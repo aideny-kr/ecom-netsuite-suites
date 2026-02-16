@@ -30,12 +30,20 @@ async def check_entitlement(
     limits = PLAN_LIMITS.get(tenant.plan, PLAN_LIMITS["trial"])
 
     if feature == "connections":
+        # NetSuite is the core product — always allowed, doesn't count against limit
         count_result = await db.execute(
-            select(func.count(Connection.id)).where(Connection.tenant_id == tenant_id)
+            select(func.count(Connection.id)).where(
+                Connection.tenant_id == tenant_id,
+                Connection.provider != "netsuite",
+            )
         )
         current_count = count_result.scalar() or 0
         max_allowed = limits["max_connections"]
         return current_count < max_allowed
+
+    if feature == "connections:netsuite":
+        # NetSuite is always allowed for active tenants
+        return True
 
     if feature == "mcp_tools":
         return limits["mcp_tools"]

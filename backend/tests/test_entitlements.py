@@ -41,7 +41,7 @@ class TestConnectionEntitlements:
         await db.commit()
         headers = make_auth_headers(user)
 
-        # Create 2 connections (the trial limit)
+        # Create 2 non-NetSuite connections (the trial limit)
         for i in range(2):
             resp = await client.post("/api/v1/connections", json={
                 "provider": "shopify",
@@ -50,14 +50,38 @@ class TestConnectionEntitlements:
             }, headers=headers)
             assert resp.status_code == 201
 
-        # Third connection should be blocked
+        # Third non-NetSuite connection should be blocked
         resp3 = await client.post("/api/v1/connections", json={
-            "provider": "netsuite",
+            "provider": "stripe",
             "label": "Third",
             "credentials": {"key": "val"},
         }, headers=headers)
         assert resp3.status_code == 403
         assert "limit" in resp3.json()["detail"].lower() or "plan" in resp3.json()["detail"].lower()
+
+    async def test_trial_netsuite_always_allowed(self, client: AsyncClient, db: AsyncSession):
+        """NetSuite is the core product — always allowed even on trial, doesn't count against limit."""
+        tenant = await create_test_tenant(db, name="Trial NS", plan="trial")
+        user, _ = await create_test_user(db, tenant, role_name="admin")
+        await db.commit()
+        headers = make_auth_headers(user)
+
+        # Create NetSuite connection first
+        resp1 = await client.post("/api/v1/connections", json={
+            "provider": "netsuite",
+            "label": "NetSuite Prod",
+            "credentials": {"account_id": "123", "token": "tok"},
+        }, headers=headers)
+        assert resp1.status_code == 201
+
+        # Should still be able to create 2 non-NetSuite connections
+        for i, provider in enumerate(["shopify", "stripe"]):
+            resp = await client.post("/api/v1/connections", json={
+                "provider": provider,
+                "label": f"Conn {i}",
+                "credentials": {"key": f"val{i}"},
+            }, headers=headers)
+            assert resp.status_code == 201
 
     async def test_pro_has_higher_limit(self, client: AsyncClient, db: AsyncSession):
         tenant = await create_test_tenant(db, name="Pro Ent", plan="pro")
