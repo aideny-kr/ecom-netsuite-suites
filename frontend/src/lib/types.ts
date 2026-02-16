@@ -47,16 +47,19 @@ export interface Connection {
 }
 
 export interface AuditEvent {
-  id: string;
+  id: number;
   tenant_id: string;
-  user_id: string | null;
+  timestamp: string;
+  actor_id: string | null;
+  actor_type: string;
   category: string;
   action: string;
-  entity_type: string | null;
-  entity_id: string | null;
-  detail: Record<string, unknown> | null;
+  resource_type: string | null;
+  resource_id: string | null;
   correlation_id: string | null;
-  created_at: string;
+  payload: Record<string, unknown> | null;
+  status: string;
+  error_message: string | null;
 }
 
 export interface Job {
@@ -193,7 +196,7 @@ export interface PaginatedResponse<T> {
   total: number;
   page: number;
   page_size: number;
-  total_pages: number;
+  pages: number;
 }
 
 export interface TenantSummary {

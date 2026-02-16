@@ -29,8 +29,8 @@ export function useAudit({
   if (category) params.set("category", category);
   if (action) params.set("action", action);
   if (correlationId) params.set("correlation_id", correlationId);
-  if (startDate) params.set("start_date", startDate);
-  if (endDate) params.set("end_date", endDate);
+  if (startDate) params.set("date_from", startDate);
+  if (endDate) params.set("date_to", endDate);
 
   return useQuery<PaginatedResponse<AuditEvent>>({
     queryKey: [
@@ -45,7 +45,7 @@ export function useAudit({
     ],
     queryFn: () =>
       apiClient.get<PaginatedResponse<AuditEvent>>(
-        `/api/v1/audit?${params.toString()}`,
+        `/api/v1/audit-events?${params.toString()}`,
       ),
     placeholderData: keepPreviousData,
   });

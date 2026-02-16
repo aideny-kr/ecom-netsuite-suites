@@ -81,7 +81,7 @@ export default function TablePage() {
           columns={columns}
           data={data?.items || []}
           page={page}
-          totalPages={data?.total_pages || 1}
+          totalPages={data?.pages || 1}
           pageSize={pageSize}
           sorting={sorting}
           onSortingChange={setSorting}

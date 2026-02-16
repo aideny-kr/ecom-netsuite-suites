@@ -104,7 +104,7 @@ export default function AuditPage() {
                   data.items.map((event) => (
                     <TableRow key={event.id}>
                       <TableCell className="whitespace-nowrap text-xs">
-                        {new Date(event.created_at).toLocaleString()}
+                        {new Date(event.timestamp).toLocaleString()}
                       </TableCell>
                       <TableCell>
                         <Badge variant="secondary">{event.category}</Badge>
@@ -113,16 +113,16 @@ export default function AuditPage() {
                         <Badge variant="outline">{event.action}</Badge>
                       </TableCell>
                       <TableCell className="text-xs">
-                        {event.entity_type
-                          ? `${event.entity_type}:${event.entity_id}`
+                        {event.resource_type
+                          ? `${event.resource_type}:${event.resource_id}`
                           : "-"}
                       </TableCell>
                       <TableCell className="max-w-[120px] truncate text-xs font-mono">
                         {event.correlation_id || "-"}
                       </TableCell>
                       <TableCell className="max-w-[200px] truncate text-xs">
-                        {event.detail
-                          ? JSON.stringify(event.detail)
+                        {event.payload
+                          ? JSON.stringify(event.payload)
                           : "-"}
                       </TableCell>
                     </TableRow>
@@ -140,7 +140,7 @@ export default function AuditPage() {
 
           <div className="flex items-center justify-end gap-2">
             <span className="text-sm text-muted-foreground">
-              Page {page} of {data?.total_pages || 1}
+              Page {page} of {data?.pages || 1}
             </span>
             <Button
               variant="outline"
@@ -154,7 +154,7 @@ export default function AuditPage() {
               variant="outline"
               size="sm"
               onClick={() => setPage((p) => p + 1)}
-              disabled={page >= (data?.total_pages || 1)}
+              disabled={page >= (data?.pages || 1)}
             >
               Next
             </Button>
