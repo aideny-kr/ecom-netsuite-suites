@@ -1,8 +1,6 @@
 """Tests for MCP tool governance: rate limiting, param validation, redaction, audit."""
-import time
-import uuid
 
-import pytest
+import uuid
 
 from app.mcp.governance import (
     TOOL_CONFIGS,
@@ -16,28 +14,36 @@ from app.mcp.governance import (
 
 
 class TestParamValidation:
-
     def test_filters_to_allowlist(self):
-        result = validate_params("netsuite.suiteql", {
-            "query": "SELECT * FROM transaction",
-            "limit": 50,
-            "evil_param": "DROP TABLE",
-        })
+        result = validate_params(
+            "netsuite.suiteql",
+            {
+                "query": "SELECT * FROM transaction",
+                "limit": 50,
+                "evil_param": "DROP TABLE",
+            },
+        )
         assert "query" in result
         assert "limit" in result
         assert "evil_param" not in result
 
     def test_injects_default_limit(self):
-        result = validate_params("netsuite.suiteql", {
-            "query": "SELECT * FROM transaction",
-        })
+        result = validate_params(
+            "netsuite.suiteql",
+            {
+                "query": "SELECT * FROM transaction",
+            },
+        )
         assert result["limit"] == 100  # default_limit
 
     def test_caps_at_max_limit(self):
-        result = validate_params("netsuite.suiteql", {
-            "query": "SELECT * FROM transaction",
-            "limit": 5000,
-        })
+        result = validate_params(
+            "netsuite.suiteql",
+            {
+                "query": "SELECT * FROM transaction",
+                "limit": 5000,
+            },
+        )
         assert result["limit"] == 1000  # max_limit
 
     def test_no_allowlist_passes_all(self):
@@ -47,7 +53,6 @@ class TestParamValidation:
 
 
 class TestRateLimiting:
-
     def setup_method(self):
         """Clear rate limit state between tests."""
         _rate_limits.clear()
@@ -83,26 +88,29 @@ class TestRateLimiting:
 
 
 class TestResultRedaction:
-
     def test_redacts_sensitive_keys(self):
-        result = redact_result({
-            "data": "safe",
-            "token": "sk_live_secret",
-            "api_key": "key123",
-            "password": "pass123",
-        })
+        result = redact_result(
+            {
+                "data": "safe",
+                "token": "sk_live_secret",
+                "api_key": "key123",
+                "password": "pass123",
+            }
+        )
         assert result["data"] == "safe"
         assert result["token"] == "***REDACTED***"
         assert result["api_key"] == "***REDACTED***"
         assert result["password"] == "***REDACTED***"
 
     def test_redacts_nested(self):
-        result = redact_result({
-            "config": {
-                "token": "nested_secret",
-                "name": "safe",
+        result = redact_result(
+            {
+                "config": {
+                    "token": "nested_secret",
+                    "name": "safe",
+                }
             }
-        })
+        )
         assert result["config"]["token"] == "***REDACTED***"
         assert result["config"]["name"] == "safe"
 
@@ -112,7 +120,6 @@ class TestResultRedaction:
 
 
 class TestAuditPayload:
-
     def test_creates_payload(self):
         payload = create_audit_payload(
             "netsuite.suiteql",
@@ -143,7 +150,6 @@ class TestAuditPayload:
 
 
 class TestGovernedExecute:
-
     async def test_successful_execution(self):
         _rate_limits.clear()
 
@@ -199,7 +205,14 @@ class TestToolConfigs:
     """Verify all expected tools are configured."""
 
     def test_all_tools_present(self):
-        expected = {"netsuite.suiteql", "recon.run", "report.export", "schedule.create", "schedule.list", "schedule.run"}
+        expected = {
+            "netsuite.suiteql",
+            "recon.run",
+            "report.export",
+            "schedule.create",
+            "schedule.list",
+            "schedule.run",
+        }
         assert set(TOOL_CONFIGS.keys()) == expected
 
     def test_all_have_required_fields(self):

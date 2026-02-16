@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from app.api.v1 import auth, tenants, users, connections, tables, audit, jobs, health
+from app.api.v1 import audit, auth, connections, health, jobs, tables, tenants, users
 
 api_router = APIRouter(prefix="/api/v1")
 

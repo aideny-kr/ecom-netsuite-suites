@@ -2,7 +2,7 @@ import csv
 import io
 from typing import Any
 
-from sqlalchemy import Select, func, select, text
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.canonical import (

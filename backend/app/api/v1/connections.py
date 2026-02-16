@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.dependencies import get_current_user, require_permission
+from app.core.dependencies import require_permission
 from app.models.user import User
 from app.schemas.connection import ConnectionCreate, ConnectionResponse, ConnectionTestResponse
 from app.services import audit_service, connection_service, entitlement_service
@@ -21,9 +21,14 @@ async def list_connections(
     connections = await connection_service.list_connections(db, user.tenant_id)
     return [
         ConnectionResponse(
-            id=str(c.id), tenant_id=str(c.tenant_id), provider=c.provider,
-            label=c.label, status=c.status, encryption_key_version=c.encryption_key_version,
-            metadata_json=c.metadata_json, created_at=c.created_at,
+            id=str(c.id),
+            tenant_id=str(c.tenant_id),
+            provider=c.provider,
+            label=c.label,
+            status=c.status,
+            encryption_key_version=c.encryption_key_version,
+            metadata_json=c.metadata_json,
+            created_at=c.created_at,
             created_by=str(c.created_by) if c.created_by else None,
         )
         for c in connections
@@ -45,23 +50,36 @@ async def create_connection(
         )
 
     connection = await connection_service.create_connection(
-        db=db, tenant_id=user.tenant_id, provider=request.provider,
-        label=request.label, credentials=request.credentials, created_by=user.id,
+        db=db,
+        tenant_id=user.tenant_id,
+        provider=request.provider,
+        label=request.label,
+        credentials=request.credentials,
+        created_by=user.id,
     )
 
     await audit_service.log_event(
-        db=db, tenant_id=user.tenant_id, category="connection", action="connection.create",
-        actor_id=user.id, resource_type="connection", resource_id=str(connection.id),
+        db=db,
+        tenant_id=user.tenant_id,
+        category="connection",
+        action="connection.create",
+        actor_id=user.id,
+        resource_type="connection",
+        resource_id=str(connection.id),
         payload={"provider": request.provider, "label": request.label},
     )
     await db.commit()
     await db.refresh(connection)
 
     return ConnectionResponse(
-        id=str(connection.id), tenant_id=str(connection.tenant_id), provider=connection.provider,
-        label=connection.label, status=connection.status,
+        id=str(connection.id),
+        tenant_id=str(connection.tenant_id),
+        provider=connection.provider,
+        label=connection.label,
+        status=connection.status,
         encryption_key_version=connection.encryption_key_version,
-        metadata_json=connection.metadata_json, created_at=connection.created_at,
+        metadata_json=connection.metadata_json,
+        created_at=connection.created_at,
         created_by=str(connection.created_by) if connection.created_by else None,
     )
 
@@ -77,8 +95,13 @@ async def delete_connection(
         raise HTTPException(status_code=404, detail="Connection not found")
 
     await audit_service.log_event(
-        db=db, tenant_id=user.tenant_id, category="connection", action="connection.delete",
-        actor_id=user.id, resource_type="connection", resource_id=str(connection_id),
+        db=db,
+        tenant_id=user.tenant_id,
+        category="connection",
+        action="connection.delete",
+        actor_id=user.id,
+        resource_type="connection",
+        resource_id=str(connection_id),
     )
     await db.commit()
 

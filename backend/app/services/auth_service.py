@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import create_access_token, create_refresh_token, decode_token, hash_password, verify_password
 from app.models.tenant import Tenant, TenantConfig
-from app.models.user import User, Role, UserRole
+from app.models.user import Role, User, UserRole
 
 
 async def register_tenant(
@@ -71,7 +71,7 @@ async def register_tenant(
 
 async def authenticate(db: AsyncSession, email: str, password: str) -> tuple[User, dict]:
     """Authenticate user and return tokens."""
-    result = await db.execute(select(User).where(User.email == email, User.is_active == True))
+    result = await db.execute(select(User).where(User.email == email, User.is_active.is_(True)))
     users = result.scalars().all()
 
     user = None
@@ -94,7 +94,7 @@ async def refresh_access_token(db: AsyncSession, refresh_token: str) -> dict:
         raise ValueError("Invalid refresh token")
 
     user_id = payload.get("sub")
-    result = await db.execute(select(User).where(User.id == uuid.UUID(user_id), User.is_active == True))
+    result = await db.execute(select(User).where(User.id == uuid.UUID(user_id), User.is_active.is_(True)))
     user = result.scalar_one_or_none()
     if not user:
         raise ValueError("User not found")
@@ -108,7 +108,7 @@ async def switch_tenant(db: AsyncSession, email: str, tenant_id: str) -> tuple[U
         select(User).where(
             User.email == email,
             User.tenant_id == uuid.UUID(tenant_id),
-            User.is_active == True,
+            User.is_active.is_(True),
         )
     )
     target_user = result.scalar_one_or_none()

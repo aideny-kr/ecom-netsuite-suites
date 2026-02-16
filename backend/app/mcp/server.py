@@ -11,7 +11,7 @@ import uuid
 
 import structlog
 
-from app.mcp.governance import governed_execute, TOOL_CONFIGS
+from app.mcp.governance import governed_execute
 from app.mcp.registry import TOOL_REGISTRY
 
 logger = structlog.get_logger()
@@ -27,14 +27,16 @@ class MCPServer:
         """Return tool definitions for MCP discovery."""
         tools = []
         for name, tool in self.tools.items():
-            tools.append({
-                "name": name,
-                "description": tool["description"],
-                "inputSchema": {
-                    "type": "object",
-                    "properties": tool["params_schema"],
-                },
-            })
+            tools.append(
+                {
+                    "name": name,
+                    "description": tool["description"],
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": tool["params_schema"],
+                    },
+                }
+            )
         return tools
 
     async def call_tool(

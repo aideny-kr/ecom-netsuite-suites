@@ -6,10 +6,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.dependencies import get_current_user
-from app.models.user import User
 from app.models.tenant import Tenant
-from app.schemas.auth import AuthResponse, LoginRequest, RefreshRequest, RegisterRequest, SwitchTenantRequest, TenantSummary, UserProfile
-from app.services import auth_service, audit_service
+from app.models.user import User
+from app.schemas.auth import (
+    AuthResponse,
+    LoginRequest,
+    RefreshRequest,
+    RegisterRequest,
+    SwitchTenantRequest,
+    TenantSummary,
+    UserProfile,
+)
+from app.services import audit_service, auth_service
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -95,13 +103,10 @@ async def list_my_tenants(
     result = await db.execute(
         select(User, Tenant)
         .join(Tenant, User.tenant_id == Tenant.id)
-        .where(User.email == user.email, User.is_active == True)
+        .where(User.email == user.email, User.is_active.is_(True))
     )
     rows = result.all()
-    return [
-        TenantSummary(id=str(t.id), name=t.name, slug=t.slug, plan=t.plan)
-        for _, t in rows
-    ]
+    return [TenantSummary(id=str(t.id), name=t.name, slug=t.slug, plan=t.plan) for _, t in rows]
 
 
 @router.post("/switch-tenant", response_model=AuthResponse)
@@ -112,9 +117,7 @@ async def switch_tenant(
 ):
     """Switch to a different tenant. User must have an account in that tenant with the same email."""
     try:
-        target_user, tokens = await auth_service.switch_tenant(
-            db, user.email, request.tenant_id
-        )
+        target_user, tokens = await auth_service.switch_tenant(db, user.email, request.tenant_id)
     except ValueError as e:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(e))
 

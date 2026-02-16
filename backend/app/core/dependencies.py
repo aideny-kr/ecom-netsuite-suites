@@ -1,5 +1,4 @@
 import uuid
-from functools import wraps
 from typing import Annotated
 
 import structlog
@@ -9,11 +8,10 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.core.config import settings
 from app.core.database import get_db
 from app.core.security import decode_token
-from app.models.user import User, UserRole, Role, RolePermission, Permission
 from app.models.tenant import Tenant
+from app.models.user import Permission, RolePermission, User, UserRole
 
 logger = structlog.get_logger()
 security = HTTPBearer()
@@ -36,7 +34,7 @@ async def get_current_user(
     result = await db.execute(
         select(User)
         .options(selectinload(User.user_roles).selectinload(UserRole.role))
-        .where(User.id == uuid.UUID(user_id), User.is_active == True)
+        .where(User.id == uuid.UUID(user_id), User.is_active.is_(True))
     )
     user = result.scalar_one_or_none()
     if user is None:

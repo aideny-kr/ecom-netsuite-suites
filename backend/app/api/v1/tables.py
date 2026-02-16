@@ -37,8 +37,13 @@ async def get_table(
         filters["source"] = source
 
     result = await query_table(
-        db=db, table_name=table_name, page=page, page_size=page_size,
-        sort_by=sort_by, sort_order=sort_order, filters=filters,
+        db=db,
+        table_name=table_name,
+        page=page,
+        page_size=page_size,
+        sort_by=sort_by,
+        sort_order=sort_order,
+        filters=filters,
     )
 
     # Serialize items

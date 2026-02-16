@@ -1,14 +1,13 @@
 """Tests for audit event emission and correlation ID propagation."""
+
 import uuid
 
-import pytest
 from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.audit import AuditEvent
-from app.models.tenant import Tenant
-from tests.conftest import create_test_tenant, create_test_user, make_auth_headers
+from tests.conftest import create_test_tenant, create_test_user
 
 
 class TestAuditEventEmission:
@@ -19,10 +18,13 @@ class TestAuditEventEmission:
         user, password = await create_test_user(db, tenant, email="audit-login@test.com")
         await db.commit()
 
-        resp = await client.post("/api/v1/auth/login", json={
-            "email": "audit-login@test.com",
-            "password": password,
-        })
+        resp = await client.post(
+            "/api/v1/auth/login",
+            json={
+                "email": "audit-login@test.com",
+                "password": password,
+            },
+        )
         assert resp.status_code == 200
 
         result = await db.execute(
@@ -38,21 +40,29 @@ class TestAuditEventEmission:
 
     async def test_connection_create_emits_audit(self, client: AsyncClient, admin_user):
         user, headers = admin_user
-        resp = await client.post("/api/v1/connections", json={
-            "provider": "shopify",
-            "label": "Audit Shopify",
-            "credentials": {"key": "val"},
-        }, headers=headers)
+        resp = await client.post(
+            "/api/v1/connections",
+            json={
+                "provider": "shopify",
+                "label": "Audit Shopify",
+                "credentials": {"key": "val"},
+            },
+            headers=headers,
+        )
         assert resp.status_code == 201
 
     async def test_connection_delete_emits_audit(self, client: AsyncClient, admin_user, db: AsyncSession):
         user, headers = admin_user
         # Create then delete
-        resp = await client.post("/api/v1/connections", json={
-            "provider": "netsuite",
-            "label": "To Delete",
-            "credentials": {"key": "val"},
-        }, headers=headers)
+        resp = await client.post(
+            "/api/v1/connections",
+            json={
+                "provider": "netsuite",
+                "label": "To Delete",
+                "credentials": {"key": "val"},
+            },
+            headers=headers,
+        )
         conn_id = resp.json()["id"]
 
         resp_del = await client.delete(f"/api/v1/connections/{conn_id}", headers=headers)
@@ -69,11 +79,15 @@ class TestAuditEventEmission:
 
     async def test_user_create_emits_audit(self, client: AsyncClient, admin_user, db: AsyncSession):
         user, headers = admin_user
-        resp = await client.post("/api/v1/users", json={
-            "email": f"newuser-{uuid.uuid4().hex[:6]}@test.com",
-            "password": "testpass123",
-            "full_name": "New User",
-        }, headers=headers)
+        resp = await client.post(
+            "/api/v1/users",
+            json={
+                "email": f"newuser-{uuid.uuid4().hex[:6]}@test.com",
+                "password": "testpass123",
+                "full_name": "New User",
+            },
+            headers=headers,
+        )
         assert resp.status_code == 201
 
         result = await db.execute(
@@ -86,11 +100,15 @@ class TestAuditEventEmission:
     async def test_user_deactivate_emits_audit(self, client: AsyncClient, admin_user, db: AsyncSession):
         user, headers = admin_user
         # Create a user to deactivate
-        resp = await client.post("/api/v1/users", json={
-            "email": f"todeact-{uuid.uuid4().hex[:6]}@test.com",
-            "password": "testpass123",
-            "full_name": "To Deactivate",
-        }, headers=headers)
+        resp = await client.post(
+            "/api/v1/users",
+            json={
+                "email": f"todeact-{uuid.uuid4().hex[:6]}@test.com",
+                "password": "testpass123",
+                "full_name": "To Deactivate",
+            },
+            headers=headers,
+        )
         target_id = resp.json()["id"]
 
         resp_del = await client.delete(f"/api/v1/users/{target_id}", headers=headers)
@@ -109,15 +127,17 @@ class TestAuditEventEmission:
         """All audit events must have a tenant_id set."""
         user, headers = admin_user
         # Generate some activity
-        await client.post("/api/v1/connections", json={
-            "provider": "stripe",
-            "label": "Audit Test",
-            "credentials": {"key": "val"},
-        }, headers=headers)
-
-        result = await db.execute(
-            select(AuditEvent).where(AuditEvent.tenant_id == user.tenant_id)
+        await client.post(
+            "/api/v1/connections",
+            json={
+                "provider": "stripe",
+                "label": "Audit Test",
+                "credentials": {"key": "val"},
+            },
+            headers=headers,
         )
+
+        result = await db.execute(select(AuditEvent).where(AuditEvent.tenant_id == user.tenant_id))
         events = result.scalars().all()
         assert len(events) > 0
         for event in events:
@@ -156,11 +176,15 @@ class TestAuditEndpoint:
     async def test_filter_by_category(self, client: AsyncClient, admin_user, db: AsyncSession):
         user, headers = admin_user
         # Create a connection to generate an audit event with category='connection'
-        await client.post("/api/v1/connections", json={
-            "provider": "shopify",
-            "label": "Filter Test",
-            "credentials": {"key": "val"},
-        }, headers=headers)
+        await client.post(
+            "/api/v1/connections",
+            json={
+                "provider": "shopify",
+                "label": "Filter Test",
+                "credentials": {"key": "val"},
+            },
+            headers=headers,
+        )
 
         resp = await client.get("/api/v1/audit-events?category=connection", headers=headers)
         assert resp.status_code == 200

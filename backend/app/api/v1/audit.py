@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import select, func
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -56,14 +56,20 @@ async def list_audit_events(
 
     items = [
         AuditEventResponse(
-            id=e.id, tenant_id=str(e.tenant_id),
+            id=e.id,
+            tenant_id=str(e.tenant_id),
             timestamp=e.timestamp.isoformat() if e.timestamp else "",
             actor_id=str(e.actor_id) if e.actor_id else None,
-            actor_type=e.actor_type, category=e.category, action=e.action,
-            resource_type=e.resource_type, resource_id=e.resource_id,
+            actor_type=e.actor_type,
+            category=e.category,
+            action=e.action,
+            resource_type=e.resource_type,
+            resource_id=e.resource_id,
             correlation_id=e.correlation_id,
             job_id=str(e.job_id) if e.job_id else None,
-            payload=e.payload, status=e.status, error_message=e.error_message,
+            payload=e.payload,
+            status=e.status,
+            error_message=e.error_message,
         )
         for e in events
     ]

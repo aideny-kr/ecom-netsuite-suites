@@ -1,11 +1,8 @@
 """Tests for plan entitlement enforcement."""
-import uuid
 
-import pytest
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.tenant import Tenant
 from app.services import entitlement_service
 from tests.conftest import create_test_tenant, create_test_user, make_auth_headers
 
@@ -20,19 +17,27 @@ class TestConnectionEntitlements:
         headers = make_auth_headers(user)
 
         # Create first connection — should succeed
-        resp1 = await client.post("/api/v1/connections", json={
-            "provider": "shopify",
-            "label": "First",
-            "credentials": {"key": "val"},
-        }, headers=headers)
+        resp1 = await client.post(
+            "/api/v1/connections",
+            json={
+                "provider": "shopify",
+                "label": "First",
+                "credentials": {"key": "val"},
+            },
+            headers=headers,
+        )
         assert resp1.status_code == 201
 
         # Create second connection — should succeed (limit is 2)
-        resp2 = await client.post("/api/v1/connections", json={
-            "provider": "stripe",
-            "label": "Second",
-            "credentials": {"key": "val"},
-        }, headers=headers)
+        resp2 = await client.post(
+            "/api/v1/connections",
+            json={
+                "provider": "stripe",
+                "label": "Second",
+                "credentials": {"key": "val"},
+            },
+            headers=headers,
+        )
         assert resp2.status_code == 201
 
     async def test_trial_blocked_beyond_limit(self, client: AsyncClient, db: AsyncSession):
@@ -43,19 +48,27 @@ class TestConnectionEntitlements:
 
         # Create 2 non-NetSuite connections (the trial limit)
         for i in range(2):
-            resp = await client.post("/api/v1/connections", json={
-                "provider": "shopify",
-                "label": f"Conn {i}",
-                "credentials": {"key": f"val{i}"},
-            }, headers=headers)
+            resp = await client.post(
+                "/api/v1/connections",
+                json={
+                    "provider": "shopify",
+                    "label": f"Conn {i}",
+                    "credentials": {"key": f"val{i}"},
+                },
+                headers=headers,
+            )
             assert resp.status_code == 201
 
         # Third non-NetSuite connection should be blocked
-        resp3 = await client.post("/api/v1/connections", json={
-            "provider": "stripe",
-            "label": "Third",
-            "credentials": {"key": "val"},
-        }, headers=headers)
+        resp3 = await client.post(
+            "/api/v1/connections",
+            json={
+                "provider": "stripe",
+                "label": "Third",
+                "credentials": {"key": "val"},
+            },
+            headers=headers,
+        )
         assert resp3.status_code == 403
         assert "limit" in resp3.json()["detail"].lower() or "plan" in resp3.json()["detail"].lower()
 
@@ -67,20 +80,28 @@ class TestConnectionEntitlements:
         headers = make_auth_headers(user)
 
         # Create NetSuite connection first
-        resp1 = await client.post("/api/v1/connections", json={
-            "provider": "netsuite",
-            "label": "NetSuite Prod",
-            "credentials": {"account_id": "123", "token": "tok"},
-        }, headers=headers)
+        resp1 = await client.post(
+            "/api/v1/connections",
+            json={
+                "provider": "netsuite",
+                "label": "NetSuite Prod",
+                "credentials": {"account_id": "123", "token": "tok"},
+            },
+            headers=headers,
+        )
         assert resp1.status_code == 201
 
         # Should still be able to create 2 non-NetSuite connections
         for i, provider in enumerate(["shopify", "stripe"]):
-            resp = await client.post("/api/v1/connections", json={
-                "provider": provider,
-                "label": f"Conn {i}",
-                "credentials": {"key": f"val{i}"},
-            }, headers=headers)
+            resp = await client.post(
+                "/api/v1/connections",
+                json={
+                    "provider": provider,
+                    "label": f"Conn {i}",
+                    "credentials": {"key": f"val{i}"},
+                },
+                headers=headers,
+            )
             assert resp.status_code == 201
 
     async def test_pro_has_higher_limit(self, client: AsyncClient, db: AsyncSession):
@@ -91,11 +112,15 @@ class TestConnectionEntitlements:
 
         # Pro plan allows up to 50 — create 3 and verify all succeed
         for i in range(3):
-            resp = await client.post("/api/v1/connections", json={
-                "provider": "shopify",
-                "label": f"Pro Conn {i}",
-                "credentials": {"key": f"val{i}"},
-            }, headers=headers)
+            resp = await client.post(
+                "/api/v1/connections",
+                json={
+                    "provider": "shopify",
+                    "label": f"Pro Conn {i}",
+                    "credentials": {"key": f"val{i}"},
+                },
+                headers=headers,
+            )
             assert resp.status_code == 201
 
 

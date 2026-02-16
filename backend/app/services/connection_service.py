@@ -3,7 +3,7 @@ import uuid
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.encryption import decrypt_credentials, encrypt_credentials, get_current_key_version
+from app.core.encryption import encrypt_credentials, get_current_key_version
 from app.models.connection import Connection
 
 

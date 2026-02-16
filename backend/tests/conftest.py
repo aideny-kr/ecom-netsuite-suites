@@ -4,26 +4,26 @@ Test fixtures for the backend test suite.
 Uses the Docker-composed PostgreSQL database.
 Tests run against real Postgres to ensure RLS, UUID types, and JSON columns work correctly.
 """
+
 import uuid
 from datetime import datetime, timedelta, timezone
 
-import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import select, text
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 
 from app.core.config import settings
 from app.core.database import get_db
 from app.core.security import create_access_token, hash_password
 from app.main import create_app
 from app.models.tenant import Tenant, TenantConfig
-from app.models.user import User, Role, UserRole
-
+from app.models.user import Role, User, UserRole
 
 # ---------------------------------------------------------------------------
 # Per-test DB session — fresh engine + connection per test to avoid loop issues
 # ---------------------------------------------------------------------------
+
 
 @pytest_asyncio.fixture
 async def db():
@@ -63,6 +63,7 @@ async def client(app) -> AsyncClient:
 # ---------------------------------------------------------------------------
 # Tenant & User factories
 # ---------------------------------------------------------------------------
+
 
 async def create_test_tenant(
     db: AsyncSession,
@@ -134,6 +135,7 @@ def make_auth_headers(user: User) -> dict[str, str]:
 # ---------------------------------------------------------------------------
 # Convenience fixtures for common test scenarios
 # ---------------------------------------------------------------------------
+
 
 @pytest_asyncio.fixture
 async def tenant_a(db: AsyncSession) -> Tenant:

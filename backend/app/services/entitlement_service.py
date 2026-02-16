@@ -1,11 +1,11 @@
 import uuid
 
 import structlog
-from sqlalchemy import select, func
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.tenant import Tenant
 from app.models.connection import Connection
+from app.models.tenant import Tenant
 
 logger = structlog.get_logger()
 

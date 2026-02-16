@@ -1,8 +1,8 @@
 import uuid
-from datetime import date, datetime
+from datetime import date
 from decimal import Decimal
 
-from sqlalchemy import Date, DateTime, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint, func
+from sqlalchemy import Date, ForeignKey, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSON, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -11,6 +11,7 @@ from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
 
 class CanonicalMixin(TimestampMixin):
     """Common columns for all canonical tables."""
+
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
     dedupe_key: Mapped[str] = mapped_column(String(512), nullable=False)
     source: Mapped[str] = mapped_column(String(50), nullable=False)
@@ -37,9 +38,7 @@ class Payment(Base, UUIDPrimaryKeyMixin, CanonicalMixin):
     __tablename__ = "payments"
     __table_args__ = (UniqueConstraint("tenant_id", "dedupe_key", name="uq_payments_dedupe"),)
 
-    order_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("orders.id"), nullable=True
-    )
+    order_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("orders.id"), nullable=True)
     amount: Mapped[Decimal] = mapped_column(Numeric(15, 2), nullable=False)
     currency: Mapped[str] = mapped_column(String(3), nullable=False)
     status: Mapped[str] = mapped_column(String(50), nullable=False)
@@ -50,9 +49,7 @@ class Refund(Base, UUIDPrimaryKeyMixin, CanonicalMixin):
     __tablename__ = "refunds"
     __table_args__ = (UniqueConstraint("tenant_id", "dedupe_key", name="uq_refunds_dedupe"),)
 
-    order_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("orders.id"), nullable=True
-    )
+    order_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("orders.id"), nullable=True)
     amount: Mapped[Decimal] = mapped_column(Numeric(15, 2), nullable=False)
     currency: Mapped[str] = mapped_column(String(3), nullable=False)
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -75,9 +72,7 @@ class PayoutLine(Base, UUIDPrimaryKeyMixin, CanonicalMixin):
     __tablename__ = "payout_lines"
     __table_args__ = (UniqueConstraint("tenant_id", "dedupe_key", name="uq_payout_lines_dedupe"),)
 
-    payout_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("payouts.id"), nullable=True
-    )
+    payout_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("payouts.id"), nullable=True)
     line_type: Mapped[str] = mapped_column(String(100), nullable=False)
     amount: Mapped[Decimal] = mapped_column(Numeric(15, 2), nullable=False)
     fee: Mapped[Decimal] = mapped_column(Numeric(15, 2), default=0, nullable=False)

@@ -1,13 +1,6 @@
 """Tests for cross-tenant data isolation via RLS."""
-import uuid
 
-import pytest
 from httpx import AsyncClient
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from app.models.user import User
-from app.models.tenant import Tenant
-from tests.conftest import create_test_tenant, create_test_user, make_auth_headers
 
 
 class TestCrossTenantIsolation:
@@ -19,11 +12,15 @@ class TestCrossTenantIsolation:
         _, headers_b = admin_user_b
 
         # Tenant A creates a connection
-        resp = await client.post("/api/v1/connections", json={
-            "provider": "shopify",
-            "label": "Tenant A Shopify",
-            "credentials": {"api_key": "secret"},
-        }, headers=headers_a)
+        resp = await client.post(
+            "/api/v1/connections",
+            json={
+                "provider": "shopify",
+                "label": "Tenant A Shopify",
+                "credentials": {"api_key": "secret"},
+            },
+            headers=headers_a,
+        )
         assert resp.status_code == 201
         conn_id = resp.json()["id"]
 
@@ -38,11 +35,15 @@ class TestCrossTenantIsolation:
         _, headers_a = admin_user
         _, headers_b = admin_user_b
 
-        resp = await client.post("/api/v1/connections", json={
-            "provider": "netsuite",
-            "label": "Tenant A NS",
-            "credentials": {"token": "abc"},
-        }, headers=headers_a)
+        resp = await client.post(
+            "/api/v1/connections",
+            json={
+                "provider": "netsuite",
+                "label": "Tenant A NS",
+                "credentials": {"token": "abc"},
+            },
+            headers=headers_a,
+        )
         assert resp.status_code == 201
         conn_id = resp.json()["id"]
 
@@ -105,11 +106,15 @@ class TestCrossTenantIsolation:
         _, headers_b = admin_user_b
 
         # Tenant A creates a connection (generates audit event)
-        await client.post("/api/v1/connections", json={
-            "provider": "stripe",
-            "label": "Stripe A",
-            "credentials": {"key": "sk_test"},
-        }, headers=headers_a)
+        await client.post(
+            "/api/v1/connections",
+            json={
+                "provider": "stripe",
+                "label": "Stripe A",
+                "credentials": {"key": "sk_test"},
+            },
+            headers=headers_a,
+        )
 
         # Tenant B should not see Tenant A's audit events
         resp_b = await client.get("/api/v1/audit-events", headers=headers_b)
@@ -119,8 +124,5 @@ class TestCrossTenantIsolation:
             # (Tenant B has no connections, so no connection events)
             pass
         # The key assertion: Tenant B sees 0 connection events
-        connection_events = [
-            e for e in resp_b.json()["items"]
-            if e["category"] == "connection"
-        ]
+        connection_events = [e for e in resp_b.json()["items"] if e["category"] == "connection"]
         assert len(connection_events) == 0

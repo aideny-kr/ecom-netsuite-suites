@@ -1,13 +1,8 @@
 """Tests for RBAC permission enforcement across all protected endpoints."""
+
 import uuid
 
-import pytest
 from httpx import AsyncClient
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from app.models.tenant import Tenant
-from app.models.user import User
-from tests.conftest import create_test_tenant, create_test_user, make_auth_headers
 
 
 class TestAdminAccess:
@@ -20,11 +15,15 @@ class TestAdminAccess:
 
     async def test_admin_create_connection(self, client: AsyncClient, admin_user):
         _, headers = admin_user
-        resp = await client.post("/api/v1/connections", json={
-            "provider": "shopify",
-            "label": "Test Shopify",
-            "credentials": {"api_key": "test123"},
-        }, headers=headers)
+        resp = await client.post(
+            "/api/v1/connections",
+            json={
+                "provider": "shopify",
+                "label": "Test Shopify",
+                "credentials": {"api_key": "test123"},
+            },
+            headers=headers,
+        )
         assert resp.status_code == 201
 
     async def test_admin_list_users(self, client: AsyncClient, admin_user):
@@ -34,11 +33,15 @@ class TestAdminAccess:
 
     async def test_admin_create_user(self, client: AsyncClient, admin_user):
         _, headers = admin_user
-        resp = await client.post("/api/v1/users", json={
-            "email": f"new-{uuid.uuid4().hex[:6]}@test.com",
-            "password": "newuserpass123",
-            "full_name": "New User",
-        }, headers=headers)
+        resp = await client.post(
+            "/api/v1/users",
+            json={
+                "email": f"new-{uuid.uuid4().hex[:6]}@test.com",
+                "password": "newuserpass123",
+                "full_name": "New User",
+            },
+            headers=headers,
+        )
         assert resp.status_code == 201
 
     async def test_admin_get_tenant(self, client: AsyncClient, admin_user):
@@ -72,11 +75,15 @@ class TestReadonlyAccess:
 
     async def test_readonly_cannot_create_connection(self, client: AsyncClient, readonly_user):
         _, headers = readonly_user
-        resp = await client.post("/api/v1/connections", json={
-            "provider": "shopify",
-            "label": "Test",
-            "credentials": {"key": "val"},
-        }, headers=headers)
+        resp = await client.post(
+            "/api/v1/connections",
+            json={
+                "provider": "shopify",
+                "label": "Test",
+                "credentials": {"key": "val"},
+            },
+            headers=headers,
+        )
         assert resp.status_code == 403
 
     async def test_readonly_can_list_connections(self, client: AsyncClient, readonly_user):
@@ -92,11 +99,15 @@ class TestReadonlyAccess:
 
     async def test_readonly_cannot_create_user(self, client: AsyncClient, readonly_user):
         _, headers = readonly_user
-        resp = await client.post("/api/v1/users", json={
-            "email": "new@test.com",
-            "password": "password123",
-            "full_name": "New User",
-        }, headers=headers)
+        resp = await client.post(
+            "/api/v1/users",
+            json={
+                "email": "new@test.com",
+                "password": "password123",
+                "full_name": "New User",
+            },
+            headers=headers,
+        )
         assert resp.status_code == 403
 
     async def test_readonly_cannot_update_tenant(self, client: AsyncClient, readonly_user):
@@ -106,9 +117,13 @@ class TestReadonlyAccess:
 
     async def test_readonly_cannot_update_config(self, client: AsyncClient, readonly_user):
         _, headers = readonly_user
-        resp = await client.patch("/api/v1/tenants/me/config", json={
-            "posting_mode": "detail",
-        }, headers=headers)
+        resp = await client.patch(
+            "/api/v1/tenants/me/config",
+            json={
+                "posting_mode": "detail",
+            },
+            headers=headers,
+        )
         assert resp.status_code == 403
 
     async def test_readonly_can_view_audit(self, client: AsyncClient, readonly_user):
@@ -138,11 +153,15 @@ class TestFinanceAccess:
 
     async def test_finance_cannot_create_connection(self, client: AsyncClient, finance_user):
         _, headers = finance_user
-        resp = await client.post("/api/v1/connections", json={
-            "provider": "shopify",
-            "label": "Test",
-            "credentials": {"key": "val"},
-        }, headers=headers)
+        resp = await client.post(
+            "/api/v1/connections",
+            json={
+                "provider": "shopify",
+                "label": "Test",
+                "credentials": {"key": "val"},
+            },
+            headers=headers,
+        )
         assert resp.status_code == 403
 
     async def test_finance_cannot_manage_users(self, client: AsyncClient, finance_user):
@@ -152,9 +171,13 @@ class TestFinanceAccess:
 
     async def test_finance_cannot_update_config(self, client: AsyncClient, finance_user):
         _, headers = finance_user
-        resp = await client.patch("/api/v1/tenants/me/config", json={
-            "posting_mode": "detail",
-        }, headers=headers)
+        resp = await client.patch(
+            "/api/v1/tenants/me/config",
+            json={
+                "posting_mode": "detail",
+            },
+            headers=headers,
+        )
         assert resp.status_code == 403
 
 

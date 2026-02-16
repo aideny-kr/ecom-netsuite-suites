@@ -1,7 +1,7 @@
 import time
 
-from app.workers.celery_app import celery_app
 from app.workers.base_task import InstrumentedTask
+from app.workers.celery_app import celery_app
 
 
 @celery_app.task(base=InstrumentedTask, bind=True, name="tasks.example_sync", queue="sync")

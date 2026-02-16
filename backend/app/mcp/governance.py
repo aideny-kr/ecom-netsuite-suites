@@ -1,7 +1,6 @@
 import time
 import uuid
 from collections import defaultdict
-from datetime import datetime, timezone
 from typing import Any, Callable
 
 import structlog
@@ -72,9 +71,7 @@ def check_rate_limit(tenant_id: str, tool_name: str) -> bool:
     window_start = now - 60
 
     # Clean old entries
-    _rate_limits[tenant_id][tool_name] = [
-        ts for ts in _rate_limits[tenant_id][tool_name] if ts > window_start
-    ]
+    _rate_limits[tenant_id][tool_name] = [ts for ts in _rate_limits[tenant_id][tool_name] if ts > window_start]
 
     if len(_rate_limits[tenant_id][tool_name]) >= limit:
         return False

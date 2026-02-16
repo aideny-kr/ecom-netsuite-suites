@@ -40,17 +40,19 @@ class InstrumentedTask(Task):
             session.flush()
             self._job_id = job.id
 
-            session.add(AuditEvent(
-                tenant_id=tenant_id,
-                category="job",
-                action="job.start",
-                actor_type="system",
-                resource_type="job",
-                resource_id=str(job.id),
-                correlation_id=self._correlation_id,
-                job_id=job.id,
-                payload={"task_name": self.name},
-            ))
+            session.add(
+                AuditEvent(
+                    tenant_id=tenant_id,
+                    category="job",
+                    action="job.start",
+                    actor_type="system",
+                    resource_type="job",
+                    resource_id=str(job.id),
+                    correlation_id=self._correlation_id,
+                    job_id=job.id,
+                    payload={"task_name": self.name},
+                )
+            )
             session.commit()
 
     def on_success(self, retval, task_id, args, kwargs):
@@ -65,17 +67,19 @@ class InstrumentedTask(Task):
                 job.completed_at = datetime.now(timezone.utc)
                 job.result_summary = retval if isinstance(retval, dict) else {"result": str(retval)}
 
-            session.add(AuditEvent(
-                tenant_id=tenant_id,
-                category="job",
-                action="job.complete",
-                actor_type="system",
-                resource_type="job",
-                resource_id=str(self._job_id),
-                correlation_id=self._correlation_id,
-                job_id=self._job_id,
-                status="success",
-            ))
+            session.add(
+                AuditEvent(
+                    tenant_id=tenant_id,
+                    category="job",
+                    action="job.complete",
+                    actor_type="system",
+                    resource_type="job",
+                    resource_id=str(self._job_id),
+                    correlation_id=self._correlation_id,
+                    job_id=self._job_id,
+                    status="success",
+                )
+            )
             session.commit()
 
     def on_failure(self, exc, task_id, args, kwargs, einfo):
@@ -90,16 +94,18 @@ class InstrumentedTask(Task):
                 job.completed_at = datetime.now(timezone.utc)
                 job.error_message = str(exc)
 
-            session.add(AuditEvent(
-                tenant_id=tenant_id,
-                category="job",
-                action="job.failed",
-                actor_type="system",
-                resource_type="job",
-                resource_id=str(self._job_id),
-                correlation_id=self._correlation_id,
-                job_id=self._job_id,
-                status="error",
-                error_message=str(exc),
-            ))
+            session.add(
+                AuditEvent(
+                    tenant_id=tenant_id,
+                    category="job",
+                    action="job.failed",
+                    actor_type="system",
+                    resource_type="job",
+                    resource_id=str(self._job_id),
+                    correlation_id=self._correlation_id,
+                    job_id=self._job_id,
+                    status="error",
+                    error_message=str(exc),
+                )
+            )
             session.commit()

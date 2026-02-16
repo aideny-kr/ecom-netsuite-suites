@@ -23,8 +23,12 @@ async def get_tenant(
     if not tenant:
         raise HTTPException(status_code=404, detail="Tenant not found")
     return TenantResponse(
-        id=str(tenant.id), name=tenant.name, slug=tenant.slug,
-        plan=tenant.plan, plan_expires_at=tenant.plan_expires_at, is_active=tenant.is_active,
+        id=str(tenant.id),
+        name=tenant.name,
+        slug=tenant.slug,
+        plan=tenant.plan,
+        plan_expires_at=tenant.plan_expires_at,
+        is_active=tenant.is_active,
     )
 
 
@@ -45,8 +49,12 @@ async def update_tenant(
     await db.commit()
     await db.refresh(tenant)
     return TenantResponse(
-        id=str(tenant.id), name=tenant.name, slug=tenant.slug,
-        plan=tenant.plan, plan_expires_at=tenant.plan_expires_at, is_active=tenant.is_active,
+        id=str(tenant.id),
+        name=tenant.name,
+        slug=tenant.slug,
+        plan=tenant.plan,
+        plan_expires_at=tenant.plan_expires_at,
+        is_active=tenant.is_active,
     )
 
 
@@ -60,10 +68,14 @@ async def get_tenant_config(
     if not config:
         raise HTTPException(status_code=404, detail="Tenant config not found")
     return TenantConfigResponse(
-        id=str(config.id), tenant_id=str(config.tenant_id),
-        subsidiaries=config.subsidiaries, account_mappings=config.account_mappings,
-        posting_mode=config.posting_mode, posting_batch_size=config.posting_batch_size,
-        posting_attach_evidence=config.posting_attach_evidence, netsuite_account_id=config.netsuite_account_id,
+        id=str(config.id),
+        tenant_id=str(config.tenant_id),
+        subsidiaries=config.subsidiaries,
+        account_mappings=config.account_mappings,
+        posting_mode=config.posting_mode,
+        posting_batch_size=config.posting_batch_size,
+        posting_attach_evidence=config.posting_attach_evidence,
+        netsuite_account_id=config.netsuite_account_id,
     )
 
 
@@ -85,8 +97,12 @@ async def update_tenant_config(
     await db.commit()
     await db.refresh(config)
     return TenantConfigResponse(
-        id=str(config.id), tenant_id=str(config.tenant_id),
-        subsidiaries=config.subsidiaries, account_mappings=config.account_mappings,
-        posting_mode=config.posting_mode, posting_batch_size=config.posting_batch_size,
-        posting_attach_evidence=config.posting_attach_evidence, netsuite_account_id=config.netsuite_account_id,
+        id=str(config.id),
+        tenant_id=str(config.tenant_id),
+        subsidiaries=config.subsidiaries,
+        account_mappings=config.account_mappings,
+        posting_mode=config.posting_mode,
+        posting_batch_size=config.posting_batch_size,
+        posting_attach_evidence=config.posting_attach_evidence,
+        netsuite_account_id=config.netsuite_account_id,
     )

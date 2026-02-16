@@ -30,8 +30,12 @@ async def list_users(
     users = result.scalars().all()
     return [
         UserResponse(
-            id=str(u.id), tenant_id=str(u.tenant_id), email=u.email,
-            full_name=u.full_name, actor_type=u.actor_type, is_active=u.is_active,
+            id=str(u.id),
+            tenant_id=str(u.tenant_id),
+            email=u.email,
+            full_name=u.full_name,
+            actor_type=u.actor_type,
+            is_active=u.is_active,
             roles=[ur.role.name for ur in u.user_roles],
         )
         for u in users
@@ -45,9 +49,7 @@ async def create_user(
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     # Check for existing user with same email in tenant
-    existing = await db.execute(
-        select(User).where(User.tenant_id == user.tenant_id, User.email == request.email)
-    )
+    existing = await db.execute(select(User).where(User.tenant_id == user.tenant_id, User.email == request.email))
     if existing.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="User with this email already exists")
 
@@ -61,14 +63,23 @@ async def create_user(
     await db.flush()
 
     await audit_service.log_event(
-        db=db, tenant_id=user.tenant_id, category="user", action="user.create",
-        actor_id=user.id, resource_type="user", resource_id=str(new_user.id),
+        db=db,
+        tenant_id=user.tenant_id,
+        category="user",
+        action="user.create",
+        actor_id=user.id,
+        resource_type="user",
+        resource_id=str(new_user.id),
     )
     await db.commit()
     return UserResponse(
-        id=str(new_user.id), tenant_id=str(new_user.tenant_id),
-        email=new_user.email, full_name=new_user.full_name,
-        actor_type=new_user.actor_type, is_active=new_user.is_active, roles=[],
+        id=str(new_user.id),
+        tenant_id=str(new_user.tenant_id),
+        email=new_user.email,
+        full_name=new_user.full_name,
+        actor_type=new_user.actor_type,
+        is_active=new_user.is_active,
+        roles=[],
     )
 
 
@@ -104,15 +115,16 @@ async def assign_roles(
 
     # Reload
     result = await db.execute(
-        select(User)
-        .options(selectinload(User.user_roles).selectinload(UserRole.role))
-        .where(User.id == user_id)
+        select(User).options(selectinload(User.user_roles).selectinload(UserRole.role)).where(User.id == user_id)
     )
     target_user = result.scalar_one()
     return UserResponse(
-        id=str(target_user.id), tenant_id=str(target_user.tenant_id),
-        email=target_user.email, full_name=target_user.full_name,
-        actor_type=target_user.actor_type, is_active=target_user.is_active,
+        id=str(target_user.id),
+        tenant_id=str(target_user.tenant_id),
+        email=target_user.email,
+        full_name=target_user.full_name,
+        actor_type=target_user.actor_type,
+        is_active=target_user.is_active,
         roles=[ur.role.name for ur in target_user.user_roles],
     )
 
@@ -123,16 +135,19 @@ async def deactivate_user(
     user: Annotated[User, Depends(require_permission("users.manage"))],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
-    result = await db.execute(
-        select(User).where(User.id == user_id, User.tenant_id == user.tenant_id)
-    )
+    result = await db.execute(select(User).where(User.id == user_id, User.tenant_id == user.tenant_id))
     target_user = result.scalar_one_or_none()
     if not target_user:
         raise HTTPException(status_code=404, detail="User not found")
 
     target_user.is_active = False
     await audit_service.log_event(
-        db=db, tenant_id=user.tenant_id, category="user", action="user.deactivate",
-        actor_id=user.id, resource_type="user", resource_id=str(target_user.id),
+        db=db,
+        tenant_id=user.tenant_id,
+        category="user",
+        action="user.deactivate",
+        actor_id=user.id,
+        resource_type="user",
+        resource_id=str(target_user.id),
     )
     await db.commit()
