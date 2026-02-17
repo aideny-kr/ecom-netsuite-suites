@@ -381,5 +381,8 @@ async def apply_changeset(
         resource_type="changeset",
         resource_id=str(changeset_id),
     )
+    await db.flush()
+    await db.refresh(cs)
+    response = _serialize_changeset(cs)
     await db.commit()
-    return _serialize_changeset(cs)
+    return response

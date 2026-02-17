@@ -1,12 +1,14 @@
 "use client";
 
 import { useState, useCallback } from "react";
+import { useRouter } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiClient } from "@/lib/api-client";
 import type { ChatSession, ChatSessionDetail, ChatMessage } from "@/lib/types";
 import { SessionSidebar } from "@/components/chat/session-sidebar";
 import { MessageList } from "@/components/chat/message-list";
 import { ChatInput } from "@/components/chat/chat-input";
+import { useWorkspaces } from "@/hooks/use-workspace";
 import { AlertCircle, X } from "lucide-react";
 
 export default function ChatPage() {
@@ -14,6 +16,8 @@ export default function ChatPage() {
   const [error, setError] = useState<string | null>(null);
   const [pendingMessage, setPendingMessage] = useState<string | null>(null);
   const queryClient = useQueryClient();
+  const router = useRouter();
+  const { data: workspaces = [] } = useWorkspaces();
 
   const { data: sessions = [] } = useQuery<ChatSession[]>({
     queryKey: ["chat-sessions"],
@@ -78,6 +82,13 @@ export default function ChatPage() {
     setPendingMessage(null);
   }, []);
 
+  const handleMentionClick = useCallback(
+    (filePath: string) => {
+      router.push(`/workspace?file=${encodeURIComponent(filePath)}`);
+    },
+    [router],
+  );
+
   return (
     <div className="flex h-[calc(100vh-4rem)] -mx-8 -my-8 animate-fade-in">
       <SessionSidebar
@@ -93,6 +104,7 @@ export default function ChatPage() {
             isLoading={isLoadingDetail && !!activeSessionId}
             pendingUserMessage={pendingMessage}
             isWaitingForReply={sendMessage.isPending}
+            onMentionClick={handleMentionClick}
           />
         </div>
         {error && (
@@ -111,6 +123,7 @@ export default function ChatPage() {
         <ChatInput
           onSend={handleSend}
           isLoading={sendMessage.isPending || createSession.isPending}
+          workspaceId={workspaces[0]?.id || null}
         />
       </div>
     </div>

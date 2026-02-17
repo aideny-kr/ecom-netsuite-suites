@@ -1,6 +1,7 @@
 """HTTP-level tests for Dev Workspace audit event emission."""
 
 import io
+import uuid
 import zipfile
 
 import pytest
@@ -9,6 +10,7 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.audit import AuditEvent
+from app.models.workspace import WorkspacePatch
 from app.services import workspace_service as ws_svc
 from tests.conftest import create_test_tenant, create_test_user, make_auth_headers
 
@@ -146,3 +148,111 @@ async def test_changeset_transition_emits_transitioned(client, db, tenant, admin
     assert event.payload["from_status"] == "draft"
     assert event.payload["to_status"] == "pending_review"
     assert event.payload["action"] == "submit"
+
+
+# ---------------------------------------------------------------------------
+# Changeset lifecycle HTTP integration test
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_changeset_lifecycle_audit_trail(client, db, tenant, admin, workspace_with_files):
+    """Full HTTP cycle: create changeset → seed patch → submit → approve → apply.
+    Verify audit events at each step and correlation_id is always present."""
+    user, headers = admin
+
+    # 1. Create changeset via HTTP
+    resp = await client.post(
+        f"/api/v1/workspaces/{workspace_with_files.id}/changesets",
+        json={"title": "Lifecycle Test CS", "description": "E2E audit trail"},
+        headers=headers,
+    )
+    assert resp.status_code == 201
+    cs_id = resp.json()["id"]
+
+    # 2. Seed a patch via service layer (no HTTP endpoint for adding patches)
+    cs_uuid = uuid.UUID(cs_id)
+    patch = WorkspacePatch(
+        tenant_id=tenant.id,
+        changeset_id=cs_uuid,
+        file_path="new_lifecycle_file.txt",
+        operation="create",
+        new_content="lifecycle test content",
+        baseline_sha256="",
+        apply_order=0,
+    )
+    db.add(patch)
+    await db.flush()
+
+    # 3. Submit
+    cid_submit = str(uuid.uuid4())
+    resp = await client.post(
+        f"/api/v1/changesets/{cs_id}/transition",
+        json={"action": "submit"},
+        headers={**headers, "X-Correlation-ID": cid_submit},
+    )
+    assert resp.status_code == 200
+
+    # 4. Approve
+    cid_approve = str(uuid.uuid4())
+    resp = await client.post(
+        f"/api/v1/changesets/{cs_id}/transition",
+        json={"action": "approve"},
+        headers={**headers, "X-Correlation-ID": cid_approve},
+    )
+    assert resp.status_code == 200
+
+    # 5. Apply
+    cid_apply = str(uuid.uuid4())
+    resp = await client.post(
+        f"/api/v1/changesets/{cs_id}/apply",
+        headers={**headers, "X-Correlation-ID": cid_apply},
+    )
+    assert resp.status_code == 200
+
+    # 6. Verify audit events
+    # changeset.created
+    result = await db.execute(
+        select(AuditEvent).where(
+            AuditEvent.action == "changeset.created",
+            AuditEvent.resource_id == cs_id,
+        )
+    )
+    created_event = result.scalars().first()
+    assert created_event is not None
+    assert created_event.correlation_id is not None
+
+    # changeset.transitioned (submit) — with our custom correlation_id
+    result = await db.execute(
+        select(AuditEvent).where(
+            AuditEvent.action == "changeset.transitioned",
+            AuditEvent.correlation_id == cid_submit,
+        )
+    )
+    submit_event = result.scalars().first()
+    assert submit_event is not None
+    assert submit_event.payload["action"] == "submit"
+    assert submit_event.payload["to_status"] == "pending_review"
+
+    # changeset.transitioned (approve) — with our custom correlation_id
+    result = await db.execute(
+        select(AuditEvent).where(
+            AuditEvent.action == "changeset.transitioned",
+            AuditEvent.correlation_id == cid_approve,
+        )
+    )
+    approve_event = result.scalars().first()
+    assert approve_event is not None
+    assert approve_event.payload["action"] == "approve"
+    assert approve_event.payload["to_status"] == "approved"
+
+    # changeset.applied — with our custom correlation_id
+    result = await db.execute(
+        select(AuditEvent).where(
+            AuditEvent.action == "changeset.applied",
+            AuditEvent.correlation_id == cid_apply,
+        )
+    )
+    apply_event = result.scalars().first()
+    assert apply_event is not None
+    assert apply_event.resource_id == cs_id

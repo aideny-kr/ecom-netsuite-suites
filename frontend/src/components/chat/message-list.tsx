@@ -8,7 +8,10 @@ import type { ChatMessage } from "@/lib/types";
 import { ToolCallStepCard } from "@/components/chat/tool-call-step";
 import { Sparkles, FileCode } from "lucide-react";
 
-function renderWithMentions(content: string): React.ReactNode[] {
+function renderWithMentions(
+  content: string,
+  onMentionClick?: (filePath: string) => void,
+): React.ReactNode[] {
   const mentionRegex = /@workspace:([^\s]+)/g;
   const parts: React.ReactNode[] = [];
   let lastIndex = 0;
@@ -20,14 +23,15 @@ function renderWithMentions(content: string): React.ReactNode[] {
     }
     const filePath = match[1];
     parts.push(
-      <span
+      <button
         key={match.index}
-        className="inline-flex items-center gap-1 rounded bg-primary/10 px-1.5 py-0.5 text-[12px] font-medium text-primary"
-        title={filePath}
+        onClick={() => onMentionClick?.(filePath)}
+        className="inline-flex items-center gap-1 rounded bg-primary/10 px-1.5 py-0.5 text-[12px] font-medium text-primary hover:bg-primary/20 cursor-pointer transition-colors"
+        title={`Open ${filePath} in workspace`}
       >
         <FileCode className="h-3 w-3" />
         {filePath.split("/").pop()}
-      </span>,
+      </button>,
     );
     lastIndex = mentionRegex.lastIndex;
   }
@@ -44,6 +48,7 @@ interface MessageListProps {
   isLoading: boolean;
   pendingUserMessage?: string | null;
   isWaitingForReply?: boolean;
+  onMentionClick?: (filePath: string) => void;
 }
 
 export function MessageList({
@@ -51,6 +56,7 @@ export function MessageList({
   isLoading,
   pendingUserMessage,
   isWaitingForReply,
+  onMentionClick,
 }: MessageListProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
 
@@ -127,7 +133,7 @@ export function MessageList({
               </div>
             ) : (
               <p className="text-[14px] leading-relaxed whitespace-pre-wrap">
-                {renderWithMentions(message.content)}
+                {renderWithMentions(message.content, onMentionClick)}
               </p>
             )}
             {message.citations && message.citations.length > 0 && (

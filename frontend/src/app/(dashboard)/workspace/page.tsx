@@ -1,6 +1,7 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
+import { useSearchParams } from "next/navigation";
 import { Plus, Search } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -52,6 +53,45 @@ export default function WorkspacePage() {
   );
   const { data: changesets = [] } = useChangesets(selectedWorkspaceId);
   const { data: diffData } = useChangesetDiff(viewingDiffId);
+  const searchParams = useSearchParams();
+
+  // Deep-link: auto-select workspace + file from ?file= query param (e.g. from chat mention)
+  const findFileInTree = useCallback(
+    (nodes: typeof fileTree, path: string): { id: string; path: string } | null => {
+      for (const node of nodes) {
+        if (!node.is_directory && node.path === path) {
+          return { id: node.id, path: node.path };
+        }
+        if (node.children) {
+          const found = findFileInTree(node.children, path);
+          if (found) return found;
+        }
+      }
+      return null;
+    },
+    [],
+  );
+
+  useEffect(() => {
+    const fileParam = searchParams.get("file");
+    if (!fileParam) return;
+
+    // Auto-select first workspace if none selected
+    if (!selectedWorkspaceId && workspaces.length > 0) {
+      setSelectedWorkspaceId(workspaces[0].id);
+      return; // fileTree will load on next render
+    }
+
+    // Find and select the file in the tree
+    if (fileTree.length > 0) {
+      const match = findFileInTree(fileTree, fileParam);
+      if (match) {
+        setSelectedFileId(match.id);
+        setSelectedFilePath(match.path);
+        setViewingDiffId(null);
+      }
+    }
+  }, [searchParams, fileTree, workspaces, selectedWorkspaceId, findFileInTree]);
 
   const handleCreate = async () => {
     if (!newName.trim()) return;
@@ -186,15 +226,28 @@ export default function WorkspacePage() {
             <div className="flex h-full flex-col">
               <div className="border-b px-4 py-2">
                 <p className="text-[13px] font-medium">{diffData.title}</p>
+                <p className="text-[11px] text-muted-foreground">
+                  {diffData.files.length} file(s) changed
+                </p>
               </div>
-              <div className="flex-1">
-                {diffData.files[0] && (
-                  <DiffViewer
-                    original={diffData.files[0].original_content}
-                    modified={diffData.files[0].modified_content}
-                    filePath={diffData.files[0].file_path}
-                  />
-                )}
+              <div className="flex-1 overflow-auto">
+                {diffData.files.map((file, idx) => (
+                  <div key={idx} className="border-b last:border-b-0">
+                    <div className="px-4 py-1.5 text-[12px] font-mono bg-muted/30 border-b">
+                      {file.file_path}{" "}
+                      <span className="text-muted-foreground">
+                        ({file.operation})
+                      </span>
+                    </div>
+                    <div style={{ height: "400px" }}>
+                      <DiffViewer
+                        original={file.original_content}
+                        modified={file.modified_content}
+                        filePath={file.file_path}
+                      />
+                    </div>
+                  </div>
+                ))}
               </div>
             </div>
           ) : fileContent ? (
