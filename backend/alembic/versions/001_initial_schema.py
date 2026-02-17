@@ -5,10 +5,12 @@ Revises:
 Create Date: 2026-02-16
 """
 
-from alembic import op
-import sqlalchemy as sa
-from sqlalchemy.dialects.postgresql import UUID, JSON
 import uuid
+
+import sqlalchemy as sa
+from sqlalchemy.dialects.postgresql import JSON, UUID
+
+from alembic import op
 
 revision = "001_initial"
 down_revision = None

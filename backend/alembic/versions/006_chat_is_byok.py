@@ -6,6 +6,7 @@ Create Date: 2026-02-16
 """
 
 import sqlalchemy as sa
+
 from alembic import op
 
 revision = "006_chat_is_byok"

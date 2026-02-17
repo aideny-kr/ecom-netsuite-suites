@@ -6,7 +6,6 @@ import uuid
 from pathlib import Path
 
 from sqlalchemy import delete
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import async_session_factory
 from app.models.chat import DocChunk

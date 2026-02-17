@@ -5,10 +5,12 @@ Revises: 002_chat_module
 Create Date: 2026-02-16
 """
 
-from alembic import op
-import sqlalchemy as sa
-from sqlalchemy.dialects.postgresql import UUID, JSON
 import uuid
+
+import sqlalchemy as sa
+from sqlalchemy.dialects.postgresql import JSON, UUID
+
+from alembic import op
 
 revision = "003_mcp_connectors"
 down_revision = "002_chat_module"

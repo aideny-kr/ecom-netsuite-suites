@@ -5,11 +5,13 @@ Revises: 001_initial
 Create Date: 2026-02-16
 """
 
-from alembic import op
+import uuid
+
 import sqlalchemy as sa
 from pgvector.sqlalchemy import Vector
-from sqlalchemy.dialects.postgresql import UUID, JSON
-import uuid
+from sqlalchemy.dialects.postgresql import JSON, UUID
+
+from alembic import op
 
 revision = "002_chat_module"
 down_revision = "001_initial"

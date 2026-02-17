@@ -5,10 +5,12 @@ Revises: 006_chat_is_byok
 Create Date: 2026-02-17
 """
 
-from alembic import op
+import uuid
+
 import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import UUID
-import uuid
+
+from alembic import op
 
 revision = "007_dev_workspace"
 down_revision = "006_chat_is_byok"
