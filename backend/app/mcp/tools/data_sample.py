@@ -21,14 +21,11 @@ async def execute(params: dict, **kwargs) -> dict:
     table_name = params.get("table_name", "")
 
     if table_name not in ALLOWED_TABLES:
-        raise ValueError(
-            f"Table '{table_name}' is not in the allowlist. "
-            f"Allowed tables: {sorted(ALLOWED_TABLES)}"
-        )
+        raise ValueError(f"Table '{table_name}' is not in the allowlist. Allowed tables: {sorted(ALLOWED_TABLES)}")
 
     context: dict = kwargs.get("context", {})
     db: AsyncSession | None = context.get("db")
-    tenant_id = context.get("tenant_id")
+    _tenant_id = context.get("tenant_id")
 
     model = TABLE_MODEL_MAP[table_name]
 
@@ -47,10 +44,7 @@ async def execute(params: dict, **kwargs) -> dict:
         result = await db.execute(query)
         rows_raw = result.scalars().all()
 
-        rows = [
-            {k: str(v) for k, v in row.__dict__.items() if not k.startswith("_")}
-            for row in rows_raw
-        ]
+        rows = [{k: str(v) for k, v in row.__dict__.items() if not k.startswith("_")} for row in rows_raw]
         columns = list(rows[0].keys()) if rows else [c.name for c in model.__table__.columns]
 
         return {

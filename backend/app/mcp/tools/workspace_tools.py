@@ -74,8 +74,14 @@ async def execute_propose_patch(params: dict[str, Any], context: dict[str, Any])
 
     try:
         result = await ws_svc.propose_patch(
-            db, workspace_id, uuid.UUID(tenant_id),
-            file_path, unified_diff, title, proposed_by, rationale,
+            db,
+            workspace_id,
+            uuid.UUID(tenant_id),
+            file_path,
+            unified_diff,
+            title,
+            proposed_by,
+            rationale,
         )
     except ValueError as e:
         return {"error": str(e), "row_count": 0}

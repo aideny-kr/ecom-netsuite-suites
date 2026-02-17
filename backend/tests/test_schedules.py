@@ -129,9 +129,7 @@ class TestScheduleCRUD:
 class TestScheduleTenantIsolation:
     """Multi-tenant isolation for schedules."""
 
-    async def test_tenant_b_cannot_see_tenant_a_schedules(
-        self, client: AsyncClient, admin_user, admin_user_b
-    ):
+    async def test_tenant_b_cannot_see_tenant_a_schedules(self, client: AsyncClient, admin_user, admin_user_b):
         """Tenant B cannot see Tenant A's schedules."""
         user_a, headers_a = admin_user
         user_b, headers_b = admin_user_b
@@ -149,9 +147,7 @@ class TestScheduleTenantIsolation:
         assert resp.status_code == 200
         assert len(resp.json()) == 0
 
-    async def test_tenant_b_cannot_delete_tenant_a_schedule(
-        self, client: AsyncClient, admin_user, admin_user_b
-    ):
+    async def test_tenant_b_cannot_delete_tenant_a_schedule(self, client: AsyncClient, admin_user, admin_user_b):
         """Tenant B cannot delete Tenant A's schedule."""
         user_a, headers_a = admin_user
         user_b, headers_b = admin_user_b
@@ -168,9 +164,7 @@ class TestScheduleTenantIsolation:
         resp = await client.delete(f"/api/v1/schedules/{schedule_id}", headers=headers_b)
         assert resp.status_code == 404
 
-    async def test_each_tenant_sees_only_own_schedules(
-        self, client: AsyncClient, admin_user, admin_user_b
-    ):
+    async def test_each_tenant_sees_only_own_schedules(self, client: AsyncClient, admin_user, admin_user_b):
         """Each tenant's list contains only their own schedules."""
         user_a, headers_a = admin_user
         user_b, headers_b = admin_user_b
@@ -242,9 +236,7 @@ class TestScheduleQuotas:
             )
             assert resp.status_code == 201
 
-    async def test_deleted_schedule_does_not_count_toward_quota(
-        self, client: AsyncClient, db: AsyncSession
-    ):
+    async def test_deleted_schedule_does_not_count_toward_quota(self, client: AsyncClient, db: AsyncSession):
         """Deleting a schedule frees up quota space."""
         tenant = await create_test_tenant(db, name="Delete Quota", plan="free")
         user, _ = await create_test_user(db, tenant, role_name="admin")
@@ -288,9 +280,7 @@ class TestScheduleRBAC:
         )
         assert resp.status_code == 403
 
-    async def test_readonly_cannot_delete_schedule(
-        self, client: AsyncClient, admin_user, readonly_user
-    ):
+    async def test_readonly_cannot_delete_schedule(self, client: AsyncClient, admin_user, readonly_user):
         """Readonly role cannot delete schedules even if owned by same tenant."""
         admin, admin_headers = admin_user
         ro_user, ro_headers = readonly_user

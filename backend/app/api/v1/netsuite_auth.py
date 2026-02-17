@@ -120,6 +120,7 @@ async def callback(
         # Delegate to MCP connector callback handler
         try:
             from app.api.v1.mcp_connectors import netsuite_mcp_callback
+
             return await netsuite_mcp_callback(code=code, state=state, db=db, _stored=mcp_stored)
         except Exception as exc:
             logger.error("netsuite.mcp_callback_delegation_failed", error=str(exc))

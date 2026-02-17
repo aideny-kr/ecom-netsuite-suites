@@ -23,15 +23,19 @@ class GeminiAdapter(BaseLLMAdapter):
             for k, v in properties.items():
                 cleaned_props[k] = {pk: pv for pk, pv in v.items() if pk != "additionalProperties"}
 
-            declarations.append(genai_types.FunctionDeclaration(
-                name=tool["name"],
-                description=tool.get("description", ""),
-                parameters={
-                    "type": "OBJECT",
-                    "properties": cleaned_props,
-                    "required": schema.get("required", []),
-                } if cleaned_props else None,
-            ))
+            declarations.append(
+                genai_types.FunctionDeclaration(
+                    name=tool["name"],
+                    description=tool.get("description", ""),
+                    parameters={
+                        "type": "OBJECT",
+                        "properties": cleaned_props,
+                        "required": schema.get("required", []),
+                    }
+                    if cleaned_props
+                    else None,
+                )
+            )
         return [genai_types.Tool(function_declarations=declarations)]
 
     def _convert_messages(self, messages: list[dict]) -> list[genai_types.Content]:
@@ -46,10 +50,12 @@ class GeminiAdapter(BaseLLMAdapter):
             gemini_role = "model" if role == "assistant" else "user"
 
             if isinstance(content, str):
-                gemini_contents.append(genai_types.Content(
-                    role=gemini_role,
-                    parts=[genai_types.Part.from_text(text=content)],
-                ))
+                gemini_contents.append(
+                    genai_types.Content(
+                        role=gemini_role,
+                        parts=[genai_types.Part.from_text(text=content)],
+                    )
+                )
             elif isinstance(content, list):
                 parts: list[genai_types.Part] = []
                 for block in content:
@@ -57,20 +63,26 @@ class GeminiAdapter(BaseLLMAdapter):
                         if block.get("type") == "text":
                             parts.append(genai_types.Part.from_text(text=block["text"]))
                         elif block.get("type") == "tool_use":
-                            parts.append(genai_types.Part.from_function_call(
-                                name=block["name"],
-                                args=block["input"],
-                            ))
+                            parts.append(
+                                genai_types.Part.from_function_call(
+                                    name=block["name"],
+                                    args=block["input"],
+                                )
+                            )
                         elif block.get("type") == "tool_result":
-                            parts.append(genai_types.Part.from_function_response(
-                                name=block.get("tool_name", "tool"),
-                                response={"result": block.get("content", "")},
-                            ))
+                            parts.append(
+                                genai_types.Part.from_function_response(
+                                    name=block.get("tool_name", "tool"),
+                                    response={"result": block.get("content", "")},
+                                )
+                            )
                 if parts:
-                    gemini_contents.append(genai_types.Content(
-                        role=gemini_role,
-                        parts=parts,
-                    ))
+                    gemini_contents.append(
+                        genai_types.Content(
+                            role=gemini_role,
+                            parts=parts,
+                        )
+                    )
 
         return gemini_contents
 
@@ -134,10 +146,12 @@ class GeminiAdapter(BaseLLMAdapter):
         for text in response.text_blocks:
             content.append({"type": "text", "text": text})
         for tool in response.tool_use_blocks:
-            content.append({
-                "type": "tool_use",
-                "id": tool.id,
-                "name": tool.name,
-                "input": tool.input,
-            })
+            content.append(
+                {
+                    "type": "tool_use",
+                    "id": tool.id,
+                    "name": tool.name,
+                    "input": tool.input,
+                }
+            )
         return {"role": "assistant", "content": content}

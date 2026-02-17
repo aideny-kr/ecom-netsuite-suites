@@ -26,6 +26,7 @@ from app.models.user import Role, User, UserRole
 # Generate a valid Fernet encryption key for tests (avoids placeholder rejection)
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture(autouse=True, scope="session")
 def _set_encryption_key():
     """Ensure a valid Fernet key is available for encrypt/decrypt operations in tests."""

@@ -83,11 +83,13 @@ async def run_chat_turn(
         rag_parts = []
         for chunk in state.doc_chunks:
             rag_parts.append(f"[Documentation: {chunk['title']}]\n{chunk['content']}")
-            citations.append({
-                "type": "doc",
-                "title": chunk["title"],
-                "snippet": chunk["content"][:200],
-            })
+            citations.append(
+                {
+                    "type": "doc",
+                    "title": chunk["title"],
+                    "snippet": chunk["content"][:200],
+                }
+            )
         rag_context = "\n\n".join(rag_parts)
 
     # ── Build messages for Claude ──
@@ -144,20 +146,24 @@ async def run_chat_turn(
                 db=db,
             )
 
-            tool_results_content.append({
-                "type": "tool_result",
-                "tool_use_id": block.id,
-                "tool_name": block.name,
-                "content": result_str,
-            })
+            tool_results_content.append(
+                {
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "tool_name": block.name,
+                    "content": result_str,
+                }
+            )
 
             # Log for audit
-            tool_calls_log.append({
-                "step": step,
-                "tool": block.name,
-                "params": block.input,
-                "result_summary": result_str[:500],
-            })
+            tool_calls_log.append(
+                {
+                    "step": step,
+                    "tool": block.name,
+                    "params": block.input,
+                    "result_summary": result_str[:500],
+                }
+            )
 
         messages.append(adapter.build_tool_result_message(tool_results_content))
 

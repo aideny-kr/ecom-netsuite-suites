@@ -85,5 +85,6 @@ async def get_audit_retention_stats(
 ):
     """Get audit retention statistics for the current tenant."""
     from app.services.audit_retention import get_retention_stats
+
     stats = await get_retention_stats(db, tenant_id=user.tenant_id)
     return stats

@@ -1,12 +1,10 @@
 """Tests for chat API endpoints."""
+
 import uuid
 from unittest.mock import AsyncMock, patch
 
 import pytest
 from sqlalchemy import text
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from tests.conftest import create_test_tenant, create_test_user, make_auth_headers
 
 
 @pytest.mark.asyncio

@@ -24,8 +24,14 @@ class TestAllowedChatTools:
     def test_contains_only_read_tools(self):
         """Only expected tools are in the set."""
         expected = {
-            "netsuite.suiteql", "netsuite.connectivity", "data.sample_table_read", "report.export",
-            "workspace.list_files", "workspace.read_file", "workspace.search", "workspace.propose_patch",
+            "netsuite.suiteql",
+            "netsuite.connectivity",
+            "data.sample_table_read",
+            "report.export",
+            "workspace.list_files",
+            "workspace.read_file",
+            "workspace.search",
+            "workspace.propose_patch",
         }
         assert ALLOWED_CHAT_TOOLS == expected
 

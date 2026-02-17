@@ -35,9 +35,7 @@ async def create_schedule(
 async def list_schedules(db: AsyncSession, tenant_id: uuid.UUID) -> list[Schedule]:
     """List all schedules for a tenant."""
     result = await db.execute(
-        select(Schedule)
-        .where(Schedule.tenant_id == tenant_id)
-        .order_by(Schedule.created_at.desc())
+        select(Schedule).where(Schedule.tenant_id == tenant_id).order_by(Schedule.created_at.desc())
     )
     return list(result.scalars().all())
 

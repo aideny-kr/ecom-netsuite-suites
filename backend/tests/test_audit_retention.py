@@ -1,4 +1,5 @@
 """Tests for audit log retention."""
+
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -25,13 +26,15 @@ class TestRetentionStats:
         tenant_id = uuid.uuid4()
 
         # Add a recent event
-        db.add(AuditEvent(
-            tenant_id=tenant_id,
-            category="test",
-            action="test.recent",
-            actor_type="system",
-            status="success",
-        ))
+        db.add(
+            AuditEvent(
+                tenant_id=tenant_id,
+                category="test",
+                action="test.recent",
+                actor_type="system",
+                status="success",
+            )
+        )
         await db.flush()
 
         stats = await get_retention_stats(db, tenant_id=tenant_id)
@@ -45,14 +48,16 @@ class TestRetentionStats:
         tenant_id = uuid.uuid4()
         old_timestamp = datetime.now(timezone.utc) - timedelta(days=settings.AUDIT_RETENTION_DAYS + 1)
 
-        db.add(AuditEvent(
-            tenant_id=tenant_id,
-            timestamp=old_timestamp,
-            category="test",
-            action="test.old",
-            actor_type="system",
-            status="success",
-        ))
+        db.add(
+            AuditEvent(
+                tenant_id=tenant_id,
+                timestamp=old_timestamp,
+                category="test",
+                action="test.old",
+                actor_type="system",
+                status="success",
+            )
+        )
         await db.flush()
 
         stats = await get_retention_stats(db, tenant_id=tenant_id)

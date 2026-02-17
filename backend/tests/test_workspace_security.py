@@ -32,12 +32,15 @@ async def workspace(db, tenant, user):
 
 # --- Path Traversal ---
 
+
 @pytest.mark.asyncio
 async def test_path_traversal_dot_dot(db, tenant, user, workspace):
     """Path traversal via .. should be blocked."""
     with pytest.raises(ValueError, match="traversal"):
         await ws_svc.propose_patch(
-            db, workspace.id, tenant.id,
+            db,
+            workspace.id,
+            tenant.id,
             "../../../etc/passwd",
             "diff content",
             "Hack attempt",
@@ -50,7 +53,9 @@ async def test_path_traversal_encoded(db, tenant, user, workspace):
     """Encoded path traversal should be blocked by safe char check."""
     with pytest.raises(ValueError, match="disallowed"):
         await ws_svc.propose_patch(
-            db, workspace.id, tenant.id,
+            db,
+            workspace.id,
+            tenant.id,
             "src%2F..%2F..%2Fetc%2Fpasswd",
             "diff",
             "Encoded hack",
@@ -71,6 +76,7 @@ async def test_absolute_path_blocked_in_import(db, tenant, user, workspace):
 
 # --- Size Limits ---
 
+
 @pytest.mark.asyncio
 async def test_oversized_file_rejected_in_import(db, tenant, user, workspace):
     """Files over 256KB should be skipped during import."""
@@ -89,12 +95,18 @@ async def test_oversized_diff_rejected(db, tenant, user, workspace):
     big_diff = "x" * (ws_svc.MAX_DIFF_SIZE + 1)
     with pytest.raises(ValueError, match="maximum size"):
         await ws_svc.propose_patch(
-            db, workspace.id, tenant.id,
-            "src/app.ts", big_diff, "Big diff", user.id,
+            db,
+            workspace.id,
+            tenant.id,
+            "src/app.ts",
+            big_diff,
+            "Big diff",
+            user.id,
         )
 
 
 # --- Content Injection ---
+
 
 @pytest.mark.asyncio
 async def test_script_injection_stored_safely(db, tenant, user, workspace):
@@ -110,6 +122,7 @@ async def test_script_injection_stored_safely(db, tenant, user, workspace):
     assert file_node is not None
 
     import uuid as _uuid
+
     result = await ws_svc.read_file(db, workspace.id, _uuid.UUID(file_node["id"]), tenant.id)
     # Content should be stored verbatim — no execution, no sanitization
     assert "<script>" in result["content"]
@@ -142,6 +155,7 @@ async def test_binary_file_skipped_in_import(db, tenant, user, workspace):
 
 
 # --- Helpers ---
+
 
 def _find_file(tree: list[dict], name: str) -> dict | None:
     for node in tree:

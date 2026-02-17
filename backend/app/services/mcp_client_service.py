@@ -122,11 +122,13 @@ async def discover_tools(connector: McpConnector, db: AsyncSession | None = None
 
     tools = []
     for tool in result.tools:
-        tools.append({
-            "name": tool.name,
-            "description": getattr(tool, "description", "") or "",
-            "input_schema": getattr(tool, "inputSchema", None),
-        })
+        tools.append(
+            {
+                "name": tool.name,
+                "description": getattr(tool, "description", "") or "",
+                "input_schema": getattr(tool, "inputSchema", None),
+            }
+        )
 
     logger.info(
         "mcp_client.discover_tools",

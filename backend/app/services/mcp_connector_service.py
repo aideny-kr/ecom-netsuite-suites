@@ -4,7 +4,7 @@ import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.encryption import decrypt_credentials, encrypt_credentials, get_current_key_version
+from app.core.encryption import encrypt_credentials, get_current_key_version
 from app.models.mcp_connector import McpConnector
 
 logger = structlog.get_logger()
@@ -87,16 +87,12 @@ async def create_netsuite_mcp_connector(
 async def list_mcp_connectors(db: AsyncSession, tenant_id: uuid.UUID) -> list[McpConnector]:
     """List all MCP connectors for a tenant."""
     result = await db.execute(
-        select(McpConnector)
-        .where(McpConnector.tenant_id == tenant_id)
-        .order_by(McpConnector.created_at.desc())
+        select(McpConnector).where(McpConnector.tenant_id == tenant_id).order_by(McpConnector.created_at.desc())
     )
     return list(result.scalars().all())
 
 
-async def get_mcp_connector(
-    db: AsyncSession, connector_id: uuid.UUID, tenant_id: uuid.UUID
-) -> McpConnector | None:
+async def get_mcp_connector(db: AsyncSession, connector_id: uuid.UUID, tenant_id: uuid.UUID) -> McpConnector | None:
     """Get a single MCP connector by ID, scoped to tenant."""
     result = await db.execute(
         select(McpConnector).where(
@@ -107,9 +103,7 @@ async def get_mcp_connector(
     return result.scalar_one_or_none()
 
 
-async def delete_mcp_connector(
-    db: AsyncSession, connector_id: uuid.UUID, tenant_id: uuid.UUID
-) -> bool:
+async def delete_mcp_connector(db: AsyncSession, connector_id: uuid.UUID, tenant_id: uuid.UUID) -> bool:
     """Soft-delete an MCP connector by setting status to revoked."""
     connector = await get_mcp_connector(db, connector_id, tenant_id)
     if not connector:
@@ -120,9 +114,7 @@ async def delete_mcp_connector(
     return True
 
 
-async def get_active_connectors_for_tenant(
-    db: AsyncSession, tenant_id: uuid.UUID
-) -> list[McpConnector]:
+async def get_active_connectors_for_tenant(db: AsyncSession, tenant_id: uuid.UUID) -> list[McpConnector]:
     """Get all active and enabled MCP connectors for a tenant."""
     result = await db.execute(
         select(McpConnector).where(
@@ -134,9 +126,7 @@ async def get_active_connectors_for_tenant(
     return list(result.scalars().all())
 
 
-async def test_mcp_connector(
-    db: AsyncSession, connector_id: uuid.UUID, tenant_id: uuid.UUID
-) -> dict:
+async def test_mcp_connector(db: AsyncSession, connector_id: uuid.UUID, tenant_id: uuid.UUID) -> dict:
     """Test an MCP connector by connecting and discovering tools."""
     connector = await get_mcp_connector(db, connector_id, tenant_id)
     if not connector:

@@ -1,6 +1,21 @@
 from fastapi import APIRouter
 
-from app.api.v1 import audit, auth, chat, connections, health, jobs, mcp_connectors, netsuite_auth, schedules, sync, tables, tenants, users, workspaces
+from app.api.v1 import (
+    audit,
+    auth,
+    chat,
+    connections,
+    health,
+    jobs,
+    mcp_connectors,
+    netsuite_auth,
+    schedules,
+    sync,
+    tables,
+    tenants,
+    users,
+    workspaces,
+)
 
 api_router = APIRouter(prefix="/api/v1")
 

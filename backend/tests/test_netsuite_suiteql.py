@@ -4,7 +4,6 @@ import pytest
 
 from app.mcp.tools.netsuite_suiteql import enforce_limit, parse_tables, validate_query
 
-
 # ---------------------------------------------------------------------------
 # parse_tables
 # ---------------------------------------------------------------------------
@@ -15,16 +14,12 @@ class TestParseTables:
         assert parse_tables("SELECT id FROM transaction") == {"transaction"}
 
     def test_join(self):
-        tables = parse_tables(
-            "SELECT t.id, c.name FROM transaction t JOIN customer c ON t.entity = c.id"
-        )
+        tables = parse_tables("SELECT t.id, c.name FROM transaction t JOIN customer c ON t.entity = c.id")
         assert tables == {"transaction", "customer"}
 
     def test_multiple_joins(self):
         query = (
-            "SELECT t.id FROM transaction t "
-            "JOIN customer c ON t.entity = c.id "
-            "JOIN subsidiary s ON t.subsidiary = s.id"
+            "SELECT t.id FROM transaction t JOIN customer c ON t.entity = c.id JOIN subsidiary s ON t.subsidiary = s.id"
         )
         tables = parse_tables(query)
         assert tables == {"transaction", "customer", "subsidiary"}
@@ -36,9 +31,7 @@ class TestParseTables:
         assert parse_tables("SELECT 1 AS health") == set()
 
     def test_subquery(self):
-        tables = parse_tables(
-            "SELECT id FROM transaction WHERE entity IN (SELECT id FROM customer)"
-        )
+        tables = parse_tables("SELECT id FROM transaction WHERE entity IN (SELECT id FROM customer)")
         assert tables == {"transaction", "customer"}
 
 
@@ -145,6 +138,4 @@ class TestMalformedQueries:
     def test_semicolon_injection_blocked(self):
         """Multi-statement with forbidden keyword is caught."""
         with pytest.raises(ValueError, match="read-only"):
-            validate_query(
-                "SELECT id FROM transaction; DROP TABLE transaction", ALLOWED
-            )
+            validate_query("SELECT id FROM transaction; DROP TABLE transaction", ALLOWED)

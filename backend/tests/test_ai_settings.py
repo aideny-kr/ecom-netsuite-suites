@@ -14,31 +14,37 @@ class TestAiSchemaValidation:
 
     def test_valid_provider(self):
         from app.schemas.tenant import TenantConfigUpdate
+
         update = TenantConfigUpdate(ai_provider="openai")
         assert update.ai_provider == "openai"
 
     def test_invalid_provider_rejected(self):
         from app.schemas.tenant import TenantConfigUpdate
+
         with pytest.raises(ValueError, match="Invalid provider"):
             TenantConfigUpdate(ai_provider="mistral")
 
     def test_valid_model(self):
         from app.schemas.tenant import TenantConfigUpdate
+
         update = TenantConfigUpdate(ai_model="gpt-5.2")
         assert update.ai_model == "gpt-5.2"
 
     def test_invalid_model_rejected(self):
         from app.schemas.tenant import TenantConfigUpdate
+
         with pytest.raises(ValueError, match="Invalid model"):
             TenantConfigUpdate(ai_model="gpt-999")
 
     def test_none_provider_allowed(self):
         from app.schemas.tenant import TenantConfigUpdate
+
         update = TenantConfigUpdate(ai_provider=None)
         assert update.ai_provider is None
 
     def test_ai_key_test_request_validates_provider(self):
         from app.schemas.tenant import AiKeyTestRequest
+
         with pytest.raises(ValueError, match="Invalid provider"):
             AiKeyTestRequest(provider="bad", api_key="key")
 
@@ -139,7 +145,9 @@ class TestAiSettingsApi:
             mock_usage = MagicMock(input_tokens=1, output_tokens=1)
             mock_adapter.create_message = AsyncMock(
                 return_value=MagicMock(
-                    text_blocks=["hi"], tool_use_blocks=[], usage=mock_usage,
+                    text_blocks=["hi"],
+                    tool_use_blocks=[],
+                    usage=mock_usage,
                 )
             )
             mock_get.return_value = mock_adapter

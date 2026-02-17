@@ -56,6 +56,7 @@ def _patch_orchestrator(**overrides):
 
     # Use contextlib-style manual patches
     import contextlib
+
     @contextlib.contextmanager
     def ctx():
         active = {}
@@ -126,10 +127,13 @@ class TestAgenticToolCall:
         session = _make_session(tenant_id)
 
         tool_only = _make_llm_response(
-            tool_blocks=[ToolUseBlock(
-                id="tool_1", name="data_sample_table_read",
-                input={"table_name": "orders"},
-            )],
+            tool_blocks=[
+                ToolUseBlock(
+                    id="tool_1",
+                    name="data_sample_table_read",
+                    input={"table_name": "orders"},
+                )
+            ],
         )
         text_response = _make_llm_response(text="You have 5 orders.")
 
@@ -150,11 +154,13 @@ class TestAgenticToolCall:
             patch(
                 f"{_ORCH}.build_all_tool_definitions",
                 new_callable=AsyncMock,
-                return_value=[{
-                    "name": "data_sample_table_read",
-                    "description": "Read table",
-                    "input_schema": {"type": "object", "properties": {}},
-                }],
+                return_value=[
+                    {
+                        "name": "data_sample_table_read",
+                        "description": "Read table",
+                        "input_schema": {"type": "object", "properties": {}},
+                    }
+                ],
             ),
             patch(
                 f"{_ORCH}.execute_tool_call",
@@ -186,16 +192,22 @@ class TestAgenticToolRetry:
         session = _make_session(tenant_id)
 
         response1 = _make_llm_response(
-            tool_blocks=[ToolUseBlock(
-                id="tool_1", name="netsuite_suiteql",
-                input={"query": "SELECT total FROM transaction"},
-            )],
+            tool_blocks=[
+                ToolUseBlock(
+                    id="tool_1",
+                    name="netsuite_suiteql",
+                    input={"query": "SELECT total FROM transaction"},
+                )
+            ],
         )
         response2 = _make_llm_response(
-            tool_blocks=[ToolUseBlock(
-                id="tool_2", name="netsuite_suiteql",
-                input={"query": "SELECT amount FROM transaction"},
-            )],
+            tool_blocks=[
+                ToolUseBlock(
+                    id="tool_2",
+                    name="netsuite_suiteql",
+                    input={"query": "SELECT amount FROM transaction"},
+                )
+            ],
         )
         response3 = _make_llm_response(text="The total is $1000.")
 
@@ -221,10 +233,13 @@ class TestAgenticToolRetry:
             patch(
                 f"{_ORCH}.build_all_tool_definitions",
                 new_callable=AsyncMock,
-                return_value=[{
-                    "name": "netsuite_suiteql", "description": "Query",
-                    "input_schema": {"type": "object", "properties": {}},
-                }],
+                return_value=[
+                    {
+                        "name": "netsuite_suiteql",
+                        "description": "Query",
+                        "input_schema": {"type": "object", "properties": {}},
+                    }
+                ],
             ),
             patch(
                 f"{_ORCH}.execute_tool_call",
@@ -259,10 +274,13 @@ class TestAgenticMaxSteps:
 
         tool_responses = [
             _make_llm_response(
-                tool_blocks=[ToolUseBlock(
-                    id=f"tool_{i}", name="data_sample_table_read",
-                    input={"table_name": "orders"},
-                )],
+                tool_blocks=[
+                    ToolUseBlock(
+                        id=f"tool_{i}",
+                        name="data_sample_table_read",
+                        input={"table_name": "orders"},
+                    )
+                ],
             )
             for i in range(MAX_STEPS)
         ]
@@ -285,10 +303,13 @@ class TestAgenticMaxSteps:
             patch(
                 f"{_ORCH}.build_all_tool_definitions",
                 new_callable=AsyncMock,
-                return_value=[{
-                    "name": "data_sample_table_read", "description": "Read",
-                    "input_schema": {"type": "object", "properties": {}},
-                }],
+                return_value=[
+                    {
+                        "name": "data_sample_table_read",
+                        "description": "Read",
+                        "input_schema": {"type": "object", "properties": {}},
+                    }
+                ],
             ),
             patch(
                 f"{_ORCH}.execute_tool_call",
@@ -320,9 +341,13 @@ class TestAgenticAllowlistEnforcement:
         session = _make_session(tenant_id)
 
         tool_response = _make_llm_response(
-            tool_blocks=[ToolUseBlock(
-                id="tool_1", name="schedule_create", input={"name": "bad"},
-            )],
+            tool_blocks=[
+                ToolUseBlock(
+                    id="tool_1",
+                    name="schedule_create",
+                    input={"name": "bad"},
+                )
+            ],
         )
         text_response = _make_llm_response(text="Sorry, I can't do that.")
 

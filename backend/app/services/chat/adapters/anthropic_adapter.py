@@ -36,9 +36,7 @@ class AnthropicAdapter(BaseLLMAdapter):
             if block.type == "text":
                 text_blocks.append(block.text)
             elif block.type == "tool_use":
-                tool_use_blocks.append(
-                    ToolUseBlock(id=block.id, name=block.name, input=block.input)
-                )
+                tool_use_blocks.append(ToolUseBlock(id=block.id, name=block.name, input=block.input))
 
         usage = TokenUsage(
             input_tokens=response.usage.input_tokens,
@@ -59,10 +57,12 @@ class AnthropicAdapter(BaseLLMAdapter):
         for text in response.text_blocks:
             content.append({"type": "text", "text": text})
         for tool in response.tool_use_blocks:
-            content.append({
-                "type": "tool_use",
-                "id": tool.id,
-                "name": tool.name,
-                "input": tool.input,
-            })
+            content.append(
+                {
+                    "type": "tool_use",
+                    "id": tool.id,
+                    "name": tool.name,
+                    "input": tool.input,
+                }
+            )
         return {"role": "assistant", "content": content}

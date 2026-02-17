@@ -3,24 +3,16 @@
 import uuid
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, status
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.dependencies import get_current_user, require_permission
+from app.core.dependencies import require_permission
 from app.models.user import User
 from app.schemas.workspace import (
     ChangeSetCreate,
-    ChangeSetResponse,
     ChangeSetTransition,
-    DiffViewResponse,
-    FileReadResponse,
-    FileTreeNode,
-    PatchResponse,
-    SearchResponse,
-    SearchResult,
     WorkspaceCreate,
-    WorkspaceResponse,
 )
 from app.services import audit_service
 from app.services import workspace_service as ws_svc
@@ -80,15 +72,14 @@ def _serialize_changeset(cs) -> dict:
 
 # --- Workspace CRUD ---
 
+
 @router.post("", status_code=status.HTTP_201_CREATED)
 async def create_workspace(
     body: WorkspaceCreate,
     user: User = Depends(require_permission("workspace.manage")),
     db: AsyncSession = Depends(get_db),
 ):
-    ws = await ws_svc.create_workspace(
-        db, user.tenant_id, body.name, user.id, body.description
-    )
+    ws = await ws_svc.create_workspace(db, user.tenant_id, body.name, user.id, body.description)
     await audit_service.log_event(
         db=db,
         tenant_id=user.tenant_id,
@@ -180,6 +171,7 @@ async def archive_workspace(
 
 # --- Files ---
 
+
 @router.get("/{workspace_id}/files")
 async def list_files(
     workspace_id: uuid.UUID,
@@ -222,6 +214,7 @@ async def search_files(
 
 # --- Changesets ---
 
+
 @router.post("/{workspace_id}/changesets", status_code=status.HTTP_201_CREATED)
 async def create_changeset(
     workspace_id: uuid.UUID,
@@ -229,9 +222,7 @@ async def create_changeset(
     user: User = Depends(require_permission("workspace.manage")),
     db: AsyncSession = Depends(get_db),
 ):
-    cs = await ws_svc.create_changeset(
-        db, workspace_id, user.tenant_id, body.title, user.id, body.description
-    )
+    cs = await ws_svc.create_changeset(db, workspace_id, user.tenant_id, body.title, user.id, body.description)
     await audit_service.log_event(
         db=db,
         tenant_id=user.tenant_id,

@@ -1,7 +1,7 @@
 """Stripe ingestion: sync payouts, balance transactions (payout lines), and disputes."""
 
 import uuid
-from datetime import date, datetime, timezone
+from datetime import date
 from decimal import Decimal
 
 import stripe
@@ -23,9 +23,7 @@ def sync_stripe(db: Session, connection_id: str, tenant_id: str) -> dict:
     Returns a summary dict with counts of records synced.
     """
     # ---- bootstrap --------------------------------------------------------
-    connection = db.execute(
-        select(Connection).where(Connection.id == connection_id)
-    ).scalar_one()
+    connection = db.execute(select(Connection).where(Connection.id == connection_id)).scalar_one()
 
     creds = decrypt_credentials(connection.encrypted_credentials)
     stripe.api_key = creds["api_key"]
@@ -62,11 +60,7 @@ def sync_stripe(db: Session, connection_id: str, tenant_id: str) -> dict:
                 "net_amount": Decimal(str(payout.amount / 100)),
                 "currency": payout.currency.upper(),
                 "status": payout.status,
-                "arrival_date": (
-                    date.fromtimestamp(payout.arrival_date)
-                    if payout.arrival_date
-                    else None
-                ),
+                "arrival_date": (date.fromtimestamp(payout.arrival_date) if payout.arrival_date else None),
                 "raw_data": dict(payout),
             },
         )
@@ -93,9 +87,7 @@ def sync_stripe(db: Session, connection_id: str, tenant_id: str) -> dict:
 
         payout_uuid = canonical_payout.id if canonical_payout else None
 
-        for txn in stripe.BalanceTransaction.list(
-            payout=stripe_payout_id, limit=100
-        ).auto_paging_iter():
+        for txn in stripe.BalanceTransaction.list(payout=stripe_payout_id, limit=100).auto_paging_iter():
             upsert_canonical(
                 db,
                 model_class=PayoutLine,

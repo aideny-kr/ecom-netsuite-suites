@@ -5,8 +5,6 @@ before executing any database queries, preventing cross-tenant data leaks.
 """
 
 
-
-
 class TestTenantSessionSource:
     """Verify tenant_session sets RLS context by inspecting source code."""
 
@@ -113,6 +111,4 @@ class TestBaseTaskUseTenantSession:
         src = self._get_source("app/workers/base_task.py")
         for method_name in ["before_start", "on_success", "on_failure"]:
             method = self._extract_method(src, method_name)
-            assert "Session(sync_engine)" not in method, (
-                f"{method_name} must not use raw Session(sync_engine)"
-            )
+            assert "Session(sync_engine)" not in method, f"{method_name} must not use raw Session(sync_engine)"

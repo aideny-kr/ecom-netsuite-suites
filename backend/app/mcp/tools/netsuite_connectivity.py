@@ -5,13 +5,11 @@ from __future__ import annotations
 from sqlalchemy import select
 
 from app.core.encryption import decrypt_credentials
-from app.models.connection import Connection
 from app.mcp.tools.netsuite_suiteql import execute as suiteql_execute
+from app.models.connection import Connection
 
 
-async def execute_connectivity(
-    params: dict, context: dict | None = None, **kwargs
-) -> dict:
+async def execute_connectivity(params: dict, context: dict | None = None, **kwargs) -> dict:
     """Test NetSuite connectivity by running a lightweight health query."""
     if not context:
         return {

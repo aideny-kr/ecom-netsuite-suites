@@ -27,9 +27,7 @@ class ChatMessage(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "chat_messages"
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
-    session_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("chat_sessions.id"), nullable=False
-    )
+    session_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("chat_sessions.id"), nullable=False)
     role: Mapped[str] = mapped_column(String(20), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
     tool_calls: Mapped[dict | None] = mapped_column(JSON, nullable=True)
@@ -48,9 +46,7 @@ class ChatMessage(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
 class DocChunk(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "doc_chunks"
-    __table_args__ = (
-        Index("ix_doc_chunks_tenant_source", "tenant_id", "source_path"),
-    )
+    __table_args__ = (Index("ix_doc_chunks_tenant_source", "tenant_id", "source_path"),)
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
     source_path: Mapped[str] = mapped_column(String(512), nullable=False)

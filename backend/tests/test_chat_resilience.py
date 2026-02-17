@@ -1,4 +1,5 @@
 """Tests for chat pipeline resilience: error handling, graceful degradation, health endpoint."""
+
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 

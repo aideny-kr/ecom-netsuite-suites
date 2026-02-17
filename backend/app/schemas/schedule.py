@@ -9,7 +9,7 @@ _DANGEROUS_PATTERNS = re.compile(
     r"EXEC\s*\(|xp_cmdshell|UNION\s+SELECT|;\s*SELECT|--\s|/\*|"
     r"</instructions>|<system>|</system>|</prompt>|<context>|<tool_call>|"
     r"sleep\s*\(|benchmark\s*\(|pg_sleep|waitfor\s+delay)",
-    re.IGNORECASE
+    re.IGNORECASE,
 )
 
 ALLOWED_SCHEDULE_TYPES = frozenset({"sync", "report", "recon"})

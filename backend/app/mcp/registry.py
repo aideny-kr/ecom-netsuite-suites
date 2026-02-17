@@ -1,4 +1,13 @@
-from app.mcp.tools import data_sample, health, netsuite_connectivity, netsuite_suiteql, recon_run, report_export, schedule_ops, workspace_tools
+from app.mcp.tools import (
+    data_sample,
+    health,
+    netsuite_connectivity,
+    netsuite_suiteql,
+    recon_run,
+    report_export,
+    schedule_ops,
+    workspace_tools,
+)
 
 TOOL_REGISTRY = {
     "health": {
@@ -100,12 +109,21 @@ TOOL_REGISTRY = {
         "params_schema": {
             "workspace_id": {"type": "string", "required": True},
             "query": {"type": "string", "required": True, "description": "Search term"},
-            "search_type": {"type": "string", "required": False, "default": "filename", "description": "'filename' or 'content'"},
+            "search_type": {
+                "type": "string",
+                "required": False,
+                "default": "filename",
+                "description": "'filename' or 'content'",
+            },
             "limit": {"type": "integer", "required": False, "default": 20},
         },
     },
     "workspace.propose_patch": {
-        "description": "Propose a code change as a unified diff. Creates a draft changeset for human review. Does NOT apply the change.",
+        "description": (
+            "Propose a code change as a unified diff."
+            " Creates a draft changeset for human review."
+            " Does NOT apply the change."
+        ),
         "execute": workspace_tools.execute_propose_patch,
         "params_schema": {
             "workspace_id": {"type": "string", "required": True},

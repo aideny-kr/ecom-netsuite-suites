@@ -1,13 +1,9 @@
 """Tests for Stripe and Shopify ingestion services with mocked APIs."""
 
 import uuid
-from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
-import pytest
-
-from app.services.ingestion.base import load_cursor, save_cursor, upsert_canonical
-
+from app.services.ingestion.base import load_cursor, save_cursor
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -100,9 +96,11 @@ class TestStripeSync:
         db.execute.return_value.scalar_one.return_value = conn
         db.execute.return_value.scalar_one_or_none.return_value = None
 
-        with patch("app.services.ingestion.stripe_sync.load_cursor", return_value=None), \
-             patch("app.services.ingestion.stripe_sync.save_cursor") as mock_save, \
-             patch("app.services.ingestion.stripe_sync.upsert_canonical") as mock_upsert:
+        with (
+            patch("app.services.ingestion.stripe_sync.load_cursor", return_value=None),
+            patch("app.services.ingestion.stripe_sync.save_cursor"),
+            patch("app.services.ingestion.stripe_sync.upsert_canonical") as mock_upsert,
+        ):
             from app.services.ingestion.stripe_sync import sync_stripe
 
             result = sync_stripe(db, str(conn.id), str(conn.tenant_id))
@@ -129,9 +127,11 @@ class TestStripeSync:
         conn = _make_connection("stripe")
         db.execute.return_value.scalar_one.return_value = conn
 
-        with patch("app.services.ingestion.stripe_sync.load_cursor", return_value=None), \
-             patch("app.services.ingestion.stripe_sync.save_cursor") as mock_save, \
-             patch("app.services.ingestion.stripe_sync.upsert_canonical") as mock_upsert:
+        with (
+            patch("app.services.ingestion.stripe_sync.load_cursor", return_value=None),
+            patch("app.services.ingestion.stripe_sync.save_cursor") as mock_save,
+            patch("app.services.ingestion.stripe_sync.upsert_canonical"),
+        ):
             from app.services.ingestion.stripe_sync import sync_stripe
 
             result = sync_stripe(db, str(conn.id), str(conn.tenant_id))
@@ -190,9 +190,11 @@ class TestShopifySync:
         db.execute.return_value.scalar_one.return_value = conn
         db.execute.return_value.scalar_one_or_none.return_value = None
 
-        with patch("app.services.ingestion.shopify_sync.load_cursor", return_value=None), \
-             patch("app.services.ingestion.shopify_sync.save_cursor") as mock_save, \
-             patch("app.services.ingestion.shopify_sync.upsert_canonical") as mock_upsert:
+        with (
+            patch("app.services.ingestion.shopify_sync.load_cursor", return_value=None),
+            patch("app.services.ingestion.shopify_sync.save_cursor"),
+            patch("app.services.ingestion.shopify_sync.upsert_canonical") as mock_upsert,
+        ):
             from app.services.ingestion.shopify_sync import sync_shopify
 
             result = sync_shopify(db, str(conn.id), str(conn.tenant_id))
@@ -252,9 +254,11 @@ class TestShopifySync:
         db.execute.return_value.scalar_one.return_value = conn
         db.execute.return_value.scalar_one_or_none.return_value = None
 
-        with patch("app.services.ingestion.shopify_sync.load_cursor", return_value=None), \
-             patch("app.services.ingestion.shopify_sync.save_cursor"), \
-             patch("app.services.ingestion.shopify_sync.upsert_canonical") as mock_upsert:
+        with (
+            patch("app.services.ingestion.shopify_sync.load_cursor", return_value=None),
+            patch("app.services.ingestion.shopify_sync.save_cursor"),
+            patch("app.services.ingestion.shopify_sync.upsert_canonical") as mock_upsert,
+        ):
             from app.services.ingestion.shopify_sync import sync_shopify
 
             result = sync_shopify(db, str(conn.id), str(conn.tenant_id))

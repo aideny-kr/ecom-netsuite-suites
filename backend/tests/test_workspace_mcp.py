@@ -9,7 +9,7 @@ import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.mcp.governance import governed_execute, check_rate_limit, _rate_limits
+from app.mcp.governance import _rate_limits, check_rate_limit, governed_execute
 from app.mcp.registry import TOOL_REGISTRY
 from app.services import workspace_service as ws_svc
 from tests.conftest import create_test_tenant, create_test_user
@@ -41,6 +41,7 @@ async def workspace_with_files(db, tenant, user):
 
 # --- Tool Registration ---
 
+
 def test_workspace_tools_registered():
     assert "workspace.list_files" in TOOL_REGISTRY
     assert "workspace.read_file" in TOOL_REGISTRY
@@ -55,6 +56,7 @@ def test_apply_patch_not_in_registry():
 
 
 # --- Tool Execution via Governance ---
+
 
 @pytest.mark.asyncio
 async def test_list_files_tool(db, tenant, user, workspace_with_files):
@@ -121,7 +123,12 @@ async def test_propose_patch_tool(db, tenant, user, workspace_with_files):
         params={
             "workspace_id": str(workspace_with_files.id),
             "file_path": "src/index.ts",
-            "unified_diff": "--- a/src/index.ts\n+++ b/src/index.ts\n@@ -1 +1 @@\n-export const app = 'hello';\n+export const app = 'world';\n",
+            "unified_diff": (
+                "--- a/src/index.ts\n+++ b/src/index.ts\n"
+                "@@ -1 +1 @@\n"
+                "-export const app = 'hello';\n"
+                "+export const app = 'world';\n"
+            ),
             "title": "Update app value",
             "rationale": "Testing patch proposal",
         },
@@ -143,7 +150,12 @@ async def test_propose_patch_creates_draft_not_applied(db, tenant, user, workspa
         params={
             "workspace_id": str(workspace_with_files.id),
             "file_path": "src/index.ts",
-            "unified_diff": "--- a/src/index.ts\n+++ b/src/index.ts\n@@ -1 +1 @@\n-export const app = 'hello';\n+export const app = 'changed';\n",
+            "unified_diff": (
+                "--- a/src/index.ts\n+++ b/src/index.ts\n"
+                "@@ -1 +1 @@\n"
+                "-export const app = 'hello';\n"
+                "+export const app = 'changed';\n"
+            ),
             "title": "Draft test",
         },
         tenant_id=str(tenant.id),
@@ -164,6 +176,7 @@ async def test_propose_patch_creates_draft_not_applied(db, tenant, user, workspa
 
 # --- Rate Limiting ---
 
+
 def test_rate_limit_enforcement():
     """Ensure rate limits are enforced for workspace tools."""
     test_tenant = str(uuid.uuid4())
@@ -182,6 +195,7 @@ def test_rate_limit_enforcement():
 
 
 # --- Helpers ---
+
 
 def _find_file(tree: list[dict], name: str) -> dict | None:
     for node in tree:

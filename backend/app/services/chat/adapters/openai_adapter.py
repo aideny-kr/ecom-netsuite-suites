@@ -15,14 +15,16 @@ class OpenAIAdapter(BaseLLMAdapter):
         """Convert Anthropic tool format to OpenAI function format."""
         openai_tools = []
         for tool in tools:
-            openai_tools.append({
-                "type": "function",
-                "function": {
-                    "name": tool["name"],
-                    "description": tool.get("description", ""),
-                    "parameters": tool.get("input_schema", {"type": "object", "properties": {}}),
-                },
-            })
+            openai_tools.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": tool["name"],
+                        "description": tool.get("description", ""),
+                        "parameters": tool.get("input_schema", {"type": "object", "properties": {}}),
+                    },
+                }
+            )
         return openai_tools
 
     def _convert_messages(self, messages: list[dict], system: str) -> list[dict]:
@@ -38,11 +40,13 @@ class OpenAIAdapter(BaseLLMAdapter):
                 tool_results = [c for c in content if isinstance(c, dict) and c.get("type") == "tool_result"]
                 if tool_results:
                     for tr in tool_results:
-                        openai_messages.append({
-                            "role": "tool",
-                            "tool_call_id": tr["tool_use_id"],
-                            "content": tr.get("content", ""),
-                        })
+                        openai_messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": tr["tool_use_id"],
+                                "content": tr.get("content", ""),
+                            }
+                        )
                     continue
 
             if role == "assistant" and isinstance(content, list):
@@ -54,14 +58,16 @@ class OpenAIAdapter(BaseLLMAdapter):
                         if block.get("type") == "text":
                             text_parts.append(block["text"])
                         elif block.get("type") == "tool_use":
-                            tool_calls.append({
-                                "id": block["id"],
-                                "type": "function",
-                                "function": {
-                                    "name": block["name"],
-                                    "arguments": json.dumps(block["input"]),
-                                },
-                            })
+                            tool_calls.append(
+                                {
+                                    "id": block["id"],
+                                    "type": "function",
+                                    "function": {
+                                        "name": block["name"],
+                                        "arguments": json.dumps(block["input"]),
+                                    },
+                                }
+                            )
 
                 assistant_msg: dict = {"role": "assistant"}
                 if text_parts:
@@ -137,10 +143,12 @@ class OpenAIAdapter(BaseLLMAdapter):
         for text in response.text_blocks:
             content.append({"type": "text", "text": text})
         for tool in response.tool_use_blocks:
-            content.append({
-                "type": "tool_use",
-                "id": tool.id,
-                "name": tool.name,
-                "input": tool.input,
-            })
+            content.append(
+                {
+                    "type": "tool_use",
+                    "id": tool.id,
+                    "name": tool.name,
+                    "input": tool.input,
+                }
+            )
         return {"role": "assistant", "content": content}

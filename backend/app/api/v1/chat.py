@@ -22,6 +22,7 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 
 # --- Schemas ---
 
+
 class CreateSessionRequest(BaseModel):
     title: str | None = None
 
@@ -62,6 +63,7 @@ class SessionDetailResponse(BaseModel):
 
 # --- Helpers ---
 
+
 def _serialize_session(session: ChatSession) -> dict:
     return {
         "id": str(session.id),
@@ -95,6 +97,7 @@ def _serialize_message(msg: ChatMessage) -> dict:
 
 
 # --- Endpoints ---
+
 
 @router.post("/sessions", status_code=status.HTTP_201_CREATED, response_model=SessionListItem)
 async def create_session(
@@ -135,8 +138,7 @@ async def get_session(
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(
-        select(ChatSession)
-        .where(
+        select(ChatSession).where(
             ChatSession.id == session_id,
             ChatSession.tenant_id == user.tenant_id,
             ChatSession.user_id == user.id,
@@ -163,8 +165,7 @@ async def send_message(
     db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(
-        select(ChatSession)
-        .where(
+        select(ChatSession).where(
             ChatSession.id == session_id,
             ChatSession.tenant_id == user.tenant_id,
             ChatSession.user_id == user.id,

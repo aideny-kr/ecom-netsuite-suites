@@ -80,7 +80,14 @@ async def refresh_tokens(account_id: str, refresh_token: str) -> dict:
         return resp.json()
 
 
-def build_mcp_authorize_url(account_id: str, client_id: str, redirect_uri: str, state: str, code_challenge: str, scope: str = "") -> str:
+def build_mcp_authorize_url(
+    account_id: str,
+    client_id: str,
+    redirect_uri: str,
+    state: str,
+    code_challenge: str,
+    scope: str = "",
+) -> str:
     """Construct the NetSuite OAuth 2.0 authorize URL for MCP connectors.
 
     Uses caller-provided client_id and redirect_uri instead of global settings,
@@ -101,7 +108,13 @@ def build_mcp_authorize_url(account_id: str, client_id: str, redirect_uri: str, 
     return f"{AUTHORIZE_URL}?{urllib.parse.urlencode(params)}"
 
 
-async def exchange_code_with_client(account_id: str, code: str, code_verifier: str, client_id: str, redirect_uri: str) -> dict:
+async def exchange_code_with_client(
+    account_id: str,
+    code: str,
+    code_verifier: str,
+    client_id: str,
+    redirect_uri: str,
+) -> dict:
     """Exchange an authorization code for tokens using a specific client_id and redirect_uri."""
     url = _token_url(account_id)
     form_data = {

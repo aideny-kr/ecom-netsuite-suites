@@ -10,12 +10,12 @@ import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.workspace import Workspace, WorkspaceChangeSet, WorkspaceFile, WorkspacePatch
+from app.models.workspace import WorkspacePatch
 from app.services import workspace_service as ws_svc
 from tests.conftest import create_test_tenant, create_test_user
 
-
 # --- Fixtures ---
+
 
 @pytest_asyncio.fixture
 async def tenant(db: AsyncSession):
@@ -49,6 +49,7 @@ def _sha256(content: str) -> str:
 
 
 # --- Workspace CRUD ---
+
 
 @pytest.mark.asyncio
 async def test_create_workspace(db, tenant, user):
@@ -84,13 +85,16 @@ async def test_get_workspace_not_found(db, tenant):
 
 # --- Import ---
 
+
 @pytest.mark.asyncio
 async def test_import_workspace(db, tenant, user, workspace):
-    zip_bytes = _make_zip({
-        "src/main.ts": "console.log('hello');",
-        "src/utils/helper.ts": "export function help() {}",
-        "README.md": "# My Project",
-    })
+    zip_bytes = _make_zip(
+        {
+            "src/main.ts": "console.log('hello');",
+            "src/utils/helper.ts": "export function help() {}",
+            "README.md": "# My Project",
+        }
+    )
     result = await ws_svc.import_workspace(db, workspace.id, tenant.id, zip_bytes)
     assert result["imported"] >= 3  # files + auto-created dirs
 
@@ -111,12 +115,15 @@ async def test_import_skips_oversized_files(db, tenant, user, workspace):
 
 # --- File Operations ---
 
+
 @pytest.mark.asyncio
 async def test_list_files_tree(db, tenant, user, workspace):
-    zip_bytes = _make_zip({
-        "src/index.ts": "export {};",
-        "src/lib/utils.ts": "export {};",
-    })
+    zip_bytes = _make_zip(
+        {
+            "src/index.ts": "export {};",
+            "src/lib/utils.ts": "export {};",
+        }
+    )
     await ws_svc.import_workspace(db, workspace.id, tenant.id, zip_bytes)
     tree = await ws_svc.list_files(db, workspace.id, tenant.id)
     assert len(tree) > 0
@@ -172,6 +179,7 @@ async def test_search_files_by_content(db, tenant, user, workspace):
 
 # --- Path Validation ---
 
+
 @pytest.mark.asyncio
 async def test_path_traversal_blocked():
     with pytest.raises(ValueError, match="traversal"):
@@ -209,6 +217,7 @@ async def test_valid_path_normalized():
 
 
 # --- Changeset State Machine ---
+
 
 @pytest.mark.asyncio
 async def test_changeset_create(db, tenant, user, workspace):
@@ -276,13 +285,16 @@ async def test_applied_changeset_is_terminal(db, tenant, user, workspace):
 
 # --- Patch Operations ---
 
+
 @pytest.mark.asyncio
 async def test_propose_patch(db, tenant, user, workspace):
     zip_bytes = _make_zip({"src/app.ts": "const x = 1;\n"})
     await ws_svc.import_workspace(db, workspace.id, tenant.id, zip_bytes)
 
     result = await ws_svc.propose_patch(
-        db, workspace.id, tenant.id,
+        db,
+        workspace.id,
+        tenant.id,
         "src/app.ts",
         "--- a/src/app.ts\n+++ b/src/app.ts\n@@ -1 +1 @@\n-const x = 1;\n+const x = 2;\n",
         "Update x value",
@@ -295,7 +307,9 @@ async def test_propose_patch(db, tenant, user, workspace):
 @pytest.mark.asyncio
 async def test_propose_patch_creates_for_new_file(db, tenant, user, workspace):
     result = await ws_svc.propose_patch(
-        db, workspace.id, tenant.id,
+        db,
+        workspace.id,
+        tenant.id,
         "new_file.ts",
         "--- /dev/null\n+++ b/new_file.ts\n@@ -0,0 +1 @@\n+console.log('new');\n",
         "Add new file",
@@ -350,6 +364,7 @@ async def test_apply_changeset_with_delete(db, tenant, user, workspace):
 
 # --- Conflict Detection ---
 
+
 @pytest.mark.asyncio
 async def test_conflict_detection(db, tenant, user, workspace):
     zip_bytes = _make_zip({"src/app.ts": "const x = 1;\n"})
@@ -384,6 +399,7 @@ async def test_apply_unapproved_changeset_blocked(db, tenant, user, workspace):
 
 # --- Changeset Diff ---
 
+
 @pytest.mark.asyncio
 async def test_get_changeset_diff(db, tenant, user, workspace):
     cs = await ws_svc.create_changeset(db, workspace.id, tenant.id, "Create file", user.id)
@@ -414,6 +430,7 @@ async def test_get_changeset_diff_not_found(db, tenant):
 
 # --- Idempotency ---
 
+
 @pytest.mark.asyncio
 async def test_import_twice_same_files(db, tenant, user, workspace):
     """Importing the same zip twice should fail on unique constraint (workspace_id, path)."""
@@ -425,6 +442,7 @@ async def test_import_twice_same_files(db, tenant, user, workspace):
 
 
 # --- Helpers ---
+
 
 def _find_file(tree: list[dict], name: str) -> dict | None:
     for node in tree:

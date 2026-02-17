@@ -1,12 +1,10 @@
 """RBAC tests for Dev Workspace endpoints."""
 
 import io
-import uuid
 import zipfile
 
 import pytest
 import pytest_asyncio
-from httpx import ASGITransport, AsyncClient
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -41,6 +39,7 @@ async def workspace(db, tenant, admin):
 
 # --- View permission tests ---
 
+
 @pytest.mark.asyncio
 async def test_readonly_can_list_workspaces(client, readonly, tenant, workspace):
     _, headers = readonly
@@ -63,6 +62,7 @@ async def test_readonly_can_list_files(client, readonly, workspace):
 
 
 # --- Manage permission tests (readonly should be denied) ---
+
 
 @pytest.mark.asyncio
 async def test_readonly_cannot_create_workspace(client, readonly):
@@ -99,6 +99,7 @@ async def test_readonly_cannot_import(client, readonly, workspace):
 
 # --- Review permission tests ---
 
+
 @pytest.mark.asyncio
 async def test_readonly_cannot_transition_changeset(client, db, tenant, readonly, admin, workspace):
     admin_user, _ = admin
@@ -117,6 +118,7 @@ async def test_readonly_cannot_transition_changeset(client, db, tenant, readonly
 
 # --- Apply permission tests ---
 
+
 @pytest.mark.asyncio
 async def test_readonly_cannot_apply_changeset(client, db, tenant, readonly, admin, workspace):
     admin_user, _ = admin
@@ -134,6 +136,7 @@ async def test_readonly_cannot_apply_changeset(client, db, tenant, readonly, adm
 
 
 # --- Admin can do everything ---
+
 
 @pytest.mark.asyncio
 async def test_admin_can_create_workspace(client, admin):

@@ -101,9 +101,7 @@ async def _test_netsuite_connection(db: AsyncSession, connection: Connection) ->
                 "message": "OAuth 2.0 token expired and refresh failed.",
             }
         try:
-            await execute_suiteql_via_rest(
-                access_token, account_id, "SELECT id FROM transaction WHERE ROWNUM <= 1", 1
-            )
+            await execute_suiteql_via_rest(access_token, account_id, "SELECT id FROM transaction WHERE ROWNUM <= 1", 1)
             return {
                 "connection_id": str(connection.id),
                 "status": "ok",

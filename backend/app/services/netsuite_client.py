@@ -38,9 +38,7 @@ def _mcp_url(account_id: str) -> str:
     return f"https://{slug}.suitetalk.api.netsuite.com/services/mcp/v1/all"
 
 
-async def execute_suiteql_via_rest(
-    access_token: str, account_id: str, query: str, limit: int = 1000
-) -> dict:
+async def execute_suiteql_via_rest(access_token: str, account_id: str, query: str, limit: int = 1000) -> dict:
     """Execute a SuiteQL query via the NetSuite REST API."""
     url = _rest_url(account_id)
     headers = {
@@ -66,9 +64,7 @@ async def execute_suiteql_via_rest(
     }
 
 
-async def execute_suiteql_via_mcp(
-    access_token: str, account_id: str, query: str, limit: int = 1000
-) -> dict:
+async def execute_suiteql_via_mcp(access_token: str, account_id: str, query: str, limit: int = 1000) -> dict:
     """Execute a SuiteQL query via NetSuite's native MCP endpoint.
 
     Uses the MCP SDK's StreamableHTTP transport (matching the reference
@@ -122,9 +118,7 @@ async def execute_suiteql_via_mcp(
     }
 
 
-async def execute_suiteql(
-    access_token: str, account_id: str, query: str, limit: int = 1000
-) -> dict:
+async def execute_suiteql(access_token: str, account_id: str, query: str, limit: int = 1000) -> dict:
     """Execute SuiteQL — try MCP first, fall back to REST API."""
     try:
         return await execute_suiteql_via_mcp(access_token, account_id, query, limit)

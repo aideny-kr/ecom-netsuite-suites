@@ -1,10 +1,9 @@
 from __future__ import annotations
 
-from datetime import datetime
 from pydantic import BaseModel, Field
 
-
 # --- Workspace ---
+
 
 class WorkspaceCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=255)
@@ -25,6 +24,7 @@ class WorkspaceResponse(BaseModel):
 
 
 # --- File Tree ---
+
 
 class FileTreeNode(BaseModel):
     id: str
@@ -47,6 +47,7 @@ class FileReadResponse(BaseModel):
 
 # --- Search ---
 
+
 class SearchResult(BaseModel):
     file_id: str
     path: str
@@ -61,6 +62,7 @@ class SearchResponse(BaseModel):
 
 
 # --- Changeset ---
+
 
 class ChangeSetCreate(BaseModel):
     title: str = Field(..., min_length=1, max_length=500)
@@ -120,6 +122,7 @@ class DiffViewResponse(BaseModel):
 
 
 # --- Patch Proposal ---
+
 
 class PatchProposal(BaseModel):
     file_path: str = Field(..., max_length=512)

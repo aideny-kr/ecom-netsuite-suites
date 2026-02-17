@@ -29,9 +29,9 @@ class TestPKCEPairGeneration:
 
     def test_challenge_is_sha256_of_verifier(self):
         verifier, challenge = generate_pkce_pair()
-        expected = base64.urlsafe_b64encode(
-            hashlib.sha256(verifier.encode("ascii")).digest()
-        ).rstrip(b"=").decode("ascii")
+        expected = (
+            base64.urlsafe_b64encode(hashlib.sha256(verifier.encode("ascii")).digest()).rstrip(b"=").decode("ascii")
+        )
         assert challenge == expected
 
     def test_pairs_are_unique(self):

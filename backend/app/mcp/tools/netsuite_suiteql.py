@@ -71,9 +71,7 @@ def enforce_limit(query: str, max_rows: int) -> str:
     stripped = query.rstrip().rstrip(";")
 
     # Check for existing FETCH FIRST ... ROWS ONLY
-    fetch_pattern = re.compile(
-        r"FETCH\s+FIRST\s+(\d+)\s+ROWS\s+ONLY", re.IGNORECASE
-    )
+    fetch_pattern = re.compile(r"FETCH\s+FIRST\s+(\d+)\s+ROWS\s+ONLY", re.IGNORECASE)
     fetch_match = fetch_pattern.search(stripped)
     if fetch_match:
         existing = int(fetch_match.group(1))
@@ -92,9 +90,7 @@ def enforce_limit(query: str, max_rows: int) -> str:
     return f"{stripped} FETCH FIRST {max_rows} ROWS ONLY"
 
 
-def build_oauth1_header(
-    credentials: dict, method: str, url: str
-) -> dict[str, str]:
+def build_oauth1_header(credentials: dict, method: str, url: str) -> dict[str, str]:
     """Build an OAuth 1.0 Authorization header using HMAC-SHA256.
 
     credentials keys: account_id, consumer_key, consumer_secret,
@@ -114,8 +110,7 @@ def build_oauth1_header(
 
     # Build base string
     sorted_params = "&".join(
-        f"{urllib.parse.quote(k, safe='')}={urllib.parse.quote(v, safe='')}"
-        for k, v in sorted(oauth_params.items())
+        f"{urllib.parse.quote(k, safe='')}={urllib.parse.quote(v, safe='')}" for k, v in sorted(oauth_params.items())
     )
     base_string = "&".join(
         [
@@ -145,19 +140,13 @@ def build_oauth1_header(
     realm = credentials["account_id"].replace("-", "_").upper()
 
     auth_header = "OAuth " + ", ".join(
-        [f'realm="{realm}"']
-        + [
-            f'{k}="{urllib.parse.quote(v, safe="")}"'
-            for k, v in sorted(oauth_params.items())
-        ]
+        [f'realm="{realm}"'] + [f'{k}="{urllib.parse.quote(v, safe="")}"' for k, v in sorted(oauth_params.items())]
     )
 
     return {"Authorization": auth_header}
 
 
-async def execute(
-    params: dict, context: dict | None = None, **kwargs
-) -> dict:
+async def execute(params: dict, context: dict | None = None, **kwargs) -> dict:
     """Execute a SuiteQL query against NetSuite via SuiteTalk REST API."""
     query: str = params.get("query", "")
     limit: int = params.get("limit", 100)
@@ -205,10 +194,7 @@ async def execute(
         return {"error": True, "message": f"Failed to decrypt credentials: {exc}"}
 
     # --- Validate query ---
-    allowed_tables = {
-        t.strip().lower()
-        for t in settings.NETSUITE_SUITEQL_ALLOWED_TABLES.split(",")
-    }
+    allowed_tables = {t.strip().lower() for t in settings.NETSUITE_SUITEQL_ALLOWED_TABLES.split(",")}
     try:
         validate_query(query, allowed_tables)
     except ValueError as exc:
@@ -245,10 +231,7 @@ async def execute(
         }
 
     # --- OAuth 1.0 path: direct REST call with HMAC signature ---
-    url = (
-        f"https://{account_id}.suitetalk.api.netsuite.com"
-        f"/services/rest/query/v1/suiteql"
-    )
+    url = f"https://{account_id}.suitetalk.api.netsuite.com/services/rest/query/v1/suiteql"
 
     auth_headers = build_oauth1_header(credentials, "POST", url)
     headers = {
@@ -258,12 +241,8 @@ async def execute(
     }
 
     try:
-        async with httpx.AsyncClient(
-            timeout=settings.NETSUITE_SUITEQL_TIMEOUT
-        ) as client:
-            response = await client.post(
-                url, headers=headers, json={"q": query}
-            )
+        async with httpx.AsyncClient(timeout=settings.NETSUITE_SUITEQL_TIMEOUT) as client:
+            response = await client.post(url, headers=headers, json={"q": query})
             response.raise_for_status()
     except httpx.HTTPStatusError as exc:
         body = exc.response.text[:500] if exc.response else ""

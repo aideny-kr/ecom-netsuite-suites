@@ -10,7 +10,6 @@ from app.mcp.metrics import get_metrics, reset_metrics
 from app.mcp.server import MCPServer
 from app.models.audit import AuditEvent
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -147,9 +146,7 @@ class TestRateLimitEnforced:
             assert "error" not in result
 
         # Next call should be denied
-        result = await server.call_tool(
-            tool, {"date_from": "2024-01-01", "date_to": "2024-01-31"}, TENANT_ID, ACTOR_ID
-        )
+        result = await server.call_tool(tool, {"date_from": "2024-01-01", "date_to": "2024-01-31"}, TENANT_ID, ACTOR_ID)
         assert "error" in result
         assert "rate limit" in result["error"].lower()
 
@@ -173,9 +170,7 @@ class TestParamFiltering:
 class TestCorrelationId:
     async def test_correlation_id_propagated(self, server: MCPServer):
         cid = str(uuid.uuid4())
-        result = await server.call_tool(
-            "health", {}, TENANT_ID, ACTOR_ID, correlation_id=cid
-        )
+        result = await server.call_tool("health", {}, TENANT_ID, ACTOR_ID, correlation_id=cid)
         # The result itself doesn't include correlation_id, but it shouldn't error
         assert result["status"] == "ok"
 
@@ -241,9 +236,7 @@ class TestAuditDBWrites:
     async def test_audit_event_on_success(self, server: MCPServer, db):
         """Call a tool with DB session → verify audit_events row created."""
         cid = str(uuid.uuid4())
-        result = await server.call_tool(
-            "health", {}, TENANT_ID, ACTOR_ID, correlation_id=cid, db=db
-        )
+        result = await server.call_tool("health", {}, TENANT_ID, ACTOR_ID, correlation_id=cid, db=db)
         assert result["status"] == "ok"
 
         # Query audit_events

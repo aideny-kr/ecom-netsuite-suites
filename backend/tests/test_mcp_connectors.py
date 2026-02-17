@@ -5,12 +5,6 @@ import uuid
 import pytest
 import pytest_asyncio
 from httpx import AsyncClient
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from app.models.mcp_connector import McpConnector
-from app.models.user import User
-from tests.conftest import create_test_tenant, create_test_user, make_auth_headers
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -106,9 +100,7 @@ async def test_tenant_isolation(client: AsyncClient, admin_user, admin_user_b, c
 
 
 @pytest.mark.asyncio
-async def test_tenant_cannot_delete_others_connector(
-    client: AsyncClient, admin_user, admin_user_b, connector_payload
-):
+async def test_tenant_cannot_delete_others_connector(client: AsyncClient, admin_user, admin_user_b, connector_payload):
     """Tenant B cannot delete Tenant A's connector."""
     _, headers_a = admin_user
     _, headers_b = admin_user_b

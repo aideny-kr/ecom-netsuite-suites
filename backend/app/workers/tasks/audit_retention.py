@@ -1,4 +1,5 @@
 """Celery task for audit log retention."""
+
 from sqlalchemy.orm import Session
 
 from app.services.audit_retention import purge_old_events_sync

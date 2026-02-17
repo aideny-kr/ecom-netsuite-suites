@@ -59,22 +59,22 @@ def build_local_tool_definitions() -> list[dict]:
             if param_spec.get("required", False):
                 required.append(param_name)
 
-        tools.append({
-            "name": name.replace(".", "_"),  # Anthropic requires alphanumeric + underscores
-            "description": tool["description"],
-            "input_schema": {
-                "type": "object",
-                "properties": properties,
-                "required": required,
-            },
-        })
+        tools.append(
+            {
+                "name": name.replace(".", "_"),  # Anthropic requires alphanumeric + underscores
+                "description": tool["description"],
+                "input_schema": {
+                    "type": "object",
+                    "properties": properties,
+                    "required": required,
+                },
+            }
+        )
     return tools
 
 
 # Mapping from Anthropic-safe local tool name back to MCP tool name
-_LOCAL_NAME_MAP: dict[str, str] = {
-    name.replace(".", "_"): name for name in TOOL_REGISTRY if name in ALLOWED_CHAT_TOOLS
-}
+_LOCAL_NAME_MAP: dict[str, str] = {name.replace(".", "_"): name for name in TOOL_REGISTRY if name in ALLOWED_CHAT_TOOLS}
 
 
 def _make_ext_tool_name(connector_id: uuid.UUID, raw_name: str) -> str:
@@ -95,7 +95,7 @@ def parse_external_tool_name(name: str) -> tuple[uuid.UUID, str] | None:
     """Reverse the external tool naming. Returns (connector_id, raw_tool_name) or None."""
     if not name.startswith(_EXT_PREFIX):
         return None
-    rest = name[len(_EXT_PREFIX):]
+    rest = name[len(_EXT_PREFIX) :]
     # hex_id is 32 chars, followed by "__"
     if len(rest) < 34 or rest[32:34] != "__":
         return None
@@ -127,11 +127,13 @@ def build_external_tool_definitions(connectors: list) -> list[dict]:
             if "type" not in input_schema:
                 input_schema["type"] = "object"
 
-            tools.append({
-                "name": anthropic_name,
-                "description": f"[{connector.provider}] {desc}"[:1024],
-                "input_schema": input_schema,
-            })
+            tools.append(
+                {
+                    "name": anthropic_name,
+                    "description": f"[{connector.provider}] {desc}"[:1024],
+                    "input_schema": input_schema,
+                }
+            )
     return tools
 
 
@@ -169,9 +171,7 @@ async def execute_tool_call(
     ext_parsed = parse_external_tool_name(tool_name)
     if ext_parsed is not None:
         connector_id, raw_tool_name = ext_parsed
-        result = await _execute_external_tool(
-            connector_id, raw_tool_name, tool_input, tenant_id, db
-        )
+        result = await _execute_external_tool(connector_id, raw_tool_name, tool_input, tenant_id, db)
         duration_ms = int((time.monotonic() - start) * 1000)
         logger.info(
             "tool_executed",

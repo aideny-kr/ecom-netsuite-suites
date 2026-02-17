@@ -39,7 +39,9 @@ class Settings(BaseSettings):
 
     NETSUITE_SUITEQL_MAX_ROWS: int = 1000
     NETSUITE_SUITEQL_TIMEOUT: int = 30
-    NETSUITE_SUITEQL_ALLOWED_TABLES: str = "transaction,customer,item,account,subsidiary,department,location,currency,employee,vendor"
+    NETSUITE_SUITEQL_ALLOWED_TABLES: str = (
+        "transaction,customer,item,account,subsidiary,department,location,currency,employee,vendor"
+    )
 
     NETSUITE_OAUTH_CLIENT_ID: str = ""
     NETSUITE_OAUTH_REDIRECT_URI: str = "http://localhost:8000/api/v1/connections/netsuite/callback"

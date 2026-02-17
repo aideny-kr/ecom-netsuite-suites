@@ -99,12 +99,15 @@ def get_adapter(provider: str, api_key: str) -> BaseLLMAdapter:
     """Factory function to get the appropriate adapter for a provider."""
     if provider == "anthropic":
         from app.services.chat.adapters.anthropic_adapter import AnthropicAdapter
+
         return AnthropicAdapter(api_key=api_key)
     elif provider == "openai":
         from app.services.chat.adapters.openai_adapter import OpenAIAdapter
+
         return OpenAIAdapter(api_key=api_key)
     elif provider == "gemini":
         from app.services.chat.adapters.gemini_adapter import GeminiAdapter
+
         return GeminiAdapter(api_key=api_key)
     else:
         raise ValueError(f"Unsupported AI provider: {provider}")

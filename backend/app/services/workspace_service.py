@@ -14,7 +14,7 @@ from typing import Any
 
 import structlog
 import whatthepatch
-from sqlalchemy import select, func
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.workspace import (
@@ -47,6 +47,7 @@ CHANGESET_TRANSITIONS: dict[str, dict[str, str]] = {
 
 # --- Path Validation ---
 
+
 def validate_path(path: str) -> str:
     """Validate and normalize a virtual file path. Raises ValueError on bad input."""
     if not path or len(path) > MAX_PATH_LENGTH:
@@ -70,6 +71,7 @@ def _sha256(content: str) -> str:
 
 
 # --- File Operations ---
+
 
 async def create_workspace(
     db: AsyncSession,
@@ -357,13 +359,15 @@ async def search_files(
                 continue
             for i, line in enumerate(f.content.splitlines(), 1):
                 if query.lower() in line.lower():
-                    results.append({
-                        "file_id": str(f.id),
-                        "path": f.path,
-                        "line_number": i,
-                        "snippet": line.strip()[:200],
-                        "context": f.path,
-                    })
+                    results.append(
+                        {
+                            "file_id": str(f.id),
+                            "path": f.path,
+                            "line_number": i,
+                            "snippet": line.strip()[:200],
+                            "context": f.path,
+                        }
+                    )
                     if len(results) >= limit:
                         break
             if len(results) >= limit:
@@ -384,18 +388,21 @@ async def search_files(
         files = result.scalars().all()
 
         for f in files:
-            results.append({
-                "file_id": str(f.id),
-                "path": f.path,
-                "line_number": 0,
-                "snippet": f.file_name,
-                "context": f.path,
-            })
+            results.append(
+                {
+                    "file_id": str(f.id),
+                    "path": f.path,
+                    "line_number": 0,
+                    "snippet": f.file_name,
+                    "context": f.path,
+                }
+            )
 
     return results
 
 
 # --- Changeset Operations ---
+
 
 async def create_changeset(
     db: AsyncSession,
@@ -462,10 +469,7 @@ async def transition_changeset(
 
     allowed = CHANGESET_TRANSITIONS.get(cs.status, {})
     if action not in allowed:
-        raise ValueError(
-            f"Action '{action}' not valid for status '{cs.status}'. "
-            f"Allowed: {list(allowed.keys())}"
-        )
+        raise ValueError(f"Action '{action}' not valid for status '{cs.status}'. Allowed: {list(allowed.keys())}")
 
     new_status = allowed[action]
     cs.status = new_status
@@ -496,9 +500,7 @@ async def apply_changeset(
 
     # Load patches ordered by apply_order
     result = await db.execute(
-        select(WorkspacePatch)
-        .where(WorkspacePatch.changeset_id == changeset_id)
-        .order_by(WorkspacePatch.apply_order)
+        select(WorkspacePatch).where(WorkspacePatch.changeset_id == changeset_id).order_by(WorkspacePatch.apply_order)
     )
     patches = list(result.scalars().all())
 
@@ -546,9 +548,7 @@ async def apply_changeset(
             # Conflict detection
             current_hash = wf.sha256_hash or ""
             if current_hash != patch.baseline_sha256:
-                raise ValueError(
-                    f"Conflict detected on {patch.file_path}: file was modified since patch was proposed"
-                )
+                raise ValueError(f"Conflict detected on {patch.file_path}: file was modified since patch was proposed")
 
             # Apply diff
             if patch.unified_diff:
@@ -595,9 +595,7 @@ async def get_changeset_diff(
         return None
 
     result = await db.execute(
-        select(WorkspacePatch)
-        .where(WorkspacePatch.changeset_id == changeset_id)
-        .order_by(WorkspacePatch.apply_order)
+        select(WorkspacePatch).where(WorkspacePatch.changeset_id == changeset_id).order_by(WorkspacePatch.apply_order)
     )
     patches = list(result.scalars().all())
 
@@ -639,12 +637,14 @@ async def get_changeset_diff(
             else:
                 modified = original
 
-        files.append({
-            "file_path": patch.file_path,
-            "operation": patch.operation,
-            "original_content": original,
-            "modified_content": modified,
-        })
+        files.append(
+            {
+                "file_path": patch.file_path,
+                "operation": patch.operation,
+                "original_content": original,
+                "modified_content": modified,
+            }
+        )
 
     return {
         "changeset_id": str(cs.id),
@@ -654,6 +654,7 @@ async def get_changeset_diff(
 
 
 # --- Patch Operations ---
+
 
 async def propose_patch(
     db: AsyncSession,
@@ -691,7 +692,11 @@ async def propose_patch(
 
     # Create changeset
     cs = await create_changeset(
-        db, workspace_id, tenant_id, title, proposed_by,
+        db,
+        workspace_id,
+        tenant_id,
+        title,
+        proposed_by,
         description=rationale,
     )
 

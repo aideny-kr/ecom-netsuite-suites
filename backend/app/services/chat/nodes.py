@@ -28,16 +28,18 @@ from app.services.chat.llm_adapter import DEFAULT_MODELS
 
 logger = logging.getLogger(__name__)
 
-ALLOWED_CHAT_TOOLS: frozenset[str] = frozenset({
-    "netsuite.suiteql",
-    "netsuite.connectivity",
-    "data.sample_table_read",
-    "report.export",
-    "workspace.list_files",
-    "workspace.read_file",
-    "workspace.search",
-    "workspace.propose_patch",
-})
+ALLOWED_CHAT_TOOLS: frozenset[str] = frozenset(
+    {
+        "netsuite.suiteql",
+        "netsuite.connectivity",
+        "data.sample_table_read",
+        "report.export",
+        "workspace.list_files",
+        "workspace.read_file",
+        "workspace.search",
+        "workspace.propose_patch",
+    }
+)
 
 SYSTEM_TENANT_ID = uuid.UUID("00000000-0000-0000-0000-000000000000")
 
@@ -97,9 +99,7 @@ def is_read_only_sql(query: str) -> bool:
 
 async def get_tenant_ai_config(db: AsyncSession, tenant_id: uuid.UUID) -> tuple[str, str, str, bool]:
     """Return (provider, model, api_key, is_byok) with fallback to platform defaults."""
-    result = await db.execute(
-        select(TenantConfig).where(TenantConfig.tenant_id == tenant_id)
-    )
+    result = await db.execute(select(TenantConfig).where(TenantConfig.tenant_id == tenant_id))
     config = result.scalar_one_or_none()
 
     if config and config.ai_provider and config.ai_api_key_encrypted:
@@ -128,9 +128,7 @@ async def retriever_node(state: OrchestratorState, db: AsyncSession) -> None:
         # pgvector cosine similarity search
         result = await db.execute(
             select(DocChunk)
-            .where(
-                (DocChunk.tenant_id == state.tenant_id) | (DocChunk.tenant_id == SYSTEM_TENANT_ID)
-            )
+            .where((DocChunk.tenant_id == state.tenant_id) | (DocChunk.tenant_id == SYSTEM_TENANT_ID))
             .order_by(DocChunk.embedding.cosine_distance(query_embedding))
             .limit(top_k)
         )
@@ -149,10 +147,7 @@ async def retriever_node(state: OrchestratorState, db: AsyncSession) -> None:
             )
             chunks = result.scalars().all()
 
-        state.doc_chunks = [
-            {"title": c.title, "content": c.content, "source_path": c.source_path}
-            for c in chunks
-        ]
+        state.doc_chunks = [{"title": c.title, "content": c.content, "source_path": c.source_path} for c in chunks]
     except Exception:
         logger.warning("retriever_node failed, continuing without docs", exc_info=True)
         state.doc_chunks = []

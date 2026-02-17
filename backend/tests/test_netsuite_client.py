@@ -31,9 +31,7 @@ class TestExecuteSuiteqlViaRest:
             mock_client.return_value.__aenter__ = AsyncMock(return_value=client_instance)
             mock_client.return_value.__aexit__ = AsyncMock(return_value=False)
 
-            result = await execute_suiteql_via_rest(
-                "token123", "12345-sb1", "SELECT id, name FROM customer", 100
-            )
+            result = await execute_suiteql_via_rest("token123", "12345-sb1", "SELECT id, name FROM customer", 100)
 
             assert result["columns"] == ["id", "name"]
             assert result["rows"] == [["1", "Acme"], ["2", "Globex"]]

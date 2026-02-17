@@ -1,7 +1,5 @@
 """Tenant isolation tests for Dev Workspace."""
 
-import uuid
-
 import pytest
 import pytest_asyncio
 from sqlalchemy import text
@@ -65,13 +63,15 @@ async def test_tenant_a_cannot_get_tenant_b_workspace(db, tenant_a, workspace_b)
 
 @pytest.mark.asyncio
 async def test_tenant_a_cannot_read_tenant_b_files(db, tenant_a, tenant_b, user_b, workspace_b):
-    import io, zipfile
+    import io
+    import zipfile
+
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as zf:
         zf.writestr("secret.txt", "tenant B secret data")
     await db.execute(text(f"SET LOCAL app.current_tenant_id = '{tenant_b.id}'"))
     await ws_svc.import_workspace(db, workspace_b.id, tenant_b.id, buf.getvalue())
-    tree = await ws_svc.list_files(db, workspace_b.id, tenant_b.id)
+    _tree = await ws_svc.list_files(db, workspace_b.id, tenant_b.id)
 
     # Now try as tenant A
     await db.execute(text(f"SET LOCAL app.current_tenant_id = '{tenant_a.id}'"))
@@ -81,7 +81,9 @@ async def test_tenant_a_cannot_read_tenant_b_files(db, tenant_a, tenant_b, user_
 
 @pytest.mark.asyncio
 async def test_tenant_a_cannot_search_tenant_b_files(db, tenant_a, tenant_b, user_b, workspace_b):
-    import io, zipfile
+    import io
+    import zipfile
+
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as zf:
         zf.writestr("data.txt", "sensitive content")

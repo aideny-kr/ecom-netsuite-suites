@@ -1,4 +1,5 @@
 """Audit log retention service — archives old events."""
+
 from datetime import datetime, timedelta, timezone
 
 import structlog
@@ -22,9 +23,7 @@ async def get_retention_stats(db: AsyncSession, tenant_id=None) -> dict:
     cutoff = get_retention_cutoff()
 
     total_query = select(func.count()).select_from(AuditEvent)
-    archivable_query = select(func.count()).select_from(AuditEvent).where(
-        AuditEvent.timestamp < cutoff
-    )
+    archivable_query = select(func.count()).select_from(AuditEvent).where(AuditEvent.timestamp < cutoff)
 
     if tenant_id:
         total_query = total_query.where(AuditEvent.tenant_id == tenant_id)
@@ -48,15 +47,8 @@ def purge_old_events_sync(db: Session, batch_size: int = 5000) -> dict:
     total_deleted = 0
     while True:
         # Delete in batches to avoid long locks
-        subq = (
-            select(AuditEvent.id)
-            .where(AuditEvent.timestamp < cutoff)
-            .limit(batch_size)
-            .subquery()
-        )
-        result = db.execute(
-            delete(AuditEvent).where(AuditEvent.id.in_(select(subq.c.id)))
-        )
+        subq = select(AuditEvent.id).where(AuditEvent.timestamp < cutoff).limit(batch_size).subquery()
+        result = db.execute(delete(AuditEvent).where(AuditEvent.id.in_(select(subq.c.id))))
         deleted = result.rowcount
         db.commit()
         total_deleted += deleted

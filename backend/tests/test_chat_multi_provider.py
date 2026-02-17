@@ -74,9 +74,11 @@ class TestMultiProviderOrchestrator:
             patch(f"{_ORCH}.log_event", new_callable=AsyncMock),
         ):
             result = await run_chat_turn(
-                db=db, session=session,
+                db=db,
+                session=session,
                 user_message="Show orders",
-                user_id=user_id, tenant_id=tenant_id,
+                user_id=user_id,
+                tenant_id=tenant_id,
             )
 
         assert result.content == "Here are your orders."
@@ -95,7 +97,8 @@ class TestMultiProviderOrchestrator:
 
         tool_response = _make_llm_response(
             tool_blocks=[ToolUseBlock(id="t1", name="search", input={"q": "test"})],
-            input_tokens=100, output_tokens=20,
+            input_tokens=100,
+            output_tokens=20,
         )
         text_response = _make_llm_response(text="Found it.", input_tokens=200, output_tokens=50)
 
@@ -124,14 +127,17 @@ class TestMultiProviderOrchestrator:
             ),
             patch(
                 f"{_ORCH}.execute_tool_call",
-                new_callable=AsyncMock, return_value='{"ok": true}',
+                new_callable=AsyncMock,
+                return_value='{"ok": true}',
             ),
             patch(f"{_ORCH}.log_event", new_callable=AsyncMock),
         ):
             result = await run_chat_turn(
-                db=db, session=session,
+                db=db,
+                session=session,
                 user_message="Search",
-                user_id=user_id, tenant_id=tenant_id,
+                user_id=user_id,
+                tenant_id=tenant_id,
             )
 
         assert result.content == "Found it."
@@ -169,9 +175,11 @@ class TestMultiProviderOrchestrator:
             patch(f"{_ORCH}.log_event", new_callable=AsyncMock),
         ):
             result = await run_chat_turn(
-                db=db, session=session,
+                db=db,
+                session=session,
                 user_message="Hello",
-                user_id=user_id, tenant_id=tenant_id,
+                user_id=user_id,
+                tenant_id=tenant_id,
             )
 
         assert result.provider_used == "anthropic"

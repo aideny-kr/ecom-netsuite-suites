@@ -1,6 +1,5 @@
 from app.models.audit import AuditEvent
 from app.models.base import Base
-from app.models.chat import ChatMessage, ChatSession, DocChunk
 from app.models.canonical import (
     Dispute,
     NetsuitePosting,
@@ -10,6 +9,7 @@ from app.models.canonical import (
     PayoutLine,
     Refund,
 )
+from app.models.chat import ChatMessage, ChatSession, DocChunk
 from app.models.connection import Connection
 from app.models.job import Job
 from app.models.mcp_connector import McpConnector

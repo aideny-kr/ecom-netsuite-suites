@@ -1,7 +1,6 @@
 """Shopify ingestion: sync orders, refunds, and payment transactions."""
 
 import uuid
-from datetime import datetime, timezone
 from decimal import Decimal
 
 import httpx
@@ -36,9 +35,7 @@ def sync_shopify(db: Session, connection_id: str, tenant_id: str) -> dict:
     Returns a summary dict with counts of records synced.
     """
     # ---- bootstrap --------------------------------------------------------
-    connection = db.execute(
-        select(Connection).where(Connection.id == connection_id)
-    ).scalar_one()
+    connection = db.execute(select(Connection).where(Connection.id == connection_id)).scalar_one()
 
     creds = decrypt_credentials(connection.encrypted_credentials)
     access_token = creds["access_token"]

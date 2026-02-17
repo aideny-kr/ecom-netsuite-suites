@@ -3,10 +3,9 @@
 import uuid
 
 import pytest
-import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.mcp.tools.data_sample import execute, ALLOWED_TABLES
+from app.mcp.tools.data_sample import ALLOWED_TABLES, execute
 from app.models.canonical import Order
 from tests.conftest import create_test_tenant
 

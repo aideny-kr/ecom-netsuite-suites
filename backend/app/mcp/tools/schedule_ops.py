@@ -77,9 +77,7 @@ async def execute_list(params: dict, **kwargs) -> dict:
         tenant_id = tenant_id_raw
 
     result = await db.execute(
-        select(Schedule)
-        .where(Schedule.tenant_id == tenant_id)
-        .order_by(Schedule.created_at.desc())
+        select(Schedule).where(Schedule.tenant_id == tenant_id).order_by(Schedule.created_at.desc())
     )
     schedules = result.scalars().all()
 

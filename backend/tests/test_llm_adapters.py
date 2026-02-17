@@ -23,16 +23,19 @@ class TestGetAdapter:
     def test_returns_anthropic_adapter(self):
         adapter = get_adapter("anthropic", "sk-test")
         from app.services.chat.adapters.anthropic_adapter import AnthropicAdapter
+
         assert isinstance(adapter, AnthropicAdapter)
 
     def test_returns_openai_adapter(self):
         adapter = get_adapter("openai", "sk-test")
         from app.services.chat.adapters.openai_adapter import OpenAIAdapter
+
         assert isinstance(adapter, OpenAIAdapter)
 
     def test_returns_gemini_adapter(self):
         adapter = get_adapter("gemini", "test-key")
         from app.services.chat.adapters.gemini_adapter import GeminiAdapter
+
         assert isinstance(adapter, GeminiAdapter)
 
     def test_invalid_provider_raises(self):
@@ -143,11 +146,13 @@ class TestAnthropicAdapter:
 class TestOpenAIAdapter:
     def test_convert_tools(self):
         adapter = get_adapter("openai", "sk-test")
-        tools = [{
-            "name": "search",
-            "description": "Search data",
-            "input_schema": {"type": "object", "properties": {"q": {"type": "string"}}},
-        }]
+        tools = [
+            {
+                "name": "search",
+                "description": "Search data",
+                "input_schema": {"type": "object", "properties": {"q": {"type": "string"}}},
+            }
+        ]
         converted = adapter._convert_tools(tools)
         assert len(converted) == 1
         assert converted[0]["type"] == "function"
@@ -169,9 +174,12 @@ class TestOpenAIAdapter:
     def test_convert_tool_results(self):
         adapter = get_adapter("openai", "sk-test")
         messages = [
-            {"role": "user", "content": [
-                {"type": "tool_result", "tool_use_id": "call_1", "content": "result data"},
-            ]},
+            {
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "call_1", "content": "result data"},
+                ],
+            },
         ]
         converted = adapter._convert_messages(messages, "sys")
         # system + tool result
@@ -192,8 +200,10 @@ class TestOpenAIAdapter:
         mock_response.usage = MagicMock(prompt_tokens=15, completion_tokens=8)
 
         with patch.object(
-            adapter._client.chat.completions, "create",
-            new_callable=AsyncMock, return_value=mock_response,
+            adapter._client.chat.completions,
+            "create",
+            new_callable=AsyncMock,
+            return_value=mock_response,
         ):
             result = await adapter.create_message(
                 model="gpt-4o",
@@ -224,8 +234,10 @@ class TestOpenAIAdapter:
         mock_response.usage = MagicMock(prompt_tokens=20, completion_tokens=10)
 
         with patch.object(
-            adapter._client.chat.completions, "create",
-            new_callable=AsyncMock, return_value=mock_response,
+            adapter._client.chat.completions,
+            "create",
+            new_callable=AsyncMock,
+            return_value=mock_response,
         ):
             result = await adapter.create_message(
                 model="gpt-4o",
@@ -248,15 +260,17 @@ class TestOpenAIAdapter:
 class TestGeminiAdapter:
     def test_convert_tools(self):
         adapter = get_adapter("gemini", "test-key")
-        tools = [{
-            "name": "search",
-            "description": "Search data",
-            "input_schema": {
-                "type": "object",
-                "properties": {"q": {"type": "string"}},
-                "required": ["q"],
-            },
-        }]
+        tools = [
+            {
+                "name": "search",
+                "description": "Search data",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"q": {"type": "string"}},
+                    "required": ["q"],
+                },
+            }
+        ]
         converted = adapter._convert_tools(tools)
         assert len(converted) == 1
         # Should be a genai Tool with function_declarations

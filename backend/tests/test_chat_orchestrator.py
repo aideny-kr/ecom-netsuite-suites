@@ -1,4 +1,5 @@
 """Tests for chat orchestrator — agentic loop with mocked Claude API."""
+
 import uuid
 
 from app.services.chat.nodes import (
@@ -27,7 +28,13 @@ class TestAllowedChatToolsFromOld:
 
     def test_contains_only_read_tools(self):
         expected = {
-            "netsuite.suiteql", "netsuite.connectivity", "data.sample_table_read", "report.export",
-            "workspace.list_files", "workspace.read_file", "workspace.search", "workspace.propose_patch",
+            "netsuite.suiteql",
+            "netsuite.connectivity",
+            "data.sample_table_read",
+            "report.export",
+            "workspace.list_files",
+            "workspace.read_file",
+            "workspace.search",
+            "workspace.propose_patch",
         }
         assert ALLOWED_CHAT_TOOLS == expected
