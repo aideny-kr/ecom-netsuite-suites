@@ -13,12 +13,16 @@ from app.models.user import User
 from app.schemas.tenant import (
     AiKeyTestRequest,
     AiKeyTestResponse,
+    PlanInfoResponse,
+    PlanLimits,
+    PlanUsage,
     TenantConfigResponse,
     TenantConfigUpdate,
     TenantResponse,
     TenantUpdate,
 )
 from app.services.chat.llm_adapter import DEFAULT_MODELS, VALID_MODELS, get_adapter
+from app.services.entitlement_service import get_plan_limits, get_usage_summary
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +45,27 @@ async def get_tenant(
         plan=tenant.plan,
         plan_expires_at=tenant.plan_expires_at,
         is_active=tenant.is_active,
+    )
+
+
+@router.get("/me/plan", response_model=PlanInfoResponse)
+async def get_tenant_plan(
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    result = await db.execute(select(Tenant).where(Tenant.id == user.tenant_id))
+    tenant = result.scalar_one_or_none()
+    if not tenant:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+
+    limits = await get_plan_limits(db, tenant.id)
+    usage = await get_usage_summary(db, tenant.id)
+
+    return PlanInfoResponse(
+        plan=tenant.plan,
+        limits=PlanLimits(**limits),
+        usage=PlanUsage(**usage),
+        plan_expires_at=tenant.plan_expires_at,
     )
 
 

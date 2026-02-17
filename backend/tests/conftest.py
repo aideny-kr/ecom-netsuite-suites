@@ -8,7 +8,9 @@ Tests run against real Postgres to ensure RLS, UUID types, and JSON columns work
 import uuid
 from datetime import datetime, timedelta, timezone
 
+import pytest
 import pytest_asyncio
+from cryptography.fernet import Fernet
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
@@ -19,6 +21,16 @@ from app.core.security import create_access_token, hash_password
 from app.main import create_app
 from app.models.tenant import Tenant, TenantConfig
 from app.models.user import Role, User, UserRole
+
+# ---------------------------------------------------------------------------
+# Generate a valid Fernet encryption key for tests (avoids placeholder rejection)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True, scope="session")
+def _set_encryption_key():
+    """Ensure a valid Fernet key is available for encrypt/decrypt operations in tests."""
+    settings.ENCRYPTION_KEY = Fernet.generate_key().decode()
+
 
 # ---------------------------------------------------------------------------
 # Per-test DB session — fresh engine + connection per test to avoid loop issues
@@ -69,7 +81,7 @@ async def create_test_tenant(
     db: AsyncSession,
     name: str = "Test Corp",
     slug: str | None = None,
-    plan: str = "trial",
+    plan: str = "free",
 ) -> Tenant:
     """Create a test tenant with config."""
     slug = slug or f"test-{uuid.uuid4().hex[:8]}"

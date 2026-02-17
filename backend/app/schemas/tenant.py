@@ -64,6 +64,27 @@ class TenantConfigUpdate(BaseModel):
         return v
 
 
+class PlanLimits(BaseModel):
+    max_connections: int
+    max_schedules: int
+    max_exports_per_day: int
+    mcp_tools: bool
+    chat: bool
+    byok_ai: bool
+
+
+class PlanUsage(BaseModel):
+    connections: int
+    schedules: int
+
+
+class PlanInfoResponse(BaseModel):
+    plan: str
+    limits: PlanLimits
+    usage: PlanUsage
+    plan_expires_at: datetime | None = None
+
+
 class AiKeyTestRequest(BaseModel):
     provider: str
     api_key: str

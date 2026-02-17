@@ -194,6 +194,27 @@ export interface NetsuitePosting {
   updated_at: string;
 }
 
+export interface PlanLimits {
+  max_connections: number;
+  max_schedules: number;
+  max_exports_per_day: number;
+  mcp_tools: boolean;
+  chat: boolean;
+  byok_ai: boolean;
+}
+
+export interface PlanUsage {
+  connections: number;
+  schedules: number;
+}
+
+export interface PlanInfo {
+  plan: string;
+  limits: PlanLimits;
+  usage: PlanUsage;
+  plan_expires_at: string | null;
+}
+
 export interface McpConnector {
   id: string;
   tenant_id: string;

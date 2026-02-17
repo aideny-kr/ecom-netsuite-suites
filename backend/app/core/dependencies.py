@@ -10,7 +10,6 @@ from sqlalchemy.orm import selectinload
 
 from app.core.database import get_db
 from app.core.security import decode_token
-from app.models.tenant import Tenant
 from app.models.user import Permission, RolePermission, User, UserRole
 
 logger = structlog.get_logger()
@@ -85,27 +84,15 @@ def require_entitlement(feature: str):
         user: Annotated[User, Depends(get_current_user)],
         db: Annotated[AsyncSession, Depends(get_db)],
     ) -> User:
-        result = await db.execute(select(Tenant).where(Tenant.id == user.tenant_id))
-        tenant = result.scalar_one_or_none()
-        if tenant is None:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Tenant not found")
+        from app.services.entitlement_service import check_entitlement
 
-        # Trial plan limits
-        plan_features = {
-            "trial": {"connections": 2, "tables": True, "exports": True, "mcp_tools": False},
-            "pro": {"connections": 50, "tables": True, "exports": True, "mcp_tools": True},
-            "enterprise": {"connections": 500, "tables": True, "exports": True, "mcp_tools": True},
-        }
-        features = plan_features.get(tenant.plan, plan_features["trial"])
-
-        if feature in features:
-            allowed = features[feature]
-            if isinstance(allowed, bool) and not allowed:
-                logger.warning("entitlement_denied", feature=feature, plan=tenant.plan)
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail=f"Feature '{feature}' not available on {tenant.plan} plan",
-                )
+        allowed = await check_entitlement(db, user.tenant_id, feature)
+        if not allowed:
+            logger.warning("entitlement_denied", feature=feature, tenant_id=str(user.tenant_id))
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Feature '{feature}' not available on your current plan",
+            )
         return user
 
     return entitlement_checker

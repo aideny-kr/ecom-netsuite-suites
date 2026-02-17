@@ -27,7 +27,7 @@ async def register_tenant(
     tenant = Tenant(
         name=tenant_name,
         slug=tenant_slug,
-        plan="trial",
+        plan="free",
         plan_expires_at=datetime.now(timezone.utc) + timedelta(days=14),
         is_active=True,
     )

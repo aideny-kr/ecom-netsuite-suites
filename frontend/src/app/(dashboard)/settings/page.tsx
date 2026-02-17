@@ -11,6 +11,8 @@ import {
   useUpdateAiSettings,
   useTestAiKey,
 } from "@/hooks/use-ai-settings";
+import { usePlanInfo } from "@/hooks/use-plan";
+import { PLAN_TIERS } from "@/lib/constants";
 import { AddMcpConnectorDialog } from "@/components/add-mcp-connector-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -52,6 +54,114 @@ const providerMeta: Record<
     label: "Custom",
   },
 };
+
+function UsageBar({ used, limit }: { used: number; limit: number }) {
+  const isUnlimited = limit === -1;
+  const pct = isUnlimited ? 0 : Math.min((used / limit) * 100, 100);
+
+  return (
+    <div className="space-y-1">
+      <div className="flex items-center justify-between text-[12px]">
+        <span className="text-muted-foreground">
+          {used} / {isUnlimited ? "Unlimited" : limit}
+        </span>
+        {!isUnlimited && (
+          <span className="text-muted-foreground">{Math.round(pct)}%</span>
+        )}
+      </div>
+      {!isUnlimited && (
+        <div className="h-1.5 w-full rounded-full bg-muted">
+          <div
+            className={`h-1.5 rounded-full transition-all ${pct >= 90 ? "bg-red-500" : pct >= 70 ? "bg-amber-500" : "bg-primary"}`}
+            style={{ width: `${pct}%` }}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PlanInfoSection() {
+  const { data: planInfo, isLoading } = usePlanInfo();
+
+  if (isLoading) {
+    return <Skeleton className="h-[140px] rounded-xl" />;
+  }
+
+  if (!planInfo) return null;
+
+  const tier = PLAN_TIERS[planInfo.plan] ?? PLAN_TIERS.free;
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <h3 className="text-lg font-semibold">Plan</h3>
+        <p className="mt-0.5 text-[13px] text-muted-foreground">
+          Your current plan and usage
+        </p>
+      </div>
+
+      <div className="rounded-xl border bg-card p-6 shadow-soft space-y-5">
+        <div className="flex items-center gap-3">
+          <Badge className={`${tier.bg} ${tier.color} border-0 text-[13px] font-semibold px-3 py-0.5`}>
+            {tier.label}
+          </Badge>
+          {planInfo.plan_expires_at && (
+            <span className="text-[12px] text-muted-foreground">
+              Expires {new Date(planInfo.plan_expires_at).toLocaleDateString()}
+            </span>
+          )}
+        </div>
+
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          <div className="space-y-1.5">
+            <p className="text-[13px] font-medium">Connections</p>
+            <UsageBar
+              used={planInfo.usage.connections}
+              limit={planInfo.limits.max_connections}
+            />
+          </div>
+          <div className="space-y-1.5">
+            <p className="text-[13px] font-medium">Schedules</p>
+            <UsageBar
+              used={planInfo.usage.schedules}
+              limit={planInfo.limits.max_schedules}
+            />
+          </div>
+          <div className="space-y-1.5">
+            <p className="text-[13px] font-medium">Features</p>
+            <div className="flex flex-wrap gap-2 text-[12px]">
+              <span className="flex items-center gap-1">
+                {planInfo.limits.chat ? (
+                  <Check className="h-3.5 w-3.5 text-green-500" />
+                ) : (
+                  <X className="h-3.5 w-3.5 text-muted-foreground" />
+                )}
+                Chat
+              </span>
+              <span className="flex items-center gap-1">
+                {planInfo.limits.mcp_tools ? (
+                  <Check className="h-3.5 w-3.5 text-green-500" />
+                ) : (
+                  <X className="h-3.5 w-3.5 text-muted-foreground" />
+                )}
+                MCP Tools
+              </span>
+              <span className="flex items-center gap-1">
+                {planInfo.limits.byok_ai ? (
+                  <Check className="h-3.5 w-3.5 text-green-500" />
+                ) : (
+                  <X className="h-3.5 w-3.5 text-muted-foreground" />
+                )}
+                BYOK AI
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function AiConfigSection() {
   const { data: aiSettings, isLoading } = useAiSettings();
@@ -315,6 +425,9 @@ export default function SettingsPage() {
           Configure your workspace and integrations
         </p>
       </div>
+
+      {/* Plan Info Section */}
+      <PlanInfoSection />
 
       {/* AI Configuration Section */}
       <AiConfigSection />

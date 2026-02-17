@@ -21,7 +21,7 @@ class Tenant(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     slug: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
-    plan: Mapped[str] = mapped_column(String(50), default="trial", nullable=False)
+    plan: Mapped[str] = mapped_column(String(50), default="free", nullable=False)
     plan_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
