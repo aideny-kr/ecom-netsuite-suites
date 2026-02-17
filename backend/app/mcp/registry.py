@@ -1,11 +1,37 @@
-from app.mcp.tools import netsuite_suiteql, recon_run, report_export, schedule_ops
+from app.mcp.tools import data_sample, health, netsuite_connectivity, netsuite_suiteql, recon_run, report_export, schedule_ops, workspace_tools
 
 TOOL_REGISTRY = {
+    "health": {
+        "description": "Health check — returns server status and registered tool count",
+        "execute": health.execute,
+        "params_schema": {},
+    },
     "netsuite.suiteql": {
         "description": "Execute a SuiteQL query against NetSuite",
         "execute": netsuite_suiteql.execute,
         "params_schema": {
             "query": {"type": "string", "required": True, "description": "SuiteQL query to execute"},
+            "limit": {"type": "integer", "required": False, "default": 100, "description": "Max rows to return"},
+        },
+    },
+    "netsuite.suiteql_stub": {
+        "description": "Stub SuiteQL query for testing MCP connectivity",
+        "execute": netsuite_suiteql.execute,
+        "params_schema": {
+            "query": {"type": "string", "required": True, "description": "SuiteQL query to execute"},
+            "limit": {"type": "integer", "required": False, "default": 100, "description": "Max rows to return"},
+        },
+    },
+    "netsuite.connectivity": {
+        "description": "Test NetSuite connectivity and verify credentials",
+        "execute": netsuite_connectivity.execute_connectivity,
+        "params_schema": {},
+    },
+    "data.sample_table_read": {
+        "description": "Read sample data from an allowlisted table",
+        "execute": data_sample.execute,
+        "params_schema": {
+            "table_name": {"type": "string", "required": True, "description": "Table name to read from"},
             "limit": {"type": "integer", "required": False, "default": 100, "description": "Max rows to return"},
         },
     },
@@ -47,6 +73,46 @@ TOOL_REGISTRY = {
         "execute": schedule_ops.execute_run,
         "params_schema": {
             "schedule_id": {"type": "string", "required": True},
+        },
+    },
+    "workspace.list_files": {
+        "description": "List files in a workspace, optionally filtered by directory path",
+        "execute": workspace_tools.execute_list_files,
+        "params_schema": {
+            "workspace_id": {"type": "string", "required": True, "description": "Workspace UUID"},
+            "directory": {"type": "string", "required": False, "description": "Directory path prefix to filter"},
+            "recursive": {"type": "boolean", "required": False, "default": True},
+        },
+    },
+    "workspace.read_file": {
+        "description": "Read the content of a single file from a workspace",
+        "execute": workspace_tools.execute_read_file,
+        "params_schema": {
+            "workspace_id": {"type": "string", "required": True},
+            "file_id": {"type": "string", "required": True, "description": "File UUID"},
+            "line_start": {"type": "integer", "required": False, "default": 1},
+            "line_end": {"type": "integer", "required": False},
+        },
+    },
+    "workspace.search": {
+        "description": "Search for files by name or content keyword across a workspace",
+        "execute": workspace_tools.execute_search,
+        "params_schema": {
+            "workspace_id": {"type": "string", "required": True},
+            "query": {"type": "string", "required": True, "description": "Search term"},
+            "search_type": {"type": "string", "required": False, "default": "filename", "description": "'filename' or 'content'"},
+            "limit": {"type": "integer", "required": False, "default": 20},
+        },
+    },
+    "workspace.propose_patch": {
+        "description": "Propose a code change as a unified diff. Creates a draft changeset for human review. Does NOT apply the change.",
+        "execute": workspace_tools.execute_propose_patch,
+        "params_schema": {
+            "workspace_id": {"type": "string", "required": True},
+            "file_path": {"type": "string", "required": True, "description": "Target file path"},
+            "unified_diff": {"type": "string", "required": True, "description": "Unified diff in standard -/+ format"},
+            "title": {"type": "string", "required": True, "description": "Summary of the change"},
+            "rationale": {"type": "string", "required": False},
         },
     },
 }

@@ -10,6 +10,7 @@ import json
 import uuid
 
 import structlog
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.mcp.governance import governed_execute
 from app.mcp.registry import TOOL_REGISTRY
@@ -46,6 +47,7 @@ class MCPServer:
         tenant_id: str,
         actor_id: str | None = None,
         correlation_id: str | None = None,
+        db: AsyncSession | None = None,
     ) -> dict:
         """Call a tool with full governance wrapper."""
         if tool_name not in self.tools:
@@ -59,6 +61,7 @@ class MCPServer:
             actor_id=actor_id,
             execute_fn=tool["execute"],
             correlation_id=correlation_id or str(uuid.uuid4()),
+            db=db,
         )
         return result
 

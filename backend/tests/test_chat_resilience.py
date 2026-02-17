@@ -67,12 +67,13 @@ class TestApiKeyValidation:
         with patch("app.services.chat.nodes.settings") as mock_settings:
             mock_settings.ANTHROPIC_API_KEY = "sk-test"
             mock_settings.ANTHROPIC_MODEL = "claude-sonnet-4-20250514"
-            provider, model, key = await get_tenant_ai_config(db, uuid.uuid4())
+            provider, model, key, is_byok = await get_tenant_ai_config(db, uuid.uuid4())
             assert provider == "anthropic"
             assert key == "sk-test"
+            assert is_byok is False
 
-    def test_voyage_client_raises_without_key(self):
-        """get_voyage_client raises ValueError when VOYAGE_API_KEY is empty."""
+    def test_voyage_client_returns_none_without_key(self):
+        """get_voyage_client returns None when VOYAGE_API_KEY is empty."""
         from app.services.chat import embeddings
 
         old_client = embeddings._client
@@ -80,8 +81,7 @@ class TestApiKeyValidation:
         try:
             with patch("app.services.chat.embeddings.settings") as mock_settings:
                 mock_settings.VOYAGE_API_KEY = ""
-                with pytest.raises(ValueError, match="VOYAGE_API_KEY"):
-                    embeddings.get_voyage_client()
+                assert embeddings.get_voyage_client() is None
         finally:
             embeddings._client = old_client
 

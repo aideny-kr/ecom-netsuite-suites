@@ -1,14 +1,30 @@
-# Test Plan — Phase 1.5 Hardening
+# Test Plan — Phase 2C
 
 ## Overview
 
-This document summarizes the test coverage established during Phase 1.5, covering backend unit/integration tests, MCP governance tests, and frontend E2E smoke tests. All backend tests run against a real PostgreSQL database with RLS enforcement.
+This document summarizes the full test coverage across backend unit/integration tests, MCP governance/client tests, chat security tests, ingestion tests, and frontend E2E smoke tests. All backend tests run against a real PostgreSQL database with RLS enforcement.
+
+**Current count:** ~190 backend tests passing, 10 frontend E2E tests
 
 ---
 
-## Backend Test Suite (96 tests)
+## Test Pyramid
 
-Run with: `make test` or `cd backend && python -m pytest tests/ -v --tb=short`
+```
+         ┌──────────┐
+         │   E2E    │  10 Playwright tests (auth, nav, tables)
+         ├──────────┤
+         │ Integr.  │  ~80 tests (API endpoints, DB, auth, audit, MCP client)
+         ├──────────┤
+         │   Unit   │  ~110 tests (services, governance, SuiteQL, ingestion, chat security)
+         └──────────┘
+```
+
+---
+
+## Backend Test Suite
+
+Run with: `cd backend && python -m pytest tests/ -v --tb=short --cov=app --cov-report=term-missing`
 
 ### Test Infrastructure (`tests/conftest.py`)
 
@@ -111,13 +127,63 @@ Run with: `make test` or `cd backend && python -m pytest tests/ -v --tb=short`
 | Result redaction (3) | Sensitive keys (token, api_key, password) redacted, nested redaction, safe data unchanged |
 | Audit payload (3) | Correct payload structure, sensitive param scrubbing, error payload format |
 | Governed execute (3) | Successful execution, rate-limited rejection, error handling |
-| Tool configs (2) | All 6 tools registered, all have required fields (timeout, rate_limit, entitlement, allowlist) |
+| Tool configs (2) | All tools registered, all have required fields (timeout, rate_limit, entitlement, allowlist) |
+
+### 8. MCP Client Contract Tests (`test_mcp_client.py` — 18 tests)
+
+| Area | Tests | What they verify |
+|------|-------|-----------------|
+| ListTools (3) | Tool list matches expected set (11 tools), all have descriptions, all have input schemas |
+| HealthTool (1) | Health tool returns status, timestamp, correct tool count |
+| SuiteQL Stub (1) | SuiteQL requires context (tenant_id + db), returns graceful error without it |
+| DataSampleTableRead (2) | Valid table returns columns/rows, invalid table returns error with table name |
+| UnknownTool (2) | Nonexistent tool rejected, unregistered tool returns "Unknown tool" error |
+| RateLimit (1) | Rate limit enforced after N calls per minute |
+| ParamFiltering (1) | Evil params stripped, only allowlisted params reach execute |
+| CorrelationId (1) | Correlation ID accepted without error |
+| Metrics (2) | Tool call metrics recorded, rate limit rejection metrics recorded |
+| DisallowedCalls (3) | Disallowed table name rejected, dangerous query params stripped, unregistered tool errors |
+| AuditDBWrites (3) | Success audit row written, rate limit denial audited, error audit row written |
+
+### 9. Chat Security (`test_chat_security.py` — 15 tests)
+
+| Area | Tests | What they verify |
+|------|-------|-----------------|
+| AllowedChatTools (3) | ALLOWED_CHAT_TOOLS is frozenset, contains only read tools, write tools blocked |
+| SanitizeUserInput (8) | Strips `</instructions>`, `<system>`, `</prompt>`, `<context>`, `<tool_call>` tags, case insensitive, preserves normal text, strips whitespace |
+| IsReadOnlySql (4+) | SELECT allowed, INSERT/UPDATE/DELETE/DROP/ALTER/TRUNCATE blocked, multi-statement blocked, empty/whitespace blocked |
+
+### 10. SuiteQL Tool Tests (`test_netsuite_suiteql.py` — 24 tests)
+
+| Area | Tests | What they verify |
+|------|-------|-----------------|
+| ParseTables (6) | Extracts tables from SELECT, JOIN, subquery, mixed case, no tables, alias handling |
+| ValidateQuery (9) | Allowed tables pass, disallowed tables blocked, mixed allowed/disallowed blocked, read-only enforced (INSERT/UPDATE/DELETE/DROP rejected), empty query rejected |
+| EnforceLimit (7) | LIMIT injected when missing, existing LIMIT preserved when under max, LIMIT capped when over max, FETCH FIRST handled, OFFSET preserved |
+| MalformedQueries (2) | Graceful handling of gibberish and SQL injection attempts |
+
+### 11. Ingestion Tests (`test_ingestion.py` — 7 tests)
+
+| Area | Tests | What they verify |
+|------|-------|-----------------|
+| Stripe Sync (2) | Payouts + payout lines synced from mocked Stripe API, idempotent (second run = same count) |
+| Shopify Sync (2) | Orders + refunds + payments synced from mocked Shopify API, idempotent |
+| Cursor State (3) | Cursor saved after sync, cursor loaded for incremental sync, cursor updated on re-sync |
+
+### 12. Additional Test Files
+
+| File | Tests | Coverage |
+|------|-------|---------|
+| `test_chat_api.py` | Chat session CRUD, message send/receive | API layer |
+| `test_chat_orchestrator.py` | LangGraph node execution, tool routing | Chat agent |
+| `test_netsuite_client.py` | NetSuite API client mocking | HTTP client |
+| `test_netsuite_oauth.py` | OAuth flow, token exchange | Auth flow |
 
 ---
 
 ## Frontend E2E Smoke Tests (Playwright)
 
-Run with: `make e2e` or `cd frontend && npx playwright test`
+Run with: `cd frontend && npx playwright test`
 
 ### Configuration
 - **Browser:** Chromium only
@@ -136,24 +202,37 @@ Run with: `make e2e` or `cd frontend && npx playwright test`
 
 ## CI Pipeline (`.github/workflows/ci.yml`)
 
-Three parallel jobs triggered on push to `main` and all PRs:
+Seven jobs triggered on push to `main` and all PRs:
 
-| Job | What it runs |
-|-----|-------------|
-| `lint` | `ruff check` + `ruff format --check` on backend |
-| `backend-tests` | Alembic migrations + pytest (96 tests) against PostgreSQL 16 + Redis 7 |
-| `frontend-lint` | `next lint` on frontend |
+| Job | What it runs | Required |
+|-----|-------------|----------|
+| `lint` | `ruff check` + `ruff format --check` on backend | Yes |
+| `backend-tests` | Alembic migrations + pytest with `--cov-fail-under=60` against PostgreSQL 16 + Redis 7 | Yes |
+| `frontend-lint` | `next lint` on frontend | Yes |
+| `frontend-typecheck` | `tsc --noEmit` — catches compile errors | Yes |
+| `frontend-build` | `npm run build` — verifies production build | Yes |
+| `secret-scan` | Gitleaks full-history scan | Yes |
+| `e2e-smoke` | Playwright tests (PR-only, currently soft-fail) | No (pending full stack in CI) |
+| `required-checks` | Gate job — depends on all required jobs above | Branch protection target |
 
 ---
 
-## Coverage Gaps & Phase 2 Test Priorities
+## Coverage Gaps & Next Steps
 
-| Area | Current State | Next Steps |
-|------|--------------|------------|
-| **Data pipeline idempotency** | No tests yet (no live integrations) | Add dedupe_key conflict tests when sync tasks land |
-| **Celery worker instrumentation** | InstrumentedTask exists but no integration test | Add test that triggers example_sync and verifies Job + audit events |
-| **CSV/Excel export** | Endpoint exists, untested | Add test for CSV download with correct headers |
-| **MCP server end-to-end** | Governance unit-tested; no live MCP protocol test | Add integration test via MCP client library |
-| **Frontend E2E in CI** | Playwright configured but not in CI workflow | Add CI job with `webServer` config to start backend + frontend |
-| **Load/stress testing** | None | Consider k6 or locust for rate limit and RLS performance |
-| **Security scanning** | None | Add `bandit` (Python) and `npm audit` to CI |
+| Area | Current State | Priority | Next Steps |
+|------|--------------|----------|------------|
+| **Celery worker integration** | InstrumentedTask tested indirectly | Medium | Add test that triggers sync task and verifies Job + audit events |
+| **CSV/Excel export** | Endpoint exists, untested | Medium | Add test for CSV download with correct headers |
+| **Frontend E2E in CI** | Playwright configured, CI job placeholder | High | Wire up docker-compose stack in CI for full E2E |
+| **Login rate limiting** | Described in SECURITY.md, not tested | High | Add test for 429 after 10 rapid failed logins |
+| **Failed login audit** | Not currently audited (SECURITY_VERIFICATION F8) | High | Add audit event + test |
+| **Load/stress testing** | None | Low | Consider k6 for rate limit and RLS performance |
+| **Refresh token in HttpOnly cookie** | Currently in JSON body (SECURITY_VERIFICATION F3) | High | Move to cookie, add tests |
+
+---
+
+## Related Documents
+
+- [QA_CHECKLIST.md](./QA_CHECKLIST.md) — Definition of Done for every PR
+- [SECURITY_VERIFICATION.md](./SECURITY_VERIFICATION.md) — OWASP ASVS-inspired security checklist
+- [RELEASE_CHECKLIST.md](./RELEASE_CHECKLIST.md) — Deploy gates and rollback procedures

@@ -22,8 +22,11 @@ class TestAllowedChatTools:
         assert isinstance(ALLOWED_CHAT_TOOLS, frozenset)
 
     def test_contains_only_read_tools(self):
-        """Only expected read-only tools are in the set."""
-        expected = {"netsuite.suiteql", "netsuite.connectivity", "data.sample_table_read", "report.export"}
+        """Only expected tools are in the set."""
+        expected = {
+            "netsuite.suiteql", "netsuite.connectivity", "data.sample_table_read", "report.export",
+            "workspace.list_files", "workspace.read_file", "workspace.search", "workspace.propose_patch",
+        }
         assert ALLOWED_CHAT_TOOLS == expected
 
     def test_write_tools_blocked(self):
@@ -153,15 +156,17 @@ class TestEncryptedKeyNeverExposed:
         mock_result.scalar_one_or_none.return_value = config_a
         db.execute = AsyncMock(return_value=mock_result)
 
-        provider_a, model_a, key_a = await get_tenant_ai_config(db, uuid.uuid4())
+        provider_a, model_a, key_a, is_byok_a = await get_tenant_ai_config(db, uuid.uuid4())
         assert key_a == "key-tenant-a"
         assert provider_a == "openai"
+        assert is_byok_a is True
 
         # Tenant B
         mock_result.scalar_one_or_none.return_value = config_b
-        provider_b, model_b, key_b = await get_tenant_ai_config(db, uuid.uuid4())
+        provider_b, model_b, key_b, is_byok_b = await get_tenant_ai_config(db, uuid.uuid4())
         assert key_b == "key-tenant-b"
         assert provider_b == "anthropic"
+        assert is_byok_b is True
 
         # Keys are isolated
         assert key_a != key_b

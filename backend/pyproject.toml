@@ -30,6 +30,7 @@ dependencies = [
     "voyageai>=0.3.0",
     "pgvector>=0.3.0",
     "stripe>=8.0.0",
+    "whatthepatch>=2.0.0",
 ]
 
 [project.optional-dependencies]

@@ -23,7 +23,6 @@ export function TableToolbar({
     const link = document.createElement("a");
     link.href = url;
     if (token) {
-      // Use fetch for authenticated download
       fetch(url, {
         headers: { Authorization: `Bearer ${token}` },
       })
@@ -42,17 +41,21 @@ export function TableToolbar({
   }
 
   return (
-    <div className="flex items-center gap-4">
+    <div className="flex items-center gap-3">
       <div className="relative flex-1 max-w-sm">
         <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
         <Input
           placeholder="Search..."
           value={search}
           onChange={(e) => onSearchChange(e.target.value)}
-          className="pl-9"
+          className="h-10 pl-9 text-[13px]"
         />
       </div>
-      <Button variant="outline" onClick={handleExport}>
+      <Button
+        variant="outline"
+        onClick={handleExport}
+        className="text-[13px] font-medium"
+      >
         <Download className="mr-2 h-4 w-4" />
         Export CSV
       </Button>

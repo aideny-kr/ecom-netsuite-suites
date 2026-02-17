@@ -4,6 +4,10 @@ from collections import defaultdict
 from typing import Any, Callable
 
 import structlog
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.mcp.metrics import record_call, record_duration, record_rate_limit_rejection
+from app.services import audit_service
 
 logger = structlog.get_logger()
 
@@ -11,6 +15,14 @@ logger = structlog.get_logger()
 _rate_limits: dict[str, dict[str, list[float]]] = defaultdict(lambda: defaultdict(list))
 
 TOOL_CONFIGS = {
+    "health": {
+        "default_limit": None,
+        "max_limit": None,
+        "timeout_seconds": 5,
+        "rate_limit_per_minute": 60,
+        "requires_entitlement": None,
+        "allowlisted_params": [],
+    },
     "netsuite.suiteql": {
         "default_limit": 100,
         "max_limit": 1000,
@@ -18,6 +30,22 @@ TOOL_CONFIGS = {
         "rate_limit_per_minute": 30,
         "requires_entitlement": "mcp_tools",
         "allowlisted_params": ["query", "limit"],
+    },
+    "netsuite.suiteql_stub": {
+        "default_limit": 100,
+        "max_limit": 1000,
+        "timeout_seconds": 30,
+        "rate_limit_per_minute": 30,
+        "requires_entitlement": "mcp_tools",
+        "allowlisted_params": ["query", "limit"],
+    },
+    "data.sample_table_read": {
+        "default_limit": 100,
+        "max_limit": 1000,
+        "timeout_seconds": 10,
+        "rate_limit_per_minute": 30,
+        "requires_entitlement": "mcp_tools",
+        "allowlisted_params": ["table_name", "limit"],
     },
     "recon.run": {
         "default_limit": None,
@@ -58,6 +86,46 @@ TOOL_CONFIGS = {
         "rate_limit_per_minute": 10,
         "requires_entitlement": "mcp_tools",
         "allowlisted_params": ["schedule_id"],
+    },
+    "netsuite.connectivity": {
+        "default_limit": None,
+        "max_limit": None,
+        "timeout_seconds": 15,
+        "rate_limit_per_minute": 10,
+        "requires_entitlement": "mcp_tools",
+        "allowlisted_params": [],
+    },
+    "workspace.list_files": {
+        "default_limit": 200,
+        "max_limit": 500,
+        "timeout_seconds": 10,
+        "rate_limit_per_minute": 60,
+        "requires_entitlement": "workspace",
+        "allowlisted_params": ["workspace_id", "directory", "recursive", "limit"],
+    },
+    "workspace.read_file": {
+        "default_limit": None,
+        "max_limit": None,
+        "timeout_seconds": 10,
+        "rate_limit_per_minute": 120,
+        "requires_entitlement": "workspace",
+        "allowlisted_params": ["workspace_id", "file_id", "line_start", "line_end"],
+    },
+    "workspace.search": {
+        "default_limit": 20,
+        "max_limit": 50,
+        "timeout_seconds": 15,
+        "rate_limit_per_minute": 30,
+        "requires_entitlement": "workspace",
+        "allowlisted_params": ["workspace_id", "query", "search_type", "limit"],
+    },
+    "workspace.propose_patch": {
+        "default_limit": None,
+        "max_limit": None,
+        "timeout_seconds": 10,
+        "rate_limit_per_minute": 10,
+        "requires_entitlement": "workspace",
+        "allowlisted_params": ["workspace_id", "file_path", "unified_diff", "title", "rationale"],
     },
 }
 
@@ -140,15 +208,51 @@ async def governed_execute(
     actor_id: str | None,
     execute_fn: Callable,
     correlation_id: str | None = None,
+    db: AsyncSession | None = None,
 ) -> dict[str, Any]:
     """
     Governance wrapper: entitlement → rate limit → param validation → execute → redact → audit.
     """
     correlation_id = correlation_id or str(uuid.uuid4())
+    start = time.monotonic()
 
     # 1. Rate limit check
     if not check_rate_limit(tenant_id, tool_name):
-        logger.warning("rate_limit_exceeded", tool=tool_name, tenant_id=tenant_id)
+        duration_ms = (time.monotonic() - start) * 1000
+        logger.warning(
+            "mcp.tool_call",
+            tool=tool_name,
+            tenant_id=tenant_id,
+            actor_id=actor_id,
+            correlation_id=correlation_id,
+            duration_ms=round(duration_ms, 2),
+            status="denied",
+        )
+        record_rate_limit_rejection(tool_name)
+        record_call(tool_name, "denied")
+
+        # Audit the rate limit denial
+        if db is not None:
+            try:
+                tenant_uuid = uuid.UUID(tenant_id) if tenant_id else uuid.uuid4()
+                actor_uuid = uuid.UUID(actor_id) if actor_id else None
+                await audit_service.log_event(
+                    db=db,
+                    tenant_id=tenant_uuid,
+                    category="tool_call",
+                    action="tool.rate_limited",
+                    actor_id=actor_uuid,
+                    actor_type="user",
+                    resource_type="mcp_tool",
+                    resource_id=tool_name,
+                    correlation_id=correlation_id,
+                    payload=create_audit_payload(tool_name, params, error="Rate limit exceeded"),
+                    status="denied",
+                    error_message="Rate limit exceeded",
+                )
+            except Exception:
+                logger.exception("mcp.audit_write_failed", tool=tool_name)
+
         return {"error": "Rate limit exceeded", "tool": tool_name}
 
     # 2. Param validation
@@ -156,23 +260,88 @@ async def governed_execute(
 
     # 3. Execute
     try:
-        result = await execute_fn(validated_params)
+        context = {
+            "tenant_id": tenant_id,
+            "actor_id": actor_id,
+            "db": db,
+            "correlation_id": correlation_id,
+        }
+        result = await execute_fn(validated_params, context=context)
     except Exception as e:
-        logger.error("tool_execution_error", tool=tool_name, error=str(e))
+        duration_ms = (time.monotonic() - start) * 1000
+        logger.error(
+            "mcp.tool_call",
+            tool=tool_name,
+            tenant_id=tenant_id,
+            actor_id=actor_id,
+            correlation_id=correlation_id,
+            duration_ms=round(duration_ms, 2),
+            status="error",
+            error=str(e),
+        )
+        record_call(tool_name, "error")
+        record_duration(tool_name, duration_ms / 1000)
+
+        # Audit the error
+        if db is not None:
+            try:
+                tenant_uuid = uuid.UUID(tenant_id) if tenant_id else uuid.uuid4()
+                actor_uuid = uuid.UUID(actor_id) if actor_id else None
+                await audit_service.log_event(
+                    db=db,
+                    tenant_id=tenant_uuid,
+                    category="tool_call",
+                    action=f"tool.{tool_name}",
+                    actor_id=actor_uuid,
+                    actor_type="user",
+                    resource_type="mcp_tool",
+                    resource_id=tool_name,
+                    correlation_id=correlation_id,
+                    payload=create_audit_payload(tool_name, validated_params, error=str(e)),
+                    status="error",
+                    error_message=str(e),
+                )
+            except Exception:
+                logger.exception("mcp.audit_write_failed", tool=tool_name)
+
         return {"error": str(e), "tool": tool_name}
 
     # 4. Redact
     redacted = redact_result(result)
 
-    # 5. Log (audit event would be saved to DB in production)
+    # 5. Log + metrics
+    duration_ms = (time.monotonic() - start) * 1000
     logger.info(
-        "tool_call",
+        "mcp.tool_call",
         tool=tool_name,
         tenant_id=tenant_id,
         actor_id=actor_id,
         correlation_id=correlation_id,
-        params=validated_params,
-        result_status="success",
+        duration_ms=round(duration_ms, 2),
+        status="success",
     )
+    record_call(tool_name, "success")
+    record_duration(tool_name, duration_ms / 1000)
+
+    # 6. Audit to DB
+    if db is not None:
+        try:
+            tenant_uuid = uuid.UUID(tenant_id) if tenant_id else uuid.uuid4()
+            actor_uuid = uuid.UUID(actor_id) if actor_id else None
+            await audit_service.log_event(
+                db=db,
+                tenant_id=tenant_uuid,
+                category="tool_call",
+                action=f"tool.{tool_name}",
+                actor_id=actor_uuid,
+                actor_type="user",
+                resource_type="mcp_tool",
+                resource_id=tool_name,
+                correlation_id=correlation_id,
+                payload=create_audit_payload(tool_name, validated_params, result=result),
+                status="success",
+            )
+        except Exception:
+            logger.exception("mcp.audit_write_failed", tool=tool_name)
 
     return redacted

@@ -30,8 +30,29 @@ async function request<T>(
   }
 
   if (!res.ok) {
-    const error = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new Error(error.detail || `Request failed: ${res.status}`);
+    let errorMessage = `Request failed: ${res.status}`;
+    try {
+      const errorData = await res.json();
+      if (errorData.detail) {
+        if (Array.isArray(errorData.detail)) {
+          // Handle Pydantic validation errors (list of objects)
+          errorMessage = errorData.detail
+            .map((err: any) => {
+              const loc = err.loc ? err.loc.join(".") : "";
+              return loc ? `${loc}: ${err.msg}` : err.msg;
+            })
+            .join("\n");
+        } else if (typeof errorData.detail === "object") {
+          errorMessage = JSON.stringify(errorData.detail);
+        } else {
+          errorMessage = String(errorData.detail);
+        }
+      }
+    } catch (e) {
+      // Use status text if JSON parsing fails
+      errorMessage = res.statusText || errorMessage;
+    }
+    throw new Error(errorMessage);
   }
 
   if (res.status === 204) {

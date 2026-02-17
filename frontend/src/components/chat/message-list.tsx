@@ -6,34 +6,82 @@ import remarkGfm from "remark-gfm";
 import { cn } from "@/lib/utils";
 import type { ChatMessage } from "@/lib/types";
 import { ToolCallStepCard } from "@/components/chat/tool-call-step";
-import { Skeleton } from "@/components/ui/skeleton";
+import { Sparkles, FileCode } from "lucide-react";
+
+function renderWithMentions(content: string): React.ReactNode[] {
+  const mentionRegex = /@workspace:([^\s]+)/g;
+  const parts: React.ReactNode[] = [];
+  let lastIndex = 0;
+  let match;
+
+  while ((match = mentionRegex.exec(content)) !== null) {
+    if (match.index > lastIndex) {
+      parts.push(content.slice(lastIndex, match.index));
+    }
+    const filePath = match[1];
+    parts.push(
+      <span
+        key={match.index}
+        className="inline-flex items-center gap-1 rounded bg-primary/10 px-1.5 py-0.5 text-[12px] font-medium text-primary"
+        title={filePath}
+      >
+        <FileCode className="h-3 w-3" />
+        {filePath.split("/").pop()}
+      </span>,
+    );
+    lastIndex = mentionRegex.lastIndex;
+  }
+
+  if (lastIndex < content.length) {
+    parts.push(content.slice(lastIndex));
+  }
+
+  return parts.length > 0 ? parts : [content];
+}
 
 interface MessageListProps {
   messages: ChatMessage[];
   isLoading: boolean;
+  pendingUserMessage?: string | null;
+  isWaitingForReply?: boolean;
 }
 
-export function MessageList({ messages, isLoading }: MessageListProps) {
+export function MessageList({
+  messages,
+  isLoading,
+  pendingUserMessage,
+  isWaitingForReply,
+}: MessageListProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
+  }, [messages, pendingUserMessage, isWaitingForReply]);
 
   if (isLoading) {
     return (
       <div className="flex h-full items-center justify-center">
-        <Skeleton className="h-8 w-48" />
+        <div className="flex flex-col items-center gap-3">
+          <div className="h-6 w-6 animate-spin rounded-full border-2 border-primary border-t-transparent" />
+          <span className="text-[13px] text-muted-foreground">
+            Loading conversation...
+          </span>
+        </div>
       </div>
     );
   }
 
-  if (messages.length === 0) {
+  if (messages.length === 0 && !pendingUserMessage) {
     return (
       <div className="flex h-full items-center justify-center">
         <div className="text-center">
-          <h3 className="text-lg font-medium">How can I help?</h3>
-          <p className="text-sm text-muted-foreground">
+          <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-2xl bg-primary/10">
+            <Sparkles className="h-6 w-6 text-primary" />
+          </div>
+          <h3 className="text-lg font-semibold text-foreground">
+            How can I help?
+          </h3>
+          <p className="mt-1.5 max-w-xs text-[14px] leading-relaxed text-muted-foreground">
             Ask questions about your data, docs, or NetSuite operations.
           </p>
         </div>
@@ -42,45 +90,52 @@ export function MessageList({ messages, isLoading }: MessageListProps) {
   }
 
   return (
-    <div className="h-full overflow-auto p-4 space-y-4">
+    <div className="h-full overflow-auto px-6 py-6 space-y-5 scrollbar-thin">
       {messages.map((message) => (
         <div
           key={message.id}
           className={cn(
-            "flex",
+            "flex gap-3",
             message.role === "user" ? "justify-end" : "justify-start",
           )}
         >
+          {message.role === "assistant" && (
+            <div className="mt-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-primary/10">
+              <Sparkles className="h-3.5 w-3.5 text-primary" />
+            </div>
+          )}
           <div
             className={cn(
-              "max-w-[80%] rounded-lg px-4 py-2",
+              "max-w-[75%] rounded-2xl px-4 py-2.5",
               message.role === "user"
                 ? "bg-primary text-primary-foreground"
-                : "bg-muted",
+                : "bg-muted/60",
             )}
           >
             {message.tool_calls && message.tool_calls.length > 0 && (
-              <div className="mb-2 space-y-1">
+              <div className="mb-2 space-y-1.5">
                 {message.tool_calls.map((tc, idx) => (
                   <ToolCallStepCard key={idx} step={tc} />
                 ))}
               </div>
             )}
             {message.role === "assistant" ? (
-              <div className="prose prose-sm dark:prose-invert max-w-none">
+              <div className="prose prose-sm dark:prose-invert max-w-none text-[14px] leading-relaxed">
                 <ReactMarkdown remarkPlugins={[remarkGfm]}>
                   {message.content}
                 </ReactMarkdown>
               </div>
             ) : (
-              <p className="text-sm whitespace-pre-wrap">{message.content}</p>
+              <p className="text-[14px] leading-relaxed whitespace-pre-wrap">
+                {renderWithMentions(message.content)}
+              </p>
             )}
             {message.citations && message.citations.length > 0 && (
-              <div className="mt-2 flex flex-wrap gap-1">
+              <div className="mt-2.5 flex flex-wrap gap-1.5">
                 {message.citations.map((citation, idx) => (
                   <span
                     key={idx}
-                    className="inline-flex items-center rounded-full bg-background/50 px-2 py-0.5 text-xs"
+                    className="inline-flex items-center rounded-full bg-background/60 px-2.5 py-1 text-[11px] font-medium"
                     title={citation.snippet}
                   >
                     {citation.type === "doc" ? "\u{1F4C4}" : "\u{1F4CA}"} {citation.title}
@@ -88,9 +143,59 @@ export function MessageList({ messages, isLoading }: MessageListProps) {
                 ))}
               </div>
             )}
+            {message.role === "assistant" && message.model_used && (
+              <div className="mt-1.5 flex items-center gap-1.5 text-[11px] text-muted-foreground/60">
+                {message.is_byok ? (
+                  <span className="rounded bg-blue-500/10 px-1.5 py-0.5 font-medium text-blue-600 dark:text-blue-400">
+                    BYOK
+                  </span>
+                ) : (
+                  <span className="rounded bg-muted px-1.5 py-0.5 font-medium">
+                    Platform
+                  </span>
+                )}
+                <span>{message.provider_used}</span>
+                <span>/</span>
+                <span>{message.model_used}</span>
+                {message.input_tokens != null && message.output_tokens != null && (
+                  <>
+                    <span className="ml-1">·</span>
+                    <span>{(message.input_tokens + message.output_tokens).toLocaleString()} tokens</span>
+                  </>
+                )}
+              </div>
+            )}
           </div>
         </div>
       ))}
+
+      {/* Optimistic pending user message */}
+      {pendingUserMessage && (
+        <div className="flex gap-3 justify-end">
+          <div className="max-w-[75%] rounded-2xl px-4 py-2.5 bg-primary text-primary-foreground">
+            <p className="text-[14px] leading-relaxed whitespace-pre-wrap">
+              {pendingUserMessage}
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* Thinking indicator */}
+      {isWaitingForReply && (
+        <div className="flex gap-3 justify-start">
+          <div className="mt-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-primary/10">
+            <Sparkles className="h-3.5 w-3.5 text-primary" />
+          </div>
+          <div className="flex items-center gap-1.5 rounded-2xl bg-muted/60 px-4 py-3">
+            <span className="inline-flex gap-1">
+              <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/60 animate-bounce [animation-delay:0ms]" />
+              <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/60 animate-bounce [animation-delay:150ms]" />
+              <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/60 animate-bounce [animation-delay:300ms]" />
+            </span>
+          </div>
+        </div>
+      )}
+
       <div ref={bottomRef} />
     </div>
   );

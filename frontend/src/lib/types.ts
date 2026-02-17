@@ -310,6 +310,7 @@ export interface ChatMessage {
   output_tokens?: number;
   model_used?: string;
   provider_used?: string;
+  is_byok?: boolean;
   created_at: string;
 }
 
@@ -320,4 +321,97 @@ export interface ChatSessionDetail {
   messages: ChatMessage[];
   created_at: string;
   updated_at: string;
+}
+
+// --- Workspace Types ---
+
+export interface Workspace {
+  id: string;
+  tenant_id: string;
+  name: string;
+  description: string | null;
+  status: "active" | "archived";
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WorkspaceFile {
+  id: string;
+  workspace_id: string;
+  path: string;
+  file_name: string;
+  mime_type: string | null;
+  size_bytes: number;
+  is_directory: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface FileTreeNode {
+  id: string;
+  name: string;
+  path: string;
+  is_directory: boolean;
+  children?: FileTreeNode[];
+  size_bytes?: number;
+}
+
+export interface FileReadResponse {
+  id: string;
+  path: string;
+  file_name: string;
+  content: string;
+  truncated: boolean;
+  total_lines: number;
+  mime_type: string | null;
+}
+
+export interface SearchResult {
+  file_id: string;
+  path: string;
+  line_number: number;
+  snippet: string;
+  context: string;
+}
+
+export interface ChangeSet {
+  id: string;
+  workspace_id: string;
+  title: string;
+  description: string | null;
+  status: "draft" | "pending_review" | "approved" | "applied" | "rejected";
+  proposed_by: string;
+  reviewed_by: string | null;
+  applied_by: string | null;
+  proposed_at: string;
+  reviewed_at: string | null;
+  applied_at: string | null;
+  rejection_reason: string | null;
+  created_at: string;
+  updated_at: string;
+  patches?: Patch[];
+}
+
+export interface Patch {
+  id: string;
+  changeset_id: string;
+  file_path: string;
+  operation: "modify" | "create" | "delete";
+  unified_diff: string | null;
+  new_content: string | null;
+  baseline_sha256: string;
+  apply_order: number;
+  created_at: string;
+}
+
+export interface DiffViewResponse {
+  changeset_id: string;
+  title: string;
+  files: Array<{
+    file_path: string;
+    operation: string;
+    original_content: string;
+    modified_content: string;
+  }>;
 }

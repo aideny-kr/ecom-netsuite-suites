@@ -6,6 +6,7 @@ and can retry/correct — all within a single turn, up to MAX_STEPS iterations.
 """
 
 import logging
+import re
 import uuid
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -103,7 +104,7 @@ async def run_chat_turn(
     tool_definitions = await build_all_tool_definitions(db, tenant_id)
 
     # ── Resolve tenant AI config ──
-    provider, model, api_key = await get_tenant_ai_config(db, tenant_id)
+    provider, model, api_key, is_byok = await get_tenant_ai_config(db, tenant_id)
     adapter = get_adapter(provider, api_key)
 
     # ── Agentic loop ──
@@ -176,6 +177,9 @@ async def run_chat_turn(
         total_output_tokens += response.usage.output_tokens
         final_text = "\n".join(response.text_blocks) if response.text_blocks else ""
 
+    # Strip raw tool reference tags the LLM may include in its text output
+    final_text = re.sub(r"\s*\[tool:\s*[^\]]+\]", "", final_text).strip()
+
     # ── Save assistant message ──
     assistant_msg = ChatMessage(
         tenant_id=tenant_id,
@@ -189,6 +193,7 @@ async def run_chat_turn(
         output_tokens=total_output_tokens,
         model_used=model,
         provider_used=provider,
+        is_byok=is_byok,
     )
     db.add(assistant_msg)
 

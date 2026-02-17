@@ -85,21 +85,21 @@ export function AddConnectionDialog() {
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
-        <Button>
+        <Button className="text-[13px] font-medium">
           <Plus className="mr-2 h-4 w-4" />
           Add Connection
         </Button>
       </DialogTrigger>
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
-          <DialogTitle>Add Connection</DialogTitle>
-          <DialogDescription>
+          <DialogTitle className="text-lg">Add Connection</DialogTitle>
+          <DialogDescription className="text-[13px]">
             Connect a new platform to sync data.
           </DialogDescription>
         </DialogHeader>
         <form onSubmit={onSubmit} className="space-y-4">
           <div className="space-y-2">
-            <Label>Provider</Label>
+            <Label className="text-[13px] font-medium">Provider</Label>
             <Select
               value={provider}
               onValueChange={(v) => {
@@ -107,7 +107,7 @@ export function AddConnectionDialog() {
                 setCredentials({});
               }}
             >
-              <SelectTrigger>
+              <SelectTrigger className="h-10 text-[13px]">
                 <SelectValue placeholder="Select a provider" />
               </SelectTrigger>
               <SelectContent>
@@ -119,20 +119,25 @@ export function AddConnectionDialog() {
           </div>
 
           <div className="space-y-2">
-            <Label htmlFor="conn-label">Label</Label>
+            <Label htmlFor="conn-label" className="text-[13px] font-medium">
+              Label
+            </Label>
             <Input
               id="conn-label"
               placeholder="e.g., Production Shopify"
               value={label}
               onChange={(e) => setLabel(e.target.value)}
               required
+              className="h-10 text-[13px]"
             />
           </div>
 
           {provider &&
             credentialFields[provider].map((field) => (
               <div key={field.key} className="space-y-2">
-                <Label htmlFor={field.key}>{field.label}</Label>
+                <Label htmlFor={field.key} className="text-[13px] font-medium">
+                  {field.label}
+                </Label>
                 <Input
                   id={field.key}
                   type="password"
@@ -144,21 +149,24 @@ export function AddConnectionDialog() {
                     }))
                   }
                   required
+                  className="h-10 text-[13px]"
                 />
               </div>
             ))}
 
-          <DialogFooter>
+          <DialogFooter className="gap-2 pt-2">
             <Button
               type="button"
               variant="outline"
               onClick={() => setOpen(false)}
+              className="text-[13px]"
             >
               Cancel
             </Button>
             <Button
               type="submit"
               disabled={!provider || createConnection.isPending}
+              className="text-[13px]"
             >
               {createConnection.isPending ? "Creating..." : "Create"}
             </Button>

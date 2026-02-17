@@ -1,6 +1,6 @@
 "use client";
 
-import { Plus } from "lucide-react";
+import { Plus, MessageSquare } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import type { ChatSession } from "@/lib/types";
@@ -19,39 +19,44 @@ export function SessionSidebar({
   onNewChat,
 }: SessionSidebarProps) {
   return (
-    <div className="flex w-64 flex-col border-r bg-muted/30">
-      <div className="border-b p-3">
+    <div className="flex w-[280px] flex-col border-r bg-muted/30">
+      <div className="p-4">
         <Button
           variant="outline"
-          className="w-full justify-start gap-2"
+          className="w-full justify-start gap-2 bg-card text-[13px] font-medium shadow-soft"
           onClick={onNewChat}
         >
           <Plus className="h-4 w-4" />
           New Chat
         </Button>
       </div>
-      <div className="flex-1 overflow-auto p-2 space-y-1">
+      <div className="flex-1 overflow-auto px-3 pb-3 space-y-0.5 scrollbar-thin">
         {sessions.map((session) => (
           <button
             key={session.id}
             onClick={() => onSelectSession(session.id)}
             className={cn(
-              "w-full rounded-md px-3 py-2 text-left text-sm transition-colors hover:bg-accent",
-              activeSessionId === session.id && "bg-accent text-accent-foreground",
+              "w-full rounded-lg px-3 py-2.5 text-left transition-all duration-150",
+              activeSessionId === session.id
+                ? "bg-card shadow-soft"
+                : "hover:bg-card/50",
             )}
           >
-            <p className="truncate font-medium">
+            <p className="truncate text-[13px] font-medium text-foreground">
               {session.title || "New Chat"}
             </p>
-            <p className="truncate text-xs text-muted-foreground">
+            <p className="truncate text-[11px] text-muted-foreground mt-0.5">
               {new Date(session.created_at).toLocaleDateString()}
             </p>
           </button>
         ))}
         {sessions.length === 0 && (
-          <p className="px-3 py-6 text-center text-sm text-muted-foreground">
-            No conversations yet
-          </p>
+          <div className="flex flex-col items-center py-12 text-center">
+            <MessageSquare className="h-8 w-8 text-muted-foreground/40" />
+            <p className="mt-3 text-[13px] text-muted-foreground">
+              No conversations yet
+            </p>
+          </div>
         )}
       </div>
     </div>

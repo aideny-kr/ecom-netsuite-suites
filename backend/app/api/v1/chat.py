@@ -89,6 +89,8 @@ def _serialize_message(msg: ChatMessage) -> dict:
         result["model_used"] = msg.model_used
     if msg.provider_used:
         result["provider_used"] = msg.provider_used
+    if msg.is_byok is not None:
+        result["is_byok"] = msg.is_byok
     return result
 
 

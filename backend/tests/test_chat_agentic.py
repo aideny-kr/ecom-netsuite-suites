@@ -36,7 +36,7 @@ def _make_session(tenant_id: uuid.UUID, messages=None):
     return session
 
 
-_DEFAULT_AI_CONFIG = ("anthropic", "claude-sonnet-4-20250514", "sk-test")
+_DEFAULT_AI_CONFIG = ("anthropic", "claude-sonnet-4-20250514", "sk-test", False)
 _ORCH = "app.services.chat.orchestrator"
 
 

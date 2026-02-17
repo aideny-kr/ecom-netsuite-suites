@@ -65,11 +65,13 @@ export function AuditFilters({
     category || action || correlationId || startDate || endDate;
 
   return (
-    <div className="flex flex-wrap items-end gap-4">
-      <div className="space-y-1">
-        <Label className="text-xs">Category</Label>
+    <div className="flex flex-wrap items-end gap-3 rounded-xl border bg-card p-4 shadow-soft">
+      <div className="space-y-1.5">
+        <Label className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+          Category
+        </Label>
         <Select value={category} onValueChange={onCategoryChange}>
-          <SelectTrigger className="h-9 w-[140px]">
+          <SelectTrigger className="h-9 w-[140px] text-[13px]">
             <SelectValue placeholder="All" />
           </SelectTrigger>
           <SelectContent>
@@ -83,10 +85,12 @@ export function AuditFilters({
         </Select>
       </div>
 
-      <div className="space-y-1">
-        <Label className="text-xs">Action</Label>
+      <div className="space-y-1.5">
+        <Label className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+          Action
+        </Label>
         <Select value={action} onValueChange={onActionChange}>
-          <SelectTrigger className="h-9 w-[140px]">
+          <SelectTrigger className="h-9 w-[140px] text-[13px]">
             <SelectValue placeholder="All" />
           </SelectTrigger>
           <SelectContent>
@@ -100,38 +104,49 @@ export function AuditFilters({
         </Select>
       </div>
 
-      <div className="space-y-1">
-        <Label className="text-xs">Correlation ID</Label>
+      <div className="space-y-1.5">
+        <Label className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+          Correlation ID
+        </Label>
         <Input
           placeholder="Filter by ID..."
           value={correlationId}
           onChange={(e) => onCorrelationIdChange(e.target.value)}
-          className="h-9 w-[200px]"
+          className="h-9 w-[200px] text-[13px]"
         />
       </div>
 
-      <div className="space-y-1">
-        <Label className="text-xs">Start Date</Label>
+      <div className="space-y-1.5">
+        <Label className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+          Start Date
+        </Label>
         <Input
           type="date"
           value={startDate}
           onChange={(e) => onStartDateChange(e.target.value)}
-          className="h-9 w-[150px]"
+          className="h-9 w-[150px] text-[13px]"
         />
       </div>
 
-      <div className="space-y-1">
-        <Label className="text-xs">End Date</Label>
+      <div className="space-y-1.5">
+        <Label className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+          End Date
+        </Label>
         <Input
           type="date"
           value={endDate}
           onChange={(e) => onEndDateChange(e.target.value)}
-          className="h-9 w-[150px]"
+          className="h-9 w-[150px] text-[13px]"
         />
       </div>
 
       {hasFilters && (
-        <Button variant="ghost" size="sm" onClick={onClear}>
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={onClear}
+          className="text-[13px]"
+        >
           <X className="mr-1 h-3 w-3" />
           Clear
         </Button>

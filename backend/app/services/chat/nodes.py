@@ -33,6 +33,10 @@ ALLOWED_CHAT_TOOLS: frozenset[str] = frozenset({
     "netsuite.connectivity",
     "data.sample_table_read",
     "report.export",
+    "workspace.list_files",
+    "workspace.read_file",
+    "workspace.search",
+    "workspace.propose_patch",
 })
 
 SYSTEM_TENANT_ID = uuid.UUID("00000000-0000-0000-0000-000000000000")
@@ -91,8 +95,8 @@ def is_read_only_sql(query: str) -> bool:
     return True
 
 
-async def get_tenant_ai_config(db: AsyncSession, tenant_id: uuid.UUID) -> tuple[str, str, str]:
-    """Return (provider, model, api_key) with fallback to platform defaults."""
+async def get_tenant_ai_config(db: AsyncSession, tenant_id: uuid.UUID) -> tuple[str, str, str, bool]:
+    """Return (provider, model, api_key, is_byok) with fallback to platform defaults."""
     result = await db.execute(
         select(TenantConfig).where(TenantConfig.tenant_id == tenant_id)
     )
@@ -101,12 +105,12 @@ async def get_tenant_ai_config(db: AsyncSession, tenant_id: uuid.UUID) -> tuple[
     if config and config.ai_provider and config.ai_api_key_encrypted:
         key = decrypt_credentials(config.ai_api_key_encrypted)["api_key"]
         model = config.ai_model or DEFAULT_MODELS.get(config.ai_provider, "")
-        return config.ai_provider, model, key
+        return config.ai_provider, model, key, True
 
     # Platform defaults
     if not settings.ANTHROPIC_API_KEY:
         raise ValueError("No AI provider configured — set a tenant API key or ANTHROPIC_API_KEY")
-    return "anthropic", settings.ANTHROPIC_MODEL, settings.ANTHROPIC_API_KEY
+    return "anthropic", settings.ANTHROPIC_MODEL, settings.ANTHROPIC_API_KEY, False
 
 
 async def retriever_node(state: OrchestratorState, db: AsyncSession) -> None:
@@ -116,6 +120,9 @@ async def retriever_node(state: OrchestratorState, db: AsyncSession) -> None:
 
     try:
         query_embedding = await embed_query(sanitize_user_input(state.user_message))
+        if query_embedding is None:
+            state.doc_chunks = []
+            return
         top_k = settings.CHAT_RAG_TOP_K
 
         # pgvector cosine similarity search

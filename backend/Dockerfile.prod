@@ -1,0 +1,37 @@
+# Production Dockerfile for FastAPI backend + Celery worker
+# Usage:
+#   Backend: docker build -f Dockerfile.prod -t backend .
+#            docker run -p 8000:8000 backend
+#   Worker:  docker run backend celery -A app.workers.celery_app worker --loglevel=info -Q default,sync,recon,export
+
+FROM python:3.11-slim AS base
+
+# Prevent Python from writing .pyc files and enable unbuffered output
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends gcc libpq-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies
+COPY pyproject.toml .
+RUN pip install --no-cache-dir . && \
+    apt-get purge -y --auto-remove gcc
+
+# Copy application code
+COPY . .
+
+# Create non-root user
+RUN addgroup --system appuser && \
+    adduser --system --ingroup appuser appuser && \
+    chown -R appuser:appuser /app
+USER appuser
+
+EXPOSE 8000
+
+# Default: run FastAPI with production settings
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]

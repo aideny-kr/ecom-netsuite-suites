@@ -23,7 +23,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { ArrowUpDown } from "lucide-react";
+import { ArrowUpDown, ChevronLeft, ChevronRight } from "lucide-react";
 
 interface DataTableProps<TData> {
   columns: ColumnDef<TData, unknown>[];
@@ -35,6 +35,7 @@ interface DataTableProps<TData> {
   onSortingChange: (sorting: SortingState) => void;
   onPageChange: (page: number) => void;
   onPageSizeChange: (size: number) => void;
+  onRowClick?: (row: TData) => void;
 }
 
 export function DataTable<TData>({
@@ -47,6 +48,7 @@ export function DataTable<TData>({
   onSortingChange,
   onPageChange,
   onPageSizeChange,
+  onRowClick,
 }: DataTableProps<TData>) {
   const table = useReactTable({
     data,
@@ -64,23 +66,26 @@ export function DataTable<TData>({
 
   return (
     <div className="space-y-4">
-      <div className="rounded-md border">
+      <div className="overflow-hidden rounded-xl border bg-card shadow-soft">
         <Table>
           <TableHeader>
             {table.getHeaderGroups().map((headerGroup) => (
-              <TableRow key={headerGroup.id}>
+              <TableRow key={headerGroup.id} className="bg-muted/50 hover:bg-muted/50">
                 {headerGroup.headers.map((header) => (
-                  <TableHead key={header.id}>
+                  <TableHead
+                    key={header.id}
+                    className="text-[12px] font-semibold uppercase tracking-wider text-muted-foreground"
+                  >
                     {header.isPlaceholder ? null : header.column.getCanSort() ? (
                       <button
-                        className="flex items-center gap-1 hover:text-foreground"
+                        className="flex items-center gap-1.5 transition-colors hover:text-foreground"
                         onClick={header.column.getToggleSortingHandler()}
                       >
                         {flexRender(
                           header.column.columnDef.header,
                           header.getContext(),
                         )}
-                        <ArrowUpDown className="h-3 w-3" />
+                        <ArrowUpDown className="h-3 w-3 opacity-40" />
                       </button>
                     ) : (
                       flexRender(
@@ -96,9 +101,17 @@ export function DataTable<TData>({
           <TableBody>
             {table.getRowModel().rows?.length ? (
               table.getRowModel().rows.map((row) => (
-                <TableRow key={row.id}>
+                <TableRow
+                  key={row.id}
+                  className={
+                    onRowClick
+                      ? "cursor-pointer transition-colors hover:bg-muted/30"
+                      : "transition-colors"
+                  }
+                  onClick={() => onRowClick?.(row.original)}
+                >
                   {row.getVisibleCells().map((cell) => (
-                    <TableCell key={cell.id}>
+                    <TableCell key={cell.id} className="text-[13px]">
                       {flexRender(
                         cell.column.columnDef.cell,
                         cell.getContext(),
@@ -111,9 +124,11 @@ export function DataTable<TData>({
               <TableRow>
                 <TableCell
                   colSpan={columns.length}
-                  className="h-24 text-center"
+                  className="h-32 text-center"
                 >
-                  No data available.
+                  <p className="text-[15px] font-medium text-muted-foreground">
+                    No data available
+                  </p>
                 </TableCell>
               </TableRow>
             )}
@@ -123,12 +138,12 @@ export function DataTable<TData>({
 
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <span className="text-sm text-muted-foreground">Rows per page</span>
+          <span className="text-[13px] text-muted-foreground">Rows per page</span>
           <Select
             value={pageSize.toString()}
             onValueChange={(v) => onPageSizeChange(Number(v))}
           >
-            <SelectTrigger className="h-8 w-[70px]">
+            <SelectTrigger className="h-8 w-[70px] text-[13px]">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -140,26 +155,30 @@ export function DataTable<TData>({
             </SelectContent>
           </Select>
         </div>
-        <div className="flex items-center gap-2">
-          <span className="text-sm text-muted-foreground">
+        <div className="flex items-center gap-3">
+          <span className="text-[13px] tabular-nums text-muted-foreground">
             Page {page} of {totalPages || 1}
           </span>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => onPageChange(page - 1)}
-            disabled={page <= 1}
-          >
-            Previous
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => onPageChange(page + 1)}
-            disabled={page >= totalPages}
-          >
-            Next
-          </Button>
+          <div className="flex gap-1">
+            <Button
+              variant="outline"
+              size="icon"
+              className="h-8 w-8"
+              onClick={() => onPageChange(page - 1)}
+              disabled={page <= 1}
+            >
+              <ChevronLeft className="h-4 w-4" />
+            </Button>
+            <Button
+              variant="outline"
+              size="icon"
+              className="h-8 w-8"
+              onClick={() => onPageChange(page + 1)}
+              disabled={page >= totalPages}
+            >
+              <ChevronRight className="h-4 w-4" />
+            </Button>
+          </div>
         </div>
       </div>
     </div>

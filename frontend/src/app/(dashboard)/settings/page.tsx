@@ -254,6 +254,17 @@ function AiConfigSection() {
       </div>
 
       <div className="rounded-xl border bg-card p-6 shadow-soft space-y-4">
+        {aiSettings?.ai_provider && (
+          <div className="flex items-center gap-2 rounded-lg bg-muted/50 px-3 py-2">
+            <Brain className="h-4 w-4 text-primary" />
+            <span className="text-[13px] font-medium">Active model:</span>
+            <span className="text-[13px] text-muted-foreground">
+              {AI_PROVIDERS.find((p) => p.value === aiSettings.ai_provider)?.label ?? aiSettings.ai_provider}
+              {" / "}
+              {(aiSettings.ai_model && AI_MODELS[aiSettings.ai_provider]?.find((m) => m.value === aiSettings.ai_model)?.label) || aiSettings.ai_model || "Default"}
+            </span>
+          </div>
+        )}
         <div className="grid gap-4 sm:grid-cols-2">
           <div className="space-y-1.5">
             <label className="text-[13px] font-medium text-foreground">

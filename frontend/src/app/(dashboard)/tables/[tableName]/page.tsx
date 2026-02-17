@@ -8,6 +8,7 @@ import { DataTable } from "@/components/data-table";
 import { TableToolbar } from "@/components/table-toolbar";
 import { Skeleton } from "@/components/ui/skeleton";
 import { CANONICAL_TABLES } from "@/lib/constants";
+import { RowDetailDrawer } from "@/components/row-detail-drawer";
 
 export default function TablePage() {
   const params = useParams<{ tableName: string }>();
@@ -17,6 +18,7 @@ export default function TablePage() {
   const [pageSize, setPageSize] = useState(25);
   const [sorting, setSorting] = useState<SortingState>([]);
   const [search, setSearch] = useState("");
+  const [selectedRow, setSelectedRow] = useState<Record<string, unknown> | null>(null);
 
   const sortBy = sorting[0]?.id;
   const sortOrder = sorting[0]?.desc ? "desc" : "asc";
@@ -52,13 +54,15 @@ export default function TablePage() {
   }, [data?.items]);
 
   return (
-    <div className="space-y-6">
+    <div className="space-y-6 animate-fade-in">
       <div>
-        <h2 className="text-3xl font-bold tracking-tight">
+        <h2 className="text-2xl font-semibold tracking-tight">
           {tableMeta?.label || tableName}
         </h2>
         {tableMeta && (
-          <p className="text-muted-foreground">{tableMeta.description}</p>
+          <p className="mt-1 text-[15px] text-muted-foreground">
+            {tableMeta.description}
+          </p>
         )}
       </div>
 
@@ -73,8 +77,8 @@ export default function TablePage() {
 
       {isLoading ? (
         <div className="space-y-2">
-          <Skeleton className="h-10 w-full" />
-          <Skeleton className="h-64 w-full" />
+          <Skeleton className="h-10 w-full rounded-xl" />
+          <Skeleton className="h-64 w-full rounded-xl" />
         </div>
       ) : (
         <DataTable
@@ -90,8 +94,16 @@ export default function TablePage() {
             setPageSize(size);
             setPage(1);
           }}
+          onRowClick={(row) => setSelectedRow(row as Record<string, unknown>)}
         />
       )}
+
+      <RowDetailDrawer
+        open={selectedRow !== null}
+        onOpenChange={(open) => { if (!open) setSelectedRow(null); }}
+        row={selectedRow}
+        tableName={tableName}
+      />
     </div>
   );
 }

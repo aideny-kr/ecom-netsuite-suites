@@ -76,3 +76,14 @@ async def list_audit_events(
 
     pages = (total + page_size - 1) // page_size if page_size > 0 else 0
     return PaginatedResponse(items=items, total=total, page=page, page_size=page_size, pages=pages)
+
+
+@router.get("/retention-stats")
+async def get_audit_retention_stats(
+    user: Annotated[User, Depends(require_permission("audit.view"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Get audit retention statistics for the current tenant."""
+    from app.services.audit_retention import get_retention_stats
+    stats = await get_retention_stats(db, tenant_id=user.tenant_id)
+    return stats

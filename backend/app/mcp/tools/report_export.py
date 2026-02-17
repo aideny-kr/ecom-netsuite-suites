@@ -1,7 +1,7 @@
 import uuid
 
 
-async def execute(params: dict) -> dict:
+async def execute(params: dict, **kwargs) -> dict:
     """Stub: Export a report."""
     return {
         "export_id": str(uuid.uuid4()),

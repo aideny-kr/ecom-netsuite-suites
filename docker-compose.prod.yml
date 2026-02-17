@@ -1,0 +1,40 @@
+# Production Docker Compose for GCP Compute Engine
+# Postgres → Supabase (external), Redis → Upstash (external), Frontend → Vercel (external)
+# This only runs: backend (FastAPI) + worker (Celery)
+#
+# Usage:
+#   docker compose -f docker-compose.prod.yml up -d
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.prod
+    env_file: .env.production
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/api/v1/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.prod
+    env_file: .env.production
+    command: celery -A app.workers.celery_app worker --loglevel=info --concurrency=2 -Q default,sync,recon,export
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

@@ -90,5 +90,6 @@ export const NAV_ITEMS = [
   { label: "Connections", href: "/connections", icon: "Plug" as const },
   { label: "Audit Log", href: "/audit", icon: "ScrollText" as const },
   { label: "Chat", href: "/chat", icon: "MessageSquare" as const },
+  { label: "Dev Workspace", href: "/workspace", icon: "Code" as const },
   { label: "Settings", href: "/settings", icon: "Settings" as const },
 ] as const;

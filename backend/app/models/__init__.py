@@ -12,9 +12,11 @@ from app.models.canonical import (
 )
 from app.models.connection import Connection
 from app.models.job import Job
+from app.models.mcp_connector import McpConnector
 from app.models.pipeline import CursorState, EvidencePack, Schedule
 from app.models.tenant import Tenant, TenantConfig
 from app.models.user import Permission, Role, RolePermission, User, UserRole
+from app.models.workspace import Workspace, WorkspaceChangeSet, WorkspaceFile, WorkspacePatch
 
 __all__ = [
     "Base",
@@ -41,4 +43,9 @@ __all__ = [
     "ChatSession",
     "ChatMessage",
     "DocChunk",
+    "McpConnector",
+    "Workspace",
+    "WorkspaceFile",
+    "WorkspaceChangeSet",
+    "WorkspacePatch",
 ]

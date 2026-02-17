@@ -18,6 +18,7 @@ PLAN_LIMITS = {
         "mcp_tools": False,
         "chat": True,
         "byok_ai": False,
+        "workspace": False,
     },
     "pro": {
         "max_connections": 50,
@@ -26,6 +27,7 @@ PLAN_LIMITS = {
         "mcp_tools": True,
         "chat": True,
         "byok_ai": True,
+        "workspace": True,
     },
     "max": {
         "max_connections": -1,
@@ -34,6 +36,7 @@ PLAN_LIMITS = {
         "mcp_tools": True,
         "chat": True,
         "byok_ai": True,
+        "workspace": True,
     },
 }
 
@@ -90,6 +93,9 @@ async def check_entitlement(
 
     if feature == "byok_ai":
         return limits["byok_ai"]
+
+    if feature == "workspace":
+        return limits["workspace"]
 
     return True
 

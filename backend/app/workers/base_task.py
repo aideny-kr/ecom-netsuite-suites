@@ -1,8 +1,9 @@
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 
 from celery import Task
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -10,6 +11,18 @@ from app.models.audit import AuditEvent
 from app.models.job import Job
 
 sync_engine = create_engine(settings.DATABASE_URL_SYNC)
+
+
+@contextmanager
+def tenant_session(tenant_id: str):
+    """Create a sync DB session with RLS tenant context set.
+
+    Ensures SET LOCAL app.current_tenant_id is called within the transaction
+    so all queries are scoped to the given tenant.
+    """
+    with Session(sync_engine) as session:
+        session.execute(text(f"SET LOCAL app.current_tenant_id = '{tenant_id}'"))
+        yield session
 
 
 class InstrumentedTask(Task):
@@ -25,7 +38,7 @@ class InstrumentedTask(Task):
         if not tenant_id:
             return
 
-        with Session(sync_engine) as session:
+        with tenant_session(tenant_id) as session:
             job = Job(
                 tenant_id=tenant_id,
                 job_type=self.name,
@@ -60,7 +73,7 @@ class InstrumentedTask(Task):
         if not tenant_id or not self._job_id:
             return
 
-        with Session(sync_engine) as session:
+        with tenant_session(tenant_id) as session:
             job = session.get(Job, self._job_id)
             if job:
                 job.status = "completed"
@@ -87,7 +100,7 @@ class InstrumentedTask(Task):
         if not tenant_id or not self._job_id:
             return
 
-        with Session(sync_engine) as session:
+        with tenant_session(tenant_id) as session:
             job = session.get(Job, self._job_id)
             if job:
                 job.status = "failed"

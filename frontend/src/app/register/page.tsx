@@ -6,15 +6,8 @@ import { useAuth } from "@/providers/auth-provider";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardFooter,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
 import { useToast } from "@/hooks/use-toast";
+import { Zap } from "lucide-react";
 
 export default function RegisterPage() {
   const { register } = useAuth();
@@ -50,48 +43,101 @@ export default function RegisterPage() {
   }
 
   return (
-    <div className="flex min-h-screen items-center justify-center">
-      <Card className="w-full max-w-md">
-        <CardHeader className="text-center">
-          <CardTitle className="text-2xl">Create Account</CardTitle>
-          <CardDescription>
-            Register your organization to get started
-          </CardDescription>
-        </CardHeader>
-        <form onSubmit={onSubmit}>
-          <CardContent className="space-y-4">
-            <div className="space-y-2">
-              <Label htmlFor="tenantName">Organization Name</Label>
-              <Input
-                id="tenantName"
-                placeholder="Acme Inc"
-                value={tenantName}
-                onChange={(e) => setTenantName(e.target.value)}
-                required
-              />
+    <div className="flex min-h-screen">
+      {/* Left Panel - Branding */}
+      <div className="hidden lg:flex lg:w-[480px] lg:flex-col lg:justify-between bg-[hsl(240_11%_4%)] p-10 text-white">
+        <div className="flex items-center gap-2.5">
+          <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary">
+            <Zap className="h-5 w-5 text-white" />
+          </div>
+          <span className="text-lg font-semibold tracking-tight">
+            Ecom Suite
+          </span>
+        </div>
+        <div>
+          <h2 className="text-3xl font-semibold leading-tight tracking-tight">
+            Get started in
+            <br />
+            minutes, not days
+          </h2>
+          <p className="mt-4 text-[15px] leading-relaxed text-white/50">
+            Set up your organization, connect your platforms, and start
+            syncing data with NetSuite right away.
+          </p>
+        </div>
+        <p className="text-xs text-white/30">
+          Ecom NetSuite Suites
+        </p>
+      </div>
+
+      {/* Right Panel - Form */}
+      <div className="flex flex-1 items-center justify-center px-6">
+        <div className="w-full max-w-[380px]">
+          {/* Mobile logo */}
+          <div className="mb-8 flex items-center gap-2.5 lg:hidden">
+            <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary">
+              <Zap className="h-5 w-5 text-white" />
+            </div>
+            <span className="text-lg font-semibold tracking-tight">
+              Ecom Suite
+            </span>
+          </div>
+
+          <div className="mb-8">
+            <h1 className="text-2xl font-semibold tracking-tight">
+              Create account
+            </h1>
+            <p className="mt-1.5 text-[15px] text-muted-foreground">
+              Register your organization to get started
+            </p>
+          </div>
+
+          <form onSubmit={onSubmit} className="space-y-4">
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="space-y-2">
+                <Label htmlFor="tenantName" className="text-[13px] font-medium">
+                  Organization
+                </Label>
+                <Input
+                  id="tenantName"
+                  placeholder="Acme Inc"
+                  value={tenantName}
+                  onChange={(e) => setTenantName(e.target.value)}
+                  required
+                  className="h-11"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="tenantSlug" className="text-[13px] font-medium">
+                  Slug
+                </Label>
+                <Input
+                  id="tenantSlug"
+                  placeholder="acme-inc"
+                  value={tenantSlug}
+                  onChange={(e) => setTenantSlug(e.target.value)}
+                  required
+                  className="h-11"
+                />
+              </div>
             </div>
             <div className="space-y-2">
-              <Label htmlFor="tenantSlug">Organization Slug</Label>
-              <Input
-                id="tenantSlug"
-                placeholder="acme-inc"
-                value={tenantSlug}
-                onChange={(e) => setTenantSlug(e.target.value)}
-                required
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="fullName">Full Name</Label>
+              <Label htmlFor="fullName" className="text-[13px] font-medium">
+                Full Name
+              </Label>
               <Input
                 id="fullName"
                 placeholder="John Doe"
                 value={fullName}
                 onChange={(e) => setFullName(e.target.value)}
                 required
+                className="h-11"
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="email">Email</Label>
+              <Label htmlFor="email" className="text-[13px] font-medium">
+                Email
+              </Label>
               <Input
                 id="email"
                 type="email"
@@ -99,10 +145,13 @@ export default function RegisterPage() {
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 required
+                className="h-11"
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="password">Password</Label>
+              <Label htmlFor="password" className="text-[13px] font-medium">
+                Password
+              </Label>
               <Input
                 id="password"
                 type="password"
@@ -110,22 +159,29 @@ export default function RegisterPage() {
                 onChange={(e) => setPassword(e.target.value)}
                 required
                 minLength={8}
+                className="h-11"
               />
             </div>
-          </CardContent>
-          <CardFooter className="flex flex-col gap-4">
-            <Button type="submit" className="w-full" disabled={isLoading}>
-              {isLoading ? "Creating account..." : "Create Account"}
+            <Button
+              type="submit"
+              className="h-11 w-full text-[14px] font-medium"
+              disabled={isLoading}
+            >
+              {isLoading ? "Creating account..." : "Create account"}
             </Button>
-            <p className="text-sm text-muted-foreground">
-              Already have an account?{" "}
-              <Link href="/login" className="text-primary hover:underline">
-                Sign In
-              </Link>
-            </p>
-          </CardFooter>
-        </form>
-      </Card>
+          </form>
+
+          <p className="mt-6 text-center text-[13px] text-muted-foreground">
+            Already have an account?{" "}
+            <Link
+              href="/login"
+              className="font-medium text-primary hover:underline"
+            >
+              Sign in
+            </Link>
+          </p>
+        </div>
+      </div>
     </div>
   );
 }

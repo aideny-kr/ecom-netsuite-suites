@@ -41,6 +41,7 @@ class ChatMessage(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     model_used: Mapped[str | None] = mapped_column(String(100), nullable=True)
     provider_used: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    is_byok: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=False)
 
     session: Mapped["ChatSession"] = relationship(back_populates="messages")
 

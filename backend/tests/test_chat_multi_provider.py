@@ -66,7 +66,7 @@ class TestMultiProviderOrchestrator:
             patch(
                 f"{_ORCH}.get_tenant_ai_config",
                 new_callable=AsyncMock,
-                return_value=("openai", "gpt-4o", "sk-test"),
+                return_value=("openai", "gpt-4o", "sk-test", True),
             ),
             patch(f"{_ORCH}.get_adapter", return_value=mock_adapter),
             patch(f"{_ORCH}.retriever_node", new_callable=AsyncMock),
@@ -113,7 +113,7 @@ class TestMultiProviderOrchestrator:
             patch(
                 f"{_ORCH}.get_tenant_ai_config",
                 new_callable=AsyncMock,
-                return_value=("gemini", "gemini-2.0-flash", "key"),
+                return_value=("gemini", "gemini-2.0-flash", "key", True),
             ),
             patch(f"{_ORCH}.get_adapter", return_value=mock_adapter),
             patch(f"{_ORCH}.retriever_node", new_callable=AsyncMock),
@@ -161,7 +161,7 @@ class TestMultiProviderOrchestrator:
             patch(
                 f"{_ORCH}.get_tenant_ai_config",
                 new_callable=AsyncMock,
-                return_value=("anthropic", "claude-sonnet-4-20250514", "platform-key"),
+                return_value=("anthropic", "claude-sonnet-4-20250514", "platform-key", False),
             ),
             patch(f"{_ORCH}.get_adapter", return_value=mock_adapter),
             patch(f"{_ORCH}.retriever_node", new_callable=AsyncMock),
@@ -194,10 +194,11 @@ class TestGetTenantAiConfig:
         original_key = settings.ANTHROPIC_API_KEY
         settings.ANTHROPIC_API_KEY = "test-platform-key"
         try:
-            provider, model, key = await get_tenant_ai_config(db, uuid.uuid4())
+            provider, model, key, is_byok = await get_tenant_ai_config(db, uuid.uuid4())
             assert provider == "anthropic"
             assert model == settings.ANTHROPIC_MODEL
             assert key == "test-platform-key"
+            assert is_byok is False
         finally:
             settings.ANTHROPIC_API_KEY = original_key
 
@@ -234,10 +235,11 @@ class TestGetTenantAiConfig:
         mock_result.scalar_one_or_none.return_value = config
         db.execute = AsyncMock(return_value=mock_result)
 
-        provider, model, key = await get_tenant_ai_config(db, uuid.uuid4())
+        provider, model, key, is_byok = await get_tenant_ai_config(db, uuid.uuid4())
         assert provider == "openai"
         assert model == "gpt-4o"
         assert key == "sk-tenant-key"
+        assert is_byok is True
 
     @pytest.mark.asyncio
     async def test_uses_default_model_when_none(self):
@@ -254,7 +256,8 @@ class TestGetTenantAiConfig:
         mock_result.scalar_one_or_none.return_value = config
         db.execute = AsyncMock(return_value=mock_result)
 
-        provider, model, key = await get_tenant_ai_config(db, uuid.uuid4())
+        provider, model, key, is_byok = await get_tenant_ai_config(db, uuid.uuid4())
         assert provider == "gemini"
         assert model == "gemini-2.5-flash"
         assert key == "gem-key"
+        assert is_byok is True

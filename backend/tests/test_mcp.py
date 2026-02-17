@@ -153,7 +153,7 @@ class TestGovernedExecute:
     async def test_successful_execution(self):
         _rate_limits.clear()
 
-        async def stub_fn(params):
+        async def stub_fn(params, **kwargs):
             return {"status": "stub", "row_count": 0, "data": []}
 
         result = await governed_execute(
@@ -172,7 +172,7 @@ class TestGovernedExecute:
         tool = "recon.run"
         limit = TOOL_CONFIGS[tool]["rate_limit_per_minute"]
 
-        async def stub_fn(params):
+        async def stub_fn(params, **kwargs):
             return {"status": "ok"}
 
         # Exhaust rate limit
@@ -187,7 +187,7 @@ class TestGovernedExecute:
     async def test_execution_error_handled(self):
         _rate_limits.clear()
 
-        async def failing_fn(params):
+        async def failing_fn(params, **kwargs):
             raise ValueError("Tool broke")
 
         result = await governed_execute(
@@ -206,12 +206,20 @@ class TestToolConfigs:
 
     def test_all_tools_present(self):
         expected = {
+            "health",
             "netsuite.suiteql",
+            "netsuite.suiteql_stub",
+            "netsuite.connectivity",
+            "data.sample_table_read",
             "recon.run",
             "report.export",
             "schedule.create",
             "schedule.list",
             "schedule.run",
+            "workspace.list_files",
+            "workspace.read_file",
+            "workspace.search",
+            "workspace.propose_patch",
         }
         assert set(TOOL_CONFIGS.keys()) == expected
 
