@@ -24,8 +24,8 @@ class TestAiSchemaValidation:
 
     def test_valid_model(self):
         from app.schemas.tenant import TenantConfigUpdate
-        update = TenantConfigUpdate(ai_model="gpt-4o")
-        assert update.ai_model == "gpt-4o"
+        update = TenantConfigUpdate(ai_model="gpt-5.2")
+        assert update.ai_model == "gpt-5.2"
 
     def test_invalid_model_rejected(self):
         from app.schemas.tenant import TenantConfigUpdate

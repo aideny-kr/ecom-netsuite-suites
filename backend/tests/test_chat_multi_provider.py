@@ -256,5 +256,5 @@ class TestGetTenantAiConfig:
 
         provider, model, key = await get_tenant_ai_config(db, uuid.uuid4())
         assert provider == "gemini"
-        assert model == "gemini-2.0-flash"
+        assert model == "gemini-2.5-flash"
         assert key == "gem-key"
