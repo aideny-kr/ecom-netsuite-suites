@@ -52,7 +52,7 @@ def _serialize_changeset(cs) -> dict:
         "created_at": cs.created_at.isoformat(),
         "updated_at": cs.updated_at.isoformat(),
     }
-    if hasattr(cs, "patches") and cs.patches:
+    if "patches" in cs.__dict__ and cs.__dict__["patches"]:
         result["patches"] = [
             {
                 "id": str(p.id),
@@ -181,6 +181,17 @@ async def list_files(
     db: AsyncSession = Depends(get_db),
 ):
     files = await ws_svc.list_files(db, workspace_id, user.tenant_id, prefix, recursive)
+    await audit_service.log_event(
+        db=db,
+        tenant_id=user.tenant_id,
+        category="workspace",
+        action="workspace.files.listed",
+        actor_id=user.id,
+        resource_type="workspace",
+        resource_id=str(workspace_id),
+        payload={"prefix": prefix, "recursive": recursive, "file_count": len(files)},
+    )
+    await db.commit()
     return files
 
 
@@ -196,6 +207,22 @@ async def read_file(
     result = await ws_svc.read_file(db, workspace_id, file_id, user.tenant_id, line_start, line_end)
     if not result:
         raise HTTPException(status_code=404, detail="File not found")
+    await audit_service.log_event(
+        db=db,
+        tenant_id=user.tenant_id,
+        category="workspace",
+        action="workspace.file.read",
+        actor_id=user.id,
+        resource_type="workspace",
+        resource_id=str(workspace_id),
+        payload={
+            "workspace_id": str(workspace_id),
+            "file_id": str(file_id),
+            "line_start": line_start,
+            "line_end": line_end,
+        },
+    )
+    await db.commit()
     return result
 
 
@@ -209,6 +236,17 @@ async def search_files(
     db: AsyncSession = Depends(get_db),
 ):
     results = await ws_svc.search_files(db, workspace_id, user.tenant_id, query, search_type, limit)
+    await audit_service.log_event(
+        db=db,
+        tenant_id=user.tenant_id,
+        category="workspace",
+        action="workspace.files.searched",
+        actor_id=user.id,
+        resource_type="workspace",
+        resource_id=str(workspace_id),
+        payload={"query": query, "search_type": search_type, "result_count": len(results)},
+    )
+    await db.commit()
     return results
 
 
@@ -283,6 +321,12 @@ async def transition_changeset(
     user: User = Depends(require_permission("workspace.review")),
     db: AsyncSession = Depends(get_db),
 ):
+    # Capture old status for transition audit
+    old_cs = await ws_svc.get_changeset(db, changeset_id, user.tenant_id)
+    if not old_cs:
+        raise HTTPException(status_code=404, detail="Changeset not found")
+    old_status = old_cs.status
+
     try:
         cs = await ws_svc.transition_changeset(
             db, changeset_id, user.tenant_id, body.action, user.id, body.rejection_reason
@@ -290,6 +334,9 @@ async def transition_changeset(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+    new_status = cs.status
+    await db.refresh(cs)
+    response = _serialize_changeset(cs)
     await audit_service.log_event(
         db=db,
         tenant_id=user.tenant_id,
@@ -298,10 +345,20 @@ async def transition_changeset(
         actor_id=user.id,
         resource_type="changeset",
         resource_id=str(changeset_id),
-        payload={"action": body.action, "new_status": cs.status},
+        payload={"action": body.action, "new_status": new_status},
+    )
+    await audit_service.log_event(
+        db=db,
+        tenant_id=user.tenant_id,
+        category="workspace",
+        action="changeset.transitioned",
+        actor_id=user.id,
+        resource_type="changeset",
+        resource_id=str(changeset_id),
+        payload={"from_status": old_status, "to_status": new_status, "action": body.action},
     )
     await db.commit()
-    return _serialize_changeset(cs)
+    return response
 
 
 @changeset_router.post("/{changeset_id}/apply")

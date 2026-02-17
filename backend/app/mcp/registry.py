@@ -133,4 +133,11 @@ TOOL_REGISTRY = {
             "rationale": {"type": "string", "required": False},
         },
     },
+    "workspace.apply_patch": {
+        "description": "Apply an approved changeset. Requires workspace.apply permission and approved status.",
+        "execute": workspace_tools.execute_apply_patch,
+        "params_schema": {
+            "changeset_id": {"type": "string", "required": True, "description": "UUID of the approved changeset"},
+        },
+    },
 }

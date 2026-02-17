@@ -127,6 +127,14 @@ TOOL_CONFIGS = {
         "requires_entitlement": "workspace",
         "allowlisted_params": ["workspace_id", "file_path", "unified_diff", "title", "rationale"],
     },
+    "workspace.apply_patch": {
+        "default_limit": None,
+        "max_limit": None,
+        "timeout_seconds": 30,
+        "rate_limit_per_minute": 5,
+        "requires_entitlement": "workspace",
+        "allowlisted_params": ["changeset_id"],
+    },
 }
 
 
@@ -257,6 +265,27 @@ async def governed_execute(
 
     # 2. Param validation
     validated_params = validate_params(tool_name, params)
+
+    # 2b. Pre-execution audit event
+    if db is not None:
+        try:
+            tenant_uuid = uuid.UUID(tenant_id) if tenant_id else uuid.uuid4()
+            actor_uuid = uuid.UUID(actor_id) if actor_id else None
+            await audit_service.log_event(
+                db=db,
+                tenant_id=tenant_uuid,
+                category="tool_call",
+                action="tool.requested",
+                actor_id=actor_uuid,
+                actor_type="user",
+                resource_type="mcp_tool",
+                resource_id=tool_name,
+                correlation_id=correlation_id,
+                payload={"tool_name": tool_name, "params": validated_params},
+                status="pending",
+            )
+        except Exception:
+            logger.exception("mcp.audit_write_failed", tool=tool_name)
 
     # 3. Execute
     try:

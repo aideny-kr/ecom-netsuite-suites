@@ -53,6 +53,27 @@ async def get_current_user(
     return user
 
 
+async def has_permission(db: AsyncSession, user_id: uuid.UUID, codename: str) -> bool:
+    """Check if a user has a specific permission. Returns bool (no HTTP raise)."""
+    result = await db.execute(
+        select(User)
+        .options(selectinload(User.user_roles).selectinload(UserRole.role))
+        .where(User.id == user_id, User.is_active.is_(True))
+    )
+    user = result.scalar_one_or_none()
+    if not user:
+        return False
+    role_ids = [ur.role_id for ur in user.user_roles]
+    if not role_ids:
+        return False
+    perm_result = await db.execute(
+        select(Permission.codename)
+        .join(RolePermission, RolePermission.permission_id == Permission.id)
+        .where(RolePermission.role_id.in_(role_ids))
+    )
+    return codename in {row[0] for row in perm_result.all()}
+
+
 def require_permission(codename: str):
     async def permission_checker(
         user: Annotated[User, Depends(get_current_user)],

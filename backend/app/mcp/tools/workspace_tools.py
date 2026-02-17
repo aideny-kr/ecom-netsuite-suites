@@ -1,7 +1,4 @@
-"""MCP tools for Dev Workspace — read-only browsing + patch proposal.
-
-apply_patch is NOT exposed here; it is REST-only to enforce human approval.
-"""
+"""MCP tools for Dev Workspace — browsing, patch proposal, and patch application."""
 
 import uuid
 from typing import Any
@@ -87,3 +84,35 @@ async def execute_propose_patch(params: dict[str, Any], context: dict[str, Any])
         return {"error": str(e), "row_count": 0}
 
     return {**result, "row_count": 1}
+
+
+async def execute_apply_patch(params: dict[str, Any], context: dict[str, Any]) -> dict:
+    """Apply an approved changeset. Requires workspace.apply permission."""
+    from app.core.dependencies import has_permission
+    from app.services import workspace_service as ws_svc
+
+    db = context["db"]
+    tenant_id = context["tenant_id"]
+    actor_id = context.get("actor_id")
+    changeset_id = uuid.UUID(params["changeset_id"])
+    actor_uuid = uuid.UUID(actor_id) if actor_id else None
+
+    if actor_uuid is None:
+        return {"error": "Actor ID required for apply", "row_count": 0}
+
+    allowed = await has_permission(db, actor_uuid, "workspace.apply")
+    if not allowed:
+        return {"error": "Permission denied: workspace.apply required", "row_count": 0}
+
+    try:
+        cs = await ws_svc.apply_changeset(db, changeset_id, uuid.UUID(tenant_id), actor_uuid)
+    except ValueError as e:
+        return {"error": str(e), "row_count": 0}
+
+    return {
+        "changeset_id": str(cs.id),
+        "status": cs.status,
+        "applied_by": str(cs.applied_by),
+        "applied_at": cs.applied_at.isoformat() if cs.applied_at else None,
+        "row_count": 1,
+    }

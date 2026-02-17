@@ -32,6 +32,7 @@ EXPECTED_TOOLS = {
     "workspace.read_file",
     "workspace.search",
     "workspace.propose_patch",
+    "workspace.apply_patch",
 }
 
 
@@ -245,9 +246,11 @@ class TestAuditDBWrites:
             AuditEvent.category == "tool_call",
         )
         rows = (await db.execute(stmt)).scalars().all()
-        assert len(rows) == 1
-        event = rows[0]
-        assert event.action == "tool.health"
+        assert len(rows) == 2  # tool.requested (pending) + tool.health (success)
+        actions = {e.action: e for e in rows}
+        assert "tool.requested" in actions
+        assert actions["tool.requested"].status == "pending"
+        event = actions["tool.health"]
         assert event.resource_type == "mcp_tool"
         assert event.resource_id == "health"
         assert event.status == "success"
@@ -304,8 +307,9 @@ class TestAuditDBWrites:
             AuditEvent.category == "tool_call",
         )
         rows = (await db.execute(stmt)).scalars().all()
-        assert len(rows) == 1
-        event = rows[0]
-        assert event.action == "tool.data.sample_table_read"
+        assert len(rows) == 2  # tool.requested (pending) + tool.data.sample_table_read (error)
+        actions = {e.action: e for e in rows}
+        assert "tool.requested" in actions
+        event = actions["tool.data.sample_table_read"]
         assert event.status == "error"
         assert "nonexistent_table" in event.error_message
