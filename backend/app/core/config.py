@@ -30,11 +30,24 @@ class Settings(BaseSettings):
 
     ANTHROPIC_API_KEY: str = ""
     ANTHROPIC_MODEL: str = "claude-sonnet-4-20250514"
+    DEFAULT_AI_PROVIDER: str = "anthropic"
     VOYAGE_API_KEY: str = ""
     VOYAGE_EMBED_MODEL: str = "voyage-3-lite"
     CHAT_MAX_HISTORY_TURNS: int = 20
     CHAT_MAX_TOOL_CALLS_PER_TURN: int = 5
     CHAT_RAG_TOP_K: int = 5
+
+    NETSUITE_SUITEQL_MAX_ROWS: int = 1000
+    NETSUITE_SUITEQL_TIMEOUT: int = 30
+    NETSUITE_SUITEQL_ALLOWED_TABLES: str = "transaction,customer,item,account,subsidiary,department,location,currency,employee,vendor"
+
+    NETSUITE_OAUTH_CLIENT_ID: str = ""
+    NETSUITE_OAUTH_REDIRECT_URI: str = "http://localhost:8000/api/v1/connections/netsuite/callback"
+    NETSUITE_OAUTH_SCOPE: str = "mcp"
+    NETSUITE_ACCOUNT_ID: str = ""
+    NETSUITE_MCP_TRANSPORT: str = "http"
+
+    AUDIT_RETENTION_DAYS: int = 90
 
     model_config = {"env_file": ".env", "extra": "ignore"}
 

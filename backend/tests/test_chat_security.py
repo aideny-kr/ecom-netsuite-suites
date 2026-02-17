@@ -1,8 +1,14 @@
 """Security tests for the chat module."""
+
+import uuid
+from unittest.mock import AsyncMock, MagicMock
+
 import pytest
 
+from app.core.encryption import encrypt_credentials
 from app.services.chat.nodes import (
     ALLOWED_CHAT_TOOLS,
+    get_tenant_ai_config,
     is_read_only_sql,
     sanitize_user_input,
 )
@@ -17,7 +23,7 @@ class TestAllowedChatTools:
 
     def test_contains_only_read_tools(self):
         """Only expected read-only tools are in the set."""
-        expected = {"netsuite.suiteql_stub", "data.sample_table_read", "report.export"}
+        expected = {"netsuite.suiteql", "netsuite.connectivity", "data.sample_table_read", "report.export"}
         assert ALLOWED_CHAT_TOOLS == expected
 
     def test_write_tools_blocked(self):
@@ -112,3 +118,50 @@ class TestIsReadOnlySql:
 
     def test_whitespace_only(self):
         assert is_read_only_sql("   ") is False
+
+
+class TestEncryptedKeyNeverExposed:
+    """Test that encrypted API keys are never exposed in responses."""
+
+    @pytest.mark.asyncio
+    async def test_encrypted_key_decrypts_correctly(self):
+        """Encrypted key can be decrypted back to original."""
+        from app.core.encryption import decrypt_credentials
+
+        original_key = "sk-super-secret-key-12345"
+        encrypted = encrypt_credentials({"api_key": original_key})
+        decrypted = decrypt_credentials(encrypted)
+        assert decrypted["api_key"] == original_key
+
+    @pytest.mark.asyncio
+    async def test_tenant_config_uses_isolated_key(self):
+        """get_tenant_ai_config returns the tenant's own key, not another tenant's."""
+        config_a = MagicMock()
+        config_a.ai_provider = "openai"
+        config_a.ai_model = "gpt-4o"
+        config_a.ai_api_key_encrypted = encrypt_credentials({"api_key": "key-tenant-a"})
+
+        config_b = MagicMock()
+        config_b.ai_provider = "anthropic"
+        config_b.ai_model = None
+        config_b.ai_api_key_encrypted = encrypt_credentials({"api_key": "key-tenant-b"})
+
+        db = AsyncMock()
+
+        # Tenant A
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = config_a
+        db.execute = AsyncMock(return_value=mock_result)
+
+        provider_a, model_a, key_a = await get_tenant_ai_config(db, uuid.uuid4())
+        assert key_a == "key-tenant-a"
+        assert provider_a == "openai"
+
+        # Tenant B
+        mock_result.scalar_one_or_none.return_value = config_b
+        provider_b, model_b, key_b = await get_tenant_ai_config(db, uuid.uuid4())
+        assert key_b == "key-tenant-b"
+        assert provider_b == "anthropic"
+
+        # Keys are isolated
+        assert key_a != key_b

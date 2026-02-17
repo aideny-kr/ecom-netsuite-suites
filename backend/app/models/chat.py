@@ -36,6 +36,12 @@ class ChatMessage(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     citations: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     token_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
+    # Granular token tracking
+    input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    model_used: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    provider_used: Mapped[str | None] = mapped_column(String(20), nullable=True)
+
     session: Mapped["ChatSession"] = relationship(back_populates="messages")
 
 

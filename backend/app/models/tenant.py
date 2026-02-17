@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, String
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.dialects.postgresql import JSON, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -12,6 +12,7 @@ from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
 
 if TYPE_CHECKING:
     from app.models.connection import Connection
+    from app.models.mcp_connector import McpConnector
     from app.models.user import User
 
 
@@ -27,6 +28,7 @@ class Tenant(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     config: Mapped["TenantConfig"] = relationship("TenantConfig", back_populates="tenant", uselist=False)
     users: Mapped[list["User"]] = relationship("User", back_populates="tenant")
     connections: Mapped[list["Connection"]] = relationship("Connection", back_populates="tenant")
+    mcp_connectors: Mapped[list["McpConnector"]] = relationship("McpConnector", back_populates="tenant")
 
 
 class TenantConfig(Base, UUIDPrimaryKeyMixin, TimestampMixin):
@@ -41,5 +43,11 @@ class TenantConfig(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     posting_batch_size: Mapped[int] = mapped_column(default=100, nullable=False)
     posting_attach_evidence: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     netsuite_account_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+    # BYOK AI provider settings
+    ai_provider: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    ai_model: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    ai_api_key_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ai_key_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False, server_default="1")
 
     tenant: Mapped["Tenant"] = relationship("Tenant", back_populates="config")

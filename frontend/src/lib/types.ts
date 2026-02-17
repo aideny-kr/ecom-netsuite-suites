@@ -16,6 +16,9 @@ export interface TenantConfig {
   netsuite_currency: string;
   sync_frequency_minutes: number;
   auto_post_to_netsuite: boolean;
+  ai_provider: string | null;
+  ai_model: string | null;
+  ai_api_key_set: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -191,6 +194,35 @@ export interface NetsuitePosting {
   updated_at: string;
 }
 
+export interface McpConnector {
+  id: string;
+  tenant_id: string;
+  provider: "netsuite_mcp" | "shopify_mcp" | "custom";
+  label: string;
+  server_url: string;
+  auth_type: "bearer" | "api_key" | "none" | "oauth2";
+  status: string;
+  discovered_tools: McpDiscoveredTool[] | null;
+  is_enabled: boolean;
+  encryption_key_version: number;
+  metadata_json: Record<string, unknown> | null;
+  created_at: string;
+  created_by: string | null;
+}
+
+export interface McpDiscoveredTool {
+  name: string;
+  description: string;
+  input_schema: Record<string, unknown> | null;
+}
+
+export interface McpConnectorTestResponse {
+  connector_id: string;
+  status: string;
+  message: string;
+  discovered_tools: McpDiscoveredTool[] | null;
+}
+
 export interface PaginatedResponse<T> {
   items: T[];
   total: number;
@@ -253,6 +285,10 @@ export interface ChatMessage {
   content: string;
   tool_calls: ToolCallStep[] | null;
   citations: Citation[] | null;
+  input_tokens?: number;
+  output_tokens?: number;
+  model_used?: string;
+  provider_used?: string;
   created_at: string;
 }
 
