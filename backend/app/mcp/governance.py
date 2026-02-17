@@ -201,9 +201,7 @@ def create_audit_payload(
     return {
         "tool_name": tool_name,
         "params": {
-            k: v
-            for k, v in params.items()
-            if k not in {"password", "secret", "token", "api_key", "credentials"}
+            k: v for k, v in params.items() if k not in {"password", "secret", "token", "api_key", "credentials"}
         },
         "result_summary": {
             "status": "error" if error else "success",

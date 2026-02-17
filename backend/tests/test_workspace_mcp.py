@@ -366,13 +366,17 @@ async def test_mcp_tool_lifecycle_on_error(db, tenant, user, workspace_with_file
     assert "error" in result
 
     rows = (
-        await db.execute(
-            select(AuditEvent).where(
-                AuditEvent.correlation_id == cid,
-                AuditEvent.category == "tool_call",
+        (
+            await db.execute(
+                select(AuditEvent).where(
+                    AuditEvent.correlation_id == cid,
+                    AuditEvent.category == "tool_call",
+                )
             )
         )
-    ).scalars().all()
+        .scalars()
+        .all()
+    )
     actions = {e.action: e for e in rows}
     assert "tool.requested" in actions
     assert actions["tool.requested"].status == "pending"
@@ -414,11 +418,7 @@ async def test_apply_patch_no_secrets_in_audit_payload(db, tenant, user, workspa
         db=db,
     )
 
-    rows = (
-        await db.execute(
-            select(AuditEvent).where(AuditEvent.correlation_id == cid)
-        )
-    ).scalars().all()
+    rows = (await db.execute(select(AuditEvent).where(AuditEvent.correlation_id == cid))).scalars().all()
     assert len(rows) > 0
 
     sensitive_keys = {"password", "secret", "token", "api_key", "credentials"}

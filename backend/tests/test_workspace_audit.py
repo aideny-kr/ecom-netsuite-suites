@@ -78,9 +78,7 @@ async def test_read_file_emits_audit(client, db, tenant, admin, workspace_with_f
     file_node = _find_file(tree, "main.ts")
     assert file_node is not None
 
-    resp = await client.get(
-        f"/api/v1/workspaces/{workspace_with_files.id}/files/{file_node['id']}", headers=headers
-    )
+    resp = await client.get(f"/api/v1/workspaces/{workspace_with_files.id}/files/{file_node['id']}", headers=headers)
     assert resp.status_code == 200
 
     result = await db.execute(
