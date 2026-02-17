@@ -1,5 +1,50 @@
-import { test, expect } from "@playwright/test";
+import fs from "node:fs";
+import path from "node:path";
+import { test, expect, type Page } from "@playwright/test";
 import { registerAndLogin } from "./helpers";
+
+const baseUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const fixtureZipPath = path.resolve(process.cwd(), "e2e/fixtures/workspace-sample.zip");
+
+async function getAuthHeaders(page: Page) {
+  const token = await page.evaluate(() => localStorage.getItem("access_token") || "");
+  return {
+    Authorization: `Bearer ${token}`,
+    "Content-Type": "application/json",
+  };
+}
+
+async function createWorkspaceViaApi(page: Page, name: string) {
+  const headers = await getAuthHeaders(page);
+  const response = await page.request.post(`${baseUrl}/api/v1/workspaces`, {
+    headers,
+    data: { name, description: "Playwright workspace" },
+  });
+  expect(response.ok()).toBeTruthy();
+  const body = await response.json();
+  return body.id as string;
+}
+
+async function importWorkspaceFixture(page: Page, workspaceId: string) {
+  const token = await page.evaluate(() => localStorage.getItem("access_token") || "");
+  const zipBuffer = fs.readFileSync(fixtureZipPath);
+  const response = await page.request.post(`${baseUrl}/api/v1/workspaces/${workspaceId}/import`, {
+    headers: { Authorization: `Bearer ${token}` },
+    multipart: {
+      file: {
+        name: "workspace-sample.zip",
+        mimeType: "application/zip",
+        buffer: zipBuffer,
+      },
+    },
+  });
+  expect(response.ok()).toBeTruthy();
+}
+
+async function selectWorkspace(page: Page, workspaceName: string) {
+  await page.getByTestId("workspace-selector").click();
+  await page.getByTestId("workspace-option").filter({ hasText: workspaceName }).first().click();
+}
 
 test.describe("Dev Workspace — smoke test", () => {
   test.beforeEach(async ({ page }) => {
@@ -9,162 +54,67 @@ test.describe("Dev Workspace — smoke test", () => {
   test("navigate to workspace page via sidebar", async ({ page }) => {
     await page.getByRole("link", { name: "Dev Workspace" }).click();
     await expect(page).toHaveURL(/\/workspace/);
-    // Workspace selector should be visible
-    await expect(
-      page.getByText(/select a workspace|no workspaces/i),
-    ).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByTestId("workspace-selector")).toBeVisible();
   });
 
   test("create workspace and see it in selector", async ({ page }) => {
     await page.goto("/workspace");
-    await page.waitForLoadState("networkidle");
-
-    // If there is a "Create Workspace" or "New" button, click it
-    const createBtn = page.getByRole("button", { name: /create|new/i });
-    const hasBtnVisible = await createBtn.isVisible().catch(() => false);
-    if (hasBtnVisible) {
-      await createBtn.click();
-      // Fill workspace name
-      const nameInput = page.getByLabel(/name/i);
-      await nameInput.fill("E2E Test Workspace");
-      // Submit
-      const submitBtn = page.getByRole("button", { name: /create|save/i });
-      await submitBtn.click();
-      // Verify workspace appears
-      await expect(page.getByText("E2E Test Workspace")).toBeVisible({
-        timeout: 10_000,
-      });
-    }
+    await page.getByRole("button", { name: "New" }).click();
+    await page.getByLabel("Name").fill("E2E UI Workspace");
+    await page.getByRole("button", { name: "Create" }).click();
+    await expect(page.getByTestId("workspace-selector")).toContainText("E2E UI Workspace");
   });
 
-  test("file tree renders after workspace selected", async ({ page }) => {
+  test("file tree and changeset panel render after workspace select", async ({ page }) => {
+    const workspaceName = "E2E Select Workspace";
+    const workspaceId = await createWorkspaceViaApi(page, workspaceName);
+    await importWorkspaceFixture(page, workspaceId);
+
     await page.goto("/workspace");
-    await page.waitForLoadState("networkidle");
+    await selectWorkspace(page, workspaceName);
 
-    // If a workspace already exists, select it
-    const selector = page.locator("[data-testid='workspace-selector']");
-    const selectorVisible = await selector.isVisible().catch(() => false);
-    if (selectorVisible) {
-      await selector.click();
-      const option = page.locator("[data-testid='workspace-option']").first();
-      const optionVisible = await option.isVisible().catch(() => false);
-      if (optionVisible) {
-        await option.click();
-        // File tree panel should appear
-        await expect(
-          page.locator("[data-testid='file-tree']"),
-        ).toBeVisible({ timeout: 10_000 });
-      }
-    }
+    await expect(page.getByTestId("file-tree")).toBeVisible();
+    await expect(page.getByTestId("changeset-panel")).toBeVisible();
+    await expect(page.getByText("No changesets yet")).toBeVisible();
   });
 
-  test("search files input is present", async ({ page }) => {
-    await page.goto("/workspace");
-    await page.waitForLoadState("networkidle");
+  test("chat @file mention opens picker when a workspace exists", async ({ page }) => {
+    await createWorkspaceViaApi(page, "E2E Chat Workspace");
 
-    // Search input should be on the page (may be disabled without workspace)
-    const searchInput = page.getByPlaceholder(/search/i);
-    await expect(searchInput).toBeVisible({ timeout: 10_000 });
-  });
-
-  test("changeset panel renders", async ({ page }) => {
-    await page.goto("/workspace");
-    await page.waitForLoadState("networkidle");
-
-    // Changeset panel or empty state should be visible
-    const changesetArea = page.getByText(/changeset|no changesets|changes/i);
-    await expect(changesetArea).toBeVisible({ timeout: 10_000 });
-  });
-
-  test("chat @file mention opens picker", async ({ page }) => {
     await page.goto("/chat");
-    await page.waitForLoadState("networkidle");
-
-    // Type @ in chat input to trigger file mention picker
-    const chatInput = page.getByPlaceholder(/message|ask|type/i);
-    const chatVisible = await chatInput.isVisible().catch(() => false);
-    if (chatVisible) {
-      await chatInput.fill("@");
-      // File mention picker should appear
-      const picker = page.getByPlaceholder(/search files/i);
-      const pickerVisible = await picker
-        .isVisible({ timeout: 3_000 })
-        .catch(() => false);
-      // Picker may not open without a workspace — just verify no crash
-      expect(pickerVisible !== undefined).toBeTruthy();
-    }
+    const chatInput = page.getByPlaceholder(/ask a question/i);
+    await chatInput.fill("@");
+    await expect(page.getByPlaceholder("Search files...")).toBeVisible();
   });
 });
 
-// ---------------------------------------------------------------------------
-// Full IDE lifecycle tests (require workspace with imported files)
-// ---------------------------------------------------------------------------
-
 test.describe("Dev Workspace — full IDE loop", () => {
-  let token: string;
+  let workspaceName: string;
 
   test.beforeEach(async ({ page }) => {
-    const tenant = await registerAndLogin(page);
-
-    // Extract JWT token from localStorage for API seeding
-    token = await page.evaluate(() => localStorage.getItem("access_token") || "");
-
-    // Seed workspace + files via API
-    const baseUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
-    const headers = { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
-
-    // Create workspace
-    const wsResp = await page.request.post(`${baseUrl}/api/v1/workspaces`, {
-      headers,
-      data: { name: "IDE Loop WS", description: "E2E test workspace" },
-    });
-    expect(wsResp.ok()).toBeTruthy();
+    await registerAndLogin(page);
+    workspaceName = `IDE Loop WS ${Date.now()}`;
+    const workspaceId = await createWorkspaceViaApi(page, workspaceName);
+    await importWorkspaceFixture(page, workspaceId);
   });
 
-  test("create workspace → import zip → file tree → open file → content visible", async ({ page }) => {
+  test("import zip populates tree and opens file in editor", async ({ page }) => {
     await page.goto("/workspace");
-    await page.waitForLoadState("networkidle");
+    await selectWorkspace(page, workspaceName);
 
-    // Select the workspace we created
-    const createBtn = page.getByRole("button", { name: /create|new/i });
-    const hasBtnVisible = await createBtn.isVisible().catch(() => false);
-
-    // Our workspace should be in the selector — look for it
-    const wsText = page.getByText("IDE Loop WS");
-    const wsVisible = await wsText.isVisible({ timeout: 5_000 }).catch(() => false);
-    if (wsVisible) {
-      // Workspace appears in the page — it may already be selected or in the selector
-      await wsText.click().catch(() => {});
-    }
-
-    // Verify the workspace page loaded (file tree pane or "Select a workspace" placeholder)
-    await expect(
-      page.getByText(/select a file|select a workspace|search files/i),
-    ).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByText("SuiteScripts")).toBeVisible();
+    await page.getByText("hello.js").click();
+    await expect(page.getByText("export const hello = 'world';")).toBeVisible();
   });
 
-  test("search input filters and shows results", async ({ page }) => {
+  test("search returns results and click opens file", async ({ page }) => {
     await page.goto("/workspace");
-    await page.waitForLoadState("networkidle");
+    await selectWorkspace(page, workspaceName);
 
-    // Search input should be present
-    const searchInput = page.getByPlaceholder(/search files/i);
-    await expect(searchInput).toBeVisible({ timeout: 10_000 });
-
-    // Type a search query (may not have files yet, but input should work)
-    await searchInput.fill("test");
-
-    // The search should not crash the page
-    await page.waitForTimeout(500);
-    await expect(page.locator("body")).toBeVisible();
-  });
-
-  test("changeset panel shows empty state for new workspace", async ({ page }) => {
-    await page.goto("/workspace");
-    await page.waitForLoadState("networkidle");
-
-    // The changesets header or empty state should be visible
-    const changesetLabel = page.getByText(/changeset/i);
-    await expect(changesetLabel).toBeVisible({ timeout: 10_000 });
+    const searchInput = page.getByPlaceholder("Search files...");
+    await searchInput.fill("hello.js");
+    await expect(page.getByText("SuiteScripts/hello.js")).toBeVisible();
+    await page.getByText("SuiteScripts/hello.js").click();
+    await expect(page.getByText("export const hello = 'world';")).toBeVisible();
   });
 });

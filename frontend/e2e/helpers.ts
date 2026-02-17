@@ -8,7 +8,7 @@ export function generateUniqueTenant() {
   return {
     name: `Test Org ${id}`,
     slug: `test-org-${id}`,
-    email: `user-${id}@e2etest.local`,
+    email: `user-${id}@example.com`,
     password: `Password1!${id}`,
     fullName: `E2E User ${id}`,
   };
@@ -22,12 +22,12 @@ export async function registerAndLogin(page: Page) {
   const tenant = generateUniqueTenant();
 
   await page.goto("/register");
-  await page.getByLabel("Organization Name").fill(tenant.name);
-  await page.getByLabel("Organization Slug").fill(tenant.slug);
+  await page.getByLabel("Organization").fill(tenant.name);
+  await page.getByLabel("Slug").fill(tenant.slug);
   await page.getByLabel("Full Name").fill(tenant.fullName);
   await page.getByLabel("Email").fill(tenant.email);
   await page.getByLabel("Password").fill(tenant.password);
-  await page.getByRole("button", { name: "Create Account" }).click();
+  await page.getByRole("button", { name: "Create account" }).click();
 
   await page.waitForURL("**/dashboard", { timeout: 15_000 });
   await expect(page).toHaveURL(/\/dashboard/);

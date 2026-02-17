@@ -22,12 +22,12 @@ export function WorkspaceSelector({
 }: WorkspaceSelectorProps) {
   return (
     <Select value={selectedId || ""} onValueChange={onSelect}>
-      <SelectTrigger className="w-[240px]">
+      <SelectTrigger className="w-[240px]" data-testid="workspace-selector">
         <SelectValue placeholder="Select workspace..." />
       </SelectTrigger>
       <SelectContent>
         {workspaces.map((ws) => (
-          <SelectItem key={ws.id} value={ws.id}>
+          <SelectItem key={ws.id} value={ws.id} data-testid="workspace-option">
             {ws.name}
           </SelectItem>
         ))}

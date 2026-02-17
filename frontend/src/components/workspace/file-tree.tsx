@@ -13,7 +13,7 @@ interface FileTreeProps {
 
 export function FileTree({ nodes, onFileSelect, selectedFileId }: FileTreeProps) {
   return (
-    <div className="text-[13px]">
+    <div className="text-[13px]" data-testid="file-tree">
       {nodes.map((node) => (
         <TreeNode
           key={node.id}

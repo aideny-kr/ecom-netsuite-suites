@@ -580,7 +580,11 @@ def _apply_diff(original: str, unified_diff: str) -> str:
     if result is None:
         raise ValueError("Failed to apply diff — lines may have changed")
 
-    applied_lines, _ = result
+    # whatthepatch may return either a list[str] or a tuple(list[str], metadata)
+    if isinstance(result, tuple):
+        applied_lines = result[0]
+    else:
+        applied_lines = result
     return "\n".join(applied_lines) + "\n" if applied_lines else ""
 
 
@@ -690,6 +694,20 @@ async def propose_patch(
         operation = "create"
         baseline = _sha256("")
 
+    # Preview
+    preview_original = (wf.content if wf else "") or ""
+    parse_error = None
+    try:
+        preview_modified = _apply_diff(preview_original, unified_diff)
+        diff_status = "valid"
+    except ValueError as e:
+        preview_modified = preview_original
+        diff_status = f"parse_error: {e}"
+        parse_error = str(e)
+
+    if operation == "create" and parse_error:
+        raise ValueError(f"Invalid diff for create patch: {parse_error}")
+
     # Create changeset
     cs = await create_changeset(
         db,
@@ -707,21 +725,12 @@ async def propose_patch(
         file_path=path,
         operation=operation,
         unified_diff=unified_diff if operation == "modify" else None,
-        new_content=None,
+        new_content=preview_modified if operation == "create" else None,
         baseline_sha256=baseline,
         apply_order=0,
     )
     db.add(patch)
     await db.flush()
-
-    # Preview
-    preview_original = (wf.content if wf else "") or ""
-    try:
-        preview_modified = _apply_diff(preview_original, unified_diff)
-        diff_status = "valid"
-    except ValueError as e:
-        preview_modified = preview_original
-        diff_status = f"parse_error: {e}"
 
     return {
         "changeset_id": str(cs.id),

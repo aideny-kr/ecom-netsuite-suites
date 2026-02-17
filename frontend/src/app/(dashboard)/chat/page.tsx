@@ -84,9 +84,14 @@ export default function ChatPage() {
 
   const handleMentionClick = useCallback(
     (filePath: string) => {
-      router.push(`/workspace?file=${encodeURIComponent(filePath)}`);
+      const params = new URLSearchParams({ file: filePath });
+      const workspaceId = workspaces[0]?.id;
+      if (workspaceId) {
+        params.set("workspace", workspaceId);
+      }
+      router.push(`/workspace?${params.toString()}`);
     },
-    [router],
+    [router, workspaces],
   );
 
   return (

@@ -74,7 +74,17 @@ export default function WorkspacePage() {
 
   useEffect(() => {
     const fileParam = searchParams.get("file");
+    const workspaceParam = searchParams.get("workspace");
     if (!fileParam) return;
+
+    if (
+      workspaceParam &&
+      selectedWorkspaceId !== workspaceParam &&
+      workspaces.some((ws) => ws.id === workspaceParam)
+    ) {
+      setSelectedWorkspaceId(workspaceParam);
+      return;
+    }
 
     // Auto-select first workspace if none selected
     if (!selectedWorkspaceId && workspaces.length > 0) {
@@ -137,8 +147,9 @@ export default function WorkspacePage() {
             </DialogHeader>
             <div className="space-y-3">
               <div>
-                <Label className="text-[13px]">Name</Label>
+                <Label htmlFor="workspace-name" className="text-[13px]">Name</Label>
                 <Input
+                  id="workspace-name"
                   value={newName}
                   onChange={(e) => setNewName(e.target.value)}
                   placeholder="My SDF Project"
@@ -146,8 +157,9 @@ export default function WorkspacePage() {
                 />
               </div>
               <div>
-                <Label className="text-[13px]">Description</Label>
+                <Label htmlFor="workspace-description" className="text-[13px]">Description</Label>
                 <Input
+                  id="workspace-description"
                   value={newDesc}
                   onChange={(e) => setNewDesc(e.target.value)}
                   placeholder="Optional description"
@@ -279,7 +291,10 @@ export default function WorkspacePage() {
 
         {/* Right: Changesets */}
         {selectedWorkspaceId && (
-          <div className="w-[300px] shrink-0 overflow-auto border-l p-3 scrollbar-thin">
+          <div
+            className="w-[300px] shrink-0 overflow-auto border-l p-3 scrollbar-thin"
+            data-testid="changeset-panel"
+          >
             <p className="mb-2 text-[11px] font-semibold uppercase tracking-widest text-muted-foreground">
               Changesets
             </p>

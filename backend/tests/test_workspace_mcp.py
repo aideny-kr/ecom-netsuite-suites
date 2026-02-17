@@ -181,6 +181,52 @@ async def test_propose_patch_creates_draft_not_applied(db, tenant, user, workspa
     assert "'hello'" in file_data["content"]
 
 
+@pytest.mark.asyncio
+async def test_propose_patch_create_file_apply_persists_content(db, tenant, user, workspace_with_files):
+    """Creating a new file via propose_patch must persist file content on apply."""
+    propose_tool = TOOL_REGISTRY["workspace.propose_patch"]
+    propose_result = await governed_execute(
+        tool_name="workspace.propose_patch",
+        params={
+            "workspace_id": str(workspace_with_files.id),
+            "file_path": "src/new_file.ts",
+            "unified_diff": (
+                "--- /dev/null\n+++ b/src/new_file.ts\n"
+                "@@ -0,0 +1 @@\n"
+                "+export const created = 'ok';\n"
+            ),
+            "title": "Create new file",
+        },
+        tenant_id=str(tenant.id),
+        actor_id=str(user.id),
+        execute_fn=propose_tool["execute"],
+        db=db,
+    )
+    assert propose_result["operation"] == "create"
+    cs_id = uuid.UUID(propose_result["changeset_id"])
+
+    await ws_svc.transition_changeset(db, cs_id, tenant.id, "submit", user.id)
+    await ws_svc.transition_changeset(db, cs_id, tenant.id, "approve", user.id)
+
+    apply_tool = TOOL_REGISTRY["workspace.apply_patch"]
+    apply_result = await governed_execute(
+        tool_name="workspace.apply_patch",
+        params={"changeset_id": str(cs_id)},
+        tenant_id=str(tenant.id),
+        actor_id=str(user.id),
+        execute_fn=apply_tool["execute"],
+        db=db,
+    )
+    assert apply_result["status"] == "applied"
+
+    tree = await ws_svc.list_files(db, workspace_with_files.id, tenant.id)
+    file_node = _find_file(tree, "new_file.ts")
+    assert file_node is not None
+    file_data = await ws_svc.read_file(db, workspace_with_files.id, uuid.UUID(file_node["id"]), tenant.id)
+    assert file_data is not None
+    assert "export const created = 'ok';" in file_data["content"]
+
+
 # --- Apply Patch Tool ---
 
 
