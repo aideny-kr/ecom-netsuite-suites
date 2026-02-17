@@ -441,6 +441,37 @@ async def test_apply_patch_without_actor_returns_error(db, tenant, user, workspa
     assert "actor" in result["error"].lower()
 
 
+@pytest.mark.asyncio
+async def test_apply_patch_on_unapproved_changeset_rejected(db, tenant, user, workspace_with_files):
+    """apply_patch on a draft (unapproved) changeset must fail — AI cannot self-apply."""
+    cs = await ws_svc.create_changeset(db, workspace_with_files.id, tenant.id, "Draft CS", user.id)
+    patch = WorkspacePatch(
+        tenant_id=tenant.id,
+        changeset_id=cs.id,
+        file_path="bypass.txt",
+        operation="create",
+        new_content="should not land",
+        baseline_sha256="",
+        apply_order=0,
+    )
+    db.add(patch)
+    await db.flush()
+
+    # Changeset is still in 'draft' — attempt to apply via governance
+    tool = TOOL_REGISTRY["workspace.apply_patch"]
+    result = await governed_execute(
+        tool_name="workspace.apply_patch",
+        params={"changeset_id": str(cs.id)},
+        tenant_id=str(tenant.id),
+        actor_id=str(user.id),
+        execute_fn=tool["execute"],
+        db=db,
+    )
+    assert "error" in result
+    # Must reject because changeset is not in 'approved' state
+    assert "approved" in result["error"].lower() or "transition" in result["error"].lower()
+
+
 # --- Helpers ---
 
 

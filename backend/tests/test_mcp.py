@@ -134,10 +134,19 @@ class TestAuditPayload:
     def test_scrubs_sensitive_params(self):
         payload = create_audit_payload(
             "netsuite.suiteql",
-            {"query": "SELECT *", "password": "secret123", "token": "abc"},
+            {
+                "query": "SELECT *",
+                "password": "secret123",
+                "token": "abc",
+                "api_key": "sk-live-xxx",
+                "credentials": {"key": "val"},
+            },
         )
         assert "password" not in payload["params"]
         assert "token" not in payload["params"]
+        assert "api_key" not in payload["params"]
+        assert "credentials" not in payload["params"]
+        assert payload["params"]["query"] == "SELECT *"
 
     def test_error_payload(self):
         payload = create_audit_payload(
