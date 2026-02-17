@@ -45,24 +45,44 @@ export const AI_PROVIDERS = [
 
 export const AI_MODELS: Record<string, { value: string; label: string }[]> = {
   anthropic: [
+    { value: "claude-opus-4-6", label: "Claude Opus 4.6" },
+    { value: "claude-sonnet-4-5-20250929", label: "Claude Sonnet 4.5" },
+    { value: "claude-haiku-4-5-20251001", label: "Claude Haiku 4.5" },
+    { value: "claude-opus-4-5-20251101", label: "Claude Opus 4.5" },
     { value: "claude-sonnet-4-20250514", label: "Claude Sonnet 4" },
-    { value: "claude-haiku-4-20250414", label: "Claude Haiku 4" },
     { value: "claude-opus-4-20250514", label: "Claude Opus 4" },
   ],
   openai: [
-    { value: "gpt-4o", label: "GPT-4o" },
-    { value: "gpt-4o-mini", label: "GPT-4o Mini" },
-    { value: "gpt-4-turbo", label: "GPT-4 Turbo" },
-    { value: "o1", label: "o1" },
-    { value: "o1-mini", label: "o1 Mini" },
+    { value: "gpt-5.2", label: "GPT-5.2" },
+    { value: "gpt-5.2-pro", label: "GPT-5.2 Pro" },
+    { value: "gpt-5", label: "GPT-5" },
+    { value: "gpt-5-mini", label: "GPT-5 Mini" },
+    { value: "gpt-5-nano", label: "GPT-5 Nano" },
+    { value: "gpt-4.1", label: "GPT-4.1" },
+    { value: "gpt-4.1-mini", label: "GPT-4.1 Mini" },
+    { value: "gpt-4.1-nano", label: "GPT-4.1 Nano" },
+    { value: "o3", label: "o3" },
     { value: "o3-mini", label: "o3 Mini" },
+    { value: "o3-pro", label: "o3 Pro" },
+    { value: "o4-mini", label: "o4 Mini" },
   ],
   gemini: [
+    { value: "gemini-2.5-flash", label: "Gemini 2.5 Flash" },
+    { value: "gemini-2.5-flash-lite", label: "Gemini 2.5 Flash Lite" },
+    { value: "gemini-2.5-pro", label: "Gemini 2.5 Pro" },
     { value: "gemini-2.0-flash", label: "Gemini 2.0 Flash" },
-    { value: "gemini-2.0-pro", label: "Gemini 2.0 Pro" },
-    { value: "gemini-1.5-flash", label: "Gemini 1.5 Flash" },
-    { value: "gemini-1.5-pro", label: "Gemini 1.5 Pro" },
+    { value: "gemini-3-pro-preview", label: "Gemini 3 Pro (Preview)" },
+    { value: "gemini-3-flash-preview", label: "Gemini 3 Flash (Preview)" },
   ],
+};
+
+export const PLAN_TIERS: Record<
+  string,
+  { label: string; color: string; bg: string }
+> = {
+  free: { label: "Free", color: "text-gray-600", bg: "bg-gray-100" },
+  pro: { label: "Pro", color: "text-blue-600", bg: "bg-blue-100" },
+  max: { label: "Max", color: "text-purple-600", bg: "bg-purple-100" },
 };
 
 export const NAV_ITEMS = [

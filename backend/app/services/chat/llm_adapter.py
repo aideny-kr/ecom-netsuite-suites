@@ -54,32 +54,43 @@ class BaseLLMAdapter(abc.ABC):
 
 # Provider-to-default-model mapping
 DEFAULT_MODELS: dict[str, str] = {
-    "anthropic": "claude-sonnet-4-20250514",
-    "openai": "gpt-4o",
-    "gemini": "gemini-2.0-flash",
+    "anthropic": "claude-sonnet-4-5-20250929",
+    "openai": "gpt-5.2",
+    "gemini": "gemini-2.5-flash",
 }
 
 VALID_PROVIDERS = {"anthropic", "openai", "gemini"}
 
 VALID_MODELS: dict[str, list[str]] = {
     "anthropic": [
+        "claude-opus-4-6",
+        "claude-sonnet-4-5-20250929",
+        "claude-haiku-4-5-20251001",
+        "claude-opus-4-5-20251101",
         "claude-sonnet-4-20250514",
-        "claude-haiku-4-20250414",
         "claude-opus-4-20250514",
     ],
     "openai": [
-        "gpt-4o",
-        "gpt-4o-mini",
-        "gpt-4-turbo",
-        "o1",
-        "o1-mini",
+        "gpt-5.2",
+        "gpt-5.2-pro",
+        "gpt-5",
+        "gpt-5-mini",
+        "gpt-5-nano",
+        "gpt-4.1",
+        "gpt-4.1-mini",
+        "gpt-4.1-nano",
+        "o3",
         "o3-mini",
+        "o3-pro",
+        "o4-mini",
     ],
     "gemini": [
+        "gemini-2.5-flash",
+        "gemini-2.5-flash-lite",
+        "gemini-2.5-pro",
         "gemini-2.0-flash",
-        "gemini-2.0-pro",
-        "gemini-1.5-flash",
-        "gemini-1.5-pro",
+        "gemini-3-pro-preview",
+        "gemini-3-flash-preview",
     ],
 }
 
