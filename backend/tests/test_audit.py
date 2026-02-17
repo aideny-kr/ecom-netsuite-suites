@@ -144,6 +144,63 @@ class TestAuditEventEmission:
             assert event.tenant_id is not None
 
 
+class TestAuditCorrelationId:
+    """Verify correlation_id is populated in audit events."""
+
+    async def test_audit_event_has_correlation_id(self, client: AsyncClient, admin_user, db: AsyncSession):
+        """POST with X-Correlation-ID header → audit event has that correlation_id."""
+        user, headers = admin_user
+        custom_cid = str(uuid.uuid4())
+        headers_with_cid = {**headers, "X-Correlation-ID": custom_cid}
+
+        resp = await client.post(
+            "/api/v1/connections",
+            json={
+                "provider": "shopify",
+                "label": "CID Test",
+                "credentials": {"key": "val"},
+            },
+            headers=headers_with_cid,
+        )
+        assert resp.status_code == 201
+
+        result = await db.execute(
+            select(AuditEvent).where(
+                AuditEvent.action == "connection.create",
+                AuditEvent.correlation_id == custom_cid,
+            )
+        )
+        event = result.scalars().first()
+        assert event is not None
+        assert event.correlation_id == custom_cid
+
+    async def test_audit_event_auto_generates_correlation_id(self, client: AsyncClient, admin_user, db: AsyncSession):
+        """POST without X-Correlation-ID header → audit event still has a correlation_id."""
+        user, headers = admin_user
+
+        resp = await client.post(
+            "/api/v1/connections",
+            json={
+                "provider": "stripe",
+                "label": "Auto CID Test",
+                "credentials": {"key": "val"},
+            },
+            headers=headers,
+        )
+        assert resp.status_code == 201
+        conn_id = resp.json()["id"]
+
+        result = await db.execute(
+            select(AuditEvent).where(
+                AuditEvent.action == "connection.create",
+                AuditEvent.resource_id == conn_id,
+            )
+        )
+        event = result.scalars().first()
+        assert event is not None
+        assert event.correlation_id is not None
+
+
 class TestCorrelationId:
     """Verify X-Correlation-ID header is generated and returned."""
 

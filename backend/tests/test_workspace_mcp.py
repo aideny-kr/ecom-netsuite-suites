@@ -313,7 +313,8 @@ async def test_mcp_tool_emits_success_audit(db, tenant, user, workspace_with_fil
 
     result = await db.execute(
         select(AuditEvent).where(
-            AuditEvent.action == "tool.workspace.list_files",
+            AuditEvent.action == "tool.executed",
+            AuditEvent.resource_id == "workspace.list_files",
             AuditEvent.tenant_id == tenant.id,
         )
     )
@@ -342,7 +343,113 @@ def test_rate_limit_enforcement():
     _rate_limits.pop(test_tenant, None)
 
 
+# --- MCP Lifecycle Error Path ---
+
+
+@pytest.mark.asyncio
+async def test_mcp_tool_lifecycle_on_error(db, tenant, user, workspace_with_files):
+    """tool.failed event emitted when execute_fn raises an exception."""
+
+    async def _raise_execute(params, context=None):
+        raise RuntimeError("Simulated tool failure")
+
+    cid = str(uuid.uuid4())
+    result = await governed_execute(
+        tool_name="workspace.read_file",
+        params={"workspace_id": str(workspace_with_files.id), "file_id": "nonexistent"},
+        tenant_id=str(tenant.id),
+        actor_id=str(user.id),
+        execute_fn=_raise_execute,
+        correlation_id=cid,
+        db=db,
+    )
+    assert "error" in result
+
+    rows = (
+        await db.execute(
+            select(AuditEvent).where(
+                AuditEvent.correlation_id == cid,
+                AuditEvent.category == "tool_call",
+            )
+        )
+    ).scalars().all()
+    actions = {e.action: e for e in rows}
+    assert "tool.requested" in actions
+    assert actions["tool.requested"].status == "pending"
+    assert "tool.failed" in actions
+    assert actions["tool.failed"].status == "error"
+    assert "Simulated tool failure" in actions["tool.failed"].error_message
+
+
+# --- Security Tests ---
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_no_secrets_in_audit_payload(db, tenant, user, workspace_with_files):
+    """Audit payloads from apply_patch must not contain secret keys."""
+    cs = await ws_svc.create_changeset(db, workspace_with_files.id, tenant.id, "Sec CS", user.id)
+    patch = WorkspacePatch(
+        tenant_id=tenant.id,
+        changeset_id=cs.id,
+        file_path="sec_file.txt",
+        operation="create",
+        new_content="secure content",
+        baseline_sha256="",
+        apply_order=0,
+    )
+    db.add(patch)
+    await db.flush()
+    await ws_svc.transition_changeset(db, cs.id, tenant.id, "submit", user.id)
+    await ws_svc.transition_changeset(db, cs.id, tenant.id, "approve", user.id)
+
+    cid = str(uuid.uuid4())
+    tool = TOOL_REGISTRY["workspace.apply_patch"]
+    await governed_execute(
+        tool_name="workspace.apply_patch",
+        params={"changeset_id": str(cs.id)},
+        tenant_id=str(tenant.id),
+        actor_id=str(user.id),
+        execute_fn=tool["execute"],
+        correlation_id=cid,
+        db=db,
+    )
+
+    rows = (
+        await db.execute(
+            select(AuditEvent).where(AuditEvent.correlation_id == cid)
+        )
+    ).scalars().all()
+    assert len(rows) > 0
+
+    sensitive_keys = {"password", "secret", "token", "api_key", "credentials"}
+    for event in rows:
+        if event.payload:
+            _assert_no_sensitive_keys(event.payload, sensitive_keys)
+
+
+@pytest.mark.asyncio
+async def test_apply_patch_without_actor_returns_error(db, tenant, user, workspace_with_files):
+    """apply_patch with actor_id=None must return an error dict."""
+    from app.mcp.tools.workspace_tools import execute_apply_patch
+
+    cs = await ws_svc.create_changeset(db, workspace_with_files.id, tenant.id, "No Actor CS", user.id)
+    result = await execute_apply_patch(
+        params={"changeset_id": str(cs.id)},
+        context={"db": db, "tenant_id": str(tenant.id), "actor_id": None},
+    )
+    assert "error" in result
+    assert "actor" in result["error"].lower()
+
+
 # --- Helpers ---
+
+
+def _assert_no_sensitive_keys(obj: dict, sensitive: set[str], path: str = ""):
+    """Recursively check that no sensitive keys appear in a dict."""
+    for key, value in obj.items():
+        assert key.lower() not in sensitive, f"Sensitive key '{key}' found at {path}.{key}"
+        if isinstance(value, dict):
+            _assert_no_sensitive_keys(value, sensitive, f"{path}.{key}")
 
 
 def _find_file(tree: list[dict], name: str) -> dict | None:

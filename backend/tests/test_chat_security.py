@@ -35,6 +35,10 @@ class TestAllowedChatTools:
         }
         assert ALLOWED_CHAT_TOOLS == expected
 
+    def test_apply_patch_not_in_chat_tools(self):
+        """workspace.apply_patch must NOT be available to chat."""
+        assert "workspace.apply_patch" not in ALLOWED_CHAT_TOOLS
+
     def test_write_tools_blocked(self):
         """Write/mutating tools are not in ALLOWED_CHAT_TOOLS."""
         write_tools = [
@@ -44,6 +48,7 @@ class TestAllowedChatTools:
             "connection.create",
             "connection.delete",
             "user.create",
+            "workspace.apply_patch",
         ]
         for tool in write_tools:
             assert tool not in ALLOWED_CHAT_TOOLS, f"{tool} should be blocked"

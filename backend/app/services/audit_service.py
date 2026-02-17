@@ -1,5 +1,6 @@
 import uuid
 
+import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.audit import AuditEvent
@@ -21,6 +22,10 @@ async def log_event(
     error_message: str | None = None,
 ) -> AuditEvent:
     """Append an audit event. This is insert-only — no updates or deletes."""
+    if correlation_id is None:
+        ctx = structlog.contextvars.get_contextvars()
+        correlation_id = ctx.get("correlation_id")
+
     event = AuditEvent(
         tenant_id=tenant_id,
         actor_id=actor_id,

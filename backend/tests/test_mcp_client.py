@@ -246,11 +246,11 @@ class TestAuditDBWrites:
             AuditEvent.category == "tool_call",
         )
         rows = (await db.execute(stmt)).scalars().all()
-        assert len(rows) == 2  # tool.requested (pending) + tool.health (success)
+        assert len(rows) == 2  # tool.requested (pending) + tool.executed (success)
         actions = {e.action: e for e in rows}
         assert "tool.requested" in actions
         assert actions["tool.requested"].status == "pending"
-        event = actions["tool.health"]
+        event = actions["tool.executed"]
         assert event.resource_type == "mcp_tool"
         assert event.resource_id == "health"
         assert event.status == "success"
@@ -307,9 +307,9 @@ class TestAuditDBWrites:
             AuditEvent.category == "tool_call",
         )
         rows = (await db.execute(stmt)).scalars().all()
-        assert len(rows) == 2  # tool.requested (pending) + tool.data.sample_table_read (error)
+        assert len(rows) == 2  # tool.requested (pending) + tool.failed (error)
         actions = {e.action: e for e in rows}
         assert "tool.requested" in actions
-        event = actions["tool.data.sample_table_read"]
+        event = actions["tool.failed"]
         assert event.status == "error"
         assert "nonexistent_table" in event.error_message
