@@ -225,3 +225,42 @@ export interface AuthResponse {
   token_type: string;
   user: User;
 }
+
+export interface ChatSession {
+  id: string;
+  title: string | null;
+  is_archived: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ToolCallStep {
+  tool: string;
+  params: Record<string, unknown>;
+  result_summary: string;
+  duration_ms: number;
+}
+
+export interface Citation {
+  type: "doc" | "table";
+  title: string;
+  snippet: string;
+}
+
+export interface ChatMessage {
+  id: string;
+  role: "user" | "assistant" | "system";
+  content: string;
+  tool_calls: ToolCallStep[] | null;
+  citations: Citation[] | null;
+  created_at: string;
+}
+
+export interface ChatSessionDetail {
+  id: string;
+  title: string | null;
+  is_archived: boolean;
+  messages: ChatMessage[];
+  created_at: string;
+  updated_at: string;
+}

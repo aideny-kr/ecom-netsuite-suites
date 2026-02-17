@@ -40,4 +40,5 @@ export const NAV_ITEMS = [
   { label: "Dashboard", href: "/dashboard", icon: "LayoutDashboard" as const },
   { label: "Connections", href: "/connections", icon: "Plug" as const },
   { label: "Audit Log", href: "/audit", icon: "ScrollText" as const },
+  { label: "Chat", href: "/chat", icon: "MessageSquare" as const },
 ] as const;

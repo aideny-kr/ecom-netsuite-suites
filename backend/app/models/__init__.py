@@ -1,5 +1,6 @@
 from app.models.audit import AuditEvent
 from app.models.base import Base
+from app.models.chat import ChatMessage, ChatSession, DocChunk
 from app.models.canonical import (
     Dispute,
     NetsuitePosting,
@@ -37,4 +38,7 @@ __all__ = [
     "CursorState",
     "EvidencePack",
     "Schedule",
+    "ChatSession",
+    "ChatMessage",
+    "DocChunk",
 ]

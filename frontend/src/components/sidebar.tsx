@@ -7,6 +7,7 @@ import {
   LayoutDashboard,
   Plug,
   ScrollText,
+  MessageSquare,
   Table2,
   ChevronDown,
   ChevronRight,
@@ -29,6 +30,7 @@ const iconMap = {
   LayoutDashboard,
   Plug,
   ScrollText,
+  MessageSquare,
 } as const;
 
 export function Sidebar() {

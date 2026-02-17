@@ -24,6 +24,9 @@ dependencies = [
     "httpx>=0.26.0",
     "python-multipart>=0.0.6",
     "mcp>=1.0.0",
+    "anthropic>=0.40.0",
+    "voyageai>=0.3.0",
+    "pgvector>=0.3.0",
 ]
 
 [project.optional-dependencies]

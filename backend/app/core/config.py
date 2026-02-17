@@ -28,6 +28,14 @@ class Settings(BaseSettings):
     MCP_SERVER_PORT: int = 8001
     MCP_RATE_LIMIT_PER_MINUTE: int = 60
 
+    ANTHROPIC_API_KEY: str = ""
+    ANTHROPIC_MODEL: str = "claude-sonnet-4-20250514"
+    VOYAGE_API_KEY: str = ""
+    VOYAGE_EMBED_MODEL: str = "voyage-3-lite"
+    CHAT_MAX_HISTORY_TURNS: int = 20
+    CHAT_MAX_TOOL_CALLS_PER_TURN: int = 5
+    CHAT_RAG_TOP_K: int = 5
+
     model_config = {"env_file": ".env", "extra": "ignore"}
 
     @property
