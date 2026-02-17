@@ -18,7 +18,10 @@ test.describe("Sidebar Navigation", () => {
   });
 
   test("click Connections link and verify URL", async ({ page }) => {
-    await page.getByRole("link", { name: "Connections" }).click();
+    // Use exact match to target the sidebar link, not the dashboard quick-link card
+    await page
+      .getByRole("link", { name: "Connections", exact: true })
+      .click();
     await expect(page).toHaveURL(/\/connections/);
   });
 
@@ -26,8 +29,11 @@ test.describe("Sidebar Navigation", () => {
     // Click the Tables toggle button to expand
     await page.getByRole("button", { name: "Tables" }).click();
 
-    // Click Orders sub-link
-    await page.getByRole("link", { name: "Orders" }).click();
+    // Target the sidebar Orders link specifically (exact match avoids dashboard card)
+    const ordersLink = page.getByRole("link", { name: "Orders", exact: true });
+    await expect(ordersLink).toBeVisible({ timeout: 5_000 });
+
+    await ordersLink.click();
     await expect(page).toHaveURL(/\/tables\/orders/);
   });
 

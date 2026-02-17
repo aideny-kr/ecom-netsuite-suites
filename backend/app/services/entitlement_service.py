@@ -47,7 +47,8 @@ async def check_entitlement(
     feature: str,
 ) -> bool:
     """Check if a tenant is entitled to use a feature."""
-    result = await db.execute(select(Tenant).where(Tenant.id == tenant_id))
+    # F10: Lock the tenant row to serialize concurrent entitlement checks
+    result = await db.execute(select(Tenant).where(Tenant.id == tenant_id).with_for_update())
     tenant = result.scalar_one_or_none()
     if not tenant or not tenant.is_active:
         return False

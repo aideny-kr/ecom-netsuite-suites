@@ -274,9 +274,9 @@ export interface RegisterRequest {
 
 export interface AuthResponse {
   access_token: string;
-  refresh_token: string;
+  refresh_token?: string;
   token_type: string;
-  user: User;
+  user?: User;
 }
 
 export interface ChatSession {

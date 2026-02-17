@@ -190,11 +190,7 @@ async def test_propose_patch_create_file_apply_persists_content(db, tenant, user
         params={
             "workspace_id": str(workspace_with_files.id),
             "file_path": "src/new_file.ts",
-            "unified_diff": (
-                "--- /dev/null\n+++ b/src/new_file.ts\n"
-                "@@ -0,0 +1 @@\n"
-                "+export const created = 'ok';\n"
-            ),
+            "unified_diff": ("--- /dev/null\n+++ b/src/new_file.ts\n@@ -0,0 +1 @@\n+export const created = 'ok';\n"),
             "title": "Create new file",
         },
         tenant_id=str(tenant.id),

@@ -19,20 +19,19 @@ test.describe("Table Explorer", () => {
     await expect(skeleton.or(table).first()).toBeVisible({ timeout: 10_000 });
   });
 
-  test("verify table header columns are visible", async ({ page }) => {
+  test("verify table renders with headers or empty state", async ({ page }) => {
     await page.goto("/tables/orders");
 
-    // Wait for the loading state to resolve
-    await page.waitForLoadState("networkidle");
-
-    // If there is data, the table headers should be rendered
-    const tableHead = page.locator("thead");
+    // A fresh tenant has no data — expect either:
+    // 1. Skeleton while loading
+    // 2. "No data available" empty state
+    // 3. A visible thead with column headers (if data exists)
     const skeleton = page.locator('[class*="skeleton"], [class*="Skeleton"]');
+    const emptyState = page.getByText("No data available");
+    const tableHead = page.locator("thead th");
 
-    // Either the table head is visible (data loaded) or the skeleton is shown (still loading / no data)
-    const headVisible = await tableHead.isVisible().catch(() => false);
-    const skeletonVisible = await skeleton.first().isVisible().catch(() => false);
-
-    expect(headVisible || skeletonVisible).toBeTruthy();
+    await expect(
+      skeleton.first().or(emptyState).or(tableHead.first()),
+    ).toBeVisible({ timeout: 15_000 });
   });
 });

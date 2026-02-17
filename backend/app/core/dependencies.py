@@ -1,4 +1,5 @@
 import uuid
+from datetime import datetime, timezone
 from typing import Annotated
 
 import structlog
@@ -10,6 +11,7 @@ from sqlalchemy.orm import selectinload
 
 from app.core.database import get_db
 from app.core.security import decode_token
+from app.models.tenant import Tenant
 from app.models.user import Permission, RolePermission, User, UserRole
 
 logger = structlog.get_logger()
@@ -38,6 +40,17 @@ async def get_current_user(
     user = result.scalar_one_or_none()
     if user is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+
+    # F12: Check tenant is active
+    tenant_result = await db.execute(select(Tenant).where(Tenant.id == user.tenant_id))
+    tenant = tenant_result.scalar_one_or_none()
+    if tenant is None or not tenant.is_active:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Tenant is deactivated")
+
+    # F11: Check trial plan expiry
+    if tenant.plan == "free" and tenant.plan_expires_at:
+        if tenant.plan_expires_at.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Plan expired")
 
     # Set RLS context
     await db.execute(text(f"SET LOCAL app.current_tenant_id = '{user.tenant_id}'"))

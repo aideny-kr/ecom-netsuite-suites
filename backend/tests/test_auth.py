@@ -23,15 +23,16 @@ class TestRegister:
                 "tenant_name": "Reg Corp",
                 "tenant_slug": slug,
                 "email": "admin@regcorp.com",
-                "password": "securepass123",
+                "password": "Securepass123!",
                 "full_name": "Admin User",
             },
         )
         assert resp.status_code == 201
         data = resp.json()
         assert "access_token" in data
-        assert "refresh_token" in data
         assert data["token_type"] == "bearer"
+        # F3: refresh_token is now in HttpOnly cookie, not in response body
+        assert "refresh_token" in resp.cookies or data.get("refresh_token") == ""
 
     async def test_register_duplicate_slug(self, client: AsyncClient, db: AsyncSession):
         slug = f"dup-{uuid.uuid4().hex[:8]}"
@@ -39,7 +40,7 @@ class TestRegister:
             "tenant_name": "Dup Corp",
             "tenant_slug": slug,
             "email": "a@dup.com",
-            "password": "securepass123",
+            "password": "Securepass123!",
             "full_name": "Admin",
         }
         resp1 = await client.post("/api/v1/auth/register", json=payload)
@@ -58,7 +59,7 @@ class TestRegister:
                 "tenant_name": "Audit Corp",
                 "tenant_slug": slug,
                 "email": "admin@auditcorp.com",
-                "password": "securepass123",
+                "password": "Securepass123!",
                 "full_name": "Admin",
             },
         )
@@ -78,7 +79,7 @@ class TestRegister:
                 "tenant_name": "Bad Slug Corp",
                 "tenant_slug": "INVALID SLUG!",
                 "email": "admin@bad.com",
-                "password": "securepass123",
+                "password": "Securepass123!",
                 "full_name": "Admin",
             },
         )
@@ -119,7 +120,6 @@ class TestLogin:
         assert resp.status_code == 200
         data = resp.json()
         assert "access_token" in data
-        assert "refresh_token" in data
 
     async def test_login_wrong_password(self, client: AsyncClient, db: AsyncSession):
         tenant = await create_test_tenant(db, name="Wrong PW Corp")
@@ -188,14 +188,13 @@ class TestRefresh:
                 "password": password,
             },
         )
-        refresh_token = login_resp.json()["refresh_token"]
+        # F3: refresh_token is now in HttpOnly cookie
+        refresh_token = login_resp.cookies.get("refresh_token")
+        assert refresh_token is not None
 
-        resp = await client.post(
-            "/api/v1/auth/refresh",
-            json={
-                "refresh_token": refresh_token,
-            },
-        )
+        # Send refresh token via cookie
+        client.cookies.set("refresh_token", refresh_token)
+        resp = await client.post("/api/v1/auth/refresh")
         assert resp.status_code == 200
         assert "access_token" in resp.json()
 

@@ -31,14 +31,13 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
 function setTokens(tokens: AuthResponse) {
   localStorage.setItem("access_token", tokens.access_token);
-  localStorage.setItem("refresh_token", tokens.refresh_token);
-  // Also set cookie so Next.js middleware can check auth
+  // refresh_token is now set as HttpOnly cookie by the backend (F3)
+  // Also set access_token cookie so Next.js middleware can check auth
   document.cookie = `access_token=${tokens.access_token}; path=/; max-age=${60 * 60 * 24 * 7}; samesite=lax`;
 }
 
 function clearTokens() {
   localStorage.removeItem("access_token");
-  localStorage.removeItem("refresh_token");
   document.cookie = "access_token=; path=/; max-age=0";
 }
 
@@ -117,7 +116,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     [router],
   );
 
-  const logout = useCallback(() => {
+  const logout = useCallback(async () => {
+    try {
+      await apiClient.post("/api/v1/auth/logout");
+    } catch {
+      // Best-effort — clear local state regardless
+    }
     clearTokens();
     setUser(null);
     router.push("/login");

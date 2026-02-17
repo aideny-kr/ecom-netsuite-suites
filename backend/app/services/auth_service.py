@@ -83,6 +83,12 @@ async def authenticate(db: AsyncSession, email: str, password: str) -> tuple[Use
     if not user:
         raise ValueError("Invalid email or password")
 
+    # F12: Block login if tenant is deactivated
+    tenant_result = await db.execute(select(Tenant).where(Tenant.id == user.tenant_id))
+    tenant = tenant_result.scalar_one_or_none()
+    if not tenant or not tenant.is_active:
+        raise ValueError("Invalid email or password")
+
     tokens = _create_tokens(user)
     return user, tokens
 
