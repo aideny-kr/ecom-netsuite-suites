@@ -33,6 +33,8 @@ EXPECTED_TOOLS = {
     "workspace.search",
     "workspace.propose_patch",
     "workspace.apply_patch",
+    "workspace.run_validate",
+    "workspace.run_unit_tests",
 }
 
 

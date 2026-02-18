@@ -230,6 +230,8 @@ class TestToolConfigs:
             "workspace.search",
             "workspace.propose_patch",
             "workspace.apply_patch",
+            "workspace.run_validate",
+            "workspace.run_unit_tests",
         }
         assert set(TOOL_CONFIGS.keys()) == expected
 
