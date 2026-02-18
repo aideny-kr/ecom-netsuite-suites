@@ -64,7 +64,7 @@ class Settings(BaseSettings):
     NETSUITE_MCP_TRANSPORT: str = "http"
 
     # Multi-agent orchestration
-    MULTI_AGENT_ENABLED: bool = False
+    MULTI_AGENT_ENABLED: bool = True
     MULTI_AGENT_SPECIALIST_PROVIDER: str = "anthropic"
     MULTI_AGENT_SPECIALIST_MODEL: str = "claude-haiku-4-5-20251001"
     MULTI_AGENT_MAX_BUDGET_TOKENS: int = 50000
