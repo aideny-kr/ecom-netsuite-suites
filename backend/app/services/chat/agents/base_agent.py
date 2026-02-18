@@ -185,21 +185,25 @@ class BaseSpecialistAgent(abc.ABC):
                                 pass
 
                     elapsed_ms = int((time.monotonic() - t0) * 1000)
-                    tool_calls_log.append({
-                        "step": step,
-                        "agent": self.agent_name,
-                        "tool": block.name,
-                        "params": block.input,
-                        "result_summary": result_str[:500],
-                        "duration_ms": elapsed_ms,
-                    })
+                    tool_calls_log.append(
+                        {
+                            "step": step,
+                            "agent": self.agent_name,
+                            "tool": block.name,
+                            "params": block.input,
+                            "result_summary": result_str[:500],
+                            "duration_ms": elapsed_ms,
+                        }
+                    )
 
-                    tool_results_content.append({
-                        "type": "tool_result",
-                        "tool_use_id": block.id,
-                        "tool_name": block.name,
-                        "content": result_str,
-                    })
+                    tool_results_content.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": block.id,
+                            "tool_name": block.name,
+                            "content": result_str,
+                        }
+                    )
 
                 messages.append(adapter.build_tool_result_message(tool_results_content))
 

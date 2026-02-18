@@ -95,7 +95,7 @@ export function StepWorkspace({ onStepComplete }: StepWorkspaceProps) {
               <FolderOpen className="h-10 w-10 text-primary/50 mx-auto mb-3" />
               <h3 className="font-medium text-lg">Create Your First Workspace</h3>
               <p className="text-sm text-muted-foreground mt-1 max-w-md mx-auto">
-                A workspace is where you'll manage your SuiteScript files and deployments.
+                A workspace is where you&apos;ll manage your SuiteScript files and deployments.
               </p>
             </div>
 

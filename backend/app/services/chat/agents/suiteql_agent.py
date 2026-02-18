@@ -18,11 +18,13 @@ if TYPE_CHECKING:
     from app.models.policy_profile import PolicyProfile
 
 # Tools this agent is allowed to use
-_SUITEQL_TOOL_NAMES = frozenset({
-    "netsuite_suiteql",
-    "netsuite_get_metadata",
-    "netsuite_connectivity",
-})
+_SUITEQL_TOOL_NAMES = frozenset(
+    {
+        "netsuite_suiteql",
+        "netsuite_get_metadata",
+        "netsuite_connectivity",
+    }
+)
 
 
 class SuiteQLAgent(BaseSpecialistAgent):
@@ -62,15 +64,13 @@ class SuiteQLAgent(BaseSpecialistAgent):
             "- Date filtering: TO_DATE('2024-01-01', 'YYYY-MM-DD')",
             "- Common tables: transaction, transactionline, customer, item, vendor, account, "
             "subsidiary, department, location, employee",
-            "- Transaction types: use type field (e.g., type = 'SalesOrd', 'CustInvc', "
-            "'VendBill', 'CustPymt')",
+            "- Transaction types: use type field (e.g., type = 'SalesOrd', 'CustInvc', 'VendBill', 'CustPymt')",
             "- Always include a ROWNUM limit to avoid fetching too much data",
             "",
             "ERROR HANDLING:",
             "- If a query fails with 'Unknown identifier', use the netsuite_get_metadata tool "
             "to look up correct field names, then fix and retry the query.",
-            "- If a query fails with a syntax error, analyse the error message, fix the query, "
-            "and retry.",
+            "- If a query fails with a syntax error, analyse the error message, fix the query, and retry.",
             "- After retrying, if the query still fails, return the error details clearly.",
             "",
             "OUTPUT FORMAT:",

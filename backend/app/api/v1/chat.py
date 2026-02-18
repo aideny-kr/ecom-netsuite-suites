@@ -126,10 +126,7 @@ async def list_sessions(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    q = (
-        select(ChatSession)
-        .where(ChatSession.tenant_id == user.tenant_id, ChatSession.user_id == user.id)
-    )
+    q = select(ChatSession).where(ChatSession.tenant_id == user.tenant_id, ChatSession.user_id == user.id)
     if workspace_id:
         q = q.where(ChatSession.workspace_id == uuid.UUID(workspace_id))
     else:

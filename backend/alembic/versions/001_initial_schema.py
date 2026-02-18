@@ -21,30 +21,59 @@ depends_on = None
 ROLES = ["admin", "finance", "ops", "readonly"]
 
 PERMISSIONS = [
-    "tenant.manage", "users.manage", "connections.manage", "connections.view",
-    "tables.view", "audit.view", "exports.csv", "exports.excel",
-    "recon.run", "tools.suiteql", "schedules.manage", "approvals.manage",
+    "tenant.manage",
+    "users.manage",
+    "connections.manage",
+    "connections.view",
+    "tables.view",
+    "audit.view",
+    "exports.csv",
+    "exports.excel",
+    "recon.run",
+    "tools.suiteql",
+    "schedules.manage",
+    "approvals.manage",
 ]
 
 # Role -> permissions mapping
 ROLE_PERMISSIONS = {
     "admin": PERMISSIONS,  # All permissions
     "finance": [
-        "connections.view", "tables.view", "audit.view", "exports.csv",
-        "exports.excel", "recon.run", "tools.suiteql",
+        "connections.view",
+        "tables.view",
+        "audit.view",
+        "exports.csv",
+        "exports.excel",
+        "recon.run",
+        "tools.suiteql",
     ],
     "ops": [
-        "connections.manage", "connections.view", "tables.view",
-        "audit.view", "exports.csv", "schedules.manage",
+        "connections.manage",
+        "connections.view",
+        "tables.view",
+        "audit.view",
+        "exports.csv",
+        "schedules.manage",
     ],
     "readonly": ["connections.view", "tables.view", "audit.view"],
 }
 
 # Tables that need RLS with standard tenant_id policy
 RLS_TABLES = [
-    "tenant_configs", "users", "user_roles", "connections",
-    "jobs", "orders", "payments", "refunds", "payouts", "payout_lines",
-    "disputes", "netsuite_postings", "evidence_packs", "schedules",
+    "tenant_configs",
+    "users",
+    "user_roles",
+    "connections",
+    "jobs",
+    "orders",
+    "payments",
+    "refunds",
+    "payouts",
+    "payout_lines",
+    "disputes",
+    "netsuite_postings",
+    "evidence_packs",
+    "schedules",
 ]
 
 
@@ -356,7 +385,8 @@ def upgrade() -> None:
     perms_table = sa.table("permissions", sa.column("id", UUID), sa.column("codename", sa.String))
     rp_table = sa.table(
         "role_permissions",
-        sa.column("role_id", UUID), sa.column("permission_id", UUID),
+        sa.column("role_id", UUID),
+        sa.column("permission_id", UUID),
     )
 
     role_ids = {}
@@ -373,10 +403,12 @@ def upgrade() -> None:
 
     for role_name, perms in ROLE_PERMISSIONS.items():
         for perm in perms:
-            op.execute(rp_table.insert().values(
-                role_id=role_ids[role_name],
-                permission_id=perm_ids[perm],
-            ))
+            op.execute(
+                rp_table.insert().values(
+                    role_id=role_ids[role_name],
+                    permission_id=perm_ids[perm],
+                )
+            )
 
 
 def downgrade() -> None:
@@ -390,12 +422,26 @@ def downgrade() -> None:
 
     # Drop tables in reverse dependency order
     tables = [
-        "schedules", "evidence_packs", "cursor_states",
-        "netsuite_postings", "disputes", "payout_lines", "payouts",
-        "refunds", "payments", "orders",
-        "jobs", "audit_events",
-        "connections", "user_roles", "role_permissions",
-        "permissions", "roles", "users", "tenant_configs", "tenants",
+        "schedules",
+        "evidence_packs",
+        "cursor_states",
+        "netsuite_postings",
+        "disputes",
+        "payout_lines",
+        "payouts",
+        "refunds",
+        "payments",
+        "orders",
+        "jobs",
+        "audit_events",
+        "connections",
+        "user_roles",
+        "role_permissions",
+        "permissions",
+        "roles",
+        "users",
+        "tenant_configs",
+        "tenants",
     ]
     for table in tables:
         op.drop_table(table)

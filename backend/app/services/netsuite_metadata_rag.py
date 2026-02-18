@@ -176,59 +176,73 @@ async def seed_metadata_docs(
     raw_chunks: list[tuple[str, str, str]] = []  # (source_path, title, content)
 
     if metadata.transaction_body_fields and isinstance(metadata.transaction_body_fields, list):
-        raw_chunks.append((
-            f"{_SOURCE_PREFIX}transaction_body_fields",
-            "NetSuite Custom Transaction Body Fields",
-            _format_body_fields(metadata.transaction_body_fields),
-        ))
+        raw_chunks.append(
+            (
+                f"{_SOURCE_PREFIX}transaction_body_fields",
+                "NetSuite Custom Transaction Body Fields",
+                _format_body_fields(metadata.transaction_body_fields),
+            )
+        )
 
     if metadata.transaction_column_fields and isinstance(metadata.transaction_column_fields, list):
-        raw_chunks.append((
-            f"{_SOURCE_PREFIX}transaction_column_fields",
-            "NetSuite Custom Transaction Line Fields",
-            _format_column_fields(metadata.transaction_column_fields),
-        ))
+        raw_chunks.append(
+            (
+                f"{_SOURCE_PREFIX}transaction_column_fields",
+                "NetSuite Custom Transaction Line Fields",
+                _format_column_fields(metadata.transaction_column_fields),
+            )
+        )
 
     if metadata.entity_custom_fields and isinstance(metadata.entity_custom_fields, list):
-        raw_chunks.append((
-            f"{_SOURCE_PREFIX}entity_custom_fields",
-            "NetSuite Custom Entity Fields",
-            _format_entity_fields(metadata.entity_custom_fields),
-        ))
+        raw_chunks.append(
+            (
+                f"{_SOURCE_PREFIX}entity_custom_fields",
+                "NetSuite Custom Entity Fields",
+                _format_entity_fields(metadata.entity_custom_fields),
+            )
+        )
 
     if metadata.item_custom_fields and isinstance(metadata.item_custom_fields, list):
-        raw_chunks.append((
-            f"{_SOURCE_PREFIX}item_custom_fields",
-            "NetSuite Custom Item Fields",
-            _format_item_fields(metadata.item_custom_fields),
-        ))
+        raw_chunks.append(
+            (
+                f"{_SOURCE_PREFIX}item_custom_fields",
+                "NetSuite Custom Item Fields",
+                _format_item_fields(metadata.item_custom_fields),
+            )
+        )
 
     if metadata.custom_record_types and isinstance(metadata.custom_record_types, list):
-        raw_chunks.append((
-            f"{_SOURCE_PREFIX}custom_record_types",
-            "NetSuite Custom Record Types",
-            _format_custom_records(metadata.custom_record_types),
-        ))
+        raw_chunks.append(
+            (
+                f"{_SOURCE_PREFIX}custom_record_types",
+                "NetSuite Custom Record Types",
+                _format_custom_records(metadata.custom_record_types),
+            )
+        )
 
     if metadata.custom_lists and isinstance(metadata.custom_lists, list):
-        raw_chunks.append((
-            f"{_SOURCE_PREFIX}custom_lists",
-            "NetSuite Custom Lists",
-            _format_custom_lists(metadata.custom_lists),
-        ))
+        raw_chunks.append(
+            (
+                f"{_SOURCE_PREFIX}custom_lists",
+                "NetSuite Custom Lists",
+                _format_custom_lists(metadata.custom_lists),
+            )
+        )
 
     # Org hierarchy as a single combined chunk
     if any([metadata.subsidiaries, metadata.departments, metadata.classifications, metadata.locations]):
-        raw_chunks.append((
-            f"{_SOURCE_PREFIX}org_hierarchy",
-            "NetSuite Organisational Hierarchy",
-            _format_org_hierarchy(
-                metadata.subsidiaries,
-                metadata.departments,
-                metadata.classifications,
-                metadata.locations,
-            ),
-        ))
+        raw_chunks.append(
+            (
+                f"{_SOURCE_PREFIX}org_hierarchy",
+                "NetSuite Organisational Hierarchy",
+                _format_org_hierarchy(
+                    metadata.subsidiaries,
+                    metadata.departments,
+                    metadata.classifications,
+                    metadata.locations,
+                ),
+            )
+        )
 
     if not raw_chunks:
         return 0

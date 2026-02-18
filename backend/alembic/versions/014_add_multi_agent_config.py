@@ -4,8 +4,9 @@ Revision ID: 014
 Revises: 013_chat_workspace_scope
 """
 
-from alembic import op
 import sqlalchemy as sa
+
+from alembic import op
 
 revision = "014_add_multi_agent_config"
 down_revision = "013_chat_workspace_scope"

@@ -1,4 +1,5 @@
 """Ingest markdown docs into doc_chunks table with vector embeddings."""
+
 import argparse
 import asyncio
 import re
@@ -22,7 +23,11 @@ def estimate_tokens(text: str) -> int:
     return len(text) // 4
 
 
-def chunk_text(text: str, target_tokens: int = CHUNK_TARGET_TOKENS, overlap_tokens: int = CHUNK_OVERLAP_TOKENS) -> list[str]:
+def chunk_text(
+    text: str,
+    target_tokens: int = CHUNK_TARGET_TOKENS,
+    overlap_tokens: int = CHUNK_OVERLAP_TOKENS,
+) -> list[str]:
     """Split text into chunks at paragraph boundaries."""
     paragraphs = re.split(r"\n\s*\n", text)
     chunks = []
@@ -87,13 +92,15 @@ async def ingest(docs_dir: str) -> None:
         chunks = chunk_text(content)
         print(f"  {rel_path}: {len(chunks)} chunks")
         for idx, chunk_content in enumerate(chunks):
-            all_chunks.append({
-                "source_path": rel_path,
-                "title": title,
-                "chunk_index": idx,
-                "content": chunk_content,
-                "token_count": estimate_tokens(chunk_content),
-            })
+            all_chunks.append(
+                {
+                    "source_path": rel_path,
+                    "title": title,
+                    "chunk_index": idx,
+                    "content": chunk_content,
+                    "token_count": estimate_tokens(chunk_content),
+                }
+            )
 
     print(f"\nTotal chunks: {len(all_chunks)}")
     print("Generating embeddings...")
@@ -111,9 +118,7 @@ async def ingest(docs_dir: str) -> None:
     print("Writing to database...")
     async with async_session_factory() as db:
         # Delete existing system tenant chunks
-        await db.execute(
-            delete(DocChunk).where(DocChunk.tenant_id == SYSTEM_TENANT_ID)
-        )
+        await db.execute(delete(DocChunk).where(DocChunk.tenant_id == SYSTEM_TENANT_ID))
 
         for chunk_data, embedding in zip(all_chunks, all_embeddings):
             doc_chunk = DocChunk(

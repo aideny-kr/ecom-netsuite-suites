@@ -380,9 +380,7 @@ class TestTenantIsolation:
         assert len(resp.json()) == 0
 
     @pytest.mark.asyncio
-    async def test_tenant_b_cannot_access_tenant_a_session_detail(
-        self, client, admin_user, admin_user_b, workspace_a
-    ):
+    async def test_tenant_b_cannot_access_tenant_a_session_detail(self, client, admin_user, admin_user_b, workspace_a):
         """Tenant B cannot fetch detail of tenant A's session."""
         _, headers_a = admin_user
         _, headers_b = admin_user_b
@@ -415,9 +413,7 @@ class TestAuditEvents:
             headers=headers,
         )
 
-        result = await db.execute(
-            select(AuditEvent).where(AuditEvent.action == "workspace.reindexed")
-        )
+        result = await db.execute(select(AuditEvent).where(AuditEvent.action == "workspace.reindexed"))
         event = result.scalar_one_or_none()
         assert event is not None
         assert event.resource_type == "workspace"

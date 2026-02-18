@@ -15,7 +15,6 @@ import structlog
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import settings
 from app.core.encryption import decrypt_credentials
 from app.models.connection import Connection
 from app.models.netsuite_metadata import NetSuiteMetadata
@@ -41,9 +40,7 @@ DISCOVERY_QUERIES: list[dict[str, Any]] = [
         "label": "transaction_column_fields",
         "description": "Custom transaction line/column fields (custcol_*)",
         "query": (
-            "SELECT scriptid, label, fieldtype, description "
-            "FROM customtransactioncolumnfield "
-            "WHERE ROWNUM <= 300"
+            "SELECT scriptid, label, fieldtype, description FROM customtransactioncolumnfield WHERE ROWNUM <= 300"
         ),
     },
     {
@@ -59,65 +56,37 @@ DISCOVERY_QUERIES: list[dict[str, Any]] = [
     {
         "label": "item_custom_fields",
         "description": "Custom item fields (custitem_*)",
-        "query": (
-            "SELECT scriptid, label, fieldtype, description "
-            "FROM itemcustomfield "
-            "WHERE ROWNUM <= 200"
-        ),
+        "query": ("SELECT scriptid, label, fieldtype, description FROM itemcustomfield WHERE ROWNUM <= 200"),
     },
     {
         "label": "custom_record_types",
         "description": "Custom record type definitions",
-        "query": (
-            "SELECT scriptid, name, description "
-            "FROM customrecordtype "
-            "WHERE ROWNUM <= 100"
-        ),
+        "query": ("SELECT scriptid, name, description FROM customrecordtype WHERE ROWNUM <= 100"),
     },
     {
         "label": "custom_lists",
         "description": "Custom list definitions",
-        "query": (
-            "SELECT scriptid, name, description "
-            "FROM customlist "
-            "WHERE ROWNUM <= 100"
-        ),
+        "query": ("SELECT scriptid, name, description FROM customlist WHERE ROWNUM <= 100"),
     },
     {
         "label": "subsidiaries",
         "description": "Subsidiary hierarchy",
-        "query": (
-            "SELECT id, name, isinactive, parent "
-            "FROM subsidiary "
-            "WHERE ROWNUM <= 100"
-        ),
+        "query": ("SELECT id, name, isinactive, parent FROM subsidiary WHERE ROWNUM <= 100"),
     },
     {
         "label": "departments",
         "description": "Department hierarchy",
-        "query": (
-            "SELECT id, name, isinactive, parent "
-            "FROM department "
-            "WHERE ROWNUM <= 100"
-        ),
+        "query": ("SELECT id, name, isinactive, parent FROM department WHERE ROWNUM <= 100"),
     },
     {
         "label": "classifications",
         "description": "Class/classification hierarchy",
-        "query": (
-            "SELECT id, name, isinactive, parent "
-            "FROM classification "
-            "WHERE ROWNUM <= 100"
-        ),
+        "query": ("SELECT id, name, isinactive, parent FROM classification WHERE ROWNUM <= 100"),
     },
     {
         "label": "locations",
         "description": "Location hierarchy",
-        "query": (
-            "SELECT id, name, isinactive, parent "
-            "FROM location "
-            "WHERE ROWNUM <= 100"
-        ),
+        "query": ("SELECT id, name, isinactive, parent FROM location WHERE ROWNUM <= 100"),
     },
 ]
 
@@ -220,15 +189,12 @@ async def run_full_discovery(
         # OAuth 1.0 — we can't use the simple execute_suiteql helper directly.
         # Fall back to the MCP tool's execute path which handles OAuth 1.0.
         raise ValueError(
-            "Metadata discovery currently requires OAuth 2.0. "
-            "Please re-connect NetSuite with OAuth 2.0 PKCE."
+            "Metadata discovery currently requires OAuth 2.0. Please re-connect NetSuite with OAuth 2.0 PKCE."
         )
 
     # ── 2. Auto-increment version ──────────────────────────────────
     result = await db.execute(
-        select(func.coalesce(func.max(NetSuiteMetadata.version), 0)).where(
-            NetSuiteMetadata.tenant_id == tenant_id
-        )
+        select(func.coalesce(func.max(NetSuiteMetadata.version), 0)).where(NetSuiteMetadata.tenant_id == tenant_id)
     )
     next_version = (result.scalar() or 0) + 1
 

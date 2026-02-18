@@ -50,14 +50,14 @@ COORDINATOR_PLAN_PROMPT = (
     "comparison, trend analysis, or interpretation. REQUIRES data from another agent first.\n"
     "\n"
     "Given the user's question, output ONLY a JSON plan (no markdown, no explanation):\n"
-    '{\n'
+    "{\n"
     '  "reasoning": "Brief explanation of your approach",\n'
     '  "steps": [\n'
     '    {"agent": "rag", "task": "Find which custom field stores warranty info on sales orders"},\n'
     '    {"agent": "suiteql", "task": "Query recent sales orders showing warranty field"}\n'
-    '  ],\n'
+    "  ],\n"
     '  "parallel": false\n'
-    '}\n'
+    "}\n"
     "\n"
     "RULES:\n"
     "- Use the FEWEST agents necessary.\n"
@@ -86,6 +86,7 @@ COORDINATOR_SYNTHESIS_PROMPT = (
 
 # ── Data classes ───────────────────────────────────────────────────────────
 
+
 @dataclass
 class PlanStep:
     agent: str
@@ -111,6 +112,7 @@ class CoordinatorResult:
 
 
 # ── Coordinator class ──────────────────────────────────────────────────────
+
 
 class MultiAgentCoordinator:
     """Supervisor agent that orchestrates specialist agents."""
@@ -167,7 +169,7 @@ class MultiAgentCoordinator:
         plan, plan_tokens = await self._plan(user_message, conversation_history)
         total_input += plan_tokens.input_tokens
         total_output += plan_tokens.output_tokens
-        budget_remaining -= (plan_tokens.input_tokens + plan_tokens.output_tokens)
+        budget_remaining -= plan_tokens.input_tokens + plan_tokens.output_tokens
 
         if plan is None:
             # Planning failed — fall back to a simple answer
@@ -210,7 +212,7 @@ class MultiAgentCoordinator:
                 all_tool_calls.extend(result.tool_calls_log)
                 total_input += result.tokens_used.input_tokens
                 total_output += result.tokens_used.output_tokens
-                budget_remaining -= (result.tokens_used.input_tokens + result.tokens_used.output_tokens)
+                budget_remaining -= result.tokens_used.input_tokens + result.tokens_used.output_tokens
 
             # ── Step 3: Evaluate ──────────────────────────────────────
             if all(r.success for r in round_results):
@@ -245,10 +247,12 @@ class MultiAgentCoordinator:
         for msg in conversation_history[-6:]:  # Last 3 turns for context
             messages.append(msg)
 
-        messages.append({
-            "role": "user",
-            "content": f"User question: {user_message}\n\nProduce a JSON plan.",
-        })
+        messages.append(
+            {
+                "role": "user",
+                "content": f"User question: {user_message}\n\nProduce a JSON plan.",
+            }
+        )
 
         response: LLMResponse = await self.main_adapter.create_message(
             model=self.main_model,
@@ -262,7 +266,7 @@ class MultiAgentCoordinator:
         # Parse JSON from response
         try:
             # Extract JSON from potential markdown code blocks
-            json_match = re.search(r'\{.*\}', plan_text, re.DOTALL)
+            json_match = re.search(r"\{.*\}", plan_text, re.DOTALL)
             if json_match:
                 plan_data = json.loads(json_match.group())
             else:
@@ -313,8 +317,7 @@ class MultiAgentCoordinator:
         context: dict[str, Any] = {}
         if prior_results:
             context["prior_results"] = [
-                {"agent": r.agent_name, "success": r.success, "data": r.data, "error": r.error}
-                for r in prior_results
+                {"agent": r.agent_name, "success": r.success, "data": r.data, "error": r.error} for r in prior_results
             ]
 
         async def run_step(step: PlanStep) -> AgentResult:
@@ -347,11 +350,13 @@ class MultiAgentCoordinator:
                 results.append(result)
                 # Update context for next step
                 if result.success and result.data:
-                    context.setdefault("prior_results", []).append({
-                        "agent": result.agent_name,
-                        "success": result.success,
-                        "data": result.data,
-                    })
+                    context.setdefault("prior_results", []).append(
+                        {
+                            "agent": result.agent_name,
+                            "success": result.success,
+                            "data": result.data,
+                        }
+                    )
             return results
 
     def _create_agent(self, agent_type: str) -> Any:
@@ -399,24 +404,30 @@ class MultiAgentCoordinator:
             if result.agent_name == "suiteql":
                 # Ask RAG to look up the field names, then retry suiteql
                 error_context = result.error or "unknown error"
-                retry_steps.append(PlanStep(
-                    agent="rag",
-                    task=f"Look up correct field names for NetSuite query that failed with: {error_context[:200]}",
-                ))
+                retry_steps.append(
+                    PlanStep(
+                        agent="rag",
+                        task=f"Look up correct field names for NetSuite query that failed with: {error_context[:200]}",
+                    )
+                )
                 # Find the original suiteql task
                 original_task = next(
                     (s.task for s in plan.steps if s.agent == "suiteql"),
                     "Retry the original query",
                 )
-                retry_steps.append(PlanStep(
-                    agent="suiteql",
-                    task=f"{original_task} (Retry: use corrected field names from RAG results)",
-                ))
+                retry_steps.append(
+                    PlanStep(
+                        agent="suiteql",
+                        task=f"{original_task} (Retry: use corrected field names from RAG results)",
+                    )
+                )
             elif result.agent_name == "rag":
-                retry_steps.append(PlanStep(
-                    agent="rag",
-                    task=f"Retry search with broader terms. Previous search failed: {result.error or 'no results'}",
-                ))
+                retry_steps.append(
+                    PlanStep(
+                        agent="rag",
+                        task=f"Retry search with broader terms. Previous search failed: {result.error or 'no results'}",
+                    )
+                )
 
         return retry_steps[:3]  # Cap retry steps
 
@@ -434,9 +445,7 @@ class MultiAgentCoordinator:
             status = "SUCCESS" if result.success else "FAILED"
             data_preview = str(result.data)[:3000] if result.data else ""
             error_info = f" Error: {result.error}" if result.error else ""
-            results_parts.append(
-                f"[Agent: {result.agent_name}] [{status}]{error_info}\n{data_preview}"
-            )
+            results_parts.append(f"[Agent: {result.agent_name}] [{status}]{error_info}\n{data_preview}")
 
         results_block = "\n\n---\n\n".join(results_parts)
 
@@ -449,15 +458,17 @@ class MultiAgentCoordinator:
         for msg in conversation_history[-6:]:
             messages.append(msg)
 
-        messages.append({
-            "role": "user",
-            "content": (
-                f"User question: {user_message}\n\n"
-                f"<agent_results>\n{results_block}\n</agent_results>"
-                f"{rag_block}\n\n"
-                f"Synthesise a clear, complete answer for the user."
-            ),
-        })
+        messages.append(
+            {
+                "role": "user",
+                "content": (
+                    f"User question: {user_message}\n\n"
+                    f"<agent_results>\n{results_block}\n</agent_results>"
+                    f"{rag_block}\n\n"
+                    f"Synthesise a clear, complete answer for the user."
+                ),
+            }
+        )
 
         # Use tenant's main model + system prompt for synthesis
         synthesis_prompt = f"{self.system_prompt}\n\n{COORDINATOR_SYNTHESIS_PROMPT}"

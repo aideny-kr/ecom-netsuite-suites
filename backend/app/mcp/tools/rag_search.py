@@ -68,9 +68,7 @@ async def execute(params: dict[str, Any], context: dict[str, Any] | None = None,
 
         # Tenant scoping: include tenant-specific + system/platform docs
         if tenant_id:
-            stmt = stmt.where(
-                (DocChunk.tenant_id == tenant_id) | (DocChunk.tenant_id == SYSTEM_TENANT_ID)
-            )
+            stmt = stmt.where((DocChunk.tenant_id == tenant_id) | (DocChunk.tenant_id == SYSTEM_TENANT_ID))
         else:
             stmt = stmt.where(DocChunk.tenant_id == SYSTEM_TENANT_ID)
 
@@ -86,12 +84,14 @@ async def execute(params: dict[str, Any], context: dict[str, Any] | None = None,
             chunk = row[0]
             distance = float(row[1]) if row[1] is not None else 1.0
             similarity = round(1.0 - distance, 4)
-            results.append({
-                "title": chunk.title,
-                "content": chunk.content[:2000],  # Truncate for token efficiency
-                "source_path": chunk.source_path,
-                "similarity_score": similarity,
-            })
+            results.append(
+                {
+                    "title": chunk.title,
+                    "content": chunk.content[:2000],  # Truncate for token efficiency
+                    "source_path": chunk.source_path,
+                    "similarity_score": similarity,
+                }
+            )
 
         return {"results": results, "count": len(results), "query": query_text}
 
@@ -109,15 +109,9 @@ async def _keyword_search(
 ) -> dict:
     """Fallback keyword search when embeddings are not available."""
     search_term = f"%{query_text[:100]}%"
-    stmt = (
-        select(DocChunk)
-        .where(DocChunk.content.ilike(search_term))
-        .limit(top_k)
-    )
+    stmt = select(DocChunk).where(DocChunk.content.ilike(search_term)).limit(top_k)
     if tenant_id:
-        stmt = stmt.where(
-            (DocChunk.tenant_id == tenant_id) | (DocChunk.tenant_id == SYSTEM_TENANT_ID)
-        )
+        stmt = stmt.where((DocChunk.tenant_id == tenant_id) | (DocChunk.tenant_id == SYSTEM_TENANT_ID))
     if source_filter:
         stmt = stmt.where(DocChunk.source_path.ilike(f"{source_filter}%"))
 

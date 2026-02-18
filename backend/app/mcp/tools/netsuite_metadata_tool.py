@@ -54,8 +54,7 @@ async def execute_get_metadata(params: dict, context: dict | None = None, **kwar
         return {
             "status": "not_discovered",
             "message": (
-                "No metadata has been discovered yet. "
-                "Use the netsuite.refresh_metadata tool to trigger discovery."
+                "No metadata has been discovered yet. Use the netsuite.refresh_metadata tool to trigger discovery."
             ),
         }
 

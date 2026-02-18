@@ -24,9 +24,7 @@ class NetSuiteMetadata(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     """
 
     __tablename__ = "netsuite_metadata"
-    __table_args__ = (
-        UniqueConstraint("tenant_id", "version", name="uq_netsuite_metadata_tenant_version"),
-    )
+    __table_args__ = (UniqueConstraint("tenant_id", "version", name="uq_netsuite_metadata_tenant_version"),)
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False, index=True
@@ -48,9 +46,7 @@ class NetSuiteMetadata(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
     # ── Discovery tracking ──────────────────────────────────────────
     discovered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    discovered_by: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
-    )
+    discovered_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     discovery_errors: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     query_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     total_fields_discovered: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

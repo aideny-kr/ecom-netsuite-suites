@@ -115,10 +115,7 @@ def _build_netsuite_customizations_section(metadata: NetSuiteMetadata | None) ->
             if f.get("appliestoemployee") == "T":
                 applies.append("employee")
             scope = f" [applies to: {', '.join(applies)}]" if applies else ""
-            parts.append(
-                f"- `{f.get('scriptid', '?')}` ({f.get('fieldtype', '?')}): "
-                f"{f.get('label', '?')}{scope}"
-            )
+            parts.append(f"- `{f.get('scriptid', '?')}` ({f.get('fieldtype', '?')}): {f.get('label', '?')}{scope}")
 
     # ── Item custom fields (custitem_*) ───────────────────────────
     if metadata.item_custom_fields and isinstance(metadata.item_custom_fields, list):
@@ -126,10 +123,7 @@ def _build_netsuite_customizations_section(metadata: NetSuiteMetadata | None) ->
         parts.append(f"\n## Custom Item Fields ({len(metadata.item_custom_fields)} total)")
         parts.append("Use on the `item` table:")
         for f in fields:
-            parts.append(
-                f"- `{f.get('scriptid', '?')}` ({f.get('fieldtype', '?')}): "
-                f"{f.get('label', '?')}"
-            )
+            parts.append(f"- `{f.get('scriptid', '?')}` ({f.get('fieldtype', '?')}): {f.get('label', '?')}")
 
     # ── Custom record types ───────────────────────────────────────
     if metadata.custom_record_types and isinstance(metadata.custom_record_types, list):

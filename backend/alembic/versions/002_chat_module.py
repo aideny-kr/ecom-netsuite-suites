@@ -79,9 +79,7 @@ def upgrade() -> None:
     op.create_index("ix_doc_chunks_tenant_source", "doc_chunks", ["tenant_id", "source_path"])
 
     # HNSW index for vector similarity search
-    op.execute(
-        "CREATE INDEX ix_doc_chunks_embedding ON doc_chunks USING hnsw (embedding vector_cosine_ops)"
-    )
+    op.execute("CREATE INDEX ix_doc_chunks_embedding ON doc_chunks USING hnsw (embedding vector_cosine_ops)")
 
     # ---- RLS Policies ----
     for table in CHAT_RLS_TABLES:
