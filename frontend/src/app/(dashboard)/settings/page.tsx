@@ -17,6 +17,10 @@ import {
   useTriggerMetadataDiscovery,
   useMetadataFields,
 } from "@/hooks/use-netsuite-metadata";
+import {
+  useSuiteScriptSyncStatus,
+  useTriggerSuiteScriptSync,
+} from "@/hooks/use-suitescript-sync";
 import { usePlanInfo } from "@/hooks/use-plan";
 import { PLAN_TIERS } from "@/lib/constants";
 import { AddMcpConnectorDialog } from "@/components/add-mcp-connector-dialog";
@@ -56,6 +60,7 @@ import {
   Users,
   Layers,
   List,
+  FileCode,
 } from "lucide-react";
 
 const providerMeta: Record<
@@ -1298,6 +1303,154 @@ function NetSuiteMetadataSection() {
 }
 
 // ---------------------------------------------------------------------------
+// SuiteScript Files Section
+// ---------------------------------------------------------------------------
+
+function SuiteScriptFilesSection() {
+  const { data: syncStatus, isLoading } = useSuiteScriptSyncStatus();
+  const triggerSync = useTriggerSuiteScriptSync();
+  const { toast } = useToast();
+
+  async function handleSync() {
+    try {
+      await triggerSync.mutateAsync();
+      toast({
+        title: "SuiteScript sync started",
+        description:
+          "Discovering and loading JavaScript files from your NetSuite account...",
+      });
+    } catch (err) {
+      toast({
+        title: "Failed to start sync",
+        description: err instanceof Error ? err.message : "Unknown error",
+        variant: "destructive",
+      });
+    }
+  }
+
+  if (isLoading) {
+    return <Skeleton className="h-[120px] rounded-xl" />;
+  }
+
+  const isSyncing = syncStatus?.status === "in_progress";
+  const isCompleted = syncStatus?.status === "completed";
+  const isFailed = syncStatus?.status === "failed";
+  const filesLoaded = syncStatus?.total_files_loaded ?? 0;
+  const filesFailed = syncStatus?.failed_files_count ?? 0;
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <div>
+          <h3 className="text-lg font-semibold">SuiteScript Files</h3>
+          <p className="mt-0.5 text-[13px] text-muted-foreground">
+            Sync JavaScript files from your NetSuite File Cabinet into the
+            workspace
+          </p>
+        </div>
+        <Button
+          variant="outline"
+          size="sm"
+          className="h-8 text-[12px]"
+          onClick={handleSync}
+          disabled={triggerSync.isPending || isSyncing}
+        >
+          {triggerSync.isPending || isSyncing ? (
+            <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+          ) : (
+            <RefreshCw className="mr-1.5 h-3.5 w-3.5" />
+          )}
+          {isSyncing ? "Syncing..." : "Sync Scripts"}
+        </Button>
+      </div>
+
+      <div className="rounded-xl border bg-card p-6 shadow-soft space-y-3">
+        {isSyncing && (
+          <div className="flex items-center gap-3 rounded-lg bg-blue-50 px-4 py-3">
+            <Loader2 className="h-5 w-5 text-blue-600 animate-spin" />
+            <div>
+              <p className="text-[13px] font-medium text-blue-800">
+                Sync in progress
+              </p>
+              <p className="text-[12px] text-blue-600">
+                Discovering JavaScript files and fetching content from NetSuite.
+                This may take 30-60 seconds.
+              </p>
+            </div>
+          </div>
+        )}
+
+        {isFailed && (
+          <div className="flex items-center gap-3 rounded-lg bg-red-50 px-4 py-3">
+            <AlertCircle className="h-5 w-5 text-red-600" />
+            <div>
+              <p className="text-[13px] font-medium text-red-800">
+                Sync failed
+              </p>
+              <p className="text-[12px] text-red-600">
+                {syncStatus?.error_message ||
+                  "Something went wrong. Try again or check your NetSuite connection."}
+              </p>
+            </div>
+          </div>
+        )}
+
+        {isCompleted && (
+          <div className="flex items-center gap-3 rounded-lg bg-green-50 px-4 py-3">
+            <CheckCircle2 className="h-5 w-5 text-green-600" />
+            <div className="flex-1">
+              <p className="text-[13px] font-medium text-green-800">
+                {filesLoaded} file{filesLoaded !== 1 ? "s" : ""} loaded
+                {filesFailed > 0 && (
+                  <span className="text-amber-700">
+                    {" "}
+                    ({filesFailed} failed)
+                  </span>
+                )}
+              </p>
+              {syncStatus?.last_sync_at && (
+                <p className="text-[12px] text-green-600">
+                  Last synced{" "}
+                  {new Date(syncStatus.last_sync_at).toLocaleString()}
+                </p>
+              )}
+            </div>
+          </div>
+        )}
+
+        {!isCompleted && !isSyncing && !isFailed && (
+          <div className="flex flex-col items-center justify-center py-6">
+            <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-muted">
+              <FileCode className="h-6 w-6 text-muted-foreground" />
+            </div>
+            <p className="mt-4 text-[15px] font-medium text-foreground">
+              No scripts synced yet
+            </p>
+            <p className="mt-1 mb-4 text-[13px] text-muted-foreground text-center max-w-md">
+              Sync SuiteScript files from your NetSuite account to browse and
+              edit them in the workspace.
+            </p>
+            <Button
+              size="sm"
+              className="h-8 text-[12px]"
+              onClick={handleSync}
+              disabled={triggerSync.isPending}
+            >
+              {triggerSync.isPending ? (
+                <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <FileCode className="mr-1.5 h-3.5 w-3.5" />
+              )}
+              Sync Scripts
+            </Button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Governance Policy Section
 // ---------------------------------------------------------------------------
 
@@ -1712,6 +1865,9 @@ export default function SettingsPage() {
 
       {/* NetSuite Metadata Discovery Section */}
       <NetSuiteMetadataSection />
+
+      {/* SuiteScript Files Section */}
+      <SuiteScriptFilesSection />
 
       {/* Governance Policy Section */}
       <GovernancePolicySection />

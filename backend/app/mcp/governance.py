@@ -95,6 +95,14 @@ TOOL_CONFIGS = {
         "requires_entitlement": "mcp_tools",
         "allowlisted_params": [],
     },
+    "suitescript.sync": {
+        "default_limit": None,
+        "max_limit": None,
+        "timeout_seconds": 60,
+        "rate_limit_per_minute": 10,
+        "requires_entitlement": "mcp_tools",
+        "allowlisted_params": [],
+    },
     "rag.search": {
         "default_limit": None,
         "max_limit": None,

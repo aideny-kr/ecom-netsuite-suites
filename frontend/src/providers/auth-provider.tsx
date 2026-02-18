@@ -24,6 +24,7 @@ interface AuthContextType {
   login: (data: LoginRequest) => Promise<void>;
   register: (data: RegisterRequest) => Promise<void>;
   switchTenant: (tenantId: string) => Promise<void>;
+  refreshUser: () => Promise<void>;
   logout: () => void;
 }
 
@@ -120,6 +121,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     [router],
   );
 
+  const refreshUser = useCallback(async () => {
+    try {
+      const profile = await apiClient.get<User>("/api/v1/auth/me");
+      setUser(profile);
+    } catch {
+      // Silently fail — user state stays as-is
+    }
+  }, []);
+
   const logout = useCallback(async () => {
     try {
       await apiClient.post("/api/v1/auth/logout");
@@ -132,7 +142,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [router]);
 
   return (
-    <AuthContext.Provider value={{ user, tenants, isLoading, login, register, switchTenant, logout }}>
+    <AuthContext.Provider value={{ user, tenants, isLoading, login, register, switchTenant, refreshUser, logout }}>
       {children}
     </AuthContext.Provider>
   );

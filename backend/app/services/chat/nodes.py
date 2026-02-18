@@ -41,6 +41,7 @@ ALLOWED_CHAT_TOOLS: frozenset[str] = frozenset(
         "workspace.read_file",
         "workspace.search",
         "workspace.propose_patch",
+        "suitescript.sync",
     }
 )
 

@@ -8,6 +8,7 @@ from app.mcp.tools import (
     recon_run,
     report_export,
     schedule_ops,
+    suitescript_sync_tool,
     workspace_tools,
 )
 
@@ -233,6 +234,16 @@ TOOL_REGISTRY = {
             "Use to answer 'what custom fields do I have?' or 'show metadata summary'."
         ),
         "execute": netsuite_metadata_tool.execute_get_metadata,
+        "params_schema": {},
+    },
+    "suitescript.sync": {
+        "description": (
+            "Sync SuiteScript files from the connected NetSuite account into the workspace. "
+            "Discovers JavaScript files and custom scripts via SuiteQL, fetches their content, "
+            "and loads them into the 'NetSuite Scripts' workspace for browsing and editing. "
+            "Use when the user says 'sync scripts', 'load suitescripts', or 'import scripts from NetSuite'."
+        ),
+        "execute": suitescript_sync_tool.execute,
         "params_schema": {},
     },
     "rag.search": {

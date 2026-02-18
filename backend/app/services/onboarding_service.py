@@ -5,6 +5,7 @@ import structlog
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.connection import Connection
 from app.models.tenant_profile import TenantProfile
 from app.services.audit_service import log_event
 
@@ -123,6 +124,28 @@ async def confirm_profile(
         logger.info("onboarding.metadata_discovery_queued", tenant_id=str(tenant_id))
     except Exception:
         logger.warning("onboarding.metadata_discovery_queue_failed", exc_info=True)
+
+    # Queue SuiteScript file sync in background
+    try:
+        from app.workers.tasks.suitescript_sync import netsuite_suitescript_sync
+
+        conn_result = await db.execute(
+            select(Connection).where(
+                Connection.tenant_id == tenant_id,
+                Connection.provider == "netsuite",
+                Connection.status == "active",
+            )
+        )
+        connection = conn_result.scalar_one_or_none()
+        if connection:
+            netsuite_suitescript_sync.delay(
+                tenant_id=str(tenant_id),
+                connection_id=str(connection.id),
+                user_id=str(user_id),
+            )
+            logger.info("onboarding.suitescript_sync_queued", tenant_id=str(tenant_id))
+    except Exception:
+        logger.warning("onboarding.suitescript_sync_queue_failed", exc_info=True)
 
     await db.refresh(profile)
 
