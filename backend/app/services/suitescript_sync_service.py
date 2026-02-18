@@ -21,7 +21,6 @@ import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.connection import Connection
 from app.models.script_sync import ScriptSyncState
 from app.models.workspace import Workspace, WorkspaceFile
 from app.services.netsuite_client import _normalize_account_id, execute_suiteql
@@ -65,15 +64,17 @@ async def discover_scripts(access_token: str, account_id: str) -> list[dict[str,
         for row in result.get("rows", []):
             cols = result.get("columns", [])
             item = dict(zip(cols, row)) if cols else {}
-            files.append({
-                "file_id": str(item.get("id", "")),
-                "name": item.get("name", "unknown.js"),
-                "folder": str(item.get("folder", "")),
-                "script_type": None,
-                "size": int(item.get("filesize", 0) or 0),
-                "modified": item.get("lastmodifieddate"),
-                "source": "file_cabinet",
-            })
+            files.append(
+                {
+                    "file_id": str(item.get("id", "")),
+                    "name": item.get("name", "unknown.js"),
+                    "folder": str(item.get("folder", "")),
+                    "script_type": None,
+                    "size": int(item.get("filesize", 0) or 0),
+                    "modified": item.get("lastmodifieddate"),
+                    "source": "file_cabinet",
+                }
+            )
         logger.info("suitescript_sync.files_discovered", count=len(files))
     except Exception:
         logger.warning("suitescript_sync.file_discovery_failed", exc_info=True)
@@ -95,13 +96,15 @@ async def discover_scripts(access_token: str, account_id: str) -> list[dict[str,
         for row in result.get("rows", []):
             cols = result.get("columns", [])
             item = dict(zip(cols, row)) if cols else {}
-            scripts.append({
-                "file_id": str(item.get("scriptfile", item.get("id", ""))),
-                "name": item.get("name", "unknown_script"),
-                "script_id": item.get("scriptid", ""),
-                "script_type": item.get("scripttype", ""),
-                "source": "custom_script",
-            })
+            scripts.append(
+                {
+                    "file_id": str(item.get("scriptfile", item.get("id", ""))),
+                    "name": item.get("name", "unknown_script"),
+                    "script_id": item.get("scriptid", ""),
+                    "script_type": item.get("scripttype", ""),
+                    "source": "custom_script",
+                }
+            )
         logger.info("suitescript_sync.scripts_discovered", count=len(scripts))
     except Exception:
         logger.warning("suitescript_sync.script_discovery_failed", exc_info=True)
@@ -170,10 +173,7 @@ async def batch_fetch_contents(
     for i in range(0, len(files), BATCH_SIZE):
         batch = files[i : i + BATCH_SIZE]
 
-        tasks = [
-            fetch_file_content(f["file_id"], access_token, account_id)
-            for f in batch
-        ]
+        tasks = [fetch_file_content(f["file_id"], access_token, account_id) for f in batch]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         for file_meta, result in zip(batch, results):
@@ -318,14 +318,16 @@ async def _ensure_directories(
             )
         )
         if not result.scalar_one_or_none():
-            db.add(WorkspaceFile(
-                tenant_id=tenant_id,
-                workspace_id=workspace_id,
-                path=dir_path,
-                file_name=PurePosixPath(dir_path).name,
-                is_directory=True,
-                size_bytes=0,
-            ))
+            db.add(
+                WorkspaceFile(
+                    tenant_id=tenant_id,
+                    workspace_id=workspace_id,
+                    path=dir_path,
+                    file_name=PurePosixPath(dir_path).name,
+                    is_directory=True,
+                    size_bytes=0,
+                )
+            )
 
     await db.flush()
 
@@ -351,9 +353,7 @@ async def sync_scripts_to_workspace(
     ws = await _get_or_create_workspace(db, tenant_id, user_id)
 
     # 2. Get or create sync state
-    result = await db.execute(
-        select(ScriptSyncState).where(ScriptSyncState.tenant_id == tenant_id)
-    )
+    result = await db.execute(select(ScriptSyncState).where(ScriptSyncState.tenant_id == tenant_id))
     sync_state = result.scalar_one_or_none()
     if not sync_state:
         sync_state = ScriptSyncState(
@@ -447,9 +447,7 @@ async def sync_scripts_to_workspace(
 
 async def get_sync_status(db: AsyncSession, tenant_id: uuid.UUID) -> dict[str, Any] | None:
     """Return the current sync state for a tenant, or None if never synced."""
-    result = await db.execute(
-        select(ScriptSyncState).where(ScriptSyncState.tenant_id == tenant_id)
-    )
+    result = await db.execute(select(ScriptSyncState).where(ScriptSyncState.tenant_id == tenant_id))
     state = result.scalar_one_or_none()
     if not state:
         return None
