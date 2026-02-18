@@ -34,9 +34,7 @@ def netsuite_suitescript_sync(
     """Discover and load SuiteScript files from NetSuite into workspace."""
     loop = asyncio.new_event_loop()
     try:
-        return loop.run_until_complete(
-            _execute(tenant_id, connection_id, user_id)
-        )
+        return loop.run_until_complete(_execute(tenant_id, connection_id, user_id))
     finally:
         loop.close()
 

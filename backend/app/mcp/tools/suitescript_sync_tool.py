@@ -36,8 +36,7 @@ async def execute(params: dict, context: dict | None = None, **kwargs) -> dict:
         return {
             "error": True,
             "message": (
-                "No active NetSuite connection found. "
-                "Please connect your NetSuite account first via Settings."
+                "No active NetSuite connection found. Please connect your NetSuite account first via Settings."
             ),
         }
 
