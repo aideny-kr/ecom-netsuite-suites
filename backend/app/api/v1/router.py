@@ -4,11 +4,15 @@ from app.api.v1 import (
     audit,
     auth,
     chat,
+    chat_api_keys,
+    chat_integration,
     connections,
     health,
     jobs,
     mcp_connectors,
     netsuite_auth,
+    onboarding,
+    policies,
     schedules,
     sync,
     tables,
@@ -34,3 +38,8 @@ api_router.include_router(schedules.router)
 api_router.include_router(health.router)
 api_router.include_router(workspaces.router)
 api_router.include_router(workspaces.changeset_router)
+api_router.include_router(workspaces.run_router)
+api_router.include_router(onboarding.router)
+api_router.include_router(policies.router)
+api_router.include_router(chat_api_keys.router)
+api_router.include_router(chat_integration.router)

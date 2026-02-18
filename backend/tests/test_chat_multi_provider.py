@@ -72,6 +72,8 @@ class TestMultiProviderOrchestrator:
             patch(f"{_ORCH}.retriever_node", new_callable=AsyncMock),
             patch(f"{_ORCH}.build_all_tool_definitions", new_callable=AsyncMock, return_value=[]),
             patch(f"{_ORCH}.log_event", new_callable=AsyncMock),
+            patch(f"{_ORCH}.get_active_template", new_callable=AsyncMock, return_value="You are a helpful assistant."),
+            patch("app.services.policy_service.get_active_policy", new_callable=AsyncMock, return_value=None),
         ):
             result = await run_chat_turn(
                 db=db,
@@ -131,6 +133,8 @@ class TestMultiProviderOrchestrator:
                 return_value='{"ok": true}',
             ),
             patch(f"{_ORCH}.log_event", new_callable=AsyncMock),
+            patch(f"{_ORCH}.get_active_template", new_callable=AsyncMock, return_value="You are a helpful assistant."),
+            patch("app.services.policy_service.get_active_policy", new_callable=AsyncMock, return_value=None),
         ):
             result = await run_chat_turn(
                 db=db,
@@ -173,6 +177,8 @@ class TestMultiProviderOrchestrator:
             patch(f"{_ORCH}.retriever_node", new_callable=AsyncMock),
             patch(f"{_ORCH}.build_all_tool_definitions", new_callable=AsyncMock, return_value=[]),
             patch(f"{_ORCH}.log_event", new_callable=AsyncMock),
+            patch(f"{_ORCH}.get_active_template", new_callable=AsyncMock, return_value="You are a helpful assistant."),
+            patch("app.services.policy_service.get_active_policy", new_callable=AsyncMock, return_value=None),
         ):
             result = await run_chat_turn(
                 db=db,

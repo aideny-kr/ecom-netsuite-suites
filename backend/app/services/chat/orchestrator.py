@@ -5,6 +5,7 @@ Claude decides which tools to call, sees results (including errors),
 and can retry/correct — all within a single turn, up to MAX_STEPS iterations.
 """
 
+import json
 import logging
 import re
 import uuid
@@ -21,8 +22,9 @@ from app.services.chat.nodes import (
     retriever_node,
     sanitize_user_input,
 )
-from app.services.chat.prompts import AGENTIC_SYSTEM_PROMPT, INPUT_SANITIZATION_PREFIX
+from app.services.chat.prompts import INPUT_SANITIZATION_PREFIX
 from app.services.chat.tools import build_all_tool_definitions, execute_tool_call
+from app.services.prompt_template_service import get_active_template
 
 logger = logging.getLogger(__name__)
 
@@ -102,8 +104,17 @@ async def run_chat_turn(
     user_content += f"User question: {sanitized_input}"
     messages.append({"role": "user", "content": user_content})
 
-    # ── Build tool definitions ──
+    # ── Build tool definitions (with policy-based filtering) ──
     tool_definitions = await build_all_tool_definitions(db, tenant_id)
+
+    # ── Resolve tenant-specific system prompt ──
+    system_prompt = await get_active_template(db, tenant_id)
+
+    # ── Load active policy for tool gating + output redaction ──
+    from app.services.policy_service import evaluate_tool_call as policy_evaluate
+    from app.services.policy_service import get_active_policy, redact_output
+
+    active_policy = await get_active_policy(db, tenant_id)
 
     # ── Resolve tenant AI config ──
     provider, model, api_key, is_byok = await get_tenant_ai_config(db, tenant_id)
@@ -119,7 +130,7 @@ async def run_chat_turn(
         response = await adapter.create_message(
             model=model,
             max_tokens=4096,
-            system=AGENTIC_SYSTEM_PROMPT,
+            system=system_prompt,
             messages=messages,
             tools=tool_definitions if tool_definitions else None,
         )
@@ -137,14 +148,28 @@ async def run_chat_turn(
         # Execute each tool call and collect results
         tool_results_content = []
         for block in response.tool_use_blocks:
-            result_str = await execute_tool_call(
-                tool_name=block.name,
-                tool_input=block.input,
-                tenant_id=tenant_id,
-                actor_id=user_id,
-                correlation_id=correlation_id,
-                db=db,
-            )
+            # Policy evaluation: check if tool call is allowed
+            policy_result = policy_evaluate(active_policy, block.name, block.input)
+            if not policy_result["allowed"]:
+                result_str = json.dumps({"error": f"Policy blocked: {policy_result.get('reason', 'Not allowed')}"})
+            else:
+                result_str = await execute_tool_call(
+                    tool_name=block.name,
+                    tool_input=block.input,
+                    tenant_id=tenant_id,
+                    actor_id=user_id,
+                    correlation_id=correlation_id,
+                    db=db,
+                )
+
+                # Output redaction: strip blocked fields from tool results
+                if active_policy and active_policy.blocked_fields:
+                    try:
+                        parsed = json.loads(result_str)
+                        parsed = redact_output(active_policy, parsed)
+                        result_str = json.dumps(parsed, default=str)
+                    except (json.JSONDecodeError, TypeError):
+                        pass  # Non-JSON result, skip redaction
 
             tool_results_content.append(
                 {
@@ -176,7 +201,7 @@ async def run_chat_turn(
         response = await adapter.create_message(
             model=model,
             max_tokens=2048,
-            system=AGENTIC_SYSTEM_PROMPT,
+            system=system_prompt,
             messages=messages,
         )
         total_input_tokens += response.usage.input_tokens

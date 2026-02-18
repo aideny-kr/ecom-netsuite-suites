@@ -10,13 +10,24 @@ from app.models.canonical import (
     Refund,
 )
 from app.models.chat import ChatMessage, ChatSession, DocChunk
+from app.models.chat_api_key import ChatApiKey
 from app.models.connection import Connection
 from app.models.job import Job
 from app.models.mcp_connector import McpConnector
 from app.models.pipeline import CursorState, EvidencePack, Schedule
+from app.models.policy_profile import PolicyProfile
+from app.models.prompt_template import SystemPromptTemplate
 from app.models.tenant import Tenant, TenantConfig
+from app.models.tenant_profile import TenantProfile
 from app.models.user import Permission, Role, RolePermission, User, UserRole
-from app.models.workspace import Workspace, WorkspaceChangeSet, WorkspaceFile, WorkspacePatch
+from app.models.workspace import (
+    Workspace,
+    WorkspaceArtifact,
+    WorkspaceChangeSet,
+    WorkspaceFile,
+    WorkspacePatch,
+    WorkspaceRun,
+)
 
 __all__ = [
     "Base",
@@ -48,4 +59,10 @@ __all__ = [
     "WorkspaceFile",
     "WorkspaceChangeSet",
     "WorkspacePatch",
+    "WorkspaceRun",
+    "WorkspaceArtifact",
+    "TenantProfile",
+    "PolicyProfile",
+    "SystemPromptTemplate",
+    "ChatApiKey",
 ]

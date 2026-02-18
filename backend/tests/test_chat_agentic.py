@@ -47,6 +47,7 @@ def _patch_orchestrator(**overrides):
         "retriever_node": AsyncMock(),
         "build_all_tool_definitions": AsyncMock(return_value=[]),
         "log_event": AsyncMock(),
+        "get_active_template": AsyncMock(return_value="You are a helpful assistant."),
     }
     defaults.update(overrides)
 
@@ -102,6 +103,8 @@ class TestAgenticSingleStep:
             patch(f"{_ORCH}.retriever_node", new_callable=AsyncMock),
             patch(f"{_ORCH}.build_all_tool_definitions", new_callable=AsyncMock, return_value=[]),
             patch(f"{_ORCH}.log_event", new_callable=AsyncMock),
+            patch(f"{_ORCH}.get_active_template", new_callable=AsyncMock, return_value="You are a helpful assistant."),
+            patch("app.services.policy_service.get_active_policy", new_callable=AsyncMock, return_value=None),
         ):
             result = await run_chat_turn(
                 db=db,
@@ -168,6 +171,8 @@ class TestAgenticToolCall:
                 return_value='{"data": [{"id": 1}]}',
             ),
             patch(f"{_ORCH}.log_event", new_callable=AsyncMock),
+            patch(f"{_ORCH}.get_active_template", new_callable=AsyncMock, return_value="You are a helpful assistant."),
+            patch("app.services.policy_service.get_active_policy", new_callable=AsyncMock, return_value=None),
         ):
             result = await run_chat_turn(
                 db=db,
@@ -247,6 +252,8 @@ class TestAgenticToolRetry:
                 side_effect=tool_results,
             ),
             patch(f"{_ORCH}.log_event", new_callable=AsyncMock),
+            patch(f"{_ORCH}.get_active_template", new_callable=AsyncMock, return_value="You are a helpful assistant."),
+            patch("app.services.policy_service.get_active_policy", new_callable=AsyncMock, return_value=None),
         ):
             result = await run_chat_turn(
                 db=db,
@@ -317,6 +324,8 @@ class TestAgenticMaxSteps:
                 return_value='{"data": []}',
             ),
             patch(f"{_ORCH}.log_event", new_callable=AsyncMock),
+            patch(f"{_ORCH}.get_active_template", new_callable=AsyncMock, return_value="You are a helpful assistant."),
+            patch("app.services.policy_service.get_active_policy", new_callable=AsyncMock, return_value=None),
         ):
             result = await run_chat_turn(
                 db=db,
@@ -367,6 +376,8 @@ class TestAgenticAllowlistEnforcement:
             patch(f"{_ORCH}.retriever_node", new_callable=AsyncMock),
             patch(f"{_ORCH}.build_all_tool_definitions", new_callable=AsyncMock, return_value=[]),
             patch(f"{_ORCH}.log_event", new_callable=AsyncMock),
+            patch(f"{_ORCH}.get_active_template", new_callable=AsyncMock, return_value="You are a helpful assistant."),
+            patch("app.services.policy_service.get_active_policy", new_callable=AsyncMock, return_value=None),
         ):
             result = await run_chat_turn(
                 db=db,

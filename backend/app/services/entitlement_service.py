@@ -19,6 +19,9 @@ PLAN_LIMITS = {
         "chat": True,
         "byok_ai": False,
         "workspace": False,
+        "onboarding": False,
+        "chat_api": False,
+        "policies": False,
     },
     "pro": {
         "max_connections": 50,
@@ -28,6 +31,9 @@ PLAN_LIMITS = {
         "chat": True,
         "byok_ai": True,
         "workspace": True,
+        "onboarding": True,
+        "chat_api": True,
+        "policies": False,
     },
     "max": {
         "max_connections": -1,
@@ -37,6 +43,9 @@ PLAN_LIMITS = {
         "chat": True,
         "byok_ai": True,
         "workspace": True,
+        "onboarding": True,
+        "chat_api": True,
+        "policies": True,
     },
 }
 
@@ -97,6 +106,15 @@ async def check_entitlement(
 
     if feature == "workspace":
         return limits["workspace"]
+
+    if feature == "onboarding":
+        return limits["onboarding"]
+
+    if feature == "chat_api":
+        return limits["chat_api"]
+
+    if feature == "policies":
+        return limits["policies"]
 
     return True
 

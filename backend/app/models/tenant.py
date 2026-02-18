@@ -50,4 +50,7 @@ class TenantConfig(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     ai_api_key_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     ai_key_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False, server_default="1")
 
+    # Onboarding
+    onboarding_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
     tenant: Mapped["Tenant"] = relationship("Tenant", back_populates="config")
