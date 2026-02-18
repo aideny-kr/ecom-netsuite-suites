@@ -15,12 +15,10 @@ export function useWorkspaceChat(workspaceId: string | null) {
   const [error, setError] = useState<string | null>(null);
   const queryClient = useQueryClient();
 
+  // Account-wide sessions (no workspace_id filter) so chat is shared everywhere
   const { data: sessions = [] } = useQuery<ChatSession[]>({
-    queryKey: ["workspace-chat-sessions", workspaceId],
-    queryFn: () =>
-      apiClient.get<ChatSession[]>(
-        `/api/v1/chat/sessions?workspace_id=${workspaceId}`,
-      ),
+    queryKey: ["chat-sessions"],
+    queryFn: () => apiClient.get<ChatSession[]>("/api/v1/chat/sessions"),
     enabled: !!workspaceId,
   });
 
@@ -44,15 +42,12 @@ export function useWorkspaceChat(workspaceId: string | null) {
       },
     });
 
+  // Create account-level sessions (no workspace_id) so they appear on /chat too
   const createSession = useMutation({
     mutationFn: () =>
-      apiClient.post<ChatSession>("/api/v1/chat/sessions", {
-        workspace_id: workspaceId,
-      }),
+      apiClient.post<ChatSession>("/api/v1/chat/sessions", {}),
     onSuccess: (session) => {
-      queryClient.invalidateQueries({
-        queryKey: ["workspace-chat-sessions", workspaceId],
-      });
+      queryClient.invalidateQueries({ queryKey: ["chat-sessions"] });
       setActiveSessionId(session.id);
     },
   });
@@ -75,9 +70,7 @@ export function useWorkspaceChat(workspaceId: string | null) {
         queryClient.invalidateQueries({
           queryKey: ["chat-session", activeSessionId],
         });
-        queryClient.invalidateQueries({
-          queryKey: ["workspace-chat-sessions", workspaceId],
-        });
+        queryClient.invalidateQueries({ queryKey: ["chat-sessions"] });
       }
     },
     onError: (err: Error) => {

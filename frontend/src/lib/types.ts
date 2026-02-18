@@ -45,6 +45,7 @@ export interface Connection {
   label: string;
   status: "active" | "inactive" | "error";
   credentials_set: boolean;
+  metadata_json: Record<string, unknown> | null;
   last_sync_at: string | null;
   created_at: string;
   updated_at: string;

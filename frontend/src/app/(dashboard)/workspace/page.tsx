@@ -1,10 +1,21 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { useSearchParams } from "next/navigation";
-import { Plus, Search } from "lucide-react";
+import { useSearchParams, useRouter } from "next/navigation";
+import {
+  Plus,
+  Search,
+  Brain,
+  Wifi,
+  WifiOff,
+  RefreshCw,
+  Loader2,
+  CheckCircle2,
+  AlertCircle,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Badge } from "@/components/ui/badge";
 import {
   Dialog,
   DialogContent,
@@ -30,9 +41,46 @@ import {
 } from "@/hooks/use-workspace";
 import { useChangesets, useChangesetDiff } from "@/hooks/use-changesets";
 import { useRuns } from "@/hooks/use-runs";
+import { useAiSettings } from "@/hooks/use-ai-settings";
+import { useConnections } from "@/hooks/use-connections";
+import { useMcpConnectors } from "@/hooks/use-mcp-connectors";
+import {
+  useSuiteScriptSyncStatus,
+  useTriggerSuiteScriptSync,
+} from "@/hooks/use-suitescript-sync";
+import { AI_PROVIDERS, AI_MODELS } from "@/lib/constants";
 import { cn } from "@/lib/utils";
+import { useQueryClient } from "@tanstack/react-query";
 
 type RightTab = "changesets" | "runs" | "chat";
+
+function detectNetSuiteEnvironment(accountId: string | undefined): {
+  label: string;
+  variant: "sandbox" | "production";
+} {
+  if (!accountId) return { label: "Unknown", variant: "production" };
+  const upper = accountId.toUpperCase();
+  if (
+    upper.includes("TSTDRV") ||
+    upper.includes("-SB") ||
+    upper.includes("_SB")
+  ) {
+    return { label: "Sandbox", variant: "sandbox" };
+  }
+  return { label: "Production", variant: "production" };
+}
+
+function timeAgo(dateStr: string): string {
+  const seconds = Math.floor(
+    (Date.now() - new Date(dateStr).getTime()) / 1000,
+  );
+  if (seconds < 60) return "just now";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  return `${Math.floor(hours / 24)}d ago`;
+}
 
 export default function WorkspacePage() {
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string | null>(
@@ -62,6 +110,49 @@ export default function WorkspacePage() {
   const { data: runs = [] } = useRuns(selectedWorkspaceId);
   const { data: diffData } = useChangesetDiff(viewingDiffId);
   const searchParams = useSearchParams();
+  const router = useRouter();
+  const queryClient = useQueryClient();
+
+  // Context bar hooks
+  const { data: aiConfig } = useAiSettings();
+  const { data: connections = [] } = useConnections();
+  const { data: mcpConnectors = [] } = useMcpConnectors();
+  const { data: syncStatus } = useSuiteScriptSyncStatus();
+  const triggerSync = useTriggerSuiteScriptSync();
+
+  // AI model display
+  const aiProvider = aiConfig?.ai_provider || "";
+  const aiModel = aiConfig?.ai_model || "";
+  const providerLabel =
+    AI_PROVIDERS.find((p) => p.value === aiProvider)?.label || "Platform Default";
+  const modelLabel =
+    (aiProvider && AI_MODELS[aiProvider]?.find((m) => m.value === aiModel)?.label) ||
+    providerLabel;
+
+  // NetSuite connection
+  const nsConnection = connections.find(
+    (c) => c.provider === "netsuite" && c.status === "active",
+  );
+  const nsAccountId = nsConnection?.metadata_json?.account_id as
+    | string
+    | undefined;
+  const nsEnv = detectNetSuiteEnvironment(nsAccountId);
+  const hasMcp = mcpConnectors.some(
+    (mc) => mc.provider === "netsuite_mcp" && mc.is_enabled,
+  );
+
+  // SuiteScript sync
+  const isSyncing =
+    syncStatus?.status === "in_progress" || syncStatus?.status === "pending";
+  const handleSync = useCallback(() => {
+    triggerSync.mutate(undefined, {
+      onSuccess: () => {
+        queryClient.invalidateQueries({
+          queryKey: ["workspace-files", selectedWorkspaceId],
+        });
+      },
+    });
+  }, [triggerSync, queryClient, selectedWorkspaceId]);
 
   // Deep-link: auto-select workspace + file from ?file= query param (e.g. from chat mention)
   const findFileInTree = useCallback(
@@ -218,6 +309,94 @@ export default function WorkspacePage() {
             />
           </div>
         </div>
+      </div>
+
+      {/* Context Bar */}
+      <div className="flex items-center gap-4 border-b bg-muted/30 px-4 py-1.5 text-[12px]">
+        {/* AI Model */}
+        <button
+          className="flex items-center gap-1.5 text-muted-foreground hover:text-foreground"
+          onClick={() => router.push("/settings")}
+        >
+          <Brain className="h-3.5 w-3.5" />
+          <span>{modelLabel}</span>
+        </button>
+
+        <div className="h-4 w-px bg-border" />
+
+        {/* NetSuite Connection */}
+        <div className="flex items-center gap-1.5">
+          {nsConnection ? (
+            <>
+              <Wifi className="h-3.5 w-3.5 text-green-500" />
+              <span className="text-muted-foreground">
+                {nsAccountId || "Connected"}
+              </span>
+              <Badge
+                variant="outline"
+                className={cn(
+                  "px-1.5 py-0 text-[10px]",
+                  nsEnv.variant === "sandbox"
+                    ? "border-amber-500/50 text-amber-600"
+                    : "border-green-500/50 text-green-600",
+                )}
+              >
+                {nsEnv.label}
+              </Badge>
+              <span className="text-[11px] text-muted-foreground">
+                {hasMcp ? "MCP \u2713" : ""}{" "}
+                {nsConnection ? "OAuth \u2713" : ""}
+              </span>
+            </>
+          ) : (
+            <button
+              className="flex items-center gap-1.5 text-muted-foreground hover:text-foreground"
+              onClick={() => router.push("/settings")}
+            >
+              <WifiOff className="h-3.5 w-3.5" />
+              <span>Not Connected</span>
+            </button>
+          )}
+        </div>
+
+        <div className="h-4 w-px bg-border" />
+
+        {/* SuiteScript Sync */}
+        <button
+          onClick={handleSync}
+          disabled={!nsConnection || isSyncing}
+          className="flex items-center gap-1.5 text-muted-foreground hover:text-foreground disabled:opacity-50"
+        >
+          {isSyncing ? (
+            <>
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              <span>Syncing...</span>
+            </>
+          ) : syncStatus?.status === "failed" ? (
+            <>
+              <AlertCircle className="h-3.5 w-3.5 text-destructive" />
+              <span className="text-destructive">Sync Failed</span>
+            </>
+          ) : syncStatus?.status === "completed" ? (
+            <>
+              <CheckCircle2 className="h-3.5 w-3.5 text-green-500" />
+              <span>
+                {syncStatus.total_files_loaded} files
+              </span>
+            </>
+          ) : (
+            <>
+              <RefreshCw className="h-3.5 w-3.5" />
+              <span>Sync Scripts</span>
+            </>
+          )}
+        </button>
+
+        {syncStatus?.last_sync_at && (
+          <span className="ml-auto text-[11px] text-muted-foreground">
+            Last sync: {timeAgo(syncStatus.last_sync_at)}
+          </span>
+        )}
       </div>
 
       {/* Main content */}
