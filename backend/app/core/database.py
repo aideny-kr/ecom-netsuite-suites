@@ -22,17 +22,18 @@ def _build_connect_args(url: str) -> dict:
     return {}
 
 
-# Pool settings: smaller for Supabase pooler (it manages its own pool)
-_is_remote = _is_supabase(settings.DATABASE_URL)
+# Prefer direct connection (bypasses PgBouncer) when available
+_db_url = settings.DATABASE_URL_DIRECT or settings.DATABASE_URL
+_is_remote = _is_supabase(_db_url)
 _pool_size = 5 if _is_remote else 20
 _max_overflow = 5 if _is_remote else 10
 
 engine = create_async_engine(
-    settings.DATABASE_URL,
+    _db_url,
     echo=settings.APP_DEBUG,
     pool_size=_pool_size,
     max_overflow=_max_overflow,
-    connect_args=_build_connect_args(settings.DATABASE_URL),
+    connect_args=_build_connect_args(_db_url),
     pool_pre_ping=True,
     pool_recycle=300 if _is_remote else -1,
 )
