@@ -165,3 +165,54 @@ class ArtifactResponse(BaseModel):
     created_at: str
 
     model_config = {"from_attributes": True}
+
+
+# --- SuiteQL Assertions ---
+
+
+class AssertionExpected(BaseModel):
+    type: str = Field(..., description="row_count | scalar | no_rows")
+    operator: str = Field("eq", description="eq | ne | gt | gte | lt | lte | between")
+    value: float | int | None = None
+    value2: float | int | None = None
+
+
+class AssertionDefinition(BaseModel):
+    name: str = Field(..., min_length=1, max_length=255)
+    query: str = Field(..., min_length=1, max_length=4096)
+    expected: AssertionExpected
+    notes: str | None = None
+    tags: list[str] | None = None
+
+
+class SuiteQLAssertionsRequest(BaseModel):
+    assertions: list[AssertionDefinition] = Field(..., min_length=1, max_length=50)
+
+
+# --- Deploy Sandbox ---
+
+
+class DeploySandboxRequest(BaseModel):
+    override_reason: str | None = Field(
+        None,
+        description="Admin override reason if prerequisites not fully met",
+        max_length=1000,
+    )
+    require_assertions: bool = Field(
+        False,
+        description="Whether SuiteQL assertions must pass before deploy",
+    )
+
+
+# --- UAT Report ---
+
+
+class UATReportResponse(BaseModel):
+    changeset_id: str
+    changeset_title: str
+    changeset_status: str
+    gates: dict
+    runs: list[dict]
+    assertions_report: dict | None
+    overall_status: str
+    generated_at: str

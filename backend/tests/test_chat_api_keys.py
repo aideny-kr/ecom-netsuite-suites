@@ -253,6 +253,26 @@ async def test_integration_chat_invalid_key(client: AsyncClient):
     assert resp.status_code == 401
 
 
+@pytest.mark.asyncio
+async def test_integration_chat_rejects_key_without_chat_scope(client: AsyncClient, pro_admin):
+    _, headers = pro_admin
+    key_resp = await client.post(
+        "/api/v1/chat-api-keys",
+        json={"name": "No Chat Scope", "scopes": ["workspace.read"]},
+        headers=headers,
+    )
+    assert key_resp.status_code == 201
+    raw_key = key_resp.json()["raw_key"]
+
+    resp = await client.post(
+        "/api/v1/integration/chat",
+        json={"message": "Hello"},
+        headers={"X-API-Key": raw_key},
+    )
+    assert resp.status_code == 403
+    assert "chat" in resp.json()["detail"]
+
+
 # ---------------------------------------------------------------------------
 # Free Plan Entitlement Gating
 # ---------------------------------------------------------------------------

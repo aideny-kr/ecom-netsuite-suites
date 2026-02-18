@@ -1,4 +1,4 @@
-"""Runner service — execute SDF validate and Jest unit tests in isolated sandboxes."""
+"""Runner service — execute SDF validate, Jest unit tests, SuiteQL assertions, and sandbox deploy."""
 
 from __future__ import annotations
 
@@ -41,6 +41,14 @@ ALLOWED_COMMANDS: dict[str, dict] = {
     "jest_unit_test": {
         "cmd": ["npx", "jest", "--json", "--coverage"],
         "timeout": 120,
+    },
+    "suiteql_assertions": {
+        "cmd": [],  # No subprocess — executed via SuiteQL client
+        "timeout": 300,
+    },
+    "deploy_sandbox": {
+        "cmd": ["suitecloud", "project:deploy", "--destinationFolder", "/SuiteScripts"],
+        "timeout": 600,
     },
 }
 
@@ -318,7 +326,99 @@ async def _audit_run_event(
     )
 
 
-async def execute_run(db: AsyncSession, run_id: uuid.UUID, tenant_id: uuid.UUID) -> WorkspaceRun:
+async def _execute_assertions_run(
+    db: AsyncSession,
+    run: WorkspaceRun,
+    extra_params: dict[str, Any],
+) -> WorkspaceRun:
+    """Execute SuiteQL assertions run (no subprocess — uses assertion service)."""
+    from app.services import assertion_service
+
+    start_time = time.monotonic()
+    assertions = extra_params.get("assertions", [])
+
+    if not assertions:
+        run.status = "error"
+        run.completed_at = datetime.now(timezone.utc)
+        run.duration_ms = int((time.monotonic() - start_time) * 1000)
+        await _store_artifact(db, run, "stderr", "No assertions provided")
+        await _audit_run_event(db, run, action="run_failed", status="error", error_message="No assertions provided")
+        await db.flush()
+        return run
+
+    # Create a stub SuiteQL executor that uses the MCP netsuite.suiteql tool
+    async def suiteql_executor(query: str, limit: int, timeout: int) -> dict:
+        from app.mcp.tools.netsuite_suiteql import execute as suiteql_execute
+
+        context = {"tenant_id": str(run.tenant_id), "db": db}
+        result = await suiteql_execute({"query": query, "limit": limit}, context=context)
+        return result
+
+    try:
+        report = await assertion_service.execute_assertions(
+            db=db,
+            tenant_id=run.tenant_id,
+            run_id=run.id,
+            assertions=assertions,
+            suiteql_executor=suiteql_executor,
+            correlation_id=run.correlation_id,
+            actor_id=run.triggered_by,
+        )
+    except Exception as exc:
+        duration_ms = int((time.monotonic() - start_time) * 1000)
+        run.status = "error"
+        run.completed_at = datetime.now(timezone.utc)
+        run.duration_ms = duration_ms
+        await _store_artifact(db, run, "stderr", f"Assertion execution error: {exc}")
+        await _audit_run_event(db, run, action="run_failed", status="error", error_message=str(exc))
+        await db.flush()
+        return run
+
+    duration_ms = int((time.monotonic() - start_time) * 1000)
+    run.status = "passed" if report["overall_status"] == "passed" else "failed"
+    run.completed_at = datetime.now(timezone.utc)
+    run.duration_ms = duration_ms
+    run.exit_code = 0 if run.status == "passed" else 1
+
+    # Store assertion report as artifact
+    await _store_artifact(db, run, "suiteql_report", json.dumps(report, default=str))
+    await _store_artifact(
+        db,
+        run,
+        "result_json",
+        json.dumps(
+            {
+                "run_id": str(run.id),
+                "run_type": run.run_type,
+                "status": run.status,
+                "summary": report["summary"],
+                "duration_ms": duration_ms,
+            },
+            default=str,
+        ),
+    )
+
+    await _audit_run_event(
+        db,
+        run,
+        action="run_succeeded" if run.status == "passed" else "run_failed",
+        status="success" if run.status == "passed" else "error",
+        payload={
+            "run_type": run.run_type,
+            "summary": report["summary"],
+            "duration_ms": duration_ms,
+        },
+    )
+    await db.flush()
+    return run
+
+
+async def execute_run(
+    db: AsyncSession,
+    run_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+    extra_params: dict[str, Any] | None = None,
+) -> WorkspaceRun:
     """Execute a workspace run: materialize snapshot, execute, and store immutable artifacts."""
     result = await db.execute(
         select(WorkspaceRun).where(WorkspaceRun.id == run_id, WorkspaceRun.tenant_id == tenant_id)
@@ -337,6 +437,11 @@ async def execute_run(db: AsyncSession, run_id: uuid.UUID, tenant_id: uuid.UUID)
     )
 
     cmd_config = validate_run_type(run.run_type)
+
+    # --- SuiteQL assertions: no subprocess, use assertion service ---
+    if run.run_type == "suiteql_assertions":
+        return await _execute_assertions_run(db, run, extra_params or {})
+
     tmp_dir = tempfile.mkdtemp(prefix=f"workspace_run_{run.tenant_id}_")
     start_time = time.monotonic()
 

@@ -16,11 +16,15 @@ def _serialize_policy(p) -> dict:
     return {
         "id": str(p.id),
         "tenant_id": str(p.tenant_id),
+        "version": p.version,
         "name": p.name,
+        "sensitivity_default": p.sensitivity_default,
         "is_active": p.is_active,
+        "is_locked": p.is_locked,
         "read_only_mode": p.read_only_mode,
         "allowed_record_types": p.allowed_record_types,
         "blocked_fields": p.blocked_fields,
+        "tool_allowlist": p.tool_allowlist,
         "max_rows_per_query": p.max_rows_per_query,
         "require_row_limit": p.require_row_limit,
         "custom_rules": p.custom_rules,
@@ -84,7 +88,9 @@ async def update_policy(
             user_id=user.id,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+        detail = str(exc)
+        status_code = status.HTTP_409_CONFLICT if "locked" in detail.lower() else status.HTTP_404_NOT_FOUND
+        raise HTTPException(status_code=status_code, detail=detail)
     await db.commit()
     return _serialize_policy(policy)
 

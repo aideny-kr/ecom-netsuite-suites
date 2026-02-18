@@ -4,13 +4,13 @@ import { useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { Check, X, Play, Eye, ChevronDown, Shield, TestTube } from "lucide-react";
+import { Check, X, Play, Eye, ChevronDown, Shield, TestTube, Rocket } from "lucide-react";
 import type { ChangeSet } from "@/lib/types";
 import {
   useTransitionChangeset,
   useApplyChangeset,
 } from "@/hooks/use-changesets";
-import { useTriggerValidate, useTriggerUnitTests } from "@/hooks/use-runs";
+import { useTriggerValidate, useTriggerUnitTests, useTriggerDeploySandbox } from "@/hooks/use-runs";
 
 interface ChangesetPanelProps {
   changesets: ChangeSet[];
@@ -30,6 +30,7 @@ export function ChangesetPanel({ changesets, onViewDiff }: ChangesetPanelProps) 
   const apply = useApplyChangeset();
   const triggerValidate = useTriggerValidate();
   const triggerTests = useTriggerUnitTests();
+  const triggerDeploy = useTriggerDeploySandbox();
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
   if (changesets.length === 0) {
@@ -167,16 +168,31 @@ export function ChangesetPanel({ changesets, onViewDiff }: ChangesetPanelProps) 
                     </>
                   )}
                   {cs.status === "approved" && (
-                    <Button
-                      size="sm"
-                      variant="default"
-                      className="h-7 text-[12px]"
-                      onClick={() => apply.mutate(cs.id)}
-                      disabled={apply.isPending}
-                    >
-                      <Play className="mr-1 h-3 w-3" />
-                      Apply
-                    </Button>
+                    <>
+                      <Button
+                        size="sm"
+                        variant="default"
+                        className="h-7 text-[12px]"
+                        onClick={() => apply.mutate(cs.id)}
+                        disabled={apply.isPending}
+                      >
+                        <Play className="mr-1 h-3 w-3" />
+                        Apply
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="h-7 text-[12px]"
+                        onClick={() =>
+                          triggerDeploy.mutate({ changesetId: cs.id })
+                        }
+                        disabled={triggerDeploy.isPending}
+                        title="Deploy to NetSuite sandbox (requires validate + tests pass)"
+                      >
+                        <Rocket className="mr-1 h-3 w-3" />
+                        Deploy Sandbox
+                      </Button>
+                    </>
                   )}
                 </div>
               </div>

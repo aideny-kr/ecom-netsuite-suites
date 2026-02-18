@@ -182,8 +182,17 @@ async def me(
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
+    from app.models.tenant import TenantConfig
+
     result = await db.execute(select(Tenant).where(Tenant.id == user.tenant_id))
     tenant = result.scalar_one_or_none()
+
+    config_result = await db.execute(select(TenantConfig).where(TenantConfig.tenant_id == user.tenant_id))
+    config = config_result.scalar_one_or_none()
+    onboarding_completed_at = (
+        config.onboarding_completed_at.isoformat() if config and config.onboarding_completed_at else None
+    )
+
     return UserProfile(
         id=str(user.id),
         tenant_id=str(user.tenant_id),
@@ -192,6 +201,7 @@ async def me(
         full_name=user.full_name,
         actor_type=user.actor_type,
         roles=[ur.role.name for ur in user.user_roles],
+        onboarding_completed_at=onboarding_completed_at,
     )
 
 

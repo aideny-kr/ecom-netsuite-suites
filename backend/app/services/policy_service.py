@@ -3,7 +3,7 @@
 import uuid
 
 import structlog
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.policy_profile import PolicyProfile
@@ -33,13 +33,32 @@ async def create_policy(
     user_id: uuid.UUID,
 ) -> PolicyProfile:
     """Create a new policy profile."""
+    version_result = await db.execute(
+        select(func.coalesce(func.max(PolicyProfile.version), 0)).where(PolicyProfile.tenant_id == tenant_id)
+    )
+    next_version = (version_result.scalar() or 0) + 1
+
+    if data.get("is_active", True):
+        await db.execute(
+            update(PolicyProfile)
+            .where(
+                PolicyProfile.tenant_id == tenant_id,
+                PolicyProfile.is_active.is_(True),
+            )
+            .values(is_active=False)
+        )
+
     policy = PolicyProfile(
         tenant_id=tenant_id,
+        version=next_version,
         name=data["name"],
         is_active=data.get("is_active", True),
+        is_locked=data.get("is_locked", False),
+        sensitivity_default=data.get("sensitivity_default", "financial"),
         read_only_mode=data.get("read_only_mode", True),
         allowed_record_types=data.get("allowed_record_types"),
         blocked_fields=data.get("blocked_fields"),
+        tool_allowlist=data.get("tool_allowlist"),
         max_rows_per_query=data.get("max_rows_per_query", 1000),
         require_row_limit=data.get("require_row_limit", True),
         custom_rules=data.get("custom_rules"),
@@ -56,7 +75,7 @@ async def create_policy(
         actor_id=user_id,
         resource_type="policy_profile",
         resource_id=str(policy.id),
-        payload={"name": policy.name},
+        payload={"name": policy.name, "version": policy.version, "is_locked": policy.is_locked},
     )
     return policy
 
@@ -78,17 +97,33 @@ async def update_policy(
     policy = result.scalar_one_or_none()
     if not policy:
         raise ValueError("Policy not found")
+    if policy.is_locked:
+        raise ValueError("Policy is locked and cannot be edited")
 
     updatable_fields = {
         "name",
+        "sensitivity_default",
         "is_active",
         "read_only_mode",
         "allowed_record_types",
         "blocked_fields",
+        "tool_allowlist",
         "max_rows_per_query",
         "require_row_limit",
         "custom_rules",
     }
+
+    if data.get("is_active") is True:
+        await db.execute(
+            update(PolicyProfile)
+            .where(
+                PolicyProfile.tenant_id == tenant_id,
+                PolicyProfile.id != policy.id,
+                PolicyProfile.is_active.is_(True),
+            )
+            .values(is_active=False)
+        )
+
     for key, value in data.items():
         if value is not None and key in updatable_fields:
             setattr(policy, key, value)
@@ -104,6 +139,33 @@ async def update_policy(
         resource_type="policy_profile",
         resource_id=str(policy.id),
         payload={"name": policy.name},
+    )
+    return policy
+
+
+async def lock_active_policy(
+    db: AsyncSession,
+    tenant_id: uuid.UUID,
+    user_id: uuid.UUID,
+) -> PolicyProfile | None:
+    """Lock the currently active policy profile for a tenant."""
+    policy = await get_active_policy(db, tenant_id)
+    if policy is None:
+        return None
+    if policy.is_locked:
+        return policy
+
+    policy.is_locked = True
+    await db.flush()
+    await log_event(
+        db=db,
+        tenant_id=tenant_id,
+        category="policy",
+        action="policy.locked",
+        actor_id=user_id,
+        resource_type="policy_profile",
+        resource_id=str(policy.id),
+        payload={"version": policy.version},
     )
     return policy
 
@@ -177,6 +239,11 @@ def evaluate_tool_call(
     if policy is None:
         # No custom policy — permissive default (read-only)
         return {"allowed": True}
+
+    if policy.tool_allowlist:
+        allowlist = policy.tool_allowlist
+        if isinstance(allowlist, list) and tool_name not in allowlist:
+            return {"allowed": False, "reason": f"Tool not allowed by policy: {tool_name}"}
 
     # Check if the tool involves a blocked record type
     if policy.allowed_record_types:

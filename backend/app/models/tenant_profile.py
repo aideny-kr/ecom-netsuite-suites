@@ -25,6 +25,7 @@ class TenantProfile(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="draft")
     industry: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    team_size: Mapped[str | None] = mapped_column(String(20), nullable=True)
     business_description: Mapped[str | None] = mapped_column(Text, nullable=True)
     netsuite_account_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     chart_of_accounts: Mapped[dict | None] = mapped_column(JSON, nullable=True)

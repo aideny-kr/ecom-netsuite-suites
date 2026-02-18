@@ -1,8 +1,9 @@
 "use client";
 
+import { useState, useCallback, useEffect } from "react";
 import { useAuth } from "@/providers/auth-provider";
 import { Sidebar } from "@/components/sidebar";
-
+import { OnboardingWizard } from "@/components/onboarding/onboarding-wizard";
 
 export default function DashboardLayout({
   children,
@@ -10,6 +11,22 @@ export default function DashboardLayout({
   children: React.ReactNode;
 }) {
   const { user, isLoading } = useAuth();
+  const [showOnboarding, setShowOnboarding] = useState(false);
+
+  useEffect(() => {
+    if (user && !user.onboarding_completed_at) {
+      const skipped = localStorage.getItem("onboarding_skipped");
+      if (!skipped) {
+        setShowOnboarding(true);
+      }
+    }
+  }, [user]);
+
+  const handleOnboardingComplete = useCallback(() => {
+    setShowOnboarding(false);
+    // Reload user profile to get updated onboarding_completed_at
+    window.location.reload();
+  }, []);
 
   if (isLoading) {
     return (
@@ -28,6 +45,9 @@ export default function DashboardLayout({
 
   return (
     <div className="flex h-screen overflow-hidden">
+      {showOnboarding && (
+        <OnboardingWizard onComplete={handleOnboardingComplete} />
+      )}
       <Sidebar />
       <main className="flex-1 overflow-auto bg-[hsl(240_5%_97.5%)] scrollbar-thin">
         <div className="mx-auto max-w-[1400px] px-8 py-8">

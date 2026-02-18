@@ -22,7 +22,11 @@ from app.services.chat.nodes import (
     retriever_node,
     sanitize_user_input,
 )
-from app.services.chat.prompts import INPUT_SANITIZATION_PREFIX
+from app.services.chat.onboarding_tools import (
+    ONBOARDING_TOOL_DEFINITIONS,
+    execute_onboarding_tool,
+)
+from app.services.chat.prompts import INPUT_SANITIZATION_PREFIX, ONBOARDING_SYSTEM_PROMPT
 from app.services.chat.tools import build_all_tool_definitions, execute_tool_call
 from app.services.prompt_template_service import get_active_template
 
@@ -38,6 +42,7 @@ async def run_chat_turn(
     user_id: uuid.UUID,
     tenant_id: uuid.UUID,
     user_msg: ChatMessage | None = None,
+    wizard_step: str | None = None,
 ) -> ChatMessage:
     """Execute an agentic chat turn with Claude's native tool use.
 
@@ -66,33 +71,37 @@ async def run_chat_turn(
         db.add(user_msg)
         await db.flush()
 
-    # ── Pre-loop: RAG retrieval for doc context ──
-    sanitized_input = sanitize_user_input(user_message)
-    state = OrchestratorState(
-        user_message=sanitized_input,
-        tenant_id=tenant_id,
-        actor_id=user_id,
-        session_id=session.id,
-        conversation_history=history_messages,
-        route={"needs_docs": True},  # always attempt RAG
-    )
-    await retriever_node(state, db)
+    is_onboarding = getattr(session, "session_type", "chat") == "onboarding"
 
-    # Build RAG context block
+    # ── Pre-loop: RAG retrieval for doc context (skip for onboarding) ──
+    sanitized_input = sanitize_user_input(user_message)
     rag_context = ""
     citations: list[dict] = []
-    if state.doc_chunks:
-        rag_parts = []
-        for chunk in state.doc_chunks:
-            rag_parts.append(f"[Documentation: {chunk['title']}]\n{chunk['content']}")
-            citations.append(
-                {
-                    "type": "doc",
-                    "title": chunk["title"],
-                    "snippet": chunk["content"][:200],
-                }
-            )
-        rag_context = "\n\n".join(rag_parts)
+
+    if not is_onboarding:
+        state = OrchestratorState(
+            user_message=sanitized_input,
+            tenant_id=tenant_id,
+            actor_id=user_id,
+            session_id=session.id,
+            conversation_history=history_messages,
+            route={"needs_docs": True},  # always attempt RAG
+        )
+        await retriever_node(state, db)
+
+        # Build RAG context block
+        if state.doc_chunks:
+            rag_parts = []
+            for chunk in state.doc_chunks:
+                rag_parts.append(f"[Documentation: {chunk['title']}]\n{chunk['content']}")
+                citations.append(
+                    {
+                        "type": "doc",
+                        "title": chunk["title"],
+                        "snippet": chunk["content"][:200],
+                    }
+                )
+            rag_context = "\n\n".join(rag_parts)
 
     # ── Build messages for Claude ──
     messages: list[dict] = list(history_messages)
@@ -105,10 +114,22 @@ async def run_chat_turn(
     messages.append({"role": "user", "content": user_content})
 
     # ── Build tool definitions (with policy-based filtering) ──
-    tool_definitions = await build_all_tool_definitions(db, tenant_id)
+    if is_onboarding:
+        tool_definitions = list(ONBOARDING_TOOL_DEFINITIONS)
+    else:
+        tool_definitions = await build_all_tool_definitions(db, tenant_id)
 
     # ── Resolve tenant-specific system prompt ──
-    system_prompt = await get_active_template(db, tenant_id)
+    if is_onboarding:
+        from app.services.chat.prompts import ONBOARDING_STEP_CONTEXTS
+
+        system_prompt = ONBOARDING_SYSTEM_PROMPT
+        if wizard_step and wizard_step in ONBOARDING_STEP_CONTEXTS:
+            system_prompt = (
+                f"{ONBOARDING_SYSTEM_PROMPT}\n\n## Current Step: {wizard_step}\n{ONBOARDING_STEP_CONTEXTS[wizard_step]}"
+            )
+    else:
+        system_prompt = await get_active_template(db, tenant_id)
 
     # ── Load active policy for tool gating + output redaction ──
     from app.services.policy_service import evaluate_tool_call as policy_evaluate
@@ -148,28 +169,42 @@ async def run_chat_turn(
         # Execute each tool call and collect results
         tool_results_content = []
         for block in response.tool_use_blocks:
-            # Policy evaluation: check if tool call is allowed
-            policy_result = policy_evaluate(active_policy, block.name, block.input)
-            if not policy_result["allowed"]:
-                result_str = json.dumps({"error": f"Policy blocked: {policy_result.get('reason', 'Not allowed')}"})
-            else:
-                result_str = await execute_tool_call(
+            # Route tool execution: onboarding tools vs standard tools
+            if is_onboarding and block.name in (
+                "save_onboarding_profile",
+                "start_netsuite_oauth",
+                "check_netsuite_connection",
+            ):
+                result_str = await execute_onboarding_tool(
                     tool_name=block.name,
                     tool_input=block.input,
                     tenant_id=tenant_id,
-                    actor_id=user_id,
-                    correlation_id=correlation_id,
+                    user_id=user_id,
                     db=db,
                 )
+            else:
+                # Policy evaluation: check if tool call is allowed
+                policy_result = policy_evaluate(active_policy, block.name, block.input)
+                if not policy_result["allowed"]:
+                    result_str = json.dumps({"error": f"Policy blocked: {policy_result.get('reason', 'Not allowed')}"})
+                else:
+                    result_str = await execute_tool_call(
+                        tool_name=block.name,
+                        tool_input=block.input,
+                        tenant_id=tenant_id,
+                        actor_id=user_id,
+                        correlation_id=correlation_id,
+                        db=db,
+                    )
 
-                # Output redaction: strip blocked fields from tool results
-                if active_policy and active_policy.blocked_fields:
-                    try:
-                        parsed = json.loads(result_str)
-                        parsed = redact_output(active_policy, parsed)
-                        result_str = json.dumps(parsed, default=str)
-                    except (json.JSONDecodeError, TypeError):
-                        pass  # Non-JSON result, skip redaction
+                    # Output redaction: strip blocked fields from tool results
+                    if active_policy and active_policy.blocked_fields:
+                        try:
+                            parsed = json.loads(result_str)
+                            parsed = redact_output(active_policy, parsed)
+                            result_str = json.dumps(parsed, default=str)
+                        except (json.JSONDecodeError, TypeError):
+                            pass  # Non-JSON result, skip redaction
 
             tool_results_content.append(
                 {
@@ -249,7 +284,7 @@ async def run_chat_turn(
             "steps": len(tool_calls_log),
             "input_tokens": total_input_tokens,
             "output_tokens": total_output_tokens,
-            "doc_chunks_count": len(state.doc_chunks) if state.doc_chunks else 0,
+            "doc_chunks_count": 0 if is_onboarding else (len(state.doc_chunks) if state.doc_chunks else 0),
             "tools_called": [t["tool"] for t in tool_calls_log],
         },
     )

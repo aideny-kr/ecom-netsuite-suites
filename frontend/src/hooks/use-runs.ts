@@ -2,7 +2,12 @@
 
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiClient } from "@/lib/api-client";
-import type { WorkspaceRun, WorkspaceArtifact } from "@/lib/types";
+import type {
+  WorkspaceRun,
+  WorkspaceArtifact,
+  AssertionDefinition,
+  UATReport,
+} from "@/lib/types";
 
 export function useRuns(workspaceId: string | null) {
   return useQuery<WorkspaceRun[]>({
@@ -72,5 +77,59 @@ export function useTriggerUnitTests() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["workspace-runs"] });
     },
+  });
+}
+
+export function useTriggerAssertions() {
+  const queryClient = useQueryClient();
+  return useMutation<
+    WorkspaceRun,
+    Error,
+    { changesetId: string; assertions: AssertionDefinition[] }
+  >({
+    mutationFn: ({ changesetId, assertions }) =>
+      apiClient.post<WorkspaceRun>(
+        `/api/v1/changesets/${changesetId}/suiteql-assertions`,
+        { assertions },
+      ),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["workspace-runs"] });
+    },
+  });
+}
+
+export function useTriggerDeploySandbox() {
+  const queryClient = useQueryClient();
+  return useMutation<
+    WorkspaceRun,
+    Error,
+    {
+      changesetId: string;
+      overrideReason?: string;
+      requireAssertions?: boolean;
+    }
+  >({
+    mutationFn: ({ changesetId, overrideReason, requireAssertions }) =>
+      apiClient.post<WorkspaceRun>(
+        `/api/v1/changesets/${changesetId}/deploy-sandbox`,
+        {
+          override_reason: overrideReason,
+          require_assertions: requireAssertions ?? false,
+        },
+      ),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["workspace-runs"] });
+    },
+  });
+}
+
+export function useUATReport(changesetId: string | null) {
+  return useQuery<UATReport>({
+    queryKey: ["uat-report", changesetId],
+    queryFn: () =>
+      apiClient.get<UATReport>(
+        `/api/v1/changesets/${changesetId}/uat-report`,
+      ),
+    enabled: !!changesetId,
   });
 }

@@ -14,6 +14,7 @@ class ChatSession(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
     user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
     title: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    session_type: Mapped[str] = mapped_column(String(20), default="chat", server_default="chat", nullable=False)
     is_archived: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     messages: Mapped[list["ChatMessage"]] = relationship(

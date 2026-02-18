@@ -22,6 +22,8 @@ const statusStyles: Record<string, string> = {
 const runTypeLabels: Record<string, string> = {
   sdf_validate: "SDF Validate",
   jest_unit_test: "Jest Tests",
+  suiteql_assertions: "SuiteQL Assertions",
+  deploy_sandbox: "Sandbox Deploy",
 };
 
 function formatDuration(ms: number | null): string {

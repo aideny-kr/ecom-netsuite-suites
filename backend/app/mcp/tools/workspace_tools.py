@@ -118,6 +118,157 @@ async def execute_apply_patch(params: dict[str, Any], context: dict[str, Any]) -
     }
 
 
+async def execute_run_suiteql_assertions(params: dict[str, Any], context: dict[str, Any]) -> dict:
+    """Trigger SuiteQL assertion run against a changeset. Requires workspace.manage permission."""
+    from app.core.dependencies import has_permission
+    from app.services import audit_service, runner_service
+    from app.services import workspace_service as ws_svc
+    from app.services.assertion_service import validate_assertions
+
+    db = context["db"]
+    tenant_id = context["tenant_id"]
+    actor_id = context.get("actor_id")
+    actor_uuid = uuid.UUID(actor_id) if actor_id else None
+    if actor_uuid is None:
+        return {"error": "Actor ID required for assertion run", "row_count": 0}
+
+    allowed = await has_permission(db, actor_uuid, "workspace.manage")
+    if not allowed:
+        return {"error": "Permission denied: workspace.manage required", "row_count": 0}
+
+    changeset_raw = params.get("changeset_id")
+    if not changeset_raw:
+        return {"error": "changeset_id is required", "row_count": 0}
+    changeset_id = uuid.UUID(changeset_raw)
+
+    assertions = params.get("assertions", [])
+    if not assertions:
+        return {"error": "At least one assertion is required", "row_count": 0}
+
+    try:
+        validate_assertions(assertions)
+    except ValueError as e:
+        return {"error": str(e), "row_count": 0}
+
+    cs = await ws_svc.get_changeset(db, changeset_id, uuid.UUID(tenant_id))
+    if cs is None:
+        return {"error": "Changeset not found", "row_count": 0}
+    if cs.status != "approved":
+        return {"error": f"Changeset must be approved (current: {cs.status})", "row_count": 0}
+
+    run = await runner_service.create_run(
+        db,
+        tenant_id=uuid.UUID(tenant_id),
+        workspace_id=cs.workspace_id,
+        run_type="suiteql_assertions",
+        triggered_by=actor_uuid,
+        changeset_id=changeset_id,
+    )
+    await audit_service.log_event(
+        db=db,
+        tenant_id=uuid.UUID(tenant_id),
+        category="workspace",
+        action="workspace.run.triggered",
+        actor_id=actor_uuid,
+        resource_type="workspace_run",
+        resource_id=str(run.id),
+        correlation_id=run.correlation_id,
+        payload={"run_type": "suiteql_assertions", "changeset_id": str(changeset_id)},
+    )
+    await db.flush()
+
+    from app.workers.tasks.workspace_run import workspace_run_task
+
+    workspace_run_task.delay(
+        tenant_id=tenant_id,
+        run_id=str(run.id),
+        correlation_id=run.correlation_id,
+        extra_params={"assertions": assertions},
+    )
+
+    return {"run_id": str(run.id), "status": run.status, "row_count": 1}
+
+
+async def execute_deploy_sandbox(params: dict[str, Any], context: dict[str, Any]) -> dict:
+    """Trigger gated sandbox deploy. Requires workspace.manage permission + prerequisites."""
+    from app.core.dependencies import has_permission
+    from app.services import audit_service, runner_service
+    from app.services import workspace_service as ws_svc
+    from app.services.deploy_service import check_deploy_prerequisites
+
+    db = context["db"]
+    tenant_id = context["tenant_id"]
+    actor_id = context.get("actor_id")
+    actor_uuid = uuid.UUID(actor_id) if actor_id else None
+    if actor_uuid is None:
+        return {"error": "Actor ID required for deploy", "row_count": 0}
+
+    allowed = await has_permission(db, actor_uuid, "workspace.manage")
+    if not allowed:
+        return {"error": "Permission denied: workspace.manage required", "row_count": 0}
+
+    changeset_raw = params.get("changeset_id")
+    if not changeset_raw:
+        return {"error": "changeset_id is required", "row_count": 0}
+    changeset_id = uuid.UUID(changeset_raw)
+
+    cs = await ws_svc.get_changeset(db, changeset_id, uuid.UUID(tenant_id))
+    if cs is None:
+        return {"error": "Changeset not found", "row_count": 0}
+    if cs.status != "approved":
+        return {"error": f"Changeset must be approved (current: {cs.status})", "row_count": 0}
+
+    override_reason = params.get("override_reason")
+    require_assertions = params.get("require_assertions", False)
+
+    gate_result = await check_deploy_prerequisites(
+        db,
+        changeset_id,
+        uuid.UUID(tenant_id),
+        require_assertions=require_assertions,
+        override_reason=override_reason,
+    )
+
+    if not gate_result["allowed"]:
+        return {"error": gate_result["blocked_reason"], "row_count": 0}
+
+    run = await runner_service.create_run(
+        db,
+        tenant_id=uuid.UUID(tenant_id),
+        workspace_id=cs.workspace_id,
+        run_type="deploy_sandbox",
+        triggered_by=actor_uuid,
+        changeset_id=changeset_id,
+    )
+    await audit_service.log_event(
+        db=db,
+        tenant_id=uuid.UUID(tenant_id),
+        category="workspace",
+        action="workspace.run.triggered",
+        actor_id=actor_uuid,
+        resource_type="workspace_run",
+        resource_id=str(run.id),
+        correlation_id=run.correlation_id,
+        payload={
+            "run_type": "deploy_sandbox",
+            "changeset_id": str(changeset_id),
+            "gates": gate_result["gates"],
+            "override": gate_result["override"],
+        },
+    )
+    await db.flush()
+
+    from app.workers.tasks.workspace_run import workspace_run_task
+
+    workspace_run_task.delay(
+        tenant_id=tenant_id,
+        run_id=str(run.id),
+        correlation_id=run.correlation_id,
+    )
+
+    return {"run_id": str(run.id), "status": run.status, "gates": gate_result["gates"], "row_count": 1}
+
+
 async def execute_run_validate(params: dict[str, Any], context: dict[str, Any]) -> dict:
     """Trigger an SDF validate run against workspace files."""
     return await _execute_privileged_run(params, context, run_type="sdf_validate")

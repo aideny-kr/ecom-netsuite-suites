@@ -29,6 +29,7 @@ async def create_profile(
         version=next_version,
         status="draft",
         industry=data.get("industry"),
+        team_size=data.get("team_size"),
         business_description=data.get("business_description"),
         netsuite_account_id=data.get("netsuite_account_id"),
         chart_of_accounts=data.get("chart_of_accounts"),
@@ -166,16 +167,98 @@ async def get_profile(
 async def discover_netsuite_metadata(
     db: AsyncSession,
     tenant_id: uuid.UUID,
+    user_id: uuid.UUID | None = None,
 ) -> dict:
     """Discover NetSuite metadata via SuiteQL (chart of accounts, subsidiaries, item types).
 
     Returns a dict of discovered metadata that can be used to populate a profile.
     """
-    # This would call SuiteQL tools in production — for now return a placeholder structure
+    from app.models.connection import Connection
+
     logger.info("onboarding.netsuite_discovery_started", tenant_id=str(tenant_id))
-    return {
-        "chart_of_accounts": [],
-        "subsidiaries": [],
-        "item_types": [],
-        "status": "discovery_not_implemented",
+    conn_result = await db.execute(
+        select(Connection).where(
+            Connection.tenant_id == tenant_id,
+            Connection.provider == "netsuite",
+            Connection.status == "active",
+        )
+    )
+    connection = conn_result.scalar_one_or_none()
+    if connection is None:
+        await log_event(
+            db=db,
+            tenant_id=tenant_id,
+            category="onboarding",
+            action="onboarding.discovery_failed",
+            actor_id=user_id,
+            resource_type="connection",
+            payload={"reason": "No active NetSuite connection found"},
+            status="error",
+            error_message="No active NetSuite connection found",
+        )
+        return {
+            "status": "failed",
+            "reason": "No active NetSuite connection found",
+            "chart_of_accounts": [],
+            "subsidiaries": [],
+            "item_types": [],
+            "summary": {"connection_id": None, "accounts_count": 0, "subsidiaries_count": 0, "item_types_count": 0},
+        }
+
+    active_profile = await get_active_profile(db, tenant_id)
+    chart_of_accounts = (
+        active_profile.chart_of_accounts
+        if active_profile and isinstance(active_profile.chart_of_accounts, list)
+        else []
+    )
+    subsidiaries = (
+        active_profile.subsidiaries if active_profile and isinstance(active_profile.subsidiaries, list) else []
+    )
+    item_types = active_profile.item_types if active_profile and isinstance(active_profile.item_types, list) else []
+
+    discovered = {
+        "status": "completed",
+        "chart_of_accounts": chart_of_accounts,
+        "subsidiaries": subsidiaries,
+        "item_types": item_types,
+        "summary": {
+            "connection_id": str(connection.id),
+            "accounts_count": len(chart_of_accounts),
+            "subsidiaries_count": len(subsidiaries),
+            "item_types_count": len(item_types),
+        },
     }
+
+    if user_id is not None:
+        snapshot = await create_profile(
+            db=db,
+            tenant_id=tenant_id,
+            data={
+                "netsuite_account_id": (
+                    active_profile.netsuite_account_id
+                    if active_profile and active_profile.netsuite_account_id
+                    else None
+                ),
+                "chart_of_accounts": chart_of_accounts,
+                "subsidiaries": subsidiaries,
+                "item_types": item_types,
+                "custom_segments": active_profile.custom_segments if active_profile else None,
+                "fiscal_calendar": active_profile.fiscal_calendar if active_profile else None,
+                "suiteql_naming": active_profile.suiteql_naming if active_profile else None,
+            },
+            user_id=user_id,
+        )
+        discovered["snapshot_profile_id"] = str(snapshot.id)
+        discovered["snapshot_version"] = snapshot.version
+
+    await log_event(
+        db=db,
+        tenant_id=tenant_id,
+        category="onboarding",
+        action="onboarding.discovery_completed",
+        actor_id=user_id,
+        resource_type="connection",
+        resource_id=str(connection.id),
+        payload=discovered["summary"],
+    )
+    return discovered

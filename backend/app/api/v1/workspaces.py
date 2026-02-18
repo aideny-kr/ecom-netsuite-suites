@@ -1,6 +1,8 @@
-"""REST API for Dev Workspace: workspaces, files, changesets, patches, runs."""
+"""REST API for Dev Workspace: workspaces, files, changesets, patches, runs, assertions, deploy."""
 
+import json
 import uuid
+from datetime import datetime, timezone
 
 import structlog
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
@@ -12,6 +14,8 @@ from app.models.user import User
 from app.schemas.workspace import (
     ChangeSetCreate,
     ChangeSetTransition,
+    DeploySandboxRequest,
+    SuiteQLAssertionsRequest,
     WorkspaceCreate,
 )
 from app.services import audit_service, runner_service
@@ -493,6 +497,245 @@ async def trigger_unit_tests(
     db: AsyncSession = Depends(get_db),
 ):
     return await _trigger_run(changeset_id, "jest_unit_test", user, db)
+
+
+@changeset_router.post("/{changeset_id}/suiteql-assertions", status_code=status.HTTP_202_ACCEPTED)
+async def trigger_suiteql_assertions(
+    changeset_id: uuid.UUID,
+    body: SuiteQLAssertionsRequest,
+    user: User = Depends(require_permission("workspace.manage")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Trigger SuiteQL assertion run. Assertions are SELECT-only, table-allowlisted, LIMIT-capped."""
+    from app.services.assertion_service import validate_assertions
+
+    cs = await ws_svc.get_changeset(db, changeset_id, user.tenant_id)
+    if not cs:
+        raise HTTPException(status_code=404, detail="Changeset not found")
+    if cs.status != "approved":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Changeset must be approved before running assertions (current: {cs.status})",
+        )
+
+    assertion_dicts = [a.model_dump() for a in body.assertions]
+    try:
+        validate_assertions(assertion_dicts)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    run = await runner_service.create_run(
+        db,
+        tenant_id=user.tenant_id,
+        workspace_id=cs.workspace_id,
+        run_type="suiteql_assertions",
+        triggered_by=user.id,
+        changeset_id=changeset_id,
+    )
+
+    await audit_service.log_event(
+        db=db,
+        tenant_id=user.tenant_id,
+        category="workspace",
+        action="workspace.run.triggered",
+        actor_id=user.id,
+        resource_type="workspace_run",
+        resource_id=str(run.id),
+        payload={
+            "run_type": "suiteql_assertions",
+            "changeset_id": str(changeset_id),
+            "assertion_count": len(assertion_dicts),
+        },
+    )
+    await db.commit()
+
+    # Dispatch Celery task
+    from app.workers.tasks.workspace_run import workspace_run_task
+
+    workspace_run_task.delay(
+        tenant_id=str(user.tenant_id),
+        run_id=str(run.id),
+        correlation_id=run.correlation_id,
+        extra_params={"assertions": assertion_dicts},
+    )
+
+    return _serialize_run(run)
+
+
+@changeset_router.post("/{changeset_id}/deploy-sandbox", status_code=status.HTTP_202_ACCEPTED)
+async def trigger_deploy_sandbox(
+    changeset_id: uuid.UUID,
+    body: DeploySandboxRequest | None = None,
+    user: User = Depends(require_permission("workspace.manage")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Trigger sandbox deploy. Requires approved changeset + validate pass + unit tests pass."""
+    from app.services.deploy_service import check_deploy_prerequisites
+
+    body = body or DeploySandboxRequest()
+
+    cs = await ws_svc.get_changeset(db, changeset_id, user.tenant_id)
+    if not cs:
+        raise HTTPException(status_code=404, detail="Changeset not found")
+    if cs.status != "approved":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Changeset must be approved before deploy (current: {cs.status})",
+        )
+
+    # Check deploy prerequisites
+    gate_result = await check_deploy_prerequisites(
+        db,
+        changeset_id,
+        user.tenant_id,
+        require_assertions=body.require_assertions,
+        override_reason=body.override_reason,
+    )
+
+    if not gate_result["allowed"]:
+        raise HTTPException(status_code=400, detail=gate_result["blocked_reason"])
+
+    # If override applied, audit it
+    if gate_result["override"]["applied"]:
+        await audit_service.log_event(
+            db=db,
+            tenant_id=user.tenant_id,
+            category="workspace",
+            action="deploy.gate_override",
+            actor_id=user.id,
+            resource_type="changeset",
+            resource_id=str(changeset_id),
+            payload={
+                "override_reason": body.override_reason,
+                "gates": gate_result["gates"],
+            },
+        )
+
+    try:
+        run = await runner_service.create_run(
+            db,
+            tenant_id=user.tenant_id,
+            workspace_id=cs.workspace_id,
+            run_type="deploy_sandbox",
+            triggered_by=user.id,
+            changeset_id=changeset_id,
+        )
+    except runner_service.CommandNotAllowedError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    await audit_service.log_event(
+        db=db,
+        tenant_id=user.tenant_id,
+        category="workspace",
+        action="workspace.run.triggered",
+        actor_id=user.id,
+        resource_type="workspace_run",
+        resource_id=str(run.id),
+        payload={
+            "run_type": "deploy_sandbox",
+            "changeset_id": str(changeset_id),
+            "gates": gate_result["gates"],
+            "override": gate_result["override"],
+        },
+    )
+    await db.commit()
+
+    from app.workers.tasks.workspace_run import workspace_run_task
+
+    workspace_run_task.delay(
+        tenant_id=str(user.tenant_id),
+        run_id=str(run.id),
+        correlation_id=run.correlation_id,
+    )
+
+    return _serialize_run(run)
+
+
+def _gate_status(ok: bool, run) -> str:
+    """Return gate status string for UAT report."""
+    if ok:
+        return "passed"
+    if not run:
+        return "missing"
+    return run.status
+
+
+@changeset_router.get("/{changeset_id}/uat-report")
+async def get_uat_report(
+    changeset_id: uuid.UUID,
+    user: User = Depends(require_permission("workspace.view")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Generate UAT report: aggregated view of validate, tests, assertions, and deploy runs."""
+    from app.services.deploy_service import get_latest_runs_for_changeset
+
+    cs = await ws_svc.get_changeset(db, changeset_id, user.tenant_id)
+    if not cs:
+        raise HTTPException(status_code=404, detail="Changeset not found")
+
+    latest_runs = await get_latest_runs_for_changeset(db, changeset_id, user.tenant_id)
+
+    runs_summary = []
+    for run_type, run in latest_runs.items():
+        if run is not None:
+            runs_summary.append(
+                {
+                    "run_type": run_type,
+                    "run_id": str(run.id),
+                    "status": run.status,
+                    "duration_ms": run.duration_ms,
+                    "started_at": run.started_at.isoformat() if run.started_at else None,
+                    "completed_at": run.completed_at.isoformat() if run.completed_at else None,
+                }
+            )
+
+    # Try to find assertions report artifact
+    assertions_report = None
+    assertion_run = latest_runs.get("suiteql_assertions")
+    if assertion_run:
+        artifacts = await runner_service.get_artifacts(db, assertion_run.id, user.tenant_id)
+        for a in artifacts:
+            if a.artifact_type == "suiteql_report":
+                try:
+                    assertions_report = json.loads(a.content) if a.content else None
+                except (json.JSONDecodeError, TypeError):
+                    assertions_report = None
+                break
+
+    # Compute overall status
+    validate_ok = latest_runs.get("sdf_validate") and latest_runs["sdf_validate"].status == "passed"
+    tests_ok = latest_runs.get("jest_unit_test") and latest_runs["jest_unit_test"].status == "passed"
+    assertions_ok = assertion_run is None or assertion_run.status == "passed"
+    deploy_ok = latest_runs.get("deploy_sandbox") and latest_runs["deploy_sandbox"].status == "passed"
+
+    if deploy_ok:
+        overall = "deployed"
+    elif validate_ok and tests_ok and assertions_ok:
+        overall = "ready_for_deploy"
+    elif any(r and r.status == "failed" for r in latest_runs.values()):
+        overall = "failed"
+    else:
+        overall = "in_progress"
+
+    return {
+        "changeset_id": str(cs.id),
+        "changeset_title": cs.title,
+        "changeset_status": cs.status,
+        "gates": {
+            "validate": _gate_status(validate_ok, latest_runs.get("sdf_validate")),
+            "unit_tests": _gate_status(tests_ok, latest_runs.get("jest_unit_test")),
+            "assertions": (
+                "passed"
+                if (assertion_run and assertion_run.status == "passed")
+                else ("not_run" if not assertion_run else assertion_run.status)
+            ),
+            "deploy": _gate_status(deploy_ok, latest_runs.get("deploy_sandbox")),
+        },
+        "runs": runs_summary,
+        "assertions_report": assertions_report,
+        "overall_status": overall,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 # --- Run query endpoints ---

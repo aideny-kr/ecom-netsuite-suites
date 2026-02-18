@@ -164,4 +164,48 @@ TOOL_REGISTRY = {
             },
         },
     },
+    "workspace.run_suiteql_assertions": {
+        "description": (
+            "Run SuiteQL assertions against NetSuite sandbox. Each assertion is a SELECT-only query "
+            "with expected result. Returns run_id to poll for results."
+        ),
+        "execute": workspace_tools.execute_run_suiteql_assertions,
+        "params_schema": {
+            "changeset_id": {
+                "type": "string",
+                "required": True,
+                "description": "Approved changeset UUID",
+            },
+            "assertions": {
+                "type": "array",
+                "required": True,
+                "description": "Array of assertion objects with name, query, expected",
+            },
+        },
+    },
+    "workspace.deploy_sandbox": {
+        "description": (
+            "Deploy approved changeset to NetSuite sandbox. Requires validate + unit tests passed. "
+            "Returns run_id to poll for results."
+        ),
+        "execute": workspace_tools.execute_deploy_sandbox,
+        "params_schema": {
+            "changeset_id": {
+                "type": "string",
+                "required": True,
+                "description": "Approved changeset UUID to deploy",
+            },
+            "override_reason": {
+                "type": "string",
+                "required": False,
+                "description": "Admin override reason if prerequisites not fully met",
+            },
+            "require_assertions": {
+                "type": "boolean",
+                "required": False,
+                "default": False,
+                "description": "Whether SuiteQL assertions must pass before deploy",
+            },
+        },
+    },
 }

@@ -61,6 +61,24 @@ async def test_create_policy(client: AsyncClient, max_admin):
 
 
 @pytest.mark.asyncio
+async def test_policy_versions_increment_and_only_one_active(client: AsyncClient, max_admin):
+    _, headers = max_admin
+    resp1 = await client.post("/api/v1/policies", json={"name": "Policy A"}, headers=headers)
+    resp2 = await client.post("/api/v1/policies", json={"name": "Policy B"}, headers=headers)
+    assert resp1.status_code == 201
+    assert resp2.status_code == 201
+    assert resp1.json()["version"] == 1
+    assert resp2.json()["version"] == 2
+
+    list_resp = await client.get("/api/v1/policies", headers=headers)
+    assert list_resp.status_code == 200
+    policies = list_resp.json()
+    active_count = sum(1 for p in policies if p["is_active"])
+    assert active_count == 1
+    assert any(p["name"] == "Policy B" and p["is_active"] for p in policies)
+
+
+@pytest.mark.asyncio
 async def test_list_policies(client: AsyncClient, max_admin):
     _, headers = max_admin
     await client.post("/api/v1/policies", json={"name": "Policy A"}, headers=headers)
@@ -99,6 +117,21 @@ async def test_update_policy(client: AsyncClient, max_admin):
 
 
 @pytest.mark.asyncio
+async def test_cannot_update_locked_policy(client: AsyncClient, max_admin):
+    _, headers = max_admin
+    create_resp = await client.post("/api/v1/policies", json={"name": "Locked", "is_locked": True}, headers=headers)
+    policy_id = create_resp.json()["id"]
+
+    update_resp = await client.put(
+        f"/api/v1/policies/{policy_id}",
+        json={"name": "Should Fail"},
+        headers=headers,
+    )
+    assert update_resp.status_code == 409
+    assert "locked" in update_resp.json()["detail"].lower()
+
+
+@pytest.mark.asyncio
 async def test_delete_policy(client: AsyncClient, max_admin):
     _, headers = max_admin
     create_resp = await client.post("/api/v1/policies", json={"name": "To Delete"}, headers=headers)
@@ -132,6 +165,7 @@ async def test_evaluate_blocked_fields():
         allowed_record_types=None,
         require_row_limit=False,
         max_rows_per_query=1000,
+        tool_allowlist=None,
     )
 
     result = evaluate_tool_call(policy, "ns_runSuiteQL", {"query": "SELECT salary FROM employee"})
@@ -148,6 +182,7 @@ async def test_evaluate_requires_row_limit():
         allowed_record_types=None,
         require_row_limit=True,
         max_rows_per_query=1000,
+        tool_allowlist=None,
     )
 
     result = evaluate_tool_call(policy, "ns_runSuiteQL", {"query": "SELECT * FROM transaction"})
@@ -164,10 +199,28 @@ async def test_evaluate_with_row_limit_passes():
         allowed_record_types=None,
         require_row_limit=True,
         max_rows_per_query=1000,
+        tool_allowlist=None,
     )
 
     result = evaluate_tool_call(policy, "ns_runSuiteQL", {"query": "SELECT * FROM transaction WHERE ROWNUM <= 10"})
     assert result["allowed"] is True
+
+
+@pytest.mark.asyncio
+async def test_evaluate_tool_allowlist_blocks_disallowed_tool():
+    from types import SimpleNamespace
+
+    policy = SimpleNamespace(
+        blocked_fields=None,
+        allowed_record_types=None,
+        require_row_limit=False,
+        max_rows_per_query=1000,
+        tool_allowlist=["netsuite.suiteql"],
+    )
+
+    result = evaluate_tool_call(policy, "workspace.propose_patch", {})
+    assert result["allowed"] is False
+    assert "not allowed" in result["reason"].lower()
 
 
 # ---------------------------------------------------------------------------

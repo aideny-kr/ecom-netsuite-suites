@@ -50,7 +50,7 @@ async def test_create_draft_profile(client: AsyncClient, pro_admin):
     user, headers = pro_admin
     resp = await client.post(
         "/api/v1/onboarding/profiles",
-        json={"industry": "Retail", "business_description": "Online fashion retailer"},
+        json={"industry": "Retail", "team_size": "6-20", "business_description": "Online fashion retailer"},
         headers=headers,
     )
     assert resp.status_code == 201
@@ -58,6 +58,7 @@ async def test_create_draft_profile(client: AsyncClient, pro_admin):
     assert data["status"] == "draft"
     assert data["version"] == 1
     assert data["industry"] == "Retail"
+    assert data["team_size"] == "6-20"
 
 
 @pytest.mark.asyncio
@@ -123,6 +124,7 @@ async def test_confirm_profile_generates_template(client: AsyncClient, pro_admin
         "/api/v1/onboarding/profiles",
         json={
             "industry": "E-commerce",
+            "team_size": "21-50",
             "business_description": "Multi-brand online store",
             "netsuite_account_id": "12345",
         },
@@ -143,6 +145,7 @@ async def test_confirm_profile_generates_template(client: AsyncClient, pro_admin
     assert template_resp.status_code == 200
     template = template_resp.json()
     assert "E-commerce" in template["template_text"]
+    assert "Team size: 21-50" in template["template_text"]
     assert template["is_active"] is True
 
 

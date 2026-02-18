@@ -35,6 +35,8 @@ EXPECTED_TOOLS = {
     "workspace.apply_patch",
     "workspace.run_validate",
     "workspace.run_unit_tests",
+    "workspace.deploy_sandbox",
+    "workspace.run_suiteql_assertions",
 }
 
 

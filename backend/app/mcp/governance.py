@@ -151,6 +151,22 @@ TOOL_CONFIGS = {
         "requires_entitlement": "workspace",
         "allowlisted_params": ["workspace_id", "changeset_id"],
     },
+    "workspace.run_suiteql_assertions": {
+        "default_limit": None,
+        "max_limit": None,
+        "timeout_seconds": 300,
+        "rate_limit_per_minute": 5,
+        "requires_entitlement": "workspace",
+        "allowlisted_params": ["changeset_id", "assertions"],
+    },
+    "workspace.deploy_sandbox": {
+        "default_limit": None,
+        "max_limit": None,
+        "timeout_seconds": 600,
+        "rate_limit_per_minute": 2,
+        "requires_entitlement": "workspace",
+        "allowlisted_params": ["changeset_id", "override_reason", "require_assertions"],
+    },
 }
 
 

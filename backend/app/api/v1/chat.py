@@ -161,6 +161,7 @@ async def get_session(
 async def send_message(
     session_id: uuid.UUID,
     body: SendMessageRequest,
+    wizard_step: str | None = None,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -193,6 +194,7 @@ async def send_message(
             user_id=user.id,
             tenant_id=user.tenant_id,
             user_msg=user_msg,
+            wizard_step=wizard_step,
         )
     except ValueError as exc:
         # Missing API key or configuration issue

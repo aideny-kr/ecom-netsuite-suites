@@ -9,6 +9,7 @@ JsonValue = dict[str, Any] | list[Any] | None
 
 class TenantProfileCreate(BaseModel):
     industry: str | None = Field(None, max_length=100)
+    team_size: str | None = Field(None, max_length=20)
     business_description: str | None = None
     netsuite_account_id: str | None = Field(None, max_length=100)
     chart_of_accounts: JsonValue = None
@@ -25,6 +26,7 @@ class TenantProfileResponse(BaseModel):
     version: int
     status: str
     industry: str | None = None
+    team_size: str | None = None
     business_description: str | None = None
     netsuite_account_id: str | None = None
     chart_of_accounts: JsonValue = None

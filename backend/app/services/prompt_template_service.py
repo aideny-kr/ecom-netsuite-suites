@@ -27,6 +27,8 @@ def _build_identity_section(profile: TenantProfile) -> str:
         parts.append(f"The business operates in the {profile.industry} industry.")
     if profile.business_description:
         parts.append(f"Business context: {profile.business_description}")
+    if getattr(profile, "team_size", None):
+        parts.append(f"Team size: {profile.team_size}")
     return "\n".join(parts)
 
 
@@ -93,6 +95,8 @@ def _build_policy_constraints_section(policy: PolicyProfile | None) -> str:
         return "You have read-only access to data. Do not modify any records."
 
     parts = ["POLICY CONSTRAINTS:"]
+    if getattr(policy, "sensitivity_default", None):
+        parts.append(f"- Sensitivity default: {policy.sensitivity_default}")
     if policy.read_only_mode:
         parts.append("- READ-ONLY MODE: You must not modify, create, or delete any records.")
     if policy.allowed_record_types:
@@ -103,6 +107,10 @@ def _build_policy_constraints_section(policy: PolicyProfile | None) -> str:
         fields = policy.blocked_fields
         if isinstance(fields, list):
             parts.append(f"- Blocked fields (never include in queries): {', '.join(fields)}")
+    if getattr(policy, "tool_allowlist", None):
+        allowlist = policy.tool_allowlist
+        if isinstance(allowlist, list) and allowlist:
+            parts.append(f"- Tool allowlist: {', '.join(allowlist)}")
     if policy.max_rows_per_query:
         parts.append(f"- Maximum rows per query: {policy.max_rows_per_query}")
     if policy.require_row_limit:

@@ -31,6 +31,7 @@ export interface User {
   full_name: string;
   role: Role;
   is_active: boolean;
+  onboarding_completed_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -282,6 +283,7 @@ export interface AuthResponse {
 export interface ChatSession {
   id: string;
   title: string | null;
+  session_type?: string;
   is_archived: boolean;
   created_at: string;
   updated_at: string;
@@ -418,7 +420,11 @@ export interface DiffViewResponse {
 
 // --- Workspace Run Types ---
 
-export type RunType = "sdf_validate" | "jest_unit_test";
+export type RunType =
+  | "sdf_validate"
+  | "jest_unit_test"
+  | "suiteql_assertions"
+  | "deploy_sandbox";
 
 export type RunStatus = "queued" | "running" | "passed" | "failed" | "error";
 
@@ -445,4 +451,117 @@ export interface WorkspaceArtifact {
   size_bytes: number;
   sha256_hash: string | null;
   created_at: string;
+}
+
+// --- Onboarding Wizard Types ---
+
+export interface OnboardingChecklistItem {
+  step_key: string;
+  status: "pending" | "completed" | "skipped";
+  completed_at: string | null;
+  completed_by: string | null;
+  metadata: Record<string, unknown> | null;
+}
+
+export interface OnboardingChecklist {
+  items: OnboardingChecklistItem[];
+  all_completed: boolean;
+  finalized_at: string | null;
+}
+
+export interface StepValidationResponse {
+  step_key: string;
+  valid: boolean;
+  reason?: string;
+}
+
+export interface OnboardingAuditEvent {
+  id: number;
+  action: string;
+  created_at: string;
+  correlation_id: string | null;
+  actor_id: string | null;
+  resource_type: string | null;
+  resource_id: string | null;
+  payload: Record<string, unknown> | null;
+}
+
+export interface OnboardingAuditTrailResponse {
+  events: OnboardingAuditEvent[];
+}
+
+// --- SuiteQL Assertions ---
+
+export interface AssertionExpected {
+  type: "row_count" | "scalar" | "no_rows";
+  operator: "eq" | "ne" | "gt" | "gte" | "lt" | "lte" | "between";
+  value?: number;
+  value2?: number;
+}
+
+export interface AssertionDefinition {
+  name: string;
+  query: string;
+  expected: AssertionExpected;
+  notes?: string;
+  tags?: string[];
+}
+
+export interface AssertionResult {
+  name: string;
+  query: string;
+  expected: AssertionExpected;
+  status: "passed" | "failed" | "error";
+  actual_value?: number;
+  row_count?: number;
+  error?: string;
+  duration_ms: number;
+}
+
+export interface AssertionsReport {
+  run_id: string;
+  tenant_id: string;
+  timestamp: string;
+  assertions: AssertionResult[];
+  summary: {
+    total: number;
+    passed: number;
+    failed: number;
+    errors: number;
+  };
+  overall_status: "passed" | "failed";
+  total_duration_ms: number;
+}
+
+// --- UAT Report ---
+
+export interface UATReport {
+  changeset_id: string;
+  changeset_title: string;
+  changeset_status: string;
+  gates: {
+    validate: string;
+    unit_tests: string;
+    assertions: string;
+    deploy: string;
+  };
+  runs: Array<{
+    run_type: string;
+    run_id: string;
+    status: string;
+    duration_ms: number | null;
+    started_at: string | null;
+    completed_at: string | null;
+  }>;
+  assertions_report: AssertionsReport | null;
+  overall_status: string;
+  generated_at: string;
+}
+
+// --- Deploy Sandbox ---
+
+export interface DeployGates {
+  validate: { status: string; run_id: string | null };
+  unit_tests: { status: string; run_id: string | null };
+  assertions: { status: string; run_id: string | null; skipped?: boolean };
 }
