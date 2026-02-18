@@ -39,5 +39,6 @@ class TestAllowedChatToolsFromOld:
             "workspace.read_file",
             "workspace.search",
             "workspace.propose_patch",
+            "suitescript.sync",
         }
         assert ALLOWED_CHAT_TOOLS == expected

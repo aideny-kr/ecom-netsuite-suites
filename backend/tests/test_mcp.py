@@ -235,6 +235,7 @@ class TestToolConfigs:
             "workspace.run_unit_tests",
             "workspace.deploy_sandbox",
             "workspace.run_suiteql_assertions",
+            "suitescript.sync",
         }
         assert set(TOOL_CONFIGS.keys()) == expected
 

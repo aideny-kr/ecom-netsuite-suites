@@ -40,6 +40,7 @@ EXPECTED_TOOLS = {
     "workspace.run_unit_tests",
     "workspace.deploy_sandbox",
     "workspace.run_suiteql_assertions",
+    "suitescript.sync",
 }
 
 
