@@ -7,6 +7,7 @@ from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.connection import Connection
+from app.models.mcp_connector import McpConnector
 from app.models.policy_profile import PolicyProfile
 from app.models.tenant import Tenant
 from app.models.tenant_profile import TenantProfile
@@ -43,6 +44,21 @@ async def _create_active_connection(db: AsyncSession, tenant: Tenant) -> Connect
     db.add(conn)
     await db.flush()
     return conn
+
+
+async def _create_active_mcp_connector(db: AsyncSession, tenant: Tenant) -> McpConnector:
+    mcp = McpConnector(
+        tenant_id=tenant.id,
+        provider="netsuite_mcp",
+        label="NetSuite MCP",
+        server_url="https://mcp.example.com",
+        auth_type="bearer",
+        status="active",
+        is_enabled=True,
+    )
+    db.add(mcp)
+    await db.flush()
+    return mcp
 
 
 async def _create_active_policy(db: AsyncSession, tenant: Tenant, user: User) -> PolicyProfile:
@@ -153,6 +169,7 @@ async def test_complete_connection_requires_discovery_metadata(
 ):
     _, headers = admin_user
     await _create_active_connection(db, tenant_a)
+    await _create_active_mcp_connector(db, tenant_a)
     resp = await client.post(f"{BASE}/checklist/connection/complete", headers=headers)
     assert resp.status_code == 400
     assert "completed discovery run" in resp.json()["detail"]
@@ -167,6 +184,7 @@ async def test_complete_connection_with_discovery_metadata(
 ):
     _, headers = admin_user
     await _create_active_connection(db, tenant_a)
+    await _create_active_mcp_connector(db, tenant_a)
     resp = await client.post(
         f"{BASE}/checklist/connection/complete",
         headers=headers,
@@ -214,26 +232,66 @@ async def test_validate_step_profile_with_confirmed_profile(
 
 
 @pytest.mark.asyncio
-async def test_validate_step_connection_no_connection(
+async def test_validate_connection_requires_both_mcp_and_oauth(
     client: AsyncClient, admin_user: tuple[User, dict], db: AsyncSession
 ):
+    """Neither MCP connector nor Connection exists → valid=False with both reasons."""
     _, headers = admin_user
     resp = await client.get(f"{BASE}/checklist/connection/validate", headers=headers)
     assert resp.status_code == 200
     data = resp.json()
     assert data["valid"] is False
-    assert "No active NetSuite connection" in data["reason"]
+    assert "No active NetSuite MCP connector" in data["reason"]
+    assert "No active NetSuite OAuth connection" in data["reason"]
 
 
 @pytest.mark.asyncio
-async def test_validate_step_connection_with_active_connection(
+async def test_validate_connection_mcp_only(
     client: AsyncClient,
     admin_user: tuple[User, dict],
     tenant_a: Tenant,
     db: AsyncSession,
 ):
+    """MCP connector exists but no Connection → valid=False."""
+    _, headers = admin_user
+    await _create_active_mcp_connector(db, tenant_a)
+    resp = await client.get(f"{BASE}/checklist/connection/validate", headers=headers)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["valid"] is False
+    assert "No active NetSuite OAuth connection" in data["reason"]
+    assert "MCP connector" not in data["reason"]
+
+
+@pytest.mark.asyncio
+async def test_validate_connection_oauth_only(
+    client: AsyncClient,
+    admin_user: tuple[User, dict],
+    tenant_a: Tenant,
+    db: AsyncSession,
+):
+    """Connection exists but no MCP connector → valid=False."""
     _, headers = admin_user
     await _create_active_connection(db, tenant_a)
+    resp = await client.get(f"{BASE}/checklist/connection/validate", headers=headers)
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["valid"] is False
+    assert "No active NetSuite MCP connector" in data["reason"]
+    assert "OAuth connection" not in data["reason"]
+
+
+@pytest.mark.asyncio
+async def test_validate_connection_both_exist(
+    client: AsyncClient,
+    admin_user: tuple[User, dict],
+    tenant_a: Tenant,
+    db: AsyncSession,
+):
+    """Both MCP connector and Connection exist → valid=True."""
+    _, headers = admin_user
+    await _create_active_connection(db, tenant_a)
+    await _create_active_mcp_connector(db, tenant_a)
     resp = await client.get(f"{BASE}/checklist/connection/validate", headers=headers)
     assert resp.status_code == 200
     assert resp.json()["valid"] is True
@@ -472,3 +530,115 @@ async def test_checklist_requires_auth(client: AsyncClient):
 async def test_finalize_requires_auth(client: AsyncClient):
     resp = await client.post(f"{BASE}/finalize")
     assert resp.status_code in (401, 403)
+
+
+# --- Two-phase connection authorize endpoints ---
+
+
+@pytest.mark.asyncio
+async def test_onboarding_mcp_authorize_endpoint(
+    client: AsyncClient, admin_user: tuple[User, dict], db: AsyncSession, monkeypatch
+):
+    """Onboarding MCP authorize endpoint returns authorize_url and state."""
+    _, headers = admin_user
+
+    # Mock Redis to avoid real connection
+    class FakeRedis:
+        async def setex(self, key, ttl, value):
+            pass
+
+        async def aclose(self):
+            pass
+
+    fake_module = type(
+        "M",
+        (),
+        {
+            "from_url": staticmethod(lambda *a, **kw: FakeRedis()),
+        },
+    )()
+    monkeypatch.setattr("app.api.v1.onboarding.aioredis", fake_module)
+
+    resp = await client.get(
+        f"{BASE}/netsuite-mcp/authorize?account_id=12345_SB1&client_id=abc123",
+        headers=headers,
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "authorize_url" in data
+    assert "state" in data
+    assert "abc123" in data["authorize_url"]  # client_id appears in URL
+    assert "system.netsuite.com" in data["authorize_url"]
+
+
+@pytest.mark.asyncio
+async def test_onboarding_mcp_authorize_requires_client_id(
+    client: AsyncClient, admin_user: tuple[User, dict], db: AsyncSession
+):
+    _, headers = admin_user
+    resp = await client.get(
+        f"{BASE}/netsuite-mcp/authorize?account_id=12345&client_id=",
+        headers=headers,
+    )
+    assert resp.status_code == 400
+    assert "client_id" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_onboarding_oauth_authorize_endpoint(
+    client: AsyncClient, admin_user: tuple[User, dict], db: AsyncSession, monkeypatch
+):
+    """Onboarding OAuth authorize endpoint returns authorize_url and state."""
+    _, headers = admin_user
+
+    # Mock Redis
+    class FakeRedis:
+        async def setex(self, key, ttl, value):
+            pass
+
+        async def aclose(self):
+            pass
+
+    fake_module = type(
+        "M",
+        (),
+        {
+            "from_url": staticmethod(lambda *a, **kw: FakeRedis()),
+        },
+    )()
+    monkeypatch.setattr("app.api.v1.onboarding.aioredis", fake_module)
+
+    # Ensure NETSUITE_OAUTH_CLIENT_ID is set
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "NETSUITE_OAUTH_CLIENT_ID", "test-client-id")
+
+    resp = await client.get(
+        f"{BASE}/netsuite-oauth/authorize?account_id=12345_SB1",
+        headers=headers,
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert "authorize_url" in data
+    assert "state" in data
+
+
+@pytest.mark.asyncio
+async def test_onboarding_oauth_authorize_requires_account_id(
+    client: AsyncClient, admin_user: tuple[User, dict], db: AsyncSession
+):
+    _, headers = admin_user
+    resp = await client.get(
+        f"{BASE}/netsuite-oauth/authorize?account_id=",
+        headers=headers,
+    )
+    assert resp.status_code == 400
+    assert "account_id" in resp.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_onboarding_authorize_requires_auth(client: AsyncClient):
+    resp = await client.get(f"{BASE}/netsuite-mcp/authorize?account_id=123&client_id=abc")
+    assert resp.status_code in (401, 403)
+    resp2 = await client.get(f"{BASE}/netsuite-oauth/authorize?account_id=123")
+    assert resp2.status_code in (401, 403)

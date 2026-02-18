@@ -20,6 +20,7 @@ import { WorkspaceSelector } from "@/components/workspace/workspace-selector";
 import { ChangesetPanel } from "@/components/workspace/changeset-panel";
 import { RunsPanel } from "@/components/workspace/runs-panel";
 import { ImportDialog } from "@/components/workspace/import-dialog";
+import { WorkspaceChatPanel } from "@/components/workspace/workspace-chat-panel";
 import {
   useWorkspaces,
   useCreateWorkspace,
@@ -29,6 +30,9 @@ import {
 } from "@/hooks/use-workspace";
 import { useChangesets, useChangesetDiff } from "@/hooks/use-changesets";
 import { useRuns } from "@/hooks/use-runs";
+import { cn } from "@/lib/utils";
+
+type RightTab = "changesets" | "runs" | "chat";
 
 export default function WorkspacePage() {
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string | null>(
@@ -41,6 +45,7 @@ export default function WorkspacePage() {
   const [createOpen, setCreateOpen] = useState(false);
   const [newName, setNewName] = useState("");
   const [newDesc, setNewDesc] = useState("");
+  const [rightTab, setRightTab] = useState<RightTab>("changesets");
 
   const { data: workspaces = [] } = useWorkspaces();
   const createWs = useCreateWorkspace();
@@ -127,6 +132,25 @@ export default function WorkspacePage() {
     setSelectedFilePath(path);
     setViewingDiffId(null);
   };
+
+  const handleMentionClick = useCallback(
+    (filePath: string) => {
+      if (!fileTree.length) return;
+      const match = findFileInTree(fileTree, filePath);
+      if (match) {
+        handleFileSelect(match.id, match.path);
+      }
+    },
+    [fileTree, findFileInTree],
+  );
+
+  const handleChatViewDiff = useCallback((changesetId: string) => {
+    setViewingDiffId(changesetId);
+  }, []);
+
+  const handleChangesetAction = useCallback(() => {
+    setRightTab("changesets");
+  }, []);
 
   return (
     <div className="flex h-[calc(100vh-4rem)] flex-col">
@@ -292,23 +316,52 @@ export default function WorkspacePage() {
           )}
         </div>
 
-        {/* Right: Changesets */}
+        {/* Right: Tabbed Panel */}
         {selectedWorkspaceId && (
-          <div
-            className="w-[300px] shrink-0 overflow-auto border-l p-3 scrollbar-thin"
-            data-testid="changeset-panel"
-          >
-            <p className="mb-2 text-[11px] font-semibold uppercase tracking-widest text-muted-foreground">
-              Changesets
-            </p>
-            <ChangesetPanel
-              changesets={changesets}
-              onViewDiff={setViewingDiffId}
-            />
-            <p className="mb-2 mt-4 text-[11px] font-semibold uppercase tracking-widest text-muted-foreground">
-              Runs
-            </p>
-            <RunsPanel runs={runs} />
+          <div className="w-[340px] shrink-0 flex flex-col overflow-hidden border-l">
+            {/* Tab bar */}
+            <div className="flex border-b">
+              {(["changesets", "runs", "chat"] as const).map((tab) => (
+                <button
+                  key={tab}
+                  onClick={() => setRightTab(tab)}
+                  className={cn(
+                    "flex-1 px-2 py-2 text-[11px] font-semibold uppercase tracking-widest transition-colors",
+                    rightTab === tab
+                      ? "border-b-2 border-primary text-foreground"
+                      : "text-muted-foreground hover:text-foreground",
+                  )}
+                >
+                  {tab}
+                </button>
+              ))}
+            </div>
+
+            {/* Tab content */}
+            {rightTab === "changesets" && (
+              <div className="flex-1 overflow-auto p-3 scrollbar-thin" data-testid="changeset-panel">
+                <ChangesetPanel
+                  changesets={changesets}
+                  onViewDiff={setViewingDiffId}
+                />
+              </div>
+            )}
+            {rightTab === "runs" && (
+              <div className="flex-1 overflow-auto p-3 scrollbar-thin">
+                <RunsPanel runs={runs} />
+              </div>
+            )}
+            {rightTab === "chat" && (
+              <div className="flex-1 overflow-hidden">
+                <WorkspaceChatPanel
+                  workspaceId={selectedWorkspaceId}
+                  currentFilePath={selectedFilePath || undefined}
+                  onMentionClick={handleMentionClick}
+                  onViewDiff={handleChatViewDiff}
+                  onChangesetAction={handleChangesetAction}
+                />
+              </div>
+            )}
           </div>
         )}
       </div>

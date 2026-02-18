@@ -14,6 +14,7 @@ from app.models.chat_api_key import ChatApiKey
 from app.models.connection import Connection
 from app.models.job import Job
 from app.models.mcp_connector import McpConnector
+from app.models.netsuite_metadata import NetSuiteMetadata
 from app.models.onboarding_checklist import OnboardingChecklistItem
 from app.models.pipeline import CursorState, EvidencePack, Schedule
 from app.models.policy_profile import PolicyProfile
@@ -56,6 +57,7 @@ __all__ = [
     "ChatMessage",
     "DocChunk",
     "McpConnector",
+    "NetSuiteMetadata",
     "Workspace",
     "WorkspaceFile",
     "WorkspaceChangeSet",

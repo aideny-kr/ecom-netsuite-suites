@@ -1,11 +1,13 @@
 import logging
 import uuid
 
+import redis.asyncio as aioredis
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.database import get_db
 from app.core.dependencies import get_current_user, require_entitlement, require_permission
 from app.models.chat import ChatSession
@@ -486,3 +488,82 @@ async def get_audit_trail(
             for e in events
         ]
     )
+
+
+# --- Onboarding-specific OAuth authorize endpoints ---
+# These bypass the normal entitlement checks (connections, mcp_tools)
+# and instead use the "onboarding" entitlement which is available on all plans.
+
+
+@router.get("/netsuite-mcp/authorize")
+async def onboarding_netsuite_mcp_authorize(
+    account_id: str,
+    client_id: str,
+    label: str = "",
+    user: User = Depends(get_current_user),
+    _ent: User = Depends(require_entitlement("onboarding")),
+):
+    """Start the OAuth 2.0 PKCE flow for a NetSuite MCP connector during onboarding.
+
+    Wraps the same logic as /mcp-connectors/netsuite/authorize but uses
+    the 'onboarding' entitlement instead of 'mcp_tools'.
+    """
+    if not client_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="client_id is required")
+    if not account_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="account_id is required")
+
+    from app.services.netsuite_oauth_service import build_mcp_authorize_url, generate_pkce_pair
+
+    code_verifier, code_challenge = generate_pkce_pair()
+    state = uuid.uuid4().hex
+    redirect_uri = settings.NETSUITE_OAUTH_REDIRECT_URI
+
+    r = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
+    await r.setex(
+        f"netsuite_mcp_oauth:{state}",
+        600,
+        f"{code_verifier}:{account_id}:{client_id}:{user.tenant_id}:{user.id}:{label}",
+    )
+    await r.aclose()
+
+    url = build_mcp_authorize_url(account_id, client_id, redirect_uri, state, code_challenge)
+    return {"authorize_url": url, "state": state}
+
+
+@router.get("/netsuite-oauth/authorize")
+async def onboarding_netsuite_oauth_authorize(
+    account_id: str,
+    user: User = Depends(get_current_user),
+    _ent: User = Depends(require_entitlement("onboarding")),
+):
+    """Start the OAuth 2.0 PKCE flow for a NetSuite Connection during onboarding.
+
+    Wraps the same logic as /connections/netsuite/authorize but uses
+    the 'onboarding' entitlement instead of requiring 'connections' entitlement.
+    Reuses the existing callback at /connections/netsuite/callback.
+    """
+    if not account_id:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="account_id is required")
+
+    if not settings.NETSUITE_OAUTH_CLIENT_ID:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="NETSUITE_OAUTH_CLIENT_ID is not configured",
+        )
+
+    from app.services.netsuite_oauth_service import build_authorize_url, generate_pkce_pair
+
+    code_verifier, code_challenge = generate_pkce_pair()
+    state = uuid.uuid4().hex
+
+    r = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
+    await r.setex(
+        f"netsuite_oauth:{state}",
+        600,
+        f"{code_verifier}:{account_id}:{user.tenant_id}:{user.id}",
+    )
+    await r.aclose()
+
+    url = build_authorize_url(account_id, state, code_challenge)
+    return {"authorize_url": url, "state": state}

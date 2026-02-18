@@ -6,6 +6,8 @@ import remarkGfm from "remark-gfm";
 import { cn } from "@/lib/utils";
 import type { ChatMessage } from "@/lib/types";
 import { ToolCallStepCard } from "@/components/chat/tool-call-step";
+import { ChangeProposalCard } from "@/components/chat/change-proposal-card";
+import { WorkspaceToolCard } from "@/components/chat/workspace-tool-card";
 import { Sparkles, FileCode } from "lucide-react";
 
 function renderWithMentions(
@@ -49,6 +51,9 @@ interface MessageListProps {
   pendingUserMessage?: string | null;
   isWaitingForReply?: boolean;
   onMentionClick?: (filePath: string) => void;
+  workspaceId?: string | null;
+  onViewDiff?: (changesetId: string) => void;
+  onChangesetAction?: () => void;
 }
 
 export function MessageList({
@@ -57,6 +62,9 @@ export function MessageList({
   pendingUserMessage,
   isWaitingForReply,
   onMentionClick,
+  workspaceId,
+  onViewDiff,
+  onChangesetAction,
 }: MessageListProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
 
@@ -120,9 +128,27 @@ export function MessageList({
           >
             {message.tool_calls && message.tool_calls.length > 0 && (
               <div className="mb-2 space-y-1.5">
-                {message.tool_calls.map((tc, idx) => (
-                  <ToolCallStepCard key={idx} step={tc} />
-                ))}
+                {message.tool_calls.map((tc, idx) => {
+                  if (
+                    tc.tool === "workspace_propose_patch" &&
+                    workspaceId &&
+                    onViewDiff
+                  ) {
+                    return (
+                      <ChangeProposalCard
+                        key={idx}
+                        step={tc}
+                        workspaceId={workspaceId}
+                        onViewDiff={onViewDiff}
+                        onChangesetAction={onChangesetAction}
+                      />
+                    );
+                  }
+                  if (tc.tool.startsWith("workspace_")) {
+                    return <WorkspaceToolCard key={idx} step={tc} />;
+                  }
+                  return <ToolCallStepCard key={idx} step={tc} />;
+                })}
               </div>
             )}
             {message.role === "assistant" ? (

@@ -1,7 +1,7 @@
 "use client";
 
-import { useState, useCallback, type KeyboardEvent } from "react";
-import { ArrowUp, AtSign } from "lucide-react";
+import { useState, useCallback, useMemo, type KeyboardEvent } from "react";
+import { ArrowUp, AtSign, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { FileMentionPicker } from "@/components/chat/file-mention-picker";
 
@@ -14,6 +14,11 @@ interface ChatInputProps {
 export function ChatInput({ onSend, isLoading, workspaceId }: ChatInputProps) {
   const [value, setValue] = useState("");
   const [mentionOpen, setMentionOpen] = useState(false);
+
+  const mentions = useMemo(
+    () => Array.from(value.matchAll(/@workspace:([^\s]+)/g)).map((m) => m[1]),
+    [value],
+  );
 
   const handleSend = useCallback(() => {
     const trimmed = value.trim();
@@ -43,6 +48,10 @@ export function ChatInput({ onSend, isLoading, workspaceId }: ChatInputProps) {
     [],
   );
 
+  const handleRemoveMention = useCallback((filePath: string) => {
+    setValue((prev) => prev.replace(`@workspace:${filePath} `, "").replace(`@workspace:${filePath}`, ""));
+  }, []);
+
   const handleChange = useCallback(
     (e: React.ChangeEvent<HTMLTextAreaElement>) => {
       const newVal = e.target.value.slice(0, 4000);
@@ -63,6 +72,26 @@ export function ChatInput({ onSend, isLoading, workspaceId }: ChatInputProps) {
   return (
     <div className="border-t bg-card px-6 py-4">
       <div className="mx-auto max-w-3xl">
+        {/* Attachment chips */}
+        {mentions.length > 0 && (
+          <div className="mb-1.5 flex flex-wrap gap-1">
+            {mentions.map((path) => (
+              <span
+                key={path}
+                className="inline-flex items-center gap-1 rounded-full bg-primary/10 px-2 py-0.5 text-[11px] font-medium text-primary"
+              >
+                {path.split("/").pop()}
+                <button
+                  onClick={() => handleRemoveMention(path)}
+                  className="hover:text-destructive"
+                  title={`Remove ${path}`}
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
         <div className="flex items-end gap-3 rounded-2xl border bg-background p-2 shadow-soft transition-shadow focus-within:shadow-soft-md focus-within:ring-1 focus-within:ring-ring">
           <textarea
             value={value}

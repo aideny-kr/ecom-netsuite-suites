@@ -796,3 +796,43 @@ async def preview_patch(
         "original_content": original[:MAX_READ_CHARS],
         "modified_content": modified[:MAX_READ_CHARS],
     }
+
+
+# --- Reindex ---
+
+
+async def reindex_workspace(
+    db: AsyncSession,
+    workspace_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+) -> dict[str, Any]:
+    """Reindex workspace files — recompute SHA256 hashes and fix mismatches."""
+    ws = await get_workspace(db, workspace_id, tenant_id)
+    if not ws:
+        raise ValueError("Workspace not found")
+
+    result = await db.execute(
+        select(WorkspaceFile).where(
+            WorkspaceFile.workspace_id == workspace_id,
+            WorkspaceFile.tenant_id == tenant_id,
+            WorkspaceFile.is_directory.is_(False),
+        )
+    )
+    files = result.scalars().all()
+
+    reindexed = 0
+    hash_mismatches = 0
+    for f in files:
+        if f.content is not None:
+            computed = _sha256(f.content)
+            if f.sha256_hash != computed:
+                f.sha256_hash = computed
+                hash_mismatches += 1
+            reindexed += 1
+
+    await db.flush()
+    return {
+        "workspace_id": str(workspace_id),
+        "files_reindexed": reindexed,
+        "hash_mismatches_fixed": hash_mismatches,
+    }

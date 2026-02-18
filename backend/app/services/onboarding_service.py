@@ -115,6 +115,15 @@ async def confirm_profile(
         payload={"version": profile.version},
     )
 
+    # Queue metadata discovery (custom fields, org hierarchy) in background
+    try:
+        from app.workers.tasks.metadata_discovery import netsuite_metadata_discovery
+
+        netsuite_metadata_discovery.delay(tenant_id=str(tenant_id), user_id=str(user_id))
+        logger.info("onboarding.metadata_discovery_queued", tenant_id=str(tenant_id))
+    except Exception:
+        logger.warning("onboarding.metadata_discovery_queue_failed", exc_info=True)
+
     await db.refresh(profile)
 
     logger.info("onboarding.profile_confirmed", tenant_id=str(tenant_id), version=profile.version)

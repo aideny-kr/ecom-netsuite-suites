@@ -50,6 +50,11 @@ class TenantConfig(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     ai_api_key_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     ai_key_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False, server_default="1")
 
+    # Multi-agent orchestration
+    multi_agent_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+
     # Onboarding
     onboarding_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 

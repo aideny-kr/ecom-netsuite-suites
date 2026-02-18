@@ -23,6 +23,13 @@ async def register_tenant(
     if existing.scalar_one_or_none():
         raise ValueError("Tenant slug already exists")
 
+    # Check email uniqueness (global — same email can exist in different tenants,
+    # but registering creates a new tenant so we check if the email is already used
+    # to prevent confusion; the DB constraint is per-tenant but we enforce globally for registration)
+    existing_user = await db.execute(select(User).where(User.email == email))
+    if existing_user.scalar_one_or_none():
+        raise ValueError("Email already registered")
+
     # Create tenant
     tenant = Tenant(
         name=tenant_name,

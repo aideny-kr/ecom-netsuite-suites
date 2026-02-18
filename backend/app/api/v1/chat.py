@@ -25,6 +25,7 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 
 class CreateSessionRequest(BaseModel):
     title: str | None = None
+    workspace_id: str | None = None
 
 
 class SendMessageRequest(BaseModel):
@@ -45,6 +46,7 @@ class MessageResponse(BaseModel):
 class SessionListItem(BaseModel):
     id: str
     title: str | None = None
+    workspace_id: str | None = None
     is_archived: bool
     created_at: str
     updated_at: str
@@ -68,6 +70,7 @@ def _serialize_session(session: ChatSession) -> dict:
     return {
         "id": str(session.id),
         "title": session.title,
+        "workspace_id": str(session.workspace_id) if session.workspace_id else None,
         "is_archived": session.is_archived,
         "created_at": session.created_at.isoformat(),
         "updated_at": session.updated_at.isoformat(),
@@ -109,6 +112,7 @@ async def create_session(
         tenant_id=user.tenant_id,
         user_id=user.id,
         title=body.title,
+        workspace_id=uuid.UUID(body.workspace_id) if body.workspace_id else None,
     )
     db.add(session)
     await db.commit()
@@ -118,15 +122,20 @@ async def create_session(
 
 @router.get("/sessions", response_model=list[SessionListItem])
 async def list_sessions(
+    workspace_id: str | None = None,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(
+    q = (
         select(ChatSession)
         .where(ChatSession.tenant_id == user.tenant_id, ChatSession.user_id == user.id)
-        .order_by(ChatSession.created_at.desc())
-        .limit(50)
     )
+    if workspace_id:
+        q = q.where(ChatSession.workspace_id == uuid.UUID(workspace_id))
+    else:
+        q = q.where(ChatSession.workspace_id.is_(None))
+    q = q.order_by(ChatSession.created_at.desc()).limit(50)
+    result = await db.execute(q)
     sessions = result.scalars().all()
     return [_serialize_session(s) for s in sessions]
 

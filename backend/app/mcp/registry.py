@@ -2,7 +2,9 @@ from app.mcp.tools import (
     data_sample,
     health,
     netsuite_connectivity,
+    netsuite_metadata_tool,
     netsuite_suiteql,
+    rag_search,
     recon_run,
     report_export,
     schedule_ops,
@@ -210,6 +212,43 @@ TOOL_REGISTRY = {
                 "required": False,
                 "default": False,
                 "description": "Whether SuiteQL assertions must pass before deploy",
+            },
+        },
+    },
+    "netsuite.refresh_metadata": {
+        "description": (
+            "Trigger a fresh discovery of NetSuite custom fields, record types, "
+            "subsidiaries, departments, classes, and locations. Updates the AI's "
+            "knowledge of this account's customisations. Use when the user says "
+            "'refresh metadata', 'discover custom fields', or after new customisations "
+            "have been added to NetSuite."
+        ),
+        "execute": netsuite_metadata_tool.execute,
+        "params_schema": {},
+    },
+    "netsuite.get_metadata": {
+        "description": (
+            "Return a summary of previously discovered NetSuite metadata "
+            "including counts of custom fields, record types, and org hierarchy. "
+            "Use to answer 'what custom fields do I have?' or 'show metadata summary'."
+        ),
+        "execute": netsuite_metadata_tool.execute_get_metadata,
+        "params_schema": {},
+    },
+    "rag.search": {
+        "description": (
+            "Search the documentation and knowledge base using vector similarity. "
+            "Returns relevant document excerpts ranked by relevance. Use to look up "
+            "field names, NetSuite documentation, platform guides, or any stored knowledge."
+        ),
+        "execute": rag_search.execute,
+        "params_schema": {
+            "query": {"type": "string", "required": True, "description": "Natural language search query"},
+            "top_k": {"type": "integer", "required": False, "default": 10, "description": "Max results to return"},
+            "source_filter": {
+                "type": "string",
+                "required": False,
+                "description": "Filter by source path prefix (e.g. 'netsuite_metadata/')",
             },
         },
     },

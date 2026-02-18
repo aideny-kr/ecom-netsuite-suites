@@ -103,14 +103,34 @@ async def validate_step(db: AsyncSession, tenant_id: uuid.UUID, step_key: str) -
 
     elif step_key == "connection":
         from app.models.connection import Connection
+        from app.models.mcp_connector import McpConnector
 
-        result = await db.execute(
-            select(Connection).where(Connection.tenant_id == tenant_id, Connection.status == "active")
+        conn_result = await db.execute(
+            select(Connection).where(
+                Connection.tenant_id == tenant_id,
+                Connection.status == "active",
+                Connection.provider == "netsuite",
+            )
         )
-        conn = result.scalars().first()
-        if conn:
+        conn = conn_result.scalars().first()
+
+        mcp_result = await db.execute(
+            select(McpConnector).where(
+                McpConnector.tenant_id == tenant_id,
+                McpConnector.status == "active",
+                McpConnector.provider == "netsuite_mcp",
+            )
+        )
+        mcp = mcp_result.scalars().first()
+
+        if conn and mcp:
             return {"step_key": step_key, "valid": True}
-        return {"step_key": step_key, "valid": False, "reason": "No active NetSuite connection found"}
+        reasons = []
+        if not mcp:
+            reasons.append("No active NetSuite MCP connector")
+        if not conn:
+            reasons.append("No active NetSuite OAuth connection")
+        return {"step_key": step_key, "valid": False, "reason": ". ".join(reasons)}
 
     elif step_key == "policy":
         from app.services.policy_service import get_active_policy

@@ -2,6 +2,7 @@
 
 import { useState, useCallback, useEffect } from "react";
 import { useAuth } from "@/providers/auth-provider";
+import { apiClient } from "@/lib/api-client";
 import { Sidebar } from "@/components/sidebar";
 import { OnboardingWizard } from "@/components/onboarding/onboarding-wizard";
 
@@ -18,14 +19,29 @@ export default function DashboardLayout({
       setShowOnboarding(false);
       return;
     }
-    if (!user.onboarding_completed_at) {
-      const skipped = localStorage.getItem("onboarding_skipped");
-      if (!skipped) {
-        setShowOnboarding(true);
-      }
-    } else {
+    if (user.onboarding_completed_at) {
       setShowOnboarding(false);
+      return;
     }
+    const skipped = localStorage.getItem("onboarding_skipped");
+    if (skipped) {
+      setShowOnboarding(false);
+      return;
+    }
+    // Check if both connections already exist — skip onboarding if so
+    apiClient
+      .get<{ valid: boolean }>("/api/v1/onboarding/checklist/connection/validate")
+      .then((result) => {
+        if (result.valid) {
+          setShowOnboarding(false);
+        } else {
+          setShowOnboarding(true);
+        }
+      })
+      .catch(() => {
+        // If check fails, show onboarding to be safe
+        setShowOnboarding(true);
+      });
   }, [user]);
 
   const handleOnboardingComplete = useCallback(() => {

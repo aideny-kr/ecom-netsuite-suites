@@ -283,6 +283,7 @@ export interface AuthResponse {
 export interface ChatSession {
   id: string;
   title: string | null;
+  workspace_id?: string | null;
   session_type?: string;
   is_archived: boolean;
   created_at: string;
@@ -290,10 +291,19 @@ export interface ChatSession {
 }
 
 export interface ToolCallStep {
+  step?: number;
   tool: string;
   params: Record<string, unknown>;
   result_summary: string;
   duration_ms: number;
+}
+
+export interface ProposePatchResult {
+  changeset_id: string;
+  patch_id: string;
+  operation: "modify" | "create" | "delete";
+  diff_status: string;
+  risk_summary: string;
 }
 
 export interface Citation {
@@ -319,6 +329,7 @@ export interface ChatMessage {
 export interface ChatSessionDetail {
   id: string;
   title: string | null;
+  workspace_id?: string | null;
   is_archived: boolean;
   messages: ChatMessage[];
   created_at: string;
@@ -564,4 +575,54 @@ export interface DeployGates {
   validate: { status: string; run_id: string | null };
   unit_tests: { status: string; run_id: string | null };
   assertions: { status: string; run_id: string | null; skipped?: boolean };
+}
+
+// --- NetSuite Metadata Discovery Types ---
+
+export interface NetSuiteMetadataCategories {
+  transaction_body_fields: number;
+  transaction_column_fields: number;
+  entity_custom_fields: number;
+  item_custom_fields: number;
+  custom_record_types: number;
+  custom_lists: number;
+  subsidiaries: number;
+  departments: number;
+  classifications: number;
+  locations: number;
+}
+
+export interface NetSuiteMetadata {
+  id: string;
+  version: number;
+  status: "pending" | "completed" | "failed" | "not_discovered";
+  message?: string;
+  discovered_at: string | null;
+  total_fields_discovered: number;
+  queries_succeeded: number;
+  discovery_errors: Record<string, string> | null;
+  categories: NetSuiteMetadataCategories;
+}
+
+export interface NetSuiteMetadataFieldItem {
+  scriptid?: string;
+  label?: string;
+  fieldtype?: string;
+  description?: string;
+  ismandatory?: string;
+  id?: string;
+  name?: string;
+  isinactive?: string;
+  parent?: string;
+}
+
+export interface NetSuiteMetadataFieldsResponse {
+  category: string;
+  count: number;
+  data: NetSuiteMetadataFieldItem[];
+}
+
+export interface MetadataDiscoveryTaskResponse {
+  task_id: string;
+  status: string;
 }

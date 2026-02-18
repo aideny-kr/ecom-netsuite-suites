@@ -8,7 +8,9 @@ and can retry/correct — all within a single turn, up to MAX_STEPS iterations.
 import json
 import logging
 import re
+import time
 import uuid
+from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -33,6 +35,18 @@ from app.services.prompt_template_service import get_active_template
 logger = logging.getLogger(__name__)
 
 MAX_STEPS = settings.CHAT_MAX_TOOL_CALLS_PER_TURN  # default 5
+
+
+def _extract_file_paths(nodes: list[dict]) -> list[str]:
+    """Flatten a nested file tree into a sorted list of file paths."""
+    paths: list[str] = []
+    for node in nodes:
+        if not node.get("is_directory"):
+            paths.append(node.get("path", ""))
+        children = node.get("children")
+        if children:
+            paths.extend(_extract_file_paths(children))
+    return sorted(paths)
 
 
 async def run_chat_turn(
@@ -131,6 +145,31 @@ async def run_chat_turn(
     else:
         system_prompt = await get_active_template(db, tenant_id)
 
+    # ── Workspace context injection ──
+    workspace_context: dict | None = None
+    if getattr(session, "workspace_id", None):
+        from app.services import workspace_service as ws_svc
+
+        ws = await ws_svc.get_workspace(db, session.workspace_id, tenant_id)
+        if ws:
+            workspace_context = {
+                "workspace_id": str(session.workspace_id),
+                "name": ws.name,
+            }
+            files = await ws_svc.list_files(db, session.workspace_id, tenant_id)
+            file_paths = _extract_file_paths(files)
+            file_listing = "\n".join(f"- {p}" for p in file_paths[:50])
+            if len(file_paths) > 50:
+                file_listing += f"\n... and {len(file_paths) - 50} more files"
+            system_prompt += (
+                f"\n\nWORKSPACE CONTEXT:\n"
+                f"Active workspace: '{ws.name}' (ID: {session.workspace_id}).\n"
+                f"Files in workspace:\n{file_listing}\n\n"
+                f"Use workspace tools (workspace_list_files, workspace_read_file, "
+                f"workspace_search, workspace_propose_patch) to browse and modify files. "
+                f"The workspace_id is '{session.workspace_id}' — it will be auto-injected."
+            )
+
     # ── Load active policy for tool gating + output redaction ──
     from app.services.policy_service import evaluate_tool_call as policy_evaluate
     from app.services.policy_service import get_active_policy, redact_output
@@ -141,7 +180,102 @@ async def run_chat_turn(
     provider, model, api_key, is_byok = await get_tenant_ai_config(db, tenant_id)
     adapter = get_adapter(provider, api_key)
 
-    # ── Agentic loop ──
+    # ── Multi-agent routing (opt-in per tenant or globally) ──
+    if not is_onboarding and not workspace_context:
+        from sqlalchemy import select as sa_select
+
+        from app.models.tenant import TenantConfig
+
+        use_multi_agent = settings.MULTI_AGENT_ENABLED
+        try:
+            tc_result = await db.execute(
+                sa_select(TenantConfig.multi_agent_enabled).where(TenantConfig.tenant_id == tenant_id)
+            )
+            tenant_ma = tc_result.scalar_one_or_none()
+            if tenant_ma is not None:
+                use_multi_agent = tenant_ma
+        except Exception:
+            pass  # Fall through to single-agent
+
+        if use_multi_agent:
+            from app.services.chat.coordinator import MultiAgentCoordinator
+            from app.services.chat.llm_adapter import get_adapter as get_specialist_adapter
+            from app.services.netsuite_metadata_service import get_active_metadata
+
+            specialist_adapter = get_specialist_adapter(
+                settings.MULTI_AGENT_SPECIALIST_PROVIDER,
+                api_key if settings.MULTI_AGENT_SPECIALIST_PROVIDER == provider else settings.ANTHROPIC_API_KEY,
+            )
+            metadata = await get_active_metadata(db, tenant_id)
+
+            coordinator = MultiAgentCoordinator(
+                db=db,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                correlation_id=correlation_id,
+                main_adapter=adapter,
+                main_model=model,
+                specialist_adapter=specialist_adapter,
+                specialist_model=settings.MULTI_AGENT_SPECIALIST_MODEL,
+                metadata=metadata,
+                policy=active_policy,
+                system_prompt=system_prompt,
+            )
+
+            coord_result = await coordinator.run(
+                user_message=sanitized_input,
+                conversation_history=history_messages,
+                rag_context=rag_context,
+            )
+
+            final_text = re.sub(r"\s*\[tool:\s*[^\]]+\]", "", coord_result.final_text).strip()
+
+            assistant_msg = ChatMessage(
+                tenant_id=tenant_id,
+                session_id=session.id,
+                role="assistant",
+                content=final_text or "I'm sorry, I couldn't generate a response.",
+                tool_calls=coord_result.tool_calls_log if coord_result.tool_calls_log else None,
+                citations=citations if citations else None,
+                token_count=coord_result.total_input_tokens + coord_result.total_output_tokens,
+                input_tokens=coord_result.total_input_tokens,
+                output_tokens=coord_result.total_output_tokens,
+                model_used=model,
+                provider_used=provider,
+                is_byok=is_byok,
+            )
+            db.add(assistant_msg)
+
+            if not session.title:
+                session.title = user_message[:100].strip()
+
+            audit_payload: dict[str, Any] = {
+                "mode": "multi_agent",
+                "provider": provider,
+                "model": model,
+                "specialist_model": settings.MULTI_AGENT_SPECIALIST_MODEL,
+                "steps": len(coord_result.tool_calls_log),
+                "input_tokens": coord_result.total_input_tokens,
+                "output_tokens": coord_result.total_output_tokens,
+                "doc_chunks_count": len(state.doc_chunks) if state.doc_chunks else 0,
+                "tools_called": [t["tool"] for t in coord_result.tool_calls_log],
+            }
+            await log_event(
+                db=db,
+                tenant_id=tenant_id,
+                category="chat",
+                action="chat.turn",
+                actor_id=user_id,
+                resource_type="chat_session",
+                resource_id=str(session.id),
+                correlation_id=correlation_id,
+                payload=audit_payload,
+            )
+
+            await db.commit()
+            return assistant_msg
+
+    # ── Single-agent agentic loop (default path) ──
     tool_calls_log: list[dict] = []
     final_text = ""
     total_input_tokens = 0
@@ -169,7 +303,13 @@ async def run_chat_turn(
         # Execute each tool call and collect results
         tool_results_content = []
         for block in response.tool_use_blocks:
+            # Auto-inject workspace_id for workspace tools
+            if workspace_context and block.name.startswith("workspace_"):
+                if "workspace_id" not in block.input:
+                    block.input["workspace_id"] = workspace_context["workspace_id"]
+
             # Route tool execution: onboarding tools vs standard tools
+            t0 = time.monotonic()
             if is_onboarding and block.name in (
                 "save_onboarding_profile",
                 "start_netsuite_oauth",
@@ -216,12 +356,14 @@ async def run_chat_turn(
             )
 
             # Log for audit
+            elapsed_ms = int((time.monotonic() - t0) * 1000)
             tool_calls_log.append(
                 {
                     "step": step,
                     "tool": block.name,
                     "params": block.input,
                     "result_summary": result_str[:500],
+                    "duration_ms": elapsed_ms,
                 }
             )
 
@@ -268,6 +410,18 @@ async def run_chat_turn(
         session.title = user_message[:100].strip()
 
     # Audit
+    audit_payload: dict[str, Any] = {
+        "mode": "agentic",
+        "provider": provider,
+        "model": model,
+        "steps": len(tool_calls_log),
+        "input_tokens": total_input_tokens,
+        "output_tokens": total_output_tokens,
+        "doc_chunks_count": 0 if is_onboarding else (len(state.doc_chunks) if state.doc_chunks else 0),
+        "tools_called": [t["tool"] for t in tool_calls_log],
+    }
+    if workspace_context:
+        audit_payload["workspace_id"] = workspace_context["workspace_id"]
     await log_event(
         db=db,
         tenant_id=tenant_id,
@@ -277,16 +431,7 @@ async def run_chat_turn(
         resource_type="chat_session",
         resource_id=str(session.id),
         correlation_id=correlation_id,
-        payload={
-            "mode": "agentic",
-            "provider": provider,
-            "model": model,
-            "steps": len(tool_calls_log),
-            "input_tokens": total_input_tokens,
-            "output_tokens": total_output_tokens,
-            "doc_chunks_count": 0 if is_onboarding else (len(state.doc_chunks) if state.doc_chunks else 0),
-            "tools_called": [t["tool"] for t in tool_calls_log],
-        },
+        payload=audit_payload,
     )
 
     await db.commit()

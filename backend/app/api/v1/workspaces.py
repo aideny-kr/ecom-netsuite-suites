@@ -152,6 +152,32 @@ async def import_workspace(
     return result
 
 
+@router.post("/{workspace_id}/reindex")
+async def reindex_workspace(
+    workspace_id: uuid.UUID,
+    user: User = Depends(require_permission("workspace.manage")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Reindex workspace files — recompute hashes and fix mismatches."""
+    try:
+        result = await ws_svc.reindex_workspace(db, workspace_id, user.tenant_id)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    await audit_service.log_event(
+        db=db,
+        tenant_id=user.tenant_id,
+        category="workspace",
+        action="workspace.reindexed",
+        actor_id=user.id,
+        resource_type="workspace",
+        resource_id=str(workspace_id),
+        payload=result,
+    )
+    await db.commit()
+    return result
+
+
 @router.delete("/{workspace_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def archive_workspace(
     workspace_id: uuid.UUID,
