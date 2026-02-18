@@ -135,6 +135,22 @@ TOOL_CONFIGS = {
         "requires_entitlement": "workspace",
         "allowlisted_params": ["changeset_id"],
     },
+    "workspace.run_validate": {
+        "default_limit": None,
+        "max_limit": None,
+        "timeout_seconds": 60,
+        "rate_limit_per_minute": 5,
+        "requires_entitlement": "workspace",
+        "allowlisted_params": ["workspace_id", "changeset_id"],
+    },
+    "workspace.run_unit_tests": {
+        "default_limit": None,
+        "max_limit": None,
+        "timeout_seconds": 120,
+        "rate_limit_per_minute": 5,
+        "requires_entitlement": "workspace",
+        "allowlisted_params": ["workspace_id", "changeset_id"],
+    },
 }
 
 

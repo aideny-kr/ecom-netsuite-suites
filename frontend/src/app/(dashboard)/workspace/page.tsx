@@ -18,6 +18,7 @@ import { CodeViewer } from "@/components/workspace/code-viewer";
 import { DiffViewer } from "@/components/workspace/diff-viewer";
 import { WorkspaceSelector } from "@/components/workspace/workspace-selector";
 import { ChangesetPanel } from "@/components/workspace/changeset-panel";
+import { RunsPanel } from "@/components/workspace/runs-panel";
 import { ImportDialog } from "@/components/workspace/import-dialog";
 import {
   useWorkspaces,
@@ -27,6 +28,7 @@ import {
   useSearchFiles,
 } from "@/hooks/use-workspace";
 import { useChangesets, useChangesetDiff } from "@/hooks/use-changesets";
+import { useRuns } from "@/hooks/use-runs";
 
 export default function WorkspacePage() {
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string | null>(
@@ -52,6 +54,7 @@ export default function WorkspacePage() {
     searchQuery,
   );
   const { data: changesets = [] } = useChangesets(selectedWorkspaceId);
+  const { data: runs = [] } = useRuns(selectedWorkspaceId);
   const { data: diffData } = useChangesetDiff(viewingDiffId);
   const searchParams = useSearchParams();
 
@@ -302,6 +305,10 @@ export default function WorkspacePage() {
               changesets={changesets}
               onViewDiff={setViewingDiffId}
             />
+            <p className="mb-2 mt-4 text-[11px] font-semibold uppercase tracking-widest text-muted-foreground">
+              Runs
+            </p>
+            <RunsPanel runs={runs} />
           </div>
         )}
       </div>

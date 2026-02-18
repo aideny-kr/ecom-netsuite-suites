@@ -129,3 +129,39 @@ class PatchProposal(BaseModel):
     unified_diff: str = Field(..., max_length=262144)  # 256KB
     title: str = Field(..., min_length=1, max_length=500)
     rationale: str | None = None
+
+
+# --- Run / Artifact ---
+
+
+class RunTriggerRequest(BaseModel):
+    changeset_id: str | None = None
+
+
+class RunResponse(BaseModel):
+    id: str
+    workspace_id: str
+    changeset_id: str | None
+    run_type: str
+    status: str
+    command: str | None
+    exit_code: int | None
+    started_at: str | None
+    completed_at: str | None
+    duration_ms: int | None
+    created_at: str
+    updated_at: str
+
+    model_config = {"from_attributes": True}
+
+
+class ArtifactResponse(BaseModel):
+    id: str
+    run_id: str
+    artifact_type: str
+    content: str | None
+    size_bytes: int
+    sha256_hash: str | None
+    created_at: str
+
+    model_config = {"from_attributes": True}

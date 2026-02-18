@@ -415,3 +415,34 @@ export interface DiffViewResponse {
     modified_content: string;
   }>;
 }
+
+// --- Workspace Run Types ---
+
+export type RunType = "sdf_validate" | "jest_unit_test";
+
+export type RunStatus = "queued" | "running" | "passed" | "failed" | "error";
+
+export interface WorkspaceRun {
+  id: string;
+  workspace_id: string;
+  changeset_id: string | null;
+  run_type: RunType;
+  status: RunStatus;
+  command: string | null;
+  exit_code: number | null;
+  started_at: string | null;
+  completed_at: string | null;
+  duration_ms: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WorkspaceArtifact {
+  id: string;
+  run_id: string;
+  artifact_type: "stdout" | "stderr" | "report_json" | "coverage_json";
+  content: string | null;
+  size_bytes: number;
+  sha256_hash: string | null;
+  created_at: string;
+}

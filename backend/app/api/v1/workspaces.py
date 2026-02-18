@@ -1,4 +1,4 @@
-"""REST API for Dev Workspace: workspaces, files, changesets, patches."""
+"""REST API for Dev Workspace: workspaces, files, changesets, patches, runs."""
 
 import uuid
 
@@ -14,7 +14,7 @@ from app.schemas.workspace import (
     ChangeSetTransition,
     WorkspaceCreate,
 )
-from app.services import audit_service
+from app.services import audit_service, runner_service
 from app.services import workspace_service as ws_svc
 
 logger = structlog.get_logger()
@@ -386,3 +386,147 @@ async def apply_changeset(
     response = _serialize_changeset(cs)
     await db.commit()
     return response
+
+
+# --- Run serializers ---
+
+
+def _serialize_run(run) -> dict:
+    return {
+        "id": str(run.id),
+        "workspace_id": str(run.workspace_id),
+        "changeset_id": str(run.changeset_id) if run.changeset_id else None,
+        "run_type": run.run_type,
+        "status": run.status,
+        "command": run.command,
+        "exit_code": run.exit_code,
+        "started_at": run.started_at.isoformat() if run.started_at else None,
+        "completed_at": run.completed_at.isoformat() if run.completed_at else None,
+        "duration_ms": run.duration_ms,
+        "created_at": run.created_at.isoformat(),
+        "updated_at": run.updated_at.isoformat(),
+    }
+
+
+def _serialize_artifact(a) -> dict:
+    return {
+        "id": str(a.id),
+        "run_id": str(a.run_id),
+        "artifact_type": a.artifact_type,
+        "content": a.content,
+        "size_bytes": a.size_bytes,
+        "sha256_hash": a.sha256_hash,
+        "created_at": a.created_at.isoformat(),
+    }
+
+
+# --- Run trigger endpoints on changeset_router ---
+
+
+async def _trigger_run(
+    changeset_id: uuid.UUID,
+    run_type: str,
+    user: User,
+    db: AsyncSession,
+) -> dict:
+    """Shared logic for triggering a run from a changeset."""
+    from app.services.runner_service import CommandNotAllowedError
+
+    cs = await ws_svc.get_changeset(db, changeset_id, user.tenant_id)
+    if not cs:
+        raise HTTPException(status_code=404, detail="Changeset not found")
+    if cs.status != "approved":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Changeset must be approved before running validate/tests (current: {cs.status})",
+        )
+
+    try:
+        run = await runner_service.create_run(
+            db,
+            tenant_id=user.tenant_id,
+            workspace_id=cs.workspace_id,
+            run_type=run_type,
+            triggered_by=user.id,
+            changeset_id=changeset_id,
+        )
+    except CommandNotAllowedError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    await audit_service.log_event(
+        db=db,
+        tenant_id=user.tenant_id,
+        category="workspace",
+        action="workspace.run.triggered",
+        actor_id=user.id,
+        resource_type="workspace_run",
+        resource_id=str(run.id),
+        payload={"run_type": run_type, "changeset_id": str(changeset_id)},
+    )
+    await db.commit()
+
+    # Dispatch Celery task
+    from app.workers.tasks.workspace_run import workspace_run_task
+
+    workspace_run_task.delay(
+        tenant_id=str(user.tenant_id),
+        run_id=str(run.id),
+        correlation_id=run.correlation_id,
+    )
+
+    return _serialize_run(run)
+
+
+@changeset_router.post("/{changeset_id}/validate", status_code=status.HTTP_202_ACCEPTED)
+async def trigger_validate(
+    changeset_id: uuid.UUID,
+    user: User = Depends(require_permission("workspace.manage")),
+    db: AsyncSession = Depends(get_db),
+):
+    return await _trigger_run(changeset_id, "sdf_validate", user, db)
+
+
+@changeset_router.post("/{changeset_id}/unit-tests", status_code=status.HTTP_202_ACCEPTED)
+async def trigger_unit_tests(
+    changeset_id: uuid.UUID,
+    user: User = Depends(require_permission("workspace.manage")),
+    db: AsyncSession = Depends(get_db),
+):
+    return await _trigger_run(changeset_id, "jest_unit_test", user, db)
+
+
+# --- Run query endpoints ---
+
+run_router = APIRouter(prefix="/runs", tags=["workspaces"])
+
+
+@run_router.get("/{run_id}")
+async def get_run(
+    run_id: uuid.UUID,
+    user: User = Depends(require_permission("workspace.view")),
+    db: AsyncSession = Depends(get_db),
+):
+    run = await runner_service.get_run(db, run_id, user.tenant_id)
+    if not run:
+        raise HTTPException(status_code=404, detail="Run not found")
+    return _serialize_run(run)
+
+
+@run_router.get("/{run_id}/artifacts")
+async def get_run_artifacts(
+    run_id: uuid.UUID,
+    user: User = Depends(require_permission("workspace.view")),
+    db: AsyncSession = Depends(get_db),
+):
+    artifacts = await runner_service.get_artifacts(db, run_id, user.tenant_id)
+    return [_serialize_artifact(a) for a in artifacts]
+
+
+@router.get("/{workspace_id}/runs")
+async def list_workspace_runs(
+    workspace_id: uuid.UUID,
+    user: User = Depends(require_permission("workspace.view")),
+    db: AsyncSession = Depends(get_db),
+):
+    runs = await runner_service.list_runs(db, workspace_id, user.tenant_id)
+    return [_serialize_run(r) for r in runs]

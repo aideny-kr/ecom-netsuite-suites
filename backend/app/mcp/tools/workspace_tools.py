@@ -116,3 +116,74 @@ async def execute_apply_patch(params: dict[str, Any], context: dict[str, Any]) -
         "applied_at": cs.applied_at.isoformat() if cs.applied_at else None,
         "row_count": 1,
     }
+
+
+async def execute_run_validate(params: dict[str, Any], context: dict[str, Any]) -> dict:
+    """Trigger an SDF validate run against workspace files."""
+    return await _execute_privileged_run(params, context, run_type="sdf_validate")
+
+
+async def execute_run_unit_tests(params: dict[str, Any], context: dict[str, Any]) -> dict:
+    """Trigger a Jest unit test run against workspace files."""
+    return await _execute_privileged_run(params, context, run_type="jest_unit_test")
+
+
+async def _execute_privileged_run(params: dict[str, Any], context: dict[str, Any], run_type: str) -> dict:
+    """Shared privileged run logic for validate/tests MCP tools."""
+    from app.core.dependencies import has_permission
+    from app.services import audit_service, runner_service
+    from app.services import workspace_service as ws_svc
+
+    db = context["db"]
+    tenant_id = context["tenant_id"]
+    actor_id = context.get("actor_id")
+    actor_uuid = uuid.UUID(actor_id) if actor_id else None
+    if actor_uuid is None:
+        return {"error": "Actor ID required for privileged run", "row_count": 0}
+
+    allowed = await has_permission(db, actor_uuid, "workspace.manage")
+    if not allowed:
+        return {"error": "Permission denied: workspace.manage required", "row_count": 0}
+
+    workspace_id = uuid.UUID(params["workspace_id"])
+    changeset_raw = params.get("changeset_id")
+    if not changeset_raw:
+        return {"error": "changeset_id is required for privileged run", "row_count": 0}
+    changeset_id = uuid.UUID(changeset_raw)
+
+    cs = await ws_svc.get_changeset(db, changeset_id, uuid.UUID(tenant_id))
+    if cs is None or cs.workspace_id != workspace_id:
+        return {"error": "Changeset not found for workspace", "row_count": 0}
+    if cs.status != "approved":
+        return {"error": f"Changeset must be approved before running (current: {cs.status})", "row_count": 0}
+
+    run = await runner_service.create_run(
+        db,
+        tenant_id=uuid.UUID(tenant_id),
+        workspace_id=workspace_id,
+        run_type=run_type,
+        triggered_by=actor_uuid,
+        changeset_id=changeset_id,
+    )
+    await audit_service.log_event(
+        db=db,
+        tenant_id=uuid.UUID(tenant_id),
+        category="workspace",
+        action="workspace.run.triggered",
+        actor_id=actor_uuid,
+        resource_type="workspace_run",
+        resource_id=str(run.id),
+        correlation_id=run.correlation_id,
+        payload={"run_type": run_type, "changeset_id": str(changeset_id)},
+    )
+    await db.flush()
+
+    from app.workers.tasks.workspace_run import workspace_run_task
+
+    workspace_run_task.delay(
+        tenant_id=tenant_id,
+        run_id=str(run.id),
+        correlation_id=run.correlation_id,
+    )
+
+    return {"run_id": str(run.id), "status": run.status, "row_count": 1}

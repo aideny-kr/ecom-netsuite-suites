@@ -431,6 +431,106 @@ async def test_mcp_tool_lifecycle_on_error(db, tenant, user, workspace_with_file
 
 
 @pytest.mark.asyncio
+async def test_run_validate_requires_actor(db, tenant, user, workspace_with_files):
+    cs = await ws_svc.create_changeset(db, workspace_with_files.id, tenant.id, "Run CS", user.id)
+    tool = TOOL_REGISTRY["workspace.run_validate"]
+    result = await governed_execute(
+        tool_name="workspace.run_validate",
+        params={"workspace_id": str(workspace_with_files.id), "changeset_id": str(cs.id)},
+        tenant_id=str(tenant.id),
+        actor_id=None,
+        execute_fn=tool["execute"],
+        db=db,
+    )
+    assert "error" in result
+    assert "actor id required" in result["error"].lower()
+
+
+@pytest.mark.asyncio
+async def test_run_validate_requires_approved_changeset(db, tenant, user, workspace_with_files):
+    cs = await ws_svc.create_changeset(db, workspace_with_files.id, tenant.id, "Run CS", user.id)
+
+    tool = TOOL_REGISTRY["workspace.run_validate"]
+    result = await governed_execute(
+        tool_name="workspace.run_validate",
+        params={"workspace_id": str(workspace_with_files.id), "changeset_id": str(cs.id)},
+        tenant_id=str(tenant.id),
+        actor_id=str(user.id),
+        execute_fn=tool["execute"],
+        db=db,
+    )
+    assert "error" in result
+    assert "approved" in result["error"].lower()
+
+
+@pytest.mark.asyncio
+async def test_run_validate_denied_for_readonly(db, tenant, user, readonly_user, workspace_with_files):
+    cs = await ws_svc.create_changeset(db, workspace_with_files.id, tenant.id, "Run CS", user.id)
+    await ws_svc.transition_changeset(db, cs.id, tenant.id, "submit", user.id)
+    await ws_svc.transition_changeset(db, cs.id, tenant.id, "approve", user.id)
+
+    tool = TOOL_REGISTRY["workspace.run_validate"]
+    result = await governed_execute(
+        tool_name="workspace.run_validate",
+        params={"workspace_id": str(workspace_with_files.id), "changeset_id": str(cs.id)},
+        tenant_id=str(tenant.id),
+        actor_id=str(readonly_user.id),
+        execute_fn=tool["execute"],
+        db=db,
+    )
+    assert "error" in result
+    assert "workspace.manage" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_run_validate_success_emits_workspace_run_audit(db, tenant, user, workspace_with_files):
+    from types import ModuleType
+    from unittest.mock import MagicMock
+
+    cs = await ws_svc.create_changeset(db, workspace_with_files.id, tenant.id, "Run CS", user.id)
+    await ws_svc.transition_changeset(db, cs.id, tenant.id, "submit", user.id)
+    await ws_svc.transition_changeset(db, cs.id, tenant.id, "approve", user.id)
+
+    fake_module = ModuleType("app.workers.tasks.workspace_run")
+    fake_task = MagicMock()
+    fake_task.delay = MagicMock()
+    fake_module.workspace_run_task = fake_task
+
+    import sys
+
+    sys.modules["app.workers.tasks.workspace_run"] = fake_module
+    try:
+        tool = TOOL_REGISTRY["workspace.run_validate"]
+        result = await governed_execute(
+            tool_name="workspace.run_validate",
+            params={"workspace_id": str(workspace_with_files.id), "changeset_id": str(cs.id)},
+            tenant_id=str(tenant.id),
+            actor_id=str(user.id),
+            execute_fn=tool["execute"],
+            db=db,
+        )
+    finally:
+        del sys.modules["app.workers.tasks.workspace_run"]
+
+    assert "run_id" in result
+    assert result["status"] == "queued"
+
+    audit = (
+        (
+            await db.execute(
+                select(AuditEvent).where(
+                    AuditEvent.action == "workspace.run.triggered",
+                    AuditEvent.resource_id == result["run_id"],
+                )
+            )
+        )
+        .scalars()
+        .first()
+    )
+    assert audit is not None
+
+
+@pytest.mark.asyncio
 async def test_apply_patch_no_secrets_in_audit_payload(db, tenant, user, workspace_with_files):
     """Audit payloads from apply_patch must not contain secret keys."""
     cs = await ws_svc.create_changeset(db, workspace_with_files.id, tenant.id, "Sec CS", user.id)

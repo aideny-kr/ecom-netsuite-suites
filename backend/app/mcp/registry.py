@@ -140,4 +140,28 @@ TOOL_REGISTRY = {
             "changeset_id": {"type": "string", "required": True, "description": "UUID of the approved changeset"},
         },
     },
+    "workspace.run_validate": {
+        "description": "Trigger an SDF validate run against workspace files. Returns run_id to poll for results.",
+        "execute": workspace_tools.execute_run_validate,
+        "params_schema": {
+            "workspace_id": {"type": "string", "required": True, "description": "Workspace UUID"},
+            "changeset_id": {
+                "type": "string",
+                "required": True,
+                "description": "Approved changeset UUID to execute against",
+            },
+        },
+    },
+    "workspace.run_unit_tests": {
+        "description": "Trigger a Jest unit test run against workspace files. Returns run_id to poll for results.",
+        "execute": workspace_tools.execute_run_unit_tests,
+        "params_schema": {
+            "workspace_id": {"type": "string", "required": True, "description": "Workspace UUID"},
+            "changeset_id": {
+                "type": "string",
+                "required": True,
+                "description": "Approved changeset UUID to execute against",
+            },
+        },
+    },
 }
