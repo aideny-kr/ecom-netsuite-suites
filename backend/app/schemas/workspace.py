@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 # --- Workspace ---
 
@@ -193,6 +193,13 @@ class SuiteQLAssertionsRequest(BaseModel):
 
 
 class DeploySandboxRequest(BaseModel):
+    sandbox_id: str = Field(
+        ...,
+        description="Target NetSuite sandbox account identifier (e.g. 6738075-sb1)",
+        min_length=2,
+        max_length=128,
+        pattern=r"(?i).*(sb|sandbox|tstdrv).*",
+    )
     override_reason: str | None = Field(
         None,
         description="Admin override reason if prerequisites not fully met",
@@ -202,6 +209,14 @@ class DeploySandboxRequest(BaseModel):
         False,
         description="Whether SuiteQL assertions must pass before deploy",
     )
+
+    @field_validator("sandbox_id")
+    @classmethod
+    def validate_sandbox_id(cls, value: str) -> str:
+        lowered = value.lower()
+        if "prod" in lowered or "production" in lowered or "live" in lowered:
+            raise ValueError("Production targets are disabled")
+        return value
 
 
 # --- UAT Report ---

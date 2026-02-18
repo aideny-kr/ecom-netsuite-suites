@@ -13,9 +13,7 @@ export function useRuns(workspaceId: string | null) {
   return useQuery<WorkspaceRun[]>({
     queryKey: ["workspace-runs", workspaceId],
     queryFn: () =>
-      apiClient.get<WorkspaceRun[]>(
-        `/api/v1/workspaces/${workspaceId}/runs`,
-      ),
+      apiClient.get<WorkspaceRun[]>(`/api/v1/workspaces/${workspaceId}/runs`),
     enabled: !!workspaceId,
     refetchInterval: (query) => {
       const data = query.state.data;
@@ -105,14 +103,21 @@ export function useTriggerDeploySandbox() {
     Error,
     {
       changesetId: string;
+      sandboxId: string;
       overrideReason?: string;
       requireAssertions?: boolean;
     }
   >({
-    mutationFn: ({ changesetId, overrideReason, requireAssertions }) =>
+    mutationFn: ({
+      changesetId,
+      sandboxId,
+      overrideReason,
+      requireAssertions,
+    }) =>
       apiClient.post<WorkspaceRun>(
         `/api/v1/changesets/${changesetId}/deploy-sandbox`,
         {
+          sandbox_id: sandboxId,
           override_reason: overrideReason,
           require_assertions: requireAssertions ?? false,
         },
@@ -127,9 +132,7 @@ export function useUATReport(changesetId: string | null) {
   return useQuery<UATReport>({
     queryKey: ["uat-report", changesetId],
     queryFn: () =>
-      apiClient.get<UATReport>(
-        `/api/v1/changesets/${changesetId}/uat-report`,
-      ),
+      apiClient.get<UATReport>(`/api/v1/changesets/${changesetId}/uat-report`),
     enabled: !!changesetId,
   });
 }

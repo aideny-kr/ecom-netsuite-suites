@@ -368,19 +368,59 @@ class TestDeployOverride:
     """Test admin override with audit."""
 
     @pytest.mark.asyncio
-    async def test_override_allows_deploy(self, db, ws_cs):
-        """Admin override should allow deploy even when gates fail."""
+    async def test_override_does_not_bypass_validate_or_tests(self, db, ws_cs):
+        """Override must not bypass validate/unit-test gates."""
         _, cs = ws_cs
         result = await check_deploy_prerequisites(db, cs.id, cs.tenant_id, override_reason="Emergency hotfix required")
-        assert result["allowed"] is True
-        assert result["override"]["applied"] is True
-        assert result["override"]["reason"] == "Emergency hotfix required"
+        assert result["allowed"] is False
+        assert result["override"]["applied"] is False
+        assert "validate" in result["blocked_reason"]
 
     @pytest.mark.asyncio
-    async def test_no_override_without_reason(self, db, ws_cs):
-        """Without override_reason, deploy should remain blocked."""
-        _, cs = ws_cs
-        result = await check_deploy_prerequisites(db, cs.id, cs.tenant_id)
+    async def test_override_allows_assertion_gate_only(self, db, ws_cs, admin_user):
+        """Override may bypass assertions only after validate + unit tests pass."""
+        user, _ = admin_user
+        ws, cs = ws_cs
+        for rt in ("sdf_validate", "jest_unit_test"):
+            run = WorkspaceRun(
+                tenant_id=cs.tenant_id,
+                workspace_id=ws.id,
+                changeset_id=cs.id,
+                run_type=rt,
+                status="passed",
+                triggered_by=user.id,
+            )
+            db.add(run)
+        await db.flush()
+
+        result = await check_deploy_prerequisites(
+            db,
+            cs.id,
+            cs.tenant_id,
+            require_assertions=True,
+            override_reason="Emergency hotfix required",
+        )
+        assert result["allowed"] is True
+        assert result["override"]["applied"] is True
+
+    @pytest.mark.asyncio
+    async def test_no_override_without_reason(self, db, ws_cs, admin_user):
+        """Without override_reason, missing required assertions should block deploy."""
+        user, _ = admin_user
+        ws, cs = ws_cs
+        for rt in ("sdf_validate", "jest_unit_test"):
+            run = WorkspaceRun(
+                tenant_id=cs.tenant_id,
+                workspace_id=ws.id,
+                changeset_id=cs.id,
+                run_type=rt,
+                status="passed",
+                triggered_by=user.id,
+            )
+            db.add(run)
+        await db.flush()
+
+        result = await check_deploy_prerequisites(db, cs.id, cs.tenant_id, require_assertions=True)
         assert result["allowed"] is False
         assert result["override"]["applied"] is False
 
@@ -493,7 +533,7 @@ class TestAPIEndpoints:
         resp = await client.post(
             f"/api/v1/changesets/{cs.id}/deploy-sandbox",
             headers=headers,
-            json={},
+            json={"sandbox_id": "6738075-sb1"},
         )
         assert resp.status_code == 400
         assert "approved" in resp.json()["detail"].lower()
@@ -506,10 +546,18 @@ class TestAPIEndpoints:
         resp = await client.post(
             f"/api/v1/changesets/{cs.id}/deploy-sandbox",
             headers=headers,
-            json={},
+            json={"sandbox_id": "6738075-sb1"},
         )
         assert resp.status_code == 400
         assert "prerequisites" in resp.json()["detail"].lower()
+
+    @pytest.mark.asyncio
+    async def test_deploy_endpoint_requires_sandbox_id(self, client, ws_cs, admin_user):
+        """Deploy endpoint should reject calls without sandbox target."""
+        _, headers = admin_user
+        _, cs = ws_cs
+        resp = await client.post(f"/api/v1/changesets/{cs.id}/deploy-sandbox", headers=headers, json={})
+        assert resp.status_code == 422
 
     @pytest.mark.asyncio
     async def test_assertions_endpoint_success(self, client, ws_cs, admin_user):
@@ -537,16 +585,31 @@ class TestAPIEndpoints:
         assert data["status"] == "queued"
 
     @pytest.mark.asyncio
-    async def test_deploy_with_override_succeeds(self, client, ws_cs, admin_user):
-        """Deploy should succeed with override reason even without prerequisites."""
-        _, headers = admin_user
-        _, cs = ws_cs
+    async def test_deploy_with_override_succeeds(self, client, db, ws_cs, admin_user):
+        """Deploy should succeed with override only when mandatory gates already pass."""
+        user, headers = admin_user
+        ws, cs = ws_cs
+        for rt in ("sdf_validate", "jest_unit_test"):
+            run = WorkspaceRun(
+                tenant_id=cs.tenant_id,
+                workspace_id=ws.id,
+                changeset_id=cs.id,
+                run_type=rt,
+                status="passed",
+                triggered_by=user.id,
+            )
+            db.add(run)
+        await db.flush()
 
         with _mock_workspace_run_task():
             resp = await client.post(
                 f"/api/v1/changesets/{cs.id}/deploy-sandbox",
                 headers=headers,
-                json={"override_reason": "Emergency hotfix"},
+                json={
+                    "sandbox_id": "6738075-sb1",
+                    "require_assertions": True,
+                    "override_reason": "Emergency hotfix",
+                },
             )
         assert resp.status_code == 202
         data = resp.json()
@@ -583,6 +646,7 @@ class TestMcpToolRegistration:
         assert config["rate_limit_per_minute"] == 2
         assert config["requires_entitlement"] == "workspace"
         assert "changeset_id" in config["allowlisted_params"]
+        assert "sandbox_id" in config["allowlisted_params"]
         assert "override_reason" in config["allowlisted_params"]
 
 
@@ -605,7 +669,7 @@ class TestTenantIsolation:
         resp = await client.post(
             f"/api/v1/changesets/{cs.id}/deploy-sandbox",
             headers=headers_b,
-            json={},
+            json={"sandbox_id": "6738075-sb1"},
         )
         assert resp.status_code == 404
 
@@ -703,17 +767,32 @@ class TestAuditEvents:
         assert events[0].status == "passed"
 
     @pytest.mark.asyncio
-    async def test_deploy_override_emits_audit(self, client, ws_cs, admin_user):
+    async def test_deploy_override_emits_audit(self, client, db, ws_cs, admin_user):
         """Deploy with override should emit a gate_override audit event."""
 
-        _, headers = admin_user
-        _, cs = ws_cs
+        user, headers = admin_user
+        ws, cs = ws_cs
+        for rt in ("sdf_validate", "jest_unit_test"):
+            run = WorkspaceRun(
+                tenant_id=cs.tenant_id,
+                workspace_id=ws.id,
+                changeset_id=cs.id,
+                run_type=rt,
+                status="passed",
+                triggered_by=user.id,
+            )
+            db.add(run)
+        await db.flush()
 
         with _mock_workspace_run_task():
             resp = await client.post(
                 f"/api/v1/changesets/{cs.id}/deploy-sandbox",
                 headers=headers,
-                json={"override_reason": "Emergency hotfix"},
+                json={
+                    "sandbox_id": "6738075-sb1",
+                    "require_assertions": True,
+                    "override_reason": "Emergency hotfix",
+                },
             )
         assert resp.status_code == 202
 

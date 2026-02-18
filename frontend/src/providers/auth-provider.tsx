@@ -79,6 +79,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         data,
       );
       setTokens(res);
+      // Clear stale onboarding skip flag — new session may be a different tenant
+      localStorage.removeItem("onboarding_skipped");
       const profile = await apiClient.get<User>("/api/v1/auth/me");
       setUser(profile);
       await loadTenants();
@@ -94,6 +96,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         data,
       );
       setTokens(res);
+      // Clear any stale onboarding skip flag so the wizard shows for new tenants
+      localStorage.removeItem("onboarding_skipped");
       const profile = await apiClient.get<User>("/api/v1/auth/me");
       setUser(profile);
       await loadTenants();

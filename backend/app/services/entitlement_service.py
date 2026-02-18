@@ -19,7 +19,7 @@ PLAN_LIMITS = {
         "chat": True,
         "byok_ai": False,
         "workspace": False,
-        "onboarding": False,
+        "onboarding": True,
         "chat_api": False,
         "policies": False,
     },

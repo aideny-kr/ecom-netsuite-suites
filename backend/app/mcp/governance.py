@@ -165,7 +165,7 @@ TOOL_CONFIGS = {
         "timeout_seconds": 600,
         "rate_limit_per_minute": 2,
         "requires_entitlement": "workspace",
-        "allowlisted_params": ["changeset_id", "override_reason", "require_assertions"],
+        "allowlisted_params": ["changeset_id", "sandbox_id", "override_reason", "require_assertions"],
     },
 }
 

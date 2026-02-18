@@ -14,11 +14,17 @@ export default function DashboardLayout({
   const [showOnboarding, setShowOnboarding] = useState(false);
 
   useEffect(() => {
-    if (user && !user.onboarding_completed_at) {
+    if (!user) {
+      setShowOnboarding(false);
+      return;
+    }
+    if (!user.onboarding_completed_at) {
       const skipped = localStorage.getItem("onboarding_skipped");
       if (!skipped) {
         setShowOnboarding(true);
       }
+    } else {
+      setShowOnboarding(false);
     }
   }, [user]);
 

@@ -465,6 +465,7 @@ async def _trigger_run(
         actor_id=user.id,
         resource_type="workspace_run",
         resource_id=str(run.id),
+        correlation_id=run.correlation_id,
         payload={"run_type": run_type, "changeset_id": str(changeset_id)},
     )
     await db.commit()
@@ -541,6 +542,7 @@ async def trigger_suiteql_assertions(
         actor_id=user.id,
         resource_type="workspace_run",
         resource_id=str(run.id),
+        correlation_id=run.correlation_id,
         payload={
             "run_type": "suiteql_assertions",
             "changeset_id": str(changeset_id),
@@ -565,14 +567,12 @@ async def trigger_suiteql_assertions(
 @changeset_router.post("/{changeset_id}/deploy-sandbox", status_code=status.HTTP_202_ACCEPTED)
 async def trigger_deploy_sandbox(
     changeset_id: uuid.UUID,
-    body: DeploySandboxRequest | None = None,
+    body: DeploySandboxRequest,
     user: User = Depends(require_permission("workspace.manage")),
     db: AsyncSession = Depends(get_db),
 ):
     """Trigger sandbox deploy. Requires approved changeset + validate pass + unit tests pass."""
     from app.services.deploy_service import check_deploy_prerequisites
-
-    body = body or DeploySandboxRequest()
 
     cs = await ws_svc.get_changeset(db, changeset_id, user.tenant_id)
     if not cs:
@@ -607,6 +607,7 @@ async def trigger_deploy_sandbox(
             resource_id=str(changeset_id),
             payload={
                 "override_reason": body.override_reason,
+                "sandbox_id": body.sandbox_id,
                 "gates": gate_result["gates"],
             },
         )
@@ -631,9 +632,11 @@ async def trigger_deploy_sandbox(
         actor_id=user.id,
         resource_type="workspace_run",
         resource_id=str(run.id),
+        correlation_id=run.correlation_id,
         payload={
             "run_type": "deploy_sandbox",
             "changeset_id": str(changeset_id),
+            "sandbox_id": body.sandbox_id,
             "gates": gate_result["gates"],
             "override": gate_result["override"],
         },
@@ -646,6 +649,7 @@ async def trigger_deploy_sandbox(
         tenant_id=str(user.tenant_id),
         run_id=str(run.id),
         correlation_id=run.correlation_id,
+        extra_params={"sandbox_id": body.sandbox_id},
     )
 
     return _serialize_run(run)
@@ -676,8 +680,13 @@ async def get_uat_report(
     latest_runs = await get_latest_runs_for_changeset(db, changeset_id, user.tenant_id)
 
     runs_summary = []
+    artifact_links: dict[str, list[dict]] = {}
+    artifact_content_by_id: dict[str, str | None] = {}
     for run_type, run in latest_runs.items():
         if run is not None:
+            artifacts = await runner_service.get_artifacts(db, run.id, user.tenant_id)
+            for artifact in artifacts:
+                artifact_content_by_id[str(artifact.id)] = artifact.content
             runs_summary.append(
                 {
                     "run_type": run_type,
@@ -686,21 +695,33 @@ async def get_uat_report(
                     "duration_ms": run.duration_ms,
                     "started_at": run.started_at.isoformat() if run.started_at else None,
                     "completed_at": run.completed_at.isoformat() if run.completed_at else None,
+                    "artifacts_url": f"/api/v1/runs/{run.id}/artifacts",
                 }
             )
+            artifact_links[run_type] = [
+                {
+                    "artifact_id": str(a.id),
+                    "artifact_type": a.artifact_type,
+                    "sha256_hash": a.sha256_hash,
+                    "size_bytes": a.size_bytes,
+                    "artifacts_url": f"/api/v1/runs/{run.id}/artifacts",
+                }
+                for a in artifacts
+            ]
 
     # Try to find assertions report artifact
     assertions_report = None
     assertion_run = latest_runs.get("suiteql_assertions")
     if assertion_run:
-        artifacts = await runner_service.get_artifacts(db, assertion_run.id, user.tenant_id)
-        for a in artifacts:
-            if a.artifact_type == "suiteql_report":
-                try:
-                    assertions_report = json.loads(a.content) if a.content else None
-                except (json.JSONDecodeError, TypeError):
-                    assertions_report = None
-                break
+        for a in artifact_links.get("suiteql_assertions", []):
+            if a["artifact_type"] != "suiteql_report":
+                continue
+            artifact_content = artifact_content_by_id.get(a["artifact_id"])
+            try:
+                assertions_report = json.loads(artifact_content) if artifact_content else None
+            except (json.JSONDecodeError, TypeError):
+                assertions_report = None
+            break
 
     # Compute overall status
     validate_ok = latest_runs.get("sdf_validate") and latest_runs["sdf_validate"].status == "passed"
@@ -732,6 +753,7 @@ async def get_uat_report(
             "deploy": _gate_status(deploy_ok, latest_runs.get("deploy_sandbox")),
         },
         "runs": runs_summary,
+        "artifact_links": artifact_links,
         "assertions_report": assertions_report,
         "overall_status": overall,
         "generated_at": datetime.now(timezone.utc).isoformat(),

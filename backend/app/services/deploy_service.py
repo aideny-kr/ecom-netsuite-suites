@@ -82,13 +82,26 @@ async def check_deploy_prerequisites(
     validate_ok = gates["validate"]["status"] == "passed"
     tests_ok = gates["unit_tests"]["status"] == "passed"
     assertions_ok = gates["assertions"]["status"] in ("passed", "not_required")
-
-    all_passed = validate_ok and tests_ok and assertions_ok
-
     override_applied = False
     blocked_reason = None
 
-    if not all_passed:
+    # Validate and unit tests are mandatory and cannot be overridden.
+    if not validate_ok or not tests_ok:
+        failures = []
+        if not validate_ok:
+            failures.append(f"validate: {gates['validate']['status']}")
+        if not tests_ok:
+            failures.append(f"unit_tests: {gates['unit_tests']['status']}")
+        blocked_reason = f"Deploy blocked — prerequisites not met: {', '.join(failures)}"
+        return {
+            "allowed": False,
+            "gates": gates,
+            "override": {"applied": False, "reason": None},
+            "blocked_reason": blocked_reason,
+        }
+
+    # Assertions can be overridden only when explicitly required.
+    if not assertions_ok:
         if override_reason:
             override_applied = True
             logger.warning(
@@ -99,17 +112,10 @@ async def check_deploy_prerequisites(
                 gates=gates,
             )
         else:
-            failures = []
-            if not validate_ok:
-                failures.append(f"validate: {gates['validate']['status']}")
-            if not tests_ok:
-                failures.append(f"unit_tests: {gates['unit_tests']['status']}")
-            if not assertions_ok:
-                failures.append(f"assertions: {gates['assertions']['status']}")
-            blocked_reason = f"Deploy blocked — prerequisites not met: {', '.join(failures)}"
+            blocked_reason = f"Deploy blocked — prerequisites not met: assertions: {gates['assertions']['status']}"
 
     return {
-        "allowed": all_passed or override_applied,
+        "allowed": assertions_ok or override_applied,
         "gates": gates,
         "override": {"applied": override_applied, "reason": override_reason},
         "blocked_reason": blocked_reason,

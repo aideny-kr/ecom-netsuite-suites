@@ -195,6 +195,11 @@ TOOL_REGISTRY = {
                 "required": True,
                 "description": "Approved changeset UUID to deploy",
             },
+            "sandbox_id": {
+                "type": "string",
+                "required": True,
+                "description": "Target sandbox account identifier (for example: 6738075-sb1)",
+            },
             "override_reason": {
                 "type": "string",
                 "required": False,

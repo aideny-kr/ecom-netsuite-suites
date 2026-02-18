@@ -211,6 +211,9 @@ async def execute_deploy_sandbox(params: dict[str, Any], context: dict[str, Any]
     if not changeset_raw:
         return {"error": "changeset_id is required", "row_count": 0}
     changeset_id = uuid.UUID(changeset_raw)
+    sandbox_id = params.get("sandbox_id")
+    if not sandbox_id:
+        return {"error": "sandbox_id is required", "row_count": 0}
 
     cs = await ws_svc.get_changeset(db, changeset_id, uuid.UUID(tenant_id))
     if cs is None:
@@ -232,6 +235,22 @@ async def execute_deploy_sandbox(params: dict[str, Any], context: dict[str, Any]
     if not gate_result["allowed"]:
         return {"error": gate_result["blocked_reason"], "row_count": 0}
 
+    if gate_result["override"]["applied"]:
+        await audit_service.log_event(
+            db=db,
+            tenant_id=uuid.UUID(tenant_id),
+            category="workspace",
+            action="deploy.gate_override",
+            actor_id=actor_uuid,
+            resource_type="changeset",
+            resource_id=str(changeset_id),
+            payload={
+                "sandbox_id": sandbox_id,
+                "override_reason": override_reason,
+                "gates": gate_result["gates"],
+            },
+        )
+
     run = await runner_service.create_run(
         db,
         tenant_id=uuid.UUID(tenant_id),
@@ -252,6 +271,7 @@ async def execute_deploy_sandbox(params: dict[str, Any], context: dict[str, Any]
         payload={
             "run_type": "deploy_sandbox",
             "changeset_id": str(changeset_id),
+            "sandbox_id": sandbox_id,
             "gates": gate_result["gates"],
             "override": gate_result["override"],
         },
@@ -264,6 +284,7 @@ async def execute_deploy_sandbox(params: dict[str, Any], context: dict[str, Any]
         tenant_id=tenant_id,
         run_id=str(run.id),
         correlation_id=run.correlation_id,
+        extra_params={"sandbox_id": sandbox_id},
     )
 
     return {"run_id": str(run.id), "status": run.status, "gates": gate_result["gates"], "row_count": 1}

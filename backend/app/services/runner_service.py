@@ -57,6 +57,8 @@ TRUNCATED_SUFFIX = "\n...[TRUNCATED]"
 AUTH_BEARER_PATTERN = re.compile(r"(?i)\b(authorization:\s*bearer)\s+[A-Za-z0-9._\-+/=]+")
 BEARER_PATTERN = re.compile(r"(?i)\b(bearer)\s+[A-Za-z0-9._\-+/=]+")
 KEY_VALUE_SECRET_PATTERN = re.compile(r"(?i)\b(api[_-]?key|token|secret|password)\b\s*[:=]\s*([^\s,;]+)")
+PRODUCTION_TARGET_PATTERN = re.compile(r"(?i)\b(prod|production|live)\b")
+SANDBOX_HINT_PATTERN = re.compile(r"(?i)(?:^|[-_])(sb\d*|sandbox\d*)$")
 
 
 class CommandNotAllowedError(Exception):
@@ -100,6 +102,27 @@ def _safe_target_path(base_dir: Path, relative_path: str) -> Path:
     if not candidate.is_relative_to(base_dir):
         raise ValueError(f"Path traversal detected while materializing snapshot: {relative_path}")
     return candidate
+
+
+def _validate_sandbox_target(sandbox_id: str) -> str:
+    target = sandbox_id.strip()
+    if not target:
+        raise ValueError("sandbox_id is required for sandbox deploy")
+
+    lowered = target.lower()
+    if PRODUCTION_TARGET_PATTERN.search(lowered):
+        raise ValueError("Production deploy targets are disabled")
+
+    # Explicit sandbox markers only: *-sb1, *_sb1, sb1, sandbox1, TSTDRV*
+    if not (SANDBOX_HINT_PATTERN.search(lowered) or lowered.startswith("tstdrv")):
+        raise ValueError("sandbox_id must clearly reference a sandbox target (example: 6738075-sb1)")
+
+    return target
+
+
+def _build_deploy_command(base_cmd: list[str], sandbox_id: str) -> list[str]:
+    target = _validate_sandbox_target(sandbox_id)
+    return [*base_cmd, "--account", target]
 
 
 async def create_run(
@@ -447,7 +470,15 @@ async def execute_run(
 
     try:
         file_count = await _materialize_snapshot(db, run, tmp_dir)
-        exit_code, stdout, stderr = await _run_subprocess(cmd_config["cmd"], tmp_dir, cmd_config["timeout"])
+
+        cmd = cmd_config["cmd"]
+        if run.run_type == "deploy_sandbox":
+            sandbox_id = (extra_params or {}).get("sandbox_id")
+            cmd = _build_deploy_command(cmd_config["cmd"], str(sandbox_id or ""))
+            run.command = " ".join(cmd)
+            await db.flush()
+
+        exit_code, stdout, stderr = await _run_subprocess(cmd, tmp_dir, cmd_config["timeout"])
         duration_ms = int((time.monotonic() - start_time) * 1000)
 
         run.exit_code = exit_code

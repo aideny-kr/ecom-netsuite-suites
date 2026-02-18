@@ -329,15 +329,15 @@ async def test_readonly_user_cannot_confirm_profile(client: AsyncClient, pro_adm
 
 
 @pytest.mark.asyncio
-async def test_free_plan_cannot_create_profile(client: AsyncClient, admin_user):
-    """Free plan tenants should be blocked from onboarding features."""
+async def test_free_plan_can_create_profile(client: AsyncClient, admin_user):
+    """Free plan tenants should be able to use onboarding (it's the first thing new users do)."""
     _, headers = admin_user
     resp = await client.post(
         "/api/v1/onboarding/profiles",
         json={"industry": "Retail"},
         headers=headers,
     )
-    assert resp.status_code == 403
+    assert resp.status_code == 201
 
 
 # ---------------------------------------------------------------------------
