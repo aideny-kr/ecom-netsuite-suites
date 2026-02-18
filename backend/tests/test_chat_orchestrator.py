@@ -30,8 +30,11 @@ class TestAllowedChatToolsFromOld:
         expected = {
             "netsuite.suiteql",
             "netsuite.connectivity",
+            "netsuite.get_metadata",
+            "netsuite.refresh_metadata",
             "data.sample_table_read",
             "report.export",
+            "rag.search",
             "workspace.list_files",
             "workspace.read_file",
             "workspace.search",

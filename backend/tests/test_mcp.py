@@ -222,6 +222,7 @@ class TestToolConfigs:
             "data.sample_table_read",
             "recon.run",
             "report.export",
+            "rag.search",
             "schedule.create",
             "schedule.list",
             "schedule.run",

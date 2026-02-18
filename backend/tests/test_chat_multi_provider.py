@@ -6,10 +6,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.services.chat.llm_adapter import LLMResponse, TokenUsage, ToolUseBlock
 from app.services.chat.orchestrator import run_chat_turn
 
 _ORCH = "app.services.chat.orchestrator"
+_SETTINGS = "app.services.chat.orchestrator.settings"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -34,6 +36,8 @@ def _make_session(tenant_id: uuid.UUID):
     session.id = uuid.uuid4()
     session.title = None
     session.messages = []
+    session.workspace_id = None
+    session.session_type = "chat"
     return session
 
 
@@ -63,6 +67,7 @@ class TestMultiProviderOrchestrator:
         db.commit = AsyncMock()
 
         with (
+            patch.object(settings, "MULTI_AGENT_ENABLED", False),
             patch(
                 f"{_ORCH}.get_tenant_ai_config",
                 new_callable=AsyncMock,
@@ -115,6 +120,7 @@ class TestMultiProviderOrchestrator:
         db.commit = AsyncMock()
 
         with (
+            patch.object(settings, "MULTI_AGENT_ENABLED", False),
             patch(
                 f"{_ORCH}.get_tenant_ai_config",
                 new_callable=AsyncMock,
@@ -168,6 +174,7 @@ class TestMultiProviderOrchestrator:
         db.commit = AsyncMock()
 
         with (
+            patch.object(settings, "MULTI_AGENT_ENABLED", False),
             patch(
                 f"{_ORCH}.get_tenant_ai_config",
                 new_callable=AsyncMock,

@@ -3,7 +3,7 @@ import ssl
 from logging.config import fileConfig
 
 from sqlalchemy import pool
-from sqlalchemy.ext.asyncio import async_engine_from_config
+from sqlalchemy.ext.asyncio import create_async_engine
 
 from alembic import context
 from app.core.config import settings
@@ -17,8 +17,7 @@ target_metadata = Base.metadata
 
 # Prefer direct connection for migrations (bypasses PgBouncer pooler)
 # Falls back to DATABASE_URL if no direct URL is configured
-migration_url = settings.DATABASE_URL_DIRECT or settings.DATABASE_URL
-config.set_main_option("sqlalchemy.url", str(migration_url))
+migration_url = str(settings.DATABASE_URL_DIRECT or settings.DATABASE_URL)
 
 
 def _is_supabase(url: str) -> bool:
@@ -26,9 +25,8 @@ def _is_supabase(url: str) -> bool:
 
 
 def run_migrations_offline() -> None:
-    url = config.get_main_option("sqlalchemy.url")
     context.configure(
-        url=url,
+        url=migration_url,
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
@@ -44,18 +42,15 @@ def do_run_migrations(connection):
 
 
 async def run_async_migrations() -> None:
-    # Build SSL connect_args for Supabase
-    url = config.get_main_option("sqlalchemy.url")
     connect_args = {}
-    if _is_supabase(url):
+    if _is_supabase(migration_url):
         ssl_ctx = ssl.create_default_context()
         ssl_ctx.check_hostname = False
         ssl_ctx.verify_mode = ssl.CERT_NONE
         connect_args["ssl"] = ssl_ctx
 
-    connectable = async_engine_from_config(
-        config.get_section(config.config_ini_section, {}),
-        prefix="sqlalchemy.",
+    connectable = create_async_engine(
+        migration_url,
         poolclass=pool.NullPool,
         connect_args=connect_args,
     )

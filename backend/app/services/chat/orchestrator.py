@@ -192,7 +192,7 @@ async def run_chat_turn(
                 sa_select(TenantConfig.multi_agent_enabled).where(TenantConfig.tenant_id == tenant_id)
             )
             tenant_ma = tc_result.scalar_one_or_none()
-            if tenant_ma is not None:
+            if isinstance(tenant_ma, bool):
                 use_multi_agent = tenant_ma
         except Exception:
             pass  # Fall through to single-agent

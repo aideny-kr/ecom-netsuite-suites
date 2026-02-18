@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.services.chat.llm_adapter import LLMResponse, TokenUsage, ToolUseBlock
 from app.services.chat.orchestrator import MAX_STEPS, run_chat_turn
 
@@ -33,10 +34,13 @@ def _make_session(tenant_id: uuid.UUID, messages=None):
     session.id = uuid.uuid4()
     session.title = None
     session.messages = messages or []
+    session.workspace_id = None
+    session.session_type = "chat"
     return session
 
 
 _DEFAULT_AI_CONFIG = ("anthropic", "claude-sonnet-4-20250514", "sk-test", False)
+_SETTINGS = "app.services.chat.orchestrator.settings"
 _ORCH = "app.services.chat.orchestrator"
 
 
@@ -98,6 +102,7 @@ class TestAgenticSingleStep:
         db.commit = AsyncMock()
 
         with (
+            patch.object(settings, "MULTI_AGENT_ENABLED", False),
             patch(f"{_ORCH}.get_tenant_ai_config", new_callable=AsyncMock, return_value=_DEFAULT_AI_CONFIG),
             patch(f"{_ORCH}.get_adapter", return_value=mock_adapter),
             patch(f"{_ORCH}.retriever_node", new_callable=AsyncMock),
@@ -151,6 +156,7 @@ class TestAgenticToolCall:
         db.commit = AsyncMock()
 
         with (
+            patch.object(settings, "MULTI_AGENT_ENABLED", False),
             patch(f"{_ORCH}.get_tenant_ai_config", new_callable=AsyncMock, return_value=_DEFAULT_AI_CONFIG),
             patch(f"{_ORCH}.get_adapter", return_value=mock_adapter),
             patch(f"{_ORCH}.retriever_node", new_callable=AsyncMock),
@@ -232,6 +238,7 @@ class TestAgenticToolRetry:
         db.commit = AsyncMock()
 
         with (
+            patch.object(settings, "MULTI_AGENT_ENABLED", False),
             patch(f"{_ORCH}.get_tenant_ai_config", new_callable=AsyncMock, return_value=_DEFAULT_AI_CONFIG),
             patch(f"{_ORCH}.get_adapter", return_value=mock_adapter),
             patch(f"{_ORCH}.retriever_node", new_callable=AsyncMock),
@@ -304,6 +311,7 @@ class TestAgenticMaxSteps:
         db.commit = AsyncMock()
 
         with (
+            patch.object(settings, "MULTI_AGENT_ENABLED", False),
             patch(f"{_ORCH}.get_tenant_ai_config", new_callable=AsyncMock, return_value=_DEFAULT_AI_CONFIG),
             patch(f"{_ORCH}.get_adapter", return_value=mock_adapter),
             patch(f"{_ORCH}.retriever_node", new_callable=AsyncMock),
@@ -371,6 +379,7 @@ class TestAgenticAllowlistEnforcement:
         db.commit = AsyncMock()
 
         with (
+            patch.object(settings, "MULTI_AGENT_ENABLED", False),
             patch(f"{_ORCH}.get_tenant_ai_config", new_callable=AsyncMock, return_value=_DEFAULT_AI_CONFIG),
             patch(f"{_ORCH}.get_adapter", return_value=mock_adapter),
             patch(f"{_ORCH}.retriever_node", new_callable=AsyncMock),

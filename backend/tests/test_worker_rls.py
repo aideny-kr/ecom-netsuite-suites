@@ -4,13 +4,17 @@ Verifies that Celery workers set SET LOCAL app.current_tenant_id
 before executing any database queries, preventing cross-tenant data leaks.
 """
 
+from pathlib import Path
+
+_BACKEND_ROOT = Path(__file__).resolve().parent.parent
+
 
 class TestTenantSessionSource:
     """Verify tenant_session sets RLS context by inspecting source code."""
 
     def _get_source(self, path: str) -> str:
         """Read a Python source file."""
-        with open(path) as f:
+        with open(_BACKEND_ROOT / path) as f:
             return f.read()
 
     def test_tenant_session_calls_set_local(self):
@@ -34,7 +38,7 @@ class TestSyncTasksUseTenantSession:
     """Verify sync tasks use tenant_session, not raw Session."""
 
     def _get_source(self, path: str) -> str:
-        with open(path) as f:
+        with open(_BACKEND_ROOT / path) as f:
             return f.read()
 
     def test_stripe_sync_uses_tenant_session(self):
@@ -65,7 +69,7 @@ class TestBaseTaskUseTenantSession:
     """Verify InstrumentedTask uses tenant_session in lifecycle hooks."""
 
     def _get_source(self, path: str) -> str:
-        with open(path) as f:
+        with open(_BACKEND_ROOT / path) as f:
             return f.read()
 
     def _extract_method(self, full_source: str, method_name: str) -> str:

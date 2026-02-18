@@ -5,6 +5,7 @@ Uses the Docker-composed PostgreSQL database.
 Tests run against real Postgres to ensure RLS, UUID types, and JSON columns work correctly.
 """
 
+import ssl
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -21,6 +22,20 @@ from app.core.security import create_access_token, hash_password
 from app.main import create_app
 from app.models.tenant import Tenant, TenantConfig
 from app.models.user import Role, User, UserRole
+
+
+def _is_supabase(url: str) -> bool:
+    return "supabase.com" in url or "supabase.co" in url
+
+
+# Use direct connection for tests (pooler doesn't support transactional rollback)
+_test_db_url = settings.DATABASE_URL_DIRECT or settings.DATABASE_URL
+_test_connect_args: dict = {}
+if _is_supabase(_test_db_url):
+    _ssl_ctx = ssl.create_default_context()
+    _ssl_ctx.check_hostname = False
+    _ssl_ctx.verify_mode = ssl.CERT_NONE
+    _test_connect_args["ssl"] = _ssl_ctx
 
 # ---------------------------------------------------------------------------
 # Generate a valid Fernet encryption key for tests (avoids placeholder rejection)
@@ -41,7 +56,7 @@ def _set_encryption_key():
 @pytest_asyncio.fixture
 async def db():
     """Provide a database session. Each test gets its own engine and a transaction that is rolled back."""
-    engine = create_async_engine(settings.DATABASE_URL, echo=False)
+    engine = create_async_engine(_test_db_url, echo=False, connect_args=_test_connect_args)
     async with engine.connect() as conn:
         trans = await conn.begin()
         session = AsyncSession(bind=conn, expire_on_commit=False)
