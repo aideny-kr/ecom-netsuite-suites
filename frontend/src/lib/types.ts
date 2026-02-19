@@ -43,7 +43,8 @@ export interface Connection {
   tenant_id: string;
   provider: "shopify" | "stripe" | "netsuite";
   label: string;
-  status: "active" | "inactive" | "error";
+  status: "active" | "inactive" | "error" | "revoked";
+  auth_type: string | null;
   credentials_set: boolean;
   metadata_json: Record<string, unknown> | null;
   last_sync_at: string | null;

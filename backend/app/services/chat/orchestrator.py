@@ -49,6 +49,12 @@ def _extract_file_paths(nodes: list[dict]) -> list[str]:
     return sorted(paths)
 
 
+def _sanitize_for_prompt(text: str) -> str:
+    """Strip control characters and limit length for prompt injection safety."""
+    cleaned = re.sub(r"[\x00-\x1f\x7f]", "", text)
+    return cleaned[:500]
+
+
 async def run_chat_turn(
     db: AsyncSession,
     session: ChatSession,
@@ -158,7 +164,7 @@ async def run_chat_turn(
             }
             files = await ws_svc.list_files(db, session.workspace_id, tenant_id)
             file_paths = _extract_file_paths(files)
-            file_listing = "\n".join(f"- {p}" for p in file_paths[:50])
+            file_listing = "\n".join(f"- {_sanitize_for_prompt(p)}" for p in file_paths[:50])
             if len(file_paths) > 50:
                 file_listing += f"\n... and {len(file_paths) - 50} more files"
             system_prompt += (
@@ -174,6 +180,13 @@ async def run_chat_turn(
                 "or when the message includes '[Currently viewing file: ...]', "
                 "use the workspace_read_file tool to read that file's content before responding. "
                 "This lets you see exactly what the user sees in their editor."
+            )
+            system_prompt += (
+                "\n\n## IDE Chat Behavior\n"
+                "You are an IDE assistant with direct file access. "
+                "Be concise — lead with the answer, use code blocks, no preambles.\n"
+                "For complex reasoning, use <thinking>...</thinking> tags before your answer. "
+                "This block is collapsed by default in the UI.\n"
             )
 
     # ── Load active policy for tool gating + output redaction ──

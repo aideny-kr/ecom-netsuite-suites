@@ -48,7 +48,14 @@ export function WorkspaceChatPanel({
     (content: string) => {
       let enrichedContent = content;
       if (currentFilePath) {
-        enrichedContent = `[Currently viewing file: ${currentFilePath}]\n\n${content}`;
+        const prefix = `[Currently viewing file: ${currentFilePath}]\n\n`;
+        // Backend max is 4000 chars — leave room for prefix
+        const maxContentLen = 4000 - prefix.length;
+        if (content.length > maxContentLen) {
+          enrichedContent = prefix + content.slice(0, maxContentLen);
+        } else {
+          enrichedContent = prefix + content;
+        }
       }
       handleSend(enrichedContent);
     },

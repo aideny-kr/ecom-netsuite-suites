@@ -34,6 +34,14 @@ async def create_connection(
     return connection
 
 
+async def get_connection(db: AsyncSession, connection_id: uuid.UUID, tenant_id: uuid.UUID) -> Connection | None:
+    """Get a single connection by ID."""
+    result = await db.execute(
+        select(Connection).where(Connection.id == connection_id, Connection.tenant_id == tenant_id)
+    )
+    return result.scalar_one_or_none()
+
+
 async def list_connections(db: AsyncSession, tenant_id: uuid.UUID) -> list[Connection]:
     """List connections for a tenant (no secrets exposed)."""
     result = await db.execute(

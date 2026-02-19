@@ -6,7 +6,13 @@ import {
   useDeleteMcpConnector,
   useTestMcpConnector,
 } from "@/hooks/use-mcp-connectors";
-import { useConnections } from "@/hooks/use-connections";
+import {
+  useConnections,
+  useUpdateConnection,
+  useReconnectConnection,
+  useTestConnection,
+  useDeleteConnection,
+} from "@/hooks/use-connections";
 import {
   useAiSettings,
   useUpdateAiSettings,
@@ -24,8 +30,28 @@ import {
 import { usePlanInfo } from "@/hooks/use-plan";
 import { PLAN_TIERS } from "@/lib/constants";
 import { AddMcpConnectorDialog } from "@/components/add-mcp-connector-dialog";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -686,6 +712,199 @@ function ConnectionStatusBadge({ status }: { status: ConnectionStatus }) {
   }
 }
 
+function ConnectionManagementCard({
+  connection,
+}: {
+  connection: { id: string; label: string; status: string; auth_type: string | null; provider: string };
+}) {
+  const { toast } = useToast();
+  const updateConn = useUpdateConnection();
+  const reconnectConn = useReconnectConnection();
+  const testConn = useTestConnection();
+  const deleteConn = useDeleteConnection();
+  const [editLabel, setEditLabel] = useState(connection.label);
+  const [editOpen, setEditOpen] = useState(false);
+
+  async function handleTest() {
+    try {
+      const result = await testConn.mutateAsync(connection.id);
+      toast({
+        title: result.status === "ok" ? "Connection OK" : "Connection issue",
+        description: result.message,
+        variant: result.status === "ok" ? "default" : "destructive",
+      });
+    } catch (err) {
+      toast({
+        title: "Test failed",
+        description: err instanceof Error ? err.message : "Unknown error",
+        variant: "destructive",
+      });
+    }
+  }
+
+  async function handleReconnect() {
+    try {
+      await reconnectConn.mutateAsync(connection.id);
+      toast({ title: "Connection reconnected" });
+    } catch (err) {
+      toast({
+        title: "Reconnect failed",
+        description: err instanceof Error ? err.message : "Unknown error",
+        variant: "destructive",
+      });
+    }
+  }
+
+  async function handleDisconnect() {
+    try {
+      await deleteConn.mutateAsync(connection.id);
+      toast({ title: "Connection disconnected" });
+    } catch (err) {
+      toast({
+        title: "Failed to disconnect",
+        description: err instanceof Error ? err.message : "Unknown error",
+        variant: "destructive",
+      });
+    }
+  }
+
+  async function handleSaveLabel() {
+    if (!editLabel.trim()) return;
+    try {
+      await updateConn.mutateAsync({ id: connection.id, data: { label: editLabel.trim() } });
+      setEditOpen(false);
+      toast({ title: "Label updated" });
+    } catch (err) {
+      toast({
+        title: "Failed to update",
+        description: err instanceof Error ? err.message : "Unknown error",
+        variant: "destructive",
+      });
+    }
+  }
+
+  const statusColor =
+    connection.status === "active"
+      ? "text-green-700 bg-green-100"
+      : connection.status === "error"
+        ? "text-red-700 bg-red-100"
+        : "text-muted-foreground bg-muted";
+
+  return (
+    <div className="rounded-lg border p-4 space-y-3">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          {connection.provider === "netsuite" ? (
+            <KeyRound className="h-4 w-4 text-muted-foreground" />
+          ) : (
+            <Link2 className="h-4 w-4 text-muted-foreground" />
+          )}
+          <span className="text-[13px] font-medium">{connection.label}</span>
+        </div>
+        <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium ${statusColor}`}>
+          {connection.status}
+        </span>
+      </div>
+      {connection.auth_type && (
+        <p className="text-[12px] text-muted-foreground">Auth: {connection.auth_type}</p>
+      )}
+      <div className="flex items-center gap-2 pt-1">
+        <Button
+          variant="outline"
+          size="sm"
+          className="h-7 text-[12px]"
+          onClick={handleTest}
+          disabled={testConn.isPending}
+        >
+          {testConn.isPending ? (
+            <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+          ) : (
+            <FlaskConical className="mr-1 h-3 w-3" />
+          )}
+          Test
+        </Button>
+
+        <Dialog open={editOpen} onOpenChange={setEditOpen}>
+          <DialogTrigger asChild>
+            <Button variant="outline" size="sm" className="h-7 text-[12px]">
+              <Pencil className="mr-1 h-3 w-3" />
+              Edit
+            </Button>
+          </DialogTrigger>
+          <DialogContent className="sm:max-w-[400px]">
+            <DialogHeader>
+              <DialogTitle>Edit Connection</DialogTitle>
+              <DialogDescription>Update the connection label.</DialogDescription>
+            </DialogHeader>
+            <div className="space-y-2 py-2">
+              <Label className="text-[13px]">Label</Label>
+              <Input
+                value={editLabel}
+                onChange={(e) => setEditLabel(e.target.value)}
+                className="h-9 text-[13px]"
+              />
+            </div>
+            <DialogFooter>
+              <Button
+                size="sm"
+                className="h-8 text-[12px]"
+                onClick={handleSaveLabel}
+                disabled={updateConn.isPending || !editLabel.trim()}
+              >
+                {updateConn.isPending && <Loader2 className="mr-1 h-3 w-3 animate-spin" />}
+                Save
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
+        {connection.status !== "active" && (
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-7 text-[12px]"
+            onClick={handleReconnect}
+            disabled={reconnectConn.isPending}
+          >
+            {reconnectConn.isPending ? (
+              <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+            ) : (
+              <RefreshCw className="mr-1 h-3 w-3" />
+            )}
+            Reconnect
+          </Button>
+        )}
+
+        <AlertDialog>
+          <AlertDialogTrigger asChild>
+            <Button variant="ghost" size="sm" className="h-7 text-[12px] text-destructive hover:text-destructive ml-auto">
+              <Trash2 className="mr-1 h-3 w-3" />
+              Disconnect
+            </Button>
+          </AlertDialogTrigger>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Disconnect &quot;{connection.label}&quot;?</AlertDialogTitle>
+              <AlertDialogDescription>
+                This will remove the connection and revoke stored credentials. You can reconnect later.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>Cancel</AlertDialogCancel>
+              <AlertDialogAction
+                onClick={handleDisconnect}
+                className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              >
+                Disconnect
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+      </div>
+    </div>
+  );
+}
+
 function NetSuiteConnectionSection() {
   const { data: mcpConnectors } = useMcpConnectors();
   const { data: connections } = useConnections();
@@ -822,17 +1041,24 @@ function NetSuiteConnectionSection() {
 
       <div className="rounded-xl border bg-card p-6 shadow-soft space-y-4">
         {bothConnected ? (
-          <div className="flex items-center gap-3 rounded-lg bg-green-50 px-4 py-3">
-            <CheckCircle2 className="h-5 w-5 text-green-600" />
-            <div>
-              <p className="text-[13px] font-medium text-green-800">
-                Both connections active
-              </p>
-              <p className="text-[12px] text-green-600">
-                MCP connector and OAuth API tokens are connected.
-              </p>
+          <>
+            <div className="flex items-center gap-3 rounded-lg bg-green-50 px-4 py-3">
+              <CheckCircle2 className="h-5 w-5 text-green-600" />
+              <div>
+                <p className="text-[13px] font-medium text-green-800">
+                  Both connections active
+                </p>
+                <p className="text-[12px] text-green-600">
+                  MCP connector and OAuth API tokens are connected.
+                </p>
+              </div>
             </div>
-          </div>
+            {connections
+              ?.filter((c) => c.provider === "netsuite")
+              .map((conn) => (
+                <ConnectionManagementCard key={conn.id} connection={conn} />
+              ))}
+          </>
         ) : (
           <>
             {/* Phase A: MCP */}

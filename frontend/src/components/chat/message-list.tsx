@@ -45,6 +45,45 @@ function renderWithMentions(
   return parts.length > 0 ? parts : [content];
 }
 
+function parseThinkingBlocks(content: string): Array<{
+  type: "text" | "thinking";
+  content: string;
+}> {
+  const parts: Array<{ type: "text" | "thinking"; content: string }> = [];
+  const regex = /<thinking>([\s\S]*?)<\/thinking>/g;
+  let lastIndex = 0;
+  let match;
+
+  while ((match = regex.exec(content)) !== null) {
+    if (match.index > lastIndex) {
+      const text = content.slice(lastIndex, match.index).trim();
+      if (text) parts.push({ type: "text", content: text });
+    }
+    parts.push({ type: "thinking", content: match[1].trim() });
+    lastIndex = regex.lastIndex;
+  }
+
+  if (lastIndex < content.length) {
+    const text = content.slice(lastIndex).trim();
+    if (text) parts.push({ type: "text", content: text });
+  }
+
+  return parts.length > 0 ? parts : [{ type: "text", content }];
+}
+
+function ThinkingBlock({ content }: { content: string }) {
+  return (
+    <details className="mb-2 rounded-md border border-muted bg-muted/30 text-[12px]">
+      <summary className="cursor-pointer select-none px-3 py-1.5 text-muted-foreground/70 hover:text-muted-foreground font-medium">
+        Thinking...
+      </summary>
+      <div className="prose prose-sm dark:prose-invert max-w-none px-3 pb-2 text-muted-foreground/80 text-[12px]">
+        <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
+      </div>
+    </details>
+  );
+}
+
 interface MessageListProps {
   messages: ChatMessage[];
   isLoading: boolean;
@@ -151,13 +190,24 @@ export function MessageList({
                 })}
               </div>
             )}
-            {message.role === "assistant" ? (
-              <div className="prose prose-sm dark:prose-invert max-w-none text-[14px] leading-relaxed">
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                  {message.content}
-                </ReactMarkdown>
-              </div>
-            ) : (
+            {message.role === "assistant" ? (() => {
+              const parts = parseThinkingBlocks(message.content);
+              return (
+                <div>
+                  {parts.map((part, i) =>
+                    part.type === "thinking" ? (
+                      <ThinkingBlock key={i} content={part.content} />
+                    ) : (
+                      <div key={i} className="prose prose-sm dark:prose-invert max-w-none text-[14px] leading-relaxed">
+                        <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                          {part.content}
+                        </ReactMarkdown>
+                      </div>
+                    )
+                  )}
+                </div>
+              );
+            })() : (
               <p className="text-[14px] leading-relaxed whitespace-pre-wrap">
                 {renderWithMentions(message.content, onMentionClick)}
               </p>

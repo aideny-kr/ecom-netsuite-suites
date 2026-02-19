@@ -68,8 +68,10 @@ import {
   type NetSuiteApiLogEntry,
 } from "@/hooks/use-netsuite-api-logs";
 import { usePullFile, usePushFile } from "@/hooks/use-netsuite-file-ops";
+import { Panel, Group as PanelGroup, Separator as PanelResizeHandle } from "react-resizable-panels";
+import { FileCode, X } from "lucide-react";
 
-type RightTab = "changesets" | "runs" | "chat" | "logs";
+type BottomTab = "chat" | "changesets" | "runs" | "logs";
 
 function detectNetSuiteEnvironment(accountId: string | undefined): {
   label: string;
@@ -164,8 +166,10 @@ export default function WorkspacePage() {
   const [createOpen, setCreateOpen] = useState(false);
   const [newName, setNewName] = useState("");
   const [newDesc, setNewDesc] = useState("");
-  const [rightTab, setRightTab] = useState<RightTab>("changesets");
+  const [bottomTab, setBottomTab] = useState<BottomTab>("chat");
   const [showPushConfirm, setShowPushConfirm] = useState(false);
+  const [openTabs, setOpenTabs] = useState<Array<{ id: string; path: string }>>([]);
+  const [activeTabId, setActiveTabId] = useState<string | null>(null);
 
   const { data: workspaces = [] } = useWorkspaces();
   const createWs = useCreateWorkspace();
@@ -279,6 +283,17 @@ export default function WorkspacePage() {
     }
   }, [searchParams, fileTree, workspaces, selectedWorkspaceId, findFileInTree]);
 
+  const handleWorkspaceSwitch = useCallback((wsId: string | null) => {
+    setSelectedWorkspaceId(wsId);
+    // Reset editor state for the new workspace
+    setOpenTabs([]);
+    setActiveTabId(null);
+    setSelectedFileId(null);
+    setSelectedFilePath("");
+    setViewingDiffId(null);
+    setSearchQuery("");
+  }, []);
+
   const handleCreate = async () => {
     if (!newName.trim()) return;
     try {
@@ -286,7 +301,7 @@ export default function WorkspacePage() {
         name: newName.trim(),
         description: newDesc.trim() || undefined,
       });
-      setSelectedWorkspaceId(ws.id);
+      handleWorkspaceSwitch(ws.id);
       setCreateOpen(false);
       setNewName("");
       setNewDesc("");
@@ -298,8 +313,35 @@ export default function WorkspacePage() {
   const handleFileSelect = (fileId: string, path: string) => {
     setSelectedFileId(fileId);
     setSelectedFilePath(path);
+    setActiveTabId(fileId);
     setViewingDiffId(null);
+    setOpenTabs((prev) => {
+      if (prev.some((t) => t.id === fileId)) return prev;
+      return [...prev, { id: fileId, path }];
+    });
   };
+
+  const closeTab = useCallback(
+    (tabId: string) => {
+      setOpenTabs((prev) => {
+        const remaining = prev.filter((t) => t.id !== tabId);
+        if (activeTabId === tabId) {
+          const last = remaining[remaining.length - 1];
+          if (last) {
+            setActiveTabId(last.id);
+            setSelectedFileId(last.id);
+            setSelectedFilePath(last.path);
+          } else {
+            setActiveTabId(null);
+            setSelectedFileId(null);
+            setSelectedFilePath("");
+          }
+        }
+        return remaining;
+      });
+    },
+    [activeTabId],
+  );
 
   const handleMentionClick = useCallback(
     (filePath: string) => {
@@ -317,7 +359,7 @@ export default function WorkspacePage() {
   }, []);
 
   const handleChangesetAction = useCallback(() => {
-    setRightTab("changesets");
+    setBottomTab("changesets");
   }, []);
 
   return (
@@ -327,7 +369,7 @@ export default function WorkspacePage() {
         <WorkspaceSelector
           workspaces={workspaces}
           selectedId={selectedWorkspaceId}
-          onSelect={setSelectedWorkspaceId}
+          onSelect={handleWorkspaceSwitch}
         />
         <Dialog open={createOpen} onOpenChange={setCreateOpen}>
           <DialogTrigger asChild>
@@ -476,218 +518,277 @@ export default function WorkspacePage() {
         )}
       </div>
 
-      {/* Main content */}
-      <div className="flex flex-1 overflow-hidden">
+      {/* Main content — resizable panels */}
+      <PanelGroup orientation="horizontal" className="flex-1 overflow-hidden">
         {/* Left: File Tree */}
-        <div className="w-[260px] shrink-0 overflow-auto border-r bg-muted/20 p-2 scrollbar-thin">
-          {selectedWorkspaceId ? (
-            searchQuery && searchResults ? (
-              <div className="space-y-1">
-                <p className="px-2 text-[11px] font-medium text-muted-foreground">
-                  {searchResults.length} result(s)
-                </p>
-                {searchResults.map((r) => (
-                  <button
-                    key={`${r.file_id}-${r.line_number}`}
-                    onClick={() => handleFileSelect(r.file_id, r.path)}
-                    className="block w-full rounded-md px-2 py-1 text-left hover:bg-accent"
-                  >
-                    <p className="truncate text-[12px] font-medium">
-                      {r.path}
-                    </p>
-                    <p className="truncate text-[11px] text-muted-foreground">
-                      L{r.line_number}: {r.snippet}
-                    </p>
-                  </button>
-                ))}
-              </div>
-            ) : (
-              <FileTree
-                nodes={fileTree}
-                onFileSelect={handleFileSelect}
-                selectedFileId={selectedFileId}
-              />
-            )
-          ) : (
-            <div className="flex h-full items-center justify-center text-[13px] text-muted-foreground">
-              Select a workspace
-            </div>
-          )}
-        </div>
-
-        {/* Center: Code/Diff Viewer */}
-        <div className="flex-1 overflow-hidden">
-          {viewingDiffId && diffData ? (
-            <div className="flex h-full flex-col">
-              <div className="border-b px-4 py-2">
-                <p className="text-[13px] font-medium">{diffData.title}</p>
-                <p className="text-[11px] text-muted-foreground">
-                  {diffData.files.length} file(s) changed
-                </p>
-              </div>
-              <div className="flex-1 overflow-auto">
-                {diffData.files.map((file, idx) => (
-                  <div key={idx} className="border-b last:border-b-0">
-                    <div className="px-4 py-1.5 text-[12px] font-mono bg-muted/30 border-b">
-                      {file.file_path}{" "}
-                      <span className="text-muted-foreground">
-                        ({file.operation})
-                      </span>
-                    </div>
-                    <div style={{ height: "400px" }}>
-                      <DiffViewer
-                        original={file.original_content}
-                        modified={file.modified_content}
-                        filePath={file.file_path}
-                      />
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          ) : fileContent ? (
-            <div className="flex h-full flex-col">
-              <div className="flex items-center justify-between border-b px-4 py-2">
-                <p className="text-[13px] font-medium font-mono">
-                  {selectedFilePath}
-                </p>
-                {nsConnection && isNetSuiteWorkspace && selectedFileId && selectedWorkspaceId && (
-                  <div className="flex items-center gap-1">
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      className="h-7 text-[11px]"
-                      disabled={pullFile.isPending}
-                      onClick={() =>
-                        pullFile.mutate({
-                          fileId: selectedFileId,
-                          workspaceId: selectedWorkspaceId,
-                        })
-                      }
-                    >
-                      {pullFile.isPending ? (
-                        <Loader2 className="mr-1 h-3 w-3 animate-spin" />
-                      ) : (
-                        <Download className="mr-1 h-3 w-3" />
-                      )}
-                      Pull
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="ghost"
-                      className="h-7 text-[11px]"
-                      disabled={pushFile.isPending}
-                      onClick={() => setShowPushConfirm(true)}
-                    >
-                      {pushFile.isPending ? (
-                        <Loader2 className="mr-1 h-3 w-3 animate-spin" />
-                      ) : (
-                        <Upload className="mr-1 h-3 w-3" />
-                      )}
-                      Push
-                    </Button>
-                    <AlertDialog open={showPushConfirm} onOpenChange={setShowPushConfirm}>
-                      <AlertDialogContent>
-                        <AlertDialogHeader>
-                          <AlertDialogTitle>Push to NetSuite {nsEnv.label}?</AlertDialogTitle>
-                          <AlertDialogDescription>
-                            This will overwrite the file on your {nsEnv.label} account. Make sure you have reviewed your changes.
-                          </AlertDialogDescription>
-                        </AlertDialogHeader>
-                        <AlertDialogFooter>
-                          <AlertDialogCancel>Cancel</AlertDialogCancel>
-                          <AlertDialogAction
-                            onClick={() => {
-                              pushFile.mutate({
-                                fileId: selectedFileId,
-                                workspaceId: selectedWorkspaceId,
-                              });
-                            }}
-                          >
-                            Push Changes
-                          </AlertDialogAction>
-                        </AlertDialogFooter>
-                      </AlertDialogContent>
-                    </AlertDialog>
-                  </div>
-                )}
-              </div>
-              {fileContent.truncated && (
-                <div className="border-b px-4 py-1">
-                  <p className="text-[11px] text-yellow-600">
-                    Showing partial content ({fileContent.total_lines} total
-                    lines)
+        <Panel defaultSize={18} minSize={10} maxSize={35}>
+          <div className="h-full overflow-auto bg-muted/20 p-2 scrollbar-thin">
+            {selectedWorkspaceId ? (
+              searchQuery && searchResults ? (
+                <div className="space-y-1">
+                  <p className="px-2 text-[11px] font-medium text-muted-foreground">
+                    {searchResults.length} result(s)
                   </p>
+                  {searchResults.map((r) => (
+                    <button
+                      key={`${r.file_id}-${r.line_number}`}
+                      onClick={() => handleFileSelect(r.file_id, r.path)}
+                      className="block w-full rounded-md px-2 py-1 text-left hover:bg-accent"
+                    >
+                      <p className="truncate text-[12px] font-medium">
+                        {r.path}
+                      </p>
+                      <p className="truncate text-[11px] text-muted-foreground">
+                        L{r.line_number}: {r.snippet}
+                      </p>
+                    </button>
+                  ))}
                 </div>
-              )}
-              <div className="flex-1">
-                <CodeViewer
-                  content={fileContent.content}
-                  filePath={selectedFilePath}
+              ) : (
+                <FileTree
+                  nodes={fileTree}
+                  onFileSelect={handleFileSelect}
+                  selectedFileId={selectedFileId}
                 />
-              </div>
-            </div>
-          ) : (
-            <div className="flex h-full items-center justify-center text-[13px] text-muted-foreground">
-              Select a file to view
-            </div>
-          )}
-        </div>
-
-        {/* Right: Tabbed Panel */}
-        {selectedWorkspaceId && (
-          <div className="w-[340px] shrink-0 flex flex-col overflow-hidden border-l">
-            {/* Tab bar */}
-            <div className="flex border-b">
-              {(["changesets", "runs", "chat", "logs"] as const).map((tab) => (
-                <button
-                  key={tab}
-                  onClick={() => setRightTab(tab)}
-                  className={cn(
-                    "flex-1 px-2 py-2 text-[11px] font-semibold uppercase tracking-widest transition-colors",
-                    rightTab === tab
-                      ? "border-b-2 border-primary text-foreground"
-                      : "text-muted-foreground hover:text-foreground",
-                  )}
-                >
-                  {tab}
-                </button>
-              ))}
-            </div>
-
-            {/* Tab content */}
-            {rightTab === "changesets" && (
-              <div className="flex-1 overflow-auto p-3 scrollbar-thin" data-testid="changeset-panel">
-                <ChangesetPanel
-                  changesets={changesets}
-                  onViewDiff={setViewingDiffId}
-                />
-              </div>
-            )}
-            {rightTab === "runs" && (
-              <div className="flex-1 overflow-auto p-3 scrollbar-thin">
-                <RunsPanel runs={runs} />
-              </div>
-            )}
-            {rightTab === "chat" && (
-              <div className="flex-1 overflow-hidden">
-                <WorkspaceChatPanel
-                  workspaceId={selectedWorkspaceId}
-                  currentFilePath={selectedFilePath || undefined}
-                  onMentionClick={handleMentionClick}
-                  onViewDiff={handleChatViewDiff}
-                  onChangesetAction={handleChangesetAction}
-                />
-              </div>
-            )}
-            {rightTab === "logs" && (
-              <div className="flex-1 overflow-auto p-3 scrollbar-thin">
-                <ApiLogsPanel logs={apiLogs} />
+              )
+            ) : (
+              <div className="flex h-full items-center justify-center text-[13px] text-muted-foreground">
+                Select a workspace
               </div>
             )}
           </div>
-        )}
-      </div>
+        </Panel>
+
+        <PanelResizeHandle className="w-px bg-border hover:bg-primary/40 transition-colors cursor-col-resize" />
+
+        {/* Right: Editor + Bottom Panel */}
+        <Panel defaultSize={82}>
+          <PanelGroup orientation="vertical">
+            {/* Top: Editor with tab bar */}
+            <Panel defaultSize={65} minSize={30}>
+              <div className="flex h-full flex-col overflow-hidden">
+                {/* Tab bar */}
+                {openTabs.length > 0 && (
+                  <div className="flex items-center border-b overflow-x-auto scrollbar-thin shrink-0 bg-muted/30">
+                    {openTabs.map((tab) => (
+                      <div
+                        key={tab.id}
+                        onClick={() => {
+                          setActiveTabId(tab.id);
+                          setSelectedFileId(tab.id);
+                          setSelectedFilePath(tab.path);
+                          setViewingDiffId(null);
+                        }}
+                        className={cn(
+                          "flex items-center gap-1.5 px-3 py-1.5 text-[12px] border-r cursor-pointer group shrink-0",
+                          activeTabId === tab.id
+                            ? "bg-background text-foreground border-b-2 border-b-primary"
+                            : "text-muted-foreground hover:text-foreground hover:bg-background/50",
+                        )}
+                      >
+                        <FileCode className="h-3 w-3" />
+                        <span className="truncate max-w-[120px]">
+                          {tab.path.split("/").pop()}
+                        </span>
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            closeTab(tab.id);
+                          }}
+                          className="ml-0.5 opacity-0 group-hover:opacity-100 hover:text-destructive"
+                        >
+                          <X className="h-3 w-3" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Editor body */}
+                <div className="flex-1 overflow-hidden">
+                  {viewingDiffId && diffData ? (
+                    <div className="flex h-full flex-col">
+                      <div className="border-b px-4 py-2">
+                        <p className="text-[13px] font-medium">{diffData.title}</p>
+                        <p className="text-[11px] text-muted-foreground">
+                          {diffData.files.length} file(s) changed
+                        </p>
+                      </div>
+                      <div className="flex-1 overflow-auto">
+                        {diffData.files.map((file, idx) => (
+                          <div key={idx} className="border-b last:border-b-0">
+                            <div className="px-4 py-1.5 text-[12px] font-mono bg-muted/30 border-b">
+                              {file.file_path}{" "}
+                              <span className="text-muted-foreground">
+                                ({file.operation})
+                              </span>
+                            </div>
+                            <div style={{ height: "400px" }}>
+                              <DiffViewer
+                                original={file.original_content}
+                                modified={file.modified_content}
+                                filePath={file.file_path}
+                              />
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : fileContent ? (
+                    <div className="flex h-full flex-col">
+                      <div className="flex items-center justify-between border-b px-4 py-2">
+                        <p className="text-[13px] font-medium font-mono">
+                          {selectedFilePath}
+                        </p>
+                        {nsConnection && isNetSuiteWorkspace && selectedFileId && selectedWorkspaceId && (
+                          <div className="flex items-center gap-1">
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              className="h-7 text-[11px]"
+                              disabled={pullFile.isPending}
+                              onClick={() =>
+                                pullFile.mutate({
+                                  fileId: selectedFileId,
+                                  workspaceId: selectedWorkspaceId,
+                                })
+                              }
+                            >
+                              {pullFile.isPending ? (
+                                <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+                              ) : (
+                                <Download className="mr-1 h-3 w-3" />
+                              )}
+                              Pull
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              className="h-7 text-[11px]"
+                              disabled={pushFile.isPending}
+                              onClick={() => setShowPushConfirm(true)}
+                            >
+                              {pushFile.isPending ? (
+                                <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+                              ) : (
+                                <Upload className="mr-1 h-3 w-3" />
+                              )}
+                              Push
+                            </Button>
+                            <AlertDialog open={showPushConfirm} onOpenChange={setShowPushConfirm}>
+                              <AlertDialogContent>
+                                <AlertDialogHeader>
+                                  <AlertDialogTitle>Push to NetSuite {nsEnv.label}?</AlertDialogTitle>
+                                  <AlertDialogDescription>
+                                    This will overwrite the file on your {nsEnv.label} account. Make sure you have reviewed your changes.
+                                  </AlertDialogDescription>
+                                </AlertDialogHeader>
+                                <AlertDialogFooter>
+                                  <AlertDialogCancel>Cancel</AlertDialogCancel>
+                                  <AlertDialogAction
+                                    onClick={() => {
+                                      pushFile.mutate({
+                                        fileId: selectedFileId,
+                                        workspaceId: selectedWorkspaceId,
+                                      });
+                                    }}
+                                  >
+                                    Push Changes
+                                  </AlertDialogAction>
+                                </AlertDialogFooter>
+                              </AlertDialogContent>
+                            </AlertDialog>
+                          </div>
+                        )}
+                      </div>
+                      {fileContent.truncated && (
+                        <div className="border-b px-4 py-1">
+                          <p className="text-[11px] text-yellow-600">
+                            Showing partial content ({fileContent.total_lines} total
+                            lines)
+                          </p>
+                        </div>
+                      )}
+                      <div className="flex-1">
+                        <CodeViewer
+                          content={fileContent.content}
+                          filePath={selectedFilePath}
+                        />
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex h-full items-center justify-center text-[13px] text-muted-foreground">
+                      Select a file to view
+                    </div>
+                  )}
+                </div>
+              </div>
+            </Panel>
+
+            <PanelResizeHandle className="h-px bg-border hover:bg-primary/40 transition-colors cursor-row-resize" />
+
+            {/* Bottom: Chat + Changesets + Runs + Logs */}
+            <Panel defaultSize={35} minSize={15}>
+              {selectedWorkspaceId ? (
+                <div className="flex h-full flex-col overflow-hidden">
+                  {/* Tab bar */}
+                  <div className="flex border-b shrink-0">
+                    {(["chat", "changesets", "runs", "logs"] as const).map((tab) => (
+                      <button
+                        key={tab}
+                        onClick={() => setBottomTab(tab)}
+                        className={cn(
+                          "flex-1 px-2 py-2 text-[11px] font-semibold uppercase tracking-widest transition-colors",
+                          bottomTab === tab
+                            ? "border-b-2 border-primary text-foreground"
+                            : "text-muted-foreground hover:text-foreground",
+                        )}
+                      >
+                        {tab}
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Tab content */}
+                  {bottomTab === "chat" && (
+                    <div className="flex-1 overflow-hidden">
+                      <WorkspaceChatPanel
+                        workspaceId={selectedWorkspaceId}
+                        currentFilePath={selectedFilePath || undefined}
+                        onMentionClick={handleMentionClick}
+                        onViewDiff={handleChatViewDiff}
+                        onChangesetAction={handleChangesetAction}
+                      />
+                    </div>
+                  )}
+                  {bottomTab === "changesets" && (
+                    <div className="flex-1 overflow-auto p-3 scrollbar-thin" data-testid="changeset-panel">
+                      <ChangesetPanel
+                        changesets={changesets}
+                        onViewDiff={setViewingDiffId}
+                      />
+                    </div>
+                  )}
+                  {bottomTab === "runs" && (
+                    <div className="flex-1 overflow-auto p-3 scrollbar-thin">
+                      <RunsPanel runs={runs} />
+                    </div>
+                  )}
+                  {bottomTab === "logs" && (
+                    <div className="flex-1 overflow-auto p-3 scrollbar-thin">
+                      <ApiLogsPanel logs={apiLogs} />
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div className="flex h-full items-center justify-center text-[13px] text-muted-foreground">
+                  Select a workspace
+                </div>
+              )}
+            </Panel>
+          </PanelGroup>
+        </Panel>
+      </PanelGroup>
     </div>
   );
 }

@@ -40,3 +40,40 @@ export function useDeleteConnection() {
     },
   });
 }
+
+interface UpdateConnectionPayload {
+  label?: string;
+  auth_type?: string;
+}
+
+export function useUpdateConnection() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, data }: { id: string; data: UpdateConnectionPayload }) =>
+      apiClient.patch<Connection>(`/api/v1/connections/${id}`, data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["connections"] });
+    },
+  });
+}
+
+export function useReconnectConnection() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) =>
+      apiClient.post<Connection>(`/api/v1/connections/${id}/reconnect`, {}),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["connections"] });
+    },
+  });
+}
+
+export function useTestConnection() {
+  return useMutation({
+    mutationFn: (id: string) =>
+      apiClient.post<{ connection_id: string; status: string; message: string }>(
+        `/api/v1/connections/${id}/test`,
+        {},
+      ),
+  });
+}

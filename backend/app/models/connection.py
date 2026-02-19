@@ -22,6 +22,7 @@ class Connection(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     provider: Mapped[str] = mapped_column(String(50), nullable=False)  # shopify, stripe, netsuite
     label: Mapped[str] = mapped_column(String(255), nullable=False)
     status: Mapped[str] = mapped_column(String(50), default="active", nullable=False)
+    auth_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
     encrypted_credentials: Mapped[str] = mapped_column(Text, nullable=False)
     encryption_key_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     metadata_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
