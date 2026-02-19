@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<restlet scriptid="customscript_ecom_filecabinet_rl">
+    <name>Ecom FileCabinet RESTlet</name>
+    <notifyadmins>F</notifyadmins>
+    <isinactive>F</isinactive>
+    <description>File Cabinet read/write API for ecom-netsuite-suites IDE workspace sync.</description>
+    <scriptfile>[/SuiteScripts/ecom_file_cabinet_restlet.js]</scriptfile>
+    <loglevel>DEBUG</loglevel>
+    <scriptdeployments>
+        <scriptdeployment scriptid="customdeploy_ecom_filecabinet_rl">
+            <title>Ecom FileCabinet RESTlet Deploy</title>
+            <status>RELEASED</status>
+            <loglevel>DEBUG</loglevel>
+            <allroles>F</allroles>
+            <audslctrole>
+                <role>ADMINISTRATOR</role>
+                <role>FULL_ACCESS</role>
+            </audslctrole>
+        </scriptdeployment>
+    </scriptdeployments>
+</restlet>

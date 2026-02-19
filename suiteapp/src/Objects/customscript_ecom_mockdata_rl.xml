@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<restlet scriptid="customscript_ecom_mockdata_rl">
+    <name>Ecom MockData RESTlet</name>
+    <notifyadmins>F</notifyadmins>
+    <isinactive>F</isinactive>
+    <description>SuiteQL mock data extraction with PII masking for offline unit testing.</description>
+    <scriptfile>[/SuiteScripts/ecom_mock_data_restlet.js]</scriptfile>
+    <loglevel>DEBUG</loglevel>
+    <scriptdeployments>
+        <scriptdeployment scriptid="customdeploy_ecom_mockdata_rl">
+            <title>Ecom MockData RESTlet Deploy</title>
+            <status>RELEASED</status>
+            <loglevel>DEBUG</loglevel>
+            <allroles>F</allroles>
+            <audslctrole>
+                <role>ADMINISTRATOR</role>
+            </audslctrole>
+        </scriptdeployment>
+    </scriptdeployments>
+</restlet>

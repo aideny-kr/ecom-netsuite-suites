@@ -1,5 +1,6 @@
 import uuid
 
+import httpx
 import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -108,19 +109,55 @@ async def _test_netsuite_connection(db: AsyncSession, connection: Connection) ->
                 "status": "error",
                 "message": "OAuth 2.0 token expired and refresh failed.",
             }
+
+        # Test OAuth / SuiteQL
+        oauth_ok = False
+        oauth_error = None
         try:
             await execute_suiteql_via_rest(access_token, account_id, "SELECT id FROM transaction WHERE ROWNUM <= 1", 1)
-            return {
-                "connection_id": str(connection.id),
-                "status": "ok",
-                "message": f"NetSuite account {account_id} connected successfully.",
-            }
+            oauth_ok = True
         except Exception as exc:
+            oauth_error = str(exc)
+
+        if not oauth_ok:
             return {
                 "connection_id": str(connection.id),
                 "status": "error",
-                "message": f"NetSuite query failed: {exc}",
+                "message": f"NetSuite query failed: {oauth_error}",
             }
+
+        # Test RESTlet availability
+        restlet_ok = False
+        restlet_error = None
+        try:
+            from app.services.netsuite_restlet_client import restlet_read_file
+
+            await restlet_read_file(access_token, account_id, file_id=1)
+            restlet_ok = True
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 403:
+                restlet_error = "RESTlet not deployed or role lacks access"
+            elif e.response.status_code == 404:
+                restlet_error = "RESTlet script not found — install the Ecom bundle"
+            else:
+                restlet_error = f"RESTlet HTTP {e.response.status_code}"
+        except Exception as e:
+            # RESTlet may return a controlled error for file ID 1 — that's still OK
+            err_msg = str(e)
+            if "RESTlet error" in err_msg:
+                restlet_ok = True  # Got a response from the RESTlet, it's deployed
+            else:
+                restlet_error = err_msg[:200]
+
+        return {
+            "connection_id": str(connection.id),
+            "status": "ok" if (oauth_ok and restlet_ok) else "ok",
+            "message": f"NetSuite account {account_id} connected successfully."
+            + ("" if restlet_ok else " RESTlet not available."),
+            "oauth_status": "valid",
+            "restlet_status": "available" if restlet_ok else "not_available",
+            "restlet_error": restlet_error,
+        }
 
     # OAuth 1.0 test — delegate to the suiteql tool's execute
     from app.mcp.tools.netsuite_suiteql import execute as suiteql_execute

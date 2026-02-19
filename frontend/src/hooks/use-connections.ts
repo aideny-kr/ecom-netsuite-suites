@@ -71,7 +71,14 @@ export function useReconnectConnection() {
 export function useTestConnection() {
   return useMutation({
     mutationFn: (id: string) =>
-      apiClient.post<{ connection_id: string; status: string; message: string }>(
+      apiClient.post<{
+        connection_id: string;
+        status: string;
+        message: string;
+        oauth_status?: string;
+        restlet_status?: string;
+        restlet_error?: string;
+      }>(
         `/api/v1/connections/${id}/test`,
         {},
       ),

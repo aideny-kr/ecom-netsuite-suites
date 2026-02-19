@@ -69,9 +69,10 @@ import {
 } from "@/hooks/use-netsuite-api-logs";
 import { usePullFile, usePushFile } from "@/hooks/use-netsuite-file-ops";
 import { Panel, Group as PanelGroup, Separator as PanelResizeHandle } from "react-resizable-panels";
-import { FileCode, X } from "lucide-react";
+import { Database, FileCode, X } from "lucide-react";
+import { useMockData } from "@/hooks/use-mock-data";
 
-type BottomTab = "chat" | "changesets" | "runs" | "logs";
+type BottomTab = "chat" | "changesets" | "runs" | "logs" | "testdata";
 
 function detectNetSuiteEnvironment(accountId: string | undefined): {
   label: string;
@@ -151,6 +152,93 @@ function ApiLogsPanel({ logs }: { logs: NetSuiteApiLogEntry[] }) {
           )}
         </div>
       ))}
+    </div>
+  );
+}
+
+function TestDataPanel() {
+  const [query, setQuery] = useState("SELECT id, companyname, email FROM customer WHERE ROWNUM <= 10");
+  const [maskPii, setMaskPii] = useState(true);
+  const mockData = useMockData();
+
+  async function handleExecute() {
+    if (!query.trim()) return;
+    await mockData.mutateAsync({ query: query.trim(), limit: 100, mask_pii: maskPii });
+  }
+
+  return (
+    <div className="flex h-full flex-col gap-2 p-3">
+      <div className="flex items-center gap-2">
+        <textarea
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          rows={2}
+          className="flex-1 rounded border bg-background px-2 py-1.5 text-[12px] font-mono resize-none focus:outline-none focus:ring-1 focus:ring-primary"
+          placeholder="SELECT id, email FROM customer WHERE ROWNUM <= 10"
+        />
+        <div className="flex flex-col gap-1.5">
+          <label className="flex items-center gap-1 text-[11px] text-muted-foreground cursor-pointer">
+            <input
+              type="checkbox"
+              checked={maskPii}
+              onChange={(e) => setMaskPii(e.target.checked)}
+              className="h-3 w-3"
+            />
+            Mask PII
+          </label>
+          <Button
+            size="sm"
+            className="h-7 text-[11px]"
+            onClick={handleExecute}
+            disabled={mockData.isPending || !query.trim()}
+          >
+            {mockData.isPending ? (
+              <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+            ) : (
+              <Database className="mr-1 h-3 w-3" />
+            )}
+            Run
+          </Button>
+        </div>
+      </div>
+
+      {mockData.error && (
+        <p className="text-[11px] text-destructive">
+          {mockData.error instanceof Error ? mockData.error.message : "Query failed"}
+        </p>
+      )}
+
+      {mockData.data && (
+        <div className="flex-1 overflow-auto">
+          <p className="text-[11px] text-muted-foreground mb-1">
+            {mockData.data.row_count} rows{mockData.data.masked ? " (PII masked)" : ""}
+          </p>
+          {mockData.data.columns.length > 0 && (
+            <table className="w-full text-[11px] border-collapse">
+              <thead>
+                <tr>
+                  {mockData.data.columns.map((col) => (
+                    <th key={col} className="border px-2 py-1 text-left font-medium bg-muted/50">
+                      {col}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {mockData.data.data.map((row, i) => (
+                  <tr key={i}>
+                    {mockData.data!.columns.map((col) => (
+                      <td key={col} className="border px-2 py-1 font-mono">
+                        {String(row[col] ?? "")}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -733,7 +821,7 @@ export default function WorkspacePage() {
                 <div className="flex h-full flex-col overflow-hidden">
                   {/* Tab bar */}
                   <div className="flex border-b shrink-0">
-                    {(["chat", "changesets", "runs", "logs"] as const).map((tab) => (
+                    {(["chat", "changesets", "runs", "logs", "testdata"] as const).map((tab) => (
                       <button
                         key={tab}
                         onClick={() => setBottomTab(tab)}
@@ -744,7 +832,7 @@ export default function WorkspacePage() {
                             : "text-muted-foreground hover:text-foreground",
                         )}
                       >
-                        {tab}
+                        {tab === "testdata" ? "test data" : tab}
                       </button>
                     ))}
                   </div>
@@ -777,6 +865,11 @@ export default function WorkspacePage() {
                   {bottomTab === "logs" && (
                     <div className="flex-1 overflow-auto p-3 scrollbar-thin">
                       <ApiLogsPanel logs={apiLogs} />
+                    </div>
+                  )}
+                  {bottomTab === "testdata" && (
+                    <div className="flex-1 overflow-hidden">
+                      <TestDataPanel />
                     </div>
                   )}
                 </div>

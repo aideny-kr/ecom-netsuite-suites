@@ -724,16 +724,27 @@ function ConnectionManagementCard({
   const deleteConn = useDeleteConnection();
   const [editLabel, setEditLabel] = useState(connection.label);
   const [editOpen, setEditOpen] = useState(false);
+  const [testResult, setTestResult] = useState<{
+    oauth_status?: string;
+    restlet_status?: string;
+    restlet_error?: string;
+  } | null>(null);
 
   async function handleTest() {
     try {
       const result = await testConn.mutateAsync(connection.id);
+      setTestResult({
+        oauth_status: result.oauth_status,
+        restlet_status: result.restlet_status,
+        restlet_error: result.restlet_error,
+      });
       toast({
         title: result.status === "ok" ? "Connection OK" : "Connection issue",
         description: result.message,
         variant: result.status === "ok" ? "default" : "destructive",
       });
     } catch (err) {
+      setTestResult(null);
       toast({
         title: "Test failed",
         description: err instanceof Error ? err.message : "Unknown error",
@@ -807,6 +818,25 @@ function ConnectionManagementCard({
       </div>
       {connection.auth_type && (
         <p className="text-[12px] text-muted-foreground">Auth: {connection.auth_type}</p>
+      )}
+      {testResult && (testResult.oauth_status || testResult.restlet_status) && (
+        <div className="flex items-center gap-3 text-[11px]">
+          {testResult.oauth_status && (
+            <span className="inline-flex items-center gap-1">
+              <span className={`h-2 w-2 rounded-full ${testResult.oauth_status === "valid" ? "bg-green-500" : "bg-red-500"}`} />
+              OAuth {testResult.oauth_status === "valid" ? "OK" : "Failed"}
+            </span>
+          )}
+          {testResult.restlet_status && (
+            <span className="inline-flex items-center gap-1">
+              <span className={`h-2 w-2 rounded-full ${testResult.restlet_status === "available" ? "bg-green-500" : "bg-yellow-500"}`} />
+              RESTlet {testResult.restlet_status === "available" ? "OK" : "N/A"}
+            </span>
+          )}
+          {testResult.restlet_error && (
+            <span className="text-yellow-600">{testResult.restlet_error}</span>
+          )}
+        </div>
       )}
       <div className="flex items-center gap-2 pt-1">
         <Button

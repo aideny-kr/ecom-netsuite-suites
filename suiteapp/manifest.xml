@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<manifest projecttype="ACCOUNTCUSTOMIZATION">
+    <projectname>Ecom NetSuite Suite</projectname>
+    <frameworkversion>1.0</frameworkversion>
+    <dependencies>
+        <features>
+            <feature required="true">RESTLETS</feature>
+            <feature required="true">SERVERSIDESCRIPTING</feature>
+        </features>
+    </dependencies>
+</manifest>
