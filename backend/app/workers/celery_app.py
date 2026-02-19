@@ -24,4 +24,12 @@ celery_app.conf.update(
     },
 )
 
-celery_app.autodiscover_tasks(["app.workers.tasks"])
+celery_app.conf.include = [
+    "app.workers.tasks.audit_retention",
+    "app.workers.tasks.example_sync",
+    "app.workers.tasks.metadata_discovery",
+    "app.workers.tasks.shopify_sync",
+    "app.workers.tasks.stripe_sync",
+    "app.workers.tasks.suitescript_sync",
+    "app.workers.tasks.workspace_run",
+]

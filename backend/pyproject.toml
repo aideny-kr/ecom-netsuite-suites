@@ -31,6 +31,7 @@ dependencies = [
     "pgvector>=0.3.0",
     "stripe>=8.0.0",
     "whatthepatch>=1.0.0",
+    "psycopg2-binary>=2.9.0",
 ]
 
 [project.optional-dependencies]
