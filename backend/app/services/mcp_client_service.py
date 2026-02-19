@@ -48,18 +48,18 @@ async def _get_oauth2_token(connector: McpConnector, db: AsyncSession | None) ->
     client_id = credentials.get("client_id")
 
     if not refresh_token or not account_id or not client_id:
-        logger.warning(
+        logger.error(
             "mcp_client.oauth2.missing_refresh_info",
             connector_id=str(connector.id),
         )
-        return access_token  # Return stale token — server will reject if truly expired
+        return None  # Fail explicitly so callers know auth is broken
 
     if db is None:
-        logger.warning(
+        logger.error(
             "mcp_client.oauth2.no_db_session_for_refresh",
             connector_id=str(connector.id),
         )
-        return access_token
+        return None  # Fail explicitly — cannot refresh without DB session
 
     try:
         from app.services.netsuite_oauth_service import refresh_tokens_with_client
@@ -76,7 +76,7 @@ async def _get_oauth2_token(connector: McpConnector, db: AsyncSession | None) ->
         return credentials["access_token"]
     except Exception:
         logger.exception("mcp_client.oauth2.refresh_failed", connector_id=str(connector.id))
-        return access_token  # Return stale token as last resort
+        return None  # Fail explicitly so callers know auth is broken
 
 
 async def _build_headers(connector: McpConnector, db: AsyncSession | None = None) -> dict[str, str]:
@@ -88,8 +88,12 @@ async def _build_headers(connector: McpConnector, db: AsyncSession | None = None
 
     if connector.auth_type == "oauth2":
         token = await _get_oauth2_token(connector, db)
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
+        if not token:
+            raise RuntimeError(
+                f"MCP connector {connector.id}: OAuth 2.0 token expired and refresh failed. "
+                "User must re-authorize the NetSuite connection."
+            )
+        headers["Authorization"] = f"Bearer {token}"
         return headers
 
     credentials = decrypt_credentials(connector.encrypted_credentials)

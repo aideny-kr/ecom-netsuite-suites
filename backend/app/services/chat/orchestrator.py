@@ -169,6 +169,12 @@ async def run_chat_turn(
                 f"workspace_search, workspace_propose_patch) to browse and modify files. "
                 f"The workspace_id is '{session.workspace_id}' — it will be auto-injected."
             )
+            system_prompt += (
+                "\nWhen the user mentions they are 'viewing' or 'looking at' a specific file, "
+                "or when the message includes '[Currently viewing file: ...]', "
+                "use the workspace_read_file tool to read that file's content before responding. "
+                "This lets you see exactly what the user sees in their editor."
+            )
 
     # ── Load active policy for tool gating + output redaction ──
     from app.services.policy_service import evaluate_tool_call as policy_evaluate

@@ -119,11 +119,16 @@ async def fetch_file_content(
     file_id: str,
     access_token: str,
     account_id: str,
+    db: AsyncSession | None = None,
+    tenant_id: uuid.UUID | None = None,
+    connection_id: uuid.UUID | None = None,
 ) -> str | None:
     """Fetch a single file's content from NetSuite REST API.
 
     Returns decoded UTF-8 content, or None on failure.
     """
+    import time as _time
+
     slug = _normalize_account_id(account_id)
     url = f"https://{slug}.suitetalk.api.netsuite.com/services/rest/record/v1/file/{file_id}"
     headers = {
@@ -131,12 +136,30 @@ async def fetch_file_content(
         "Accept": "application/json",
     }
 
+    t0 = _time.monotonic()
     try:
         async with httpx.AsyncClient(timeout=FETCH_TIMEOUT) as client:
             resp = await client.get(url, headers=headers)
+            elapsed_ms = int((_time.monotonic() - t0) * 1000)
             resp.raise_for_status()
 
         data = resp.json()
+
+        # Log successful API call
+        if db and tenant_id:
+            from app.services.netsuite_api_logger import log_netsuite_request
+
+            await log_netsuite_request(
+                db=db,
+                tenant_id=tenant_id,
+                connection_id=connection_id,
+                method="GET",
+                url=url,
+                response_status=resp.status_code,
+                response_time_ms=elapsed_ms,
+                source="suitescript_sync",
+            )
+
         content_b64 = data.get("content", "")
         if not content_b64:
             return None
@@ -153,7 +176,23 @@ async def fetch_file_content(
     except UnicodeDecodeError:
         logger.warning("suitescript_sync.non_utf8_file", file_id=file_id)
         return None
-    except Exception:
+    except Exception as exc:
+        elapsed_ms = int((_time.monotonic() - t0) * 1000)
+        # Log failed API call
+        if db and tenant_id:
+            from app.services.netsuite_api_logger import log_netsuite_request
+
+            await log_netsuite_request(
+                db=db,
+                tenant_id=tenant_id,
+                connection_id=connection_id,
+                method="GET",
+                url=url,
+                response_status=getattr(getattr(exc, "response", None), "status_code", None),
+                response_time_ms=elapsed_ms,
+                error_message=str(exc),
+                source="suitescript_sync",
+            )
         logger.warning("suitescript_sync.fetch_failed", file_id=file_id, exc_info=True)
         return None
 
@@ -162,17 +201,24 @@ async def batch_fetch_contents(
     files: list[dict[str, Any]],
     access_token: str,
     account_id: str,
+    db: AsyncSession | None = None,
+    tenant_id: uuid.UUID | None = None,
+    connection_id: uuid.UUID | None = None,
 ) -> tuple[dict[str, str], list[str]]:
     """Fetch file contents in batches with rate limiting.
 
     Returns: (success_dict[file_id → content], failed_file_ids)
     """
+    import time as _time
+
     contents: dict[str, str] = {}
     failed: list[str] = []
+    t0 = _time.monotonic()
 
     for i in range(0, len(files), BATCH_SIZE):
         batch = files[i : i + BATCH_SIZE]
 
+        # Don't pass db to individual tasks — asyncio.gather with shared session is unsafe
         tasks = [fetch_file_content(f["file_id"], access_token, account_id) for f in batch]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -192,6 +238,23 @@ async def batch_fetch_contents(
             fetched=len(contents),
             failed=len(failed),
             remaining=max(0, len(files) - i - BATCH_SIZE),
+        )
+
+    # Log a single summary entry after all batches complete
+    if db and tenant_id:
+        from app.services.netsuite_api_logger import log_netsuite_request
+
+        total_elapsed_ms = int((_time.monotonic() - t0) * 1000)
+        await log_netsuite_request(
+            db=db,
+            tenant_id=tenant_id,
+            connection_id=connection_id,
+            method="GET",
+            url=f"batch_fetch ({len(files)} files)",
+            response_status=200 if not failed else 207,
+            response_time_ms=total_elapsed_ms,
+            error_message=f"{len(failed)} files failed" if failed else None,
+            source="suitescript_sync_batch",
         )
 
     return contents, failed
@@ -260,6 +323,7 @@ async def _upsert_workspace_file(
     workspace_id: uuid.UUID,
     path: str,
     content: str,
+    netsuite_file_id: str | None = None,
 ) -> WorkspaceFile:
     """Create or update a workspace file by path."""
     result = await db.execute(
@@ -279,6 +343,8 @@ async def _upsert_workspace_file(
             existing.sha256_hash = sha
             existing.size_bytes = len(content.encode("utf-8"))
             existing.updated_at = datetime.now(timezone.utc)
+        if netsuite_file_id and not existing.netsuite_file_id:
+            existing.netsuite_file_id = netsuite_file_id
         return existing
 
     wf = WorkspaceFile(
@@ -291,6 +357,7 @@ async def _upsert_workspace_file(
         size_bytes=len(content.encode("utf-8")),
         mime_type="application/javascript",
         is_directory=False,
+        netsuite_file_id=netsuite_file_id,
     )
     db.add(wf)
     return wf
@@ -391,7 +458,14 @@ async def sync_scripts_to_workspace(
             }
 
         # 4. Batch fetch content
-        contents, failed_ids = await batch_fetch_contents(discovered, access_token, account_id)
+        contents, failed_ids = await batch_fetch_contents(
+            discovered,
+            access_token,
+            account_id,
+            db=db,
+            tenant_id=tenant_id,
+            connection_id=connection_id,
+        )
 
         # 5. Build file paths and upsert
         file_paths: set[str] = set()
@@ -405,7 +479,14 @@ async def sync_scripts_to_workspace(
 
             path = _build_file_path(file_meta)
             file_paths.add(path)
-            await _upsert_workspace_file(db, tenant_id, ws.id, path, content)
+            await _upsert_workspace_file(
+                db,
+                tenant_id,
+                ws.id,
+                path,
+                content,
+                netsuite_file_id=fid,
+            )
             loaded += 1
 
         # 6. Ensure directories exist

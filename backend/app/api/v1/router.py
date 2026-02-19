@@ -10,6 +10,7 @@ from app.api.v1 import (
     health,
     jobs,
     mcp_connectors,
+    netsuite_api_logs,
     netsuite_auth,
     netsuite_metadata,
     onboarding,
@@ -47,3 +48,4 @@ api_router.include_router(chat_api_keys.router)
 api_router.include_router(chat_integration.router)
 api_router.include_router(netsuite_metadata.router)
 api_router.include_router(suitescript_sync.router)
+api_router.include_router(netsuite_api_logs.router)

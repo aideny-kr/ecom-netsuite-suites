@@ -66,12 +66,13 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       ])
         .catch(() => {
           clearTokens();
+          router.push("/login");
         })
         .finally(() => setIsLoading(false));
     } else {
       setIsLoading(false);
     }
-  }, []);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const login = useCallback(
     async (data: LoginRequest) => {

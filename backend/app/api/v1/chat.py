@@ -123,12 +123,19 @@ async def create_session(
 @router.get("/sessions", response_model=list[SessionListItem])
 async def list_sessions(
     workspace_id: str | None = None,
+    include_all: bool = False,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     q = select(ChatSession).where(ChatSession.tenant_id == user.tenant_id, ChatSession.user_id == user.id)
-    if workspace_id:
-        q = q.where(ChatSession.workspace_id == uuid.UUID(workspace_id))
+    if include_all:
+        pass  # No workspace_id filter — return everything
+    elif workspace_id:
+        try:
+            ws_uuid = uuid.UUID(workspace_id)
+        except ValueError:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Invalid workspace_id")
+        q = q.where(ChatSession.workspace_id == ws_uuid)
     else:
         q = q.where(ChatSession.workspace_id.is_(None))
     q = q.order_by(ChatSession.created_at.desc()).limit(50)

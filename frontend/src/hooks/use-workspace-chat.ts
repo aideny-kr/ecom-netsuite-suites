@@ -15,10 +15,11 @@ export function useWorkspaceChat(workspaceId: string | null) {
   const [error, setError] = useState<string | null>(null);
   const queryClient = useQueryClient();
 
-  // Account-wide sessions (no workspace_id filter) so chat is shared everywhere
+  // Show all sessions (workspace + account-level) so chat is unified
   const { data: sessions = [] } = useQuery<ChatSession[]>({
-    queryKey: ["chat-sessions"],
-    queryFn: () => apiClient.get<ChatSession[]>("/api/v1/chat/sessions"),
+    queryKey: ["chat-sessions", "all"],
+    queryFn: () =>
+      apiClient.get<ChatSession[]>("/api/v1/chat/sessions?include_all=true"),
     enabled: !!workspaceId,
   });
 
@@ -42,10 +43,12 @@ export function useWorkspaceChat(workspaceId: string | null) {
       },
     });
 
-  // Create account-level sessions (no workspace_id) so they appear on /chat too
+  // Create workspace-scoped sessions so orchestrator injects workspace context
   const createSession = useMutation({
     mutationFn: () =>
-      apiClient.post<ChatSession>("/api/v1/chat/sessions", {}),
+      apiClient.post<ChatSession>("/api/v1/chat/sessions", {
+        workspace_id: workspaceId,
+      }),
     onSuccess: (session) => {
       queryClient.invalidateQueries({ queryKey: ["chat-sessions"] });
       setActiveSessionId(session.id);

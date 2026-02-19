@@ -20,7 +20,7 @@ export default function ChatPage() {
   const { data: workspaces = [] } = useWorkspaces();
 
   const { data: sessions = [] } = useQuery<ChatSession[]>({
-    queryKey: ["chat-sessions"],
+    queryKey: ["chat-sessions", "main"],
     queryFn: () => apiClient.get<ChatSession[]>("/api/v1/chat/sessions"),
   });
 

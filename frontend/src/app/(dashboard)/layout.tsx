@@ -82,7 +82,13 @@ export default function DashboardLayout({
   }
 
   if (!user) {
-    return null;
+    return (
+      <div className="flex h-screen items-center justify-center bg-background">
+        <div className="flex flex-col items-center gap-3">
+          <span className="text-sm text-muted-foreground">Redirecting to login...</span>
+        </div>
+      </div>
+    );
   }
 
   return (

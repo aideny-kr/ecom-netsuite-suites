@@ -6,13 +6,13 @@ import {
   Paperclip,
   Plus,
   AlertCircle,
+  FileCode,
   X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { MessageList } from "@/components/chat/message-list";
 import { ChatInput } from "@/components/chat/chat-input";
 import { useWorkspaceChat } from "@/hooks/use-workspace-chat";
-import { useWorkspaces } from "@/hooks/use-workspace";
 
 interface WorkspaceChatPanelProps {
   workspaceId: string;
@@ -38,28 +38,21 @@ export function WorkspaceChatPanel({
     pendingMessage,
     error,
     setError,
-    handleSend: rawSend,
+    handleSend,
     handleNewChat,
     isSending,
   } = useWorkspaceChat(workspaceId);
 
-  const { data: workspaces = [] } = useWorkspaces();
-  const workspaceName = workspaces.find((ws) => ws.id === workspaceId)?.name;
-
-  // Inject workspace context into messages so the AI knows where the user is
-  const handleSend = useCallback(
+  // Auto-inject current file context so the AI knows what the user is viewing
+  const handleSendWithContext = useCallback(
     (content: string) => {
-      const parts: string[] = [];
-      if (workspaceName) {
-        parts.push(`Working in workspace "${workspaceName}"`);
-      }
+      let enrichedContent = content;
       if (currentFilePath) {
-        parts.push(`viewing file: ${currentFilePath}`);
+        enrichedContent = `[Currently viewing file: ${currentFilePath}]\n\n${content}`;
       }
-      const prefix = parts.length > 0 ? `[Context: ${parts.join(", ")}]\n\n` : "";
-      return rawSend(prefix + content);
+      handleSend(enrichedContent);
     },
-    [rawSend, workspaceName, currentFilePath],
+    [handleSend, currentFilePath],
   );
 
   const inputRef = useRef<{ insertText: (text: string) => void }>(null);
@@ -162,10 +155,18 @@ export function WorkspaceChatPanel({
         </div>
       )}
 
+      {/* Current file indicator */}
+      {currentFilePath && (
+        <div className="border-t bg-muted/30 px-3 py-1 text-[11px] text-muted-foreground flex items-center gap-1">
+          <FileCode className="h-3 w-3" />
+          <span className="truncate">Viewing: {currentFilePath}</span>
+        </div>
+      )}
+
       {/* Input */}
       <div className="border-t">
         <ChatInput
-          onSend={handleSend}
+          onSend={handleSendWithContext}
           isLoading={isSending}
           workspaceId={workspaceId}
         />

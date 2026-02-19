@@ -1,7 +1,8 @@
+import logging as _logging
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, BackgroundTasks, Cookie, Depends, HTTPException, Request, Response, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,6 +25,8 @@ from app.schemas.auth import (
     UserProfile,
 )
 from app.services import audit_service, auth_service
+
+_logger = _logging.getLogger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -86,11 +89,56 @@ async def register(
     return AuthResponse(access_token=tokens["access_token"], token_type=tokens["token_type"])
 
 
+async def _check_connection_health(tenant_id: uuid.UUID) -> None:
+    """Background task: validate active connections, mark broken ones as error."""
+    from app.core.database import async_session_factory, set_tenant_context
+    from app.core.encryption import decrypt_credentials
+    from app.models.connection import Connection
+    from app.services.netsuite_oauth_service import get_valid_token
+
+    try:
+        async with async_session_factory() as db:
+            await set_tenant_context(db, str(tenant_id))
+            result = await db.execute(
+                select(Connection).where(
+                    Connection.tenant_id == tenant_id,
+                    Connection.status == "active",
+                )
+            )
+            connections = result.scalars().all()
+            for conn in connections:
+                if conn.provider != "netsuite":
+                    continue
+                try:
+                    creds = decrypt_credentials(conn.encrypted_credentials)
+                    auth_type = creds.get("auth_type", "oauth1")
+                    if auth_type != "oauth2":
+                        continue  # Skip non-OAuth2 connections
+                    token = await get_valid_token(db, conn)
+                    if not token:
+                        conn.status = "error"
+                        _logger.warning(
+                            "connection_health.token_refresh_failed",
+                            extra={"connection_id": str(conn.id)},
+                        )
+                except Exception:
+                    conn.status = "error"
+                    _logger.warning(
+                        "connection_health.check_failed",
+                        extra={"connection_id": str(conn.id)},
+                        exc_info=True,
+                    )
+            await db.commit()
+    except Exception:
+        _logger.warning("connection_health.background_check_failed", exc_info=True)
+
+
 @router.post("/login", response_model=AuthResponse)
 async def login(
     request: LoginRequest,
     raw_request: Request,
     response: Response,
+    background_tasks: BackgroundTasks,
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     # F2: Rate-limit login attempts by IP
@@ -121,6 +169,9 @@ async def login(
         actor_id=user.id,
     )
     await db.commit()
+
+    # Fire-and-forget: check connection health in background
+    background_tasks.add_task(_check_connection_health, user.tenant_id)
 
     # F3: Set refresh token as HttpOnly cookie, strip from body
     _set_refresh_cookie(response, tokens["refresh_token"])

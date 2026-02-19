@@ -193,6 +193,7 @@ async def callback(
     if connection:
         connection.encrypted_credentials = encrypt_credentials(credentials)
         connection.encryption_key_version = get_current_key_version()
+        connection.metadata_json = {"account_id": account_id, "auth_type": "oauth2"}
     else:
         connection = Connection(
             tenant_id=tenant_id,
@@ -201,6 +202,7 @@ async def callback(
             status="active",
             encrypted_credentials=encrypt_credentials(credentials),
             encryption_key_version=get_current_key_version(),
+            metadata_json={"account_id": account_id, "auth_type": "oauth2"},
             created_by=user_id,
         )
         db.add(connection)

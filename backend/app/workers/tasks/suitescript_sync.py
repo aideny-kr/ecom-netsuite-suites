@@ -64,11 +64,17 @@ async def _execute(
             raise ValueError(f"Active NetSuite connection {connection_id} not found for tenant {tenant_id}")
 
         creds = decrypt_credentials(connection.encrypted_credentials)
-        access_token = creds.get("access_token", "")
         account_id = creds.get("account_id", "") or creds.get("netsuite_account_id", "")
 
-        if not access_token or not account_id:
-            raise ValueError("Connection credentials missing access_token or account_id")
+        if not account_id:
+            raise ValueError("Connection credentials missing account_id")
+
+        # Auto-refresh token if expired (matches pattern used by SuiteQL tool and metadata discovery)
+        from app.services.netsuite_oauth_service import get_valid_token
+
+        access_token = await get_valid_token(session, connection)
+        if not access_token:
+            raise ValueError("OAuth 2.0 token expired and refresh failed. User must re-authorize.")
 
         sync_result = await sync_scripts_to_workspace(
             db=session,

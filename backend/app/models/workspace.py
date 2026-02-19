@@ -56,6 +56,7 @@ class WorkspaceFile(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     content: Mapped[str | None] = mapped_column(Text, nullable=True)
     sha256_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     is_directory: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    netsuite_file_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
 
     workspace: Mapped["Workspace"] = relationship("Workspace", back_populates="files")
 

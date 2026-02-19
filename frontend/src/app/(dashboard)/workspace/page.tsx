@@ -12,6 +12,8 @@ import {
   Loader2,
   CheckCircle2,
   AlertCircle,
+  Download,
+  Upload,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -24,6 +26,16 @@ import {
   DialogTrigger,
 } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { FileTree } from "@/components/workspace/file-tree";
 import { CodeViewer } from "@/components/workspace/code-viewer";
 import { DiffViewer } from "@/components/workspace/diff-viewer";
@@ -51,8 +63,13 @@ import {
 import { AI_PROVIDERS, AI_MODELS } from "@/lib/constants";
 import { cn } from "@/lib/utils";
 import { useQueryClient } from "@tanstack/react-query";
+import {
+  useNetSuiteApiLogs,
+  type NetSuiteApiLogEntry,
+} from "@/hooks/use-netsuite-api-logs";
+import { usePullFile, usePushFile } from "@/hooks/use-netsuite-file-ops";
 
-type RightTab = "changesets" | "runs" | "chat";
+type RightTab = "changesets" | "runs" | "chat" | "logs";
 
 function detectNetSuiteEnvironment(accountId: string | undefined): {
   label: string;
@@ -82,6 +99,60 @@ function timeAgo(dateStr: string): string {
   return `${Math.floor(hours / 24)}d ago`;
 }
 
+function ApiLogsPanel({ logs }: { logs: NetSuiteApiLogEntry[] }) {
+  if (logs.length === 0) {
+    return (
+      <div className="flex h-32 items-center justify-center text-[12px] text-muted-foreground">
+        No API logs yet. Trigger a sync or discovery to generate logs.
+      </div>
+    );
+  }
+  return (
+    <div className="space-y-1">
+      <p className="text-[11px] font-medium text-muted-foreground mb-2">
+        {logs.length} recent API calls
+      </p>
+      {logs.map((log) => (
+        <div
+          key={log.id}
+          className="rounded border px-2 py-1.5 text-[11px] space-y-0.5"
+        >
+          <div className="flex items-center gap-2">
+            <span className="font-mono font-bold">{log.method}</span>
+            <span className="flex-1 truncate text-muted-foreground font-mono">
+              {log.url.replace(/https?:\/\/[^/]+/, "")}
+            </span>
+            <span
+              className={cn(
+                "font-mono font-bold",
+                log.response_status && log.response_status < 300
+                  ? "text-green-600"
+                  : log.response_status && log.response_status >= 400
+                    ? "text-red-600"
+                    : "text-muted-foreground",
+              )}
+            >
+              {log.response_status || "ERR"}
+            </span>
+          </div>
+          <div className="flex items-center gap-2 text-muted-foreground">
+            <span>{log.source}</span>
+            {log.response_time_ms != null && (
+              <span>{log.response_time_ms}ms</span>
+            )}
+            {log.created_at && <span>{timeAgo(log.created_at)}</span>}
+          </div>
+          {log.error_message && (
+            <div className="text-destructive truncate">
+              {log.error_message}
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export default function WorkspacePage() {
   const [selectedWorkspaceId, setSelectedWorkspaceId] = useState<string | null>(
     null,
@@ -94,6 +165,7 @@ export default function WorkspacePage() {
   const [newName, setNewName] = useState("");
   const [newDesc, setNewDesc] = useState("");
   const [rightTab, setRightTab] = useState<RightTab>("changesets");
+  const [showPushConfirm, setShowPushConfirm] = useState(false);
 
   const { data: workspaces = [] } = useWorkspaces();
   const createWs = useCreateWorkspace();
@@ -119,6 +191,9 @@ export default function WorkspacePage() {
   const { data: mcpConnectors = [] } = useMcpConnectors();
   const { data: syncStatus } = useSuiteScriptSyncStatus();
   const triggerSync = useTriggerSuiteScriptSync();
+  const { data: apiLogs = [] } = useNetSuiteApiLogs({ limit: 50 });
+  const pullFile = usePullFile();
+  const pushFile = usePushFile();
 
   // AI model display
   const aiProvider = aiConfig?.ai_provider || "";
@@ -140,6 +215,8 @@ export default function WorkspacePage() {
   const hasMcp = mcpConnectors.some(
     (mc) => mc.provider === "netsuite_mcp" && mc.is_enabled,
   );
+  const selectedWorkspace = workspaces.find((ws) => ws.id === selectedWorkspaceId);
+  const isNetSuiteWorkspace = selectedWorkspace?.name === "NetSuite Scripts";
 
   // SuiteScript sync
   const isSyncing =
@@ -470,17 +547,79 @@ export default function WorkspacePage() {
             </div>
           ) : fileContent ? (
             <div className="flex h-full flex-col">
-              <div className="border-b px-4 py-2">
+              <div className="flex items-center justify-between border-b px-4 py-2">
                 <p className="text-[13px] font-medium font-mono">
                   {selectedFilePath}
                 </p>
-                {fileContent.truncated && (
+                {nsConnection && isNetSuiteWorkspace && selectedFileId && selectedWorkspaceId && (
+                  <div className="flex items-center gap-1">
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-7 text-[11px]"
+                      disabled={pullFile.isPending}
+                      onClick={() =>
+                        pullFile.mutate({
+                          fileId: selectedFileId,
+                          workspaceId: selectedWorkspaceId,
+                        })
+                      }
+                    >
+                      {pullFile.isPending ? (
+                        <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+                      ) : (
+                        <Download className="mr-1 h-3 w-3" />
+                      )}
+                      Pull
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      className="h-7 text-[11px]"
+                      disabled={pushFile.isPending}
+                      onClick={() => setShowPushConfirm(true)}
+                    >
+                      {pushFile.isPending ? (
+                        <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+                      ) : (
+                        <Upload className="mr-1 h-3 w-3" />
+                      )}
+                      Push
+                    </Button>
+                    <AlertDialog open={showPushConfirm} onOpenChange={setShowPushConfirm}>
+                      <AlertDialogContent>
+                        <AlertDialogHeader>
+                          <AlertDialogTitle>Push to NetSuite {nsEnv.label}?</AlertDialogTitle>
+                          <AlertDialogDescription>
+                            This will overwrite the file on your {nsEnv.label} account. Make sure you have reviewed your changes.
+                          </AlertDialogDescription>
+                        </AlertDialogHeader>
+                        <AlertDialogFooter>
+                          <AlertDialogCancel>Cancel</AlertDialogCancel>
+                          <AlertDialogAction
+                            onClick={() => {
+                              pushFile.mutate({
+                                fileId: selectedFileId,
+                                workspaceId: selectedWorkspaceId,
+                              });
+                            }}
+                          >
+                            Push Changes
+                          </AlertDialogAction>
+                        </AlertDialogFooter>
+                      </AlertDialogContent>
+                    </AlertDialog>
+                  </div>
+                )}
+              </div>
+              {fileContent.truncated && (
+                <div className="border-b px-4 py-1">
                   <p className="text-[11px] text-yellow-600">
                     Showing partial content ({fileContent.total_lines} total
                     lines)
                   </p>
-                )}
-              </div>
+                </div>
+              )}
               <div className="flex-1">
                 <CodeViewer
                   content={fileContent.content}
@@ -500,7 +639,7 @@ export default function WorkspacePage() {
           <div className="w-[340px] shrink-0 flex flex-col overflow-hidden border-l">
             {/* Tab bar */}
             <div className="flex border-b">
-              {(["changesets", "runs", "chat"] as const).map((tab) => (
+              {(["changesets", "runs", "chat", "logs"] as const).map((tab) => (
                 <button
                   key={tab}
                   onClick={() => setRightTab(tab)}
@@ -539,6 +678,11 @@ export default function WorkspacePage() {
                   onViewDiff={handleChatViewDiff}
                   onChangesetAction={handleChangesetAction}
                 />
+              </div>
+            )}
+            {rightTab === "logs" && (
+              <div className="flex-1 overflow-auto p-3 scrollbar-thin">
+                <ApiLogsPanel logs={apiLogs} />
               </div>
             )}
           </div>
