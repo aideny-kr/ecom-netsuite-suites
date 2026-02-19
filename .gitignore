@@ -28,6 +28,10 @@ out/
 .DS_Store
 Thumbs.db
 
+# Test artifacts
+.coverage
+frontend/e2e/screenshots/
+
 # Docker
 pgdata/
 
