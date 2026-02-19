@@ -202,12 +202,19 @@ def _build_suiteql_rules_section(profile: TenantProfile) -> str:
 def _build_tool_rules_section() -> str:
     return (
         "WORKFLOW GUIDANCE:\n"
-        "- When the user asks about NetSuite data, use the custom field reference above "
-        "to identify correct field names BEFORE constructing a SuiteQL query.\n"
-        "- If a query fails with 'Unknown identifier', look up correct field names "
-        "using metadata tools, fix the query, and retry automatically.\n"
+        "- To query NetSuite data, use the netsuite_suiteql tool with a SuiteQL query. "
+        "This is your PRIMARY tool for answering data questions.\n"
+        "  Example: netsuite_suiteql({\"query\": \"SELECT id, tranid, trandate FROM transaction "
+        "WHERE type = 'SalesOrd' ORDER BY trandate DESC FETCH FIRST 10 ROWS ONLY\"})\n"
+        "- To discover custom field names before writing a query, call netsuite_get_metadata first.\n"
+        "- If a query fails with 'Unknown identifier', call netsuite_get_metadata to look up "
+        "correct field names, fix the query, and retry automatically.\n"
         "- You may call tools multiple times in sequence.\n"
-        "- To refresh custom field metadata, call the netsuite.refresh_metadata tool."
+        "- To refresh custom field metadata, call netsuite_refresh_metadata.\n"
+        "- For local platform data (orders, payments, refunds, payouts, disputes), "
+        "use data_sample_table_read.\n"
+        "- For documentation, use rag_search.\n"
+        "- SuiteQL pagination: use FETCH FIRST N ROWS ONLY (NOT LIMIT)."
     )
 
 

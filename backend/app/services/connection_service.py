@@ -151,7 +151,7 @@ async def _test_netsuite_connection(db: AsyncSession, connection: Connection) ->
 
         return {
             "connection_id": str(connection.id),
-            "status": "ok" if (oauth_ok and restlet_ok) else "ok",
+            "status": "ok" if (oauth_ok and restlet_ok) else "partial",
             "message": f"NetSuite account {account_id} connected successfully."
             + ("" if restlet_ok else " RESTlet not available."),
             "oauth_status": "valid",

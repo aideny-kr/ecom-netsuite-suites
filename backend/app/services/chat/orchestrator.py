@@ -151,6 +151,15 @@ async def run_chat_turn(
     else:
         system_prompt = await get_active_template(db, tenant_id)
 
+    # ── Inject dynamic tool inventory into system prompt ──
+    # This ensures the model always knows the exact tool names it can call,
+    # regardless of whether the base prompt matches.
+    if not is_onboarding and tool_definitions:
+        tool_inventory_lines = ["\nAVAILABLE TOOLS (use these exact names when calling tools):"]
+        for td in tool_definitions:
+            tool_inventory_lines.append(f"- {td['name']}: {td.get('description', '')}")
+        system_prompt += "\n".join(tool_inventory_lines)
+
     # ── Workspace context injection ──
     workspace_context: dict | None = None
     if getattr(session, "workspace_id", None):
