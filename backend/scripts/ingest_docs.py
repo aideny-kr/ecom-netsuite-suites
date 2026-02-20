@@ -71,7 +71,7 @@ def extract_title(content: str, file_path: str) -> str:
     return Path(file_path).stem.replace("-", " ").replace("_", " ").title()
 
 
-async def ingest(docs_dir: str) -> None:
+async def ingest(docs_dir: str, source_prefix: str = "") -> None:
     """Main ingestion pipeline."""
     docs_path = Path(docs_dir).resolve()
     if not docs_path.exists():
@@ -88,13 +88,14 @@ async def ingest(docs_dir: str) -> None:
     for md_file in md_files:
         content = md_file.read_text(encoding="utf-8")
         rel_path = str(md_file.relative_to(docs_path))
+        prefixed_path = f"{source_prefix}{rel_path}" if source_prefix else rel_path
         title = extract_title(content, rel_path)
         chunks = chunk_text(content)
-        print(f"  {rel_path}: {len(chunks)} chunks")
+        print(f"  {prefixed_path}: {len(chunks)} chunks")
         for idx, chunk_content in enumerate(chunks):
             all_chunks.append(
                 {
-                    "source_path": rel_path,
+                    "source_path": prefixed_path,
                     "title": title,
                     "chunk_index": idx,
                     "content": chunk_content,
@@ -106,19 +107,35 @@ async def ingest(docs_dir: str) -> None:
     print("Generating embeddings...")
 
     # Embed in batches
-    all_embeddings: list[list[float]] = []
+    all_embeddings: list[list[float] | None] = []
     texts = [c["content"] for c in all_chunks]
+    has_embeddings = True
     for i in range(0, len(texts), EMBED_BATCH_SIZE):
         batch = texts[i : i + EMBED_BATCH_SIZE]
         embeddings = await embed_texts(batch)
-        all_embeddings.extend(embeddings)
-        print(f"  Embedded {min(i + EMBED_BATCH_SIZE, len(texts))}/{len(texts)}")
+        if embeddings is None:
+            print("  WARNING: VOYAGE_API_KEY not set — inserting chunks without embeddings (keyword search only)")
+            all_embeddings.extend([None] * len(batch))
+            has_embeddings = False
+        else:
+            all_embeddings.extend(embeddings)
+        print(f"  Processed {min(i + EMBED_BATCH_SIZE, len(texts))}/{len(texts)}")
+    if not has_embeddings:
+        print("  TIP: Set VOYAGE_API_KEY in .env and re-run to enable vector similarity search")
 
     # Write to DB
     print("Writing to database...")
     async with async_session_factory() as db:
-        # Delete existing system tenant chunks
-        await db.execute(delete(DocChunk).where(DocChunk.tenant_id == SYSTEM_TENANT_ID))
+        # Delete existing system tenant chunks (scoped to prefix if provided)
+        if source_prefix:
+            await db.execute(
+                delete(DocChunk).where(
+                    DocChunk.tenant_id == SYSTEM_TENANT_ID,
+                    DocChunk.source_path.like(f"{source_prefix}%"),
+                )
+            )
+        else:
+            await db.execute(delete(DocChunk).where(DocChunk.tenant_id == SYSTEM_TENANT_ID))
 
         for chunk_data, embedding in zip(all_chunks, all_embeddings):
             doc_chunk = DocChunk(
@@ -139,8 +156,13 @@ async def ingest(docs_dir: str) -> None:
 def main():
     parser = argparse.ArgumentParser(description="Ingest markdown docs into vector store")
     parser.add_argument("--docs-dir", default="../docs", help="Path to docs directory")
+    parser.add_argument(
+        "--source-prefix",
+        default="",
+        help="Prefix for source_path (e.g., 'netsuite_docs/'). Scopes deletion to this prefix only.",
+    )
     args = parser.parse_args()
-    asyncio.run(ingest(args.docs_dir))
+    asyncio.run(ingest(args.docs_dir, source_prefix=args.source_prefix))
 
 
 if __name__ == "__main__":

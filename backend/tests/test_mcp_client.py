@@ -28,6 +28,7 @@ EXPECTED_TOOLS = {
     "recon.run",
     "report.export",
     "rag.search",
+    "web.search",
     "schedule.create",
     "schedule.list",
     "schedule.run",

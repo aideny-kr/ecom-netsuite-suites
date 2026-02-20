@@ -7,7 +7,7 @@ organisational hierarchies from the tenant's NetSuite account.
 import asyncio
 import uuid
 
-from app.core.database import async_session_factory, set_tenant_context
+from app.core.database import set_tenant_context, worker_async_session
 from app.workers.base_task import InstrumentedTask
 from app.workers.celery_app import celery_app
 
@@ -33,7 +33,7 @@ async def _execute(tenant_id: str, user_id: str | None) -> dict:
     """Async inner: open session, set RLS, run discovery."""
     from app.services.netsuite_metadata_service import run_full_discovery
 
-    async with async_session_factory() as session:
+    async with worker_async_session() as session:
         await set_tenant_context(session, tenant_id)
         metadata = await run_full_discovery(
             db=session,

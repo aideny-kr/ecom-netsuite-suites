@@ -1,133 +1,71 @@
 # Data Model Overview
-_Last updated: 2026-02-16_
+_Last updated: 2026-02-19_
 
-This document describes the complete Phase 1 data model: all tables, columns, types, constraints, indexes, RLS policies, and relationships.
+This document describes the complete data model: all tables, their purpose, key columns, and relationships.
+
+---
+
+## Table Summary
+
+| Category | Tables | Count |
+|----------|--------|-------|
+| System | tenants, tenant_configs, users, roles, permissions, role_permissions, user_roles | 7 |
+| Auth & Connections | connections | 1 |
+| Jobs & Scheduling | jobs, schedules, cursor_states, evidence_packs | 4 |
+| Audit | audit_events | 1 |
+| Canonical Data | orders, payments, refunds, payouts, payout_lines, disputes, netsuite_postings | 7 |
+| Chat & AI | chat_sessions, chat_messages, doc_chunks, chat_api_keys | 4 |
+| MCP | mcp_connectors | 1 |
+| Workspace / IDE | workspaces, workspace_files, workspace_changesets, workspace_patches, workspace_runs, workspace_artifacts | 6 |
+| Onboarding & Config | onboarding_checklist_items, tenant_profiles, policy_profiles, system_prompt_templates | 4 |
+| NetSuite | netsuite_metadata, script_sync_states, netsuite_api_logs | 3 |
+| **Total** | | **38** |
 
 ---
 
 ## Entity Relationship Diagram
 
 ```
-                                  +------------------+
-                                  |     tenants      |
-                                  +------------------+
-                                  | id (PK, UUID)    |
-                                  | name             |
-                                  | slug (UNIQUE)    |
-                                  | plan             |
-                                  | plan_expires_at  |
-                                  | is_active        |
-                                  | created_at       |
-                                  | updated_at       |
-                                  +--------+---------+
-                                           |
-                    +-------------+--------+--------+------------------+
-                    |             |                  |                  |
-           +--------v-------+  +-v-----------+  +---v-----------+  +--v--------------+
-           |  tenant_configs |  |    users    |  | connections   |  |     jobs        |
-           +----------------+  +-------------+  +---------------+  +-----------------+
-           | id (PK)        |  | id (PK)     |  | id (PK)       |  | id (PK)         |
-           | tenant_id (FK) |  | tenant_id   |  | tenant_id(FK) |  | tenant_id       |
-           | subsidiaries   |  | email       |  | provider      |  | job_type        |
-           | account_       |  | hashed_pwd  |  | label         |  | status          |
-           |  mappings      |  | full_name   |  | status        |  | correlation_id  |
-           | posting_mode   |  | actor_type  |  | encrypted_    |  | connection_id   |
-           | posting_batch_ |  | is_active   |  |  credentials  |  | started_at      |
-           |  size          |  | created_at  |  | encryption_   |  | completed_at    |
-           | posting_attach |  | updated_at  |  |  key_version  |  | parameters      |
-           |  _evidence     |  +------+------+  | metadata_json |  | result_summary  |
-           | netsuite_      |         |         | created_by    |  | error_message   |
-           |  account_id    |         |         | created_at    |  | celery_task_id  |
-           | created_at     |         |         | updated_at    |  | created_at      |
-           | updated_at     |  +------v------+  +---------------+  | updated_at      |
-           +----------------+  |  user_roles  |                    +-----------------+
-                               +--------------+
-                               | id (PK)      |
-                               | tenant_id    |       +------------+
-                               | user_id (FK) +------>|   roles    |
-                               | role_id (FK) |       +------------+
-                               | created_at   |       | id (PK)    |
-                               | updated_at   |       | name (UQ)  |
-                               +--------------+       +-----+------+
-                                                            |
-                                                    +-------v----------+
-                                                    | role_permissions  |
-                                                    +------------------+
-                                                    | role_id (PK,FK)  |
-                                                    | permission_id    |
-                                                    |   (PK, FK)       |
-                                                    +--------+---------+
-                                                             |
-                                                    +--------v---------+
-                                                    |   permissions    |
-                                                    +------------------+
-                                                    | id (PK)          |
-                                                    | codename (UQ)    |
-                                                    +------------------+
+                              +------------------+
+                              |     tenants      |
+                              +------------------+
+                              | id (PK, UUID)    |
+                              | name, slug (UQ)  |
+                              | plan, is_active  |
+                              +--------+---------+
+                                       |
+          +----------+--------+--------+--------+-----------+----------+
+          |          |        |                  |           |          |
+  +-------v----+ +--v------+ v-----------+ +---v-------+ +-v--------+ v-----------+
+  |tenant_     | |  users  | connections | |   jobs    | |chat_     | |workspaces  |
+  | configs    | +----+----+ +-----------+ +-----------+ |sessions  | +------------+
+  +------------+      |                                   +----------+ |workspace_  |
+  |ai_provider |  +---v--------+                          |session_  | | files      |
+  |ai_model    |  | user_roles |                          | type     | |workspace_  |
+  |multi_agent |  +------------+                          |workspace_| | changesets |
+  | _enabled   |  | role_id FK |                          | id (FK?) | +------------+
+  +------------+  +------+-----+                          +----+-----+
+                         |                                     |
+                  +------v------+                     +--------v--------+
+                  |   roles     |                     | chat_messages   |
+                  +------+------+                     +-----------------+
+                         |                            | model_used      |
+                  +------v----------+                 | provider_used   |
+                  |role_permissions |                 | is_byok         |
+                  +---------+-------+                 | input/output    |
+                            |                         |  _tokens        |
+                  +---------v-------+                 +-----------------+
+                  |  permissions    |
+                  +-----------------+
 
-
-  +------------------+    +------------------+    +-------------------+
-  | audit_events     |    | canonical_orders |    | canonical_payouts |
-  +------------------+    +------------------+    +-------------------+
-  | id (PK, BIGINT)  |    | id (PK)          |    | id (PK)           |
-  | tenant_id        |    | tenant_id        |    | tenant_id         |
-  | timestamp        |    | dedupe_key (UQ)  |    | dedupe_key (UQ)   |
-  | actor_id         |    | source           |    | source            |
-  | actor_type       |    | source_id        |    | source_id         |
-  | category         |    | order_number     |    | payout_id         |
-  | action           |    | status           |    | status            |
-  | resource_type    |    | currency         |    | currency          |
-  | resource_id      |    | total_amount     |    | gross_amount      |
-  | correlation_id   |    | subtotal         |    | fee_amount        |
-  | job_id           |    | tax_amount       |    | net_amount         |
-  | payload          |    | discount_amount  |    | arrival_date      |
-  | status           |    | customer_email   |    | transaction_count |
-  | error_message    |    | source_created   |    | source_created    |
-  +------------------+    | synced_at        |    | synced_at         |
-                          | created_at       |    | created_at        |
-                          | updated_at       |    | updated_at        |
-                          +------------------+    +-------------------+
-
-  +--------------------+   +--------------------+   +-------------------+
-  | canonical_refunds  |   | canonical_fees     |   | canonical_disputes|
-  +--------------------+   +--------------------+   +-------------------+
-  | id (PK)            |   | id (PK)            |   | id (PK)           |
-  | tenant_id          |   | tenant_id          |   | tenant_id         |
-  | dedupe_key (UQ)    |   | dedupe_key (UQ)    |   | dedupe_key (UQ)   |
-  | source             |   | source             |   | source            |
-  | source_id          |   | source_id          |   | source_id         |
-  | order_id           |   | payout_id          |   | charge_id         |
-  | reason             |   | fee_type           |   | reason            |
-  | amount             |   | amount             |   | amount            |
-  | currency           |   | currency           |   | currency          |
-  | status             |   | description        |   | status            |
-  | source_created     |   | source_created     |   | source_created    |
-  | synced_at          |   | synced_at          |   | synced_at         |
-  | created_at         |   | created_at         |   | created_at        |
-  | updated_at         |   | updated_at         |   | updated_at        |
-  +--------------------+   +--------------------+   +-------------------+
-
-  +---------------------------+    +----------------------+
-  | canonical_ns_transactions |    |    sync_cursors      |
-  +---------------------------+    +----------------------+
-  | id (PK)                   |    | id (PK)              |
-  | tenant_id                 |    | tenant_id            |
-  | dedupe_key (UQ)           |    | connection_id (FK)   |
-  | transaction_type          |    | object_type          |
-  | internal_id               |    | cursor_value         |
-  | tran_id                   |    | cursor_type          |
-  | tran_date                 |    | last_synced_at       |
-  | posting_period            |    | created_at           |
-  | account_id                |    | updated_at           |
-  | amount                    |    +----------------------+
-  | currency                  |
-  | subsidiary_id             |
-  | memo                      |
-  | source_created            |
-  | synced_at                 |
-  | created_at                |
-  | updated_at                |
-  +---------------------------+
+  +----------------+  +----------------+  +----------------+
+  | doc_chunks     |  | mcp_connectors |  | netsuite_      |
+  +----------------+  +----------------+  |  metadata       |
+  | embedding      |  | server_url     |  +----------------+
+  |  Vector(1024)  |  | auth_type      |  | transaction_   |
+  | source_path    |  | oauth_*        |  |  body_fields   |
+  +----------------+  +----------------+  | subsidiaries   |
+                                          +----------------+
 ```
 
 ---
@@ -140,33 +78,33 @@ This document describes the complete Phase 1 data model: all tables, columns, ty
 
 | Column | Type | Constraints | Description |
 |--------|------|------------|-------------|
-| `id` | UUID | PK, default uuid4 | Tenant identifier |
+| `id` | UUID | PK | Tenant identifier |
 | `name` | VARCHAR(255) | NOT NULL | Organization display name |
 | `slug` | VARCHAR(255) | UNIQUE, NOT NULL | URL-safe identifier |
 | `plan` | VARCHAR(50) | NOT NULL, default `'trial'` | Current plan: `trial`, `pro` |
 | `plan_expires_at` | TIMESTAMPTZ | NULLABLE | Trial expiration date |
 | `is_active` | BOOLEAN | NOT NULL, default `true` | Soft-delete / suspend flag |
-| `created_at` | TIMESTAMPTZ | NOT NULL, default `now()` | Row creation time |
-| `updated_at` | TIMESTAMPTZ | NOT NULL, default `now()` | Last modification time |
-
-**Indexes:** Primary key on `id`, unique index on `slug`.
+| `created_at` | TIMESTAMPTZ | NOT NULL | Row creation time |
+| `updated_at` | TIMESTAMPTZ | NOT NULL | Last modification time |
 
 #### `tenant_configs`
 
 | Column | Type | Constraints | Description |
 |--------|------|------------|-------------|
 | `id` | UUID | PK | Config record identifier |
-| `tenant_id` | UUID | UNIQUE, NOT NULL, FK -> tenants.id | One config per tenant |
-| `subsidiaries` | JSONB | NULLABLE | List of subsidiary configurations |
-| `account_mappings` | JSONB | NULLABLE | Account mapping rules per subsidiary |
-| `posting_mode` | VARCHAR(50) | NOT NULL, default `'lumpsum'` | `lumpsum` or `detail` |
-| `posting_batch_size` | INTEGER | NOT NULL, default `100` | Max lines per journal entry batch |
-| `posting_attach_evidence` | BOOLEAN | NOT NULL, default `false` | Attach evidence CSV to JE |
-| `netsuite_account_id` | VARCHAR(255) | NULLABLE | NetSuite account identifier |
-| `created_at` | TIMESTAMPTZ | NOT NULL | Row creation time |
-| `updated_at` | TIMESTAMPTZ | NOT NULL | Last modification time |
-
-**Indexes:** Unique index on `tenant_id`.
+| `tenant_id` | UUID | UNIQUE, FK -> tenants.id | One config per tenant |
+| `subsidiaries` | JSONB | NULLABLE | Subsidiary configurations |
+| `account_mappings` | JSONB | NULLABLE | Account mapping rules |
+| `posting_mode` | VARCHAR(50) | default `'lumpsum'` | `lumpsum` or `detail` |
+| `posting_batch_size` | INTEGER | default `100` | Max lines per JE batch |
+| `posting_attach_evidence` | BOOLEAN | default `false` | Attach evidence CSV |
+| `netsuite_account_id` | VARCHAR(255) | NULLABLE | NetSuite account ID |
+| `ai_provider` | VARCHAR(50) | NULLABLE | BYOK: `openai`, `anthropic`, `gemini` |
+| `ai_model` | VARCHAR(100) | NULLABLE | BYOK model identifier |
+| `ai_api_key_encrypted` | TEXT | NULLABLE | Fernet-encrypted API key |
+| `ai_key_version` | INTEGER | NULLABLE | Encryption key version |
+| `multi_agent_enabled` | BOOLEAN | NULLABLE | Enable multi-agent coordinator |
+| `onboarding_completed_at` | TIMESTAMPTZ | NULLABLE | When onboarding finished |
 
 #### `users`
 
@@ -177,337 +115,260 @@ This document describes the complete Phase 1 data model: all tables, columns, ty
 | `email` | VARCHAR(255) | NOT NULL | User email |
 | `hashed_password` | VARCHAR(255) | NOT NULL | bcrypt hash |
 | `full_name` | VARCHAR(255) | NOT NULL | Display name |
-| `actor_type` | VARCHAR(50) | NOT NULL, default `'user'` | `user` or `service_account` |
-| `is_active` | BOOLEAN | NOT NULL, default `true` | Active flag |
-| `created_at` | TIMESTAMPTZ | NOT NULL | Row creation time |
-| `updated_at` | TIMESTAMPTZ | NOT NULL | Last modification time |
+| `actor_type` | VARCHAR(50) | default `'user'` | `user` or `service_account` |
+| `is_active` | BOOLEAN | default `true` | Active flag |
 
-**Indexes:** Index on `tenant_id`. Unique constraint on `(tenant_id, email)`.
+**Unique constraint:** `(tenant_id, email)`.
 
-#### `roles`
+#### `roles`, `permissions`, `role_permissions`, `user_roles`
 
-| Column | Type | Constraints | Description |
-|--------|------|------------|-------------|
-| `id` | UUID | PK | Role identifier |
-| `name` | VARCHAR(50) | UNIQUE, NOT NULL | Role name: `admin`, `finance`, `ops`, `readonly` |
+Standard RBAC tables. Roles: `admin`, `finance`, `ops`, `readonly`. Permissions include `connections:read/write`, `tables:read/export`, `config:read/write`, `users:manage`, `audit:read`, `jobs:read/write`, `mcp_tools:invoke`.
 
-**Seed data:** `admin`, `finance`, `ops`, `readonly`.
-
-#### `permissions`
-
-| Column | Type | Constraints | Description |
-|--------|------|------------|-------------|
-| `id` | UUID | PK | Permission identifier |
-| `codename` | VARCHAR(100) | UNIQUE, NOT NULL | Permission codename |
-
-**Seed data:** `connections:read`, `connections:write`, `tables:read`, `tables:export`, `config:read`, `config:write`, `users:manage`, `audit:read`, `jobs:read`, `jobs:write`, `mcp_tools:invoke`.
-
-#### `role_permissions`
-
-| Column | Type | Constraints | Description |
-|--------|------|------------|-------------|
-| `role_id` | UUID | PK, FK -> roles.id | Role reference |
-| `permission_id` | UUID | PK, FK -> permissions.id | Permission reference |
-
-**Composite primary key** on `(role_id, permission_id)`.
-
-#### `user_roles`
-
-| Column | Type | Constraints | Description |
-|--------|------|------------|-------------|
-| `id` | UUID | PK | Assignment identifier |
-| `tenant_id` | UUID | NOT NULL, FK -> tenants.id | Tenant scope |
-| `user_id` | UUID | NOT NULL, FK -> users.id | User reference |
-| `role_id` | UUID | NOT NULL, FK -> roles.id | Role reference |
-| `created_at` | TIMESTAMPTZ | NOT NULL | Assignment time |
-| `updated_at` | TIMESTAMPTZ | NOT NULL | Last modification time |
-
-**Indexes:** Index on `tenant_id`, `user_id`, `role_id`.
+### Auth & Connections
 
 #### `connections`
 
 | Column | Type | Constraints | Description |
 |--------|------|------------|-------------|
 | `id` | UUID | PK | Connection identifier |
-| `tenant_id` | UUID | NOT NULL, FK -> tenants.id | Owning tenant |
+| `tenant_id` | UUID | FK -> tenants.id | Owning tenant |
 | `provider` | VARCHAR(50) | NOT NULL | `netsuite`, `shopify`, `stripe` |
 | `label` | VARCHAR(255) | NOT NULL | User-defined label |
-| `status` | VARCHAR(50) | NOT NULL, default `'active'` | `active`, `error`, `revoked` |
-| `encrypted_credentials` | TEXT | NOT NULL | Fernet-encrypted credential blob |
-| `encryption_key_version` | INTEGER | NOT NULL, default `1` | Key version for rotation |
+| `status` | VARCHAR(50) | default `'active'` | `active`, `error`, `revoked` |
+| `auth_type` | VARCHAR(50) | default `'oauth2'` | `oauth2` or `tba` |
+| `encrypted_credentials` | TEXT | NOT NULL | Fernet-encrypted credentials |
+| `encryption_key_version` | INTEGER | default `1` | Key version for rotation |
 | `metadata_json` | JSONB | NULLABLE | Provider-specific metadata |
-| `created_by` | UUID | NULLABLE, FK -> users.id | Creating user |
-| `created_at` | TIMESTAMPTZ | NOT NULL | Row creation time |
-| `updated_at` | TIMESTAMPTZ | NOT NULL | Last modification time |
+| `created_by` | UUID | FK -> users.id | Creating user |
 
-**Indexes:** Index on `tenant_id`.
+### Jobs & Scheduling
 
 #### `jobs`
 
-| Column | Type | Constraints | Description |
-|--------|------|------------|-------------|
-| `id` | UUID | PK | Job identifier |
-| `tenant_id` | UUID | NOT NULL | Owning tenant |
-| `job_type` | VARCHAR(100) | NOT NULL | `shopify_sync`, `stripe_sync`, `netsuite_sync`, etc. |
-| `status` | VARCHAR(50) | NOT NULL, default `'pending'` | `pending`, `running`, `completed`, `failed` |
-| `correlation_id` | VARCHAR(255) | NULLABLE | Correlation ID for tracing |
-| `connection_id` | UUID | NULLABLE, FK -> connections.id | Associated connection |
-| `started_at` | TIMESTAMPTZ | NULLABLE | When worker started processing |
-| `completed_at` | TIMESTAMPTZ | NULLABLE | When processing finished |
-| `parameters` | JSONB | NULLABLE | Job input parameters |
-| `result_summary` | JSONB | NULLABLE | `{rows_processed, rows_created, rows_updated}` |
-| `error_message` | TEXT | NULLABLE | Error details on failure |
-| `celery_task_id` | VARCHAR(255) | NULLABLE | Celery task reference |
-| `created_at` | TIMESTAMPTZ | NOT NULL | Row creation time |
-| `updated_at` | TIMESTAMPTZ | NOT NULL | Last modification time |
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | UUID (PK) | Job identifier |
+| `tenant_id` | UUID | Owning tenant |
+| `job_type` | VARCHAR(100) | `shopify_sync`, `stripe_sync`, `netsuite_sync`, `metadata_discovery`, etc. |
+| `status` | VARCHAR(50) | `pending`, `running`, `completed`, `failed` |
+| `correlation_id` | VARCHAR(255) | Cross-service tracing |
+| `connection_id` | UUID (FK) | Associated connection |
+| `parameters` | JSONB | Job input parameters |
+| `result_summary` | JSONB | `{rows_processed, rows_created, rows_updated}` |
+| `error_message` | TEXT | Error details on failure |
+| `celery_task_id` | VARCHAR(255) | Celery task reference |
 
-**Indexes:** Index on `tenant_id`, `correlation_id`.
+#### `schedules`
+
+Cron-based job schedules linked to connections.
+
+#### `cursor_states`
+
+Incremental sync cursors. Unique on `(tenant_id, connection_id, object_type)`.
+
+#### `evidence_packs`
+
+Immutable evidence CSV/attachment packs linked to jobs for audit trail.
+
+### Audit
 
 #### `audit_events`
 
-| Column | Type | Constraints | Description |
-|--------|------|------------|-------------|
-| `id` | BIGINT | PK, AUTOINCREMENT | Sequential event ID |
-| `tenant_id` | UUID | NOT NULL | Owning tenant |
-| `timestamp` | TIMESTAMPTZ | NOT NULL, default `now()` | Event time |
-| `actor_id` | UUID | NULLABLE | User or service account |
-| `actor_type` | VARCHAR(50) | NOT NULL, default `'user'` | `user`, `service_account`, `system` |
-| `category` | VARCHAR(100) | NOT NULL | Event category |
-| `action` | VARCHAR(100) | NOT NULL | Specific action |
-| `resource_type` | VARCHAR(100) | NULLABLE | Affected resource type |
-| `resource_id` | VARCHAR(255) | NULLABLE | Affected resource identifier |
-| `correlation_id` | VARCHAR(255) | NULLABLE | Cross-service correlation |
-| `job_id` | UUID | NULLABLE | Associated job |
-| `payload` | JSONB | NULLABLE | Event-specific data |
-| `status` | VARCHAR(50) | NOT NULL, default `'success'` | `success`, `error`, `denied` |
-| `error_message` | TEXT | NULLABLE | Error details |
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | BIGINT (PK, AUTO) | Sequential event ID |
+| `tenant_id` | UUID | Owning tenant |
+| `timestamp` | TIMESTAMPTZ | Event time |
+| `actor_id` | UUID | User or service account |
+| `actor_type` | VARCHAR(50) | `user`, `service_account`, `system` |
+| `category` | VARCHAR(100) | Event category |
+| `action` | VARCHAR(100) | Specific action |
+| `resource_type` | VARCHAR(100) | Affected resource type |
+| `resource_id` | VARCHAR(255) | Affected resource ID |
+| `correlation_id` | VARCHAR(255) | Cross-service correlation |
+| `payload` | JSONB | Event-specific data |
+| `status` | VARCHAR(50) | `success`, `error`, `denied` |
 
-**Indexes:** Index on `tenant_id`, `category`, `action`, `correlation_id`.
+**Append-only:** No UPDATE or DELETE operations permitted.
 
-**Append-only:** No UPDATE or DELETE operations permitted on this table. Consider adding a trigger to prevent modifications.
+### Canonical Data Tables
 
-### Canonical Tables
+All canonical tables share: `id` (UUID PK), `tenant_id`, `dedupe_key` (UNIQUE), `source`, `source_id`, `source_created`, `synced_at`, `created_at`, `updated_at`.
 
-All canonical tables share these common columns:
+**Dedupe key format:** `{tenant_id}:{source}:{object_type}:{source_id}`
 
-| Column | Type | Constraints | Description |
-|--------|------|------------|-------------|
-| `id` | UUID | PK | Record identifier |
-| `tenant_id` | UUID | NOT NULL | Owning tenant (RLS key) |
-| `dedupe_key` | VARCHAR(512) | UNIQUE | Deterministic deduplication key |
-| `source` | VARCHAR(50) | NOT NULL | Source system: `shopify`, `stripe`, `netsuite` |
-| `source_id` | VARCHAR(255) | NOT NULL | ID in the source system |
-| `source_created` | TIMESTAMPTZ | NULLABLE | Creation time in source |
-| `synced_at` | TIMESTAMPTZ | NOT NULL | When this row was last synced |
-| `created_at` | TIMESTAMPTZ | NOT NULL | Row creation time |
-| `updated_at` | TIMESTAMPTZ | NOT NULL | Last modification time |
+| Table | Key Additional Columns |
+|-------|----------------------|
+| `orders` | order_number, status, currency, total_amount, subtotal, tax_amount, discount_amount, customer_email |
+| `payments` | payment_id, order_id, amount, currency, status, payment_method |
+| `refunds` | order_id, reason, amount, currency, status |
+| `payouts` | payout_id, status, currency, gross_amount, fee_amount, net_amount, arrival_date, transaction_count |
+| `payout_lines` | payout_id (FK), fee_type, amount, currency, description |
+| `disputes` | charge_id, reason, amount, currency, status |
+| `netsuite_postings` | transaction_type, internal_id, tran_id, tran_date, posting_period, account_id, amount, currency, subsidiary_id, memo |
 
-#### `canonical_orders`
+### Chat & AI Tables
 
-Additional columns:
+#### `chat_sessions`
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `order_number` | VARCHAR(100) | Human-readable order number |
-| `status` | VARCHAR(50) | `open`, `closed`, `cancelled` |
-| `currency` | VARCHAR(10) | ISO 4217 currency code |
-| `total_amount` | NUMERIC(15,2) | Order total |
-| `subtotal` | NUMERIC(15,2) | Subtotal before tax/discount |
-| `tax_amount` | NUMERIC(15,2) | Tax amount |
-| `discount_amount` | NUMERIC(15,2) | Discount amount |
-| `customer_email` | VARCHAR(255) | Customer email |
+| `id` | UUID (PK) | Session identifier |
+| `tenant_id` | UUID | Owning tenant |
+| `user_id` | UUID | Session owner |
+| `title` | VARCHAR | Display title (auto-set from first message) |
+| `session_type` | VARCHAR(20) | `chat` (dashboard), `workspace`, `onboarding` |
+| `workspace_id` | UUID (nullable) | Links session to a specific workspace |
+| `is_archived` | BOOLEAN | Soft archive flag |
 
-#### `canonical_payouts`
+**Session segregation:** Dashboard shows `session_type='chat'` + `workspace_id IS NULL`. Each workspace shows only its own sessions filtered by `workspace_id`.
 
-Additional columns:
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `payout_id` | VARCHAR(255) | Provider payout ID |
-| `status` | VARCHAR(50) | `pending`, `in_transit`, `paid`, `failed`, `cancelled` |
-| `currency` | VARCHAR(10) | ISO 4217 currency code |
-| `gross_amount` | NUMERIC(15,2) | Gross payout amount |
-| `fee_amount` | NUMERIC(15,2) | Total fees |
-| `net_amount` | NUMERIC(15,2) | Net amount (gross - fees) |
-| `arrival_date` | DATE | Expected or actual arrival date |
-| `transaction_count` | INTEGER | Number of transactions in payout |
-
-#### `canonical_refunds`
-
-Additional columns:
+#### `chat_messages`
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `order_id` | VARCHAR(255) | Associated order ID |
-| `reason` | VARCHAR(255) | Refund reason |
-| `amount` | NUMERIC(15,2) | Refund amount |
-| `currency` | VARCHAR(10) | ISO 4217 currency code |
-| `status` | VARCHAR(50) | `pending`, `completed`, `failed` |
+| `id` | UUID (PK) | Message identifier |
+| `tenant_id` | UUID | Owning tenant |
+| `session_id` | UUID (FK) | Parent session |
+| `role` | VARCHAR | `user`, `assistant`, `system` |
+| `content` | TEXT | Message text |
+| `tool_calls` | JSONB | Logged tool calls with params, results, durations |
+| `citations` | JSONB | RAG citations |
+| `token_count` | INTEGER | Total tokens |
+| `input_tokens` | INTEGER | Input token count |
+| `output_tokens` | INTEGER | Output token count |
+| `model_used` | VARCHAR | Model identifier (e.g., `claude-sonnet-4-5-20250929`, `gpt-5.2`) |
+| `provider_used` | VARCHAR | `anthropic`, `openai`, `gemini` |
+| `is_byok` | BOOLEAN | Whether tenant's own API key was used |
 
-#### `canonical_fees`
+#### `doc_chunks`
 
-Additional columns:
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `payout_id` | VARCHAR(255) | Associated payout |
-| `fee_type` | VARCHAR(100) | Fee type: `processing`, `platform`, `refund`, `chargeback`, `other` |
-| `amount` | NUMERIC(15,2) | Fee amount |
-| `currency` | VARCHAR(10) | ISO 4217 currency code |
-| `description` | TEXT | Fee description |
-
-#### `canonical_disputes`
-
-Additional columns:
+RAG vector store for documentation search.
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `charge_id` | VARCHAR(255) | Associated charge/payment |
-| `reason` | VARCHAR(255) | Dispute reason |
-| `amount` | NUMERIC(15,2) | Disputed amount |
-| `currency` | VARCHAR(10) | ISO 4217 currency code |
-| `status` | VARCHAR(50) | `warning_needs_response`, `needs_response`, `under_review`, `won`, `lost` |
+| `id` | UUID (PK) | Chunk identifier |
+| `tenant_id` | UUID | System tenant (`00000000-...`) for shared docs |
+| `source_path` | VARCHAR | File path (e.g., `netsuite_docs/suiteql-syntax-reference.md`) |
+| `title` | VARCHAR | Document title |
+| `chunk_index` | INTEGER | Position within document |
+| `content` | TEXT | Chunk text |
+| `token_count` | INTEGER | Estimated token count |
+| `embedding` | Vector(1024) | Voyage AI embedding (pgvector) |
 
-#### `canonical_ns_transactions`
+#### `chat_api_keys`
 
-Additional columns:
+Hashed API keys for external chat integration (`/api/v1/integration/chat`).
+
+### MCP Tables
+
+#### `mcp_connectors`
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `transaction_type` | VARCHAR(100) | `deposit`, `journal_entry`, `customer_payment`, `cash_sale`, etc. |
-| `internal_id` | VARCHAR(100) | NetSuite internal ID |
-| `tran_id` | VARCHAR(100) | NetSuite transaction number |
-| `tran_date` | DATE | Transaction date |
-| `posting_period` | VARCHAR(100) | NetSuite posting period |
-| `account_id` | VARCHAR(100) | GL account ID |
-| `amount` | NUMERIC(15,2) | Transaction amount |
-| `currency` | VARCHAR(10) | ISO 4217 currency code |
-| `subsidiary_id` | VARCHAR(100) | NetSuite subsidiary ID |
-| `memo` | TEXT | Transaction memo |
+| `id` | UUID (PK) | Connector identifier |
+| `tenant_id` | UUID | Owning tenant |
+| `name` | VARCHAR | Display name (e.g., "NetSuite MCP") |
+| `server_url` | VARCHAR | MCP server endpoint URL |
+| `auth_type` | VARCHAR | `oauth2`, `api_key`, `none` |
+| `oauth_client_id` | VARCHAR | OAuth client ID |
+| `oauth_token_encrypted` | TEXT | Encrypted OAuth tokens |
+| `status` | VARCHAR | `active`, `error`, `inactive` |
+| `discovered_tools` | JSONB | Cached tool definitions from `list_tools()` |
 
-#### `sync_cursors`
+### Workspace / IDE Tables
 
-| Column | Type | Constraints | Description |
-|--------|------|------------|-------------|
-| `id` | UUID | PK | Cursor identifier |
-| `tenant_id` | UUID | NOT NULL | Owning tenant |
-| `connection_id` | UUID | NOT NULL, FK -> connections.id | Associated connection |
-| `object_type` | VARCHAR(100) | NOT NULL | `orders`, `payouts`, `refunds`, etc. |
-| `cursor_value` | TEXT | NOT NULL | Last cursor/timestamp/offset |
-| `cursor_type` | VARCHAR(50) | NOT NULL | `timestamp`, `offset`, `cursor_string` |
-| `last_synced_at` | TIMESTAMPTZ | NOT NULL | When cursor was last advanced |
-| `created_at` | TIMESTAMPTZ | NOT NULL | Row creation time |
-| `updated_at` | TIMESTAMPTZ | NOT NULL | Last modification time |
+#### `workspaces`
 
-**Unique constraint:** `(tenant_id, connection_id, object_type)`.
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | UUID (PK) | Workspace identifier |
+| `tenant_id` | UUID | Owning tenant |
+| `name` | VARCHAR | Workspace display name |
+| `description` | TEXT | Optional description |
 
----
+#### `workspace_files`
 
-## Dedupe Key Format
+Virtual filesystem entries within a workspace.
 
-All canonical tables use a deterministic dedupe key to ensure idempotent upserts:
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | UUID (PK) | File identifier |
+| `workspace_id` | UUID (FK) | Parent workspace |
+| `path` | VARCHAR | File path within SDF project |
+| `content` | TEXT | File content |
+| `netsuite_file_id` | VARCHAR | NetSuite File Cabinet ID (changes on push) |
 
-```
-Format: {tenant_id}:{source}:{object_type}:{source_id}
-```
+#### `workspace_changesets`
 
-**Examples:**
+Diff-based change sets with approval state machine: `draft → pending_review → approved → applied`.
 
-| Table | Dedupe Key Example |
-|-------|-------------------|
-| canonical_orders | `550e8400-...:shopify:order:4832901234` |
-| canonical_payouts | `550e8400-...:stripe:payout:po_1NqBz2...` |
-| canonical_refunds | `550e8400-...:shopify:refund:8812349012` |
-| canonical_fees | `550e8400-...:stripe:fee:txn_1NqBz2..._fee` |
-| canonical_disputes | `550e8400-...:stripe:dispute:dp_1NqBz2...` |
-| canonical_ns_transactions | `550e8400-...:netsuite:transaction:12345` |
+#### `workspace_patches`
 
-**Properties:**
-- Deterministic: same source record always produces the same key
-- Globally unique within a tenant (enforced by UNIQUE constraint)
-- Enables safe UPSERT (INSERT ... ON CONFLICT (dedupe_key) DO UPDATE)
-- Supports backfill replay without creating duplicates
+Individual file patches (diffs) within a changeset.
 
----
+#### `workspace_runs`
 
-## Index Strategy
+SDF validate, Jest test, and SuiteQL assertion execution records.
 
-### Primary Indexes (Automatic)
+#### `workspace_artifacts`
 
-Every table has a primary key index (UUID or BIGINT).
+Immutable stdout/stderr/report artifacts from runs.
 
-### Tenant Isolation Indexes
+### Onboarding & Configuration Tables
 
-Every multi-tenant table has an index on `tenant_id`. This supports RLS policy evaluation performance.
+#### `tenant_profiles`
 
-### Query Performance Indexes
+Business context profiles used to generate AI system prompts. Contains industry, description, subsidiaries, chart of accounts, item types, custom segments, fiscal calendar.
 
-| Table | Index | Purpose |
-|-------|-------|---------|
-| `canonical_orders` | `(tenant_id, source_created DESC)` | Table view default sort |
-| `canonical_orders` | `(tenant_id, status)` | Filter by status |
-| `canonical_payouts` | `(tenant_id, arrival_date DESC)` | Payout timeline queries |
-| `canonical_payouts` | `(tenant_id, status)` | Filter by status |
-| `canonical_refunds` | `(tenant_id, source_created DESC)` | Table view default sort |
-| `canonical_ns_transactions` | `(tenant_id, tran_date DESC)` | Transaction timeline queries |
-| `canonical_ns_transactions` | `(tenant_id, transaction_type)` | Filter by type |
-| `audit_events` | `(tenant_id, timestamp DESC)` | Audit log view |
-| `audit_events` | `(tenant_id, category)` | Filter by category |
-| `audit_events` | `(correlation_id)` | Trace lookup |
-| `jobs` | `(tenant_id, created_at DESC)` | Job list view |
-| `jobs` | `(tenant_id, status)` | Filter by status |
-| `sync_cursors` | `(tenant_id, connection_id, object_type)` UNIQUE | Cursor lookup |
+#### `policy_profiles`
 
-### Dedupe Indexes
+Data governance policies: read_only_mode, allowed_record_types, blocked_fields, tool_allowlist, max_rows_per_query, custom_rules.
 
-All canonical tables have a UNIQUE index on `dedupe_key` to support `ON CONFLICT` upserts.
+#### `system_prompt_templates`
+
+Versioned generated system prompt templates built from tenant + policy profiles.
+
+#### `onboarding_checklist_items`
+
+Wizard step tracking: `connection`, `profile`, `policy`, `discovery`, `finalize`.
+
+### NetSuite Tables
+
+#### `netsuite_metadata`
+
+Versioned snapshots of discovered NetSuite custom fields, record types, subsidiaries, departments, locations, classifications. Used to inject accurate schema info into SuiteQL agent prompts.
+
+#### `script_sync_states`
+
+Per-tenant SuiteScript file sync tracking (last sync time, file counts, status).
+
+#### `netsuite_api_logs`
+
+Full request/response logging for NetSuite REST API and MCP calls. Includes method, URL, status code, duration, request/response bodies.
 
 ---
 
 ## RLS Policy Summary
 
-All multi-tenant tables have RLS enabled with the following policy pattern:
+All multi-tenant tables have RLS enabled with:
 
 ```sql
--- Enable RLS
 ALTER TABLE <table_name> ENABLE ROW LEVEL SECURITY;
-
--- Force RLS for table owner too
 ALTER TABLE <table_name> FORCE ROW LEVEL SECURITY;
 
--- Tenant isolation policy
 CREATE POLICY tenant_isolation ON <table_name>
     USING (tenant_id = current_setting('app.current_tenant_id')::uuid);
 ```
 
-### Tables with RLS
-
-| Table | RLS Enabled | Policy |
-|-------|-------------|--------|
-| `tenants` | No | Accessed by system queries only |
-| `tenant_configs` | Yes | `tenant_id = current_setting(...)` |
-| `users` | Yes | `tenant_id = current_setting(...)` |
-| `user_roles` | Yes | `tenant_id = current_setting(...)` |
-| `connections` | Yes | `tenant_id = current_setting(...)` |
-| `jobs` | Yes | `tenant_id = current_setting(...)` |
-| `audit_events` | Yes | `tenant_id = current_setting(...)` |
-| `canonical_orders` | Yes | `tenant_id = current_setting(...)` |
-| `canonical_payouts` | Yes | `tenant_id = current_setting(...)` |
-| `canonical_refunds` | Yes | `tenant_id = current_setting(...)` |
-| `canonical_fees` | Yes | `tenant_id = current_setting(...)` |
-| `canonical_disputes` | Yes | `tenant_id = current_setting(...)` |
-| `canonical_ns_transactions` | Yes | `tenant_id = current_setting(...)` |
-| `sync_cursors` | Yes | `tenant_id = current_setting(...)` |
-| `roles` | No | Global reference data |
-| `permissions` | No | Global reference data |
-| `role_permissions` | No | Global reference data |
+Global reference tables (`tenants`, `roles`, `permissions`, `role_permissions`) do not have RLS.
 
 ---
 
-## Table Count Summary
+## Index Strategy
 
-| Category | Tables | Count |
-|----------|--------|-------|
-| System | tenants, tenant_configs, users, roles, permissions, role_permissions, user_roles, connections, jobs, audit_events, sync_cursors | 11 |
-| Canonical | canonical_orders, canonical_payouts, canonical_refunds, canonical_fees, canonical_disputes, canonical_ns_transactions | 6 |
-| **Total** | | **17** |
+- **Tenant isolation:** Every multi-tenant table has an index on `tenant_id`
+- **Dedupe:** All canonical tables have a UNIQUE index on `dedupe_key`
+- **Query performance:** Composite indexes on frequently filtered columns (e.g., `(tenant_id, source_created DESC)`, `(tenant_id, status)`)
+- **Vector search:** `doc_chunks.embedding` uses pgvector ivfflat or HNSW index for cosine similarity
+- **Audit:** Indexes on `(tenant_id, timestamp DESC)`, `(correlation_id)`

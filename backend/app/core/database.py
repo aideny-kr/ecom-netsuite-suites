@@ -52,3 +52,34 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 async def set_tenant_context(session: AsyncSession, tenant_id: str) -> None:
     """Set RLS tenant context for the current database session."""
     await session.execute(text(f"SET LOCAL app.current_tenant_id = '{tenant_id}'"))
+
+
+def worker_async_session():
+    """Create a fresh async engine + session for Celery worker tasks.
+
+    Each Celery prefork worker creates its own event loop via asyncio.new_event_loop().
+    The module-level engine/session_factory are bound to the main process's loop and
+    cannot be reused. This function creates a disposable engine per task invocation.
+    """
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def _session():
+        _engine = create_async_engine(
+            _db_url,
+            echo=settings.APP_DEBUG,
+            pool_size=2,
+            max_overflow=3,
+            connect_args=_build_connect_args(_db_url),
+            pool_pre_ping=True,
+            pool_recycle=300 if _is_remote else -1,
+        )
+        factory = async_sessionmaker(_engine, class_=AsyncSession, expire_on_commit=False)
+        async with factory() as session:
+            try:
+                yield session
+            finally:
+                await session.close()
+        await _engine.dispose()
+
+    return _session()

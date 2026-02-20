@@ -31,42 +31,47 @@ DISCOVERY_QUERIES: list[dict[str, Any]] = [
         "label": "transaction_body_fields",
         "description": "Custom transaction body fields (custbody_*)",
         "query": (
-            "SELECT scriptid, label, fieldtype, description, ismandatory "
-            "FROM customtransactionbodyfield "
-            "WHERE ROWNUM <= 300"
+            "SELECT scriptid, name, fieldtype, fieldvaluetype, ismandatory, lastmodifieddate "
+            "FROM CustomField "
+            "WHERE LOWER(scriptid) LIKE 'custbody%' AND ROWNUM <= 300"
         ),
     },
     {
         "label": "transaction_column_fields",
         "description": "Custom transaction line/column fields (custcol_*)",
         "query": (
-            "SELECT scriptid, label, fieldtype, description FROM customtransactioncolumnfield WHERE ROWNUM <= 300"
+            "SELECT scriptid, name, fieldtype, fieldvaluetype, lastmodifieddate "
+            "FROM CustomField "
+            "WHERE LOWER(scriptid) LIKE 'custcol%' AND ROWNUM <= 300"
         ),
     },
     {
         "label": "entity_custom_fields",
         "description": "Custom entity fields (custentity_*)",
         "query": (
-            "SELECT scriptid, label, fieldtype, description, "
-            "appliestocustomer, appliestovendor, appliestoemployee "
-            "FROM entitycustomfield "
-            "WHERE ROWNUM <= 200"
+            "SELECT scriptid, name, fieldtype, fieldvaluetype, ismandatory, lastmodifieddate "
+            "FROM CustomField "
+            "WHERE LOWER(scriptid) LIKE 'custentity%' AND ROWNUM <= 200"
         ),
     },
     {
         "label": "item_custom_fields",
         "description": "Custom item fields (custitem_*)",
-        "query": ("SELECT scriptid, label, fieldtype, description FROM itemcustomfield WHERE ROWNUM <= 200"),
+        "query": (
+            "SELECT scriptid, name, fieldtype, fieldvaluetype, lastmodifieddate "
+            "FROM CustomField "
+            "WHERE LOWER(scriptid) LIKE 'custitem%' AND ROWNUM <= 200"
+        ),
     },
     {
         "label": "custom_record_types",
         "description": "Custom record type definitions",
-        "query": ("SELECT scriptid, name, description FROM customrecordtype WHERE ROWNUM <= 100"),
+        "query": ("SELECT scriptid, name, description FROM CustomRecordType WHERE ROWNUM <= 100"),
     },
     {
         "label": "custom_lists",
         "description": "Custom list definitions",
-        "query": ("SELECT scriptid, name, description FROM customlist WHERE ROWNUM <= 100"),
+        "query": ("SELECT scriptid, name, description FROM CustomList WHERE ROWNUM <= 100"),
     },
     {
         "label": "subsidiaries",
@@ -164,11 +169,14 @@ async def run_full_discovery(
 
     # ── 1. Resolve NetSuite connection ──────────────────────────────
     conn_result = await db.execute(
-        select(Connection).where(
+        select(Connection)
+        .where(
             Connection.tenant_id == tenant_id,
             Connection.provider == "netsuite",
             Connection.status == "active",
         )
+        .order_by((Connection.auth_type == "oauth2").desc(), Connection.created_at.desc())
+        .limit(1)
     )
     connection = conn_result.scalar_one_or_none()
     if connection is None:

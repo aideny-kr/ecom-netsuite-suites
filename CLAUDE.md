@@ -17,7 +17,7 @@
 
 - **Multi-tenant**: All tables have `tenant_id`. RLS enforced via `SET LOCAL app.current_tenant_id`.
 - **NetSuite Auth**: OAuth 2.0 Authorization Code flow. Token refresh handled by `get_valid_token()`.
-- **File Cabinet I/O**: Custom RESTlet (`ecom_file_cabinet_restlet.js`) replaces broken REST API PATCH. RESTlet does delete+recreate for updates (file ID changes — always update `netsuite_file_id` after push).
+- **File Cabinet I/O**: Custom RESTlet (`ecom_file_cabinet_restlet.js`) replaces broken REST API PATCH. RESTlet does in-place load-update-save (preserves file ID).
 - **SuiteQL**: Via REST API POST `/services/rest/query/v1/suiteql` with Bearer token. Also available via MCP at `/services/mcp/v1/all`.
 - **Mock Data**: MockData RESTlet runs SuiteQL inside NetSuite with server-side PII masking. Never transmit real PII to our backend.
 - **Chat**: AI orchestrator in `orchestrator.py` with `<thinking>` tags for reasoning (collapsed in UI). System prompt includes workspace tools and current file context.
@@ -250,13 +250,13 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 7. **Don't use raw `fetch()`** in frontend — use `apiClient`
 8. **Don't forget `"use client"`** on any file using hooks
 9. **Don't use `WidthType.PERCENTAGE`** in docx — use DXA
-10. **RESTlet PUT changes file IDs** — always update `workspace_file.netsuite_file_id` after push
+10. **RESTlet PUT preserves file IDs** — in-place update via load → set `.contents` → `.save()`
 11. **SuiteQL pagination** — use `FETCH FIRST N ROWS ONLY`, not `LIMIT` (not supported in SuiteQL)
 12. **NetSuite account IDs** — normalize with `replace("_", "-").lower()` for URLs
 
 ## Current State (update after each major change)
 
-- **Latest migration**: 020_add_auth_type
+- **Latest migration**: 023_audit_uuidv7
 - **Known gap**: OAuth reconnect just flips status, doesn't re-initiate browser flow
 - **Known gap**: `inputRef` in workspace-chat-panel never attached to ChatInput
 - **Deferred**: SDF CI/CD pipeline, bundle versioning strategy, RESTlet rate limiting

@@ -160,10 +160,16 @@ async def netsuite_mcp_callback(
         )
 
     try:
-        parts = stored.split(":", 5)
-        code_verifier, account_id, client_id, tenant_id_str, user_id_str, label = parts
-        tenant_id = uuid.UUID(tenant_id_str)
-        user_id = uuid.UUID(user_id_str)
+        parts = stored.split(":")
+        code_verifier = parts[0]
+        account_id = parts[1]
+        client_id = parts[2]
+        tenant_id = uuid.UUID(parts[3])
+        user_id = uuid.UUID(parts[4])
+        label = parts[5] if len(parts) > 5 else ""
+        # Check for re-authorization mode
+        is_reauth = len(parts) >= 8 and parts[6] == "reauth"
+        reauth_connector_id = uuid.UUID(parts[7]) if is_reauth else None
     except Exception as exc:
         logger.error("netsuite_mcp.oauth2.state_parse_failed", error=str(exc), stored_length=len(stored))
         return HTMLResponse(
@@ -195,15 +201,27 @@ async def netsuite_mcp_callback(
         )
 
     try:
-        connector = await mcp_connector_service.create_netsuite_mcp_connector(
-            db=db,
-            tenant_id=tenant_id,
-            account_id=account_id,
-            client_id=client_id,
-            token_data=token_data,
-            label=label or None,
-            created_by=user_id,
-        )
+        if is_reauth and reauth_connector_id:
+            # Re-authorization — update existing connector's tokens
+            connector = await mcp_connector_service.get_mcp_connector(db, reauth_connector_id, tenant_id)
+            if connector is None:
+                raise ValueError(f"Connector {reauth_connector_id} not found")
+            await mcp_connector_service.update_connector_tokens(
+                db=db, connector=connector, token_data=token_data,
+                account_id=account_id, client_id=client_id,
+            )
+            logger.info("netsuite_mcp.oauth2.reauthorized", connector_id=str(connector.id))
+        else:
+            # New connector
+            connector = await mcp_connector_service.create_netsuite_mcp_connector(
+                db=db,
+                tenant_id=tenant_id,
+                account_id=account_id,
+                client_id=client_id,
+                token_data=token_data,
+                label=label or None,
+                created_by=user_id,
+            )
     except Exception as exc:
         logger.error("netsuite_mcp.oauth2.connector_create_failed", error=str(exc))
         return HTMLResponse(
@@ -257,6 +275,49 @@ async def netsuite_mcp_callback(
             error_detail="",
         )
     )
+
+
+# ---------------------------------------------------------------------------
+# Re-authorize existing connector
+# ---------------------------------------------------------------------------
+
+
+@router.post("/{connector_id}/reauthorize")
+async def reauthorize_mcp_connector(
+    connector_id: uuid.UUID,
+    user: Annotated[User, Depends(require_permission("connections.manage"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Start an OAuth 2.0 re-authorization flow for an existing MCP connector."""
+    connector = await mcp_connector_service.get_mcp_connector(db, connector_id, user.tenant_id)
+    if connector is None:
+        raise HTTPException(status_code=404, detail="MCP connector not found")
+    if connector.auth_type != "oauth2":
+        raise HTTPException(status_code=400, detail="Only OAuth 2.0 connectors can be re-authorized")
+
+    from app.core.encryption import decrypt_credentials
+
+    credentials = decrypt_credentials(connector.encrypted_credentials)
+    account_id = credentials.get("account_id")
+    client_id = credentials.get("client_id")
+    if not account_id or not client_id:
+        raise HTTPException(status_code=400, detail="Connector is missing account_id or client_id")
+
+    code_verifier, code_challenge = generate_pkce_pair()
+    state = uuid.uuid4().hex
+    redirect_uri = _mcp_callback_uri()
+
+    # Store PKCE verifier + context in Redis — include connector_id for re-auth
+    r = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
+    await r.setex(
+        f"netsuite_mcp_oauth:{state}",
+        600,
+        f"{code_verifier}:{account_id}:{client_id}:{user.tenant_id}:{user.id}:{connector.label}:reauth:{connector_id}",
+    )
+    await r.aclose()
+
+    url = build_mcp_authorize_url(account_id, client_id, redirect_uri, state, code_challenge)
+    return {"authorize_url": url, "state": state}
 
 
 # ---------------------------------------------------------------------------

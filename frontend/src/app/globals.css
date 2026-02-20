@@ -66,3 +66,18 @@
     background-color: hsl(var(--muted-foreground) / 0.4);
   }
 }
+
+@layer base {
+  .prose table {
+    @apply w-full text-left border-collapse my-4 text-sm whitespace-nowrap;
+  }
+  .prose th {
+    @apply border-b border-border font-semibold p-2 text-muted-foreground bg-muted/30;
+  }
+  .prose td {
+    @apply border-b border-border p-2 min-w-[120px] max-w-[400px] truncate;
+  }
+  .prose tr:last-child td {
+    @apply border-b-0;
+  }
+}

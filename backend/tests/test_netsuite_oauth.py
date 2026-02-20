@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from app.core.config import settings
 from app.services.netsuite_oauth_service import (
     build_authorize_url,
     exchange_code,
@@ -145,7 +146,7 @@ class TestGetValidToken:
 
         with (
             patch("app.services.netsuite_oauth_service.decrypt_credentials", return_value=credentials),
-            patch("app.services.netsuite_oauth_service.refresh_tokens", new_callable=AsyncMock) as mock_refresh,
+            patch("app.services.netsuite_oauth_service.refresh_tokens_with_client", new_callable=AsyncMock) as mock_refresh,
             patch("app.services.netsuite_oauth_service.encrypt_credentials", return_value="encrypted"),
         ):
             mock_refresh.return_value = {
@@ -157,7 +158,7 @@ class TestGetValidToken:
             token = await get_valid_token(db, connection)
 
             assert token == "new_token"
-            mock_refresh.assert_awaited_once_with("12345", "rt_valid")
+            mock_refresh.assert_awaited_once_with("12345", "rt_valid", settings.NETSUITE_OAUTH_CLIENT_ID)
 
     @pytest.mark.asyncio
     async def test_returns_none_for_oauth1_credentials(self):

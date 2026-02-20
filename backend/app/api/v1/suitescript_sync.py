@@ -36,11 +36,18 @@ async def trigger_script_sync(
 ):
     """Queue an async task to discover and load SuiteScript files from NetSuite."""
     result = await db.execute(
-        select(Connection).where(
+        select(Connection)
+        .where(
             Connection.tenant_id == user.tenant_id,
             Connection.provider == "netsuite",
             Connection.status == "active",
         )
+        .order_by(
+            # Prefer OAuth 2.0 connections
+            (Connection.auth_type == "oauth2").desc(),
+            Connection.created_at.desc(),
+        )
+        .limit(1)
     )
     connection = result.scalar_one_or_none()
     if not connection:
@@ -80,11 +87,14 @@ async def _get_netsuite_creds(db: AsyncSession, tenant_id: uuid.UUID) -> tuple[C
     from app.services.netsuite_oauth_service import get_valid_token
 
     result = await db.execute(
-        select(Connection).where(
+        select(Connection)
+        .where(
             Connection.tenant_id == tenant_id,
             Connection.provider == "netsuite",
             Connection.status == "active",
         )
+        .order_by((Connection.auth_type == "oauth2").desc(), Connection.created_at.desc())
+        .limit(1)
     )
     connection = result.scalar_one_or_none()
     if not connection:

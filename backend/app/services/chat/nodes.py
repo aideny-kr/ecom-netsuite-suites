@@ -35,6 +35,7 @@ ALLOWED_CHAT_TOOLS: frozenset[str] = frozenset(
         "netsuite.refresh_metadata",
         "netsuite.get_metadata",
         "rag.search",
+        "web.search",
         "data.sample_table_read",
         "report.export",
         "workspace.list_files",

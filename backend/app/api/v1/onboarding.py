@@ -476,7 +476,7 @@ async def get_audit_trail(
     return AuditTrailResponse(
         events=[
             AuditTrailEvent(
-                id=e.id,
+                id=str(e.id),
                 action=e.action,
                 created_at=e.timestamp.isoformat(),
                 correlation_id=e.correlation_id,

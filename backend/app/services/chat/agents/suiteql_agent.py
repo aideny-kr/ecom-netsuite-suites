@@ -1,34 +1,124 @@
-"""SuiteQL specialist agent.
+"""SuiteQL specialist agent — reasoning-first query generation.
 
-Specialises in constructing and executing SuiteQL queries against NetSuite.
-Has the tenant's custom field metadata injected into its system prompt so it
-knows the exact scriptid for every custom field, record type, subsidiary, etc.
+Uses chain-of-thought reasoning to understand user intent, plan the query
+approach, explore the schema via metadata tools, and construct correct
+SuiteQL queries. Designed to work with a strong reasoning model (Sonnet+).
+
+Prefers external MCP tools (like ns_runCustomSuiteQL from NetSuite's native
+MCP endpoint) over the local netsuite_suiteql REST API tool when available.
 """
 
 from __future__ import annotations
 
+import logging
 import uuid
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from app.services.chat.agents.base_agent import BaseSpecialistAgent
+from app.services.chat.agents.base_agent import AgentResult, BaseSpecialistAgent
 from app.services.chat.tools import build_local_tool_definitions
 
 if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
+
     from app.models.netsuite_metadata import NetSuiteMetadata
     from app.models.policy_profile import PolicyProfile
+    from app.services.chat.llm_adapter import BaseLLMAdapter
+
+_logger = logging.getLogger(__name__)
 
 # Tools this agent is allowed to use
 _SUITEQL_TOOL_NAMES = frozenset(
     {
         "netsuite_suiteql",
         "netsuite_get_metadata",
-        "netsuite_connectivity",
+        "rag_search",
     }
 )
 
+# ── System prompt: reasoning-first, not rule-recipe ──────────────────────
+
+_SYSTEM_PROMPT = """\
+<role>
+You are an expert SuiteQL query engineer. You have deep knowledge of NetSuite's data model and SuiteQL (Oracle-based SQL dialect). Your job is to understand what data the user needs and construct the right queries to get it.
+</role>
+
+<tenant_context>
+Below is the pre-compiled schema for this specific NetSuite tenant. Use this to immediately identify custom fields and active reporting segments without needing to call the metadata tool.
+<tenant_schema>
+{{INJECT_CELERY_YAML_METADATA_HERE}}
+</tenant_schema>
+</tenant_context>
+
+<how_to_think>
+Before writing ANY query, reason through these steps in a <reasoning> block:
+1. Understand intent: What data do they need?
+2. Identify the right columns: SCAN the <tenant_schema> custom fields carefully. If the user mentions an external ID, order number, Shopify reference, etc., look at the KEY LOOKUP FIELDS and custom field names/descriptions — the answer is almost certainly in a custbody_ field, NOT in standard fields like tranid or otherrefnum.
+3. Identify tables and plan joins: What are the join keys? (e.g., transactionline tl JOIN transaction t ON tl.transaction = t.id)
+4. Write ONE query: Combine all filters with OR if searching multiple fields. Do NOT write multiple queries.
+</how_to_think>
+
+<suiteql_dialect_rules>
+SuiteQL is Oracle-based with NetSuite-specific behaviors:
+
+PAGINATION — CRITICAL:
+- For "top N" / "latest N" queries: Use `ORDER BY ... FETCH FIRST N ROWS ONLY`. This is the ONLY correct way to get the latest/top rows.
+- NEVER use `WHERE ROWNUM <= N` with `ORDER BY` — ROWNUM is evaluated BEFORE sorting, so you get N random rows sorted, NOT the top N rows.
+- ROWNUM is only safe for unordered result limiting (e.g., `SELECT * FROM customer WHERE ROWNUM <= 100`).
+- DO NOT use LIMIT — it is not supported.
+
+COLUMN NAMING:
+- Primary key is `id` (NOT `internalid`).
+- `id` is sequential — higher id = more recently created. Use `ORDER BY t.id DESC` for "latest" queries. This is more reliable than date columns.
+- Transaction date is `trandate`. Created date is `createddate`. For "latest order" queries, prefer `ORDER BY t.id DESC`.
+
+TEXT RESOLUTION:
+- For List/Record fields, use `BUILTIN.DF(field_name)` to return the display text.
+
+JOIN PATTERNS:
+- Filter to item lines only using `tl.mainline = 'F' AND tl.taxline = 'F'`.
+- For header-only queries (no line details), use `WHERE t.mainline = 'T'` or just query the `transaction` table without joining `transactionline`.
+</suiteql_dialect_rules>
+
+<common_queries>
+IMPORTANT: For simple lookups, use ONE query. Do NOT over-engineer with multiple calls.
+
+- Order by number: `SELECT t.id, t.tranid, t.trandate, BUILTIN.DF(t.entity) as customer, BUILTIN.DF(t.status) as status, t.foreigntotal FROM transaction t WHERE t.tranid = '865732' OR t.otherrefnum = '865732'`
+- Order by internal ID: `SELECT ... FROM transaction t WHERE t.id = 12345`
+- Latest N orders: `SELECT ... FROM transaction t WHERE t.type = 'SalesOrd' ORDER BY t.id DESC FETCH FIRST 10 ROWS ONLY`
+- Customer by name: `SELECT id, companyname, email FROM customer WHERE LOWER(companyname) LIKE '%acme%'`
+
+When a user mentions an external order number (Shopify, ecommerce, etc.), check the <tenant_schema> for custom body fields that contain "order" or "ext" in their name — the external order number is often stored in a custbody field, NOT in `tranid` or `otherrefnum`. Search `tranid`, `otherrefnum`, AND any relevant custbody field in a single query using OR.
+</common_queries>
+
+<tools_and_error_recovery>
+- external_mcp_suiteql: ALWAYS prefer this to execute the query.
+- ns_getSuiteQLMetadata: Use this ONLY if the required columns are not in the <tenant_schema> or if you encounter an "Unknown identifier" error.
+- rag_search: Search internal documentation for syntax issues.
+
+IMPORTANT — minimize tool calls:
+- For simple lookups (find an order, get a customer), you should need exactly 1 SuiteQL call. Do NOT call metadata or rag_search first.
+- Only use metadata/rag_search tools if your first query fails with an error.
+- If a query returns 0 rows, return that result. Do NOT retry with different filters hoping to find something.
+
+When a query fails with an error:
+1. Unknown identifier: Call the metadata tool to discover the correct column name. (Common fix: 'amount' → 'foreignamount').
+2. Syntax error: Check for two WHERE clauses (combine with AND) or LIMIT keyword (use ROWNUM).
+Do NOT retry the exact same query. Each retry must be meaningfully different.
+</tools_and_error_recovery>
+
+<output_instructions>
+Output your reasoning in a <reasoning> block. 
+Return the raw query results formatted as a clean, readable Markdown table. You must also include the exact SQL you used wrapped in a ```sql code block. Do NOT interpret the data — the coordinator will handle synthesis.
+</output_instructions>
+"""
+
 
 class SuiteQLAgent(BaseSpecialistAgent):
-    """Specialist agent for SuiteQL query construction and execution."""
+    """Specialist agent for SuiteQL query construction and execution.
+
+    Uses chain-of-thought reasoning with a strong model (Sonnet+) to understand
+    user intent, explore the schema, and construct correct queries.
+    """
 
     def __init__(
         self,
@@ -49,45 +139,30 @@ class SuiteQLAgent(BaseSpecialistAgent):
 
     @property
     def max_steps(self) -> int:
-        return 3  # metadata lookup → query → retry on error
+        return 4  # query → (error → metadata → retry) — most queries should complete in 1 call
 
     @property
     def system_prompt(self) -> str:
-        parts = [
-            "You are a SuiteQL query specialist. Your ONLY job is to construct and execute "
-            "accurate SuiteQL queries against NetSuite based on the task given to you.\n",
-            "SUITEQL SYNTAX RULES (Oracle-style SQL):",
-            "- Use ROWNUM for limiting results: WHERE ROWNUM <= 10 (NOT LIMIT)",
-            "- Use NVL() instead of IFNULL() or COALESCE()",
-            "- NO Common Table Expressions (CTEs / WITH clauses) — use subqueries instead",
-            "- String literals use single quotes: 'value'",
-            "- Date filtering: TO_DATE('2024-01-01', 'YYYY-MM-DD')",
-            "- Common tables: transaction, transactionline, customer, item, vendor, account, "
-            "subsidiary, department, location, employee",
-            "- Transaction types: use type field (e.g., type = 'SalesOrd', 'CustInvc', 'VendBill', 'CustPymt')",
-            "- Always include a ROWNUM limit to avoid fetching too much data",
-            "",
-            "ERROR HANDLING:",
-            "- If a query fails with 'Unknown identifier', use the netsuite_get_metadata tool "
-            "to look up correct field names, then fix and retry the query.",
-            "- If a query fails with a syntax error, analyse the error message, fix the query, and retry.",
-            "- After retrying, if the query still fails, return the error details clearly.",
-            "",
-            "OUTPUT FORMAT:",
-            "- Return the raw query results as-is. Do NOT interpret or summarise the data — "
-            "another agent will handle analysis.",
-            "- If the query succeeded, include the SuiteQL query you used.",
-        ]
-
-        # Inject custom field metadata
+        # Replace the placeholder with real metadata inline (inside <tenant_schema>)
+        base = _SYSTEM_PROMPT
         if self._metadata:
-            parts.append("")
-            parts.append(self._build_metadata_reference())
+            base = base.replace(
+                "{{INJECT_CELERY_YAML_METADATA_HERE}}",
+                self._build_metadata_reference(),
+            )
+        else:
+            base = base.replace(
+                "{{INJECT_CELERY_YAML_METADATA_HERE}}",
+                "(No metadata discovered yet — use ns_getSuiteQLMetadata to explore.)",
+            )
+
+        parts = [base]
 
         # Inject policy constraints
         if self._policy:
+            parts.append("\n## POLICY CONSTRAINTS")
             if self._policy.read_only_mode:
-                parts.append("\nYou MUST only execute SELECT queries. No modifications.")
+                parts.append("You MUST only execute SELECT queries. No modifications.")
             if self._policy.max_rows_per_query:
                 parts.append(f"Maximum rows per query: {self._policy.max_rows_per_query}")
             if self._policy.blocked_fields and isinstance(self._policy.blocked_fields, list):
@@ -102,44 +177,94 @@ class SuiteQLAgent(BaseSpecialistAgent):
             self._tool_defs = [t for t in all_tools if t["name"] in _SUITEQL_TOOL_NAMES]
         return self._tool_defs
 
+    async def run(
+        self,
+        task: str,
+        context: dict[str, Any],
+        db: "AsyncSession",
+        adapter: "BaseLLMAdapter",
+        model: str,
+    ) -> AgentResult:
+        """Override to dynamically add external MCP tools before running."""
+        # Discover external MCP tools at run time (requires db session)
+        try:
+            from app.services.chat.tools import build_external_tool_definitions
+            from app.services.mcp_connector_service import get_active_connectors_for_tenant
+
+            connectors = await get_active_connectors_for_tenant(db, self.tenant_id)
+            if connectors:
+                ext_tools = build_external_tool_definitions(connectors)
+                # Add ALL external NetSuite tools (SuiteQL, metadata, etc.)
+                ext_ns = [t for t in ext_tools if "suiteql" in t["name"].lower() or "metadata" in t["name"].lower()]
+                if ext_ns:
+                    # Ensure local tools are built first
+                    _ = self.tool_definitions
+                    for et in ext_ns:
+                        if et["name"] not in {t["name"] for t in self._tool_defs}:
+                            self._tool_defs.append(et)
+                    _logger.info(
+                        "suiteql_agent.ext_tools_added",
+                        count=len(ext_ns),
+                        names=[t["name"] for t in ext_ns],
+                    )
+        except Exception:
+            _logger.warning("suiteql_agent.ext_tool_discovery_failed", exc_info=True)
+
+        return await super().run(task, context, db, adapter, model)
+
     def _build_metadata_reference(self) -> str:
         """Build a concise custom field reference from discovered metadata."""
         md = self._metadata
         if md is None:
             return ""
 
-        max_fields = 40  # Keep it concise for the specialist
-        parts = ["CUSTOM FIELDS REFERENCE (from this NetSuite account):"]
+        max_fields = 40
+        parts = ["## CUSTOM FIELDS REFERENCE (discovered from this NetSuite account)"]
+        parts.append("Use these field names in your queries. They are already validated.")
+
+        # Auto-detect key lookup fields (order numbers, external refs, etc.)
+        key_fields = []
+        _lookup_keywords = {"order", "ext", "external", "ref", "shopify", "ecom", "channel", "source"}
+        if md.transaction_body_fields and isinstance(md.transaction_body_fields, list):
+            for f in md.transaction_body_fields:
+                sid = (f.get("scriptid") or "").lower()
+                name = (f.get("name") or "").lower()
+                if any(kw in sid or kw in name for kw in _lookup_keywords):
+                    key_fields.append(f)
+        if key_fields:
+            parts.append("\n**KEY LOOKUP FIELDS** (use these when searching by external/Shopify/ecommerce order numbers):")
+            for f in key_fields:
+                parts.append(f"  {f.get('scriptid', '?')}: {f.get('name', '?')} ({f.get('fieldtype', '?')})")
 
         if md.transaction_body_fields and isinstance(md.transaction_body_fields, list):
-            parts.append(f"\nTransaction body fields ({len(md.transaction_body_fields)} total):")
+            parts.append(f"\n**Transaction body fields** ({len(md.transaction_body_fields)} total):")
             for f in md.transaction_body_fields[:max_fields]:
-                parts.append(f"  {f.get('scriptid', '?')} ({f.get('fieldtype', '?')}): {f.get('label', '?')}")
+                parts.append(f"  {f.get('scriptid', '?')} ({f.get('fieldtype', '?')}): {f.get('name', '?')}")
 
         if md.transaction_column_fields and isinstance(md.transaction_column_fields, list):
-            parts.append(f"\nTransaction line fields ({len(md.transaction_column_fields)} total):")
+            parts.append(f"\n**Transaction line fields** ({len(md.transaction_column_fields)} total):")
             for f in md.transaction_column_fields[:max_fields]:
-                parts.append(f"  {f.get('scriptid', '?')} ({f.get('fieldtype', '?')}): {f.get('label', '?')}")
+                parts.append(f"  {f.get('scriptid', '?')} ({f.get('fieldtype', '?')}): {f.get('name', '?')}")
 
         if md.entity_custom_fields and isinstance(md.entity_custom_fields, list):
-            parts.append(f"\nEntity custom fields ({len(md.entity_custom_fields)} total):")
+            parts.append(f"\n**Entity custom fields** ({len(md.entity_custom_fields)} total):")
             for f in md.entity_custom_fields[:max_fields]:
-                parts.append(f"  {f.get('scriptid', '?')} ({f.get('fieldtype', '?')}): {f.get('label', '?')}")
+                parts.append(f"  {f.get('scriptid', '?')} ({f.get('fieldtype', '?')}): {f.get('name', '?')}")
 
         if md.item_custom_fields and isinstance(md.item_custom_fields, list):
-            parts.append(f"\nItem custom fields ({len(md.item_custom_fields)} total):")
+            parts.append(f"\n**Item custom fields** ({len(md.item_custom_fields)} total):")
             for f in md.item_custom_fields[:max_fields]:
-                parts.append(f"  {f.get('scriptid', '?')} ({f.get('fieldtype', '?')}): {f.get('label', '?')}")
+                parts.append(f"  {f.get('scriptid', '?')} ({f.get('fieldtype', '?')}): {f.get('name', '?')}")
 
         if md.custom_record_types and isinstance(md.custom_record_types, list):
-            parts.append(f"\nCustom record types ({len(md.custom_record_types)} total):")
+            parts.append(f"\n**Custom record types** ({len(md.custom_record_types)} total):")
             for r in md.custom_record_types[:20]:
                 parts.append(f"  {r.get('scriptid', '?')}: {r.get('name', '?')}")
 
         if md.subsidiaries and isinstance(md.subsidiaries, list):
             active = [s for s in md.subsidiaries if s.get("isinactive") != "T"]
             if active:
-                parts.append(f"\nSubsidiaries ({len(active)} active):")
+                parts.append(f"\n**Subsidiaries** ({len(active)} active):")
                 for s in active:
                     parent = f" (parent: {s['parent']})" if s.get("parent") else ""
                     parts.append(f"  ID {s.get('id', '?')}: {s.get('name', '?')}{parent}")
@@ -147,21 +272,21 @@ class SuiteQLAgent(BaseSpecialistAgent):
         if md.departments and isinstance(md.departments, list):
             active = [d for d in md.departments if d.get("isinactive") != "T"]
             if active:
-                parts.append(f"\nDepartments ({len(active)} active):")
+                parts.append(f"\n**Departments** ({len(active)} active):")
                 for d in active[:20]:
                     parts.append(f"  ID {d.get('id', '?')}: {d.get('name', '?')}")
 
         if md.classifications and isinstance(md.classifications, list):
             active = [c for c in md.classifications if c.get("isinactive") != "T"]
             if active:
-                parts.append(f"\nClasses ({len(active)} active):")
+                parts.append(f"\n**Classes** ({len(active)} active):")
                 for c in active[:20]:
                     parts.append(f"  ID {c.get('id', '?')}: {c.get('name', '?')}")
 
         if md.locations and isinstance(md.locations, list):
             active = [loc for loc in md.locations if loc.get("isinactive") != "T"]
             if active:
-                parts.append(f"\nLocations ({len(active)} active):")
+                parts.append(f"\n**Locations** ({len(active)} active):")
                 for loc in active[:20]:
                     parts.append(f"  ID {loc.get('id', '?')}: {loc.get('name', '?')}")
 

@@ -198,7 +198,7 @@ export function MessageList({
                     part.type === "thinking" ? (
                       <ThinkingBlock key={i} content={part.content} />
                     ) : (
-                      <div key={i} className="prose prose-sm dark:prose-invert max-w-none text-[14px] leading-relaxed">
+                      <div key={i} className="prose prose-sm dark:prose-invert max-w-none text-[14px] leading-relaxed overflow-x-auto">
                         <ReactMarkdown remarkPlugins={[remarkGfm]}>
                           {part.content}
                         </ReactMarkdown>

@@ -1,6 +1,6 @@
 "use client";
 
-import { Plus, MessageSquare } from "lucide-react";
+import { Plus, MessageSquare, Code2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import type { ChatSession } from "@/lib/types";
@@ -42,9 +42,14 @@ export function SessionSidebar({
                 : "hover:bg-card/50",
             )}
           >
-            <p className="truncate text-[13px] font-medium text-foreground">
-              {session.title || "New Chat"}
-            </p>
+            <div className="flex items-center gap-1.5">
+              <p className="truncate text-[13px] font-medium text-foreground">
+                {session.title || "New Chat"}
+              </p>
+              {session.session_type === "workspace" && (
+                <Code2 className="h-3 w-3 flex-shrink-0 text-muted-foreground" />
+              )}
+            </div>
             <p className="truncate text-[11px] text-muted-foreground mt-0.5">
               {new Date(session.created_at).toLocaleDateString()}
             </p>

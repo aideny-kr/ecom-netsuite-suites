@@ -133,7 +133,7 @@ class BaseSpecialistAgent(abc.ABC):
             for step in range(self.max_steps):
                 response: LLMResponse = await adapter.create_message(
                     model=model,
-                    max_tokens=2048,
+                    max_tokens=16384,
                     system=self.system_prompt,
                     messages=messages,
                     tools=tools,
@@ -200,7 +200,6 @@ class BaseSpecialistAgent(abc.ABC):
                         {
                             "type": "tool_result",
                             "tool_use_id": block.id,
-                            "tool_name": block.name,
                             "content": result_str,
                         }
                     )
@@ -215,7 +214,7 @@ class BaseSpecialistAgent(abc.ABC):
             )
             response = await adapter.create_message(
                 model=model,
-                max_tokens=1024,
+                max_tokens=16384,
                 system=self.system_prompt,
                 messages=messages,
             )

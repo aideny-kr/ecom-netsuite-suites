@@ -156,8 +156,30 @@ async def run_chat_turn(
     # regardless of whether the base prompt matches.
     if not is_onboarding and tool_definitions:
         tool_inventory_lines = ["\nAVAILABLE TOOLS (use these exact names when calling tools):"]
+        ext_suiteql_tools = []
         for td in tool_definitions:
             tool_inventory_lines.append(f"- {td['name']}: {td.get('description', '')}")
+            # Detect external MCP tools that can run SuiteQL
+            if td["name"].startswith("ext__") and "suiteql" in td["name"].lower():
+                ext_suiteql_tools.append(td["name"])
+
+        # If external MCP SuiteQL tools are available, guide the LLM to prefer them
+        if ext_suiteql_tools:
+            tool_inventory_lines.append(
+                "\n\nIMPORTANT — NETSUITE MCP TOOLS:\n"
+                "You have access to NetSuite's native MCP tools (prefixed with 'ext__'). "
+                "These connect DIRECTLY to NetSuite and are more reliable than the local "
+                "netsuite_suiteql tool.\n"
+                "\n"
+                "PREFERRED TOOL FOR SUITEQL QUERIES:\n"
+                f"Use `{ext_suiteql_tools[0]}` instead of `netsuite_suiteql` for all "
+                "SuiteQL data queries. This tool runs queries directly inside NetSuite "
+                "via the MCP protocol.\n"
+                "Parameters: {\"sqlQuery\": \"SELECT ...\", \"description\": \"Brief description\"}\n"
+                "\n"
+                "Only fall back to `netsuite_suiteql` if the MCP tool is unavailable or errors."
+            )
+
         system_prompt += "\n".join(tool_inventory_lines)
 
     # ── Workspace context injection ──
@@ -312,7 +334,7 @@ async def run_chat_turn(
     for step in range(MAX_STEPS):
         response = await adapter.create_message(
             model=model,
-            max_tokens=4096,
+            max_tokens=16384,
             system=system_prompt,
             messages=messages,
             tools=tool_definitions if tool_definitions else None,
@@ -378,7 +400,6 @@ async def run_chat_turn(
                 {
                     "type": "tool_result",
                     "tool_use_id": block.id,
-                    "tool_name": block.name,
                     "content": result_str,
                 }
             )
@@ -405,7 +426,7 @@ async def run_chat_turn(
         )
         response = await adapter.create_message(
             model=model,
-            max_tokens=2048,
+            max_tokens=8192,
             system=system_prompt,
             messages=messages,
         )

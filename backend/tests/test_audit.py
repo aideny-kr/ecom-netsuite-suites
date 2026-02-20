@@ -91,7 +91,7 @@ class TestAuditEventEmission:
         assert resp.status_code == 201
 
         result = await db.execute(
-            select(AuditEvent).where(AuditEvent.action == "user.create").order_by(AuditEvent.id.desc())
+            select(AuditEvent).where(AuditEvent.action == "user.create").order_by(AuditEvent.timestamp.desc())
         )
         event = result.scalars().first()
         assert event is not None

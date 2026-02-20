@@ -47,6 +47,7 @@ class SessionListItem(BaseModel):
     id: str
     title: str | None = None
     workspace_id: str | None = None
+    session_type: str = "chat"
     is_archived: bool
     created_at: str
     updated_at: str
@@ -71,6 +72,7 @@ def _serialize_session(session: ChatSession) -> dict:
         "id": str(session.id),
         "title": session.title,
         "workspace_id": str(session.workspace_id) if session.workspace_id else None,
+        "session_type": session.session_type or "chat",
         "is_archived": session.is_archived,
         "created_at": session.created_at.isoformat(),
         "updated_at": session.updated_at.isoformat(),
@@ -108,11 +110,13 @@ async def create_session(
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    ws_id = uuid.UUID(body.workspace_id) if body.workspace_id else None
     session = ChatSession(
         tenant_id=user.tenant_id,
         user_id=user.id,
         title=body.title,
-        workspace_id=uuid.UUID(body.workspace_id) if body.workspace_id else None,
+        workspace_id=ws_id,
+        session_type="workspace" if ws_id else "chat",
     )
     db.add(session)
     await db.commit()
@@ -123,6 +127,7 @@ async def create_session(
 @router.get("/sessions", response_model=list[SessionListItem])
 async def list_sessions(
     workspace_id: str | None = None,
+    session_type: str | None = None,
     include_all: bool = False,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -137,7 +142,14 @@ async def list_sessions(
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Invalid workspace_id")
         q = q.where(ChatSession.workspace_id == ws_uuid)
     else:
+        # Default: general chats only (exclude workspace and onboarding sessions)
         q = q.where(ChatSession.workspace_id.is_(None))
+        q = q.where(ChatSession.session_type == "chat")
+
+    # Optional session_type filter (e.g., ?session_type=onboarding)
+    if session_type:
+        q = q.where(ChatSession.session_type == session_type)
+
     q = q.order_by(ChatSession.created_at.desc()).limit(50)
     result = await db.execute(q)
     sessions = result.scalars().all()

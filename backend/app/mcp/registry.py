@@ -9,6 +9,7 @@ from app.mcp.tools import (
     report_export,
     schedule_ops,
     suitescript_sync_tool,
+    web_search,
     workspace_tools,
 )
 
@@ -245,6 +246,28 @@ TOOL_REGISTRY = {
         ),
         "execute": suitescript_sync_tool.execute,
         "params_schema": {},
+    },
+    "web.search": {
+        "description": (
+            "Search the web for current information. Use when internal documentation "
+            "(rag_search) doesn't have what you need. Good for: unfamiliar error messages, "
+            "recent NetSuite updates, external API documentation, SuiteQL syntax questions "
+            "not covered by stored docs, or any topic requiring up-to-date information."
+        ),
+        "execute": web_search.execute,
+        "params_schema": {
+            "query": {
+                "type": "string",
+                "required": True,
+                "description": "Search query (be specific for better results)",
+            },
+            "max_results": {
+                "type": "integer",
+                "required": False,
+                "default": 5,
+                "description": "Max results to return (1-10)",
+            },
+        },
     },
     "rag.search": {
         "description": (

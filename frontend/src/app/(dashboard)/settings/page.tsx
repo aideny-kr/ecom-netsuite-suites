@@ -5,6 +5,7 @@ import {
   useMcpConnectors,
   useDeleteMcpConnector,
   useTestMcpConnector,
+  useReauthorizeMcpConnector,
 } from "@/hooks/use-mcp-connectors";
 import {
   useConnections,
@@ -962,10 +963,10 @@ function NetSuiteConnectionSection() {
 
   useEffect(() => {
     if (connections) {
-      const hasActiveOauth = connections.some(
-        (c) => c.provider === "netsuite" && c.status === "active",
+      const hasActiveOauth2 = connections.some(
+        (c) => c.provider === "netsuite" && c.status === "active" && c.auth_type === "oauth2",
       );
-      if (hasActiveOauth) setOauthStatus("connected");
+      if (hasActiveOauth2) setOauthStatus("connected");
     }
   }, [connections]);
 
@@ -1057,8 +1058,9 @@ function NetSuiteConnectionSection() {
     }
   }
 
-  const bothConnected =
-    mcpStatus === "connected" && oauthStatus === "connected";
+  const oauthConnections = connections?.filter(
+    (c) => c.provider === "netsuite" && c.auth_type === "oauth2" && c.status === "active",
+  ) ?? [];
 
   return (
     <div className="space-y-4">
@@ -1069,137 +1071,108 @@ function NetSuiteConnectionSection() {
         </p>
       </div>
 
+      {/* MCP Connector */}
       <div className="rounded-xl border bg-card p-6 shadow-soft space-y-4">
-        {bothConnected ? (
-          <>
-            <div className="flex items-center gap-3 rounded-lg bg-green-50 px-4 py-3">
-              <CheckCircle2 className="h-5 w-5 text-green-600" />
-              <div>
-                <p className="text-[13px] font-medium text-green-800">
-                  Both connections active
-                </p>
-                <p className="text-[12px] text-green-600">
-                  MCP connector and OAuth API tokens are connected.
-                </p>
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <Link2 className="h-4 w-4 text-muted-foreground" />
+            <span className="text-[13px] font-medium">MCP Connector</span>
+          </div>
+          <ConnectionStatusBadge status={mcpStatus} />
+        </div>
+        {mcpStatus !== "connected" ? (
+          <div className="space-y-3">
+            <div className="grid grid-cols-2 gap-3">
+              <div className="space-y-1">
+                <Label className="text-[12px]">Account ID</Label>
+                <Input
+                  placeholder="e.g., TSTDRV1234567"
+                  value={accountId}
+                  onChange={(e) => setAccountId(e.target.value)}
+                  className="h-8 text-[12px]"
+                />
+              </div>
+              <div className="space-y-1">
+                <Label className="text-[12px]">Client ID</Label>
+                <Input
+                  placeholder="OAuth 2.0 Client ID"
+                  value={clientId}
+                  onChange={(e) => setClientId(e.target.value)}
+                  className="h-8 text-[12px]"
+                />
               </div>
             </div>
-            {connections
-              ?.filter((c) => c.provider === "netsuite")
-              .map((conn) => (
-                <ConnectionManagementCard key={conn.id} connection={conn} />
-              ))}
-          </>
+            <div className="space-y-1">
+              <Label className="text-[12px]">Label (optional)</Label>
+              <Input
+                placeholder="e.g., Production NetSuite"
+                value={label}
+                onChange={(e) => setLabel(e.target.value)}
+                className="h-8 text-[12px]"
+              />
+            </div>
+            <Button
+              size="sm"
+              className="h-8 text-[12px]"
+              onClick={handleConnectMcp}
+              disabled={!accountId || !clientId || mcpStatus === "connecting"}
+            >
+              {mcpStatus === "connecting" ? (
+                <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+              ) : null}
+              Connect MCP via OAuth
+            </Button>
+          </div>
         ) : (
-          <>
-            {/* Phase A: MCP */}
-            <div className="rounded-lg border p-4 space-y-3">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <Link2 className="h-4 w-4 text-muted-foreground" />
-                  <span className="text-[13px] font-medium">
-                    MCP Connector
-                  </span>
-                </div>
-                <ConnectionStatusBadge status={mcpStatus} />
-              </div>
-              {mcpStatus !== "connected" && (
-                <div className="space-y-3">
-                  <div className="grid grid-cols-2 gap-3">
-                    <div className="space-y-1">
-                      <Label className="text-[12px]">Account ID</Label>
-                      <Input
-                        placeholder="e.g., TSTDRV1234567"
-                        value={accountId}
-                        onChange={(e) => setAccountId(e.target.value)}
-                        className="h-8 text-[12px]"
-                      />
-                    </div>
-                    <div className="space-y-1">
-                      <Label className="text-[12px]">Client ID</Label>
-                      <Input
-                        placeholder="OAuth 2.0 Client ID"
-                        value={clientId}
-                        onChange={(e) => setClientId(e.target.value)}
-                        className="h-8 text-[12px]"
-                      />
-                    </div>
-                  </div>
-                  <div className="space-y-1">
-                    <Label className="text-[12px]">Label (optional)</Label>
-                    <Input
-                      placeholder="e.g., Production NetSuite"
-                      value={label}
-                      onChange={(e) => setLabel(e.target.value)}
-                      className="h-8 text-[12px]"
-                    />
-                  </div>
-                  <Button
-                    size="sm"
-                    className="h-8 text-[12px]"
-                    onClick={handleConnectMcp}
-                    disabled={
-                      !accountId ||
-                      !clientId ||
-                      mcpStatus === "connecting"
-                    }
-                  >
-                    {mcpStatus === "connecting" ? (
-                      <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
-                    ) : null}
-                    Connect MCP via OAuth
-                  </Button>
-                </div>
-              )}
-            </div>
-
-            {/* Phase B: OAuth */}
-            <div className="rounded-lg border p-4 space-y-3">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <KeyRound className="h-4 w-4 text-muted-foreground" />
-                  <span className="text-[13px] font-medium">
-                    OAuth API Tokens
-                  </span>
-                </div>
-                <ConnectionStatusBadge status={oauthStatus} />
-              </div>
-              {oauthStatus !== "connected" && (
-                <div className="space-y-3">
-                  <div className="space-y-1">
-                    <Label className="text-[12px]">Account ID</Label>
-                    <Input
-                      placeholder="Pre-filled from MCP setup"
-                      value={accountId}
-                      onChange={(e) => setAccountId(e.target.value)}
-                      className="h-8 text-[12px]"
-                    />
-                  </div>
-                  <Button
-                    size="sm"
-                    className="h-8 text-[12px]"
-                    onClick={handleConnectOauth}
-                    disabled={
-                      !accountId || oauthStatus === "connecting"
-                    }
-                  >
-                    {oauthStatus === "connecting" ? (
-                      <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
-                    ) : null}
-                    Connect OAuth API
-                  </Button>
-                </div>
-              )}
-            </div>
-          </>
+          <p className="text-[12px] text-green-600">MCP connector is active.</p>
         )}
+      </div>
 
-        {errorMessage && (
-          <div className="flex items-start gap-2 rounded-md bg-destructive/10 px-3 py-2 text-destructive text-[12px]">
-            <AlertCircle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
-            <span>{errorMessage}</span>
+      {/* OAuth API Connection */}
+      <div className="rounded-xl border bg-card p-6 shadow-soft space-y-4">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <KeyRound className="h-4 w-4 text-muted-foreground" />
+            <span className="text-[13px] font-medium">OAuth API Connection</span>
+          </div>
+          <ConnectionStatusBadge status={oauthStatus} />
+        </div>
+        {oauthConnections.length > 0 ? (
+          oauthConnections.map((conn) => (
+            <ConnectionManagementCard key={conn.id} connection={conn} />
+          ))
+        ) : (
+          <div className="space-y-3">
+            <div className="space-y-1">
+              <Label className="text-[12px]">Account ID</Label>
+              <Input
+                placeholder="e.g., 9745435"
+                value={accountId}
+                onChange={(e) => setAccountId(e.target.value)}
+                className="h-8 text-[12px]"
+              />
+            </div>
+            <Button
+              size="sm"
+              className="h-8 text-[12px]"
+              onClick={handleConnectOauth}
+              disabled={!accountId || oauthStatus === "connecting"}
+            >
+              {oauthStatus === "connecting" ? (
+                <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+              ) : null}
+              Connect OAuth API
+            </Button>
           </div>
         )}
       </div>
+
+      {errorMessage && (
+        <div className="flex items-start gap-2 rounded-md bg-destructive/10 px-3 py-2 text-destructive text-[12px]">
+          <AlertCircle className="h-3.5 w-3.5 mt-0.5 shrink-0" />
+          <span>{errorMessage}</span>
+        </div>
+      )}
     </div>
   );
 }
@@ -2065,6 +2038,7 @@ export default function SettingsPage() {
   const { data: connectors, isLoading } = useMcpConnectors();
   const deleteConnector = useDeleteMcpConnector();
   const testConnector = useTestMcpConnector();
+  const reauthorize = useReauthorizeMcpConnector();
   const { toast } = useToast();
 
   async function handleDelete(id: string) {
@@ -2074,6 +2048,19 @@ export default function SettingsPage() {
     } catch (err) {
       toast({
         title: "Failed to delete connector",
+        description: err instanceof Error ? err.message : "Unknown error",
+        variant: "destructive",
+      });
+    }
+  }
+
+  async function handleReauthorize(id: string) {
+    try {
+      await reauthorize.mutateAsync(id);
+      toast({ title: "Re-authorization successful", description: "MCP connector tokens refreshed" });
+    } catch (err) {
+      toast({
+        title: "Re-authorization failed",
         description: err instanceof Error ? err.message : "Unknown error",
         variant: "destructive",
       });
@@ -2218,16 +2205,41 @@ export default function SettingsPage() {
                   )}
 
                   <div className="mt-4 flex items-center justify-between border-t pt-3">
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="h-8 text-[12px]"
-                      onClick={() => handleTest(conn.id)}
-                      disabled={testConnector.isPending}
-                    >
-                      <FlaskConical className="mr-1.5 h-3.5 w-3.5" />
-                      {testConnector.isPending ? "Testing..." : "Test"}
-                    </Button>
+                    <div className="flex items-center gap-1">
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-8 text-[12px]"
+                        onClick={() => handleTest(conn.id)}
+                        disabled={testConnector.isPending}
+                      >
+                        <FlaskConical className="mr-1.5 h-3.5 w-3.5" />
+                        {testConnector.isPending ? "Testing..." : "Test"}
+                      </Button>
+                      {conn.status === "revoked" || conn.status === "error" ? (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-8 text-[12px] text-primary"
+                          onClick={() => handleReauthorize(conn.id)}
+                          disabled={reauthorize.isPending}
+                        >
+                          <RefreshCw className={`mr-1.5 h-3.5 w-3.5 ${reauthorize.isPending ? "animate-spin" : ""}`} />
+                          {reauthorize.isPending ? "Authorizing..." : "Re-authorize"}
+                        </Button>
+                      ) : (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-8 text-[12px] text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100"
+                          onClick={() => handleReauthorize(conn.id)}
+                          disabled={reauthorize.isPending}
+                        >
+                          <RefreshCw className={`mr-1.5 h-3.5 w-3.5 ${reauthorize.isPending ? "animate-spin" : ""}`} />
+                          Re-authorize
+                        </Button>
+                      )}
+                    </div>
                     <Button
                       variant="ghost"
                       size="icon"

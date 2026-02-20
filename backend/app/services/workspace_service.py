@@ -16,6 +16,7 @@ import structlog
 import whatthepatch
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.models.workspace import (
     Workspace,
@@ -35,6 +36,7 @@ MAX_READ_CHARS = 32_000
 MAX_DIFF_SIZE = 256 * 1024  # 256 KB
 MAX_IMPORT_FILES = 2000
 SAFE_PATH_RE = re.compile(r"^[a-zA-Z0-9_./ \-]+$")
+LOCK_EXPIRY_MINUTES = 30
 
 CHANGESET_TRANSITIONS: dict[str, dict[str, str]] = {
     "draft": {"submit": "pending_review", "discard": "rejected"},
@@ -481,6 +483,10 @@ async def transition_changeset(
     if action == "reject" and rejection_reason:
         cs.rejection_reason = rejection_reason
 
+    # Release file locks when changeset is rejected or discarded
+    if new_status == "rejected":
+        await release_file_locks(db, changeset_id, tenant_id)
+
     await db.flush()
     return cs
 
@@ -492,7 +498,16 @@ async def apply_changeset(
     actor_id: uuid.UUID,
 ) -> WorkspaceChangeSet:
     """Apply an approved changeset to workspace files."""
-    cs = await get_changeset(db, changeset_id, tenant_id)
+    # Lock the changeset row to prevent concurrent applies
+    cs_result = await db.execute(
+        select(WorkspaceChangeSet)
+        .where(
+            WorkspaceChangeSet.id == changeset_id,
+            WorkspaceChangeSet.tenant_id == tenant_id,
+        )
+        .with_for_update()
+    )
+    cs = cs_result.scalar_one_or_none()
     if not cs:
         raise ValueError("Changeset not found")
     if cs.status != "approved":
@@ -523,11 +538,13 @@ async def apply_changeset(
 
         elif patch.operation == "delete":
             file_result = await db.execute(
-                select(WorkspaceFile).where(
+                select(WorkspaceFile)
+                .where(
                     WorkspaceFile.workspace_id == cs.workspace_id,
                     WorkspaceFile.path == patch.file_path,
                     WorkspaceFile.tenant_id == tenant_id,
                 )
+                .with_for_update()
             )
             wf = file_result.scalar_one_or_none()
             if wf:
@@ -535,11 +552,13 @@ async def apply_changeset(
 
         elif patch.operation == "modify":
             file_result = await db.execute(
-                select(WorkspaceFile).where(
+                select(WorkspaceFile)
+                .where(
                     WorkspaceFile.workspace_id == cs.workspace_id,
                     WorkspaceFile.path == patch.file_path,
                     WorkspaceFile.tenant_id == tenant_id,
                 )
+                .with_for_update()
             )
             wf = file_result.scalar_one_or_none()
             if not wf:
@@ -561,6 +580,20 @@ async def apply_changeset(
             wf.content = new_content
             wf.sha256_hash = _sha256(new_content)
             wf.size_bytes = len(new_content.encode("utf-8"))
+
+    # Release all file locks held by this changeset
+    for patch in patches:
+        file_result = await db.execute(
+            select(WorkspaceFile).where(
+                WorkspaceFile.workspace_id == cs.workspace_id,
+                WorkspaceFile.path == patch.file_path,
+                WorkspaceFile.tenant_id == tenant_id,
+            )
+        )
+        wf = file_result.scalar_one_or_none()
+        if wf and wf.locked_by:
+            wf.locked_by = None
+            wf.locked_at = None
 
     cs.status = "applied"
     cs.applied_by = actor_id
@@ -660,6 +693,51 @@ async def get_changeset_diff(
 # --- Patch Operations ---
 
 
+def _is_lock_expired(locked_at: datetime | None) -> bool:
+    """Check if a file lock has expired (older than LOCK_EXPIRY_MINUTES)."""
+    if not locked_at:
+        return True
+    from datetime import timedelta
+    return datetime.now(timezone.utc) - locked_at > timedelta(minutes=LOCK_EXPIRY_MINUTES)
+
+
+async def release_file_locks(
+    db: AsyncSession,
+    changeset_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+) -> None:
+    """Release locks on all files affected by a changeset."""
+    patch_result = await db.execute(
+        select(WorkspacePatch.file_path).where(
+            WorkspacePatch.changeset_id == changeset_id,
+            WorkspacePatch.tenant_id == tenant_id,
+        )
+    )
+    paths = [row[0] for row in patch_result.all()]
+    if not paths:
+        return
+
+    # Look up the changeset to get workspace_id
+    cs = await get_changeset(db, changeset_id, tenant_id)
+    if not cs:
+        return
+
+    for path in paths:
+        file_result = await db.execute(
+            select(WorkspaceFile).where(
+                WorkspaceFile.workspace_id == cs.workspace_id,
+                WorkspaceFile.path == path,
+                WorkspaceFile.tenant_id == tenant_id,
+            )
+        )
+        wf = file_result.scalar_one_or_none()
+        if wf and wf.locked_by:
+            wf.locked_by = None
+            wf.locked_at = None
+
+    await db.flush()
+
+
 async def propose_patch(
     db: AsyncSession,
     workspace_id: uuid.UUID,
@@ -676,18 +754,30 @@ async def propose_patch(
     if len(unified_diff) > MAX_DIFF_SIZE:
         raise ValueError(f"Diff exceeds maximum size of {MAX_DIFF_SIZE} bytes")
 
-    # Find the target file
+    # Find the target file (with FOR UPDATE to prevent races)
     file_result = await db.execute(
-        select(WorkspaceFile).where(
+        select(WorkspaceFile)
+        .where(
             WorkspaceFile.workspace_id == workspace_id,
             WorkspaceFile.path == path,
             WorkspaceFile.tenant_id == tenant_id,
             WorkspaceFile.is_directory.is_(False),
         )
+        .with_for_update()
     )
     wf = file_result.scalar_one_or_none()
 
     if wf:
+        # Check for existing lock by another user
+        if wf.locked_by and wf.locked_by != proposed_by and not _is_lock_expired(wf.locked_at):
+            raise ValueError(
+                f"File '{path}' is locked by another user. "
+                f"Lock acquired at {wf.locked_at.isoformat() if wf.locked_at else 'unknown'}. "
+                f"Locks expire after {LOCK_EXPIRY_MINUTES} minutes."
+            )
+        # Acquire lock
+        wf.locked_by = proposed_by
+        wf.locked_at = datetime.now(timezone.utc)
         operation = "modify"
         baseline = wf.sha256_hash or _sha256(wf.content or "")
     else:

@@ -123,27 +123,15 @@ async def fetch_file_content(
     tenant_id: uuid.UUID | None = None,
     connection_id: uuid.UUID | None = None,
 ) -> str | None:
-    """Fetch a single file's content from NetSuite REST API.
-
-    Returns decoded UTF-8 content, or None on failure.
-    """
+    """Fetch a single file's content from NetSuite File Cabinet via RESTlet."""
     import time as _time
-
-    slug = _normalize_account_id(account_id)
-    url = f"https://{slug}.suitetalk.api.netsuite.com/services/rest/record/v1/file/{file_id}"
-    headers = {
-        "Authorization": f"Bearer {access_token}",
-        "Accept": "application/json",
-    }
+    from app.services.netsuite_restlet_client import restlet_read_file
 
     t0 = _time.monotonic()
+    url = f"RESTlet:filecabinet:read:{file_id}"
     try:
-        async with httpx.AsyncClient(timeout=FETCH_TIMEOUT) as client:
-            resp = await client.get(url, headers=headers)
-            elapsed_ms = int((_time.monotonic() - t0) * 1000)
-            resp.raise_for_status()
-
-        data = resp.json()
+        data = await restlet_read_file(access_token, account_id, int(file_id))
+        elapsed_ms = int((_time.monotonic() - t0) * 1000)
 
         # Log successful API call
         if db and tenant_id:
@@ -155,16 +143,16 @@ async def fetch_file_content(
                 connection_id=connection_id,
                 method="GET",
                 url=url,
-                response_status=resp.status_code,
+                response_status=200,
                 response_time_ms=elapsed_ms,
                 source="suitescript_sync",
             )
 
-        content_b64 = data.get("content", "")
-        if not content_b64:
+        content = data.get("content", "")
+        if not content:
             return None
 
-        raw_bytes = base64.b64decode(content_b64)
+        raw_bytes = content.encode("utf-8")
 
         # Enforce size limit
         if len(raw_bytes) > MAX_FILE_SIZE:
@@ -172,10 +160,7 @@ async def fetch_file_content(
             text = truncated.decode("utf-8", errors="replace")
             return f"// WARNING: File truncated from {len(raw_bytes)} bytes to {MAX_FILE_SIZE} bytes\n{text}"
 
-        return raw_bytes.decode("utf-8")
-    except UnicodeDecodeError:
-        logger.warning("suitescript_sync.non_utf8_file", file_id=file_id)
-        return None
+        return content
     except Exception as exc:
         elapsed_ms = int((_time.monotonic() - t0) * 1000)
         # Log failed API call
@@ -188,7 +173,7 @@ async def fetch_file_content(
                 connection_id=connection_id,
                 method="GET",
                 url=url,
-                response_status=getattr(getattr(exc, "response", None), "status_code", None),
+                response_status=getattr(getattr(exc, "response", None), "status_code", 500),
                 response_time_ms=elapsed_ms,
                 error_message=str(exc),
                 source="suitescript_sync",
@@ -343,7 +328,7 @@ async def _upsert_workspace_file(
             existing.sha256_hash = sha
             existing.size_bytes = len(content.encode("utf-8"))
             existing.updated_at = datetime.now(timezone.utc)
-        if netsuite_file_id and not existing.netsuite_file_id:
+        if netsuite_file_id:
             existing.netsuite_file_id = netsuite_file_id
         return existing
 

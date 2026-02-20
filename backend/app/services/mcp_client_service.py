@@ -70,7 +70,7 @@ async def _get_oauth2_token(connector: McpConnector, db: AsyncSession | None) ->
         credentials["expires_at"] = time.time() + int(token_data.get("expires_in", 3600))
 
         connector.encrypted_credentials = encrypt_credentials(credentials)
-        await db.flush()
+        await db.commit()
 
         logger.info("mcp_client.oauth2.token_refreshed", connector_id=str(connector.id))
         return credentials["access_token"]

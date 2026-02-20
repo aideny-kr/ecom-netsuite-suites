@@ -100,9 +100,10 @@ async def authorize(
 
 @router.get("/callback", response_class=HTMLResponse)
 async def callback(
-    code: str,
     state: str,
     db: Annotated[AsyncSession, Depends(get_db)],
+    code: str | None = None,
+    error: str | None = None,
 ):
     """OAuth 2.0 callback — exchanges code for tokens and stores connection.
 
@@ -110,6 +111,22 @@ async def callback(
     since NetSuite requires the redirect_uri to match the Integration record.
     The flow type is determined by which Redis key prefix exists for the state.
     """
+    # Handle error responses from NetSuite (e.g. scope_mismatch)
+    if error or not code:
+        logger.warning("netsuite.oauth2.callback_error", error=error, state=state)
+        return HTMLResponse(
+            CALLBACK_HTML.format(
+                status="error",
+                heading="Authentication Failed",
+                message=f"NetSuite returned an error: {error or 'no authorization code received'}. "
+                "Check that the Integration Record scopes match the requested scopes "
+                "(REST Web Services, RESTlets).",
+                event_type="NETSUITE_AUTH_ERROR",
+                error_detail=error or "no_code",
+            ),
+            status_code=400,
+        )
+
     r = await _get_redis()
 
     # Check if this is an MCP connector OAuth flow
@@ -174,6 +191,7 @@ async def callback(
 
     credentials = {
         "auth_type": "oauth2",
+        "client_id": settings.NETSUITE_OAUTH_CLIENT_ID,
         "access_token": token_data["access_token"],
         "refresh_token": token_data.get("refresh_token", ""),
         "expires_at": time.time() + int(token_data.get("expires_in", 3600)),
@@ -193,6 +211,7 @@ async def callback(
     if connection:
         connection.encrypted_credentials = encrypt_credentials(credentials)
         connection.encryption_key_version = get_current_key_version()
+        connection.auth_type = "oauth2"
         connection.metadata_json = {"account_id": account_id, "auth_type": "oauth2"}
     else:
         connection = Connection(
@@ -200,6 +219,7 @@ async def callback(
             provider="netsuite",
             label=f"NetSuite {account_id}",
             status="active",
+            auth_type="oauth2",
             encrypted_credentials=encrypt_credentials(credentials),
             encryption_key_version=get_current_key_version(),
             metadata_json={"account_id": account_id, "auth_type": "oauth2"},

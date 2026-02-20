@@ -226,7 +226,7 @@ class TestLogout:
         await client.post("/api/v1/auth/logout", headers=headers)
 
         result = await db.execute(
-            select(AuditEvent).where(AuditEvent.action == "user.logout").order_by(AuditEvent.id.desc())
+            select(AuditEvent).where(AuditEvent.action == "user.logout").order_by(AuditEvent.timestamp.desc())
         )
         event = result.scalars().first()
         assert event is not None
@@ -249,7 +249,7 @@ class TestAuditFailedLogin:
         assert resp.status_code == 401
 
         result = await db.execute(
-            select(AuditEvent).where(AuditEvent.action == "user.login_failed").order_by(AuditEvent.id.desc())
+            select(AuditEvent).where(AuditEvent.action == "user.login_failed").order_by(AuditEvent.timestamp.desc())
         )
         event = result.scalars().first()
         assert event is not None

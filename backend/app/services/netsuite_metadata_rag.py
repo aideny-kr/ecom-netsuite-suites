@@ -35,8 +35,8 @@ def _format_body_fields(fields: list[dict]) -> str:
     ]
     for f in fields:
         mandatory = " [REQUIRED]" if f.get("ismandatory") == "T" else ""
-        desc = f" — {f['description']}" if f.get("description") else ""
-        lines.append(f"- {f.get('scriptid')}: {f.get('label')} (type: {f.get('fieldtype')}){mandatory}{desc}")
+        desc = f" (value type: {f['fieldvaluetype']})" if f.get("fieldvaluetype") else ""
+        lines.append(f"- {f.get('scriptid')}: {f.get('name')} (type: {f.get('fieldtype')}){mandatory}{desc}")
     return "\n".join(lines)
 
 
@@ -47,8 +47,8 @@ def _format_column_fields(fields: list[dict]) -> str:
         "",
     ]
     for f in fields:
-        desc = f" — {f['description']}" if f.get("description") else ""
-        lines.append(f"- {f.get('scriptid')}: {f.get('label')} (type: {f.get('fieldtype')}){desc}")
+        desc = f" (value type: {f['fieldvaluetype']})" if f.get("fieldvaluetype") else ""
+        lines.append(f"- {f.get('scriptid')}: {f.get('name')} (type: {f.get('fieldtype')}){desc}")
     return "\n".join(lines)
 
 
@@ -59,15 +59,8 @@ def _format_entity_fields(fields: list[dict]) -> str:
         "",
     ]
     for f in fields:
-        applies = []
-        if f.get("appliestocustomer") == "T":
-            applies.append("customer")
-        if f.get("appliestovendor") == "T":
-            applies.append("vendor")
-        if f.get("appliestoemployee") == "T":
-            applies.append("employee")
-        scope = f" [applies to: {', '.join(applies)}]" if applies else ""
-        lines.append(f"- {f.get('scriptid')}: {f.get('label')} (type: {f.get('fieldtype')}){scope}")
+        vtype = f" (value type: {f['fieldvaluetype']})" if f.get("fieldvaluetype") else ""
+        lines.append(f"- {f.get('scriptid')}: {f.get('name')} (type: {f.get('fieldtype')}){vtype}")
     return "\n".join(lines)
 
 
@@ -78,7 +71,7 @@ def _format_item_fields(fields: list[dict]) -> str:
         "",
     ]
     for f in fields:
-        lines.append(f"- {f.get('scriptid')}: {f.get('label')} (type: {f.get('fieldtype')})")
+        lines.append(f"- {f.get('scriptid')}: {f.get('name')} (type: {f.get('fieldtype')})")
     return "\n".join(lines)
 
 

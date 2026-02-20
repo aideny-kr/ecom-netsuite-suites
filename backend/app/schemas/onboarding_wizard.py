@@ -41,7 +41,7 @@ class FinalizeResponse(BaseModel):
 
 
 class AuditTrailEvent(BaseModel):
-    id: int
+    id: str
     action: str
     created_at: str
     correlation_id: str | None = None

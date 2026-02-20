@@ -15,11 +15,11 @@ export function useWorkspaceChat(workspaceId: string | null) {
   const [error, setError] = useState<string | null>(null);
   const queryClient = useQueryClient();
 
-  // Show all sessions (workspace + account-level) so chat is unified
+  // Show only sessions for this workspace
   const { data: sessions = [] } = useQuery<ChatSession[]>({
-    queryKey: ["chat-sessions", "all"],
+    queryKey: ["chat-sessions", "workspace", workspaceId],
     queryFn: () =>
-      apiClient.get<ChatSession[]>("/api/v1/chat/sessions?include_all=true"),
+      apiClient.get<ChatSession[]>(`/api/v1/chat/sessions?workspace_id=${workspaceId}`),
     enabled: !!workspaceId,
   });
 

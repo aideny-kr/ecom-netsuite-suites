@@ -3,7 +3,7 @@
 import asyncio
 import uuid
 
-from app.core.database import async_session_factory, set_tenant_context
+from app.core.database import set_tenant_context, worker_async_session
 from app.services import runner_service
 from app.workers.base_task import InstrumentedTask
 from app.workers.celery_app import celery_app
@@ -22,7 +22,7 @@ def workspace_run_task(self, tenant_id: str, run_id: str, **kwargs):
 
 async def _execute(tenant_id: str, run_id: str, extra_params: dict | None = None) -> dict:
     """Async inner: open session, set RLS, execute run."""
-    async with async_session_factory() as session:
+    async with worker_async_session() as session:
         await set_tenant_context(session, tenant_id)
         run = await runner_service.execute_run(
             session, uuid.UUID(run_id), uuid.UUID(tenant_id), extra_params=extra_params

@@ -14,7 +14,7 @@ class PaginatedResponse(BaseModel, Generic[T]):
 
 
 class AuditEventResponse(BaseModel):
-    id: int
+    id: str
     tenant_id: str
     timestamp: str
     actor_id: str | None = None

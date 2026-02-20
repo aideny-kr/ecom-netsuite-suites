@@ -84,6 +84,29 @@ async def create_netsuite_mcp_connector(
     return connector
 
 
+async def update_connector_tokens(
+    db: AsyncSession,
+    connector: McpConnector,
+    token_data: dict,
+    account_id: str,
+    client_id: str,
+) -> None:
+    """Update an existing connector's OAuth 2.0 tokens after re-authorization."""
+    import time
+
+    credentials = {
+        "auth_type": "oauth2",
+        "access_token": token_data["access_token"],
+        "refresh_token": token_data.get("refresh_token", ""),
+        "expires_at": time.time() + int(token_data.get("expires_in", 3600)),
+        "account_id": account_id,
+        "client_id": client_id,
+    }
+    connector.encrypted_credentials = encrypt_credentials(credentials)
+    connector.status = "active"
+    await db.flush()
+
+
 async def list_mcp_connectors(db: AsyncSession, tenant_id: uuid.UUID) -> list[McpConnector]:
     """List all MCP connectors for a tenant."""
     result = await db.execute(

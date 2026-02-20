@@ -31,6 +31,7 @@ class TestAllowedChatTools:
             "data.sample_table_read",
             "report.export",
             "rag.search",
+            "web.search",
             "workspace.list_files",
             "workspace.read_file",
             "workspace.search",

@@ -56,7 +56,7 @@ async def list_audit_events(
 
     items = [
         AuditEventResponse(
-            id=e.id,
+            id=str(e.id),
             tenant_id=str(e.tenant_id),
             timestamp=e.timestamp.isoformat() if e.timestamp else "",
             actor_id=str(e.actor_id) if e.actor_id else None,

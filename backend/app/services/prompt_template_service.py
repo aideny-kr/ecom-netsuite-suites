@@ -83,11 +83,11 @@ def _build_netsuite_customizations_section(metadata: NetSuiteMetadata | None) ->
         parts.append(f"\n## Custom Transaction Body Fields ({len(metadata.transaction_body_fields)} total)")
         parts.append("Use these in SELECT/WHERE on the `transaction` table:")
         for f in fields:
-            line = f"- `{f.get('scriptid', '?')}` ({f.get('fieldtype', '?')}): {f.get('label', '?')}"
+            line = f"- `{f.get('scriptid', '?')}` ({f.get('fieldtype', '?')}): {f.get('name', '?')}"
             if f.get("ismandatory") == "T":
                 line += " [REQUIRED]"
-            if f.get("description"):
-                line += f" — {f['description'][:80]}"
+            if f.get("fieldvaluetype"):
+                line += f" — {f['fieldvaluetype']}"
             parts.append(line)
 
     # ── Transaction column/line fields (custcol_*) ────────────────
@@ -96,9 +96,9 @@ def _build_netsuite_customizations_section(metadata: NetSuiteMetadata | None) ->
         parts.append(f"\n## Custom Transaction Line Fields ({len(metadata.transaction_column_fields)} total)")
         parts.append("Use these in SELECT/WHERE on the `transactionline` table:")
         for f in fields:
-            line = f"- `{f.get('scriptid', '?')}` ({f.get('fieldtype', '?')}): {f.get('label', '?')}"
-            if f.get("description"):
-                line += f" — {f['description'][:80]}"
+            line = f"- `{f.get('scriptid', '?')}` ({f.get('fieldtype', '?')}): {f.get('name', '?')}"
+            if f.get("fieldvaluetype"):
+                line += f" — {f['fieldvaluetype']}"
             parts.append(line)
 
     # ── Entity custom fields (custentity_*) ───────────────────────
@@ -107,15 +107,8 @@ def _build_netsuite_customizations_section(metadata: NetSuiteMetadata | None) ->
         parts.append(f"\n## Custom Entity Fields ({len(metadata.entity_custom_fields)} total)")
         parts.append("Use on `customer`, `vendor`, or `employee` tables:")
         for f in fields:
-            applies = []
-            if f.get("appliestocustomer") == "T":
-                applies.append("customer")
-            if f.get("appliestovendor") == "T":
-                applies.append("vendor")
-            if f.get("appliestoemployee") == "T":
-                applies.append("employee")
-            scope = f" [applies to: {', '.join(applies)}]" if applies else ""
-            parts.append(f"- `{f.get('scriptid', '?')}` ({f.get('fieldtype', '?')}): {f.get('label', '?')}{scope}")
+            vtype = f" (value type: {f['fieldvaluetype']})" if f.get("fieldvaluetype") else ""
+            parts.append(f"- `{f.get('scriptid', '?')}` ({f.get('fieldtype', '?')}): {f.get('name', '?')}{vtype}")
 
     # ── Item custom fields (custitem_*) ───────────────────────────
     if metadata.item_custom_fields and isinstance(metadata.item_custom_fields, list):
@@ -123,7 +116,7 @@ def _build_netsuite_customizations_section(metadata: NetSuiteMetadata | None) ->
         parts.append(f"\n## Custom Item Fields ({len(metadata.item_custom_fields)} total)")
         parts.append("Use on the `item` table:")
         for f in fields:
-            parts.append(f"- `{f.get('scriptid', '?')}` ({f.get('fieldtype', '?')}): {f.get('label', '?')}")
+            parts.append(f"- `{f.get('scriptid', '?')}` ({f.get('fieldtype', '?')}): {f.get('name', '?')}")
 
     # ── Custom record types ───────────────────────────────────────
     if metadata.custom_record_types and isinstance(metadata.custom_record_types, list):
@@ -184,12 +177,26 @@ def _build_netsuite_customizations_section(metadata: NetSuiteMetadata | None) ->
 def _build_suiteql_rules_section(profile: TenantProfile) -> str:
     parts = [
         "SUITEQL SYNTAX RULES (Oracle-style SQL):",
-        "- Use ROWNUM for limiting results: WHERE ROWNUM <= 10 (NOT LIMIT)",
+        "- Row limiting: use ROWNUM in WHERE clause, e.g. WHERE type = 'SalesOrd' AND ROWNUM <= 10 ORDER BY id DESC",
+        "- NEVER use FETCH FIRST N ROWS ONLY or LIMIT — they are NOT supported",
+        "- NEVER use 'internalid' — the correct column is 'id'",
+        "- NEVER use 'mainline' — it is not a valid SuiteQL column",
+        "- Only ONE WHERE clause per query — combine conditions with AND",
         "- Use NVL() instead of IFNULL() or COALESCE()",
         "- NO Common Table Expressions (CTEs / WITH clauses) — use subqueries instead",
         "- String literals use single quotes: 'value'",
         "- Date filtering: TO_DATE('2024-01-01', 'YYYY-MM-DD')",
         "- Common tables: transaction, transactionline, customer, item, vendor, account, subsidiary",
+        "- Common transaction columns: id, tranid, trandate, type, status, entity, memo, "
+        "foreigntotal, exchangerate, subsidiary, department, location, createddate",
+        "",
+        "TRANSACTIONLINE RULES:",
+        "- Join: transactionline tl JOIN transaction t ON tl.transaction = t.id",
+        "- Line columns: id, linesequencenumber, item, quantity, rate, rateamount, "
+        "foreignamount, memo, isclosed",
+        "- Filter item lines: tl.mainline = 'F' AND tl.taxline = 'F' (TEXT 'T'/'F')",
+        "- NEVER use dot notation (tl.item.name) — JOIN instead: JOIN item i ON tl.item = i.id",
+        "- NEVER use 'amount' on transactionline — use 'foreignamount' or 'netamount'",
     ]
     if profile.suiteql_naming:
         naming = profile.suiteql_naming
@@ -202,10 +209,9 @@ def _build_suiteql_rules_section(profile: TenantProfile) -> str:
 def _build_tool_rules_section() -> str:
     return (
         "WORKFLOW GUIDANCE:\n"
-        "- To query NetSuite data, use the netsuite_suiteql tool with a SuiteQL query. "
-        "This is your PRIMARY tool for answering data questions.\n"
-        "  Example: netsuite_suiteql({\"query\": \"SELECT id, tranid, trandate FROM transaction "
-        "WHERE type = 'SalesOrd' ORDER BY trandate DESC FETCH FIRST 10 ROWS ONLY\"})\n"
+        "- To query NetSuite data, prefer external MCP tools (prefixed with 'ext__') if available. "
+        "These connect directly to NetSuite and are the most reliable option.\n"
+        "- If no external MCP tools are available, use the netsuite_suiteql tool as fallback.\n"
         "- To discover custom field names before writing a query, call netsuite_get_metadata first.\n"
         "- If a query fails with 'Unknown identifier', call netsuite_get_metadata to look up "
         "correct field names, fix the query, and retry automatically.\n"

@@ -42,7 +42,7 @@ class Settings(BaseSettings):
     ANTHROPIC_MODEL: str = "claude-sonnet-4-20250514"
     DEFAULT_AI_PROVIDER: str = "anthropic"
     VOYAGE_API_KEY: str = ""
-    VOYAGE_EMBED_MODEL: str = "voyage-3-lite"
+    VOYAGE_EMBED_MODEL: str = "voyage-3"
     CHAT_MAX_HISTORY_TURNS: int = 20
     CHAT_MAX_TOOL_CALLS_PER_TURN: int = 5
     CHAT_RAG_TOP_K: int = 5
@@ -57,9 +57,15 @@ class Settings(BaseSettings):
         "customrecordtype,customlist"
     )
 
+    # OAuth for regular API connection (SuiteQL, file sync, metadata)
     NETSUITE_OAUTH_CLIENT_ID: str = ""
     NETSUITE_OAUTH_REDIRECT_URI: str = "http://localhost:8000/api/v1/connections/netsuite/callback"
-    NETSUITE_OAUTH_SCOPE: str = "mcp"
+    NETSUITE_OAUTH_SCOPE: str = "rest_webservices"
+
+    # OAuth for MCP connector (AI tools)
+    NETSUITE_MCP_OAUTH_CLIENT_ID: str = ""
+    NETSUITE_MCP_OAUTH_SCOPE: str = "mcp"
+
     NETSUITE_ACCOUNT_ID: str = ""
     NETSUITE_MCP_TRANSPORT: str = "http"
 
@@ -67,8 +73,15 @@ class Settings(BaseSettings):
     MULTI_AGENT_ENABLED: bool = True
     MULTI_AGENT_SPECIALIST_PROVIDER: str = "anthropic"
     MULTI_AGENT_SPECIALIST_MODEL: str = "claude-haiku-4-5-20251001"
+    # SuiteQL agent uses a stronger model for SQL reasoning
+    MULTI_AGENT_SQL_MODEL: str = "claude-sonnet-4-5-20250929"
     MULTI_AGENT_MAX_BUDGET_TOKENS: int = 50000
     MULTI_AGENT_MAX_RETRIES: int = 2
+
+    # Web search
+    WEB_SEARCH_PROVIDER: str = "duckduckgo"  # Options: "duckduckgo", "tavily"
+    TAVILY_API_KEY: str = ""  # For future Tavily upgrade
+    WEB_SEARCH_MAX_RESULTS: int = 5
 
     AUDIT_RETENTION_DAYS: int = 90
 

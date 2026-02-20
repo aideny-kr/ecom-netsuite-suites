@@ -111,6 +111,14 @@ TOOL_CONFIGS = {
         "requires_entitlement": "mcp_tools",
         "allowlisted_params": ["query", "top_k", "source_filter"],
     },
+    "web.search": {
+        "default_limit": None,
+        "max_limit": None,
+        "timeout_seconds": 15,
+        "rate_limit_per_minute": 10,
+        "requires_entitlement": "mcp_tools",
+        "allowlisted_params": ["query", "max_results"],
+    },
     "workspace.list_files": {
         "default_limit": 200,
         "max_limit": 500,

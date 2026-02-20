@@ -93,9 +93,9 @@ def build_mcp_authorize_url(
     Uses caller-provided client_id and redirect_uri instead of global settings,
     allowing per-connector OAuth configuration.
     """
-    # Default to the same scope configured for regular NetSuite OAuth
+    # Default to MCP scope for MCP connectors
     if not scope:
-        scope = settings.NETSUITE_OAUTH_SCOPE
+        scope = settings.NETSUITE_MCP_OAUTH_SCOPE
     params = {
         "response_type": "code",
         "client_id": client_id,
@@ -172,13 +172,15 @@ async def get_valid_token(db: AsyncSession, connection) -> str | None:
         return None
 
     try:
-        token_data = await refresh_tokens(account_id, refresh_token)
+        # Use stored client_id if available, fallback to global setting
+        client_id = credentials.get("client_id", settings.NETSUITE_OAUTH_CLIENT_ID)
+        token_data = await refresh_tokens_with_client(account_id, refresh_token, client_id)
         credentials["access_token"] = token_data["access_token"]
         credentials["refresh_token"] = token_data.get("refresh_token", refresh_token)
         credentials["expires_at"] = time.time() + int(token_data.get("expires_in", 3600))
 
         connection.encrypted_credentials = encrypt_credentials(credentials)
-        await db.flush()
+        await db.commit()
 
         logger.info("netsuite.oauth2.token_refreshed", connection_id=str(connection.id))
         return credentials["access_token"]

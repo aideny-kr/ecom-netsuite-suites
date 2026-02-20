@@ -5,7 +5,8 @@ question into sub-tasks, delegates to specialist agents, collects and
 evaluates results, retries on failure, and synthesises the final answer.
 
 The coordinator uses the tenant's main model (Sonnet/Opus) for planning
-and synthesis, while specialist agents use a cheaper/faster model (Haiku).
+and synthesis. The SuiteQL agent uses Sonnet for strong SQL reasoning,
+while other specialists (RAG, analysis) use Haiku for efficiency.
 """
 
 from __future__ import annotations
@@ -42,10 +43,14 @@ COORDINATOR_PLAN_PROMPT = (
     "You are a coordinator that decomposes user questions and delegates to specialist agents.\n"
     "\n"
     "Available specialists:\n"
-    "- suiteql: Constructs and executes SuiteQL queries against NetSuite. Use for ANY "
-    "data retrieval from NetSuite (transactions, invoices, customers, items, vendors, etc.).\n"
-    "- rag: Searches documentation and knowledge base. Use for 'how-to' questions, "
-    "feature explanations, field name lookups, or when you need reference information.\n"
+    "- suiteql: Expert SuiteQL engineer that reasons about the NetSuite data model, "
+    "explores schemas via metadata tools, and constructs queries. It can handle multi-step "
+    "data retrieval (e.g., finding an order then getting its line items) within a single "
+    "agent run — it has its own agentic loop with up to 6 tool calls. Use for ANY "
+    "data retrieval from NetSuite.\n"
+    "- rag: Searches documentation, knowledge base, and the web. Use for 'how-to' questions, "
+    "feature explanations, unfamiliar error messages, or when you need reference information. "
+    "Can also search the web for recent NetSuite documentation or topics not in stored docs.\n"
     "- analysis: Analyses and interprets data. Use when query results need aggregation, "
     "comparison, trend analysis, or interpretation. REQUIRES data from another agent first.\n"
     "\n"
@@ -53,34 +58,48 @@ COORDINATOR_PLAN_PROMPT = (
     "{\n"
     '  "reasoning": "Brief explanation of your approach",\n'
     '  "steps": [\n'
-    '    {"agent": "rag", "task": "Find which custom field stores warranty info on sales orders"},\n'
-    '    {"agent": "suiteql", "task": "Query recent sales orders showing warranty field"}\n'
+    '    {"agent": "suiteql", "task": "Detailed description of what data to retrieve"}\n'
     "  ],\n"
     '  "parallel": false\n'
     "}\n"
     "\n"
     "RULES:\n"
     "- Use the FEWEST agents necessary.\n"
-    "- Set parallel=true ONLY when steps are truly independent.\n"
-    "- If the question is simple enough for a single agent, use just one step.\n"
-    "- For data questions: typically suiteql alone (it has metadata in its prompt).\n"
-    "- For complex data questions: rag (field lookup) → suiteql (query) → analysis (interpret).\n"
+    "- The suiteql agent is smart — give it a clear, complete task description and let it "
+    "figure out the right queries. Include context like record IDs from prior conversation.\n"
+    "- For data questions involving dates (today, this week, this month), ALWAYS include "
+    "the explicit date in the task description so the agent uses it directly.\n"
+    "- Tell the agent what output format you expect (e.g., 'return all rows grouped by X', "
+    "'return the top 10 by amount').\n"
+    "- For most data questions: just suiteql alone. It can explore metadata, run multiple "
+    "queries, and handle errors internally.\n"
+    "- For complex analysis: suiteql (get data) → analysis (interpret).\n"
     "- For documentation questions: just rag.\n"
-    "- The analysis agent MUST come after data-producing agents (suiteql/rag).\n"
+    "- The analysis agent MUST come after data-producing agents.\n"
     "- Maximum 4 steps.\n"
-    "- Each task description must be specific and self-contained.\n"
+    "- Each task description must be specific and self-contained. Include any IDs, names, "
+    "or context from the conversation that the agent needs.\n"
 )
 
 COORDINATOR_SYNTHESIS_PROMPT = (
     "You are synthesising the final answer for the user based on specialist agent results.\n"
     "\n"
+    "FORMAT:\n"
+    "1. Start with a direct answer to the user's question in 1-2 sentences.\n"
+    "2. If agents returned data rows, present them in a **markdown table**. Include all rows.\n"
+    "3. Show the SQL query used in a code block (```sql ... ```) so the user can verify.\n"
+    "4. If results returned 0 rows, say so clearly and suggest possible reasons:\n"
+    "   - Wrong date range? No transactions posted yet today?\n"
+    "   - Different record type needed?\n"
+    "   - Suggest a broader query the user could try.\n"
+    "\n"
     "RULES:\n"
-    "- Combine the outputs from all agents into a single, coherent response.\n"
-    "- If agents produced data tables, present them clearly in markdown.\n"
-    "- Cite tool results using [tool: tool_name] notation.\n"
-    "- If any agent failed, mention what couldn't be retrieved and why.\n"
-    "- Be concise and focused on what the user asked.\n"
+    "- Preserve all numeric values EXACTLY as returned — do not round or convert.\n"
     "- Do NOT fabricate data — only use what agents returned.\n"
+    "- If an agent failed, briefly explain the error and what you tried.\n"
+    "- Be concise. No filler phrases or disclaimers.\n"
+    "- Use column headers that are human-readable (e.g., 'Sales Channel' not 'source').\n"
+    "- Format currency values with commas and 2 decimal places.\n"
 )
 
 
@@ -242,6 +261,10 @@ class MultiAgentCoordinator:
         conversation_history: list[dict],
     ) -> tuple[CoordinatorPlan | None, TokenUsage]:
         """Call the main model to produce a plan."""
+        from datetime import date
+
+        today = date.today().isoformat()
+
         # Build messages with recent conversation context
         messages: list[dict] = []
         for msg in conversation_history[-6:]:  # Last 3 turns for context
@@ -250,12 +273,13 @@ class MultiAgentCoordinator:
         messages.append(
             {
                 "role": "user",
-                "content": f"User question: {user_message}\n\nProduce a JSON plan.",
+                "content": f"[Today is {today}]\nUser question: {user_message}\n\nProduce a JSON plan.",
             }
         )
 
-        response: LLMResponse = await self.main_adapter.create_message(
-            model=self.main_model,
+        # Use the fast specialist model for planning (just JSON routing)
+        response: LLMResponse = await self.specialist_adapter.create_message(
+            model=self.specialist_model,
             max_tokens=512,
             system=COORDINATOR_PLAN_PROMPT,
             messages=messages,
@@ -328,12 +352,16 @@ class MultiAgentCoordinator:
                     error=f"Unknown agent type: {step.agent}",
                     agent_name=step.agent,
                 )
+            # SuiteQL agent uses a stronger model for SQL reasoning
+            step_model = self.specialist_model
+            if step.agent == "suiteql" and settings.MULTI_AGENT_SQL_MODEL:
+                step_model = settings.MULTI_AGENT_SQL_MODEL
             return await agent.run(
                 task=step.task,
                 context=context,
                 db=self.db,
                 adapter=self.specialist_adapter,
-                model=self.specialist_model,
+                model=step_model,
             )
 
         if parallel and len(steps) > 1:
@@ -443,7 +471,7 @@ class MultiAgentCoordinator:
         results_parts = []
         for result in agent_results:
             status = "SUCCESS" if result.success else "FAILED"
-            data_preview = str(result.data)[:3000] if result.data else ""
+            data_preview = str(result.data)[:8000] if result.data else ""
             error_info = f" Error: {result.error}" if result.error else ""
             results_parts.append(f"[Agent: {result.agent_name}] [{status}]{error_info}\n{data_preview}")
 

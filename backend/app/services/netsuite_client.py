@@ -118,15 +118,22 @@ async def execute_suiteql_via_mcp(access_token: str, account_id: str, query: str
     }
 
 
-async def execute_suiteql(access_token: str, account_id: str, query: str, limit: int = 1000) -> dict:
-    """Execute SuiteQL — try MCP first, fall back to REST API."""
-    try:
-        return await execute_suiteql_via_mcp(access_token, account_id, query, limit)
-    except Exception as exc:
-        logger.warning(
-            "netsuite.mcp_fallback_to_rest",
-            error=str(exc),
-            account_id=account_id,
-        )
+async def execute_suiteql(
+    access_token: str, account_id: str, query: str, limit: int = 1000, *, use_mcp: bool = False
+) -> dict:
+    """Execute SuiteQL — uses REST API by default, MCP only when explicitly requested.
+
+    MCP requires a separate OAuth token with 'mcp' scope, so it should only be
+    used when the caller knows the token has that scope.
+    """
+    if use_mcp:
+        try:
+            return await execute_suiteql_via_mcp(access_token, account_id, query, limit)
+        except Exception as exc:
+            logger.warning(
+                "netsuite.mcp_fallback_to_rest",
+                error=str(exc),
+                account_id=account_id,
+            )
 
     return await execute_suiteql_via_rest(access_token, account_id, query, limit)

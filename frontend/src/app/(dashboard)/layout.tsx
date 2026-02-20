@@ -2,11 +2,13 @@
 
 import { useState, useCallback, useEffect } from "react";
 import Link from "next/link";
+import { useRouter, usePathname } from "next/navigation";
 import { useAuth } from "@/providers/auth-provider";
 import { apiClient } from "@/lib/api-client";
 import { Sidebar } from "@/components/sidebar";
 import { OnboardingWizard } from "@/components/onboarding/onboarding-wizard";
 import { AlertTriangle, X } from "lucide-react";
+import { cn } from "@/lib/utils";
 
 export default function DashboardLayout({
   children,
@@ -14,6 +16,9 @@ export default function DashboardLayout({
   children: React.ReactNode;
 }) {
   const { user, isLoading, refreshUser } = useAuth();
+  const router = useRouter();
+  const pathname = usePathname();
+  const isWorkspace = pathname?.startsWith("/workspace");
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [connectionMissing, setConnectionMissing] = useState(false);
   const [bannerDismissed, setBannerDismissed] = useState(false);
@@ -70,22 +75,20 @@ export default function DashboardLayout({
     await refreshUser();
   }, [refreshUser]);
 
-  if (isLoading) {
+  useEffect(() => {
+    if (!isLoading && !user) {
+      router.push("/login");
+    }
+  }, [isLoading, user, router]);
+
+  if (isLoading || !user) {
     return (
       <div className="flex h-screen items-center justify-center bg-background">
         <div className="flex flex-col items-center gap-3">
           <div className="h-8 w-8 animate-spin rounded-full border-2 border-primary border-t-transparent" />
-          <span className="text-sm text-muted-foreground">Loading...</span>
-        </div>
-      </div>
-    );
-  }
-
-  if (!user) {
-    return (
-      <div className="flex h-screen items-center justify-center bg-background">
-        <div className="flex flex-col items-center gap-3">
-          <span className="text-sm text-muted-foreground">Redirecting to login...</span>
+          <span className="text-sm text-muted-foreground">
+            {isLoading ? "Loading..." : "Redirecting to login..."}
+          </span>
         </div>
       </div>
     );
@@ -122,7 +125,10 @@ export default function DashboardLayout({
             </button>
           </div>
         )}
-        <div className="mx-auto max-w-[1400px] px-8 py-8">
+        <div className={cn(
+          "mx-auto",
+          isWorkspace ? "h-full w-full max-w-none" : "max-w-[1400px] px-8 py-8"
+        )}>
           {children}
         </div>
       </main>

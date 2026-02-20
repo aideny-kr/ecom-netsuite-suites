@@ -79,11 +79,13 @@ define(['N/file', 'N/search', 'N/log', 'N/runtime', 'N/error'], (file, search, l
     };
 
     /**
-     * PUT: Update existing file content by internal ID.
+     * PUT: Update existing file content in-place by internal ID.
      * Body: { fileId, content, description? }
      * Returns: { success, fileId, name, size }
      *
-     * N/file does not support in-place update — we delete + re-create with same name/folder.
+     * Loads the file, overwrites contents, and saves — preserving the Internal ID.
+     * This is critical: Script Record deployments reference file IDs. If the ID
+     * changes, deployed scripts stop executing.
      */
     const put = (requestBody) => {
         try {
@@ -96,35 +98,21 @@ define(['N/file', 'N/search', 'N/log', 'N/runtime', 'N/error'], (file, search, l
                 });
             }
 
-            // Load existing to preserve metadata
+            // Load existing file — update contents in-place to preserve Internal ID
             const existing = file.load({ id: parseInt(requestBody.fileId, 10) });
-            const meta = {
-                name: existing.name,
-                folder: existing.folder,
-                fileType: existing.fileType,
-                description: requestBody.description || existing.description || '',
-            };
+            existing.contents = requestBody.content;
+            if (requestBody.description) {
+                existing.description = requestBody.description;
+            }
 
-            // Delete and re-create (N/file update strategy)
-            file.delete({ id: parseInt(requestBody.fileId, 10) });
-
-            const newFile = file.create({
-                name: meta.name,
-                fileType: meta.fileType,
-                contents: requestBody.content,
-                folder: meta.folder,
-                description: meta.description,
-            });
-
-            const newFileId = newFile.save();
-            log.audit('FileCabinet UPDATE', `Updated ${meta.name}: old=${requestBody.fileId} new=${newFileId}`);
+            const savedId = existing.save();
+            log.audit('FileCabinet UPDATE', `Updated ${existing.name} (ID ${savedId})`);
 
             return {
                 success: true,
-                fileId: newFileId,
-                name: meta.name,
+                fileId: savedId,
+                name: existing.name,
                 size: requestBody.content.length,
-                previousFileId: parseInt(requestBody.fileId, 10),
             };
         } catch (e) {
             log.error('FileCabinet PUT Error', e.message);

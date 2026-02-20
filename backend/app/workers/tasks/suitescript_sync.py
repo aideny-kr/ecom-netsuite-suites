@@ -9,7 +9,7 @@ import uuid
 
 from sqlalchemy import select
 
-from app.core.database import async_session_factory, set_tenant_context
+from app.core.database import set_tenant_context, worker_async_session
 from app.core.encryption import decrypt_credentials
 from app.models.connection import Connection
 from app.workers.base_task import InstrumentedTask
@@ -47,7 +47,7 @@ async def _execute(
     """Async inner: open session, decrypt credentials, run sync."""
     from app.services.suitescript_sync_service import sync_scripts_to_workspace
 
-    async with async_session_factory() as session:
+    async with worker_async_session() as session:
         await set_tenant_context(session, tenant_id)
 
         # Get connection and decrypt OAuth credentials
