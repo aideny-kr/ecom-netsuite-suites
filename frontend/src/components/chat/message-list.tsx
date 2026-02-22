@@ -93,6 +93,8 @@ interface MessageListProps {
   workspaceId?: string | null;
   onViewDiff?: (changesetId: string) => void;
   onChangesetAction?: () => void;
+  streamingContent?: string | null;
+  streamingStatus?: string | null;
 }
 
 export function MessageList({
@@ -104,6 +106,8 @@ export function MessageList({
   workspaceId,
   onViewDiff,
   onChangesetAction,
+  streamingContent,
+  streamingStatus,
 }: MessageListProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
 
@@ -262,18 +266,33 @@ export function MessageList({
         </div>
       )}
 
-      {/* Thinking indicator */}
-      {isWaitingForReply && (
+      {/* Thinking indicator / Streaming */}
+      {(isWaitingForReply || streamingContent || streamingStatus) && (
         <div className="flex gap-3 justify-start">
           <div className="mt-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-primary/10">
             <Sparkles className="h-3.5 w-3.5 text-primary" />
           </div>
-          <div className="flex items-center gap-1.5 rounded-2xl bg-muted/60 px-4 py-3">
-            <span className="inline-flex gap-1">
-              <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/60 animate-bounce [animation-delay:0ms]" />
-              <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/60 animate-bounce [animation-delay:150ms]" />
-              <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/60 animate-bounce [animation-delay:300ms]" />
-            </span>
+          <div className="flex flex-col gap-2 rounded-2xl bg-muted/60 px-4 py-3 min-w-[30%]">
+            {streamingStatus ? (
+              <div className="text-[12px] font-medium text-muted-foreground flex items-center gap-2">
+                <span className="h-1.5 w-1.5 rounded-full bg-primary animate-pulse" />
+                {streamingStatus}
+              </div>
+            ) : !streamingContent ? (
+              <span className="inline-flex gap-1 h-[20px] items-center">
+                <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/60 animate-bounce [animation-delay:0ms]" />
+                <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/60 animate-bounce [animation-delay:150ms]" />
+                <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/60 animate-bounce [animation-delay:300ms]" />
+              </span>
+            ) : null}
+
+            {streamingContent && (
+              <div className="prose prose-sm dark:prose-invert max-w-none text-[14px] leading-relaxed overflow-x-auto">
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                  {streamingContent}
+                </ReactMarkdown>
+              </div>
+            )}
           </div>
         </div>
       )}

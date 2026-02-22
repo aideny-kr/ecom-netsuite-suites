@@ -14,6 +14,34 @@ _ORCH = "app.services.chat.orchestrator"
 _SETTINGS = "app.services.chat.orchestrator.settings"
 
 # ---------------------------------------------------------------------------
+# Async generator helpers
+# ---------------------------------------------------------------------------
+
+
+async def _collect_stream_result(async_gen):
+    """Consume the run_chat_turn async generator and return the final message dict."""
+    result = None
+    async for chunk in async_gen:
+        if chunk.get("type") == "message":
+            result = chunk["message"]
+    return result
+
+
+def _make_stream_side_effect(responses):
+    call_count = 0
+
+    async def stream_fn(**kwargs):
+        nonlocal call_count
+        resp = responses[call_count] if call_count < len(responses) else responses[-1]
+        call_count += 1
+        for text in resp.text_blocks:
+            yield "text", text
+        yield "response", resp
+
+    return stream_fn
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -60,6 +88,7 @@ class TestMultiProviderOrchestrator:
 
         mock_adapter = MagicMock()
         mock_adapter.create_message = AsyncMock(return_value=text_response)
+        mock_adapter.stream_message = _make_stream_side_effect([text_response])
 
         db = AsyncMock(spec=AsyncSession)
         db.add = MagicMock()
@@ -80,20 +109,23 @@ class TestMultiProviderOrchestrator:
             patch(f"{_ORCH}.get_active_template", new_callable=AsyncMock, return_value="You are a helpful assistant."),
             patch("app.services.policy_service.get_active_policy", new_callable=AsyncMock, return_value=None),
         ):
-            result = await run_chat_turn(
+            result = await _collect_stream_result(run_chat_turn(
                 db=db,
                 session=session,
                 user_message="Show orders",
                 user_id=user_id,
                 tenant_id=tenant_id,
-            )
+            ))
 
-        assert result.content == "Here are your orders."
-        assert result.input_tokens == 50
-        assert result.output_tokens == 30
-        assert result.token_count == 80
-        assert result.model_used == "gpt-4o"
-        assert result.provider_used == "openai"
+        assert result["content"] == "Here are your orders."
+
+        # Verify token counts and provider on the ChatMessage passed to db.add
+        added_msg = db.add.call_args_list[-1][0][0]
+        assert added_msg.input_tokens == 50
+        assert added_msg.output_tokens == 30
+        assert added_msg.token_count == 80
+        assert added_msg.model_used == "gpt-4o"
+        assert added_msg.provider_used == "openai"
 
     @pytest.mark.asyncio
     async def test_tool_call_accumulates_tokens(self):
@@ -111,6 +143,7 @@ class TestMultiProviderOrchestrator:
 
         mock_adapter = MagicMock()
         mock_adapter.create_message = AsyncMock(side_effect=[tool_response, text_response])
+        mock_adapter.stream_message = _make_stream_side_effect([tool_response, text_response])
         mock_adapter.build_assistant_message = MagicMock(return_value={"role": "assistant", "content": []})
         mock_adapter.build_tool_result_message = MagicMock(return_value={"role": "user", "content": []})
 
@@ -142,19 +175,22 @@ class TestMultiProviderOrchestrator:
             patch(f"{_ORCH}.get_active_template", new_callable=AsyncMock, return_value="You are a helpful assistant."),
             patch("app.services.policy_service.get_active_policy", new_callable=AsyncMock, return_value=None),
         ):
-            result = await run_chat_turn(
+            result = await _collect_stream_result(run_chat_turn(
                 db=db,
                 session=session,
                 user_message="Search",
                 user_id=user_id,
                 tenant_id=tenant_id,
-            )
+            ))
 
-        assert result.content == "Found it."
-        assert result.input_tokens == 300  # 100 + 200
-        assert result.output_tokens == 70  # 20 + 50
-        assert result.token_count == 370
-        assert result.provider_used == "gemini"
+        assert result["content"] == "Found it."
+
+        # Verify accumulated token counts on the ChatMessage passed to db.add
+        added_msg = db.add.call_args_list[-1][0][0]
+        assert added_msg.input_tokens == 300  # 100 + 200
+        assert added_msg.output_tokens == 70  # 20 + 50
+        assert added_msg.token_count == 370
+        assert added_msg.provider_used == "gemini"
 
     @pytest.mark.asyncio
     async def test_anthropic_fallback(self):
@@ -167,6 +203,7 @@ class TestMultiProviderOrchestrator:
 
         mock_adapter = MagicMock()
         mock_adapter.create_message = AsyncMock(return_value=text_response)
+        mock_adapter.stream_message = _make_stream_side_effect([text_response])
 
         db = AsyncMock(spec=AsyncSession)
         db.add = MagicMock()
@@ -187,16 +224,20 @@ class TestMultiProviderOrchestrator:
             patch(f"{_ORCH}.get_active_template", new_callable=AsyncMock, return_value="You are a helpful assistant."),
             patch("app.services.policy_service.get_active_policy", new_callable=AsyncMock, return_value=None),
         ):
-            result = await run_chat_turn(
+            result = await _collect_stream_result(run_chat_turn(
                 db=db,
                 session=session,
                 user_message="Hello",
                 user_id=user_id,
                 tenant_id=tenant_id,
-            )
+            ))
 
-        assert result.provider_used == "anthropic"
-        assert result.model_used == "claude-sonnet-4-20250514"
+        assert result["content"] == "Default response"
+
+        # Verify provider/model on the ChatMessage passed to db.add
+        added_msg = db.add.call_args_list[-1][0][0]
+        assert added_msg.provider_used == "anthropic"
+        assert added_msg.model_used == "claude-sonnet-4-20250514"
 
 
 class TestGetTenantAiConfig:

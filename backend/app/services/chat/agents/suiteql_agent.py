@@ -107,8 +107,16 @@ Do NOT retry the exact same query. Each retry must be meaningfully different.
 </tools_and_error_recovery>
 
 <output_instructions>
-Output your reasoning in a <reasoning> block. 
-Return the raw query results formatted as a clean, readable Markdown table. You must also include the exact SQL you used wrapped in a ```sql code block. Do NOT interpret the data — the coordinator will handle synthesis.
+LANGUAGE: Always respond in English only. Never mix in other languages.
+
+Output your reasoning in a <reasoning> block (this is hidden from the user).
+Return ONLY the raw query results formatted as a clean, readable Markdown table.
+Do NOT echo tool call parameters, JSON payloads, or SQL queries in your text output.
+Do NOT interpret the data — the coordinator will handle synthesis.
+
+If all tool calls failed or timed out, return a brief summary of what went wrong
+and suggest what information the user could provide to help (e.g., "Could you confirm
+the exact order number format?").
 </output_instructions>
 """
 

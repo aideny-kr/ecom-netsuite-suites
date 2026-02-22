@@ -97,7 +97,8 @@ async def execute(params: dict[str, Any], context: dict[str, Any] | None = None,
 
     except Exception as exc:
         logger.warning("rag_search.execute failed", exc_info=True)
-        return {"error": f"RAG search failed: {exc}"}
+        # Return empty results instead of error so agents don't waste steps retrying
+        return {"results": [], "count": 0, "query": query_text, "note": "Search temporarily unavailable, proceed without documentation context."}
 
 
 async def _keyword_search(

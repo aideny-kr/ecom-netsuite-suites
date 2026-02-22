@@ -10,7 +10,7 @@ import logging
 import re
 import time
 import uuid
-from typing import Any
+from typing import Any, AsyncGenerator
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -63,7 +63,7 @@ async def run_chat_turn(
     tenant_id: uuid.UUID,
     user_msg: ChatMessage | None = None,
     wizard_step: str | None = None,
-) -> ChatMessage:
+) -> AsyncGenerator[dict, None]:
     """Execute an agentic chat turn with Claude's native tool use.
 
     Signature and return type match the previous linear pipeline —
@@ -107,7 +107,11 @@ async def run_chat_turn(
             conversation_history=history_messages,
             route={"needs_docs": True},  # always attempt RAG
         )
-        await retriever_node(state, db)
+        try:
+            await retriever_node(state, db)
+        except Exception:
+            logger.warning("Pre-loop RAG retrieval failed, continuing without docs")
+            state.doc_chunks = []
 
         # Build RAG context block
         if state.doc_chunks:
@@ -272,24 +276,41 @@ async def run_chat_turn(
                 system_prompt=system_prompt,
             )
 
-            coord_result = await coordinator.run(
+            # Stream multi-agent: dispatch agents first, then stream synthesis
+            streamed_text_parts: list[str] = []
+            async for event in coordinator.run_streaming(
                 user_message=sanitized_input,
                 conversation_history=history_messages,
                 rag_context=rag_context,
-            )
+            ):
+                if event["type"] == "text":
+                    streamed_text_parts.append(event["content"])
+                yield event
+                if event["type"] == "message":
+                    # Final message already yielded — save and return
+                    break
 
-            final_text = re.sub(r"\s*\[tool:\s*[^\]]+\]", "", coord_result.final_text).strip()
+            coord_result = coordinator.last_result
+            if coord_result is None:
+                # Fallback: synthesis didn't produce a result
+                final_text = "".join(streamed_text_parts).strip() or "I'm sorry, I couldn't generate a response."
+                coord_result_tokens = (0, 0)
+                coord_result_tool_calls: list[dict] = []
+            else:
+                final_text = re.sub(r"\s*\[tool:\s*[^\]]+\]", "", coord_result.final_text).strip()
+                coord_result_tokens = (coord_result.total_input_tokens, coord_result.total_output_tokens)
+                coord_result_tool_calls = coord_result.tool_calls_log
 
             assistant_msg = ChatMessage(
                 tenant_id=tenant_id,
                 session_id=session.id,
                 role="assistant",
                 content=final_text or "I'm sorry, I couldn't generate a response.",
-                tool_calls=coord_result.tool_calls_log if coord_result.tool_calls_log else None,
+                tool_calls=coord_result_tool_calls if coord_result_tool_calls else None,
                 citations=citations if citations else None,
-                token_count=coord_result.total_input_tokens + coord_result.total_output_tokens,
-                input_tokens=coord_result.total_input_tokens,
-                output_tokens=coord_result.total_output_tokens,
+                token_count=coord_result_tokens[0] + coord_result_tokens[1],
+                input_tokens=coord_result_tokens[0],
+                output_tokens=coord_result_tokens[1],
                 model_used=model,
                 provider_used=provider,
                 is_byok=is_byok,
@@ -304,11 +325,11 @@ async def run_chat_turn(
                 "provider": provider,
                 "model": model,
                 "specialist_model": settings.MULTI_AGENT_SPECIALIST_MODEL,
-                "steps": len(coord_result.tool_calls_log),
-                "input_tokens": coord_result.total_input_tokens,
-                "output_tokens": coord_result.total_output_tokens,
+                "steps": len(coord_result_tool_calls),
+                "input_tokens": coord_result_tokens[0],
+                "output_tokens": coord_result_tokens[1],
                 "doc_chunks_count": len(state.doc_chunks) if state.doc_chunks else 0,
-                "tools_called": [t["tool"] for t in coord_result.tool_calls_log],
+                "tools_called": [t["tool"] for t in coord_result_tool_calls],
             }
             await log_event(
                 db=db,
@@ -323,7 +344,21 @@ async def run_chat_turn(
             )
 
             await db.commit()
-            return assistant_msg
+
+            # If we already yielded the final message via streaming, just return
+            # Otherwise yield a final message now
+            if not streamed_text_parts:
+                result_msg = {
+                    "id": str(assistant_msg.id),
+                    "role": assistant_msg.role,
+                    "content": assistant_msg.content,
+                    "tool_calls": assistant_msg.tool_calls,
+                    "citations": assistant_msg.citations,
+                }
+                if hasattr(assistant_msg, 'created_at') and assistant_msg.created_at:
+                    result_msg["created_at"] = assistant_msg.created_at.isoformat()
+                yield {"type": "message", "message": result_msg}
+            return
 
     # ── Single-agent agentic loop (default path) ──
     tool_calls_log: list[dict] = []
@@ -332,13 +367,25 @@ async def run_chat_turn(
     total_output_tokens = 0
 
     for step in range(MAX_STEPS):
-        response = await adapter.create_message(
+        response = None
+        
+        # Determine if we should stream using stream_message or fallback
+        # (Assuming all adapters implemented stream_message, else this would fail)
+        async for event_type, payload in adapter.stream_message(
             model=model,
             max_tokens=16384,
             system=system_prompt,
             messages=messages,
             tools=tool_definitions if tool_definitions else None,
-        )
+        ):
+            if event_type == "text":
+                yield {"type": "text", "content": payload}
+            elif event_type == "response":
+                response = payload
+
+        if not response:
+             break
+
         total_input_tokens += response.usage.input_tokens
         total_output_tokens += response.usage.output_tokens
 
@@ -357,6 +404,8 @@ async def run_chat_turn(
             if workspace_context and block.name.startswith("workspace_"):
                 if "workspace_id" not in block.input:
                     block.input["workspace_id"] = workspace_context["workspace_id"]
+
+            yield {"type": "tool_status", "content": f"Executing {block.name}..."}
 
             # Route tool execution: onboarding tools vs standard tools
             t0 = time.monotonic()
@@ -424,15 +473,22 @@ async def run_chat_turn(
             "Agentic loop exhausted %d steps, forcing final response",
             MAX_STEPS,
         )
-        response = await adapter.create_message(
+        response = None
+        async for event_type, payload in adapter.stream_message(
             model=model,
             max_tokens=8192,
             system=system_prompt,
             messages=messages,
-        )
-        total_input_tokens += response.usage.input_tokens
-        total_output_tokens += response.usage.output_tokens
-        final_text = "\n".join(response.text_blocks) if response.text_blocks else ""
+        ):
+            if event_type == "text":
+                yield {"type": "text", "content": payload}
+            elif event_type == "response":
+                response = payload
+                
+        if response:
+            total_input_tokens += response.usage.input_tokens
+            total_output_tokens += response.usage.output_tokens
+            final_text = "\n".join(response.text_blocks) if response.text_blocks else ""
 
     # Strip raw tool reference tags the LLM may include in its text output
     final_text = re.sub(r"\s*\[tool:\s*[^\]]+\]", "", final_text).strip()
@@ -484,4 +540,15 @@ async def run_chat_turn(
     )
 
     await db.commit()
-    return assistant_msg
+
+    result_msg = {
+        "id": str(assistant_msg.id),
+        "role": assistant_msg.role,
+        "content": assistant_msg.content,
+        "tool_calls": assistant_msg.tool_calls,
+        "citations": assistant_msg.citations,
+    }
+    if hasattr(assistant_msg, 'created_at') and assistant_msg.created_at:
+        result_msg["created_at"] = assistant_msg.created_at.isoformat()
+
+    yield {"type": "message", "message": result_msg}

@@ -1,5 +1,6 @@
 """Tests for chat pipeline resilience: error handling, graceful degradation, health endpoint."""
 
+import json
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -125,7 +126,7 @@ class TestRetrieverFaultTolerance:
 class TestSendMessageErrorHandling:
     @pytest.mark.asyncio
     async def test_send_message_missing_api_key(self, client, db, admin_user):
-        """POST /messages with no ANTHROPIC_API_KEY → 503."""
+        """POST /messages with no ANTHROPIC_API_KEY → SSE error event."""
         user, headers = admin_user
         await db.execute(text(f"SET LOCAL app.current_tenant_id = '{user.tenant_id}'"))
 
@@ -139,12 +140,14 @@ class TestSendMessageErrorHandling:
                 headers=headers,
             )
 
-        assert resp.status_code == 503
-        assert "not configured" in resp.json()["detail"]
+        # SSE always returns 200, errors are in the stream
+        assert resp.status_code == 200
+        body = resp.text
+        assert "not configured" in body.lower()
 
     @pytest.mark.asyncio
     async def test_send_message_auth_error(self, client, db, admin_user):
-        """POST /messages with invalid API key → 503."""
+        """POST /messages with invalid API key → SSE error event."""
         user, headers = admin_user
         await db.execute(text(f"SET LOCAL app.current_tenant_id = '{user.tenant_id}'"))
 
@@ -164,12 +167,13 @@ class TestSendMessageErrorHandling:
                 headers=headers,
             )
 
-        assert resp.status_code == 503
-        assert "invalid" in resp.json()["detail"].lower()
+        assert resp.status_code == 200
+        body = resp.text
+        assert "invalid" in body.lower()
 
     @pytest.mark.asyncio
     async def test_send_message_generic_error(self, client, db, admin_user):
-        """POST /messages with unexpected error → 502."""
+        """POST /messages with unexpected error → SSE error event."""
         user, headers = admin_user
         await db.execute(text(f"SET LOCAL app.current_tenant_id = '{user.tenant_id}'"))
 
@@ -183,8 +187,9 @@ class TestSendMessageErrorHandling:
                 headers=headers,
             )
 
-        assert resp.status_code == 502
-        assert "temporarily unavailable" in resp.json()["detail"].lower()
+        assert resp.status_code == 200
+        body = resp.text
+        assert "temporarily unavailable" in body.lower()
 
 
 # ---------------------------------------------------------------------------

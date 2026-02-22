@@ -133,6 +133,92 @@ class OpenAIAdapter(BaseLLMAdapter):
             usage=usage,
         )
 
+    async def stream_message(
+        self,
+        *,
+        model: str,
+        max_tokens: int,
+        system: str,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+    ):
+        """Stream tokens from OpenAI and yield ('text', chunk) events."""
+        openai_messages = self._convert_messages(messages, system)
+
+        kwargs: dict = {
+            "model": model,
+            "max_completion_tokens": max_tokens,
+            "messages": openai_messages,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
+        if tools:
+            kwargs["tools"] = self._convert_tools(tools)
+
+        text_blocks: list[str] = []
+        tool_use_blocks: list[ToolUseBlock] = []
+        tool_call_accumulators: dict[int, dict] = {}
+        usage = TokenUsage(0, 0)
+        current_text = ""
+
+        stream = await self._client.chat.completions.create(**kwargs)
+
+        async for chunk in stream:
+            if chunk.usage:
+                usage = TokenUsage(
+                    input_tokens=chunk.usage.prompt_tokens or 0,
+                    output_tokens=chunk.usage.completion_tokens or 0,
+                )
+
+            if not chunk.choices:
+                continue
+
+            delta = chunk.choices[0].delta
+
+            # Stream text content
+            if delta.content:
+                current_text += delta.content
+                yield "text", delta.content
+
+            # Accumulate tool calls from deltas
+            if delta.tool_calls:
+                for tc_delta in delta.tool_calls:
+                    idx = tc_delta.index
+                    if idx not in tool_call_accumulators:
+                        tool_call_accumulators[idx] = {
+                            "id": tc_delta.id or "",
+                            "name": "",
+                            "arguments": "",
+                        }
+                    acc = tool_call_accumulators[idx]
+                    if tc_delta.id:
+                        acc["id"] = tc_delta.id
+                    if tc_delta.function:
+                        if tc_delta.function.name:
+                            acc["name"] = tc_delta.function.name
+                        if tc_delta.function.arguments:
+                            acc["arguments"] += tc_delta.function.arguments
+
+        # Build final response
+        if current_text:
+            text_blocks.append(current_text)
+
+        for _idx, acc in sorted(tool_call_accumulators.items()):
+            try:
+                args = json.loads(acc["arguments"]) if acc["arguments"] else {}
+            except json.JSONDecodeError:
+                args = {}
+            tool_use_blocks.append(
+                ToolUseBlock(id=acc["id"], name=acc["name"], input=args)
+            )
+
+        response = LLMResponse(
+            text_blocks=text_blocks,
+            tool_use_blocks=tool_use_blocks,
+            usage=usage,
+        )
+        yield "response", response
+
     def build_tool_result_message(self, tool_results: list[dict]) -> dict:
         # OpenAI expects tool results as the user message in Anthropic format,
         # but we store them in Anthropic format and convert in _convert_messages

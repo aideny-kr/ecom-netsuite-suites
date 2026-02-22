@@ -43,6 +43,32 @@ class BaseLLMAdapter(abc.ABC):
     ) -> LLMResponse:
         """Send a message to the LLM and return a normalized response."""
 
+    async def stream_message(
+        self,
+        *,
+        model: str,
+        max_tokens: int,
+        system: str,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+    ):
+        """Send a message to the LLM and yield streaming events, finishing with LLMResponse.
+
+        Default implementation falls back to non-streaming create_message.
+        Subclasses can override for true streaming support.
+        """
+        response = await self.create_message(
+            model=model,
+            max_tokens=max_tokens,
+            system=system,
+            messages=messages,
+            tools=tools,
+        )
+        # Emit all text as a single chunk then yield the full response
+        for text in response.text_blocks:
+            yield "text", text
+        yield "response", response
+
     @abc.abstractmethod
     def build_tool_result_message(self, tool_results: list[dict]) -> dict:
         """Build a message containing tool results in the provider's format."""

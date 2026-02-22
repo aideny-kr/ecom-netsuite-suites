@@ -110,22 +110,25 @@ async def test_send_message(client, db, admin_user):
     create_resp = await client.post("/api/v1/chat/sessions", json={"title": "Msg Test"}, headers=headers)
     session_id = create_resp.json()["id"]
 
-    # Mock the orchestrator to avoid actual LLM calls
-    mock_msg = AsyncMock()
-    mock_msg.id = uuid.uuid4()
-    mock_msg.role = "assistant"
-    mock_msg.content = "Hello! Here is your answer."
-    mock_msg.tool_calls = None
-    mock_msg.citations = None
-    mock_msg.created_at = __import__("datetime").datetime.now(__import__("datetime").timezone.utc)
+    # Mock the orchestrator as an async generator (SSE streaming)
+    msg_dict = {
+        "id": str(uuid.uuid4()),
+        "role": "assistant",
+        "content": "Hello! Here is your answer.",
+        "tool_calls": None,
+        "citations": None,
+    }
 
-    with patch("app.api.v1.chat.run_chat_turn", return_value=mock_msg):
+    async def mock_generator(**kwargs):
+        yield {"type": "text", "content": "Hello! Here is your answer."}
+        yield {"type": "message", "message": msg_dict}
+
+    with patch("app.api.v1.chat.run_chat_turn", side_effect=mock_generator):
         resp = await client.post(
             f"/api/v1/chat/sessions/{session_id}/messages",
             json={"content": "What are my recent orders?"},
             headers=headers,
         )
-    assert resp.status_code == 201
-    data = resp.json()
-    assert data["role"] == "assistant"
-    assert data["content"] == "Hello! Here is your answer."
+    # SSE streaming returns 200, not 201
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/event-stream")

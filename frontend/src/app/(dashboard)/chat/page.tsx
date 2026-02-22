@@ -15,6 +15,9 @@ export default function ChatPage() {
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pendingMessage, setPendingMessage] = useState<string | null>(null);
+  const [streamingContent, setStreamingContent] = useState<string | null>(null);
+  const [streamingStatus, setStreamingStatus] = useState<string | null>(null);
+  const [isStreaming, setIsStreaming] = useState(false);
   const queryClient = useQueryClient();
   const router = useRouter();
   const { data: workspaces = [] } = useWorkspaces();
@@ -39,26 +42,14 @@ export default function ChatPage() {
     },
   });
 
-  const sendMessage = useMutation({
-    mutationFn: ({ sessionId, content }: { sessionId: string; content: string }) =>
-      apiClient.post<ChatMessage>(`/api/v1/chat/sessions/${sessionId}/messages`, { content }),
-    onSuccess: () => {
-      setPendingMessage(null);
-      if (activeSessionId) {
-        queryClient.invalidateQueries({ queryKey: ["chat-session", activeSessionId] });
-        queryClient.invalidateQueries({ queryKey: ["chat-sessions"] });
-      }
-    },
-    onError: (err: Error) => {
-      setPendingMessage(null);
-      setError(err.message || "Failed to send message. Please try again.");
-    },
-  });
-
   const handleSend = useCallback(
     async (content: string) => {
+      if (isStreaming || createSession.isPending) return;
       setError(null);
       setPendingMessage(content);
+      setIsStreaming(true);
+      setStreamingContent("");
+      setStreamingStatus(null);
 
       let sessionId = activeSessionId;
       if (!sessionId) {
@@ -67,13 +58,71 @@ export default function ChatPage() {
           sessionId = session.id;
         } catch {
           setPendingMessage(null);
+          setIsStreaming(false);
           setError("Failed to create chat session.");
           return;
         }
       }
-      sendMessage.mutate({ sessionId, content });
+
+      try {
+        const res = await apiClient.stream(
+          `/api/v1/chat/sessions/${sessionId}/messages`,
+          { content },
+        );
+
+        const reader = res.body?.getReader();
+        const decoder = new TextDecoder();
+        if (!reader) throw new Error("Stream not available");
+
+        let buffer = "";
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+
+          const chunks = buffer.split("\n\n");
+          buffer = chunks.pop() || "";
+
+          for (const chunk of chunks) {
+            const lines = chunk.split("\n");
+            for (const line of lines) {
+              if (line.startsWith("data: ")) {
+                const dataStr = line.slice(6).trim();
+                if (!dataStr) continue;
+                try {
+                  const data = JSON.parse(dataStr);
+                  if (data.type === "text") {
+                    setStreamingContent((prev) => (prev || "") + data.content);
+                    setStreamingStatus(null);
+                  } else if (data.type === "tool_status") {
+                    setStreamingStatus(data.content);
+                  } else if (data.type === "error") {
+                    setError(data.error);
+                  }
+                } catch (e) {
+                  console.error("Failed to parse SSE line", e);
+                }
+              }
+            }
+          }
+        }
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : "Failed to send message. Please try again.";
+        setError(message);
+      } finally {
+        // Refetch persisted messages BEFORE clearing streaming state
+        // so there's no blank gap between streaming text disappearing
+        // and the saved message appearing.
+        // Use local sessionId (not activeSessionId) to avoid stale closure.
+        await queryClient.invalidateQueries({ queryKey: ["chat-session", sessionId] });
+        await queryClient.invalidateQueries({ queryKey: ["chat-sessions"] });
+        setIsStreaming(false);
+        setPendingMessage(null);
+        setStreamingContent(null);
+        setStreamingStatus(null);
+      }
     },
-    [activeSessionId, createSession, sendMessage],
+    [activeSessionId, createSession, isStreaming, queryClient],
   );
 
   const handleNewChat = useCallback(() => {
@@ -108,7 +157,9 @@ export default function ChatPage() {
             messages={sessionDetail?.messages || []}
             isLoading={isLoadingDetail && !!activeSessionId}
             pendingUserMessage={pendingMessage}
-            isWaitingForReply={sendMessage.isPending}
+            isWaitingForReply={isStreaming}
+            streamingContent={streamingContent}
+            streamingStatus={streamingStatus}
             onMentionClick={handleMentionClick}
           />
         </div>
@@ -127,7 +178,7 @@ export default function ChatPage() {
         )}
         <ChatInput
           onSend={handleSend}
-          isLoading={sendMessage.isPending || createSession.isPending}
+          isLoading={isStreaming || createSession.isPending}
           workspaceId={workspaces[0]?.id || null}
         />
       </div>

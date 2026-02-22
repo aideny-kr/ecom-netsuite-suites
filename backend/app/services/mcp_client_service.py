@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import time
+import asyncio
 from typing import TYPE_CHECKING
 
 import structlog
@@ -149,6 +150,20 @@ async def call_external_mcp_tool(
     db: AsyncSession | None = None,
 ) -> dict:
     """Call a tool on an external MCP server and return the parsed result."""
+    
+    if tool_params is None:
+        tool_params = {}
+        
+    # --- GOVERNANCE INTERCEPT ---
+    if tool_name == "ns_runCustomSuiteQL" and "sqlQuery" in tool_params:
+        sql = tool_params["sqlQuery"].strip()
+        sql_upper = sql.upper()
+        if "ROWNUM" not in sql_upper and "FETCH" not in sql_upper:
+            # Wrap in pagination limit to enforce strict 50-row max
+            sql = f"SELECT * FROM ({sql}) WHERE ROWNUM <= 50"
+            tool_params["sqlQuery"] = sql
+    # ----------------------------
+
     headers = await _build_headers(connector, db)
 
     async with streamablehttp_client(url=connector.server_url, headers=headers) as (
@@ -158,7 +173,14 @@ async def call_external_mcp_tool(
     ):
         async with ClientSession(read_stream, write_stream) as session:
             await session.initialize()
-            result = await session.call_tool(tool_name, tool_params or {})
+            try:
+                result = await asyncio.wait_for(
+                    session.call_tool(tool_name, tool_params),
+                    timeout=15.0
+                )
+            except asyncio.TimeoutError:
+                logger.error("mcp_client.tool_timeout", server_url=connector.server_url, tool_name=tool_name)
+                return {"error": "Tool execution exceeded 15-second strict timeout limit"}
 
     if result.isError:
         error_text = str(result.content)

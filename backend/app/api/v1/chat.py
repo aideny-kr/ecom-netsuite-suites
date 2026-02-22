@@ -1,9 +1,11 @@
+import json
 import logging
 import uuid
 
 import anthropic
 import openai
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -181,7 +183,6 @@ async def get_session(
 @router.post(
     "/sessions/{session_id}/messages",
     status_code=status.HTTP_201_CREATED,
-    response_model=MessageResponse,
 )
 async def send_message(
     session_id: uuid.UUID,
@@ -211,40 +212,39 @@ async def send_message(
     db.add(user_msg)
     await db.flush()
 
-    try:
-        assistant_msg = await run_chat_turn(
-            db=db,
-            session=session,
-            user_message=body.content,
-            user_id=user.id,
-            tenant_id=user.tenant_id,
-            user_msg=user_msg,
-            wizard_step=wizard_step,
-        )
-    except ValueError as exc:
-        # Missing API key or configuration issue
-        await db.commit()  # persist user message
-        logger.warning("Chat configuration error: %s", exc)
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Chat service is not configured. Contact your administrator.",
-        )
-    except (anthropic.AuthenticationError, openai.AuthenticationError):
-        await db.commit()
-        logger.warning("AI provider API key is invalid")
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Chat API key is invalid.",
-        )
-    except (anthropic.APIError, openai.APIError, Exception) as exc:
-        await db.commit()
-        logger.exception("Chat pipeline error: %s", exc)
-        raise HTTPException(
-            status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Chat service temporarily unavailable. Please try again.",
-        )
+    async def stream_generator():
+        try:
+            async for chunk in run_chat_turn(
+                db=db,
+                session=session,
+                user_message=body.content,
+                user_id=user.id,
+                tenant_id=user.tenant_id,
+                user_msg=user_msg,
+                wizard_step=wizard_step,
+            ):
+                yield f"data: {json.dumps(chunk)}\n\n"
+        except ValueError as exc:
+            await db.commit()  # persist user message
+            logger.warning("Chat configuration error: %s", exc)
+            yield f"data: {json.dumps({'type': 'error', 'error': 'Chat service is not configured. Contact your administrator.'})}\n\n"
+        except (anthropic.AuthenticationError, openai.AuthenticationError):
+            await db.commit()
+            logger.warning("AI provider API key is invalid")
+            yield f"data: {json.dumps({'type': 'error', 'error': 'Chat API key is invalid.'})}\n\n"
+        except (anthropic.APIError, openai.APIError, Exception) as exc:
+            await db.commit()
+            logger.exception("Chat pipeline error: %s", exc)
+            yield f"data: {json.dumps({'type': 'error', 'error': 'Chat service temporarily unavailable. Please try again.'})}\n\n"
 
-    return _serialize_message(assistant_msg)
+    return StreamingResponse(
+        stream_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",  # Disable nginx/proxy buffering
+        },
+    )
 
 
 @router.get("/health")

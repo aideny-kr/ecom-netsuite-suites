@@ -23,6 +23,33 @@ from app.models.workspace import Workspace, WorkspaceFile
 _FAKE_AI_CONFIG = ("anthropic", "claude-3-haiku-20240307", "fake-key", False)
 _ORCH = "app.services.chat.orchestrator"
 
+
+# ---- Async generator helpers ----
+
+
+async def _collect_stream_result(async_gen):
+    """Consume the run_chat_turn async generator and return the final message dict."""
+    result = None
+    async for chunk in async_gen:
+        if chunk.get("type") == "message":
+            result = chunk["message"]
+    return result
+
+
+def _make_stream_side_effect(responses):
+    call_count = 0
+
+    async def stream_fn(**kwargs):
+        nonlocal call_count
+        resp = responses[call_count] if call_count < len(responses) else responses[-1]
+        call_count += 1
+        for text in resp.text_blocks:
+            yield "text", text
+        yield "response", resp
+
+    return stream_fn
+
+
 # ---- Fixtures ----
 
 
@@ -265,6 +292,7 @@ class TestWorkspaceContextInjection:
 
         mock_adapter = AsyncMock()
         mock_adapter.create_message = AsyncMock(return_value=mock_response)
+        mock_adapter.stream_message = _make_stream_side_effect([mock_response])
         mock_adapter.build_assistant_message = MagicMock(return_value={"role": "assistant", "content": "test"})
 
         with (
@@ -275,16 +303,17 @@ class TestWorkspaceContextInjection:
         ):
             from app.services.chat.orchestrator import run_chat_turn
 
-            await run_chat_turn(
+            async for _ in run_chat_turn(
                 db=db,
                 session=session,
                 user_message="List workspace files",
                 user_id=user.id,
                 tenant_id=tenant_a.id,
-            )
+            ):
+                pass
 
-            # Verify create_message was called with system prompt containing workspace info
-            call_args = mock_adapter.create_message.call_args
+            # Verify stream_message was called with system prompt containing workspace info
+            call_args = mock_adapter.stream_message.call_args
             system_prompt = call_args.kwargs["system"]
             assert "WORKSPACE CONTEXT" in system_prompt
             assert "Chat Test Workspace" in system_prompt
@@ -323,6 +352,7 @@ class TestWorkspaceContextInjection:
 
         mock_adapter = AsyncMock()
         mock_adapter.create_message = AsyncMock(side_effect=[response_with_tool, response_text])
+        mock_adapter.stream_message = _make_stream_side_effect([response_with_tool, response_text])
         mock_adapter.build_assistant_message = MagicMock(return_value={"role": "assistant", "content": "test"})
         mock_adapter.build_tool_result_message = MagicMock(return_value={"role": "user", "content": "tool result"})
 
@@ -337,13 +367,14 @@ class TestWorkspaceContextInjection:
         ):
             from app.services.chat.orchestrator import run_chat_turn
 
-            await run_chat_turn(
+            async for _ in run_chat_turn(
                 db=db,
                 session=session,
                 user_message="Show me workspace files",
                 user_id=user.id,
                 tenant_id=tenant_a.id,
-            )
+            ):
+                pass
 
             # Verify workspace_id was injected into tool_block.input
             assert tool_block.input.get("workspace_id") == str(workspace_a.id)
@@ -440,6 +471,7 @@ class TestAuditEvents:
 
         mock_adapter = AsyncMock()
         mock_adapter.create_message = AsyncMock(return_value=mock_response)
+        mock_adapter.stream_message = _make_stream_side_effect([mock_response])
 
         with (
             patch(f"{_ORCH}.get_adapter", return_value=mock_adapter),
@@ -449,13 +481,14 @@ class TestAuditEvents:
         ):
             from app.services.chat.orchestrator import run_chat_turn
 
-            await run_chat_turn(
+            async for _ in run_chat_turn(
                 db=db,
                 session=session,
                 user_message="Hello",
                 user_id=user.id,
                 tenant_id=tenant_a.id,
-            )
+            ):
+                pass
 
         result = await db.execute(
             select(AuditEvent).where(
@@ -506,6 +539,7 @@ class TestOrchestratorToolTiming:
 
         mock_adapter = AsyncMock()
         mock_adapter.create_message = AsyncMock(side_effect=[response_with_tool, response_text])
+        mock_adapter.stream_message = _make_stream_side_effect([response_with_tool, response_text])
         mock_adapter.build_assistant_message = MagicMock(return_value={"role": "assistant", "content": "test"})
         mock_adapter.build_tool_result_message = MagicMock(return_value={"role": "user", "content": "result"})
 
@@ -520,18 +554,18 @@ class TestOrchestratorToolTiming:
         ):
             from app.services.chat.orchestrator import run_chat_turn
 
-            result = await run_chat_turn(
+            result = await _collect_stream_result(run_chat_turn(
                 db=db,
                 session=session,
                 user_message="List files",
                 user_id=user.id,
                 tenant_id=tenant_a.id,
-            )
+            ))
 
         # Verify tool_calls in the saved message contain duration_ms
-        assert result.tool_calls is not None
-        assert len(result.tool_calls) >= 1
-        for tc in result.tool_calls:
+        assert result["tool_calls"] is not None
+        assert len(result["tool_calls"]) >= 1
+        for tc in result["tool_calls"]:
             assert "duration_ms" in tc
             assert isinstance(tc["duration_ms"], int)
             assert tc["duration_ms"] >= 0

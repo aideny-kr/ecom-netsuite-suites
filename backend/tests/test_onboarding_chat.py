@@ -18,6 +18,35 @@ from app.services.chat.onboarding_tools import (
 from app.services.chat.prompts import ONBOARDING_SYSTEM_PROMPT
 from tests.conftest import create_test_tenant, create_test_user, make_auth_headers
 
+
+# ---------------------------------------------------------------------------
+# Async generator helpers
+# ---------------------------------------------------------------------------
+
+
+async def _collect_stream_result(async_gen):
+    """Consume the run_chat_turn async generator and return the final message dict."""
+    result = None
+    async for chunk in async_gen:
+        if chunk.get("type") == "message":
+            result = chunk["message"]
+    return result
+
+
+def _make_stream_side_effect(responses):
+    call_count = 0
+
+    async def stream_fn(**kwargs):
+        nonlocal call_count
+        resp = responses[call_count] if call_count < len(responses) else responses[-1]
+        call_count += 1
+        for text in resp.text_blocks:
+            yield "text", text
+        yield "response", resp
+
+    return stream_fn
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -202,20 +231,22 @@ class TestOrchestratorOnboardingRouting:
             mock_response.text_blocks = ["Welcome!"]
             mock_response.usage = AsyncMock(input_tokens=10, output_tokens=20)
             mock_adapter.create_message = AsyncMock(return_value=mock_response)
+            mock_adapter.stream_message = _make_stream_side_effect([mock_response])
             mock_adapter_fn.return_value = mock_adapter
 
             from app.services.chat.orchestrator import run_chat_turn
 
-            await run_chat_turn(
+            async for _ in run_chat_turn(
                 db=db,
                 session=session,
                 user_message="Hello",
                 user_id=user.id,
                 tenant_id=tenant.id,
-            )
+            ):
+                pass
 
             # Verify the system prompt used was the onboarding prompt
-            call_args = mock_adapter.create_message.call_args
+            call_args = mock_adapter.stream_message.call_args
             assert call_args.kwargs["system"] == ONBOARDING_SYSTEM_PROMPT
 
     @pytest.mark.asyncio
@@ -253,17 +284,19 @@ class TestOrchestratorOnboardingRouting:
             mock_response.text_blocks = ["Welcome!"]
             mock_response.usage = AsyncMock(input_tokens=10, output_tokens=20)
             mock_adapter.create_message = AsyncMock(return_value=mock_response)
+            mock_adapter.stream_message = _make_stream_side_effect([mock_response])
             mock_adapter_fn.return_value = mock_adapter
 
             from app.services.chat.orchestrator import run_chat_turn
 
-            await run_chat_turn(
+            async for _ in run_chat_turn(
                 db=db,
                 session=session,
                 user_message="Hello",
                 user_id=user.id,
                 tenant_id=tenant.id,
-            )
+            ):
+                pass
 
             # RAG retriever should NOT have been called
             mock_retriever.assert_not_called()

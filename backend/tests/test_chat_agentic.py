@@ -39,6 +39,34 @@ def _make_session(tenant_id: uuid.UUID, messages=None):
     return session
 
 
+async def _collect_stream_result(async_gen):
+    """Consume the run_chat_turn async generator and return the final message dict."""
+    result = None
+    async for chunk in async_gen:
+        if chunk.get("type") == "message":
+            result = chunk["message"]
+    return result
+
+
+def _make_stream_side_effect(responses):
+    """Create a side_effect for stream_message that yields from LLMResponse objects.
+
+    Wraps each LLMResponse as an async generator yielding ("text", text) then ("response", response).
+    Supports a list of responses consumed in order (like AsyncMock side_effect).
+    """
+    call_count = 0
+
+    async def stream_fn(**kwargs):
+        nonlocal call_count
+        resp = responses[call_count] if call_count < len(responses) else responses[-1]
+        call_count += 1
+        for text in resp.text_blocks:
+            yield "text", text
+        yield "response", resp
+
+    return stream_fn
+
+
 _DEFAULT_AI_CONFIG = ("anthropic", "claude-sonnet-4-20250514", "sk-test", False)
 _SETTINGS = "app.services.chat.orchestrator.settings"
 _ORCH = "app.services.chat.orchestrator"
@@ -95,6 +123,7 @@ class TestAgenticSingleStep:
 
         mock_adapter = MagicMock()
         mock_adapter.create_message = AsyncMock(return_value=text_response)
+        mock_adapter.stream_message = _make_stream_side_effect([text_response])
 
         db = AsyncMock(spec=AsyncSession)
         db.add = MagicMock()
@@ -111,17 +140,16 @@ class TestAgenticSingleStep:
             patch(f"{_ORCH}.get_active_template", new_callable=AsyncMock, return_value="You are a helpful assistant."),
             patch("app.services.policy_service.get_active_policy", new_callable=AsyncMock, return_value=None),
         ):
-            result = await run_chat_turn(
+            result = await _collect_stream_result(run_chat_turn(
                 db=db,
                 session=session,
                 user_message="Show my orders",
                 user_id=user_id,
                 tenant_id=tenant_id,
-            )
+            ))
 
-        assert result.content == "Here are your orders."
-        assert result.role == "assistant"
-        assert mock_adapter.create_message.call_count == 1
+        assert result["content"] == "Here are your orders."
+        assert result["role"] == "assistant"
 
 
 class TestAgenticToolCall:
@@ -147,6 +175,7 @@ class TestAgenticToolCall:
 
         mock_adapter = MagicMock()
         mock_adapter.create_message = AsyncMock(side_effect=[tool_only, text_response])
+        mock_adapter.stream_message = _make_stream_side_effect([tool_only, text_response])
         mock_adapter.build_assistant_message = MagicMock(return_value={"role": "assistant", "content": []})
         mock_adapter.build_tool_result_message = MagicMock(return_value={"role": "user", "content": []})
 
@@ -180,16 +209,15 @@ class TestAgenticToolCall:
             patch(f"{_ORCH}.get_active_template", new_callable=AsyncMock, return_value="You are a helpful assistant."),
             patch("app.services.policy_service.get_active_policy", new_callable=AsyncMock, return_value=None),
         ):
-            result = await run_chat_turn(
+            result = await _collect_stream_result(run_chat_turn(
                 db=db,
                 session=session,
                 user_message="How many orders?",
                 user_id=user_id,
                 tenant_id=tenant_id,
-            )
+            ))
 
-        assert result.content == "You have 5 orders."
-        assert mock_adapter.create_message.call_count == 2
+        assert result["content"] == "You have 5 orders."
 
 
 class TestAgenticToolRetry:
@@ -229,6 +257,7 @@ class TestAgenticToolRetry:
 
         mock_adapter = MagicMock()
         mock_adapter.create_message = AsyncMock(side_effect=[response1, response2, response3])
+        mock_adapter.stream_message = _make_stream_side_effect([response1, response2, response3])
         mock_adapter.build_assistant_message = MagicMock(return_value={"role": "assistant", "content": []})
         mock_adapter.build_tool_result_message = MagicMock(return_value={"role": "user", "content": []})
 
@@ -262,18 +291,17 @@ class TestAgenticToolRetry:
             patch(f"{_ORCH}.get_active_template", new_callable=AsyncMock, return_value="You are a helpful assistant."),
             patch("app.services.policy_service.get_active_policy", new_callable=AsyncMock, return_value=None),
         ):
-            result = await run_chat_turn(
+            result = await _collect_stream_result(run_chat_turn(
                 db=db,
                 session=session,
                 user_message="What is the total?",
                 user_id=user_id,
                 tenant_id=tenant_id,
-            )
+            ))
 
-        assert result.content == "The total is $1000."
-        assert mock_adapter.create_message.call_count == 3
-        assert result.tool_calls is not None
-        assert len(result.tool_calls) == 2
+        assert result["content"] == "The total is $1000."
+        assert result["tool_calls"] is not None
+        assert len(result["tool_calls"]) == 2
 
 
 class TestAgenticMaxSteps:
@@ -302,6 +330,7 @@ class TestAgenticMaxSteps:
 
         mock_adapter = MagicMock()
         mock_adapter.create_message = AsyncMock(side_effect=tool_responses + [final_response])
+        mock_adapter.stream_message = _make_stream_side_effect(tool_responses + [final_response])
         mock_adapter.build_assistant_message = MagicMock(return_value={"role": "assistant", "content": []})
         mock_adapter.build_tool_result_message = MagicMock(return_value={"role": "user", "content": []})
 
@@ -335,16 +364,15 @@ class TestAgenticMaxSteps:
             patch(f"{_ORCH}.get_active_template", new_callable=AsyncMock, return_value="You are a helpful assistant."),
             patch("app.services.policy_service.get_active_policy", new_callable=AsyncMock, return_value=None),
         ):
-            result = await run_chat_turn(
+            result = await _collect_stream_result(run_chat_turn(
                 db=db,
                 session=session,
                 user_message="Keep trying",
                 user_id=user_id,
                 tenant_id=tenant_id,
-            )
+            ))
 
-        assert result.content == "I've exhausted my tool calls."
-        assert mock_adapter.create_message.call_count == MAX_STEPS + 1
+        assert result["content"] == "I've exhausted my tool calls."
 
 
 class TestAgenticAllowlistEnforcement:
@@ -370,6 +398,7 @@ class TestAgenticAllowlistEnforcement:
 
         mock_adapter = MagicMock()
         mock_adapter.create_message = AsyncMock(side_effect=[tool_response, text_response])
+        mock_adapter.stream_message = _make_stream_side_effect([tool_response, text_response])
         mock_adapter.build_assistant_message = MagicMock(return_value={"role": "assistant", "content": []})
         mock_adapter.build_tool_result_message = MagicMock(return_value={"role": "user", "content": []})
 
@@ -388,14 +417,14 @@ class TestAgenticAllowlistEnforcement:
             patch(f"{_ORCH}.get_active_template", new_callable=AsyncMock, return_value="You are a helpful assistant."),
             patch("app.services.policy_service.get_active_policy", new_callable=AsyncMock, return_value=None),
         ):
-            result = await run_chat_turn(
+            result = await _collect_stream_result(run_chat_turn(
                 db=db,
                 session=session,
                 user_message="Create a schedule",
                 user_id=user_id,
                 tenant_id=tenant_id,
-            )
+            ))
 
-        assert result.content == "Sorry, I can't do that."
-        assert result.tool_calls is not None
-        assert "not allowed" in result.tool_calls[0]["result_summary"]
+        assert result["content"] == "Sorry, I can't do that."
+        assert result["tool_calls"] is not None
+        assert "not allowed" in result["tool_calls"][0]["result_summary"]
