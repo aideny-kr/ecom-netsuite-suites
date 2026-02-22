@@ -256,7 +256,7 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 
 ## Current State (update after each major change)
 
-- **Latest migration**: 023_audit_uuidv7
+- **Latest migration**: 024_add_custom_record_fields
 - **Known gap**: OAuth reconnect just flips status, doesn't re-initiate browser flow
 - **Known gap**: `inputRef` in workspace-chat-panel never attached to ChatInput
 - **Deferred**: SDF CI/CD pipeline, bundle versioning strategy, RESTlet rate limiting

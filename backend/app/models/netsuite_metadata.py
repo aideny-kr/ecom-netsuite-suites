@@ -38,6 +38,7 @@ class NetSuiteMetadata(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     entity_custom_fields: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     item_custom_fields: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     custom_record_types: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    custom_record_fields: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     custom_lists: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     subsidiaries: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     departments: Mapped[dict | None] = mapped_column(JSON, nullable=True)

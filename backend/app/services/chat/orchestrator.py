@@ -293,7 +293,7 @@ async def run_chat_turn(
             coord_result = coordinator.last_result
             if coord_result is None:
                 # Fallback: synthesis didn't produce a result
-                final_text = "".join(streamed_text_parts).strip() or "I'm sorry, I couldn't generate a response."
+                final_text = "".join(streamed_text_parts).strip() or "I wasn't able to find relevant information for that question. Could you rephrase or provide more details?"
                 coord_result_tokens = (0, 0)
                 coord_result_tool_calls: list[dict] = []
             else:
@@ -305,7 +305,7 @@ async def run_chat_turn(
                 tenant_id=tenant_id,
                 session_id=session.id,
                 role="assistant",
-                content=final_text or "I'm sorry, I couldn't generate a response.",
+                content=final_text or "I wasn't able to find relevant information for that question. Could you rephrase or provide more details?",
                 tool_calls=coord_result_tool_calls if coord_result_tool_calls else None,
                 citations=citations if citations else None,
                 token_count=coord_result_tokens[0] + coord_result_tokens[1],
@@ -498,7 +498,7 @@ async def run_chat_turn(
         tenant_id=tenant_id,
         session_id=session.id,
         role="assistant",
-        content=final_text or "I'm sorry, I couldn't generate a response.",
+        content=final_text or "I wasn't able to find relevant information for that question. Could you rephrase or provide more details?",
         tool_calls=tool_calls_log if tool_calls_log else None,
         citations=citations if citations else None,
         token_count=total_input_tokens + total_output_tokens,

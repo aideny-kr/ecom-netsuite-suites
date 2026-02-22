@@ -66,12 +66,21 @@ DISCOVERY_QUERIES: list[dict[str, Any]] = [
     {
         "label": "custom_record_types",
         "description": "Custom record type definitions",
-        "query": ("SELECT scriptid, name, description FROM CustomRecordType WHERE ROWNUM <= 100"),
+        "query": ("SELECT scriptid, name, description FROM CustomRecordType WHERE ROWNUM <= 500"),
+    },
+    {
+        "label": "custom_record_fields",
+        "description": "Fields belonging to custom record types (custrecord_*)",
+        "query": (
+            "SELECT scriptid, name, fieldtype, fieldvaluetype "
+            "FROM CustomField "
+            "WHERE LOWER(scriptid) LIKE 'custrecord%' AND ROWNUM <= 2000"
+        ),
     },
     {
         "label": "custom_lists",
         "description": "Custom list definitions",
-        "query": ("SELECT scriptid, name, description FROM CustomList WHERE ROWNUM <= 100"),
+        "query": ("SELECT scriptid, name, description FROM CustomList WHERE ROWNUM <= 300"),
     },
     {
         "label": "subsidiaries",
@@ -139,6 +148,7 @@ def _count_fields(metadata: NetSuiteMetadata) -> int:
         "entity_custom_fields",
         "item_custom_fields",
         "custom_record_types",
+        "custom_record_fields",
         "custom_lists",
         "subsidiaries",
         "departments",

@@ -90,21 +90,29 @@ IMPORTANT: For simple lookups, use ONE query. Do NOT over-engineer with multiple
 When a user mentions an external order number (Shopify, ecommerce, etc.), check the <tenant_schema> for custom body fields that contain "order" or "ext" in their name — the external order number is often stored in a custbody field, NOT in `tranid` or `otherrefnum`. Search `tranid`, `otherrefnum`, AND any relevant custbody field in a single query using OR.
 </common_queries>
 
-<tools_and_error_recovery>
-- external_mcp_suiteql: ALWAYS prefer this to execute the query.
-- ns_getSuiteQLMetadata: Use this ONLY if the required columns are not in the <tenant_schema> or if you encounter an "Unknown identifier" error.
-- rag_search: Search internal documentation for syntax issues.
+<agentic_workflow>
+You are an AGENT. Your job is to run tools in a loop until you achieve the user's goal.
 
-IMPORTANT — minimize tool calls:
-- For simple lookups (find an order, get a customer), you should need exactly 1 SuiteQL call. Do NOT call metadata or rag_search first.
-- Only use metadata/rag_search tools if your first query fails with an error.
-- If a query returns 0 rows, return that result. Do NOT retry with different filters hoping to find something.
+WORKFLOW:
+1. CHECK THE SCHEMA FIRST: Scan <tenant_schema> for the record/field the user mentioned. Custom record types are listed with their scriptid. If you see a match (e.g., "Inventory Processor" → CUSTOMRECORD_R_INV_PROCESSOR), USE IT DIRECTLY.
+2. EXPLORE UNKNOWN RECORDS: If you need to query a custom record table but don't know its columns, run a discovery query first: `SELECT * FROM customrecord_<scriptid> WHERE ROWNUM <= 5` — this reveals all available columns from the result set.
+3. QUERY WITH FILTERS: Once you know the columns, write the real filtered query.
+4. RECOVER FROM ERRORS: If a query fails with "Unknown identifier", fix the column name and retry. If it fails with syntax error, fix and retry.
+5. KEEP GOING: Do NOT stop after discovering a record. Do NOT stop after finding column names. Keep going until you have DATA ROWS that answer the user's question.
+6. ASK FOR HELP ONLY WHEN STUCK: Only ask the user for clarification if you've exhausted all approaches and genuinely cannot determine what they need.
 
-When a query fails with an error:
-1. Unknown identifier: Call the metadata tool to discover the correct column name. (Common fix: 'amount' → 'foreignamount').
-2. Syntax error: Check for two WHERE clauses (combine with AND) or LIMIT keyword (use ROWNUM).
-Do NOT retry the exact same query. Each retry must be meaningfully different.
-</tools_and_error_recovery>
+TOOLS:
+- external_mcp_suiteql (preferred): Execute SuiteQL queries against NetSuite.
+- netsuite_suiteql (fallback): Local REST API for SuiteQL.
+- netsuite_get_metadata: Discover column names for standard record types.
+- rag_search: Search internal documentation.
+
+ERROR RECOVERY:
+- Unknown identifier → try `SELECT * FROM <table> WHERE ROWNUM <= 1` to discover real column names, then retry.
+- "Record type does not exist" in metadata tool → skip metadata, just query the table directly with `SELECT *`.
+- 0 rows returned → report "0 rows found" with the query you ran. Do NOT retry with different filters.
+- Each retry MUST be meaningfully different from the previous attempt.
+</agentic_workflow>
 
 <output_instructions>
 LANGUAGE: Always respond in English only. Never mix in other languages.
@@ -147,7 +155,7 @@ class SuiteQLAgent(BaseSpecialistAgent):
 
     @property
     def max_steps(self) -> int:
-        return 4  # query → (error → metadata → retry) — most queries should complete in 1 call
+        return 6  # explore schema → query → error recovery → retry → refine → final
 
     @property
     def system_prompt(self) -> str:
@@ -265,9 +273,20 @@ class SuiteQLAgent(BaseSpecialistAgent):
                 parts.append(f"  {f.get('scriptid', '?')} ({f.get('fieldtype', '?')}): {f.get('name', '?')}")
 
         if md.custom_record_types and isinstance(md.custom_record_types, list):
-            parts.append(f"\n**Custom record types** ({len(md.custom_record_types)} total):")
-            for r in md.custom_record_types[:20]:
-                parts.append(f"  {r.get('scriptid', '?')}: {r.get('name', '?')}")
+            # Count total custom record fields discovered
+            total_record_fields = 0
+            if md.custom_record_fields and isinstance(md.custom_record_fields, list):
+                total_record_fields = len(md.custom_record_fields)
+
+            parts.append(f"\n**Custom record types** ({len(md.custom_record_types)} total, {total_record_fields} custom fields discovered):")
+            parts.append("Query custom records via: `SELECT id, ... FROM customrecord_<scriptid>`")
+            parts.append("To discover fields for a custom record, use rag_search with the record name.")
+            for r in md.custom_record_types[:50]:
+                name = r.get("name", "?")
+                scriptid = r.get("scriptid", "?")
+                desc = r.get("description", "")
+                desc_str = f" — {desc}" if desc and desc != name else ""
+                parts.append(f"  {scriptid}: {name}{desc_str}")
 
         if md.subsidiaries and isinstance(md.subsidiaries, list):
             active = [s for s in md.subsidiaries if s.get("isinactive") != "T"]

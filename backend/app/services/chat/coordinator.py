@@ -544,7 +544,7 @@ class MultiAgentCoordinator:
             "type": "message",
             "message": {
                 "role": "assistant",
-                "content": final_text or "I'm sorry, I couldn't generate a response.",
+                "content": final_text or "I wasn't able to find relevant information for that question. Could you rephrase or provide more details?",
                 "tool_calls": all_tool_calls if all_tool_calls else None,
             },
         }

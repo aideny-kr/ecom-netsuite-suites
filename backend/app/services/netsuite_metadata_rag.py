@@ -87,6 +87,19 @@ def _format_custom_records(records: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _format_custom_record_fields(fields: list[dict]) -> str:
+    lines = [
+        "NetSuite Custom Record Fields (custrecord_*)",
+        "These fields belong to custom record types. Query them via: SELECT id, <field> FROM customrecord_<scriptid>",
+        "The field scriptid prefix often matches its parent record type scriptid.",
+        "",
+    ]
+    for f in fields:
+        vtype = f" (value type: {f['fieldvaluetype']})" if f.get("fieldvaluetype") else ""
+        lines.append(f"- {f.get('scriptid')}: {f.get('name')} (type: {f.get('fieldtype')}){vtype}")
+    return "\n".join(lines)
+
+
 def _format_custom_lists(lists: list[dict]) -> str:
     lines = [
         "NetSuite Custom Lists",
@@ -210,6 +223,15 @@ async def seed_metadata_docs(
                 f"{_SOURCE_PREFIX}custom_record_types",
                 "NetSuite Custom Record Types",
                 _format_custom_records(metadata.custom_record_types),
+            )
+        )
+
+    if metadata.custom_record_fields and isinstance(metadata.custom_record_fields, list):
+        raw_chunks.append(
+            (
+                f"{_SOURCE_PREFIX}custom_record_fields",
+                "NetSuite Custom Record Fields",
+                _format_custom_record_fields(metadata.custom_record_fields),
             )
         )
 
