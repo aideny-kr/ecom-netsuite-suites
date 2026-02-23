@@ -700,8 +700,27 @@ class MultiAgentCoordinator:
                 )
             # SuiteQL agent uses a stronger model for SQL reasoning
             step_model = self.specialist_model
-            if step.agent == "suiteql" and settings.MULTI_AGENT_SQL_MODEL:
-                step_model = settings.MULTI_AGENT_SQL_MODEL
+            if step.agent == "suiteql":
+                if settings.MULTI_AGENT_SQL_MODEL:
+                    step_model = settings.MULTI_AGENT_SQL_MODEL
+                
+                # Tenant-Aware Entity Resolution via Fast NER & pg_trgm
+                from app.services.chat.tenant_resolver import TenantEntityResolver
+                vernacular = await TenantEntityResolver.resolve_entities(
+                    user_message=step.task,
+                    tenant_id=self.tenant_id,
+                    db=self.db,
+                    adapter=self.specialist_adapter,
+                    model=self.specialist_model,
+                )
+                if vernacular:
+                    context["tenant_vernacular"] = vernacular
+                    logger.info(
+                        "coordinator.tenant_vernacular_injected",
+                        extra={"vernacular_len": len(vernacular), "preview": vernacular[:300]},
+                    )
+                    print(f"[COORDINATOR] Vernacular injected ({len(vernacular)} chars)", flush=True)
+                    
             return await agent.run(
                 task=step.task,
                 context=context,

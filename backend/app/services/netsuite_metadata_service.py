@@ -275,6 +275,13 @@ async def run_full_discovery(
     except Exception:
         logger.warning("metadata.rag_seeding_failed", exc_info=True)
 
+    try:
+        from app.services.tenant_entity_seeder import seed_entity_mappings
+
+        await seed_entity_mappings(db, tenant_id, metadata)
+    except Exception:
+        logger.warning("metadata.entity_mapping_seeding_failed", exc_info=True)
+
     # ── 6. Audit log ────────────────────────────────────────────────
     await log_event(
         db=db,

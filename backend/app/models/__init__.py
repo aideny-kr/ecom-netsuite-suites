@@ -22,6 +22,7 @@ from app.models.policy_profile import PolicyProfile
 from app.models.prompt_template import SystemPromptTemplate
 from app.models.script_sync import ScriptSyncState
 from app.models.tenant import Tenant, TenantConfig
+from app.models.tenant_entity_mapping import TenantEntityMapping
 from app.models.tenant_profile import TenantProfile
 from app.models.user import Permission, Role, RolePermission, User, UserRole
 from app.models.workspace import (
@@ -73,4 +74,5 @@ __all__ = [
     "OnboardingChecklistItem",
     "ScriptSyncState",
     "NetSuiteApiLog",
+    "TenantEntityMapping",
 ]

@@ -48,12 +48,20 @@ def parse_tables(query: str) -> set[str]:
 
 
 def validate_query(query: str, allowed_tables: set[str]) -> None:
-    """Validate that the query is read-only and only touches allowed tables."""
+    """Validate that the query is read-only and only touches allowed tables.
+
+    Custom record tables (customrecord_*) and custom list tables (customlist_*)
+    are dynamically allowed since each tenant has different custom records.
+    """
     if not is_read_only_sql(query):
         raise ValueError("Only read-only SELECT queries are permitted.")
 
     tables = parse_tables(query)
-    disallowed = tables - allowed_tables
+    # Allow any custom record/list table dynamically
+    disallowed = {
+        t for t in tables - allowed_tables
+        if not t.startswith("customrecord_") and not t.startswith("customlist_")
+    }
     if disallowed:
         raise ValueError(
             f"Query references disallowed tables: {', '.join(sorted(disallowed))}. "

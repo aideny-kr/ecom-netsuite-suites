@@ -156,11 +156,11 @@ async def call_external_mcp_tool(
         
     # --- GOVERNANCE INTERCEPT ---
     if tool_name == "ns_runCustomSuiteQL" and "sqlQuery" in tool_params:
-        sql = tool_params["sqlQuery"].strip()
+        sql = tool_params["sqlQuery"].strip().rstrip(";")
         sql_upper = sql.upper()
         if "ROWNUM" not in sql_upper and "FETCH" not in sql_upper:
-            # Wrap in pagination limit to enforce strict 50-row max
-            sql = f"SELECT * FROM ({sql}) WHERE ROWNUM <= 50"
+            # Append FETCH FIRST to enforce max rows without breaking field access
+            sql = f"{sql} FETCH FIRST 50 ROWS ONLY"
             tool_params["sqlQuery"] = sql
     # ----------------------------
 

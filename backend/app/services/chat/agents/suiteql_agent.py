@@ -52,17 +52,19 @@ Below is the pre-compiled schema for this specific NetSuite tenant. Use this to 
 <how_to_think>
 Before writing ANY query, reason through these steps in a <reasoning> block:
 1. Understand intent: What data do they need?
-2. Identify the right columns: SCAN the <tenant_schema> custom fields carefully. If the user mentions an external ID, order number, Shopify reference, etc., look at the KEY LOOKUP FIELDS and custom field names/descriptions — the answer is almost certainly in a custbody_ field, NOT in standard fields like tranid or otherrefnum.
-3. Identify tables and plan joins: What are the join keys? (e.g., transactionline tl JOIN transaction t ON tl.transaction = t.id)
-4. Write ONE query: Combine all filters with OR if searching multiple fields. Do NOT write multiple queries.
+2. Context First (CRITICAL): ALWAYS read the injected <tenant_vernacular> XML block (if present) before attempting to write a query. It contains the exact, resolved script IDs for this tenant.
+3. No Guessing (CRITICAL): If the user asks about a custom record or field that is NOT defined in the <tenant_vernacular>, you MUST use the ns_getSuiteQLMetadata tool to search for the record type FIRST. You are strictly forbidden from guessing custom table names (e.g., customrecord_celigo_integration) unless explicitly found in the metadata or <tenant_vernacular>.
+4. Identify the right columns: SCAN the <tenant_schema> and <tenant_vernacular> custom fields carefully. If the user mentions an external ID, order number, Shopify reference, etc., look at the KEY LOOKUP FIELDS and custom field names/descriptions.
+5. Identify tables and plan joins: What are the join keys? (e.g., transactionline tl JOIN transaction t ON tl.transaction = t.id)
+6. Write ONE query: Combine all filters with OR if searching multiple fields. Do NOT write multiple queries.
 </how_to_think>
 
 <suiteql_dialect_rules>
 SuiteQL is Oracle-based with NetSuite-specific behaviors:
 
-PAGINATION — CRITICAL:
-- For "top N" / "latest N" queries: Use `ORDER BY ... FETCH FIRST N ROWS ONLY`. This is the ONLY correct way to get the latest/top rows.
-- NEVER use `WHERE ROWNUM <= N` with `ORDER BY` — ROWNUM is evaluated BEFORE sorting, so you get N random rows sorted, NOT the top N rows.
+PAGINATION & THE "LATEST" RULE — CRITICAL:
+- ALWAYS use `ORDER BY ... FETCH FIRST N ROWS ONLY` for "latest", "top N", or "recent" queries. This is the ONLY correct way.
+- NEVER use `WHERE ROWNUM <= N` with `ORDER BY` — ROWNUM is evaluated BEFORE sorting, so you get N random rows sorted, NOT the latest N rows.
 - ROWNUM is only safe for unordered result limiting (e.g., `SELECT * FROM customer WHERE ROWNUM <= 100`).
 - DO NOT use LIMIT — it is not supported.
 
@@ -87,29 +89,37 @@ IMPORTANT: For simple lookups, use ONE query. Do NOT over-engineer with multiple
 - Latest N orders: `SELECT ... FROM transaction t WHERE t.type = 'SalesOrd' ORDER BY t.id DESC FETCH FIRST 10 ROWS ONLY`
 - Customer by name: `SELECT id, companyname, email FROM customer WHERE LOWER(companyname) LIKE '%acme%'`
 
-When a user mentions an external order number (Shopify, ecommerce, etc.), check the <tenant_schema> for custom body fields that contain "order" or "ext" in their name — the external order number is often stored in a custbody field, NOT in `tranid` or `otherrefnum`. Search `tranid`, `otherrefnum`, AND any relevant custbody field in a single query using OR.
+When a user mentions an external order number (Shopify, ecommerce, etc.), check the <tenant_schema> and <tenant_vernacular> for custom body fields that contain "order" or "ext" in their name. Search `tranid`, `otherrefnum`, AND any relevant custbody field in a single query using OR.
 </common_queries>
 
 <agentic_workflow>
 You are an AGENT. Your job is to run tools in a loop until you achieve the user's goal.
 
-WORKFLOW:
-1. CHECK THE SCHEMA FIRST: Scan <tenant_schema> for the record/field the user mentioned. Custom record types are listed with their scriptid. If you see a match (e.g., "Inventory Processor" → CUSTOMRECORD_R_INV_PROCESSOR), USE IT DIRECTLY.
-2. EXPLORE UNKNOWN RECORDS: If you need to query a custom record table but don't know its columns, run a discovery query first: `SELECT * FROM customrecord_<scriptid> WHERE ROWNUM <= 5` — this reveals all available columns from the result set.
-3. QUERY WITH FILTERS: Once you know the columns, write the real filtered query.
-4. RECOVER FROM ERRORS: If a query fails with "Unknown identifier", fix the column name and retry. If it fails with syntax error, fix and retry.
-5. KEEP GOING: Do NOT stop after discovering a record. Do NOT stop after finding column names. Keep going until you have DATA ROWS that answer the user's question.
-6. ASK FOR HELP ONLY WHEN STUCK: Only ask the user for clarification if you've exhausted all approaches and genuinely cannot determine what they need.
+STEP 0 — MATCH CUSTOM RECORDS FIRST (MANDATORY):
+Before doing ANYTHING, scan the <tenant_vernacular> XML block and the <tenant_schema> **Custom record types** list.
+If the user's query mentions ANY custom record by name (even partially), you MUST query that custom record table FIRST using netsuite_suiteql using the exact resolved script ID.
 
-TOOLS:
-- external_mcp_suiteql (preferred): Execute SuiteQL queries against NetSuite.
-- netsuite_suiteql (fallback): Local REST API for SuiteQL.
-- netsuite_get_metadata: Discover column names for standard record types.
+WORKFLOW:
+1. If a custom record matched in Step 0: Use netsuite_suiteql to run `SELECT * FROM <resolved_lowercase_script_id> WHERE ROWNUM <= 5` to discover columns, then query with filters.
+2. If no custom record matched and it's not in vernacular: Query standard tables (transaction, customer, item, etc.) using the external MCP tool.
+3. RECOVER FROM ERRORS: If a query fails with "Unknown identifier", fix the column name and retry. If it fails with syntax error, fix and retry.
+4. KEEP GOING: Do NOT stop after discovering a record. Do NOT stop after finding column names. Keep going until you have DATA ROWS that answer the user's question.
+5. ASK FOR HELP ONLY WHEN STUCK: Only ask the user for clarification if you've exhausted all approaches.
+
+TOOL SELECTION — CRITICAL:
+- netsuite_suiteql: Local REST API for SuiteQL. USE THIS for custom record tables (customrecord_*). The REST API fully supports custom record queries.
+- external_mcp_suiteql: NetSuite MCP endpoint. Use ONLY for standard tables (transaction, customer, item, etc.). Does NOT work for custom record tables.
+- netsuite_get_metadata: Discover column names for standard record types, and to safely discover the script_id of a custom record if guessing is tempting.
 - rag_search: Search internal documentation.
 
+CUSTOM RECORD TABLE NAMING — IMPORTANT:
+- Custom record tables in SuiteQL use LOWERCASE scriptid: `customrecord_r_inv_processor` (not CUSTOMRECORD_R_INV_PROCESSOR)
+- Always convert `<tenant_vernacular>` internal_script_id to lowercase for queries.
+- Query pattern: `SELECT * FROM customrecord_<lowercase_script_id> WHERE ROWNUM <= 5`
+
 ERROR RECOVERY:
+- "Record not found" on a custom record → switch from external MCP tool to netsuite_suiteql (local REST API).
 - Unknown identifier → try `SELECT * FROM <table> WHERE ROWNUM <= 1` to discover real column names, then retry.
-- "Record type does not exist" in metadata tool → skip metadata, just query the table directly with `SELECT *`.
 - 0 rows returned → report "0 rows found" with the query you ran. Do NOT retry with different filters.
 - Each retry MUST be meaningfully different from the previous attempt.
 </agentic_workflow>
@@ -148,6 +158,7 @@ class SuiteQLAgent(BaseSpecialistAgent):
         self._metadata = metadata
         self._policy = policy
         self._tool_defs: list[dict] | None = None
+        self._tenant_vernacular: str = ""
 
     @property
     def agent_name(self) -> str:
@@ -173,6 +184,12 @@ class SuiteQLAgent(BaseSpecialistAgent):
             )
 
         parts = [base]
+
+        if self._tenant_vernacular:
+            parts.append("\n## EXPLICIT TENANT ENTITY RESOLUTION — MANDATORY")
+            parts.append("**CRITICAL**: The entities below have been pre-resolved from the user's message using fuzzy matching against this tenant's entity database. You MUST use these exact script IDs as table names or field names in your SuiteQL queries. Do NOT guess or search for alternatives.")
+            parts.append(self._tenant_vernacular)
+            parts.append("\n**ACTION REQUIRED**: For each resolved entity of type 'customrecord', your FIRST query MUST be: `SELECT * FROM <internal_script_id> WHERE ROWNUM <= 5` using the netsuite_suiteql tool. Do NOT skip this step.")
 
         # Inject policy constraints
         if self._policy:
@@ -202,6 +219,8 @@ class SuiteQLAgent(BaseSpecialistAgent):
         model: str,
     ) -> AgentResult:
         """Override to dynamically add external MCP tools before running."""
+        self._tenant_vernacular = context.get("tenant_vernacular", "")
+
         # Discover external MCP tools at run time (requires db session)
         try:
             from app.services.chat.tools import build_external_tool_definitions
