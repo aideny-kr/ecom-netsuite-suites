@@ -112,6 +112,32 @@ def _format_custom_lists(lists: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _format_custom_list_values(list_name: str, values: list[dict]) -> str:
+    """Format a single custom list's values for RAG retrieval."""
+    lines = [
+        f"Custom List Values for: {list_name}",
+        "Use these exact internal IDs when filtering records by this custom list field.",
+        f"SuiteQL: WHERE field_name = <id> (or use BUILTIN.DF(field_name) = '<name>')",
+        "",
+    ]
+    for v in values:
+        status = " [INACTIVE]" if v.get("isinactive") == "T" else ""
+        lines.append(f"- ID {v.get('id')}: {v.get('name')}{status}")
+    return "\n".join(lines)
+
+
+def _format_saved_searches(searches: list[dict]) -> str:
+    lines = [
+        "NetSuite Saved Searches (Public)",
+        "These saved searches are available in the account. Reference them by ID or title.",
+        "",
+    ]
+    for ss in searches:
+        owner = f" (owner: {ss['owner']})" if ss.get("owner") else ""
+        lines.append(f"- ID {ss.get('id')}: {ss.get('title')} (record type: {ss.get('recordtype', '?')}){owner}")
+    return "\n".join(lines)
+
+
 def _format_org_hierarchy(
     subsidiaries: list[dict] | None,
     departments: list[dict] | None,
@@ -241,6 +267,28 @@ async def seed_metadata_docs(
                 f"{_SOURCE_PREFIX}custom_lists",
                 "NetSuite Custom Lists",
                 _format_custom_lists(metadata.custom_lists),
+            )
+        )
+
+    # Per-list value RAG chunks (one per custom list with values)
+    if getattr(metadata, "custom_list_values", None) and isinstance(metadata.custom_list_values, dict):
+        for table_name, values in metadata.custom_list_values.items():
+            if isinstance(values, list) and values:
+                raw_chunks.append(
+                    (
+                        f"{_SOURCE_PREFIX}custom_list_values/{table_name}",
+                        f"Custom List Values: {table_name}",
+                        _format_custom_list_values(table_name, values),
+                    )
+                )
+
+    # Saved searches
+    if getattr(metadata, "saved_searches", None) and isinstance(metadata.saved_searches, list):
+        raw_chunks.append(
+            (
+                f"{_SOURCE_PREFIX}saved_searches",
+                "NetSuite Saved Searches",
+                _format_saved_searches(metadata.saved_searches),
             )
         )
 

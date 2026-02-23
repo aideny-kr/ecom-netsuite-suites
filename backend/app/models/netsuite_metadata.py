@@ -44,6 +44,11 @@ class NetSuiteMetadata(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     departments: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     classifications: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     locations: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    scripts: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    script_deployments: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    workflows: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    custom_list_values: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    saved_searches: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     # ── Discovery tracking ──────────────────────────────────────────
     discovered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

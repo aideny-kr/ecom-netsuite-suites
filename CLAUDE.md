@@ -275,7 +275,7 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 
 ## Current State (update after each major change)
 
-- **Latest migration**: 025_tenant_entity_mapping
+- **Latest migration**: 027_add_missing_metadata_columns
 - **Entity mappings**: 2,109 seeded for test tenant (bf92d059), seeder runs in metadata discovery pipeline
 - **Known gap**: OAuth reconnect just flips status, doesn't re-initiate browser flow
 - **Known gap**: `inputRef` in workspace-chat-panel never attached to ChatInput

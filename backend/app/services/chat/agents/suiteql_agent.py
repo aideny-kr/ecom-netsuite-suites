@@ -76,6 +76,12 @@ COLUMN NAMING:
 TEXT RESOLUTION:
 - For List/Record fields, use `BUILTIN.DF(field_name)` to return the display text.
 
+CUSTOM LIST FIELDS:
+- Fields with type SELECT store integer IDs referencing custom lists.
+- Check the Custom List Values section in the tenant schema for ID → name mappings.
+- To filter: use `WHERE field = <id>` (fastest) or `BUILTIN.DF(field) = 'Value Name'` (readable).
+- The field-to-list linkage is shown as `(SELECT → customlist_name)` in the field listing.
+
 JOIN PATTERNS:
 - Filter to item lines only using `tl.mainline = 'F' AND tl.taxline = 'F'`.
 - For header-only queries (no line details), use `WHERE t.mainline = 'T'` or just query the `transaction` table without joining `transactionline`.
@@ -274,22 +280,34 @@ class SuiteQLAgent(BaseSpecialistAgent):
         if md.transaction_body_fields and isinstance(md.transaction_body_fields, list):
             parts.append(f"\n**Transaction body fields** ({len(md.transaction_body_fields)} total):")
             for f in md.transaction_body_fields[:max_fields]:
-                parts.append(f"  {f.get('scriptid', '?')} ({f.get('fieldtype', '?')}): {f.get('name', '?')}")
+                linkage = ""
+                if f.get("fieldtype") == "SELECT" and f.get("fieldvaluetype"):
+                    linkage = f" → {f['fieldvaluetype']}"
+                parts.append(f"  {f.get('scriptid', '?')} ({f.get('fieldtype', '?')}{linkage}): {f.get('name', '?')}")
 
         if md.transaction_column_fields and isinstance(md.transaction_column_fields, list):
             parts.append(f"\n**Transaction line fields** ({len(md.transaction_column_fields)} total):")
             for f in md.transaction_column_fields[:max_fields]:
-                parts.append(f"  {f.get('scriptid', '?')} ({f.get('fieldtype', '?')}): {f.get('name', '?')}")
+                linkage = ""
+                if f.get("fieldtype") == "SELECT" and f.get("fieldvaluetype"):
+                    linkage = f" → {f['fieldvaluetype']}"
+                parts.append(f"  {f.get('scriptid', '?')} ({f.get('fieldtype', '?')}{linkage}): {f.get('name', '?')}")
 
         if md.entity_custom_fields and isinstance(md.entity_custom_fields, list):
             parts.append(f"\n**Entity custom fields** ({len(md.entity_custom_fields)} total):")
             for f in md.entity_custom_fields[:max_fields]:
-                parts.append(f"  {f.get('scriptid', '?')} ({f.get('fieldtype', '?')}): {f.get('name', '?')}")
+                linkage = ""
+                if f.get("fieldtype") == "SELECT" and f.get("fieldvaluetype"):
+                    linkage = f" → {f['fieldvaluetype']}"
+                parts.append(f"  {f.get('scriptid', '?')} ({f.get('fieldtype', '?')}{linkage}): {f.get('name', '?')}")
 
         if md.item_custom_fields and isinstance(md.item_custom_fields, list):
             parts.append(f"\n**Item custom fields** ({len(md.item_custom_fields)} total):")
             for f in md.item_custom_fields[:max_fields]:
-                parts.append(f"  {f.get('scriptid', '?')} ({f.get('fieldtype', '?')}): {f.get('name', '?')}")
+                linkage = ""
+                if f.get("fieldtype") == "SELECT" and f.get("fieldvaluetype"):
+                    linkage = f" → {f['fieldvaluetype']}"
+                parts.append(f"  {f.get('scriptid', '?')} ({f.get('fieldtype', '?')}{linkage}): {f.get('name', '?')}")
 
         if md.custom_record_types and isinstance(md.custom_record_types, list):
             # Count total custom record fields discovered
@@ -335,5 +353,34 @@ class SuiteQLAgent(BaseSpecialistAgent):
                 parts.append(f"\n**Locations** ({len(active)} active):")
                 for loc in active[:20]:
                     parts.append(f"  ID {loc.get('id', '?')}: {loc.get('name', '?')}")
+
+        if getattr(md, "scripts", None) and isinstance(md.scripts, list):
+            parts.append(f"\n**Active Scripts** ({len(md.scripts)} total):")
+            for s in md.scripts[:100]:
+                parts.append(f"  ID {s.get('id', '?')} | {s.get('scriptid', '?')} ({s.get('scripttype', '?')}): {s.get('name', '?')}")
+
+        if getattr(md, "script_deployments", None) and isinstance(md.script_deployments, list):
+            parts.append(f"\n**Active Script Deployments** ({len(md.script_deployments)} total):")
+            for d in md.script_deployments[:100]:
+                parts.append(f"  {d.get('scriptid', '?')} on {d.get('recordtype', '?')} (Status: {d.get('status', '?')}) | Script: {d.get('script', '?')}")
+
+        if getattr(md, "workflows", None) and isinstance(md.workflows, list):
+            parts.append(f"\n**Active Workflows** ({len(md.workflows)} total):")
+            for w in md.workflows[:50]:
+                parts.append(f"  {w.get('scriptid', '?')} on {w.get('recordtype', '?')} (Status: {w.get('status', '?')}): {w.get('name', '?')}")
+
+        if getattr(md, "custom_list_values", None) and isinstance(md.custom_list_values, dict):
+            parts.append(f"\n**Custom List Values** — Use exact Internal IDs for WHERE clauses instead of text:")
+            parts.append("When filtering by a list field, use `WHERE field = <id>` or `BUILTIN.DF(field) = '<name>'`.")
+            for list_name, values in md.custom_list_values.items():
+                if values:
+                    val_str = ", ".join([f"'{v.get('name')}': ID {v.get('id')}" for v in values[:50]])
+                    parts.append(f"  {list_name} => {val_str}")
+
+        if getattr(md, "saved_searches", None) and isinstance(md.saved_searches, list):
+            parts.append(f"\n**Saved Searches** ({len(md.saved_searches)} public):")
+            for ss in md.saved_searches[:30]:
+                owner = f" (owner: {ss.get('owner', '?')})" if ss.get("owner") else ""
+                parts.append(f"  ID {ss.get('id', '?')}: {ss.get('title', '?')} (type: {ss.get('recordtype', '?')}){owner}")
 
         return "\n".join(parts)

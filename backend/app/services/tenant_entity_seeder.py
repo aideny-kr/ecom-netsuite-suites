@@ -148,6 +148,43 @@ def _build_rows(
                 "description": cl.get("description") or None,
             })
 
+    # ── Custom List Values (Dynamic) ────────────────────────────────
+    # These represent the exact internal ID integer values for options
+    # e.g., mapping "Failed" to internal ID '3' within customlist_integration_status
+    if getattr(metadata, "custom_list_values", None) and isinstance(metadata.custom_list_values, dict):
+        for table_name, list_values in metadata.custom_list_values.items():
+            if not isinstance(list_values, list):
+                continue
+            for val in list_values:
+                internal_id = str(val.get("id", ""))
+                name = val.get("name", "")
+                if not internal_id or not name:
+                    continue
+                rows.append({
+                    "tenant_id": tenant_id,
+                    "entity_type": "customlistvalue",
+                    "natural_name": _truncate(name),
+                    # We store the parent list script ID AND the value's internal ID
+                    # so the AI knows exactly what context it belongs to
+                    "script_id": _truncate(f"{table_name}.{internal_id}"),
+                    "description": f"Value for list: {table_name}",
+                })
+
+    # ── Saved Searches ─────────────────────────────────────────────
+    if getattr(metadata, "saved_searches", None) and isinstance(metadata.saved_searches, list):
+        for ss in metadata.saved_searches:
+            title = ss.get("title", "")
+            ss_id = str(ss.get("id", ""))
+            if not title or not ss_id:
+                continue
+            rows.append({
+                "tenant_id": tenant_id,
+                "entity_type": "savedsearch",
+                "natural_name": _truncate(title),
+                "script_id": _truncate(ss_id),
+                "description": f"Record type: {ss.get('recordtype', 'unknown')}",
+            })
+
     return rows
 
 

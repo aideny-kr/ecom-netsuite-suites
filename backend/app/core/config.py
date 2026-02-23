@@ -73,7 +73,7 @@ class Settings(BaseSettings):
     MULTI_AGENT_ENABLED: bool = True
     MULTI_AGENT_SPECIALIST_PROVIDER: str = "anthropic"
     MULTI_AGENT_SPECIALIST_MODEL: str = "claude-haiku-4-5-20251001"
-    # SuiteQL agent uses a stronger model for SQL reasoning
+    # SuiteQL agent uses a stronger model for SQL reasoning and huge NetSuite context
     MULTI_AGENT_SQL_MODEL: str = "claude-sonnet-4-5-20250929"
     MULTI_AGENT_MAX_BUDGET_TOKENS: int = 50000
     MULTI_AGENT_MAX_RETRIES: int = 2

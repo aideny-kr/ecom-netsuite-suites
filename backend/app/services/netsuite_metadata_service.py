@@ -7,6 +7,7 @@ downstream prompt-template regeneration and RAG document seeding.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -102,6 +103,42 @@ DISCOVERY_QUERIES: list[dict[str, Any]] = [
         "description": "Location hierarchy",
         "query": ("SELECT id, name, isinactive, parent FROM location WHERE ROWNUM <= 100"),
     },
+    {
+        "label": "scripts",
+        "description": "Active SuiteScripts in the environment",
+        "query": (
+            "SELECT id, scriptid, name, scripttype "
+            "FROM script "
+            "WHERE isinactive = 'F' AND ROWNUM <= 1000"
+        ),
+    },
+    {
+        "label": "script_deployments",
+        "description": "Active SuiteScript Deployments",
+        "query": (
+            "SELECT script, scriptid, status, recordtype "
+            "FROM scriptdeployment "
+            "WHERE isdeployed = 'T' AND ROWNUM <= 1000"
+        ),
+    },
+    {
+        "label": "workflows",
+        "description": "Active Workflows",
+        "query": (
+            "SELECT scriptid, name, recordtype, status "
+            "FROM workflow "
+            "WHERE isinactive = 'F' AND ROWNUM <= 500"
+        ),
+    },
+    {
+        "label": "saved_searches",
+        "description": "Public saved searches",
+        "query": (
+            "SELECT id, title, recordtype, BUILTIN.DF(owner) as owner "
+            "FROM savedsearch "
+            "WHERE isPublic = 'T' AND ROWNUM <= 200"
+        ),
+    },
 ]
 
 
@@ -154,10 +191,18 @@ def _count_fields(metadata: NetSuiteMetadata) -> int:
         "departments",
         "classifications",
         "locations",
+        "scripts",
+        "script_deployments",
+        "workflows",
     ):
         val = getattr(metadata, attr, None)
         if isinstance(val, list):
             total += len(val)
+            
+    # Also sum dynamically fetched custom list keys
+    if getattr(metadata, "custom_list_values", None):
+        total += len(metadata.custom_list_values)
+        
     return total
 
 
@@ -244,6 +289,44 @@ async def run_full_discovery(
         else:
             setattr(metadata, label, result["rows"])
             success_count += 1
+
+    # ── 3b. Dynamically extract custom list values (parallel) ──────
+    # Query actual list option IDs so the AI knows what "1" vs "2" means.
+    if getattr(metadata, "custom_lists", None):
+        try:
+            target_lists = metadata.custom_lists[:100]
+            semaphore = asyncio.Semaphore(5)  # Max 5 concurrent API calls
+
+            async def _fetch_list_values(clist: dict) -> tuple[str, list[dict]] | None:
+                list_script_id = clist.get("scriptid")
+                if not list_script_id:
+                    return None
+                table_name = list_script_id.lower()
+                async with semaphore:
+                    q = f"SELECT id, name FROM {table_name} WHERE isinactive = 'F' AND ROWNUM <= 200"
+                    cl_res = await _execute_discovery_query(
+                        access_token=access_token,
+                        account_id=account_id,
+                        query=q,
+                        label=f"custom_list_values_{table_name}",
+                    )
+                if "error" not in cl_res and cl_res.get("rows"):
+                    return (table_name, cl_res["rows"])
+                return None
+
+            results = await asyncio.gather(
+                *(_fetch_list_values(cl) for cl in target_lists),
+                return_exceptions=True,
+            )
+            custom_list_values = {}
+            for r in results:
+                if isinstance(r, tuple) and r is not None:
+                    custom_list_values[r[0]] = r[1]
+            
+            metadata.custom_list_values = custom_list_values
+        except Exception as exc:
+            logger.warning("metadata.custom_list_value_extraction_failed", error=str(exc))
+            errors["custom_list_values"] = str(exc)
 
     # ── 4. Finalise metadata record ─────────────────────────────────
     metadata.status = "completed" if success_count > 0 else "failed"
