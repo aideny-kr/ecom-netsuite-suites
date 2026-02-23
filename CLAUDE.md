@@ -20,7 +20,9 @@
 - **File Cabinet I/O**: Custom RESTlet (`ecom_file_cabinet_restlet.js`) replaces broken REST API PATCH. RESTlet does in-place load-update-save (preserves file ID).
 - **SuiteQL**: Via REST API POST `/services/rest/query/v1/suiteql` with Bearer token. Also available via MCP at `/services/mcp/v1/all`.
 - **Mock Data**: MockData RESTlet runs SuiteQL inside NetSuite with server-side PII masking. Never transmit real PII to our backend.
-- **Chat**: AI orchestrator in `orchestrator.py` with `<thinking>` tags for reasoning (collapsed in UI). System prompt includes workspace tools and current file context.
+- **Chat**: Multi-agent coordinator in `coordinator.py` with semantic routing (heuristic → LLM fallback). Specialist agents: SuiteQL, RAG, analysis, workspace. SSE streaming with `<thinking>` tags (collapsed in UI).
+- **Entity Resolution**: Fast NER (Haiku) → pg_trgm fuzzy matching → `<tenant_vernacular>` XML injection into agent prompts. Table: `tenant_entity_mapping` with composite GIN index. Seeded from metadata discovery pipeline.
+- **Two SuiteQL paths**: Local REST API (`netsuite_suiteql` tool) supports all tables including `customrecord_*`. External MCP (`ns_runCustomSuiteQL`) works only for standard tables. Agent prompt guides tool selection.
 - **react-resizable-panels v4**: Imports are `Panel`, `Group as PanelGroup`, `Separator as PanelResizeHandle`. Uses `orientation` prop (not `direction`).
 
 ## Backend Patterns — FOLLOW EXACTLY
@@ -223,6 +225,10 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 |------|-------|
 | API routes | `backend/app/api/v1/` |
 | Services | `backend/app/services/` |
+| Chat agents | `backend/app/services/chat/agents/` |
+| Chat adapters | `backend/app/services/chat/adapters/` |
+| Entity resolver | `backend/app/services/chat/tenant_resolver.py` |
+| Entity seeder | `backend/app/services/tenant_entity_seeder.py` |
 | Models | `backend/app/models/` |
 | Schemas | `backend/app/schemas/` |
 | Migrations | `backend/alembic/versions/` |
@@ -254,9 +260,23 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 11. **SuiteQL pagination** — use `FETCH FIRST N ROWS ONLY`, not `LIMIT` (not supported in SuiteQL)
 12. **NetSuite account IDs** — normalize with `replace("_", "-").lower()` for URLs
 
+## Chat Architecture
+
+- **Orchestrator** (`orchestrator.py`): SSE streaming endpoint, routes to single-agent or multi-agent
+- **Coordinator** (`coordinator.py`): Semantic router with heuristic classifier (`classify_intent()`), LLM fallback for ambiguous queries. Dispatches specialist agents, handles retries, streams synthesis.
+- **Specialist agents** (`agents/`): Each runs a mini agentic loop with tools (max_steps varies per agent)
+  - `SuiteQLAgent`: max_steps=6, tenant metadata + entity vernacular injected into prompt
+  - `RAGAgent`: max_steps=2, strict tool budget (2 rag_search + 1 web_search)
+  - `DataAnalysisAgent`: requires prior data from SuiteQL agent
+  - `WorkspaceAgent`: file ops, propose_patch, search workspace
+- **LLM adapters** (`adapters/`): Anthropic, OpenAI, Gemini — all implement `create_message()` and `stream_message()`
+- **Entity resolution** (`tenant_resolver.py`): Runs before SuiteQL agent dispatch. Haiku extracts entities → pg_trgm resolves to script IDs → XML block injected via `context["tenant_vernacular"]`
+- **Route registry**: Add new agents via `ROUTE_REGISTRY` dict + `_create_agent()` factory in coordinator
+
 ## Current State (update after each major change)
 
 - **Latest migration**: 025_tenant_entity_mapping
+- **Entity mappings**: 2,109 seeded for test tenant (bf92d059), seeder runs in metadata discovery pipeline
 - **Known gap**: OAuth reconnect just flips status, doesn't re-initiate browser flow
 - **Known gap**: `inputRef` in workspace-chat-panel never attached to ChatInput
 - **Deferred**: SDF CI/CD pipeline, bundle versioning strategy, RESTlet rate limiting
