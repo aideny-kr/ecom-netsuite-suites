@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ecom NetSuite Suites — Architecture</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif; background: #0a0a0f; color: #e0e0e8; overflow-x: hidden; }
+
+  .container { max-width: 1400px; margin: 0 auto; padding: 32px 24px; }
+
+  .title { font-size: 28px; font-weight: 700; color: #f0f0f5; margin-bottom: 4px; letter-spacing: -0.5px; }
+  .subtitle { font-size: 14px; color: #7a7a8e; margin-bottom: 32px; }
+
+  /* Layer system */
+  .layer { margin-bottom: 16px; border-radius: 12px; overflow: hidden; border: 1px solid #1a1a2e; }
+  .layer-header { padding: 14px 20px; display: flex; align-items: center; gap: 12px; cursor: pointer; user-select: none; transition: background 0.15s; }
+  .layer-header:hover { filter: brightness(1.1); }
+  .layer-number { width: 28px; height: 28px; border-radius: 6px; display: flex; align-items: center; justify-content: center; font-size: 13px; font-weight: 700; color: #fff; flex-shrink: 0; }
+  .layer-title { font-size: 15px; font-weight: 600; flex: 1; }
+  .layer-tech { font-size: 12px; color: #8888a0; }
+  .layer-arrow { font-size: 11px; color: #555; transition: transform 0.2s; }
+  .layer-arrow.open { transform: rotate(90deg); }
+
+  .layer-body { padding: 0 20px 16px; display: none; }
+  .layer-body.open { display: block; }
+
+  /* Service boxes */
+  .services-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 10px; margin-top: 12px; }
+  .service-box { background: #12121e; border: 1px solid #252540; border-radius: 8px; padding: 12px; }
+  .service-box-title { font-size: 13px; font-weight: 600; color: #c8c8d8; margin-bottom: 4px; display: flex; align-items: center; gap: 6px; }
+  .service-box-desc { font-size: 11.5px; color: #6e6e82; line-height: 1.5; }
+  .service-icon { font-size: 14px; }
+
+  /* Data flow */
+  .flow-section { margin-top: 32px; }
+  .flow-title { font-size: 18px; font-weight: 700; color: #f0f0f5; margin-bottom: 16px; }
+  .flow-container { background: #0d0d18; border: 1px solid #1a1a2e; border-radius: 12px; padding: 24px; }
+  .flow-steps { display: flex; flex-direction: column; gap: 0; }
+  .flow-step { display: flex; align-items: flex-start; gap: 14px; position: relative; padding-bottom: 20px; }
+  .flow-step:last-child { padding-bottom: 0; }
+  .flow-step::before { content: ''; position: absolute; left: 15px; top: 32px; bottom: 0; width: 2px; background: #252540; }
+  .flow-step:last-child::before { display: none; }
+  .flow-dot { width: 32px; height: 32px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700; flex-shrink: 0; color: #fff; z-index: 1; }
+  .flow-content { flex: 1; padding-top: 4px; }
+  .flow-label { font-size: 13px; font-weight: 600; color: #d0d0de; }
+  .flow-desc { font-size: 11.5px; color: #6e6e82; margin-top: 2px; }
+
+  /* Color system */
+  .c-frontend { background: #1a3a2e; border-color: #2a5a45; }
+  .c-frontend .layer-number { background: #22804a; }
+  .c-frontend .layer-header { background: #0f2a20; }
+
+  .c-api { background: #1a2a3e; border-color: #2a4a6e; }
+  .c-api .layer-number { background: #2266aa; }
+  .c-api .layer-header { background: #0f1a2e; }
+
+  .c-services { background: #2a1a3e; border-color: #4a2a6e; }
+  .c-services .layer-number { background: #7733bb; }
+  .c-services .layer-header { background: #1a0f2e; }
+
+  .c-mcp { background: #3a2a1a; border-color: #6e4a2a; }
+  .c-mcp .layer-number { background: #bb7722; }
+  .c-mcp .layer-header { background: #2a1a0f; }
+
+  .c-workers { background: #3a1a1a; border-color: #6e2a2a; }
+  .c-workers .layer-number { background: #bb3333; }
+  .c-workers .layer-header { background: #2a0f0f; }
+
+  .c-infra { background: #1a1a2e; border-color: #2a2a4e; }
+  .c-infra .layer-number { background: #5555aa; }
+  .c-infra .layer-header { background: #0f0f1e; }
+
+  .c-netsuite { background: #1a2e2e; border-color: #2a4e4e; }
+  .c-netsuite .layer-number { background: #228888; }
+  .c-netsuite .layer-header { background: #0f1e1e; }
+
+  .dot-1 { background: #22804a; }
+  .dot-2 { background: #2266aa; }
+  .dot-3 { background: #7733bb; }
+  .dot-4 { background: #bb7722; }
+  .dot-5 { background: #bb3333; }
+  .dot-6 { background: #228888; }
+
+  /* Connector lines between layers */
+  .connector { text-align: center; padding: 4px 0; color: #333350; font-size: 16px; letter-spacing: 2px; }
+
+  /* Tabs */
+  .tabs { display: flex; gap: 4px; margin-bottom: 24px; background: #0d0d18; border-radius: 8px; padding: 4px; border: 1px solid #1a1a2e; width: fit-content; }
+  .tab { padding: 8px 16px; border-radius: 6px; font-size: 13px; font-weight: 500; color: #7a7a8e; cursor: pointer; transition: all 0.15s; border: none; background: none; }
+  .tab:hover { color: #b0b0c0; }
+  .tab.active { background: #1a1a2e; color: #e0e0f0; }
+
+  /* Summary stats */
+  .stats { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; margin-bottom: 28px; }
+  .stat { background: #0d0d18; border: 1px solid #1a1a2e; border-radius: 8px; padding: 14px; }
+  .stat-value { font-size: 22px; font-weight: 700; color: #f0f0f5; }
+  .stat-label { font-size: 11px; color: #6e6e82; margin-top: 2px; text-transform: uppercase; letter-spacing: 0.5px; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState } = React;
+
+const layers = [
+  {
+    id: 'frontend',
+    num: 1,
+    title: 'Frontend — User Interface',
+    tech: 'Next.js 14 · TypeScript · TanStack Query · shadcn/ui · Tailwind',
+    colorClass: 'c-frontend',
+    port: ':3000',
+    services: [
+      { icon: '📊', title: 'Dashboard', desc: 'Overview cards, sync status, recent activity, quick links' },
+      { icon: '💬', title: 'Chat (AI)', desc: 'Streaming SSE messages, tool call rendering, session management' },
+      { icon: '🛠', title: 'Workspace IDE', desc: 'Resizable panels: file tree → code editor → diff viewer → runs' },
+      { icon: '🔗', title: 'Connections', desc: 'OAuth flows for Shopify, Stripe, NetSuite. Status cards + test' },
+      { icon: '📋', title: 'Tables', desc: 'TanStack Table with sort, filter, paginate. CSV export' },
+      { icon: '⚙️', title: 'Settings', desc: 'AI provider config, metadata refresh, script sync triggers' },
+      { icon: '🎯', title: 'Onboarding', desc: 'Multi-step wizard: profile → connection → policy → workspace' },
+      { icon: '📜', title: 'Audit Log', desc: 'Paginated events with action/status/date filters' },
+    ]
+  },
+  {
+    id: 'api',
+    num: 2,
+    title: 'API Layer — REST Endpoints',
+    tech: 'FastAPI (async) · Pydantic v2 · JWT Auth · RBAC',
+    colorClass: 'c-api',
+    port: ':8000',
+    services: [
+      { icon: '🔐', title: '/auth', desc: 'Register, login, refresh, logout, switch-tenant. JWT + HttpOnly cookies' },
+      { icon: '💬', title: '/chat', desc: 'Sessions + messages. SSE streaming. Workspace-scoped chat' },
+      { icon: '🔗', title: '/connections', desc: 'CRUD, OAuth, test, sync triggers. Multi-provider (Shopify/Stripe/NS)' },
+      { icon: '📁', title: '/workspaces', desc: 'Files, changesets, runs, assertions, deployments' },
+      { icon: '🗃', title: '/tables', desc: 'Browse canonical data, sample read, CSV export' },
+      { icon: '🧩', title: '/mcp-connectors', desc: 'Register external MCP servers, test connectivity' },
+      { icon: '📊', title: '/netsuite/*', desc: 'Metadata discovery, script sync, API logs, OAuth flow' },
+      { icon: '📝', title: '/audit, /jobs', desc: 'Event logs, background task status tracking' },
+    ]
+  },
+  {
+    id: 'services',
+    num: 3,
+    title: 'Services — Business Logic',
+    tech: 'Async Python · SQLAlchemy 2.0 · httpx · structlog',
+    colorClass: 'c-services',
+    services: [
+      { icon: '🤖', title: 'Chat Orchestrator', desc: 'Agentic loop: LLM → tool calls → results → refine. Up to 5 steps/turn' },
+      { icon: '🔄', title: 'LLM Adapters', desc: 'Provider abstraction: Anthropic, OpenAI, Gemini. BYOK support' },
+      { icon: '🌐', title: 'NetSuite Client', desc: 'SuiteQL via REST API (MCP optional). OAuth token auto-refresh' },
+      { icon: '📦', title: 'Ingestion', desc: 'Cursor-based sync: Shopify orders, Stripe payouts → canonical tables' },
+      { icon: '🔍', title: 'Metadata Discovery', desc: '10 SuiteQL queries → custom fields, record types, org hierarchy' },
+      { icon: '📄', title: 'Prompt Templates', desc: 'Deterministic prompt generation from tenant profile + policy + metadata' },
+      { icon: '🛡', title: 'Policy Engine', desc: 'Tool allowlists, blocked fields, row limits, custom rules' },
+      { icon: '📊', title: 'Audit Service', desc: 'Immutable event log with correlation IDs. 90-day retention' },
+    ]
+  },
+  {
+    id: 'mcp',
+    num: 4,
+    title: 'MCP Tool System — AI-Callable Tools',
+    tech: 'Model Context Protocol · Governance Layer · Rate Limiting',
+    colorClass: 'c-mcp',
+    services: [
+      { icon: '🗄', title: 'netsuite.suiteql', desc: 'Execute SuiteQL queries. Table allowlist, ROWNUM enforcement' },
+      { icon: '📋', title: 'netsuite.get_metadata', desc: 'Return discovered custom fields, record types, org hierarchy' },
+      { icon: '📖', title: 'rag.search', desc: 'Vector similarity search over documentation + metadata chunks' },
+      { icon: '📊', title: 'data.sample_table_read', desc: 'Read from canonical tables: orders, payments, refunds, payouts' },
+      { icon: '📁', title: 'workspace.*', desc: 'list_files, read_file, search, propose_patch, apply_patch' },
+      { icon: '🌐', title: 'web.search', desc: 'DuckDuckGo web search for external context' },
+      { icon: '📤', title: 'report.export', desc: 'Generate CSV/PDF reports from query results' },
+      { icon: '🛡', title: 'Governance', desc: 'Rate limit → param validate → execute → redact PII → audit log' },
+    ]
+  },
+  {
+    id: 'workers',
+    num: 5,
+    title: 'Background Workers — Async Tasks',
+    tech: 'Celery · Redis (4 queues) · Job tracking',
+    colorClass: 'c-workers',
+    services: [
+      { icon: '🔍', title: 'metadata_discovery', desc: 'Queue: sync. Runs 10 SuiteQL queries, saves to netsuite_metadata table' },
+      { icon: '📥', title: 'suitescript_sync', desc: 'Queue: sync. Batch-fetch JS files from File Cabinet → workspace' },
+      { icon: '🛒', title: 'shopify_sync', desc: 'Queue: sync. Cursor-based incremental order/payment/refund ingestion' },
+      { icon: '💳', title: 'stripe_sync', desc: 'Queue: sync. Payout reconciliation, transaction matching' },
+      { icon: '🧹', title: 'audit_retention', desc: 'Queue: default. Delete audit events older than 90 days' },
+      { icon: '🚀', title: 'workspace_run', desc: 'Queue: default. Execute assertions, deploy to sandbox' },
+    ]
+  },
+  {
+    id: 'infra',
+    num: 6,
+    title: 'Infrastructure — Databases & Cache',
+    tech: 'PostgreSQL 16 (pgvector) · Redis 7 · Docker',
+    colorClass: 'c-infra',
+    services: [
+      { icon: '🐘', title: 'PostgreSQL', desc: 'Port 5432. pgvector for embeddings. RLS for tenant isolation. UUID-ossp' },
+      { icon: '⚡', title: 'Redis', desc: 'Port 6379. DB0: cache/sessions. DB1: Celery broker. DB2: task results' },
+      { icon: '🔒', title: 'Row-Level Security', desc: 'SET LOCAL app.current_tenant_id on every DB session' },
+      { icon: '🔑', title: 'Fernet Encryption', desc: 'Credentials encrypted at rest. Versioned key rotation' },
+    ]
+  },
+  {
+    id: 'netsuite',
+    num: 7,
+    title: 'NetSuite SuiteApp — Customer Account',
+    tech: 'SuiteScript 2.1 · SDF · RESTlets · SuiteBundler',
+    colorClass: 'c-netsuite',
+    services: [
+      { icon: '📁', title: 'File Cabinet RESTlet', desc: 'GET/POST/PUT/DELETE. In-place file update preserving file IDs' },
+      { icon: '🔒', title: 'Mock Data RESTlet', desc: 'SuiteQL execution with server-side PII masking for test data' },
+      { icon: '📦', title: 'Bundle Install Script', desc: 'Lifecycle hooks: afterInstall, beforeUpdate, afterUpdate, beforeUninstall' },
+      { icon: '⚙️', title: 'SDF Config', desc: 'manifest.xml, deploy.xml. Type: ACCOUNTCUSTOMIZATION' },
+    ]
+  },
+];
+
+const chatFlow = [
+  { dot: 'dot-1', label: 'User types "what is the latest order?"', desc: 'Frontend sends POST /api/v1/chat/sessions/{id}/messages via SSE stream' },
+  { dot: 'dot-2', label: 'API receives request', desc: 'JWT validated → run_chat_turn() orchestrator starts → loads conversation history' },
+  { dot: 'dot-3', label: 'Orchestrator builds context', desc: 'RAG retrieval for docs → resolves system prompt (template or default) → injects dynamic tool inventory' },
+  { dot: 'dot-3', label: 'LLM decides tool call', desc: 'Claude/GPT receives tools list → calls netsuite_suiteql({"query": "SELECT id, tranid..."})' },
+  { dot: 'dot-4', label: 'MCP governance validates', desc: 'Rate limit check → param validation → table allowlist → ROWNUM enforcement' },
+  { dot: 'dot-3', label: 'OAuth token refresh', desc: 'get_valid_token() checks expiry → auto-refresh if < 60s remaining' },
+  { dot: 'dot-6', label: 'SuiteQL hits NetSuite REST API', desc: 'POST /services/rest/query/v1/suiteql with Bearer token → returns JSON rows' },
+  { dot: 'dot-4', label: 'Result flows back through governance', desc: 'PII redaction → audit log → result returned to LLM' },
+  { dot: 'dot-3', label: 'LLM formats answer', desc: 'Model receives tool result → generates human-readable response with data table' },
+  { dot: 'dot-1', label: 'Streamed to user', desc: 'SSE events: text chunks → tool_status → final message saved to DB' },
+];
+
+const settingsFlow = [
+  { dot: 'dot-1', label: 'User clicks "Refresh Metadata"', desc: 'Frontend POST /api/v1/netsuite/metadata/discover' },
+  { dot: 'dot-2', label: 'API queues Celery task', desc: 'Returns task_id immediately. Frontend starts polling for status' },
+  { dot: 'dot-5', label: 'Worker picks up task', desc: 'Celery worker on sync queue. 120s soft limit, 180s hard limit' },
+  { dot: 'dot-6', label: '10 SuiteQL discovery queries', desc: 'Custom fields (body, column, entity, item), record types, lists, subsidiaries, departments, classes, locations' },
+  { dot: 'dot-5', label: 'Results saved to DB', desc: 'netsuite_metadata table updated. Triggers prompt template regeneration' },
+  { dot: 'dot-1', label: 'Frontend sees completion', desc: 'Polling detects status=completed. UI shows discovered field counts' },
+];
+
+function Layer({ layer, isOpen, onToggle }) {
+  return (
+    <div className={`layer ${layer.colorClass}`}>
+      <div className="layer-header" onClick={onToggle}>
+        <div className="layer-number">{layer.num}</div>
+        <div className="layer-title">{layer.title}</div>
+        <div className="layer-tech">{layer.tech}{layer.port ? ` · ${layer.port}` : ''}</div>
+        <div className={`layer-arrow ${isOpen ? 'open' : ''}`}>▶</div>
+      </div>
+      <div className={`layer-body ${isOpen ? 'open' : ''}`}>
+        <div className="services-grid">
+          {layer.services.map((s, i) => (
+            <div key={i} className="service-box">
+              <div className="service-box-title">
+                <span className="service-icon">{s.icon}</span>
+                {s.title}
+              </div>
+              <div className="service-box-desc">{s.desc}</div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function FlowDiagram({ steps }) {
+  return (
+    <div className="flow-container">
+      <div className="flow-steps">
+        {steps.map((step, i) => (
+          <div key={i} className="flow-step">
+            <div className={`flow-dot ${step.dot}`}>{i + 1}</div>
+            <div className="flow-content">
+              <div className="flow-label">{step.label}</div>
+              <div className="flow-desc">{step.desc}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function App() {
+  const [openLayers, setOpenLayers] = useState(new Set(['frontend', 'api', 'services', 'mcp', 'workers', 'infra', 'netsuite']));
+  const [activeTab, setActiveTab] = useState('layers');
+
+  const toggleLayer = (id) => {
+    setOpenLayers(prev => {
+      const next = new Set(prev);
+      next.has(id) ? next.delete(id) : next.add(id);
+      return next;
+    });
+  };
+
+  return (
+    <div className="container">
+      <div className="title">Ecom NetSuite Suites</div>
+      <div className="subtitle">Multi-tenant SaaS — E-commerce ↔ NetSuite AI Operations Platform</div>
+
+      <div className="stats">
+        <div className="stat"><div className="stat-value">7</div><div className="stat-label">Architecture Layers</div></div>
+        <div className="stat"><div className="stat-value">20+</div><div className="stat-label">API Routes</div></div>
+        <div className="stat"><div className="stat-value">17+</div><div className="stat-label">MCP Tools</div></div>
+        <div className="stat"><div className="stat-value">23</div><div className="stat-label">DB Migrations</div></div>
+        <div className="stat"><div className="stat-value">3</div><div className="stat-label">LLM Providers</div></div>
+        <div className="stat"><div className="stat-value">4</div><div className="stat-label">Celery Queues</div></div>
+        <div className="stat"><div className="stat-value">49</div><div className="stat-label">Backend Tests</div></div>
+        <div className="stat"><div className="stat-value">5</div><div className="stat-label">Docker Services</div></div>
+      </div>
+
+      <div className="tabs">
+        <button className={`tab ${activeTab === 'layers' ? 'active' : ''}`} onClick={() => setActiveTab('layers')}>Architecture Layers</button>
+        <button className={`tab ${activeTab === 'chat-flow' ? 'active' : ''}`} onClick={() => setActiveTab('chat-flow')}>Chat Data Flow</button>
+        <button className={`tab ${activeTab === 'settings-flow' ? 'active' : ''}`} onClick={() => setActiveTab('settings-flow')}>Metadata Flow</button>
+      </div>
+
+      {activeTab === 'layers' && (
+        <div>
+          {layers.map((layer, i) => (
+            <React.Fragment key={layer.id}>
+              <Layer
+                layer={layer}
+                isOpen={openLayers.has(layer.id)}
+                onToggle={() => toggleLayer(layer.id)}
+              />
+              {i < layers.length - 1 && <div className="connector">↓↓↓</div>}
+            </React.Fragment>
+          ))}
+        </div>
+      )}
+
+      {activeTab === 'chat-flow' && (
+        <div className="flow-section">
+          <div className="flow-title">Chat Flow: "What is the latest order?"</div>
+          <FlowDiagram steps={chatFlow} />
+        </div>
+      )}
+
+      {activeTab === 'settings-flow' && (
+        <div className="flow-section">
+          <div className="flow-title">Metadata Discovery: Settings → NetSuite → DB</div>
+          <FlowDiagram steps={settingsFlow} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+</script>
+</body>
+</html>

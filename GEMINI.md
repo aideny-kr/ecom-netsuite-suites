@@ -3,6 +3,15 @@
 > Give this file to Gemini at the start of every session.
 > These rules are non-negotiable and override any assumptions.
 
+# Code standards and guidelines
+1. Simple is better than complex
+2. Readability is better than cleverness
+3. Comments only when necessary
+4. Be concise, short README.md, no emojis
+5. Avoid overly defensive programming
+6. avoid isinstance checks
+7. only manage exceptions when necessary
+
 ## SuiteQL Dialect (Oracle-based)
 
 **ROWNUM vs FETCH FIRST — CRITICAL:**
