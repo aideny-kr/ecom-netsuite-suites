@@ -1,9 +1,8 @@
 import json
-import logging
 import uuid
 
 import structlog
-from sqlalchemy import select, func
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.tenant_entity_mapping import TenantEntityMapping
@@ -115,7 +114,7 @@ class TenantEntityResolver:
             rule_query = (
                 select(TenantLearnedRule)
                 .where(TenantLearnedRule.tenant_id == tenant_id)
-                .where(TenantLearnedRule.is_active == True)
+                .where(TenantLearnedRule.is_active == True)  # noqa: E712
             )
             rule_result = await db.execute(rule_query)
             learned_rules = list(rule_result.scalars().all())

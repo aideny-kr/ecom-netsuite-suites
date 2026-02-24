@@ -40,4 +40,4 @@ class TenantWallet(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     # Watermark for Stripe sync delta calculation
     last_synced_metered_credits: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
-    tenant: Mapped["Tenant"] = relationship("Tenant", foreign_keys=[tenant_id])
+    tenant: Mapped["Tenant"] = relationship("Tenant", foreign_keys=[tenant_id])  # noqa: F821

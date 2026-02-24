@@ -55,6 +55,18 @@ line-length = 120
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W"]
 
+[tool.ruff.lint.per-file-ignores]
+"app/services/chat/agents/suiteql_agent.py" = ["E501"]
+"app/services/chat/agents/workspace_agent.py" = ["E501"]
+"app/services/chat/coordinator.py" = ["E501"]
+"app/services/chat/orchestrator.py" = ["E501"]
+"app/services/chat/tenant_resolver.py" = ["E501"]
+"app/api/v1/chat.py" = ["E501"]
+"app/mcp/tools/rag_search.py" = ["E501"]
+"tests/test_netsuite_oauth.py" = ["E501"]
+"tests/test_suiteql_agent_prompt.py" = ["E501"]
+"tests/test_web_search_tool.py" = ["E501"]
+
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
