@@ -74,6 +74,34 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Proactive token refresh — check every 5 minutes, refresh 2 min before expiry
+  useEffect(() => {
+    const BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+    const interval = setInterval(async () => {
+      const token = localStorage.getItem("access_token");
+      if (!token) return;
+      try {
+        const payload = JSON.parse(atob(token.split(".")[1]));
+        const expiresAt = payload.exp * 1000;
+        const twoMinutes = 2 * 60 * 1000;
+        if (Date.now() > expiresAt - twoMinutes) {
+          const res = await fetch(`${BASE_URL}/api/v1/auth/refresh`, {
+            method: "POST",
+            credentials: "include",
+            headers: { "Content-Type": "application/json" },
+          });
+          if (res.ok) {
+            const data = await res.json();
+            setTokens(data);
+          }
+        }
+      } catch {
+        // Ignore decode errors — token will refresh on next API call via 401 retry
+      }
+    }, 5 * 60 * 1000);
+    return () => clearInterval(interval);
+  }, []);
+
   const login = useCallback(
     async (data: LoginRequest) => {
       const res = await apiClient.post<AuthResponse>(

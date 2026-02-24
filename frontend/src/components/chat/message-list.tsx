@@ -111,9 +111,12 @@ export function MessageList({
 }: MessageListProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
 
+  // Use instant scroll during streaming (smooth can't keep up with rapid updates),
+  // smooth scroll for message list changes (new messages loaded, pending message shown).
+  const isStreamingNow = !!(streamingContent || isWaitingForReply);
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, pendingUserMessage, isWaitingForReply]);
+    bottomRef.current?.scrollIntoView({ behavior: isStreamingNow ? "auto" : "smooth" });
+  }, [messages, pendingUserMessage, isWaitingForReply, streamingContent, isStreamingNow]);
 
   if (isLoading) {
     return (

@@ -1,5 +1,34 @@
 const BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
+// ── Silent token refresh on 401 ────────────────────────────────
+let isRefreshing = false;
+let refreshPromise: Promise<boolean> | null = null;
+
+async function tryRefreshToken(): Promise<boolean> {
+  if (isRefreshing && refreshPromise) return refreshPromise;
+  isRefreshing = true;
+  refreshPromise = (async () => {
+    try {
+      const res = await fetch(`${BASE_URL}/api/v1/auth/refresh`, {
+        method: "POST",
+        credentials: "include", // sends HttpOnly refresh_token cookie
+        headers: { "Content-Type": "application/json" },
+      });
+      if (!res.ok) return false;
+      const data = await res.json();
+      localStorage.setItem("access_token", data.access_token);
+      document.cookie = `access_token=${data.access_token}; path=/; max-age=${60 * 60 * 24 * 7}; samesite=lax`;
+      return true;
+    } catch {
+      return false;
+    } finally {
+      isRefreshing = false;
+      refreshPromise = null;
+    }
+  })();
+  return refreshPromise;
+}
+
 async function request<T>(
   method: string,
   path: string,
@@ -23,7 +52,23 @@ async function request<T>(
     body: body ? JSON.stringify(body) : undefined,
   });
 
+  // On 401, attempt silent token refresh before redirecting to login
   if (res.status === 401 && typeof window !== "undefined") {
+    const refreshed = await tryRefreshToken();
+    if (refreshed) {
+      // Retry the original request with the new token
+      headers["Authorization"] = `Bearer ${localStorage.getItem("access_token")}`;
+      const retry = await fetch(`${BASE_URL}${path}`, {
+        method,
+        headers,
+        credentials: "include",
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      if (retry.ok) {
+        if (retry.status === 204) return undefined as T;
+        return retry.json();
+      }
+    }
     localStorage.removeItem("access_token");
     localStorage.removeItem("refresh_token");
     window.location.href = "/login";
@@ -86,7 +131,20 @@ async function streamRequest(path: string, body?: unknown): Promise<Response> {
     body: body ? JSON.stringify(body) : undefined,
   });
 
+  // On 401, attempt silent token refresh before redirecting to login
   if (res.status === 401 && typeof window !== "undefined") {
+    const refreshed = await tryRefreshToken();
+    if (refreshed) {
+      // Retry the stream request with the new token
+      headers["Authorization"] = `Bearer ${localStorage.getItem("access_token")}`;
+      const retry = await fetch(`${BASE_URL}${path}`, {
+        method: "POST",
+        headers,
+        credentials: "include",
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      if (retry.ok) return retry;
+    }
     localStorage.removeItem("access_token");
     localStorage.removeItem("refresh_token");
     window.location.href = "/login";

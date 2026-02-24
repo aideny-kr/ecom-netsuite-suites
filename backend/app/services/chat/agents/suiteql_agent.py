@@ -4,8 +4,8 @@ Uses chain-of-thought reasoning to understand user intent, plan the query
 approach, explore the schema via metadata tools, and construct correct
 SuiteQL queries. Designed to work with a strong reasoning model (Sonnet+).
 
-Prefers external MCP tools (like ns_runCustomSuiteQL from NetSuite's native
-MCP endpoint) over the local netsuite_suiteql REST API tool when available.
+Prefers the local netsuite_suiteql REST API tool (OAuth 2.0, full permissions)
+over the external MCP endpoint which may have restricted record type access.
 """
 
 from __future__ import annotations
@@ -82,6 +82,14 @@ CUSTOM LIST FIELDS:
 - To filter: use `WHERE field = <id>` (fastest) or `BUILTIN.DF(field) = 'Value Name'` (readable).
 - The field-to-list linkage is shown as `(SELECT → customlist_name)` in the field listing.
 
+TRANSACTION NUMBER CONVENTIONS:
+- NetSuite `tranid` typically includes the type prefix (e.g., "RMA61214", "SO865732", "PO12345").
+- When the user says "RMA61214", search for the EXACT value first: `WHERE t.tranid = 'RMA61214'`
+- Common prefixes and their type codes (use to filter by type for faster queries):
+  RMA → `t.type = 'RtnAuth'`, SO → `t.type = 'SalesOrd'`, PO → `t.type = 'PurchOrd'`,
+  INV → `t.type = 'CustInvc'`, TO → `t.type = 'TrnfrOrd'`, IF → `t.type = 'ItemShip'`,
+  IR → `t.type = 'ItemRcpt'`, WO → `t.type = 'WorkOrd'`, VB → `t.type = 'VendBill'`
+
 JOIN PATTERNS:
 - Filter to item lines only using `tl.mainline = 'F' AND tl.taxline = 'F'`.
 - For header-only queries (no line details), use `WHERE t.mainline = 'T'` or just query the `transaction` table without joining `transactionline`.
@@ -90,7 +98,7 @@ JOIN PATTERNS:
 <common_queries>
 IMPORTANT: For simple lookups, use ONE query. Do NOT over-engineer with multiple calls.
 
-- Order by number: `SELECT t.id, t.tranid, t.trandate, BUILTIN.DF(t.entity) as customer, BUILTIN.DF(t.status) as status, t.foreigntotal FROM transaction t WHERE t.tranid = '865732' OR t.otherrefnum = '865732'`
+- Transaction by number: `SELECT t.id, t.tranid, t.trandate, BUILTIN.DF(t.entity) as customer, BUILTIN.DF(t.status) as status, t.foreigntotal FROM transaction t WHERE t.tranid = 'RMA61214'`
 - Order by internal ID: `SELECT ... FROM transaction t WHERE t.id = 12345`
 - Latest N orders: `SELECT ... FROM transaction t WHERE t.type = 'SalesOrd' ORDER BY t.id DESC FETCH FIRST 10 ROWS ONLY`
 - Customer by name: `SELECT id, companyname, email FROM customer WHERE LOWER(companyname) LIKE '%acme%'`
@@ -107,14 +115,14 @@ If the user's query mentions ANY custom record by name (even partially), you MUS
 
 WORKFLOW:
 1. If a custom record matched in Step 0: Use netsuite_suiteql to run `SELECT * FROM <resolved_lowercase_script_id> WHERE ROWNUM <= 5` to discover columns, then query with filters.
-2. If no custom record matched and it's not in vernacular: Query standard tables (transaction, customer, item, etc.) using the external MCP tool.
+2. If no custom record matched and it's not in vernacular: Query standard tables (transaction, customer, item, etc.) using netsuite_suiteql (local REST API).
 3. RECOVER FROM ERRORS: If a query fails with "Unknown identifier", fix the column name and retry. If it fails with syntax error, fix and retry.
 4. KEEP GOING: Do NOT stop after discovering a record. Do NOT stop after finding column names. Keep going until you have DATA ROWS that answer the user's question.
 5. ASK FOR HELP ONLY WHEN STUCK: Only ask the user for clarification if you've exhausted all approaches.
 
 TOOL SELECTION — CRITICAL:
-- netsuite_suiteql: Local REST API for SuiteQL. USE THIS for custom record tables (customrecord_*). The REST API fully supports custom record queries.
-- external_mcp_suiteql: NetSuite MCP endpoint. Use ONLY for standard tables (transaction, customer, item, etc.). Does NOT work for custom record tables.
+- netsuite_suiteql: Local REST API for SuiteQL (OAuth 2.0). USE THIS AS DEFAULT for ALL queries — both custom records (customrecord_*) AND standard tables (transaction, customer, item, etc.). Has full permissions.
+- external_mcp_suiteql: NetSuite MCP endpoint. ONLY use as fallback if netsuite_suiteql fails. May have restricted permissions (some record types like RMA/Return Authorization may not be visible).
 - netsuite_get_metadata: Discover column names for standard record types, and to safely discover the script_id of a custom record if guessing is tempting.
 - rag_search: Search internal documentation.
 
@@ -124,7 +132,7 @@ CUSTOM RECORD TABLE NAMING — IMPORTANT:
 - Query pattern: `SELECT * FROM customrecord_<lowercase_script_id> WHERE ROWNUM <= 5`
 
 ERROR RECOVERY:
-- "Record not found" on a custom record → switch from external MCP tool to netsuite_suiteql (local REST API).
+- "Record not found" or "Invalid or unsupported search" → switch to netsuite_suiteql (local REST API) which has full permissions.
 - Unknown identifier → try `SELECT * FROM <table> WHERE ROWNUM <= 1` to discover real column names, then retry.
 - 0 rows returned → report "0 rows found" with the query you ran. Do NOT retry with different filters.
 - Each retry MUST be meaningfully different from the previous attempt.
