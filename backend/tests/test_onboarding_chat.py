@@ -118,7 +118,7 @@ class TestOnboardingChatStart:
     @pytest.mark.asyncio
     async def test_start_onboarding_creates_session_with_type(self, client, db, user_and_headers):
         _, headers = user_and_headers
-        with patch("app.api.v1.onboarding.run_chat_turn") as mock_turn:
+        with patch("app.api.v1.onboarding.run_chat_turn", new_callable=AsyncMock) as mock_turn:
             mock_msg = AsyncMock()
             mock_msg.id = uuid.uuid4()
             mock_msg.role = "assistant"
@@ -142,7 +142,7 @@ class TestOnboardingChatStart:
     @pytest.mark.asyncio
     async def test_start_onboarding_returns_greeting(self, client, user_and_headers):
         _, headers = user_and_headers
-        with patch("app.api.v1.onboarding.run_chat_turn") as mock_turn:
+        with patch("app.api.v1.onboarding.run_chat_turn", new_callable=AsyncMock) as mock_turn:
             mock_msg = AsyncMock()
             mock_msg.id = uuid.uuid4()
             mock_msg.role = "assistant"
@@ -230,7 +230,7 @@ class TestOrchestratorOnboardingRouting:
             mock_response.text_blocks = ["Welcome!"]
             mock_response.usage = AsyncMock(input_tokens=10, output_tokens=20)
             mock_adapter.create_message = AsyncMock(return_value=mock_response)
-            mock_adapter.stream_message = _make_stream_side_effect([mock_response])
+            mock_adapter.stream_message.side_effect = _make_stream_side_effect([mock_response])
             mock_adapter_fn.return_value = mock_adapter
 
             from app.services.chat.orchestrator import run_chat_turn
@@ -283,7 +283,7 @@ class TestOrchestratorOnboardingRouting:
             mock_response.text_blocks = ["Welcome!"]
             mock_response.usage = AsyncMock(input_tokens=10, output_tokens=20)
             mock_adapter.create_message = AsyncMock(return_value=mock_response)
-            mock_adapter.stream_message = _make_stream_side_effect([mock_response])
+            mock_adapter.stream_message.side_effect = _make_stream_side_effect([mock_response])
             mock_adapter_fn.return_value = mock_adapter
 
             from app.services.chat.orchestrator import run_chat_turn

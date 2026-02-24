@@ -292,7 +292,7 @@ class TestWorkspaceContextInjection:
 
         mock_adapter = AsyncMock()
         mock_adapter.create_message = AsyncMock(return_value=mock_response)
-        mock_adapter.stream_message = _make_stream_side_effect([mock_response])
+        mock_adapter.stream_message.side_effect = _make_stream_side_effect([mock_response])
         mock_adapter.build_assistant_message = MagicMock(return_value={"role": "assistant", "content": "test"})
 
         with (
@@ -352,7 +352,7 @@ class TestWorkspaceContextInjection:
 
         mock_adapter = AsyncMock()
         mock_adapter.create_message = AsyncMock(side_effect=[response_with_tool, response_text])
-        mock_adapter.stream_message = _make_stream_side_effect([response_with_tool, response_text])
+        mock_adapter.stream_message.side_effect = _make_stream_side_effect([response_with_tool, response_text])
         mock_adapter.build_assistant_message = MagicMock(return_value={"role": "assistant", "content": "test"})
         mock_adapter.build_tool_result_message = MagicMock(return_value={"role": "user", "content": "tool result"})
 
@@ -471,7 +471,7 @@ class TestAuditEvents:
 
         mock_adapter = AsyncMock()
         mock_adapter.create_message = AsyncMock(return_value=mock_response)
-        mock_adapter.stream_message = _make_stream_side_effect([mock_response])
+        mock_adapter.stream_message.side_effect = _make_stream_side_effect([mock_response])
 
         with (
             patch(f"{_ORCH}.get_adapter", return_value=mock_adapter),
@@ -539,7 +539,7 @@ class TestOrchestratorToolTiming:
 
         mock_adapter = AsyncMock()
         mock_adapter.create_message = AsyncMock(side_effect=[response_with_tool, response_text])
-        mock_adapter.stream_message = _make_stream_side_effect([response_with_tool, response_text])
+        mock_adapter.stream_message.side_effect = _make_stream_side_effect([response_with_tool, response_text])
         mock_adapter.build_assistant_message = MagicMock(return_value={"role": "assistant", "content": "test"})
         mock_adapter.build_tool_result_message = MagicMock(return_value={"role": "user", "content": "result"})
 
