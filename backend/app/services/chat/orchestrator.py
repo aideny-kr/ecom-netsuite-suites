@@ -29,6 +29,7 @@ from app.services.chat.onboarding_tools import (
     execute_onboarding_tool,
 )
 from app.services.chat.prompts import INPUT_SANITIZATION_PREFIX, ONBOARDING_SYSTEM_PROMPT
+from app.services.chat.billing import deduct_chat_credits
 from app.services.chat.tools import build_all_tool_definitions, execute_tool_call
 from app.services.prompt_template_service import get_active_template
 
@@ -343,6 +344,9 @@ async def run_chat_turn(
                 payload=audit_payload,
             )
 
+            # Tollbooth: deduct credits before commit
+            await deduct_chat_credits(db, tenant_id, model)
+
             await db.commit()
 
             # If we already yielded the final message via streaming, just return
@@ -538,6 +542,9 @@ async def run_chat_turn(
         correlation_id=correlation_id,
         payload=audit_payload,
     )
+
+    # Tollbooth: deduct credits before commit
+    await deduct_chat_credits(db, tenant_id, model)
 
     await db.commit()
 

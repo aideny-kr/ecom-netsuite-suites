@@ -26,6 +26,7 @@ celery_app.conf.update(
 
 celery_app.conf.include = [
     "app.workers.tasks.audit_retention",
+    "app.workers.tasks.billing_sync",
     "app.workers.tasks.example_sync",
     "app.workers.tasks.metadata_discovery",
     "app.workers.tasks.shopify_sync",
@@ -33,3 +34,10 @@ celery_app.conf.include = [
     "app.workers.tasks.suitescript_sync",
     "app.workers.tasks.workspace_run",
 ]
+
+celery_app.conf.beat_schedule = {
+    "sync-metered-billing": {
+        "task": "tasks.billing_sync",
+        "schedule": 3600.0,  # hourly
+    },
+}

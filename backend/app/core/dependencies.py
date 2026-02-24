@@ -113,6 +113,18 @@ def require_permission(codename: str):
     return permission_checker
 
 
+async def get_current_superadmin(
+    user: Annotated[User, Depends(get_current_user)],
+) -> User:
+    """Dependency that requires the user to have the superadmin global role."""
+    if getattr(user, "global_role", "user") != "superadmin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Super admin privileges required",
+        )
+    return user
+
+
 def require_entitlement(feature: str):
     async def entitlement_checker(
         user: Annotated[User, Depends(get_current_user)],

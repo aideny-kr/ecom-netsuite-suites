@@ -628,3 +628,42 @@ export interface MetadataDiscoveryTaskResponse {
   task_id: string;
   status: string;
 }
+
+// --- Admin / Billing Types ---
+
+export interface AdminWallet {
+  tenant_id: string;
+  stripe_customer_id: string | null;
+  stripe_subscription_item_id: string | null;
+  billing_period_start: string;
+  billing_period_end: string;
+  base_credits_remaining: number;
+  metered_credits_used: number;
+  last_synced_metered_credits: number;
+}
+
+export interface AdminTenant {
+  id: string;
+  name: string;
+  slug: string;
+  plan: string;
+  is_active: boolean;
+  created_at: string;
+  user_count: number;
+  wallet: AdminWallet | null;
+}
+
+export interface PlatformStats {
+  active_tenants: number;
+  total_tenants: number;
+  total_users: number;
+  total_base_credits_remaining: number;
+  total_metered_credits_used: number;
+}
+
+export interface ImpersonateResponse {
+  access_token: string;
+  token_type: string;
+  tenant_id: string;
+  tenant_name: string;
+}

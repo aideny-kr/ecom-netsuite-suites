@@ -83,6 +83,11 @@ class Settings(BaseSettings):
     TAVILY_API_KEY: str = ""  # For future Tavily upgrade
     WEB_SEARCH_MAX_RESULTS: int = 5
 
+    # Stripe billing
+    STRIPE_API_KEY: str = ""
+    STRIPE_WEBHOOK_SECRET: str = ""
+    BILLING_BASE_CREDITS: int = 500
+
     AUDIT_RETENTION_DAYS: int = 90
 
     model_config = {"env_file": str(_env_file), "extra": "ignore"}

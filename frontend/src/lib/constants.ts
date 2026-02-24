@@ -93,3 +93,8 @@ export const NAV_ITEMS = [
   { label: "Dev Workspace", href: "/workspace", icon: "Code" as const },
   { label: "Settings", href: "/settings", icon: "Settings" as const },
 ] as const;
+
+export const ADMIN_NAV_ITEMS = [
+  { label: "Overview", href: "/admin/dashboard", icon: "LayoutDashboard" as const },
+  { label: "Tenants", href: "/admin/dashboard", icon: "Building2" as const },
+] as const;

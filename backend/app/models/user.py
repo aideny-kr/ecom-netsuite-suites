@@ -25,6 +25,7 @@ class User(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     full_name: Mapped[str] = mapped_column(String(255), nullable=False)
     actor_type: Mapped[str] = mapped_column(String(50), default="user", nullable=False)
     is_active: Mapped[bool] = mapped_column(default=True, nullable=False)
+    global_role: Mapped[str] = mapped_column(String(20), default="user", nullable=False, server_default="user")
 
     tenant: Mapped["Tenant"] = relationship("Tenant", back_populates="users")
     user_roles: Mapped[list["UserRole"]] = relationship("UserRole", back_populates="user")
