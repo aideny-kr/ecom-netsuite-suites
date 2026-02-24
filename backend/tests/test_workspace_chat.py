@@ -290,9 +290,17 @@ class TestWorkspaceContextInjection:
         mock_response.tool_use_blocks = []
         mock_response.text_blocks = ["Hello from workspace!"]
 
+        captured_kwargs = {}
+
+        async def _capturing_stream(**kwargs):
+            captured_kwargs.update(kwargs)
+            for text in mock_response.text_blocks:
+                yield "text", text
+            yield "response", mock_response
+
         mock_adapter = AsyncMock()
         mock_adapter.create_message = AsyncMock(return_value=mock_response)
-        mock_adapter.stream_message.side_effect = _make_stream_side_effect([mock_response])
+        mock_adapter.stream_message = _capturing_stream
         mock_adapter.build_assistant_message = MagicMock(return_value={"role": "assistant", "content": "test"})
 
         with (
@@ -300,6 +308,7 @@ class TestWorkspaceContextInjection:
             patch(f"{_ORCH}.get_tenant_ai_config", return_value=_FAKE_AI_CONFIG),
             patch(f"{_ORCH}.get_active_template", return_value="You are helpful."),
             patch(f"{_ORCH}.retriever_node", new_callable=AsyncMock),
+            patch(f"{_ORCH}.deduct_chat_credits", new_callable=AsyncMock, return_value=None),
         ):
             from app.services.chat.orchestrator import run_chat_turn
 
@@ -313,8 +322,7 @@ class TestWorkspaceContextInjection:
                 pass
 
             # Verify stream_message was called with system prompt containing workspace info
-            call_args = mock_adapter.stream_message.call_args
-            system_prompt = call_args.kwargs["system"]
+            system_prompt = captured_kwargs["system"]
             assert "WORKSPACE CONTEXT" in system_prompt
             assert "Chat Test Workspace" in system_prompt
             assert "SuiteScripts/main.js" in system_prompt
@@ -352,7 +360,7 @@ class TestWorkspaceContextInjection:
 
         mock_adapter = AsyncMock()
         mock_adapter.create_message = AsyncMock(side_effect=[response_with_tool, response_text])
-        mock_adapter.stream_message.side_effect = _make_stream_side_effect([response_with_tool, response_text])
+        mock_adapter.stream_message = _make_stream_side_effect([response_with_tool, response_text])
         mock_adapter.build_assistant_message = MagicMock(return_value={"role": "assistant", "content": "test"})
         mock_adapter.build_tool_result_message = MagicMock(return_value={"role": "user", "content": "tool result"})
 
@@ -364,6 +372,7 @@ class TestWorkspaceContextInjection:
             patch(f"{_ORCH}.build_all_tool_definitions", return_value=[]),
             patch(f"{_ORCH}.execute_tool_call", new_callable=AsyncMock, return_value='{"files": []}'),
             patch("app.services.policy_service.get_active_policy", new_callable=AsyncMock, return_value=None),
+            patch(f"{_ORCH}.deduct_chat_credits", new_callable=AsyncMock, return_value=None),
         ):
             from app.services.chat.orchestrator import run_chat_turn
 
@@ -469,15 +478,21 @@ class TestAuditEvents:
         mock_response.tool_use_blocks = []
         mock_response.text_blocks = ["Response"]
 
+        async def _fake_stream(**kwargs):
+            for text in mock_response.text_blocks:
+                yield "text", text
+            yield "response", mock_response
+
         mock_adapter = AsyncMock()
         mock_adapter.create_message = AsyncMock(return_value=mock_response)
-        mock_adapter.stream_message.side_effect = _make_stream_side_effect([mock_response])
+        mock_adapter.stream_message = _fake_stream
 
         with (
             patch(f"{_ORCH}.get_adapter", return_value=mock_adapter),
             patch(f"{_ORCH}.get_tenant_ai_config", return_value=_FAKE_AI_CONFIG),
             patch(f"{_ORCH}.get_active_template", return_value="You are helpful."),
             patch(f"{_ORCH}.retriever_node", new_callable=AsyncMock),
+            patch(f"{_ORCH}.deduct_chat_credits", new_callable=AsyncMock, return_value=None),
         ):
             from app.services.chat.orchestrator import run_chat_turn
 
@@ -539,7 +554,7 @@ class TestOrchestratorToolTiming:
 
         mock_adapter = AsyncMock()
         mock_adapter.create_message = AsyncMock(side_effect=[response_with_tool, response_text])
-        mock_adapter.stream_message.side_effect = _make_stream_side_effect([response_with_tool, response_text])
+        mock_adapter.stream_message = _make_stream_side_effect([response_with_tool, response_text])
         mock_adapter.build_assistant_message = MagicMock(return_value={"role": "assistant", "content": "test"})
         mock_adapter.build_tool_result_message = MagicMock(return_value={"role": "user", "content": "result"})
 
@@ -551,6 +566,7 @@ class TestOrchestratorToolTiming:
             patch(f"{_ORCH}.build_all_tool_definitions", return_value=[]),
             patch(f"{_ORCH}.execute_tool_call", new_callable=AsyncMock, return_value='{"files": []}'),
             patch("app.services.policy_service.get_active_policy", new_callable=AsyncMock, return_value=None),
+            patch(f"{_ORCH}.deduct_chat_credits", new_callable=AsyncMock, return_value=None),
         ):
             from app.services.chat.orchestrator import run_chat_turn
 

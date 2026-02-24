@@ -118,14 +118,20 @@ class TestOnboardingChatStart:
     @pytest.mark.asyncio
     async def test_start_onboarding_creates_session_with_type(self, client, db, user_and_headers):
         _, headers = user_and_headers
-        with patch("app.api.v1.onboarding.run_chat_turn", new_callable=AsyncMock) as mock_turn:
-            mock_msg = AsyncMock()
-            mock_msg.id = uuid.uuid4()
-            mock_msg.role = "assistant"
-            mock_msg.content = "Welcome! Let's get you set up."
-            mock_msg.created_at = datetime.now(timezone.utc)
-            mock_turn.return_value = mock_msg
 
+        async def _fake_run_chat_turn(**kwargs):
+            msg_id = uuid.uuid4()
+            yield {
+                "type": "message",
+                "message": {
+                    "id": str(msg_id),
+                    "role": "assistant",
+                    "content": "Welcome! Let's get you set up.",
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                },
+            }
+
+        with patch("app.api.v1.onboarding.run_chat_turn", side_effect=_fake_run_chat_turn):
             resp = await client.post("/api/v1/onboarding/chat/start", headers=headers)
             assert resp.status_code == 201
             data = resp.json()
@@ -142,14 +148,20 @@ class TestOnboardingChatStart:
     @pytest.mark.asyncio
     async def test_start_onboarding_returns_greeting(self, client, user_and_headers):
         _, headers = user_and_headers
-        with patch("app.api.v1.onboarding.run_chat_turn", new_callable=AsyncMock) as mock_turn:
-            mock_msg = AsyncMock()
-            mock_msg.id = uuid.uuid4()
-            mock_msg.role = "assistant"
-            mock_msg.content = "Hello! Welcome to the platform."
-            mock_msg.created_at = datetime.now(timezone.utc)
-            mock_turn.return_value = mock_msg
 
+        async def _fake_run_chat_turn(**kwargs):
+            msg_id = uuid.uuid4()
+            yield {
+                "type": "message",
+                "message": {
+                    "id": str(msg_id),
+                    "role": "assistant",
+                    "content": "Hello! Welcome to the platform.",
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                },
+            }
+
+        with patch("app.api.v1.onboarding.run_chat_turn", side_effect=_fake_run_chat_turn):
             resp = await client.post("/api/v1/onboarding/chat/start", headers=headers)
             assert resp.status_code == 201
             data = resp.json()
@@ -217,22 +229,31 @@ class TestOrchestratorOnboardingRouting:
         )
         session = result.scalar_one()
 
+        mock_response = AsyncMock()
+        mock_response.tool_use_blocks = []
+        mock_response.text_blocks = ["Welcome!"]
+        mock_response.usage = AsyncMock(input_tokens=10, output_tokens=20)
+
+        captured_kwargs = {}
+
+        async def _capturing_stream(**kwargs):
+            captured_kwargs.update(kwargs)
+            for text in mock_response.text_blocks:
+                yield "text", text
+            yield "response", mock_response
+
+        mock_adapter = AsyncMock()
+        mock_adapter.create_message = AsyncMock(return_value=mock_response)
+        mock_adapter.stream_message = _capturing_stream
+
         with (
-            patch("app.services.chat.orchestrator.get_adapter") as mock_adapter_fn,
+            patch("app.services.chat.orchestrator.get_adapter", return_value=mock_adapter),
             patch(
                 "app.services.chat.orchestrator.get_tenant_ai_config",
                 return_value=("anthropic", "claude-sonnet-4-5-20250929", "fake-key", False),
             ),
+            patch("app.services.chat.orchestrator.deduct_chat_credits", new_callable=AsyncMock, return_value=None),
         ):
-            mock_adapter = AsyncMock()
-            mock_response = AsyncMock()
-            mock_response.tool_use_blocks = []
-            mock_response.text_blocks = ["Welcome!"]
-            mock_response.usage = AsyncMock(input_tokens=10, output_tokens=20)
-            mock_adapter.create_message = AsyncMock(return_value=mock_response)
-            mock_adapter.stream_message.side_effect = _make_stream_side_effect([mock_response])
-            mock_adapter_fn.return_value = mock_adapter
-
             from app.services.chat.orchestrator import run_chat_turn
 
             async for _ in run_chat_turn(
@@ -245,8 +266,7 @@ class TestOrchestratorOnboardingRouting:
                 pass
 
             # Verify the system prompt used was the onboarding prompt
-            call_args = mock_adapter.stream_message.call_args
-            assert call_args.kwargs["system"] == ONBOARDING_SYSTEM_PROMPT
+            assert captured_kwargs["system"] == ONBOARDING_SYSTEM_PROMPT
 
     @pytest.mark.asyncio
     async def test_onboarding_skips_rag(self, db, user_and_headers, tenant):
@@ -269,23 +289,29 @@ class TestOrchestratorOnboardingRouting:
         )
         session = result.scalar_one()
 
+        mock_response = AsyncMock()
+        mock_response.tool_use_blocks = []
+        mock_response.text_blocks = ["Welcome!"]
+        mock_response.usage = AsyncMock(input_tokens=10, output_tokens=20)
+
+        async def _fake_stream(**kwargs):
+            for text in mock_response.text_blocks:
+                yield "text", text
+            yield "response", mock_response
+
+        mock_adapter = AsyncMock()
+        mock_adapter.create_message = AsyncMock(return_value=mock_response)
+        mock_adapter.stream_message = _fake_stream
+
         with (
-            patch("app.services.chat.orchestrator.get_adapter") as mock_adapter_fn,
+            patch("app.services.chat.orchestrator.get_adapter", return_value=mock_adapter),
             patch("app.services.chat.orchestrator.retriever_node") as mock_retriever,
             patch(
                 "app.services.chat.orchestrator.get_tenant_ai_config",
                 return_value=("anthropic", "claude-sonnet-4-5-20250929", "fake-key", False),
             ),
+            patch("app.services.chat.orchestrator.deduct_chat_credits", new_callable=AsyncMock, return_value=None),
         ):
-            mock_adapter = AsyncMock()
-            mock_response = AsyncMock()
-            mock_response.tool_use_blocks = []
-            mock_response.text_blocks = ["Welcome!"]
-            mock_response.usage = AsyncMock(input_tokens=10, output_tokens=20)
-            mock_adapter.create_message = AsyncMock(return_value=mock_response)
-            mock_adapter.stream_message.side_effect = _make_stream_side_effect([mock_response])
-            mock_adapter_fn.return_value = mock_adapter
-
             from app.services.chat.orchestrator import run_chat_turn
 
             async for _ in run_chat_turn(

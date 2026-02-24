@@ -251,15 +251,18 @@ async def start_onboarding_chat(
     db.add(session)
     await db.flush()
 
-    # Trigger the first AI greeting by sending a system-initiated message
+    # Trigger the first AI greeting by consuming the async generator
     try:
-        assistant_msg = await run_chat_turn(
+        final_message = None
+        async for event in run_chat_turn(
             db=db,
             session=session,
             user_message="Hello! I just signed up and I'm ready to set up my account.",
             user_id=user.id,
             tenant_id=user.tenant_id,
-        )
+        ):
+            if event.get("type") == "message":
+                final_message = event["message"]
     except Exception:
         logger.exception("Failed to start onboarding chat")
         raise HTTPException(
@@ -267,13 +270,19 @@ async def start_onboarding_chat(
             detail="Failed to start onboarding chat. Please try again.",
         )
 
+    if not final_message:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Failed to generate onboarding greeting.",
+        )
+
     return OnboardingChatStartResponse(
         session_id=str(session.id),
         message={
-            "id": str(assistant_msg.id),
-            "role": assistant_msg.role,
-            "content": assistant_msg.content,
-            "created_at": assistant_msg.created_at.isoformat(),
+            "id": final_message["id"],
+            "role": final_message["role"],
+            "content": final_message["content"],
+            "created_at": final_message.get("created_at", ""),
         },
     )
 
