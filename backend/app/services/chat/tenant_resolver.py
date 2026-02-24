@@ -7,6 +7,7 @@ from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.tenant_entity_mapping import TenantEntityMapping
+from app.models.tenant_learned_rule import TenantLearnedRule
 from app.services.chat.llm_adapter import BaseLLMAdapter
 
 logger = structlog.get_logger(__name__)
@@ -108,30 +109,53 @@ class TenantEntityResolver:
                     user_term=entity,
                 )
 
-        if not resolved:
-            logger.info("tenant_resolver.no_resolved_entities")
+        # Extract Tenant Learned Rules (Semantic Memory)
+        learned_rules = []
+        try:
+            rule_query = (
+                select(TenantLearnedRule)
+                .where(TenantLearnedRule.tenant_id == tenant_id)
+                .where(TenantLearnedRule.is_active == True)
+            )
+            rule_result = await db.execute(rule_query)
+            learned_rules = list(rule_result.scalars().all())
+        except Exception as e:
+            logger.warning("tenant_resolver.learned_rules_extraction_failed", exc_info=e)
+
+        if not resolved and not learned_rules:
+            logger.info("tenant_resolver.no_resolved_entities_or_rules")
             return ""
 
         # Construct the XML block to attach to the context
         xml_parts = [
             "<tenant_vernacular>",
             "    <instruction_context>",
-            "        The following entities have been identified in the user's conversational prompt and mapped to their specific internal NetSuite Script IDs for this particular tenant. ",
-            "        You MUST use these exact inner script IDs when constructing your SuiteQL FROM and WHERE clauses instead of guessing the NetSuite nomenclature.",
-            "    </instruction_context>",
-            "    <resolved_entities>"
+            "        The following entities and rules have been mapped to their specific internal NetSuite constraints for this particular tenant. ",
+            "        You MUST use these exact inner script IDs and rules when constructing your SuiteQL FROM and WHERE clauses.",
+            "    </instruction_context>"
         ]
 
-        for r in resolved:
-            xml_parts.append("        <entity>")
-            xml_parts.append(f"            <user_term>{r['user_term']}</user_term>")
-            xml_parts.append(f"            <internal_script_id>{r['internal_script_id']}</internal_script_id>")
-            xml_parts.append(f"            <entity_type>{r['entity_type']}</entity_type>")
-            xml_parts.append(f"            <metadata>{r['metadata']}</metadata>")
-            xml_parts.append(f"            <confidence_score>{r['confidence_score']}</confidence_score>")
-            xml_parts.append("        </entity>")
+        if resolved:
+            xml_parts.append("    <resolved_entities>")
+            for r in resolved:
+                xml_parts.append("        <entity>")
+                xml_parts.append(f"            <user_term>{r['user_term']}</user_term>")
+                xml_parts.append(f"            <internal_script_id>{r['internal_script_id']}</internal_script_id>")
+                xml_parts.append(f"            <entity_type>{r['entity_type']}</entity_type>")
+                xml_parts.append(f"            <metadata>{r['metadata']}</metadata>")
+                xml_parts.append(f"            <confidence_score>{r['confidence_score']}</confidence_score>")
+                xml_parts.append("        </entity>")
+            xml_parts.append("    </resolved_entities>")
 
-        xml_parts.append("    </resolved_entities>")
+        if learned_rules:
+            xml_parts.append("    <learned_rules>")
+            xml_parts.append("        <!-- Explicit business logic / schema rules learned for this tenant. FOLLOW THESE STRICTLY. -->")
+            for rule in learned_rules:
+                xml_parts.append(f"        <rule category=\"{rule.rule_category or 'general'}\">")
+                xml_parts.append(f"            {rule.rule_description}")
+                xml_parts.append("        </rule>")
+            xml_parts.append("    </learned_rules>")
+
         xml_parts.append("</tenant_vernacular>")
 
         xml_output = "\n".join(xml_parts)

@@ -174,7 +174,7 @@ class TestExecuteSuiteqlFallback:
                 new_callable=AsyncMock,
             ) as mock_rest,
         ):
-            result = await execute_suiteql("token", "acct", "SELECT id FROM x", 10)
+            result = await execute_suiteql("token", "acct", "SELECT id FROM x", 10, use_mcp=True)
 
             assert result["rows"] == [["mcp_1"]]
             mock_rest.assert_not_awaited()
