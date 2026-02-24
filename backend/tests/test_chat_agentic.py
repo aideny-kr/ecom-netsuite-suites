@@ -80,6 +80,7 @@ def _patch_orchestrator(**overrides):
         "build_all_tool_definitions": AsyncMock(return_value=[]),
         "log_event": AsyncMock(),
         "get_active_template": AsyncMock(return_value="You are a helpful assistant."),
+        "deduct_chat_credits": AsyncMock(return_value=None),
     }
     defaults.update(overrides)
 
@@ -138,6 +139,7 @@ class TestAgenticSingleStep:
             patch(f"{_ORCH}.build_all_tool_definitions", new_callable=AsyncMock, return_value=[]),
             patch(f"{_ORCH}.log_event", new_callable=AsyncMock),
             patch(f"{_ORCH}.get_active_template", new_callable=AsyncMock, return_value="You are a helpful assistant."),
+            patch(f"{_ORCH}.deduct_chat_credits", new_callable=AsyncMock, return_value=None),
             patch("app.services.policy_service.get_active_policy", new_callable=AsyncMock, return_value=None),
         ):
             result = await _collect_stream_result(run_chat_turn(
@@ -207,6 +209,7 @@ class TestAgenticToolCall:
             ),
             patch(f"{_ORCH}.log_event", new_callable=AsyncMock),
             patch(f"{_ORCH}.get_active_template", new_callable=AsyncMock, return_value="You are a helpful assistant."),
+            patch(f"{_ORCH}.deduct_chat_credits", new_callable=AsyncMock, return_value=None),
             patch("app.services.policy_service.get_active_policy", new_callable=AsyncMock, return_value=None),
         ):
             result = await _collect_stream_result(run_chat_turn(
@@ -289,6 +292,7 @@ class TestAgenticToolRetry:
             ),
             patch(f"{_ORCH}.log_event", new_callable=AsyncMock),
             patch(f"{_ORCH}.get_active_template", new_callable=AsyncMock, return_value="You are a helpful assistant."),
+            patch(f"{_ORCH}.deduct_chat_credits", new_callable=AsyncMock, return_value=None),
             patch("app.services.policy_service.get_active_policy", new_callable=AsyncMock, return_value=None),
         ):
             result = await _collect_stream_result(run_chat_turn(
@@ -362,6 +366,7 @@ class TestAgenticMaxSteps:
             ),
             patch(f"{_ORCH}.log_event", new_callable=AsyncMock),
             patch(f"{_ORCH}.get_active_template", new_callable=AsyncMock, return_value="You are a helpful assistant."),
+            patch(f"{_ORCH}.deduct_chat_credits", new_callable=AsyncMock, return_value=None),
             patch("app.services.policy_service.get_active_policy", new_callable=AsyncMock, return_value=None),
         ):
             result = await _collect_stream_result(run_chat_turn(
@@ -415,6 +420,7 @@ class TestAgenticAllowlistEnforcement:
             patch(f"{_ORCH}.build_all_tool_definitions", new_callable=AsyncMock, return_value=[]),
             patch(f"{_ORCH}.log_event", new_callable=AsyncMock),
             patch(f"{_ORCH}.get_active_template", new_callable=AsyncMock, return_value="You are a helpful assistant."),
+            patch(f"{_ORCH}.deduct_chat_credits", new_callable=AsyncMock, return_value=None),
             patch("app.services.policy_service.get_active_policy", new_callable=AsyncMock, return_value=None),
         ):
             result = await _collect_stream_result(run_chat_turn(

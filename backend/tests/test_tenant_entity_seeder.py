@@ -2,8 +2,6 @@
 
 import uuid
 
-import pytest
-
 from app.services.tenant_entity_seeder import _build_rows
 
 

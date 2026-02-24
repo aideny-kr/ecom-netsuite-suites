@@ -5,9 +5,9 @@ Uses the MCP SDK's streamablehttp_client for Streamable HTTP transport.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
-import asyncio
 from typing import TYPE_CHECKING
 
 import structlog
@@ -150,10 +150,10 @@ async def call_external_mcp_tool(
     db: AsyncSession | None = None,
 ) -> dict:
     """Call a tool on an external MCP server and return the parsed result."""
-    
+
     if tool_params is None:
         tool_params = {}
-        
+
     # --- GOVERNANCE INTERCEPT ---
     if tool_name == "ns_runCustomSuiteQL" and "sqlQuery" in tool_params:
         sql = tool_params["sqlQuery"].strip().rstrip(";")

@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.models.chat import ChatMessage, ChatSession
 from app.services.audit_service import log_event
+from app.services.chat.billing import deduct_chat_credits
 from app.services.chat.llm_adapter import get_adapter
 from app.services.chat.nodes import (
     OrchestratorState,
@@ -29,7 +30,6 @@ from app.services.chat.onboarding_tools import (
     execute_onboarding_tool,
 )
 from app.services.chat.prompts import INPUT_SANITIZATION_PREFIX, ONBOARDING_SYSTEM_PROMPT
-from app.services.chat.billing import deduct_chat_credits
 from app.services.chat.tools import build_all_tool_definitions, execute_tool_call
 from app.services.prompt_template_service import get_active_template
 
@@ -372,7 +372,7 @@ async def run_chat_turn(
 
     for step in range(MAX_STEPS):
         response = None
-        
+
         # Determine if we should stream using stream_message or fallback
         # (Assuming all adapters implemented stream_message, else this would fail)
         async for event_type, payload in adapter.stream_message(
@@ -488,7 +488,7 @@ async def run_chat_turn(
                 yield {"type": "text", "content": payload}
             elif event_type == "response":
                 response = payload
-                
+
         if response:
             total_input_tokens += response.usage.input_tokens
             total_output_tokens += response.usage.output_tokens

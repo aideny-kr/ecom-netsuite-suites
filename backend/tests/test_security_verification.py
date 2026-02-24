@@ -12,9 +12,8 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
-import pytest_asyncio
 from httpx import AsyncClient
-from sqlalchemy import select, text
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -30,8 +29,7 @@ from app.models.connection import Connection
 from app.models.tenant import Tenant
 from app.models.user import User
 
-from .conftest import create_test_tenant, create_test_user, make_auth_headers
-
+from .conftest import create_test_user, make_auth_headers
 
 # ---------------------------------------------------------------------------
 # V2.1 — Password Security

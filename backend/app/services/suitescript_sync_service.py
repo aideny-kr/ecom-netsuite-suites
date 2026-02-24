@@ -9,21 +9,19 @@ Workflow:
 from __future__ import annotations
 
 import asyncio
-import base64
 import hashlib
 import uuid
 from datetime import datetime, timezone
 from pathlib import PurePosixPath
 from typing import Any
 
-import httpx
 import structlog
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.script_sync import ScriptSyncState
 from app.models.workspace import Workspace, WorkspaceFile
-from app.services.netsuite_client import _normalize_account_id, execute_suiteql
+from app.services.netsuite_client import execute_suiteql
 
 logger = structlog.get_logger()
 
@@ -125,6 +123,7 @@ async def fetch_file_content(
 ) -> str | None:
     """Fetch a single file's content from NetSuite File Cabinet via RESTlet."""
     import time as _time
+
     from app.services.netsuite_restlet_client import restlet_read_file
 
     t0 = _time.monotonic()

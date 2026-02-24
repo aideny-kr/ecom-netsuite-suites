@@ -1,8 +1,7 @@
 """Tests for SuiteQL agent prompt rules and metadata reference builder."""
 
-import pytest
 
-from app.services.chat.agents.suiteql_agent import SuiteQLAgent, _SYSTEM_PROMPT
+from app.services.chat.agents.suiteql_agent import _SYSTEM_PROMPT, SuiteQLAgent
 
 
 class TestSuiteQLPromptRules:

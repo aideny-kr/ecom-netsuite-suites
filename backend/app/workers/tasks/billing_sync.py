@@ -10,7 +10,6 @@ from sqlalchemy import select
 
 from app.core.config import settings
 from app.models.tenant_wallet import TenantWallet
-from app.workers.base_task import tenant_session
 from app.workers.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
@@ -22,8 +21,9 @@ def sync_metered_billing_to_stripe():
 
     Uses a raw sync session (no tenant RLS) since this is a platform-level job.
     """
-    from app.workers.base_task import sync_engine
     from sqlalchemy.orm import Session
+
+    from app.workers.base_task import sync_engine
 
     synced_count = 0
     error_count = 0

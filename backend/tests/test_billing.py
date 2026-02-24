@@ -1,13 +1,11 @@
 """Tests for the metered billing tollbooth and Stripe sync task."""
 
 import uuid
-from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from app.services.chat.billing import calculate_cost, deduct_chat_credits
-
 
 # ── calculate_cost tests ──
 

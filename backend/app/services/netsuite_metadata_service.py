@@ -198,11 +198,11 @@ def _count_fields(metadata: NetSuiteMetadata) -> int:
         val = getattr(metadata, attr, None)
         if isinstance(val, list):
             total += len(val)
-            
+
     # Also sum dynamically fetched custom list keys
     if getattr(metadata, "custom_list_values", None):
         total += len(metadata.custom_list_values)
-        
+
     return total
 
 
@@ -322,7 +322,7 @@ async def run_full_discovery(
             for r in results:
                 if isinstance(r, tuple) and r is not None:
                     custom_list_values[r[0]] = r[1]
-            
+
             metadata.custom_list_values = custom_list_values
         except Exception as exc:
             logger.warning("metadata.custom_list_value_extraction_failed", error=str(exc))

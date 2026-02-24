@@ -117,7 +117,7 @@ def _format_custom_list_values(list_name: str, values: list[dict]) -> str:
     lines = [
         f"Custom List Values for: {list_name}",
         "Use these exact internal IDs when filtering records by this custom list field.",
-        f"SuiteQL: WHERE field_name = <id> (or use BUILTIN.DF(field_name) = '<name>')",
+        "SuiteQL: WHERE field_name = <id> (or use BUILTIN.DF(field_name) = '<name>')",
         "",
     ]
     for v in values:

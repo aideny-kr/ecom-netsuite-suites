@@ -703,7 +703,7 @@ class MultiAgentCoordinator:
             if step.agent == "suiteql":
                 if settings.MULTI_AGENT_SQL_MODEL:
                     step_model = settings.MULTI_AGENT_SQL_MODEL
-                
+
                 # Tenant-Aware Entity Resolution via Fast NER & pg_trgm
                 from app.services.chat.tenant_resolver import TenantEntityResolver
                 vernacular = await TenantEntityResolver.resolve_entities(
@@ -720,7 +720,7 @@ class MultiAgentCoordinator:
                         extra={"vernacular_len": len(vernacular), "preview": vernacular[:300]},
                     )
                     print(f"[COORDINATOR] Vernacular injected ({len(vernacular)} chars)", flush=True)
-                    
+
             return await agent.run(
                 task=step.task,
                 context=context,

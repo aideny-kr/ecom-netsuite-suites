@@ -8,11 +8,10 @@ without unnecessary LLM calls.
 import pytest
 
 from app.services.chat.coordinator import (
-    IntentType,
     ROUTE_REGISTRY,
+    IntentType,
     classify_intent,
 )
-
 
 # ── DATA_QUERY intent ──────────────────────────────────────────────────────
 

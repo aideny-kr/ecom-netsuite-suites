@@ -18,7 +18,6 @@ from app.services.chat.onboarding_tools import (
 from app.services.chat.prompts import ONBOARDING_SYSTEM_PROMPT
 from tests.conftest import create_test_tenant, create_test_user, make_auth_headers
 
-
 # ---------------------------------------------------------------------------
 # Async generator helpers
 # ---------------------------------------------------------------------------

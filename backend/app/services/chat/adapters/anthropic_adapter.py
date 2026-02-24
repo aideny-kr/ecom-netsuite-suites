@@ -70,9 +70,9 @@ class AnthropicAdapter(BaseLLMAdapter):
         async with self._client.messages.stream(**kwargs) as stream:
             async for text in stream.text_stream:
                 yield "text", text
-            
+
             final_message = await stream.get_final_message()
-            
+
             text_blocks: list[str] = []
             tool_use_blocks: list[ToolUseBlock] = []
 

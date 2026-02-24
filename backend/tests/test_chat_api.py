@@ -1,7 +1,7 @@
 """Tests for chat API endpoints."""
 
 import uuid
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 from sqlalchemy import text

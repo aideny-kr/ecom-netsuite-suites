@@ -1,6 +1,5 @@
 """Tests for tenant_resolver — NER extraction prompt."""
 
-import pytest
 
 from app.services.chat.tenant_resolver import EXTRACTOR_SYSTEM_PROMPT
 

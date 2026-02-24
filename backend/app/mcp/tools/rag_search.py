@@ -95,7 +95,7 @@ async def execute(params: dict[str, Any], context: dict[str, Any] | None = None,
 
         return {"results": results, "count": len(results), "query": query_text}
 
-    except Exception as exc:
+    except Exception:
         logger.warning("rag_search.execute failed", exc_info=True)
         # Return empty results instead of error so agents don't waste steps retrying
         return {"results": [], "count": 0, "query": query_text, "note": "Search temporarily unavailable, proceed without documentation context."}

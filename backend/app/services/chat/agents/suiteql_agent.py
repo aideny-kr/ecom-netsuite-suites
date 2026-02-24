@@ -380,7 +380,7 @@ class SuiteQLAgent(BaseSpecialistAgent):
                 parts.append(f"  {w.get('scriptid', '?')} on {w.get('recordtype', '?')} (Status: {w.get('status', '?')}): {w.get('name', '?')}")
 
         if getattr(md, "custom_list_values", None) and isinstance(md.custom_list_values, dict):
-            parts.append(f"\n**Custom List Values** — Use exact Internal IDs for WHERE clauses instead of text:")
+            parts.append("\n**Custom List Values** — Use exact Internal IDs for WHERE clauses instead of text:")
             parts.append("When filtering by a list field, use `WHERE field = <id>` or `BUILTIN.DF(field) = '<name>'`.")
             for list_name, values in md.custom_list_values.items():
                 if values:
