@@ -697,6 +697,7 @@ def _is_lock_expired(locked_at: datetime | None) -> bool:
     if not locked_at:
         return True
     from datetime import timedelta
+
     return datetime.now(timezone.utc) - locked_at > timedelta(minutes=LOCK_EXPIRY_MINUTES)
 
 

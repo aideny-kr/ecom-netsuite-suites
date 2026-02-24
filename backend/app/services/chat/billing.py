@@ -72,11 +72,7 @@ async def deduct_chat_credits(
         return None
 
     # Row-level lock on the wallet
-    result = await db.execute(
-        select(TenantWallet)
-        .where(TenantWallet.tenant_id == tenant_id)
-        .with_for_update()
-    )
+    result = await db.execute(select(TenantWallet).where(TenantWallet.tenant_id == tenant_id).with_for_update())
     wallet = result.scalar_one_or_none()
 
     if not wallet:

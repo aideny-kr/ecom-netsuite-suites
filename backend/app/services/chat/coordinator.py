@@ -544,7 +544,8 @@ class MultiAgentCoordinator:
             "type": "message",
             "message": {
                 "role": "assistant",
-                "content": final_text or "I wasn't able to find relevant information for that question. Could you rephrase or provide more details?",
+                "content": final_text
+                or "I wasn't able to find relevant information for that question. Could you rephrase or provide more details?",
                 "tool_calls": all_tool_calls if all_tool_calls else None,
             },
         }
@@ -686,8 +687,7 @@ class MultiAgentCoordinator:
         context: dict[str, Any] = {}
         if prior_results:
             context["prior_results"] = [
-                {"agent": r.agent_name, "success": r.success, "data": r.data, "error": r.error}
-                for r in prior_results
+                {"agent": r.agent_name, "success": r.success, "data": r.data, "error": r.error} for r in prior_results
             ]
 
         async def run_step(step: PlanStep) -> AgentResult:
@@ -706,6 +706,7 @@ class MultiAgentCoordinator:
 
                 # Tenant-Aware Entity Resolution via Fast NER & pg_trgm
                 from app.services.chat.tenant_resolver import TenantEntityResolver
+
                 vernacular = await TenantEntityResolver.resolve_entities(
                     user_message=step.task,
                     tenant_id=self.tenant_id,

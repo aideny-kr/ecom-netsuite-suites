@@ -54,9 +54,7 @@ class TestPasswordNotExposed:
     """V2.1.2 — hashed_password never returned in responses."""
 
     @pytest.mark.asyncio
-    async def test_me_endpoint_excludes_hashed_password(
-        self, client: AsyncClient, admin_user: tuple[User, dict]
-    ):
+    async def test_me_endpoint_excludes_hashed_password(self, client: AsyncClient, admin_user: tuple[User, dict]):
         _, headers = admin_user
         resp = await client.get("/api/v1/auth/me", headers=headers)
         assert resp.status_code == 200
@@ -77,9 +75,7 @@ class TestGenericAuthErrors:
     async def test_identical_error_for_wrong_password_and_nonexistent_user(
         self, client: AsyncClient, db: AsyncSession, tenant_a: Tenant
     ):
-        user, raw_pw = await create_test_user(
-            db, tenant_a, email="real@test.com", password="ValidPass1!"
-        )
+        user, raw_pw = await create_test_user(db, tenant_a, email="real@test.com", password="ValidPass1!")
 
         # Wrong password for existing user
         resp_wrong_pw = await client.post(
@@ -103,12 +99,8 @@ class TestDeactivatedUser:
     """V2.2.3 — Deactivated user (is_active=False) cannot login or use tokens."""
 
     @pytest.mark.asyncio
-    async def test_deactivated_user_cannot_login(
-        self, client: AsyncClient, db: AsyncSession, tenant_a: Tenant
-    ):
-        user, raw_pw = await create_test_user(
-            db, tenant_a, email="deactivated@test.com", password="ValidPass1!"
-        )
+    async def test_deactivated_user_cannot_login(self, client: AsyncClient, db: AsyncSession, tenant_a: Tenant):
+        user, raw_pw = await create_test_user(db, tenant_a, email="deactivated@test.com", password="ValidPass1!")
         # Deactivate the user
         user.is_active = False
         await db.flush()
@@ -120,9 +112,7 @@ class TestDeactivatedUser:
         assert resp.status_code == 401
 
     @pytest.mark.asyncio
-    async def test_deactivated_user_token_rejected(
-        self, client: AsyncClient, db: AsyncSession, tenant_a: Tenant
-    ):
+    async def test_deactivated_user_token_rejected(self, client: AsyncClient, db: AsyncSession, tenant_a: Tenant):
         user, _ = await create_test_user(db, tenant_a, password="ValidPass1!")
         headers = make_auth_headers(user)
 
@@ -163,21 +153,15 @@ class TestTokenExpiry:
             algorithms=[settings.JWT_ALGORITHM],
         )
         payload["exp"] = datetime.now(timezone.utc) - timedelta(minutes=5)
-        forged = jose_jwt.encode(
-            payload, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM
-        )
+        forged = jose_jwt.encode(payload, settings.JWT_SECRET_KEY, algorithm=settings.JWT_ALGORITHM)
 
         result = decode_token(forged)
         assert result is None, "Expired token should decode to None"
 
     @pytest.mark.asyncio
-    async def test_access_token_rejected_as_refresh(
-        self, client: AsyncClient, db: AsyncSession, tenant_a: Tenant
-    ):
+    async def test_access_token_rejected_as_refresh(self, client: AsyncClient, db: AsyncSession, tenant_a: Tenant):
         user, _ = await create_test_user(db, tenant_a, password="ValidPass1!")
-        access_token = create_access_token(
-            {"sub": str(user.id), "tenant_id": str(user.tenant_id)}
-        )
+        access_token = create_access_token({"sub": str(user.id), "tenant_id": str(user.tenant_id)})
 
         # Try to use access token as refresh token
         resp = await client.post(
@@ -198,9 +182,7 @@ class TestJWTContent:
     """
 
     async def test_access_token_payload_fields(self):
-        token = create_access_token(
-            {"sub": "user-123", "tenant_id": "tenant-456"}
-        )
+        token = create_access_token({"sub": "user-123", "tenant_id": "tenant-456"})
         # Decode the middle segment (payload)
         parts = token.split(".")
         # Add padding
@@ -216,9 +198,7 @@ class TestJWTContent:
         assert payload["tenant_id"] == "tenant-456"
 
     async def test_refresh_token_payload_fields(self):
-        token = create_refresh_token(
-            {"sub": "user-123", "tenant_id": "tenant-456"}
-        )
+        token = create_refresh_token({"sub": "user-123", "tenant_id": "tenant-456"})
         parts = token.split(".")
         padded = parts[1] + "=" * (4 - len(parts[1]) % 4)
         payload = json.loads(base64.urlsafe_b64decode(padded))
@@ -229,9 +209,7 @@ class TestJWTContent:
 
     async def test_alg_none_token_rejected(self):
         """Forged token with alg:none must be rejected."""
-        header = base64.urlsafe_b64encode(
-            json.dumps({"alg": "none", "typ": "JWT"}).encode()
-        ).rstrip(b"=")
+        header = base64.urlsafe_b64encode(json.dumps({"alg": "none", "typ": "JWT"}).encode()).rstrip(b"=")
         payload = base64.urlsafe_b64encode(
             json.dumps(
                 {
@@ -266,9 +244,7 @@ class TestCredentialEncryption:
         encrypted = encrypt_credentials(creds)
 
         # Fernet tokens start with 'gAAAAA'
-        assert encrypted.startswith("gAAAAA"), (
-            f"Expected Fernet token prefix, got: {encrypted[:10]}"
-        )
+        assert encrypted.startswith("gAAAAA"), f"Expected Fernet token prefix, got: {encrypted[:10]}"
 
         # Create a connection directly to check DB storage
         conn = Connection(
@@ -284,9 +260,7 @@ class TestCredentialEncryption:
 
         # Query raw DB value
         result = await db.execute(
-            text(
-                "SELECT encrypted_credentials FROM connections WHERE id = :id"
-            ).bindparams(id=conn.id)
+            text("SELECT encrypted_credentials FROM connections WHERE id = :id").bindparams(id=conn.id)
         )
         raw = result.scalar_one()
         assert raw.startswith("gAAAAA"), "DB value should be Fernet-encrypted"
@@ -336,9 +310,7 @@ class TestIdempotency:
     """V10.1.1 — dedupe_key unique constraint prevents duplicate inserts."""
 
     @pytest.mark.asyncio
-    async def test_duplicate_dedupe_key_rejected(
-        self, db: AsyncSession, tenant_a: Tenant
-    ):
+    async def test_duplicate_dedupe_key_rejected(self, db: AsyncSession, tenant_a: Tenant):
         """Inserting two orders with the same tenant_id + dedupe_key should fail."""
         order1 = Order(
             tenant_id=tenant_a.id,

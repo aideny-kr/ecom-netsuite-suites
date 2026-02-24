@@ -32,9 +32,11 @@ TENANT_ID = uuid.uuid4()
 
 class TestBuildRowsCustomLists:
     def test_custom_list_rows_have_required_fields(self):
-        md = _make_metadata(custom_lists=[
-            {"scriptid": "customlist_order_status", "name": "Order Status", "description": "Status list"},
-        ])
+        md = _make_metadata(
+            custom_lists=[
+                {"scriptid": "customlist_order_status", "name": "Order Status", "description": "Status list"},
+            ]
+        )
         rows = _build_rows(TENANT_ID, md)
         assert len(rows) == 1
         row = rows[0]
@@ -44,22 +46,26 @@ class TestBuildRowsCustomLists:
         assert row["tenant_id"] == TENANT_ID
 
     def test_custom_list_skips_non_customlist_scriptid(self):
-        md = _make_metadata(custom_lists=[
-            {"scriptid": "some_other_thing", "name": "Not a list"},
-        ])
+        md = _make_metadata(
+            custom_lists=[
+                {"scriptid": "some_other_thing", "name": "Not a list"},
+            ]
+        )
         rows = _build_rows(TENANT_ID, md)
         assert len(rows) == 0
 
 
 class TestBuildRowsCustomListValues:
     def test_custom_list_values_seeded(self):
-        md = _make_metadata(custom_list_values={
-            "customlist_integration_status": [
-                {"id": 1, "name": "Pending"},
-                {"id": 2, "name": "Completed"},
-                {"id": 3, "name": "Failed"},
-            ]
-        })
+        md = _make_metadata(
+            custom_list_values={
+                "customlist_integration_status": [
+                    {"id": 1, "name": "Pending"},
+                    {"id": 2, "name": "Completed"},
+                    {"id": 3, "name": "Failed"},
+                ]
+            }
+        )
         rows = _build_rows(TENANT_ID, md)
         assert len(rows) == 3
         assert all(r["entity_type"] == "customlistvalue" for r in rows)
@@ -75,9 +81,11 @@ class TestBuildRowsCustomListValues:
 
 class TestBuildRowsSavedSearches:
     def test_saved_searches_seeded(self):
-        md = _make_metadata(saved_searches=[
-            {"id": 100, "title": "Open Orders Report", "recordtype": "transaction", "owner": "Admin"},
-        ])
+        md = _make_metadata(
+            saved_searches=[
+                {"id": 100, "title": "Open Orders Report", "recordtype": "transaction", "owner": "Admin"},
+            ]
+        )
         rows = _build_rows(TENANT_ID, md)
         assert len(rows) == 1
         row = rows[0]
@@ -94,9 +102,11 @@ class TestBuildRowsSavedSearches:
 
 class TestBuildRowsCustomRecordTypes:
     def test_custom_record_types_seeded(self):
-        md = _make_metadata(custom_record_types=[
-            {"scriptid": "customrecord_r_inv_processor", "name": "Inventory Processor", "description": "Inv proc"},
-        ])
+        md = _make_metadata(
+            custom_record_types=[
+                {"scriptid": "customrecord_r_inv_processor", "name": "Inventory Processor", "description": "Inv proc"},
+            ]
+        )
         rows = _build_rows(TENANT_ID, md)
         assert len(rows) == 1
         assert rows[0]["entity_type"] == "customrecord"
@@ -105,9 +115,11 @@ class TestBuildRowsCustomRecordTypes:
 
 class TestBuildRowsBodyFields:
     def test_body_fields_seeded_with_fieldtype(self):
-        md = _make_metadata(transaction_body_fields=[
-            {"scriptid": "custbody_order_status", "name": "Order Status", "fieldtype": "SELECT"},
-        ])
+        md = _make_metadata(
+            transaction_body_fields=[
+                {"scriptid": "custbody_order_status", "name": "Order Status", "fieldtype": "SELECT"},
+            ]
+        )
         rows = _build_rows(TENANT_ID, md)
         assert len(rows) == 1
         assert rows[0]["entity_type"] == "transactionbodyfield"

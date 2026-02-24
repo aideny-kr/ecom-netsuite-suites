@@ -554,13 +554,15 @@ class TestOrchestratorToolTiming:
         ):
             from app.services.chat.orchestrator import run_chat_turn
 
-            result = await _collect_stream_result(run_chat_turn(
-                db=db,
-                session=session,
-                user_message="List files",
-                user_id=user.id,
-                tenant_id=tenant_a.id,
-            ))
+            result = await _collect_stream_result(
+                run_chat_turn(
+                    db=db,
+                    session=session,
+                    user_message="List files",
+                    user_id=user.id,
+                    tenant_id=tenant_a.id,
+                )
+            )
 
         # Verify tool_calls in the saved message contain duration_ms
         assert result["tool_calls"] is not None

@@ -174,10 +174,7 @@ async def call_external_mcp_tool(
         async with ClientSession(read_stream, write_stream) as session:
             await session.initialize()
             try:
-                result = await asyncio.wait_for(
-                    session.call_tool(tool_name, tool_params),
-                    timeout=15.0
-                )
+                result = await asyncio.wait_for(session.call_tool(tool_name, tool_params), timeout=15.0)
             except asyncio.TimeoutError:
                 logger.error("mcp_client.tool_timeout", server_url=connector.server_url, tool_name=tool_name)
                 return {"error": "Tool execution exceeded 15-second strict timeout limit"}

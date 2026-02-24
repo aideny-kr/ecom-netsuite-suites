@@ -110,13 +110,15 @@ class TestMultiProviderOrchestrator:
             patch(f"{_ORCH}.deduct_chat_credits", new_callable=AsyncMock, return_value=None),
             patch("app.services.policy_service.get_active_policy", new_callable=AsyncMock, return_value=None),
         ):
-            result = await _collect_stream_result(run_chat_turn(
-                db=db,
-                session=session,
-                user_message="Show orders",
-                user_id=user_id,
-                tenant_id=tenant_id,
-            ))
+            result = await _collect_stream_result(
+                run_chat_turn(
+                    db=db,
+                    session=session,
+                    user_message="Show orders",
+                    user_id=user_id,
+                    tenant_id=tenant_id,
+                )
+            )
 
         assert result["content"] == "Here are your orders."
 
@@ -177,13 +179,15 @@ class TestMultiProviderOrchestrator:
             patch(f"{_ORCH}.deduct_chat_credits", new_callable=AsyncMock, return_value=None),
             patch("app.services.policy_service.get_active_policy", new_callable=AsyncMock, return_value=None),
         ):
-            result = await _collect_stream_result(run_chat_turn(
-                db=db,
-                session=session,
-                user_message="Search",
-                user_id=user_id,
-                tenant_id=tenant_id,
-            ))
+            result = await _collect_stream_result(
+                run_chat_turn(
+                    db=db,
+                    session=session,
+                    user_message="Search",
+                    user_id=user_id,
+                    tenant_id=tenant_id,
+                )
+            )
 
         assert result["content"] == "Found it."
 
@@ -227,13 +231,15 @@ class TestMultiProviderOrchestrator:
             patch(f"{_ORCH}.deduct_chat_credits", new_callable=AsyncMock, return_value=None),
             patch("app.services.policy_service.get_active_policy", new_callable=AsyncMock, return_value=None),
         ):
-            result = await _collect_stream_result(run_chat_turn(
-                db=db,
-                session=session,
-                user_message="Hello",
-                user_id=user_id,
-                tenant_id=tenant_id,
-            ))
+            result = await _collect_stream_result(
+                run_chat_turn(
+                    db=db,
+                    session=session,
+                    user_message="Hello",
+                    user_id=user_id,
+                    tenant_id=tenant_id,
+                )
+            )
 
         assert result["content"] == "Default response"
 

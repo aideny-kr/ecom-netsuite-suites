@@ -22,9 +22,7 @@ class TenantEntityMapping(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
     __tablename__ = "tenant_entity_mapping"
 
-    __table_args__ = (
-        UniqueConstraint("tenant_id", "entity_type", "script_id", name="uq_tenant_entity_type_script"),
-    )
+    __table_args__ = (UniqueConstraint("tenant_id", "entity_type", "script_id", name="uq_tenant_entity_type_script"),)
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False, index=True

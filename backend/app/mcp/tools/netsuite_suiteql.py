@@ -59,8 +59,7 @@ def validate_query(query: str, allowed_tables: set[str]) -> None:
     tables = parse_tables(query)
     # Allow any custom record/list table dynamically
     disallowed = {
-        t for t in tables - allowed_tables
-        if not t.startswith("customrecord_") and not t.startswith("customlist_")
+        t for t in tables - allowed_tables if not t.startswith("customrecord_") and not t.startswith("customlist_")
     }
     if disallowed:
         raise ValueError(

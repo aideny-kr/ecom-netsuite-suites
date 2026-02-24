@@ -146,7 +146,9 @@ class TestGetValidToken:
 
         with (
             patch("app.services.netsuite_oauth_service.decrypt_credentials", return_value=credentials),
-            patch("app.services.netsuite_oauth_service.refresh_tokens_with_client", new_callable=AsyncMock) as mock_refresh,
+            patch(
+                "app.services.netsuite_oauth_service.refresh_tokens_with_client", new_callable=AsyncMock
+            ) as mock_refresh,
             patch("app.services.netsuite_oauth_service.encrypt_credentials", return_value="encrypted"),
         ):
             mock_refresh.return_value = {

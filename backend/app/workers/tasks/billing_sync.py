@@ -29,12 +29,16 @@ def sync_metered_billing_to_stripe():
     error_count = 0
 
     with Session(sync_engine) as db:
-        wallets = db.execute(
-            select(TenantWallet).where(
-                TenantWallet.metered_credits_used > TenantWallet.last_synced_metered_credits,
-                TenantWallet.stripe_subscription_item_id.isnot(None),
+        wallets = (
+            db.execute(
+                select(TenantWallet).where(
+                    TenantWallet.metered_credits_used > TenantWallet.last_synced_metered_credits,
+                    TenantWallet.stripe_subscription_item_id.isnot(None),
+                )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
 
         if not wallets:
             logger.info("billing_sync: no wallets need syncing")
@@ -43,6 +47,7 @@ def sync_metered_billing_to_stripe():
         # Lazy import Stripe — only needed when there's work to do
         try:
             import stripe
+
             stripe.api_key = settings.STRIPE_API_KEY
         except ImportError:
             logger.error("billing_sync: stripe package not installed")

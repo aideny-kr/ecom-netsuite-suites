@@ -53,7 +53,7 @@ class RAGAgent(BaseSpecialistAgent):
             "CRITICAL — MINIMIZE TOOL CALLS:\n"
             "- You have a strict budget of 3-4 tool calls total. Do NOT exhaust them.\n"
             "- If both rag_search and web_search return 0 results, STOP IMMEDIATELY and report "
-            "\"No relevant documentation found.\" Do NOT retry with rephrased queries.\n"
+            '"No relevant documentation found." Do NOT retry with rephrased queries.\n'
             "- Never make more than 2 rag_search calls or 2 web_search calls.\n"
             "\n"
             "SEARCH TIPS:\n"
@@ -66,7 +66,7 @@ class RAGAgent(BaseSpecialistAgent):
             "- Return the relevant information extracted from the documents.\n"
             "- Include the source_path for each piece of information.\n"
             "- Be concise — only include what's directly relevant to the task.\n"
-            "- If no relevant results are found, say \"No relevant documentation found\" and stop."
+            '- If no relevant results are found, say "No relevant documentation found" and stop.'
         )
 
     @property

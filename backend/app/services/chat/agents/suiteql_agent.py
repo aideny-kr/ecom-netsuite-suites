@@ -203,9 +203,13 @@ class SuiteQLAgent(BaseSpecialistAgent):
 
         if self._tenant_vernacular:
             parts.append("\n## EXPLICIT TENANT ENTITY RESOLUTION — MANDATORY")
-            parts.append("**CRITICAL**: The entities below have been pre-resolved from the user's message using fuzzy matching against this tenant's entity database. You MUST use these exact script IDs as table names or field names in your SuiteQL queries. Do NOT guess or search for alternatives.")
+            parts.append(
+                "**CRITICAL**: The entities below have been pre-resolved from the user's message using fuzzy matching against this tenant's entity database. You MUST use these exact script IDs as table names or field names in your SuiteQL queries. Do NOT guess or search for alternatives."
+            )
             parts.append(self._tenant_vernacular)
-            parts.append("\n**ACTION REQUIRED**: For each resolved entity of type 'customrecord', your FIRST query MUST be: `SELECT * FROM <internal_script_id> WHERE ROWNUM <= 5` using the netsuite_suiteql tool. Do NOT skip this step.")
+            parts.append(
+                "\n**ACTION REQUIRED**: For each resolved entity of type 'customrecord', your FIRST query MUST be: `SELECT * FROM <internal_script_id> WHERE ROWNUM <= 5` using the netsuite_suiteql tool. Do NOT skip this step."
+            )
 
         # Inject policy constraints
         if self._policy:
@@ -283,7 +287,9 @@ class SuiteQLAgent(BaseSpecialistAgent):
                 if any(kw in sid or kw in name for kw in _lookup_keywords):
                     key_fields.append(f)
         if key_fields:
-            parts.append("\n**KEY LOOKUP FIELDS** (use these when searching by external/Shopify/ecommerce order numbers):")
+            parts.append(
+                "\n**KEY LOOKUP FIELDS** (use these when searching by external/Shopify/ecommerce order numbers):"
+            )
             for f in key_fields:
                 parts.append(f"  {f.get('scriptid', '?')}: {f.get('name', '?')} ({f.get('fieldtype', '?')})")
 
@@ -325,7 +331,9 @@ class SuiteQLAgent(BaseSpecialistAgent):
             if md.custom_record_fields and isinstance(md.custom_record_fields, list):
                 total_record_fields = len(md.custom_record_fields)
 
-            parts.append(f"\n**Custom record types** ({len(md.custom_record_types)} total, {total_record_fields} custom fields discovered):")
+            parts.append(
+                f"\n**Custom record types** ({len(md.custom_record_types)} total, {total_record_fields} custom fields discovered):"
+            )
             parts.append("Query custom records via: `SELECT id, ... FROM customrecord_<scriptid>`")
             parts.append("To discover fields for a custom record, use rag_search with the record name.")
             for r in md.custom_record_types[:50]:
@@ -367,17 +375,23 @@ class SuiteQLAgent(BaseSpecialistAgent):
         if getattr(md, "scripts", None) and isinstance(md.scripts, list):
             parts.append(f"\n**Active Scripts** ({len(md.scripts)} total):")
             for s in md.scripts[:100]:
-                parts.append(f"  ID {s.get('id', '?')} | {s.get('scriptid', '?')} ({s.get('scripttype', '?')}): {s.get('name', '?')}")
+                parts.append(
+                    f"  ID {s.get('id', '?')} | {s.get('scriptid', '?')} ({s.get('scripttype', '?')}): {s.get('name', '?')}"
+                )
 
         if getattr(md, "script_deployments", None) and isinstance(md.script_deployments, list):
             parts.append(f"\n**Active Script Deployments** ({len(md.script_deployments)} total):")
             for d in md.script_deployments[:100]:
-                parts.append(f"  {d.get('scriptid', '?')} on {d.get('recordtype', '?')} (Status: {d.get('status', '?')}) | Script: {d.get('script', '?')}")
+                parts.append(
+                    f"  {d.get('scriptid', '?')} on {d.get('recordtype', '?')} (Status: {d.get('status', '?')}) | Script: {d.get('script', '?')}"
+                )
 
         if getattr(md, "workflows", None) and isinstance(md.workflows, list):
             parts.append(f"\n**Active Workflows** ({len(md.workflows)} total):")
             for w in md.workflows[:50]:
-                parts.append(f"  {w.get('scriptid', '?')} on {w.get('recordtype', '?')} (Status: {w.get('status', '?')}): {w.get('name', '?')}")
+                parts.append(
+                    f"  {w.get('scriptid', '?')} on {w.get('recordtype', '?')} (Status: {w.get('status', '?')}): {w.get('name', '?')}"
+                )
 
         if getattr(md, "custom_list_values", None) and isinstance(md.custom_list_values, dict):
             parts.append("\n**Custom List Values** — Use exact Internal IDs for WHERE clauses instead of text:")
@@ -391,6 +405,8 @@ class SuiteQLAgent(BaseSpecialistAgent):
             parts.append(f"\n**Saved Searches** ({len(md.saved_searches)} public):")
             for ss in md.saved_searches[:30]:
                 owner = f" (owner: {ss.get('owner', '?')})" if ss.get("owner") else ""
-                parts.append(f"  ID {ss.get('id', '?')}: {ss.get('title', '?')} (type: {ss.get('recordtype', '?')}){owner}")
+                parts.append(
+                    f"  ID {ss.get('id', '?')}: {ss.get('title', '?')} (type: {ss.get('recordtype', '?')}){owner}"
+                )
 
         return "\n".join(parts)

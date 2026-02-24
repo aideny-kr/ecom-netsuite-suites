@@ -192,8 +192,7 @@ def _build_suiteql_rules_section(profile: TenantProfile) -> str:
         "",
         "TRANSACTIONLINE RULES:",
         "- Join: transactionline tl JOIN transaction t ON tl.transaction = t.id",
-        "- Line columns: id, linesequencenumber, item, quantity, rate, rateamount, "
-        "foreignamount, memo, isclosed",
+        "- Line columns: id, linesequencenumber, item, quantity, rate, rateamount, foreignamount, memo, isclosed",
         "- Filter item lines: tl.mainline = 'F' AND tl.taxline = 'F' (TEXT 'T'/'F')",
         "- NEVER use dot notation (tl.item.name) — JOIN instead: JOIN item i ON tl.item = i.id",
         "- NEVER use 'amount' on transactionline — use 'foreignamount' or 'netamount'",

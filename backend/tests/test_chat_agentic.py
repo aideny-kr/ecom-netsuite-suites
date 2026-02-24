@@ -142,13 +142,15 @@ class TestAgenticSingleStep:
             patch(f"{_ORCH}.deduct_chat_credits", new_callable=AsyncMock, return_value=None),
             patch("app.services.policy_service.get_active_policy", new_callable=AsyncMock, return_value=None),
         ):
-            result = await _collect_stream_result(run_chat_turn(
-                db=db,
-                session=session,
-                user_message="Show my orders",
-                user_id=user_id,
-                tenant_id=tenant_id,
-            ))
+            result = await _collect_stream_result(
+                run_chat_turn(
+                    db=db,
+                    session=session,
+                    user_message="Show my orders",
+                    user_id=user_id,
+                    tenant_id=tenant_id,
+                )
+            )
 
         assert result["content"] == "Here are your orders."
         assert result["role"] == "assistant"
@@ -212,13 +214,15 @@ class TestAgenticToolCall:
             patch(f"{_ORCH}.deduct_chat_credits", new_callable=AsyncMock, return_value=None),
             patch("app.services.policy_service.get_active_policy", new_callable=AsyncMock, return_value=None),
         ):
-            result = await _collect_stream_result(run_chat_turn(
-                db=db,
-                session=session,
-                user_message="How many orders?",
-                user_id=user_id,
-                tenant_id=tenant_id,
-            ))
+            result = await _collect_stream_result(
+                run_chat_turn(
+                    db=db,
+                    session=session,
+                    user_message="How many orders?",
+                    user_id=user_id,
+                    tenant_id=tenant_id,
+                )
+            )
 
         assert result["content"] == "You have 5 orders."
 
@@ -295,13 +299,15 @@ class TestAgenticToolRetry:
             patch(f"{_ORCH}.deduct_chat_credits", new_callable=AsyncMock, return_value=None),
             patch("app.services.policy_service.get_active_policy", new_callable=AsyncMock, return_value=None),
         ):
-            result = await _collect_stream_result(run_chat_turn(
-                db=db,
-                session=session,
-                user_message="What is the total?",
-                user_id=user_id,
-                tenant_id=tenant_id,
-            ))
+            result = await _collect_stream_result(
+                run_chat_turn(
+                    db=db,
+                    session=session,
+                    user_message="What is the total?",
+                    user_id=user_id,
+                    tenant_id=tenant_id,
+                )
+            )
 
         assert result["content"] == "The total is $1000."
         assert result["tool_calls"] is not None
@@ -369,13 +375,15 @@ class TestAgenticMaxSteps:
             patch(f"{_ORCH}.deduct_chat_credits", new_callable=AsyncMock, return_value=None),
             patch("app.services.policy_service.get_active_policy", new_callable=AsyncMock, return_value=None),
         ):
-            result = await _collect_stream_result(run_chat_turn(
-                db=db,
-                session=session,
-                user_message="Keep trying",
-                user_id=user_id,
-                tenant_id=tenant_id,
-            ))
+            result = await _collect_stream_result(
+                run_chat_turn(
+                    db=db,
+                    session=session,
+                    user_message="Keep trying",
+                    user_id=user_id,
+                    tenant_id=tenant_id,
+                )
+            )
 
         assert result["content"] == "I've exhausted my tool calls."
 
@@ -423,13 +431,15 @@ class TestAgenticAllowlistEnforcement:
             patch(f"{_ORCH}.deduct_chat_credits", new_callable=AsyncMock, return_value=None),
             patch("app.services.policy_service.get_active_policy", new_callable=AsyncMock, return_value=None),
         ):
-            result = await _collect_stream_result(run_chat_turn(
-                db=db,
-                session=session,
-                user_message="Create a schedule",
-                user_id=user_id,
-                tenant_id=tenant_id,
-            ))
+            result = await _collect_stream_result(
+                run_chat_turn(
+                    db=db,
+                    session=session,
+                    user_message="Create a schedule",
+                    user_id=user_id,
+                    tenant_id=tenant_id,
+                )
+            )
 
         assert result["content"] == "Sorry, I can't do that."
         assert result["tool_calls"] is not None

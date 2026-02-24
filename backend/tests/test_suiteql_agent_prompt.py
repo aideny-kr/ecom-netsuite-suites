@@ -1,6 +1,5 @@
 """Tests for SuiteQL agent prompt rules and metadata reference builder."""
 
-
 from app.services.chat.agents.suiteql_agent import _SYSTEM_PROMPT, SuiteQLAgent
 
 
@@ -39,7 +38,12 @@ class TestMetadataReference:
 
         class FakeMD:
             transaction_body_fields = [
-                {"scriptid": "custbody_status", "name": "Status", "fieldtype": "SELECT", "fieldvaluetype": "customlist_order_status"},
+                {
+                    "scriptid": "custbody_status",
+                    "name": "Status",
+                    "fieldtype": "SELECT",
+                    "fieldvaluetype": "customlist_order_status",
+                },
             ]
             transaction_column_fields = None
             entity_custom_fields = None
@@ -54,10 +58,12 @@ class TestMetadataReference:
             scripts = None
             script_deployments = None
             workflows = None
-            custom_list_values = {"customlist_order_status": [
-                {"id": 1, "name": "Pending"},
-                {"id": 2, "name": "Failed"},
-            ]}
+            custom_list_values = {
+                "customlist_order_status": [
+                    {"id": 1, "name": "Pending"},
+                    {"id": 2, "name": "Failed"},
+                ]
+            }
             saved_searches = None
 
         agent._metadata = FakeMD()

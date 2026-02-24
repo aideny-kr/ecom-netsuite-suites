@@ -180,7 +180,7 @@ async def run_chat_turn(
                 f"Use `{ext_suiteql_tools[0]}` instead of `netsuite_suiteql` for all "
                 "SuiteQL data queries. This tool runs queries directly inside NetSuite "
                 "via the MCP protocol.\n"
-                "Parameters: {\"sqlQuery\": \"SELECT ...\", \"description\": \"Brief description\"}\n"
+                'Parameters: {"sqlQuery": "SELECT ...", "description": "Brief description"}\n'
                 "\n"
                 "Only fall back to `netsuite_suiteql` if the MCP tool is unavailable or errors."
             )
@@ -294,7 +294,10 @@ async def run_chat_turn(
             coord_result = coordinator.last_result
             if coord_result is None:
                 # Fallback: synthesis didn't produce a result
-                final_text = "".join(streamed_text_parts).strip() or "I wasn't able to find relevant information for that question. Could you rephrase or provide more details?"
+                final_text = (
+                    "".join(streamed_text_parts).strip()
+                    or "I wasn't able to find relevant information for that question. Could you rephrase or provide more details?"
+                )
                 coord_result_tokens = (0, 0)
                 coord_result_tool_calls: list[dict] = []
             else:
@@ -306,7 +309,8 @@ async def run_chat_turn(
                 tenant_id=tenant_id,
                 session_id=session.id,
                 role="assistant",
-                content=final_text or "I wasn't able to find relevant information for that question. Could you rephrase or provide more details?",
+                content=final_text
+                or "I wasn't able to find relevant information for that question. Could you rephrase or provide more details?",
                 tool_calls=coord_result_tool_calls if coord_result_tool_calls else None,
                 citations=citations if citations else None,
                 token_count=coord_result_tokens[0] + coord_result_tokens[1],
@@ -359,7 +363,7 @@ async def run_chat_turn(
                     "tool_calls": assistant_msg.tool_calls,
                     "citations": assistant_msg.citations,
                 }
-                if hasattr(assistant_msg, 'created_at') and assistant_msg.created_at:
+                if hasattr(assistant_msg, "created_at") and assistant_msg.created_at:
                     result_msg["created_at"] = assistant_msg.created_at.isoformat()
                 yield {"type": "message", "message": result_msg}
             return
@@ -388,7 +392,7 @@ async def run_chat_turn(
                 response = payload
 
         if not response:
-             break
+            break
 
         total_input_tokens += response.usage.input_tokens
         total_output_tokens += response.usage.output_tokens
@@ -502,7 +506,8 @@ async def run_chat_turn(
         tenant_id=tenant_id,
         session_id=session.id,
         role="assistant",
-        content=final_text or "I wasn't able to find relevant information for that question. Could you rephrase or provide more details?",
+        content=final_text
+        or "I wasn't able to find relevant information for that question. Could you rephrase or provide more details?",
         tool_calls=tool_calls_log if tool_calls_log else None,
         citations=citations if citations else None,
         token_count=total_input_tokens + total_output_tokens,
@@ -555,7 +560,7 @@ async def run_chat_turn(
         "tool_calls": assistant_msg.tool_calls,
         "citations": assistant_msg.citations,
     }
-    if hasattr(assistant_msg, 'created_at') and assistant_msg.created_at:
+    if hasattr(assistant_msg, "created_at") and assistant_msg.created_at:
         result_msg["created_at"] = assistant_msg.created_at.isoformat()
 
     yield {"type": "message", "message": result_msg}

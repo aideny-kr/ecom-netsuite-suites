@@ -57,9 +57,7 @@ class WorkspaceFile(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     sha256_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     is_directory: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     netsuite_file_id: Mapped[str | None] = mapped_column(String(50), nullable=True)
-    locked_by: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
-    )
+    locked_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     workspace: Mapped["Workspace"] = relationship("Workspace", back_populates="files")

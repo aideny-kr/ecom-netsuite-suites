@@ -147,8 +147,7 @@ class TestBillingSyncTask:
         mock_session.__enter__ = MagicMock(return_value=mock_session)
         mock_session.__exit__ = MagicMock(return_value=False)
 
-        with patch("sqlalchemy.orm.Session", return_value=mock_session), \
-             patch("app.workers.base_task.sync_engine"):
+        with patch("sqlalchemy.orm.Session", return_value=mock_session), patch("app.workers.base_task.sync_engine"):
             result = sync_metered_billing_to_stripe()
 
         assert result["synced"] == 0
@@ -172,9 +171,11 @@ class TestBillingSyncTask:
         mock_session.__exit__ = MagicMock(return_value=False)
 
         mock_stripe = MagicMock()
-        with patch("sqlalchemy.orm.Session", return_value=mock_session), \
-             patch("app.workers.base_task.sync_engine"), \
-             patch.dict("sys.modules", {"stripe": mock_stripe}):
+        with (
+            patch("sqlalchemy.orm.Session", return_value=mock_session),
+            patch("app.workers.base_task.sync_engine"),
+            patch.dict("sys.modules", {"stripe": mock_stripe}),
+        ):
             mock_stripe.api_key = None
             mock_stripe.SubscriptionItem.create_usage_record = MagicMock()
 

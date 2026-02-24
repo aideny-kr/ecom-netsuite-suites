@@ -40,16 +40,12 @@ async def list_tenants(
     # Clear RLS so we see all tenants
     await db.execute(text("RESET app.current_tenant_id"))
 
-    result = await db.execute(
-        select(Tenant).order_by(Tenant.created_at.desc())
-    )
+    result = await db.execute(select(Tenant).order_by(Tenant.created_at.desc()))
     tenants = result.scalars().all()
 
     # Batch-load user counts
     user_counts_result = await db.execute(
-        select(User.tenant_id, func.count(User.id))
-        .where(User.is_active.is_(True))
-        .group_by(User.tenant_id)
+        select(User.tenant_id, func.count(User.id)).where(User.is_active.is_(True)).group_by(User.tenant_id)
     )
     user_counts = dict(user_counts_result.all())
 
@@ -78,7 +74,9 @@ async def list_tenants(
                     base_credits_remaining=wallet.base_credits_remaining,
                     metered_credits_used=wallet.metered_credits_used,
                     last_synced_metered_credits=wallet.last_synced_metered_credits,
-                ) if wallet else None,
+                )
+                if wallet
+                else None,
             )
         )
     return items
@@ -93,9 +91,7 @@ async def get_tenant_wallet(
     """Get wallet details for a specific tenant."""
     await db.execute(text("RESET app.current_tenant_id"))
 
-    result = await db.execute(
-        select(TenantWallet).where(TenantWallet.tenant_id == tenant_id)
-    )
+    result = await db.execute(select(TenantWallet).where(TenantWallet.tenant_id == tenant_id))
     wallet = result.scalar_one_or_none()
     if not wallet:
         return None
@@ -121,9 +117,7 @@ async def update_tenant_wallet(
     """Update wallet settings (credit top-up, Stripe IDs)."""
     await db.execute(text("RESET app.current_tenant_id"))
 
-    result = await db.execute(
-        select(TenantWallet).where(TenantWallet.tenant_id == tenant_id)
-    )
+    result = await db.execute(select(TenantWallet).where(TenantWallet.tenant_id == tenant_id))
     wallet = result.scalar_one_or_none()
     if not wallet:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Wallet not found")
@@ -175,9 +169,7 @@ async def impersonate_tenant(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tenant not found")
 
     # Find the first active owner/admin of this tenant to impersonate as
-    user_result = await db.execute(
-        select(User).where(User.tenant_id == tenant_id, User.is_active.is_(True)).limit(1)
-    )
+    user_result = await db.execute(select(User).where(User.tenant_id == tenant_id, User.is_active.is_(True)).limit(1))
     target_user = user_result.scalar_one_or_none()
     if not target_user:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No active user in tenant")
@@ -213,17 +205,11 @@ async def get_platform_stats(
     """Platform-wide aggregate stats for the admin dashboard."""
     await db.execute(text("RESET app.current_tenant_id"))
 
-    active_tenants = (await db.execute(
-        select(func.count(Tenant.id)).where(Tenant.is_active.is_(True))
-    )).scalar() or 0
+    active_tenants = (await db.execute(select(func.count(Tenant.id)).where(Tenant.is_active.is_(True)))).scalar() or 0
 
-    total_tenants = (await db.execute(
-        select(func.count(Tenant.id))
-    )).scalar() or 0
+    total_tenants = (await db.execute(select(func.count(Tenant.id)))).scalar() or 0
 
-    total_users = (await db.execute(
-        select(func.count(User.id)).where(User.is_active.is_(True))
-    )).scalar() or 0
+    total_users = (await db.execute(select(func.count(User.id)).where(User.is_active.is_(True)))).scalar() or 0
 
     wallet_stats = await db.execute(
         select(

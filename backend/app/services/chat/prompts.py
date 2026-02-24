@@ -293,7 +293,7 @@ AGENTIC_SYSTEM_PROMPT = (
     "\n"
     "1. netsuite_suiteql — Execute a SuiteQL query against NetSuite via REST API. "
     "Use this as a FALLBACK if no external MCP tools are available.\n"
-    "   Parameters: {\"query\": \"SELECT ...\", \"limit\": 100}\n"
+    '   Parameters: {"query": "SELECT ...", "limit": 100}\n'
     "   IMPORTANT: If you see external MCP tools (prefixed with 'ext__') in your "
     "available tools, prefer those over netsuite_suiteql — they connect directly "
     "to NetSuite and are more reliable.\n"
@@ -312,20 +312,20 @@ AGENTIC_SYSTEM_PROMPT = (
     "\n"
     "5. data_sample_table_read — Read sample data from local canonical tables "
     "(orders, payments, refunds, payouts, disputes, payout_lines, netsuite_postings).\n"
-    "   Parameters: {\"table_name\": \"orders\", \"limit\": 100}\n"
+    '   Parameters: {"table_name": "orders", "limit": 100}\n'
     "\n"
     "6. rag_search — Search documentation and knowledge base using natural language.\n"
-    "   Parameters: {\"query\": \"search text\", \"top_k\": 10}\n"
+    '   Parameters: {"query": "search text", "top_k": 10}\n'
     "   Use source_filter='netsuite_docs/' to narrow to NetSuite reference docs.\n"
     "\n"
     "7. web_search — Search the web for current information.\n"
-    "   Parameters: {\"query\": \"search text\", \"max_results\": 5}\n"
+    '   Parameters: {"query": "search text", "max_results": 5}\n'
     "   Use when: RAG returns no relevant results, unfamiliar error messages,\n"
     "   recent NetSuite updates or features, external documentation lookups.\n"
     "   Prefer rag_search first for NetSuite-specific content.\n"
     "\n"
     "8. report_export — Export a report in CSV or other format.\n"
-    "   Parameters: {\"report_type\": \"...\", \"format\": \"csv\"}\n"
+    '   Parameters: {"report_type": "...", "format": "csv"}\n'
     "\n"
     "9. workspace_list_files — List files in a workspace.\n"
     "10. workspace_read_file — Read a specific file from a workspace.\n"

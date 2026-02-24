@@ -33,9 +33,7 @@ class TenantLearnedRule(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
     # Who created this rule (admin audit trail)
-    created_by: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
-    )
+    created_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
 
     # Relationships
     tenant: Mapped["Tenant"] = relationship("Tenant", foreign_keys=[tenant_id])  # noqa: F821

@@ -208,9 +208,7 @@ class OpenAIAdapter(BaseLLMAdapter):
                 args = json.loads(acc["arguments"]) if acc["arguments"] else {}
             except json.JSONDecodeError:
                 args = {}
-            tool_use_blocks.append(
-                ToolUseBlock(id=acc["id"], name=acc["name"], input=args)
-            )
+            tool_use_blocks.append(ToolUseBlock(id=acc["id"], name=acc["name"], input=args))
 
         response = LLMResponse(
             text_blocks=text_blocks,

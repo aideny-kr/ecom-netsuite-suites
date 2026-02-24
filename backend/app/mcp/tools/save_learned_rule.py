@@ -92,8 +92,5 @@ async def execute(
     return {
         "status": "saved",
         "rule_id": str(rule.id),
-        "message": (
-            "Rule saved successfully. This will be applied to all future "
-            "chat sessions for your organization."
-        ),
+        "message": ("Rule saved successfully. This will be applied to all future chat sessions for your organization."),
     }

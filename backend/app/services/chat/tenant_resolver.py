@@ -22,6 +22,7 @@ Do NOT extract generic NetSuite terms like "sales order", "customer", "invoice",
 Output ONLY valid JSON, e.g., ["Inventory Processor", "Failed", "Ordoro"]\
 """
 
+
 class TenantEntityResolver:
     """
     Interceptor layer that runs before the main reasoning agent.
@@ -94,14 +95,19 @@ class TenantEntityResolver:
                     entity_type=match.entity_type,
                     similarity=round(score, 3),
                 )
-                print(f"[TENANT_RESOLVER] MATCH: '{entity}' → {match.script_id} ({match.entity_type}, sim={score:.3f})", flush=True)
-                resolved.append({
-                    "user_term": entity,
-                    "internal_script_id": match.script_id,
-                    "entity_type": match.entity_type,
-                    "metadata": match.description or "",
-                    "confidence_score": round(score, 2)
-                })
+                print(
+                    f"[TENANT_RESOLVER] MATCH: '{entity}' → {match.script_id} ({match.entity_type}, sim={score:.3f})",
+                    flush=True,
+                )
+                resolved.append(
+                    {
+                        "user_term": entity,
+                        "internal_script_id": match.script_id,
+                        "entity_type": match.entity_type,
+                        "metadata": match.description or "",
+                        "confidence_score": round(score, 2),
+                    }
+                )
             else:
                 logger.info(
                     "tenant_resolver.no_match",
@@ -131,7 +137,7 @@ class TenantEntityResolver:
             "    <instruction_context>",
             "        The following entities and rules have been mapped to their specific internal NetSuite constraints for this particular tenant. ",
             "        You MUST use these exact inner script IDs and rules when constructing your SuiteQL FROM and WHERE clauses.",
-            "    </instruction_context>"
+            "    </instruction_context>",
         ]
 
         if resolved:
@@ -148,9 +154,11 @@ class TenantEntityResolver:
 
         if learned_rules:
             xml_parts.append("    <learned_rules>")
-            xml_parts.append("        <!-- Explicit business logic / schema rules learned for this tenant. FOLLOW THESE STRICTLY. -->")
+            xml_parts.append(
+                "        <!-- Explicit business logic / schema rules learned for this tenant. FOLLOW THESE STRICTLY. -->"
+            )
             for rule in learned_rules:
-                xml_parts.append(f"        <rule category=\"{rule.rule_category or 'general'}\">")
+                xml_parts.append(f'        <rule category="{rule.rule_category or "general"}">')
                 xml_parts.append(f"            {rule.rule_description}")
                 xml_parts.append("        </rule>")
             xml_parts.append("    </learned_rules>")

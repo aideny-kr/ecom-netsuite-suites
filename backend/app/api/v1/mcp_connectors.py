@@ -207,8 +207,11 @@ async def netsuite_mcp_callback(
             if connector is None:
                 raise ValueError(f"Connector {reauth_connector_id} not found")
             await mcp_connector_service.update_connector_tokens(
-                db=db, connector=connector, token_data=token_data,
-                account_id=account_id, client_id=client_id,
+                db=db,
+                connector=connector,
+                token_data=token_data,
+                account_id=account_id,
+                client_id=client_id,
             )
             logger.info("netsuite_mcp.oauth2.reauthorized", connector_id=str(connector.id))
         else:

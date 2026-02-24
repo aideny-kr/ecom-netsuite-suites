@@ -33,7 +33,9 @@ def _mock_ddgs():
 
     with patch("app.mcp.tools.web_search.DDGS", return_value=mock_ddgs_instance, create=True):
         # Also patch the import inside _sync_search
-        with patch.dict("sys.modules", {"duckduckgo_search": MagicMock(DDGS=MagicMock(return_value=mock_ddgs_instance))}):
+        with patch.dict(
+            "sys.modules", {"duckduckgo_search": MagicMock(DDGS=MagicMock(return_value=mock_ddgs_instance))}
+        ):
             yield mock_ddgs_instance
 
 
