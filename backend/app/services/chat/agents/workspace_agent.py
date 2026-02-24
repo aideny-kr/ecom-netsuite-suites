@@ -15,11 +15,12 @@ from app.services.chat.tools import build_local_tool_definitions
 # Tools this agent is allowed to use
 _WORKSPACE_TOOL_NAMES = frozenset(
     {
-        "workspace.list_files",
-        "workspace.read_file",
-        "workspace.search",
-        "workspace.propose_patch",
+        "workspace_list_files",
+        "workspace_read_file",
+        "workspace_search",
+        "workspace_propose_patch",
         "rag_search",
+        "tenant_save_learned_rule",
     }
 )
 

@@ -43,6 +43,7 @@ ALLOWED_CHAT_TOOLS: frozenset[str] = frozenset(
         "workspace.search",
         "workspace.propose_patch",
         "suitescript.sync",
+        "tenant.save_learned_rule",
     }
 )
 

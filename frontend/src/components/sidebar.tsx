@@ -53,7 +53,7 @@ export function Sidebar() {
           </div>
           <div>
             <h1 className="text-[15px] font-semibold tracking-tight text-white">
-              Ecom Suite
+              Suite Studio AI
             </h1>
           </div>
         </div>

@@ -42,7 +42,7 @@ export default function LoginPage() {
             <Zap className="h-5 w-5 text-white" />
           </div>
           <span className="text-lg font-semibold tracking-tight">
-            Ecom Suite
+            Suite Studio AI
           </span>
         </div>
         <div>
@@ -57,7 +57,7 @@ export default function LoginPage() {
           </p>
         </div>
         <p className="text-xs text-white/30">
-          Ecom NetSuite Suites
+          Suite Studio AI
         </p>
       </div>
 
@@ -70,7 +70,7 @@ export default function LoginPage() {
               <Zap className="h-5 w-5 text-white" />
             </div>
             <span className="text-lg font-semibold tracking-tight">
-              Ecom Suite
+              Suite Studio AI
             </span>
           </div>
 

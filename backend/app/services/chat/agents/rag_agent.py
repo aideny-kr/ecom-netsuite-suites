@@ -14,7 +14,7 @@ from app.services.chat.agents.base_agent import BaseSpecialistAgent
 from app.services.chat.tools import build_local_tool_definitions
 
 # Tools this agent is allowed to use
-_RAG_TOOL_NAMES = frozenset({"rag_search", "web_search"})
+_RAG_TOOL_NAMES = frozenset({"rag_search", "web_search", "tenant_save_learned_rule"})
 
 
 class RAGAgent(BaseSpecialistAgent):

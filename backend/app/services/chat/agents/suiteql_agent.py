@@ -32,6 +32,7 @@ _SUITEQL_TOOL_NAMES = frozenset(
         "netsuite_suiteql",
         "netsuite_get_metadata",
         "rag_search",
+        "tenant_save_learned_rule",
     }
 )
 
@@ -124,6 +125,7 @@ TOOL SELECTION — CRITICAL:
 - netsuite_suiteql: Local REST API for SuiteQL (OAuth 2.0). USE THIS AS DEFAULT for ALL queries — both custom records (customrecord_*) AND standard tables (transaction, customer, item, etc.). Has full permissions.
 - external_mcp_suiteql: NetSuite MCP endpoint. ONLY use as fallback if netsuite_suiteql fails. May have restricted permissions (some record types like RMA/Return Authorization may not be visible).
 - netsuite_get_metadata: Discover column names for standard record types, and to safely discover the script_id of a custom record if guessing is tempting.
+- tenant_save_learned_rule: When the user gives a standing instruction, correction, or preference about how queries or outputs should work (e.g., "always show Value not ID", "remember that X means Y"), call this tool to persist it for future sessions.
 - rag_search: Search internal documentation.
 
 CUSTOM RECORD TABLE NAMING — IMPORTANT:

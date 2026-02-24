@@ -7,6 +7,7 @@ from app.mcp.tools import (
     rag_search,
     recon_run,
     report_export,
+    save_learned_rule,
     schedule_ops,
     suitescript_sync_tool,
     web_search,
@@ -266,6 +267,29 @@ TOOL_REGISTRY = {
                 "required": False,
                 "default": 5,
                 "description": "Max results to return (1-10)",
+            },
+        },
+    },
+    "tenant.save_learned_rule": {
+        "description": (
+            "Save a persistent business rule or preference for this tenant. "
+            "Call this when the user gives you a standing instruction, correction, "
+            "or preference about how queries or outputs should work (e.g., "
+            "'always show Value not ID', 'stuck in Ordoro means status=5'). "
+            "Only tenant admins can persist rules; non-admins get session-only memory."
+        ),
+        "execute": save_learned_rule.execute,
+        "params_schema": {
+            "rule_description": {
+                "type": "string",
+                "required": True,
+                "description": "The business rule or preference to remember across sessions",
+            },
+            "rule_category": {
+                "type": "string",
+                "required": False,
+                "default": "general",
+                "description": "Category: output_preference, status_mapping, query_logic, term_definition, or general",
             },
         },
     },

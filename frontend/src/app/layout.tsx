@@ -8,7 +8,7 @@ import { Toaster } from "@/components/ui/toaster";
 const inter = Inter({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
-  title: "Ecom NetSuite Suites",
+  title: "Suite Studio AI",
   description: "Multi-tenant e-commerce to NetSuite integration platform",
 };
 

@@ -42,6 +42,7 @@ EXPECTED_TOOLS = {
     "workspace.deploy_sandbox",
     "workspace.run_suiteql_assertions",
     "suitescript.sync",
+    "tenant.save_learned_rule",
 }
 
 
