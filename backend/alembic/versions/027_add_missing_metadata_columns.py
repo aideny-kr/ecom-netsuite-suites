@@ -7,8 +7,9 @@ Revises: 026_add_saved_searches
 Create Date: 2026-02-23
 """
 
-from alembic import op
 import sqlalchemy as sa
+
+from alembic import op
 
 revision = "027_add_missing_metadata_columns"
 down_revision = "026_add_saved_searches"

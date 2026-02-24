@@ -3,8 +3,9 @@
 Add column to store discovered fields for each custom record type.
 """
 
-from alembic import op
 import sqlalchemy as sa
+
+from alembic import op
 
 revision = "024_add_custom_record_fields"
 down_revision = "023_audit_uuidv7"

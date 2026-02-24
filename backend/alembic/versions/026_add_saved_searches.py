@@ -5,8 +5,9 @@ Revises: 025_tenant_entity_mapping
 Create Date: 2026-02-23
 """
 
-from alembic import op
 import sqlalchemy as sa
+
+from alembic import op
 
 revision = "026_add_saved_searches"
 down_revision = "025_tenant_entity_mapping"

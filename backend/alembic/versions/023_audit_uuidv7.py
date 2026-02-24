@@ -8,9 +8,10 @@ Revises: 022_workspace_file_locking
 Create Date: 2026-02-19
 """
 
-from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import UUID
+
+from alembic import op
 
 revision = "023_audit_uuidv7"
 down_revision = "022_workspace_file_locking"

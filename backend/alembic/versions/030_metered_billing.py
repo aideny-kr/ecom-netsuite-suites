@@ -7,9 +7,9 @@ Create Date: 2026-02-24 05:00:00.000000
 """
 from typing import Sequence, Union
 
-from alembic import op
 import sqlalchemy as sa
-from sqlalchemy.dialects import postgresql
+
+from alembic import op
 
 # revision identifiers, used by Alembic.
 revision: str = '030_metered_billing'
@@ -22,7 +22,11 @@ def upgrade() -> None:
     # tenant_wallets — credit ledger
     op.create_table(
         'tenant_wallets',
-        sa.Column('tenant_id', sa.UUID(), sa.ForeignKey('tenants.id', name=op.f('fk_tenant_wallets_tenant_id_tenants')), nullable=False),
+        sa.Column(
+            'tenant_id', sa.UUID(),
+            sa.ForeignKey('tenants.id', name=op.f('fk_tenant_wallets_tenant_id_tenants')),
+            nullable=False,
+        ),
         sa.Column('stripe_customer_id', sa.String(255), nullable=True),
         sa.Column('stripe_subscription_item_id', sa.String(255), nullable=True),
         sa.Column('billing_period_start', sa.DateTime(timezone=True), nullable=False),

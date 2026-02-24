@@ -7,9 +7,9 @@ Create Date: 2026-02-24 03:30:00.000000
 """
 from typing import Sequence, Union
 
-from alembic import op
 import sqlalchemy as sa
-from sqlalchemy.dialects import postgresql
+
+from alembic import op
 
 # revision identifiers, used by Alembic.
 revision: str = '029_learned_rules_created_by'
@@ -21,7 +21,11 @@ depends_on: Union[str, Sequence[str], None] = None
 def upgrade() -> None:
     op.add_column(
         'tenant_learned_rules',
-        sa.Column('created_by', sa.UUID(), sa.ForeignKey('users.id', name=op.f('fk_tenant_learned_rules_created_by_users')), nullable=True),
+        sa.Column(
+            'created_by', sa.UUID(),
+            sa.ForeignKey('users.id', name=op.f('fk_tenant_learned_rules_created_by_users')),
+            nullable=True,
+        ),
     )
 
 

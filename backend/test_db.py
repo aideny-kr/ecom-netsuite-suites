@@ -1,7 +1,5 @@
-import asyncio
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy import text
 
 engine = create_engine("postgresql://postgres:postgres@localhost:5432/ecom_netsuite")
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

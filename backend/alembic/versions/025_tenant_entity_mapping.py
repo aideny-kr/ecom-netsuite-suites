@@ -4,9 +4,10 @@ Create tenant_entity_mapping table with pg_trgm and btree_gin extensions
 for high-speed fuzzy entity resolution per tenant.
 """
 
-from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import UUID
+
+from alembic import op
 
 revision = "025_tenant_entity_mapping"
 down_revision = "024_add_custom_record_fields"
