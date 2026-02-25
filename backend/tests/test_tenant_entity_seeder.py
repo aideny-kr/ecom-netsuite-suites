@@ -138,6 +138,7 @@ class TestBuildRowsScripts:
                     "name": "Order Processor",
                     "scripttype": "USEREVENT",
                     "description": "Processes orders",
+                    "filepath": "landedcost/order_proc.js",
                 },
             ]
         )
@@ -147,7 +148,22 @@ class TestBuildRowsScripts:
         assert rows[0]["script_id"] == "customscript_order_proc"
         assert rows[0]["natural_name"] == "Order Processor"
         assert "USEREVENT" in rows[0]["description"]
+        assert "Path: landedcost/order_proc.js" in rows[0]["description"]
         assert "Processes orders" in rows[0]["description"]
+
+    def test_script_without_filepath(self):
+        md = _make_metadata(
+            scripts=[
+                {
+                    "scriptid": "customscript_simple",
+                    "name": "Simple Script",
+                    "scripttype": "SCHEDULED",
+                },
+            ]
+        )
+        rows = _build_rows(TENANT_ID, md)
+        assert len(rows) == 1
+        assert "Path:" not in rows[0]["description"]
 
     def test_script_missing_name_skipped(self):
         md = _make_metadata(scripts=[{"scriptid": "customscript_x", "name": ""}])

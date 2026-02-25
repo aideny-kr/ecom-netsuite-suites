@@ -107,15 +107,19 @@ DISCOVERY_QUERIES: list[dict[str, Any]] = [
         "label": "scripts",
         "description": "Active SuiteScripts in the environment",
         "query": (
-            "SELECT id, scriptid, name, scripttype, description "
-            "FROM script WHERE isinactive = 'F' AND ROWNUM <= 1000"
+            "SELECT s.id, s.scriptid, s.name, s.scripttype, s.description, "
+            "BUILTIN.DF(s.scriptfile) as scriptfile, "
+            "BUILTIN.DF(f.folder) as foldername "
+            "FROM script s "
+            "LEFT JOIN file f ON s.scriptfile = f.id "
+            "WHERE s.isinactive = 'F' AND ROWNUM <= 1000"
         ),
     },
     {
         "label": "script_deployments",
         "description": "Active SuiteScript Deployments",
         "query": (
-            "SELECT script, scriptid, title, status, recordtype "
+            "SELECT script, scriptid, title, status "
             "FROM scriptdeployment "
             "WHERE isdeployed = 'T' AND ROWNUM <= 1000"
         ),
@@ -288,7 +292,16 @@ async def run_full_discovery(
             setattr(metadata, label, result["rows"])
             success_count += 1
 
-    # ── 3b. Dynamically extract custom list values (parallel) ──────
+    # ── 3b. Enrich scripts with folder path ────────────────────────
+    # SuiteQL scriptdeployment does not expose recordtype, so we only
+    # enrich with filepath (folder + filename) from the file JOIN.
+    if metadata.scripts:
+        for s in metadata.scripts:
+            folder = s.get("foldername", "")
+            filename = s.get("scriptfile", "")
+            s["filepath"] = f"{folder}/{filename}" if folder and filename else (filename or "")
+
+    # ── 3c. Dynamically extract custom list values (parallel) ──────
     # Query actual list option IDs so the AI knows what "1" vs "2" means.
     if getattr(metadata, "custom_lists", None):
         try:

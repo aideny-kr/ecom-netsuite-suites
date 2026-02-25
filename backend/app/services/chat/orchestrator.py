@@ -56,6 +56,33 @@ def _sanitize_for_prompt(text: str) -> str:
     return cleaned[:500]
 
 
+def _is_valid_uuid(val: str) -> bool:
+    """Check if a string is a valid UUID."""
+    try:
+        uuid.UUID(str(val))
+        return True
+    except (ValueError, AttributeError):
+        return False
+
+
+async def _resolve_default_workspace(
+    db: AsyncSession, tenant_id: uuid.UUID,
+) -> str | None:
+    """Find the most recent active workspace for a tenant (cached per request)."""
+    from sqlalchemy import select
+
+    from app.models.workspace import Workspace
+
+    result = await db.execute(
+        select(Workspace.id)
+        .where(Workspace.tenant_id == tenant_id, Workspace.status == "active")
+        .order_by(Workspace.created_at.desc())
+        .limit(1)
+    )
+    ws = result.scalar_one_or_none()
+    return str(ws) if ws else None
+
+
 async def run_chat_turn(
     db: AsyncSession,
     session: ChatSession,
@@ -155,6 +182,18 @@ async def run_chat_turn(
             )
     else:
         system_prompt = await get_active_template(db, tenant_id)
+
+    # ── Inject AI Soul (Tone & Quirks) ──
+    if not is_onboarding:
+        from app.services.soul_service import get_soul_config
+        soul_config = await get_soul_config(tenant_id)
+        if soul_config.exists:
+            soul_parts = ["\n\n## Tenant-Specific AI Configuration & Logic\n"]
+            if soul_config.bot_tone:
+                soul_parts.append(f"TONE & MANNER:\n{soul_config.bot_tone}\n")
+            if soul_config.netsuite_quirks:
+                soul_parts.append(f"NETSUITE QUIRKS & LOGIC:\n{soul_config.netsuite_quirks}\n")
+            system_prompt += "\n".join(soul_parts)
 
     # ── Inject dynamic tool inventory into system prompt ──
     # This ensures the model always knows the exact tool names it can call,
@@ -410,9 +449,17 @@ async def run_chat_turn(
         tool_results_content = []
         for block in response.tool_use_blocks:
             # Auto-inject workspace_id for workspace tools
-            if workspace_context and block.name.startswith("workspace_"):
-                if "workspace_id" not in block.input:
-                    block.input["workspace_id"] = workspace_context["workspace_id"]
+            if block.name.startswith("workspace_"):
+                if "workspace_id" not in block.input or not _is_valid_uuid(block.input.get("workspace_id", "")):
+                    if workspace_context:
+                        block.input["workspace_id"] = workspace_context["workspace_id"]
+                    elif not workspace_context:
+                        # Auto-resolve default workspace for non-workspace sessions
+                        resolved_ws_id = await _resolve_default_workspace(db, tenant_id)
+                        if resolved_ws_id:
+                            block.input["workspace_id"] = resolved_ws_id
+                            if not workspace_context:
+                                workspace_context = {"workspace_id": resolved_ws_id, "name": "auto-resolved"}
 
             yield {"type": "tool_status", "content": f"Executing {block.name}..."}
 

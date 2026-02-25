@@ -61,6 +61,7 @@ class RAGAgent(BaseSpecialistAgent):
             "'custentity', 'custitem', or the field label.\n"
             "- Use source_filter='netsuite_metadata/' to narrow to custom field reference docs.\n"
             "- Use source_filter='netsuite_docs/' for SuiteQL syntax or record types.\n"
+            "- Use source_filter='workspace_scripts/' to search SuiteScript source code and business logic.\n"
             "\n"
             "OUTPUT FORMAT:\n"
             "- Return the relevant information extracted from the documents.\n"

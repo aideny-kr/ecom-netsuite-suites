@@ -175,6 +175,7 @@ class SuiteQLAgent(BaseSpecialistAgent):
         self._policy = policy
         self._tool_defs: list[dict] | None = None
         self._tenant_vernacular: str = ""
+        self._soul_quirks: str = ""
 
     @property
     def agent_name(self) -> str:
@@ -211,6 +212,11 @@ class SuiteQLAgent(BaseSpecialistAgent):
                 "\n**ACTION REQUIRED**: For each resolved entity of type 'customrecord', your FIRST query MUST be: `SELECT * FROM <internal_script_id> WHERE ROWNUM <= 5` using the netsuite_suiteql tool. Do NOT skip this step."
             )
 
+        if self._soul_quirks:
+            parts.append("\n## TENANT NETSUITE QUIRKS AND BUSINESS LOGIC")
+            parts.append("CRITICAL: Pay strict attention to these tenant-specific NetSuite quirks when forming queries:")
+            parts.append(self._soul_quirks)
+
         # Inject policy constraints
         if self._policy:
             parts.append("\n## POLICY CONSTRAINTS")
@@ -240,6 +246,14 @@ class SuiteQLAgent(BaseSpecialistAgent):
     ) -> AgentResult:
         """Override to dynamically add external MCP tools before running."""
         self._tenant_vernacular = context.get("tenant_vernacular", "")
+
+        try:
+            from app.services.soul_service import get_soul_config
+            soul_config = await get_soul_config(self.tenant_id)
+            if soul_config.exists and soul_config.netsuite_quirks:
+                self._soul_quirks = soul_config.netsuite_quirks
+        except Exception:
+            _logger.warning("suiteql_agent.soul_fetch_failed", exc_info=True)
 
         # Discover external MCP tools at run time (requires db session)
         try:
@@ -376,9 +390,10 @@ class SuiteQLAgent(BaseSpecialistAgent):
             parts.append(f"\n**Active Scripts** ({len(md.scripts)} total):")
             for s in md.scripts[:100]:
                 desc = f" — {s['description']}" if s.get("description") else ""
-                file_info = f" (file: {s['scriptfile']})" if s.get("scriptfile") else ""
+                filepath = s.get("filepath") or s.get("scriptfile") or ""
+                file_info = f" [{filepath}]" if filepath else ""
                 parts.append(
-                    f"  ID {s.get('id', '?')} | {s.get('scriptid', '?')} ({s.get('scripttype', '?')}): "
+                    f"  {s.get('scriptid', '?')} ({s.get('scripttype', '?')}): "
                     f"{s.get('name', '?')}{desc}{file_info}"
                 )
 

@@ -49,14 +49,14 @@ class TestFormatScripts:
                 "name": "Order Processor",
                 "scripttype": "USEREVENT",
                 "description": "Processes sales orders",
-                "scriptfile": 42,
+                "filepath": "landedcost/WD_SCM_LC_CS_Transactions.js",
             },
         ]
         result = _format_scripts(scripts)
         assert "customscript_order_proc" in result
         assert "USEREVENT" in result
         assert "Processes sales orders" in result
-        assert "(file: 42)" in result
+        assert "landedcost/WD_SCM_LC_CS_Transactions.js" in result
         assert "SuiteScripts" in result
 
     def test_missing_optional_fields(self):
@@ -64,7 +64,6 @@ class TestFormatScripts:
         result = _format_scripts(scripts)
         assert "customscript_x" in result
         assert "SCHEDULED" in result
-        assert "file:" not in result
 
 
 class TestFormatScriptDeployments:

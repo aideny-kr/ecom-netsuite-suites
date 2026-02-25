@@ -41,6 +41,8 @@ export function WorkspaceChatPanel({
     handleSend,
     handleNewChat,
     isSending,
+    streamingContent,
+    streamingStatus,
   } = useWorkspaceChat(workspaceId);
 
   // Auto-inject current file context so the AI knows what the user is viewing
@@ -144,6 +146,8 @@ export function WorkspaceChatPanel({
           isLoading={isLoadingDetail && !!activeSessionId}
           pendingUserMessage={pendingMessage}
           isWaitingForReply={isSending}
+          streamingContent={streamingContent}
+          streamingStatus={streamingStatus}
           onMentionClick={onMentionClick}
           workspaceId={workspaceId}
           onViewDiff={onViewDiff}

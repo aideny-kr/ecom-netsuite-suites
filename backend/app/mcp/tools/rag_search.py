@@ -56,23 +56,27 @@ async def execute(params: dict[str, Any], context: dict[str, Any] | None = None,
             # Embedding service not configured — fall back to keyword search
             return await _keyword_search(db, tenant_id, query_text, top_k, source_filter)
 
-        # Build base query
+        # Vector search only works on docs WITH embeddings.
+        # Many tenant docs may have NULL embeddings (e.g. rate-limited Voyage AI).
+        # Strategy: run vector search for embedded docs, then supplement with
+        # keyword search for unembedded tenant docs, deduplicating by source_path.
+
+        # 1. Vector search (only finds docs with non-NULL embeddings)
         stmt = (
             select(
                 DocChunk,
                 DocChunk.embedding.cosine_distance(query_embedding).label("distance"),
             )
+            .where(DocChunk.embedding.isnot(None))
             .order_by("distance")
             .limit(top_k)
         )
 
-        # Tenant scoping: include tenant-specific + system/platform docs
         if tenant_id:
             stmt = stmt.where((DocChunk.tenant_id == tenant_id) | (DocChunk.tenant_id == SYSTEM_TENANT_ID))
         else:
             stmt = stmt.where(DocChunk.tenant_id == SYSTEM_TENANT_ID)
 
-        # Optional source path filter
         if source_filter:
             stmt = stmt.where(DocChunk.source_path.ilike(f"{source_filter}%"))
 
@@ -80,6 +84,7 @@ async def execute(params: dict[str, Any], context: dict[str, Any] | None = None,
         rows = result.all()
 
         results = []
+        seen_paths: set[str] = set()
         for row in rows:
             chunk = row[0]
             distance = float(row[1]) if row[1] is not None else 1.0
@@ -87,11 +92,33 @@ async def execute(params: dict[str, Any], context: dict[str, Any] | None = None,
             results.append(
                 {
                     "title": chunk.title,
-                    "content": chunk.content[:2000],  # Truncate for token efficiency
+                    "content": chunk.content[:2000],
                     "source_path": chunk.source_path,
                     "similarity_score": similarity,
                 }
             )
+            seen_paths.add(chunk.source_path)
+
+        # 2. Always supplement with keyword search for tenant docs
+        # (many tenant docs have NULL embeddings and are invisible to vector search)
+        if tenant_id:
+            kw_result = await _keyword_search(
+                db, tenant_id, query_text, top_k, source_filter
+            )
+            for kr in kw_result.get("results", []):
+                if kr["source_path"] not in seen_paths:
+                    results.append(kr)
+                    seen_paths.add(kr["source_path"])
+
+        # Prioritise keyword-matched tenant docs over low-similarity system docs
+        # by sorting: tenant keyword hits first, then vector similarity
+        def _sort_key(r: dict) -> tuple:
+            kw_hits = r.get("keyword_hits", 0)
+            sim = r.get("similarity_score") or 0
+            return (-kw_hits, -sim)
+
+        results.sort(key=_sort_key)
+        results = results[:top_k]
 
         return {"results": results, "count": len(results), "query": query_text}
 
@@ -113,24 +140,51 @@ async def _keyword_search(
     top_k: int,
     source_filter: str | None,
 ) -> dict:
-    """Fallback keyword search when embeddings are not available."""
-    search_term = f"%{query_text[:100]}%"
-    stmt = select(DocChunk).where(DocChunk.content.ilike(search_term)).limit(top_k)
+    """Fallback keyword search when embeddings are not available.
+
+    Splits the query into individual words and matches documents containing
+    ANY of them (OR logic), then ranks by number of keyword hits.
+    """
+    from sqlalchemy import case, or_
+
+    # Extract meaningful keywords (skip very short words)
+    words = [w.strip().lower() for w in query_text.split() if len(w.strip()) >= 3]
+    if not words:
+        words = [query_text.strip().lower()]
+
+    # Build OR conditions: content ILIKE '%word%' for each keyword
+    conditions = [DocChunk.content.ilike(f"%{w[:50]}%") for w in words[:10]]
+
+    # Score = number of keywords found in each doc (for ranking)
+    hit_score = sum(
+        case((DocChunk.content.ilike(f"%{w[:50]}%"), 1), else_=0)
+        for w in words[:10]
+    )
+
+    stmt = (
+        select(DocChunk, hit_score.label("score"))
+        .where(or_(*conditions))
+        .order_by(hit_score.desc())
+        .limit(top_k)
+    )
     if tenant_id:
-        stmt = stmt.where((DocChunk.tenant_id == tenant_id) | (DocChunk.tenant_id == SYSTEM_TENANT_ID))
+        stmt = stmt.where(
+            (DocChunk.tenant_id == tenant_id) | (DocChunk.tenant_id == SYSTEM_TENANT_ID)
+        )
     if source_filter:
         stmt = stmt.where(DocChunk.source_path.ilike(f"{source_filter}%"))
 
     result = await db.execute(stmt)
-    chunks = result.scalars().all()
+    rows = result.all()
 
     results = [
         {
-            "title": c.title,
-            "content": c.content[:2000],
-            "source_path": c.source_path,
+            "title": row[0].title,
+            "content": row[0].content[:2000],
+            "source_path": row[0].source_path,
             "similarity_score": None,
+            "keyword_hits": int(row[1]) if row[1] else 0,
         }
-        for c in chunks
+        for row in rows
     ]
     return {"results": results, "count": len(results), "query": query_text, "method": "keyword_fallback"}

@@ -211,6 +211,8 @@ def _build_rows(
             if not scriptid or not name:
                 continue
             desc = f"Type: {s.get('scripttype', 'unknown')}"
+            if s.get("filepath"):
+                desc += f" | Path: {s['filepath']}"
             if s.get("description"):
                 desc += f" — {s['description']}"
             rows.append(

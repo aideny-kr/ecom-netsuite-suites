@@ -24,6 +24,35 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _is_valid_uuid(val: str) -> bool:
+    """Check if a string is a valid UUID."""
+    import uuid as _uuid
+
+    try:
+        _uuid.UUID(str(val))
+        return True
+    except (ValueError, AttributeError):
+        return False
+
+
+async def _resolve_default_workspace(
+    db: "AsyncSession", tenant_id: "uuid.UUID",
+) -> str | None:
+    """Find the most recent active workspace for a tenant."""
+    from sqlalchemy import select
+
+    from app.models.workspace import Workspace
+
+    result = await db.execute(
+        select(Workspace.id)
+        .where(Workspace.tenant_id == tenant_id, Workspace.status == "active")
+        .order_by(Workspace.created_at.desc())
+        .limit(1)
+    )
+    ws = result.scalar_one_or_none()
+    return str(ws) if ws else None
+
+
 @dataclass
 class AgentResult:
     """Result from a specialist agent run."""
@@ -157,6 +186,14 @@ class BaseSpecialistAgent(abc.ABC):
 
                 tool_results_content = []
                 for block in response.tool_use_blocks:
+                    # Auto-inject workspace_id for workspace tools
+                    if block.name.startswith("workspace_"):
+                        ws_id = block.input.get("workspace_id", "")
+                        if not ws_id or not _is_valid_uuid(ws_id):
+                            resolved = await _resolve_default_workspace(db, self.tenant_id)
+                            if resolved:
+                                block.input["workspace_id"] = resolved
+
                     t0 = time.monotonic()
 
                     # Policy check

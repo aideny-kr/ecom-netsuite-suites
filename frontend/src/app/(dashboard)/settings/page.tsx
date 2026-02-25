@@ -478,6 +478,8 @@ interface TenantProfile {
   industry: string;
   team_size: string | null;
   business_description: string | null;
+  bot_tone: string | null;
+  netsuite_quirks: string | null;
   version: number;
   status: string;
 }
@@ -594,11 +596,10 @@ function TenantProfileSection() {
                   <button
                     key={ind}
                     onClick={() => setIndustry(ind)}
-                    className={`rounded-lg border px-3 py-2 text-[13px] text-left transition-colors ${
-                      industry === ind
-                        ? "border-primary bg-primary/5 text-foreground"
-                        : "border-border hover:border-primary/40 text-muted-foreground"
-                    }`}
+                    className={`rounded-lg border px-3 py-2 text-[13px] text-left transition-colors ${industry === ind
+                      ? "border-primary bg-primary/5 text-foreground"
+                      : "border-border hover:border-primary/40 text-muted-foreground"
+                      }`}
                   >
                     {ind}
                   </button>
@@ -630,11 +631,10 @@ function TenantProfileSection() {
                   <button
                     key={size}
                     onClick={() => setTeamSize(size)}
-                    className={`rounded-full border px-4 py-1.5 text-[12px] font-medium transition-colors ${
-                      teamSize === size
-                        ? "border-primary bg-primary/5 text-foreground"
-                        : "border-border hover:border-primary/40 text-muted-foreground"
-                    }`}
+                    className={`rounded-full border px-4 py-1.5 text-[12px] font-medium transition-colors ${teamSize === size
+                      ? "border-primary bg-primary/5 text-foreground"
+                      : "border-border hover:border-primary/40 text-muted-foreground"
+                      }`}
                   >
                     {size}
                   </button>
@@ -668,6 +668,194 @@ function TenantProfileSection() {
                     setIndustry(profile.industry || "");
                     setDescription(profile.business_description || "");
                     setTeamSize(profile.team_size || "");
+                    setError("");
+                  }}
+                >
+                  Cancel
+                </Button>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// AI Soul (Tone & Quirks) Section
+// ---------------------------------------------------------------------------
+
+function SoulSection() {
+  const [botTone, setBotTone] = useState("");
+  const [netsuiteQuirks, setNetsuiteQuirks] = useState("");
+  const [isExisting, setIsExisting] = useState(false);
+  const [isLoading, setIsLoading] = useState(true);
+  const [isEditing, setIsEditing] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const [error, setError] = useState("");
+  const { toast } = useToast();
+
+  useEffect(() => {
+    apiClient
+      .get<{ bot_tone: string | null; netsuite_quirks: string | null; exists: boolean }>("/api/v1/onboarding/soul")
+      .then((data) => {
+        setBotTone(data.bot_tone || "");
+        setNetsuiteQuirks(data.netsuite_quirks || "");
+        setIsExisting(data.exists);
+        // If it doesn't exist, start in editing mode
+        if (!data.exists) {
+          setIsEditing(true);
+        }
+      })
+      .catch(() => {
+        setIsEditing(true);
+      })
+      .finally(() => setIsLoading(false));
+  }, []);
+
+  async function handleSave() {
+    setIsSaving(true);
+    setError("");
+    try {
+      const payload = {
+        bot_tone: botTone,
+        netsuite_quirks: netsuiteQuirks,
+      };
+
+      const updated = await apiClient.post<{ bot_tone: string | null; netsuite_quirks: string | null; exists: boolean }>(
+        "/api/v1/onboarding/soul",
+        payload,
+      );
+
+      setBotTone(updated.bot_tone || "");
+      setNetsuiteQuirks(updated.netsuite_quirks || "");
+      setIsExisting(updated.exists);
+      setIsEditing(false);
+      toast({ title: "AI Soul configuration saved" });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to save AI soul configuration");
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  if (isLoading) return <Skeleton className="h-[140px] rounded-xl" />;
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <div>
+          <h3 className="text-lg font-semibold">AI Personality & Core Logic (Soul)</h3>
+          <p className="mt-0.5 text-[13px] text-muted-foreground">
+            Set the tone and manner of the chatbot and specific quirks about your NetSuite setup.
+          </p>
+        </div>
+        {isExisting && !isEditing && (
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-8 text-[12px]"
+            onClick={() => setIsEditing(true)}
+          >
+            <Pencil className="mr-1.5 h-3.5 w-3.5" />
+            Edit
+          </Button>
+        )}
+      </div>
+
+      <div className="rounded-xl border bg-card p-6 shadow-soft space-y-4">
+        {!isEditing && isExisting ? (
+          <div className="space-y-5">
+            {botTone && (
+              <div className="space-y-1.5">
+                <div className="flex items-center gap-2">
+                  <Brain className="h-4 w-4 text-primary" />
+                  <span className="text-[13px] font-medium">Chatbot Tone & Manner</span>
+                </div>
+                <p className="text-[13px] text-muted-foreground whitespace-pre-wrap">
+                  {botTone}
+                </p>
+              </div>
+            )}
+
+            {(botTone && netsuiteQuirks) && (
+              <hr className="border-border opacity-50" />
+            )}
+
+            {netsuiteQuirks && (
+              <div className="space-y-1.5">
+                <div className="flex items-center gap-2">
+                  <Database className="h-4 w-4 text-primary" />
+                  <span className="text-[13px] font-medium">NetSuite Quirks & Business Logic</span>
+                </div>
+                <p className="text-[13px] text-muted-foreground whitespace-pre-wrap">
+                  {netsuiteQuirks}
+                </p>
+              </div>
+            )}
+
+            {(!botTone && !netsuiteQuirks) && (
+              <p className="text-[13px] text-muted-foreground italic">
+                No custom tone or NetSuite quirks have been configured yet.
+              </p>
+            )}
+          </div>
+        ) : (
+          <div className="space-y-5">
+            <div className="space-y-1.5">
+              <label className="text-[13px] font-medium">
+                Chatbot Tone & Manner
+              </label>
+              <p className="text-[12px] text-muted-foreground mb-1">
+                Instructions on how the AI should behave (e.g., &quot;Professional, technical, concise, snarky...&quot;).
+              </p>
+              <textarea
+                value={botTone}
+                onChange={(e) => setBotTone(e.target.value)}
+                placeholder="e.g. Always respond in bullet points and use emojis..."
+                className="w-full rounded-lg border bg-background px-3 py-2 text-[13px] placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring min-h-[100px] resize-none"
+              />
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="text-[13px] font-medium">
+                NetSuite Quirks & Business Logic
+              </label>
+              <p className="text-[12px] text-muted-foreground mb-1">
+                Custom fields, record specific rules, script behaviors or anything specific to your NetSuite instance.
+              </p>
+              <textarea
+                value={netsuiteQuirks}
+                onChange={(e) => setNetsuiteQuirks(e.target.value)}
+                placeholder="e.g. We use custbody_priority for SLA routing. Sales order net amount is calculated by ri_ue_copy_so_net_amount.js..."
+                className="w-full rounded-lg border bg-background px-3 py-2 text-[13px] placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring min-h-[120px] resize-none"
+              />
+            </div>
+
+            {error && (
+              <p className="text-[12px] text-destructive">{error}</p>
+            )}
+
+            <div className="flex items-center gap-2 pt-1">
+              <Button
+                size="sm"
+                className="h-8 text-[12px]"
+                onClick={handleSave}
+                disabled={isSaving}
+              >
+                {isSaving ? (
+                  <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                ) : null}
+                Save Configuration
+              </Button>
+              {isExisting && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-8 text-[12px]"
+                  onClick={() => {
+                    setIsEditing(false);
                     setError("");
                   }}
                 >
@@ -1333,8 +1521,26 @@ function NetSuiteMetadataSection() {
   const { data: metadata, isLoading } = useNetSuiteMetadata();
   const triggerDiscovery = useTriggerMetadataDiscovery();
   const { toast } = useToast();
+  const { data: mcpConnectors } = useMcpConnectors();
+  const { data: connections } = useConnections();
 
   async function handleDiscover() {
+    const hasActiveMcp = mcpConnectors?.some(
+      (c) => c.provider === "netsuite_mcp" && c.status === "active" && c.is_enabled
+    );
+    const hasActiveOauth = connections?.some(
+      (c) => c.provider === "netsuite" && c.status === "active" && c.auth_type === "oauth2"
+    );
+
+    if (!hasActiveMcp || !hasActiveOauth) {
+      toast({
+        title: "Configuration Required",
+        description: "Please configure both NetSuite MCP and OAuth API connections before discovering metadata.",
+        variant: "destructive",
+      });
+      return;
+    }
+
     try {
       await triggerDiscovery.mutateAsync();
       toast({
@@ -1515,22 +1721,22 @@ function NetSuiteMetadataSection() {
                 number,
               ][]
             ).filter(([, count]) => count === 0).length > 0 && (
-              <div className="text-[12px] text-muted-foreground">
-                No data found for:{" "}
-                {(
-                  Object.entries(metadata.categories) as [
-                    keyof NetSuiteMetadataCategories,
-                    number,
-                  ][]
-                )
-                  .filter(([, count]) => count === 0)
-                  .map(
-                    ([key]) =>
-                      CATEGORY_META[key]?.label ?? key,
+                <div className="text-[12px] text-muted-foreground">
+                  No data found for:{" "}
+                  {(
+                    Object.entries(metadata.categories) as [
+                      keyof NetSuiteMetadataCategories,
+                      number,
+                    ][]
                   )
-                  .join(", ")}
-              </div>
-            )}
+                    .filter(([, count]) => count === 0)
+                    .map(
+                      ([key]) =>
+                        CATEGORY_META[key]?.label ?? key,
+                    )
+                    .join(", ")}
+                </div>
+              )}
           </>
         )}
       </div>
@@ -1546,8 +1752,26 @@ function SuiteScriptFilesSection() {
   const { data: syncStatus, isLoading } = useSuiteScriptSyncStatus();
   const triggerSync = useTriggerSuiteScriptSync();
   const { toast } = useToast();
+  const { data: mcpConnectors } = useMcpConnectors();
+  const { data: connections } = useConnections();
 
   async function handleSync() {
+    const hasActiveMcp = mcpConnectors?.some(
+      (c) => c.provider === "netsuite_mcp" && c.status === "active" && c.is_enabled
+    );
+    const hasActiveOauth = connections?.some(
+      (c) => c.provider === "netsuite" && c.status === "active" && c.auth_type === "oauth2"
+    );
+
+    if (!hasActiveMcp || !hasActiveOauth) {
+      toast({
+        title: "Configuration Required",
+        description: "Please configure both NetSuite MCP and OAuth API connections before syncing SuiteScripts.",
+        variant: "destructive",
+      });
+      return;
+    }
+
     try {
       await triggerSync.mutateAsync();
       toast({
@@ -2024,14 +2248,12 @@ function ToggleSwitch({
   return (
     <button
       onClick={onToggle}
-      className={`relative h-6 w-11 rounded-full transition-colors ${
-        enabled ? "bg-primary" : "bg-muted-foreground/20"
-      }`}
+      className={`relative h-6 w-11 rounded-full transition-colors ${enabled ? "bg-primary" : "bg-muted-foreground/20"
+        }`}
     >
       <span
-        className={`absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${
-          enabled ? "translate-x-5" : "translate-x-0"
-        }`}
+        className={`absolute top-0.5 left-0.5 h-5 w-5 rounded-full bg-white shadow transition-transform ${enabled ? "translate-x-5" : "translate-x-0"
+          }`}
       />
     </button>
   );
@@ -2109,6 +2331,9 @@ export default function SettingsPage() {
 
       {/* Tenant Profile Section */}
       <TenantProfileSection />
+
+      {/* AI Personality & Core Logic (Soul) Section */}
+      <SoulSection />
 
       {/* NetSuite Connection Section */}
       <NetSuiteConnectionSection />

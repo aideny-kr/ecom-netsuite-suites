@@ -493,6 +493,15 @@ async def sync_scripts_to_workspace(
             duration_ms=elapsed_ms,
         )
 
+        # Seed RAG chunks from synced scripts
+        try:
+            from app.services.workspace_rag_seeder import seed_workspace_scripts
+
+            chunks_seeded = await seed_workspace_scripts(db, tenant_id, workspace_id=ws.id)
+            logger.info("suitescript_sync.rag_seeded", tenant_id=str(tenant_id), chunks=chunks_seeded)
+        except Exception:
+            logger.warning("suitescript_sync.rag_seeding_failed", exc_info=True)
+
         return {
             "status": "completed",
             "workspace_id": str(ws.id),

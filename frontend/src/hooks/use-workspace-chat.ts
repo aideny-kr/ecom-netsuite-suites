@@ -3,16 +3,15 @@
 import { useState, useCallback } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiClient } from "@/lib/api-client";
-import type {
-  ChatSession,
-  ChatSessionDetail,
-  ChatMessage,
-} from "@/lib/types";
+import type { ChatSession, ChatSessionDetail } from "@/lib/types";
 
 export function useWorkspaceChat(workspaceId: string | null) {
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [pendingMessage, setPendingMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [isStreaming, setIsStreaming] = useState(false);
+  const [streamingContent, setStreamingContent] = useState<string | null>(null);
+  const [streamingStatus, setStreamingStatus] = useState<string | null>(null);
   const queryClient = useQueryClient();
 
   // Show only sessions for this workspace
@@ -31,16 +30,6 @@ export function useWorkspaceChat(workspaceId: string | null) {
           `/api/v1/chat/sessions/${activeSessionId}`,
         ),
       enabled: !!activeSessionId,
-      refetchInterval: (query) => {
-        const data = query.state.data;
-        if (!data) return false;
-        const msgs = data.messages;
-        // Refetch while waiting for assistant reply
-        if (msgs.length > 0 && msgs[msgs.length - 1].role === "user") {
-          return 2000;
-        }
-        return false;
-      },
     });
 
   // Create workspace-scoped sessions so orchestrator injects workspace context
@@ -55,37 +44,15 @@ export function useWorkspaceChat(workspaceId: string | null) {
     },
   });
 
-  const sendMessage = useMutation({
-    mutationFn: ({
-      sessionId,
-      content,
-    }: {
-      sessionId: string;
-      content: string;
-    }) =>
-      apiClient.post<ChatMessage>(
-        `/api/v1/chat/sessions/${sessionId}/messages`,
-        { content },
-      ),
-    onSuccess: () => {
-      setPendingMessage(null);
-      if (activeSessionId) {
-        queryClient.invalidateQueries({
-          queryKey: ["chat-session", activeSessionId],
-        });
-        queryClient.invalidateQueries({ queryKey: ["chat-sessions"] });
-      }
-    },
-    onError: (err: Error) => {
-      setPendingMessage(null);
-      setError(err.message || "Failed to send message.");
-    },
-  });
-
   const handleSend = useCallback(
     async (content: string) => {
+      if (isStreaming || createSession.isPending) return;
       setError(null);
       setPendingMessage(content);
+      setIsStreaming(true);
+      setStreamingContent("");
+      setStreamingStatus(null);
+
       let sessionId = activeSessionId;
       if (!sessionId) {
         try {
@@ -93,13 +60,74 @@ export function useWorkspaceChat(workspaceId: string | null) {
           sessionId = session.id;
         } catch {
           setPendingMessage(null);
+          setIsStreaming(false);
           setError("Failed to create chat session.");
           return;
         }
       }
-      sendMessage.mutate({ sessionId, content });
+
+      try {
+        const res = await apiClient.stream(
+          `/api/v1/chat/sessions/${sessionId}/messages`,
+          { content },
+        );
+
+        const reader = res.body?.getReader();
+        const decoder = new TextDecoder();
+        if (!reader) throw new Error("Stream not available");
+
+        let buffer = "";
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+
+          const chunks = buffer.split("\n\n");
+          buffer = chunks.pop() || "";
+
+          for (const chunk of chunks) {
+            const lines = chunk.split("\n");
+            for (const line of lines) {
+              if (line.startsWith("data: ")) {
+                const dataStr = line.slice(6).trim();
+                if (!dataStr) continue;
+                try {
+                  const data = JSON.parse(dataStr);
+                  if (data.type === "text") {
+                    setStreamingContent((prev) => (prev || "") + data.content);
+                    setStreamingStatus(null);
+                  } else if (data.type === "tool_status") {
+                    setStreamingStatus(data.content);
+                  } else if (data.type === "error") {
+                    setError(data.error);
+                  }
+                } catch (e) {
+                  console.error("Failed to parse SSE line", e);
+                }
+              }
+            }
+          }
+        }
+      } catch (err: unknown) {
+        const message =
+          err instanceof Error
+            ? err.message
+            : "Failed to send message. Please try again.";
+        setError(message);
+      } finally {
+        await queryClient.invalidateQueries({
+          queryKey: ["chat-session", sessionId],
+        });
+        await queryClient.invalidateQueries({
+          queryKey: ["chat-sessions"],
+        });
+        setIsStreaming(false);
+        setPendingMessage(null);
+        setStreamingContent(null);
+        setStreamingStatus(null);
+      }
     },
-    [activeSessionId, createSession, sendMessage],
+    [activeSessionId, createSession, isStreaming, queryClient],
   );
 
   const handleNewChat = useCallback(() => {
@@ -118,6 +146,8 @@ export function useWorkspaceChat(workspaceId: string | null) {
     setError,
     handleSend,
     handleNewChat,
-    isSending: sendMessage.isPending || createSession.isPending,
+    isSending: isStreaming || createSession.isPending,
+    streamingContent,
+    streamingStatus,
   };
 }

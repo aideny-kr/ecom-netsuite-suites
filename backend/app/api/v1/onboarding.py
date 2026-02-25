@@ -24,6 +24,7 @@ from app.schemas.onboarding_wizard import (
     StepValidationResponse,
 )
 from app.schemas.prompt_template import PromptTemplatePreview, PromptTemplateResponse
+from app.schemas.soul import SoulConfigResponse, SoulUpdateRequest
 from app.schemas.tenant_profile import TenantProfileCreate, TenantProfileResponse
 from app.services import onboarding_service, onboarding_wizard_service, policy_service, prompt_template_service
 from app.services.chat.orchestrator import run_chat_turn
@@ -189,6 +190,29 @@ async def preview_prompt_template(
     policy = await get_active_policy(db, user.tenant_id)
     template_text, sections = prompt_template_service.generate_template(profile, policy)
     return {"template_text": template_text, "sections": sections}
+
+
+# --- Soul.md Endpoints ---
+
+@router.get("/soul", response_model=SoulConfigResponse)
+async def get_soul_config(
+    user: User = Depends(require_permission("onboarding.view")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Retrieve the parsed contents of the tenant's soul.md file."""
+    from app.services.soul_service import get_soul_config as get_soul
+    return await get_soul(user.tenant_id)
+
+
+@router.post("/soul", response_model=SoulConfigResponse)
+async def update_soul_config(
+    body: SoulUpdateRequest,
+    user: User = Depends(require_permission("onboarding.manage")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Update or create the tenant's soul.md file."""
+    from app.services.soul_service import update_soul_config as update_soul
+    return await update_soul(user.tenant_id, body)
 
 
 # --- Chat-based onboarding endpoints ---
