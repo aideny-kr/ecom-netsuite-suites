@@ -107,7 +107,7 @@ DISCOVERY_QUERIES: list[dict[str, Any]] = [
         "label": "scripts",
         "description": "Active SuiteScripts in the environment",
         "query": (
-            "SELECT id, scriptid, name, scripttype, description, scriptfile, notifyowner "
+            "SELECT id, scriptid, name, scripttype, description "
             "FROM script WHERE isinactive = 'F' AND ROWNUM <= 1000"
         ),
     },
@@ -115,7 +115,7 @@ DISCOVERY_QUERIES: list[dict[str, Any]] = [
         "label": "script_deployments",
         "description": "Active SuiteScript Deployments",
         "query": (
-            "SELECT script, scriptid, title, status, recordtype, eventtype, allroles, loglevel "
+            "SELECT script, scriptid, title, status, recordtype "
             "FROM scriptdeployment "
             "WHERE isdeployed = 'T' AND ROWNUM <= 1000"
         ),
@@ -124,7 +124,7 @@ DISCOVERY_QUERIES: list[dict[str, Any]] = [
         "label": "workflows",
         "description": "Active Workflows",
         "query": (
-            "SELECT id, scriptid, name, recordtype, status, description, initoncreate, initonedit "
+            "SELECT scriptid, name, recordtype, status "
             "FROM workflow WHERE isinactive = 'F' AND ROWNUM <= 500"
         ),
     },

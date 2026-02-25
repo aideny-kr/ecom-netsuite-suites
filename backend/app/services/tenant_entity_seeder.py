@@ -283,6 +283,13 @@ async def seed_entity_mappings(
     if not rows:
         return 0
 
+    # Deduplicate: ON CONFLICT DO UPDATE cannot handle duplicate keys
+    # within a single INSERT batch. Keep last occurrence (wins).
+    seen: dict[tuple, int] = {}
+    for idx, r in enumerate(rows):
+        seen[(r["entity_type"], r["script_id"])] = idx
+    rows = [rows[i] for i in sorted(seen.values())]
+
     # Batch upsert using Postgres INSERT ... ON CONFLICT DO UPDATE
     stmt = pg_insert(TenantEntityMapping).values(rows)
     stmt = stmt.on_conflict_do_update(
