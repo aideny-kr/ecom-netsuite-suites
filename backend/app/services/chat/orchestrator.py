@@ -140,6 +140,24 @@ async def run_chat_turn(
             if msg.role in ("user", "assistant"):
                 history_messages.append({"role": msg.role, "content": msg.content})
 
+    # ── Compact history if too long (saves tokens on subsequent calls) ──
+    if len(history_messages) > 12:
+        try:
+            from app.services.chat.history_compactor import compact_history
+            from app.services.chat.llm_adapter import get_adapter as _get_compactor_adapter
+
+            compactor_adapter = _get_compactor_adapter(
+                settings.MULTI_AGENT_SPECIALIST_PROVIDER,
+                settings.ANTHROPIC_API_KEY,
+            )
+            history_messages = await compact_history(
+                history_messages,
+                adapter=compactor_adapter,
+                model=settings.MULTI_AGENT_SPECIALIST_MODEL,
+            )
+        except Exception:
+            logger.warning("history_compaction_failed", exc_info=True)
+
     # ── Save user message (if not already saved by caller) ──
     if user_msg is None:
         user_msg = ChatMessage(
@@ -216,12 +234,14 @@ async def run_chat_turn(
         system_prompt = await get_active_template(db, tenant_id)
 
     # ── Inject AI Soul (Tone & Quirks) ──
+    soul_bot_tone = ""
     if not is_onboarding:
         from app.services.soul_service import get_soul_config
         soul_config = await get_soul_config(tenant_id)
         if soul_config.exists:
             soul_parts = ["\n\n## Tenant-Specific AI Configuration & Logic\n"]
             if soul_config.bot_tone:
+                soul_bot_tone = soul_config.bot_tone
                 soul_parts.append(f"TONE & MANNER:\n{soul_config.bot_tone}\n")
             if soul_config.netsuite_quirks:
                 soul_parts.append(f"NETSUITE QUIRKS & LOGIC:\n{soul_config.netsuite_quirks}\n")
@@ -348,6 +368,7 @@ async def run_chat_turn(
                 system_prompt=system_prompt,
                 user_timezone=user_timezone,
             )
+            coordinator.soul_tone = soul_bot_tone
 
             # Stream multi-agent: dispatch agents first, then stream synthesis
             streamed_text_parts: list[str] = []

@@ -256,15 +256,16 @@ COORDINATOR_PLAN_PROMPT = (
 )
 
 COORDINATOR_SYNTHESIS_PROMPT = (
+    "<synthesis_rules>\n"
     "You are synthesising the final answer for the user based on specialist agent results.\n"
     "\n"
     "CRITICAL: You are in SYNTHESIS mode. You CANNOT call tools, make queries, or execute functions.\n"
     "You must work ONLY with the data provided in <agent_results>. Do NOT output function calls,\n"
     "XML tags, or tool invocations — they will not execute and will be shown as raw text to the user.\n"
     "\n"
-    "LANGUAGE: Always respond in English only.\n"
+    "<language>Always respond in English only.</language>\n"
     "\n"
-    "FORMAT:\n"
+    "<format>\n"
     "1. Start with a direct answer to the user's question in 1-2 sentences.\n"
     "2. If agents returned data rows, present them in a **markdown table**. Include all rows.\n"
     "3. If results returned 0 rows, say so clearly and suggest possible reasons:\n"
@@ -274,8 +275,9 @@ COORDINATOR_SYNTHESIS_PROMPT = (
     "4. If agents failed or timed out, briefly explain what happened and ASK the user\n"
     "   a clarifying question to help narrow the search. For example:\n"
     "   'I wasn't able to retrieve that data. Could you tell me [specific detail]?'\n"
+    "</format>\n"
     "\n"
-    "RULES:\n"
+    "<constraints>\n"
     "- Preserve all numeric values EXACTLY as returned — do not round or convert.\n"
     "- Do NOT fabricate data — only use what agents returned.\n"
     "- NEVER invent or guess order numbers, document numbers, or record IDs. If the agent\n"
@@ -291,6 +293,8 @@ COORDINATOR_SYNTHESIS_PROMPT = (
     "  The user does not need to see the technical implementation details.\n"
     "- Do NOT echo the agent's <reasoning> blocks or internal planning text.\n"
     "- Do NOT include tool names, tool IDs, or API call details.\n"
+    "</constraints>\n"
+    "</synthesis_rules>"
 )
 
 
@@ -359,6 +363,7 @@ class MultiAgentCoordinator:
         self.policy = policy
         self.system_prompt = system_prompt
         self.user_timezone = user_timezone
+        self.soul_tone: str = ""
         self.last_result: CoordinatorResult | None = None
 
     async def run(
@@ -897,6 +902,30 @@ class MultiAgentCoordinator:
         """Return the model to use for synthesis, preferring the dedicated setting."""
         return settings.MULTI_AGENT_SYNTHESIS_MODEL or self.main_model
 
+    def _build_synthesis_system_prompt(self) -> str:
+        """Build a lean system prompt for synthesis — no tools, no SuiteQL rules, no workspace."""
+        parts = [
+            "<system_directives>",
+            "<persona>",
+            "You are the NetSuite AI assistant composing a final answer from specialist agent results.",
+            "</persona>",
+            "<core_constraints>",
+            "- Present ONLY data from agent results. Never fabricate or guess.",
+            "- Format data in markdown tables with human-readable headers.",
+            "- Preserve exact numeric values — do not round or convert currencies.",
+            "- You CANNOT call tools or make queries. Work only with provided data.",
+            "</core_constraints>",
+            "</system_directives>",
+        ]
+
+        if self.soul_tone:
+            parts.append(
+                f"<tenant_context><business_logic>{self.soul_tone}</business_logic></tenant_context>"
+            )
+
+        parts.append(COORDINATOR_SYNTHESIS_PROMPT)
+        return "\n".join(parts)
+
     async def _synthesise(
         self,
         user_message: str,
@@ -940,7 +969,7 @@ class MultiAgentCoordinator:
             }
         )
 
-        synthesis_prompt = f"{self.system_prompt}\n\n{COORDINATOR_SYNTHESIS_PROMPT}"
+        synthesis_prompt = self._build_synthesis_system_prompt()
 
         response: LLMResponse = await self.main_adapter.create_message(
             model=self._get_synthesis_model(),
@@ -1000,7 +1029,7 @@ class MultiAgentCoordinator:
             }
         )
 
-        synthesis_prompt = f"{self.system_prompt}\n\n{COORDINATOR_SYNTHESIS_PROMPT}"
+        synthesis_prompt = self._build_synthesis_system_prompt()
 
         async for event_type, payload in self.main_adapter.stream_message(
             model=self._get_synthesis_model(),

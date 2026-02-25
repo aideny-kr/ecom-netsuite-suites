@@ -11,6 +11,7 @@ over the external MCP endpoint which may have restricted record type access.
 from __future__ import annotations
 
 import logging
+import re
 import uuid
 from typing import TYPE_CHECKING, Any
 
@@ -25,6 +26,15 @@ if TYPE_CHECKING:
     from app.services.chat.llm_adapter import BaseLLMAdapter
 
 _logger = logging.getLogger(__name__)
+
+# Keywords that indicate the user's query is about scripts/automation/workflows.
+# When absent, Tier 2 metadata (scripts, deployments, workflows) is omitted to save tokens.
+_SCRIPT_KEYWORDS = re.compile(
+    r"\b(?:scripts?|deploy(?:ment)?s?|workflows?|triggers?|automation|scheduled|user\s*events?|"
+    r"suitelets?|restlets?|map\s*reduce|client\s*scripts?|mass\s*updates?|portlets?|"
+    r"bundles?|sdf|customscript\w*)\b",
+    re.IGNORECASE,
+)
 
 # Tools this agent is allowed to use
 _SUITEQL_TOOL_NAMES = frozenset(
@@ -212,6 +222,7 @@ class SuiteQLAgent(BaseSpecialistAgent):
         self._tenant_vernacular: str = ""
         self._soul_quirks: str = ""
         self._user_timezone: str | None = None
+        self._current_task: str = ""
 
     @property
     def agent_name(self) -> str:
@@ -228,7 +239,7 @@ class SuiteQLAgent(BaseSpecialistAgent):
         if self._metadata:
             base = base.replace(
                 "{{INJECT_CELERY_YAML_METADATA_HERE}}",
-                self._build_metadata_reference(),
+                self._build_metadata_reference(self._current_task),
             )
         else:
             base = base.replace(
@@ -301,6 +312,7 @@ class SuiteQLAgent(BaseSpecialistAgent):
         model: str,
     ) -> AgentResult:
         """Override to dynamically add external MCP tools before running."""
+        self._current_task = task
         self._tenant_vernacular = context.get("tenant_vernacular", "")
         self._user_timezone = context.get("user_timezone")
 
@@ -338,8 +350,12 @@ class SuiteQLAgent(BaseSpecialistAgent):
 
         return await super().run(task, context, db, adapter, model)
 
-    def _build_metadata_reference(self) -> str:
-        """Build a concise custom field reference from discovered metadata."""
+    def _build_metadata_reference(self, task: str = "") -> str:
+        """Build a concise custom field reference from discovered metadata.
+
+        Tier 1 (always): custom fields, record types, org hierarchy, lists, saved searches.
+        Tier 2 (JIT): scripts, deployments, workflows — only when task mentions them.
+        """
         md = self._metadata
         if md is None:
             return ""
@@ -443,40 +459,55 @@ class SuiteQLAgent(BaseSpecialistAgent):
                 for loc in active[:20]:
                     parts.append(f"  ID {loc.get('id', '?')}: {loc.get('name', '?')}")
 
-        if getattr(md, "scripts", None) and isinstance(md.scripts, list):
-            parts.append(f"\n**Active Scripts** ({len(md.scripts)} total):")
-            for s in md.scripts[:100]:
-                desc = f" — {s['description']}" if s.get("description") else ""
-                filepath = s.get("filepath") or s.get("scriptfile") or ""
-                file_info = f" [{filepath}]" if filepath else ""
-                parts.append(
-                    f"  {s.get('scriptid', '?')} ({s.get('scripttype', '?')}): "
-                    f"{s.get('name', '?')}{desc}{file_info}"
-                )
+        # Tier 2: Scripts, deployments, workflows — only when task mentions them
+        include_scripts = bool(_SCRIPT_KEYWORDS.search(task))
 
-        if getattr(md, "script_deployments", None) and isinstance(md.script_deployments, list):
-            parts.append(f"\n**Active Script Deployments** ({len(md.script_deployments)} total):")
-            for d in md.script_deployments[:100]:
-                title = f" ({d['title']})" if d.get("title") else ""
-                event = f" [event: {d['eventtype']}]" if d.get("eventtype") else ""
-                parts.append(
-                    f"  {d.get('scriptid', '?')}{title} on {d.get('recordtype', '?')} "
-                    f"(Status: {d.get('status', '?')}) | Script: {d.get('script', '?')}{event}"
-                )
+        if include_scripts:
+            if getattr(md, "scripts", None) and isinstance(md.scripts, list):
+                parts.append(f"\n**Active Scripts** ({len(md.scripts)} total):")
+                for s in md.scripts[:100]:
+                    desc = f" — {s['description']}" if s.get("description") else ""
+                    filepath = s.get("filepath") or s.get("scriptfile") or ""
+                    file_info = f" [{filepath}]" if filepath else ""
+                    parts.append(
+                        f"  {s.get('scriptid', '?')} ({s.get('scripttype', '?')}): "
+                        f"{s.get('name', '?')}{desc}{file_info}"
+                    )
 
-        if getattr(md, "workflows", None) and isinstance(md.workflows, list):
-            parts.append(f"\n**Active Workflows** ({len(md.workflows)} total):")
-            for w in md.workflows[:50]:
-                desc = f" — {w['description']}" if w.get("description") else ""
-                triggers = []
-                if w.get("initoncreate") == "T":
-                    triggers.append("create")
-                if w.get("initonedit") == "T":
-                    triggers.append("edit")
-                trigger_str = f" [triggers: {', '.join(triggers)}]" if triggers else ""
+            if getattr(md, "script_deployments", None) and isinstance(md.script_deployments, list):
+                parts.append(f"\n**Active Script Deployments** ({len(md.script_deployments)} total):")
+                for d in md.script_deployments[:100]:
+                    title = f" ({d['title']})" if d.get("title") else ""
+                    event = f" [event: {d['eventtype']}]" if d.get("eventtype") else ""
+                    parts.append(
+                        f"  {d.get('scriptid', '?')}{title} on {d.get('recordtype', '?')} "
+                        f"(Status: {d.get('status', '?')}) | Script: {d.get('script', '?')}{event}"
+                    )
+
+            if getattr(md, "workflows", None) and isinstance(md.workflows, list):
+                parts.append(f"\n**Active Workflows** ({len(md.workflows)} total):")
+                for w in md.workflows[:50]:
+                    desc = f" — {w['description']}" if w.get("description") else ""
+                    triggers = []
+                    if w.get("initoncreate") == "T":
+                        triggers.append("create")
+                    if w.get("initonedit") == "T":
+                        triggers.append("edit")
+                    trigger_str = f" [triggers: {', '.join(triggers)}]" if triggers else ""
+                    parts.append(
+                        f"  {w.get('scriptid', '?')} on {w.get('recordtype', '?')} "
+                        f"(Status: {w.get('status', '?')}): {w.get('name', '?')}{desc}{trigger_str}"
+                    )
+        else:
+            # Summary counts so agent knows data is available on request
+            script_count = len(md.scripts) if getattr(md, "scripts", None) and isinstance(md.scripts, list) else 0
+            deploy_count = len(md.script_deployments) if getattr(md, "script_deployments", None) and isinstance(md.script_deployments, list) else 0
+            wf_count = len(md.workflows) if getattr(md, "workflows", None) and isinstance(md.workflows, list) else 0
+            if script_count or deploy_count or wf_count:
                 parts.append(
-                    f"  {w.get('scriptid', '?')} on {w.get('recordtype', '?')} "
-                    f"(Status: {w.get('status', '?')}): {w.get('name', '?')}{desc}{trigger_str}"
+                    f"\n(Automation metadata available but not shown: {script_count} scripts, "
+                    f"{deploy_count} deployments, {wf_count} workflows. "
+                    f"Ask about scripts/workflows to see details.)"
                 )
 
         if getattr(md, "custom_list_values", None) and isinstance(md.custom_list_values, dict):
