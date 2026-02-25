@@ -22,6 +22,9 @@ def _make_metadata(**kwargs):
         "custom_lists",
         "custom_list_values",
         "saved_searches",
+        "scripts",
+        "script_deployments",
+        "workflows",
     ]:
         setattr(md, attr, kwargs.get(attr))
     return md
@@ -124,3 +127,84 @@ class TestBuildRowsBodyFields:
         assert len(rows) == 1
         assert rows[0]["entity_type"] == "transactionbodyfield"
         assert "SELECT" in rows[0]["description"]
+
+
+class TestBuildRowsScripts:
+    def test_scripts_seeded(self):
+        md = _make_metadata(
+            scripts=[
+                {
+                    "scriptid": "customscript_order_proc",
+                    "name": "Order Processor",
+                    "scripttype": "USEREVENT",
+                    "description": "Processes orders",
+                },
+            ]
+        )
+        rows = _build_rows(TENANT_ID, md)
+        assert len(rows) == 1
+        assert rows[0]["entity_type"] == "script"
+        assert rows[0]["script_id"] == "customscript_order_proc"
+        assert rows[0]["natural_name"] == "Order Processor"
+        assert "USEREVENT" in rows[0]["description"]
+        assert "Processes orders" in rows[0]["description"]
+
+    def test_script_missing_name_skipped(self):
+        md = _make_metadata(scripts=[{"scriptid": "customscript_x", "name": ""}])
+        rows = _build_rows(TENANT_ID, md)
+        assert len(rows) == 0
+
+
+class TestBuildRowsScriptDeployments:
+    def test_deployments_seeded(self):
+        md = _make_metadata(
+            script_deployments=[
+                {
+                    "scriptid": "customdeploy_order_proc",
+                    "title": "Order Deploy",
+                    "status": "RELEASED",
+                    "recordtype": "salesorder",
+                },
+            ]
+        )
+        rows = _build_rows(TENANT_ID, md)
+        assert len(rows) == 1
+        assert rows[0]["entity_type"] == "scriptdeployment"
+        assert rows[0]["natural_name"] == "Order Deploy"
+        assert "salesorder" in rows[0]["description"]
+
+    def test_deployment_uses_scriptid_when_no_title(self):
+        md = _make_metadata(
+            script_deployments=[
+                {"scriptid": "customdeploy_x", "status": "RELEASED", "recordtype": "invoice"},
+            ]
+        )
+        rows = _build_rows(TENANT_ID, md)
+        assert rows[0]["natural_name"] == "customdeploy_x"
+
+
+class TestBuildRowsWorkflows:
+    def test_workflows_seeded(self):
+        md = _make_metadata(
+            workflows=[
+                {
+                    "scriptid": "customworkflow_approve_po",
+                    "name": "Approve PO",
+                    "recordtype": "purchaseorder",
+                    "description": "PO approval",
+                },
+            ]
+        )
+        rows = _build_rows(TENANT_ID, md)
+        assert len(rows) == 1
+        assert rows[0]["entity_type"] == "workflow"
+        assert rows[0]["script_id"] == "customworkflow_approve_po"
+        assert "purchaseorder" in rows[0]["description"]
+        assert "PO approval" in rows[0]["description"]
+
+    def test_workflow_missing_name_skipped(self):
+        md = _make_metadata(
+            workflows=[{"scriptid": "customworkflow_x", "name": "", "recordtype": "salesorder"}]
+        )
+        rows = _build_rows(TENANT_ID, md)
+        assert len(rows) == 0

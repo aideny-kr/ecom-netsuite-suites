@@ -17,7 +17,9 @@ Read the user prompt and output a strict JSON array of potential entities. Extra
 1. Custom record names (e.g., "Inventory Processor", "Integration Log")
 2. Custom field names (e.g., "Rush flag", "External Order Number")
 3. Status values or list option names that sound tenant-specific (e.g., "Failed", "Completed", "Pending", "In Progress", "Ordoro")
-4. Saved search names or report names
+4. Script or SuiteScript names (e.g., "Order Processor", "Fulfillment Scheduler")
+5. Workflow names (e.g., "Approve Purchase Order", "Sales Order Routing")
+6. Saved search names or report names
 Do NOT extract generic NetSuite terms like "sales order", "customer", "invoice", or "transaction".
 Output ONLY valid JSON, e.g., ["Inventory Processor", "Failed", "Ordoro"]\
 """

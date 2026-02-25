@@ -203,6 +203,66 @@ def _build_rows(
                 }
             )
 
+    # ── Scripts ────────────────────────────────────────────────────
+    if getattr(metadata, "scripts", None) and isinstance(metadata.scripts, list):
+        for s in metadata.scripts:
+            scriptid = s.get("scriptid", "")
+            name = s.get("name", "")
+            if not scriptid or not name:
+                continue
+            desc = f"Type: {s.get('scripttype', 'unknown')}"
+            if s.get("description"):
+                desc += f" — {s['description']}"
+            rows.append(
+                {
+                    "tenant_id": tenant_id,
+                    "entity_type": "script",
+                    "natural_name": _truncate(name),
+                    "script_id": _truncate(scriptid.lower()),
+                    "description": desc,
+                }
+            )
+
+    # ── Script Deployments ─────────────────────────────────────────
+    if getattr(metadata, "script_deployments", None) and isinstance(metadata.script_deployments, list):
+        for d in metadata.script_deployments:
+            scriptid = d.get("scriptid", "")
+            if not scriptid:
+                continue
+            name = d.get("title") or scriptid
+            rows.append(
+                {
+                    "tenant_id": tenant_id,
+                    "entity_type": "scriptdeployment",
+                    "natural_name": _truncate(name),
+                    "script_id": _truncate(scriptid.lower()),
+                    "description": (
+                        f"Deployed on: {d.get('recordtype', 'unknown')}, "
+                        f"Status: {d.get('status', 'unknown')}"
+                    ),
+                }
+            )
+
+    # ── Workflows ──────────────────────────────────────────────────
+    if getattr(metadata, "workflows", None) and isinstance(metadata.workflows, list):
+        for w in metadata.workflows:
+            scriptid = w.get("scriptid", "")
+            name = w.get("name", "")
+            if not scriptid or not name:
+                continue
+            desc = f"Record type: {w.get('recordtype', 'unknown')}"
+            if w.get("description"):
+                desc += f" — {w['description']}"
+            rows.append(
+                {
+                    "tenant_id": tenant_id,
+                    "entity_type": "workflow",
+                    "natural_name": _truncate(name),
+                    "script_id": _truncate(scriptid.lower()),
+                    "description": desc,
+                }
+            )
+
     return rows
 
 

@@ -37,3 +37,6 @@ pgdata/
 
 # Docs (generated/internal)
 docs/
+
+# MCP config (contains API keys)
+.mcp.json

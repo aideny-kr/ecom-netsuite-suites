@@ -182,6 +182,62 @@ def _format_org_hierarchy(
     return "\n".join(lines)
 
 
+def _format_scripts(scripts: list[dict]) -> str:
+    lines = [
+        "NetSuite Active SuiteScripts",
+        "These are the active SuiteScript scripts in this account.",
+        "Script types: USEREVENT, SCHEDULED, MAPREDUCE, RESTLET, SUITELET, CLIENT, PORTLET, "
+        "WORKFLOW_ACTION, BUNDLE_INSTALLATION.",
+        "",
+    ]
+    for s in scripts:
+        desc = f" — {s['description']}" if s.get("description") else ""
+        file_info = f" (file: {s['scriptfile']})" if s.get("scriptfile") else ""
+        lines.append(
+            f"- ID {s.get('id', '?')} | {s.get('scriptid', '?')} ({s.get('scripttype', '?')}): "
+            f"{s.get('name', '?')}{desc}{file_info}"
+        )
+    return "\n".join(lines)
+
+
+def _format_script_deployments(deployments: list[dict]) -> str:
+    lines = [
+        "NetSuite Active Script Deployments",
+        "These deployments determine which records and events trigger each script.",
+        "The 'script' field is the internal ID of the parent script.",
+        "",
+    ]
+    for d in deployments:
+        title = f" ({d['title']})" if d.get("title") else ""
+        event = f" [event: {d['eventtype']}]" if d.get("eventtype") else ""
+        lines.append(
+            f"- {d.get('scriptid', '?')}{title} on {d.get('recordtype', '?')} "
+            f"(Status: {d.get('status', '?')}) | Script: {d.get('script', '?')}{event}"
+        )
+    return "\n".join(lines)
+
+
+def _format_workflows(workflows: list[dict]) -> str:
+    lines = [
+        "NetSuite Active Workflows",
+        "These workflows automate business processes on specific record types.",
+        "",
+    ]
+    for w in workflows:
+        desc = f" — {w['description']}" if w.get("description") else ""
+        triggers = []
+        if w.get("initoncreate") == "T":
+            triggers.append("on create")
+        if w.get("initonedit") == "T":
+            triggers.append("on edit")
+        trigger_str = f" [triggers: {', '.join(triggers)}]" if triggers else ""
+        lines.append(
+            f"- {w.get('scriptid', '?')} on {w.get('recordtype', '?')} "
+            f"(Status: {w.get('status', '?')}): {w.get('name', '?')}{desc}{trigger_str}"
+        )
+    return "\n".join(lines)
+
+
 # ──────────────────────────────────────────────────────────────────
 # Main seeding function
 # ──────────────────────────────────────────────────────────────────
@@ -289,6 +345,36 @@ async def seed_metadata_docs(
                 f"{_SOURCE_PREFIX}saved_searches",
                 "NetSuite Saved Searches",
                 _format_saved_searches(metadata.saved_searches),
+            )
+        )
+
+    # Scripts
+    if getattr(metadata, "scripts", None) and isinstance(metadata.scripts, list):
+        raw_chunks.append(
+            (
+                f"{_SOURCE_PREFIX}scripts",
+                "NetSuite Active SuiteScripts",
+                _format_scripts(metadata.scripts),
+            )
+        )
+
+    # Script deployments
+    if getattr(metadata, "script_deployments", None) and isinstance(metadata.script_deployments, list):
+        raw_chunks.append(
+            (
+                f"{_SOURCE_PREFIX}script_deployments",
+                "NetSuite Active Script Deployments",
+                _format_script_deployments(metadata.script_deployments),
+            )
+        )
+
+    # Workflows
+    if getattr(metadata, "workflows", None) and isinstance(metadata.workflows, list):
+        raw_chunks.append(
+            (
+                f"{_SOURCE_PREFIX}workflows",
+                "NetSuite Active Workflows",
+                _format_workflows(metadata.workflows),
             )
         )
 

@@ -375,22 +375,36 @@ class SuiteQLAgent(BaseSpecialistAgent):
         if getattr(md, "scripts", None) and isinstance(md.scripts, list):
             parts.append(f"\n**Active Scripts** ({len(md.scripts)} total):")
             for s in md.scripts[:100]:
+                desc = f" — {s['description']}" if s.get("description") else ""
+                file_info = f" (file: {s['scriptfile']})" if s.get("scriptfile") else ""
                 parts.append(
-                    f"  ID {s.get('id', '?')} | {s.get('scriptid', '?')} ({s.get('scripttype', '?')}): {s.get('name', '?')}"
+                    f"  ID {s.get('id', '?')} | {s.get('scriptid', '?')} ({s.get('scripttype', '?')}): "
+                    f"{s.get('name', '?')}{desc}{file_info}"
                 )
 
         if getattr(md, "script_deployments", None) and isinstance(md.script_deployments, list):
             parts.append(f"\n**Active Script Deployments** ({len(md.script_deployments)} total):")
             for d in md.script_deployments[:100]:
+                title = f" ({d['title']})" if d.get("title") else ""
+                event = f" [event: {d['eventtype']}]" if d.get("eventtype") else ""
                 parts.append(
-                    f"  {d.get('scriptid', '?')} on {d.get('recordtype', '?')} (Status: {d.get('status', '?')}) | Script: {d.get('script', '?')}"
+                    f"  {d.get('scriptid', '?')}{title} on {d.get('recordtype', '?')} "
+                    f"(Status: {d.get('status', '?')}) | Script: {d.get('script', '?')}{event}"
                 )
 
         if getattr(md, "workflows", None) and isinstance(md.workflows, list):
             parts.append(f"\n**Active Workflows** ({len(md.workflows)} total):")
             for w in md.workflows[:50]:
+                desc = f" — {w['description']}" if w.get("description") else ""
+                triggers = []
+                if w.get("initoncreate") == "T":
+                    triggers.append("create")
+                if w.get("initonedit") == "T":
+                    triggers.append("edit")
+                trigger_str = f" [triggers: {', '.join(triggers)}]" if triggers else ""
                 parts.append(
-                    f"  {w.get('scriptid', '?')} on {w.get('recordtype', '?')} (Status: {w.get('status', '?')}): {w.get('name', '?')}"
+                    f"  {w.get('scriptid', '?')} on {w.get('recordtype', '?')} "
+                    f"(Status: {w.get('status', '?')}): {w.get('name', '?')}{desc}{trigger_str}"
                 )
 
         if getattr(md, "custom_list_values", None) and isinstance(md.custom_list_values, dict):
