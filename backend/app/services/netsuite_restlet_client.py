@@ -10,15 +10,22 @@ from app.services.netsuite_client import _normalize_account_id
 logger = structlog.get_logger()
 
 
-def _restlet_url(account_id: str, script_id: str, deploy_id: str) -> str:
-    """Build RESTlet URL from account + deployment IDs."""
+def _restlet_base_url(account_id: str) -> str:
+    """Build RESTlet base URL (without query params)."""
     slug = _normalize_account_id(account_id)
-    return f"https://{slug}.restlets.api.netsuite.com/app/site/hosting/restlet.nl?script={script_id}&deploy={deploy_id}"
+    return f"https://{slug}.restlets.api.netsuite.com/app/site/hosting/restlet.nl"
+
+
+def _restlet_params(script_id: str, deploy_id: str, **extra) -> dict:
+    """Build query params dict with script/deploy IDs plus any extras."""
+    params = {"script": script_id, "deploy": deploy_id}
+    params.update(extra)
+    return params
 
 
 # Script/deploy IDs — will be configurable via Connection metadata later
-FILECABINET_SCRIPT_ID = "customscript_ecom_filecabinet_rl"
-FILECABINET_DEPLOY_ID = "customdeploy_ecom_filecabinet_rl"
+FILECABINET_SCRIPT_ID = "3901"
+FILECABINET_DEPLOY_ID = "1"
 MOCKDATA_SCRIPT_ID = "customscript_ecom_mockdata_rl"
 MOCKDATA_DEPLOY_ID = "customdeploy_ecom_mockdata_rl"
 
@@ -30,12 +37,14 @@ async def restlet_read_file(
     timeout: int = 15,
 ) -> dict:
     """Read a file from NetSuite File Cabinet via RESTlet GET."""
-    url = _restlet_url(account_id, FILECABINET_SCRIPT_ID, FILECABINET_DEPLOY_ID)
+    url = _restlet_base_url(account_id)
     headers = {
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json",
     }
-    params = {"fileId": str(file_id)}
+    params = _restlet_params(
+        FILECABINET_SCRIPT_ID, FILECABINET_DEPLOY_ID, fileId=str(file_id)
+    )
 
     async with httpx.AsyncClient(timeout=timeout) as client:
         resp = await client.get(url, headers=headers, params=params)
@@ -55,15 +64,16 @@ async def restlet_write_file(
     timeout: int = 30,
 ) -> dict:
     """Write/update a file in NetSuite File Cabinet via RESTlet PUT."""
-    url = _restlet_url(account_id, FILECABINET_SCRIPT_ID, FILECABINET_DEPLOY_ID)
+    url = _restlet_base_url(account_id)
     headers = {
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json",
     }
+    params = _restlet_params(FILECABINET_SCRIPT_ID, FILECABINET_DEPLOY_ID)
     payload = {"fileId": file_id, "content": content}
 
     async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.put(url, headers=headers, json=payload)
+        resp = await client.put(url, headers=headers, json=payload, params=params)
         resp.raise_for_status()
 
     data = resp.json()
@@ -82,11 +92,12 @@ async def restlet_create_file(
     timeout: int = 15,
 ) -> dict:
     """Create a new file in NetSuite File Cabinet via RESTlet POST."""
-    url = _restlet_url(account_id, FILECABINET_SCRIPT_ID, FILECABINET_DEPLOY_ID)
+    url = _restlet_base_url(account_id)
     headers = {
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json",
     }
+    params = _restlet_params(FILECABINET_SCRIPT_ID, FILECABINET_DEPLOY_ID)
     payload = {
         "name": name,
         "folder": folder_id,
@@ -95,7 +106,7 @@ async def restlet_create_file(
     }
 
     async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.post(url, headers=headers, json=payload)
+        resp = await client.post(url, headers=headers, json=payload, params=params)
         resp.raise_for_status()
 
     data = resp.json()
@@ -113,11 +124,12 @@ async def restlet_extract_mock_data(
     timeout: int = 30,
 ) -> dict:
     """Extract mock data via the MockData RESTlet with PII masking."""
-    url = _restlet_url(account_id, MOCKDATA_SCRIPT_ID, MOCKDATA_DEPLOY_ID)
+    url = _restlet_base_url(account_id)
     headers = {
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json",
     }
+    params = _restlet_params(MOCKDATA_SCRIPT_ID, MOCKDATA_DEPLOY_ID)
     payload = {
         "query": suiteql_query,
         "limit": limit,
@@ -125,7 +137,7 @@ async def restlet_extract_mock_data(
     }
 
     async with httpx.AsyncClient(timeout=timeout) as client:
-        resp = await client.post(url, headers=headers, json=payload)
+        resp = await client.post(url, headers=headers, json=payload, params=params)
         resp.raise_for_status()
 
     data = resp.json()

@@ -60,7 +60,7 @@ class Settings(BaseSettings):
     # OAuth for regular API connection (SuiteQL, file sync, metadata)
     NETSUITE_OAUTH_CLIENT_ID: str = ""
     NETSUITE_OAUTH_REDIRECT_URI: str = "http://localhost:8000/api/v1/connections/netsuite/callback"
-    NETSUITE_OAUTH_SCOPE: str = "rest_webservices"
+    NETSUITE_OAUTH_SCOPE: str = "rest_webservices,restlets"
 
     # OAuth for MCP connector (AI tools)
     NETSUITE_MCP_OAUTH_CLIENT_ID: str = ""
