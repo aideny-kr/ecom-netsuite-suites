@@ -258,6 +258,10 @@ COORDINATOR_PLAN_PROMPT = (
 COORDINATOR_SYNTHESIS_PROMPT = (
     "You are synthesising the final answer for the user based on specialist agent results.\n"
     "\n"
+    "CRITICAL: You are in SYNTHESIS mode. You CANNOT call tools, make queries, or execute functions.\n"
+    "You must work ONLY with the data provided in <agent_results>. Do NOT output function calls,\n"
+    "XML tags, or tool invocations — they will not execute and will be shown as raw text to the user.\n"
+    "\n"
     "LANGUAGE: Always respond in English only.\n"
     "\n"
     "FORMAT:\n"
@@ -843,6 +847,8 @@ class MultiAgentCoordinator:
             return ""
         # Remove <reasoning>...</reasoning> blocks
         cleaned = re.sub(r"<reasoning>.*?</reasoning>", "", data, flags=re.DOTALL)
+        # Remove <function_calls>...</function_calls> blocks (hallucinated tool calls)
+        cleaned = re.sub(r"<function_calls>.*?</function_calls>", "", cleaned, flags=re.DOTALL)
         # Remove ```sql code blocks (raw queries)
         cleaned = re.sub(r"```sql\s*.*?```", "", cleaned, flags=re.DOTALL)
         # Remove raw JSON tool call blocks ({"sqlQuery":...})
