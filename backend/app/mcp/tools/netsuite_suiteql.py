@@ -231,11 +231,17 @@ async def execute(params: dict, context: dict | None = None, **kwargs) -> dict:
         except Exception as exc:
             return {"error": True, "message": f"NetSuite query failed: {exc}"}
 
-        return {
-            **result,
-            "query": query,
-            "limit": max_rows,
-        }
+        result = {**result, "query": query, "limit": max_rows}
+
+        # Diagnose permission issues on 0-row results for common tables
+        items = result.get("items", [])
+        rows = result.get("rows", items)
+        if len(rows) == 0 and not result.get("error"):
+            diag = await _diagnose_empty_result(query, access_token, account_id)
+            if diag:
+                result["permission_warning"] = diag
+
+        return result
 
     # --- OAuth 1.0 path: direct REST call with HMAC signature ---
     url = f"https://{account_id}.suitetalk.api.netsuite.com/services/rest/query/v1/suiteql"
@@ -270,7 +276,7 @@ async def execute(params: dict, context: dict | None = None, **kwargs) -> dict:
     total_results = data.get("totalResults", len(rows))
     truncated = total_results > len(rows)
 
-    return {
+    result = {
         "columns": columns,
         "rows": rows,
         "row_count": len(rows),
@@ -278,3 +284,85 @@ async def execute(params: dict, context: dict | None = None, **kwargs) -> dict:
         "query": query,
         "limit": max_rows,
     }
+
+    # Diagnose permission issues on 0-row results
+    if len(rows) == 0:
+        diag = await _diagnose_empty_result_oauth1(query, credentials, url, account_id)
+        if diag:
+            result["permission_warning"] = diag
+
+    return result
+
+
+# ──────────────────────────────────────────────────────────────────
+# Permission diagnostics
+# ──────────────────────────────────────────────────────────────────
+
+# Tables where 0 rows almost certainly means a permissions problem
+_DIAGNOSTIC_TABLES = {
+    "transaction": "SELECT COUNT(*) as cnt FROM transaction FETCH FIRST 1 ROWS ONLY",
+    "customer": "SELECT COUNT(*) as cnt FROM customer FETCH FIRST 1 ROWS ONLY",
+    "item": "SELECT COUNT(*) as cnt FROM item FETCH FIRST 1 ROWS ONLY",
+    "employee": "SELECT COUNT(*) as cnt FROM employee FETCH FIRST 1 ROWS ONLY",
+    "vendor": "SELECT COUNT(*) as cnt FROM vendor FETCH FIRST 1 ROWS ONLY",
+}
+
+_PERMISSION_WARNING = (
+    "⚠️ PERMISSION ISSUE DETECTED: Your NetSuite OAuth connection returned 0 rows "
+    "for the '{table}' table. This typically means the Integration Record's role in "
+    "NetSuite does not have permission to view these records.\n\n"
+    "To fix this, please check your NetSuite setup:\n"
+    "1. Go to Setup > Integration > Manage Integrations and find your Integration Record\n"
+    "2. Verify the assigned Role has '{table}' permissions (View or Full level)\n"
+    "3. If using a custom role, ensure it includes: Transactions, Lists, Reports permissions\n"
+    "4. Alternatively, assign the Administrator role to the Integration Record\n\n"
+    "Please relay this information to the user so they can fix their NetSuite connection settings."
+)
+
+
+async def _diagnose_empty_result(
+    query: str, access_token: str, account_id: str,
+) -> str | None:
+    """Run a diagnostic count query when a user query returns 0 rows (OAuth 2.0)."""
+    from app.services.netsuite_client import execute_suiteql
+
+    tables = parse_tables(query)
+    for table in tables:
+        if table in _DIAGNOSTIC_TABLES:
+            try:
+                diag_result = await execute_suiteql(
+                    access_token, account_id, _DIAGNOSTIC_TABLES[table],
+                )
+                items = diag_result.get("items", [])
+                if not items or items[0].get("cnt", 0) == 0:
+                    return _PERMISSION_WARNING.format(table=table)
+            except Exception:
+                pass
+    return None
+
+
+async def _diagnose_empty_result_oauth1(
+    query: str, credentials: dict, url: str, account_id: str,
+) -> str | None:
+    """Run a diagnostic count query when a user query returns 0 rows (OAuth 1.0)."""
+    tables = parse_tables(query)
+    for table in tables:
+        if table in _DIAGNOSTIC_TABLES:
+            diag_query = _DIAGNOSTIC_TABLES[table]
+            auth_headers = build_oauth1_header(credentials, "POST", url)
+            headers = {
+                **auth_headers,
+                "Content-Type": "application/json",
+                "Prefer": "transient",
+            }
+            try:
+                async with httpx.AsyncClient(timeout=10) as client:
+                    resp = await client.post(url, headers=headers, json={"q": diag_query})
+                    resp.raise_for_status()
+                    data = resp.json()
+                    items = data.get("items", [])
+                    if not items or items[0].get("cnt", 0) == 0:
+                        return _PERMISSION_WARNING.format(table=table)
+            except Exception:
+                pass
+    return None

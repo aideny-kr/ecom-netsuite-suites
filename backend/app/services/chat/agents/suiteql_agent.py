@@ -136,7 +136,7 @@ CUSTOM RECORD TABLE NAMING — IMPORTANT:
 ERROR RECOVERY:
 - "Record not found" or "Invalid or unsupported search" → switch to netsuite_suiteql (local REST API) which has full permissions.
 - Unknown identifier → try `SELECT * FROM <table> WHERE ROWNUM <= 1` to discover real column names, then retry.
-- 0 rows returned → report "0 rows found" with the query you ran. Do NOT retry with different filters.
+- 0 rows returned → check the tool result for a "permission_warning" field. If present, STOP IMMEDIATELY and relay the permission warning to the user verbatim — do NOT retry the query. If no warning, report "0 rows found" with the query you ran. Do NOT retry with different filters.
 - Each retry MUST be meaningfully different from the previous attempt.
 </agentic_workflow>
 
