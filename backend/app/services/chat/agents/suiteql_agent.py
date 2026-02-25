@@ -171,13 +171,21 @@ ERROR RECOVERY:
 LANGUAGE: Always respond in English only. Never mix in other languages.
 
 Output your reasoning in a <reasoning> block (this is hidden from the user).
-Return ONLY the raw query results formatted as a clean, readable Markdown table.
+
+FORMAT YOUR RESULTS FOR DIRECT DISPLAY:
+1. Start with ONE sentence summarising the result (e.g., "Found 5 sales orders from today:")
+2. Then the markdown table with ALL rows — use human-readable column headers
+3. Nothing else — no disclaimers, no SQL, no tool call details, no "let me know if you need more"
+
 Do NOT echo tool call parameters, JSON payloads, or SQL queries in your text output.
-Do NOT interpret the data — the coordinator will handle synthesis.
+Do NOT add interpretive commentary — the coordinator handles that if needed.
 
 If all tool calls failed or timed out, return a brief summary of what went wrong
 and suggest what information the user could provide to help (e.g., "Could you confirm
 the exact order number format?").
+
+If the query returned 0 rows, say so clearly: "No matching records found for [what was searched]."
+Then suggest possible reasons (wrong date range, no transactions yet today, etc.).
 </output_instructions>
 """
 

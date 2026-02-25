@@ -75,6 +75,8 @@ class Settings(BaseSettings):
     MULTI_AGENT_SPECIALIST_MODEL: str = "claude-sonnet-4-5-20250929"
     # SuiteQL agent uses a stronger model for SQL reasoning and huge NetSuite context
     MULTI_AGENT_SQL_MODEL: str = "claude-sonnet-4-5-20250929"
+    # Synthesis model — used to compose final user-facing answer from agent results
+    MULTI_AGENT_SYNTHESIS_MODEL: str = "claude-sonnet-4-5-20250929"
     MULTI_AGENT_MAX_BUDGET_TOKENS: int = 50000
     MULTI_AGENT_MAX_RETRIES: int = 2
 

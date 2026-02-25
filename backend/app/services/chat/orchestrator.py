@@ -5,6 +5,7 @@ Claude decides which tools to call, sees results (including errors),
 and can retry/correct — all within a single turn, up to MAX_STEPS iterations.
 """
 
+import asyncio
 import json
 import logging
 import re
@@ -81,6 +82,36 @@ async def _resolve_default_workspace(
     )
     ws = result.scalar_one_or_none()
     return str(ws) if ws else None
+
+
+async def _dispatch_memory_update(
+    tenant_id: uuid.UUID,
+    user_id: uuid.UUID,
+    db: AsyncSession,
+    user_message: str,
+    assistant_message: str,
+) -> None:
+    """Helper to safely run the regex-gated memory updater in the background."""
+    from app.services.chat.llm_adapter import get_adapter
+    from app.services.chat.memory_updater import maybe_extract_correction
+
+    provider = settings.MULTI_AGENT_SPECIALIST_PROVIDER
+    api_key = settings.ANTHROPIC_API_KEY
+    model = settings.MULTI_AGENT_SPECIALIST_MODEL
+
+    try:
+        adapter = get_adapter(provider, api_key)
+        await maybe_extract_correction(
+            db=db,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            user_message=user_message,
+            assistant_message=assistant_message,
+            adapter=adapter,
+            model=model,
+        )
+    except Exception as e:
+        logger.error(f"background.memory_update_failed: {e}")
 
 
 async def run_chat_turn(
@@ -395,6 +426,17 @@ async def run_chat_turn(
 
             await db.commit()
 
+            # Fire-and-forget background memory update
+            asyncio.create_task(
+                _dispatch_memory_update(
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    db=db,
+                    user_message=sanitized_input,
+                    assistant_message=final_text,
+                )
+            )
+
             # If we already yielded the final message via streaming, just return
             # Otherwise yield a final message now
             if not streamed_text_parts:
@@ -603,6 +645,17 @@ async def run_chat_turn(
         await deduct_chat_credits(db, tenant_id, model)
 
     await db.commit()
+
+    # Fire-and-forget background memory update
+    asyncio.create_task(
+        _dispatch_memory_update(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            db=db,
+            user_message=sanitized_input,
+            assistant_message=final_text,
+        )
+    )
 
     result_msg = {
         "id": str(assistant_msg.id),

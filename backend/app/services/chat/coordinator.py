@@ -857,6 +857,46 @@ class MultiAgentCoordinator:
         cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
         return cleaned.strip()[:8000]
 
+    @staticmethod
+    def _contains_markdown_table(text: str) -> bool:
+        """Check if the text contains a markdown table structure."""
+        if not text:
+            return False
+        # Matches typical markdown table separator: |---| or |:---:| etc.
+        return bool(re.search(r"\|[\s\-:]+\|", text))
+
+    def _should_pass_through(self, agent_results: list[AgentResult]) -> str | None:
+        """Decide if we can skip synthesis and pass agent output directly.
+
+        Returns the pass-through text if yes, None if synthesis is needed.
+        """
+        successful = [r for r in agent_results if r.success and r.data]
+
+        # Only pass-through for single-agent results (multi-agent needs synthesis to merge)
+        if len(successful) != 1:
+            return None
+
+        result = successful[0]
+        cleaned = self._sanitize_agent_data(str(result.data))
+
+        if not cleaned or len(cleaned) < 20:
+            return None
+
+        # Pass-through if agent returned a markdown table
+        if self._contains_markdown_table(cleaned):
+            return cleaned
+
+        # Pass-through if agent returned a clear "no data" message
+        no_data_phrases = ["0 rows", "no results", "no data", "no matching", "no records"]
+        if any(phrase in cleaned.lower() for phrase in no_data_phrases):
+            return cleaned
+
+        return None
+
+    def _get_synthesis_model(self) -> str:
+        """Return the model to use for synthesis, preferring the dedicated setting."""
+        return settings.MULTI_AGENT_SYNTHESIS_MODEL or self.main_model
+
     async def _synthesise(
         self,
         user_message: str,
@@ -865,6 +905,12 @@ class MultiAgentCoordinator:
         rag_context: str = "",
     ) -> tuple[str, TokenUsage]:
         """Final LLM call to compose the user-facing answer."""
+        # Check if we can skip synthesis entirely
+        pass_through = self._should_pass_through(agent_results)
+        if pass_through:
+            logger.info("coordinator.synthesis_bypass", extra={"tenant_id": str(self.tenant_id)})
+            return pass_through, TokenUsage(0, 0)
+
         results_parts = []
         for result in agent_results:
             status = "SUCCESS" if result.success else "FAILED"
@@ -897,7 +943,7 @@ class MultiAgentCoordinator:
         synthesis_prompt = f"{self.system_prompt}\n\n{COORDINATOR_SYNTHESIS_PROMPT}"
 
         response: LLMResponse = await self.main_adapter.create_message(
-            model=self.main_model,
+            model=self._get_synthesis_model(),
             max_tokens=4096,
             system=synthesis_prompt,
             messages=messages,
@@ -917,6 +963,14 @@ class MultiAgentCoordinator:
 
         Yields (text_chunk, None) for each token, then (None, TokenUsage) at end.
         """
+        # Check if we can skip synthesis entirely
+        pass_through = self._should_pass_through(agent_results)
+        if pass_through:
+            logger.info("coordinator.synthesis_streaming_bypass", extra={"tenant_id": str(self.tenant_id)})
+            yield pass_through, None
+            yield None, TokenUsage(0, 0)
+            return
+
         results_parts = []
         for result in agent_results:
             status = "SUCCESS" if result.success else "FAILED"
@@ -949,7 +1003,7 @@ class MultiAgentCoordinator:
         synthesis_prompt = f"{self.system_prompt}\n\n{COORDINATOR_SYNTHESIS_PROMPT}"
 
         async for event_type, payload in self.main_adapter.stream_message(
-            model=self.main_model,
+            model=self._get_synthesis_model(),
             max_tokens=4096,
             system=synthesis_prompt,
             messages=messages,
