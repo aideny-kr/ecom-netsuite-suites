@@ -72,7 +72,7 @@ class Settings(BaseSettings):
     # Multi-agent orchestration
     MULTI_AGENT_ENABLED: bool = True
     MULTI_AGENT_SPECIALIST_PROVIDER: str = "anthropic"
-    MULTI_AGENT_SPECIALIST_MODEL: str = "claude-haiku-4-5-20251001"
+    MULTI_AGENT_SPECIALIST_MODEL: str = "claude-sonnet-4-5-20250929"
     # SuiteQL agent uses a stronger model for SQL reasoning and huge NetSuite context
     MULTI_AGENT_SQL_MODEL: str = "claude-sonnet-4-5-20250929"
     MULTI_AGENT_MAX_BUDGET_TOKENS: int = 50000

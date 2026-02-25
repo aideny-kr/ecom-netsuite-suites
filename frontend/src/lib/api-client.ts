@@ -122,6 +122,12 @@ async function streamRequest(path: string, body?: unknown): Promise<Response> {
     if (token) {
       headers["Authorization"] = `Bearer ${token}`;
     }
+    // Send browser timezone for date-aware queries
+    try {
+      headers["X-Timezone"] = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    } catch {
+      // Fallback silently if Intl API unavailable
+    }
   }
 
   const res = await fetch(`${BASE_URL}${path}`, {

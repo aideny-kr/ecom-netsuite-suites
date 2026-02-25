@@ -233,14 +233,6 @@ async def execute(params: dict, context: dict | None = None, **kwargs) -> dict:
 
         result = {**result, "query": query, "limit": max_rows}
 
-        # Diagnose permission issues on 0-row results for common tables
-        items = result.get("items", [])
-        rows = result.get("rows", items)
-        if len(rows) == 0 and not result.get("error"):
-            diag = await _diagnose_empty_result(query, access_token, account_id)
-            if diag:
-                result["permission_warning"] = diag
-
         return result
 
     # --- OAuth 1.0 path: direct REST call with HMAC signature ---
@@ -284,12 +276,6 @@ async def execute(params: dict, context: dict | None = None, **kwargs) -> dict:
         "query": query,
         "limit": max_rows,
     }
-
-    # Diagnose permission issues on 0-row results
-    if len(rows) == 0:
-        diag = await _diagnose_empty_result_oauth1(query, credentials, url, account_id)
-        if diag:
-            result["permission_warning"] = diag
 
     return result
 

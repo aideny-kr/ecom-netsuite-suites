@@ -4,7 +4,7 @@ import uuid
 
 import anthropic
 import openai
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -188,6 +188,7 @@ async def send_message(
     session_id: uuid.UUID,
     body: SendMessageRequest,
     wizard_step: str | None = None,
+    x_timezone: str | None = Header(None),
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -222,6 +223,7 @@ async def send_message(
                 tenant_id=user.tenant_id,
                 user_msg=user_msg,
                 wizard_step=wizard_step,
+                user_timezone=x_timezone,
             ):
                 yield f"data: {json.dumps(chunk)}\n\n"
         except ValueError as exc:

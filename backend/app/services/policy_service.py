@@ -277,8 +277,10 @@ def evaluate_tool_call(
                         }
 
     # Check row limit requirement
-    if policy.require_row_limit:
-        query = params.get("query", "")
+    # Note: netsuite_suiteql tool always enforces FETCH FIRST via enforce_limit(),
+    # so we only warn for external MCP tools that don't have automatic enforcement.
+    if policy.require_row_limit and tool_name and not tool_name.startswith("netsuite"):
+        query = params.get("query", "") or params.get("sqlQuery", "")
         if isinstance(query, str) and query:
             query_upper = query.upper()
             if "ROWNUM" not in query_upper and "FETCH" not in query_upper:
@@ -286,7 +288,7 @@ def evaluate_tool_call(
                 return {
                     "allowed": False,
                     "reason": f"Query must include a row limit (max {max_rows} rows). "
-                    f"Add WHERE ROWNUM <= {max_rows} to your query.",
+                    f"Add FETCH FIRST {max_rows} ROWS ONLY to your query.",
                 }
 
     return {"allowed": True}

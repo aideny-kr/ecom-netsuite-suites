@@ -102,6 +102,18 @@ TRANSACTION NUMBER CONVENTIONS:
 JOIN PATTERNS:
 - Filter to item lines only using `tl.mainline = 'F' AND tl.taxline = 'F'`.
 - For header-only queries (no line details), use `WHERE t.mainline = 'T'` or just query the `transaction` table without joining `transactionline`.
+
+MULTI-CURRENCY — CRITICAL:
+- `t.foreigntotal` = amount in the TRANSACTION currency (could be USD, EUR, GBP, etc.)
+- `t.total` = amount in the SUBSIDIARY's base currency (not necessarily USD)
+- `t.currency` = the transaction's currency (use BUILTIN.DF(t.currency) for name)
+- `t.exchangerate` = conversion rate from transaction currency to subsidiary base currency
+- `tl.foreignamount` / `tl.netamount` = line amounts in TRANSACTION currency, NOT USD
+- When the user asks for totals "in USD", you CANNOT simply SUM foreigntotal — different orders may be in different currencies.
+- CORRECT approach: Always include BUILTIN.DF(t.currency) as currency in your SELECT and GROUP BY currency. This shows the user what currency each amount is in.
+- If the user asks for amounts "in USD", first query WITH currency grouping to see what currencies exist, then present each currency's total separately. Do NOT filter by currency name (it varies: "USD", "US Dollar", "USA Dollar", etc.).
+- NEVER alias a column as "total_sales_usd" or "revenue_usd" unless you have verified ALL rows are in the same currency.
+- If the tenant has multiple subsidiaries, always include currency and/or subsidiary in your results so the user can see the breakdown.
 </suiteql_dialect_rules>
 
 <common_queries>
@@ -113,6 +125,13 @@ IMPORTANT: For simple lookups, use ONE query. Do NOT over-engineer with multiple
 - Customer by name: `SELECT id, companyname, email FROM customer WHERE LOWER(companyname) LIKE '%acme%'`
 
 When a user mentions an external order number (Shopify, ecommerce, etc.), check the <tenant_schema> and <tenant_vernacular> for custom body fields that contain "order" or "ext" in their name. Search `tranid`, `otherrefnum`, AND any relevant custbody field in a single query using OR.
+
+BUSINESS DIMENSIONS & CUSTOM FIELDS:
+When the user asks to group by or filter on a business term (e.g., "platform", "channel", "source", "warehouse", "brand"), check the <tenant_vernacular> and <tenant_schema> for matching custom fields. These are often:
+- custbody_* fields on transactions (e.g., custbody_platform, custbody_channel)
+- custitem_* fields on items (e.g., custitem_fw_platform)
+- custcol_* fields on transaction lines
+Use BUILTIN.DF(field) to get display values, or JOIN the custom list table if you need to aggregate by list value names.
 </common_queries>
 
 <agentic_workflow>
@@ -144,7 +163,7 @@ CUSTOM RECORD TABLE NAMING — IMPORTANT:
 ERROR RECOVERY:
 - "Record not found" or "Invalid or unsupported search" → switch to netsuite_suiteql (local REST API) which has full permissions.
 - Unknown identifier → try `SELECT * FROM <table> WHERE ROWNUM <= 1` to discover real column names, then retry.
-- 0 rows returned → check the tool result for a "permission_warning" field. If present, STOP IMMEDIATELY and relay the permission warning to the user verbatim — do NOT retry the query. If no warning, report "0 rows found" with the query you ran. Do NOT retry with different filters.
+- 0 rows returned → report "0 rows found" with the query you ran. This is often a legitimate result (no matching data). Do NOT assume permissions are wrong. Only retry if you suspect the query logic itself was incorrect (e.g., wrong date function, wrong column name).
 - Each retry MUST be meaningfully different from the previous attempt.
 </agentic_workflow>
 
@@ -184,6 +203,7 @@ class SuiteQLAgent(BaseSpecialistAgent):
         self._tool_defs: list[dict] | None = None
         self._tenant_vernacular: str = ""
         self._soul_quirks: str = ""
+        self._user_timezone: str | None = None
 
     @property
     def agent_name(self) -> str:
@@ -225,6 +245,26 @@ class SuiteQLAgent(BaseSpecialistAgent):
             parts.append("CRITICAL: Pay strict attention to these tenant-specific NetSuite quirks when forming queries:")
             parts.append(self._soul_quirks)
 
+        # Inject user's local date/time so date queries use correct day
+        if self._user_timezone:
+            from datetime import datetime, timedelta
+            from zoneinfo import ZoneInfo
+
+            try:
+                tz = ZoneInfo(self._user_timezone)
+                local_now = datetime.now(tz)
+                local_today = local_now.strftime("%Y-%m-%d")
+                local_yesterday = (local_now - timedelta(days=1)).strftime("%Y-%m-%d")
+                parts.append("\n## USER LOCAL TIME")
+                parts.append(
+                    f"The user's timezone is {self._user_timezone}. "
+                    f"Their local date is {local_today} and local time is {local_now.strftime('%H:%M')}. "
+                    f"When the user says 'today', use TO_DATE('{local_today}', 'YYYY-MM-DD'). "
+                    f"When the user says 'yesterday', use TO_DATE('{local_yesterday}', 'YYYY-MM-DD')."
+                )
+            except Exception:
+                pass  # Invalid timezone — fall back to SYSDATE behavior
+
         # Inject policy constraints
         if self._policy:
             parts.append("\n## POLICY CONSTRAINTS")
@@ -254,6 +294,7 @@ class SuiteQLAgent(BaseSpecialistAgent):
     ) -> AgentResult:
         """Override to dynamically add external MCP tools before running."""
         self._tenant_vernacular = context.get("tenant_vernacular", "")
+        self._user_timezone = context.get("user_timezone")
 
         try:
             from app.services.soul_service import get_soul_config

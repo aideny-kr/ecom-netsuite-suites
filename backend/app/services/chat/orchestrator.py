@@ -91,6 +91,7 @@ async def run_chat_turn(
     tenant_id: uuid.UUID,
     user_msg: ChatMessage | None = None,
     wizard_step: str | None = None,
+    user_timezone: str | None = None,
 ) -> AsyncGenerator[dict, None]:
     """Execute an agentic chat turn with Claude's native tool use.
 
@@ -314,6 +315,7 @@ async def run_chat_turn(
                 metadata=metadata,
                 policy=active_policy,
                 system_prompt=system_prompt,
+                user_timezone=user_timezone,
             )
 
             # Stream multi-agent: dispatch agents first, then stream synthesis

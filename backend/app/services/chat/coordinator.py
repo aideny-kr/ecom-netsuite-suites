@@ -274,6 +274,12 @@ COORDINATOR_SYNTHESIS_PROMPT = (
     "RULES:\n"
     "- Preserve all numeric values EXACTLY as returned — do not round or convert.\n"
     "- Do NOT fabricate data — only use what agents returned.\n"
+    "- NEVER invent or guess order numbers, document numbers, or record IDs. If the agent\n"
+    "  did not return a specific order number, do NOT make one up. Only reference exact\n"
+    "  values from the agent results.\n"
+    "- CURRENCY: Present amounts in the currency returned by the data. If the user asks for\n"
+    "  a different currency (e.g., 'in USD'), note the original currency and explain that\n"
+    "  conversion requires exchange rate data. Do NOT apply approximate conversions.\n"
     "- Be concise. No filler phrases or disclaimers.\n"
     "- Use column headers that are human-readable (e.g., 'Sales Channel' not 'source').\n"
     "- Format currency values with commas and 2 decimal places.\n"
@@ -335,6 +341,7 @@ class MultiAgentCoordinator:
         metadata: NetSuiteMetadata | None = None,
         policy: PolicyProfile | None = None,
         system_prompt: str = "",
+        user_timezone: str | None = None,
     ) -> None:
         self.db = db
         self.tenant_id = tenant_id
@@ -347,6 +354,7 @@ class MultiAgentCoordinator:
         self.metadata = metadata
         self.policy = policy
         self.system_prompt = system_prompt
+        self.user_timezone = user_timezone
         self.last_result: CoordinatorResult | None = None
 
     async def run(
@@ -685,6 +693,8 @@ class MultiAgentCoordinator:
             return []
 
         context: dict[str, Any] = {}
+        if self.user_timezone:
+            context["user_timezone"] = self.user_timezone
         if prior_results:
             context["prior_results"] = [
                 {"agent": r.agent_name, "success": r.success, "data": r.data, "error": r.error} for r in prior_results
