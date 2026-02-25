@@ -25,7 +25,7 @@ import { useToast } from "@/hooks/use-toast";
 import { Plus } from "lucide-react";
 import { apiClient } from "@/lib/api-client";
 
-type Provider = "netsuite_mcp" | "shopify_mcp" | "custom";
+type Provider = "netsuite_mcp" | "shopify_mcp" | "stripe_mcp" | "custom";
 type AuthType = "bearer" | "api_key" | "none";
 
 const credentialFields: Record<AuthType, { key: string; label: string }[]> = {
@@ -55,6 +55,10 @@ export function AddMcpConnectorDialog() {
   const { toast } = useToast();
 
   const isNetSuite = provider === "netsuite_mcp";
+  const isStripe = provider === "stripe_mcp";
+
+  // Stripe-specific state
+  const [stripeKey, setStripeKey] = useState("");
 
   function resetForm() {
     setProvider("");
@@ -65,6 +69,7 @@ export function AddMcpConnectorDialog() {
     setAccountId("");
     setClientId("");
     setIsAuthorizing(false);
+    setStripeKey("");
   }
 
   // Listen for OAuth callback messages from popup window
@@ -135,6 +140,29 @@ export function AddMcpConnectorDialog() {
       return;
     }
 
+    if (isStripe) {
+      if (!stripeKey) return;
+      try {
+        await createConnector.mutateAsync({
+          provider: "stripe_mcp",
+          label: label || "Stripe MCP",
+          server_url: "https://mcp.stripe.com",
+          auth_type: "bearer",
+          credentials: { access_token: stripeKey },
+        });
+        toast({ title: "Stripe MCP connector created successfully" });
+        setOpen(false);
+        resetForm();
+      } catch (err) {
+        toast({
+          title: "Failed to create Stripe MCP connector",
+          description: err instanceof Error ? err.message : "Unknown error",
+          variant: "destructive",
+        });
+      }
+      return;
+    }
+
     if (!provider || !serverUrl) return;
 
     try {
@@ -159,7 +187,9 @@ export function AddMcpConnectorDialog() {
 
   const isSubmitDisabled = isNetSuite
     ? !accountId || !clientId || isAuthorizing
-    : !provider || !serverUrl || createConnector.isPending;
+    : isStripe
+      ? !stripeKey || createConnector.isPending
+      : !provider || !serverUrl || createConnector.isPending;
 
   const submitLabel = isNetSuite
     ? isAuthorizing
@@ -196,6 +226,7 @@ export function AddMcpConnectorDialog() {
                 setCredentials({});
                 setAccountId("");
                 setClientId("");
+                setStripeKey("");
               }}
             >
               <SelectTrigger className="h-10 text-[13px]">
@@ -204,6 +235,7 @@ export function AddMcpConnectorDialog() {
               <SelectContent>
                 <SelectItem value="netsuite_mcp">NetSuite MCP</SelectItem>
                 <SelectItem value="shopify_mcp">Shopify MCP</SelectItem>
+                <SelectItem value="stripe_mcp">Stripe MCP</SelectItem>
                 <SelectItem value="custom">Custom</SelectItem>
               </SelectContent>
             </Select>
@@ -218,7 +250,9 @@ export function AddMcpConnectorDialog() {
               placeholder={
                 isNetSuite
                   ? "e.g., Production NetSuite"
-                  : "e.g., Production NetSuite MCP"
+                  : isStripe
+                    ? "e.g., Stripe Production"
+                    : "e.g., Production NetSuite MCP"
               }
               value={label}
               onChange={(e) => setLabel(e.target.value)}
@@ -265,8 +299,29 @@ export function AddMcpConnectorDialog() {
             </>
           )}
 
-          {/* Generic connector fields (non-NetSuite) */}
-          {!isNetSuite && (
+          {/* Stripe-specific fields */}
+          {isStripe && (
+            <div className="space-y-2">
+              <Label htmlFor="stripe-key" className="text-[13px] font-medium">
+                Stripe Secret Key
+              </Label>
+              <Input
+                id="stripe-key"
+                type="password"
+                placeholder="sk_live_... or sk_test_..."
+                value={stripeKey}
+                onChange={(e) => setStripeKey(e.target.value)}
+                required
+                className="h-10 text-[13px]"
+              />
+              <p className="text-[11px] text-muted-foreground">
+                Found in the Stripe Dashboard under Developers &gt; API Keys
+              </p>
+            </div>
+          )}
+
+          {/* Generic connector fields (non-NetSuite, non-Stripe) */}
+          {!isNetSuite && !isStripe && (
             <>
               <div className="space-y-2">
                 <Label htmlFor="mcp-url" className="text-[13px] font-medium">

@@ -12,7 +12,7 @@ export function useMcpConnectors() {
 }
 
 interface CreateMcpConnectorPayload {
-  provider: "netsuite_mcp" | "shopify_mcp" | "custom";
+  provider: "netsuite_mcp" | "shopify_mcp" | "stripe_mcp" | "custom";
   label: string;
   server_url: string;
   auth_type: "bearer" | "api_key" | "none";

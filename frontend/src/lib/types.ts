@@ -221,7 +221,7 @@ export interface PlanInfo {
 export interface McpConnector {
   id: string;
   tenant_id: string;
-  provider: "netsuite_mcp" | "shopify_mcp" | "custom";
+  provider: "netsuite_mcp" | "shopify_mcp" | "stripe_mcp" | "custom";
   label: string;
   server_url: string;
   auth_type: "bearer" | "api_key" | "none" | "oauth2";

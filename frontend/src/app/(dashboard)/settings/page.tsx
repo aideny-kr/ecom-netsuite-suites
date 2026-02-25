@@ -88,6 +88,7 @@ import {
   Layers,
   List,
   FileCode,
+  CreditCard,
 } from "lucide-react";
 
 const providerMeta: Record<
@@ -105,6 +106,12 @@ const providerMeta: Record<
     color: "text-green-600",
     bg: "bg-green-50",
     label: "Shopify MCP",
+  },
+  stripe_mcp: {
+    icon: CreditCard,
+    color: "text-violet-600",
+    bg: "bg-violet-50",
+    label: "Stripe MCP",
   },
   custom: {
     icon: Server,
