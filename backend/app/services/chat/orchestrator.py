@@ -348,8 +348,9 @@ async def run_chat_turn(
                 payload=audit_payload,
             )
 
-            # Tollbooth: deduct credits before commit
-            await deduct_chat_credits(db, tenant_id, model)
+            # Tollbooth: deduct credits before commit (skip for BYOK users)
+            if not is_byok:
+                await deduct_chat_credits(db, tenant_id, model)
 
             await db.commit()
 
@@ -548,8 +549,9 @@ async def run_chat_turn(
         payload=audit_payload,
     )
 
-    # Tollbooth: deduct credits before commit
-    await deduct_chat_credits(db, tenant_id, model)
+    # Tollbooth: deduct credits before commit (skip for BYOK users)
+    if not is_byok:
+        await deduct_chat_credits(db, tenant_id, model)
 
     await db.commit()
 
