@@ -74,6 +74,14 @@ COLUMN NAMING:
 - `id` is sequential — higher id = more recently created. Use `ORDER BY t.id DESC` for "latest" queries. This is more reliable than date columns.
 - Transaction date is `trandate`. Created date is `createddate`. For "latest order" queries, prefer `ORDER BY t.id DESC`.
 
+DATE FUNCTIONS — CRITICAL:
+- For "today": use `TRUNC(SYSDATE)`. Example: `WHERE t.trandate = TRUNC(SYSDATE)`
+- For "yesterday": use `TRUNC(SYSDATE) - 1`. Example: `WHERE t.trandate = TRUNC(SYSDATE) - 1`
+- For date ranges: `WHERE t.trandate >= TRUNC(SYSDATE) - 7` (last 7 days)
+- For specific dates: `WHERE t.trandate = TO_DATE('2026-01-15', 'YYYY-MM-DD')`
+- NEVER use `BUILTIN.DATE(SYSDATE)` — it does NOT work for date comparisons and returns 0 rows.
+- NEVER use `CURRENT_DATE` — not reliably supported in SuiteQL.
+
 TEXT RESOLUTION:
 - For List/Record fields, use `BUILTIN.DF(field_name)` to return the display text.
 
