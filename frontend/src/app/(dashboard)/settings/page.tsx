@@ -57,6 +57,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useToast } from "@/hooks/use-toast";
+import { SyncLoader } from "@/components/ui/sync-loader";
 import { apiClient } from "@/lib/api-client";
 import { AI_PROVIDERS, AI_MODELS } from "@/lib/constants";
 import type { NetSuiteMetadataCategories } from "@/lib/types";
@@ -1141,6 +1142,7 @@ function NetSuiteConnectionSection() {
   const [accountId, setAccountId] = useState("");
   const [clientId, setClientId] = useState("");
   const [label, setLabel] = useState("");
+  const [restletUrl, setRestletUrl] = useState("");
   const [errorMessage, setErrorMessage] = useState("");
 
   // Derive status from fetched data
@@ -1240,6 +1242,7 @@ function NetSuiteConnectionSection() {
     setErrorMessage("");
     try {
       const params = new URLSearchParams({ account_id: accountId });
+      if (restletUrl) params.append("restlet_url", restletUrl);
       const data = await apiClient.get<{
         authorize_url: string;
         state: string;
@@ -1344,6 +1347,15 @@ function NetSuiteConnectionSection() {
                 placeholder="e.g., 9745435"
                 value={accountId}
                 onChange={(e) => setAccountId(e.target.value)}
+                className="h-8 text-[12px]"
+              />
+            </div>
+            <div className="space-y-1">
+              <Label className="text-[12px]">File Cabinet RESTlet URL (optional)</Label>
+              <Input
+                placeholder="https://...restlet.nl?script=customscript...&deploy=customdeploy..."
+                value={restletUrl}
+                onChange={(e) => setRestletUrl(e.target.value)}
                 className="h-8 text-[12px]"
               />
             </div>
@@ -1826,17 +1838,8 @@ function SuiteScriptFilesSection() {
 
       <div className="rounded-xl border bg-card p-6 shadow-soft space-y-3">
         {isSyncing && (
-          <div className="flex items-center gap-3 rounded-lg bg-blue-50 px-4 py-3">
-            <Loader2 className="h-5 w-5 text-blue-600 animate-spin" />
-            <div>
-              <p className="text-[13px] font-medium text-blue-800">
-                Sync in progress
-              </p>
-              <p className="text-[12px] text-blue-600">
-                Discovering JavaScript files and fetching content from NetSuite.
-                This may take 30-60 seconds.
-              </p>
-            </div>
+          <div className="my-2">
+            <SyncLoader />
           </div>
         )}
 

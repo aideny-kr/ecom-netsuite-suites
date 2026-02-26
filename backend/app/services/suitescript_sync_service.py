@@ -37,7 +37,7 @@ FETCH_TIMEOUT = 15  # seconds per file fetch
 # --- Discovery ---
 
 
-async def discover_scripts(access_token: str, account_id: str) -> list[dict[str, Any]]:
+async def discover_scripts(access_token: str, account_id: str, restlet_url: str | None = None) -> list[dict[str, Any]]:
     """Discover JavaScript files and custom scripts via SuiteQL.
 
     Returns a combined list of file metadata dicts with keys:
@@ -49,7 +49,10 @@ async def discover_scripts(access_token: str, account_id: str) -> list[dict[str,
     folder_map: dict[str, dict[str, str]] = {}
     try:
         from app.services.netsuite_restlet_client import restlet_get_folder_map
-        folder_map = await restlet_get_folder_map(access_token, account_id)
+        folder_map = await restlet_get_folder_map(access_token, account_id, restlet_url=restlet_url)
+        logger.info(f"suitescript_sync.folder_discovery_success: map_size={len(folder_map)}")
+        if folder_map:
+            logger.info(f"suitescript_sync.folder_discovery_sample: {list(folder_map.items())[:5]}")
     except Exception as exc:
         details = getattr(getattr(exc, "response", None), "text", str(exc))
         logger.warning(f"suitescript_sync.folder_discovery_failed: {details}", exc_info=True)
@@ -159,6 +162,7 @@ async def fetch_file_content(
     db: AsyncSession | None = None,
     tenant_id: uuid.UUID | None = None,
     connection_id: uuid.UUID | None = None,
+    restlet_url: str | None = None,
 ) -> str | None:
     """Fetch a single file's content from NetSuite File Cabinet via RESTlet."""
     import time as _time
@@ -168,7 +172,7 @@ async def fetch_file_content(
     t0 = _time.monotonic()
     url = f"RESTlet:filecabinet:read:{file_id}"
     try:
-        data = await restlet_read_file(access_token, account_id, int(file_id))
+        data = await restlet_read_file(access_token, account_id, int(file_id), restlet_url=restlet_url)
         elapsed_ms = int((_time.monotonic() - t0) * 1000)
 
         # Log successful API call
@@ -227,6 +231,7 @@ async def batch_fetch_contents(
     db: AsyncSession | None = None,
     tenant_id: uuid.UUID | None = None,
     connection_id: uuid.UUID | None = None,
+    restlet_url: str | None = None,
 ) -> tuple[dict[str, str], list[str]]:
     """Fetch file contents in batches with rate limiting.
 
@@ -242,7 +247,7 @@ async def batch_fetch_contents(
         batch = files[i : i + BATCH_SIZE]
 
         # Don't pass db to individual tasks — asyncio.gather with shared session is unsafe
-        tasks = [fetch_file_content(f["file_id"], access_token, account_id) for f in batch]
+        tasks = [fetch_file_content(f["file_id"], access_token, account_id, restlet_url=restlet_url) for f in batch]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         for file_meta, result in zip(batch, results):
@@ -457,9 +462,15 @@ async def sync_scripts_to_workspace(
     sync_state.connection_id = connection_id
     await db.flush()
 
+    # Get connection to extract customized restlet URL if present
+    from app.models.connection import Connection
+    conn_result = await db.execute(select(Connection).where(Connection.id == connection_id))
+    connection = conn_result.scalar_one_or_none()
+    restlet_url = connection.metadata_json.get("restlet_url") if connection and connection.metadata_json else None
+
     try:
         # 3. Discover scripts
-        discovered = await discover_scripts(access_token, account_id)
+        discovered = await discover_scripts(access_token, account_id, restlet_url=restlet_url)
         sync_state.discovered_file_count = len(discovered)
         await db.flush()
 
@@ -485,6 +496,7 @@ async def sync_scripts_to_workspace(
             db=db,
             tenant_id=tenant_id,
             connection_id=connection_id,
+            restlet_url=restlet_url,
         )
 
         # 5. Build file paths and upsert

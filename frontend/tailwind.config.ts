@@ -39,6 +39,12 @@ const config: Config = {
           DEFAULT: "hsl(var(--popover))",
           foreground: "hsl(var(--popover-foreground))",
         },
+        electric: {
+          indigo: "hsl(243.4 75.4% 58.6%)",
+        },
+        hot: {
+          coral: "hsl(354.8 100% 63.9%)",
+        },
       },
       borderRadius: {
         lg: "var(--radius)",

@@ -4,30 +4,39 @@
 
 @layer base {
   :root {
-    --background: 0 0% 99%;
+    /* Base Monochrome Background - Pearl White */
+    --background: 0 0% 98.0%;
     --foreground: 240 10% 3.9%;
+
     --card: 0 0% 100%;
     --card-foreground: 240 10% 3.9%;
     --popover: 0 0% 100%;
     --popover-foreground: 240 10% 3.9%;
-    --primary: 243 75% 59%;
+
+    /* Primary Punch - Electric Indigo */
+    --primary: 243.4 75.4% 58.6%;
     --primary-foreground: 0 0% 100%;
-    --secondary: 240 5% 96%;
-    --secondary-foreground: 240 6% 10%;
-    --muted: 240 5% 96%;
-    --muted-foreground: 240 4% 46%;
-    --accent: 243 75% 97%;
-    --accent-foreground: 243 75% 59%;
-    --destructive: 0 84% 60%;
+
+    /* Secondary Punch - Hot Coral */
+    --accent: 354.8 100% 63.9%;
+    --accent-foreground: 0 0% 100%;
+    --destructive: 354.8 100% 63.9%;
     --destructive-foreground: 0 0% 100%;
-    --border: 240 6% 90%;
-    --input: 240 6% 90%;
-    --ring: 243 75% 59%;
-    --radius: 0.625rem;
+
+    /* Monochrome Muted / Secondary */
+    --secondary: 240 4.8% 95.9%;
+    --secondary-foreground: 240 5.9% 10%;
+    --muted: 240 4.8% 95.9%;
+    --muted-foreground: 240 3.8% 46.1%;
+
+    --border: 240 5.9% 90%;
+    --input: 240 5.9% 90%;
+    --ring: 243.4 75.4% 58.6%;
+    --radius: 0.5rem;
 
     --sidebar-bg: 240 11% 4%;
     --sidebar-foreground: 240 5% 65%;
-    --sidebar-active: 243 75% 59%;
+    --sidebar-active: 243.4 75.4% 58.6%;
     --sidebar-hover: 240 6% 10%;
     --sidebar-border: 240 6% 12%;
     --sidebar-muted: 240 5% 40%;
@@ -35,12 +44,42 @@
     --success: 142 71% 45%;
     --warning: 38 92% 50%;
   }
+
+  .dark {
+    --background: 240 10% 3.9%;
+    --foreground: 0 0% 98.0%;
+    --card: 240 10% 3.9%;
+    --card-foreground: 0 0% 98.0%;
+    --popover: 240 10% 3.9%;
+    --popover-foreground: 0 0% 98.0%;
+    --primary: 243.4 75.4% 58.6%;
+    --primary-foreground: 0 0% 100%;
+    --accent: 354.8 100% 63.9%;
+    --accent-foreground: 0 0% 100%;
+    --destructive: 354.8 100% 63.9%;
+    --destructive-foreground: 0 0% 100%;
+    --secondary: 240 3.7% 15.9%;
+    --secondary-foreground: 0 0% 98.0%;
+    --muted: 240 3.7% 15.9%;
+    --muted-foreground: 240 5% 64.9%;
+    --border: 240 3.7% 15.9%;
+    --input: 240 3.7% 15.9%;
+    --ring: 243.4 75.4% 58.6%;
+
+    --sidebar-bg: 240 10% 3.9%;
+    --sidebar-foreground: 240 5% 65%;
+    --sidebar-active: 243.4 75.4% 58.6%;
+    --sidebar-hover: 240 3.7% 15.9%;
+    --sidebar-border: 240 3.7% 15.9%;
+    --sidebar-muted: 240 5% 40%;
+  }
 }
 
 @layer base {
   * {
     @apply border-border;
   }
+
   body {
     @apply bg-background text-foreground antialiased;
   }
@@ -51,17 +90,21 @@
     scrollbar-width: thin;
     scrollbar-color: hsl(var(--border)) transparent;
   }
+
   .scrollbar-thin::-webkit-scrollbar {
     width: 6px;
     height: 6px;
   }
+
   .scrollbar-thin::-webkit-scrollbar-track {
     background: transparent;
   }
+
   .scrollbar-thin::-webkit-scrollbar-thumb {
     background-color: hsl(var(--border));
     border-radius: 3px;
   }
+
   .scrollbar-thin::-webkit-scrollbar-thumb:hover {
     background-color: hsl(var(--muted-foreground) / 0.4);
   }
@@ -71,12 +114,15 @@
   .prose table {
     @apply w-full text-left border-collapse my-4 text-sm whitespace-nowrap;
   }
+
   .prose th {
     @apply border-b border-border font-semibold p-2 text-muted-foreground bg-muted/30;
   }
+
   .prose td {
     @apply border-b border-border p-2 min-w-[120px] max-w-[400px] truncate;
   }
+
   .prose tr:last-child td {
     @apply border-b-0;
   }

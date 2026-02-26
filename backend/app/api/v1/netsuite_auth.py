@@ -74,6 +74,7 @@ async def _get_redis() -> aioredis.Redis:
 async def authorize(
     account_id: str,
     user: Annotated[User, Depends(require_permission("connections.manage"))],
+    restlet_url: str = "",
 ):
     """Start the OAuth 2.0 PKCE flow — returns the authorize URL."""
     if not settings.NETSUITE_OAUTH_CLIENT_ID:
@@ -90,7 +91,7 @@ async def authorize(
     await r.setex(
         f"netsuite_oauth:{state}",
         600,
-        f"{code_verifier}:{account_id}:{user.tenant_id}:{user.id}",
+        f"{code_verifier}:{account_id}:{user.tenant_id}:{user.id}:{restlet_url}",
     )
     await r.aclose()
 
@@ -168,7 +169,13 @@ async def callback(
             status_code=400,
         )
 
-    code_verifier, account_id, tenant_id_str, user_id_str = stored.split(":", 3)
+    stored_parts = stored.split(":")
+    code_verifier = stored_parts[0]
+    account_id = stored_parts[1]
+    tenant_id_str = stored_parts[2]
+    user_id_str = stored_parts[3]
+    restlet_url = stored_parts[4] if len(stored_parts) > 4 else ""
+
     tenant_id = uuid.UUID(tenant_id_str)
     user_id = uuid.UUID(user_id_str)
 
@@ -208,11 +215,15 @@ async def callback(
     )
     connection = result.scalars().first()
 
+    metadata_json = {"account_id": account_id, "auth_type": "oauth2"}
+    if restlet_url:
+        metadata_json["restlet_url"] = restlet_url
+
     if connection:
         connection.encrypted_credentials = encrypt_credentials(credentials)
         connection.encryption_key_version = get_current_key_version()
         connection.auth_type = "oauth2"
-        connection.metadata_json = {"account_id": account_id, "auth_type": "oauth2"}
+        connection.metadata_json = metadata_json
     else:
         connection = Connection(
             tenant_id=tenant_id,
@@ -222,7 +233,7 @@ async def callback(
             auth_type="oauth2",
             encrypted_credentials=encrypt_credentials(credentials),
             encryption_key_version=get_current_key_version(),
-            metadata_json={"account_id": account_id, "auth_type": "oauth2"},
+            metadata_json=metadata_json,
             created_by=user_id,
         )
         db.add(connection)

@@ -567,6 +567,7 @@ async def onboarding_netsuite_mcp_authorize(
 @router.get("/netsuite-oauth/authorize")
 async def onboarding_netsuite_oauth_authorize(
     account_id: str,
+    restlet_url: str = "",
     user: User = Depends(get_current_user),
     _ent: User = Depends(require_entitlement("onboarding")),
 ):
@@ -594,7 +595,7 @@ async def onboarding_netsuite_oauth_authorize(
     await r.setex(
         f"netsuite_oauth:{state}",
         600,
-        f"{code_verifier}:{account_id}:{user.tenant_id}:{user.id}",
+        f"{code_verifier}:{account_id}:{user.tenant_id}:{user.id}:{restlet_url}",
     )
     await r.aclose()
 
