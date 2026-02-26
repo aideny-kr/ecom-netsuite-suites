@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import urllib.parse
+
 import httpx
 import structlog
 
@@ -23,6 +25,17 @@ def _restlet_params(script_id: str, deploy_id: str, **extra) -> dict:
     return params
 
 
+def _parse_restlet_url(restlet_url: str | None, default_script: str, default_deploy: str) -> tuple[str, str]:
+    """Extract script and deploy IDs from a custom RESTlet URL, or use defaults."""
+    if not restlet_url:
+        return default_script, default_deploy
+    parsed = urllib.parse.urlparse(restlet_url)
+    query = urllib.parse.parse_qs(parsed.query)
+    script_id = query.get("script", [default_script])[0]
+    deploy_id = query.get("deploy", [default_deploy])[0]
+    return script_id, deploy_id
+
+
 # Script/deploy IDs — will be configurable via Connection metadata later
 FILECABINET_SCRIPT_ID = "3901"
 FILECABINET_DEPLOY_ID = "1"
@@ -34,6 +47,7 @@ async def restlet_read_file(
     access_token: str,
     account_id: str,
     file_id: int,
+    restlet_url: str | None = None,
     timeout: int = 15,
 ) -> dict:
     """Read a file from NetSuite File Cabinet via RESTlet GET."""
@@ -42,8 +56,9 @@ async def restlet_read_file(
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json",
     }
+    script_id, deploy_id = _parse_restlet_url(restlet_url, FILECABINET_SCRIPT_ID, FILECABINET_DEPLOY_ID)
     params = _restlet_params(
-        FILECABINET_SCRIPT_ID, FILECABINET_DEPLOY_ID, fileId=str(file_id)
+        script_id, deploy_id, fileId=str(file_id)
     )
 
     async with httpx.AsyncClient(timeout=timeout) as client:
@@ -61,6 +76,7 @@ async def restlet_write_file(
     account_id: str,
     file_id: int,
     content: str,
+    restlet_url: str | None = None,
     timeout: int = 30,
 ) -> dict:
     """Write/update a file in NetSuite File Cabinet via RESTlet PUT."""
@@ -69,7 +85,8 @@ async def restlet_write_file(
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json",
     }
-    params = _restlet_params(FILECABINET_SCRIPT_ID, FILECABINET_DEPLOY_ID)
+    script_id, deploy_id = _parse_restlet_url(restlet_url, FILECABINET_SCRIPT_ID, FILECABINET_DEPLOY_ID)
+    params = _restlet_params(script_id, deploy_id)
     payload = {"fileId": file_id, "content": content}
 
     async with httpx.AsyncClient(timeout=timeout) as client:
@@ -89,6 +106,7 @@ async def restlet_create_file(
     folder_id: int,
     content: str,
     file_type: str = "JAVASCRIPT",
+    restlet_url: str | None = None,
     timeout: int = 15,
 ) -> dict:
     """Create a new file in NetSuite File Cabinet via RESTlet POST."""
@@ -97,7 +115,8 @@ async def restlet_create_file(
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json",
     }
-    params = _restlet_params(FILECABINET_SCRIPT_ID, FILECABINET_DEPLOY_ID)
+    script_id, deploy_id = _parse_restlet_url(restlet_url, FILECABINET_SCRIPT_ID, FILECABINET_DEPLOY_ID)
+    params = _restlet_params(script_id, deploy_id)
     payload = {
         "name": name,
         "folder": folder_id,
@@ -118,6 +137,7 @@ async def restlet_create_file(
 async def restlet_get_folder_map(
     access_token: str,
     account_id: str,
+    restlet_url: str | None = None,
     timeout: int = 15,
 ) -> dict:
     """Retrieve the entire folder hierarchy mapping from NetSuite via RESTlet GET."""
@@ -126,8 +146,9 @@ async def restlet_get_folder_map(
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json",
     }
+    script_id, deploy_id = _parse_restlet_url(restlet_url, FILECABINET_SCRIPT_ID, FILECABINET_DEPLOY_ID)
     params = _restlet_params(
-        FILECABINET_SCRIPT_ID, FILECABINET_DEPLOY_ID, action="folderMap"
+        script_id, deploy_id, action="folderMap"
     )
 
     async with httpx.AsyncClient(timeout=timeout) as client:
@@ -146,6 +167,7 @@ async def restlet_extract_mock_data(
     suiteql_query: str,
     limit: int = 100,
     mask_pii: bool = True,
+    restlet_url: str | None = None,
     timeout: int = 30,
 ) -> dict:
     """Extract mock data via the MockData RESTlet with PII masking."""
@@ -154,7 +176,8 @@ async def restlet_extract_mock_data(
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json",
     }
-    params = _restlet_params(MOCKDATA_SCRIPT_ID, MOCKDATA_DEPLOY_ID)
+    script_id, deploy_id = _parse_restlet_url(restlet_url, MOCKDATA_SCRIPT_ID, MOCKDATA_DEPLOY_ID)
+    params = _restlet_params(script_id, deploy_id)
     payload = {
         "query": suiteql_query,
         "limit": limit,
