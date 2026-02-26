@@ -20,15 +20,20 @@ define(['N/file', 'N/search', 'N/log', 'N/runtime', 'N/error'], (file, search, l
                 const folderMap = {};
                 // Note: isinactive=false is implied on the folder record by default, filtering on it explicitly
                 // can cause issues in some NetSuite accounts. We fetch all folders and map them.
-                search.create({
+                const folderSearch = search.create({
                     type: search.Type.FOLDER,
                     columns: ['internalid', 'name', 'parent']
-                }).run().each((result) => {
-                    folderMap[result.id] = {
-                        name: result.getValue('name'),
-                        parent: result.getValue('parent') || ''
-                    };
-                    return true; // continue iteration
+                });
+
+                const pagedData = folderSearch.runPaged({ pageSize: 1000 });
+                pagedData.pageRanges.forEach((pageRange) => {
+                    const page = pagedData.fetch({ index: pageRange.index });
+                    page.data.forEach((result) => {
+                        folderMap[result.id] = {
+                            name: result.getValue('name'),
+                            parent: result.getValue('parent') || ''
+                        };
+                    });
                 });
 
                 return {
