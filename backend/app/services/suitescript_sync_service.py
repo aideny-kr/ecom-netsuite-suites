@@ -41,9 +41,48 @@ async def discover_scripts(access_token: str, account_id: str) -> list[dict[str,
     """Discover JavaScript files and custom scripts via SuiteQL.
 
     Returns a combined list of file metadata dicts with keys:
-      file_id, name, folder, script_type, size, modified, source
+      file_id, name, folder_path, script_type, size, modified, source
     """
     files: list[dict[str, Any]] = []
+
+    # Query 0: Fetch folder mapping to resolve nested paths
+    folder_map: dict[str, dict[str, str]] = {}
+    try:
+        from app.services.netsuite_restlet_client import restlet_get_folder_map
+        folder_map = await restlet_get_folder_map(access_token, account_id)
+    except Exception as exc:
+        details = getattr(getattr(exc, "response", None), "text", str(exc))
+        logger.warning(f"suitescript_sync.folder_discovery_failed: {details}", exc_info=True)
+
+    def _get_folder_path(folder_id: str) -> str:
+        """Resolve a nested folder path from the folder_map."""
+        if not folder_id or folder_id not in folder_map:
+            return "Uncategorized"
+        
+        path_segments = []
+        current_id = folder_id
+        visited = set()  # Prevent infinite loops in corrupted DBs
+        
+        while current_id in folder_map and current_id not in visited:
+            visited.add(current_id)
+            node = folder_map[current_id]
+            
+            # Skip the root 'SuiteScripts' folder if it exists as we inject it manually later
+            name = node["name"]
+            if name and name.lower() != "suitescripts":
+                # Sanitize the segment name
+                safe_name = "".join(c if c.isalnum() or c in "._- " else "_" for c in name)
+                path_segments.append(safe_name)
+                
+            current_id = node["parent"]
+            if not current_id:
+                break
+                
+        if not path_segments:
+            return "Uncategorized"
+            
+        # Reverse because we traversed from child to parent
+        return "/".join(reversed(path_segments))
 
     # Query 1: JavaScript files in the File Cabinet
     try:
@@ -66,7 +105,7 @@ async def discover_scripts(access_token: str, account_id: str) -> list[dict[str,
                 {
                     "file_id": str(item.get("id", "")),
                     "name": item.get("name", "unknown.js"),
-                    "folder": str(item.get("folder", "")),
+                    "folder_path": _get_folder_path(str(item.get("folder", ""))),
                     "script_type": None,
                     "size": int(item.get("filesize", 0) or 0),
                     "modified": item.get("lastmodifieddate"),
@@ -265,11 +304,8 @@ def _build_file_path(file_meta: dict[str, Any]) -> str:
         prefix = f"{script_id}_" if script_id else ""
         return f"CustomScripts/{prefix}{safe_name}"
     else:
-        folder = file_meta.get("folder", "")
-        folder_name = str(folder) if folder else "Uncategorized"
-        # Sanitize folder name
-        safe_folder = "".join(c if c.isalnum() or c in "._- " else "_" for c in folder_name)
-        return f"SuiteScripts/{safe_folder}/{safe_name}"
+        folder_path = file_meta.get("folder_path", "Uncategorized")
+        return f"SuiteScripts/{folder_path}/{safe_name}"
 
 
 async def _get_or_create_workspace(

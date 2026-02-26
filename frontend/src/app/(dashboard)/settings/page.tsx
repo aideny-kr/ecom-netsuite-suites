@@ -261,7 +261,7 @@ function AiConfigSection() {
         payload.ai_api_key = null;
       } else {
         payload.ai_provider = provider;
-        if (model) payload.ai_model = model;
+        payload.ai_model = model || null;
         if (apiKey) payload.ai_api_key = apiKey;
       }
 
@@ -524,7 +524,7 @@ function TenantProfileSection() {
         {
           industry,
           business_description: description,
-          team_size: teamSize || undefined,
+          team_size: teamSize || null,
         },
       );
       await apiClient.post(
@@ -719,8 +719,8 @@ function SoulSection() {
     setError("");
     try {
       const payload = {
-        bot_tone: botTone,
-        netsuite_quirks: netsuiteQuirks,
+        bot_tone: botTone || null,
+        netsuite_quirks: netsuiteQuirks || null,
       };
 
       const updated = await apiClient.post<{ bot_tone: string | null; netsuite_quirks: string | null; exists: boolean }>(

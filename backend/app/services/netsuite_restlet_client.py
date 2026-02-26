@@ -115,6 +115,31 @@ async def restlet_create_file(
     return data
 
 
+async def restlet_get_folder_map(
+    access_token: str,
+    account_id: str,
+    timeout: int = 15,
+) -> dict:
+    """Retrieve the entire folder hierarchy mapping from NetSuite via RESTlet GET."""
+    url = _restlet_base_url(account_id)
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json",
+    }
+    params = _restlet_params(
+        FILECABINET_SCRIPT_ID, FILECABINET_DEPLOY_ID, action="folderMap"
+    )
+
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.get(url, headers=headers, params=params)
+        resp.raise_for_status()
+
+    data = resp.json()
+    if not data.get("success"):
+        raise RuntimeError(f"RESTlet error: {data.get('message', 'Unknown error')}")
+    return data.get("folders", {})
+
+
 async def restlet_extract_mock_data(
     access_token: str,
     account_id: str,

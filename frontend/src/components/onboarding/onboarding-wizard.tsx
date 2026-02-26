@@ -66,11 +66,15 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
       await fetchChecklist();
       if (currentStep < STEP_KEYS.length - 1) {
         setCurrentStep((s) => s + 1);
+      } else {
+        await apiClient.post("/api/v1/onboarding/finalize");
+        setIsExiting(true);
+        setTimeout(onComplete, 500);
       }
     } catch (err) {
       console.error("Failed to skip step:", err);
     }
-  }, [currentStep, fetchChecklist]);
+  }, [currentStep, fetchChecklist, onComplete]);
 
   const handleDone = useCallback(async () => {
     setIsValidating(true);
@@ -121,9 +125,8 @@ export function OnboardingWizard({ onComplete }: OnboardingWizardProps) {
 
   return (
     <div
-      className={`fixed inset-0 z-50 flex transition-all duration-500 ${
-        isExiting ? "opacity-0 scale-105" : "opacity-100 scale-100 animate-in fade-in duration-300"
-      }`}
+      className={`fixed inset-0 z-50 flex transition-all duration-500 ${isExiting ? "opacity-0 scale-105" : "opacity-100 scale-100 animate-in fade-in duration-300"
+        }`}
       style={{
         background: "linear-gradient(135deg, hsl(250 40% 15%) 0%, hsl(230 35% 20%) 30%, hsl(260 30% 18%) 60%, hsl(240 35% 12%) 100%)",
       }}

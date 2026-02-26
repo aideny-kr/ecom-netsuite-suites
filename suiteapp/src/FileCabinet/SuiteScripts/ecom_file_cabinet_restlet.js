@@ -15,6 +15,29 @@ define(['N/file', 'N/search', 'N/log', 'N/runtime', 'N/error'], (file, search, l
             const script = runtime.getCurrentScript();
             log.debug('FileCabinet GET', JSON.stringify(requestParams));
 
+            // Custom folder resolution endpoint to bypass REST SuiteQL restrictions
+            if (requestParams.action === 'folderMap') {
+                const folderMap = {};
+                // Note: isinactive=false is implied on the folder record by default, filtering on it explicitly
+                // can cause issues in some NetSuite accounts. We fetch all folders and map them.
+                search.create({
+                    type: search.Type.FOLDER,
+                    columns: ['internalid', 'name', 'parent']
+                }).run().each((result) => {
+                    folderMap[result.id] = {
+                        name: result.getValue('name'),
+                        parent: result.getValue('parent') || ''
+                    };
+                    return true; // continue iteration
+                });
+
+                return {
+                    success: true,
+                    folders: folderMap,
+                    remainingUsage: script.getRemainingUsage()
+                };
+            }
+
             let fileObj;
             if (requestParams.fileId) {
                 fileObj = file.load({ id: parseInt(requestParams.fileId, 10) });
@@ -23,7 +46,7 @@ define(['N/file', 'N/search', 'N/log', 'N/runtime', 'N/error'], (file, search, l
             } else {
                 throw error.create({
                     name: 'MISSING_PARAM',
-                    message: 'Provide fileId or filePath',
+                    message: 'Provide fileId, filePath, or action=folderMap',
                 });
             }
 
