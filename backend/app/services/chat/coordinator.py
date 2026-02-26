@@ -741,6 +741,20 @@ class MultiAgentCoordinator:
                     )
                     print(f"[COORDINATOR] Vernacular injected ({len(vernacular)} chars)", flush=True)
 
+                # JIT domain knowledge retrieval
+                try:
+                    from app.services.chat.domain_knowledge import retrieve_domain_knowledge
+
+                    dk_results = await retrieve_domain_knowledge(db=self.db, query_text=step.task)
+                    if dk_results:
+                        context["domain_knowledge"] = [r["raw_text"] for r in dk_results]
+                        logger.info(
+                            "coordinator.domain_knowledge_injected",
+                            extra={"chunk_count": len(dk_results), "sources": [r.get("source_uri") for r in dk_results]},
+                        )
+                except Exception:
+                    logger.warning("coordinator.domain_knowledge_retrieval_failed", exc_info=True)
+
             return await agent.run(
                 task=step.task,
                 context=context,

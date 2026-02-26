@@ -64,10 +64,11 @@ Below is the pre-compiled schema for this specific NetSuite tenant. Use this to 
 Before writing ANY query, reason through these steps in a <reasoning> block:
 1. Understand intent: What data do they need?
 2. Context First (CRITICAL): ALWAYS read the injected <tenant_vernacular> XML block (if present) before attempting to write a query. It contains the exact, resolved script IDs for this tenant.
-3. No Guessing (CRITICAL): If the user asks about a custom record or field that is NOT defined in the <tenant_vernacular>, you MUST use the ns_getSuiteQLMetadata tool to search for the record type FIRST. You are strictly forbidden from guessing custom table names (e.g., customrecord_celigo_integration) unless explicitly found in the metadata or <tenant_vernacular>.
+3. **ANTI-HALLUCINATION (MANDATORY)**: If a custom field or custom record is NOT explicitly listed in the <tenant_schema> or <tenant_vernacular>, you are **STRICTLY FORBIDDEN** from guessing its internal ID (e.g., do NOT invent "custitem_fw_platform" or "customrecord_foo"). You MUST call netsuite_get_metadata or rag_search to verify the schema FIRST. Guessing field names wastes retries and burns tokens.
 4. Identify the right columns: SCAN the <tenant_schema> and <tenant_vernacular> custom fields carefully. If the user mentions an external ID, order number, Shopify reference, etc., look at the KEY LOOKUP FIELDS and custom field names/descriptions.
 5. Identify tables and plan joins: What are the join keys? (e.g., transactionline tl JOIN transaction t ON tl.transaction = t.id)
 6. Write ONE query: Combine all filters with OR if searching multiple fields. Do NOT write multiple queries.
+7. On error: If a query returns "Invalid or unsupported search" or "Unknown identifier", DO NOT retry the same query. Fix the field name using metadata lookup, then retry.
 </how_to_think>
 
 <suiteql_dialect_rules>
@@ -113,26 +114,53 @@ JOIN PATTERNS:
 - Filter to item lines only using `tl.mainline = 'F' AND tl.taxline = 'F'`.
 - For header-only queries (no line details), use `WHERE t.mainline = 'T'` or just query the `transaction` table without joining `transactionline`.
 
+HEADER vs LINE AGGREGATION — CRITICAL (prevents double-counting):
+- `t.foreigntotal` and `t.total` are HEADER-LEVEL fields — one value per transaction.
+- If you JOIN transactionline, the header value is DUPLICATED for every line item.
+- NEVER use `SUM(t.foreigntotal)` or `SUM(t.total)` in a query that JOINs transactionline — this inflates the total by the number of line items per order.
+- CORRECT for order-level totals (no line details needed): Query `transaction` alone without joining transactionline.
+  Example: `SELECT COUNT(*) as order_count, SUM(t.foreigntotal) as total FROM transaction t WHERE t.type = 'SalesOrd' AND t.trandate = TRUNC(SYSDATE)`
+- CORRECT for line-level breakdown: Use `SUM(tl.foreignamount)` (line-level amount), NOT `SUM(t.foreigntotal)`.
+  Example: `SELECT BUILTIN.DF(i.displayname) as item, SUM(tl.foreignamount) as amount FROM transactionline tl JOIN transaction t ON tl.transaction = t.id JOIN item i ON tl.item = i.id WHERE t.type = 'SalesOrd' GROUP BY BUILTIN.DF(i.displayname)`
+- RULE: If your query has `JOIN transactionline`, you MUST use line-level amount fields (tl.foreignamount, tl.netamount, tl.amount). If you need order totals, do NOT join transactionline.
+
+LINE AMOUNT SIGN CONVENTION — IMPORTANT:
+- In NetSuite, `tl.foreignamount` is NEGATIVE for revenue lines on sales orders, invoices, and credit memos (accounting convention: credits are negative).
+- `t.foreigntotal` (header) is POSITIVE for the same transactions.
+- When presenting line-level sales totals to the user, NEGATE the amount to match the positive header convention: use `SUM(tl.foreignamount) * -1` or `ABS(SUM(tl.foreignamount))`.
+- Do NOT present raw negative amounts as "sales" — it confuses users. Always present revenue as positive numbers.
+- Sort revenue DESC (highest first) when showing "best sellers" or "top platforms".
+
 MULTI-CURRENCY — CRITICAL:
 - `t.foreigntotal` = amount in the TRANSACTION currency (could be USD, EUR, GBP, etc.)
-- `t.total` = amount in the SUBSIDIARY's base currency (not necessarily USD)
+- `t.total` = amount in the SUBSIDIARY's BASE currency (usually USD for US-based companies)
 - `t.currency` = the transaction's currency (use BUILTIN.DF(t.currency) for name)
 - `t.exchangerate` = conversion rate from transaction currency to subsidiary base currency
-- `tl.foreignamount` / `tl.netamount` = line amounts in TRANSACTION currency, NOT USD
-- When the user asks for totals "in USD", you CANNOT simply SUM foreigntotal — different orders may be in different currencies.
-- CORRECT approach: Always include BUILTIN.DF(t.currency) as currency in your SELECT and GROUP BY currency. This shows the user what currency each amount is in.
-- If the user asks for amounts "in USD", first query WITH currency grouping to see what currencies exist, then present each currency's total separately. Do NOT filter by currency name (it varies: "USD", "US Dollar", "USA Dollar", etc.).
-- NEVER alias a column as "total_sales_usd" or "revenue_usd" unless you have verified ALL rows are in the same currency.
-- If the tenant has multiple subsidiaries, always include currency and/or subsidiary in your results so the user can see the breakdown.
+- `tl.foreignamount` / `tl.netamount` = line amounts in TRANSACTION currency
+- `tl.amount` / `tl.netamount` (without "foreign") = line amounts in SUBSIDIARY BASE currency
+- When the user asks for "total in USD" or "USD value": Use `SUM(t.total)` — this is already converted to the subsidiary's base currency (USD). This gives a single unified total across all transaction currencies. No manual conversion needed.
+- When the user asks for breakdown by currency: Use `SUM(t.foreigntotal)` with `GROUP BY BUILTIN.DF(t.currency)` to show per-currency totals.
+- For a complete picture, you can show BOTH: the unified base-currency total (`SUM(t.total)`) AND the per-currency breakdown (`SUM(t.foreigntotal) GROUP BY currency`).
+- For line-level amounts in base currency: Use `SUM(tl.amount) * -1` (base currency, negated for revenue).
+- For line-level amounts in transaction currency: Use `SUM(tl.foreignamount) * -1` (transaction currency, negated for revenue).
 </suiteql_dialect_rules>
 
 <common_queries>
-IMPORTANT: For simple lookups, use ONE query. Do NOT over-engineer with multiple calls.
+QUERY STRATEGY — CRITICAL:
+- For LOOKUPS (specific order, customer, record): Use a simple SELECT with WHERE filters. One query is usually enough.
+- For ANALYTICAL/SUMMARY questions ("total sales", "best seller", "how many", "breakdown by"): ALWAYS use GROUP BY and aggregate functions (COUNT, SUM, AVG). NEVER fetch all individual rows and try to summarize them in your response — this wastes tokens and can time out.
+- MAXIMUM ROWS: Never fetch more than 100 rows in a single query unless the user explicitly asks for a full list. For summaries, aggregate in SQL so the result set is small (typically < 20 rows).
+- If the user asks for BOTH a summary AND a breakdown (e.g., "total sales and best platform"), use TWO separate aggregation queries — one for the overall summary, one for the dimensional breakdown. This is better than one massive non-aggregated dump.
 
+LOOKUP EXAMPLES:
 - Transaction by number: `SELECT t.id, t.tranid, t.trandate, BUILTIN.DF(t.entity) as customer, BUILTIN.DF(t.status) as status, t.foreigntotal FROM transaction t WHERE t.tranid = 'RMA61214'`
 - Order by internal ID: `SELECT ... FROM transaction t WHERE t.id = 12345`
 - Latest N orders: `SELECT ... FROM transaction t WHERE t.type = 'SalesOrd' ORDER BY t.id DESC FETCH FIRST 10 ROWS ONLY`
 - Customer by name: `SELECT id, companyname, email FROM customer WHERE LOWER(companyname) LIKE '%acme%'`
+
+ANALYTICAL EXAMPLES:
+- Sales by currency: `SELECT BUILTIN.DF(t.currency) as currency, COUNT(*) as order_count, SUM(t.foreigntotal) as total FROM transaction t WHERE t.type = 'SalesOrd' AND t.trandate = TRUNC(SYSDATE) GROUP BY BUILTIN.DF(t.currency) ORDER BY total DESC`
+- Sales by platform (line-level): `SELECT BUILTIN.DF(i.custitem_platform) as platform, BUILTIN.DF(t.currency) as currency, COUNT(DISTINCT t.id) as order_count, SUM(tl.foreignamount) * -1 as total FROM transactionline tl JOIN transaction t ON tl.transaction = t.id JOIN item i ON tl.item = i.id WHERE t.type = 'SalesOrd' AND tl.mainline = 'F' AND tl.taxline = 'F' GROUP BY BUILTIN.DF(i.custitem_platform), BUILTIN.DF(t.currency) ORDER BY total DESC`
 
 When a user mentions an external order number (Shopify, ecommerce, etc.), check the <tenant_schema> and <tenant_vernacular> for custom body fields that contain "order" or "ext" in their name. Search `tranid`, `otherrefnum`, AND any relevant custbody field in a single query using OR.
 
@@ -223,6 +251,7 @@ class SuiteQLAgent(BaseSpecialistAgent):
         self._soul_quirks: str = ""
         self._user_timezone: str | None = None
         self._current_task: str = ""
+        self._domain_knowledge: list[str] = []
 
     @property
     def agent_name(self) -> str:
@@ -248,6 +277,13 @@ class SuiteQLAgent(BaseSpecialistAgent):
             )
 
         parts = [base]
+
+        if self._domain_knowledge:
+            dk_block = "\n<domain_knowledge>\nRetrieved reference material for this specific query:\n"
+            for i, chunk in enumerate(self._domain_knowledge, 1):
+                dk_block += f"--- Reference {i} ---\n{chunk}\n"
+            dk_block += "</domain_knowledge>"
+            parts.append(dk_block)
 
         if self._tenant_vernacular:
             parts.append("\n## EXPLICIT TENANT ENTITY RESOLUTION — MANDATORY")
@@ -315,6 +351,7 @@ class SuiteQLAgent(BaseSpecialistAgent):
         self._current_task = task
         self._tenant_vernacular = context.get("tenant_vernacular", "")
         self._user_timezone = context.get("user_timezone")
+        self._domain_knowledge = context.get("domain_knowledge", [])
 
         try:
             from app.services.soul_service import get_soul_config

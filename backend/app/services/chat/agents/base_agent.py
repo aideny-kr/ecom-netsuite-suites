@@ -35,6 +35,74 @@ def _is_valid_uuid(val: str) -> bool:
         return False
 
 
+_MAX_ERROR_CHARS = 1000
+_MAX_RESULT_ROWS = 50  # Cap rows sent back to LLM to prevent token bloat
+
+
+def _truncate_tool_result(result_str: str) -> str:
+    """Truncate tool results to prevent token bloat.
+
+    Handles both error payloads (truncate message) and large success payloads
+    (cap rows at _MAX_RESULT_ROWS). This prevents the LLM from choking on
+    hundreds of raw data rows.
+    """
+    try:
+        parsed = json.loads(result_str)
+    except (json.JSONDecodeError, TypeError):
+        # Not JSON — truncate if very large
+        if len(result_str) > _MAX_ERROR_CHARS * 3:
+            return result_str[:_MAX_ERROR_CHARS] + "\n... (truncated)"
+        return result_str
+
+    if not isinstance(parsed, dict):
+        return result_str
+
+    # Truncate error responses
+    is_error = parsed.get("error") is True or (
+        isinstance(parsed.get("error"), str) and parsed["error"]
+    )
+    if is_error:
+        for key in ("message", "error_message", "detail"):
+            if key in parsed and isinstance(parsed[key], str) and len(parsed[key]) > _MAX_ERROR_CHARS:
+                parsed[key] = parsed[key][:_MAX_ERROR_CHARS] + "... (truncated)"
+        return json.dumps(parsed, default=str)
+
+    # Cap large row-based results (e.g., SuiteQL queries returning hundreds of rows)
+    rows = parsed.get("rows")
+    if isinstance(rows, list) and len(rows) > _MAX_RESULT_ROWS:
+        original_count = len(rows)
+        parsed["rows"] = rows[:_MAX_RESULT_ROWS]
+        parsed["row_count"] = original_count
+        parsed["rows_truncated"] = True
+        parsed["rows_shown"] = _MAX_RESULT_ROWS
+        parsed["_warning"] = (
+            f"Only first {_MAX_RESULT_ROWS} of {original_count} rows shown. "
+            f"Use GROUP BY with aggregate functions (COUNT, SUM) to get summaries "
+            f"instead of fetching individual rows."
+        )
+        return json.dumps(parsed, default=str)
+
+    # Also cap large "items" arrays (alternative result format)
+    items = parsed.get("items")
+    if isinstance(items, list) and len(items) > _MAX_RESULT_ROWS:
+        original_count = len(items)
+        parsed["items"] = items[:_MAX_RESULT_ROWS]
+        parsed["items_truncated"] = True
+        parsed["items_shown"] = _MAX_RESULT_ROWS
+        parsed["total_items"] = original_count
+        parsed["_warning"] = (
+            f"Only first {_MAX_RESULT_ROWS} of {original_count} items shown. "
+            f"Use GROUP BY with aggregate functions to get summaries."
+        )
+        return json.dumps(parsed, default=str)
+
+    return result_str
+
+
+# Backward-compatible alias
+_truncate_error_payload = _truncate_tool_result
+
+
 async def _resolve_default_workspace(
     db: "AsyncSession", tenant_id: "uuid.UUID",
 ) -> str | None:
@@ -220,6 +288,9 @@ class BaseSpecialistAgent(abc.ABC):
                                 result_str = json.dumps(parsed, default=str)
                             except (json.JSONDecodeError, TypeError):
                                 pass
+
+                    # Truncate error payloads to prevent token bloat on retries
+                    result_str = _truncate_error_payload(result_str)
 
                     elapsed_ms = int((time.monotonic() - t0) * 1000)
                     tool_calls_log.append(
