@@ -264,19 +264,27 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 
 - **Orchestrator** (`orchestrator.py`): SSE streaming endpoint, routes to single-agent or multi-agent
 - **Coordinator** (`coordinator.py`): Semantic router with heuristic classifier (`classify_intent()`), LLM fallback for ambiguous queries. Dispatches specialist agents, handles retries, streams synthesis.
+- **Intent types**: DOCUMENTATION, DATA_QUERY, CODE_UNDERSTANDING, WORKSPACE_DEV, ANALYSIS, AMBIGUOUS. Heuristic regex rules checked first; AMBIGUOUS falls back to LLM planner.
 - **Specialist agents** (`agents/`): Each runs a mini agentic loop with tools (max_steps varies per agent)
   - `SuiteQLAgent`: max_steps=6, tenant metadata + entity vernacular injected into prompt
-  - `RAGAgent`: max_steps=2, strict tool budget (2 rag_search + 1 web_search)
+  - `RAGAgent`: max_steps=2, strict tool budget (2 rag_search + 1 web_search). Handles docs, script logic, AND online research.
   - `DataAnalysisAgent`: requires prior data from SuiteQL agent
   - `WorkspaceAgent`: file ops, propose_patch, search workspace
 - **LLM adapters** (`adapters/`): Anthropic, OpenAI, Gemini — all implement `create_message()` and `stream_message()`
 - **Entity resolution** (`tenant_resolver.py`): Runs before SuiteQL agent dispatch. Haiku extracts entities → pg_trgm resolves to script IDs → XML block injected via `context["tenant_vernacular"]`
 - **Route registry**: Add new agents via `ROUTE_REGISTRY` dict + `_create_agent()` factory in coordinator
+- **History compaction**: Full history loaded → compacted via LLM summary (if >12 messages) → keeps last 4 verbatim. Hard-truncate as fallback only.
+- **Session ordering**: Sorted by `updated_at DESC`. Session `updated_at` bumped on every message. Frontend auto-selects most recent session on page load.
+- **Doc chunk embeddings**: OpenAI `text-embedding-3-small` (1024-dim) primary, Voyage AI fallback. 3,198 chunks embedded. UTF-8 sanitized on ingest.
+- **Logging**: Coordinator/orchestrator use `print(flush=True)` for docker visibility (structlog doesn't surface stdlib `logger.info` calls).
 
 ## Current State (update after each major change)
 
-- **Latest migration**: 027_add_missing_metadata_columns
+- **Latest migration**: 031_domain_knowledge_chunks
 - **Entity mappings**: 2,109 seeded for test tenant (bf92d059), seeder runs in metadata discovery pipeline
-- **Known gap**: OAuth reconnect just flips status, doesn't re-initiate browser flow
+- **Doc chunk embeddings**: 3,198/3,198 embedded with OpenAI (was 2/3,198 with Voyage AI)
+- **Utility scripts**: `scripts/sanitize_doc_chunks.py`, `scripts/reembed_doc_chunks.py`
+- **Known gap**: OAuth reconnect just flips status, doesn't re-initiate browser flow (refresh token expired for tenant 9745435)
 - **Known gap**: `inputRef` in workspace-chat-panel never attached to ChatInput
+- **Known gap**: structlog setup doesn't surface stdlib `logging.getLogger()` — use `print(flush=True)` for docker log visibility
 - **Deferred**: SDF CI/CD pipeline, bundle versioning strategy, RESTlet rate limiting
