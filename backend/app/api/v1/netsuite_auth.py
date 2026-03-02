@@ -169,7 +169,7 @@ async def callback(
             status_code=400,
         )
 
-    stored_parts = stored.split(":")
+    stored_parts = stored.split(":", maxsplit=4)
     code_verifier = stored_parts[0]
     account_id = stored_parts[1]
     tenant_id_str = stored_parts[2]

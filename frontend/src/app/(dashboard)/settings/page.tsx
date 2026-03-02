@@ -1804,7 +1804,7 @@ function SuiteScriptFilesSection() {
     return <Skeleton className="h-[120px] rounded-xl" />;
   }
 
-  const isSyncing = syncStatus?.status === "in_progress";
+  const isSyncing = syncStatus?.status === "in_progress" || syncStatus?.status === "pending";
   const isCompleted = syncStatus?.status === "completed";
   const isFailed = syncStatus?.status === "failed";
   const filesLoaded = syncStatus?.total_files_loaded ?? 0;

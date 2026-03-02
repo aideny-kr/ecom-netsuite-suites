@@ -30,8 +30,8 @@ export function useSuiteScriptSyncStatus() {
       apiClient.get<SyncStatus>("/api/v1/netsuite/scripts/sync-status"),
     refetchInterval: (query) => {
       const data = query.state.data;
-      if (data && data.status === "in_progress") {
-        return 3000; // Poll every 3s while syncing
+      if (data && (data.status === "in_progress" || data.status === "pending")) {
+        return 3000; // Poll every 3s while syncing or pending
       }
       return false;
     },
@@ -49,6 +49,12 @@ export function useTriggerSuiteScriptSync() {
       apiClient.post<SyncTriggerResponse>(
         "/api/v1/netsuite/scripts/sync",
       ),
+    onMutate: () => {
+      // Optimistically set status to pending so loader shows immediately
+      queryClient.setQueryData<SyncStatus>(["suitescript-sync-status"], (old) =>
+        old ? { ...old, status: "pending" } : old
+      );
+    },
     onSuccess: () => {
       queryClient.invalidateQueries({
         queryKey: ["suitescript-sync-status"],
