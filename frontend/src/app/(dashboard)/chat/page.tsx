@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiClient } from "@/lib/api-client";
@@ -41,6 +41,15 @@ export default function ChatPage() {
       setActiveSessionId(session.id);
     },
   });
+
+  // Auto-select the most recent session on initial page load only
+  const [hasAutoSelected, setHasAutoSelected] = useState(false);
+  useEffect(() => {
+    if (!hasAutoSelected && !activeSessionId && sessions.length > 0) {
+      setActiveSessionId(sessions[0].id);
+      setHasAutoSelected(true);
+    }
+  }, [sessions, activeSessionId, hasAutoSelected]);
 
   const handleSend = useCallback(
     async (content: string) => {

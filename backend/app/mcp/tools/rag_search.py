@@ -174,8 +174,14 @@ async def _keyword_search(
     if source_filter:
         stmt = stmt.where(DocChunk.source_path.ilike(f"{source_filter}%"))
 
-    result = await db.execute(stmt)
-    rows = result.all()
+    try:
+        result = await db.execute(stmt)
+        rows = result.all()
+    except Exception:
+        # Corrupted UTF-8 in doc_chunks can crash ILIKE queries with
+        # CharacterNotInRepertoireError.  Return empty rather than bubbling up.
+        logger.warning("rag_search._keyword_search failed (likely encoding issue)", exc_info=True)
+        return {"results": [], "count": 0, "query": query_text, "method": "keyword_fallback", "note": "keyword search unavailable"}
 
     results = [
         {

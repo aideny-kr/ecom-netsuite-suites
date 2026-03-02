@@ -51,7 +51,7 @@ export function SessionSidebar({
               )}
             </div>
             <p className="truncate text-[11px] text-muted-foreground mt-0.5">
-              {new Date(session.created_at).toLocaleDateString()}
+              {new Date(session.updated_at).toLocaleDateString()}
             </p>
           </button>
         ))}

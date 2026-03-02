@@ -13,6 +13,7 @@ import time
 import uuid
 from typing import Any, AsyncGenerator
 
+from sqlalchemy import func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -133,15 +134,15 @@ async def run_chat_turn(
 
     # ── Load conversation history ──
     max_turns = settings.CHAT_MAX_HISTORY_TURNS
-    history_messages: list[dict] = []
+    all_history: list[dict] = []
     if session.messages:
-        recent = session.messages[-(max_turns * 2) :]
-        for msg in recent:
+        for msg in session.messages:
             if msg.role in ("user", "assistant"):
-                history_messages.append({"role": msg.role, "content": msg.content})
+                all_history.append({"role": msg.role, "content": msg.content})
 
-    # ── Compact history if too long (saves tokens on subsequent calls) ──
-    if len(history_messages) > 12:
+    # ── Compact history if long (summarise old turns, keep recent verbatim) ──
+    print(f"[ORCHESTRATOR] history loaded: {len(all_history)} messages", flush=True)
+    if len(all_history) > 12:
         try:
             from app.services.chat.history_compactor import compact_history
             from app.services.chat.llm_adapter import get_adapter as _get_compactor_adapter
@@ -151,12 +152,18 @@ async def run_chat_turn(
                 settings.ANTHROPIC_API_KEY,
             )
             history_messages = await compact_history(
-                history_messages,
+                all_history,
                 adapter=compactor_adapter,
                 model=settings.MULTI_AGENT_SPECIALIST_MODEL,
             )
+            print(f"[ORCHESTRATOR] history compacted: {len(all_history)} → {len(history_messages)} messages", flush=True)
         except Exception:
             logger.warning("history_compaction_failed", exc_info=True)
+            print(f"[ORCHESTRATOR] compaction failed, hard-truncating to last {max_turns * 2} messages", flush=True)
+            # Fallback: hard-truncate to last N turns
+            history_messages = all_history[-(max_turns * 2):]
+    else:
+        history_messages = all_history
 
     # ── Save user message (if not already saved by caller) ──
     if user_msg is None:
@@ -417,6 +424,8 @@ async def run_chat_turn(
 
             if not session.title:
                 session.title = user_message[:100].strip()
+            # Always bump updated_at so session re-sorts to top of list
+            session.updated_at = func.now()
 
             audit_payload: dict[str, Any] = {
                 "mode": "multi_agent",
@@ -635,6 +644,8 @@ async def run_chat_turn(
     # Auto-title from first message
     if not session.title:
         session.title = user_message[:100].strip()
+    # Always bump updated_at so session re-sorts to top of list
+    session.updated_at = func.now()
 
     # Audit
     audit_payload: dict[str, Any] = {

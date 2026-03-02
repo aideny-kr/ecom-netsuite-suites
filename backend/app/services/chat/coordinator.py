@@ -52,6 +52,7 @@ class IntentType(str, enum.Enum):
     DATA_QUERY = "data_query"
     WORKSPACE_DEV = "workspace_dev"
     ANALYSIS = "analysis"
+    CODE_UNDERSTANDING = "code_understanding"
     AMBIGUOUS = "ambiguous"
 
 
@@ -88,6 +89,11 @@ ROUTE_REGISTRY: dict[IntentType, RouteConfig] = {
         agents=["suiteql", "analysis"],  # Data first, then analysis
         parallel=False,
     ),
+    IntentType.CODE_UNDERSTANDING: RouteConfig(
+        intent=IntentType.CODE_UNDERSTANDING,
+        agents=["rag"],
+        model_override=None,
+    ),
 }
 
 
@@ -97,8 +103,24 @@ ROUTE_REGISTRY: dict[IntentType, RouteConfig] = {
 # Each entry: (IntentType, compiled_regex_pattern)
 
 _HEURISTIC_RULES: list[tuple[IntentType, re.Pattern[str]]] = [
+    # --- CODE_UNDERSTANDING: Questions about script logic, calculations, and internal business logic ---
+    # Checked first to catch "how does the script calculate X" before WORKSPACE_DEV or DATA_QUERY.
+    (
+        IntentType.CODE_UNDERSTANDING,
+        re.compile(
+            r"""(?xi)
+            \b(?:
+                how\s+(?:do|does|is|are)\s+.*(?:script|code|calculation|computed|formula|logic|calculating) |
+                where\s+(?:in\s+the\s+code|in\s+the\s+script) |
+                logic\s+(?:for|behind|of) |
+                how\s+are\s+we\s+(?:calculating|computing|processing|parsing) |
+                what\s+(?:does|is)\s+(?:the\s+)?(?:script|code)\s+do|doing
+            )\b
+            """
+        ),
+    ),
     # --- WORKSPACE_DEV: SuiteScript development tasks ---
-    # Checked first because "write a script" is unambiguously workspace, not docs.
+    # Checked early because "write a script" is unambiguously workspace, not docs.
     (
         IntentType.WORKSPACE_DEV,
         re.compile(
@@ -213,12 +235,15 @@ def classify_intent(user_message: str) -> IntentType:
 
     # Short messages with just a number/ID are almost always data lookups
     if re.match(r"^#?\d{4,}$", text):
+        print(f"[COORDINATOR] heuristic_hit intent=data_query pattern=numeric_id", flush=True)
         return IntentType.DATA_QUERY
 
     for intent, pattern in _HEURISTIC_RULES:
         if pattern.search(text):
+            print(f"[COORDINATOR] heuristic_hit intent={intent.value}", flush=True)
             return intent
 
+    print("[COORDINATOR] heuristic_miss intent=ambiguous, falling back to LLM planner", flush=True)
     return IntentType.AMBIGUOUS
 
 
@@ -231,8 +256,9 @@ COORDINATOR_PLAN_PROMPT = (
     "Available specialists:\n"
     "- suiteql: Expert SuiteQL engineer for ANY data retrieval from NetSuite "
     "(orders, invoices, customers, items, financial data, custom records).\n"
-    "- rag: Documentation/knowledge search. Use for 'how-to', error lookups, "
-    "API reference, feature explanations.\n"
+    "- rag: Documentation/knowledge search, codebase logic queries, AND web research. "
+    "Has tools: rag_search (internal docs/scripts) + web_search (internet). Use for 'how-to', error lookups, "
+    "API reference, feature explanations, script logic/calculations, AND online research.\n"
     "- analysis: Data interpretation — aggregations, trends, comparisons. "
     "REQUIRES data from suiteql first.\n"
     "- workspace: SuiteScript workspace operations — read/write/search files, "
@@ -252,6 +278,9 @@ COORDINATOR_PLAN_PROMPT = (
     "- For data questions: just suiteql. For docs: just rag. For code: just workspace.\n"
     "- For complex analysis: suiteql → analysis (2 steps, sequential).\n"
     "- For data questions involving dates, include the explicit date in the task.\n"
+    "- For questions about script logic, calculations, or how the code behaves, route to `rag` (and specify to search code).\n"
+    "- For requests to research something online or look something up on the internet, route to `rag` (it has web_search).\n"
+    "- NEVER respond directly without dispatching at least one agent. Always produce at least 1 step.\n"
     "- Maximum 4 steps.\n"
 )
 

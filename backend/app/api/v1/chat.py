@@ -152,7 +152,7 @@ async def list_sessions(
     if session_type:
         q = q.where(ChatSession.session_type == session_type)
 
-    q = q.order_by(ChatSession.created_at.desc()).limit(50)
+    q = q.order_by(ChatSession.updated_at.desc()).limit(50)
     result = await db.execute(q)
     sessions = result.scalars().all()
     return [_serialize_session(s) for s in sessions]

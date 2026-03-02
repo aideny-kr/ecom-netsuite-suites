@@ -11,6 +11,21 @@ import re
 import uuid
 
 import structlog
+
+# ──────────────────────────────────────────────────────────────────
+# UTF-8 sanitisation
+# ──────────────────────────────────────────────────────────────────
+
+
+def sanitize_utf8(text: str) -> str:
+    """Strip invalid UTF-8 sequences that crash PostgreSQL ILIKE queries.
+
+    Some SuiteScript content arrives with broken box-drawing or other
+    non-UTF-8 byte sequences (e.g. 0xe2 0x94).  Encode → decode with
+    'replace' to swap them for the Unicode replacement character, then
+    strip those replacement characters out entirely.
+    """
+    return text.encode("utf-8", errors="replace").decode("utf-8", errors="replace").replace("\ufffd", "")
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -239,6 +254,7 @@ async def seed_workspace_scripts(
             continue
 
         filepath = f.path
+        f.content = sanitize_utf8(f.content)
 
         # Incremental check: skip if hash unchanged
         if not force and filepath in existing_hashes:
