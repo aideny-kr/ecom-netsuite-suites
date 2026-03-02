@@ -71,8 +71,6 @@ async def embed_texts(texts: list[str]) -> list[list[float]] | None:
     voyage = _get_voyage_client()
     if voyage is not None:
         try:
-            import voyageai
-
             result = await voyage.embed(texts, model=settings.VOYAGE_EMBED_MODEL)
             return result.embeddings
         except Exception:

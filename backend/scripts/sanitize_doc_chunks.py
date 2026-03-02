@@ -18,12 +18,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.core.config import settings
+from app.core.text import sanitize_utf8
 from app.models.chat import DocChunk
-
-
-def sanitize_utf8(val: str) -> str:
-    """Strip invalid UTF-8 sequences."""
-    return val.encode("utf-8", errors="replace").decode("utf-8", errors="replace").replace("\ufffd", "")
 
 
 async def main() -> None:

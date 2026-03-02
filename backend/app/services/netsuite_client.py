@@ -38,24 +38,46 @@ def _mcp_url(account_id: str) -> str:
     return f"https://{slug}.suitetalk.api.netsuite.com/services/mcp/v1/all"
 
 
-async def execute_suiteql_via_rest(access_token: str, account_id: str, query: str, limit: int = 1000) -> dict:
-    """Execute a SuiteQL query via the NetSuite REST API."""
-    url = _rest_url(account_id)
+async def execute_suiteql_via_rest(
+    access_token: str, account_id: str, query: str, limit: int = 1000, *, paginate: bool = False
+) -> dict:
+    """Execute a SuiteQL query via the NetSuite REST API.
+
+    When paginate=True, automatically fetches all pages (up to `limit` total rows).
+    NetSuite returns max 1000 rows per request; pagination uses the `offset` param.
+    """
+    base_url = _rest_url(account_id)
     headers = {
         "Authorization": f"Bearer {access_token}",
         "Content-Type": "application/json",
         "Prefer": "transient",
     }
+
+    all_items: list[dict] = []
+    columns: list[str] = []
+    total_results = 0
+    offset = 0
+    page_size = 1000  # NetSuite max per request
+
     async with httpx.AsyncClient(timeout=settings.NETSUITE_SUITEQL_TIMEOUT) as client:
-        resp = await client.post(url, headers=headers, json={"q": query})
-        resp.raise_for_status()
+        while True:
+            url = f"{base_url}?limit={page_size}&offset={offset}" if paginate else base_url
+            resp = await client.post(url, headers=headers, json={"q": query})
+            resp.raise_for_status()
 
-    data = resp.json()
-    items = data.get("items", [])
-    columns = list(items[0].keys()) if items else []
-    rows = [list(item.values()) for item in items]
-    total_results = data.get("totalResults", len(rows))
+            data = resp.json()
+            items = data.get("items", [])
+            if not columns and items:
+                columns = list(items[0].keys())
+            all_items.extend(items)
+            total_results = data.get("totalResults", len(all_items))
 
+            if not paginate or not data.get("hasMore", False) or len(all_items) >= limit:
+                break
+
+            offset += len(items)
+
+    rows = [list(item.values()) for item in all_items]
     return {
         "columns": columns,
         "rows": rows,
@@ -119,12 +141,20 @@ async def execute_suiteql_via_mcp(access_token: str, account_id: str, query: str
 
 
 async def execute_suiteql(
-    access_token: str, account_id: str, query: str, limit: int = 1000, *, use_mcp: bool = False
+    access_token: str,
+    account_id: str,
+    query: str,
+    limit: int = 1000,
+    *,
+    use_mcp: bool = False,
+    paginate: bool = False,
 ) -> dict:
     """Execute SuiteQL — uses REST API by default, MCP only when explicitly requested.
 
     MCP requires a separate OAuth token with 'mcp' scope, so it should only be
     used when the caller knows the token has that scope.
+
+    When paginate=True (REST only), automatically fetches all pages up to `limit`.
     """
     if use_mcp:
         try:
@@ -136,4 +166,4 @@ async def execute_suiteql(
                 account_id=account_id,
             )
 
-    return await execute_suiteql_via_rest(access_token, account_id, query, limit)
+    return await execute_suiteql_via_rest(access_token, account_id, query, limit, paginate=paginate)

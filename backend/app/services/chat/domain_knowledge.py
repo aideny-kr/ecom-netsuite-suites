@@ -8,29 +8,15 @@ relevant chunks via pgvector cosine similarity, with keyword fallback.
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 from sqlalchemy import case, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.models.domain_knowledge import DomainKnowledgeChunk
+from app.services.chat.embeddings import _get_openai_client
 
 logger = logging.getLogger(__name__)
-
-_openai_client: Any = None
-
-
-def _get_openai_client() -> Any:
-    """Lazy singleton for OpenAI async client."""
-    global _openai_client
-    if _openai_client is None:
-        if not settings.OPENAI_EMBEDDING_API_KEY:
-            return None
-        import openai
-
-        _openai_client = openai.AsyncOpenAI(api_key=settings.OPENAI_EMBEDDING_API_KEY)
-    return _openai_client
 
 
 async def embed_domain_texts(texts: list[str]) -> list[list[float]] | None:

@@ -87,7 +87,24 @@ async def discover_scripts(access_token: str, account_id: str, restlet_url: str 
         # Reverse because we traversed from child to parent
         return "/".join(reversed(path_segments))
 
-    # Query 1: JavaScript files in the File Cabinet
+    # Build a set of SuiteBundles folder IDs to exclude from results.
+    # These are NetSuite-managed bundles whose files typically can't be read
+    # by the OAuth role (INSUFFICIENT_PERMISSION).
+    suitebundle_folder_ids: set[str] = set()
+    for fid, node in folder_map.items():
+        # Walk up the tree — if any ancestor is named "SuiteBundles", exclude
+        cur = fid
+        visited_walk: set[str] = set()
+        while cur in folder_map and cur not in visited_walk:
+            visited_walk.add(cur)
+            if folder_map[cur]["name"] == "SuiteBundles":
+                suitebundle_folder_ids.add(fid)
+                break
+            cur = folder_map[cur].get("parent", "")
+    if suitebundle_folder_ids:
+        logger.info(f"suitescript_sync.suitebundles_excluded: {len(suitebundle_folder_ids)} folders")
+
+    # Query 1: JavaScript files in the File Cabinet (paginated, up to 5000)
     try:
         result = await execute_suiteql(
             access_token=access_token,
@@ -99,23 +116,30 @@ async def discover_scripts(access_token: str, account_id: str, restlet_url: str 
                 "AND isinactive = 'F' "
                 "ORDER BY lastmodifieddate DESC"
             ),
-            limit=1000,
+            limit=5000,
+            paginate=True,
         )
+        skipped_bundles = 0
         for row in result.get("rows", []):
             cols = result.get("columns", [])
             item = dict(zip(cols, row)) if cols else {}
+            folder_id = str(item.get("folder", ""))
+            # Skip files inside SuiteBundles folders
+            if folder_id in suitebundle_folder_ids:
+                skipped_bundles += 1
+                continue
             files.append(
                 {
                     "file_id": str(item.get("id", "")),
                     "name": item.get("name", "unknown.js"),
-                    "folder_path": _get_folder_path(str(item.get("folder", ""))),
+                    "folder_path": _get_folder_path(folder_id),
                     "script_type": None,
                     "size": int(item.get("filesize", 0) or 0),
                     "modified": item.get("lastmodifieddate"),
                     "source": "file_cabinet",
                 }
             )
-        logger.info("suitescript_sync.files_discovered", count=len(files))
+        logger.info("suitescript_sync.files_discovered", count=len(files), skipped_bundles=skipped_bundles)
     except Exception:
         logger.warning("suitescript_sync.file_discovery_failed", exc_info=True)
 
@@ -131,7 +155,8 @@ async def discover_scripts(access_token: str, account_id: str, restlet_url: str 
                 "WHERE isinactive = 'F' "
                 "ORDER BY name ASC"
             ),
-            limit=1000,
+            limit=5000,
+            paginate=True,
         )
         for row in result.get("rows", []):
             cols = result.get("columns", [])
