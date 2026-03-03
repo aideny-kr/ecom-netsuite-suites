@@ -18,7 +18,7 @@ export default function DashboardLayout({
   const { user, isLoading, refreshUser } = useAuth();
   const router = useRouter();
   const pathname = usePathname();
-  const isWorkspace = pathname?.startsWith("/workspace");
+  const isFluid = pathname?.startsWith("/workspace") || pathname?.startsWith("/chat");
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [connectionHealth, setConnectionHealth] = useState<
     | { state: "ok" }
@@ -123,7 +123,7 @@ export default function DashboardLayout({
         <OnboardingWizard onComplete={handleOnboardingComplete} />
       )}
       <Sidebar />
-      <main className="flex-1 overflow-auto bg-[hsl(240_5%_97.5%)] scrollbar-thin">
+      <main className="flex-1 overflow-auto bg-background scrollbar-thin">
         {/* Connection warning banner — missing */}
         {connectionHealth.state === "missing" && !bannerDismissed && (
           <div className="mx-8 mt-6 flex items-center justify-between gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 dark:border-amber-800 dark:bg-amber-950/50">
@@ -174,7 +174,7 @@ export default function DashboardLayout({
         )}
         <div className={cn(
           "mx-auto",
-          isWorkspace ? "h-full w-full max-w-none" : "max-w-[1400px] px-8 py-8"
+          isFluid ? "h-full w-full max-w-none" : "max-w-[1400px] px-8 py-8"
         )}>
           {children}
         </div>

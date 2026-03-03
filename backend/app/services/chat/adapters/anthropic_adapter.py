@@ -31,7 +31,11 @@ class AnthropicAdapter(BaseLLMAdapter):
             "messages": messages,
         }
         if tools:
-            kwargs["tools"] = tools
+            # Cache tool definitions — they're large and identical every step
+            cached_tools = list(tools)
+            if cached_tools:
+                cached_tools[-1] = {**cached_tools[-1], "cache_control": {"type": "ephemeral"}}
+            kwargs["tools"] = cached_tools
 
         response = await self._client.messages.create(**kwargs)
 
@@ -47,6 +51,8 @@ class AnthropicAdapter(BaseLLMAdapter):
         usage = TokenUsage(
             input_tokens=response.usage.input_tokens,
             output_tokens=response.usage.output_tokens,
+            cache_creation_input_tokens=getattr(response.usage, "cache_creation_input_tokens", 0) or 0,
+            cache_read_input_tokens=getattr(response.usage, "cache_read_input_tokens", 0) or 0,
         )
 
         return LLMResponse(
@@ -77,7 +83,10 @@ class AnthropicAdapter(BaseLLMAdapter):
             "messages": messages,
         }
         if tools:
-            kwargs["tools"] = tools
+            cached_tools = list(tools)
+            if cached_tools:
+                cached_tools[-1] = {**cached_tools[-1], "cache_control": {"type": "ephemeral"}}
+            kwargs["tools"] = cached_tools
 
         async with self._client.messages.stream(**kwargs) as stream:
             async for text in stream.text_stream:
@@ -97,6 +106,8 @@ class AnthropicAdapter(BaseLLMAdapter):
             usage = TokenUsage(
                 input_tokens=final_message.usage.input_tokens,
                 output_tokens=final_message.usage.output_tokens,
+                cache_creation_input_tokens=getattr(final_message.usage, "cache_creation_input_tokens", 0) or 0,
+                cache_read_input_tokens=getattr(final_message.usage, "cache_read_input_tokens", 0) or 0,
             )
 
             response = LLMResponse(

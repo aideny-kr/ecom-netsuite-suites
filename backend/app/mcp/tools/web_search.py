@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 def _sync_search(query: str, max_results: int) -> list[dict]:
     """Run DuckDuckGo search synchronously (called via asyncio.to_thread)."""
-    from duckduckgo_search import DDGS
+    from ddgs import DDGS
 
     with DDGS() as ddgs:
         return list(ddgs.text(query, max_results=max_results))
@@ -62,10 +62,10 @@ async def execute(
         }
 
     except ImportError:
-        logger.error("duckduckgo-search package not installed")
+        logger.error("ddgs package not installed")
         return {
-            "error": "Web search not available: duckduckgo-search package not installed. "
-            "Install with: pip install duckduckgo-search"
+            "error": "Web search not available: ddgs package not installed. "
+            "Install with: pip install ddgs"
         }
     except Exception as exc:
         logger.warning("web_search.execute failed", exc_info=True)

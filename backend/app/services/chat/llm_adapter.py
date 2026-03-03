@@ -19,6 +19,8 @@ class ToolUseBlock:
 class TokenUsage:
     input_tokens: int = 0
     output_tokens: int = 0
+    cache_creation_input_tokens: int = 0
+    cache_read_input_tokens: int = 0
 
 
 @dataclass
@@ -90,6 +92,7 @@ VALID_PROVIDERS = {"anthropic", "openai", "gemini"}
 VALID_MODELS: dict[str, list[str]] = {
     "anthropic": [
         "claude-opus-4-6",
+        "claude-sonnet-4-6",
         "claude-sonnet-4-5-20250929",
         "claude-haiku-4-5-20251001",
         "claude-opus-4-5-20251101",

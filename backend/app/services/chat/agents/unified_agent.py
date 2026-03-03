@@ -126,10 +126,11 @@ HEADER vs LINE AGGREGATION — CRITICAL:
 LINE AMOUNT SIGN:
 - `tl.foreignamount` is NEGATIVE for revenue lines. Use `* -1` when presenting sales totals.
 
-MULTI-CURRENCY:
-- `t.foreigntotal` = transaction currency. `t.total` = base currency (usually USD).
-- For "total in USD": use `SUM(t.total)`.
-- For per-currency breakdown: `SUM(t.foreigntotal)` with `GROUP BY BUILTIN.DF(t.currency)`.
+MULTI-CURRENCY — CRITICAL (this tenant is multi-currency USD + EUR):
+- `t.foreigntotal` = transaction currency (could be EUR, GBP, etc). NEVER use for USD totals.
+- `t.total` = base/USD currency. ALWAYS use `SUM(t.total)` when user asks for "total", "revenue", or "in USD".
+- ONLY use `t.foreigntotal` when user explicitly asks for per-currency breakdown with `GROUP BY BUILTIN.DF(t.currency)`.
+- DEFAULT: If the user does not specify a currency, assume USD and use `t.total`.
 
 TRANSACTION TYPES (avoid double-counting):
 - For order analysis: `t.type = 'SalesOrd'` only.
@@ -140,17 +141,25 @@ ITEM TABLE GOTCHA:
 - Only safe columns: id, itemid, displayname, description. Other columns may cause 0 rows.
 - If a minimal query succeeds, present those results. Don't add more columns.
 
-INVENTORY QUERIES:
-- Use `inventoryitemlocations` table (NOT `inventorybalance`).
-- Break out by location: `BUILTIN.DF(iil.location)`.
+INVENTORY QUERIES — USE THIS PATTERN:
+- ALWAYS use `inventoryitemlocations` table (NOT `inventorybalance`, NOT custom records).
+- Join with `item` for item details: `JOIN item i ON i.id = iil.item`
+- Key columns: `iil.quantityavailable`, `iil.quantityonhand`, `BUILTIN.DF(iil.location)`.
+- Example: `SELECT i.itemid, i.displayname, BUILTIN.DF(iil.location) as location, iil.quantityavailable, iil.quantityonhand FROM inventoryitemlocations iil JOIN item i ON i.id = iil.item WHERE iil.quantityavailable > 0 ORDER BY i.itemid FETCH FIRST 100 ROWS ONLY`
+- For item filtering: add `WHERE i.displayname LIKE '%keyword%'` or `WHERE i.itemid LIKE '%keyword%'`.
+- If inventory query returns 0 rows, retry WITHOUT the `quantityavailable > 0` filter — items may have zero stock.
+- If the JOIN still returns 0, query `item` alone first to confirm items exist, then retry `inventoryitemlocations` with explicit item IDs: `WHERE iil.item IN (id1, id2, ...)`. NetSuite REST API can occasionally return 0 rows transiently.
+- DO NOT waste steps searching RAG, web_search, or custom records for inventory data — `inventoryitemlocations` is the definitive source.
 
 CUSTOM RECORD TABLES:
 - Use LOWERCASE scriptid: `customrecord_r_inv_processor`.
 
-PREFLIGHT SCHEMA CHECK:
-- Before executing any query, verify all columns exist in <tenant_schema>, <domain_knowledge>, or <tenant_vernacular>.
-- If uncertain, use web_search or netsuite_get_metadata to verify BEFORE running the query.
-- Standard safe columns that never need verification: id, tranid, trandate, type, entity, status, total, foreigntotal (transaction); id, companyname, email (customer); id, itemid, displayname, description (item).
+PREFLIGHT SCHEMA CHECK — MANDATORY:
+- Before executing any query, verify ALL columns exist in <domain_knowledge>, <tenant_schema>, or <tenant_vernacular>.
+- If a column is NOT in any of those sources, you MUST look it up BEFORE running the query. Use netsuite_get_metadata or web_search to verify.
+- NEVER guess column names. Guessing wastes steps and budget on 400 errors.
+- Standard safe columns that never need verification: id, tranid, trandate, type, entity, status, total, foreigntotal, memo, createddate (transaction); id, transaction, item, quantity, rate, amount, foreignamount, mainline, taxline, iscogs, linesequencenumber, class, department, location, quantityreceived, quantitybilled, memo, createdfrom (transactionline); id, companyname, email (customer); id, itemid, displayname, description, type (item).
+- KNOWN RESTRICTED COLUMNS on transactionline via REST API (will return 400): expectedreceiptdate, itemtype. Use t.expectedreceiptdate from transaction header. Use i.type from item table for item type filtering.
 </suiteql_dialect_rules>
 
 <rag_search_tips>
@@ -245,7 +254,7 @@ class UnifiedAgent(BaseSpecialistAgent):
 
     @property
     def max_steps(self) -> int:
-        return 6
+        return 10
 
     @property
     def system_prompt(self) -> str:

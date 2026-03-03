@@ -229,7 +229,15 @@ async def execute(params: dict, context: dict | None = None, **kwargs) -> dict:
         try:
             result = await execute_suiteql(access_token, account_id, query, max_rows)
         except Exception as exc:
-            return {"error": True, "message": f"NetSuite query failed: {exc}"}
+            error_msg = str(exc)
+            hint = ""
+            if "400" in error_msg:
+                hint = (
+                    " HINT: A 400 error usually means an invalid column name in your query."
+                    " Use netsuite_get_metadata or web_search to verify column names"
+                    " before retrying. Do NOT guess — look it up."
+                )
+            return {"error": True, "message": f"NetSuite query failed: {error_msg}{hint}"}
 
         result = {**result, "query": query, "limit": max_rows}
 

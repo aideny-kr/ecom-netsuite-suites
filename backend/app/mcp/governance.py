@@ -254,14 +254,18 @@ def create_audit_payload(
     error: str | None = None,
 ) -> dict:
     """Create an audit event payload for a tool call."""
+    # Detect tool-level errors returned as {"error": True, "message": "..."}
+    effective_error = error
+    if not effective_error and result and result.get("error"):
+        effective_error = result.get("message", "Tool returned an error")
     return {
         "tool_name": tool_name,
         "params": {
             k: v for k, v in params.items() if k not in {"password", "secret", "token", "api_key", "credentials"}
         },
         "result_summary": {
-            "status": "error" if error else "success",
-            "error": error,
+            "status": "error" if effective_error else "success",
+            "error": effective_error,
             "row_count": result.get("row_count", 0) if result else 0,
         },
     }

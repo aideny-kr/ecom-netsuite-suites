@@ -5,6 +5,7 @@ import {
   useSavedQueries,
   useCreateSavedQuery,
   useDeleteSavedQuery,
+  useUpdateSavedQuery,
 } from "@/hooks/use-saved-queries";
 import { QueryPreviewModal } from "@/components/analytics/QueryPreviewModal";
 import { Button } from "@/components/ui/button";
@@ -19,11 +20,14 @@ import {
   Calendar,
   X,
   Loader2,
+  Pencil,
+  Check,
 } from "lucide-react";
 
 export default function QueriesPage() {
   const { data: queries, isLoading } = useSavedQueries();
   const deleteMutation = useDeleteSavedQuery();
+  const updateMutation = useUpdateSavedQuery();
   const { toast } = useToast();
 
   const [selectedQuery, setSelectedQuery] = useState<SavedQueryResponse | null>(
@@ -31,6 +35,34 @@ export default function QueriesPage() {
   );
   const [showForm, setShowForm] = useState(false);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editName, setEditName] = useState("");
+  const [editDescription, setEditDescription] = useState("");
+
+  function startEditing(query: SavedQueryResponse) {
+    setEditingId(query.id);
+    setEditName(query.name);
+    setEditDescription(query.description || "");
+  }
+
+  async function handleSaveEdit(id: string) {
+    if (!editName.trim()) return;
+    try {
+      await updateMutation.mutateAsync({
+        id,
+        name: editName.trim(),
+        description: editDescription.trim() || null,
+      });
+      toast({ title: "Query updated" });
+      setEditingId(null);
+    } catch (err) {
+      toast({
+        title: "Failed to update query",
+        description: err instanceof Error ? err.message : "Unknown error",
+        variant: "destructive",
+      });
+    }
+  }
 
   async function handleDelete(id: string) {
     try {
@@ -94,19 +126,78 @@ export default function QueriesPage() {
             <div
               key={query.id}
               className="group relative cursor-pointer rounded-xl border bg-card p-5 shadow-soft transition-all duration-200 hover:border-primary hover:shadow-soft-md"
-              onClick={() => setSelectedQuery(query)}
+              onClick={() => {
+                if (editingId !== query.id && confirmDeleteId !== query.id) {
+                  setSelectedQuery(query);
+                }
+              }}
             >
               <div className="flex items-start gap-3">
                 <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-primary/10">
                   <TableIcon className="h-5 w-5 text-primary transition-transform group-hover:scale-110" />
                 </div>
                 <div className="min-w-0 flex-1">
-                  <p className="truncate text-[15px] font-semibold text-foreground">
-                    {query.name}
-                  </p>
-                  <p className="mt-0.5 line-clamp-2 text-[13px] text-muted-foreground">
-                    {query.description || "No description"}
-                  </p>
+                  {editingId === query.id ? (
+                    <div
+                      className="space-y-2"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <input
+                        type="text"
+                        value={editName}
+                        onChange={(e) => setEditName(e.target.value)}
+                        className="w-full rounded-md border bg-background px-2 py-1 text-[13px] text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+                        autoFocus
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") handleSaveEdit(query.id);
+                          if (e.key === "Escape") setEditingId(null);
+                        }}
+                      />
+                      <input
+                        type="text"
+                        value={editDescription}
+                        onChange={(e) => setEditDescription(e.target.value)}
+                        placeholder="Add a description..."
+                        className="w-full rounded-md border bg-background px-2 py-1 text-[12px] text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") handleSaveEdit(query.id);
+                          if (e.key === "Escape") setEditingId(null);
+                        }}
+                      />
+                      <div className="flex gap-1.5">
+                        <Button
+                          variant="default"
+                          size="sm"
+                          className="h-6 text-[11px] px-2"
+                          onClick={() => handleSaveEdit(query.id)}
+                          disabled={!editName.trim() || updateMutation.isPending}
+                        >
+                          {updateMutation.isPending ? (
+                            <Loader2 className="h-3 w-3 animate-spin" />
+                          ) : (
+                            <Check className="h-3 w-3" />
+                          )}
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-6 text-[11px] px-2"
+                          onClick={() => setEditingId(null)}
+                        >
+                          <X className="h-3 w-3" />
+                        </Button>
+                      </div>
+                    </div>
+                  ) : (
+                    <>
+                      <p className="truncate text-[15px] font-semibold text-foreground">
+                        {query.name}
+                      </p>
+                      <p className="mt-0.5 line-clamp-2 text-[13px] text-muted-foreground">
+                        {query.description || "No description"}
+                      </p>
+                    </>
+                  )}
                 </div>
               </div>
 
@@ -117,43 +208,60 @@ export default function QueriesPage() {
                   {new Date(query.created_at).toLocaleDateString()}
                 </div>
 
-                {/* Delete button */}
-                {confirmDeleteId === query.id ? (
-                  <div
-                    className="flex items-center gap-2"
-                    onClick={(e) => e.stopPropagation()}
-                  >
-                    <Button
-                      variant="destructive"
-                      size="sm"
-                      className="h-7 text-[12px]"
-                      onClick={() => handleDelete(query.id)}
-                      disabled={deleteMutation.isPending}
-                    >
-                      Confirm
-                    </Button>
+                <div className="flex items-center gap-1">
+                  {/* Edit button */}
+                  {editingId !== query.id && (
                     <Button
                       variant="ghost"
-                      size="sm"
-                      className="h-7 text-[12px]"
-                      onClick={() => setConfirmDeleteId(null)}
+                      size="icon"
+                      className="h-8 w-8 opacity-0 transition-opacity group-hover:opacity-100"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        startEditing(query);
+                      }}
                     >
-                      Cancel
+                      <Pencil className="h-4 w-4 text-muted-foreground hover:text-foreground" />
                     </Button>
-                  </div>
-                ) : (
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    className="h-8 w-8 opacity-0 transition-opacity group-hover:opacity-100"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setConfirmDeleteId(query.id);
-                    }}
-                  >
-                    <Trash2 className="h-4 w-4 text-muted-foreground hover:text-destructive" />
-                  </Button>
-                )}
+                  )}
+
+                  {/* Delete button */}
+                  {confirmDeleteId === query.id ? (
+                    <div
+                      className="flex items-center gap-2"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <Button
+                        variant="destructive"
+                        size="sm"
+                        className="h-7 text-[12px]"
+                        onClick={() => handleDelete(query.id)}
+                        disabled={deleteMutation.isPending}
+                      >
+                        Confirm
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-7 text-[12px]"
+                        onClick={() => setConfirmDeleteId(null)}
+                      >
+                        Cancel
+                      </Button>
+                    </div>
+                  ) : (
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-8 w-8 opacity-0 transition-opacity group-hover:opacity-100"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setConfirmDeleteId(query.id);
+                      }}
+                    >
+                      <Trash2 className="h-4 w-4 text-muted-foreground hover:text-destructive" />
+                    </Button>
+                  )}
+                </div>
               </div>
             </div>
           ))}

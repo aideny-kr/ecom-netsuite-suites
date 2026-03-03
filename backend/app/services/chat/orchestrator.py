@@ -370,7 +370,7 @@ async def run_chat_turn(
                 if isinstance(tenant_ua, bool):
                     use_unified = tenant_ua
             except Exception:
-                pass  # Column may not exist yet — fall through
+                logger.warning("unified_agent.flag_check_failed", exc_info=True)
 
             if use_unified:
                 # ── Unified agent path: context assembly → single agent → stream ──
@@ -393,18 +393,44 @@ async def run_chat_turn(
                     user_timezone=user_timezone,
                 )
 
-                # Assemble context (entity resolution + domain knowledge)
+                # Assemble context concurrently (entity resolution + domain knowledge + proven patterns)
+                import asyncio
+                from app.services.chat.tenant_resolver import TenantEntityResolver
+                from app.services.chat.domain_knowledge import retrieve_domain_knowledge
+                from app.services.query_pattern_service import retrieve_similar_patterns
+
+                vernacular_result, dk_result, patterns_result = await asyncio.gather(
+                    TenantEntityResolver.resolve_entities(
+                        user_message=sanitized_input,
+                        tenant_id=tenant_id,
+                        db=db,
+                        adapter=specialist_adapter,
+                        model=settings.MULTI_AGENT_SPECIALIST_MODEL,
+                    ),
+                    retrieve_domain_knowledge(db=db, query_text=sanitized_input),
+                    retrieve_similar_patterns(db, tenant_id, sanitized_input),
+                    return_exceptions=True,
+                )
+
                 context: dict[str, Any] = {}
-                try:
-                    vernacular = await coordinator._resolve_entities(sanitized_input)
-                    context["tenant_vernacular"] = vernacular
-                except Exception:
-                    logger.warning("unified_agent.entity_resolution_failed", exc_info=True)
-                try:
-                    dk = await coordinator._retrieve_domain_knowledge(sanitized_input)
-                    context["domain_knowledge"] = dk
-                except Exception:
-                    logger.warning("unified_agent.domain_knowledge_failed", exc_info=True)
+                if isinstance(vernacular_result, Exception):
+                    logger.warning("unified_agent.entity_resolution_failed", exc_info=vernacular_result)
+                elif vernacular_result:
+                    context["tenant_vernacular"] = vernacular_result
+                    print(f"[UNIFIED] Vernacular injected ({len(vernacular_result)} chars)", flush=True)
+
+                if isinstance(dk_result, Exception):
+                    logger.warning("unified_agent.domain_knowledge_failed", exc_info=dk_result)
+                elif dk_result:
+                    context["domain_knowledge"] = [r["raw_text"] for r in dk_result]
+                    print(f"[UNIFIED] Domain knowledge injected ({len(dk_result)} chunks)", flush=True)
+
+                if isinstance(patterns_result, Exception):
+                    logger.warning("unified_agent.proven_patterns_failed", exc_info=patterns_result)
+                elif patterns_result:
+                    context["proven_patterns"] = patterns_result
+                    print(f"[UNIFIED] Proven patterns injected ({len(patterns_result)} patterns)", flush=True)
+
                 context["user_timezone"] = user_timezone
 
                 # Create and run unified agent
@@ -425,6 +451,7 @@ async def run_chat_turn(
                     db=db,
                     adapter=specialist_adapter,
                     model=settings.MULTI_AGENT_SQL_MODEL,
+                    conversation_history=history_messages,
                 ):
                     if event_type == "text":
                         streamed_text_parts.append(payload)
@@ -437,10 +464,12 @@ async def run_chat_turn(
                 if agent_result is None:
                     final_text = "".join(streamed_text_parts).strip() or "I wasn't able to process that request."
                     coord_result_tokens = (0, 0)
+                    coord_result_cache = (0, 0)
                     coord_result_tool_calls: list[dict] = []
                 else:
                     final_text = re.sub(r"\s*\[tool:\s*[^\]]+\]", "", agent_result.data or "").strip()
                     coord_result_tokens = (agent_result.tokens_used.input_tokens, agent_result.tokens_used.output_tokens)
+                    coord_result_cache = (agent_result.tokens_used.cache_creation_input_tokens, agent_result.tokens_used.cache_read_input_tokens)
                     coord_result_tool_calls = agent_result.tool_calls_log
 
                 assistant_msg = ChatMessage(
@@ -470,9 +499,14 @@ async def run_chat_turn(
                     "steps": len(coord_result_tool_calls),
                     "input_tokens": coord_result_tokens[0],
                     "output_tokens": coord_result_tokens[1],
+                    "cache_creation_tokens": coord_result_cache[0],
+                    "cache_read_tokens": coord_result_cache[1],
                     "doc_chunks_count": len(state.doc_chunks) if state.doc_chunks else 0,
                     "tools_called": [t["tool"] for t in coord_result_tool_calls],
                 }
+                if coord_result_cache[1] > 0:
+                    # Log cache savings for visibility
+                    print(f"[ORCHESTRATOR] Cache hit: {coord_result_cache[1]:,} tokens read from cache", flush=True)
                 await log_event(
                     db=db,
                     tenant_id=tenant_id,

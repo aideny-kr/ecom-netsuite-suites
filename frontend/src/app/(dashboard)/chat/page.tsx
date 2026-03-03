@@ -153,7 +153,7 @@ export default function ChatPage() {
   );
 
   return (
-    <div className="flex h-[calc(100vh-4rem)] -mx-8 -my-8 animate-fade-in">
+    <div className="flex h-full w-full animate-fade-in">
       <SessionSidebar
         sessions={sessions}
         activeSessionId={activeSessionId}

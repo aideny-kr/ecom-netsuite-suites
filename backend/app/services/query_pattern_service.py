@@ -151,11 +151,11 @@ async def retrieve_similar_patterns(
     result = await db.execute(
         text("""
             SELECT user_question, working_sql, tables_used, success_count,
-                   1 - (intent_embedding <=> :embedding::vector) as similarity
+                   1 - (intent_embedding <=> CAST(:embedding AS vector)) as similarity
             FROM tenant_query_patterns
-            WHERE tenant_id = :tenant_id
+            WHERE tenant_id = CAST(:tenant_id AS uuid)
               AND intent_embedding IS NOT NULL
-            ORDER BY intent_embedding <=> :embedding::vector
+            ORDER BY intent_embedding <=> CAST(:embedding AS vector)
             LIMIT :top_k
         """),
         {

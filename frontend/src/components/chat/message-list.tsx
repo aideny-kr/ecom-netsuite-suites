@@ -2,7 +2,10 @@
 
 import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
+import type { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
+import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { useCreateSavedQuery } from "@/hooks/use-saved-queries";
 import { cn } from "@/lib/utils";
 import type { ChatMessage } from "@/lib/types";
@@ -10,7 +13,54 @@ import { ToolCallStepCard } from "@/components/chat/tool-call-step";
 import { ChangeProposalCard } from "@/components/chat/change-proposal-card";
 import { WorkspaceToolCard } from "@/components/chat/workspace-tool-card";
 import { SuiteQLToolCard } from "@/components/chat/suiteql-tool-card";
-import { Sparkles, FileCode, Bookmark, Check, Loader2 } from "lucide-react";
+import { Sparkles, FileCode, Bookmark, Check, Loader2, Copy } from "lucide-react";
+
+/** Shared markdown components with syntax-highlighted code blocks */
+const mdComponents: Components = {
+  code({ className, children, ...props }) {
+    const match = /language-(\w+)/.exec(className || "");
+    const codeString = String(children).replace(/\n$/, "");
+
+    if (!match) {
+      return (
+        <code
+          className="rounded bg-muted px-1.5 py-0.5 text-[13px] font-mono text-foreground"
+          {...props}
+        >
+          {children}
+        </code>
+      );
+    }
+
+    return (
+      <div className="group relative my-3 rounded-lg overflow-hidden border border-border/50">
+        <div className="flex items-center justify-between bg-muted/80 px-3 py-1.5 text-[11px] font-medium text-muted-foreground">
+          <span>{match[1]}</span>
+          <button
+            onClick={() => navigator.clipboard.writeText(codeString)}
+            className="opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1 hover:text-foreground"
+          >
+            <Copy className="h-3 w-3" />
+            Copy
+          </button>
+        </div>
+        <SyntaxHighlighter
+          style={oneDark}
+          language={match[1]}
+          PreTag="div"
+          customStyle={{
+            margin: 0,
+            borderRadius: 0,
+            fontSize: "13px",
+            lineHeight: "1.5",
+          }}
+        >
+          {codeString}
+        </SyntaxHighlighter>
+      </div>
+    );
+  },
+};
 
 function renderWithMentions(
   content: string,
@@ -47,12 +97,15 @@ function renderWithMentions(
   return parts.length > 0 ? parts : [content];
 }
 
+/** Shared pattern for matching closed thinking/reasoning XML blocks. Must create new RegExp for each use (stateful /g flag). */
+const THINKING_TAG_PATTERN = String.raw`<(?:thinking|reasoning)>([\s\S]*?)<\/(?:thinking|reasoning)>`;
+
 function parseThinkingBlocks(content: string): Array<{
   type: "text" | "thinking";
   content: string;
 }> {
   const parts: Array<{ type: "text" | "thinking"; content: string }> = [];
-  const regex = /<thinking>([\s\S]*?)<\/thinking>/g;
+  const regex = new RegExp(THINKING_TAG_PATTERN, "g");
   let lastIndex = 0;
   let match;
 
@@ -73,16 +126,101 @@ function parseThinkingBlocks(content: string): Array<{
   return parts.length > 0 ? parts : [{ type: "text", content }];
 }
 
+/**
+ * Parse streaming content to separate thinking/reasoning blocks from text.
+ * Handles incomplete (still-open) tags during streaming.
+ */
+function parseStreamingThinking(content: string): {
+  thinking: string | null;
+  isThinking: boolean;
+  text: string;
+} {
+  const closedRegex = new RegExp(THINKING_TAG_PATTERN, "g");
+  let lastThinking: string | null = null;
+  let lastIndex = 0;
+  let match;
+  const textParts: string[] = [];
+
+  while ((match = closedRegex.exec(content)) !== null) {
+    if (match.index > lastIndex) {
+      const text = content.slice(lastIndex, match.index).trim();
+      if (text) textParts.push(text);
+    }
+    lastThinking = match[1].trim();
+    lastIndex = closedRegex.lastIndex;
+  }
+
+  // Check remainder after all closed tags for an unclosed open tag
+  const remainder = content.slice(lastIndex);
+  const openTagMatch = remainder.match(/<(thinking|reasoning)>([\s\S]*)$/);
+
+  if (openTagMatch) {
+    const beforeOpenTag = remainder.slice(0, openTagMatch.index).trim();
+    if (beforeOpenTag) textParts.push(beforeOpenTag);
+    return {
+      thinking: openTagMatch[2].trim() || null,
+      isThinking: true,
+      text: textParts.join("\n\n"),
+    };
+  }
+
+  if (lastIndex > 0) {
+    const remainingText = remainder.trim();
+    if (remainingText) textParts.push(remainingText);
+    return {
+      thinking: lastThinking,
+      isThinking: false,
+      text: textParts.join("\n\n"),
+    };
+  }
+
+  return { thinking: null, isThinking: false, text: content };
+}
+
+/** Collapsed thinking block for completed messages */
 function ThinkingBlock({ content }: { content: string }) {
   return (
-    <details className="mb-2 rounded-md border border-muted bg-muted/30 text-[12px]">
-      <summary className="cursor-pointer select-none px-3 py-1.5 text-muted-foreground/70 hover:text-muted-foreground font-medium">
-        Thinking...
+    <details className="mb-2 rounded-lg border border-muted/50 bg-muted/20 text-[12px] group">
+      <summary className="cursor-pointer select-none px-3 py-2 text-muted-foreground/60 hover:text-muted-foreground font-medium flex items-center gap-2 transition-colors">
+        <Sparkles className="h-3 w-3" />
+        Thought process
       </summary>
-      <div className="prose prose-sm dark:prose-invert max-w-none px-3 pb-2 text-muted-foreground/80 text-[12px]">
-        <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
+      <div className="prose prose-sm dark:prose-invert max-w-none px-3 pb-2.5 text-muted-foreground/70 text-[12px] leading-relaxed">
+        <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>{content}</ReactMarkdown>
       </div>
     </details>
+  );
+}
+
+/** Live thinking block shown during streaming — Gemini-style animation */
+function StreamingThinkingBlock({ content, isActive }: { content: string | null; isActive: boolean }) {
+  return (
+    <div className="mb-2 rounded-lg border border-primary/10 bg-primary/[0.03] overflow-hidden">
+      <div className="flex items-center gap-2 px-3 py-2">
+        {isActive && (
+          <span className="relative flex h-2 w-2">
+            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-primary/40" />
+            <span className="relative inline-flex h-2 w-2 rounded-full bg-primary/60" />
+          </span>
+        )}
+        <span className="text-[12px] font-medium text-primary/70">
+          {isActive ? "Thinking..." : "Thought process"}
+        </span>
+      </div>
+      {content && (
+        <div className={cn(
+          "px-3 pb-2.5 text-[12px] leading-relaxed text-muted-foreground/60",
+          isActive && "animate-thinking-fade"
+        )}>
+          {/* Use plain text while actively streaming to avoid expensive ReactMarkdown re-renders per chunk */}
+          {isActive ? (
+            <p className="whitespace-pre-wrap">{content}</p>
+          ) : (
+            <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>{content}</ReactMarkdown>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -222,7 +360,7 @@ export function MessageList({
                       <ThinkingBlock key={i} content={part.content} />
                     ) : (
                       <div key={i} className="prose prose-sm dark:prose-invert max-w-none text-[14px] leading-relaxed overflow-x-auto">
-                        <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                        <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
                           {part.content}
                         </ReactMarkdown>
                       </div>
@@ -312,13 +450,26 @@ export function MessageList({
               </span>
             ) : null}
 
-            {streamingContent && (
-              <div className="prose prose-sm dark:prose-invert max-w-none text-[14px] leading-relaxed overflow-x-auto">
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                  {streamingContent}
-                </ReactMarkdown>
-              </div>
-            )}
+            {streamingContent && (() => {
+              const parsed = parseStreamingThinking(streamingContent);
+              return (
+                <>
+                  {(parsed.thinking !== null || parsed.isThinking) && (
+                    <StreamingThinkingBlock
+                      content={parsed.thinking}
+                      isActive={parsed.isThinking}
+                    />
+                  )}
+                  {parsed.text && (
+                    <div className="prose prose-sm dark:prose-invert max-w-none text-[14px] leading-relaxed overflow-x-auto">
+                      <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
+                        {parsed.text}
+                      </ReactMarkdown>
+                    </div>
+                  )}
+                </>
+              );
+            })()}
           </div>
         </div>
       )}

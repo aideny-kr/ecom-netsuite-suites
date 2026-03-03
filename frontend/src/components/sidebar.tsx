@@ -2,7 +2,8 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { useTheme } from "next-themes";
 import {
   LayoutDashboard,
   Plug,
@@ -17,6 +18,8 @@ import {
   ChevronsUpDown,
   Check,
   Zap,
+  Moon,
+  Sun,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { NAV_ITEMS, CANONICAL_TABLES } from "@/lib/constants";
@@ -41,9 +44,15 @@ const iconMap = {
 export function Sidebar() {
   const pathname = usePathname();
   const { user, tenants, switchTenant, logout } = useAuth();
+  const { theme, setTheme, resolvedTheme } = useTheme();
+  const [mounted, setMounted] = useState(false);
   const [tablesExpanded, setTablesExpanded] = useState(
     pathname.startsWith("/tables"),
   );
+
+  useEffect(() => {
+    setMounted(true);
+  }, []);
 
   return (
     <aside className="flex h-full w-[260px] flex-col bg-[hsl(var(--sidebar-bg))] text-[hsl(var(--sidebar-foreground))]">
@@ -189,6 +198,25 @@ export function Sidebar() {
           <LogOut className="h-4 w-4 text-[hsl(var(--sidebar-muted))]" />
           Sign Out
         </button>
+
+        {mounted && (
+          <button
+            onClick={() => setTheme(resolvedTheme === 'dark' ? 'light' : 'dark')}
+            className="mt-1 flex w-full items-center gap-3 rounded-lg px-3 py-2 text-[13px] font-medium text-[hsl(var(--sidebar-foreground))] transition-all duration-150 hover:bg-[hsl(var(--sidebar-hover))] hover:text-white"
+          >
+            {resolvedTheme === 'dark' ? (
+              <>
+                <Sun className="h-4 w-4 text-[hsl(var(--sidebar-muted))]" />
+                Light Mode
+              </>
+            ) : (
+              <>
+                <Moon className="h-4 w-4 text-[hsl(var(--sidebar-muted))]" />
+                Dark Mode
+              </>
+            )}
+          </button>
+        )}
       </div>
     </aside>
   );

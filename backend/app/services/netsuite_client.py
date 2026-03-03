@@ -63,7 +63,13 @@ async def execute_suiteql_via_rest(
         while True:
             url = f"{base_url}?limit={page_size}&offset={offset}" if paginate else base_url
             resp = await client.post(url, headers=headers, json={"q": query})
-            resp.raise_for_status()
+            if resp.status_code >= 400:
+                body = resp.text[:500] if resp.text else ""
+                raise httpx.HTTPStatusError(
+                    f"NetSuite API error {resp.status_code}: {body}",
+                    request=resp.request,
+                    response=resp,
+                )
 
             data = resp.json()
             items = data.get("items", [])

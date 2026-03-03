@@ -221,6 +221,72 @@ FETCH FIRST 50 ROWS ONLY
 
 Item types: `InvtPart` (inventory), `NonInvtPart` (non-inventory), `Service`, `Kit`, `Assembly`, `Group`.
 
+## Purchase Order Queries
+
+### Transaction header columns for POs
+The `transaction` table has PO-specific header columns:
+- `expectedreceiptdate` — Expected receipt date (header level, set on the PO form)
+- `shipdate` — Ship date
+- `duedate` — Due date
+
+```sql
+-- Purchase orders with expected receipt dates
+SELECT t.tranid, t.trandate,
+       BUILTIN.DF(t.entity) as vendor,
+       BUILTIN.DF(t.status) as status,
+       t.expectedreceiptdate,
+       t.foreigntotal
+FROM transaction t
+WHERE t.type = 'PurchOrd'
+  AND t.status IN ('PurchOrd:B', 'PurchOrd:D')
+ORDER BY t.expectedreceiptdate
+FETCH FIRST 100 ROWS ONLY
+```
+
+### TransactionLine columns — REST API restrictions
+**CRITICAL**: Some columns that appear in the NetSuite Analytics Browser for `transactionline` are NOT accessible via the SuiteQL REST API and will return **400 errors**. Known restricted columns on `transactionline` via REST API:
+- `expectedreceiptdate` — Use `t.expectedreceiptdate` on the `transaction` header instead
+- `itemtype` — This is NOT a transactionline column. Use `i.type` from the `item` table with a JOIN: `JOIN item i ON i.id = tl.item WHERE i.type = 'InvtPart'`
+
+**Safe transactionline columns** (always work via REST API):
+- `id`, `transaction`, `item`, `quantity`, `rate`, `amount`, `foreignamount`
+- `mainline`, `taxline`, `iscogs`, `linesequencenumber`
+- `class`, `department`, `location`, `expenseaccount`
+- `quantityreceived`, `quantitybilled`, `quantityshiprecv`
+- `memo`, `createdfrom`
+
+```sql
+-- PO line items with vendor and item details (CORRECT approach)
+SELECT t.tranid, t.trandate,
+       BUILTIN.DF(t.entity) as vendor,
+       BUILTIN.DF(tl.item) as item_name,
+       tl.quantity,
+       tl.quantityreceived,
+       tl.foreignamount,
+       t.expectedreceiptdate,
+       BUILTIN.DF(t.status) as status
+FROM transaction t
+INNER JOIN transactionline tl ON tl.transaction = t.id
+WHERE t.type = 'PurchOrd'
+  AND tl.mainline = 'F'
+  AND tl.item IS NOT NULL
+  AND BUILTIN.DF(tl.item) LIKE '%DDR5%'
+ORDER BY t.tranid
+FETCH FIRST 100 ROWS ONLY
+
+-- Filter by item type (use item table JOIN, NOT tl.itemtype)
+SELECT t.tranid, BUILTIN.DF(tl.item) as item_name,
+       tl.quantity, tl.rate
+FROM transaction t
+INNER JOIN transactionline tl ON tl.transaction = t.id
+INNER JOIN item i ON i.id = tl.item
+WHERE t.type = 'PurchOrd'
+  AND i.type = 'InvtPart'
+  AND tl.mainline = 'F'
+ORDER BY t.tranid
+FETCH FIRST 100 ROWS ONLY
+```
+
 ## Custom Record Tables
 
 Custom records use the naming convention `customrecord_<scriptid>` (always lowercase in SuiteQL):

@@ -1,9 +1,29 @@
 "use client";
 
-import { Plus, MessageSquare, Code2 } from "lucide-react";
+import { useState } from "react";
+import {
+  Plus,
+  MessageSquare,
+  Code2,
+  Database,
+  ChevronDown,
+  ChevronRight,
+  Pencil,
+  Trash2,
+  Check,
+  X,
+  Loader2,
+} from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import type { ChatSession } from "@/lib/types";
+import {
+  useSavedQueries,
+  useUpdateSavedQuery,
+  useDeleteSavedQuery,
+} from "@/hooks/use-saved-queries";
+import { useToast } from "@/hooks/use-toast";
+import type { SavedQueryResponse } from "@/types/analytics";
 
 interface SessionSidebarProps {
   sessions: ChatSession[];
@@ -18,8 +38,11 @@ export function SessionSidebar({
   onSelectSession,
   onNewChat,
 }: SessionSidebarProps) {
+  const [queriesExpanded, setQueriesExpanded] = useState(true);
+
   return (
     <div className="flex w-[280px] flex-col border-r bg-muted/30">
+      {/* New Chat button */}
       <div className="p-4">
         <Button
           variant="outline"
@@ -30,7 +53,9 @@ export function SessionSidebar({
           New Chat
         </Button>
       </div>
-      <div className="flex-1 overflow-auto px-3 pb-3 space-y-0.5 scrollbar-thin">
+
+      {/* Chat Sessions — scrollable */}
+      <div className="flex-1 min-h-0 overflow-auto px-3 space-y-0.5 scrollbar-thin">
         {sessions.map((session) => (
           <button
             key={session.id}
@@ -64,6 +89,221 @@ export function SessionSidebar({
           </div>
         )}
       </div>
+
+      {/* Saved Queries — pinned at bottom, own scroll */}
+      <div className="border-t">
+        <button
+          onClick={() => setQueriesExpanded(!queriesExpanded)}
+          className="flex w-full items-center gap-1.5 px-5 py-2.5 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground hover:text-foreground transition-colors"
+        >
+          {queriesExpanded ? (
+            <ChevronDown className="h-3 w-3" />
+          ) : (
+            <ChevronRight className="h-3 w-3" />
+          )}
+          <Database className="h-3 w-3" />
+          Saved Queries
+        </button>
+        {queriesExpanded && (
+          <div className="max-h-[240px] overflow-auto px-3 pb-3 scrollbar-thin">
+            <SavedQueriesSection />
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Saved Queries section inside the sidebar
+// ---------------------------------------------------------------------------
+
+function SavedQueriesSection() {
+  const { data: queries, isLoading } = useSavedQueries();
+  const updateMutation = useUpdateSavedQuery();
+  const deleteMutation = useDeleteSavedQuery();
+  const { toast } = useToast();
+
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editName, setEditName] = useState("");
+  const [editDescription, setEditDescription] = useState("");
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+
+  function startEditing(query: SavedQueryResponse) {
+    setEditingId(query.id);
+    setEditName(query.name);
+    setEditDescription(query.description || "");
+    setConfirmDeleteId(null);
+  }
+
+  async function handleSaveEdit(id: string) {
+    if (!editName.trim()) return;
+    try {
+      await updateMutation.mutateAsync({
+        id,
+        name: editName.trim(),
+        description: editDescription.trim() || null,
+      });
+      toast({ title: "Query updated" });
+      setEditingId(null);
+    } catch (err) {
+      toast({
+        title: "Failed to update",
+        description: err instanceof Error ? err.message : "Unknown error",
+        variant: "destructive",
+      });
+    }
+  }
+
+  async function handleDelete(id: string) {
+    try {
+      await deleteMutation.mutateAsync(id);
+      toast({ title: "Query deleted" });
+      setConfirmDeleteId(null);
+    } catch (err) {
+      toast({
+        title: "Failed to delete",
+        description: err instanceof Error ? err.message : "Unknown error",
+        variant: "destructive",
+      });
+    }
+  }
+
+  if (isLoading) {
+    return (
+      <div className="px-2 py-3 text-[11px] text-muted-foreground">
+        Loading...
+      </div>
+    );
+  }
+
+  if (!queries?.length) {
+    return (
+      <div className="px-2 py-3 text-[11px] text-muted-foreground">
+        No saved queries
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-0.5">
+      {queries.map((query) => (
+        <div key={query.id} className="group">
+          {editingId === query.id ? (
+            /* ---- Editing Mode ---- */
+            <div className="rounded-lg bg-card p-2.5 shadow-soft space-y-1.5">
+              <input
+                type="text"
+                value={editName}
+                onChange={(e) => setEditName(e.target.value)}
+                className="w-full rounded-md border bg-background px-2 py-1 text-[12px] text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+                autoFocus
+                placeholder="Query name"
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") handleSaveEdit(query.id);
+                  if (e.key === "Escape") setEditingId(null);
+                }}
+              />
+              <input
+                type="text"
+                value={editDescription}
+                onChange={(e) => setEditDescription(e.target.value)}
+                placeholder="Description (optional)"
+                className="w-full rounded-md border bg-background px-2 py-1 text-[11px] text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") handleSaveEdit(query.id);
+                  if (e.key === "Escape") setEditingId(null);
+                }}
+              />
+              <div className="flex gap-1">
+                <Button
+                  variant="default"
+                  size="sm"
+                  className="h-5 text-[10px] px-1.5"
+                  onClick={() => handleSaveEdit(query.id)}
+                  disabled={!editName.trim() || updateMutation.isPending}
+                >
+                  {updateMutation.isPending ? (
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                  ) : (
+                    <Check className="h-3 w-3" />
+                  )}
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-5 text-[10px] px-1.5"
+                  onClick={() => setEditingId(null)}
+                >
+                  <X className="h-3 w-3" />
+                </Button>
+              </div>
+            </div>
+          ) : confirmDeleteId === query.id ? (
+            /* ---- Delete Confirmation ---- */
+            <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-2.5 space-y-2">
+              <p className="text-[11px] text-destructive font-medium">
+                Delete &quot;{query.name}&quot;?
+              </p>
+              <div className="flex gap-1.5">
+                <Button
+                  variant="destructive"
+                  size="sm"
+                  className="h-6 text-[11px] px-2"
+                  onClick={() => handleDelete(query.id)}
+                  disabled={deleteMutation.isPending}
+                >
+                  {deleteMutation.isPending ? (
+                    <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+                  ) : null}
+                  Yes, delete
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-6 text-[11px] px-2"
+                  onClick={() => setConfirmDeleteId(null)}
+                >
+                  Cancel
+                </Button>
+              </div>
+            </div>
+          ) : (
+            /* ---- Normal Display ---- */
+            <div className="flex items-center rounded-lg px-3 py-2 hover:bg-card/50 transition-all duration-150">
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-[12px] font-medium text-foreground">
+                  {query.name}
+                </p>
+                {query.description && (
+                  <p className="truncate text-[10px] text-muted-foreground mt-0.5">
+                    {query.description}
+                  </p>
+                )}
+              </div>
+              <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity shrink-0 ml-1">
+                <button
+                  onClick={() => startEditing(query)}
+                  className="rounded p-1 text-muted-foreground hover:text-foreground hover:bg-muted"
+                  title="Edit"
+                >
+                  <Pencil className="h-3 w-3" />
+                </button>
+                <button
+                  onClick={() => {
+                    setConfirmDeleteId(query.id);
+                    setEditingId(null);
+                  }}
+                  className="rounded p-1 text-muted-foreground hover:text-destructive hover:bg-destructive/10"
+                  title="Delete"
+                >
+                  <Trash2 className="h-3 w-3" />
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      ))}
     </div>
   );
 }

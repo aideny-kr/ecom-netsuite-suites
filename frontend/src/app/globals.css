@@ -46,31 +46,31 @@
   }
 
   .dark {
-    --background: 240 10% 3.9%;
-    --foreground: 0 0% 98.0%;
-    --card: 240 10% 3.9%;
-    --card-foreground: 0 0% 98.0%;
-    --popover: 240 10% 3.9%;
-    --popover-foreground: 0 0% 98.0%;
+    --background: 240 10% 6%;
+    --foreground: 0 0% 95%;
+    --card: 240 10% 8%;
+    --card-foreground: 0 0% 95%;
+    --popover: 240 10% 8%;
+    --popover-foreground: 0 0% 95%;
     --primary: 243.4 75.4% 58.6%;
     --primary-foreground: 0 0% 100%;
     --accent: 354.8 100% 63.9%;
     --accent-foreground: 0 0% 100%;
     --destructive: 354.8 100% 63.9%;
     --destructive-foreground: 0 0% 100%;
-    --secondary: 240 3.7% 15.9%;
-    --secondary-foreground: 0 0% 98.0%;
-    --muted: 240 3.7% 15.9%;
-    --muted-foreground: 240 5% 64.9%;
-    --border: 240 3.7% 15.9%;
-    --input: 240 3.7% 15.9%;
+    --secondary: 240 4% 14%;
+    --secondary-foreground: 0 0% 95%;
+    --muted: 240 4% 14%;
+    --muted-foreground: 240 5% 65%;
+    --border: 240 4% 16%;
+    --input: 240 4% 16%;
     --ring: 243.4 75.4% 58.6%;
 
-    --sidebar-bg: 240 10% 3.9%;
+    --sidebar-bg: 240 11% 4%;
     --sidebar-foreground: 240 5% 65%;
     --sidebar-active: 243.4 75.4% 58.6%;
-    --sidebar-hover: 240 3.7% 15.9%;
-    --sidebar-border: 240 3.7% 15.9%;
+    --sidebar-hover: 240 6% 12%;
+    --sidebar-border: 240 4% 12%;
     --sidebar-muted: 240 5% 40%;
   }
 }
@@ -126,4 +126,14 @@
   .prose tr:last-child td {
     @apply border-b-0;
   }
+}
+
+/* Thinking animation — Gemini-style fade pulse */
+@keyframes thinking-fade {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 0.8; }
+}
+
+.animate-thinking-fade {
+  animation: thinking-fade 2s ease-in-out infinite;
 }

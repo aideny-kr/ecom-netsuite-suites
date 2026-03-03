@@ -154,6 +154,85 @@ class TestListEndpoint:
         assert data[0]["name"] == "A query"
 
 
+class TestUpdateEndpoint:
+    @pytest.mark.asyncio
+    async def test_update_name_and_description(self, client: AsyncClient, db: AsyncSession):
+        tenant = await create_test_tenant(db, name="Update Corp", plan="pro")
+        user, _ = await create_test_user(db, tenant, role_name="admin")
+        headers = make_auth_headers(user)
+
+        query = SavedSuiteQLQuery(
+            tenant_id=tenant.id, name="Old Name", description="Old desc", query_text="SELECT 1"
+        )
+        db.add(query)
+        await db.flush()
+
+        resp = await client.patch(
+            f"/api/v1/skills/{query.id}",
+            json={"name": "New Name", "description": "New desc"},
+            headers=headers,
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["name"] == "New Name"
+        assert data["description"] == "New desc"
+        assert data["query_text"] == "SELECT 1"
+
+    @pytest.mark.asyncio
+    async def test_update_name_only(self, client: AsyncClient, db: AsyncSession):
+        tenant = await create_test_tenant(db, name="Partial Corp", plan="pro")
+        user, _ = await create_test_user(db, tenant, role_name="admin")
+        headers = make_auth_headers(user)
+
+        query = SavedSuiteQLQuery(
+            tenant_id=tenant.id, name="Original", description="Keep me", query_text="SELECT 1"
+        )
+        db.add(query)
+        await db.flush()
+
+        resp = await client.patch(
+            f"/api/v1/skills/{query.id}",
+            json={"name": "Updated"},
+            headers=headers,
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["name"] == "Updated"
+
+    @pytest.mark.asyncio
+    async def test_update_404_for_missing_query(self, client: AsyncClient, db: AsyncSession):
+        tenant = await create_test_tenant(db, name="Missing Corp", plan="pro")
+        user, _ = await create_test_user(db, tenant, role_name="admin")
+        headers = make_auth_headers(user)
+
+        resp = await client.patch(
+            f"/api/v1/skills/{uuid.uuid4()}",
+            json={"name": "Nope"},
+            headers=headers,
+        )
+        assert resp.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_update_cross_tenant_isolation(self, client: AsyncClient, db: AsyncSession):
+        tenant_a = await create_test_tenant(db, name="Corp A Update", plan="pro")
+        tenant_b = await create_test_tenant(db, name="Corp B Update", plan="pro")
+        user_b, _ = await create_test_user(db, tenant_b, role_name="admin")
+        headers_b = make_auth_headers(user_b)
+
+        query_a = SavedSuiteQLQuery(
+            tenant_id=tenant_a.id, name="A's Query", query_text="SELECT 1"
+        )
+        db.add(query_a)
+        await db.flush()
+
+        resp = await client.patch(
+            f"/api/v1/skills/{query_a.id}",
+            json={"name": "Stolen"},
+            headers=headers_b,
+        )
+        assert resp.status_code == 404
+
+
 class TestPreviewEndpoint:
     @pytest_asyncio.fixture
     async def setup(self, db: AsyncSession):

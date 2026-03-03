@@ -16,6 +16,12 @@ export interface SavedQueryCreatePayload {
   query_text: string;
 }
 
+/** PATCH /api/v1/skills/:id — update a saved query */
+export interface SavedQueryUpdatePayload {
+  name?: string;
+  description?: string | null;
+}
+
 /** Response from POST /api/v1/skills */
 export interface SavedQueryResponse {
   id: string;

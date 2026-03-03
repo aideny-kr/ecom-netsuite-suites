@@ -25,6 +25,25 @@ async def get_saved_query(
     return result.scalar_one_or_none()
 
 
+async def update_saved_query(
+    db: AsyncSession,
+    query_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+    *,
+    name: str | None = None,
+    description: str | None = ...,  # type: ignore[assignment]
+) -> SavedSuiteQLQuery | None:
+    """Update a saved query's name and/or description. Returns None if not found."""
+    query = await get_saved_query(db, query_id, tenant_id)
+    if not query:
+        return None
+    if name is not None:
+        query.name = name
+    if description is not ...:
+        query.description = description
+    return query
+
+
 async def delete_saved_query(
     db: AsyncSession, query_id: uuid.UUID, tenant_id: uuid.UUID
 ) -> bool:

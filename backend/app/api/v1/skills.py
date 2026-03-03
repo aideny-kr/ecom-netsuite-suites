@@ -14,7 +14,7 @@ from app.models.connection import Connection
 from app.models.saved_query import SavedSuiteQLQuery
 from app.models.user import User
 from app.services import audit_service
-from app.services.skills_service import delete_saved_query, get_saved_query, inject_fetch_limit
+from app.services.skills_service import delete_saved_query, get_saved_query, inject_fetch_limit, update_saved_query
 
 router = APIRouter(prefix="/skills", tags=["skills"])
 
@@ -42,6 +42,11 @@ class ExportRequest(BaseModel):
 class ExportResponse(BaseModel):
     task_id: str
     status: str = "queued"
+
+
+class SavedQueryUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    description: str | None = None
 
 
 class SavedQueryCreate(BaseModel):
@@ -233,6 +238,45 @@ async def trigger_export(
     )
 
     return ExportResponse(task_id=task.id, status="queued")
+
+
+@router.patch("/{query_id}", response_model=SavedQueryResponse)
+async def update_saved_query_endpoint(
+    query_id: uuid.UUID,
+    request: SavedQueryUpdate,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Update a saved query's name and/or description."""
+    kwargs: dict = {}
+    if request.name is not None:
+        kwargs["name"] = request.name
+    # Allow setting description to None (clearing it) or a new value
+    kwargs["description"] = request.description
+
+    updated = await update_saved_query(db, query_id, user.tenant_id, **kwargs)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Saved query not found.")
+
+    await audit_service.log_event(
+        db=db,
+        tenant_id=user.tenant_id,
+        category="skills",
+        action="skills.query_update",
+        actor_id=user.id,
+        resource_type="saved_suiteql_query",
+        resource_id=str(query_id),
+    )
+    await db.commit()
+    await db.refresh(updated)
+    return SavedQueryResponse(
+        id=str(updated.id),
+        tenant_id=str(updated.tenant_id),
+        name=updated.name,
+        description=updated.description,
+        query_text=updated.query_text,
+        created_at=updated.created_at.isoformat(),
+    )
 
 
 @router.delete("/{query_id}", status_code=status.HTTP_204_NO_CONTENT)

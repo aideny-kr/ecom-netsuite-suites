@@ -250,6 +250,8 @@ class BaseSpecialistAgent(abc.ABC):
         tool_calls_log: list[dict] = []
         total_input_tokens = 0
         total_output_tokens = 0
+        total_cache_creation = 0
+        total_cache_read = 0
 
         # Load policy for tool gating
         active_policy = await get_active_policy(db, self.tenant_id)
@@ -280,6 +282,8 @@ class BaseSpecialistAgent(abc.ABC):
                 )
                 total_input_tokens += response.usage.input_tokens
                 total_output_tokens += response.usage.output_tokens
+                total_cache_creation += response.usage.cache_creation_input_tokens
+                total_cache_read += response.usage.cache_read_input_tokens
 
                 # Pure text response — agent is done
                 if not response.tool_use_blocks:
@@ -300,7 +304,7 @@ class BaseSpecialistAgent(abc.ABC):
                         success=True,
                         data=final_text,
                         tool_calls_log=tool_calls_log,
-                        tokens_used=TokenUsage(total_input_tokens, total_output_tokens),
+                        tokens_used=TokenUsage(total_input_tokens, total_output_tokens, total_cache_creation, total_cache_read),
                         agent_name=self.agent_name,
                     )
 
@@ -369,7 +373,7 @@ class BaseSpecialistAgent(abc.ABC):
 
                 messages.append(adapter.build_tool_result_message(tool_results_content))
 
-            # Loop exhausted — make one final call without tools
+            # Loop exhausted — make one final call without tools (must answer)
             print(
                 f"[AGENT] {self.agent_name} loop exhausted {self.max_steps} steps, forcing final response",
                 flush=True,
@@ -379,6 +383,10 @@ class BaseSpecialistAgent(abc.ABC):
                 self.agent_name,
                 self.max_steps,
             )
+            messages.append({
+                "role": "user",
+                "content": "You have used all available tool steps. You MUST now provide your final answer to the user based on everything you have gathered so far. Do NOT output only reasoning — give the user a clear, helpful response.",
+            })
             response = await adapter.create_message(
                 model=model,
                 max_tokens=16384,
@@ -402,7 +410,7 @@ class BaseSpecialistAgent(abc.ABC):
                 success=True,
                 data=final_text,
                 tool_calls_log=tool_calls_log,
-                tokens_used=TokenUsage(total_input_tokens, total_output_tokens),
+                tokens_used=TokenUsage(total_input_tokens, total_output_tokens, total_cache_creation, total_cache_read),
                 agent_name=self.agent_name,
             )
 
@@ -412,7 +420,7 @@ class BaseSpecialistAgent(abc.ABC):
                 success=False,
                 error=str(exc),
                 tool_calls_log=tool_calls_log,
-                tokens_used=TokenUsage(total_input_tokens, total_output_tokens),
+                tokens_used=TokenUsage(total_input_tokens, total_output_tokens, total_cache_creation, total_cache_read),
                 agent_name=self.agent_name,
             )
 
@@ -423,6 +431,7 @@ class BaseSpecialistAgent(abc.ABC):
         db: "AsyncSession",
         adapter: "BaseLLMAdapter",
         model: str,
+        conversation_history: list[dict] | None = None,
     ):
         """Execute the agentic loop with streaming text output.
 
@@ -441,6 +450,8 @@ class BaseSpecialistAgent(abc.ABC):
         tool_calls_log: list[dict] = []
         total_input_tokens = 0
         total_output_tokens = 0
+        total_cache_creation = 0
+        total_cache_read = 0
 
         active_policy = await get_active_policy(db, self.tenant_id)
 
@@ -449,9 +460,11 @@ class BaseSpecialistAgent(abc.ABC):
             prior = json.dumps(context["prior_results"], default=str)
             context_block = f"\n\n<prior_agent_results>\n{prior}\n</prior_agent_results>"
 
-        messages: list[dict] = [
-            {"role": "user", "content": f"Task: {task}{context_block}"}
-        ]
+        # Build messages: include conversation history for multi-turn context
+        messages: list[dict] = []
+        if conversation_history:
+            messages.extend(conversation_history)
+        messages.append({"role": "user", "content": f"Task: {task}{context_block}"})
 
         tools = self.tool_definitions if self.tool_definitions else None
 
@@ -476,6 +489,8 @@ class BaseSpecialistAgent(abc.ABC):
 
                 total_input_tokens += response.usage.input_tokens
                 total_output_tokens += response.usage.output_tokens
+                total_cache_creation += response.usage.cache_creation_input_tokens
+                total_cache_read += response.usage.cache_read_input_tokens
 
                 # Pure text response — done
                 if not response.tool_use_blocks:
@@ -494,7 +509,7 @@ class BaseSpecialistAgent(abc.ABC):
                         success=True,
                         data=final_text,
                         tool_calls_log=tool_calls_log,
-                        tokens_used=TokenUsage(total_input_tokens, total_output_tokens),
+                        tokens_used=TokenUsage(total_input_tokens, total_output_tokens, total_cache_creation, total_cache_read),
                         agent_name=self.agent_name,
                     )
                     return
@@ -556,11 +571,15 @@ class BaseSpecialistAgent(abc.ABC):
 
                 messages.append(adapter.build_tool_result_message(tool_results_content))
 
-            # Loop exhausted — force final response
+            # Loop exhausted — force final response (no tools, must answer)
             print(
                 f"[AGENT] {self.agent_name} streaming loop exhausted {self.max_steps} steps",
                 flush=True,
             )
+            messages.append({
+                "role": "user",
+                "content": "You have used all available tool steps. You MUST now provide your final answer to the user based on everything you have gathered so far. Do NOT output only reasoning — give the user a clear, helpful response.",
+            })
             response = None
             async for event_type, payload in adapter.stream_message(
                 model=model,
@@ -592,7 +611,7 @@ class BaseSpecialistAgent(abc.ABC):
                 success=True,
                 data=final_text,
                 tool_calls_log=tool_calls_log,
-                tokens_used=TokenUsage(total_input_tokens, total_output_tokens),
+                tokens_used=TokenUsage(total_input_tokens, total_output_tokens, total_cache_creation, total_cache_read),
                 agent_name=self.agent_name,
             )
 
@@ -602,6 +621,6 @@ class BaseSpecialistAgent(abc.ABC):
                 success=False,
                 error=str(exc),
                 tool_calls_log=tool_calls_log,
-                tokens_used=TokenUsage(total_input_tokens, total_output_tokens),
+                tokens_used=TokenUsage(total_input_tokens, total_output_tokens, total_cache_creation, total_cache_read),
                 agent_name=self.agent_name,
             )
