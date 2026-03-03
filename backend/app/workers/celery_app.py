@@ -33,11 +33,17 @@ celery_app.conf.include = [
     "app.workers.tasks.stripe_sync",
     "app.workers.tasks.suitescript_sync",
     "app.workers.tasks.workspace_run",
+    "app.workers.tasks.suiteql_export",
+    "app.workers.tasks.connection_health",
 ]
 
 celery_app.conf.beat_schedule = {
     "sync-metered-billing": {
         "task": "tasks.billing_sync",
         "schedule": 3600.0,  # hourly
+    },
+    "check-connection-health": {
+        "task": "tasks.connection_health",
+        "schedule": 900.0,  # every 15 minutes
     },
 }

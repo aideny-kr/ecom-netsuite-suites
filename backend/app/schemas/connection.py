@@ -24,6 +24,8 @@ class ConnectionResponse(BaseModel):
     auth_type: str | None = None
     encryption_key_version: int
     metadata_json: dict | None = None
+    last_health_check_at: datetime | None = None
+    error_reason: str | None = None
     created_at: datetime
     created_by: str | None = None
 

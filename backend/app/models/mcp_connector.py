@@ -3,7 +3,9 @@ from __future__ import annotations
 import uuid
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Boolean, ForeignKey, Integer, String, Text
+from datetime import datetime
+
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.dialects.postgresql import JSON, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -30,5 +32,7 @@ class McpConnector(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
     metadata_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    last_health_check_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    error_reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
     tenant: Mapped["Tenant"] = relationship("Tenant", back_populates="mcp_connectors")

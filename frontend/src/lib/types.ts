@@ -48,6 +48,8 @@ export interface Connection {
   credentials_set: boolean;
   metadata_json: Record<string, unknown> | null;
   last_sync_at: string | null;
+  last_health_check_at: string | null;
+  error_reason: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -230,6 +232,8 @@ export interface McpConnector {
   is_enabled: boolean;
   encryption_key_version: number;
   metadata_json: Record<string, unknown> | null;
+  last_health_check_at: string | null;
+  error_reason: string | null;
   created_at: string;
   created_by: string | null;
 }

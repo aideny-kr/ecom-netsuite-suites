@@ -20,7 +20,11 @@ export default function DashboardLayout({
   const pathname = usePathname();
   const isWorkspace = pathname?.startsWith("/workspace");
   const [showOnboarding, setShowOnboarding] = useState(false);
-  const [connectionMissing, setConnectionMissing] = useState(false);
+  const [connectionHealth, setConnectionHealth] = useState<
+    | { state: "ok" }
+    | { state: "missing" }
+    | { state: "expired"; reason: string }
+  >({ state: "ok" });
   const [bannerDismissed, setBannerDismissed] = useState(false);
 
   useEffect(() => {
@@ -56,16 +60,35 @@ export default function DashboardLayout({
   // Check connection status for the warning banner (runs when onboarding is not shown)
   useEffect(() => {
     if (!user || showOnboarding) {
-      setConnectionMissing(false);
+      setConnectionHealth({ state: "ok" });
       return;
     }
     apiClient
-      .get<{ valid: boolean }>("/api/v1/onboarding/checklist/connection/validate")
+      .get<{
+        valid: boolean;
+        connection_status?: string | null;
+        mcp_status?: string | null;
+        error_reason?: string | null;
+      }>("/api/v1/onboarding/checklist/connection/validate")
       .then((result) => {
-        setConnectionMissing(!result.valid);
+        if (result.valid) {
+          setConnectionHealth({ state: "ok" });
+        } else if (
+          result.connection_status === "error" ||
+          result.mcp_status === "error"
+        ) {
+          setConnectionHealth({
+            state: "expired",
+            reason:
+              result.error_reason ||
+              "OAuth token expired — re-authorize your NetSuite connection",
+          });
+        } else {
+          setConnectionHealth({ state: "missing" });
+        }
       })
       .catch(() => {
-        setConnectionMissing(true);
+        setConnectionHealth({ state: "missing" });
       });
   }, [user, showOnboarding]);
 
@@ -101,8 +124,8 @@ export default function DashboardLayout({
       )}
       <Sidebar />
       <main className="flex-1 overflow-auto bg-[hsl(240_5%_97.5%)] scrollbar-thin">
-        {/* Connection warning banner */}
-        {connectionMissing && !bannerDismissed && (
+        {/* Connection warning banner — missing */}
+        {connectionHealth.state === "missing" && !bannerDismissed && (
           <div className="mx-8 mt-6 flex items-center justify-between gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 dark:border-amber-800 dark:bg-amber-950/50">
             <div className="flex items-center gap-3">
               <AlertTriangle className="h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
@@ -120,6 +143,30 @@ export default function DashboardLayout({
             <button
               onClick={() => setBannerDismissed(true)}
               className="shrink-0 rounded p-1 text-amber-600 hover:bg-amber-100 dark:text-amber-400 dark:hover:bg-amber-900"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+        )}
+
+        {/* Connection warning banner — expired */}
+        {connectionHealth.state === "expired" && !bannerDismissed && (
+          <div className="mx-8 mt-6 flex items-center justify-between gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 dark:border-red-800 dark:bg-red-950/50">
+            <div className="flex items-center gap-3">
+              <AlertTriangle className="h-4 w-4 shrink-0 text-red-600 dark:text-red-400" />
+              <p className="text-sm text-red-800 dark:text-red-200">
+                {connectionHealth.reason}{" "}
+                <Link
+                  href="/connections"
+                  className="font-medium underline underline-offset-2 hover:text-red-900 dark:hover:text-red-100"
+                >
+                  Re-authorize on Connections
+                </Link>
+              </p>
+            </div>
+            <button
+              onClick={() => setBannerDismissed(true)}
+              className="shrink-0 rounded p-1 text-red-600 hover:bg-red-100 dark:text-red-400 dark:hover:bg-red-900"
             >
               <X className="h-4 w-4" />
             </button>

@@ -105,32 +105,81 @@ async def validate_step(db: AsyncSession, tenant_id: uuid.UUID, step_key: str) -
         from app.models.connection import Connection
         from app.models.mcp_connector import McpConnector
 
+        # Fetch all netsuite connections — prefer active, fall back to error/other
         conn_result = await db.execute(
             select(Connection).where(
                 Connection.tenant_id == tenant_id,
-                Connection.status == "active",
                 Connection.provider == "netsuite",
+            ).order_by(
+                # Sort so "active" comes first
+                Connection.status.asc()
             )
         )
-        conn = conn_result.scalars().first()
+        all_conns = conn_result.scalars().all()
+        # Pick the best one: active > error > anything else
+        conn = next((c for c in all_conns if c.status == "active"), None)
+        if not conn:
+            conn = next((c for c in all_conns if c.status == "error"), None)
+        if not conn and all_conns:
+            conn = all_conns[0]
 
         mcp_result = await db.execute(
             select(McpConnector).where(
                 McpConnector.tenant_id == tenant_id,
-                McpConnector.status == "active",
                 McpConnector.provider == "netsuite_mcp",
+            ).order_by(
+                McpConnector.status.asc()
             )
         )
-        mcp = mcp_result.scalars().first()
-
-        if conn and mcp:
-            return {"step_key": step_key, "valid": True}
-        reasons = []
+        all_mcps = mcp_result.scalars().all()
+        mcp = next((m for m in all_mcps if m.status == "active"), None)
         if not mcp:
-            reasons.append("No active NetSuite MCP connector")
+            mcp = next((m for m in all_mcps if m.status == "error"), None)
+        if not mcp and all_mcps:
+            mcp = all_mcps[0]
+
+        conn_status = conn.status if conn else None
+        mcp_status = mcp.status if mcp else None
+        conn_active = conn is not None and conn.status == "active"
+        mcp_active = mcp is not None and mcp.status == "active"
+
+        # Collect the first error_reason from whichever is broken
+        error_reason = None
+        if conn and conn.status == "error" and conn.error_reason:
+            error_reason = conn.error_reason
+        elif mcp and mcp.status == "error" and mcp.error_reason:
+            error_reason = mcp.error_reason
+
+        if conn_active and mcp_active:
+            return {
+                "step_key": step_key,
+                "valid": True,
+                "connection_status": conn_status,
+                "mcp_status": mcp_status,
+            }
+
+        reasons = []
         if not conn:
-            reasons.append("No active NetSuite OAuth connection")
-        return {"step_key": step_key, "valid": False, "reason": ". ".join(reasons)}
+            reasons.append("No NetSuite OAuth connection")
+        elif conn.status == "error":
+            reasons.append("NetSuite OAuth connection has expired")
+        elif conn.status != "active":
+            reasons.append(f"NetSuite OAuth connection is {conn.status}")
+        if not mcp:
+            reasons.append("No NetSuite MCP connector")
+        elif mcp.status == "error":
+            reasons.append("NetSuite MCP connector has expired")
+        elif mcp.status != "active":
+            reasons.append(f"NetSuite MCP connector is {mcp.status}")
+
+        return {
+            "step_key": step_key,
+            "valid": False,
+            "reason": ". ".join(reasons),
+            "connection_status": conn_status,
+            "mcp_status": mcp_status,
+            "error_reason": error_reason,
+        }
 
     elif step_key == "policy":
         from app.services.policy_service import get_active_policy

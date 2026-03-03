@@ -1,14 +1,18 @@
 "use client";
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { apiClient } from "@/lib/api-client";
 import { cn } from "@/lib/utils";
 import type { ChatMessage } from "@/lib/types";
+import type { SavedQueryCreatePayload, SavedQueryResponse } from "@/types/analytics";
 import { ToolCallStepCard } from "@/components/chat/tool-call-step";
 import { ChangeProposalCard } from "@/components/chat/change-proposal-card";
 import { WorkspaceToolCard } from "@/components/chat/workspace-tool-card";
-import { Sparkles, FileCode } from "lucide-react";
+import { SuiteQLToolCard } from "@/components/chat/suiteql-tool-card";
+import { Sparkles, FileCode, Bookmark, Check, Loader2 } from "lucide-react";
 
 function renderWithMentions(
   content: string,
@@ -190,6 +194,20 @@ export function MessageList({
                       />
                     );
                   }
+                  if (tc.tool === "netsuite_suiteql") {
+                    const msgIndex = messages.indexOf(message);
+                    const prevUserMsg = messages
+                      .slice(0, msgIndex)
+                      .reverse()
+                      .find((m) => m.role === "user");
+                    return (
+                      <SuiteQLToolCard
+                        key={idx}
+                        step={tc}
+                        userQuestion={prevUserMsg?.content}
+                      />
+                    );
+                  }
                   if (tc.tool.startsWith("workspace_")) {
                     return <WorkspaceToolCard key={idx} step={tc} />;
                   }
@@ -231,6 +249,13 @@ export function MessageList({
                   </span>
                 ))}
               </div>
+            )}
+            {message.role === "assistant" &&
+              message.tool_calls?.some((tc) => tc.tool === "netsuite_suiteql") && (
+              <InlineSaveLink
+                message={message}
+                messages={messages}
+              />
             )}
             {message.role === "assistant" && message.model_used && (
               <div className="mt-1.5 flex items-center gap-1.5 text-[11px] text-muted-foreground/60">
@@ -301,6 +326,78 @@ export function MessageList({
       )}
 
       <div ref={bottomRef} />
+    </div>
+  );
+}
+
+/**
+ * Subtle inline save link rendered below assistant messages that contain
+ * SuiteQL tool calls. Provides a secondary save trigger near the data table.
+ */
+function InlineSaveLink({
+  message,
+  messages,
+}: {
+  message: ChatMessage;
+  messages: ChatMessage[];
+}) {
+  const queryClient = useQueryClient();
+  const [state, setState] = useState<"idle" | "saving" | "saved">("idle");
+
+  const suiteqlCall = message.tool_calls?.find(
+    (tc) => tc.tool === "netsuite_suiteql",
+  );
+  const queryText = (suiteqlCall?.params?.query as string) ?? "";
+
+  const msgIndex = messages.indexOf(message);
+  const prevUserMsg = messages
+    .slice(0, msgIndex)
+    .reverse()
+    .find((m) => m.role === "user");
+  const autoName = prevUserMsg?.content?.slice(0, 120) ?? "Saved Query";
+
+  const mutation = useMutation({
+    mutationFn: (data: SavedQueryCreatePayload) =>
+      apiClient.post<SavedQueryResponse>("/api/v1/skills", data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["saved-queries"] });
+      setState("saved");
+    },
+  });
+
+  if (!queryText) return null;
+
+  if (state === "saved") {
+    return (
+      <div className="mt-2 flex items-center gap-1.5 text-[11px] font-medium text-green-600 dark:text-green-400">
+        <Check className="h-3 w-3" />
+        Saved to Analytics
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-2">
+      <button
+        onClick={() => {
+          setState("saving");
+          mutation.mutate({ name: autoName, query_text: queryText });
+        }}
+        disabled={mutation.isPending}
+        className="flex items-center gap-1.5 text-[11px] text-muted-foreground hover:text-primary transition-colors"
+      >
+        {mutation.isPending ? (
+          <Loader2 className="h-3 w-3 animate-spin" />
+        ) : (
+          <Bookmark className="h-3 w-3" />
+        )}
+        Save query to Analytics
+      </button>
+      {mutation.isError && (
+        <span className="mt-0.5 text-[11px] text-destructive">
+          Failed to save
+        </span>
+      )}
     </div>
   );
 }

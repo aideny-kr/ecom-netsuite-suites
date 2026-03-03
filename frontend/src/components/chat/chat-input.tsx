@@ -4,6 +4,7 @@ import { useState, useCallback, useMemo, type KeyboardEvent } from "react";
 import { ArrowUp, AtSign, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { FileMentionPicker } from "@/components/chat/file-mention-picker";
+import { AnalyticsDashboard } from "@/components/analytics/AnalyticsDashboard";
 
 interface ChatInputProps {
   onSend: (content: string) => void;
@@ -14,6 +15,8 @@ interface ChatInputProps {
 export function ChatInput({ onSend, isLoading, workspaceId }: ChatInputProps) {
   const [value, setValue] = useState("");
   const [mentionOpen, setMentionOpen] = useState(false);
+  const [commandOpen, setCommandOpen] = useState(false);
+  const [analyticsOpen, setAnalyticsOpen] = useState(false);
 
   const mentions = useMemo(
     () => Array.from(value.matchAll(/@workspace:([^\s]+)/g)).map((m) => m[1]),
@@ -65,6 +68,13 @@ export function ChatInput({ onSend, isLoading, workspaceId }: ChatInputProps) {
       ) {
         setMentionOpen(true);
       }
+
+      // Detect / at the start of input to trigger command picker
+      if (newVal === "/") {
+        setCommandOpen(true);
+      } else if (!newVal.startsWith("/")) {
+        setCommandOpen(false);
+      }
     },
     [workspaceId],
   );
@@ -92,7 +102,7 @@ export function ChatInput({ onSend, isLoading, workspaceId }: ChatInputProps) {
             ))}
           </div>
         )}
-        <div className="flex items-end gap-3 rounded-2xl border bg-background p-2 shadow-soft transition-shadow focus-within:shadow-soft-md focus-within:ring-1 focus-within:ring-ring">
+        <div className="relative flex items-end gap-3 rounded-2xl border bg-background p-2 shadow-soft transition-shadow focus-within:shadow-soft-md focus-within:ring-1 focus-within:ring-ring">
           <textarea
             value={value}
             onChange={handleChange}
@@ -141,11 +151,29 @@ export function ChatInput({ onSend, isLoading, workspaceId }: ChatInputProps) {
           >
             <ArrowUp className="h-4 w-4" />
           </Button>
+          {commandOpen && (
+            <div className="absolute bottom-full mb-2 left-2 z-50 w-64 rounded-xl border bg-card p-1 shadow-lg overflow-hidden">
+              <div className="px-2 py-1.5 text-xs font-semibold text-muted-foreground">Commands</div>
+              <button
+                className="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-sm text-foreground hover:bg-primary hover:text-primary-foreground transition-colors"
+                onClick={() => {
+                  setCommandOpen(false);
+                  setValue("");
+                  setAnalyticsOpen(true);
+                }}
+              >
+                <span className="font-mono text-xs">/export_analytics</span>
+                <span className="text-muted-foreground">View Saved Queries</span>
+              </button>
+            </div>
+          )}
         </div>
         <p className="mt-1.5 text-right text-[11px] tabular-nums text-muted-foreground">
           {value.length}/4000
         </p>
       </div>
+
+      <AnalyticsDashboard open={analyticsOpen} onOpenChange={setAnalyticsOpen} />
     </div>
   );
 }

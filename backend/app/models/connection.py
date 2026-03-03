@@ -3,7 +3,9 @@ from __future__ import annotations
 import uuid
 from typing import TYPE_CHECKING
 
-from sqlalchemy import ForeignKey, Integer, String, Text
+from datetime import datetime
+
+from sqlalchemy import DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.dialects.postgresql import JSON, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -27,5 +29,7 @@ class Connection(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     encryption_key_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
     metadata_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
+    last_health_check_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    error_reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
     tenant: Mapped["Tenant"] = relationship("Tenant", back_populates="connections")

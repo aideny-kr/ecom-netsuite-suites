@@ -107,6 +107,11 @@ export default function ConnectionsPage() {
                     {conn.status}
                   </Badge>
                 </div>
+                {conn.status === "error" && conn.error_reason && (
+                  <p className="mt-3 text-[13px] text-destructive">
+                    {conn.error_reason}
+                  </p>
+                )}
                 <div className="mt-4 flex items-center justify-between border-t pt-3">
                   <p className="text-[12px] text-muted-foreground">
                     {conn.last_sync_at

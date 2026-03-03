@@ -17,6 +17,7 @@ from app.api.v1 import (
     onboarding,
     policies,
     schedules,
+    skills,
     suitescript_sync,
     sync,
     tables,
@@ -51,3 +52,4 @@ api_router.include_router(chat_integration.router)
 api_router.include_router(netsuite_metadata.router)
 api_router.include_router(suitescript_sync.router)
 api_router.include_router(netsuite_api_logs.router)
+api_router.include_router(skills.router)
