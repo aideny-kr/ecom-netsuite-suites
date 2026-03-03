@@ -252,6 +252,26 @@ class UnifiedAgent(BaseSpecialistAgent):
     def agent_name(self) -> str:
         return "unified"
 
+    @staticmethod
+    def _augment_task_with_entities(task: str, vernacular: str) -> str:
+        """Append resolved entity mappings directly to the user message.
+
+        This ensures the agent sees the correct field mappings in the user turn
+        itself, not just the system prompt, making it much harder to ignore.
+        """
+        import re
+        # Extract entity mappings from the XML
+        entities = re.findall(
+            r"<user_term>(.*?)</user_term>\s*"
+            r"<internal_script_id>(.*?)</internal_script_id>\s*"
+            r"<entity_type>(.*?)</entity_type>",
+            vernacular,
+        )
+        if not entities:
+            return task
+        lines = [f'\n[FIELD MAPPING: "{term}" = {script_id} ({etype})]' for term, script_id, etype in entities]
+        return task + "".join(lines)
+
     @property
     def max_steps(self) -> int:
         return 10
@@ -371,8 +391,12 @@ class UnifiedAgent(BaseSpecialistAgent):
         model: str,
     ):
         """Override to inject context and discover external MCP tools."""
+        # Augment the task with resolved entity mappings so the agent can't ignore them
+        vernacular = context.get("tenant_vernacular", "")
+        if vernacular:
+            task = self._augment_task_with_entities(task, vernacular)
         self._current_task = task
-        self._tenant_vernacular = context.get("tenant_vernacular", "")
+        self._tenant_vernacular = vernacular
         self._user_timezone = context.get("user_timezone")
         self._domain_knowledge = context.get("domain_knowledge", [])
         self._proven_patterns = context.get("proven_patterns", [])
