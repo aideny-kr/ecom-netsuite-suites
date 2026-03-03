@@ -77,14 +77,14 @@ class TestApiKeyValidation:
         """get_voyage_client returns None when VOYAGE_API_KEY is empty."""
         from app.services.chat import embeddings
 
-        old_client = embeddings._client
-        embeddings._client = None
+        old_client = embeddings._voyage_client
+        embeddings._voyage_client = None
         try:
             with patch("app.services.chat.embeddings.settings") as mock_settings:
                 mock_settings.VOYAGE_API_KEY = ""
-                assert embeddings.get_voyage_client() is None
+                assert embeddings._get_voyage_client() is None
         finally:
-            embeddings._client = old_client
+            embeddings._voyage_client = old_client
 
 
 # ---------------------------------------------------------------------------

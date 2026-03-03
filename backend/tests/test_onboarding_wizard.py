@@ -241,8 +241,8 @@ async def test_validate_connection_requires_both_mcp_and_oauth(
     assert resp.status_code == 200
     data = resp.json()
     assert data["valid"] is False
-    assert "No active NetSuite MCP connector" in data["reason"]
-    assert "No active NetSuite OAuth connection" in data["reason"]
+    assert "No NetSuite MCP connector" in data["reason"]
+    assert "No NetSuite OAuth connection" in data["reason"]
 
 
 @pytest.mark.asyncio
@@ -259,7 +259,7 @@ async def test_validate_connection_mcp_only(
     assert resp.status_code == 200
     data = resp.json()
     assert data["valid"] is False
-    assert "No active NetSuite OAuth connection" in data["reason"]
+    assert "No NetSuite OAuth connection" in data["reason"]
     assert "MCP connector" not in data["reason"]
 
 
@@ -277,7 +277,7 @@ async def test_validate_connection_oauth_only(
     assert resp.status_code == 200
     data = resp.json()
     assert data["valid"] is False
-    assert "No active NetSuite MCP connector" in data["reason"]
+    assert "No NetSuite MCP connector" in data["reason"]
     assert "OAuth connection" not in data["reason"]
 
 

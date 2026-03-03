@@ -193,7 +193,8 @@ class TestAgentDomainKnowledgeInjection:
         )
         agent._domain_knowledge = []
         prompt = agent.system_prompt
-        assert "<domain_knowledge>" not in prompt
+        # The dynamic block with actual references should NOT be present
+        assert "Retrieved reference material for this specific query" not in prompt
 
 
 # ── Retrieval service ──
