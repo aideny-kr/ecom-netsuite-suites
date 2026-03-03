@@ -302,8 +302,10 @@ class UnifiedAgent(BaseSpecialistAgent):
         if self._tenant_vernacular:
             parts.append("\n## EXPLICIT TENANT ENTITY RESOLUTION — MANDATORY")
             parts.append(
-                "**CRITICAL**: The entities below have been pre-resolved. "
-                "Use these exact script IDs in your SuiteQL queries."
+                "**CRITICAL**: The entities below have been pre-resolved to their exact NetSuite script IDs. "
+                "You MUST use these script IDs — they OVERRIDE any column names used in prior conversation messages. "
+                "If earlier queries in this conversation used a different column for the same concept, IGNORE the earlier column and use the resolved script ID instead. "
+                "Example: if 'platform' resolves to custitem_fw_platform (item field), use `BUILTIN.DF(i.custitem_fw_platform)` — NOT tl.class or any other field from prior queries."
             )
             parts.append(self._tenant_vernacular)
             parts.append(
@@ -313,8 +315,12 @@ class UnifiedAgent(BaseSpecialistAgent):
 
         # Soul quirks
         if self._soul_quirks:
-            parts.append("\n## TENANT NETSUITE QUIRKS AND BUSINESS LOGIC")
-            parts.append("Pay strict attention to these tenant-specific quirks:")
+            parts.append("\n## TENANT NETSUITE QUIRKS AND BUSINESS LOGIC — HIGHEST PRIORITY")
+            parts.append(
+                "These are the tenant's explicit field mappings and business rules. "
+                "They ALWAYS take priority over conversation history and proven patterns. "
+                "If a field mapping here contradicts a query from earlier in the conversation, USE THE MAPPING HERE."
+            )
             parts.append(self._soul_quirks)
 
         # User timezone
