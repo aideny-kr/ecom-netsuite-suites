@@ -3,11 +3,9 @@
 import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { apiClient } from "@/lib/api-client";
+import { useCreateSavedQuery } from "@/hooks/use-saved-queries";
 import { cn } from "@/lib/utils";
 import type { ChatMessage } from "@/lib/types";
-import type { SavedQueryCreatePayload, SavedQueryResponse } from "@/types/analytics";
 import { ToolCallStepCard } from "@/components/chat/tool-call-step";
 import { ChangeProposalCard } from "@/components/chat/change-proposal-card";
 import { WorkspaceToolCard } from "@/components/chat/workspace-tool-card";
@@ -341,7 +339,6 @@ function InlineSaveLink({
   message: ChatMessage;
   messages: ChatMessage[];
 }) {
-  const queryClient = useQueryClient();
   const [state, setState] = useState<"idle" | "saving" | "saved">("idle");
 
   const suiteqlCall = message.tool_calls?.find(
@@ -356,14 +353,7 @@ function InlineSaveLink({
     .find((m) => m.role === "user");
   const autoName = prevUserMsg?.content?.slice(0, 120) ?? "Saved Query";
 
-  const mutation = useMutation({
-    mutationFn: (data: SavedQueryCreatePayload) =>
-      apiClient.post<SavedQueryResponse>("/api/v1/skills", data),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["saved-queries"] });
-      setState("saved");
-    },
-  });
+  const mutation = useCreateSavedQuery();
 
   if (!queryText) return null;
 
@@ -381,7 +371,10 @@ function InlineSaveLink({
       <button
         onClick={() => {
           setState("saving");
-          mutation.mutate({ name: autoName, query_text: queryText });
+          mutation.mutate(
+            { name: autoName, query_text: queryText },
+            { onSuccess: () => setState("saved") },
+          );
         }}
         disabled={mutation.isPending}
         className="flex items-center gap-1.5 text-[11px] text-muted-foreground hover:text-primary transition-colors"

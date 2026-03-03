@@ -63,6 +63,20 @@ SUM(tl.amount) * -1 as revenue_usd
 SUM(tl.foreignamount) * -1 as revenue_in_txn_currency
 ```
 
+## Margin / COGS Calculations — Currency Consistency
+
+When computing margins (revenue minus COGS), ALWAYS use the same currency column for both sides. Use `tl.amount` (base currency) for both revenue and COGS lines. NEVER mix `tl.foreignamount` with `tl.amount` — summing `foreignamount` across currencies (AUD + GBP + EUR) produces meaningless numbers.
+
+```sql
+-- CORRECT: both revenue and COGS use tl.amount (base currency)
+SUM(tl.amount * -1) as revenue_usd   -- from CustInvc lines
+SUM(tl.amount * -1) as cogs_usd      -- from iscogs = 'T' lines
+
+-- WRONG: mixing currency columns
+SUM(tl.foreignamount * -1) as revenue   -- transaction currency (mixed!)
+SUM(tl.amount * -1) as cogs             -- base currency (USD)
+```
+
 ## Exchange Rate Considerations
 
 - `t.exchangerate` converts from transaction currency to subsidiary base currency

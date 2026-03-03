@@ -9,12 +9,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.dependencies import get_current_user
+from app.core.dependencies import get_current_user, require_permission
 from app.models.connection import Connection
 from app.models.saved_query import SavedSuiteQLQuery
 from app.models.user import User
 from app.services import audit_service
-from app.services.skills_service import get_saved_query, inject_fetch_limit
+from app.services.skills_service import delete_saved_query, get_saved_query, inject_fetch_limit
 
 router = APIRouter(prefix="/skills", tags=["skills"])
 
@@ -233,3 +233,26 @@ async def trigger_export(
     )
 
     return ExportResponse(task_id=task.id, status="queued")
+
+
+@router.delete("/{query_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_saved_query_endpoint(
+    query_id: uuid.UUID,
+    user: Annotated[User, Depends(require_permission("skills.manage"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Delete a saved query by ID."""
+    deleted = await delete_saved_query(db, query_id, user.tenant_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Saved query not found.")
+
+    await audit_service.log_event(
+        db=db,
+        tenant_id=user.tenant_id,
+        category="skills",
+        action="skills.delete",
+        actor_id=user.id,
+        resource_type="saved_suiteql_query",
+        resource_id=str(query_id),
+    )
+    await db.commit()

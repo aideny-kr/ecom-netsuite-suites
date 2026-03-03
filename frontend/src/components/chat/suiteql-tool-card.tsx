@@ -1,10 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { apiClient } from "@/lib/api-client";
+import { useCreateSavedQuery } from "@/hooks/use-saved-queries";
 import type { ToolCallStep } from "@/lib/types";
-import type { SavedQueryCreatePayload, SavedQueryResponse } from "@/types/analytics";
 import { cn } from "@/lib/utils";
 import {
   ChevronDown,
@@ -25,22 +23,19 @@ export function SuiteQLToolCard({ step, userQuestion }: SuiteQLToolCardProps) {
   const [open, setOpen] = useState(false);
   const [saveMode, setSaveMode] = useState<"idle" | "editing" | "saved">("idle");
   const [name, setName] = useState(userQuestion?.slice(0, 120) ?? "");
-  const queryClient = useQueryClient();
 
   const queryText = (step.params?.query as string) ?? "";
 
-  const mutation = useMutation({
-    mutationFn: (data: SavedQueryCreatePayload) =>
-      apiClient.post<SavedQueryResponse>("/api/v1/skills", data),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["saved-queries"] });
-      setSaveMode("saved");
-    },
-  });
+  const mutation = useCreateSavedQuery();
+
+  const handleMutationSuccess = () => setSaveMode("saved");
 
   const handleSave = () => {
     if (!name.trim() || !queryText.trim()) return;
-    mutation.mutate({ name: name.trim(), query_text: queryText.trim() });
+    mutation.mutate(
+      { name: name.trim(), query_text: queryText.trim() },
+      { onSuccess: handleMutationSuccess },
+    );
   };
 
   // Parse row count from result_summary if available

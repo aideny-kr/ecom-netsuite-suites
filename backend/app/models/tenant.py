@@ -52,6 +52,7 @@ class TenantConfig(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
     # Multi-agent orchestration
     multi_agent_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    unified_agent_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
 
     # Onboarding
     onboarding_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

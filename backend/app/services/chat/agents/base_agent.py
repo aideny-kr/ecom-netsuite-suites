@@ -10,6 +10,7 @@ from __future__ import annotations
 import abc
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -101,6 +102,48 @@ def _truncate_tool_result(result_str: str) -> str:
 
 # Backward-compatible alias
 _truncate_error_payload = _truncate_tool_result
+
+_CONFIDENCE_RE = re.compile(r"<confidence>(\d)</confidence>")
+_LOW_CONFIDENCE_DISCLAIMER = (
+    "\n\n*Note: I'm not fully confident in this result. "
+    "Please verify the data before acting on it.*"
+)
+
+
+def parse_confidence(text: str) -> int | None:
+    """Extract confidence score (1-5) from <confidence>N</confidence> tag."""
+    match = _CONFIDENCE_RE.search(text)
+    if match:
+        return int(match.group(1))
+    return None
+
+
+def strip_confidence_tag(text: str) -> str:
+    """Remove <confidence>N</confidence> tag from text."""
+    return _CONFIDENCE_RE.sub("", text).strip()
+
+
+async def _maybe_store_query_pattern(
+    db: "AsyncSession",
+    tenant_id: "uuid.UUID",
+    user_question: str,
+    tool_calls_log: list[dict],
+) -> None:
+    """Auto-extract and store successful SuiteQL query patterns (fire-and-forget)."""
+    # Only store if there were successful SuiteQL calls
+    has_suiteql = any(
+        c.get("tool") == "netsuite_suiteql"
+        and '"error"' not in c.get("result_summary", "").lower()
+        for c in tool_calls_log
+    )
+    if not has_suiteql:
+        return
+
+    try:
+        from app.services.query_pattern_service import extract_and_store_pattern
+        await extract_and_store_pattern(db, tenant_id, user_question, tool_calls_log)
+    except Exception:
+        logger.warning("query_pattern.auto_extract_failed", exc_info=True)
 
 
 async def _resolve_default_workspace(
@@ -241,6 +284,18 @@ class BaseSpecialistAgent(abc.ABC):
                 # Pure text response — agent is done
                 if not response.tool_use_blocks:
                     final_text = "\n".join(response.text_blocks) if response.text_blocks else ""
+
+                    # Parse and handle confidence scoring
+                    confidence = parse_confidence(final_text)
+                    if confidence is not None:
+                        final_text = strip_confidence_tag(final_text)
+                        if confidence <= 2:
+                            final_text += _LOW_CONFIDENCE_DISCLAIMER
+                        logger.info("agent.confidence agent=%s score=%d", self.agent_name, confidence)
+
+                    # Auto-extract query patterns (fire-and-forget)
+                    await _maybe_store_query_pattern(db, self.tenant_id, task, tool_calls_log)
+
                     return AgentResult(
                         success=True,
                         data=final_text,
@@ -315,6 +370,10 @@ class BaseSpecialistAgent(abc.ABC):
                 messages.append(adapter.build_tool_result_message(tool_results_content))
 
             # Loop exhausted — make one final call without tools
+            print(
+                f"[AGENT] {self.agent_name} loop exhausted {self.max_steps} steps, forcing final response",
+                flush=True,
+            )
             logger.warning(
                 "Agent %s loop exhausted %d steps, forcing final response",
                 self.agent_name,
@@ -330,6 +389,15 @@ class BaseSpecialistAgent(abc.ABC):
             total_output_tokens += response.usage.output_tokens
             final_text = "\n".join(response.text_blocks) if response.text_blocks else ""
 
+            confidence = parse_confidence(final_text)
+            if confidence is not None:
+                final_text = strip_confidence_tag(final_text)
+                if confidence <= 2:
+                    final_text += _LOW_CONFIDENCE_DISCLAIMER
+                logger.info("agent.confidence agent=%s score=%d", self.agent_name, confidence)
+
+            await _maybe_store_query_pattern(db, self.tenant_id, task, tool_calls_log)
+
             return AgentResult(
                 success=True,
                 data=final_text,
@@ -341,6 +409,196 @@ class BaseSpecialistAgent(abc.ABC):
         except Exception as exc:
             logger.error("Agent %s failed: %s", self.agent_name, exc, exc_info=True)
             return AgentResult(
+                success=False,
+                error=str(exc),
+                tool_calls_log=tool_calls_log,
+                tokens_used=TokenUsage(total_input_tokens, total_output_tokens),
+                agent_name=self.agent_name,
+            )
+
+    async def run_streaming(
+        self,
+        task: str,
+        context: dict[str, Any],
+        db: "AsyncSession",
+        adapter: "BaseLLMAdapter",
+        model: str,
+    ):
+        """Execute the agentic loop with streaming text output.
+
+        Yields events:
+        - ("text", chunk) — text token from the LLM stream
+        - ("tool_status", message) — tool execution status
+        - ("response", AgentResult) — final result when done
+
+        This allows the orchestrator to stream directly to the client
+        without a separate synthesis step.
+        """
+        from app.services.chat.tools import execute_tool_call
+        from app.services.policy_service import evaluate_tool_call as policy_evaluate
+        from app.services.policy_service import get_active_policy, redact_output
+
+        tool_calls_log: list[dict] = []
+        total_input_tokens = 0
+        total_output_tokens = 0
+
+        active_policy = await get_active_policy(db, self.tenant_id)
+
+        context_block = ""
+        if context.get("prior_results"):
+            prior = json.dumps(context["prior_results"], default=str)
+            context_block = f"\n\n<prior_agent_results>\n{prior}\n</prior_agent_results>"
+
+        messages: list[dict] = [
+            {"role": "user", "content": f"Task: {task}{context_block}"}
+        ]
+
+        tools = self.tool_definitions if self.tool_definitions else None
+
+        try:
+            for step in range(self.max_steps):
+                # Stream the LLM response
+                response = None
+                async for event_type, payload in adapter.stream_message(
+                    model=model,
+                    max_tokens=16384,
+                    system=self.system_prompt,
+                    messages=messages,
+                    tools=tools,
+                ):
+                    if event_type == "text":
+                        yield "text", payload
+                    elif event_type == "response":
+                        response = payload
+
+                if not response:
+                    break
+
+                total_input_tokens += response.usage.input_tokens
+                total_output_tokens += response.usage.output_tokens
+
+                # Pure text response — done
+                if not response.tool_use_blocks:
+                    final_text = "\n".join(response.text_blocks) if response.text_blocks else ""
+
+                    confidence = parse_confidence(final_text)
+                    if confidence is not None:
+                        final_text = strip_confidence_tag(final_text)
+                        if confidence <= 2:
+                            final_text += _LOW_CONFIDENCE_DISCLAIMER
+                        logger.info("agent.confidence agent=%s score=%d", self.agent_name, confidence)
+
+                    await _maybe_store_query_pattern(db, self.tenant_id, task, tool_calls_log)
+
+                    yield "response", AgentResult(
+                        success=True,
+                        data=final_text,
+                        tool_calls_log=tool_calls_log,
+                        tokens_used=TokenUsage(total_input_tokens, total_output_tokens),
+                        agent_name=self.agent_name,
+                    )
+                    return
+
+                # Process tool calls
+                messages.append(adapter.build_assistant_message(response))
+                tool_results_content = []
+
+                for block in response.tool_use_blocks:
+                    if block.name.startswith("workspace_"):
+                        ws_id = block.input.get("workspace_id", "")
+                        if not ws_id or not _is_valid_uuid(ws_id):
+                            resolved = await _resolve_default_workspace(db, self.tenant_id)
+                            if resolved:
+                                block.input["workspace_id"] = resolved
+
+                    yield "tool_status", f"Executing {block.name}..."
+
+                    t0 = time.monotonic()
+                    policy_result = policy_evaluate(active_policy, block.name, block.input)
+                    if not policy_result["allowed"]:
+                        result_str = json.dumps(
+                            {"error": f"Policy blocked: {policy_result.get('reason', 'Not allowed')}"}
+                        )
+                    else:
+                        result_str = await execute_tool_call(
+                            tool_name=block.name,
+                            tool_input=block.input,
+                            tenant_id=self.tenant_id,
+                            actor_id=self.user_id,
+                            correlation_id=self.correlation_id,
+                            db=db,
+                        )
+                        if active_policy and active_policy.blocked_fields:
+                            try:
+                                parsed = json.loads(result_str)
+                                parsed = redact_output(active_policy, parsed)
+                                result_str = json.dumps(parsed, default=str)
+                            except (json.JSONDecodeError, TypeError):
+                                pass
+
+                    result_str = _truncate_tool_result(result_str)
+                    elapsed_ms = int((time.monotonic() - t0) * 1000)
+
+                    tool_calls_log.append({
+                        "step": step,
+                        "agent": self.agent_name,
+                        "tool": block.name,
+                        "params": block.input,
+                        "result_summary": result_str[:500],
+                        "duration_ms": elapsed_ms,
+                    })
+
+                    tool_results_content.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": result_str,
+                    })
+
+                messages.append(adapter.build_tool_result_message(tool_results_content))
+
+            # Loop exhausted — force final response
+            print(
+                f"[AGENT] {self.agent_name} streaming loop exhausted {self.max_steps} steps",
+                flush=True,
+            )
+            response = None
+            async for event_type, payload in adapter.stream_message(
+                model=model,
+                max_tokens=16384,
+                system=self.system_prompt,
+                messages=messages,
+            ):
+                if event_type == "text":
+                    yield "text", payload
+                elif event_type == "response":
+                    response = payload
+
+            if response:
+                total_input_tokens += response.usage.input_tokens
+                total_output_tokens += response.usage.output_tokens
+
+            final_text = "\n".join(response.text_blocks) if response and response.text_blocks else ""
+
+            confidence = parse_confidence(final_text)
+            if confidence is not None:
+                final_text = strip_confidence_tag(final_text)
+                if confidence <= 2:
+                    final_text += _LOW_CONFIDENCE_DISCLAIMER
+                logger.info("agent.confidence agent=%s score=%d", self.agent_name, confidence)
+
+            await _maybe_store_query_pattern(db, self.tenant_id, task, tool_calls_log)
+
+            yield "response", AgentResult(
+                success=True,
+                data=final_text,
+                tool_calls_log=tool_calls_log,
+                tokens_used=TokenUsage(total_input_tokens, total_output_tokens),
+                agent_name=self.agent_name,
+            )
+
+        except Exception as exc:
+            logger.error("Agent %s streaming failed: %s", self.agent_name, exc, exc_info=True)
+            yield "response", AgentResult(
                 success=False,
                 error=str(exc),
                 tool_calls_log=tool_calls_log,

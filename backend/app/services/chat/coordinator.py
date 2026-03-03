@@ -468,8 +468,15 @@ class MultiAgentCoordinator:
                 budget_remaining -= result.tokens_used.input_tokens + result.tokens_used.output_tokens
 
             # ── Step 3: Evaluate ──────────────────────────────────────
-            if all(r.success for r in round_results):
-                break  # All succeeded, proceed to synthesis
+            all_ok = all(r.success for r in round_results)
+            any_soft_fail = any(self._is_suiteql_soft_failure(r) for r in round_results)
+            print(
+                f"[COORDINATOR] Evaluate round {round_num}: all_ok={all_ok}, any_soft_fail={any_soft_fail}, "
+                f"agents={[(r.agent_name, r.success) for r in round_results]}",
+                flush=True,
+            )
+            if all_ok and not any_soft_fail:
+                break  # All succeeded with real data, proceed to synthesis
 
         # ── Step 4: Synthesise ────────────────────────────────────────
         final_text, synth_tokens = await self._synthesise(
@@ -558,8 +565,19 @@ class MultiAgentCoordinator:
                 total_output += result.tokens_used.output_tokens
                 budget_remaining -= result.tokens_used.input_tokens + result.tokens_used.output_tokens
 
-            if all(r.success for r in round_results):
+            all_ok = all(r.success for r in round_results)
+            any_soft_fail = any(self._is_suiteql_soft_failure(r) for r in round_results)
+            print(
+                f"[COORDINATOR] Evaluate round {round_num}: all_ok={all_ok}, any_soft_fail={any_soft_fail}, "
+                f"agents={[(r.agent_name, r.success) for r in round_results]}",
+                flush=True,
+            )
+            if all_ok and not any_soft_fail:
                 break
+
+            # Emit status for retry round
+            if not all_ok or any_soft_fail:
+                yield {"type": "tool_status", "content": "Looking up documentation..."}
 
         # ── Step 3: Streaming synthesis ──
         yield {"type": "tool_status", "content": "Composing answer..."}
@@ -846,30 +864,107 @@ class MultiAgentCoordinator:
             )
         return None
 
+    # ── Soft-failure detection ────────────────────────────────────────────
+
+    _SOFT_FAILURE_PHRASES = frozenset({
+        "couldn't find",
+        "could not find",
+        "unable to",
+        "i was not able",
+        "i wasn't able",
+        "no data",
+        "no results",
+        "0 rows",
+        "zero rows",
+        "not supported",
+        "unknown identifier",
+        "invalid search",
+        "i don't have enough information",
+        "i apologize",
+        "i'm sorry",
+        "unfortunately",
+    })
+
+    @staticmethod
+    def _is_suiteql_soft_failure(result: AgentResult) -> bool:
+        """Detect SuiteQL agents that returned success=True but clearly failed.
+
+        This catches loop-exhaustion scenarios where the agent burned all steps
+        without finding usable data and produced an apologetic final response.
+        """
+        if result.agent_name != "suiteql" or not result.success:
+            return False
+
+        text = (result.data or "").lower()
+        if not text:
+            return True  # Empty response = soft failure
+
+        # Check for failure language in the output
+        hit_count = sum(1 for phrase in MultiAgentCoordinator._SOFT_FAILURE_PHRASES if phrase in text)
+        if hit_count >= 2:
+            return True
+
+        # Check if agent made any tool calls that returned actual data rows
+        has_data_rows = False
+        for tc in result.tool_calls_log:
+            if tc.get("tool") in ("netsuite_suiteql", "external_mcp_suiteql"):
+                summary = (tc.get("result_summary") or "").lower()
+                # Successful queries contain row data or "rows" count
+                if "items" in summary and '"error"' not in summary:
+                    has_data_rows = True
+                    break
+        if not has_data_rows and len(result.tool_calls_log) > 0:
+            return True
+
+        return False
+
     def _get_retry_steps(
         self,
         plan: CoordinatorPlan,
         results: list[AgentResult],
     ) -> list[PlanStep]:
-        """Determine retry steps based on failed agents."""
+        """Determine retry steps based on failed or soft-failed agents."""
         failed = [r for r in results if not r.success]
-        if not failed:
+
+        # Also pick up SuiteQL soft failures (success=True but no useful data)
+        soft_failed = [r for r in results if self._is_suiteql_soft_failure(r)]
+        all_failed = failed + [r for r in soft_failed if r not in failed]
+
+        if not all_failed:
             return []
 
         retry_steps = []
-        for result in failed:
+        for result in all_failed:
             if result.agent_name == "suiteql":
-                error_context = result.error or "unknown error"
-                retry_steps.append(
-                    PlanStep(
-                        agent="rag",
-                        task=f"Look up correct field names for NetSuite query that failed with: {error_context[:200]}",
-                    )
-                )
                 original_task = next(
                     (s.task for s in plan.steps if s.agent == "suiteql"),
                     "Retry the original query",
                 )
+                if result.success:
+                    # Soft failure — escalate to RAG for doc/web lookup
+                    print(
+                        f"[COORDINATOR] SuiteQL soft-failure detected, escalating to RAG for: {original_task[:100]}",
+                        flush=True,
+                    )
+                    retry_steps.append(
+                        PlanStep(
+                            agent="rag",
+                            task=(
+                                f"Search NetSuite documentation for the correct table names and columns "
+                                f"needed to answer: {original_task}. "
+                                f"Try web_search if internal docs have no results."
+                            ),
+                        )
+                    )
+                else:
+                    # Hard failure — original behavior
+                    error_context = result.error or "unknown error"
+                    retry_steps.append(
+                        PlanStep(
+                            agent="rag",
+                            task=f"Look up correct field names for NetSuite query that failed with: {error_context[:200]}",
+                        )
+                    )
                 retry_steps.append(
                     PlanStep(
                         agent="suiteql",

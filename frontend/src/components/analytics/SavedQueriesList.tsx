@@ -1,19 +1,14 @@
 "use client";
 
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { apiClient } from "@/lib/api-client";
+import { useSavedQueries } from "@/hooks/use-saved-queries";
 import type { SavedQueryResponse } from "@/types/analytics";
 import { Card, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Loader2, Table as TableIcon, Database } from "lucide-react";
 import { QueryPreviewModal } from "@/components/analytics/QueryPreviewModal";
 
 export function SavedQueriesList({ enabled }: { enabled: boolean }) {
-  const { data: queries, isLoading } = useQuery<SavedQueryResponse[]>({
-    queryKey: ["saved-queries"],
-    queryFn: () => apiClient.get<SavedQueryResponse[]>("/api/v1/skills"),
-    enabled,
-  });
+  const { data: queries, isLoading } = useSavedQueries(enabled);
 
   const [selectedQuery, setSelectedQuery] = useState<SavedQueryResponse | null>(null);
 

@@ -84,6 +84,9 @@ class Settings(BaseSettings):
     MULTI_AGENT_MAX_BUDGET_TOKENS: int = 50000
     MULTI_AGENT_MAX_RETRIES: int = 2
 
+    # Unified agent (Phase 2) — single agent replaces multi-agent routing
+    UNIFIED_AGENT_ENABLED: bool = True
+
     # Web search
     WEB_SEARCH_PROVIDER: str = "duckduckgo"  # Options: "duckduckgo", "tavily"
     TAVILY_API_KEY: str = ""  # For future Tavily upgrade

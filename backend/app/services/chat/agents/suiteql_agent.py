@@ -42,6 +42,7 @@ _SUITEQL_TOOL_NAMES = frozenset(
         "netsuite_suiteql",
         "netsuite_get_metadata",
         "rag_search",
+        "web_search",
         "tenant_save_learned_rule",
     }
 )
@@ -202,10 +203,22 @@ If the user's query mentions ANY custom record by name (even partially), you MUS
 
 WORKFLOW:
 1. If a custom record matched in Step 0: Use netsuite_suiteql to run `SELECT * FROM <resolved_lowercase_script_id> WHERE ROWNUM <= 5` to discover columns, then query with filters.
-2. If no custom record matched and it's not in vernacular: Query standard tables (transaction, customer, item, etc.) using netsuite_suiteql (local REST API).
-3. RECOVER FROM ERRORS: If a query fails with "Unknown identifier", fix the column name and retry. If it fails with syntax error, fix and retry.
-4. STOP WHEN YOU HAVE DATA: Once a query returns 1+ rows with data that answers the user's question, STOP and present those results. Do NOT run additional queries to "add more columns" or "get more detail" — especially on the item table where adding columns causes 0 rows. The user can always ask follow-up questions if they need more fields.
-5. ASK FOR HELP ONLY WHEN STUCK: Only ask the user for clarification if you've exhausted all approaches.
+2. **CHECK <domain_knowledge> FIRST**: If a `<domain_knowledge>` block is injected below, READ IT before writing any query. It contains curated table names, column names, and example queries for common scenarios (inventory, transactions, etc.). Use those exact table/column names — they are verified to work.
+3. **PREFLIGHT SCHEMA CHECK** — Before executing ANY SuiteQL query:
+   - Verify every column in your query exists in <tenant_schema>, <domain_knowledge>, or <tenant_vernacular>.
+   - If your query references columns NOT confirmed in any of those sources, use web_search ("NetSuite SuiteQL [table] columns") or netsuite_get_metadata to verify they exist BEFORE running the query.
+   - This prevents wasted steps on "Unknown identifier" errors and saves your step budget.
+   - Standard safe columns that never need verification: id, tranid, trandate, type, entity, status, total, foreigntotal, subsidiary, currency, exchangerate (transaction); id, companyname, email, phone (customer); id, itemid, displayname, description (item).
+4. If no custom record matched and it's not in vernacular: Query standard tables (transaction, customer, item, etc.) using netsuite_suiteql (local REST API).
+5. RECOVER FROM ERRORS: If a query fails with "Unknown identifier", fix the column name and retry. If it fails with syntax error, fix and retry.
+6. STOP WHEN YOU HAVE DATA: Once a query returns 1+ rows with data that answers the user's question, STOP and present those results. Do NOT run additional queries to "add more columns" or "get more detail" — especially on the item table where adding columns causes 0 rows. The user can always ask follow-up questions if they need more fields.
+7. ASK FOR HELP ONLY WHEN STUCK: Only ask the user for clarification if you've exhausted all approaches.
+
+INVENTORY QUERIES — CRITICAL:
+- For inventory/stock/quantity queries, use `inventoryitemlocations` table — NOT `inventorybalance` (which is often restricted via SuiteQL REST API) and NOT item-level aggregate fields like `item.quantityavailable` (which often return 0).
+- `inventoryitemlocations` gives per-item, per-location quantities: `quantityonhand`, `quantityavailable`, `quantitycommitted`, `quantityonorder`.
+- Always break out inventory results BY LOCATION using `BUILTIN.DF(iil.location)` — users expect location-specific data.
+- Example: `SELECT i.itemid, BUILTIN.DF(iil.location) as location, iil.quantityonhand, iil.quantityavailable FROM inventoryitemlocations iil JOIN item i ON iil.item = i.id WHERE LOWER(i.itemid) LIKE '%search_term%' AND iil.quantityonhand != 0 ORDER BY i.itemid, location`
 
 TOOL SELECTION — CRITICAL:
 - netsuite_suiteql: Local REST API for SuiteQL (OAuth 2.0). USE THIS AS DEFAULT for ALL queries — both custom records (customrecord_*) AND standard tables (transaction, customer, item, etc.). Has full permissions.
@@ -213,6 +226,7 @@ TOOL SELECTION — CRITICAL:
 - netsuite_get_metadata: Discover column names for standard record types, and to safely discover the script_id of a custom record if guessing is tempting.
 - tenant_save_learned_rule: When the user gives a standing instruction, correction, or preference about how queries or outputs should work (e.g., "always show Value not ID", "remember that X means Y"), call this tool to persist it for future sessions.
 - rag_search: Search internal documentation.
+- web_search: Search the web for NetSuite record schemas and SuiteQL syntax. Use this when you need to know which columns exist on a standard record type (e.g., item, employee, transactionaccountingline) and the tenant metadata doesn't have the answer. Query format: "NetSuite SuiteQL [record_type] table columns". Max 1 web_search call per run. Use it early (step 1-2) if you're uncertain about schema — don't waste steps guessing column names first. Do NOT use web_search for business data questions or tenant-specific queries.
 
 CUSTOM RECORD TABLE NAMING — IMPORTANT:
 - Custom record tables in SuiteQL use LOWERCASE scriptid: `customrecord_r_inv_processor` (not CUSTOMRECORD_R_INV_PROCESSOR)
@@ -225,7 +239,7 @@ ERROR RECOVERY:
 - 0 rows on ITEM table after basic query succeeded → DO NOT retry with different column combos. This means the extra columns don't exist on this item type. Call netsuite_get_metadata immediately to discover valid columns.
 - 0 rows on other tables → report "0 rows found" with the query you ran. This is often a legitimate result (no matching data). Only retry if you suspect the query logic itself was incorrect (e.g., wrong date function, wrong column name).
 - Each retry MUST be meaningfully different from the previous attempt. Removing or swapping columns on the same table is NOT meaningfully different — escalate to metadata discovery instead.
-- BUDGET AWARENESS: You have only 4 steps. Do not waste steps on trial-and-error column guessing. If step 1 fails, use step 2 for metadata discovery, step 3 for the corrected query, step 4 as final fallback.
+- BUDGET AWARENESS: You have only 4 steps. Do not waste steps on trial-and-error column guessing. If step 1 fails, use step 2 for metadata discovery or web_search to look up the record schema, step 3 for the corrected query, step 4 as final fallback.
 </agentic_workflow>
 
 <output_instructions>

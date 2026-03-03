@@ -1,9 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { apiClient } from "@/lib/api-client";
-import type { SavedQueryCreatePayload, SavedQueryResponse } from "@/types/analytics";
+import { useCreateSavedQuery } from "@/hooks/use-saved-queries";
 import {
   Dialog,
   DialogContent,
@@ -60,28 +58,23 @@ export function AnalyticsDashboard({
 }
 
 function SaveQueryForm({ onClose }: { onClose: () => void }) {
-  const queryClient = useQueryClient();
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [queryText, setQueryText] = useState("");
 
-  const mutation = useMutation({
-    mutationFn: (data: SavedQueryCreatePayload) =>
-      apiClient.post<SavedQueryResponse>("/api/v1/skills", data),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["saved-queries"] });
-      onClose();
-    },
-  });
+  const mutation = useCreateSavedQuery();
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!name.trim() || !queryText.trim()) return;
-    mutation.mutate({
-      name: name.trim(),
-      description: description.trim() || undefined,
-      query_text: queryText.trim(),
-    });
+    mutation.mutate(
+      {
+        name: name.trim(),
+        description: description.trim() || undefined,
+        query_text: queryText.trim(),
+      },
+      { onSuccess: onClose },
+    );
   };
 
   return (

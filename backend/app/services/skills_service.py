@@ -6,7 +6,7 @@ import re
 import uuid
 from typing import Any, Callable, Coroutine
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.saved_query import SavedSuiteQLQuery
@@ -23,6 +23,19 @@ async def get_saved_query(
         )
     )
     return result.scalar_one_or_none()
+
+
+async def delete_saved_query(
+    db: AsyncSession, query_id: uuid.UUID, tenant_id: uuid.UUID
+) -> bool:
+    """Delete a saved query scoped to the tenant. Returns True if deleted."""
+    result = await db.execute(
+        delete(SavedSuiteQLQuery).where(
+            SavedSuiteQLQuery.id == query_id,
+            SavedSuiteQLQuery.tenant_id == tenant_id,
+        )
+    )
+    return result.rowcount > 0
 
 
 def inject_fetch_limit(query_text: str, limit: int = 500) -> str:

@@ -35,7 +35,7 @@ class RAGAgent(BaseSpecialistAgent):
 
     @property
     def max_steps(self) -> int:
-        return 2  # rag search → web fallback (stop early if empty)
+        return 3  # rag_search → refined rag_search → web_search fallback
 
     @property
     def system_prompt(self) -> str:
@@ -46,15 +46,16 @@ class RAGAgent(BaseSpecialistAgent):
             "LANGUAGE: Always respond in English only.\n"
             "\n"
             "WORKFLOW:\n"
-            "1. Use the rag_search tool to search stored documents first (1 call, up to 2 different queries max).\n"
-            "2. If internal docs return 0 results, try ONE web_search call with a focused query.\n"
-            "3. Return whatever you found. If nothing is found, say so immediately and STOP.\n"
+            "1. Use the rag_search tool to search stored documents first.\n"
+            "2. If results are poor or incomplete, try a refined rag_search with different search terms.\n"
+            "3. If internal docs return 0 results after refinement, try ONE web_search call with a focused query.\n"
+            "4. Return whatever you found. If nothing is found, say so immediately and STOP.\n"
             "\n"
             "CRITICAL — MINIMIZE TOOL CALLS:\n"
-            "- You have a strict budget of 3-4 tool calls total. Do NOT exhaust them.\n"
+            "- You have a strict budget of 4-5 tool calls total. Do NOT exhaust them.\n"
             "- If both rag_search and web_search return 0 results, STOP IMMEDIATELY and report "
             '"No relevant documentation found." Do NOT retry with rephrased queries.\n'
-            "- Never make more than 2 rag_search calls or 2 web_search calls.\n"
+            "- Never make more than 2 rag_search calls or 1 web_search call.\n"
             "\n"
             "SEARCH TIPS:\n"
             "- For custom field lookups, search with terms like 'custbody', 'custcol', "

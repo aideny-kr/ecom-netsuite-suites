@@ -21,7 +21,13 @@ class AnthropicAdapter(BaseLLMAdapter):
         kwargs: dict = {
             "model": model,
             "max_tokens": max_tokens,
-            "system": system,
+            "system": [
+                {
+                    "type": "text",
+                    "text": system,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
             "messages": messages,
         }
         if tools:
@@ -61,7 +67,13 @@ class AnthropicAdapter(BaseLLMAdapter):
         kwargs: dict = {
             "model": model,
             "max_tokens": max_tokens,
-            "system": system,
+            "system": [
+                {
+                    "type": "text",
+                    "text": system,
+                    "cache_control": {"type": "ephemeral"},
+                }
+            ],
             "messages": messages,
         }
         if tools:

@@ -351,7 +351,6 @@ async def run_chat_turn(
             pass  # Fall through to single-agent
 
         if use_multi_agent:
-            from app.services.chat.coordinator import MultiAgentCoordinator
             from app.services.chat.llm_adapter import get_adapter as get_specialist_adapter
             from app.services.netsuite_metadata_service import get_active_metadata
 
@@ -360,6 +359,161 @@ async def run_chat_turn(
                 api_key if settings.MULTI_AGENT_SPECIALIST_PROVIDER == provider else settings.ANTHROPIC_API_KEY,
             )
             metadata = await get_active_metadata(db, tenant_id)
+
+            # ── Check for unified agent flag (Phase 2) ──
+            use_unified = settings.UNIFIED_AGENT_ENABLED
+            try:
+                tc_result2 = await db.execute(
+                    sa_select(TenantConfig.unified_agent_enabled).where(TenantConfig.tenant_id == tenant_id)
+                )
+                tenant_ua = tc_result2.scalar_one_or_none()
+                if isinstance(tenant_ua, bool):
+                    use_unified = tenant_ua
+            except Exception:
+                pass  # Column may not exist yet — fall through
+
+            if use_unified:
+                # ── Unified agent path: context assembly → single agent → stream ──
+                from app.services.chat.agents import UnifiedAgent
+                from app.services.chat.coordinator import MultiAgentCoordinator
+
+                # Use coordinator just for context enrichment
+                coordinator = MultiAgentCoordinator(
+                    db=db,
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    correlation_id=correlation_id,
+                    main_adapter=adapter,
+                    main_model=model,
+                    specialist_adapter=specialist_adapter,
+                    specialist_model=settings.MULTI_AGENT_SPECIALIST_MODEL,
+                    metadata=metadata,
+                    policy=active_policy,
+                    system_prompt=system_prompt,
+                    user_timezone=user_timezone,
+                )
+
+                # Assemble context (entity resolution + domain knowledge)
+                context: dict[str, Any] = {}
+                try:
+                    vernacular = await coordinator._resolve_entities(sanitized_input)
+                    context["tenant_vernacular"] = vernacular
+                except Exception:
+                    logger.warning("unified_agent.entity_resolution_failed", exc_info=True)
+                try:
+                    dk = await coordinator._retrieve_domain_knowledge(sanitized_input)
+                    context["domain_knowledge"] = dk
+                except Exception:
+                    logger.warning("unified_agent.domain_knowledge_failed", exc_info=True)
+                context["user_timezone"] = user_timezone
+
+                # Create and run unified agent
+                unified_agent = UnifiedAgent(
+                    tenant_id=tenant_id,
+                    user_id=user_id,
+                    correlation_id=correlation_id,
+                    metadata=metadata,
+                    policy=active_policy,
+                )
+
+                streamed_text_parts: list[str] = []
+                agent_result = None
+
+                async for event_type, payload in unified_agent.run_streaming(
+                    task=sanitized_input,
+                    context=context,
+                    db=db,
+                    adapter=specialist_adapter,
+                    model=settings.MULTI_AGENT_SQL_MODEL,
+                ):
+                    if event_type == "text":
+                        streamed_text_parts.append(payload)
+                        yield {"type": "text", "content": payload}
+                    elif event_type == "tool_status":
+                        yield {"type": "tool_status", "content": payload}
+                    elif event_type == "response":
+                        agent_result = payload
+
+                if agent_result is None:
+                    final_text = "".join(streamed_text_parts).strip() or "I wasn't able to process that request."
+                    coord_result_tokens = (0, 0)
+                    coord_result_tool_calls: list[dict] = []
+                else:
+                    final_text = re.sub(r"\s*\[tool:\s*[^\]]+\]", "", agent_result.data or "").strip()
+                    coord_result_tokens = (agent_result.tokens_used.input_tokens, agent_result.tokens_used.output_tokens)
+                    coord_result_tool_calls = agent_result.tool_calls_log
+
+                assistant_msg = ChatMessage(
+                    tenant_id=tenant_id,
+                    session_id=session.id,
+                    role="assistant",
+                    content=final_text or "I wasn't able to find relevant information for that question.",
+                    tool_calls=coord_result_tool_calls if coord_result_tool_calls else None,
+                    citations=citations if citations else None,
+                    token_count=coord_result_tokens[0] + coord_result_tokens[1],
+                    input_tokens=coord_result_tokens[0],
+                    output_tokens=coord_result_tokens[1],
+                    model_used=settings.MULTI_AGENT_SQL_MODEL,
+                    provider_used=settings.MULTI_AGENT_SPECIALIST_PROVIDER,
+                    is_byok=is_byok,
+                )
+                db.add(assistant_msg)
+
+                if not session.title:
+                    session.title = user_message[:100].strip()
+                session.updated_at = func.now()
+
+                audit_payload: dict[str, Any] = {
+                    "mode": "unified_agent",
+                    "provider": settings.MULTI_AGENT_SPECIALIST_PROVIDER,
+                    "model": settings.MULTI_AGENT_SQL_MODEL,
+                    "steps": len(coord_result_tool_calls),
+                    "input_tokens": coord_result_tokens[0],
+                    "output_tokens": coord_result_tokens[1],
+                    "doc_chunks_count": len(state.doc_chunks) if state.doc_chunks else 0,
+                    "tools_called": [t["tool"] for t in coord_result_tool_calls],
+                }
+                await log_event(
+                    db=db,
+                    tenant_id=tenant_id,
+                    category="chat",
+                    action="chat.turn",
+                    actor_id=user_id,
+                    resource_type="chat_session",
+                    resource_id=str(session.id),
+                    correlation_id=correlation_id,
+                    payload=audit_payload,
+                )
+
+                if not is_byok:
+                    await deduct_chat_credits(db, tenant_id, settings.MULTI_AGENT_SQL_MODEL)
+
+                await db.commit()
+
+                asyncio.create_task(
+                    _dispatch_memory_update(
+                        tenant_id=tenant_id,
+                        user_id=user_id,
+                        db=db,
+                        user_message=sanitized_input,
+                        assistant_message=final_text,
+                    )
+                )
+
+                result_msg = {
+                    "id": str(assistant_msg.id),
+                    "role": assistant_msg.role,
+                    "content": assistant_msg.content,
+                    "tool_calls": assistant_msg.tool_calls,
+                    "citations": assistant_msg.citations,
+                }
+                if hasattr(assistant_msg, "created_at") and assistant_msg.created_at:
+                    result_msg["created_at"] = assistant_msg.created_at.isoformat()
+                yield {"type": "message", "message": result_msg}
+                return
+
+            # ── Legacy multi-agent path ──
+            from app.services.chat.coordinator import MultiAgentCoordinator
 
             coordinator = MultiAgentCoordinator(
                 db=db,

@@ -9,6 +9,7 @@ import {
   ScrollText,
   MessageSquare,
   Code,
+  Database,
   Settings,
   Table2,
   ChevronDown,
@@ -33,6 +34,7 @@ const iconMap = {
   ScrollText,
   MessageSquare,
   Code,
+  Database,
   Settings,
 } as const;
 
