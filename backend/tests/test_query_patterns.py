@@ -93,15 +93,15 @@ class TestPatternStorage:
             {
                 "tool": "netsuite_suiteql",
                 "params": {
-                    "query": "SELECT t.id, t.tranid FROM transaction t WHERE t.type = 'SalesOrd' ORDER BY t.id DESC FETCH FIRST 10 ROWS ONLY"
+                    "query": "SELECT t.type, COUNT(t.id) as cnt FROM transaction t WHERE t.type = 'SalesOrd' GROUP BY t.type"
                 },
-                "result_summary": '{"columns": ["id", "tranid"], "rows": [["1", "SO001"]], "row_count": 1}',
+                "result_summary": '{"columns": ["type", "cnt"], "rows": [["SalesOrd", "42"]], "row_count": 1}',
             }
         ]
 
         with patch("app.services.query_pattern_service._embed_text", new_callable=AsyncMock, return_value=None):
             stored = await extract_and_store_pattern(
-                db, tenant.id, "show me latest 10 sales orders", tool_calls_log
+                db, tenant.id, "how many sales orders do we have?", tool_calls_log
             )
             await db.flush()
 
@@ -112,7 +112,7 @@ class TestPatternStorage:
         )
         patterns = result.scalars().all()
         assert len(patterns) == 1
-        assert patterns[0].user_question == "show me latest 10 sales orders"
+        assert patterns[0].user_question == "how many sales orders do we have?"
         assert "SalesOrd" in patterns[0].working_sql
         assert "transaction" in patterns[0].tables_used
 
@@ -120,20 +120,20 @@ class TestPatternStorage:
     async def test_upsert_increments_count(self, db: AsyncSession):
         """Running the same query twice should increment success_count."""
         tenant = await create_test_tenant(db, name="Upsert Corp")
-        sql = "SELECT id FROM item WHERE ROWNUM <= 5"
+        sql = "SELECT type, COUNT(id) as cnt FROM item GROUP BY type"
 
         tool_calls_log = [
             {
                 "tool": "netsuite_suiteql",
                 "params": {"query": sql},
-                "result_summary": '{"columns": ["id"], "rows": [["1"]], "row_count": 1}',
+                "result_summary": '{"columns": ["type", "cnt"], "rows": [["InvtPart", "5"]], "row_count": 1}',
             }
         ]
 
         with patch("app.services.query_pattern_service._embed_text", new_callable=AsyncMock, return_value=None):
-            await extract_and_store_pattern(db, tenant.id, "show items", tool_calls_log)
+            await extract_and_store_pattern(db, tenant.id, "count items by type", tool_calls_log)
             await db.flush()
-            await extract_and_store_pattern(db, tenant.id, "show items again", tool_calls_log)
+            await extract_and_store_pattern(db, tenant.id, "count items by type again", tool_calls_log)
             await db.flush()
 
         result = await db.execute(
@@ -164,6 +164,50 @@ class TestPatternStorage:
         assert stored is False
 
     @pytest.mark.asyncio
+    async def test_skips_non_analytical_queries(self, db: AsyncSession):
+        """Should not store simple probe queries without GROUP BY / aggregation."""
+        tenant = await create_test_tenant(db, name="Probe Corp")
+
+        tool_calls_log = [
+            {
+                "tool": "netsuite_suiteql",
+                "params": {
+                    "query": "SELECT id, itemid FROM item FETCH FIRST 5 ROWS ONLY"
+                },
+                "result_summary": '{"columns": ["id", "itemid"], "rows": [["1", "FW001"]], "row_count": 1}',
+            }
+        ]
+
+        with patch("app.services.query_pattern_service._embed_text", new_callable=AsyncMock, return_value=None):
+            stored = await extract_and_store_pattern(
+                db, tenant.id, "show items", tool_calls_log
+            )
+
+        assert stored is False
+
+    @pytest.mark.asyncio
+    async def test_skips_zero_row_results(self, db: AsyncSession):
+        """Should not store patterns from queries returning 0 rows."""
+        tenant = await create_test_tenant(db, name="Empty Corp")
+
+        tool_calls_log = [
+            {
+                "tool": "netsuite_suiteql",
+                "params": {
+                    "query": "SELECT type, COUNT(id) as cnt FROM transaction GROUP BY type"
+                },
+                "result_summary": '{"columns": ["type", "cnt"], "rows": [], "row_count": 0}',
+            }
+        ]
+
+        with patch("app.services.query_pattern_service._embed_text", new_callable=AsyncMock, return_value=None):
+            stored = await extract_and_store_pattern(
+                db, tenant.id, "orders by type", tool_calls_log
+            )
+
+        assert stored is False
+
+    @pytest.mark.asyncio
     async def test_tenant_isolation(self, db: AsyncSession):
         """Patterns from different tenants should not leak."""
         tenant_a = await create_test_tenant(db, name="Corp A")
@@ -172,21 +216,21 @@ class TestPatternStorage:
         tool_calls_log_a = [
             {
                 "tool": "netsuite_suiteql",
-                "params": {"query": "SELECT 1 FROM transaction"},
-                "result_summary": '{"columns": ["1"], "rows": [["1"]], "row_count": 1}',
+                "params": {"query": "SELECT type, COUNT(id) as cnt FROM transaction GROUP BY type"},
+                "result_summary": '{"columns": ["type", "cnt"], "rows": [["SalesOrd", "10"]], "row_count": 1}',
             }
         ]
         tool_calls_log_b = [
             {
                 "tool": "netsuite_suiteql",
-                "params": {"query": "SELECT 2 FROM customer"},
-                "result_summary": '{"columns": ["2"], "rows": [["2"]], "row_count": 1}',
+                "params": {"query": "SELECT category, COUNT(id) as cnt FROM customer GROUP BY category"},
+                "result_summary": '{"columns": ["category", "cnt"], "rows": [["Corp", "5"]], "row_count": 1}',
             }
         ]
 
         with patch("app.services.query_pattern_service._embed_text", new_callable=AsyncMock, return_value=None):
-            await extract_and_store_pattern(db, tenant_a.id, "q from A", tool_calls_log_a)
-            await extract_and_store_pattern(db, tenant_b.id, "q from B", tool_calls_log_b)
+            await extract_and_store_pattern(db, tenant_a.id, "orders by type", tool_calls_log_a)
+            await extract_and_store_pattern(db, tenant_b.id, "customers by category", tool_calls_log_b)
             await db.flush()
 
         result = await db.execute(

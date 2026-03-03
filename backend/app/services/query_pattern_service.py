@@ -69,6 +69,16 @@ async def _embed_text(text_to_embed: str) -> list[float] | None:
         return None
 
 
+def _is_analytical_query(sql: str) -> bool:
+    """Check if a query is analytical (GROUP BY, aggregation) vs a simple probe."""
+    sql_upper = sql.upper()
+    has_aggregation = any(fn in sql_upper for fn in ("GROUP BY", "SUM(", "COUNT(", "AVG(", "MIN(", "MAX("))
+    has_reasonable_limit = "FETCH FIRST 5 ROWS" not in sql_upper
+    # Reject simple probes like SELECT * FROM item WHERE id IN (...)
+    is_probe = "ROWNUM" in sql_upper and "SELECT *" in sql_upper.replace("  ", " ")
+    return has_aggregation and has_reasonable_limit and not is_probe
+
+
 async def extract_and_store_pattern(
     db: AsyncSession,
     tenant_id: uuid.UUID,
@@ -76,6 +86,9 @@ async def extract_and_store_pattern(
     tool_calls_log: list[dict],
 ) -> bool:
     """Extract successful SuiteQL queries from tool call log and store as patterns.
+
+    Only stores analytical queries (GROUP BY / aggregation) that returned data.
+    Skips exploratory probes and failed queries.
 
     Returns True if at least one pattern was stored.
     """
@@ -90,14 +103,27 @@ async def extract_and_store_pattern(
         if not query:
             continue
 
-        # Check if the result was successful (not an error)
+        # Check if the result was successful (not an error) and returned rows
         result_summary = call.get("result_summary", "")
-        try:
-            parsed = json.loads(result_summary)
-            if parsed.get("error"):
-                continue
-        except (json.JSONDecodeError, AttributeError):
-            pass
+        if isinstance(result_summary, dict):
+            parsed = result_summary
+        else:
+            try:
+                parsed = json.loads(result_summary)
+            except (json.JSONDecodeError, AttributeError):
+                parsed = {}
+
+        if parsed.get("error"):
+            continue
+        # Skip queries that returned 0 rows
+        row_count = parsed.get("row_count", 0)
+        if row_count == 0:
+            continue
+
+        # Only store analytical queries, not exploratory probes
+        if not _is_analytical_query(query):
+            _logger.debug("query_pattern.skip_non_analytical", sql_preview=query[:100])
+            continue
 
         tables = _extract_tables(query)
         columns = _extract_columns(query)
