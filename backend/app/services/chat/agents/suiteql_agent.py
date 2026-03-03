@@ -152,6 +152,20 @@ QUERY STRATEGY — CRITICAL:
 - MAXIMUM ROWS: Never fetch more than 100 rows in a single query unless the user explicitly asks for a full list. For summaries, aggregate in SQL so the result set is small (typically < 20 rows).
 - If the user asks for BOTH a summary AND a breakdown (e.g., "total sales and best platform"), use TWO separate aggregation queries — one for the overall summary, one for the dimensional breakdown. This is better than one massive non-aggregated dump.
 
+AGGREGATION DISCIPLINE — CRITICAL (prevents 500-row explosions):
+- GROUP BY at most 2-3 dimensions. If the user asks "sales by class, FY2025 vs FY2026", group by fiscal_year + class. Do NOT also group by transaction_type, platform, currency, etc. unless the user explicitly asked for those breakdowns.
+- If an aggregation query returns more than 50 rows, your grouping is TOO GRANULAR. Reduce dimensions — do not dump hundreds of rows to the LLM.
+- ONE query per intent. When the user corrects you ("use item.class instead"), build ONE corrected query. Do not run 5 variations of the same query with minor tweaks.
+- For year-over-year (YoY) comparisons, the ideal result is ~5-15 rows: one row per dimension value per year. Example: 5 classes × 2 years = 10 rows.
+
+TRANSACTION TYPE DOUBLE-COUNTING — CRITICAL:
+- In NetSuite, a sale typically flows: Sales Order → Invoice (→ Cash Sale for POS). These are DIFFERENT records for the SAME underlying sale.
+- NEVER filter `t.type IN ('SalesOrd', 'CustInvc', 'CashSale')` and SUM amounts — this DOUBLE-COUNTS revenue because the same sale appears as both a Sales Order AND an Invoice.
+- For ORDER volume/revenue analysis: Use `t.type = 'SalesOrd'` only.
+- For RECOGNIZED revenue analysis: Use `t.type = 'CustInvc'` only (invoices = booked revenue).
+- For POS/cash sales: Use `t.type = 'CashSale'` only.
+- If unsure which the user wants, default to `t.type = 'SalesOrd'` for "sales" questions and explain in your response which transaction type you used.
+
 LOOKUP EXAMPLES:
 - Transaction by number: `SELECT t.id, t.tranid, t.trandate, BUILTIN.DF(t.entity) as customer, BUILTIN.DF(t.status) as status, t.foreigntotal FROM transaction t WHERE t.tranid = 'RMA61214'`
 - Order by internal ID: `SELECT ... FROM transaction t WHERE t.id = 12345`
@@ -160,7 +174,7 @@ LOOKUP EXAMPLES:
 
 ANALYTICAL EXAMPLES:
 - Sales by currency: `SELECT BUILTIN.DF(t.currency) as currency, COUNT(*) as order_count, SUM(t.foreigntotal) as total FROM transaction t WHERE t.type = 'SalesOrd' AND t.trandate = TRUNC(SYSDATE) GROUP BY BUILTIN.DF(t.currency) ORDER BY total DESC`
-- Sales by platform (line-level): `SELECT BUILTIN.DF(i.custitem_platform) as platform, BUILTIN.DF(t.currency) as currency, COUNT(DISTINCT t.id) as order_count, SUM(tl.foreignamount) * -1 as total FROM transactionline tl JOIN transaction t ON tl.transaction = t.id JOIN item i ON tl.item = i.id WHERE t.type = 'SalesOrd' AND tl.mainline = 'F' AND tl.taxline = 'F' GROUP BY BUILTIN.DF(i.custitem_platform), BUILTIN.DF(t.currency) ORDER BY total DESC`
+- Sales by class (YoY): `SELECT CASE WHEN t.trandate >= TO_DATE('2026-01-01','YYYY-MM-DD') THEN 'FY2026' ELSE 'FY2025' END as fiscal_year, BUILTIN.DF(i.class) as product_class, COUNT(DISTINCT t.id) as order_count, ROUND(SUM(tl.amount * -1), 2) as revenue_usd FROM transactionline tl JOIN transaction t ON tl.transaction = t.id JOIN item i ON tl.item = i.id WHERE t.type = 'SalesOrd' AND tl.mainline = 'F' AND tl.taxline = 'F' AND ((t.trandate >= TO_DATE('2025-01-01','YYYY-MM-DD') AND t.trandate <= TO_DATE('2025-03-03','YYYY-MM-DD')) OR (t.trandate >= TO_DATE('2026-01-01','YYYY-MM-DD') AND t.trandate <= TO_DATE('2026-03-03','YYYY-MM-DD'))) GROUP BY CASE WHEN t.trandate >= TO_DATE('2026-01-01','YYYY-MM-DD') THEN 'FY2026' ELSE 'FY2025' END, BUILTIN.DF(i.class) ORDER BY fiscal_year DESC, revenue_usd DESC`
 
 When a user mentions an external order number (Shopify, ecommerce, etc.), check the <tenant_schema> and <tenant_vernacular> for custom body fields that contain "order" or "ext" in their name. Search `tranid`, `otherrefnum`, AND any relevant custbody field in a single query using OR.
 
@@ -170,6 +184,13 @@ When the user asks to group by or filter on a business term (e.g., "platform", "
 - custitem_* fields on items (e.g., custitem_fw_platform)
 - custcol_* fields on transaction lines
 Use BUILTIN.DF(field) to get display values, or JOIN the custom list table if you need to aggregate by list value names.
+
+ITEM TABLE — CRITICAL GOTCHA:
+In SuiteQL, selecting a column that doesn't exist on a particular item type causes the ENTIRE ROW to disappear (returns 0 rows instead of NULL). This is a NetSuite SuiteQL quirk. Even standard-looking columns like `itemtype`, `class`, `department`, `baseprice`, `salesdescription`, `created`, `lastmodified` can cause 0 rows on certain item types.
+- For item lookups, ONLY use these safe columns: `SELECT i.id, i.itemid, i.displayname, i.description FROM item i WHERE i.itemid = 'X'`
+- If the minimal query returns 1+ rows, THAT IS YOUR ANSWER. Present those results immediately. Do NOT attempt to "enrich" the result by adding more columns — they will likely cause 0 rows and waste your remaining steps.
+- NEVER try column variations after a successful minimal query. The columns `id`, `itemid`, `displayname`, and `description` are the only universally safe columns on the item table.
+- If the user specifically asks for a column that isn't in the safe set (e.g., "what class is this item?"), use it in a SEPARATE query so the failure is isolated and you still have the basic data to present.
 </common_queries>
 
 <agentic_workflow>
@@ -183,7 +204,7 @@ WORKFLOW:
 1. If a custom record matched in Step 0: Use netsuite_suiteql to run `SELECT * FROM <resolved_lowercase_script_id> WHERE ROWNUM <= 5` to discover columns, then query with filters.
 2. If no custom record matched and it's not in vernacular: Query standard tables (transaction, customer, item, etc.) using netsuite_suiteql (local REST API).
 3. RECOVER FROM ERRORS: If a query fails with "Unknown identifier", fix the column name and retry. If it fails with syntax error, fix and retry.
-4. KEEP GOING: Do NOT stop after discovering a record. Do NOT stop after finding column names. Keep going until you have DATA ROWS that answer the user's question.
+4. STOP WHEN YOU HAVE DATA: Once a query returns 1+ rows with data that answers the user's question, STOP and present those results. Do NOT run additional queries to "add more columns" or "get more detail" — especially on the item table where adding columns causes 0 rows. The user can always ask follow-up questions if they need more fields.
 5. ASK FOR HELP ONLY WHEN STUCK: Only ask the user for clarification if you've exhausted all approaches.
 
 TOOL SELECTION — CRITICAL:
@@ -201,8 +222,10 @@ CUSTOM RECORD TABLE NAMING — IMPORTANT:
 ERROR RECOVERY:
 - "Record not found" or "Invalid or unsupported search" → switch to netsuite_suiteql (local REST API) which has full permissions.
 - Unknown identifier → try `SELECT * FROM <table> WHERE ROWNUM <= 1` to discover real column names, then retry.
-- 0 rows returned → report "0 rows found" with the query you ran. This is often a legitimate result (no matching data). Do NOT assume permissions are wrong. Only retry if you suspect the query logic itself was incorrect (e.g., wrong date function, wrong column name).
-- Each retry MUST be meaningfully different from the previous attempt.
+- 0 rows on ITEM table after basic query succeeded → DO NOT retry with different column combos. This means the extra columns don't exist on this item type. Call netsuite_get_metadata immediately to discover valid columns.
+- 0 rows on other tables → report "0 rows found" with the query you ran. This is often a legitimate result (no matching data). Only retry if you suspect the query logic itself was incorrect (e.g., wrong date function, wrong column name).
+- Each retry MUST be meaningfully different from the previous attempt. Removing or swapping columns on the same table is NOT meaningfully different — escalate to metadata discovery instead.
+- BUDGET AWARENESS: You have only 4 steps. Do not waste steps on trial-and-error column guessing. If step 1 fails, use step 2 for metadata discovery, step 3 for the corrected query, step 4 as final fallback.
 </agentic_workflow>
 
 <output_instructions>
@@ -259,7 +282,7 @@ class SuiteQLAgent(BaseSpecialistAgent):
 
     @property
     def max_steps(self) -> int:
-        return 6  # explore schema → query → error recovery → retry → refine → final
+        return 4  # query → metadata discovery if needed → corrected query → final
 
     @property
     def system_prompt(self) -> str:

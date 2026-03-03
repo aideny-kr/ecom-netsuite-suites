@@ -114,7 +114,7 @@ _HEURISTIC_RULES: list[tuple[IntentType, re.Pattern[str]]] = [
                 where\s+(?:in\s+the\s+code|in\s+the\s+script) |
                 logic\s+(?:for|behind|of) |
                 how\s+are\s+we\s+(?:calculating|computing|processing|parsing) |
-                what\s+(?:does|is)\s+(?:the\s+)?(?:script|code)\s+do|doing
+                what\s+(?:does|is)\s+(?:the\s+)?(?:script|code)\s+do(?:ing)?
             )\b
             """
         ),
@@ -184,6 +184,8 @@ _HEURISTIC_RULES: list[tuple[IntentType, re.Pattern[str]]] = [
                 (?:trend|trending)\s+(?:for|of|in|over) |
                 month\s*-?\s*over\s*-?\s*month |
                 year\s*-?\s*over\s*-?\s*year |
+                (?:year\s+to\s+date|ytd)\b |
+                (?:doing\s+)?(?:better|worse)\s+(?:than|compared?\s+to) |
                 growth\s+(?:rate|trend|in) |
                 (?:analyze|analyse)\s+(?:the\s+)? |
                 (?:breakdown|break\s+down)\s+(?:the\s+|of\s+)?(?:data|sales|revenue|order|transaction) |
@@ -205,8 +207,9 @@ _HEURISTIC_RULES: list[tuple[IntentType, re.Pattern[str]]] = [
                     (?:latest|recent|last|open|pending|total)\s+(?:order|invoice|transaction|payment|bill|journal|customer|item|vendor) |
                     how\s+many\s+(?:order|invoice|transaction|payment|bill|customer|item|vendor)s? |
                     (?:order|invoice|transaction|payment|bill|journal|customer|item|vendor)\s+(?:number|id|status|[#]) |
-                    sales\s+(?:order|total|amount|revenue|data|report) |
+                    sales\s+(?:order|total|amount|revenue|data|report|this|last|today|yesterday) |
                     revenue\s+(?:by|for|from|today|this|last) |
+                    (?:doing|going)\s+(?:on|with)\s+sales |
                     (?:today|this\s+(?:week|month|quarter|year)|last\s+(?:week|month|quarter|year))(?:'s)?\s+(?:order|invoice|transaction|sales|revenue|payment) |
                     tell\s+me\s+about\s+(?:[#]|\bnumber\b|order|invoice|customer|transaction) |
                     (?:shopify|ecom|ecommerce)\s+(?:order|number|ref) |
