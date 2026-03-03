@@ -1,6 +1,8 @@
 "use client";
 
 import { useState } from "react";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { apiClient } from "@/lib/api-client";
 import {
   Plus,
   MessageSquare,
@@ -57,28 +59,15 @@ export function SessionSidebar({
       {/* Chat Sessions — scrollable */}
       <div className="flex-1 min-h-0 overflow-auto px-3 space-y-0.5 scrollbar-thin">
         {sessions.map((session) => (
-          <button
+          <SessionItem
             key={session.id}
-            onClick={() => onSelectSession(session.id)}
-            className={cn(
-              "w-full rounded-lg px-3 py-2.5 text-left transition-all duration-150",
-              activeSessionId === session.id
-                ? "bg-card shadow-soft"
-                : "hover:bg-card/50",
-            )}
-          >
-            <div className="flex items-center gap-1.5">
-              <p className="truncate text-[13px] font-medium text-foreground">
-                {session.title || "New Chat"}
-              </p>
-              {session.session_type === "workspace" && (
-                <Code2 className="h-3 w-3 flex-shrink-0 text-muted-foreground" />
-              )}
-            </div>
-            <p className="truncate text-[11px] text-muted-foreground mt-0.5">
-              {new Date(session.updated_at).toLocaleDateString()}
-            </p>
-          </button>
+            session={session}
+            isActive={activeSessionId === session.id}
+            onSelect={() => onSelectSession(session.id)}
+            onDeleted={() => {
+              if (activeSessionId === session.id) onNewChat();
+            }}
+          />
         ))}
         {sessions.length === 0 && (
           <div className="flex flex-col items-center py-12 text-center">
@@ -109,6 +98,194 @@ export function SessionSidebar({
             <SavedQueriesSection />
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Chat Session item with inline edit + delete
+// ---------------------------------------------------------------------------
+
+function SessionItem({
+  session,
+  isActive,
+  onSelect,
+  onDeleted,
+}: {
+  session: ChatSession;
+  isActive: boolean;
+  onSelect: () => void;
+  onDeleted: () => void;
+}) {
+  const { toast } = useToast();
+  const queryClient = useQueryClient();
+  const [isEditing, setIsEditing] = useState(false);
+  const [editTitle, setEditTitle] = useState("");
+  const [confirmDelete, setConfirmDelete] = useState(false);
+
+  const updateMutation = useMutation({
+    mutationFn: (title: string) =>
+      apiClient.patch<ChatSession>(`/api/v1/chat/sessions/${session.id}`, { title }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["chat-sessions"] });
+      queryClient.invalidateQueries({ queryKey: ["chat-session", session.id] });
+    },
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: () => apiClient.delete(`/api/v1/chat/sessions/${session.id}`),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["chat-sessions"] });
+      onDeleted();
+    },
+  });
+
+  function startEditing() {
+    setEditTitle(session.title || "");
+    setIsEditing(true);
+    setConfirmDelete(false);
+  }
+
+  async function handleSaveTitle() {
+    if (!editTitle.trim()) return;
+    try {
+      await updateMutation.mutateAsync(editTitle.trim());
+      toast({ title: "Chat renamed" });
+      setIsEditing(false);
+    } catch {
+      toast({ title: "Failed to rename", variant: "destructive" });
+    }
+  }
+
+  async function handleDelete() {
+    try {
+      await deleteMutation.mutateAsync();
+      toast({ title: "Chat deleted" });
+    } catch {
+      toast({ title: "Failed to delete", variant: "destructive" });
+    }
+  }
+
+  if (confirmDelete) {
+    return (
+      <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-2.5 space-y-2">
+        <p className="text-[11px] text-destructive font-medium">
+          Delete this chat?
+        </p>
+        <p className="text-[10px] text-muted-foreground">
+          All messages will be permanently removed.
+        </p>
+        <div className="flex gap-1.5">
+          <Button
+            variant="destructive"
+            size="sm"
+            className="h-6 text-[11px] px-2"
+            onClick={handleDelete}
+            disabled={deleteMutation.isPending}
+          >
+            {deleteMutation.isPending && (
+              <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+            )}
+            Yes, delete
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-6 text-[11px] px-2"
+            onClick={() => setConfirmDelete(false)}
+          >
+            Cancel
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
+  if (isEditing) {
+    return (
+      <div className="rounded-lg bg-card p-2.5 shadow-soft space-y-1.5">
+        <input
+          type="text"
+          value={editTitle}
+          onChange={(e) => setEditTitle(e.target.value)}
+          className="w-full rounded-md border bg-background px-2 py-1 text-[12px] text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+          autoFocus
+          placeholder="Chat title"
+          onKeyDown={(e) => {
+            if (e.key === "Enter") handleSaveTitle();
+            if (e.key === "Escape") setIsEditing(false);
+          }}
+        />
+        <div className="flex gap-1">
+          <Button
+            variant="default"
+            size="sm"
+            className="h-5 text-[10px] px-1.5"
+            onClick={handleSaveTitle}
+            disabled={!editTitle.trim() || updateMutation.isPending}
+          >
+            {updateMutation.isPending ? (
+              <Loader2 className="h-3 w-3 animate-spin" />
+            ) : (
+              <Check className="h-3 w-3" />
+            )}
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-5 text-[10px] px-1.5"
+            onClick={() => setIsEditing(false)}
+          >
+            <X className="h-3 w-3" />
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div
+      className={cn(
+        "group flex items-center rounded-lg px-3 py-2.5 text-left transition-all duration-150 cursor-pointer",
+        isActive ? "bg-card shadow-soft" : "hover:bg-card/50",
+      )}
+      onClick={onSelect}
+    >
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-1.5">
+          <p className="truncate text-[13px] font-medium text-foreground">
+            {session.title || "New Chat"}
+          </p>
+          {session.session_type === "workspace" && (
+            <Code2 className="h-3 w-3 flex-shrink-0 text-muted-foreground" />
+          )}
+        </div>
+        <p className="truncate text-[11px] text-muted-foreground mt-0.5">
+          {new Date(session.updated_at).toLocaleDateString()}
+        </p>
+      </div>
+      <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity shrink-0 ml-1">
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            startEditing();
+          }}
+          className="rounded p-1 text-muted-foreground hover:text-foreground hover:bg-muted"
+          title="Rename"
+        >
+          <Pencil className="h-3 w-3" />
+        </button>
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            setConfirmDelete(true);
+          }}
+          className="rounded p-1 text-muted-foreground hover:text-destructive hover:bg-destructive/10"
+          title="Delete"
+        >
+          <Trash2 className="h-3 w-3" />
+        </button>
       </div>
     </div>
   );
@@ -190,7 +367,6 @@ function SavedQueriesSection() {
       {queries.map((query) => (
         <div key={query.id} className="group">
           {editingId === query.id ? (
-            /* ---- Editing Mode ---- */
             <div className="rounded-lg bg-card p-2.5 shadow-soft space-y-1.5">
               <input
                 type="text"
@@ -240,7 +416,6 @@ function SavedQueriesSection() {
               </div>
             </div>
           ) : confirmDeleteId === query.id ? (
-            /* ---- Delete Confirmation ---- */
             <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-2.5 space-y-2">
               <p className="text-[11px] text-destructive font-medium">
                 Delete &quot;{query.name}&quot;?
@@ -269,7 +444,6 @@ function SavedQueriesSection() {
               </div>
             </div>
           ) : (
-            /* ---- Normal Display ---- */
             <div className="flex items-center rounded-lg px-3 py-2 hover:bg-card/50 transition-all duration-150">
               <div className="min-w-0 flex-1">
                 <p className="truncate text-[12px] font-medium text-foreground">

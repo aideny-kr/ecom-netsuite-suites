@@ -132,3 +132,128 @@ async def test_send_message(client, db, admin_user):
     # SSE streaming returns 200, not 201
     assert resp.status_code == 200
     assert resp.headers["content-type"].startswith("text/event-stream")
+
+
+# ---------------------------------------------------------------------------
+# PATCH /api/v1/chat/sessions/{session_id} — rename session
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_update_session_title(client, db, admin_user):
+    """PATCH /api/v1/chat/sessions/{id} → 200 with new title."""
+    user, headers = admin_user
+    await db.execute(text(f"SET LOCAL app.current_tenant_id = '{user.tenant_id}'"))
+
+    create_resp = await client.post(
+        "/api/v1/chat/sessions", json={"title": "Old Title"}, headers=headers
+    )
+    session_id = create_resp.json()["id"]
+
+    resp = await client.patch(
+        f"/api/v1/chat/sessions/{session_id}",
+        json={"title": "New Title"},
+        headers=headers,
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["title"] == "New Title"
+    assert data["id"] == session_id
+
+
+@pytest.mark.asyncio
+async def test_update_session_not_found(client, db, admin_user):
+    """PATCH /api/v1/chat/sessions/{random_id} → 404."""
+    _, headers = admin_user
+    random_id = str(uuid.uuid4())
+    resp = await client.patch(
+        f"/api/v1/chat/sessions/{random_id}",
+        json={"title": "Nope"},
+        headers=headers,
+    )
+    assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_update_session_cross_tenant(client, db, admin_user, admin_user_b):
+    """PATCH cross-tenant session → 404."""
+    user_a, headers_a = admin_user
+    _, headers_b = admin_user_b
+
+    await db.execute(text(f"SET LOCAL app.current_tenant_id = '{user_a.tenant_id}'"))
+    create_resp = await client.post(
+        "/api/v1/chat/sessions", json={"title": "Tenant A"}, headers=headers_a
+    )
+    session_id = create_resp.json()["id"]
+
+    # User B should not be able to rename User A's session
+    resp = await client.patch(
+        f"/api/v1/chat/sessions/{session_id}",
+        json={"title": "Hijacked"},
+        headers=headers_b,
+    )
+    assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# DELETE /api/v1/chat/sessions/{session_id} — delete session
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_delete_session(client, db, admin_user):
+    """DELETE /api/v1/chat/sessions/{id} → 204, then GET → 404."""
+    user, headers = admin_user
+    await db.execute(text(f"SET LOCAL app.current_tenant_id = '{user.tenant_id}'"))
+
+    create_resp = await client.post(
+        "/api/v1/chat/sessions", json={"title": "To Delete"}, headers=headers
+    )
+    session_id = create_resp.json()["id"]
+
+    resp = await client.delete(
+        f"/api/v1/chat/sessions/{session_id}", headers=headers
+    )
+    assert resp.status_code == 204
+
+    # Verify it's gone
+    resp = await client.get(
+        f"/api/v1/chat/sessions/{session_id}", headers=headers
+    )
+    assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_delete_session_not_found(client, db, admin_user):
+    """DELETE /api/v1/chat/sessions/{random_id} → 404."""
+    _, headers = admin_user
+    random_id = str(uuid.uuid4())
+    resp = await client.delete(
+        f"/api/v1/chat/sessions/{random_id}", headers=headers
+    )
+    assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_delete_session_cross_tenant(client, db, admin_user, admin_user_b):
+    """DELETE cross-tenant session → 404."""
+    user_a, headers_a = admin_user
+    _, headers_b = admin_user_b
+
+    await db.execute(text(f"SET LOCAL app.current_tenant_id = '{user_a.tenant_id}'"))
+    create_resp = await client.post(
+        "/api/v1/chat/sessions", json={"title": "Tenant A"}, headers=headers_a
+    )
+    session_id = create_resp.json()["id"]
+
+    # User B should not be able to delete User A's session
+    resp = await client.delete(
+        f"/api/v1/chat/sessions/{session_id}", headers=headers_b
+    )
+    assert resp.status_code == 404
+
+    # Verify it still exists for User A
+    resp = await client.get(
+        f"/api/v1/chat/sessions/{session_id}", headers=headers_a
+    )
+    assert resp.status_code == 200

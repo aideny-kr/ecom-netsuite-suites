@@ -10,11 +10,14 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from typing import Annotated
+
 from app.core.config import settings
 from app.core.database import get_db
 from app.core.dependencies import get_current_user
 from app.models.chat import ChatMessage, ChatSession
 from app.models.user import User
+from app.services import audit_service
 from app.services.chat.orchestrator import run_chat_turn
 
 logger = logging.getLogger(__name__)
@@ -28,6 +31,10 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 class CreateSessionRequest(BaseModel):
     title: str | None = None
     workspace_id: str | None = None
+
+
+class UpdateSessionRequest(BaseModel):
+    title: str | None = Field(default=None, max_length=255)
 
 
 class SendMessageRequest(BaseModel):
@@ -247,6 +254,80 @@ async def send_message(
             "X-Accel-Buffering": "no",  # Disable nginx/proxy buffering
         },
     )
+
+
+@router.patch("/sessions/{session_id}", response_model=SessionListItem)
+async def update_session(
+    session_id: uuid.UUID,
+    body: UpdateSessionRequest,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Update a chat session's title."""
+    result = await db.execute(
+        select(ChatSession).where(
+            ChatSession.id == session_id,
+            ChatSession.tenant_id == user.tenant_id,
+            ChatSession.user_id == user.id,
+        )
+    )
+    session = result.scalar_one_or_none()
+    if not session:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
+
+    if body.title is not None:
+        session.title = body.title
+
+    await audit_service.log_event(
+        db=db,
+        tenant_id=user.tenant_id,
+        category="chat",
+        action="chat.session_update",
+        actor_id=user.id,
+        resource_type="chat_session",
+        resource_id=str(session_id),
+    )
+    await db.commit()
+    await db.refresh(session)
+    return _serialize_session(session)
+
+
+@router.delete("/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_session(
+    session_id: uuid.UUID,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Delete a chat session and its messages."""
+    from sqlalchemy import delete
+
+    result = await db.execute(
+        select(ChatSession).where(
+            ChatSession.id == session_id,
+            ChatSession.tenant_id == user.tenant_id,
+            ChatSession.user_id == user.id,
+        )
+    )
+    session = result.scalar_one_or_none()
+    if not session:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
+
+    # Delete messages first (FK constraint)
+    await db.execute(
+        delete(ChatMessage).where(ChatMessage.session_id == session_id)
+    )
+    await db.delete(session)
+
+    await audit_service.log_event(
+        db=db,
+        tenant_id=user.tenant_id,
+        category="chat",
+        action="chat.session_delete",
+        actor_id=user.id,
+        resource_type="chat_session",
+        resource_id=str(session_id),
+    )
+    await db.commit()
 
 
 @router.get("/health")
