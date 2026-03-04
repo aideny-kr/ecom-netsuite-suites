@@ -405,7 +405,6 @@ async def run_chat_turn(
                 )
 
                 # Assemble context concurrently (entity resolution + domain knowledge + proven patterns)
-                import asyncio
                 from app.services.chat.tenant_resolver import TenantEntityResolver
                 from app.services.chat.domain_knowledge import retrieve_domain_knowledge
                 from app.services.query_pattern_service import retrieve_similar_patterns

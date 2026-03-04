@@ -16,6 +16,7 @@ class TestExecuteSuiteqlViaRest:
     @pytest.mark.asyncio
     async def test_parses_response(self):
         mock_response = MagicMock()
+        mock_response.status_code = 200
         mock_response.json.return_value = {
             "items": [
                 {"id": "1", "name": "Acme"},
@@ -41,6 +42,7 @@ class TestExecuteSuiteqlViaRest:
     @pytest.mark.asyncio
     async def test_truncated_flag(self):
         mock_response = MagicMock()
+        mock_response.status_code = 200
         mock_response.json.return_value = {
             "items": [{"id": "1"}],
             "totalResults": 100,
@@ -59,6 +61,7 @@ class TestExecuteSuiteqlViaRest:
     @pytest.mark.asyncio
     async def test_empty_response(self):
         mock_response = MagicMock()
+        mock_response.status_code = 200
         mock_response.json.return_value = {"items": [], "totalResults": 0}
         mock_response.raise_for_status = MagicMock()
 
