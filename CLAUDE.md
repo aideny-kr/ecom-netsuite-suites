@@ -24,6 +24,10 @@
 - **Entity Resolution**: Fast NER (Haiku) → pg_trgm fuzzy matching → `<tenant_vernacular>` XML injection into agent prompts. Table: `tenant_entity_mapping` with composite GIN index. Seeded from metadata discovery pipeline.
 - **Two SuiteQL paths**: Local REST API (`netsuite_suiteql` tool) supports all tables including `customrecord_*`. External MCP (`ns_runCustomSuiteQL`) works only for standard tables. Agent prompt guides tool selection.
 - **react-resizable-panels v4**: Imports are `Panel`, `Group as PanelGroup`, `Separator as PanelResizeHandle`. Uses `orientation` prop (not `direction`).
+- **White-Label Branding**: Per-tenant brand_name, brand_color_hsl, brand_logo_url, brand_favicon_url in `tenant_configs`. Frontend `BrandingProvider` injects `--primary` CSS variable at runtime. Sidebar/login dynamically render tenant brand.
+- **Custom Domains**: `custom_domain` + `domain_verified` on `tenant_configs`. DNS TXT verification via `domain_service.py`. Public resolver endpoint `GET /api/v1/settings/resolve-domain?domain=`.
+- **Feature Flags**: `tenant_feature_flags` table with TTL-cached service (`feature_flag_service.py`). `require_feature(flag_key)` FastAPI dependency returns 403 when disabled. Default flags seeded on tenant creation.
+- **Soul Seeding**: `seed_default_soul()` auto-populates soul.md with tenant-specific defaults on registration. Called from `auth_service.register_tenant()`.
 
 ## Backend Patterns — FOLLOW EXACTLY
 
@@ -238,6 +242,11 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 | UI primitives (shadcn) | `frontend/src/components/ui/` |
 | Types | `frontend/src/lib/types.ts` |
 | API client | `frontend/src/lib/api-client.ts` |
+| Settings API | `backend/app/api/v1/settings.py` |
+| Feature flags | `backend/app/services/feature_flag_service.py` |
+| Domain service | `backend/app/services/domain_service.py` |
+| Branding provider | `frontend/src/providers/branding-provider.tsx` |
+| Feature hooks | `frontend/src/hooks/use-features.ts` |
 | SuiteScripts | `suiteapp/src/FileCabinet/SuiteScripts/` |
 | SDF Objects | `suiteapp/src/Objects/` |
 | SuiteScript tests | `suiteapp/__tests__/` |
