@@ -125,6 +125,25 @@ async def get_current_superadmin(
     return user
 
 
+def require_feature(flag_key: str):
+    """Dependency that checks if a tenant feature flag is enabled."""
+
+    async def feature_checker(
+        user: Annotated[User, Depends(get_current_user)],
+        db: Annotated[AsyncSession, Depends(get_db)],
+    ) -> User:
+        from app.services.feature_flag_service import is_enabled
+
+        if not await is_enabled(db, user.tenant_id, flag_key):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Feature '{flag_key}' is not enabled for your account.",
+            )
+        return user
+
+    return feature_checker
+
+
 def require_entitlement(feature: str):
     async def entitlement_checker(
         user: Annotated[User, Depends(get_current_user)],

@@ -682,3 +682,20 @@ export interface AgentSkillMetadata {
   triggers: string[];
   slug: string;
 }
+
+// ---------------------------------------------------------------------------
+// White-Label / Branding
+// ---------------------------------------------------------------------------
+
+export interface BrandingConfig {
+  brand_name: string | null;
+  brand_color_hsl: string | null;
+  brand_logo_url: string | null;
+  brand_favicon_url: string | null;
+  custom_domain: string | null;
+  domain_verified: boolean;
+}
+
+export interface FeatureFlagsResponse {
+  flags: Record<string, boolean>;
+}

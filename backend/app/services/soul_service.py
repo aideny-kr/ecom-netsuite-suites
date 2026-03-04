@@ -50,6 +50,29 @@ async def get_soul_config(tenant_id: uuid.UUID) -> SoulConfigResponse:
     )
 
 
+async def seed_default_soul(tenant_id: uuid.UUID, tenant_name: str) -> None:
+    """Seed a default soul.md for a new tenant. Idempotent — skips if already exists."""
+    existing = await get_soul_config(tenant_id)
+    if existing.exists:
+        return
+
+    default_tone = (
+        f"You are the AI assistant for {tenant_name}. "
+        "Be professional, concise, and helpful. "
+        "Focus on actionable insights from NetSuite data."
+    )
+    default_quirks = (
+        "- Always verify custom field script IDs before using them in SuiteQL\n"
+        "- Use BUILTIN.DF() to display friendly names for list/record fields\n"
+        "- Remember: tl.amount is negative for revenue lines — use * -1"
+    )
+
+    await update_soul_config(
+        tenant_id,
+        SoulUpdateRequest(bot_tone=default_tone, netsuite_quirks=default_quirks),
+    )
+
+
 async def update_soul_config(tenant_id: uuid.UUID, data: SoulUpdateRequest) -> SoulConfigResponse:
     """Write the tone and quirks into the tenant's soul.md file."""
     storage_dir = getattr(settings, "WORKSPACE_STORAGE_DIR", "/tmp/workspace_storage")

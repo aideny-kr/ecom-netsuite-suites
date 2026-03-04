@@ -24,6 +24,7 @@ import {
 import { cn } from "@/lib/utils";
 import { NAV_ITEMS, CANONICAL_TABLES } from "@/lib/constants";
 import { useAuth } from "@/providers/auth-provider";
+import { useBranding } from "@/providers/branding-provider";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -44,6 +45,7 @@ const iconMap = {
 export function Sidebar() {
   const pathname = usePathname();
   const { user, tenants, switchTenant, logout } = useAuth();
+  const { brandName, logoUrl } = useBranding();
   const { theme, setTheme, resolvedTheme } = useTheme();
   const [mounted, setMounted] = useState(false);
   const [tablesExpanded, setTablesExpanded] = useState(
@@ -59,12 +61,16 @@ export function Sidebar() {
       {/* Brand */}
       <div className="border-b border-[hsl(var(--sidebar-border))] px-5 py-5">
         <div className="flex items-center gap-2.5">
-          <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-[hsl(var(--sidebar-active))]">
-            <Zap className="h-4 w-4 text-white" />
-          </div>
+          {logoUrl ? (
+            <img src={logoUrl} alt={brandName} className="h-8 w-8 rounded-lg object-contain" />
+          ) : (
+            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-[hsl(var(--sidebar-active))]">
+              <Zap className="h-4 w-4 text-white" />
+            </div>
+          )}
           <div>
             <h1 className="text-[15px] font-semibold tracking-tight text-white">
-              Suite Studio AI
+              {brandName}
             </h1>
           </div>
         </div>

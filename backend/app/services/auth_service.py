@@ -68,9 +68,19 @@ async def register_tenant(
         user_role = UserRole(tenant_id=tenant.id, user_id=user.id, role_id=role.id)
         db.add(user_role)
 
+    # Seed default feature flags
+    from app.services.feature_flag_service import seed_default_flags
+
+    await seed_default_flags(db, tenant.id)
+
     await db.commit()
     await db.refresh(tenant)
     await db.refresh(user)
+
+    # Seed default soul config (file-based, after commit so tenant_id is stable)
+    from app.services.soul_service import seed_default_soul
+
+    await seed_default_soul(tenant.id, tenant_name)
 
     tokens = _create_tokens(user)
     return tenant, user, tokens

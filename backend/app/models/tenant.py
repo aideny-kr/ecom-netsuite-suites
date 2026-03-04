@@ -57,4 +57,14 @@ class TenantConfig(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     # Onboarding
     onboarding_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
+    # White-label branding
+    brand_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    brand_color_hsl: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    brand_logo_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    brand_favicon_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Custom domain mapping
+    custom_domain: Mapped[str | None] = mapped_column(String(255), nullable=True, unique=True)
+    domain_verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+
     tenant: Mapped["Tenant"] = relationship("Tenant", back_populates="config")
