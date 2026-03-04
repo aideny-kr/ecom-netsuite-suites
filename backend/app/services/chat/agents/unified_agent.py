@@ -382,16 +382,8 @@ class UnifiedAgent(BaseSpecialistAgent):
             self._tool_defs = [t for t in all_tools if t["name"] in _UNIFIED_TOOL_NAMES]
         return self._tool_defs
 
-    async def run(
-        self,
-        task: str,
-        context: dict[str, Any],
-        db: "AsyncSession",
-        adapter: "BaseLLMAdapter",
-        model: str,
-    ):
-        """Override to inject context and discover external MCP tools."""
-        # Augment the task with resolved entity mappings so the agent can't ignore them
+    async def _setup_context(self, task: str, context: dict[str, Any], db: "AsyncSession") -> str:
+        """Shared setup for run() and run_streaming(). Returns augmented task."""
         vernacular = context.get("tenant_vernacular", "")
         if vernacular:
             task = self._augment_task_with_entities(task, vernacular)
@@ -427,4 +419,30 @@ class UnifiedAgent(BaseSpecialistAgent):
         except Exception:
             _logger.warning("unified_agent.ext_tool_discovery_failed", exc_info=True)
 
+        return task
+
+    async def run(
+        self,
+        task: str,
+        context: dict[str, Any],
+        db: "AsyncSession",
+        adapter: "BaseLLMAdapter",
+        model: str,
+    ):
+        """Override to inject context and discover external MCP tools."""
+        task = await self._setup_context(task, context, db)
         return await super().run(task, context, db, adapter, model)
+
+    async def run_streaming(
+        self,
+        task: str,
+        context: dict[str, Any],
+        db: "AsyncSession",
+        adapter: "BaseLLMAdapter",
+        model: str,
+        conversation_history: list[dict] | None = None,
+    ):
+        """Override to inject context before streaming."""
+        task = await self._setup_context(task, context, db)
+        async for event in super().run_streaming(task, context, db, adapter, model, conversation_history):
+            yield event
