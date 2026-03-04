@@ -25,6 +25,7 @@ import { cn } from "@/lib/utils";
 import { NAV_ITEMS, CANONICAL_TABLES } from "@/lib/constants";
 import { useAuth } from "@/providers/auth-provider";
 import { useBranding } from "@/providers/branding-provider";
+import { useFeatures } from "@/hooks/use-features";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -46,6 +47,7 @@ export function Sidebar() {
   const pathname = usePathname();
   const { user, tenants, switchTenant, logout } = useAuth();
   const { brandName, logoUrl } = useBranding();
+  const { data: features } = useFeatures();
   const { theme, setTheme, resolvedTheme } = useTheme();
   const [mounted, setMounted] = useState(false);
   const [tablesExpanded, setTablesExpanded] = useState(
@@ -113,7 +115,10 @@ export function Sidebar() {
         <p className="mb-2 px-3 text-[10px] font-semibold uppercase tracking-widest text-[hsl(var(--sidebar-muted))]">
           Menu
         </p>
-        {NAV_ITEMS.map((item) => {
+        {NAV_ITEMS.filter((item) => {
+          if (!item.featureFlag) return true;
+          return features?.[item.featureFlag] !== false;
+        }).map((item) => {
           const Icon = iconMap[item.icon];
           const isActive = pathname === item.href;
           return (

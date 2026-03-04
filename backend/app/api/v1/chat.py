@@ -1,6 +1,7 @@
 import json
 import logging
 import uuid
+from typing import Annotated
 
 import anthropic
 import openai
@@ -10,11 +11,9 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from typing import Annotated
-
 from app.core.config import settings
 from app.core.database import get_db
-from app.core.dependencies import get_current_user
+from app.core.dependencies import get_current_user, require_feature
 from app.models.chat import ChatMessage, ChatSession
 from app.models.user import User
 from app.services import audit_service
@@ -116,8 +115,8 @@ def _serialize_message(msg: ChatMessage) -> dict:
 @router.post("/sessions", status_code=status.HTTP_201_CREATED, response_model=SessionListItem)
 async def create_session(
     body: CreateSessionRequest,
-    user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
+    user: Annotated[User, Depends(require_feature("chat"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
 ):
     ws_id = uuid.UUID(body.workspace_id) if body.workspace_id else None
     session = ChatSession(
@@ -194,10 +193,10 @@ async def get_session(
 async def send_message(
     session_id: uuid.UUID,
     body: SendMessageRequest,
+    user: Annotated[User, Depends(require_feature("chat"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
     wizard_step: str | None = None,
     x_timezone: str | None = Header(None),
-    user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
 ):
     result = await db.execute(
         select(ChatSession).where(

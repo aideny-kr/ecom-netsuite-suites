@@ -58,7 +58,9 @@ import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useToast } from "@/hooks/use-toast";
 import { SyncLoader } from "@/components/ui/sync-loader";
+import { useQueryClient } from "@tanstack/react-query";
 import { apiClient } from "@/lib/api-client";
+import { useFeature } from "@/hooks/use-features";
 import { AI_PROVIDERS, AI_MODELS } from "@/lib/constants";
 import type { NetSuiteMetadataCategories } from "@/lib/types";
 import {
@@ -90,6 +92,9 @@ import {
   List,
   FileCode,
   CreditCard,
+  Paintbrush,
+  Globe,
+  ImageIcon,
 } from "lucide-react";
 
 const providerMeta: Record<
@@ -225,6 +230,321 @@ function PlanInfoSection() {
             </div>
           </div>
         </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Branding Section (Tenant Admin)
+// ---------------------------------------------------------------------------
+
+function BrandingSection() {
+  const queryClient = useQueryClient();
+  const { toast } = useToast();
+  const [isLoading, setIsLoading] = useState(true);
+  const [isSaving, setIsSaving] = useState(false);
+  const [isEditing, setIsEditing] = useState(false);
+
+  const [brandName, setBrandName] = useState("");
+  const [brandColorHsl, setBrandColorHsl] = useState("");
+  const [brandLogoUrl, setBrandLogoUrl] = useState("");
+  const [brandFaviconUrl, setBrandFaviconUrl] = useState("");
+  const [customDomain, setCustomDomain] = useState("");
+  const [domainVerified, setDomainVerified] = useState(false);
+  const [isVerifying, setIsVerifying] = useState(false);
+
+  const [original, setOriginal] = useState({
+    brandName: "",
+    brandColorHsl: "",
+    brandLogoUrl: "",
+    brandFaviconUrl: "",
+    customDomain: "",
+  });
+
+  useEffect(() => {
+    apiClient
+      .get<{
+        brand_name: string | null;
+        brand_color_hsl: string | null;
+        brand_logo_url: string | null;
+        brand_favicon_url: string | null;
+        custom_domain: string | null;
+        domain_verified: boolean;
+      }>("/api/v1/settings/branding")
+      .then((data) => {
+        const vals = {
+          brandName: data.brand_name || "",
+          brandColorHsl: data.brand_color_hsl || "",
+          brandLogoUrl: data.brand_logo_url || "",
+          brandFaviconUrl: data.brand_favicon_url || "",
+          customDomain: data.custom_domain || "",
+        };
+        setBrandName(vals.brandName);
+        setBrandColorHsl(vals.brandColorHsl);
+        setBrandLogoUrl(vals.brandLogoUrl);
+        setBrandFaviconUrl(vals.brandFaviconUrl);
+        setCustomDomain(vals.customDomain);
+        setDomainVerified(data.domain_verified);
+        setOriginal(vals);
+        if (!data.brand_name && !data.brand_logo_url) {
+          setIsEditing(true);
+        }
+      })
+      .catch(() => setIsEditing(true))
+      .finally(() => setIsLoading(false));
+  }, []);
+
+  const isDirty =
+    brandName !== original.brandName ||
+    brandColorHsl !== original.brandColorHsl ||
+    brandLogoUrl !== original.brandLogoUrl ||
+    brandFaviconUrl !== original.brandFaviconUrl ||
+    customDomain !== original.customDomain;
+
+  async function handleSave() {
+    setIsSaving(true);
+    try {
+      const payload: Record<string, string | null> = {};
+      payload.brand_name = brandName || null;
+      payload.brand_color_hsl = brandColorHsl || null;
+      payload.brand_logo_url = brandLogoUrl || null;
+      payload.brand_favicon_url = brandFaviconUrl || null;
+      payload.custom_domain = customDomain || null;
+
+      const updated = await apiClient.patch<{
+        brand_name: string | null;
+        brand_color_hsl: string | null;
+        brand_logo_url: string | null;
+        brand_favicon_url: string | null;
+        custom_domain: string | null;
+        domain_verified: boolean;
+      }>("/api/v1/settings/branding", payload);
+
+      const newVals = {
+        brandName: updated.brand_name || "",
+        brandColorHsl: updated.brand_color_hsl || "",
+        brandLogoUrl: updated.brand_logo_url || "",
+        brandFaviconUrl: updated.brand_favicon_url || "",
+        customDomain: updated.custom_domain || "",
+      };
+      setBrandName(newVals.brandName);
+      setBrandColorHsl(newVals.brandColorHsl);
+      setBrandLogoUrl(newVals.brandLogoUrl);
+      setBrandFaviconUrl(newVals.brandFaviconUrl);
+      setCustomDomain(newVals.customDomain);
+      setDomainVerified(updated.domain_verified);
+      setOriginal(newVals);
+      setIsEditing(false);
+      queryClient.invalidateQueries({ queryKey: ["branding"] });
+      toast({ title: "Branding updated" });
+    } catch (err) {
+      toast({
+        title: "Failed to update branding",
+        description: err instanceof Error ? err.message : "Unknown error",
+        variant: "destructive",
+      });
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function handleVerifyDomain() {
+    if (!customDomain) return;
+    setIsVerifying(true);
+    try {
+      const result = await apiClient.post<{ domain: string; verified: boolean; dns_record: Record<string, string> }>(
+        "/api/v1/settings/verify-domain",
+        { domain: customDomain },
+      );
+      setDomainVerified(result.verified);
+      toast({
+        title: result.verified ? "Domain verified!" : "Domain verification failed",
+        description: result.verified
+          ? `${customDomain} is now verified.`
+          : `Add a TXT record: ${result.dns_record.name} → ${result.dns_record.value}`,
+        variant: result.verified ? "default" : "destructive",
+      });
+    } catch (err) {
+      toast({
+        title: "Verification failed",
+        description: err instanceof Error ? err.message : "Unknown error",
+        variant: "destructive",
+      });
+    } finally {
+      setIsVerifying(false);
+    }
+  }
+
+  function handleCancel() {
+    setBrandName(original.brandName);
+    setBrandColorHsl(original.brandColorHsl);
+    setBrandLogoUrl(original.brandLogoUrl);
+    setBrandFaviconUrl(original.brandFaviconUrl);
+    setCustomDomain(original.customDomain);
+    setIsEditing(false);
+  }
+
+  if (isLoading) return <Skeleton className="h-[200px] rounded-xl" />;
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <div>
+          <h3 className="text-lg font-semibold">Branding</h3>
+          <p className="mt-0.5 text-[13px] text-muted-foreground">
+            Customize your workspace appearance — name, logo, colors, and custom domain
+          </p>
+        </div>
+        {!isEditing && (
+          <Button variant="outline" size="sm" className="h-8 text-[12px]" onClick={() => setIsEditing(true)}>
+            <Pencil className="mr-1.5 h-3.5 w-3.5" />
+            Edit
+          </Button>
+        )}
+      </div>
+
+      <div className="rounded-xl border bg-card p-6 shadow-soft space-y-5">
+        {/* Preview */}
+        {(brandName || brandLogoUrl || brandColorHsl) && !isEditing && (
+          <div className="flex items-center gap-3 rounded-lg border bg-muted/30 p-4">
+            {brandLogoUrl ? (
+              <img src={brandLogoUrl} alt={brandName} className="h-10 w-10 rounded-lg object-contain" />
+            ) : (
+              <div
+                className="flex h-10 w-10 items-center justify-center rounded-lg"
+                style={{ backgroundColor: brandColorHsl ? `hsl(${brandColorHsl})` : "hsl(var(--primary))" }}
+              >
+                <Paintbrush className="h-5 w-5 text-white" />
+              </div>
+            )}
+            <div>
+              <p className="text-[15px] font-semibold">{brandName || "Suite Studio AI"}</p>
+              {brandColorHsl && (
+                <div className="mt-1 flex items-center gap-2">
+                  <div className="h-3 w-3 rounded-full" style={{ backgroundColor: `hsl(${brandColorHsl})` }} />
+                  <span className="text-[11px] text-muted-foreground">{brandColorHsl}</span>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {isEditing && (
+          <div className="space-y-4">
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="space-y-2">
+                <Label className="text-[13px]">
+                  <Paintbrush className="mr-1.5 inline h-3.5 w-3.5" />
+                  App Name
+                </Label>
+                <Input
+                  value={brandName}
+                  onChange={(e) => setBrandName(e.target.value)}
+                  placeholder="Suite Studio AI"
+                  maxLength={100}
+                  className="text-[13px]"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label className="text-[13px]">
+                  Primary Color (HSL)
+                </Label>
+                <div className="flex gap-2">
+                  <Input
+                    value={brandColorHsl}
+                    onChange={(e) => setBrandColorHsl(e.target.value)}
+                    placeholder="262 83% 58%"
+                    maxLength={30}
+                    className="flex-1 text-[13px]"
+                  />
+                  {brandColorHsl && (
+                    <div
+                      className="h-9 w-9 shrink-0 rounded-md border"
+                      style={{ backgroundColor: `hsl(${brandColorHsl})` }}
+                    />
+                  )}
+                </div>
+                <p className="text-[11px] text-muted-foreground">
+                  Format: &quot;262 83% 58%&quot; — overrides the primary theme color
+                </p>
+              </div>
+            </div>
+
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="space-y-2">
+                <Label className="text-[13px]">
+                  <ImageIcon className="mr-1.5 inline h-3.5 w-3.5" />
+                  Logo URL
+                </Label>
+                <Input
+                  value={brandLogoUrl}
+                  onChange={(e) => setBrandLogoUrl(e.target.value)}
+                  placeholder="https://example.com/logo.png"
+                  className="text-[13px]"
+                />
+              </div>
+              <div className="space-y-2">
+                <Label className="text-[13px]">Favicon URL</Label>
+                <Input
+                  value={brandFaviconUrl}
+                  onChange={(e) => setBrandFaviconUrl(e.target.value)}
+                  placeholder="https://example.com/favicon.ico"
+                  className="text-[13px]"
+                />
+              </div>
+            </div>
+
+            {/* Custom Domain */}
+            <div className="space-y-2">
+              <Label className="text-[13px]">
+                <Globe className="mr-1.5 inline h-3.5 w-3.5" />
+                Custom Domain
+              </Label>
+              <div className="flex gap-2">
+                <Input
+                  value={customDomain}
+                  onChange={(e) => setCustomDomain(e.target.value)}
+                  placeholder="analytics.yourcompany.com"
+                  className="flex-1 text-[13px]"
+                />
+                {customDomain && original.customDomain === customDomain && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-9 text-[12px]"
+                    onClick={handleVerifyDomain}
+                    disabled={isVerifying || domainVerified}
+                  >
+                    {isVerifying ? (
+                      <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                    ) : domainVerified ? (
+                      <CheckCircle2 className="mr-1.5 h-3.5 w-3.5 text-emerald-500" />
+                    ) : (
+                      <AlertCircle className="mr-1.5 h-3.5 w-3.5" />
+                    )}
+                    {domainVerified ? "Verified" : "Verify DNS"}
+                  </Button>
+                )}
+              </div>
+              {customDomain && !domainVerified && (
+                <p className="text-[11px] text-muted-foreground">
+                  Save first, then add a DNS TXT record and click &quot;Verify DNS&quot;
+                </p>
+              )}
+            </div>
+
+            <div className="flex gap-2 pt-2">
+              <Button size="sm" className="h-8 text-[12px]" onClick={handleSave} disabled={isSaving || !isDirty}>
+                {isSaving && <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />}
+                Save Branding
+              </Button>
+              <Button variant="ghost" size="sm" className="h-8 text-[12px]" onClick={handleCancel}>
+                Cancel
+              </Button>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -2272,6 +2592,7 @@ export default function SettingsPage() {
   const testConnector = useTestMcpConnector();
   const reauthorize = useReauthorizeMcpConnector();
   const { toast } = useToast();
+  const showBranding = useFeature("custom_branding");
 
   async function handleDelete(id: string) {
     try {
@@ -2328,6 +2649,9 @@ export default function SettingsPage() {
 
       {/* Plan Info Section */}
       <PlanInfoSection />
+
+      {/* Branding Section */}
+      {showBranding && <BrandingSection />}
 
       {/* AI Configuration Section */}
       <AiConfigSection />

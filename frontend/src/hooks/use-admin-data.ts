@@ -43,3 +43,22 @@ export function useUpdateWallet() {
     },
   });
 }
+
+export function useTenantFeatures(tenantId: string | null) {
+  return useQuery<{ flags: Record<string, boolean> }>({
+    queryKey: ["admin", "tenants", tenantId, "features"],
+    queryFn: () => apiClient.get<{ flags: Record<string, boolean> }>(`/api/v1/admin/tenants/${tenantId}/features`),
+    enabled: !!tenantId,
+  });
+}
+
+export function useUpdateTenantFeatures() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ tenantId, flags }: { tenantId: string; flags: Record<string, boolean> }) =>
+      apiClient.patch<{ flags: Record<string, boolean> }>(`/api/v1/admin/tenants/${tenantId}/features`, { flags }),
+    onSuccess: (_, variables) => {
+      queryClient.invalidateQueries({ queryKey: ["admin", "tenants", variables.tenantId, "features"] });
+    },
+  });
+}

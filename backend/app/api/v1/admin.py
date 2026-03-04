@@ -26,6 +26,7 @@ from app.schemas.admin import (
     WalletResponse,
     WalletUpdateRequest,
 )
+from app.schemas.settings import FeatureFlagsResponse, FeatureFlagsUpdate
 from app.services.audit_service import log_event
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -226,3 +227,51 @@ async def get_platform_stats(
         total_base_credits_remaining=base_remaining,
         total_metered_credits_used=metered_used,
     )
+
+
+# ---------------------------------------------------------------------------
+# Feature flags (super admin — per-tenant)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/tenants/{tenant_id}/features", response_model=FeatureFlagsResponse)
+async def get_tenant_features(
+    tenant_id: uuid.UUID,
+    admin: Annotated[User, Depends(get_current_superadmin)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Get feature flags for a specific tenant."""
+    await db.execute(text("RESET app.current_tenant_id"))
+    from app.services.feature_flag_service import get_all_flags
+
+    flags = await get_all_flags(db, tenant_id)
+    return FeatureFlagsResponse(flags=flags)
+
+
+@router.patch("/tenants/{tenant_id}/features", response_model=FeatureFlagsResponse)
+async def update_tenant_features(
+    tenant_id: uuid.UUID,
+    request: FeatureFlagsUpdate,
+    admin: Annotated[User, Depends(get_current_superadmin)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Update feature flags for a specific tenant (super admin only)."""
+    await db.execute(text("RESET app.current_tenant_id"))
+    from app.services.feature_flag_service import get_all_flags, set_flags_bulk
+
+    await set_flags_bulk(db, tenant_id, request.flags)
+
+    await log_event(
+        db=db,
+        tenant_id=tenant_id,
+        category="admin",
+        action="admin.features_update",
+        actor_id=admin.id,
+        resource_type="tenant_feature_flags",
+        resource_id=str(tenant_id),
+        payload=request.flags,
+    )
+    await db.commit()
+
+    flags = await get_all_flags(db, tenant_id)
+    return FeatureFlagsResponse(flags=flags)

@@ -87,13 +87,13 @@ export const PLAN_TIERS: Record<
 };
 
 export const NAV_ITEMS = [
-  { label: "Dashboard", href: "/dashboard", icon: "LayoutDashboard" as const },
-  { label: "Connections", href: "/connections", icon: "Plug" as const },
-  { label: "Audit Log", href: "/audit", icon: "ScrollText" as const },
-  { label: "Chat", href: "/chat", icon: "MessageSquare" as const },
-  { label: "Saved Queries", href: "/queries", icon: "Database" as const },
-  { label: "Dev Workspace", href: "/workspace", icon: "Code" as const },
-  { label: "Settings", href: "/settings", icon: "Settings" as const },
+  { label: "Dashboard", href: "/dashboard", icon: "LayoutDashboard" as const, featureFlag: null },
+  { label: "Connections", href: "/connections", icon: "Plug" as const, featureFlag: null },
+  { label: "Audit Log", href: "/audit", icon: "ScrollText" as const, featureFlag: null },
+  { label: "Chat", href: "/chat", icon: "MessageSquare" as const, featureFlag: "chat" },
+  { label: "Saved Queries", href: "/queries", icon: "Database" as const, featureFlag: "analytics_export" },
+  { label: "Dev Workspace", href: "/workspace", icon: "Code" as const, featureFlag: "workspace" },
+  { label: "Settings", href: "/settings", icon: "Settings" as const, featureFlag: null },
 ] as const;
 
 export const ADMIN_NAV_ITEMS = [
