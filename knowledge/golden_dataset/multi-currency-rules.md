@@ -56,12 +56,20 @@ For a comprehensive answer, provide BOTH:
 When joining transactionline and aggregating by line amounts:
 
 ```sql
--- Base currency (USD) line totals — negate for revenue
-SUM(tl.amount) * -1 as revenue_usd
+-- Base currency (USD) line totals — DEFAULT for revenue
+SUM(tl.amount * -1) as revenue_usd
 
--- Transaction currency line totals — negate for revenue
-SUM(tl.foreignamount) * -1 as revenue_in_txn_currency
+-- Transaction currency line totals — ONLY for per-currency breakdown
+SUM(tl.foreignamount * -1) as revenue_in_txn_currency
 ```
+
+**DEFAULT**: Use `tl.amount` (base currency / USD) for line-level revenue totals. NEVER use `tl.foreignamount` for totals — it mixes different currencies (EUR + USD) and produces inflated, meaningless numbers.
+
+**IMPORTANT**: Always filter non-revenue lines when summing amounts:
+```sql
+WHERE tl.mainline = 'F' AND tl.taxline = 'F' AND (tl.iscogs = 'F' OR tl.iscogs IS NULL)
+```
+Note: `tl.iscogs` can be NULL on some lines — always include the `IS NULL` fallback.
 
 ## Margin / COGS Calculations — Currency Consistency
 

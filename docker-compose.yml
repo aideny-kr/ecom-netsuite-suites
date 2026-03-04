@@ -49,6 +49,7 @@ services:
     volumes:
       - ./backend:/app
       - ./knowledge:/knowledge
+      - workspace_storage:/tmp/workspace_storage
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
   worker:
@@ -90,3 +91,4 @@ services:
 
 volumes:
   pgdata:
+  workspace_storage:

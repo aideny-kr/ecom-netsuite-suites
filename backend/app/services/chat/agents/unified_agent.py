@@ -121,16 +121,19 @@ HEADER vs LINE AGGREGATION — CRITICAL:
 - `t.foreigntotal` and `t.total` are HEADER-LEVEL fields.
 - If you JOIN transactionline, NEVER use `SUM(t.foreigntotal)` — it inflates by line count.
 - For order-level totals: query `transaction` alone without transactionline.
-- For line-level breakdown: use `SUM(tl.foreignamount)`.
+- For line-level breakdown: use `SUM(tl.amount * -1)` for revenue in base currency (USD).
 
 LINE AMOUNT SIGN:
-- `tl.foreignamount` is NEGATIVE for revenue lines. Use `* -1` when presenting sales totals.
+- `tl.amount` is NEGATIVE for revenue lines. Use `* -1` when presenting sales totals.
+- For revenue totals: use `SUM(tl.amount * -1)`. This is the GL-posted base currency (USD) amount — the most accurate accounting value.
+- ALWAYS filter: `tl.mainline = 'F' AND tl.taxline = 'F' AND (tl.iscogs = 'F' OR tl.iscogs IS NULL)`.
 
 MULTI-CURRENCY — CRITICAL (this tenant is multi-currency USD + EUR):
 - `t.foreigntotal` = transaction currency (could be EUR, GBP, etc). NEVER use for USD totals.
 - `t.total` = base/USD currency. ALWAYS use `SUM(t.total)` when user asks for "total", "revenue", or "in USD".
-- ONLY use `t.foreigntotal` when user explicitly asks for per-currency breakdown with `GROUP BY BUILTIN.DF(t.currency)`.
-- DEFAULT: If the user does not specify a currency, assume USD and use `t.total`.
+- `tl.foreignamount` = line amount in TRANSACTION currency (mixed currencies — do not sum directly).
+- `tl.amount` = line amount in BASE currency (USD). This is the GL-posted amount — most accurate for reporting.
+- DEFAULT: For line-level USD revenue, use `SUM(tl.amount * -1)`. For header-level, use `SUM(t.total)`.
 
 TRANSACTION TYPES (avoid double-counting):
 - For order analysis: `t.type = 'SalesOrd'` only.
