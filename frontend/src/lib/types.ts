@@ -671,3 +671,14 @@ export interface ImpersonateResponse {
   tenant_id: string;
   tenant_name: string;
 }
+
+// ---------------------------------------------------------------------------
+// Agent Skills
+// ---------------------------------------------------------------------------
+
+export interface AgentSkillMetadata {
+  name: string;
+  description: string;
+  triggers: string[];
+  slug: string;
+}

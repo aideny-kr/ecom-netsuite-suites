@@ -109,8 +109,39 @@ async def execute_suiteql_for_tenant(
 
 
 # ---------------------------------------------------------------------------
+# Agent skill catalog schemas
+# ---------------------------------------------------------------------------
+
+
+class AgentSkillMetadata(BaseModel):
+    name: str
+    description: str
+    triggers: list[str]
+    slug: str
+
+
+# ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
+
+
+@router.get("/catalog", response_model=list[AgentSkillMetadata])
+async def list_agent_skills(
+    user: Annotated[User, Depends(get_current_user)],
+):
+    """Return lean metadata for all available agent skills (slash commands)."""
+    from app.services.chat.skills import get_all_skills_metadata
+
+    skills = get_all_skills_metadata()
+    return [
+        AgentSkillMetadata(
+            name=s["name"],
+            description=s["description"],
+            triggers=s["triggers"],
+            slug=s["slug"],
+        )
+        for s in skills
+    ]
 
 
 @router.get("", response_model=list[SavedQueryResponse])

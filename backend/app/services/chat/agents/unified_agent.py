@@ -200,7 +200,7 @@ ERROR RECOVERY:
 </agentic_workflow>
 
 <output_instructions>
-LANGUAGE: Always respond in English only.
+LANGUAGE: Always respond in English unless the user asks in another language but do not get the lanugage mixed when output.
 
 Output reasoning in a <reasoning> block (hidden from user).
 
@@ -250,6 +250,7 @@ class UnifiedAgent(BaseSpecialistAgent):
         self._current_task: str = ""
         self._domain_knowledge: list[str] = []
         self._proven_patterns: list[dict] = []
+        self._active_skill: dict | None = None  # Set when a skill is triggered
 
     @property
     def agent_name(self) -> str:
@@ -366,6 +367,31 @@ class UnifiedAgent(BaseSpecialistAgent):
             except Exception:
                 pass
 
+        # Active skill instructions (progressive disclosure)
+        if self._active_skill:
+            from app.services.chat.skills import get_skill_instructions
+
+            instructions = get_skill_instructions(self._active_skill["slug"])
+            if instructions:
+                parts.append(f"\n<skill_instructions>\n{instructions}\n</skill_instructions>")
+                parts.append(
+                    "**IMPORTANT**: You are executing a specific skill. "
+                    "Follow the instructions above step-by-step. "
+                    "Do NOT deviate from the prescribed workflow."
+                )
+        else:
+            # Inject lean skill awareness (available commands)
+            from app.services.chat.skills import get_all_skills_metadata
+
+            skills = get_all_skills_metadata()
+            if skills:
+                skills_block = "\n<available_skills>\nThe user can invoke these skills via slash commands:\n"
+                for s in skills:
+                    primary_trigger = next((t for t in s["triggers"] if t.startswith("/")), s["triggers"][0])
+                    skills_block += f"- `{primary_trigger}` — {s['name']}: {s['description']}\n"
+                skills_block += "</available_skills>"
+                parts.append(skills_block)
+
         # Policy constraints
         if self._policy:
             parts.append("\n## POLICY CONSTRAINTS")
@@ -387,6 +413,13 @@ class UnifiedAgent(BaseSpecialistAgent):
 
     async def _setup_context(self, task: str, context: dict[str, Any], db: "AsyncSession") -> str:
         """Shared setup for run() and run_streaming(). Returns augmented task."""
+        # Skill detection (before entity augmentation)
+        from app.services.chat.skills import match_skill
+
+        matched = match_skill(task)
+        if matched:
+            self._active_skill = matched
+
         vernacular = context.get("tenant_vernacular", "")
         if vernacular:
             task = self._augment_task_with_entities(task, vernacular)
