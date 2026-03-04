@@ -17,6 +17,17 @@ from sqlalchemy import func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+
+# Regex to strip leaked Anthropic tool-call XML from assistant text
+_TOOL_XML_RE = re.compile(r"</?(?:invoke|parameter|tool_use)[^>]*>", re.DOTALL)
+_TOOL_TAG_RE = re.compile(r"\s*\[tool:\s*[^\]]+\]")
+
+
+def _sanitize_assistant_text(text: str) -> str:
+    """Remove leaked tool-call XML and tool tags from assistant response text."""
+    text = _TOOL_XML_RE.sub("", text)
+    text = _TOOL_TAG_RE.sub("", text)
+    return text.strip()
 from app.models.chat import ChatMessage, ChatSession
 from app.services.audit_service import log_event
 from app.services.chat.billing import deduct_chat_credits
@@ -462,12 +473,12 @@ async def run_chat_turn(
                         agent_result = payload
 
                 if agent_result is None:
-                    final_text = "".join(streamed_text_parts).strip() or "I wasn't able to process that request."
+                    final_text = _sanitize_assistant_text("".join(streamed_text_parts)) or "I wasn't able to process that request."
                     coord_result_tokens = (0, 0)
                     coord_result_cache = (0, 0)
                     coord_result_tool_calls: list[dict] = []
                 else:
-                    final_text = re.sub(r"\s*\[tool:\s*[^\]]+\]", "", agent_result.data or "").strip()
+                    final_text = _sanitize_assistant_text(agent_result.data or "")
                     coord_result_tokens = (agent_result.tokens_used.input_tokens, agent_result.tokens_used.output_tokens)
                     coord_result_cache = (agent_result.tokens_used.cache_creation_input_tokens, agent_result.tokens_used.cache_read_input_tokens)
                     coord_result_tool_calls = agent_result.tool_calls_log
@@ -583,13 +594,13 @@ async def run_chat_turn(
             if coord_result is None:
                 # Fallback: synthesis didn't produce a result
                 final_text = (
-                    "".join(streamed_text_parts).strip()
+                    _sanitize_assistant_text("".join(streamed_text_parts))
                     or "I wasn't able to find relevant information for that question. Could you rephrase or provide more details?"
                 )
                 coord_result_tokens = (0, 0)
                 coord_result_tool_calls: list[dict] = []
             else:
-                final_text = re.sub(r"\s*\[tool:\s*[^\]]+\]", "", coord_result.final_text).strip()
+                final_text = _sanitize_assistant_text(coord_result.final_text)
                 coord_result_tokens = (coord_result.total_input_tokens, coord_result.total_output_tokens)
                 coord_result_tool_calls = coord_result.tool_calls_log
 
@@ -808,8 +819,8 @@ async def run_chat_turn(
             total_output_tokens += response.usage.output_tokens
             final_text = "\n".join(response.text_blocks) if response.text_blocks else ""
 
-    # Strip raw tool reference tags the LLM may include in its text output
-    final_text = re.sub(r"\s*\[tool:\s*[^\]]+\]", "", final_text).strip()
+    # Strip raw tool reference tags / leaked XML the LLM may include
+    final_text = _sanitize_assistant_text(final_text)
 
     # ── Save assistant message ──
     assistant_msg = ChatMessage(
