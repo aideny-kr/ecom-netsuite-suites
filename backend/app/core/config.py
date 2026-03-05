@@ -55,6 +55,7 @@ class Settings(BaseSettings):
     NETSUITE_SUITEQL_TIMEOUT: int = 30
     NETSUITE_SUITEQL_ALLOWED_TABLES: str = (
         "transaction,transactionline,transactionaccountingline,customer,item,account,subsidiary,"
+        "accountingperiod,accountingbook,"
         "department,location,classification,currency,employee,vendor,"
         "inventoryitemlocations,inventorybalance,aggregateitemlocation,inventorynumber,"
         "customtransactionbodyfield,customtransactioncolumnfield,"

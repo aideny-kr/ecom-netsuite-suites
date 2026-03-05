@@ -404,6 +404,28 @@ async def run_chat_turn(
                     user_timezone=user_timezone,
                 )
 
+                # Detect financial intent for task augmentation + domain knowledge boost
+                from app.services.chat.coordinator import classify_intent, IntentType
+                detected_intent = classify_intent(sanitized_input)
+                is_financial = detected_intent == IntentType.FINANCIAL_REPORT
+
+                # Follow-up detection: if the previous turn used financial report mode
+                # (TAL queries, accttype grouping), carry forward for short follow-ups
+                if not is_financial and history_messages:
+                    prev_assistant = next(
+                        (m["content"] for m in reversed(history_messages) if m["role"] == "assistant"),
+                        "",
+                    )
+                    _financial_history_markers = (
+                        "transactionaccountingline", "accttype", "Net Income",
+                        "Income Statement", "Balance Sheet", "FINANCIAL REPORT MODE",
+                    )
+                    if any(marker in prev_assistant for marker in _financial_history_markers):
+                        is_financial = True
+                        print("[UNIFIED] Financial follow-up detected from conversation history", flush=True)
+
+                dk_top_k = 5 if is_financial else None  # default from settings
+
                 # Assemble context concurrently (entity resolution + domain knowledge + proven patterns)
                 from app.services.chat.tenant_resolver import TenantEntityResolver
                 from app.services.chat.domain_knowledge import retrieve_domain_knowledge
@@ -417,7 +439,7 @@ async def run_chat_turn(
                         adapter=specialist_adapter,
                         model=settings.MULTI_AGENT_SPECIALIST_MODEL,
                     ),
-                    retrieve_domain_knowledge(db=db, query_text=sanitized_input),
+                    retrieve_domain_knowledge(db=db, query_text=sanitized_input, top_k=dk_top_k),
                     retrieve_similar_patterns(db, tenant_id, sanitized_input),
                     return_exceptions=True,
                 )
@@ -452,11 +474,37 @@ async def run_chat_turn(
                     policy=active_policy,
                 )
 
+                # Augment task for financial report queries
+                unified_task = sanitized_input
+                if is_financial:
+                    unified_task = (
+                        f"{sanitized_input}\n\n"
+                        "[FINANCIAL REPORT MODE] Use TransactionAccountingLine (TAL) joined to Account "
+                        "and AccountingPeriod for this query.\n"
+                        "EXACT COLUMN NAMES (do NOT guess — these are verified):\n"
+                        "- Account: a.accttype (NOT a.type), a.acctnumber (NOT a.acctnum), a.acctname\n"
+                        "- TAL: tal.amount, tal.posting, tal.accountingbook, tal.account, tal.transaction\n"
+                        "- Period: ap.periodname (e.g. 'Jan 2026'), ap.startdate, ap.enddate\n"
+                        "MANDATORY FILTERS:\n"
+                        "- tal.accountingbook = (SELECT id FROM accountingbook WHERE isprimary = 'T')\n"
+                        "- tal.posting = 'T'\n"
+                        "- JOIN AccountingPeriod ap ON ap.id = t.postingperiod\n"
+                        "MANDATORY CURRENCY TRANSLATION (multi-subsidiary multi-currency tenant):\n"
+                        "- Do NOT use raw SUM(tal.amount) — it mixes USD and EUR amounts.\n"
+                        "- MUST wrap amounts: BUILTIN.CONSOLIDATE(tal.amount, 'INCOME', 'DEFAULT', 'DEFAULT', 1, ap.id, 'DEFAULT') for P&L\n"
+                        "- MUST wrap amounts: BUILTIN.CONSOLIDATE(tal.amount, 'LEDGER', 'DEFAULT', 'DEFAULT', 1, ap.id, 'DEFAULT') for Balance Sheet\n"
+                        "P&L account types: a.accttype IN ('Income','OthIncome','COGS','Expense','OthExpense')\n"
+                        "Revenue is NEGATIVE in TAL — multiply consolidated result by -1.\n"
+                        "For Balance Sheet: inception-to-date (NO start date filter).\n"
+                        "Check <domain_knowledge> for exact query templates."
+                    )
+                    print(f"[UNIFIED] Financial report mode activated", flush=True)
+
                 streamed_text_parts: list[str] = []
                 agent_result = None
 
                 async for event_type, payload in unified_agent.run_streaming(
-                    task=sanitized_input,
+                    task=unified_task,
                     context=context,
                     db=db,
                     adapter=specialist_adapter,

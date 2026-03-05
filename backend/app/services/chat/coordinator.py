@@ -50,6 +50,7 @@ class IntentType(str, enum.Enum):
 
     DOCUMENTATION = "documentation"
     DATA_QUERY = "data_query"
+    FINANCIAL_REPORT = "financial_report"
     WORKSPACE_DEV = "workspace_dev"
     ANALYSIS = "analysis"
     CODE_UNDERSTANDING = "code_understanding"
@@ -93,6 +94,11 @@ ROUTE_REGISTRY: dict[IntentType, RouteConfig] = {
         intent=IntentType.CODE_UNDERSTANDING,
         agents=["rag"],
         model_override=None,
+    ),
+    IntentType.FINANCIAL_REPORT: RouteConfig(
+        intent=IntentType.FINANCIAL_REPORT,
+        agents=["suiteql", "analysis"],
+        parallel=False,
     ),
 }
 
@@ -195,6 +201,34 @@ _HEURISTIC_RULES: list[tuple[IntentType, re.Pattern[str]]] = [
             """
         ),
     ),
+    # --- FINANCIAL_REPORT: Income statement, balance sheet, P&L, GL queries ---
+    # Checked BEFORE DATA_QUERY so "balance sheet" and "revenue by account" don't get caught as generic data.
+    (
+        IntentType.FINANCIAL_REPORT,
+        re.compile(
+            r"""(?xi)
+            \b(?:
+                income\s+statement |
+                profit\s*(?:&|and)\s*loss |
+                p\s*[&/]\s*l\b |
+                balance\s+sheet |
+                cash\s+flow\s+statement |
+                trial\s+balance |
+                (?:net|gross)\s+(?:income|profit|margin|revenue) |
+                operating\s+(?:income|expenses?|profit|loss) |
+                ebitda |
+                consolidated\s+(?:revenue|financials?|income|report) |
+                financial\s+(?:statement|report|summary|performance|results?) |
+                chart\s+of\s+accounts |
+                general\s+ledger |
+                gl\s+(?:summary|report|impact|entries|detail|balance) |
+                accounting\s+period |
+                fiscal\s+(?:year|period|quarter)\s+(?:report|summary|results?) |
+                (?:revenue|expenses?|cogs|cost\s+of\s+(?:goods\s+sold|goods|sales))\s+by\s+(?:account|gl|period|category)
+            )\b
+            """
+        ),
+    ),
     # --- DATA_QUERY: Financial data, orders, records, lookups ---
     (
         IntentType.DATA_QUERY,
@@ -279,6 +313,9 @@ COORDINATOR_PLAN_PROMPT = (
     "RULES:\n"
     "- Use the FEWEST agents necessary. Most questions need only 1 agent.\n"
     "- For data questions: just suiteql. For docs: just rag. For code: just workspace.\n"
+    "- For financial statement questions (income statement, P&L, balance sheet, trial balance, "
+    "net income, gross margin, GL summary): suiteql → analysis (2 steps, sequential). "
+    "The suiteql agent knows how to query TransactionAccountingLine for GL data.\n"
     "- For complex analysis: suiteql → analysis (2 steps, sequential).\n"
     "- For data questions involving dates, include the explicit date in the task.\n"
     "- For questions about script logic, calculations, or how the code behaves, route to `rag` (and specify to search code).\n"
@@ -458,6 +495,7 @@ class MultiAgentCoordinator:
                 plan.parallel and round_num == 0,
                 agent_results,
                 budget_remaining,
+                intent=plan.intent,
             )
 
             for result in round_results:
@@ -556,6 +594,7 @@ class MultiAgentCoordinator:
                 plan.parallel and round_num == 0,
                 agent_results,
                 budget_remaining,
+                intent=plan.intent,
             )
 
             for result in round_results:
@@ -658,7 +697,33 @@ class MultiAgentCoordinator:
             # Shouldn't happen, but fall back to suiteql
             route = ROUTE_REGISTRY[IntentType.DATA_QUERY]
 
-        steps = [PlanStep(agent=agent, task=user_message) for agent in route.agents]
+        steps = []
+        for agent in route.agents:
+            task = user_message
+            # For financial report queries, augment the suiteql task with GL framing
+            if intent == IntentType.FINANCIAL_REPORT and agent == "suiteql":
+                task = (
+                    f"{user_message}\n\n"
+                    "[FINANCIAL REPORT MODE] Use TransactionAccountingLine (TAL) joined to Account "
+                    "and AccountingPeriod for this query.\n"
+                    "EXACT COLUMN NAMES (do NOT guess — these are verified):\n"
+                    "- Account: a.accttype (NOT a.type), a.acctnumber (NOT a.acctnum), a.acctname\n"
+                    "- TAL: tal.amount, tal.posting, tal.accountingbook, tal.account, tal.transaction\n"
+                    "- Period: ap.periodname (e.g. 'Jan 2026'), ap.startdate, ap.enddate\n"
+                    "MANDATORY FILTERS:\n"
+                    "- tal.accountingbook = (SELECT id FROM accountingbook WHERE isprimary = 'T')\n"
+                    "- tal.posting = 'T'\n"
+                    "- JOIN AccountingPeriod ap ON ap.id = t.postingperiod\n"
+                    "MANDATORY CURRENCY TRANSLATION (multi-subsidiary multi-currency tenant):\n"
+                    "- Do NOT use raw SUM(tal.amount) — it mixes USD and EUR amounts.\n"
+                    "- MUST wrap amounts: BUILTIN.CONSOLIDATE(tal.amount, 'INCOME', 'DEFAULT', 'DEFAULT', 1, ap.id, 'DEFAULT') for P&L\n"
+                    "- MUST wrap amounts: BUILTIN.CONSOLIDATE(tal.amount, 'LEDGER', 'DEFAULT', 'DEFAULT', 1, ap.id, 'DEFAULT') for Balance Sheet\n"
+                    "P&L account types: a.accttype IN ('Income','OthIncome','COGS','Expense','OthExpense')\n"
+                    "Revenue is NEGATIVE in TAL — multiply consolidated result by -1.\n"
+                    "For Balance Sheet: inception-to-date (NO start date filter).\n"
+                    "Check <domain_knowledge> for exact query templates."
+                )
+            steps.append(PlanStep(agent=agent, task=task))
 
         return CoordinatorPlan(
             reasoning=f"Heuristic: classified as {intent.value}",
@@ -746,6 +811,7 @@ class MultiAgentCoordinator:
         parallel: bool,
         prior_results: list[AgentResult],
         budget_remaining: int,
+        intent: IntentType = IntentType.AMBIGUOUS,
     ) -> list[AgentResult]:
         """Instantiate and run specialist agents for the given steps."""
         if budget_remaining <= 0:
@@ -791,11 +857,12 @@ class MultiAgentCoordinator:
                     )
                     print(f"[COORDINATOR] Vernacular injected ({len(vernacular)} chars)", flush=True)
 
-                # JIT domain knowledge retrieval
+                # JIT domain knowledge retrieval (bump top_k for financial queries)
                 try:
                     from app.services.chat.domain_knowledge import retrieve_domain_knowledge
 
-                    dk_results = await retrieve_domain_knowledge(db=self.db, query_text=step.task)
+                    dk_top_k = 5 if intent == IntentType.FINANCIAL_REPORT else None
+                    dk_results = await retrieve_domain_knowledge(db=self.db, query_text=step.task, top_k=dk_top_k)
                     if dk_results:
                         context["domain_knowledge"] = [r["raw_text"] for r in dk_results]
                         logger.info(

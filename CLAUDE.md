@@ -273,7 +273,8 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 
 - **Orchestrator** (`orchestrator.py`): SSE streaming endpoint, routes to single-agent or multi-agent
 - **Coordinator** (`coordinator.py`): Semantic router with heuristic classifier (`classify_intent()`), LLM fallback for ambiguous queries. Dispatches specialist agents, handles retries, streams synthesis.
-- **Intent types**: DOCUMENTATION, DATA_QUERY, CODE_UNDERSTANDING, WORKSPACE_DEV, ANALYSIS, AMBIGUOUS. Heuristic regex rules checked first; AMBIGUOUS falls back to LLM planner.
+- **Intent types**: DOCUMENTATION, DATA_QUERY, FINANCIAL_REPORT, CODE_UNDERSTANDING, WORKSPACE_DEV, ANALYSIS, AMBIGUOUS. Heuristic regex rules checked first; AMBIGUOUS falls back to LLM planner.
+- **Financial report routing**: FINANCIAL_REPORT intent → suiteql + analysis (sequential). SuiteQL task augmented with GL framing (TAL, account types, sign conventions). Domain knowledge top_k bumped to 5 for financial queries. Golden dataset `financial-statements.md` provides P&L/BS/GL templates.
 - **Specialist agents** (`agents/`): Each runs a mini agentic loop with tools (max_steps varies per agent)
   - `SuiteQLAgent`: max_steps=6, tenant metadata + entity vernacular injected into prompt
   - `RAGAgent`: max_steps=2, strict tool budget (2 rag_search + 1 web_search). Handles docs, script logic, AND online research.
@@ -291,9 +292,11 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 
 - **Latest migration**: 037_tenant_feature_flags
 - **Entity mappings**: 2,109 seeded for test tenant (bf92d059), seeder runs in metadata discovery pipeline
+- **Golden dataset**: 9 files (added `financial-statements.md` for GL/P&L/BS query templates)
 - **Doc chunk embeddings**: 3,198/3,198 embedded with OpenAI (was 2/3,198 with Voyage AI)
 - **Utility scripts**: `scripts/sanitize_doc_chunks.py`, `scripts/reembed_doc_chunks.py`
 - **Known gap**: OAuth reconnect just flips status, doesn't re-initiate browser flow (refresh token expired for tenant 9745435)
 - **Known gap**: `inputRef` in workspace-chat-panel never attached to ChatInput
 - **Known gap**: structlog setup doesn't surface stdlib `logging.getLogger()` — use `print(flush=True)` for docker log visibility
 - **Deferred**: SDF CI/CD pipeline, bundle versioning strategy, RESTlet rate limiting
+- **Researched**: Celigo flow integration — API sync + ZIP upload into DocChunk RAG. Awaiting prioritization. See `memory/celigo-research.md`.

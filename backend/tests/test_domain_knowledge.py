@@ -267,11 +267,11 @@ class TestRetrievalService:
 class TestGoldenDataset:
     """Validate the golden dataset files themselves."""
 
-    def test_all_8_files_exist(self):
+    def test_all_9_files_exist(self):
         golden_dir = Path(__file__).resolve().parents[1].parent / "knowledge" / "golden_dataset"
         md_files = list(golden_dir.glob("*.md"))
-        assert len(md_files) == 8, (
-            f"Expected 8 golden dataset files, found {len(md_files)}: {[f.name for f in md_files]}"
+        assert len(md_files) == 9, (
+            f"Expected 9 golden dataset files, found {len(md_files)}: {[f.name for f in md_files]}"
         )
 
     def test_all_files_have_frontmatter(self):
