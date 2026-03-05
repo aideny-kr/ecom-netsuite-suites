@@ -48,18 +48,18 @@ export function BrandingProvider({ children }: { children: ReactNode }) {
     refetchOnWindowFocus: true,
   });
 
-  // Inject --primary CSS variable override when brand color is set
+  // Inject CSS variable overrides when brand color is set
   useEffect(() => {
     if (data?.brand_color_hsl) {
-      document.documentElement.style.setProperty(
-        "--primary",
-        data.brand_color_hsl,
-      );
+      document.documentElement.style.setProperty("--primary", data.brand_color_hsl);
+      document.documentElement.style.setProperty("--sidebar-active", data.brand_color_hsl);
     } else {
       document.documentElement.style.removeProperty("--primary");
+      document.documentElement.style.removeProperty("--sidebar-active");
     }
     return () => {
       document.documentElement.style.removeProperty("--primary");
+      document.documentElement.style.removeProperty("--sidebar-active");
     };
   }, [data?.brand_color_hsl]);
 

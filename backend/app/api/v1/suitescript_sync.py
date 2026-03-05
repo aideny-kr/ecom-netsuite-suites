@@ -156,7 +156,8 @@ async def pull_single_file(
     try:
         from app.services.netsuite_restlet_client import restlet_read_file
 
-        result = await restlet_read_file(access_token, account_id, int(ns_file_id))
+        restlet_url = connection.metadata_json.get("restlet_url") if connection.metadata_json else None
+        result = await restlet_read_file(access_token, account_id, int(ns_file_id), restlet_url=restlet_url)
         elapsed_ms = int((time.monotonic() - t0) * 1000)
     except Exception as exc:
         elapsed_ms = int((time.monotonic() - t0) * 1000)
@@ -237,7 +238,8 @@ async def push_single_file(
     try:
         from app.services.netsuite_restlet_client import restlet_write_file
 
-        result = await restlet_write_file(access_token, account_id, int(ns_file_id), content)
+        restlet_url = connection.metadata_json.get("restlet_url") if connection.metadata_json else None
+        result = await restlet_write_file(access_token, account_id, int(ns_file_id), content, restlet_url=restlet_url)
         elapsed_ms = int((time.monotonic() - t0) * 1000)
     except Exception as exc:
         elapsed_ms = int((time.monotonic() - t0) * 1000)
