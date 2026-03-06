@@ -46,7 +46,7 @@ def parse_frontmatter(content: str) -> tuple[dict[str, Any], str]:
         fm = yaml.safe_load(match.group(1)) or {}
     except yaml.YAMLError:
         fm = {}
-    remaining = content[match.end():]
+    remaining = content[match.end() :]
     return fm, remaining
 
 
@@ -89,26 +89,30 @@ def chunk_markdown(content: str, source_uri: str) -> list[dict]:
         if estimate_tokens(section) > CHUNK_MAX_TOKENS:
             sub_chunks = _split_large_section(section, h1_title)
             for sc in sub_chunks:
-                chunks.append({
-                    "source_uri": source_uri,
-                    "chunk_index": chunk_index,
-                    "raw_text": sc,
-                    "token_count": estimate_tokens(sc),
-                    "topic_tags": topic_tags,
-                    "source_type": source_type,
-                })
+                chunks.append(
+                    {
+                        "source_uri": source_uri,
+                        "chunk_index": chunk_index,
+                        "raw_text": sc,
+                        "token_count": estimate_tokens(sc),
+                        "topic_tags": topic_tags,
+                        "source_type": source_type,
+                    }
+                )
                 chunk_index += 1
         else:
             # Prepend H1 title for context
             chunk_text = f"# {h1_title}\n\n{section}"
-            chunks.append({
-                "source_uri": source_uri,
-                "chunk_index": chunk_index,
-                "raw_text": chunk_text,
-                "token_count": estimate_tokens(chunk_text),
-                "topic_tags": topic_tags,
-                "source_type": source_type,
-            })
+            chunks.append(
+                {
+                    "source_uri": source_uri,
+                    "chunk_index": chunk_index,
+                    "raw_text": chunk_text,
+                    "token_count": estimate_tokens(chunk_text),
+                    "topic_tags": topic_tags,
+                    "source_type": source_type,
+                }
+            )
             chunk_index += 1
 
     return chunks
@@ -200,7 +204,7 @@ async def ingest(docs_dir: Path | None = None) -> int:
     has_embeddings = True
 
     for i in range(0, len(texts), EMBED_BATCH_SIZE):
-        batch = texts[i: i + EMBED_BATCH_SIZE]
+        batch = texts[i : i + EMBED_BATCH_SIZE]
         embeddings = await embed_domain_texts(batch)
         if embeddings is None:
             print("  WARNING: OPENAI_EMBEDDING_API_KEY not set — inserting without embeddings")
@@ -217,26 +221,30 @@ async def ingest(docs_dir: Path | None = None) -> int:
     print("Upserting to database...")
     async with async_session_factory() as db:
         for chunk_data, embedding in zip(all_chunks, all_embeddings):
-            stmt = pg_insert(DomainKnowledgeChunk).values(
-                id=uuid.uuid4(),
-                source_uri=chunk_data["source_uri"],
-                chunk_index=chunk_data["chunk_index"],
-                raw_text=chunk_data["raw_text"],
-                token_count=chunk_data["token_count"],
-                embedding=embedding,
-                topic_tags=chunk_data["topic_tags"],
-                source_type=chunk_data["source_type"],
-                is_deprecated=False,
-            ).on_conflict_do_update(
-                constraint="uq_dk_source_chunk",
-                set_={
-                    "raw_text": chunk_data["raw_text"],
-                    "token_count": chunk_data["token_count"],
-                    "embedding": embedding,
-                    "topic_tags": chunk_data["topic_tags"],
-                    "source_type": chunk_data["source_type"],
-                    "is_deprecated": False,
-                },
+            stmt = (
+                pg_insert(DomainKnowledgeChunk)
+                .values(
+                    id=uuid.uuid4(),
+                    source_uri=chunk_data["source_uri"],
+                    chunk_index=chunk_data["chunk_index"],
+                    raw_text=chunk_data["raw_text"],
+                    token_count=chunk_data["token_count"],
+                    embedding=embedding,
+                    topic_tags=chunk_data["topic_tags"],
+                    source_type=chunk_data["source_type"],
+                    is_deprecated=False,
+                )
+                .on_conflict_do_update(
+                    constraint="uq_dk_source_chunk",
+                    set_={
+                        "raw_text": chunk_data["raw_text"],
+                        "token_count": chunk_data["token_count"],
+                        "embedding": embedding,
+                        "topic_tags": chunk_data["topic_tags"],
+                        "source_type": chunk_data["source_type"],
+                        "is_deprecated": False,
+                    },
+                )
             )
             await db.execute(stmt)
 

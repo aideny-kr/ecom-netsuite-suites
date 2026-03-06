@@ -270,6 +270,11 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 12. **NetSuite account IDs** — normalize with `replace("_", "-").lower()` for URLs
 13. **SuiteQL status codes via REST API** — REST API returns single-letter status codes (`'B'`, `'H'`), NOT compound codes (`'SalesOrd:B'`). Always use single-letter codes in WHERE filters: `t.status NOT IN ('C', 'H')`. Compound codes silently fail via REST API.
 14. **Agent hallucination from history** — The LLM may answer data queries from conversation memory without calling tools. `_task_contains_query()` guard in `base_agent.py` forces tool execution when step==0 and no tools called.
+15. **SET LOCAL doesn't support bind params** — PostgreSQL `SET LOCAL` rejects `$1` placeholders. Use `set_tenant_context()` from `database.py` which validates UUID before interpolation. Never use raw f-string with user input.
+16. **Token denylist and rate limiter use Redis** — `token_denylist.py` and `rate_limit.py` are Redis-backed. Falls back to in-memory in dev if Redis unavailable. Must have Redis in production.
+17. **Production secrets validated at startup** — `_validate_production_secrets()` in `main.py` refuses to start if `APP_ENV != "development"` and JWT_SECRET_KEY or ENCRYPTION_KEY are defaults.
+18. **Swagger docs disabled in production** — `docs_url` and `redoc_url` are `None` when `APP_ENV != "development"`.
+19. **Migrations run in CI, not container startup** — `entrypoint.sh` no longer runs `alembic upgrade head`. Run migrations via deploy.yml workflow.
 
 ## Chat Architecture
 
@@ -296,7 +301,9 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 - **Entity mappings**: 2,109 seeded for test tenant (bf92d059), seeder runs in metadata discovery pipeline
 - **Golden dataset**: 9 files, 85 chunks (added `financial-statements.md` for GL/P&L/BS; status code + REST API behavior docs)
 - **Doc chunk embeddings**: 3,198/3,198 embedded with OpenAI (was 2/3,198 with Voyage AI)
-- **Utility scripts**: `scripts/sanitize_doc_chunks.py`, `scripts/reembed_doc_chunks.py`
+- **Utility scripts**: `scripts/sanitize_doc_chunks.py`, `scripts/reembed_doc_chunks.py`, `scripts/export_tenant.py`, `scripts/import_tenant.py`, `scripts/reencrypt_tenant.py`
+- **Security hardening**: SET LOCAL UUID validation, Redis denylist/rate limiter, SSL verification, production secret validation, security headers, Swagger disabled in prod, Sentry integration
+- **CI/CD**: `deploy.yml` (staging auto + production manual), `rollback.yml` (manual)
 - **Known gap**: OAuth reconnect just flips status, doesn't re-initiate browser flow (refresh token expired for tenant 9745435)
 - **Known gap**: `inputRef` in workspace-chat-panel never attached to ChatInput
 - **Known gap**: structlog setup doesn't surface stdlib `logging.getLogger()` — use `print(flush=True)` for docker log visibility

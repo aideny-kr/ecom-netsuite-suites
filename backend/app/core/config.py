@@ -99,6 +99,9 @@ class Settings(BaseSettings):
     STRIPE_WEBHOOK_SECRET: str = ""
     BILLING_BASE_CREDITS: int = 500
 
+    SENTRY_DSN: str = ""
+    SENTRY_TRACES_SAMPLE_RATE: float = 0.1
+
     AUDIT_RETENTION_DAYS: int = 90
 
     model_config = {"env_file": str(_env_file), "extra": "ignore"}

@@ -1,0 +1,67 @@
+name: Rollback
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "Environment to rollback"
+        required: true
+        type: choice
+        options:
+          - staging
+          - production
+      image_sha:
+        description: "Git SHA of image to rollback to (7-char, e.g. abc1234)"
+        required: true
+        type: string
+      rollback_migration:
+        description: "Alembic revision to downgrade to (e.g. 036). Leave empty to skip migration rollback."
+        required: false
+        type: string
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}/backend
+
+jobs:
+  rollback:
+    name: Rollback ${{ inputs.environment }}
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify image exists in GHCR
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+          docker manifest inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ inputs.image_sha }}
+
+      - name: Rollback migration
+        if: inputs.rollback_migration != ''
+        env:
+          DATABASE_URL_SYNC: ${{ inputs.environment == 'production' && secrets.PROD_DATABASE_URL_SYNC || secrets.STAGING_DATABASE_URL_SYNC }}
+        run: |
+          cd backend
+          pip install -e .
+          echo "Current revision:"
+          alembic current
+          echo "Downgrading to: ${{ inputs.rollback_migration }}"
+          alembic downgrade ${{ inputs.rollback_migration }}
+          echo "New revision:"
+          alembic current
+
+      - name: Deploy previous image
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ inputs.environment == 'production' && secrets.PROD_HOST || secrets.STAGING_HOST }}
+          username: ${{ inputs.environment == 'production' && secrets.PROD_SSH_USER || secrets.STAGING_SSH_USER }}
+          key: ${{ inputs.environment == 'production' && secrets.PROD_SSH_KEY || secrets.STAGING_SSH_KEY }}
+          script: |
+            cd /opt/ecom-netsuite
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+            export IMAGE_TAG=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:sha-${{ inputs.image_sha }}
+            docker compose -f docker-compose.prod.yml pull
+            docker compose -f docker-compose.prod.yml up -d --no-deps backend worker
+            sleep 10
+            curl -f http://localhost:8000/api/v1/health || exit 1

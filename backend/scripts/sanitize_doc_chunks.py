@@ -11,9 +11,8 @@ the bad bytes with clean UTF-8.
 from __future__ import annotations
 
 import asyncio
-import sys
 
-from sqlalchemy import select, text, update
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -36,10 +35,7 @@ async def main() -> None:
 
         while True:
             result = await db.execute(
-                select(DocChunk.id, DocChunk.content)
-                .order_by(DocChunk.id)
-                .offset(offset)
-                .limit(batch_size)
+                select(DocChunk.id, DocChunk.content).order_by(DocChunk.id).offset(offset).limit(batch_size)
             )
             rows = result.all()
             if not rows:
@@ -48,11 +44,7 @@ async def main() -> None:
             for chunk_id, content in rows:
                 cleaned = sanitize_utf8(content)
                 if cleaned != content:
-                    await db.execute(
-                        update(DocChunk)
-                        .where(DocChunk.id == chunk_id)
-                        .values(content=cleaned)
-                    )
+                    await db.execute(update(DocChunk).where(DocChunk.id == chunk_id).values(content=cleaned))
                     total_fixed += 1
 
             offset += batch_size

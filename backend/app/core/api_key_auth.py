@@ -4,7 +4,6 @@ import uuid
 
 import structlog
 from fastapi import Depends, HTTPException, Request, status
-from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -54,7 +53,9 @@ async def get_api_key_context(
         )
 
     # Set RLS context
-    await db.execute(text(f"SET LOCAL app.current_tenant_id = '{tenant_id}'"))
+    from app.core.database import set_tenant_context
+
+    await set_tenant_context(db, str(tenant_id))
 
     # Bind structured logging context
     structlog.contextvars.bind_contextvars(

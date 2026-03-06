@@ -21,7 +21,10 @@ def tenant_session(tenant_id: str):
     so all queries are scoped to the given tenant.
     """
     with Session(sync_engine) as session:
-        session.execute(text(f"SET LOCAL app.current_tenant_id = '{tenant_id}'"))
+        # SET LOCAL doesn't support $1 bind params in PostgreSQL.
+        # Validate UUID to prevent SQL injection.
+        validated = str(uuid.UUID(str(tenant_id)))
+        session.execute(text(f"SET LOCAL app.current_tenant_id = '{validated}'"))
         yield session
 
 

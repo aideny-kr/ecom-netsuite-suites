@@ -1,4 +1,5 @@
 import ssl
+import uuid
 from collections.abc import AsyncGenerator
 
 from sqlalchemy import text
@@ -15,9 +16,9 @@ def _is_supabase(url: str) -> bool:
 def _build_connect_args(url: str) -> dict:
     """Build connection args with SSL for Supabase, plain for local."""
     if _is_supabase(url):
+        # Use default context which verifies certificates against system CA bundle.
+        # Supabase uses Let's Encrypt/AWS certs that validate against public CAs.
         ssl_ctx = ssl.create_default_context()
-        ssl_ctx.check_hostname = False
-        ssl_ctx.verify_mode = ssl.CERT_NONE
         return {"ssl": ssl_ctx}
     return {}
 
@@ -50,8 +51,13 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
 
 
 async def set_tenant_context(session: AsyncSession, tenant_id: str) -> None:
-    """Set RLS tenant context for the current database session."""
-    await session.execute(text(f"SET LOCAL app.current_tenant_id = '{tenant_id}'"))
+    """Set RLS tenant context for the current database session.
+
+    PostgreSQL SET LOCAL does not support parameterized queries ($1 binds),
+    so we validate the tenant_id is a valid UUID to prevent SQL injection.
+    """
+    validated = str(uuid.UUID(str(tenant_id)))  # Raises ValueError if not a valid UUID
+    await session.execute(text(f"SET LOCAL app.current_tenant_id = '{validated}'"))
 
 
 def worker_async_session():

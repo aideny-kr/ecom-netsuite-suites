@@ -34,9 +34,7 @@ async def main() -> None:
 
     async with async_session() as db:
         # Count total NULL-embedding rows
-        count_result = await db.execute(
-            select(DocChunk.id).where(DocChunk.embedding.is_(None))
-        )
+        count_result = await db.execute(select(DocChunk.id).where(DocChunk.embedding.is_(None)))
         null_ids = [row[0] for row in count_result.all()]
         total_null = len(null_ids)
         print(f"Found {total_null} doc_chunks with NULL embeddings.")
@@ -51,9 +49,7 @@ async def main() -> None:
             batch_ids = null_ids[i : i + batch_size]
 
             # Fetch content for this batch
-            result = await db.execute(
-                select(DocChunk.id, DocChunk.content).where(DocChunk.id.in_(batch_ids))
-            )
+            result = await db.execute(select(DocChunk.id, DocChunk.content).where(DocChunk.id.in_(batch_ids)))
             rows = result.all()
 
             if not rows:
@@ -72,14 +68,12 @@ async def main() -> None:
                     truncated = text[:28000] if len(text) > 28000 else text
                     single = await embed_texts([truncated])
                     if single is not None:
-                        await db.execute(
-                            update(DocChunk)
-                            .where(DocChunk.id == chunk_id)
-                            .values(embedding=single[0])
-                        )
+                        await db.execute(update(DocChunk).where(DocChunk.id == chunk_id).values(embedding=single[0]))
                         individual_count += 1
                 total_embedded += individual_count
-                print(f"  Batch {i // batch_size + 1}: batch failed, embedded {individual_count}/{len(chunk_ids)} individually ({total_embedded}/{total_null})")
+                print(
+                    f"  Batch {i // batch_size + 1}: batch failed, embedded {individual_count}/{len(chunk_ids)} individually ({total_embedded}/{total_null})"
+                )
                 await db.commit()
                 if i + batch_size < total_null:
                     await asyncio.sleep(0.5)
@@ -87,11 +81,7 @@ async def main() -> None:
 
             # Update each row
             for chunk_id, embedding in zip(chunk_ids, embeddings):
-                await db.execute(
-                    update(DocChunk)
-                    .where(DocChunk.id == chunk_id)
-                    .values(embedding=embedding)
-                )
+                await db.execute(update(DocChunk).where(DocChunk.id == chunk_id).values(embedding=embedding))
 
             total_embedded += len(embeddings)
             print(f"  Batch {i // batch_size + 1}: embedded {len(embeddings)} chunks ({total_embedded}/{total_null})")

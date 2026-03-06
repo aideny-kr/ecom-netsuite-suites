@@ -5,7 +5,7 @@ from typing import Annotated
 import structlog
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from sqlalchemy import select, text
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -53,7 +53,9 @@ async def get_current_user(
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Plan expired")
 
     # Set RLS context
-    await db.execute(text(f"SET LOCAL app.current_tenant_id = '{user.tenant_id}'"))
+    from app.core.database import set_tenant_context
+
+    await set_tenant_context(db, str(user.tenant_id))
 
     # Bind structured logging context
     structlog.contextvars.bind_contextvars(

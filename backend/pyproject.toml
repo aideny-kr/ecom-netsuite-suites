@@ -34,6 +34,7 @@ dependencies = [
     "psycopg2-binary>=2.9.0",
     "ddgs>=6.0.0",
     "dnspython>=2.6.0",
+    "sentry-sdk[fastapi]>=2.0.0",
 ]
 
 [project.optional-dependencies]
@@ -74,6 +75,7 @@ select = ["E", "F", "I", "N", "W"]
 "tests/test_saved_queries.py" = ["E501"]
 "tests/test_suiteql_agent_prompt.py" = ["E501"]
 "tests/test_web_search_tool.py" = ["E501"]
+"tests/test_security_hardening.py" = ["E501"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
