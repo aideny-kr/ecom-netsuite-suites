@@ -11,9 +11,7 @@ from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
 
 class TenantFeatureFlag(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "tenant_feature_flags"
-    __table_args__ = (
-        UniqueConstraint("tenant_id", "flag_key", name="uq_tenant_feature_flag"),
-    )
+    __table_args__ = (UniqueConstraint("tenant_id", "flag_key", name="uq_tenant_feature_flag"),)
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False, index=True

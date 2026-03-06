@@ -73,8 +73,7 @@ class TestIntentClassification:
     def test_heuristic_classification(self, question: str, expected_intent: IntentType):
         result = classify_intent(question)
         assert result == expected_intent, (
-            f"Question: '{question}'\n"
-            f"Expected: {expected_intent.value}, Got: {result.value}"
+            f"Question: '{question}'\nExpected: {expected_intent.value}, Got: {result.value}"
         )
 
     def test_ambiguous_falls_through(self):
@@ -87,9 +86,7 @@ class TestIntentClassification:
         ]
         for q in ambiguous:
             result = classify_intent(q)
-            assert result == IntentType.AMBIGUOUS, (
-                f"Expected AMBIGUOUS for '{q}', got {result.value}"
-            )
+            assert result == IntentType.AMBIGUOUS, f"Expected AMBIGUOUS for '{q}', got {result.value}"
 
     def test_numeric_id_shortcut(self):
         """Bare numeric IDs should route to DATA_QUERY."""
@@ -100,9 +97,7 @@ class TestIntentClassification:
         """Transaction prefixes (SO, PO, INV, etc.) should route to DATA_QUERY."""
         for prefix in ["SO865732", "INV12345", "PO99999", "RMA61214", "VB54321"]:
             result = classify_intent(prefix)
-            assert result == IntentType.DATA_QUERY, (
-                f"Expected DATA_QUERY for '{prefix}', got {result.value}"
-            )
+            assert result == IntentType.DATA_QUERY, f"Expected DATA_QUERY for '{prefix}', got {result.value}"
 
 
 # ---------------------------------------------------------------------------
@@ -161,18 +156,25 @@ class TestSuiteQLQueryAccuracy:
     @pytest.mark.asyncio
     async def test_latest_sales_orders(self, agent, mock_adapter, mock_db):
         """'latest 10 sales orders' should use ORDER BY ... DESC FETCH FIRST 10 ROWS ONLY."""
-        suiteql_call = _make_tool_use("netsuite_suiteql", {
-            "query": "SELECT t.id, t.tranid, t.trandate, BUILTIN.DF(t.entity) as customer, t.foreigntotal FROM transaction t WHERE t.type = 'SalesOrd' ORDER BY t.id DESC FETCH FIRST 10 ROWS ONLY"
-        })
+        suiteql_call = _make_tool_use(
+            "netsuite_suiteql",
+            {
+                "query": "SELECT t.id, t.tranid, t.trandate, BUILTIN.DF(t.entity) as customer, t.foreigntotal FROM transaction t WHERE t.type = 'SalesOrd' ORDER BY t.id DESC FETCH FIRST 10 ROWS ONLY"
+            },
+        )
         mock_adapter.create_message.side_effect = [
             _make_llm_response(tool_calls=[suiteql_call]),
             _make_text_response("Here are the latest 10 sales orders."),
         ]
 
-        with patch("app.services.chat.tools.execute_tool_call", new_callable=AsyncMock) as mock_exec, \
-             patch("app.services.policy_service.get_active_policy", new_callable=AsyncMock, return_value=None):
+        with (
+            patch("app.services.chat.tools.execute_tool_call", new_callable=AsyncMock) as mock_exec,
+            patch("app.services.policy_service.get_active_policy", new_callable=AsyncMock, return_value=None),
+        ):
             mock_exec.return_value = json.dumps({"columns": ["id"], "rows": [["1"]], "row_count": 1})
-            result = await agent.run("show me the latest 10 sales orders", {}, mock_db, mock_adapter, "claude-sonnet-4-5-20250929")
+            result = await agent.run(
+                "show me the latest 10 sales orders", {}, mock_db, mock_adapter, "claude-sonnet-4-5-20250929"
+            )
 
         assert result.success
         assert len(result.tool_calls_log) == 1
@@ -187,17 +189,24 @@ class TestSuiteQLQueryAccuracy:
     @pytest.mark.asyncio
     async def test_revenue_aggregation_no_line_join(self, agent, mock_adapter, mock_db):
         """'total revenue today' should use SUM(t.foreigntotal) WITHOUT joining transactionline."""
-        suiteql_call = _make_tool_use("netsuite_suiteql", {
-            "query": "SELECT COUNT(*) as order_count, SUM(t.foreigntotal) as total FROM transaction t WHERE t.type = 'SalesOrd' AND t.trandate = TRUNC(SYSDATE)"
-        })
+        suiteql_call = _make_tool_use(
+            "netsuite_suiteql",
+            {
+                "query": "SELECT COUNT(*) as order_count, SUM(t.foreigntotal) as total FROM transaction t WHERE t.type = 'SalesOrd' AND t.trandate = TRUNC(SYSDATE)"
+            },
+        )
         mock_adapter.create_message.side_effect = [
             _make_llm_response(tool_calls=[suiteql_call]),
             _make_text_response("Total revenue today: $50,000"),
         ]
 
-        with patch("app.services.chat.tools.execute_tool_call", new_callable=AsyncMock) as mock_exec, \
-             patch("app.services.policy_service.get_active_policy", new_callable=AsyncMock, return_value=None):
-            mock_exec.return_value = json.dumps({"columns": ["order_count", "total"], "rows": [["10", "50000"]], "row_count": 1})
+        with (
+            patch("app.services.chat.tools.execute_tool_call", new_callable=AsyncMock) as mock_exec,
+            patch("app.services.policy_service.get_active_policy", new_callable=AsyncMock, return_value=None),
+        ):
+            mock_exec.return_value = json.dumps(
+                {"columns": ["order_count", "total"], "rows": [["10", "50000"]], "row_count": 1}
+            )
             result = await agent.run("total revenue today", {}, mock_db, mock_adapter, "claude-sonnet-4-5-20250929")
 
         assert result.success
@@ -209,17 +218,24 @@ class TestSuiteQLQueryAccuracy:
     @pytest.mark.asyncio
     async def test_line_level_uses_foreignamount(self, agent, mock_adapter, mock_db):
         """When querying line-level data, should use tl.foreignamount, not t.foreigntotal."""
-        suiteql_call = _make_tool_use("netsuite_suiteql", {
-            "query": "SELECT BUILTIN.DF(i.displayname) as item, SUM(tl.foreignamount * -1) as revenue FROM transactionline tl JOIN transaction t ON tl.transaction = t.id JOIN item i ON tl.item = i.id WHERE t.type = 'SalesOrd' AND tl.mainline = 'F' AND tl.taxline = 'F' GROUP BY BUILTIN.DF(i.displayname) ORDER BY revenue DESC FETCH FIRST 10 ROWS ONLY"
-        })
+        suiteql_call = _make_tool_use(
+            "netsuite_suiteql",
+            {
+                "query": "SELECT BUILTIN.DF(i.displayname) as item, SUM(tl.foreignamount * -1) as revenue FROM transactionline tl JOIN transaction t ON tl.transaction = t.id JOIN item i ON tl.item = i.id WHERE t.type = 'SalesOrd' AND tl.mainline = 'F' AND tl.taxline = 'F' GROUP BY BUILTIN.DF(i.displayname) ORDER BY revenue DESC FETCH FIRST 10 ROWS ONLY"
+            },
+        )
         mock_adapter.create_message.side_effect = [
             _make_llm_response(tool_calls=[suiteql_call]),
             _make_text_response("Top 10 items by revenue."),
         ]
 
-        with patch("app.services.chat.tools.execute_tool_call", new_callable=AsyncMock) as mock_exec, \
-             patch("app.services.policy_service.get_active_policy", new_callable=AsyncMock, return_value=None):
-            mock_exec.return_value = json.dumps({"columns": ["item", "revenue"], "rows": [["Widget", "5000"]], "row_count": 1})
+        with (
+            patch("app.services.chat.tools.execute_tool_call", new_callable=AsyncMock) as mock_exec,
+            patch("app.services.policy_service.get_active_policy", new_callable=AsyncMock, return_value=None),
+        ):
+            mock_exec.return_value = json.dumps(
+                {"columns": ["item", "revenue"], "rows": [["Widget", "5000"]], "row_count": 1}
+            )
             result = await agent.run("top 10 items by revenue", {}, mock_db, mock_adapter, "claude-sonnet-4-5-20250929")
 
         assert result.success
@@ -232,17 +248,26 @@ class TestSuiteQLQueryAccuracy:
     @pytest.mark.asyncio
     async def test_customer_lookup_by_name(self, agent, mock_adapter, mock_db):
         """Customer lookup should use LOWER(companyname) LIKE pattern."""
-        suiteql_call = _make_tool_use("netsuite_suiteql", {
-            "query": "SELECT id, companyname, email FROM customer WHERE LOWER(companyname) LIKE '%acme%'"
-        })
+        suiteql_call = _make_tool_use(
+            "netsuite_suiteql",
+            {"query": "SELECT id, companyname, email FROM customer WHERE LOWER(companyname) LIKE '%acme%'"},
+        )
         mock_adapter.create_message.side_effect = [
             _make_llm_response(tool_calls=[suiteql_call]),
             _make_text_response("Found customer Acme Corp."),
         ]
 
-        with patch("app.services.chat.tools.execute_tool_call", new_callable=AsyncMock) as mock_exec, \
-             patch("app.services.policy_service.get_active_policy", new_callable=AsyncMock, return_value=None):
-            mock_exec.return_value = json.dumps({"columns": ["id", "companyname", "email"], "rows": [["1", "Acme Corp", "acme@test.com"]], "row_count": 1})
+        with (
+            patch("app.services.chat.tools.execute_tool_call", new_callable=AsyncMock) as mock_exec,
+            patch("app.services.policy_service.get_active_policy", new_callable=AsyncMock, return_value=None),
+        ):
+            mock_exec.return_value = json.dumps(
+                {
+                    "columns": ["id", "companyname", "email"],
+                    "rows": [["1", "Acme Corp", "acme@test.com"]],
+                    "row_count": 1,
+                }
+            )
             result = await agent.run("find customer Acme Corp", {}, mock_db, mock_adapter, "claude-sonnet-4-5-20250929")
 
         assert result.success
@@ -253,17 +278,24 @@ class TestSuiteQLQueryAccuracy:
     @pytest.mark.asyncio
     async def test_transaction_by_id_direct_lookup(self, agent, mock_adapter, mock_db):
         """Transaction number lookup should use WHERE t.tranid = 'RMA61214'."""
-        suiteql_call = _make_tool_use("netsuite_suiteql", {
-            "query": "SELECT t.id, t.tranid, t.trandate, BUILTIN.DF(t.entity) as customer, BUILTIN.DF(t.status) as status, t.foreigntotal FROM transaction t WHERE t.tranid = 'RMA61214'"
-        })
+        suiteql_call = _make_tool_use(
+            "netsuite_suiteql",
+            {
+                "query": "SELECT t.id, t.tranid, t.trandate, BUILTIN.DF(t.entity) as customer, BUILTIN.DF(t.status) as status, t.foreigntotal FROM transaction t WHERE t.tranid = 'RMA61214'"
+            },
+        )
         mock_adapter.create_message.side_effect = [
             _make_llm_response(tool_calls=[suiteql_call]),
             _make_text_response("Found RMA61214."),
         ]
 
-        with patch("app.services.chat.tools.execute_tool_call", new_callable=AsyncMock) as mock_exec, \
-             patch("app.services.policy_service.get_active_policy", new_callable=AsyncMock, return_value=None):
-            mock_exec.return_value = json.dumps({"columns": ["id", "tranid"], "rows": [["1", "RMA61214"]], "row_count": 1})
+        with (
+            patch("app.services.chat.tools.execute_tool_call", new_callable=AsyncMock) as mock_exec,
+            patch("app.services.policy_service.get_active_policy", new_callable=AsyncMock, return_value=None),
+        ):
+            mock_exec.return_value = json.dumps(
+                {"columns": ["id", "tranid"], "rows": [["1", "RMA61214"]], "row_count": 1}
+            )
             result = await agent.run("look up RMA61214", {}, mock_db, mock_adapter, "claude-sonnet-4-5-20250929")
 
         assert result.success
@@ -273,18 +305,25 @@ class TestSuiteQLQueryAccuracy:
     @pytest.mark.asyncio
     async def test_multi_currency_uses_base_for_usd(self, agent, mock_adapter, mock_db):
         """'total in USD' should use SUM(t.total) which is already in base currency."""
-        suiteql_call = _make_tool_use("netsuite_suiteql", {
-            "query": "SELECT SUM(t.total) as total_usd FROM transaction t WHERE t.type = 'SalesOrd' AND t.trandate >= TRUNC(SYSDATE) - 30"
-        })
+        suiteql_call = _make_tool_use(
+            "netsuite_suiteql",
+            {
+                "query": "SELECT SUM(t.total) as total_usd FROM transaction t WHERE t.type = 'SalesOrd' AND t.trandate >= TRUNC(SYSDATE) - 30"
+            },
+        )
         mock_adapter.create_message.side_effect = [
             _make_llm_response(tool_calls=[suiteql_call]),
             _make_text_response("Total in USD: $150,000"),
         ]
 
-        with patch("app.services.chat.tools.execute_tool_call", new_callable=AsyncMock) as mock_exec, \
-             patch("app.services.policy_service.get_active_policy", new_callable=AsyncMock, return_value=None):
+        with (
+            patch("app.services.chat.tools.execute_tool_call", new_callable=AsyncMock) as mock_exec,
+            patch("app.services.policy_service.get_active_policy", new_callable=AsyncMock, return_value=None),
+        ):
             mock_exec.return_value = json.dumps({"columns": ["total_usd"], "rows": [["150000"]], "row_count": 1})
-            result = await agent.run("what's total sales in USD this month", {}, mock_db, mock_adapter, "claude-sonnet-4-5-20250929")
+            result = await agent.run(
+                "what's total sales in USD this month", {}, mock_db, mock_adapter, "claude-sonnet-4-5-20250929"
+            )
 
         assert result.success
         query = result.tool_calls_log[0]["params"]["query"].upper()
@@ -294,18 +333,31 @@ class TestSuiteQLQueryAccuracy:
     @pytest.mark.asyncio
     async def test_inventory_uses_inventoryitemlocations(self, agent, mock_adapter, mock_db):
         """Inventory queries should use inventoryitemlocations table."""
-        suiteql_call = _make_tool_use("netsuite_suiteql", {
-            "query": "SELECT i.itemid, BUILTIN.DF(iil.location) as location, iil.quantityonhand, iil.quantityavailable FROM inventoryitemlocations iil JOIN item i ON iil.item = i.id WHERE LOWER(i.itemid) LIKE '%frafmk0006%' AND iil.quantityonhand != 0"
-        })
+        suiteql_call = _make_tool_use(
+            "netsuite_suiteql",
+            {
+                "query": "SELECT i.itemid, BUILTIN.DF(iil.location) as location, iil.quantityonhand, iil.quantityavailable FROM inventoryitemlocations iil JOIN item i ON iil.item = i.id WHERE LOWER(i.itemid) LIKE '%frafmk0006%' AND iil.quantityonhand != 0"
+            },
+        )
         mock_adapter.create_message.side_effect = [
             _make_llm_response(tool_calls=[suiteql_call]),
             _make_text_response("Inventory for FRAFMK0006."),
         ]
 
-        with patch("app.services.chat.tools.execute_tool_call", new_callable=AsyncMock) as mock_exec, \
-             patch("app.services.policy_service.get_active_policy", new_callable=AsyncMock, return_value=None):
-            mock_exec.return_value = json.dumps({"columns": ["itemid", "location", "quantityonhand"], "rows": [["FRAFMK0006", "Main Warehouse", "50"]], "row_count": 1})
-            result = await agent.run("inventory for FRAFMK0006", {}, mock_db, mock_adapter, "claude-sonnet-4-5-20250929")
+        with (
+            patch("app.services.chat.tools.execute_tool_call", new_callable=AsyncMock) as mock_exec,
+            patch("app.services.policy_service.get_active_policy", new_callable=AsyncMock, return_value=None),
+        ):
+            mock_exec.return_value = json.dumps(
+                {
+                    "columns": ["itemid", "location", "quantityonhand"],
+                    "rows": [["FRAFMK0006", "Main Warehouse", "50"]],
+                    "row_count": 1,
+                }
+            )
+            result = await agent.run(
+                "inventory for FRAFMK0006", {}, mock_db, mock_adapter, "claude-sonnet-4-5-20250929"
+            )
 
         assert result.success
         query = result.tool_calls_log[0]["params"]["query"].upper()
@@ -316,17 +368,24 @@ class TestSuiteQLQueryAccuracy:
     @pytest.mark.asyncio
     async def test_item_lookup_uses_safe_columns(self, agent, mock_adapter, mock_db):
         """Item lookups should only use safe columns: id, itemid, displayname, description."""
-        suiteql_call = _make_tool_use("netsuite_suiteql", {
-            "query": "SELECT i.id, i.itemid, i.displayname, i.description FROM item i WHERE LOWER(i.itemid) LIKE '%widget%'"
-        })
+        suiteql_call = _make_tool_use(
+            "netsuite_suiteql",
+            {
+                "query": "SELECT i.id, i.itemid, i.displayname, i.description FROM item i WHERE LOWER(i.itemid) LIKE '%widget%'"
+            },
+        )
         mock_adapter.create_message.side_effect = [
             _make_llm_response(tool_calls=[suiteql_call]),
             _make_text_response("Found items matching 'widget'."),
         ]
 
-        with patch("app.services.chat.tools.execute_tool_call", new_callable=AsyncMock) as mock_exec, \
-             patch("app.services.policy_service.get_active_policy", new_callable=AsyncMock, return_value=None):
-            mock_exec.return_value = json.dumps({"columns": ["id", "itemid"], "rows": [["1", "WIDGET-001"]], "row_count": 1})
+        with (
+            patch("app.services.chat.tools.execute_tool_call", new_callable=AsyncMock) as mock_exec,
+            patch("app.services.policy_service.get_active_policy", new_callable=AsyncMock, return_value=None),
+        ):
+            mock_exec.return_value = json.dumps(
+                {"columns": ["id", "itemid"], "rows": [["1", "WIDGET-001"]], "row_count": 1}
+            )
             result = await agent.run("find item widget", {}, mock_db, mock_adapter, "claude-sonnet-4-5-20250929")
 
         assert result.success
@@ -339,16 +398,21 @@ class TestSuiteQLQueryAccuracy:
     @pytest.mark.asyncio
     async def test_no_limit_keyword(self, agent, mock_adapter, mock_db):
         """SuiteQL does not support LIMIT — must use FETCH FIRST N ROWS ONLY."""
-        suiteql_call = _make_tool_use("netsuite_suiteql", {
-            "query": "SELECT id, tranid FROM transaction WHERE type = 'SalesOrd' ORDER BY id DESC FETCH FIRST 5 ROWS ONLY"
-        })
+        suiteql_call = _make_tool_use(
+            "netsuite_suiteql",
+            {
+                "query": "SELECT id, tranid FROM transaction WHERE type = 'SalesOrd' ORDER BY id DESC FETCH FIRST 5 ROWS ONLY"
+            },
+        )
         mock_adapter.create_message.side_effect = [
             _make_llm_response(tool_calls=[suiteql_call]),
             _make_text_response("Here are the orders."),
         ]
 
-        with patch("app.services.chat.tools.execute_tool_call", new_callable=AsyncMock) as mock_exec, \
-             patch("app.services.policy_service.get_active_policy", new_callable=AsyncMock, return_value=None):
+        with (
+            patch("app.services.chat.tools.execute_tool_call", new_callable=AsyncMock) as mock_exec,
+            patch("app.services.policy_service.get_active_policy", new_callable=AsyncMock, return_value=None),
+        ):
             mock_exec.return_value = json.dumps({"columns": ["id", "tranid"], "rows": [["1", "SO001"]], "row_count": 1})
             result = await agent.run("show 5 recent orders", {}, mock_db, mock_adapter, "claude-sonnet-4-5-20250929")
 
@@ -361,17 +425,24 @@ class TestSuiteQLQueryAccuracy:
     @pytest.mark.asyncio
     async def test_no_double_counting_transaction_types(self, agent, mock_adapter, mock_db):
         """Sales queries should NOT filter on multiple transaction types that double-count."""
-        suiteql_call = _make_tool_use("netsuite_suiteql", {
-            "query": "SELECT COUNT(*) as order_count, SUM(t.foreigntotal) as total FROM transaction t WHERE t.type = 'SalesOrd' AND t.trandate >= TRUNC(SYSDATE) - 30"
-        })
+        suiteql_call = _make_tool_use(
+            "netsuite_suiteql",
+            {
+                "query": "SELECT COUNT(*) as order_count, SUM(t.foreigntotal) as total FROM transaction t WHERE t.type = 'SalesOrd' AND t.trandate >= TRUNC(SYSDATE) - 30"
+            },
+        )
         mock_adapter.create_message.side_effect = [
             _make_llm_response(tool_calls=[suiteql_call]),
             _make_text_response("Sales this month."),
         ]
 
-        with patch("app.services.chat.tools.execute_tool_call", new_callable=AsyncMock) as mock_exec, \
-             patch("app.services.policy_service.get_active_policy", new_callable=AsyncMock, return_value=None):
-            mock_exec.return_value = json.dumps({"columns": ["order_count", "total"], "rows": [["100", "500000"]], "row_count": 1})
+        with (
+            patch("app.services.chat.tools.execute_tool_call", new_callable=AsyncMock) as mock_exec,
+            patch("app.services.policy_service.get_active_policy", new_callable=AsyncMock, return_value=None),
+        ):
+            mock_exec.return_value = json.dumps(
+                {"columns": ["order_count", "total"], "rows": [["100", "500000"]], "row_count": 1}
+            )
             result = await agent.run("total sales this month", {}, mock_db, mock_adapter, "claude-sonnet-4-5-20250929")
 
         assert result.success
@@ -383,17 +454,15 @@ class TestSuiteQLQueryAccuracy:
     async def test_error_recovery_metadata_lookup(self, agent, mock_adapter, mock_db):
         """When a query fails with 'Unknown identifier', agent should recover via metadata."""
         # Step 1: First attempt fails
-        bad_query_call = _make_tool_use("netsuite_suiteql", {
-            "query": "SELECT id, itemid, itemtype FROM item WHERE ROWNUM <= 5"
-        })
+        bad_query_call = _make_tool_use(
+            "netsuite_suiteql", {"query": "SELECT id, itemid, itemtype FROM item WHERE ROWNUM <= 5"}
+        )
         # Step 2: Agent uses metadata to discover columns
-        metadata_call = _make_tool_use("netsuite_get_metadata", {
-            "record_type": "item"
-        })
+        metadata_call = _make_tool_use("netsuite_get_metadata", {"record_type": "item"})
         # Step 3: Corrected query
-        fixed_query_call = _make_tool_use("netsuite_suiteql", {
-            "query": "SELECT id, itemid, displayname FROM item WHERE ROWNUM <= 5"
-        })
+        fixed_query_call = _make_tool_use(
+            "netsuite_suiteql", {"query": "SELECT id, itemid, displayname FROM item WHERE ROWNUM <= 5"}
+        )
 
         mock_adapter.create_message.side_effect = [
             _make_llm_response(tool_calls=[bad_query_call]),
@@ -412,10 +481,14 @@ class TestSuiteQLQueryAccuracy:
             elif call_count == 2:
                 return json.dumps({"columns": ["id", "itemid", "displayname"], "metadata": True})
             else:
-                return json.dumps({"columns": ["id", "itemid", "displayname"], "rows": [["1", "ITEM-001", "Widget"]], "row_count": 1})
+                return json.dumps(
+                    {"columns": ["id", "itemid", "displayname"], "rows": [["1", "ITEM-001", "Widget"]], "row_count": 1}
+                )
 
-        with patch("app.services.chat.tools.execute_tool_call", new_callable=AsyncMock, side_effect=mock_exec), \
-             patch("app.services.policy_service.get_active_policy", new_callable=AsyncMock, return_value=None):
+        with (
+            patch("app.services.chat.tools.execute_tool_call", new_callable=AsyncMock, side_effect=mock_exec),
+            patch("app.services.policy_service.get_active_policy", new_callable=AsyncMock, return_value=None),
+        ):
             result = await agent.run("show me 5 items", {}, mock_db, mock_adapter, "claude-sonnet-4-5-20250929")
 
         assert result.success
@@ -476,6 +549,7 @@ class TestEdgeCases:
     def test_web_search_tool_available(self):
         """SuiteQL agent should have web_search in its tool set."""
         from app.services.chat.agents.suiteql_agent import _SUITEQL_TOOL_NAMES
+
         assert "web_search" in _SUITEQL_TOOL_NAMES
         assert "netsuite_suiteql" in _SUITEQL_TOOL_NAMES
         assert "netsuite_get_metadata" in _SUITEQL_TOOL_NAMES
@@ -485,11 +559,13 @@ class TestEdgeCases:
         """Verify the agent caps results at _MAX_RESULT_ROWS."""
         from app.services.chat.agents.base_agent import _MAX_RESULT_ROWS, _truncate_tool_result
 
-        big_result = json.dumps({
-            "columns": ["id"],
-            "rows": [[str(i)] for i in range(200)],
-            "row_count": 200,
-        })
+        big_result = json.dumps(
+            {
+                "columns": ["id"],
+                "rows": [[str(i)] for i in range(200)],
+                "row_count": 200,
+            }
+        )
         truncated = _truncate_tool_result(big_result)
         parsed = json.loads(truncated)
         assert len(parsed["rows"]) == _MAX_RESULT_ROWS

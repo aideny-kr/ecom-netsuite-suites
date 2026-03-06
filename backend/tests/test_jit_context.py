@@ -24,9 +24,12 @@ def _make_coordinator(**kwargs):
 def _make_metadata(**overrides):
     """Build a mock NetSuiteMetadata object."""
     md = MagicMock()
-    md.transaction_body_fields = overrides.get("transaction_body_fields", [
-        {"scriptid": "custbody_channel", "name": "Sales Channel", "fieldtype": "SELECT"},
-    ])
+    md.transaction_body_fields = overrides.get(
+        "transaction_body_fields",
+        [
+            {"scriptid": "custbody_channel", "name": "Sales Channel", "fieldtype": "SELECT"},
+        ],
+    )
     md.transaction_column_fields = overrides.get("transaction_column_fields", [])
     md.entity_custom_fields = overrides.get("entity_custom_fields", [])
     md.item_custom_fields = overrides.get("item_custom_fields", [])
@@ -36,18 +39,30 @@ def _make_metadata(**overrides):
     md.departments = overrides.get("departments", [])
     md.classifications = overrides.get("classifications", [])
     md.locations = overrides.get("locations", [])
-    md.scripts = overrides.get("scripts", [
-        {"scriptid": "customscript_foo", "scripttype": "USEREVENT", "name": "Foo Script"},
-    ])
-    md.script_deployments = overrides.get("script_deployments", [
-        {
-            "scriptid": "customdeploy_foo", "title": "Foo Deploy",
-            "recordtype": "salesorder", "status": "Released", "script": "customscript_foo",
-        },
-    ])
-    md.workflows = overrides.get("workflows", [
-        {"scriptid": "customworkflow_bar", "recordtype": "salesorder", "status": "Released", "name": "Bar WF"},
-    ])
+    md.scripts = overrides.get(
+        "scripts",
+        [
+            {"scriptid": "customscript_foo", "scripttype": "USEREVENT", "name": "Foo Script"},
+        ],
+    )
+    md.script_deployments = overrides.get(
+        "script_deployments",
+        [
+            {
+                "scriptid": "customdeploy_foo",
+                "title": "Foo Deploy",
+                "recordtype": "salesorder",
+                "status": "Released",
+                "script": "customscript_foo",
+            },
+        ],
+    )
+    md.workflows = overrides.get(
+        "workflows",
+        [
+            {"scriptid": "customworkflow_bar", "recordtype": "salesorder", "status": "Released", "name": "Bar WF"},
+        ],
+    )
     md.custom_list_values = overrides.get("custom_list_values", {})
     md.saved_searches = overrides.get("saved_searches", [])
     return md
@@ -186,6 +201,7 @@ class TestXMLStructure:
     def test_agentic_prompt_has_xml_tags(self):
         """AGENTIC_SYSTEM_PROMPT should use XML structure."""
         from app.services.chat.prompts import AGENTIC_SYSTEM_PROMPT
+
         assert "<system_directives>" in AGENTIC_SYSTEM_PROMPT
         assert "<persona>" in AGENTIC_SYSTEM_PROMPT
         assert "<tool_inventory>" in AGENTIC_SYSTEM_PROMPT
@@ -225,11 +241,13 @@ class TestTruncateToolResult:
 
         from app.services.chat.agents.base_agent import _MAX_RESULT_ROWS, _truncate_tool_result
 
-        big_result = json.dumps({
-            "columns": ["id", "name"],
-            "rows": [[i, f"item_{i}"] for i in range(257)],
-            "row_count": 257,
-        })
+        big_result = json.dumps(
+            {
+                "columns": ["id", "name"],
+                "rows": [[i, f"item_{i}"] for i in range(257)],
+                "row_count": 257,
+            }
+        )
         result = _truncate_tool_result(big_result)
         parsed = json.loads(result)
         assert len(parsed["rows"]) == _MAX_RESULT_ROWS

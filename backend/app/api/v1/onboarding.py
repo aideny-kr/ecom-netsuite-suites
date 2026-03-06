@@ -194,6 +194,7 @@ async def preview_prompt_template(
 
 # --- Soul.md Endpoints ---
 
+
 @router.get("/soul", response_model=SoulConfigResponse)
 async def get_soul_config(
     user: User = Depends(require_permission("onboarding.view")),
@@ -201,6 +202,7 @@ async def get_soul_config(
 ):
     """Retrieve the parsed contents of the tenant's soul.md file."""
     from app.services.soul_service import get_soul_config as get_soul
+
     return await get_soul(user.tenant_id)
 
 
@@ -212,6 +214,7 @@ async def update_soul_config(
 ):
     """Update or create the tenant's soul.md file."""
     from app.services.soul_service import update_soul_config as update_soul
+
     return await update_soul(user.tenant_id, body)
 
 

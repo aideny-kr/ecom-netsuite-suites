@@ -47,10 +47,13 @@ class TestMaybeExtractCorrection:
         adapter = AsyncMock()
         db = AsyncMock()
         result = await maybe_extract_correction(
-            db=db, tenant_id=uuid.uuid4(), user_id=uuid.uuid4(),
+            db=db,
+            tenant_id=uuid.uuid4(),
+            user_id=uuid.uuid4(),
             user_message="Show me today's orders",
             assistant_message="Here are the orders...",
-            adapter=adapter, model="test",
+            adapter=adapter,
+            model="test",
         )
         assert result is False
         adapter.create_message.assert_not_called()
@@ -60,28 +63,37 @@ class TestMaybeExtractCorrection:
         """'Use customrecord_foo' should save an entity mapping."""
         adapter = AsyncMock()
         adapter.create_message.return_value = LLMResponse(
-            text_blocks=[json.dumps({
-                "entity_correction": {
-                    "natural_name": "inventory processor",
-                    "script_id": "customrecord_r_inv_processor",
-                    "entity_type": "customrecord",
-                },
-                "rule": None,
-            })],
+            text_blocks=[
+                json.dumps(
+                    {
+                        "entity_correction": {
+                            "natural_name": "inventory processor",
+                            "script_id": "customrecord_r_inv_processor",
+                            "entity_type": "customrecord",
+                        },
+                        "rule": None,
+                    }
+                )
+            ],
             tool_use_blocks=[],
             usage=TokenUsage(50, 30),
         )
         db = AsyncMock()
 
-        with patch("app.services.chat.memory_updater._save_entity_mapping", new_callable=AsyncMock) as mock_save_entity, \
-             patch("app.services.chat.memory_updater._save_learned_rule", new_callable=AsyncMock) as mock_save_rule, \
-             patch("app.services.audit_service.log_event", new_callable=AsyncMock):
+        with (
+            patch("app.services.chat.memory_updater._save_entity_mapping", new_callable=AsyncMock) as mock_save_entity,
+            patch("app.services.chat.memory_updater._save_learned_rule", new_callable=AsyncMock) as mock_save_rule,
+            patch("app.services.audit_service.log_event", new_callable=AsyncMock),
+        ):
             mock_save_entity.return_value = True
             result = await maybe_extract_correction(
-                db=db, tenant_id=uuid.uuid4(), user_id=uuid.uuid4(),
+                db=db,
+                tenant_id=uuid.uuid4(),
+                user_id=uuid.uuid4(),
                 user_message="Actually, use customrecord_r_inv_processor for inventory processor",
                 assistant_message="I queried the inventory table...",
-                adapter=adapter, model="test",
+                adapter=adapter,
+                model="test",
             )
             assert result is True
             mock_save_entity.assert_called_once()
@@ -92,27 +104,36 @@ class TestMaybeExtractCorrection:
         """'Always show currency' should save a learned rule."""
         adapter = AsyncMock()
         adapter.create_message.return_value = LLMResponse(
-            text_blocks=[json.dumps({
-                "entity_correction": None,
-                "rule": {
-                    "description": "Always include the currency column in query results",
-                    "category": "output_preference",
-                },
-            })],
+            text_blocks=[
+                json.dumps(
+                    {
+                        "entity_correction": None,
+                        "rule": {
+                            "description": "Always include the currency column in query results",
+                            "category": "output_preference",
+                        },
+                    }
+                )
+            ],
             tool_use_blocks=[],
             usage=TokenUsage(50, 30),
         )
         db = AsyncMock()
 
-        with patch("app.services.chat.memory_updater._save_entity_mapping", new_callable=AsyncMock) as mock_save_entity, \
-             patch("app.services.chat.memory_updater._save_learned_rule", new_callable=AsyncMock) as mock_save_rule, \
-             patch("app.services.audit_service.log_event", new_callable=AsyncMock):
+        with (
+            patch("app.services.chat.memory_updater._save_entity_mapping", new_callable=AsyncMock) as mock_save_entity,
+            patch("app.services.chat.memory_updater._save_learned_rule", new_callable=AsyncMock) as mock_save_rule,
+            patch("app.services.audit_service.log_event", new_callable=AsyncMock),
+        ):
             mock_save_rule.return_value = True
             result = await maybe_extract_correction(
-                db=db, tenant_id=uuid.uuid4(), user_id=uuid.uuid4(),
+                db=db,
+                tenant_id=uuid.uuid4(),
+                user_id=uuid.uuid4(),
                 user_message="Always show the currency column in results",
                 assistant_message="Here are your orders...",
-                adapter=adapter, model="test",
+                adapter=adapter,
+                model="test",
             )
             assert result is True
             mock_save_rule.assert_called_once()
@@ -129,10 +150,13 @@ class TestMaybeExtractCorrection:
         )
         db = AsyncMock()
         result = await maybe_extract_correction(
-            db=db, tenant_id=uuid.uuid4(), user_id=uuid.uuid4(),
+            db=db,
+            tenant_id=uuid.uuid4(),
+            user_id=uuid.uuid4(),
             user_message="No, that's not what I meant",
             assistant_message="I showed you...",
-            adapter=adapter, model="test",
+            adapter=adapter,
+            model="test",
         )
         assert result is False
 
@@ -147,10 +171,13 @@ class TestMaybeExtractCorrection:
         )
         db = AsyncMock()
         result = await maybe_extract_correction(
-            db=db, tenant_id=uuid.uuid4(), user_id=uuid.uuid4(),
+            db=db,
+            tenant_id=uuid.uuid4(),
+            user_id=uuid.uuid4(),
             user_message="No, that doesn't look right but whatever",
             assistant_message="Here is the data...",
-            adapter=adapter, model="test",
+            adapter=adapter,
+            model="test",
         )
         assert result is False
 
@@ -161,9 +188,12 @@ class TestMaybeExtractCorrection:
         adapter.create_message.side_effect = Exception("API error")
         db = AsyncMock()
         result = await maybe_extract_correction(
-            db=db, tenant_id=uuid.uuid4(), user_id=uuid.uuid4(),
+            db=db,
+            tenant_id=uuid.uuid4(),
+            user_id=uuid.uuid4(),
             user_message="Remember that X is Y",
             assistant_message="...",
-            adapter=adapter, model="test",
+            adapter=adapter,
+            model="test",
         )
         assert result is False

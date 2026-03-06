@@ -330,9 +330,7 @@ class TestDomainResolver:
         )
 
         # Directly set domain_verified=True in DB (bypass DNS check)
-        result = await db.execute(
-            select(TenantConfig).where(TenantConfig.tenant_id == tenant_a.id)
-        )
+        result = await db.execute(select(TenantConfig).where(TenantConfig.tenant_id == tenant_a.id))
         config = result.scalar_one()
         config.domain_verified = True
         await db.flush()
@@ -439,6 +437,7 @@ class TestSoulSeeding:
                 os.remove(soul_path)
 
             from app.schemas.soul import SoulConfigResponse
+
             return SoulConfigResponse(
                 bot_tone=data.bot_tone.strip() if data.bot_tone else None,
                 netsuite_quirks=data.netsuite_quirks.strip() if data.netsuite_quirks else None,

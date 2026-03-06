@@ -137,17 +137,26 @@ async def maybe_extract_correction(
         entity = data.get("entity_correction")
         if entity and entity.get("natural_name") and entity.get("script_id"):
             saved = await _save_entity_mapping(
-                db, tenant_id, entity["natural_name"], entity["script_id"],
+                db,
+                tenant_id,
+                entity["natural_name"],
+                entity["script_id"],
                 entity.get("entity_type", "general"),
             )
 
         # Handle general learned rule
         rule = data.get("rule")
         if rule and rule.get("description"):
-            saved = await _save_learned_rule(
-                db, tenant_id, user_id, rule["description"],
-                rule.get("category", "general"),
-            ) or saved
+            saved = (
+                await _save_learned_rule(
+                    db,
+                    tenant_id,
+                    user_id,
+                    rule["description"],
+                    rule.get("category", "general"),
+                )
+                or saved
+            )
 
         if saved:
             from app.services.audit_service import log_event

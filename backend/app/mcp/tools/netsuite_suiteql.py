@@ -320,7 +320,9 @@ _PERMISSION_WARNING = (
 
 
 async def _diagnose_empty_result(
-    query: str, access_token: str, account_id: str,
+    query: str,
+    access_token: str,
+    account_id: str,
 ) -> str | None:
     """Run a diagnostic count query when a user query returns 0 rows (OAuth 2.0)."""
     from app.services.netsuite_client import execute_suiteql
@@ -330,7 +332,9 @@ async def _diagnose_empty_result(
         if table in _DIAGNOSTIC_TABLES:
             try:
                 diag_result = await execute_suiteql(
-                    access_token, account_id, _DIAGNOSTIC_TABLES[table],
+                    access_token,
+                    account_id,
+                    _DIAGNOSTIC_TABLES[table],
                 )
                 items = diag_result.get("items", [])
                 if not items or items[0].get("cnt", 0) == 0:
@@ -341,7 +345,10 @@ async def _diagnose_empty_result(
 
 
 async def _diagnose_empty_result_oauth1(
-    query: str, credentials: dict, url: str, account_id: str,
+    query: str,
+    credentials: dict,
+    url: str,
+    account_id: str,
 ) -> str | None:
     """Run a diagnostic count query when a user query returns 0 rows (OAuth 1.0)."""
     tables = parse_tables(query)

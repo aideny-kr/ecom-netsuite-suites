@@ -26,14 +26,10 @@ from app.models.tenant_query_pattern import TenantQueryPattern
 _logger = logging.getLogger(__name__)
 
 # Regex to extract table names from SQL (FROM/JOIN clauses)
-_TABLE_RE = re.compile(
-    r"\b(?:FROM|JOIN)\s+(\w+)", re.IGNORECASE
-)
+_TABLE_RE = re.compile(r"\b(?:FROM|JOIN)\s+(\w+)", re.IGNORECASE)
 
 # Regex to extract column references (alias.column or bare column in SELECT)
-_COLUMN_RE = re.compile(
-    r"\b(\w+\.\w+)\b"
-)
+_COLUMN_RE = re.compile(r"\b(\w+\.\w+)\b")
 
 
 def _extract_tables(sql: str) -> list[str]:
@@ -194,12 +190,14 @@ async def retrieve_similar_patterns(
 
     patterns = []
     for row in result.fetchall():
-        patterns.append({
-            "question": row[0],
-            "sql": row[1],
-            "tables": row[2] or [],
-            "success_count": row[3],
-            "similarity": float(row[4]),
-        })
+        patterns.append(
+            {
+                "question": row[0],
+                "sql": row[1],
+                "tables": row[2] or [],
+                "success_count": row[3],
+                "similarity": float(row[4]),
+            }
+        )
 
     return patterns

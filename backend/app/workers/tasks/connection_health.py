@@ -202,8 +202,6 @@ def _run_async_refresh(account_id: str, refresh_token: str, client_id: str) -> d
 
     loop = asyncio.new_event_loop()
     try:
-        return loop.run_until_complete(
-            refresh_tokens_with_client(account_id, refresh_token, client_id)
-        )
+        return loop.run_until_complete(refresh_tokens_with_client(account_id, refresh_token, client_id))
     finally:
         loop.close()

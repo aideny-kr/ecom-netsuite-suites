@@ -113,10 +113,7 @@ async def _keyword_domain_search(
     # Limit to 10 keywords, 50 chars each
     conditions = [DomainKnowledgeChunk.raw_text.ilike(f"%{w[:50]}%") for w in words[:10]]
 
-    hit_score = sum(
-        case((DomainKnowledgeChunk.raw_text.ilike(f"%{w[:50]}%"), 1), else_=0)
-        for w in words[:10]
-    )
+    hit_score = sum(case((DomainKnowledgeChunk.raw_text.ilike(f"%{w[:50]}%"), 1), else_=0) for w in words[:10])
 
     stmt = (
         select(DomainKnowledgeChunk, hit_score.label("score"))

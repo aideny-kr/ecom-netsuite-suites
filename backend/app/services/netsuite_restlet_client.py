@@ -57,9 +57,7 @@ async def restlet_read_file(
         "Content-Type": "application/json",
     }
     script_id, deploy_id = _parse_restlet_url(restlet_url, FILECABINET_SCRIPT_ID, FILECABINET_DEPLOY_ID)
-    params = _restlet_params(
-        script_id, deploy_id, fileId=str(file_id)
-    )
+    params = _restlet_params(script_id, deploy_id, fileId=str(file_id))
 
     async with httpx.AsyncClient(timeout=timeout) as client:
         resp = await client.get(url, headers=headers, params=params)
@@ -147,9 +145,7 @@ async def restlet_get_folder_map(
         "Content-Type": "application/json",
     }
     script_id, deploy_id = _parse_restlet_url(restlet_url, FILECABINET_SCRIPT_ID, FILECABINET_DEPLOY_ID)
-    params = _restlet_params(
-        script_id, deploy_id, action="folderMap"
-    )
+    params = _restlet_params(script_id, deploy_id, action="folderMap")
 
     async with httpx.AsyncClient(timeout=timeout) as client:
         resp = await client.get(url, headers=headers, params=params)

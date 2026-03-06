@@ -20,7 +20,9 @@ class DomainKnowledgeChunk(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     )
 
     source_uri: Mapped[str] = mapped_column(
-        String(255), nullable=False, comment="e.g. golden_dataset/join-patterns.md",
+        String(255),
+        nullable=False,
+        comment="e.g. golden_dataset/join-patterns.md",
     )
     chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
     raw_text: Mapped[str] = mapped_column(Text, nullable=False)
@@ -28,6 +30,8 @@ class DomainKnowledgeChunk(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     embedding = mapped_column(Vector(1536), nullable=True)
     topic_tags: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     source_type: Mapped[str] = mapped_column(
-        String(50), nullable=False, default="expert_rules",
+        String(50),
+        nullable=False,
+        default="expert_rules",
     )
     is_deprecated: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)

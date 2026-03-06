@@ -48,9 +48,7 @@ class TestFinancialReportClassification:
         ],
     )
     def test_financial_queries_classified_correctly(self, query):
-        assert classify_intent(query) == IntentType.FINANCIAL_REPORT, (
-            f"Expected FINANCIAL_REPORT for: {query!r}"
-        )
+        assert classify_intent(query) == IntentType.FINANCIAL_REPORT, f"Expected FINANCIAL_REPORT for: {query!r}"
 
     @pytest.mark.parametrize(
         "query,expected",
@@ -73,9 +71,7 @@ class TestFinancialReportClassification:
     )
     def test_non_financial_queries_not_misrouted(self, query, expected):
         result = classify_intent(query)
-        assert result == expected, (
-            f"Expected {expected.value} for: {query!r}, got {result.value}"
-        )
+        assert result == expected, f"Expected {expected.value} for: {query!r}, got {result.value}"
 
 
 # ── Route registry tests ──
@@ -116,18 +112,14 @@ class TestFinancialReportPlanBuilding:
 
     def test_financial_plan_has_two_steps(self):
         coord = self._make_coordinator()
-        plan = coord._build_plan_from_intent(
-            IntentType.FINANCIAL_REPORT, "Show me the P&L for January"
-        )
+        plan = coord._build_plan_from_intent(IntentType.FINANCIAL_REPORT, "Show me the P&L for January")
         assert len(plan.steps) == 2
         assert plan.steps[0].agent == "suiteql"
         assert plan.steps[1].agent == "analysis"
 
     def test_financial_plan_augments_suiteql_task(self):
         coord = self._make_coordinator()
-        plan = coord._build_plan_from_intent(
-            IntentType.FINANCIAL_REPORT, "Show me the P&L for January"
-        )
+        plan = coord._build_plan_from_intent(IntentType.FINANCIAL_REPORT, "Show me the P&L for January")
         task = plan.steps[0].task
         assert "FINANCIAL REPORT MODE" in task
         assert "TransactionAccountingLine" in task
@@ -135,33 +127,25 @@ class TestFinancialReportPlanBuilding:
 
     def test_financial_plan_includes_accountingbook_filter(self):
         coord = self._make_coordinator()
-        plan = coord._build_plan_from_intent(
-            IntentType.FINANCIAL_REPORT, "Show me the P&L for January"
-        )
+        plan = coord._build_plan_from_intent(IntentType.FINANCIAL_REPORT, "Show me the P&L for January")
         task = plan.steps[0].task
         assert "accountingbook" in task.lower()
 
     def test_financial_plan_includes_posting_filter(self):
         coord = self._make_coordinator()
-        plan = coord._build_plan_from_intent(
-            IntentType.FINANCIAL_REPORT, "Show me the P&L for January"
-        )
+        plan = coord._build_plan_from_intent(IntentType.FINANCIAL_REPORT, "Show me the P&L for January")
         task = plan.steps[0].task
         assert "posting" in task.lower()
 
     def test_financial_plan_includes_postingperiod(self):
         coord = self._make_coordinator()
-        plan = coord._build_plan_from_intent(
-            IntentType.FINANCIAL_REPORT, "Show me the P&L for January"
-        )
+        plan = coord._build_plan_from_intent(IntentType.FINANCIAL_REPORT, "Show me the P&L for January")
         task = plan.steps[0].task
         assert "postingperiod" in task.lower()
 
     def test_financial_plan_mentions_consolidate(self):
         coord = self._make_coordinator()
-        plan = coord._build_plan_from_intent(
-            IntentType.FINANCIAL_REPORT, "Show me the P&L for January"
-        )
+        plan = coord._build_plan_from_intent(IntentType.FINANCIAL_REPORT, "Show me the P&L for January")
         task = plan.steps[0].task
         assert "CONSOLIDATE" in task
 
@@ -180,9 +164,7 @@ class TestFinancialReportPlanBuilding:
 
     def test_financial_plan_intent_is_set(self):
         coord = self._make_coordinator()
-        plan = coord._build_plan_from_intent(
-            IntentType.FINANCIAL_REPORT, "income statement"
-        )
+        plan = coord._build_plan_from_intent(IntentType.FINANCIAL_REPORT, "income statement")
         assert plan.intent == IntentType.FINANCIAL_REPORT
         assert plan.used_heuristic is True
 

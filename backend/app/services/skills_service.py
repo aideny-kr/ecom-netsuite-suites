@@ -12,9 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.saved_query import SavedSuiteQLQuery
 
 
-async def get_saved_query(
-    db: AsyncSession, query_id: uuid.UUID, tenant_id: uuid.UUID
-) -> SavedSuiteQLQuery | None:
+async def get_saved_query(db: AsyncSession, query_id: uuid.UUID, tenant_id: uuid.UUID) -> SavedSuiteQLQuery | None:
     """Fetch a saved query scoped to the tenant."""
     result = await db.execute(
         select(SavedSuiteQLQuery).where(
@@ -44,9 +42,7 @@ async def update_saved_query(
     return query
 
 
-async def delete_saved_query(
-    db: AsyncSession, query_id: uuid.UUID, tenant_id: uuid.UUID
-) -> bool:
+async def delete_saved_query(db: AsyncSession, query_id: uuid.UUID, tenant_id: uuid.UUID) -> bool:
     """Delete a saved query scoped to the tenant. Returns True if deleted."""
     result = await db.execute(
         delete(SavedSuiteQLQuery).where(
@@ -97,10 +93,7 @@ async def paginate_suiteql(
     offset = 0
 
     while True:
-        paginated_query = (
-            f"{query.rstrip().rstrip(';').rstrip()} "
-            f"OFFSET {offset} FETCH FIRST {chunk_size} ROWS ONLY"
-        )
+        paginated_query = f"{query.rstrip().rstrip(';').rstrip()} OFFSET {offset} FETCH FIRST {chunk_size} ROWS ONLY"
         result = await execute_fn(
             access_token=access_token,
             account_id=account_id,

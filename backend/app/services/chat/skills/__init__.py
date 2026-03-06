@@ -10,7 +10,6 @@ are loaded on-demand when a skill is triggered (progressive disclosure).
 
 from __future__ import annotations
 
-import os
 import re
 from pathlib import Path
 from typing import Any
@@ -132,7 +131,7 @@ def get_skill_instructions(slug: str) -> str | None:
 
             match = _FRONTMATTER_RE.match(content)
             if match:
-                body = content[match.end():]
+                body = content[match.end() :]
             else:
                 body = content
 

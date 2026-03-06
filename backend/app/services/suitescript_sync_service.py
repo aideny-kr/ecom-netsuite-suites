@@ -49,6 +49,7 @@ async def discover_scripts(access_token: str, account_id: str, restlet_url: str 
     folder_map: dict[str, dict[str, str]] = {}
     try:
         from app.services.netsuite_restlet_client import restlet_get_folder_map
+
         folder_map = await restlet_get_folder_map(access_token, account_id, restlet_url=restlet_url)
         logger.info(f"suitescript_sync.folder_discovery_success: map_size={len(folder_map)}")
         if folder_map:
@@ -489,6 +490,7 @@ async def sync_scripts_to_workspace(
 
     # Get connection to extract customized restlet URL if present
     from app.models.connection import Connection
+
     conn_result = await db.execute(select(Connection).where(Connection.id == connection_id))
     connection = conn_result.scalar_one_or_none()
     restlet_url = connection.metadata_json.get("restlet_url") if connection and connection.metadata_json else None

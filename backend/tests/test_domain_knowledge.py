@@ -289,6 +289,7 @@ class TestGoldenDataset:
             content = md_file.read_text()
             # Find all SQL code blocks
             import re
+
             sql_blocks = re.findall(r"```sql\n(.*?)```", content, re.DOTALL)
             for block in sql_blocks:
                 # LIMIT should not appear as a SQL keyword (but OK in comments/text)

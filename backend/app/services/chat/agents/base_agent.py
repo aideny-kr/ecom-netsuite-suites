@@ -42,8 +42,16 @@ _MAX_RESULT_ROWS = 500  # Cap rows sent back to LLM (50 was too low for grouped 
 # Pattern to detect data queries that MUST be executed, not answered from memory
 _QUERY_PATTERN = re.compile(r"\bSELECT\b", re.IGNORECASE)
 _DATA_QUESTION_KEYWORDS = {
-    "how many", "total", "count", "sum", "average",
-    "quantity", "revenue", "sales", "orders", "inventory",
+    "how many",
+    "total",
+    "count",
+    "sum",
+    "average",
+    "quantity",
+    "revenue",
+    "sales",
+    "orders",
+    "inventory",
 }
 
 
@@ -74,9 +82,7 @@ def _truncate_tool_result(result_str: str) -> str:
         return result_str
 
     # Truncate error responses
-    is_error = parsed.get("error") is True or (
-        isinstance(parsed.get("error"), str) and parsed["error"]
-    )
+    is_error = parsed.get("error") is True or (isinstance(parsed.get("error"), str) and parsed["error"])
     if is_error:
         for key in ("message", "error_message", "detail"):
             if key in parsed and isinstance(parsed[key], str) and len(parsed[key]) > _MAX_ERROR_CHARS:
@@ -120,8 +126,7 @@ _truncate_error_payload = _truncate_tool_result
 
 _CONFIDENCE_RE = re.compile(r"<confidence>(\d)</confidence>")
 _LOW_CONFIDENCE_DISCLAIMER = (
-    "\n\n*Note: I'm not fully confident in this result. "
-    "Please verify the data before acting on it.*"
+    "\n\n*Note: I'm not fully confident in this result. Please verify the data before acting on it.*"
 )
 
 
@@ -147,8 +152,7 @@ async def _maybe_store_query_pattern(
     """Auto-extract and store successful SuiteQL query patterns (fire-and-forget)."""
     # Only store if there were successful SuiteQL calls
     has_suiteql = any(
-        c.get("tool") == "netsuite_suiteql"
-        and '"error"' not in c.get("result_summary", "").lower()
+        c.get("tool") == "netsuite_suiteql" and '"error"' not in c.get("result_summary", "").lower()
         for c in tool_calls_log
     )
     if not has_suiteql:
@@ -156,13 +160,15 @@ async def _maybe_store_query_pattern(
 
     try:
         from app.services.query_pattern_service import extract_and_store_pattern
+
         await extract_and_store_pattern(db, tenant_id, user_question, tool_calls_log)
     except Exception:
         logger.warning("query_pattern.auto_extract_failed", exc_info=True)
 
 
 async def _resolve_default_workspace(
-    db: "AsyncSession", tenant_id: "uuid.UUID",
+    db: "AsyncSession",
+    tenant_id: "uuid.UUID",
 ) -> str | None:
     """Find the most recent active workspace for a tenant."""
     from sqlalchemy import select
@@ -308,14 +314,16 @@ class BaseSpecialistAgent(abc.ABC):
                     if step == 0 and tool_calls_log == [] and _task_contains_query(task):
                         print(f"[AGENT] {self.agent_name} skipped tool on data query — forcing execution", flush=True)
                         messages.append(adapter.build_assistant_message(response))
-                        messages.append({
-                            "role": "user",
-                            "content": (
-                                "You MUST execute the query using netsuite_suiteql — do NOT answer from memory "
-                                "or prior conversation. The user needs fresh, live data from NetSuite. "
-                                "Call the tool NOW."
-                            ),
-                        })
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": (
+                                    "You MUST execute the query using netsuite_suiteql — do NOT answer from memory "
+                                    "or prior conversation. The user needs fresh, live data from NetSuite. "
+                                    "Call the tool NOW."
+                                ),
+                            }
+                        )
                         continue
 
                     final_text = "\n".join(response.text_blocks) if response.text_blocks else ""
@@ -335,7 +343,9 @@ class BaseSpecialistAgent(abc.ABC):
                         success=True,
                         data=final_text,
                         tool_calls_log=tool_calls_log,
-                        tokens_used=TokenUsage(total_input_tokens, total_output_tokens, total_cache_creation, total_cache_read),
+                        tokens_used=TokenUsage(
+                            total_input_tokens, total_output_tokens, total_cache_creation, total_cache_read
+                        ),
                         agent_name=self.agent_name,
                     )
 
@@ -414,10 +424,12 @@ class BaseSpecialistAgent(abc.ABC):
                 self.agent_name,
                 self.max_steps,
             )
-            messages.append({
-                "role": "user",
-                "content": "You have used all available tool steps. You MUST now provide your final answer to the user based on everything you have gathered so far. Do NOT output only reasoning — give the user a clear, helpful response.",
-            })
+            messages.append(
+                {
+                    "role": "user",
+                    "content": "You have used all available tool steps. You MUST now provide your final answer to the user based on everything you have gathered so far. Do NOT output only reasoning — give the user a clear, helpful response.",
+                }
+            )
             response = await adapter.create_message(
                 model=model,
                 max_tokens=16384,
@@ -531,14 +543,16 @@ class BaseSpecialistAgent(abc.ABC):
                     if step == 0 and tool_calls_log == [] and _task_contains_query(task):
                         print(f"[AGENT] {self.agent_name} skipped tool on data query — forcing execution", flush=True)
                         messages.append(adapter.build_assistant_message(response))
-                        messages.append({
-                            "role": "user",
-                            "content": (
-                                "You MUST execute the query using netsuite_suiteql — do NOT answer from memory "
-                                "or prior conversation. The user needs fresh, live data from NetSuite. "
-                                "Call the tool NOW."
-                            ),
-                        })
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": (
+                                    "You MUST execute the query using netsuite_suiteql — do NOT answer from memory "
+                                    "or prior conversation. The user needs fresh, live data from NetSuite. "
+                                    "Call the tool NOW."
+                                ),
+                            }
+                        )
                         continue
 
                     final_text = "\n".join(response.text_blocks) if response.text_blocks else ""
@@ -552,12 +566,17 @@ class BaseSpecialistAgent(abc.ABC):
 
                     await _maybe_store_query_pattern(db, self.tenant_id, task, tool_calls_log)
 
-                    yield "response", AgentResult(
-                        success=True,
-                        data=final_text,
-                        tool_calls_log=tool_calls_log,
-                        tokens_used=TokenUsage(total_input_tokens, total_output_tokens, total_cache_creation, total_cache_read),
-                        agent_name=self.agent_name,
+                    yield (
+                        "response",
+                        AgentResult(
+                            success=True,
+                            data=final_text,
+                            tool_calls_log=tool_calls_log,
+                            tokens_used=TokenUsage(
+                                total_input_tokens, total_output_tokens, total_cache_creation, total_cache_read
+                            ),
+                            agent_name=self.agent_name,
+                        ),
                     )
                     return
 
@@ -601,20 +620,24 @@ class BaseSpecialistAgent(abc.ABC):
                     result_str = _truncate_tool_result(result_str)
                     elapsed_ms = int((time.monotonic() - t0) * 1000)
 
-                    tool_calls_log.append({
-                        "step": step,
-                        "agent": self.agent_name,
-                        "tool": block.name,
-                        "params": block.input,
-                        "result_summary": result_str[:500],
-                        "duration_ms": elapsed_ms,
-                    })
+                    tool_calls_log.append(
+                        {
+                            "step": step,
+                            "agent": self.agent_name,
+                            "tool": block.name,
+                            "params": block.input,
+                            "result_summary": result_str[:500],
+                            "duration_ms": elapsed_ms,
+                        }
+                    )
 
-                    tool_results_content.append({
-                        "type": "tool_result",
-                        "tool_use_id": block.id,
-                        "content": result_str,
-                    })
+                    tool_results_content.append(
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": block.id,
+                            "content": result_str,
+                        }
+                    )
 
                 messages.append(adapter.build_tool_result_message(tool_results_content))
 
@@ -623,10 +646,12 @@ class BaseSpecialistAgent(abc.ABC):
                 f"[AGENT] {self.agent_name} streaming loop exhausted {self.max_steps} steps",
                 flush=True,
             )
-            messages.append({
-                "role": "user",
-                "content": "You have used all available tool steps. You MUST now provide your final answer to the user based on everything you have gathered so far. Do NOT output only reasoning — give the user a clear, helpful response.",
-            })
+            messages.append(
+                {
+                    "role": "user",
+                    "content": "You have used all available tool steps. You MUST now provide your final answer to the user based on everything you have gathered so far. Do NOT output only reasoning — give the user a clear, helpful response.",
+                }
+            )
             response = None
             async for event_type, payload in adapter.stream_message(
                 model=model,
@@ -654,20 +679,30 @@ class BaseSpecialistAgent(abc.ABC):
 
             await _maybe_store_query_pattern(db, self.tenant_id, task, tool_calls_log)
 
-            yield "response", AgentResult(
-                success=True,
-                data=final_text,
-                tool_calls_log=tool_calls_log,
-                tokens_used=TokenUsage(total_input_tokens, total_output_tokens, total_cache_creation, total_cache_read),
-                agent_name=self.agent_name,
+            yield (
+                "response",
+                AgentResult(
+                    success=True,
+                    data=final_text,
+                    tool_calls_log=tool_calls_log,
+                    tokens_used=TokenUsage(
+                        total_input_tokens, total_output_tokens, total_cache_creation, total_cache_read
+                    ),
+                    agent_name=self.agent_name,
+                ),
             )
 
         except Exception as exc:
             logger.error("Agent %s streaming failed: %s", self.agent_name, exc, exc_info=True)
-            yield "response", AgentResult(
-                success=False,
-                error=str(exc),
-                tool_calls_log=tool_calls_log,
-                tokens_used=TokenUsage(total_input_tokens, total_output_tokens, total_cache_creation, total_cache_read),
-                agent_name=self.agent_name,
+            yield (
+                "response",
+                AgentResult(
+                    success=False,
+                    error=str(exc),
+                    tool_calls_log=tool_calls_log,
+                    tokens_used=TokenUsage(
+                        total_input_tokens, total_output_tokens, total_cache_creation, total_cache_read
+                    ),
+                    agent_name=self.agent_name,
+                ),
             )

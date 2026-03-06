@@ -54,16 +54,12 @@ async def is_enabled(db: AsyncSession, tenant_id: uuid.UUID, flag_key: str) -> b
 
 async def get_all_flags(db: AsyncSession, tenant_id: uuid.UUID) -> dict[str, bool]:
     """Return all feature flags for a tenant as a dict."""
-    result = await db.execute(
-        select(TenantFeatureFlag).where(TenantFeatureFlag.tenant_id == tenant_id)
-    )
+    result = await db.execute(select(TenantFeatureFlag).where(TenantFeatureFlag.tenant_id == tenant_id))
     flags = result.scalars().all()
     return {f.flag_key: f.enabled for f in flags}
 
 
-async def set_flag(
-    db: AsyncSession, tenant_id: uuid.UUID, flag_key: str, enabled: bool
-) -> TenantFeatureFlag:
+async def set_flag(db: AsyncSession, tenant_id: uuid.UUID, flag_key: str, enabled: bool) -> TenantFeatureFlag:
     """Set a feature flag for a tenant (upsert)."""
     result = await db.execute(
         select(TenantFeatureFlag).where(
@@ -75,9 +71,7 @@ async def set_flag(
     if flag:
         flag.enabled = enabled
     else:
-        flag = TenantFeatureFlag(
-            tenant_id=tenant_id, flag_key=flag_key, enabled=enabled
-        )
+        flag = TenantFeatureFlag(tenant_id=tenant_id, flag_key=flag_key, enabled=enabled)
         db.add(flag)
 
     # Invalidate cache
@@ -87,9 +81,7 @@ async def set_flag(
     return flag
 
 
-async def set_flags_bulk(
-    db: AsyncSession, tenant_id: uuid.UUID, flags: dict[str, bool]
-) -> dict[str, bool]:
+async def set_flags_bulk(db: AsyncSession, tenant_id: uuid.UUID, flags: dict[str, bool]) -> dict[str, bool]:
     """Set multiple feature flags at once."""
     for key, enabled in flags.items():
         await set_flag(db, tenant_id, key, enabled)
@@ -106,8 +98,4 @@ async def seed_default_flags(db: AsyncSession, tenant_id: uuid.UUID) -> None:
             )
         )
         if not result.scalar_one_or_none():
-            db.add(
-                TenantFeatureFlag(
-                    tenant_id=tenant_id, flag_key=flag_key, enabled=enabled
-                )
-            )
+            db.add(TenantFeatureFlag(tenant_id=tenant_id, flag_key=flag_key, enabled=enabled))

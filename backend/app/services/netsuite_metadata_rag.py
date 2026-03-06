@@ -194,10 +194,7 @@ def _format_scripts(scripts: list[dict]) -> str:
         desc = f" — {s['description']}" if s.get("description") else ""
         filepath = s.get("filepath") or s.get("scriptfile") or ""
         file_info = f" [{filepath}]" if filepath else ""
-        lines.append(
-            f"- {s.get('scriptid', '?')} ({s.get('scripttype', '?')}): "
-            f"{s.get('name', '?')}{desc}{file_info}"
-        )
+        lines.append(f"- {s.get('scriptid', '?')} ({s.get('scripttype', '?')}): {s.get('name', '?')}{desc}{file_info}")
     return "\n".join(lines)
 
 

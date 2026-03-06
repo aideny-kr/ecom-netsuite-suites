@@ -239,8 +239,7 @@ def _build_rows(
                     "natural_name": _truncate(name),
                     "script_id": _truncate(scriptid.lower()),
                     "description": (
-                        f"Deployed on: {d.get('recordtype', 'unknown')}, "
-                        f"Status: {d.get('status', 'unknown')}"
+                        f"Deployed on: {d.get('recordtype', 'unknown')}, Status: {d.get('status', 'unknown')}"
                     ),
                 }
             )

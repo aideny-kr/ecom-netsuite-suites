@@ -31,9 +31,7 @@ class TestSavedSuiteQLQueryModel:
         db.add(query)
         await db.flush()
 
-        result = await db.execute(
-            select(SavedSuiteQLQuery).where(SavedSuiteQLQuery.id == query.id)
-        )
+        result = await db.execute(select(SavedSuiteQLQuery).where(SavedSuiteQLQuery.id == query.id))
         fetched = result.scalar_one()
         assert fetched.name == "Monthly Revenue"
         assert fetched.tenant_id == tenant.id
@@ -46,20 +44,12 @@ class TestSavedSuiteQLQueryModel:
         tenant_a = await create_test_tenant(db, name="Corp A")
         tenant_b = await create_test_tenant(db, name="Corp B")
 
-        q_a = SavedSuiteQLQuery(
-            tenant_id=tenant_a.id, name="A query", query_text="SELECT 1"
-        )
-        q_b = SavedSuiteQLQuery(
-            tenant_id=tenant_b.id, name="B query", query_text="SELECT 2"
-        )
+        q_a = SavedSuiteQLQuery(tenant_id=tenant_a.id, name="A query", query_text="SELECT 1")
+        q_b = SavedSuiteQLQuery(tenant_id=tenant_b.id, name="B query", query_text="SELECT 2")
         db.add_all([q_a, q_b])
         await db.flush()
 
-        result = await db.execute(
-            select(SavedSuiteQLQuery).where(
-                SavedSuiteQLQuery.tenant_id == tenant_a.id
-            )
-        )
+        result = await db.execute(select(SavedSuiteQLQuery).where(SavedSuiteQLQuery.tenant_id == tenant_a.id))
         queries = result.scalars().all()
         assert len(queries) == 1
         assert queries[0].name == "A query"
@@ -160,9 +150,7 @@ class TestUpdateEndpoint:
         user, _ = await create_test_user(db, tenant, role_name="admin")
         headers = make_auth_headers(user)
 
-        query = SavedSuiteQLQuery(
-            tenant_id=tenant.id, name="Old Name", description="Old desc", query_text="SELECT 1"
-        )
+        query = SavedSuiteQLQuery(tenant_id=tenant.id, name="Old Name", description="Old desc", query_text="SELECT 1")
         db.add(query)
         await db.flush()
 
@@ -183,9 +171,7 @@ class TestUpdateEndpoint:
         user, _ = await create_test_user(db, tenant, role_name="admin")
         headers = make_auth_headers(user)
 
-        query = SavedSuiteQLQuery(
-            tenant_id=tenant.id, name="Original", description="Keep me", query_text="SELECT 1"
-        )
+        query = SavedSuiteQLQuery(tenant_id=tenant.id, name="Original", description="Keep me", query_text="SELECT 1")
         db.add(query)
         await db.flush()
 
@@ -218,9 +204,7 @@ class TestUpdateEndpoint:
         user_b, _ = await create_test_user(db, tenant_b, role_name="admin")
         headers_b = make_auth_headers(user_b)
 
-        query_a = SavedSuiteQLQuery(
-            tenant_id=tenant_a.id, name="A's Query", query_text="SELECT 1"
-        )
+        query_a = SavedSuiteQLQuery(tenant_id=tenant_a.id, name="A's Query", query_text="SELECT 1")
         db.add(query_a)
         await db.flush()
 
@@ -259,9 +243,7 @@ class TestPreviewEndpoint:
             "truncated": False,
         }
 
-        with patch(
-            "app.api.v1.skills.execute_suiteql_for_tenant", new_callable=AsyncMock
-        ) as mock_exec:
+        with patch("app.api.v1.skills.execute_suiteql_for_tenant", new_callable=AsyncMock) as mock_exec:
             mock_exec.return_value = mock_result
             resp = await client.post(
                 "/api/v1/skills/preview",
@@ -358,6 +340,7 @@ class TestPaginateSuiteql:
     @pytest.mark.asyncio
     async def test_single_page(self):
         """When results fit in one page, only one call should be made."""
+
         async def mock_execute(*, access_token, account_id, query, limit=1000):
             return {
                 "columns": ["id"],
@@ -393,9 +376,7 @@ class TestExportTriggerEndpoint:
         db.add(query)
         await db.flush()
 
-        with patch(
-            "app.workers.tasks.suiteql_export.export_suiteql_to_csv"
-        ) as mock_task:
+        with patch("app.workers.tasks.suiteql_export.export_suiteql_to_csv") as mock_task:
             mock_task.delay.return_value = MagicMock(id="celery-task-123")
             resp = await client.post(
                 "/api/v1/skills/export",

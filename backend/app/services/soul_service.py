@@ -43,11 +43,7 @@ async def get_soul_config(tenant_id: uuid.UUID) -> SoulConfigResponse:
     if quirks_match:
         quirks = quirks_match.group(1).strip()
 
-    return SoulConfigResponse(
-        bot_tone=bot_tone or None,
-        netsuite_quirks=quirks or None,
-        exists=True
-    )
+    return SoulConfigResponse(bot_tone=bot_tone or None, netsuite_quirks=quirks or None, exists=True)
 
 
 async def seed_default_soul(tenant_id: uuid.UUID, tenant_name: str) -> None:
@@ -105,5 +101,5 @@ async def update_soul_config(tenant_id: uuid.UUID, data: SoulUpdateRequest) -> S
     return SoulConfigResponse(
         bot_tone=data.bot_tone.strip() if data.bot_tone else None,
         netsuite_quirks=data.netsuite_quirks.strip() if data.netsuite_quirks else None,
-        exists=exists
+        exists=exists,
     )

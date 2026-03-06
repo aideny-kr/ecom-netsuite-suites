@@ -35,21 +35,23 @@ _SCRIPT_KEYWORDS = re.compile(
 )
 
 # Superset of all specialist tools
-_UNIFIED_TOOL_NAMES = frozenset({
-    # SuiteQL agent tools
-    "netsuite_suiteql",
-    "netsuite_get_metadata",
-    # RAG agent tools
-    "rag_search",
-    "web_search",
-    # Workspace agent tools
-    "workspace_list_files",
-    "workspace_read_file",
-    "workspace_search",
-    "workspace_propose_patch",
-    # Shared
-    "tenant_save_learned_rule",
-})
+_UNIFIED_TOOL_NAMES = frozenset(
+    {
+        # SuiteQL agent tools
+        "netsuite_suiteql",
+        "netsuite_get_metadata",
+        # RAG agent tools
+        "rag_search",
+        "web_search",
+        # Workspace agent tools
+        "workspace_list_files",
+        "workspace_read_file",
+        "workspace_search",
+        "workspace_propose_patch",
+        # Shared
+        "tenant_save_learned_rule",
+    }
+)
 
 
 _SYSTEM_PROMPT = """\
@@ -269,6 +271,7 @@ class UnifiedAgent(BaseSpecialistAgent):
         itself, not just the system prompt, making it much harder to ignore.
         """
         import re
+
         # Extract entity mappings from the XML
         entities = re.findall(
             r"<user_term>(.*?)</user_term>\s*"
@@ -437,6 +440,7 @@ class UnifiedAgent(BaseSpecialistAgent):
         # Load soul config
         try:
             from app.services.soul_service import get_soul_config
+
             soul_config = await get_soul_config(self.tenant_id)
             if soul_config.exists and soul_config.netsuite_quirks:
                 self._soul_quirks = soul_config.netsuite_quirks

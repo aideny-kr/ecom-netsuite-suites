@@ -145,9 +145,7 @@ async def test_update_session_title(client, db, admin_user):
     user, headers = admin_user
     await db.execute(text(f"SET LOCAL app.current_tenant_id = '{user.tenant_id}'"))
 
-    create_resp = await client.post(
-        "/api/v1/chat/sessions", json={"title": "Old Title"}, headers=headers
-    )
+    create_resp = await client.post("/api/v1/chat/sessions", json={"title": "Old Title"}, headers=headers)
     session_id = create_resp.json()["id"]
 
     resp = await client.patch(
@@ -181,9 +179,7 @@ async def test_update_session_cross_tenant(client, db, admin_user, admin_user_b)
     _, headers_b = admin_user_b
 
     await db.execute(text(f"SET LOCAL app.current_tenant_id = '{user_a.tenant_id}'"))
-    create_resp = await client.post(
-        "/api/v1/chat/sessions", json={"title": "Tenant A"}, headers=headers_a
-    )
+    create_resp = await client.post("/api/v1/chat/sessions", json={"title": "Tenant A"}, headers=headers_a)
     session_id = create_resp.json()["id"]
 
     # User B should not be able to rename User A's session
@@ -206,20 +202,14 @@ async def test_delete_session(client, db, admin_user):
     user, headers = admin_user
     await db.execute(text(f"SET LOCAL app.current_tenant_id = '{user.tenant_id}'"))
 
-    create_resp = await client.post(
-        "/api/v1/chat/sessions", json={"title": "To Delete"}, headers=headers
-    )
+    create_resp = await client.post("/api/v1/chat/sessions", json={"title": "To Delete"}, headers=headers)
     session_id = create_resp.json()["id"]
 
-    resp = await client.delete(
-        f"/api/v1/chat/sessions/{session_id}", headers=headers
-    )
+    resp = await client.delete(f"/api/v1/chat/sessions/{session_id}", headers=headers)
     assert resp.status_code == 204
 
     # Verify it's gone
-    resp = await client.get(
-        f"/api/v1/chat/sessions/{session_id}", headers=headers
-    )
+    resp = await client.get(f"/api/v1/chat/sessions/{session_id}", headers=headers)
     assert resp.status_code == 404
 
 
@@ -228,9 +218,7 @@ async def test_delete_session_not_found(client, db, admin_user):
     """DELETE /api/v1/chat/sessions/{random_id} → 404."""
     _, headers = admin_user
     random_id = str(uuid.uuid4())
-    resp = await client.delete(
-        f"/api/v1/chat/sessions/{random_id}", headers=headers
-    )
+    resp = await client.delete(f"/api/v1/chat/sessions/{random_id}", headers=headers)
     assert resp.status_code == 404
 
 
@@ -241,19 +229,13 @@ async def test_delete_session_cross_tenant(client, db, admin_user, admin_user_b)
     _, headers_b = admin_user_b
 
     await db.execute(text(f"SET LOCAL app.current_tenant_id = '{user_a.tenant_id}'"))
-    create_resp = await client.post(
-        "/api/v1/chat/sessions", json={"title": "Tenant A"}, headers=headers_a
-    )
+    create_resp = await client.post("/api/v1/chat/sessions", json={"title": "Tenant A"}, headers=headers_a)
     session_id = create_resp.json()["id"]
 
     # User B should not be able to delete User A's session
-    resp = await client.delete(
-        f"/api/v1/chat/sessions/{session_id}", headers=headers_b
-    )
+    resp = await client.delete(f"/api/v1/chat/sessions/{session_id}", headers=headers_b)
     assert resp.status_code == 404
 
     # Verify it still exists for User A
-    resp = await client.get(
-        f"/api/v1/chat/sessions/{session_id}", headers=headers_a
-    )
+    resp = await client.get(f"/api/v1/chat/sessions/{session_id}", headers=headers_a)
     assert resp.status_code == 200

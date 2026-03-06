@@ -344,7 +344,9 @@ class SuiteQLAgent(BaseSpecialistAgent):
 
         if self._soul_quirks:
             parts.append("\n## TENANT NETSUITE QUIRKS AND BUSINESS LOGIC")
-            parts.append("CRITICAL: Pay strict attention to these tenant-specific NetSuite quirks when forming queries:")
+            parts.append(
+                "CRITICAL: Pay strict attention to these tenant-specific NetSuite quirks when forming queries:"
+            )
             parts.append(self._soul_quirks)
 
         # Inject user's local date/time so date queries use correct day
@@ -402,6 +404,7 @@ class SuiteQLAgent(BaseSpecialistAgent):
 
         try:
             from app.services.soul_service import get_soul_config
+
             soul_config = await get_soul_config(self.tenant_id)
             if soul_config.exists and soul_config.netsuite_quirks:
                 self._soul_quirks = soul_config.netsuite_quirks
@@ -585,7 +588,11 @@ class SuiteQLAgent(BaseSpecialistAgent):
         else:
             # Summary counts so agent knows data is available on request
             script_count = len(md.scripts) if getattr(md, "scripts", None) and isinstance(md.scripts, list) else 0
-            deploy_count = len(md.script_deployments) if getattr(md, "script_deployments", None) and isinstance(md.script_deployments, list) else 0
+            deploy_count = (
+                len(md.script_deployments)
+                if getattr(md, "script_deployments", None) and isinstance(md.script_deployments, list)
+                else 0
+            )
             wf_count = len(md.workflows) if getattr(md, "workflows", None) and isinstance(md.workflows, list) else 0
             if script_count or deploy_count or wf_count:
                 parts.append(

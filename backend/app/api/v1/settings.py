@@ -32,9 +32,7 @@ router = APIRouter(prefix="/settings", tags=["settings"])
 
 
 async def _get_tenant_config(db: AsyncSession, tenant_id: uuid.UUID) -> TenantConfig:
-    result = await db.execute(
-        select(TenantConfig).where(TenantConfig.tenant_id == tenant_id)
-    )
+    result = await db.execute(select(TenantConfig).where(TenantConfig.tenant_id == tenant_id))
     config = result.scalar_one_or_none()
     if not config:
         raise HTTPException(status_code=404, detail="Tenant config not found")

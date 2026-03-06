@@ -71,9 +71,7 @@ class SavedQueryResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-async def execute_suiteql_for_tenant(
-    *, db: AsyncSession, tenant_id: uuid.UUID, query: str
-) -> dict:
+async def execute_suiteql_for_tenant(*, db: AsyncSession, tenant_id: uuid.UUID, query: str) -> dict:
     """Resolve creds and execute SuiteQL for the given tenant."""
     from app.core.encryption import decrypt_credentials
     from app.services.netsuite_client import execute_suiteql
@@ -221,9 +219,7 @@ async def preview_query(
         raise HTTPException(status_code=404, detail="Saved query not found.")
 
     limited_sql = inject_fetch_limit(saved_query.query_text, limit=500)
-    result = await execute_suiteql_for_tenant(
-        db=db, tenant_id=user.tenant_id, query=limited_sql
-    )
+    result = await execute_suiteql_for_tenant(db=db, tenant_id=user.tenant_id, query=limited_sql)
 
     return PreviewResponse(
         columns=result.get("columns", []),

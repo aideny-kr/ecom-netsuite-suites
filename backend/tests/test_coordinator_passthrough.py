@@ -79,9 +79,7 @@ class TestShouldPassThrough:
 
     def test_failed_agent_does_not_pass_through(self):
         coord = _make_coordinator()
-        result = coord._should_pass_through(
-            [_make_result(success=False, data="| A |\n|---|\n| 1 |", error="timeout")]
-        )
+        result = coord._should_pass_through([_make_result(success=False, data="| A |\n|---|\n| 1 |", error="timeout")])
         assert result is None
 
     def test_no_results_message_variants(self):
@@ -185,8 +183,6 @@ class TestGetSynthesisModel:
         assert coord._get_synthesis_model() == "claude-sonnet-4-5-20250929"
 
     def test_falls_back_to_main_model(self, monkeypatch):
-        monkeypatch.setattr(
-            "app.services.chat.coordinator.settings.MULTI_AGENT_SYNTHESIS_MODEL", ""
-        )
+        monkeypatch.setattr("app.services.chat.coordinator.settings.MULTI_AGENT_SYNTHESIS_MODEL", "")
         coord = _make_coordinator()
         assert coord._get_synthesis_model() == "test-main"

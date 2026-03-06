@@ -107,10 +107,12 @@ async def validate_step(db: AsyncSession, tenant_id: uuid.UUID, step_key: str) -
 
         # Fetch all netsuite connections — prefer active, fall back to error/other
         conn_result = await db.execute(
-            select(Connection).where(
+            select(Connection)
+            .where(
                 Connection.tenant_id == tenant_id,
                 Connection.provider == "netsuite",
-            ).order_by(
+            )
+            .order_by(
                 # Sort so "active" comes first
                 Connection.status.asc()
             )
@@ -124,12 +126,12 @@ async def validate_step(db: AsyncSession, tenant_id: uuid.UUID, step_key: str) -
             conn = all_conns[0]
 
         mcp_result = await db.execute(
-            select(McpConnector).where(
+            select(McpConnector)
+            .where(
                 McpConnector.tenant_id == tenant_id,
                 McpConnector.provider == "netsuite_mcp",
-            ).order_by(
-                McpConnector.status.asc()
             )
+            .order_by(McpConnector.status.asc())
         )
         all_mcps = mcp_result.scalars().all()
         mcp = next((m for m in all_mcps if m.status == "active"), None)

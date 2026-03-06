@@ -98,16 +98,12 @@ class TestPatternStorage:
         ]
 
         with patch("app.services.query_pattern_service._embed_text", new_callable=AsyncMock, return_value=None):
-            stored = await extract_and_store_pattern(
-                db, tenant.id, "how many sales orders do we have?", tool_calls_log
-            )
+            stored = await extract_and_store_pattern(db, tenant.id, "how many sales orders do we have?", tool_calls_log)
             await db.flush()
 
         assert stored is True
 
-        result = await db.execute(
-            select(TenantQueryPattern).where(TenantQueryPattern.tenant_id == tenant.id)
-        )
+        result = await db.execute(select(TenantQueryPattern).where(TenantQueryPattern.tenant_id == tenant.id))
         patterns = result.scalars().all()
         assert len(patterns) == 1
         assert patterns[0].user_question == "how many sales orders do we have?"
@@ -134,9 +130,7 @@ class TestPatternStorage:
             await extract_and_store_pattern(db, tenant.id, "count items by type again", tool_calls_log)
             await db.flush()
 
-        result = await db.execute(
-            select(TenantQueryPattern).where(TenantQueryPattern.tenant_id == tenant.id)
-        )
+        result = await db.execute(select(TenantQueryPattern).where(TenantQueryPattern.tenant_id == tenant.id))
         patterns = result.scalars().all()
         assert len(patterns) == 1
         assert patterns[0].success_count == 2
@@ -155,9 +149,7 @@ class TestPatternStorage:
         ]
 
         with patch("app.services.query_pattern_service._embed_text", new_callable=AsyncMock, return_value=None):
-            stored = await extract_and_store_pattern(
-                db, tenant.id, "bad query", tool_calls_log
-            )
+            stored = await extract_and_store_pattern(db, tenant.id, "bad query", tool_calls_log)
 
         assert stored is False
 
@@ -169,17 +161,13 @@ class TestPatternStorage:
         tool_calls_log = [
             {
                 "tool": "netsuite_suiteql",
-                "params": {
-                    "query": "SELECT id, itemid FROM item FETCH FIRST 5 ROWS ONLY"
-                },
+                "params": {"query": "SELECT id, itemid FROM item FETCH FIRST 5 ROWS ONLY"},
                 "result_summary": '{"columns": ["id", "itemid"], "rows": [["1", "FW001"]], "row_count": 1}',
             }
         ]
 
         with patch("app.services.query_pattern_service._embed_text", new_callable=AsyncMock, return_value=None):
-            stored = await extract_and_store_pattern(
-                db, tenant.id, "show items", tool_calls_log
-            )
+            stored = await extract_and_store_pattern(db, tenant.id, "show items", tool_calls_log)
 
         assert stored is False
 
@@ -191,17 +179,13 @@ class TestPatternStorage:
         tool_calls_log = [
             {
                 "tool": "netsuite_suiteql",
-                "params": {
-                    "query": "SELECT type, COUNT(id) as cnt FROM transaction GROUP BY type"
-                },
+                "params": {"query": "SELECT type, COUNT(id) as cnt FROM transaction GROUP BY type"},
                 "result_summary": '{"columns": ["type", "cnt"], "rows": [], "row_count": 0}',
             }
         ]
 
         with patch("app.services.query_pattern_service._embed_text", new_callable=AsyncMock, return_value=None):
-            stored = await extract_and_store_pattern(
-                db, tenant.id, "orders by type", tool_calls_log
-            )
+            stored = await extract_and_store_pattern(db, tenant.id, "orders by type", tool_calls_log)
 
         assert stored is False
 
@@ -231,9 +215,7 @@ class TestPatternStorage:
             await extract_and_store_pattern(db, tenant_b.id, "customers by category", tool_calls_log_b)
             await db.flush()
 
-        result = await db.execute(
-            select(TenantQueryPattern).where(TenantQueryPattern.tenant_id == tenant_a.id)
-        )
+        result = await db.execute(select(TenantQueryPattern).where(TenantQueryPattern.tenant_id == tenant_a.id))
         patterns_a = result.scalars().all()
         assert len(patterns_a) == 1
         assert "transaction" in patterns_a[0].tables_used
@@ -254,7 +236,10 @@ class TestProvenPatternsInjection:
             correlation_id="test",
         )
         agent._proven_patterns = [
-            {"question": "total sales today", "sql": "SELECT SUM(t.foreigntotal) FROM transaction t WHERE t.type = 'SalesOrd'"},
+            {
+                "question": "total sales today",
+                "sql": "SELECT SUM(t.foreigntotal) FROM transaction t WHERE t.type = 'SalesOrd'",
+            },
             {"question": "inventory for item X", "sql": "SELECT * FROM inventoryitemlocations WHERE item = 123"},
         ]
 

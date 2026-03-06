@@ -870,7 +870,10 @@ class MultiAgentCoordinator:
                         context["domain_knowledge"] = [r["raw_text"] for r in dk_results]
                         logger.info(
                             "coordinator.domain_knowledge_injected",
-                            extra={"chunk_count": len(dk_results), "sources": [r.get("source_uri") for r in dk_results]},
+                            extra={
+                                "chunk_count": len(dk_results),
+                                "sources": [r.get("source_uri") for r in dk_results],
+                            },
                         )
                 except Exception:
                     logger.warning("coordinator.domain_knowledge_retrieval_failed", exc_info=True)
@@ -936,24 +939,26 @@ class MultiAgentCoordinator:
 
     # ── Soft-failure detection ────────────────────────────────────────────
 
-    _SOFT_FAILURE_PHRASES = frozenset({
-        "couldn't find",
-        "could not find",
-        "unable to",
-        "i was not able",
-        "i wasn't able",
-        "no data",
-        "no results",
-        "0 rows",
-        "zero rows",
-        "not supported",
-        "unknown identifier",
-        "invalid search",
-        "i don't have enough information",
-        "i apologize",
-        "i'm sorry",
-        "unfortunately",
-    })
+    _SOFT_FAILURE_PHRASES = frozenset(
+        {
+            "couldn't find",
+            "could not find",
+            "unable to",
+            "i was not able",
+            "i wasn't able",
+            "no data",
+            "no results",
+            "0 rows",
+            "zero rows",
+            "not supported",
+            "unknown identifier",
+            "invalid search",
+            "i don't have enough information",
+            "i apologize",
+            "i'm sorry",
+            "unfortunately",
+        }
+    )
 
     @staticmethod
     def _is_suiteql_soft_failure(result: AgentResult) -> bool:
@@ -1130,9 +1135,7 @@ class MultiAgentCoordinator:
         ]
 
         if self.soul_tone:
-            parts.append(
-                f"<tenant_context><business_logic>{self.soul_tone}</business_logic></tenant_context>"
-            )
+            parts.append(f"<tenant_context><business_logic>{self.soul_tone}</business_logic></tenant_context>")
 
         parts.append(COORDINATOR_SYNTHESIS_PROMPT)
         return "\n".join(parts)

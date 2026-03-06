@@ -219,8 +219,6 @@ class TestBuildRowsWorkflows:
         assert "PO approval" in rows[0]["description"]
 
     def test_workflow_missing_name_skipped(self):
-        md = _make_metadata(
-            workflows=[{"scriptid": "customworkflow_x", "name": "", "recordtype": "salesorder"}]
-        )
+        md = _make_metadata(workflows=[{"scriptid": "customworkflow_x", "name": "", "recordtype": "salesorder"}])
         rows = _build_rows(TENANT_ID, md)
         assert len(rows) == 0

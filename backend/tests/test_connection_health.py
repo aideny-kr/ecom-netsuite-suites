@@ -14,6 +14,7 @@ from tests.conftest import create_test_tenant
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_oauth2_creds(*, expired: bool = False) -> dict:
     """Build a mock OAuth2 credentials dict."""
     return {
@@ -28,6 +29,7 @@ def _make_oauth2_creds(*, expired: bool = False) -> dict:
 
 def _encrypt(creds: dict) -> str:
     from app.core.encryption import encrypt_credentials
+
     return encrypt_credentials(creds)
 
 

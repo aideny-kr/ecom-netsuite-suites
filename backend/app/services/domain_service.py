@@ -32,9 +32,7 @@ async def verify_domain(domain: str, tenant_id: uuid.UUID) -> bool:
     try:
         # Run DNS query in thread pool to avoid blocking
         loop = asyncio.get_event_loop()
-        answers = await loop.run_in_executor(
-            None, lambda: dns.resolver.resolve(record_name, "TXT")
-        )
+        answers = await loop.run_in_executor(None, lambda: dns.resolver.resolve(record_name, "TXT"))
         for rdata in answers:
             for txt_string in rdata.strings:
                 decoded = txt_string.decode("utf-8").strip().strip('"')

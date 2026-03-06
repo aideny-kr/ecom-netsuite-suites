@@ -119,18 +119,13 @@ DISCOVERY_QUERIES: list[dict[str, Any]] = [
         "label": "script_deployments",
         "description": "Active SuiteScript Deployments",
         "query": (
-            "SELECT script, scriptid, title, status "
-            "FROM scriptdeployment "
-            "WHERE isdeployed = 'T' AND ROWNUM <= 1000"
+            "SELECT script, scriptid, title, status FROM scriptdeployment WHERE isdeployed = 'T' AND ROWNUM <= 1000"
         ),
     },
     {
         "label": "workflows",
         "description": "Active Workflows",
-        "query": (
-            "SELECT scriptid, name, recordtype, status "
-            "FROM workflow WHERE isinactive = 'F' AND ROWNUM <= 500"
-        ),
+        "query": ("SELECT scriptid, name, recordtype, status FROM workflow WHERE isinactive = 'F' AND ROWNUM <= 500"),
     },
     {
         "label": "saved_searches",

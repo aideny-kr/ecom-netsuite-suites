@@ -102,9 +102,7 @@ async def execute(params: dict[str, Any], context: dict[str, Any] | None = None,
         # 2. Always supplement with keyword search for tenant docs
         # (many tenant docs have NULL embeddings and are invisible to vector search)
         if tenant_id:
-            kw_result = await _keyword_search(
-                db, tenant_id, query_text, top_k, source_filter
-            )
+            kw_result = await _keyword_search(db, tenant_id, query_text, top_k, source_filter)
             for kr in kw_result.get("results", []):
                 if kr["source_path"] not in seen_paths:
                     results.append(kr)
@@ -156,21 +154,11 @@ async def _keyword_search(
     conditions = [DocChunk.content.ilike(f"%{w[:50]}%") for w in words[:10]]
 
     # Score = number of keywords found in each doc (for ranking)
-    hit_score = sum(
-        case((DocChunk.content.ilike(f"%{w[:50]}%"), 1), else_=0)
-        for w in words[:10]
-    )
+    hit_score = sum(case((DocChunk.content.ilike(f"%{w[:50]}%"), 1), else_=0) for w in words[:10])
 
-    stmt = (
-        select(DocChunk, hit_score.label("score"))
-        .where(or_(*conditions))
-        .order_by(hit_score.desc())
-        .limit(top_k)
-    )
+    stmt = select(DocChunk, hit_score.label("score")).where(or_(*conditions)).order_by(hit_score.desc()).limit(top_k)
     if tenant_id:
-        stmt = stmt.where(
-            (DocChunk.tenant_id == tenant_id) | (DocChunk.tenant_id == SYSTEM_TENANT_ID)
-        )
+        stmt = stmt.where((DocChunk.tenant_id == tenant_id) | (DocChunk.tenant_id == SYSTEM_TENANT_ID))
     if source_filter:
         stmt = stmt.where(DocChunk.source_path.ilike(f"{source_filter}%"))
 
@@ -181,7 +169,13 @@ async def _keyword_search(
         # Corrupted UTF-8 in doc_chunks can crash ILIKE queries with
         # CharacterNotInRepertoireError.  Return empty rather than bubbling up.
         logger.warning("rag_search._keyword_search failed (likely encoding issue)", exc_info=True)
-        return {"results": [], "count": 0, "query": query_text, "method": "keyword_fallback", "note": "keyword search unavailable"}
+        return {
+            "results": [],
+            "count": 0,
+            "query": query_text,
+            "method": "keyword_fallback",
+            "note": "keyword search unavailable",
+        }
 
     results = [
         {

@@ -48,6 +48,8 @@ def _sanitize_assistant_text(text: str) -> str:
     text = _TOOL_XML_RE.sub("", text)
     text = _TOOL_TAG_RE.sub("", text)
     return text.strip()
+
+
 from app.models.chat import ChatMessage, ChatSession
 from app.services.audit_service import log_event
 from app.services.chat.billing import deduct_chat_credits
@@ -99,7 +101,8 @@ def _is_valid_uuid(val: str) -> bool:
 
 
 async def _resolve_default_workspace(
-    db: AsyncSession, tenant_id: uuid.UUID,
+    db: AsyncSession,
+    tenant_id: uuid.UUID,
 ) -> str | None:
     """Find the most recent active workspace for a tenant (cached per request)."""
     from sqlalchemy import select
@@ -187,12 +190,14 @@ async def run_chat_turn(
                 adapter=compactor_adapter,
                 model=settings.MULTI_AGENT_SPECIALIST_MODEL,
             )
-            print(f"[ORCHESTRATOR] history compacted: {len(all_history)} → {len(history_messages)} messages", flush=True)
+            print(
+                f"[ORCHESTRATOR] history compacted: {len(all_history)} → {len(history_messages)} messages", flush=True
+            )
         except Exception:
             logger.warning("history_compaction_failed", exc_info=True)
             print(f"[ORCHESTRATOR] compaction failed, hard-truncating to last {max_turns * 2} messages", flush=True)
             # Fallback: hard-truncate to last N turns
-            history_messages = all_history[-(max_turns * 2):]
+            history_messages = all_history[-(max_turns * 2) :]
     else:
         history_messages = all_history
 
@@ -275,6 +280,7 @@ async def run_chat_turn(
     soul_bot_tone = ""
     if not is_onboarding:
         from app.services.soul_service import get_soul_config
+
         soul_config = await get_soul_config(tenant_id)
         if soul_config.exists:
             soul_parts = ["\n\n## Tenant-Specific AI Configuration & Logic\n"]
@@ -424,6 +430,7 @@ async def run_chat_turn(
                 else:
                     # Detect financial intent for task augmentation + domain knowledge boost
                     from app.services.chat.coordinator import IntentType, classify_intent
+
                     detected_intent = classify_intent(sanitized_input)
                     is_financial = detected_intent == IntentType.FINANCIAL_REPORT
 
@@ -434,8 +441,12 @@ async def run_chat_turn(
                             "",
                         )
                         _financial_history_markers = (
-                            "transactionaccountingline", "accttype", "Net Income",
-                            "Income Statement", "Balance Sheet", _FINANCIAL_MODE_TAG,
+                            "transactionaccountingline",
+                            "accttype",
+                            "Net Income",
+                            "Income Statement",
+                            "Balance Sheet",
+                            _FINANCIAL_MODE_TAG,
                         )
                         if any(marker in prev_assistant for marker in _financial_history_markers):
                             is_financial = True
@@ -540,14 +551,23 @@ async def run_chat_turn(
                         agent_result = payload
 
                 if agent_result is None:
-                    final_text = _sanitize_assistant_text("".join(streamed_text_parts)) or "I wasn't able to process that request."
+                    final_text = (
+                        _sanitize_assistant_text("".join(streamed_text_parts))
+                        or "I wasn't able to process that request."
+                    )
                     coord_result_tokens = (0, 0)
                     coord_result_cache = (0, 0)
                     coord_result_tool_calls: list[dict] = []
                 else:
                     final_text = _sanitize_assistant_text(agent_result.data or "")
-                    coord_result_tokens = (agent_result.tokens_used.input_tokens, agent_result.tokens_used.output_tokens)
-                    coord_result_cache = (agent_result.tokens_used.cache_creation_input_tokens, agent_result.tokens_used.cache_read_input_tokens)
+                    coord_result_tokens = (
+                        agent_result.tokens_used.input_tokens,
+                        agent_result.tokens_used.output_tokens,
+                    )
+                    coord_result_cache = (
+                        agent_result.tokens_used.cache_creation_input_tokens,
+                        agent_result.tokens_used.cache_read_input_tokens,
+                    )
                     coord_result_tool_calls = agent_result.tool_calls_log
 
                 assistant_msg = ChatMessage(

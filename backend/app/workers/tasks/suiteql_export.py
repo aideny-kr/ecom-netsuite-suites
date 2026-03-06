@@ -41,11 +41,13 @@ def export_suiteql_to_csv(
         from sqlalchemy import select as sa_select
 
         result = session.execute(
-            sa_select(Connection).where(
+            sa_select(Connection)
+            .where(
                 Connection.tenant_id == tenant_id,
                 Connection.provider == "netsuite",
                 Connection.status == "active",
-            ).limit(1)
+            )
+            .limit(1)
         )
         connection = result.scalar_one_or_none()
         if not connection:
@@ -73,9 +75,7 @@ def export_suiteql_to_csv(
             base_query = query_text.rstrip().rstrip(";").rstrip()
             paginated_query = f"{base_query} OFFSET {offset} FETCH FIRST {chunk_size} ROWS ONLY"
 
-            result = loop.run_until_complete(
-                execute_suiteql_via_rest(access_token, account_id, paginated_query)
-            )
+            result = loop.run_until_complete(execute_suiteql_via_rest(access_token, account_id, paginated_query))
 
             if not columns and result.get("columns"):
                 columns = result["columns"]

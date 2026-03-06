@@ -28,29 +28,50 @@ _MAX_CHUNK_CHARS = 6000
 # SuiteScript entry point names by script type
 # ──────────────────────────────────────────────────────────────────
 
-_ENTRY_POINT_NAMES = frozenset({
-    # UserEvent
-    "beforeLoad", "beforeSubmit", "afterSubmit",
-    # MapReduce
-    "getInputData", "map", "reduce", "summarize",
-    # Restlet
-    "get", "post", "put", "delete",
-    # Suitelet / Portlet
-    "onRequest", "render",
-    # Client Script
-    "pageInit", "fieldChanged", "postSourcing", "sublistChanged",
-    "lineInit", "validateField", "validateLine", "validateInsert",
-    "validateDelete", "saveRecord",
-    # Scheduled
-    "execute",
-    # Bundle Installation
-    "afterInstall", "afterUpdate", "beforeInstall", "beforeUpdate",
-    "beforeUninstall",
-    # Workflow Action
-    "onAction",
-    # Mass Update
-    "each",
-})  # noqa: E501
+_ENTRY_POINT_NAMES = frozenset(
+    {
+        # UserEvent
+        "beforeLoad",
+        "beforeSubmit",
+        "afterSubmit",
+        # MapReduce
+        "getInputData",
+        "map",
+        "reduce",
+        "summarize",
+        # Restlet
+        "get",
+        "post",
+        "put",
+        "delete",
+        # Suitelet / Portlet
+        "onRequest",
+        "render",
+        # Client Script
+        "pageInit",
+        "fieldChanged",
+        "postSourcing",
+        "sublistChanged",
+        "lineInit",
+        "validateField",
+        "validateLine",
+        "validateInsert",
+        "validateDelete",
+        "saveRecord",
+        # Scheduled
+        "execute",
+        # Bundle Installation
+        "afterInstall",
+        "afterUpdate",
+        "beforeInstall",
+        "beforeUpdate",
+        "beforeUninstall",
+        # Workflow Action
+        "onAction",
+        # Mass Update
+        "each",
+    }
+)  # noqa: E501
 
 # Regex patterns for entry point function declarations
 # Pattern 1: const/let/var name = (params) => {
@@ -62,9 +83,9 @@ _EP_NAMES_PATTERN = "|".join(re.escape(n) for n in sorted(_ENTRY_POINT_NAMES))
 _ENTRY_POINT_RE = re.compile(
     rf"(?:"
     rf"(?:const|let|var)\s+({_EP_NAMES_PATTERN})\s*="  # Pattern 1-2
-    rf"|function\s+({_EP_NAMES_PATTERN})\s*\("          # Pattern 3
-    rf"|({_EP_NAMES_PATTERN})\s*:\s*function\s*\("      # Pattern 4
-    rf"|({_EP_NAMES_PATTERN})\s*\([^)]*\)\s*\{{"         # Pattern 5
+    rf"|function\s+({_EP_NAMES_PATTERN})\s*\("  # Pattern 3
+    rf"|({_EP_NAMES_PATTERN})\s*:\s*function\s*\("  # Pattern 4
+    rf"|({_EP_NAMES_PATTERN})\s*\([^)]*\)\s*\{{"  # Pattern 5
     rf")",
     re.MULTILINE,
 )
@@ -262,14 +283,16 @@ async def seed_workspace_scripts(
 
         for title, source_suffix, chunk_content in chunks:
             entry_point = source_suffix.split("#")[1] if "#" in source_suffix else None
-            all_new_chunks.append((
-                f"{_SOURCE_PREFIX}{source_suffix}",
-                title,
-                chunk_content,
-                f.sha256_hash,
-                script_type,
-                entry_point,
-            ))
+            all_new_chunks.append(
+                (
+                    f"{_SOURCE_PREFIX}{source_suffix}",
+                    title,
+                    chunk_content,
+                    f.sha256_hash,
+                    script_type,
+                    entry_point,
+                )
+            )
 
     if not all_new_chunks:
         return 0

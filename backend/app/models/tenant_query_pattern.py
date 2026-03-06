@@ -24,6 +24,4 @@ class TenantQueryPattern(Base, UUIDPrimaryKeyMixin):
     columns_used: Mapped[list[str] | None] = mapped_column(ARRAY(Text), nullable=True)
     success_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)

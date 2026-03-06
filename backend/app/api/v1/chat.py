@@ -317,9 +317,7 @@ async def delete_session(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
 
     # Delete messages first (FK constraint)
-    await db.execute(
-        delete(ChatMessage).where(ChatMessage.session_id == session_id)
-    )
+    await db.execute(delete(ChatMessage).where(ChatMessage.session_id == session_id))
     await db.delete(session)
 
     await audit_service.log_event(
