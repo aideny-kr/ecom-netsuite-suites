@@ -32,7 +32,7 @@ def _mock_ddgs():
     mock_ddgs_instance.__exit__ = MagicMock(return_value=False)
 
     with patch("app.mcp.tools.web_search.DDGS", return_value=mock_ddgs_instance, create=True):
-        # Also patch the import inside _sync_search
+        # Also patch the import inside _sync_ddg_search
         with patch.dict("sys.modules", {"ddgs": MagicMock(DDGS=MagicMock(return_value=mock_ddgs_instance))}):
             yield mock_ddgs_instance
 
@@ -109,8 +109,8 @@ class TestWebSearchExecute:
         """Test graceful handling when duckduckgo-search is not installed."""
         from app.mcp.tools.web_search import execute
 
-        with patch("app.mcp.tools.web_search._sync_search", side_effect=ImportError("No module")):
-            # The ImportError is caught inside _sync_search which is called via to_thread,
+        with patch("app.mcp.tools.web_search._sync_ddg_search", side_effect=ImportError("No module")):
+            # The ImportError is caught inside _sync_ddg_search which is called via to_thread,
             # but the outer try/except catches it
             result = await execute({"query": "test"})
             # Should return an error, not crash
@@ -121,7 +121,7 @@ class TestWebSearchExecute:
         from app.mcp.tools.web_search import execute
 
         with patch(
-            "app.mcp.tools.web_search._sync_search",
+            "app.mcp.tools.web_search._sync_ddg_search",
             side_effect=ConnectionError("Network unreachable"),
         ):
             result = await execute({"query": "test"})
