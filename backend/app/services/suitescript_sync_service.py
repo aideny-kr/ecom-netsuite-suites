@@ -61,29 +61,29 @@ async def discover_scripts(access_token: str, account_id: str, restlet_url: str 
         """Resolve a nested folder path from the folder_map."""
         if not folder_id or folder_id not in folder_map:
             return "Uncategorized"
-        
+
         path_segments = []
         current_id = folder_id
         visited = set()  # Prevent infinite loops in corrupted DBs
-        
+
         while current_id in folder_map and current_id not in visited:
             visited.add(current_id)
             node = folder_map[current_id]
-            
+
             # Skip the root 'SuiteScripts' folder if it exists as we inject it manually later
             name = node["name"]
             if name and name.lower() != "suitescripts":
                 # Sanitize the segment name
                 safe_name = "".join(c if c.isalnum() or c in "._- " else "_" for c in name)
                 path_segments.append(safe_name)
-                
+
             current_id = node["parent"]
             if not current_id:
                 break
-                
+
         if not path_segments:
             return "Uncategorized"
-            
+
         # Reverse because we traversed from child to parent
         return "/".join(reversed(path_segments))
 

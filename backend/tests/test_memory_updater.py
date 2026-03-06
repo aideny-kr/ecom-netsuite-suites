@@ -9,7 +9,6 @@ import pytest
 from app.services.chat.llm_adapter import LLMResponse, TokenUsage
 from app.services.chat.memory_updater import has_correction_signal, maybe_extract_correction
 
-
 # ── Regex gate tests ──
 
 

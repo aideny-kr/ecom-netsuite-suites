@@ -41,7 +41,10 @@ _MAX_RESULT_ROWS = 500  # Cap rows sent back to LLM (50 was too low for grouped 
 
 # Pattern to detect data queries that MUST be executed, not answered from memory
 _QUERY_PATTERN = re.compile(r"\bSELECT\b", re.IGNORECASE)
-_DATA_QUESTION_KEYWORDS = {"how many", "total", "count", "sum", "average", "quantity", "revenue", "sales", "orders", "inventory"}
+_DATA_QUESTION_KEYWORDS = {
+    "how many", "total", "count", "sum", "average",
+    "quantity", "revenue", "sales", "orders", "inventory",
+}
 
 
 def _task_contains_query(task: str) -> bool:

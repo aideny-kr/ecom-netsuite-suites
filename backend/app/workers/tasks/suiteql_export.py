@@ -2,7 +2,6 @@
 
 import asyncio
 import csv
-import io
 import os
 import uuid
 from datetime import datetime, timezone

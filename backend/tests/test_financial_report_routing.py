@@ -6,12 +6,11 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.services.chat.coordinator import (
+    ROUTE_REGISTRY,
     IntentType,
     MultiAgentCoordinator,
-    ROUTE_REGISTRY,
     classify_intent,
 )
-
 
 # ── classify_intent tests ──
 

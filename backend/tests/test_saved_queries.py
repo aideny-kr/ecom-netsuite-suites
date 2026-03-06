@@ -13,7 +13,6 @@ from app.models.saved_query import SavedSuiteQLQuery
 from app.services.skills_service import inject_fetch_limit, paginate_suiteql, rows_to_csv
 from tests.conftest import create_test_tenant, create_test_user, make_auth_headers
 
-
 # ---------------------------------------------------------------------------
 # Step 1: Model tests (require DB)
 # ---------------------------------------------------------------------------

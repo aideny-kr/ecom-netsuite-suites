@@ -10,11 +10,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.services.chat.coordinator import IntentType, classify_intent
-from app.services.chat.agents.base_agent import AgentResult
 from app.services.chat.agents.suiteql_agent import SuiteQLAgent
+from app.services.chat.coordinator import IntentType, classify_intent
 from app.services.chat.llm_adapter import LLMResponse, TokenUsage, ToolUseBlock
-
 
 # ---------------------------------------------------------------------------
 # Phase 1: Intent Classification — heuristic accuracy
@@ -485,7 +483,7 @@ class TestEdgeCases:
 
     def test_max_result_rows_cap(self):
         """Verify the agent caps results at _MAX_RESULT_ROWS."""
-        from app.services.chat.agents.base_agent import _truncate_tool_result, _MAX_RESULT_ROWS
+        from app.services.chat.agents.base_agent import _MAX_RESULT_ROWS, _truncate_tool_result
 
         big_result = json.dumps({
             "columns": ["id"],

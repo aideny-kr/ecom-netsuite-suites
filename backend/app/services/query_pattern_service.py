@@ -17,7 +17,7 @@ import re
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import select, text, update
+from sqlalchemy import text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -50,6 +50,7 @@ async def _embed_text(text_to_embed: str) -> list[float] | None:
     """Embed text using OpenAI text-embedding-3-small (1536-dim)."""
     try:
         import openai
+
         from app.core.config import settings
 
         api_key = settings.OPENAI_EMBEDDING_API_KEY

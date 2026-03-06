@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 import uuid
-from typing import TYPE_CHECKING
-
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.dialects.postgresql import JSON, UUID

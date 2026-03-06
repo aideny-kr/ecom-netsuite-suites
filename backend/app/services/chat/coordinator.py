@@ -272,7 +272,7 @@ def classify_intent(user_message: str) -> IntentType:
 
     # Short messages with just a number/ID are almost always data lookups
     if re.match(r"^#?\d{4,}$", text):
-        print(f"[COORDINATOR] heuristic_hit intent=data_query pattern=numeric_id", flush=True)
+        print("[COORDINATOR] heuristic_hit intent=data_query pattern=numeric_id", flush=True)
         return IntentType.DATA_QUERY
 
     for intent, pattern in _HEURISTIC_RULES:

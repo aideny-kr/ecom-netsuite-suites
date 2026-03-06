@@ -3,7 +3,6 @@
 import uuid
 
 import pytest
-from sqlalchemy import text
 
 from app.services.chat.skills import (
     get_all_skills_metadata,

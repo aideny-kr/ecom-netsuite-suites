@@ -7,19 +7,17 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from sqlalchemy import select, text
 
-from app.models.feature_flag import TenantFeatureFlag
 from app.models.tenant import TenantConfig
 from app.services.feature_flag_service import (
-    DEFAULT_FLAGS,
-    _FLAG_CACHE,
     _CACHE_TTL,
+    _FLAG_CACHE,
+    DEFAULT_FLAGS,
     clear_cache,
     get_all_flags,
     is_enabled,
     seed_default_flags,
     set_flag,
 )
-
 
 # ---------------------------------------------------------------------------
 # Feature Flag Service
@@ -700,8 +698,10 @@ class TestRequireFeatureHTTPGuard:
     @pytest.mark.asyncio
     async def test_feature_disabled_returns_403(self, client, db, admin_user, tenant_a, app):
         """An endpoint guarded by require_feature should return 403 when flag is disabled."""
-        from fastapi import APIRouter, Depends
         from typing import Annotated
+
+        from fastapi import APIRouter, Depends
+
         from app.core.dependencies import require_feature
         from app.models.user import User
 

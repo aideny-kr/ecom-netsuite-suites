@@ -423,7 +423,7 @@ async def run_chat_turn(
                     )
                 else:
                     # Detect financial intent for task augmentation + domain knowledge boost
-                    from app.services.chat.coordinator import classify_intent, IntentType
+                    from app.services.chat.coordinator import IntentType, classify_intent
                     detected_intent = classify_intent(sanitized_input)
                     is_financial = detected_intent == IntentType.FINANCIAL_REPORT
 
@@ -444,8 +444,8 @@ async def run_chat_turn(
                     dk_top_k = 5 if is_financial else None  # default from settings
 
                     # Assemble context concurrently (entity resolution + domain knowledge + proven patterns)
-                    from app.services.chat.tenant_resolver import TenantEntityResolver
                     from app.services.chat.domain_knowledge import retrieve_domain_knowledge
+                    from app.services.chat.tenant_resolver import TenantEntityResolver
                     from app.services.query_pattern_service import retrieve_similar_patterns
 
                     vernacular_result, dk_result, patterns_result = await asyncio.gather(
@@ -518,7 +518,7 @@ async def run_chat_turn(
                         "TIMEZONE: For date filters, prefer BUILTIN.RELATIVE_RANGES('TODAY','START') over TRUNC(SYSDATE) — it respects company timezone and matches saved search boundaries.\n"
                         "Check <domain_knowledge> for exact query templates."
                     )
-                    print(f"[UNIFIED] Financial report mode activated", flush=True)
+                    print("[UNIFIED] Financial report mode activated", flush=True)
 
                 streamed_text_parts: list[str] = []
                 agent_result = None

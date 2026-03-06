@@ -1,6 +1,5 @@
 """Tests for tenant query pattern service — extraction, storage, retrieval, and confidence parsing."""
 
-import json
 import uuid
 from unittest.mock import AsyncMock, patch
 
@@ -20,7 +19,6 @@ from app.services.query_pattern_service import (
     extract_and_store_pattern,
 )
 from tests.conftest import create_test_tenant
-
 
 # ---------------------------------------------------------------------------
 # Unit tests: confidence parsing

@@ -1,9 +1,7 @@
 """Tests for the connection health check Celery task."""
 
 import time
-import uuid
 from datetime import datetime, timezone
-from unittest.mock import MagicMock, patch
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -11,7 +9,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.connection import Connection
 from app.models.mcp_connector import McpConnector
 from tests.conftest import create_test_tenant
-
 
 # ---------------------------------------------------------------------------
 # Helpers
