@@ -63,7 +63,11 @@ WHERE t.tranid = 'RMA61214' AND t.type = 'RtnAuth'
 
 ## Status Format
 
-Transaction statuses use a compound format: `TypeCode:StatusLetter`. Use `BUILTIN.DF(t.status)` for readable names:
+**CRITICAL — REST API vs Local SuiteQL difference:**
+- In the **local SuiteQL editor**, `t.status` in WHERE clauses matches compound codes like `'SalesOrd:B'`.
+- Via the **REST API**, `t.status` returns **single-letter codes** (e.g., `'B'`, `'C'`, `'H'`), so compound codes will NOT match and filters silently fail.
+- **Always use single-letter codes** in status filters: `t.status NOT IN ('C', 'H')` — NOT `t.status NOT IN ('SalesOrd:C', 'SalesOrd:H')`.
+- Use `BUILTIN.DF(t.status)` for readable names in SELECT.
 
 ```sql
 SELECT t.tranid,
@@ -74,15 +78,15 @@ WHERE t.type = 'SalesOrd'
 FETCH FIRST 5 ROWS ONLY
 ```
 
-Common sales order statuses:
-- `SalesOrd:A` → Pending Approval
-- `SalesOrd:B` → Pending Fulfillment
-- `SalesOrd:C` → Partially Fulfilled
-- `SalesOrd:D` → Pending Billing/Partially Fulfilled
-- `SalesOrd:E` → Pending Billing
-- `SalesOrd:F` → Billed
-- `SalesOrd:G` → Closed
-- `SalesOrd:H` → Cancelled
+Common sales order statuses (use single-letter code in WHERE filters):
+- `A` → Pending Approval
+- `B` → Pending Fulfillment
+- `C` → Partially Fulfilled
+- `D` → Pending Billing/Partially Fulfilled
+- `E` → Pending Billing
+- `F` → Billed
+- `G` → Closed
+- `H` → Cancelled
 
 ## Common Date-Based Queries
 

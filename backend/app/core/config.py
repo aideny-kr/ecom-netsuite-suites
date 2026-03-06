@@ -90,8 +90,8 @@ class Settings(BaseSettings):
     UNIFIED_AGENT_ENABLED: bool = True
 
     # Web search
-    WEB_SEARCH_PROVIDER: str = "duckduckgo"  # Options: "duckduckgo", "tavily"
-    TAVILY_API_KEY: str = ""  # For future Tavily upgrade
+    WEB_SEARCH_PROVIDER: str = "brave"  # Options: "brave", "duckduckgo"
+    BRAVE_SEARCH_API_KEY: str = ""
     WEB_SEARCH_MAX_RESULTS: int = 5
 
     # Stripe billing

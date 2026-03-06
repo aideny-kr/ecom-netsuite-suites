@@ -37,7 +37,19 @@ def _is_valid_uuid(val: str) -> bool:
 
 
 _MAX_ERROR_CHARS = 1000
-_MAX_RESULT_ROWS = 50  # Cap rows sent back to LLM to prevent token bloat
+_MAX_RESULT_ROWS = 500  # Cap rows sent back to LLM (50 was too low for grouped queries like 14 platforms x 10 weeks)
+
+# Pattern to detect data queries that MUST be executed, not answered from memory
+_QUERY_PATTERN = re.compile(r"\bSELECT\b", re.IGNORECASE)
+_DATA_QUESTION_KEYWORDS = {"how many", "total", "count", "sum", "average", "quantity", "revenue", "sales", "orders", "inventory"}
+
+
+def _task_contains_query(task: str) -> bool:
+    """Check if the task contains a SQL query or data question that requires tool execution."""
+    if _QUERY_PATTERN.search(task):
+        return True
+    task_lower = task.lower()
+    return any(kw in task_lower for kw in _DATA_QUESTION_KEYWORDS)
 
 
 def _truncate_tool_result(result_str: str) -> str:
@@ -287,6 +299,22 @@ class BaseSpecialistAgent(abc.ABC):
 
                 # Pure text response — agent is done
                 if not response.tool_use_blocks:
+                    # Guard: if step 0 and task contains a SELECT query, the model
+                    # is hallucinating from conversation history instead of executing.
+                    # Force it to actually call the tool.
+                    if step == 0 and tool_calls_log == [] and _task_contains_query(task):
+                        print(f"[AGENT] {self.agent_name} skipped tool on data query — forcing execution", flush=True)
+                        messages.append(adapter.build_assistant_message(response))
+                        messages.append({
+                            "role": "user",
+                            "content": (
+                                "You MUST execute the query using netsuite_suiteql — do NOT answer from memory "
+                                "or prior conversation. The user needs fresh, live data from NetSuite. "
+                                "Call the tool NOW."
+                            ),
+                        })
+                        continue
+
                     final_text = "\n".join(response.text_blocks) if response.text_blocks else ""
 
                     # Parse and handle confidence scoring
@@ -494,6 +522,22 @@ class BaseSpecialistAgent(abc.ABC):
 
                 # Pure text response — done
                 if not response.tool_use_blocks:
+                    # Guard: if step 0 and task contains a SELECT query, the model
+                    # is hallucinating from conversation history instead of executing.
+                    # Force it to actually call the tool.
+                    if step == 0 and tool_calls_log == [] and _task_contains_query(task):
+                        print(f"[AGENT] {self.agent_name} skipped tool on data query — forcing execution", flush=True)
+                        messages.append(adapter.build_assistant_message(response))
+                        messages.append({
+                            "role": "user",
+                            "content": (
+                                "You MUST execute the query using netsuite_suiteql — do NOT answer from memory "
+                                "or prior conversation. The user needs fresh, live data from NetSuite. "
+                                "Call the tool NOW."
+                            ),
+                        })
+                        continue
+
                     final_text = "\n".join(response.text_blocks) if response.text_blocks else ""
 
                     confidence = parse_confidence(final_text)

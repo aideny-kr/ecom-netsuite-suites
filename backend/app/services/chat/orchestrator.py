@@ -506,6 +506,8 @@ async def run_chat_turn(
                         "- tal.accountingbook = (SELECT id FROM accountingbook WHERE isprimary = 'T')\n"
                         "- tal.posting = 'T'\n"
                         "- JOIN AccountingPeriod ap ON ap.id = t.postingperiod\n"
+                        "- ap.isquarter = 'F' AND ap.isyear = 'F' (exclude rollup periods)\n"
+                        "- COALESCE(a.eliminate, 'F') = 'F' (exclude intercompany elimination accounts)\n"
                         "MANDATORY CURRENCY TRANSLATION (multi-subsidiary multi-currency tenant):\n"
                         "- Do NOT use raw SUM(tal.amount) — it mixes USD and EUR amounts.\n"
                         "- MUST wrap amounts: BUILTIN.CONSOLIDATE(tal.amount, 'INCOME', 'DEFAULT', 'DEFAULT', 1, ap.id, 'DEFAULT') for P&L\n"
@@ -513,6 +515,7 @@ async def run_chat_turn(
                         "P&L account types: a.accttype IN ('Income','OthIncome','COGS','Expense','OthExpense')\n"
                         "Revenue is NEGATIVE in TAL — multiply consolidated result by -1.\n"
                         "For Balance Sheet: inception-to-date (NO start date filter).\n"
+                        "TIMEZONE: For date filters, prefer BUILTIN.RELATIVE_RANGES('TODAY','START') over TRUNC(SYSDATE) — it respects company timezone and matches saved search boundaries.\n"
                         "Check <domain_knowledge> for exact query templates."
                     )
                     print(f"[UNIFIED] Financial report mode activated", flush=True)

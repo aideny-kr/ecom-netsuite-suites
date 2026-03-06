@@ -16,7 +16,7 @@ Key columns:
 - `type` — Transaction type code (e.g., 'SalesOrd', 'CustInvc')
 - `trandate` — Transaction date
 - `entity` — Customer/vendor ID (FK to customer/vendor)
-- `status` — Compound status code (e.g., 'SalesOrd:B')
+- `status` — Status code. **CRITICAL: REST API vs local SuiteQL behavior differs.** In the local SuiteQL editor, WHERE clauses match compound codes (e.g., `'SalesOrd:B'`). Via the REST API, `t.status` returns single-letter codes (e.g., `'B'`, `'C'`, `'H'`), so compound codes like `'SalesOrd:H'` will NOT match. **Always use single-letter codes** in status filters to ensure consistent results across both contexts: `t.status NOT IN ('C', 'H')` instead of `t.status NOT IN ('SalesOrd:C', 'SalesOrd:H')`. Common status letters: A=Pending Approval, B=Pending Fulfillment, C=Cancelled, D=Partially Fulfilled, E=Pending Billing/Partially Fulfilled, F=Pending Billing, G=Billed, H=Closed/On Hold.
 - `foreigntotal` — Total in transaction currency
 - `total` — Total in subsidiary base currency
 - `currency` — Currency record ID
@@ -250,10 +250,16 @@ FETCH FIRST 100 ROWS ONLY
 
 **Safe transactionline columns** (always work via REST API):
 - `id`, `transaction`, `item`, `quantity`, `rate`, `amount`, `foreignamount`
-- `mainline`, `taxline`, `iscogs`, `linesequencenumber`
+- `mainline`, `taxline`, `iscogs`, `assemblycomponent`, `linesequencenumber`
 - `class`, `department`, `location`, `expenseaccount`
 - `quantityreceived`, `quantitybilled`, `quantityshiprecv`
 - `memo`, `createdfrom`
+
+**Item type filtering**: Do NOT use `tl.itemtype` (returns 400). Always JOIN the item table and use `i.type`:
+```sql
+JOIN item i ON tl.item = i.id
+WHERE i.type IN ('InvtPart', 'Assembly')  -- filter to specific item types
+```
 
 ```sql
 -- PO line items with vendor and item details (CORRECT approach)

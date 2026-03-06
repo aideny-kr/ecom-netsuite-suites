@@ -87,10 +87,12 @@ COLUMN NAMING:
 - Transaction date is `trandate`. Created date is `createddate`. For "latest order" queries, prefer `ORDER BY t.id DESC`.
 
 DATE FUNCTIONS — CRITICAL:
-- For "today": use `TRUNC(SYSDATE)`. Example: `WHERE t.trandate = TRUNC(SYSDATE)`
-- For "yesterday": use `TRUNC(SYSDATE) - 1`. Example: `WHERE t.trandate = TRUNC(SYSDATE) - 1`
+- For "today": prefer `BUILTIN.RELATIVE_RANGES('TODAY', 'START')` — it respects company timezone and matches saved search date boundaries.
+- Fallback for "today": `TRUNC(SYSDATE)` works but uses server time (Pacific), which may differ from company timezone by hours.
+- For "yesterday": use `TRUNC(SYSDATE) - 1`.
 - For date ranges: `WHERE t.trandate >= TRUNC(SYSDATE) - 7` (last 7 days)
 - For specific dates: `WHERE t.trandate = TO_DATE('2026-01-15', 'YYYY-MM-DD')`
+- For matching saved search periods: use `BUILTIN.RELATIVE_RANGES('THIS_MONTH', 'START')` / `BUILTIN.RELATIVE_RANGES('THIS_MONTH', 'END')`.
 - NEVER use `BUILTIN.DATE(SYSDATE)` — it does NOT work for date comparisons and returns 0 rows.
 - NEVER use `CURRENT_DATE` — not reliably supported in SuiteQL.
 
@@ -112,8 +114,11 @@ TRANSACTION NUMBER CONVENTIONS:
   IR → `t.type = 'ItemRcpt'`, WO → `t.type = 'WorkOrd'`, VB → `t.type = 'VendBill'`
 
 JOIN PATTERNS:
-- Filter to item lines only using `tl.mainline = 'F' AND tl.taxline = 'F'`.
+- Filter to item lines only using `tl.mainline = 'F' AND tl.taxline = 'F' AND (tl.iscogs = 'F' OR tl.iscogs IS NULL)`.
 - For header-only queries (no line details), use `WHERE t.mainline = 'T'` or just query the `transaction` table without joining `transactionline`.
+- COLUMN RESTRICTION: `tl.itemtype` does NOT work on transactionline via REST API (returns 400). Use `i.type` from the item table instead: `JOIN item i ON tl.item = i.id WHERE i.type IN ('InvtPart', 'Assembly')`.
+- For strict revenue queries (excluding shipping, discounts, subtotals): `JOIN item i ON tl.item = i.id WHERE i.type NOT IN ('ShipItem', 'Discount', 'Subtotal', 'Markup', 'Payment', 'EndGroup')`.
+- To exclude assembly/kit component lines: add `AND tl.assemblycomponent = 'F'` (prevents double-counting kit components alongside the parent line).
 
 HEADER vs LINE AGGREGATION — CRITICAL (prevents double-counting):
 - `t.foreigntotal` and `t.total` are HEADER-LEVEL fields — one value per transaction.
@@ -196,6 +201,11 @@ In SuiteQL, selecting a column that doesn't exist on a particular item type caus
 
 <agentic_workflow>
 You are an AGENT. Your job is to run tools in a loop until you achieve the user's goal.
+
+MANDATORY EXECUTION RULE:
+- If the user provides a SQL/SuiteQL query (SELECT statement), you MUST execute it via netsuite_suiteql. NEVER answer from memory or prior conversation context.
+- If the user asks a data question (quantities, totals, lists, counts), you MUST call a tool to get fresh data. NEVER synthesize data from previous responses.
+- Only skip tool execution for pure documentation, how-to, or conceptual questions.
 
 STEP 0 — MATCH CUSTOM RECORDS FIRST (MANDATORY):
 Before doing ANYTHING, scan the <tenant_vernacular> XML block and the <tenant_schema> **Custom record types** list.

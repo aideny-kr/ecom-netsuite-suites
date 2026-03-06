@@ -1,7 +1,7 @@
 """Web search tool for the chat system.
 
-Searches the web using DuckDuckGo (no API key required) and returns
-structured results. Designed for AI agent use: concise snippets,
+Searches the web using Brave Search API (primary) or DuckDuckGo (fallback)
+and returns structured results. Designed for AI agent use: concise snippets,
 not full page content.
 """
 
@@ -11,11 +11,49 @@ import asyncio
 import logging
 from typing import Any
 
+import httpx
+
+from app.core.config import settings
+
 logger = logging.getLogger(__name__)
 
 
-def _sync_search(query: str, max_results: int) -> list[dict]:
-    """Run DuckDuckGo search synchronously (called via asyncio.to_thread)."""
+async def _brave_search(query: str, max_results: int) -> list[dict]:
+    """Search via Brave Search API."""
+    async with httpx.AsyncClient(timeout=10) as client:
+        resp = await client.get(
+            "https://api.search.brave.com/res/v1/web/search",
+            params={
+                "q": query,
+                "count": max_results,
+                "extra_snippets": True,
+            },
+            headers={
+                "X-Subscription-Token": settings.BRAVE_SEARCH_API_KEY,
+                "Accept": "application/json",
+            },
+        )
+        resp.raise_for_status()
+        data = resp.json()
+
+    results = []
+    for item in data.get("web", {}).get("results", [])[:max_results]:
+        snippet = item.get("description", "")
+        extra = item.get("extra_snippets", [])
+        if extra:
+            snippet += "\n" + "\n".join(extra[:2])
+        results.append(
+            {
+                "title": item.get("title", ""),
+                "snippet": snippet[:800],
+                "url": item.get("url", ""),
+            }
+        )
+    return results
+
+
+def _sync_ddg_search(query: str, max_results: int) -> list[dict]:
+    """DuckDuckGo fallback (no API key required)."""
     from ddgs import DDGS
 
     with DDGS() as ddgs:
@@ -42,31 +80,39 @@ async def execute(
 
     max_results = min(int(params.get("max_results", 5)), 10)
 
+    # Try Brave Search first if configured
+    if settings.BRAVE_SEARCH_API_KEY:
+        try:
+            results = await _brave_search(query, max_results)
+            return {
+                "results": results,
+                "count": len(results),
+                "query": query,
+                "provider": "brave",
+            }
+        except Exception as exc:
+            logger.warning("Brave search failed, falling back to DuckDuckGo: %s", exc)
+
+    # Fallback to DuckDuckGo
     try:
-        raw_results = await asyncio.to_thread(_sync_search, query, max_results)
-
-        results = []
-        for r in raw_results:
-            results.append(
-                {
-                    "title": r.get("title", ""),
-                    "snippet": r.get("body", "")[:500],
-                    "url": r.get("href", ""),
-                }
-            )
-
+        raw_results = await asyncio.to_thread(_sync_ddg_search, query, max_results)
+        results = [
+            {
+                "title": r.get("title", ""),
+                "snippet": r.get("body", "")[:500],
+                "url": r.get("href", ""),
+            }
+            for r in raw_results
+        ]
         return {
             "results": results,
             "count": len(results),
             "query": query,
+            "provider": "duckduckgo",
         }
-
     except ImportError:
-        logger.error("ddgs package not installed")
-        return {
-            "error": "Web search not available: ddgs package not installed. "
-            "Install with: pip install ddgs"
-        }
+        logger.error("ddgs package not installed and Brave API key not set")
+        return {"error": "Web search not available: set BRAVE_SEARCH_API_KEY or install ddgs package"}
     except Exception as exc:
         logger.warning("web_search.execute failed", exc_info=True)
         return {"error": f"Web search failed: {exc}"}

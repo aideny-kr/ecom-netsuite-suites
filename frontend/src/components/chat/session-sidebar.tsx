@@ -248,7 +248,9 @@ function SessionItem({
     <div
       className={cn(
         "group flex items-center rounded-lg px-3 py-2.5 text-left transition-all duration-150 cursor-pointer",
-        isActive ? "bg-card shadow-soft" : "hover:bg-card/50",
+        isActive
+          ? "bg-primary/10 border border-primary/20 shadow-soft"
+          : "hover:bg-card/50",
       )}
       onClick={onSelect}
     >

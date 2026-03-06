@@ -55,11 +55,43 @@ Always filter out non-item lines when joining transactionline:
 ```sql
 WHERE tl.mainline = 'F'    -- Exclude header pseudo-line
   AND tl.taxline = 'F'     -- Exclude tax lines
+  AND (tl.iscogs = 'F' OR tl.iscogs IS NULL)  -- Exclude COGS lines (NULL on some line types)
 ```
+
+### Shipping, Discount, and Subtotal Lines
+
+The standard triple filter above does NOT exclude shipping, discount, or subtotal lines — they pass through all three filters. For strict revenue-only totals, JOIN the item table:
+
+```sql
+-- Strict revenue lines only (excludes shipping, discount, subtotal, markup)
+SELECT SUM(tl.amount * -1) as revenue_usd
+FROM transactionline tl
+  JOIN transaction t ON tl.transaction = t.id
+  JOIN item i ON tl.item = i.id
+WHERE t.type = 'CustInvc' AND t.posting = 'T'
+  AND tl.mainline = 'F' AND tl.taxline = 'F'
+  AND (tl.iscogs = 'F' OR tl.iscogs IS NULL)
+  AND i.type NOT IN ('ShipItem', 'Discount', 'Subtotal', 'Markup', 'Payment', 'EndGroup')
+```
+
+**When to use the strict filter:** Comparing against saved searches that show "Item Lines Only" amounts.
+**When NOT needed:** General revenue queries where shipping/discount are expected to be included in the total.
 
 For header-only queries without line details, either:
 1. Don't join transactionline at all, or
 2. Use `WHERE t.mainline = 'T'` on the transaction table
+
+## Transaction Type Double-Counting
+
+A single sale flows through multiple transaction types: Sales Order → Invoice (or Cash Sale). Each is a separate row in `transaction`. NEVER filter `t.type IN ('SalesOrd', 'CustInvc', 'CashSale')` and SUM amounts — this counts the same revenue 2-3x.
+
+**Choose ONE type based on what you're measuring:**
+- **Order pipeline** (what was ordered): `t.type = 'SalesOrd'`
+- **Recognized revenue** (what was invoiced): `t.type = 'CustInvc'` with `t.posting = 'T'`
+- **Cash sales** (POS/immediate): `t.type = 'CashSale'`
+- **Payments received**: `t.type = 'CustPymt'`
+
+Saved searches are always scoped to a single record type, which is why they don't have this problem.
 
 ## Line Amount Sign Convention
 

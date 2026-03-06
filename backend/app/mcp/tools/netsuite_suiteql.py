@@ -161,6 +161,9 @@ async def execute(params: dict, context: dict | None = None, **kwargs) -> dict:
     if not query:
         return {"error": True, "message": "No query provided."}
 
+    # Log the FULL query for debugging (SQLAlchemy engine logs truncate it)
+    print(f"[SUITEQL] Full query received:\n{query}", flush=True)
+
     # --- context is required for tenant_id and db session ---
     if not context:
         return {
@@ -210,6 +213,8 @@ async def execute(params: dict, context: dict | None = None, **kwargs) -> dict:
     # --- Enforce limit ---
     max_rows = min(limit, settings.NETSUITE_SUITEQL_MAX_ROWS)
     query = enforce_limit(query, max_rows)
+
+    print(f"[SUITEQL] Final query after enforce_limit (max_rows={max_rows}):\n{query}", flush=True)
 
     account_id = credentials["account_id"].replace("_", "-").lower()
     auth_type = credentials.get("auth_type", "oauth1")

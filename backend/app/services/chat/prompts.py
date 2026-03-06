@@ -365,7 +365,7 @@ AGENTIC_SYSTEM_PROMPT = (  # noqa: E501
     "- Row limiting: use ROWNUM in the WHERE clause, e.g. WHERE ROWNUM <= 10\n"
     "- NEVER use FETCH FIRST N ROWS ONLY or LIMIT — they are NOT supported\n"
     "- NEVER use 'internalid' — the correct column is 'id'\n"
-    "- NEVER use 'mainline' — it is not a valid SuiteQL column\n"
+    "- 'mainline' and 'taxline' are TEXT columns ('T'/'F') on transactionline — always filter: tl.mainline = 'F' AND tl.taxline = 'F'\n"
     "- Only ONE WHERE clause per query — combine conditions with AND\n"
     "- Use NVL() instead of IFNULL() or COALESCE()\n"
     "- NO Common Table Expressions (CTEs / WITH clauses) — use subqueries instead\n"
@@ -388,7 +388,7 @@ AGENTIC_SYSTEM_PROMPT = (  # noqa: E501
     "(mainline/taxline are TEXT 'T'/'F' on transactionline)\n"
     "- NEVER use dot notation like tl.item.name — use JOIN: "
     "JOIN item i ON tl.item = i.id\n"
-    "- NEVER use 'amount' on transactionline — use 'foreignamount' or 'netamount'\n"
+    "- tl.amount = base currency (USD); tl.foreignamount = transaction currency. Use tl.amount for consolidated totals, tl.foreignamount for per-currency breakdowns.\n"
     "</transactionline_rules>\n"
     "</domain_rules>\n"
 )

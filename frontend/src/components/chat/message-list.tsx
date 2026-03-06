@@ -13,7 +13,21 @@ import { ToolCallStepCard } from "@/components/chat/tool-call-step";
 import { ChangeProposalCard } from "@/components/chat/change-proposal-card";
 import { WorkspaceToolCard } from "@/components/chat/workspace-tool-card";
 import { SuiteQLToolCard } from "@/components/chat/suiteql-tool-card";
-import { Sparkles, FileCode, Bookmark, Check, Loader2, Copy } from "lucide-react";
+import { FileCode, Bookmark, Check, Loader2, Copy } from "lucide-react";
+
+/** Framework-inspired gear/module icon used as AI assistant avatar.
+ *  A square with notches on each side — resembles the Framework Computer logo. */
+function FrameworkIcon({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="currentColor" className={className}>
+      <path
+        fillRule="evenodd"
+        clipRule="evenodd"
+        d="M8 1a1 1 0 0 0-1 1v2H4a2 2 0 0 0-2 2v1a1 1 0 0 0 1 1h2v8H3a1 1 0 0 0-1 1v1a2 2 0 0 0 2 2h3v2a1 1 0 0 0 1 1h2a1 1 0 0 0 1-1v-2h2v2a1 1 0 0 0 1 1h2a1 1 0 0 0 1-1v-2h3a2 2 0 0 0 2-2v-1a1 1 0 0 0-1-1h-2V8h2a1 1 0 0 0 1-1V6a2 2 0 0 0-2-2h-3V2a1 1 0 0 0-1-1h-2a1 1 0 0 0-1 1v2h-2V2a1 1 0 0 0-1-1H8zm1 7a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h6a1 1 0 0 0 1-1V9a1 1 0 0 0-1-1H9z"
+      />
+    </svg>
+  );
+}
 
 /** Shared markdown components with syntax-highlighted code blocks */
 const mdComponents: Components = {
@@ -182,7 +196,7 @@ function ThinkingBlock({ content }: { content: string }) {
   return (
     <details className="mb-2 rounded-lg border border-muted/50 bg-muted/20 text-[12px] group">
       <summary className="cursor-pointer select-none px-3 py-2 text-muted-foreground/60 hover:text-muted-foreground font-medium flex items-center gap-2 transition-colors">
-        <Sparkles className="h-3 w-3" />
+        <FrameworkIcon className="h-3 w-3" />
         Thought process
       </summary>
       <div className="prose prose-sm dark:prose-invert max-w-none px-3 pb-2.5 text-muted-foreground/70 text-[12px] leading-relaxed">
@@ -276,7 +290,7 @@ export function MessageList({
       <div className="flex h-full items-center justify-center">
         <div className="text-center">
           <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-2xl bg-primary/10">
-            <Sparkles className="h-6 w-6 text-primary" />
+            <FrameworkIcon className="h-6 w-6 text-primary" />
           </div>
           <h3 className="text-lg font-semibold text-foreground">
             How can I help?
@@ -301,7 +315,7 @@ export function MessageList({
         >
           {message.role === "assistant" && (
             <div className="mt-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-primary/10">
-              <Sparkles className="h-3.5 w-3.5 text-primary" />
+              <FrameworkIcon className="h-3.5 w-3.5 text-primary" />
             </div>
           )}
           <div
@@ -434,7 +448,7 @@ export function MessageList({
       {(isWaitingForReply || streamingContent || streamingStatus) && (
         <div className="flex gap-3 justify-start">
           <div className="mt-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-primary/10">
-            <Sparkles className="h-3.5 w-3.5 text-primary" />
+            <FrameworkIcon className="h-3.5 w-3.5 text-primary" />
           </div>
           <div className="flex flex-col gap-2 rounded-2xl bg-muted/60 px-4 py-3 min-w-[30%]">
             {streamingStatus ? (

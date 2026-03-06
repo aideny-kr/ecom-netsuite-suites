@@ -268,6 +268,8 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 10. **RESTlet PUT preserves file IDs** — in-place update via load → set `.contents` → `.save()`
 11. **SuiteQL pagination** — use `FETCH FIRST N ROWS ONLY`, not `LIMIT` (not supported in SuiteQL)
 12. **NetSuite account IDs** — normalize with `replace("_", "-").lower()` for URLs
+13. **SuiteQL status codes via REST API** — REST API returns single-letter status codes (`'B'`, `'H'`), NOT compound codes (`'SalesOrd:B'`). Always use single-letter codes in WHERE filters: `t.status NOT IN ('C', 'H')`. Compound codes silently fail via REST API.
+14. **Agent hallucination from history** — The LLM may answer data queries from conversation memory without calling tools. `_task_contains_query()` guard in `base_agent.py` forces tool execution when step==0 and no tools called.
 
 ## Chat Architecture
 
@@ -292,7 +294,7 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 
 - **Latest migration**: 037_tenant_feature_flags
 - **Entity mappings**: 2,109 seeded for test tenant (bf92d059), seeder runs in metadata discovery pipeline
-- **Golden dataset**: 9 files (added `financial-statements.md` for GL/P&L/BS query templates)
+- **Golden dataset**: 9 files, 85 chunks (added `financial-statements.md` for GL/P&L/BS; status code + REST API behavior docs)
 - **Doc chunk embeddings**: 3,198/3,198 embedded with OpenAI (was 2/3,198 with Voyage AI)
 - **Utility scripts**: `scripts/sanitize_doc_chunks.py`, `scripts/reembed_doc_chunks.py`
 - **Known gap**: OAuth reconnect just flips status, doesn't re-initiate browser flow (refresh token expired for tenant 9745435)

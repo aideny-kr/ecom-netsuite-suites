@@ -71,6 +71,8 @@ WHERE tl.mainline = 'F' AND tl.taxline = 'F' AND (tl.iscogs = 'F' OR tl.iscogs I
 ```
 Note: `tl.iscogs` can be NULL on some lines — always include the `IS NULL` fallback.
 
+**Shipping/Discount lines**: The above filter does NOT exclude shipping (`ShipItem`), discount (`Discount`), or subtotal (`Subtotal`) lines. For strict revenue matching against saved searches, add: `JOIN item i ON tl.item = i.id` and `AND i.type NOT IN ('ShipItem', 'Discount', 'Subtotal', 'Markup')`.
+
 ## Margin / COGS Calculations — Currency Consistency
 
 When computing margins (revenue minus COGS), ALWAYS use the same currency column for both sides. Use `tl.amount` (base currency) for both revenue and COGS lines. NEVER mix `tl.foreignamount` with `tl.amount` — summing `foreignamount` across currencies (AUD + GBP + EUR) produces meaningless numbers.
