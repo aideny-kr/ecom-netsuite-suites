@@ -253,6 +253,8 @@ class UnifiedAgent(BaseSpecialistAgent):
         self._tool_defs: list[dict] | None = None
         self._tenant_vernacular: str = ""
         self._soul_quirks: str = ""
+        self._soul_tone: str = ""
+        self._brand_name: str = ""
         self._user_timezone: str | None = None
         self._current_task: str = ""
         self._domain_knowledge: list[str] = []
@@ -344,6 +346,17 @@ class UnifiedAgent(BaseSpecialistAgent):
                 "\n**ACTION REQUIRED**: For each resolved entity of type 'customrecord', "
                 "your FIRST query MUST be: `SELECT * FROM <internal_script_id> WHERE ROWNUM <= 5`."
             )
+
+        # Brand identity
+        if self._brand_name:
+            parts.append(
+                f'\n## IDENTITY\nYour name is "{self._brand_name}". '
+                f"When asked to introduce yourself or asked your name, say you are {self._brand_name}."
+            )
+
+        # Soul tone
+        if self._soul_tone:
+            parts.append(f"\n## TONE & MANNER\n{self._soul_tone}")
 
         # Soul quirks
         if self._soul_quirks:
@@ -442,10 +455,31 @@ class UnifiedAgent(BaseSpecialistAgent):
             from app.services.soul_service import get_soul_config
 
             soul_config = await get_soul_config(self.tenant_id)
-            if soul_config.exists and soul_config.netsuite_quirks:
-                self._soul_quirks = soul_config.netsuite_quirks
+            if soul_config.exists:
+                if soul_config.netsuite_quirks:
+                    self._soul_quirks = soul_config.netsuite_quirks
+                if soul_config.bot_tone:
+                    self._soul_tone = soul_config.bot_tone
         except Exception:
             _logger.warning("unified_agent.soul_fetch_failed", exc_info=True)
+
+        # Load brand name so the agent knows its identity
+        try:
+            from sqlalchemy import select as sa_select
+
+            from app.models.tenant import Tenant, TenantConfig
+
+            config_result = await db.execute(
+                sa_select(TenantConfig.brand_name).where(TenantConfig.tenant_id == self.tenant_id)
+            )
+            self._brand_name = config_result.scalar_one_or_none() or ""
+            if not self._brand_name:
+                tenant_result = await db.execute(
+                    sa_select(Tenant.name).where(Tenant.id == self.tenant_id)
+                )
+                self._brand_name = tenant_result.scalar_one_or_none() or "Suite Studio AI"
+        except Exception:
+            _logger.warning("unified_agent.brand_fetch_failed", exc_info=True)
 
         # Discover external MCP tools
         try:

@@ -236,32 +236,34 @@ class TestTruncateToolResult:
         assert result == small_success
 
     def test_truncates_large_rows(self):
-        """Large row-based results should be capped at 50 rows."""
+        """Large row-based results should be capped at _MAX_RESULT_ROWS."""
         import json
 
         from app.services.chat.agents.base_agent import _MAX_RESULT_ROWS, _truncate_tool_result
 
+        row_count = _MAX_RESULT_ROWS + 100
         big_result = json.dumps(
             {
                 "columns": ["id", "name"],
-                "rows": [[i, f"item_{i}"] for i in range(257)],
-                "row_count": 257,
+                "rows": [[i, f"item_{i}"] for i in range(row_count)],
+                "row_count": row_count,
             }
         )
         result = _truncate_tool_result(big_result)
         parsed = json.loads(result)
         assert len(parsed["rows"]) == _MAX_RESULT_ROWS
         assert parsed["rows_truncated"] is True
-        assert parsed["row_count"] == 257
+        assert parsed["row_count"] == row_count
         assert "GROUP BY" in parsed["_warning"]
 
     def test_truncates_large_items(self):
-        """Large items arrays should be capped at 50."""
+        """Large items arrays should be capped at _MAX_RESULT_ROWS."""
         import json
 
         from app.services.chat.agents.base_agent import _MAX_RESULT_ROWS, _truncate_tool_result
 
-        big_items = json.dumps({"items": [{"id": i} for i in range(200)]})
+        item_count = _MAX_RESULT_ROWS + 100
+        big_items = json.dumps({"items": [{"id": i} for i in range(item_count)]})
         result = _truncate_tool_result(big_items)
         parsed = json.loads(result)
         assert len(parsed["items"]) == _MAX_RESULT_ROWS

@@ -433,6 +433,7 @@ class MultiAgentCoordinator:
         self.system_prompt = system_prompt
         self.user_timezone = user_timezone
         self.soul_tone: str = ""
+        self.brand_name: str = ""
         self.last_result: CoordinatorResult | None = None
 
     async def run(
@@ -1133,6 +1134,9 @@ class MultiAgentCoordinator:
             "</core_constraints>",
             "</system_directives>",
         ]
+
+        if self.brand_name:
+            parts.append(f"<identity>Your name is \"{self.brand_name}\". When asked who you are, say you are {self.brand_name}.</identity>")
 
         if self.soul_tone:
             parts.append(f"<tenant_context><business_logic>{self.soul_tone}</business_logic></tenant_context>")

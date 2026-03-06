@@ -1272,8 +1272,22 @@ function ConnectionManagementCard({
 
   async function handleReconnect() {
     try {
-      await reconnectConn.mutateAsync(connection.id);
-      toast({ title: "Connection reconnected" });
+      const result = await reconnectConn.mutateAsync(connection.id);
+      if ("authorize_url" in result) {
+        // OAuth2 re-authorization — open popup
+        const width = 600;
+        const height = 700;
+        const left = window.screenX + (window.innerWidth - width) / 2;
+        const top = window.screenY + (window.innerHeight - height) / 2;
+        window.open(
+          result.authorize_url,
+          "netsuite_oauth_reconnect",
+          `width=${width},height=${height},left=${left},top=${top},popup=yes`,
+        );
+        toast({ title: "OAuth window opened", description: "Complete authentication in the popup." });
+      } else {
+        toast({ title: "Connection reconnected" });
+      }
     } catch (err) {
       toast({
         title: "Reconnect failed",
@@ -1455,6 +1469,7 @@ function ConnectionManagementCard({
 function NetSuiteConnectionSection() {
   const { data: mcpConnectors } = useMcpConnectors();
   const { data: connections } = useConnections();
+  const queryClient = useQueryClient();
   const { toast } = useToast();
 
   const [mcpStatus, setMcpStatus] = useState<ConnectionStatus>("idle");
@@ -1507,13 +1522,14 @@ function NetSuiteConnectionSection() {
       } else if (event.data?.type === "NETSUITE_AUTH_SUCCESS") {
         setOauthStatus("connected");
         setErrorMessage("");
-        toast({ title: "NetSuite OAuth connection created" });
+        queryClient.invalidateQueries({ queryKey: ["connections"] });
+        toast({ title: "NetSuite OAuth connection updated" });
       } else if (event.data?.type === "NETSUITE_AUTH_ERROR") {
         setOauthStatus("error");
         setErrorMessage(event.data.error || "OAuth authentication failed");
       }
     },
-    [toast],
+    [toast, queryClient],
   );
 
   useEffect(() => {

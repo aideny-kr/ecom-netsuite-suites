@@ -276,6 +276,25 @@ async def run_chat_turn(
     else:
         system_prompt = await get_active_template(db, tenant_id)
 
+    # ── Inject brand identity so the AI knows its name ──
+    brand_name = ""
+    if not is_onboarding:
+        from sqlalchemy import select as sa_select
+
+        from app.models.tenant import Tenant, TenantConfig
+
+        config_result = await db.execute(
+            sa_select(TenantConfig.brand_name).where(TenantConfig.tenant_id == tenant_id)
+        )
+        brand_name = config_result.scalar_one_or_none() or ""
+        if not brand_name:
+            tenant_result = await db.execute(sa_select(Tenant.name).where(Tenant.id == tenant_id))
+            brand_name = tenant_result.scalar_one_or_none() or "Suite Studio AI"
+        system_prompt += (
+            f"\n\nYour name is \"{brand_name}\". When asked to introduce yourself "
+            f"or asked your name, say you are {brand_name}.\n"
+        )
+
     # ── Inject AI Soul (Tone & Quirks) ──
     soul_bot_tone = ""
     if not is_onboarding:
@@ -663,6 +682,7 @@ async def run_chat_turn(
                 user_timezone=user_timezone,
             )
             coordinator.soul_tone = soul_bot_tone
+            coordinator.brand_name = brand_name
 
             # Stream multi-agent: dispatch agents first, then stream synthesis
             streamed_text_parts: list[str] = []

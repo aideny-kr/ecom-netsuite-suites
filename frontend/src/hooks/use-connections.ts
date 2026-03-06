@@ -61,7 +61,10 @@ export function useReconnectConnection() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (id: string) =>
-      apiClient.post<Connection>(`/api/v1/connections/${id}/reconnect`, {}),
+      apiClient.post<Connection | { authorize_url: string; state: string }>(
+        `/api/v1/connections/${id}/reconnect`,
+        {},
+      ),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["connections"] });
     },

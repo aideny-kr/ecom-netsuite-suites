@@ -559,11 +559,12 @@ class TestEdgeCases:
         """Verify the agent caps results at _MAX_RESULT_ROWS."""
         from app.services.chat.agents.base_agent import _MAX_RESULT_ROWS, _truncate_tool_result
 
+        row_count = _MAX_RESULT_ROWS + 100
         big_result = json.dumps(
             {
                 "columns": ["id"],
-                "rows": [[str(i)] for i in range(200)],
-                "row_count": 200,
+                "rows": [[str(i)] for i in range(row_count)],
+                "row_count": row_count,
             }
         )
         truncated = _truncate_tool_result(big_result)

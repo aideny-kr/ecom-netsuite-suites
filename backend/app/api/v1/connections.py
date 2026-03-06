@@ -156,16 +156,71 @@ async def update_connection(
     )
 
 
-@router.post("/{connection_id}/reconnect", response_model=ConnectionResponse)
+@router.post("/{connection_id}/reconnect")
 async def reconnect_connection(
     connection_id: uuid.UUID,
     user: Annotated[User, Depends(require_permission("connections.manage"))],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
+    """Re-initiate OAuth flow for a disconnected/expired connection.
+
+    For OAuth2 connections: returns an authorize_url to open in a popup.
+    For non-OAuth connections: flips status back to active.
+    """
     connection = await connection_service.get_connection(db, connection_id, user.tenant_id)
     if not connection:
         raise HTTPException(status_code=404, detail="Connection not found")
 
+    # OAuth2 connections need a full re-authorization flow
+    if connection.auth_type == "oauth2" and connection.provider == "netsuite":
+        from app.core.config import settings
+
+        if not settings.NETSUITE_OAUTH_CLIENT_ID:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="NETSUITE_OAUTH_CLIENT_ID is not configured",
+            )
+
+        from app.services.netsuite_oauth_service import build_authorize_url, generate_pkce_pair
+
+        import redis.asyncio as aioredis
+
+        account_id = (connection.metadata_json or {}).get("account_id", "")
+        if not account_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Connection missing account_id in metadata",
+            )
+
+        restlet_url = (connection.metadata_json or {}).get("restlet_url", "")
+        code_verifier, code_challenge = generate_pkce_pair()
+        state = uuid.uuid4().hex
+
+        r = aioredis.from_url(settings.REDIS_URL, decode_responses=True)
+        await r.setex(
+            f"netsuite_oauth:{state}",
+            600,
+            f"{code_verifier}:{account_id}:{user.tenant_id}:{user.id}:{restlet_url}",
+        )
+        await r.aclose()
+
+        url = build_authorize_url(account_id, state, code_challenge)
+
+        await audit_service.log_event(
+            db=db,
+            tenant_id=user.tenant_id,
+            category="connection",
+            action="connection.reconnect",
+            actor_id=user.id,
+            resource_type="connection",
+            resource_id=str(connection_id),
+            payload={"method": "oauth2_reauthorize"},
+        )
+        await db.commit()
+
+        return {"authorize_url": url, "state": state}
+
+    # Non-OAuth connections: simple status flip
     connection.status = "active"
 
     await audit_service.log_event(

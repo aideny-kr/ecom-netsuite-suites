@@ -20,6 +20,7 @@ from app.core.config import settings
 from app.core.database import get_db
 from app.core.security import create_access_token, hash_password
 from app.main import create_app
+from app.models.feature_flag import TenantFeatureFlag
 from app.models.tenant import Tenant, TenantConfig
 from app.models.user import Role, User, UserRole
 
@@ -119,6 +120,14 @@ async def create_test_tenant(
     )
     db.add(config)
     await db.flush()
+
+    # Seed default feature flags so require_feature("chat") etc. pass in tests
+    from app.services.feature_flag_service import DEFAULT_FLAGS
+
+    for flag_key, enabled in DEFAULT_FLAGS.items():
+        db.add(TenantFeatureFlag(tenant_id=tenant.id, flag_key=flag_key, enabled=enabled))
+    await db.flush()
+
     return tenant
 
 
