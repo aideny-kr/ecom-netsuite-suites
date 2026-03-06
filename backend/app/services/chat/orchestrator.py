@@ -11,6 +11,7 @@ import logging
 import re
 import time
 import uuid
+from datetime import datetime, timezone
 from typing import Any, AsyncGenerator
 
 from sqlalchemy import func
@@ -21,6 +22,25 @@ from app.core.config import settings
 # Regex to strip leaked Anthropic tool-call XML from assistant text
 _TOOL_XML_RE = re.compile(r"</?(?:invoke|parameter|tool_use)[^>]*>", re.DOTALL)
 _TOOL_TAG_RE = re.compile(r"\s*\[tool:\s*[^\]]+\]")
+
+# Chitchat regex — matches greetings, compliments, affirmations, farewells.
+# Short-circuits expensive context assembly (entity resolution, domain knowledge, etc.)
+_FINANCIAL_MODE_TAG = "FINANCIAL REPORT MODE"
+
+_CHITCHAT_FILLER = r"(?:\s+(?:bro|man|dude|mate|buddy|guys?|y'?all|there))?"
+_CHITCHAT_SEP = r"[!.\s,]*"
+_CHITCHAT_RE = re.compile(
+    rf"""(?xi)^[\s]*(?:
+        (?:thanks?|thank\s*you|thx|ty|cheers)\b{_CHITCHAT_FILLER}{_CHITCHAT_SEP} |
+        (?:great|nice|awesome|perfect|amazing|cool|excellent|wonderful|fantastic|brilliant)\b{_CHITCHAT_FILLER}{_CHITCHAT_SEP} |
+        (?:good\s*job|well\s*done|nice\s*work|nailed\s*it)\b{_CHITCHAT_FILLER}{_CHITCHAT_SEP} |
+        (?:you(?:'re|\s+are)\s+(?:the\s+)?(?:best|great|awesome|perfect|amazing))\b{_CHITCHAT_FILLER}{_CHITCHAT_SEP} |
+        (?:(?:you\s+)?rock|love\s+(?:it|this|you)|bravo)\b{_CHITCHAT_FILLER}{_CHITCHAT_SEP} |
+        (?:wow|lol|(?:ha){{2,}}|ok(?:ay)?|sure|yep|nope|got\s*it|understood|i\s*see|makes?\s*sense)\b{_CHITCHAT_FILLER}{_CHITCHAT_SEP} |
+        (?:hi|hello|hey|good\s*(?:morning|afternoon|evening|night))\b{_CHITCHAT_FILLER}{_CHITCHAT_SEP} |
+        (?:bye|goodbye|see\s*ya|later|gn)\b{_CHITCHAT_FILLER}{_CHITCHAT_SEP}
+    ){{1,5}}[\s!.]*$""",
+)
 
 
 def _sanitize_assistant_text(text: str) -> str:
@@ -386,100 +406,97 @@ async def run_chat_turn(
             if use_unified:
                 # ── Unified agent path: context assembly → single agent → stream ──
                 from app.services.chat.agents import UnifiedAgent
-                from app.services.chat.coordinator import MultiAgentCoordinator
 
-                # Use coordinator just for context enrichment
-                coordinator = MultiAgentCoordinator(
-                    db=db,
-                    tenant_id=tenant_id,
-                    user_id=user_id,
-                    correlation_id=correlation_id,
-                    main_adapter=adapter,
-                    main_model=model,
-                    specialist_adapter=specialist_adapter,
-                    specialist_model=settings.MULTI_AGENT_SPECIALIST_MODEL,
-                    metadata=metadata,
-                    policy=active_policy,
-                    system_prompt=system_prompt,
-                    user_timezone=user_timezone,
-                )
+                # ── Chitchat short-circuit: skip expensive context for conversational messages ──
+                _is_chitchat = bool(_CHITCHAT_RE.match(sanitized_input))
+                is_financial = False
 
-                # Detect financial intent for task augmentation + domain knowledge boost
-                from app.services.chat.coordinator import classify_intent, IntentType
-                detected_intent = classify_intent(sanitized_input)
-                is_financial = detected_intent == IntentType.FINANCIAL_REPORT
-
-                # Follow-up detection: if the previous turn used financial report mode
-                # (TAL queries, accttype grouping), carry forward for short follow-ups
-                if not is_financial and history_messages:
-                    prev_assistant = next(
-                        (m["content"] for m in reversed(history_messages) if m["role"] == "assistant"),
-                        "",
-                    )
-                    _financial_history_markers = (
-                        "transactionaccountingline", "accttype", "Net Income",
-                        "Income Statement", "Balance Sheet", "FINANCIAL REPORT MODE",
-                    )
-                    if any(marker in prev_assistant for marker in _financial_history_markers):
-                        is_financial = True
-                        print("[UNIFIED] Financial follow-up detected from conversation history", flush=True)
-
-                dk_top_k = 5 if is_financial else None  # default from settings
-
-                # Assemble context concurrently (entity resolution + domain knowledge + proven patterns)
-                from app.services.chat.tenant_resolver import TenantEntityResolver
-                from app.services.chat.domain_knowledge import retrieve_domain_knowledge
-                from app.services.query_pattern_service import retrieve_similar_patterns
-
-                vernacular_result, dk_result, patterns_result = await asyncio.gather(
-                    TenantEntityResolver.resolve_entities(
-                        user_message=sanitized_input,
+                if _is_chitchat:
+                    print("[UNIFIED] Chitchat detected — skipping context assembly", flush=True)
+                    context: dict[str, Any] = {"user_timezone": user_timezone}
+                    unified_agent = UnifiedAgent(
                         tenant_id=tenant_id,
-                        db=db,
-                        adapter=specialist_adapter,
-                        model=settings.MULTI_AGENT_SPECIALIST_MODEL,
-                    ),
-                    retrieve_domain_knowledge(db=db, query_text=sanitized_input, top_k=dk_top_k),
-                    retrieve_similar_patterns(db, tenant_id, sanitized_input),
-                    return_exceptions=True,
-                )
+                        user_id=user_id,
+                        correlation_id=correlation_id,
+                        metadata=None,
+                        policy=active_policy,
+                    )
+                else:
+                    # Detect financial intent for task augmentation + domain knowledge boost
+                    from app.services.chat.coordinator import classify_intent, IntentType
+                    detected_intent = classify_intent(sanitized_input)
+                    is_financial = detected_intent == IntentType.FINANCIAL_REPORT
 
-                context: dict[str, Any] = {}
-                if isinstance(vernacular_result, Exception):
-                    logger.warning("unified_agent.entity_resolution_failed", exc_info=vernacular_result)
-                elif vernacular_result:
-                    context["tenant_vernacular"] = vernacular_result
-                    print(f"[UNIFIED] Vernacular injected ({len(vernacular_result)} chars)", flush=True)
+                    # Follow-up detection: if the previous turn used financial report mode
+                    if not is_financial and history_messages:
+                        prev_assistant = next(
+                            (m["content"] for m in reversed(history_messages) if m["role"] == "assistant"),
+                            "",
+                        )
+                        _financial_history_markers = (
+                            "transactionaccountingline", "accttype", "Net Income",
+                            "Income Statement", "Balance Sheet", _FINANCIAL_MODE_TAG,
+                        )
+                        if any(marker in prev_assistant for marker in _financial_history_markers):
+                            is_financial = True
+                            print("[UNIFIED] Financial follow-up detected from conversation history", flush=True)
 
-                if isinstance(dk_result, Exception):
-                    logger.warning("unified_agent.domain_knowledge_failed", exc_info=dk_result)
-                elif dk_result:
-                    context["domain_knowledge"] = [r["raw_text"] for r in dk_result]
-                    print(f"[UNIFIED] Domain knowledge injected ({len(dk_result)} chunks)", flush=True)
+                    dk_top_k = 5 if is_financial else None  # default from settings
 
-                if isinstance(patterns_result, Exception):
-                    logger.warning("unified_agent.proven_patterns_failed", exc_info=patterns_result)
-                elif patterns_result:
-                    context["proven_patterns"] = patterns_result
-                    print(f"[UNIFIED] Proven patterns injected ({len(patterns_result)} patterns)", flush=True)
+                    # Assemble context concurrently (entity resolution + domain knowledge + proven patterns)
+                    from app.services.chat.tenant_resolver import TenantEntityResolver
+                    from app.services.chat.domain_knowledge import retrieve_domain_knowledge
+                    from app.services.query_pattern_service import retrieve_similar_patterns
 
-                context["user_timezone"] = user_timezone
+                    vernacular_result, dk_result, patterns_result = await asyncio.gather(
+                        TenantEntityResolver.resolve_entities(
+                            user_message=sanitized_input,
+                            tenant_id=tenant_id,
+                            db=db,
+                            adapter=specialist_adapter,
+                            model=settings.MULTI_AGENT_SPECIALIST_MODEL,
+                        ),
+                        retrieve_domain_knowledge(db=db, query_text=sanitized_input, top_k=dk_top_k),
+                        retrieve_similar_patterns(db, tenant_id, sanitized_input),
+                        return_exceptions=True,
+                    )
 
-                # Create and run unified agent
-                unified_agent = UnifiedAgent(
-                    tenant_id=tenant_id,
-                    user_id=user_id,
-                    correlation_id=correlation_id,
-                    metadata=metadata,
-                    policy=active_policy,
-                )
+                    context: dict[str, Any] = {}
+                    if isinstance(vernacular_result, Exception):
+                        logger.warning("unified_agent.entity_resolution_failed", exc_info=vernacular_result)
+                    elif vernacular_result:
+                        context["tenant_vernacular"] = vernacular_result
+                        print(f"[UNIFIED] Vernacular injected ({len(vernacular_result)} chars)", flush=True)
+
+                    if isinstance(dk_result, Exception):
+                        logger.warning("unified_agent.domain_knowledge_failed", exc_info=dk_result)
+                    elif dk_result:
+                        context["domain_knowledge"] = [r["raw_text"] for r in dk_result]
+                        print(f"[UNIFIED] Domain knowledge injected ({len(dk_result)} chunks)", flush=True)
+
+                    if isinstance(patterns_result, Exception):
+                        logger.warning("unified_agent.proven_patterns_failed", exc_info=patterns_result)
+                    elif patterns_result:
+                        context["proven_patterns"] = patterns_result
+                        print(f"[UNIFIED] Proven patterns injected ({len(patterns_result)} patterns)", flush=True)
+
+                    context["user_timezone"] = user_timezone
+
+                    # Create unified agent with full context
+                    unified_agent = UnifiedAgent(
+                        tenant_id=tenant_id,
+                        user_id=user_id,
+                        correlation_id=correlation_id,
+                        metadata=metadata,
+                        policy=active_policy,
+                    )
 
                 # Augment task for financial report queries
                 unified_task = sanitized_input
-                if is_financial:
+                if not _is_chitchat and is_financial:
                     unified_task = (
                         f"{sanitized_input}\n\n"
-                        "[FINANCIAL REPORT MODE] Use TransactionAccountingLine (TAL) joined to Account "
+                        f"[{_FINANCIAL_MODE_TAG}] Use TransactionAccountingLine (TAL) joined to Account "
                         "and AccountingPeriod for this query.\n"
                         "EXACT COLUMN NAMES (do NOT guess — these are verified):\n"
                         "- Account: a.accttype (NOT a.type), a.acctnumber (NOT a.acctnum), a.acctname\n"
@@ -543,6 +560,7 @@ async def run_chat_turn(
                     model_used=settings.MULTI_AGENT_SQL_MODEL,
                     provider_used=settings.MULTI_AGENT_SPECIALIST_PROVIDER,
                     is_byok=is_byok,
+                    created_at=datetime.now(timezone.utc),
                 )
                 db.add(assistant_msg)
 
@@ -665,6 +683,7 @@ async def run_chat_turn(
                 model_used=model,
                 provider_used=provider,
                 is_byok=is_byok,
+                created_at=datetime.now(timezone.utc),
             )
             db.add(assistant_msg)
 
@@ -884,6 +903,7 @@ async def run_chat_turn(
         model_used=model,
         provider_used=provider,
         is_byok=is_byok,
+        created_at=datetime.now(timezone.utc),
     )
     db.add(assistant_msg)
 

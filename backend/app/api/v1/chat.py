@@ -1,6 +1,7 @@
 import json
 import logging
 import uuid
+from datetime import datetime, timezone
 from typing import Annotated
 
 import anthropic
@@ -209,12 +210,16 @@ async def send_message(
     if not session:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
 
-    # Save user message *before* calling the pipeline so it persists on errors
+    # Save user message *before* calling the pipeline so it persists on errors.
+    # Explicitly set created_at in Python (not server_default) to guarantee the
+    # user message timestamp is strictly before the assistant message, preventing
+    # ordering issues when both land in the same DB transaction.
     user_msg = ChatMessage(
         tenant_id=user.tenant_id,
         session_id=session.id,
         role="user",
         content=body.content,
+        created_at=datetime.now(timezone.utc),
     )
     db.add(user_msg)
     await db.flush()

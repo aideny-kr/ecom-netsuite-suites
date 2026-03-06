@@ -20,7 +20,7 @@ class ChatSession(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
     messages: Mapped[list["ChatMessage"]] = relationship(
         back_populates="session",
-        order_by="ChatMessage.created_at",
+        order_by="ChatMessage.created_at, ChatMessage.id",
         lazy="selectin",
     )
 
