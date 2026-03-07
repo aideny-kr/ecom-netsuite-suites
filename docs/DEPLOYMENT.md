@@ -529,6 +529,78 @@ Use GCP's HTTP(S) Load Balancer with a managed SSL certificate. More complex but
 
 ---
 
+## Troubleshooting / Gotchas
+
+Lessons learned from the first deployment. Read these before deploying to a new environment.
+
+### 1. Supabase IPv4 Required for External Connections
+
+**Problem:** GCP VM cannot connect to Supabase on free tier — pooler returns `Tenant or user not found`, direct port 5432 times out.
+
+**Cause:** Supabase free tier shared pooler is not IPv4-compatible. GCP VMs use IPv4.
+
+**Fix:** Upgrade Supabase to Pro ($25/mo) and enable the **IPv4 Add-on** ($4/mo) under Settings → Add-ons.
+
+### 2. Supabase SSL Cert Verification Fails in Docker
+
+**Problem:** `SSLCertVerificationError: certificate verify failed: self-signed certificate in certificate chain`
+
+**Cause:** Python `ssl.create_default_context()` validates against the system CA bundle. The `python:3.11-slim` Docker image has a minimal CA bundle that doesn't trust Supabase's certificate chain.
+
+**Fix:** Disable cert verification in `database.py` (connection is still TLS-encrypted):
+```python
+ssl_ctx = ssl.create_default_context()
+ssl_ctx.check_hostname = False
+ssl_ctx.verify_mode = ssl.CERT_NONE
+```
+
+### 3. Celery Requires SSL Params for Upstash (rediss://)
+
+**Problem:** Worker crashes with `ValueError: A rediss:// URL must have parameter ssl_cert_reqs`
+
+**Cause:** Celery's Redis backend requires explicit SSL cert params when using `rediss://` URLs.
+
+**Fix:** Append `?ssl_cert_reqs=CERT_NONE` to both Celery URLs:
+```bash
+CELERY_BROKER_URL=rediss://...@host:6379?ssl_cert_reqs=CERT_NONE
+CELERY_RESULT_BACKEND=rediss://...@host:6379?ssl_cert_reqs=CERT_NONE
+```
+Leave `REDIS_URL` as-is (the app uses `redis.asyncio` which handles SSL differently).
+
+### 4. Docker Permission Denied on Fresh VM
+
+**Problem:** `permission denied while trying to connect to the docker API at unix:///var/run/docker.sock`
+
+**Fix:** Add your user to the docker group:
+```bash
+sudo usermod -aG docker $USER
+newgrp docker
+```
+
+### 5. GHCR Image Build Needs Buildx
+
+**Problem:** `Cache export is not supported for the docker driver`
+
+**Cause:** `docker/build-push-action` with GHA cache requires the `docker-container` buildx driver.
+
+**Fix:** Add `docker/setup-buildx-action@v3` step before the build step in `deploy.yml`.
+
+### 6. Use Direct Connection (Port 5432), Not Pooler
+
+**Problem:** After enabling IPv4, the direct connection works but pooler still fails.
+
+**Solution:** Use the direct connection string (`db.PROJECT_REF.supabase.co:5432`) for all `DATABASE_URL*` vars in `.env.production`. The pooler (port 6543) uses a different username format (`postgres.PROJECT_REF`) that can be finicky. Direct connection is simpler and fine for low-connection workloads.
+
+### 7. Ruff Import Ordering in CI
+
+**Problem:** CI lint fails on import ordering even though code works locally.
+
+**Cause:** Inline imports (`import x` inside a function) must come before `from x import y` per ruff's isort rules.
+
+**Fix:** Always put stdlib `import` statements before `from ... import` statements, even inside functions.
+
+---
+
 ## Security Notes
 
 - **Secrets validation**: App refuses to start in non-development mode with default JWT/encryption keys
@@ -537,19 +609,19 @@ Use GCP's HTTP(S) Load Balancer with a managed SSL certificate. More complex but
 - **Rate limiting**: Redis-backed sliding window on login endpoint
 - **Security headers**: HSTS, X-Content-Type-Options, X-Frame-Options, Referrer-Policy
 - **Swagger disabled**: `/docs` and `/redoc` only available in development
-- **SSL verification**: Supabase connections use `ssl.create_default_context()` (no CERT_NONE)
+- **SSL**: Supabase connections use TLS (encrypted) with verification disabled in Docker (see Gotcha #2)
 - **No migrations on boot**: Alembic runs in CI pipeline, not container startup
 
 ---
 
 ## Cost Summary
 
-| Service | Free Tier | When to Upgrade |
-|---------|-----------|-----------------|
-| Supabase | 500MB DB, 2 projects | >500MB data or need dedicated compute |
-| Upstash | 10K commands/day, 256MB | >10K daily Redis commands |
-| Vercel | 100GB bandwidth | Custom domain SSL, team features |
-| GCP e2-small | N/A (~$13/mo) | Upgrade to e2-medium for production |
+| Service | Tier | Cost |
+|---------|------|------|
+| Supabase | Pro + IPv4 | $29/mo |
+| Upstash | Free (10K commands/day) | $0 |
+| Vercel | Free (100GB bandwidth) | $0 |
+| GCP e2-small | On-demand | ~$13/mo |
+| **Total staging** | | **~$42/mo** |
 
-**Staging cost: ~$13/mo** (GCP VM only)
-**Production cost: ~$50-80/mo** (larger VM + Supabase Pro + Upstash Pro)
+**Production estimate:** ~$80-120/mo (larger VM + Supabase Pro + Upstash Pro + Vercel Pro)
