@@ -181,9 +181,9 @@ async def reconnect_connection(
                 detail="NETSUITE_OAUTH_CLIENT_ID is not configured",
             )
 
-        from app.services.netsuite_oauth_service import build_authorize_url, generate_pkce_pair
-
         import redis.asyncio as aioredis
+
+        from app.services.netsuite_oauth_service import build_authorize_url, generate_pkce_pair
 
         account_id = (connection.metadata_json or {}).get("account_id", "")
         if not account_id:
