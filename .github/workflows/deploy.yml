@@ -163,7 +163,8 @@ jobs:
 
       - name: Run Alembic migrations against staging DB
         env:
-          DATABASE_URL_SYNC: ${{ secrets.STAGING_DATABASE_URL_SYNC }}
+          DATABASE_URL_DIRECT: ${{ secrets.STAGING_DATABASE_URL }}
+          DATABASE_URL: ${{ secrets.STAGING_DATABASE_URL }}
         run: |
           cd backend
           pip install -e .
@@ -201,7 +202,8 @@ jobs:
 
       - name: Run Alembic migrations against production DB
         env:
-          DATABASE_URL_SYNC: ${{ secrets.PROD_DATABASE_URL_SYNC }}
+          DATABASE_URL_DIRECT: ${{ secrets.PROD_DATABASE_URL }}
+          DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }}
         run: |
           cd backend
           pip install -e .
