@@ -16,9 +16,11 @@ def _is_supabase(url: str) -> bool:
 def _build_connect_args(url: str) -> dict:
     """Build connection args with SSL for Supabase, plain for local."""
     if _is_supabase(url):
-        # Use default context which verifies certificates against system CA bundle.
-        # Supabase uses Let's Encrypt/AWS certs that validate against public CAs.
         ssl_ctx = ssl.create_default_context()
+        # Supabase uses a self-signed cert in the chain that slim Docker images
+        # don't trust. Disable verification (connection is still encrypted).
+        ssl_ctx.check_hostname = False
+        ssl_ctx.verify_mode = ssl.CERT_NONE
         return {"ssl": ssl_ctx}
     return {}
 
