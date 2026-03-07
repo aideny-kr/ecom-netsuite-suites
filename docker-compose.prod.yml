@@ -3,13 +3,12 @@
 # This only runs: backend (FastAPI) + worker (Celery)
 #
 # Usage:
+#   docker compose -f docker-compose.prod.yml pull
 #   docker compose -f docker-compose.prod.yml up -d
 
 services:
   backend:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile.prod
+    image: ghcr.io/aideny-kr/ecom-netsuite-suites/backend:latest
     env_file: .env.production
     ports:
       - "8000:8000"
@@ -27,9 +26,7 @@ services:
         max-file: "3"
 
   worker:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile.prod
+    image: ghcr.io/aideny-kr/ecom-netsuite-suites/backend:latest
     env_file: .env.production
     command: celery -A app.workers.celery_app worker --loglevel=info --concurrency=2 -Q default,sync,recon,export
     restart: unless-stopped
