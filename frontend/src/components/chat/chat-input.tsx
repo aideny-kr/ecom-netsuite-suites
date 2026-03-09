@@ -175,7 +175,7 @@ export function ChatInput({ onSend, isLoading, workspaceId }: ChatInputProps) {
   );
 
   return (
-    <div className="border-t bg-card px-6 py-4">
+    <div className="shrink-0 border-t bg-card px-6 py-4">
       <div className="mx-auto max-w-3xl">
         {/* Attachment chips */}
         {mentions.length > 0 && (

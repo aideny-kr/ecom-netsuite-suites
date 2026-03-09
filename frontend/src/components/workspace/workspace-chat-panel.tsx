@@ -43,6 +43,7 @@ export function WorkspaceChatPanel({
     isSending,
     streamingContent,
     streamingStatus,
+    streamingMessage,
   } = useWorkspaceChat(workspaceId);
 
   // Auto-inject current file context so the AI knows what the user is viewing
@@ -80,7 +81,7 @@ export function WorkspaceChatPanel({
 
   return (
     <div
-      className="flex h-full flex-col"
+      className="flex h-full min-h-0 min-w-0 flex-col"
       data-testid="workspace-chat-panel"
     >
       {/* Header */}
@@ -140,7 +141,7 @@ export function WorkspaceChatPanel({
       )}
 
       {/* Messages */}
-      <div className="flex-1 overflow-hidden">
+      <div className="min-h-0 min-w-0 flex-1 overflow-hidden">
         <MessageList
           messages={sessionDetail?.messages || []}
           isLoading={isLoadingDetail && !!activeSessionId}
@@ -148,6 +149,7 @@ export function WorkspaceChatPanel({
           isWaitingForReply={isSending}
           streamingContent={streamingContent}
           streamingStatus={streamingStatus}
+          streamingMessage={streamingMessage}
           onMentionClick={onMentionClick}
           workspaceId={workspaceId}
           onViewDiff={onViewDiff}

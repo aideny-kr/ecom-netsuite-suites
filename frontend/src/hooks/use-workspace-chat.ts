@@ -3,7 +3,8 @@
 import { useState, useCallback } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiClient } from "@/lib/api-client";
-import type { ChatSession, ChatSessionDetail } from "@/lib/types";
+import { consumeChatStream } from "@/lib/chat-stream";
+import type { ChatMessage, ChatSession, ChatSessionDetail } from "@/lib/types";
 
 export function useWorkspaceChat(workspaceId: string | null) {
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
@@ -12,6 +13,7 @@ export function useWorkspaceChat(workspaceId: string | null) {
   const [isStreaming, setIsStreaming] = useState(false);
   const [streamingContent, setStreamingContent] = useState<string | null>(null);
   const [streamingStatus, setStreamingStatus] = useState<string | null>(null);
+  const [streamingMessage, setStreamingMessage] = useState<ChatMessage | null>(null);
   const queryClient = useQueryClient();
 
   // Show only sessions for this workspace
@@ -52,6 +54,7 @@ export function useWorkspaceChat(workspaceId: string | null) {
       setIsStreaming(true);
       setStreamingContent("");
       setStreamingStatus(null);
+      setStreamingMessage(null);
 
       let sessionId = activeSessionId;
       if (!sessionId) {
@@ -71,43 +74,19 @@ export function useWorkspaceChat(workspaceId: string | null) {
           `/api/v1/chat/sessions/${sessionId}/messages`,
           { content },
         );
-
-        const reader = res.body?.getReader();
-        const decoder = new TextDecoder();
-        if (!reader) throw new Error("Stream not available");
-
-        let buffer = "";
-        while (true) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-
-          const chunks = buffer.split("\n\n");
-          buffer = chunks.pop() || "";
-
-          for (const chunk of chunks) {
-            const lines = chunk.split("\n");
-            for (const line of lines) {
-              if (line.startsWith("data: ")) {
-                const dataStr = line.slice(6).trim();
-                if (!dataStr) continue;
-                try {
-                  const data = JSON.parse(dataStr);
-                  if (data.type === "text") {
-                    setStreamingContent((prev) => (prev || "") + data.content);
-                    setStreamingStatus(null);
-                  } else if (data.type === "tool_status") {
-                    setStreamingStatus(data.content);
-                  } else if (data.type === "error") {
-                    setError(data.error);
-                  }
-                } catch (e) {
-                  console.error("Failed to parse SSE line", e);
-                }
-              }
-            }
-          }
-        }
+        await consumeChatStream(res, {
+          onText: (chunk) => {
+            setStreamingContent((prev) => (prev || "") + chunk);
+            setStreamingStatus(null);
+          },
+          onToolStatus: (status) => setStreamingStatus(status),
+          onError: (streamError) => setError(streamError),
+          onMessage: (message) => {
+            setStreamingMessage(message);
+            setStreamingContent(null);
+            setStreamingStatus(null);
+          },
+        });
       } catch (err: unknown) {
         const message =
           err instanceof Error
@@ -125,6 +104,7 @@ export function useWorkspaceChat(workspaceId: string | null) {
         setPendingMessage(null);
         setStreamingContent(null);
         setStreamingStatus(null);
+        setStreamingMessage(null);
       }
     },
     [activeSessionId, createSession, isStreaming, queryClient],
@@ -149,5 +129,6 @@ export function useWorkspaceChat(workspaceId: string | null) {
     isSending: isStreaming || createSession.isPending,
     streamingContent,
     streamingStatus,
+    streamingMessage,
   };
 }

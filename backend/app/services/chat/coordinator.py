@@ -32,6 +32,7 @@ from app.services.chat.agents import (
     WorkspaceAgent,
 )
 from app.services.chat.llm_adapter import BaseLLMAdapter, LLMResponse, TokenUsage
+from app.services.chat.tool_call_results import tool_call_had_error, tool_call_row_count
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -984,9 +985,7 @@ class MultiAgentCoordinator:
         has_data_rows = False
         for tc in result.tool_calls_log:
             if tc.get("tool") in ("netsuite_suiteql", "external_mcp_suiteql"):
-                summary = (tc.get("result_summary") or "").lower()
-                # Successful queries contain row data or "rows" count
-                if "items" in summary and '"error"' not in summary:
+                if not tool_call_had_error(tc) and tool_call_row_count(tc) > 0:
                     has_data_rows = True
                     break
         if not has_data_rows and len(result.tool_calls_log) > 0:

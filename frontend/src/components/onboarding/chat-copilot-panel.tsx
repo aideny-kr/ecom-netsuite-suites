@@ -37,7 +37,7 @@ export function ChatCopilotPanel({ wizardStep }: ChatCopilotPanelProps) {
   }, [wizardStep, setWizardStep]);
 
   return (
-    <div className="flex h-full flex-col border-l bg-card">
+    <div className="flex h-full min-h-0 min-w-0 flex-col border-l bg-card">
       {/* Header */}
       <div className="flex items-center gap-2 border-b px-4 py-3">
         <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-primary/10">
@@ -52,7 +52,7 @@ export function ChatCopilotPanel({ wizardStep }: ChatCopilotPanelProps) {
       </div>
 
       {/* Messages */}
-      <div className="flex-1 overflow-hidden">
+      <div className="min-h-0 min-w-0 flex-1 overflow-hidden">
         {isStarting ? (
           <div className="flex h-full items-center justify-center">
             <div className="flex flex-col items-center gap-3">

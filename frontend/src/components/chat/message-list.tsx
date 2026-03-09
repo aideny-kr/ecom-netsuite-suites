@@ -47,7 +47,7 @@ const mdComponents: Components = {
     }
 
     return (
-      <div className="group relative my-3 rounded-lg overflow-hidden border border-border/50">
+      <div className="group relative my-0 overflow-hidden rounded-xl border border-border/50">
         <div className="flex items-center justify-between bg-muted/80 px-3 py-1.5 text-[11px] font-medium text-muted-foreground">
           <span>{match[1]}</span>
           <button
@@ -58,19 +58,21 @@ const mdComponents: Components = {
             Copy
           </button>
         </div>
-        <SyntaxHighlighter
-          style={oneDark}
-          language={match[1]}
-          PreTag="div"
-          customStyle={{
-            margin: 0,
-            borderRadius: 0,
-            fontSize: "13px",
-            lineHeight: "1.5",
-          }}
-        >
-          {codeString}
-        </SyntaxHighlighter>
+        <div className="overflow-x-auto scrollbar-thin">
+          <SyntaxHighlighter
+            style={oneDark}
+            language={match[1]}
+            PreTag="div"
+            customStyle={{
+              margin: 0,
+              borderRadius: 0,
+              fontSize: "13px",
+              lineHeight: "1.5",
+            }}
+          >
+            {codeString}
+          </SyntaxHighlighter>
+        </div>
       </div>
     );
   },
@@ -191,6 +193,169 @@ function parseStreamingThinking(content: string): {
   return { thinking: null, isThinking: false, text: content };
 }
 
+type MarkdownDisplayBlock = {
+  kind: "bubble" | "rich";
+  content: string;
+};
+
+const TABLE_SEPARATOR_PATTERN = /^\s*\|?(?:\s*:?-{3,}:?\s*\|)+(?:\s*:?-{3,}:?\s*)?\|?\s*$/;
+
+function splitMarkdownDisplayBlocks(content: string): MarkdownDisplayBlock[] {
+  const lines = content.replace(/\r\n/g, "\n").split("\n");
+  const blocks: MarkdownDisplayBlock[] = [];
+  let narrativeBuffer: string[] = [];
+  let index = 0;
+
+  const flushNarrative = () => {
+    const narrative = narrativeBuffer.join("\n").trim();
+    if (narrative) {
+      blocks.push({ kind: "bubble", content: narrative });
+    }
+    narrativeBuffer = [];
+  };
+
+  while (index < lines.length) {
+    const line = lines[index];
+    const fence = getFence(line);
+    if (fence) {
+      flushNarrative();
+      const codeLines = [line];
+      index += 1;
+      while (index < lines.length) {
+        codeLines.push(lines[index]);
+        if (isFenceClose(lines[index], fence)) {
+          index += 1;
+          break;
+        }
+        index += 1;
+      }
+      blocks.push({ kind: "rich", content: codeLines.join("\n").trim() });
+      continue;
+    }
+
+    if (isMarkdownTableStart(lines, index)) {
+      flushNarrative();
+      const tableLines = [lines[index], lines[index + 1]];
+      index += 2;
+      while (index < lines.length) {
+        const nextLine = lines[index];
+        if (!nextLine.trim() || !nextLine.includes("|")) {
+          break;
+        }
+        tableLines.push(nextLine);
+        index += 1;
+      }
+      blocks.push({ kind: "rich", content: tableLines.join("\n").trim() });
+      continue;
+    }
+
+    if (isIndentedCodeStart(lines, index)) {
+      flushNarrative();
+      const codeLines = [line];
+      index += 1;
+      while (
+        index < lines.length &&
+        (isIndentedCodeLine(lines[index]) || lines[index].trim() === "")
+      ) {
+        codeLines.push(lines[index]);
+        index += 1;
+      }
+      blocks.push({ kind: "rich", content: codeLines.join("\n").trimEnd() });
+      continue;
+    }
+
+    narrativeBuffer.push(line);
+    index += 1;
+  }
+
+  flushNarrative();
+  return blocks.length > 0 ? blocks : [{ kind: "bubble", content }];
+}
+
+function getFence(line: string): { char: "`" | "~"; len: number } | null {
+  const match = line.match(/^\s*(`{3,}|~{3,})/);
+  if (!match) return null;
+  const fenceText = match[1];
+  return {
+    char: fenceText[0] as "`" | "~",
+    len: fenceText.length,
+  };
+}
+
+function isFenceClose(line: string, fence: { char: "`" | "~"; len: number }): boolean {
+  const match = line.match(/^\s*(`{3,}|~{3,})\s*$/);
+  return !!match && match[1][0] === fence.char && match[1].length >= fence.len;
+}
+
+function isMarkdownTableStart(lines: string[], index: number): boolean {
+  return (
+    index + 1 < lines.length &&
+    lines[index].includes("|") &&
+    TABLE_SEPARATOR_PATTERN.test(lines[index + 1])
+  );
+}
+
+function isIndentedCodeLine(line: string): boolean {
+  return /^(?: {4}|\t)/.test(line);
+}
+
+function isIndentedCodeStart(lines: string[], index: number): boolean {
+  return isIndentedCodeLine(lines[index]) && (index === 0 || lines[index - 1].trim() === "");
+}
+
+function MarkdownRenderer({
+  content,
+  className,
+}: {
+  content: string;
+  className?: string;
+}) {
+  return (
+    <div className={cn("chat-markdown text-[14px] leading-relaxed", className)}>
+      <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
+        {content}
+      </ReactMarkdown>
+    </div>
+  );
+}
+
+function AssistantNarrativeBubble({ content }: { content: string }) {
+  return (
+    <div className="max-w-full rounded-2xl bg-muted/60 px-4 py-3 md:max-w-[75%]">
+      <MarkdownRenderer content={content} />
+    </div>
+  );
+}
+
+function AssistantRichBlock({ content }: { content: string }) {
+  return (
+    <div
+      className="w-full overflow-hidden rounded-2xl border border-border/60 bg-background/80"
+      data-testid="assistant-rich-block"
+    >
+      <div className="max-h-[60vh] overflow-auto p-4 scrollbar-thin">
+        <MarkdownRenderer content={content} className="chat-markdown-rich" />
+      </div>
+    </div>
+  );
+}
+
+function AssistantTextBlocks({ content }: { content: string }) {
+  const blocks = splitMarkdownDisplayBlocks(content);
+
+  return (
+    <>
+      {blocks.map((block, index) =>
+        block.kind === "rich" ? (
+          <AssistantRichBlock key={index} content={block.content} />
+        ) : (
+          <AssistantNarrativeBubble key={index} content={block.content} />
+        ),
+      )}
+    </>
+  );
+}
+
 /** Collapsed thinking block for completed messages */
 function ThinkingBlock({ content }: { content: string }) {
   return (
@@ -199,8 +364,8 @@ function ThinkingBlock({ content }: { content: string }) {
         <FrameworkIcon className="h-3 w-3" />
         Thought process
       </summary>
-      <div className="prose prose-sm dark:prose-invert max-w-none px-3 pb-2.5 text-muted-foreground/70 text-[12px] leading-relaxed">
-        <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>{content}</ReactMarkdown>
+      <div className="px-3 pb-2.5 text-muted-foreground/70 text-[12px] leading-relaxed">
+        <MarkdownRenderer content={content} className="text-[12px] text-muted-foreground/70" />
       </div>
     </details>
   );
@@ -230,7 +395,7 @@ function StreamingThinkingBlock({ content, isActive }: { content: string | null;
           {isActive ? (
             <p className="whitespace-pre-wrap">{content}</p>
           ) : (
-            <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>{content}</ReactMarkdown>
+            <MarkdownRenderer content={content} className="text-[12px] text-muted-foreground/60" />
           )}
         </div>
       )}
@@ -249,6 +414,7 @@ interface MessageListProps {
   onChangesetAction?: () => void;
   streamingContent?: string | null;
   streamingStatus?: string | null;
+  streamingMessage?: ChatMessage | null;
 }
 
 export function MessageList({
@@ -262,6 +428,7 @@ export function MessageList({
   onChangesetAction,
   streamingContent,
   streamingStatus,
+  streamingMessage,
 }: MessageListProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
 
@@ -303,140 +470,49 @@ export function MessageList({
     );
   }
 
+  const shouldRenderStreamingMessage = !!(
+    streamingMessage &&
+    !messages.some((message) => {
+      if (message.role !== "assistant") return false;
+      if (message.id === streamingMessage.id) return true;
+      return (
+        message.content === streamingMessage.content &&
+        JSON.stringify(message.tool_calls ?? null) ===
+          JSON.stringify(streamingMessage.tool_calls ?? null)
+      );
+    })
+  );
+
   return (
-    <div className="h-full overflow-auto px-6 py-6 space-y-5 scrollbar-thin">
+    <div
+      className="h-full min-h-0 min-w-0 overflow-auto px-6 py-6 space-y-5 scrollbar-thin"
+      data-testid="message-list"
+    >
       {messages.map((message) => (
-        <div
-          key={message.id}
-          className={cn(
-            "flex gap-3",
-            message.role === "user" ? "justify-end" : "justify-start",
-          )}
-        >
-          {message.role === "assistant" && (
-            <div className="mt-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-primary/10">
-              <FrameworkIcon className="h-3.5 w-3.5 text-primary" />
-            </div>
-          )}
-          <div
-            className={cn(
-              "max-w-[75%] rounded-2xl px-4 py-2.5",
-              message.role === "user"
-                ? "bg-primary text-primary-foreground"
-                : "bg-muted/60",
-            )}
-          >
-            {message.tool_calls && message.tool_calls.length > 0 && (
-              <div className="mb-2 space-y-1.5">
-                {message.tool_calls.map((tc, idx) => {
-                  if (
-                    tc.tool === "workspace_propose_patch" &&
-                    workspaceId &&
-                    onViewDiff
-                  ) {
-                    return (
-                      <ChangeProposalCard
-                        key={idx}
-                        step={tc}
-                        workspaceId={workspaceId}
-                        onViewDiff={onViewDiff}
-                        onChangesetAction={onChangesetAction}
-                      />
-                    );
-                  }
-                  if (tc.tool === "netsuite_suiteql") {
-                    const msgIndex = messages.indexOf(message);
-                    const prevUserMsg = messages
-                      .slice(0, msgIndex)
-                      .reverse()
-                      .find((m) => m.role === "user");
-                    return (
-                      <SuiteQLToolCard
-                        key={idx}
-                        step={tc}
-                        userQuestion={prevUserMsg?.content}
-                      />
-                    );
-                  }
-                  if (tc.tool.startsWith("workspace_")) {
-                    return <WorkspaceToolCard key={idx} step={tc} />;
-                  }
-                  return <ToolCallStepCard key={idx} step={tc} />;
-                })}
-              </div>
-            )}
-            {message.role === "assistant" ? (() => {
-              const parts = parseThinkingBlocks(message.content);
-              return (
-                <div>
-                  {parts.map((part, i) =>
-                    part.type === "thinking" ? (
-                      <ThinkingBlock key={i} content={part.content} />
-                    ) : (
-                      <div key={i} className="prose prose-sm dark:prose-invert max-w-none text-[14px] leading-relaxed overflow-x-auto">
-                        <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
-                          {part.content}
-                        </ReactMarkdown>
-                      </div>
-                    )
-                  )}
-                </div>
-              );
-            })() : (
-              <p className="text-[14px] leading-relaxed whitespace-pre-wrap">
+        message.role === "assistant" ? (
+          <AssistantMessageRow
+            key={message.id}
+            message={message}
+            messages={messages}
+            workspaceId={workspaceId}
+            onViewDiff={onViewDiff}
+            onChangesetAction={onChangesetAction}
+          />
+        ) : (
+          <div key={message.id} className="flex max-w-full justify-end gap-3">
+            <div className="max-w-full rounded-2xl bg-primary px-4 py-2.5 text-primary-foreground md:max-w-[75%]">
+              <p className="text-[14px] leading-relaxed whitespace-pre-wrap break-words">
                 {renderWithMentions(message.content, onMentionClick)}
               </p>
-            )}
-            {message.citations && message.citations.length > 0 && (
-              <div className="mt-2.5 flex flex-wrap gap-1.5">
-                {message.citations.map((citation, idx) => (
-                  <span
-                    key={idx}
-                    className="inline-flex items-center rounded-full bg-background/60 px-2.5 py-1 text-[11px] font-medium"
-                    title={citation.snippet}
-                  >
-                    {citation.type === "doc" ? "\u{1F4C4}" : "\u{1F4CA}"} {citation.title}
-                  </span>
-                ))}
-              </div>
-            )}
-            {message.role === "assistant" &&
-              message.tool_calls?.some((tc) => tc.tool === "netsuite_suiteql") && (
-              <InlineSaveLink
-                message={message}
-                messages={messages}
-              />
-            )}
-            {message.role === "assistant" && message.model_used && (
-              <div className="mt-1.5 flex items-center gap-1.5 text-[11px] text-muted-foreground/60">
-                {message.is_byok ? (
-                  <span className="rounded bg-blue-500/10 px-1.5 py-0.5 font-medium text-blue-600 dark:text-blue-400">
-                    BYOK
-                  </span>
-                ) : (
-                  <span className="rounded bg-muted px-1.5 py-0.5 font-medium">
-                    Platform
-                  </span>
-                )}
-                <span>{message.provider_used}</span>
-                <span>/</span>
-                <span>{message.model_used}</span>
-                {message.input_tokens != null && message.output_tokens != null && (
-                  <>
-                    <span className="ml-1">·</span>
-                    <span>{(message.input_tokens + message.output_tokens).toLocaleString()} tokens</span>
-                  </>
-                )}
-              </div>
-            )}
+            </div>
           </div>
-        </div>
+        )
       ))}
 
       {/* Optimistic pending user message */}
       {pendingUserMessage && (
-        <div className="flex gap-3 justify-end">
-          <div className="max-w-[75%] rounded-2xl px-4 py-2.5 bg-primary text-primary-foreground">
+        <div className="flex max-w-full justify-end gap-3">
+          <div className="max-w-full rounded-2xl bg-primary px-4 py-2.5 text-primary-foreground md:max-w-[75%]">
             <p className="text-[14px] leading-relaxed whitespace-pre-wrap">
               {pendingUserMessage}
             </p>
@@ -445,12 +521,25 @@ export function MessageList({
       )}
 
       {/* Thinking indicator / Streaming */}
-      {(isWaitingForReply || streamingContent || streamingStatus) && (
-        <div className="flex gap-3 justify-start">
+      {shouldRenderStreamingMessage && streamingMessage && (
+        <AssistantMessageRow
+          message={streamingMessage}
+          messages={messages}
+          workspaceId={workspaceId}
+          onViewDiff={onViewDiff}
+          onChangesetAction={onChangesetAction}
+          isStreamingPreview
+        />
+      )}
+
+      {!shouldRenderStreamingMessage && (isWaitingForReply || streamingContent || streamingStatus) && (
+        <div className="flex min-w-0 justify-start gap-3">
           <div className="mt-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-primary/10">
             <FrameworkIcon className="h-3.5 w-3.5 text-primary" />
           </div>
-          <div className="flex flex-col gap-2 rounded-2xl bg-muted/60 px-4 py-3 min-w-[30%]">
+          <div className="min-w-0 flex-1">
+            <div className="min-w-0 overflow-hidden rounded-2xl border border-border/50 bg-muted/40">
+              <div className="flex max-h-[60vh] min-w-0 flex-col gap-2 overflow-auto px-4 py-3 scrollbar-thin">
             {streamingStatus ? (
               <div className="text-[12px] font-medium text-muted-foreground flex items-center gap-2">
                 <span className="h-1.5 w-1.5 rounded-full bg-primary animate-pulse" />
@@ -475,20 +564,137 @@ export function MessageList({
                     />
                   )}
                   {parsed.text && (
-                    <div className="prose prose-sm dark:prose-invert max-w-none text-[14px] leading-relaxed overflow-x-auto">
-                      <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
-                        {parsed.text}
-                      </ReactMarkdown>
-                    </div>
+                    <MarkdownRenderer content={parsed.text} />
                   )}
                 </>
               );
             })()}
+              </div>
+            </div>
           </div>
         </div>
       )}
 
       <div ref={bottomRef} />
+    </div>
+  );
+}
+
+function AssistantMessageRow({
+  message,
+  messages,
+  workspaceId,
+  onViewDiff,
+  onChangesetAction,
+  isStreamingPreview = false,
+}: {
+  message: ChatMessage;
+  messages: ChatMessage[];
+  workspaceId?: string | null;
+  onViewDiff?: (changesetId: string) => void;
+  onChangesetAction?: () => void;
+  isStreamingPreview?: boolean;
+}) {
+  return (
+    <div className="flex min-w-0 justify-start gap-3">
+      <div className="mt-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-primary/10">
+        <FrameworkIcon className="h-3.5 w-3.5 text-primary" />
+      </div>
+      <div className="flex min-w-0 flex-1 flex-col gap-2">
+        {message.tool_calls && message.tool_calls.length > 0 && (
+          <div className="space-y-1.5">
+            {message.tool_calls.map((tc, idx) => {
+              if (
+                tc.tool === "workspace_propose_patch" &&
+                workspaceId &&
+                onViewDiff
+              ) {
+                return (
+                  <ChangeProposalCard
+                    key={idx}
+                    step={tc}
+                    workspaceId={workspaceId}
+                    onViewDiff={onViewDiff}
+                    onChangesetAction={onChangesetAction}
+                  />
+                );
+              }
+              if (tc.tool === "netsuite_suiteql") {
+                const msgIndex = messages.indexOf(message);
+                const prevUserMsg = messages
+                  .slice(0, msgIndex)
+                  .reverse()
+                  .find((m) => m.role === "user");
+                return (
+                  <SuiteQLToolCard
+                    key={idx}
+                    step={tc}
+                    userQuestion={prevUserMsg?.content}
+                  />
+                );
+              }
+              if (tc.tool.startsWith("workspace_")) {
+                return <WorkspaceToolCard key={idx} step={tc} />;
+              }
+              return <ToolCallStepCard key={idx} step={tc} />;
+            })}
+          </div>
+        )}
+
+        <div className="flex min-w-0 flex-col gap-2">
+          {parseThinkingBlocks(message.content).map((part, index) =>
+            part.type === "thinking" ? (
+              <ThinkingBlock key={index} content={part.content} />
+            ) : (
+              <AssistantTextBlocks key={index} content={part.content} />
+            ),
+          )}
+        </div>
+
+        {message.citations && message.citations.length > 0 && (
+          <div className="mt-0.5 flex flex-wrap gap-1.5">
+            {message.citations.map((citation, idx) => (
+              <span
+                key={idx}
+                className="inline-flex items-center rounded-full bg-background/60 px-2.5 py-1 text-[11px] font-medium"
+                title={citation.snippet}
+              >
+                {citation.type === "doc" ? "\u{1F4C4}" : "\u{1F4CA}"} {citation.title}
+              </span>
+            ))}
+          </div>
+        )}
+
+        {message.tool_calls?.some((tc) => tc.tool === "netsuite_suiteql") && (
+          <InlineSaveLink
+            message={message}
+            messages={messages}
+          />
+        )}
+
+        {!isStreamingPreview && message.model_used && (
+          <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-muted-foreground/60">
+            {message.is_byok ? (
+              <span className="rounded bg-blue-500/10 px-1.5 py-0.5 font-medium text-blue-600 dark:text-blue-400">
+                BYOK
+              </span>
+            ) : (
+              <span className="rounded bg-muted px-1.5 py-0.5 font-medium">
+                Platform
+              </span>
+            )}
+            <span>{message.provider_used}</span>
+            <span>/</span>
+            <span>{message.model_used}</span>
+            {message.input_tokens != null && message.output_tokens != null && (
+              <>
+                <span className="ml-1">·</span>
+                <span>{(message.input_tokens + message.output_tokens).toLocaleString()} tokens</span>
+              </>
+            )}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

@@ -111,6 +111,41 @@ class TestPatternStorage:
         assert "transaction" in patterns[0].tables_used
 
     @pytest.mark.asyncio
+    async def test_insert_pattern_from_result_payload(self, db: AsyncSession):
+        """Structured result_payload should be enough to store a query pattern."""
+        tenant = await create_test_tenant(db, name="Payload Corp")
+
+        tool_calls_log = [
+            {
+                "tool": "netsuite_suiteql",
+                "params": {
+                    "query": "SELECT t.type, COUNT(t.id) as cnt FROM transaction t GROUP BY t.type"
+                },
+                "result_summary": "Returned 1 row",
+                "result_payload": {
+                    "kind": "table",
+                    "columns": ["type", "cnt"],
+                    "rows": [["SalesOrd", "42"]],
+                    "row_count": 1,
+                    "truncated": False,
+                    "query": "SELECT t.type, COUNT(t.id) as cnt FROM transaction t GROUP BY t.type",
+                    "limit": 100,
+                },
+            }
+        ]
+
+        with patch("app.services.query_pattern_service._embed_text", new_callable=AsyncMock, return_value=None):
+            stored = await extract_and_store_pattern(db, tenant.id, "count sales orders by type", tool_calls_log)
+            await db.flush()
+
+        assert stored is True
+
+        result = await db.execute(select(TenantQueryPattern).where(TenantQueryPattern.tenant_id == tenant.id))
+        patterns = result.scalars().all()
+        assert len(patterns) == 1
+        assert "transaction" in patterns[0].tables_used
+
+    @pytest.mark.asyncio
     async def test_upsert_increments_count(self, db: AsyncSession):
         """Running the same query twice should increment success_count."""
         tenant = await create_test_tenant(db, name="Upsert Corp")

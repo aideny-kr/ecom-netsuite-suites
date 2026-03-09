@@ -180,10 +180,10 @@ export function WorkspaceToolCard({ step }: WorkspaceToolCardProps) {
   };
 
   return (
-    <div className="rounded-lg border bg-background/80 text-[12px]">
+    <div className="min-w-0 rounded-lg border bg-background/80 text-[12px]">
       <button
         onClick={() => setOpen(!open)}
-        className="flex w-full items-center gap-2 px-3 py-2 transition-colors hover:bg-accent/50"
+        className="flex min-w-0 w-full items-center gap-2 px-3 py-2 transition-colors hover:bg-accent/50"
       >
         <ChevronDown
           className={cn(

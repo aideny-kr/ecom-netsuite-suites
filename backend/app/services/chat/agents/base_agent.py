@@ -16,6 +16,11 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from app.services.chat.llm_adapter import BaseLLMAdapter, LLMResponse, TokenUsage
+from app.services.chat.tool_call_results import (
+    build_tool_call_log_entry,
+    tool_call_had_error,
+    tool_call_row_count,
+)
 
 if TYPE_CHECKING:
     import uuid
@@ -152,7 +157,9 @@ async def _maybe_store_query_pattern(
     """Auto-extract and store successful SuiteQL query patterns (fire-and-forget)."""
     # Only store if there were successful SuiteQL calls
     has_suiteql = any(
-        c.get("tool") == "netsuite_suiteql" and '"error"' not in c.get("result_summary", "").lower()
+        c.get("tool") == "netsuite_suiteql"
+        and not tool_call_had_error(c)
+        and tool_call_row_count(c) > 0
         for c in tool_calls_log
     )
     if not has_suiteql:
@@ -394,14 +401,14 @@ class BaseSpecialistAgent(abc.ABC):
 
                     elapsed_ms = int((time.monotonic() - t0) * 1000)
                     tool_calls_log.append(
-                        {
-                            "step": step,
-                            "agent": self.agent_name,
-                            "tool": block.name,
-                            "params": block.input,
-                            "result_summary": result_str[:500],
-                            "duration_ms": elapsed_ms,
-                        }
+                        build_tool_call_log_entry(
+                            step=step,
+                            agent_name=self.agent_name,
+                            tool_name=block.name,
+                            params=block.input,
+                            result_str=result_str,
+                            duration_ms=elapsed_ms,
+                        )
                     )
 
                     tool_results_content.append(
@@ -621,14 +628,14 @@ class BaseSpecialistAgent(abc.ABC):
                     elapsed_ms = int((time.monotonic() - t0) * 1000)
 
                     tool_calls_log.append(
-                        {
-                            "step": step,
-                            "agent": self.agent_name,
-                            "tool": block.name,
-                            "params": block.input,
-                            "result_summary": result_str[:500],
-                            "duration_ms": elapsed_ms,
-                        }
+                        build_tool_call_log_entry(
+                            step=step,
+                            agent_name=self.agent_name,
+                            tool_name=block.name,
+                            params=block.input,
+                            result_str=result_str,
+                            duration_ms=elapsed_ms,
+                        )
                     )
 
                     tool_results_content.append(

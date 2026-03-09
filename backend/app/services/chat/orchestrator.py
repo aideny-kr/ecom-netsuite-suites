@@ -65,6 +65,7 @@ from app.services.chat.onboarding_tools import (
     execute_onboarding_tool,
 )
 from app.services.chat.prompts import INPUT_SANITIZATION_PREFIX, ONBOARDING_SYSTEM_PROMPT
+from app.services.chat.tool_call_results import build_tool_call_log_entry
 from app.services.chat.tools import build_all_tool_definitions, execute_tool_call
 from app.services.prompt_template_service import get_active_template
 
@@ -894,13 +895,13 @@ async def run_chat_turn(
             # Log for audit
             elapsed_ms = int((time.monotonic() - t0) * 1000)
             tool_calls_log.append(
-                {
-                    "step": step,
-                    "tool": block.name,
-                    "params": block.input,
-                    "result_summary": result_str[:500],
-                    "duration_ms": elapsed_ms,
-                }
+                build_tool_call_log_entry(
+                    step=step,
+                    tool_name=block.name,
+                    params=block.input,
+                    result_str=result_str,
+                    duration_ms=elapsed_ms,
+                )
             )
 
         messages.append(adapter.build_tool_result_message(tool_results_content))

@@ -4,6 +4,7 @@ import { useState, useCallback, useEffect, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiClient } from "@/lib/api-client";
+import { consumeChatStream } from "@/lib/chat-stream";
 import type { ChatSession, ChatSessionDetail, ChatMessage } from "@/lib/types";
 import { SessionSidebar } from "@/components/chat/session-sidebar";
 import { MessageList } from "@/components/chat/message-list";
@@ -17,6 +18,7 @@ export default function ChatPage() {
   const [pendingMessage, setPendingMessage] = useState<string | null>(null);
   const [streamingContent, setStreamingContent] = useState<string | null>(null);
   const [streamingStatus, setStreamingStatus] = useState<string | null>(null);
+  const [streamingMessage, setStreamingMessage] = useState<ChatMessage | null>(null);
   const [isStreaming, setIsStreaming] = useState(false);
   const queryClient = useQueryClient();
   const router = useRouter();
@@ -59,6 +61,7 @@ export default function ChatPage() {
       setIsStreaming(true);
       setStreamingContent("");
       setStreamingStatus(null);
+      setStreamingMessage(null);
 
       let sessionId = activeSessionId;
       if (!sessionId) {
@@ -78,43 +81,19 @@ export default function ChatPage() {
           `/api/v1/chat/sessions/${sessionId}/messages`,
           { content },
         );
-
-        const reader = res.body?.getReader();
-        const decoder = new TextDecoder();
-        if (!reader) throw new Error("Stream not available");
-
-        let buffer = "";
-        while (true) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          buffer += decoder.decode(value, { stream: true });
-
-          const chunks = buffer.split("\n\n");
-          buffer = chunks.pop() || "";
-
-          for (const chunk of chunks) {
-            const lines = chunk.split("\n");
-            for (const line of lines) {
-              if (line.startsWith("data: ")) {
-                const dataStr = line.slice(6).trim();
-                if (!dataStr) continue;
-                try {
-                  const data = JSON.parse(dataStr);
-                  if (data.type === "text") {
-                    setStreamingContent((prev) => (prev || "") + data.content);
-                    setStreamingStatus(null);
-                  } else if (data.type === "tool_status") {
-                    setStreamingStatus(data.content);
-                  } else if (data.type === "error") {
-                    setError(data.error);
-                  }
-                } catch (e) {
-                  console.error("Failed to parse SSE line", e);
-                }
-              }
-            }
-          }
-        }
+        await consumeChatStream(res, {
+          onText: (chunk) => {
+            setStreamingContent((prev) => (prev || "") + chunk);
+            setStreamingStatus(null);
+          },
+          onToolStatus: (status) => setStreamingStatus(status),
+          onError: (streamError) => setError(streamError),
+          onMessage: (message) => {
+            setStreamingMessage(message);
+            setStreamingContent(null);
+            setStreamingStatus(null);
+          },
+        });
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : "Failed to send message. Please try again.";
         setError(message);
@@ -129,6 +108,7 @@ export default function ChatPage() {
         setPendingMessage(null);
         setStreamingContent(null);
         setStreamingStatus(null);
+        setStreamingMessage(null);
       }
     },
     [activeSessionId, createSession, isStreaming, queryClient],
@@ -153,15 +133,15 @@ export default function ChatPage() {
   );
 
   return (
-    <div className="flex h-full w-full animate-fade-in">
+    <div className="flex h-full min-h-0 w-full min-w-0 animate-fade-in">
       <SessionSidebar
         sessions={sessions}
         activeSessionId={activeSessionId}
         onSelectSession={setActiveSessionId}
         onNewChat={handleNewChat}
       />
-      <div className="flex flex-1 flex-col bg-card">
-        <div className="flex-1 overflow-hidden">
+      <div className="flex min-w-0 flex-1 flex-col bg-card">
+        <div className="min-h-0 min-w-0 flex-1 overflow-hidden">
           <MessageList
             messages={sessionDetail?.messages || []}
             isLoading={isLoadingDetail && !!activeSessionId}
@@ -169,6 +149,7 @@ export default function ChatPage() {
             isWaitingForReply={isStreaming}
             streamingContent={streamingContent}
             streamingStatus={streamingStatus}
+            streamingMessage={streamingMessage}
             onMentionClick={handleMentionClick}
           />
         </div>

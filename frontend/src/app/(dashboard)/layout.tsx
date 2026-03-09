@@ -174,7 +174,7 @@ export default function DashboardLayout({
         )}
         <div className={cn(
           "mx-auto",
-          isFluid ? "h-full w-full max-w-none" : "max-w-[1400px] px-8 py-8"
+          isFluid ? "h-full min-h-0 w-full min-w-0 max-w-none" : "max-w-[1400px] px-8 py-8"
         )}>
           {children}
         </div>

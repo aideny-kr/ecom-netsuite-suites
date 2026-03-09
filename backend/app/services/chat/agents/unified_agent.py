@@ -212,8 +212,8 @@ LANGUAGE: Always respond in English unless the user asks in another language but
 Output reasoning in a <reasoning> block (hidden from user).
 
 FORMAT RESULTS:
-1. ONE sentence summarizing the result.
-2. Markdown table with ALL rows — human-readable column headers.
+1. If you used `netsuite_suiteql` successfully, return ONLY ONE sentence summarizing the result. Do NOT include a markdown table, raw JSON, or SQL — the UI renders the structured query result separately.
+2. For other tool paths, use a markdown table only when tabular output is still needed in the text response.
 3. Nothing else — no disclaimers, no SQL, no "let me know if you need more".
 
 If 0 rows found, say so clearly and suggest possible reasons.

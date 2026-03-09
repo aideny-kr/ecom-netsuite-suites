@@ -110,20 +110,58 @@
   }
 }
 
-@layer base {
-  .prose table {
-    @apply w-full text-left border-collapse my-4 text-sm whitespace-nowrap;
+@layer components {
+  .chat-markdown {
+    @apply min-w-0 max-w-none text-foreground;
   }
 
-  .prose th {
-    @apply border-b border-border font-semibold p-2 text-muted-foreground bg-muted/30;
+  .chat-markdown > :first-child {
+    @apply mt-0;
   }
 
-  .prose td {
-    @apply border-b border-border p-2 min-w-[120px] max-w-[400px] truncate;
+  .chat-markdown > :last-child {
+    @apply mb-0;
   }
 
-  .prose tr:last-child td {
+  .chat-markdown p,
+  .chat-markdown ul,
+  .chat-markdown ol,
+  .chat-markdown blockquote,
+  .chat-markdown pre,
+  .chat-markdown table {
+    @apply my-3;
+  }
+
+  .chat-markdown ul,
+  .chat-markdown ol {
+    @apply pl-5;
+  }
+
+  .chat-markdown li {
+    @apply my-1;
+  }
+
+  .chat-markdown a {
+    @apply text-primary underline underline-offset-2;
+  }
+
+  .chat-markdown blockquote {
+    @apply border-l-2 border-border pl-4 text-muted-foreground;
+  }
+
+  .chat-markdown table {
+    @apply w-max min-w-full border-collapse text-left text-sm;
+  }
+
+  .chat-markdown th {
+    @apply sticky top-0 z-10 border-b border-border bg-background/95 p-2 text-muted-foreground backdrop-blur;
+  }
+
+  .chat-markdown td {
+    @apply border-b border-border p-2 align-top whitespace-nowrap;
+  }
+
+  .chat-markdown tr:last-child td {
     @apply border-b-0;
   }
 }

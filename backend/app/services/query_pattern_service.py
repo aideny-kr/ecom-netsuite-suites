@@ -11,7 +11,6 @@ via pgvector cosine similarity.
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 import uuid
@@ -22,6 +21,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.tenant_query_pattern import TenantQueryPattern
+from app.services.chat.tool_call_results import tool_call_had_error, tool_call_row_count
 
 _logger = logging.getLogger(__name__)
 
@@ -101,20 +101,9 @@ async def extract_and_store_pattern(
             continue
 
         # Check if the result was successful (not an error) and returned rows
-        result_summary = call.get("result_summary", "")
-        if isinstance(result_summary, dict):
-            parsed = result_summary
-        else:
-            try:
-                parsed = json.loads(result_summary)
-            except (json.JSONDecodeError, AttributeError):
-                parsed = {}
-
-        if parsed.get("error"):
+        if tool_call_had_error(call):
             continue
-        # Skip queries that returned 0 rows
-        row_count = parsed.get("row_count", 0)
-        if row_count == 0:
+        if tool_call_row_count(call) == 0:
             continue
 
         # Only store analytical queries, not exploratory probes

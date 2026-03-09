@@ -258,8 +258,8 @@ LANGUAGE: Always respond in English only. Never mix in other languages.
 Output your reasoning in a <reasoning> block (this is hidden from the user).
 
 FORMAT YOUR RESULTS FOR DIRECT DISPLAY:
-1. Start with ONE sentence summarising the result (e.g., "Found 5 sales orders from today:")
-2. Then the markdown table with ALL rows — use human-readable column headers
+1. If you used `netsuite_suiteql` successfully, output ONLY ONE sentence summarising the result. Do NOT include a markdown table, raw JSON, or SQL — the UI renders the structured query result separately.
+2. If you used another tool path and need to present tabular data, you may use a markdown table with human-readable column headers.
 3. Nothing else — no disclaimers, no SQL, no tool call details, no "let me know if you need more"
 
 Do NOT echo tool call parameters, JSON payloads, or SQL queries in your text output.

@@ -1,11 +1,13 @@
 """Tests for chat API endpoints."""
 
 import uuid
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 import pytest
 from sqlalchemy import text
 
+from app.models.chat import ChatMessage, ChatSession
 
 @pytest.mark.asyncio
 async def test_create_session(client, db, admin_user):
@@ -132,6 +134,54 @@ async def test_send_message(client, db, admin_user):
     # SSE streaming returns 200, not 201
     assert resp.status_code == 200
     assert resp.headers["content-type"].startswith("text/event-stream")
+
+
+@pytest.mark.asyncio
+async def test_get_session_detail_includes_tool_call_result_payload(client, db, admin_user):
+    """Session detail serialization preserves structured tool call payloads."""
+    user, headers = admin_user
+    session = ChatSession(
+        tenant_id=user.tenant_id,
+        user_id=user.id,
+        title="Payload Test",
+    )
+    db.add(session)
+    await db.flush()
+
+    message = ChatMessage(
+        tenant_id=user.tenant_id,
+        session_id=session.id,
+        role="assistant",
+        content="Returned 2 rows.",
+        tool_calls=[
+            {
+                "tool": "netsuite_suiteql",
+                "params": {"query": "SELECT id, tranid FROM transaction"},
+                "result_summary": "Returned 2 rows",
+                "result_payload": {
+                    "kind": "table",
+                    "columns": ["id", "tranid"],
+                    "rows": [["1", "SO1001"], ["2", "SO1002"]],
+                    "row_count": 2,
+                    "truncated": False,
+                    "query": "SELECT id, tranid FROM transaction",
+                    "limit": 100,
+                },
+                "duration_ms": 42,
+            }
+        ],
+        created_at=datetime.now(timezone.utc),
+    )
+    db.add(message)
+    await db.commit()
+
+    resp = await client.get(f"/api/v1/chat/sessions/{session.id}", headers=headers)
+    assert resp.status_code == 200
+    data = resp.json()
+    tool_call = data["messages"][0]["tool_calls"][0]
+    assert tool_call["result_payload"]["kind"] == "table"
+    assert tool_call["result_payload"]["columns"] == ["id", "tranid"]
+    assert tool_call["result_payload"]["row_count"] == 2
 
 
 # ---------------------------------------------------------------------------

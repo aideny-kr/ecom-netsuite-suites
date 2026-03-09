@@ -301,8 +301,21 @@ export interface ToolCallStep {
   tool: string;
   params: Record<string, unknown>;
   result_summary: string;
+  result_payload?: ToolCallResultPayload | null;
   duration_ms: number;
 }
+
+export interface ToolCallTableResultPayload {
+  kind: "table";
+  columns: string[];
+  rows: unknown[][];
+  row_count: number;
+  truncated: boolean;
+  query: string;
+  limit: number;
+}
+
+export type ToolCallResultPayload = ToolCallTableResultPayload;
 
 export interface ProposePatchResult {
   changeset_id: string;

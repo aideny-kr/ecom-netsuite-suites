@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { useCreateSavedQuery } from "@/hooks/use-saved-queries";
-import type { ToolCallStep } from "@/lib/types";
+import type { ToolCallStep, ToolCallTableResultPayload } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import {
   ChevronDown,
@@ -13,6 +13,7 @@ import {
   X,
   Pencil,
 } from "lucide-react";
+import { TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 
 interface SuiteQLToolCardProps {
   step: ToolCallStep;
@@ -20,11 +21,14 @@ interface SuiteQLToolCardProps {
 }
 
 export function SuiteQLToolCard({ step, userQuestion }: SuiteQLToolCardProps) {
-  const [open, setOpen] = useState(false);
+  const [showQuery, setShowQuery] = useState(false);
   const [saveMode, setSaveMode] = useState<"idle" | "editing" | "saved">("idle");
   const [name, setName] = useState(userQuestion?.slice(0, 120) ?? "");
 
   const queryText = (step.params?.query as string) ?? "";
+  const resultPayload = getTablePayload(step);
+  const hasStructuredRows = !!resultPayload;
+  const isError = !hasStructuredRows && !!step.result_summary;
 
   const mutation = useCreateSavedQuery();
 
@@ -40,58 +44,169 @@ export function SuiteQLToolCard({ step, userQuestion }: SuiteQLToolCardProps) {
 
   // Parse row count from result_summary if available
   const rowCountMatch = step.result_summary?.match(/(\d+)\s*rows?/i);
-  const rowCount = rowCountMatch ? rowCountMatch[1] : null;
+  const rowCount = resultPayload?.row_count ?? (rowCountMatch ? Number(rowCountMatch[1]) : null);
+
+  if (!hasStructuredRows) {
+    return (
+      <div className="rounded-lg border bg-background/80 text-[12px]">
+        <button
+          onClick={() => setShowQuery(!showQuery)}
+          className="flex w-full items-center gap-2 px-3 py-2 transition-colors hover:bg-accent/50"
+        >
+          <ChevronDown
+            className={cn(
+              "h-3 w-3 shrink-0 text-muted-foreground transition-transform duration-200",
+              !showQuery && "-rotate-90",
+            )}
+          />
+          <Database className="h-3 w-3 shrink-0 text-primary/70" />
+          <span className="font-medium truncate">SuiteQL Query</span>
+          <span className="ml-auto shrink-0 rounded-md bg-muted px-1.5 py-0.5 text-[11px] tabular-nums text-muted-foreground">
+            {step.duration_ms}ms
+          </span>
+        </button>
+        <div
+          className={cn(
+            "overflow-hidden transition-all duration-200",
+            showQuery ? "max-h-[600px]" : "max-h-0",
+          )}
+        >
+          <div className="space-y-2 border-t px-3 py-2">
+            <pre className="max-h-[200px] overflow-x-auto whitespace-pre-wrap break-all rounded-md bg-muted/50 px-2.5 py-2 text-[11px] font-mono leading-relaxed text-foreground/90 scrollbar-thin">
+              {queryText}
+            </pre>
+            {step.result_summary && (
+              <div className={cn("text-[11px]", isError && "text-destructive")}>
+                <span className="text-muted-foreground">Result: </span>
+                <span>{step.result_summary}</span>
+              </div>
+            )}
+          </div>
+        </div>
+        <div className="border-t px-3 py-1.5">
+          <SaveQueryBar
+            saveMode={saveMode}
+            setSaveMode={setSaveMode}
+            name={name}
+            setName={setName}
+            mutation={mutation}
+            onSave={handleSave}
+          />
+        </div>
+      </div>
+    );
+  }
 
   return (
-    <div className="rounded-lg border bg-background/80 text-[12px]">
-      {/* Header */}
-      <button
-        onClick={() => setOpen(!open)}
-        className="flex w-full items-center gap-2 px-3 py-2 transition-colors hover:bg-accent/50"
-      >
-        <ChevronDown
-          className={cn(
-            "h-3 w-3 shrink-0 text-muted-foreground transition-transform duration-200",
-            !open && "-rotate-90",
-          )}
-        />
-        <Database className="h-3 w-3 shrink-0 text-primary/70" />
-        <span className="font-medium truncate">SuiteQL Query</span>
-        {rowCount && (
-          <span className="shrink-0 rounded-md bg-primary/10 px-1.5 py-0.5 text-[11px] tabular-nums text-primary font-medium">
+    <div className="overflow-hidden rounded-2xl border bg-background/90 text-[12px]" data-testid="suiteql-result-card">
+      <div className="flex items-center gap-2 border-b px-4 py-3">
+        <Database className="h-3.5 w-3.5 shrink-0 text-primary/70" />
+        <div className="min-w-0 flex-1">
+          <p className="text-[12px] font-semibold text-foreground">Query Results</p>
+          <p className="truncate text-[11px] text-muted-foreground">{step.result_summary}</p>
+        </div>
+        {rowCount != null && (
+          <span className="shrink-0 rounded-md bg-primary/10 px-1.5 py-0.5 text-[11px] font-medium tabular-nums text-primary">
             {rowCount} rows
           </span>
         )}
-        <span className="ml-auto shrink-0 rounded-md bg-muted px-1.5 py-0.5 text-[11px] tabular-nums text-muted-foreground">
+        <span className="shrink-0 rounded-md bg-muted px-1.5 py-0.5 text-[11px] tabular-nums text-muted-foreground">
           {step.duration_ms}ms
         </span>
-      </button>
+      </div>
 
-      {/* Expanded body */}
-      <div
-        className={cn(
-          "overflow-hidden transition-all duration-200",
-          open ? "max-h-[600px]" : "max-h-0",
-        )}
-      >
-        <div className="border-t px-3 py-2 space-y-2">
-          {/* Formatted SQL */}
-          <pre className="whitespace-pre-wrap break-all rounded-md bg-muted/50 px-2.5 py-2 text-[11px] font-mono text-foreground/90 leading-relaxed overflow-x-auto max-h-[200px] scrollbar-thin">
-            {queryText}
-          </pre>
-
-          {/* Result summary */}
-          {step.result_summary && (
-            <div>
-              <span className="text-muted-foreground">Result: </span>
-              <span className="text-[11px]">{step.result_summary}</span>
-            </div>
-          )}
+      <div className="max-h-[60vh] overflow-auto scrollbar-thin">
+        <div className="min-w-full">
+          <table className="w-max min-w-full caption-bottom text-sm">
+            <TableHeader>
+              <TableRow className="hover:bg-transparent">
+                {resultPayload.columns.map((column) => (
+                  <TableHead
+                    key={column}
+                    className="sticky top-0 z-10 h-auto whitespace-nowrap bg-background/95 px-3 py-2 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground backdrop-blur"
+                  >
+                    {toReadableHeader(column)}
+                  </TableHead>
+                ))}
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {resultPayload.rows.map((row, rowIndex) => (
+                <TableRow key={rowIndex}>
+                  {row.map((cell, cellIndex) => (
+                    <TableCell
+                      key={`${rowIndex}-${cellIndex}`}
+                      className="max-w-[320px] whitespace-nowrap px-3 py-2 text-[12px]"
+                    >
+                      {formatCellValue(cell)}
+                    </TableCell>
+                  ))}
+                </TableRow>
+              ))}
+            </TableBody>
+          </table>
         </div>
       </div>
 
-      {/* Footer action bar */}
-      <div className="border-t px-3 py-1.5">
+      <div className="space-y-3 border-t px-4 py-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="text-[11px] text-muted-foreground">
+            {resultPayload.truncated
+              ? `Showing ${resultPayload.rows.length} of ${resultPayload.row_count} rows`
+              : `${resultPayload.row_count} row${resultPayload.row_count === 1 ? "" : "s"} returned`}
+          </div>
+          {queryText && (
+            <button
+              onClick={() => setShowQuery((open) => !open)}
+              className="inline-flex items-center gap-1 text-[11px] font-medium text-muted-foreground transition-colors hover:text-foreground"
+            >
+              <ChevronDown
+                className={cn(
+                  "h-3 w-3 transition-transform duration-200",
+                  !showQuery && "-rotate-90",
+                )}
+              />
+              {showQuery ? "Hide query" : "Show query"}
+            </button>
+          )}
+        </div>
+
+        {showQuery && queryText && (
+          <pre className="max-h-[200px] overflow-x-auto whitespace-pre-wrap break-all rounded-md bg-muted/50 px-2.5 py-2 text-[11px] font-mono leading-relaxed text-foreground/90 scrollbar-thin">
+            {queryText}
+          </pre>
+        )}
+
+        <SaveQueryBar
+          saveMode={saveMode}
+          setSaveMode={setSaveMode}
+          name={name}
+          setName={setName}
+          mutation={mutation}
+          onSave={handleSave}
+        />
+      </div>
+    </div>
+  );
+}
+
+function SaveQueryBar({
+  saveMode,
+  setSaveMode,
+  name,
+  setName,
+  mutation,
+  onSave,
+}: {
+  saveMode: "idle" | "editing" | "saved";
+  setSaveMode: (mode: "idle" | "editing" | "saved") => void;
+  name: string;
+  setName: (name: string) => void;
+  mutation: ReturnType<typeof useCreateSavedQuery>;
+  onSave: () => void;
+}) {
+  return (
+    <>
         {saveMode === "idle" && (
           <button
             onClick={(e) => {
@@ -116,14 +231,14 @@ export function SuiteQLToolCard({ step, userQuestion }: SuiteQLToolCardProps) {
                 className="w-full rounded-md border bg-background px-2.5 py-1 pr-7 text-[11px] text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
                 autoFocus
                 onKeyDown={(e) => {
-                  if (e.key === "Enter") handleSave();
+                  if (e.key === "Enter") onSave();
                   if (e.key === "Escape") setSaveMode("idle");
                 }}
               />
               <Pencil className="absolute right-2 top-1/2 -translate-y-1/2 h-3 w-3 text-muted-foreground/50" />
             </div>
             <button
-              onClick={handleSave}
+              onClick={onSave}
               disabled={!name.trim() || mutation.isPending}
               className="shrink-0 flex items-center gap-1 rounded-md bg-primary px-2.5 py-1 text-[11px] font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50 transition-colors"
             >
@@ -153,7 +268,52 @@ export function SuiteQLToolCard({ step, userQuestion }: SuiteQLToolCardProps) {
             Saved to Analytics
           </div>
         )}
-      </div>
-    </div>
+    </>
   );
+}
+
+function getTablePayload(step: ToolCallStep): ToolCallTableResultPayload | null {
+  const payload = step.result_payload;
+  if (payload?.kind === "table") {
+    return payload;
+  }
+
+  try {
+    const parsed = JSON.parse(step.result_summary) as Partial<ToolCallTableResultPayload>;
+    if (parsed && Array.isArray(parsed.columns) && Array.isArray(parsed.rows)) {
+      return {
+        kind: "table",
+        columns: parsed.columns,
+        rows: parsed.rows as unknown[][],
+        row_count: typeof parsed.row_count === "number" ? parsed.row_count : parsed.rows.length,
+        truncated: Boolean(parsed.truncated),
+        query: typeof parsed.query === "string" ? parsed.query : ((step.params?.query as string) ?? ""),
+        limit: typeof parsed.limit === "number" ? parsed.limit : parsed.rows.length,
+      };
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
+function toReadableHeader(value: string): string {
+  return value
+    .replace(/_/g, " ")
+    .replace(/([a-z])([A-Z])/g, "$1 $2")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function formatCellValue(value: unknown): string {
+  if (value == null) return "—";
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
 }
