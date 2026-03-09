@@ -225,6 +225,8 @@ async def send_message(
     await db.flush()
 
     async def stream_generator():
+        # Send padding to force Cloudflare Tunnel to start streaming
+        yield f": {' ' * 2048}\n\n"
         try:
             async for chunk in run_chat_turn(
                 db=db,
