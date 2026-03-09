@@ -22,6 +22,7 @@ from app.core.config import settings
 # Regex to strip leaked Anthropic tool-call XML from assistant text
 _TOOL_XML_RE = re.compile(r"</?(?:invoke|parameter|tool_use)[^>]*>", re.DOTALL)
 _TOOL_TAG_RE = re.compile(r"\s*\[tool:\s*[^\]]+\]")
+_REASONING_RE = re.compile(r"<reasoning>.*?</reasoning>\s*", re.DOTALL)
 
 # Chitchat regex — matches greetings, compliments, affirmations, farewells.
 # Short-circuits expensive context assembly (entity resolution, domain knowledge, etc.)
@@ -44,9 +45,10 @@ _CHITCHAT_RE = re.compile(
 
 
 def _sanitize_assistant_text(text: str) -> str:
-    """Remove leaked tool-call XML and tool tags from assistant response text."""
+    """Remove leaked tool-call XML, tool tags, and reasoning blocks from assistant response text."""
     text = _TOOL_XML_RE.sub("", text)
     text = _TOOL_TAG_RE.sub("", text)
+    text = _REASONING_RE.sub("", text)
     return text.strip()
 
 
@@ -150,6 +152,26 @@ async def _dispatch_memory_update(
         logger.error(f"background.memory_update_failed: {e}")
 
 
+async def _dispatch_content_summary(
+    db: AsyncSession,
+    message_id: uuid.UUID,
+    user_message: str,
+    assistant_message: str,
+) -> None:
+    """Fire-and-forget: generate and persist a factual summary for history."""
+    from app.services.chat.summariser import dispatch_content_summary
+
+    try:
+        await dispatch_content_summary(
+            db=db,
+            message_id=message_id,
+            user_message=user_message,
+            assistant_message=assistant_message,
+        )
+    except Exception as e:
+        logger.error(f"background.content_summary_failed: {e}")
+
+
 async def run_chat_turn(
     db: AsyncSession,
     session: ChatSession,
@@ -167,40 +189,25 @@ async def run_chat_turn(
     """
     correlation_id = str(uuid.uuid4())
 
-    # ── Load conversation history ──
+    # ── Load conversation history (summary-based windowing) ──
+    from app.services.chat.history_compactor import KEEP_RECENT
+
     max_turns = settings.CHAT_MAX_HISTORY_TURNS
-    all_history: list[dict] = []
+    all_messages: list[dict] = []
+    summarised = 0
     if session.messages:
-        for msg in session.messages:
-            if msg.role in ("user", "assistant"):
-                all_history.append({"role": msg.role, "content": msg.content})
+        msg_list = [m for m in session.messages if m.role in ("user", "assistant")]
+        for i, msg in enumerate(msg_list):
+            is_recent = i >= len(msg_list) - KEEP_RECENT
+            if is_recent or not msg.content_summary:
+                all_messages.append({"role": msg.role, "content": msg.content})
+            else:
+                all_messages.append({"role": msg.role, "content": msg.content_summary})
+                summarised += 1
 
-    # ── Compact history if long (summarise old turns, keep recent verbatim) ──
-    print(f"[ORCHESTRATOR] history loaded: {len(all_history)} messages", flush=True)
-    if len(all_history) > 12:
-        try:
-            from app.services.chat.history_compactor import compact_history
-            from app.services.chat.llm_adapter import get_adapter as _get_compactor_adapter
-
-            compactor_adapter = _get_compactor_adapter(
-                settings.MULTI_AGENT_SPECIALIST_PROVIDER,
-                settings.ANTHROPIC_API_KEY,
-            )
-            history_messages = await compact_history(
-                all_history,
-                adapter=compactor_adapter,
-                model=settings.MULTI_AGENT_SPECIALIST_MODEL,
-            )
-            print(
-                f"[ORCHESTRATOR] history compacted: {len(all_history)} → {len(history_messages)} messages", flush=True
-            )
-        except Exception:
-            logger.warning("history_compaction_failed", exc_info=True)
-            print(f"[ORCHESTRATOR] compaction failed, hard-truncating to last {max_turns * 2} messages", flush=True)
-            # Fallback: hard-truncate to last N turns
-            history_messages = all_history[-(max_turns * 2) :]
-    else:
-        history_messages = all_history
+    # Hard cap at max_turns * 2 messages
+    history_messages = all_messages[-(max_turns * 2) :]
+    print(f"[ORCHESTRATOR] history loaded: {len(history_messages)} messages ({summarised} summarised)", flush=True)
 
     # ── Save user message (if not already saved by caller) ──
     if user_msg is None:
@@ -650,6 +657,14 @@ async def run_chat_turn(
                         assistant_message=final_text,
                     )
                 )
+                asyncio.create_task(
+                    _dispatch_content_summary(
+                        db=db,
+                        message_id=assistant_msg.id,
+                        user_message=sanitized_input,
+                        assistant_message=final_text,
+                    )
+                )
 
                 result_msg = {
                     "id": str(assistant_msg.id),
@@ -763,12 +778,20 @@ async def run_chat_turn(
 
             await db.commit()
 
-            # Fire-and-forget background memory update
+            # Fire-and-forget background tasks
             asyncio.create_task(
                 _dispatch_memory_update(
                     tenant_id=tenant_id,
                     user_id=user_id,
                     db=db,
+                    user_message=sanitized_input,
+                    assistant_message=final_text,
+                )
+            )
+            asyncio.create_task(
+                _dispatch_content_summary(
+                    db=db,
+                    message_id=assistant_msg.id,
                     user_message=sanitized_input,
                     assistant_message=final_text,
                 )
@@ -986,12 +1009,20 @@ async def run_chat_turn(
 
     await db.commit()
 
-    # Fire-and-forget background memory update
+    # Fire-and-forget background tasks
     asyncio.create_task(
         _dispatch_memory_update(
             tenant_id=tenant_id,
             user_id=user_id,
             db=db,
+            user_message=sanitized_input,
+            assistant_message=final_text,
+        )
+    )
+    asyncio.create_task(
+        _dispatch_content_summary(
+            db=db,
+            message_id=assistant_msg.id,
             user_message=sanitized_input,
             assistant_message=final_text,
         )

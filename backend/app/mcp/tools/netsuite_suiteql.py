@@ -97,6 +97,110 @@ def enforce_limit(query: str, max_rows: int) -> str:
     return f"{stripped} FETCH FIRST {max_rows} ROWS ONLY"
 
 
+_SELECT_RE = re.compile(r"SELECT\s+(.*?)\s+FROM\s+", re.IGNORECASE)
+_AS_RE = re.compile(r"\bAS\s+(\w+)\s*$", re.IGNORECASE)
+_IDENT_RE = re.compile(r"^[a-zA-Z_]\w*$")
+_DOT_RE = re.compile(r"\.(\w+)$")
+
+
+def collect_columns(items: list[dict]) -> list[str]:
+    """Extract unique column names from NetSuite API response items.
+
+    Preserves insertion order, excludes the ``links`` metadata field,
+    and handles NULL-key omission (different items may have different keys).
+    """
+    columns: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        for k in item.keys():
+            if k != "links" and k not in seen:
+                columns.append(k)
+                seen.add(k)
+    return columns
+
+
+def parse_select_aliases(query: str) -> list[str]:
+    """Extract column aliases from the SELECT clause in query order.
+
+    Handles: ``t.tranid``, ``t.tranid AS po_number``, ``BUILTIN.DF(t.status) AS status``,
+    ``SUM(tl.quantity) AS total_qty``.  Returns lowercased alias names.
+    """
+    normalized = re.sub(r"\s+", " ", query.strip())
+    select_match = _SELECT_RE.match(normalized)
+    if not select_match:
+        return []
+
+    select_body = select_match.group(1)
+
+    # Split by commas respecting parentheses depth
+    expressions: list[str] = []
+    depth = 0
+    current: list[str] = []
+    for ch in select_body:
+        if ch == "(":
+            depth += 1
+            current.append(ch)
+        elif ch == ")":
+            depth -= 1
+            current.append(ch)
+        elif ch == "," and depth == 0:
+            expressions.append("".join(current).strip())
+            current = []
+        else:
+            current.append(ch)
+    if current:
+        expressions.append("".join(current).strip())
+
+    result: list[str] = []
+    for expr in expressions:
+        as_match = _AS_RE.search(expr)
+        if as_match:
+            result.append(as_match.group(1).lower())
+            continue
+        tokens = expr.strip().split()
+        # Positional alias without AS keyword (e.g. "SUM(x) total_qty")
+        if len(tokens) >= 2 and _IDENT_RE.match(tokens[-1]):
+            result.append(tokens[-1].lower())
+            continue
+        # Single expression — extract last dotted part (e.g. t.tranid → tranid)
+        clean = tokens[-1] if tokens else expr
+        dot_match = _DOT_RE.search(clean)
+        if dot_match:
+            result.append(dot_match.group(1).lower())
+        else:
+            result.append(clean.lower())
+
+    return result
+
+
+def reorder_columns(api_columns: list[str], query: str) -> list[str]:
+    """Reorder API-returned columns to match the SELECT clause order.
+
+    Columns present in the SELECT aliases come first (in SELECT order),
+    followed by any extra API columns not matched (preserving their order).
+    """
+    select_order = parse_select_aliases(query)
+    if not select_order:
+        return api_columns
+
+    # Build case-insensitive lookup: lowered name → original name
+    lower_to_orig = {c.lower(): c for c in api_columns}
+    ordered: list[str] = []
+    used: set[str] = set()
+
+    for alias in select_order:
+        if alias in lower_to_orig and alias not in used:
+            ordered.append(lower_to_orig[alias])
+            used.add(alias)
+
+    # Append any remaining columns not in SELECT order
+    for col in api_columns:
+        if col.lower() not in used:
+            ordered.append(col)
+
+    return ordered
+
+
 def build_oauth1_header(credentials: dict, method: str, url: str) -> dict[str, str]:
     """Build an OAuth 1.0 Authorization header using HMAC-SHA256.
 
@@ -276,8 +380,9 @@ async def execute(params: dict, context: dict | None = None, **kwargs) -> dict:
 
     data = response.json()
     items = data.get("items", [])
-    columns = list(items[0].keys()) if items else []
-    rows = [list(item.values()) for item in items]
+    columns = reorder_columns(collect_columns(items), query)
+    # Build rows aligned to columns — use None for missing keys (NULL omission)
+    rows = [[item.get(col) for col in columns] for item in items]
     total_results = data.get("totalResults", len(rows))
     truncated = total_results > len(rows)
 

@@ -22,8 +22,8 @@ logger = logging.getLogger(__name__)
 # Each user-assistant exchange = 2 messages, so 12 messages = 6 turns.
 COMPACTION_THRESHOLD = 12
 
-# Number of recent messages to preserve verbatim (last 2 user-assistant exchanges).
-KEEP_RECENT = 4
+# Number of recent messages to preserve verbatim (last 4 user-assistant exchanges).
+KEEP_RECENT = 8
 
 COMPACTION_PROMPT = """\
 Summarise this conversation into a dense snapshot for an AI assistant.

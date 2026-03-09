@@ -76,6 +76,9 @@ Before taking ANY action, reason through these steps in a <reasoning> block:
 3. **Choose the right tool**: Pick the most direct tool for the job — don't over-engineer.
 4. **ANTI-HALLUCINATION**: If a custom field or custom record is NOT in <tenant_schema> or <tenant_vernacular>, \
 you are STRICTLY FORBIDDEN from guessing its internal ID. Use netsuite_get_metadata or rag_search to verify first.
+5. **NEVER COPY QUERIES FROM HISTORY**: When the user says "try again", "redo", or asks a follow-up, \
+do NOT copy SQL from prior conversation messages. Always construct a NEW query following <suiteql_dialect_rules>. \
+Prior queries may have used wrong syntax (e.g. compound status codes). The system prompt rules ALWAYS override conversation history.
 </how_to_think>
 
 <tool_selection>
@@ -142,6 +145,16 @@ TRANSACTION TYPES (avoid double-counting):
 - For recognized revenue: `t.type = 'CustInvc'` only.
 - NEVER combine SalesOrd + CustInvc in one SUM — same sale appears as both.
 
+STATUS CODE FILTERING — CRITICAL:
+- The REST API uses SINGLE-LETTER status codes, NOT compound codes.
+- WRONG: `t.status = 'SalesOrd:B'` or `t.status = 'PurchOrd:H'` — these silently match NOTHING.
+- CORRECT: `t.status = 'B'` or `t.status NOT IN ('G', 'H')`
+- Sales Order statuses: A=Pending Approval, B=Pending Fulfillment, C=Cancelled, D=Partially Fulfilled, E=Pending Billing/Partially Fulfilled, F=Pending Billing, G=Billed, H=Closed
+- Purchase Order statuses: A=Pending Supervisor Approval, B=Pending Receipt, C=Rejected, D=Partially Received, E=Pending Billing/Partially Received, F=Pending Bill, G=Fully Billed, H=Closed
+- For active POs (open/in-progress), exclude closed and fully billed: `t.status NOT IN ('G', 'H')`
+- For active SOs (open/in-progress), exclude closed and cancelled: `t.status NOT IN ('C', 'H')`
+- ALWAYS use single-letter codes for ALL transaction types.
+
 ITEM TABLE GOTCHA:
 - Only safe columns: id, itemid, displayname, description. Other columns may cause 0 rows.
 - If a minimal query succeeds, present those results. Don't add more columns.
@@ -163,8 +176,21 @@ PREFLIGHT SCHEMA CHECK — MANDATORY:
 - Before executing any query, verify ALL columns exist in <domain_knowledge>, <tenant_schema>, or <tenant_vernacular>.
 - If a column is NOT in any of those sources, you MUST look it up BEFORE running the query. Use netsuite_get_metadata or web_search to verify.
 - NEVER guess column names. Guessing wastes steps and budget on 400 errors.
-- Standard safe columns that never need verification: id, tranid, trandate, type, entity, status, total, foreigntotal, memo, createddate (transaction); id, transaction, item, quantity, rate, amount, foreignamount, mainline, taxline, iscogs, linesequencenumber, class, department, location, quantityreceived, quantitybilled, memo, createdfrom (transactionline); id, companyname, email (customer); id, itemid, displayname, description, type (item).
-- KNOWN RESTRICTED COLUMNS on transactionline via REST API (will return 400): expectedreceiptdate, itemtype. Use t.expectedreceiptdate from transaction header. Use i.type from item table for item type filtering.
+- Standard safe columns that never need verification: id, tranid, trandate, type, entity, status, total, foreigntotal, memo, createddate (transaction); id, transaction, item, quantity, rate, amount, foreignamount, mainline, taxline, iscogs, linesequencenumber, class, department, location, quantityshiprecv, quantitybilled, memo, createdfrom (transactionline); id, companyname, email (customer); id, itemid, displayname, description, type (item).
+- KNOWN RESTRICTED COLUMNS via REST API (will return 400): itemtype (transactionline only — use `i.type` from item table instead).
+- FIELD TABLE RESTRICTIONS: `expectedreceiptdate` exists on TRANSACTIONLINE only (`tl.expectedreceiptdate`), NOT on transaction header (`t.expectedreceiptdate` returns 400). \
+`quantityreceived` does NOT exist on transactionline — the correct field is `tl.quantityshiprecv` (quantity shipped/received).
+- PURCHASE ORDER "COMING IN" / PENDING RECEIPT: Use `tl.expectedreceiptdate` for expected arrival date (line-level), `t.duedate` as fallback (header-level). \
+Calculate pending qty as `(tl.quantity - NVL(tl.quantityshiprecv, 0)) AS pending_qty`. Include both in results per <learned_rules>.
+
+SELECT COLUMN ORDER — for readable table output, order columns logically:
+1. Identifiers first: PO/SO number (tranid), entity/vendor name
+2. Item details: item name, itemid, description
+3. Dates grouped together: order date, due date, expected date
+4. Status fields: status, approval status
+5. Quantities grouped: ordered, received, billed, pending
+6. Amounts grouped: rate, amount, total
+7. Dimensions last: location, subsidiary, department, class
 </suiteql_dialect_rules>
 
 <rag_search_tips>

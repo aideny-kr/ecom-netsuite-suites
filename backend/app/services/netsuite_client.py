@@ -15,6 +15,7 @@ import httpx
 import structlog
 
 from app.core.config import settings
+from app.mcp.tools.netsuite_suiteql import collect_columns, reorder_columns
 
 logger = structlog.get_logger()
 
@@ -54,7 +55,6 @@ async def execute_suiteql_via_rest(
     }
 
     all_items: list[dict] = []
-    columns: list[str] = []
     total_results = 0
     offset = 0
     page_size = 1000  # NetSuite max per request
@@ -72,20 +72,15 @@ async def execute_suiteql_via_rest(
                 )
 
             data = resp.json()
-            items = data.get("items", [])
-            # Collect all column names across pages (order-preserving)
-            for item in items:
-                for k in item.keys():
-                    if k != "links" and k not in columns:
-                        columns.append(k)
-            all_items.extend(items)
+            all_items.extend(data.get("items", []))
             total_results = data.get("totalResults", len(all_items))
 
             if not paginate or not data.get("hasMore", False) or len(all_items) >= limit:
                 break
 
-            offset += len(items)
+            offset += len(data.get("items", []))
 
+    columns = reorder_columns(collect_columns(all_items), query)
     # Build rows aligned to columns — use None for missing keys
     rows = [[item.get(col) for col in columns] for item in all_items]
     return {
@@ -136,8 +131,8 @@ async def execute_suiteql_via_mcp(access_token: str, account_id: str, query: str
     result_count = raw.get("resultCount", len(items))
 
     if items and isinstance(items[0], dict):
-        columns = list(items[0].keys())
-        rows = [list(item.values()) for item in items]
+        columns = reorder_columns(collect_columns(items), query)
+        rows = [[item.get(col) for col in columns] for item in items]
     else:
         columns = raw.get("columns", [])
         rows = items

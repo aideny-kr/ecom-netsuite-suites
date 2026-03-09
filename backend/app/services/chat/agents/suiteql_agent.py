@@ -127,6 +127,10 @@ JOIN PATTERNS:
 - Filter to item lines only using `tl.mainline = 'F' AND tl.taxline = 'F' AND (tl.iscogs = 'F' OR tl.iscogs IS NULL)`.
 - For header-only queries (no line details), use `WHERE t.mainline = 'T'` or just query the `transaction` table without joining `transactionline`.
 - COLUMN RESTRICTION: `tl.itemtype` does NOT work on transactionline via REST API (returns 400). Use `i.type` from the item table instead: `JOIN item i ON tl.item = i.id WHERE i.type IN ('InvtPart', 'Assembly')`.
+- FIELD TABLE RESTRICTIONS: `expectedreceiptdate` exists on TRANSACTIONLINE only (`tl.expectedreceiptdate`), NOT on transaction header (`t.expectedreceiptdate` returns 400). \
+`quantityreceived` does NOT exist on transactionline — the correct field is `tl.quantityshiprecv` (quantity shipped/received).
+- PURCHASE ORDER "COMING IN" / PENDING RECEIPT: Use `tl.expectedreceiptdate` for expected arrival date (line-level), `t.duedate` as fallback (header-level). \
+Calculate pending qty as `(tl.quantity - NVL(tl.quantityshiprecv, 0)) AS pending_qty`. Include both in results per <learned_rules>.
 - For strict revenue queries (excluding shipping, discounts, subtotals): `JOIN item i ON tl.item = i.id WHERE i.type NOT IN ('ShipItem', 'Discount', 'Subtotal', 'Markup', 'Payment', 'EndGroup')`.
 - To exclude assembly/kit component lines: add `AND tl.assemblycomponent = 'F'` (prevents double-counting kit components alongside the parent line).
 
@@ -159,6 +163,15 @@ MULTI-CURRENCY — CRITICAL:
 - For a complete picture, you can show BOTH: the unified base-currency total (`SUM(t.total)`) AND the per-currency breakdown (`SUM(t.foreigntotal) GROUP BY currency`).
 - For line-level amounts in base currency: Use `SUM(tl.amount) * -1` (base currency, negated for revenue).
 - For line-level amounts in transaction currency: Use `SUM(tl.foreignamount) * -1` (transaction currency, negated for revenue).
+
+SELECT COLUMN ORDER — for readable table output, order columns logically:
+1. Identifiers first: PO/SO number (tranid), entity/vendor name
+2. Item details: item name, itemid, description
+3. Dates grouped together: order date, due date, expected date
+4. Status fields: status, approval status
+5. Quantities grouped: ordered, received, billed, pending
+6. Amounts grouped: rate, amount, total
+7. Dimensions last: location, subsidiary, department, class
 </suiteql_dialect_rules>
 
 <common_queries>

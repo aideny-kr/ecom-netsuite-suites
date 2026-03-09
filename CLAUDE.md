@@ -297,7 +297,7 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 
 ## Current State (update after each major change)
 
-- **Latest migration**: 037_tenant_feature_flags
+- **Latest migration**: 038_chat_message_content_summary
 - **Entity mappings**: 2,109 seeded for test tenant (bf92d059), seeder runs in metadata discovery pipeline
 - **Golden dataset**: 9 files, 85 chunks (added `financial-statements.md` for GL/P&L/BS; status code + REST API behavior docs)
 - **Doc chunk embeddings**: 3,198/3,198 embedded with OpenAI (was 2/3,198 with Voyage AI)
