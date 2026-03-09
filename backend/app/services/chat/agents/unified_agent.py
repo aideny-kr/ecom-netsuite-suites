@@ -474,9 +474,7 @@ class UnifiedAgent(BaseSpecialistAgent):
             )
             self._brand_name = config_result.scalar_one_or_none() or ""
             if not self._brand_name:
-                tenant_result = await db.execute(
-                    sa_select(Tenant.name).where(Tenant.id == self.tenant_id)
-                )
+                tenant_result = await db.execute(sa_select(Tenant.name).where(Tenant.id == self.tenant_id))
                 self._brand_name = tenant_result.scalar_one_or_none() or "Suite Studio AI"
         except Exception:
             _logger.warning("unified_agent.brand_fetch_failed", exc_info=True)

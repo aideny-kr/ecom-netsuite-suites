@@ -284,15 +284,13 @@ async def run_chat_turn(
 
         from app.models.tenant import Tenant, TenantConfig
 
-        config_result = await db.execute(
-            sa_select(TenantConfig.brand_name).where(TenantConfig.tenant_id == tenant_id)
-        )
+        config_result = await db.execute(sa_select(TenantConfig.brand_name).where(TenantConfig.tenant_id == tenant_id))
         brand_name = config_result.scalar_one_or_none() or ""
         if not brand_name:
             tenant_result = await db.execute(sa_select(Tenant.name).where(Tenant.id == tenant_id))
             brand_name = tenant_result.scalar_one_or_none() or "Suite Studio AI"
         system_prompt += (
-            f"\n\nYour name is \"{brand_name}\". When asked to introduce yourself "
+            f'\n\nYour name is "{brand_name}". When asked to introduce yourself '
             f"or asked your name, say you are {brand_name}.\n"
         )
 

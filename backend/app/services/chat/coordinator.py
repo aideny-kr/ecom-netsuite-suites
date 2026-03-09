@@ -1135,7 +1135,9 @@ class MultiAgentCoordinator:
         ]
 
         if self.brand_name:
-            parts.append(f"<identity>Your name is \"{self.brand_name}\". When asked who you are, say you are {self.brand_name}.</identity>")
+            parts.append(
+                f'<identity>Your name is "{self.brand_name}". When asked who you are, say you are {self.brand_name}.</identity>'
+            )
 
         if self.soul_tone:
             parts.append(f"<tenant_context><business_logic>{self.soul_tone}</business_logic></tenant_context>")

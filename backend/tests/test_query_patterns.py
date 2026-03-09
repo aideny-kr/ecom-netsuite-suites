@@ -118,9 +118,7 @@ class TestPatternStorage:
         tool_calls_log = [
             {
                 "tool": "netsuite_suiteql",
-                "params": {
-                    "query": "SELECT t.type, COUNT(t.id) as cnt FROM transaction t GROUP BY t.type"
-                },
+                "params": {"query": "SELECT t.type, COUNT(t.id) as cnt FROM transaction t GROUP BY t.type"},
                 "result_summary": "Returned 1 row",
                 "result_payload": {
                     "kind": "table",

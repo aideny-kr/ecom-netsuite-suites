@@ -157,9 +157,7 @@ async def _maybe_store_query_pattern(
     """Auto-extract and store successful SuiteQL query patterns (fire-and-forget)."""
     # Only store if there were successful SuiteQL calls
     has_suiteql = any(
-        c.get("tool") == "netsuite_suiteql"
-        and not tool_call_had_error(c)
-        and tool_call_row_count(c) > 0
+        c.get("tool") == "netsuite_suiteql" and not tool_call_had_error(c) and tool_call_row_count(c) > 0
         for c in tool_calls_log
     )
     if not has_suiteql:
