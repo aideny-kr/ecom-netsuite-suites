@@ -272,10 +272,20 @@ function SaveQueryBar({
   );
 }
 
+function stripLinksColumn(payload: ToolCallTableResultPayload): ToolCallTableResultPayload {
+  const linksIdx = payload.columns.indexOf("links");
+  if (linksIdx === -1) return payload;
+  return {
+    ...payload,
+    columns: payload.columns.filter((_, i) => i !== linksIdx),
+    rows: payload.rows.map((row) => row.filter((_, i) => i !== linksIdx)),
+  };
+}
+
 function getTablePayload(step: ToolCallStep): ToolCallTableResultPayload | null {
   const payload = step.result_payload;
   if (payload?.kind === "table") {
-    return payload;
+    return stripLinksColumn(payload);
   }
 
   try {

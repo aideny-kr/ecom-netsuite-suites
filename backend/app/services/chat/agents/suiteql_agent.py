@@ -113,6 +113,16 @@ TRANSACTION NUMBER CONVENTIONS:
   INV → `t.type = 'CustInvc'`, TO → `t.type = 'TrnfrOrd'`, IF → `t.type = 'ItemShip'`,
   IR → `t.type = 'ItemRcpt'`, WO → `t.type = 'WorkOrd'`, VB → `t.type = 'VendBill'`
 
+STATUS CODE FILTERING — CRITICAL:
+- The REST API uses SINGLE-LETTER status codes, NOT compound codes.
+- WRONG: `t.status = 'SalesOrd:B'` or `t.status = 'PurchOrd:H'` — these silently match NOTHING.
+- CORRECT: `t.status = 'B'` or `t.status NOT IN ('G', 'H')`
+- Sales Order statuses: A=Pending Approval, B=Pending Fulfillment, C=Cancelled, D=Partially Fulfilled, E=Pending Billing/Partially Fulfilled, F=Pending Billing, G=Billed, H=Closed
+- Purchase Order statuses: A=Pending Supervisor Approval, B=Pending Receipt, C=Rejected, D=Partially Received, E=Pending Billing/Partially Received, F=Pending Bill, G=Fully Billed, H=Closed
+- For active POs (open/in-progress), exclude closed and fully billed: `t.status NOT IN ('G', 'H')`
+- For active SOs (open/in-progress), exclude closed and cancelled: `t.status NOT IN ('C', 'H')`
+- ALWAYS use single-letter codes for ALL transaction types.
+
 JOIN PATTERNS:
 - Filter to item lines only using `tl.mainline = 'F' AND tl.taxline = 'F' AND (tl.iscogs = 'F' OR tl.iscogs IS NULL)`.
 - For header-only queries (no line details), use `WHERE t.mainline = 'T'` or just query the `transaction` table without joining `transactionline`.

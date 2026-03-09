@@ -73,8 +73,11 @@ async def execute_suiteql_via_rest(
 
             data = resp.json()
             items = data.get("items", [])
-            if not columns and items:
-                columns = list(items[0].keys())
+            # Collect all column names across pages (order-preserving)
+            for item in items:
+                for k in item.keys():
+                    if k != "links" and k not in columns:
+                        columns.append(k)
             all_items.extend(items)
             total_results = data.get("totalResults", len(all_items))
 
@@ -83,7 +86,8 @@ async def execute_suiteql_via_rest(
 
             offset += len(items)
 
-    rows = [list(item.values()) for item in all_items]
+    # Build rows aligned to columns — use None for missing keys
+    rows = [[item.get(col) for col in columns] for item in all_items]
     return {
         "columns": columns,
         "rows": rows,
