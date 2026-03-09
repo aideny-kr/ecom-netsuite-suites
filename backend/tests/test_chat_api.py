@@ -9,6 +9,7 @@ from sqlalchemy import text
 
 from app.models.chat import ChatMessage, ChatSession
 
+
 @pytest.mark.asyncio
 async def test_create_session(client, db, admin_user):
     """POST /api/v1/chat/sessions → 201."""
