@@ -26,6 +26,11 @@ TOOL_REGISTRY = {
         "params_schema": {
             "query": {"type": "string", "required": True, "description": "SuiteQL query to execute"},
             "limit": {"type": "integer", "required": False, "default": 100, "description": "Max rows to return"},
+            "user_question": {
+                "type": "string",
+                "required": False,
+                "description": "The original user question — enables post-execution judge verification",
+            },
         },
     },
     "netsuite.suiteql_stub": {

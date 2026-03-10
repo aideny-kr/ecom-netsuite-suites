@@ -90,10 +90,12 @@ class OpenAIAdapter(BaseLLMAdapter):
         model: str,
         max_tokens: int,
         system: str,
+        system_dynamic: str = "",
         messages: list[dict],
         tools: list[dict] | None = None,
     ) -> LLMResponse:
-        openai_messages = self._convert_messages(messages, system)
+        full_system = f"{system}\n\n{system_dynamic}".strip() if system_dynamic else system
+        openai_messages = self._convert_messages(messages, full_system)
 
         kwargs: dict = {
             "model": model,
@@ -139,11 +141,13 @@ class OpenAIAdapter(BaseLLMAdapter):
         model: str,
         max_tokens: int,
         system: str,
+        system_dynamic: str = "",
         messages: list[dict],
         tools: list[dict] | None = None,
     ):
         """Stream tokens from OpenAI and yield ('text', chunk) events."""
-        openai_messages = self._convert_messages(messages, system)
+        full_system = f"{system}\n\n{system_dynamic}".strip() if system_dynamic else system
+        openai_messages = self._convert_messages(messages, full_system)
 
         kwargs: dict = {
             "model": model,

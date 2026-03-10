@@ -40,6 +40,7 @@ class BaseLLMAdapter(abc.ABC):
         model: str,
         max_tokens: int,
         system: str,
+        system_dynamic: str = "",
         messages: list[dict],
         tools: list[dict] | None = None,
     ) -> LLMResponse:
@@ -51,6 +52,7 @@ class BaseLLMAdapter(abc.ABC):
         model: str,
         max_tokens: int,
         system: str,
+        system_dynamic: str = "",
         messages: list[dict],
         tools: list[dict] | None = None,
     ):
@@ -63,6 +65,7 @@ class BaseLLMAdapter(abc.ABC):
             model=model,
             max_tokens=max_tokens,
             system=system,
+            system_dynamic=system_dynamic,
             messages=messages,
             tools=tools,
         )

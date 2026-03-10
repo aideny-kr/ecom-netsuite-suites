@@ -92,13 +92,15 @@ class GeminiAdapter(BaseLLMAdapter):
         model: str,
         max_tokens: int,
         system: str,
+        system_dynamic: str = "",
         messages: list[dict],
         tools: list[dict] | None = None,
     ) -> LLMResponse:
         gemini_contents = self._convert_messages(messages)
+        full_system = f"{system}\n\n{system_dynamic}".strip() if system_dynamic else system
 
         config = genai_types.GenerateContentConfig(
-            system_instruction=system,
+            system_instruction=full_system,
             max_output_tokens=max_tokens,
         )
         if tools:

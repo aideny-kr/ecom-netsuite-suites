@@ -15,19 +15,24 @@ class AnthropicAdapter(BaseLLMAdapter):
         model: str,
         max_tokens: int,
         system: str,
+        system_dynamic: str = "",
         messages: list[dict],
         tools: list[dict] | None = None,
     ) -> LLMResponse:
+        system_blocks = [
+            {
+                "type": "text",
+                "text": system,
+                "cache_control": {"type": "ephemeral"},
+            }
+        ]
+        if system_dynamic:
+            system_blocks.append({"type": "text", "text": system_dynamic})
+
         kwargs: dict = {
             "model": model,
             "max_tokens": max_tokens,
-            "system": [
-                {
-                    "type": "text",
-                    "text": system,
-                    "cache_control": {"type": "ephemeral"},
-                }
-            ],
+            "system": system_blocks,
             "messages": messages,
         }
         if tools:
@@ -67,19 +72,24 @@ class AnthropicAdapter(BaseLLMAdapter):
         model: str,
         max_tokens: int,
         system: str,
+        system_dynamic: str = "",
         messages: list[dict],
         tools: list[dict] | None = None,
     ):
+        system_blocks = [
+            {
+                "type": "text",
+                "text": system,
+                "cache_control": {"type": "ephemeral"},
+            }
+        ]
+        if system_dynamic:
+            system_blocks.append({"type": "text", "text": system_dynamic})
+
         kwargs: dict = {
             "model": model,
             "max_tokens": max_tokens,
-            "system": [
-                {
-                    "type": "text",
-                    "text": system,
-                    "cache_control": {"type": "ephemeral"},
-                }
-            ],
+            "system": system_blocks,
             "messages": messages,
         }
         if tools:

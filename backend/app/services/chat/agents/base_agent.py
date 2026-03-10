@@ -16,11 +16,13 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from app.services.chat.llm_adapter import BaseLLMAdapter, LLMResponse, TokenUsage
+from app.services.chat.prompt_cache import split_system_prompt
 from app.services.chat.tool_call_results import (
     build_tool_call_log_entry,
     tool_call_had_error,
     tool_call_row_count,
 )
+from app.services.confidence_extractor import extract_structured_confidence
 from app.services.confidence_service import CompositeScorer
 
 if TYPE_CHECKING:
@@ -326,13 +328,15 @@ class BaseSpecialistAgent(abc.ABC):
         ]
 
         tools = self.tool_definitions if self.tool_definitions else None
+        prompt_parts = split_system_prompt(self.system_prompt)
 
         try:
             for step in range(self.max_steps):
                 response: LLMResponse = await adapter.create_message(
                     model=model,
                     max_tokens=16384,
-                    system=self.system_prompt,
+                    system=prompt_parts.static,
+                    system_dynamic=prompt_parts.dynamic,
                     messages=messages,
                     tools=tools,
                 )
@@ -363,13 +367,26 @@ class BaseSpecialistAgent(abc.ABC):
 
                     final_text = "\n".join(response.text_blocks) if response.text_blocks else ""
 
-                    # Parse and handle confidence scoring
-                    confidence = parse_confidence(final_text)
-                    if confidence is not None:
-                        final_text = strip_confidence_tag(final_text)
-                        if confidence <= 2:
-                            final_text += _LOW_CONFIDENCE_DISCLAIMER
-                        logger.info("agent.confidence agent=%s score=%d", self.agent_name, confidence)
+                    # Always strip confidence tags from displayed text
+                    final_text = strip_confidence_tag(final_text)
+
+                    # Structured confidence extraction
+                    tools_used = [c.get("tool", "") for c in tool_calls_log]
+                    tool_ok = sum(1 for c in tool_calls_log if not tool_call_had_error(c))
+                    tool_rate = tool_ok / len(tool_calls_log) if tool_calls_log else 0.0
+
+                    assessment = await extract_structured_confidence(
+                        user_question=task,
+                        assistant_response=final_text[:500],
+                        tools_used=tools_used,
+                        tool_success_rate=tool_rate,
+                    )
+                    confidence = assessment.score
+                    if confidence <= 2:
+                        final_text += _LOW_CONFIDENCE_DISCLAIMER
+                    logger.info(
+                        "agent.confidence agent=%s score=%d source=%s", self.agent_name, confidence, assessment.source
+                    )
 
                     composite = _compute_confidence(confidence, context, tool_calls_log)
 
@@ -471,19 +488,32 @@ class BaseSpecialistAgent(abc.ABC):
             response = await adapter.create_message(
                 model=model,
                 max_tokens=16384,
-                system=self.system_prompt,
+                system=prompt_parts.static,
+                system_dynamic=prompt_parts.dynamic,
                 messages=messages,
             )
             total_input_tokens += response.usage.input_tokens
             total_output_tokens += response.usage.output_tokens
             final_text = "\n".join(response.text_blocks) if response.text_blocks else ""
 
-            confidence = parse_confidence(final_text)
-            if confidence is not None:
-                final_text = strip_confidence_tag(final_text)
-                if confidence <= 2:
-                    final_text += _LOW_CONFIDENCE_DISCLAIMER
-                logger.info("agent.confidence agent=%s score=%d", self.agent_name, confidence)
+            # Always strip confidence tags from displayed text
+            final_text = strip_confidence_tag(final_text)
+
+            # Structured confidence extraction
+            tools_used = [c.get("tool", "") for c in tool_calls_log]
+            tool_ok = sum(1 for c in tool_calls_log if not tool_call_had_error(c))
+            tool_rate = tool_ok / len(tool_calls_log) if tool_calls_log else 0.0
+
+            assessment = await extract_structured_confidence(
+                user_question=task,
+                assistant_response=final_text[:500],
+                tools_used=tools_used,
+                tool_success_rate=tool_rate,
+            )
+            confidence = assessment.score
+            if confidence <= 2:
+                final_text += _LOW_CONFIDENCE_DISCLAIMER
+            logger.info("agent.confidence agent=%s score=%d source=%s", self.agent_name, confidence, assessment.source)
 
             composite = _compute_confidence(confidence, context, tool_calls_log)
 
@@ -551,6 +581,7 @@ class BaseSpecialistAgent(abc.ABC):
         messages.append({"role": "user", "content": f"Task: {task}{context_block}"})
 
         tools = self.tool_definitions if self.tool_definitions else None
+        prompt_parts = split_system_prompt(self.system_prompt)
 
         try:
             for step in range(self.max_steps):
@@ -559,7 +590,8 @@ class BaseSpecialistAgent(abc.ABC):
                 async for event_type, payload in adapter.stream_message(
                     model=model,
                     max_tokens=16384,
-                    system=self.system_prompt,
+                    system=prompt_parts.static,
+                    system_dynamic=prompt_parts.dynamic,
                     messages=messages,
                     tools=tools,
                 ):
@@ -598,12 +630,26 @@ class BaseSpecialistAgent(abc.ABC):
 
                     final_text = "\n".join(response.text_blocks) if response.text_blocks else ""
 
-                    confidence = parse_confidence(final_text)
-                    if confidence is not None:
-                        final_text = strip_confidence_tag(final_text)
-                        if confidence <= 2:
-                            final_text += _LOW_CONFIDENCE_DISCLAIMER
-                        logger.info("agent.confidence agent=%s score=%d", self.agent_name, confidence)
+                    # Always strip confidence tags from displayed text
+                    final_text = strip_confidence_tag(final_text)
+
+                    # Structured confidence extraction
+                    tools_used = [c.get("tool", "") for c in tool_calls_log]
+                    tool_ok = sum(1 for c in tool_calls_log if not tool_call_had_error(c))
+                    tool_rate = tool_ok / len(tool_calls_log) if tool_calls_log else 0.0
+
+                    assessment = await extract_structured_confidence(
+                        user_question=task,
+                        assistant_response=final_text[:500],
+                        tools_used=tools_used,
+                        tool_success_rate=tool_rate,
+                    )
+                    confidence = assessment.score
+                    if confidence <= 2:
+                        final_text += _LOW_CONFIDENCE_DISCLAIMER
+                    logger.info(
+                        "agent.confidence agent=%s score=%d source=%s", self.agent_name, confidence, assessment.source
+                    )
 
                     composite = _compute_confidence(confidence, context, tool_calls_log)
 
@@ -700,7 +746,8 @@ class BaseSpecialistAgent(abc.ABC):
             async for event_type, payload in adapter.stream_message(
                 model=model,
                 max_tokens=16384,
-                system=self.system_prompt,
+                system=prompt_parts.static,
+                system_dynamic=prompt_parts.dynamic,
                 messages=messages,
             ):
                 if event_type == "text":
@@ -714,12 +761,24 @@ class BaseSpecialistAgent(abc.ABC):
 
             final_text = "\n".join(response.text_blocks) if response and response.text_blocks else ""
 
-            confidence = parse_confidence(final_text)
-            if confidence is not None:
-                final_text = strip_confidence_tag(final_text)
-                if confidence <= 2:
-                    final_text += _LOW_CONFIDENCE_DISCLAIMER
-                logger.info("agent.confidence agent=%s score=%d", self.agent_name, confidence)
+            # Always strip confidence tags from displayed text
+            final_text = strip_confidence_tag(final_text)
+
+            # Structured confidence extraction
+            tools_used = [c.get("tool", "") for c in tool_calls_log]
+            tool_ok = sum(1 for c in tool_calls_log if not tool_call_had_error(c))
+            tool_rate = tool_ok / len(tool_calls_log) if tool_calls_log else 0.0
+
+            assessment = await extract_structured_confidence(
+                user_question=task,
+                assistant_response=final_text[:500],
+                tools_used=tools_used,
+                tool_success_rate=tool_rate,
+            )
+            confidence = assessment.score
+            if confidence <= 2:
+                final_text += _LOW_CONFIDENCE_DISCLAIMER
+            logger.info("agent.confidence agent=%s score=%d source=%s", self.agent_name, confidence, assessment.source)
 
             composite = _compute_confidence(confidence, context, tool_calls_log)
 
