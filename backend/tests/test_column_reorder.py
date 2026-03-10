@@ -91,8 +91,15 @@ class TestReorderColumns:
     def test_real_world_po_query(self):
         """Simulate the actual PO query that was showing alphabetical columns."""
         api_cols = [
-            "expectedreceiptdate", "itemid", "location", "ordered_qty",
-            "pending_qty", "po_duedate", "po_number", "received_qty", "status",
+            "expectedreceiptdate",
+            "itemid",
+            "location",
+            "ordered_qty",
+            "pending_qty",
+            "po_duedate",
+            "po_number",
+            "received_qty",
+            "status",
         ]
         query = (
             "SELECT t.tranid AS po_number, BUILTIN.DF(t.entity) AS vendor, "
