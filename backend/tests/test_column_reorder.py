@@ -1,7 +1,5 @@
 """Tests for SELECT-clause column reordering in SuiteQL results."""
 
-import pytest
-
 from app.mcp.tools.netsuite_suiteql import parse_select_aliases, reorder_columns
 
 
@@ -25,7 +23,10 @@ class TestParseSelectAliases:
         assert parse_select_aliases(query) == ["entity", "total_qty", "row_count"]
 
     def test_nested_functions(self):
-        query = "SELECT BUILTIN.CONSOLIDATE(tal.amount, 'INCOME', 'DEFAULT', 'DEFAULT', 1, ap.id, 'DEFAULT') AS amount FROM transactionaccountingline tal"
+        query = (
+            "SELECT BUILTIN.CONSOLIDATE(tal.amount, 'INCOME', 'DEFAULT', 'DEFAULT', 1, ap.id, 'DEFAULT')"
+            " AS amount FROM transactionaccountingline tal"
+        )
         aliases = parse_select_aliases(query)
         assert aliases == ["amount"]
 
@@ -60,7 +61,10 @@ class TestReorderColumns:
 
     def test_with_aliases(self):
         api_cols = ["ordered_qty", "po_number", "status"]
-        query = "SELECT t.tranid AS po_number, BUILTIN.DF(t.status) AS status, tl.quantity AS ordered_qty FROM transaction t"
+        query = (
+            "SELECT t.tranid AS po_number, BUILTIN.DF(t.status) AS status,"
+            " tl.quantity AS ordered_qty FROM transaction t"
+        )
         assert reorder_columns(api_cols, query) == ["po_number", "status", "ordered_qty"]
 
     def test_extra_api_columns_appended(self):
