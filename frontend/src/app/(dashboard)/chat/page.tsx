@@ -151,6 +151,17 @@ export default function ChatPage() {
             streamingStatus={streamingStatus}
             streamingMessage={streamingMessage}
             onMentionClick={handleMentionClick}
+            onImportanceOverride={(messageId, newTier) => {
+              queryClient.setQueryData<ChatSessionDetail>(
+                ["chat-session", activeSessionId],
+                (old) => old ? {
+                  ...old,
+                  messages: old.messages.map((m) =>
+                    m.id === messageId ? { ...m, query_importance: newTier } : m
+                  ),
+                } : old
+              );
+            }}
           />
         </div>
         {error && (

@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.database import get_db
-from app.core.dependencies import get_current_user, require_feature
+from app.core.dependencies import get_current_user, require_feature, require_permission
 from app.models.chat import ChatMessage, ChatSession
 from app.models.user import User
 from app.services import audit_service
@@ -47,6 +47,13 @@ class MessageResponse(BaseModel):
     content: str
     tool_calls: list | None = None
     citations: list | None = None
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    model_used: str | None = None
+    provider_used: str | None = None
+    is_byok: bool | None = None
+    confidence_score: float | None = None
+    query_importance: int | None = None
     created_at: str
 
     model_config = {"from_attributes": True}
@@ -109,6 +116,8 @@ def _serialize_message(msg: ChatMessage) -> dict:
         result["is_byok"] = msg.is_byok
     if msg.confidence_score is not None:
         result["confidence_score"] = float(msg.confidence_score)
+    if msg.query_importance is not None:
+        result["query_importance"] = msg.query_importance
     return result
 
 
@@ -298,6 +307,45 @@ async def update_session(
     await db.commit()
     await db.refresh(session)
     return _serialize_session(session)
+
+
+class UpdateMessageImportance(BaseModel):
+    query_importance: int = Field(ge=1, le=4)
+
+
+@router.patch("/messages/{message_id}/importance")
+async def update_message_importance(
+    message_id: uuid.UUID,
+    body: UpdateMessageImportance,
+    user: Annotated[User, Depends(require_permission("chat_api.manage"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Admin-only: override the auto-classified importance tier on a message."""
+    result = await db.execute(
+        select(ChatMessage).where(
+            ChatMessage.id == message_id,
+            ChatMessage.tenant_id == user.tenant_id,
+        )
+    )
+    msg = result.scalar_one_or_none()
+    if not msg:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Message not found")
+
+    old_tier = msg.query_importance
+    msg.query_importance = body.query_importance
+
+    await audit_service.log_event(
+        db=db,
+        tenant_id=user.tenant_id,
+        category="chat",
+        action="chat.importance_override",
+        actor_id=user.id,
+        resource_type="chat_message",
+        resource_id=str(message_id),
+        payload={"old_tier": old_tier, "new_tier": body.query_importance},
+    )
+    await db.commit()
+    return {"id": str(msg.id), "query_importance": msg.query_importance}
 
 
 @router.delete("/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)

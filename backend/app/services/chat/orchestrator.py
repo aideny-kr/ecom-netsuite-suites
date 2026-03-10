@@ -453,6 +453,10 @@ async def run_chat_turn(
                 _is_chitchat = bool(_CHITCHAT_RE.match(sanitized_input))
                 is_financial = False
 
+                from app.services.importance_classifier import ImportanceTier, classify_importance
+
+                importance_tier = ImportanceTier.CASUAL  # default for chitchat/MCP
+
                 if _is_chitchat:
                     print("[UNIFIED] Chitchat detected — skipping context assembly", flush=True)
                     context: dict[str, Any] = {"user_timezone": user_timezone}
@@ -469,6 +473,15 @@ async def run_chat_turn(
 
                     detected_intent = classify_intent(sanitized_input)
                     is_financial = detected_intent == IntentType.FINANCIAL_REPORT
+
+                    importance_tier = classify_importance(
+                        sanitized_input,
+                        intent_hint=detected_intent.value if is_financial else None,
+                    )
+                    print(
+                        f"[ORCHESTRATOR] Importance tier: {importance_tier.label} ({importance_tier.value})",
+                        flush=True,
+                    )
 
                     # Follow-up detection: if the previous turn used financial report mode
                     if not is_financial and history_messages:
@@ -545,6 +558,7 @@ async def run_chat_turn(
                         context["matched_pattern_success_count"] = patterns_result[0].get("success_count", 0)
 
                     context["user_timezone"] = user_timezone
+                    context["importance_tier"] = importance_tier.value
 
                     # Create unified agent with full context
                     unified_agent = UnifiedAgent(
@@ -636,6 +650,21 @@ async def run_chat_turn(
                         "explanation": _get_confidence_explanation(confidence_val),
                     }
 
+                # Emit importance tier SSE event
+                yield {
+                    "type": "importance",
+                    "tier": importance_tier.value,
+                    "label": importance_tier.label,
+                    "needs_review": (
+                        agent_result is not None
+                        and any(
+                            isinstance(tc.get("result"), dict)
+                            and tc.get("result", {}).get("judge_verdict", {}).get("needs_review")
+                            for tc in (agent_result.tool_calls_log or [])
+                        )
+                    ),
+                }
+
                 assistant_msg = ChatMessage(
                     tenant_id=tenant_id,
                     session_id=session.id,
@@ -650,6 +679,7 @@ async def run_chat_turn(
                     provider_used=settings.MULTI_AGENT_SPECIALIST_PROVIDER,
                     is_byok=is_byok,
                     confidence_score=confidence_val,
+                    query_importance=importance_tier.value,
                     created_at=datetime.now(timezone.utc),
                 )
                 db.add(assistant_msg)
@@ -719,6 +749,7 @@ async def run_chat_turn(
                     result_msg["created_at"] = assistant_msg.created_at.isoformat()
                 if confidence_val is not None:
                     result_msg["confidence_score"] = confidence_val
+                result_msg["query_importance"] = importance_tier.value
                 yield {"type": "message", "message": result_msg}
                 return
 
@@ -784,6 +815,7 @@ async def run_chat_turn(
                 model_used=model,
                 provider_used=provider,
                 is_byok=is_byok,
+                query_importance=importance_tier.value,
                 created_at=datetime.now(timezone.utc),
             )
             db.add(assistant_msg)
@@ -853,6 +885,7 @@ async def run_chat_turn(
                 }
                 if hasattr(assistant_msg, "created_at") and assistant_msg.created_at:
                     result_msg["created_at"] = assistant_msg.created_at.isoformat()
+                result_msg["query_importance"] = importance_tier.value
                 yield {"type": "message", "message": result_msg}
             return
 
@@ -1012,6 +1045,7 @@ async def run_chat_turn(
         model_used=model,
         provider_used=provider,
         is_byok=is_byok,
+        query_importance=importance_tier.value,
         created_at=datetime.now(timezone.utc),
     )
     db.add(assistant_msg)
@@ -1081,5 +1115,6 @@ async def run_chat_turn(
     }
     if hasattr(assistant_msg, "created_at") and assistant_msg.created_at:
         result_msg["created_at"] = assistant_msg.created_at.isoformat()
+    result_msg["query_importance"] = importance_tier.value
 
     yield {"type": "message", "message": result_msg}

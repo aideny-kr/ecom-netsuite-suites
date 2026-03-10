@@ -13,7 +13,10 @@ import asyncio
 import logging
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from app.services.importance_classifier import ImportanceTier
 
 import anthropic
 
@@ -149,3 +152,51 @@ async def judge_suiteql_result(
             confidence=0.0,
             reason=f"Judge error — fail-open: {exc}",
         )
+
+
+@dataclass(frozen=True)
+class EnforcementResult:
+    """Result of applying tier-specific confidence thresholds."""
+
+    passed: bool
+    tier: str
+    needs_review: bool
+    reason: str
+
+
+def enforce_judge_threshold(
+    verdict: JudgeVerdict,
+    tier: "ImportanceTier",
+) -> EnforcementResult:
+    """Apply tier-specific confidence thresholds to a judge verdict."""
+    from app.services.importance_classifier import ImportanceTier
+
+    threshold = tier.judge_confidence_threshold
+
+    # Casual tier: always pass (existing fail-open behavior)
+    if tier == ImportanceTier.CASUAL:
+        return EnforcementResult(
+            passed=True, tier=tier.label, needs_review=False, reason=verdict.reason
+        )
+
+    # Tier 2+: disapproved verdict always fails
+    if not verdict.approved:
+        return EnforcementResult(
+            passed=False,
+            tier=tier.label,
+            needs_review=tier == ImportanceTier.AUDIT_CRITICAL,
+            reason=f"Judge disapproved: {verdict.reason}",
+        )
+
+    # Check confidence threshold
+    passed = verdict.confidence >= threshold
+    needs_review = not passed and tier == ImportanceTier.AUDIT_CRITICAL
+
+    if passed:
+        reason = verdict.reason
+    else:
+        reason = f"Confidence {verdict.confidence:.2f} below threshold {threshold:.2f} for {tier.label} tier"
+
+    return EnforcementResult(
+        passed=passed, tier=tier.label, needs_review=needs_review, reason=reason
+    )

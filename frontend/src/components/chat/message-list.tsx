@@ -15,6 +15,7 @@ import { WorkspaceToolCard } from "@/components/chat/workspace-tool-card";
 import { SuiteQLToolCard } from "@/components/chat/suiteql-tool-card";
 import { FileCode, Bookmark, Check, Loader2, Copy } from "lucide-react";
 import { ConfidenceBadge } from "@/components/chat/confidence-badge";
+import { ImportanceBanner } from "@/components/chat/importance-banner";
 
 /** Framework-inspired gear/module icon used as AI assistant avatar.
  *  A square with notches on each side — resembles the Framework Computer logo. */
@@ -420,6 +421,7 @@ interface MessageListProps {
   streamingContent?: string | null;
   streamingStatus?: string | null;
   streamingMessage?: ChatMessage | null;
+  onImportanceOverride?: (messageId: string, newTier: number) => void;
 }
 
 export function MessageList({
@@ -434,6 +436,7 @@ export function MessageList({
   streamingContent,
   streamingStatus,
   streamingMessage,
+  onImportanceOverride,
 }: MessageListProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
 
@@ -502,6 +505,7 @@ export function MessageList({
             workspaceId={workspaceId}
             onViewDiff={onViewDiff}
             onChangesetAction={onChangesetAction}
+            onImportanceOverride={onImportanceOverride}
           />
         ) : (
           <div key={message.id} className="flex max-w-full justify-end gap-3">
@@ -592,6 +596,7 @@ function AssistantMessageRow({
   onViewDiff,
   onChangesetAction,
   isStreamingPreview = false,
+  onImportanceOverride,
 }: {
   message: ChatMessage;
   messages: ChatMessage[];
@@ -599,6 +604,7 @@ function AssistantMessageRow({
   onViewDiff?: (changesetId: string) => void;
   onChangesetAction?: () => void;
   isStreamingPreview?: boolean;
+  onImportanceOverride?: (messageId: string, newTier: number) => void;
 }) {
   return (
     <div className="flex min-w-0 justify-start gap-3">
@@ -677,8 +683,16 @@ function AssistantMessageRow({
           />
         )}
 
+        {!isStreamingPreview && message.query_importance != null && message.query_importance >= 2 && (
+          <ImportanceBanner
+            tier={message.query_importance}
+            messageId={message.id}
+            onOverride={onImportanceOverride}
+          />
+        )}
+
         {!isStreamingPreview && message.model_used && (
-          <div className="mt-0.5 flex items-center gap-1.5 text-[11px] text-muted-foreground/60">
+          <div className="mt-1.5 flex items-center gap-1.5 text-[11px] text-muted-foreground/60">
             {message.is_byok ? (
               <span className="rounded bg-blue-500/10 px-1.5 py-0.5 font-medium text-blue-600 dark:text-blue-400">
                 BYOK

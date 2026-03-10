@@ -50,6 +50,9 @@ class ChatMessage(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     # Composite confidence score (1.0-5.0) for assistant responses
     confidence_score: Mapped[Decimal | None] = mapped_column(Numeric(precision=3, scale=1), nullable=True)
 
+    # Query importance tier (1=Casual, 2=Operational, 3=Reporting, 4=Audit Critical)
+    query_importance: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
     session: Mapped["ChatSession"] = relationship(back_populates="messages")
 
 

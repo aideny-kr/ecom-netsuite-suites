@@ -29,7 +29,8 @@ export interface User {
   tenant_name: string;
   email: string;
   full_name: string;
-  role: Role;
+  role?: Role;
+  roles?: Role[];
   is_active: boolean;
   onboarding_completed_at: string | null;
   created_at: string;
@@ -343,6 +344,7 @@ export interface ChatMessage {
   provider_used?: string;
   is_byok?: boolean;
   confidence_score?: number;
+  query_importance?: number; // 1=Casual, 2=Operational, 3=Reporting, 4=Audit Critical
   created_at: string;
 }
 

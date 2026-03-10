@@ -257,7 +257,7 @@ def build_oauth1_header(credentials: dict, method: str, url: str) -> dict[str, s
     return {"Authorization": auth_header}
 
 
-async def _maybe_judge(result: dict, user_question: str | None, query: str) -> dict:
+async def _maybe_judge(result: dict, user_question: str | None, query: str, importance_tier: int = 1) -> dict:
     """Run the SuiteQL judge if user_question is provided and result has rows."""
     if not user_question or result.get("error"):
         return result
@@ -267,7 +267,8 @@ async def _maybe_judge(result: dict, user_question: str | None, query: str) -> d
         return result
 
     try:
-        from app.services.suiteql_judge import judge_suiteql_result
+        from app.services.importance_classifier import ImportanceTier
+        from app.services.suiteql_judge import enforce_judge_threshold, judge_suiteql_result
 
         verdict = await judge_suiteql_result(
             user_question=user_question,
@@ -275,13 +276,20 @@ async def _maybe_judge(result: dict, user_question: str | None, query: str) -> d
             result_preview=rows[:5],
             row_count=result.get("row_count", len(rows)),
         )
+
+        tier = ImportanceTier(importance_tier)
+        enforcement = enforce_judge_threshold(verdict, tier)
+
         result["judge_verdict"] = {
             "approved": verdict.approved,
             "confidence": verdict.confidence,
-            "reason": verdict.reason,
+            "reason": enforcement.reason,
+            "tier": enforcement.tier,
+            "passed": enforcement.passed,
+            "needs_review": enforcement.needs_review,
         }
-        if not verdict.approved:
-            result["_judge_warning"] = f"Query may not correctly answer the question: {verdict.reason}"
+        if not enforcement.passed:
+            result["_judge_warning"] = f"[{enforcement.tier}] {enforcement.reason}"
     except Exception:
         pass  # Fail-open: judge errors don't block the result
 
@@ -382,7 +390,12 @@ async def execute(params: dict, context: dict | None = None, **kwargs) -> dict:
 
         result = {**result, "query": query, "limit": max_rows}
 
-        return await _maybe_judge(result, user_question, query)
+        return await _maybe_judge(
+            result,
+            user_question,
+            query,
+            importance_tier=context.get("importance_tier", 1) if context else 1,
+        )
 
     # --- OAuth 1.0 path: direct REST call with HMAC signature ---
     url = f"https://{account_id}.suitetalk.api.netsuite.com/services/rest/query/v1/suiteql"
@@ -427,7 +440,12 @@ async def execute(params: dict, context: dict | None = None, **kwargs) -> dict:
         "limit": max_rows,
     }
 
-    return await _maybe_judge(result, user_question, query)
+    return await _maybe_judge(
+        result,
+        user_question,
+        query,
+        importance_tier=context.get("importance_tier", 1) if context else 1,
+    )
 
 
 # ──────────────────────────────────────────────────────────────────

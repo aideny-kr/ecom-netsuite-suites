@@ -6,6 +6,7 @@ export type ChatStreamEvent =
   | { type: "text"; content: string }
   | { type: "tool_status"; content: string }
   | { type: "confidence"; score: number; explanation: string }
+  | { type: "importance"; tier: number; label: string; needs_review: boolean }
   | { type: "error"; error: string }
   | { type: "message"; message: ChatMessage };
 
@@ -18,6 +19,7 @@ type StreamHandlers = {
   onText?: (content: string) => void;
   onToolStatus?: (content: string) => void;
   onConfidence?: (score: number, explanation: string) => void;
+  onImportance?: (tier: number, label: string, needsReview: boolean) => void;
   onError?: (error: string) => void;
   onMessage?: (message: ChatMessage) => void;
 };
@@ -44,6 +46,7 @@ export function normalizeStreamMessage(raw: Record<string, unknown>): ChatMessag
     provider_used: typeof raw.provider_used === "string" ? raw.provider_used : undefined,
     is_byok: typeof raw.is_byok === "boolean" ? raw.is_byok : undefined,
     confidence_score: typeof raw.confidence_score === "number" ? raw.confidence_score : undefined,
+    query_importance: typeof raw.query_importance === "number" ? raw.query_importance : undefined,
   };
 }
 
@@ -106,6 +109,8 @@ export async function consumeChatStream(
         handlers.onToolStatus?.(event.content);
       } else if (event.type === "confidence") {
         handlers.onConfidence?.(event.score, event.explanation);
+      } else if (event.type === "importance") {
+        handlers.onImportance?.(event.tier, event.label, event.needs_review);
       } else if (event.type === "error") {
         handlers.onError?.(event.error);
       } else if (event.type === "message") {
@@ -126,6 +131,14 @@ function normalizeStreamEvent(data: Record<string, unknown>): ChatStreamEvent | 
   }
   if (type === "confidence" && typeof data.score === "number") {
     return { type, score: data.score, explanation: String(data.explanation || "") };
+  }
+  if (type === "importance" && typeof data.tier === "number") {
+    return {
+      type,
+      tier: data.tier,
+      label: String(data.label || ""),
+      needs_review: Boolean(data.needs_review),
+    };
   }
   if (type === "error" && typeof data.error === "string") {
     return { type, error: data.error };

@@ -89,3 +89,55 @@ class TestJudgeFailOpen:
 
         assert verdict.approved is True
         assert "error" in verdict.reason.lower() or "fail-open" in verdict.reason.lower()
+
+
+class TestEnforceJudgeThreshold:
+    def test_casual_tier_always_passes(self):
+        from app.services.importance_classifier import ImportanceTier
+        from app.services.suiteql_judge import JudgeVerdict, enforce_judge_threshold
+
+        verdict = JudgeVerdict(approved=True, confidence=0.3, reason="Low confidence")
+        result = enforce_judge_threshold(verdict, ImportanceTier.CASUAL)
+        assert result.passed is True
+        assert result.tier == "Casual"
+
+    def test_operational_tier_fails_below_threshold(self):
+        from app.services.importance_classifier import ImportanceTier
+        from app.services.suiteql_judge import JudgeVerdict, enforce_judge_threshold
+
+        verdict = JudgeVerdict(approved=True, confidence=0.5, reason="Moderate")
+        result = enforce_judge_threshold(verdict, ImportanceTier.OPERATIONAL)
+        assert result.passed is False
+        assert "below threshold" in result.reason.lower()
+
+    def test_operational_tier_passes_above_threshold(self):
+        from app.services.importance_classifier import ImportanceTier
+        from app.services.suiteql_judge import JudgeVerdict, enforce_judge_threshold
+
+        verdict = JudgeVerdict(approved=True, confidence=0.7, reason="Good")
+        result = enforce_judge_threshold(verdict, ImportanceTier.OPERATIONAL)
+        assert result.passed is True
+
+    def test_audit_critical_requires_high_confidence(self):
+        from app.services.importance_classifier import ImportanceTier
+        from app.services.suiteql_judge import JudgeVerdict, enforce_judge_threshold
+
+        verdict = JudgeVerdict(approved=True, confidence=0.85, reason="Pretty good")
+        result = enforce_judge_threshold(verdict, ImportanceTier.AUDIT_CRITICAL)
+        assert result.passed is False  # 0.85 < 0.9
+
+    def test_audit_critical_flags_for_review(self):
+        from app.services.importance_classifier import ImportanceTier
+        from app.services.suiteql_judge import JudgeVerdict, enforce_judge_threshold
+
+        verdict = JudgeVerdict(approved=True, confidence=0.85, reason="Pretty good")
+        result = enforce_judge_threshold(verdict, ImportanceTier.AUDIT_CRITICAL)
+        assert result.needs_review is True
+
+    def test_disapproved_always_fails_tier_2_plus(self):
+        from app.services.importance_classifier import ImportanceTier
+        from app.services.suiteql_judge import JudgeVerdict, enforce_judge_threshold
+
+        verdict = JudgeVerdict(approved=False, confidence=0.9, reason="Wrong columns")
+        result = enforce_judge_threshold(verdict, ImportanceTier.OPERATIONAL)
+        assert result.passed is False
