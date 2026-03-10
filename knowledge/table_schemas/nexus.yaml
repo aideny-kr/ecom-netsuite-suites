@@ -1,0 +1,27 @@
+table_name: nexus
+description: >
+  Tax nexus records representing tax jurisdictions where the company has tax obligations.
+  Used for tax calculation and compliance. Each nexus represents a country/state
+  combination where tax must be collected or reported. Paginate with
+  `FETCH FIRST N ROWS ONLY`.
+
+columns:
+  - name: id
+    type: INTEGER
+    description: Internal ID (primary key).
+
+  - name: description
+    type: VARCHAR
+    description: Nexus description (e.g., "US-CA", "United Kingdom").
+
+  - name: country
+    type: VARCHAR
+    description: Country code (e.g., "US", "GB", "CA").
+
+  - name: state
+    type: VARCHAR
+    description: State/province code (e.g., "CA", "NY"). NULL for country-level nexus.
+
+  - name: isinactive
+    type: VARCHAR
+    description: "'T' if inactive, 'F' if active."

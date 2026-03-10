@@ -1,0 +1,43 @@
+table_name: subsidiary
+description: >
+  Subsidiary hierarchy for multi-subsidiary (OneWorld) NetSuite accounts. Each row is
+  one subsidiary. Used as FK on transactions, accounts, items, entities, and most other
+  records. The `iselimination` flag identifies elimination subsidiaries used for
+  intercompany consolidation. Paginate with `FETCH FIRST N ROWS ONLY`.
+
+columns:
+  - name: id
+    type: INTEGER
+    description: Internal ID (primary key).
+
+  - name: name
+    type: VARCHAR
+    description: Subsidiary name.
+
+  - name: namenohi
+    type: VARCHAR
+    description: Name without hierarchy prefix (no parent chain).
+
+  - name: fullname
+    type: VARCHAR
+    description: "Full hierarchical name (e.g., 'Parent Co : Child Sub')."
+
+  - name: currency
+    type: INTEGER
+    description: FK to currency table. The subsidiary's base currency.
+
+  - name: country
+    type: VARCHAR
+    description: Country code (e.g., "US", "GB", "CA").
+
+  - name: isinactive
+    type: VARCHAR
+    description: "'T' if inactive, 'F' if active."
+
+  - name: iselimination
+    type: VARCHAR
+    description: "'T' if this is an elimination subsidiary for intercompany consolidation."
+
+  - name: parent
+    type: INTEGER
+    description: FK to parent subsidiary (self-referencing) for hierarchy.

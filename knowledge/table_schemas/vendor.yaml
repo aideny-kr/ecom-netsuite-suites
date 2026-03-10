@@ -1,0 +1,65 @@
+table_name: vendor
+description: >
+  Vendor/supplier records in NetSuite. Used as the entity on purchase orders, vendor
+  bills, vendor payments, and other procurement transactions. Use BUILTIN.DF() for FK
+  display names. Paginate with `FETCH FIRST N ROWS ONLY`.
+
+columns:
+  - name: id
+    type: INTEGER
+    description: Internal ID (primary key).
+
+  - name: companyname
+    type: VARCHAR
+    description: Vendor company name.
+
+  - name: entityid
+    type: VARCHAR
+    description: Vendor display ID/number. User-visible identifier.
+
+  - name: email
+    type: VARCHAR
+    description: Primary email address.
+
+  - name: phone
+    type: VARCHAR
+    description: Primary phone number.
+
+  - name: category
+    type: INTEGER
+    description: FK to vendor category. Use BUILTIN.DF(v.category) for display name.
+
+  - name: subsidiary
+    type: INTEGER
+    description: FK to subsidiary table.
+
+  - name: datecreated
+    type: TIMESTAMP
+    description: When the vendor record was created.
+
+  - name: lastmodifieddate
+    type: TIMESTAMP
+    description: When the vendor record was last modified.
+
+  - name: isinactive
+    type: VARCHAR
+    description: "'T' if inactive, 'F' if active."
+
+  - name: terms
+    type: INTEGER
+    description: FK to payment terms. Default payment terms for this vendor.
+
+  - name: custentity_*
+    type: varies
+    description: >
+      Dynamic custom entity fields. Tenant-specific, discovered via netsuite_get_metadata.
+      Always verify field existence before querying.
+    dynamic: true
+
+common_joins:
+  - partner: transaction
+    alias: t
+    on: t.entity = v.id
+    use_when: >
+      Need vendor's transactions. Only valid for purchase-side transaction types
+      (PurchOrd, VendBill, VendPymt, etc.).

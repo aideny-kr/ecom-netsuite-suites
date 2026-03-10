@@ -1,0 +1,46 @@
+table_name: contact
+description: >
+  Contact records associated with customers, vendors, or other entities. Contacts are
+  individuals (people) linked to a parent company record. Paginate with
+  `FETCH FIRST N ROWS ONLY`.
+
+columns:
+  - name: id
+    type: INTEGER
+    description: Internal ID (primary key).
+
+  - name: entityid
+    type: VARCHAR
+    description: Contact display ID/number.
+
+  - name: firstname
+    type: VARCHAR
+    description: First name.
+
+  - name: lastname
+    type: VARCHAR
+    description: Last name.
+
+  - name: email
+    type: VARCHAR
+    description: Email address.
+
+  - name: phone
+    type: VARCHAR
+    description: Phone number.
+
+  - name: company
+    type: INTEGER
+    description: FK to the parent company record (customer or vendor).
+
+  - name: subsidiary
+    type: INTEGER
+    description: FK to subsidiary table.
+
+  - name: isinactive
+    type: VARCHAR
+    description: "'T' if inactive, 'F' if active."
+
+  - name: datecreated
+    type: TIMESTAMP
+    description: When the contact record was created.

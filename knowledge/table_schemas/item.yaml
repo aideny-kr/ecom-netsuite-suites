@@ -1,0 +1,81 @@
+table_name: item
+description: >
+  All item types in NetSuite — inventory items, non-inventory items, service items,
+  assembly items, kit items, etc. The `type` column distinguishes item types. This is
+  the ONLY place to get item type information — the transactionline table does NOT have
+  an `itemtype` column. Always JOIN transactionline to item to get item type. Use
+  BUILTIN.DF() for FK display names. Paginate with `FETCH FIRST N ROWS ONLY`.
+
+columns:
+  - name: id
+    type: INTEGER
+    description: Internal ID (primary key).
+
+  - name: itemid
+    type: VARCHAR
+    description: Item name/number. The primary user-visible identifier (e.g., "SKU-12345").
+
+  - name: displayname
+    type: VARCHAR
+    description: Display name shown on transactions.
+
+  - name: description
+    type: VARCHAR
+    description: Item description text.
+
+  - name: type
+    type: VARCHAR
+    description: >
+      Item type. Common values: InvtPart (inventory), NonInvtPart (non-inventory),
+      Service, Assembly, Kit, Group, Discount, Payment, Markup, OthCharge, Subtotal,
+      Description, EndGroup, GiftCert.
+
+  - name: baseprice
+    type: CURRENCY
+    description: Base/list price.
+
+  - name: cost
+    type: CURRENCY
+    description: Standard cost.
+
+  - name: averagecost
+    type: CURRENCY
+    description: Average cost (calculated from purchase history).
+
+  - name: lastpurchaseprice
+    type: CURRENCY
+    description: Most recent purchase price.
+
+  - name: isinactive
+    type: VARCHAR
+    description: "'T' if inactive, 'F' if active."
+
+  - name: subsidiary
+    type: INTEGER
+    description: FK to subsidiary table.
+
+  - name: department
+    type: INTEGER
+    description: FK to department table.
+
+  - name: class
+    type: INTEGER
+    description: FK to classification table.
+
+  - name: location
+    type: INTEGER
+    description: FK to location table.
+
+  - name: custitem_*
+    type: varies
+    description: >
+      Dynamic custom item fields. Tenant-specific, discovered via netsuite_get_metadata.
+      Example: custitem_fw_platform (Framework tenant has 29 platform values).
+      Always verify field existence before querying.
+    dynamic: true
+
+common_joins:
+  - partner: transactionline
+    alias: tl
+    on: tl.item = i.id
+    use_when: Need to find transactions containing this item or aggregate line data by item.

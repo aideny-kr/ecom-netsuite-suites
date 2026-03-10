@@ -1,0 +1,34 @@
+table_name: department
+description: >
+  Department records for classification and reporting. Departments can be hierarchical
+  (parent/child). Used as a classification dimension on transactions, transaction lines,
+  and accounting lines. Paginate with `FETCH FIRST N ROWS ONLY`.
+
+columns:
+  - name: id
+    type: INTEGER
+    description: Internal ID (primary key).
+
+  - name: name
+    type: VARCHAR
+    description: Department name.
+
+  - name: namenohi
+    type: VARCHAR
+    description: Name without hierarchy prefix.
+
+  - name: fullname
+    type: VARCHAR
+    description: "Full hierarchical name (e.g., 'Operations : Warehouse')."
+
+  - name: isinactive
+    type: VARCHAR
+    description: "'T' if inactive, 'F' if active."
+
+  - name: parent
+    type: INTEGER
+    description: FK to parent department (self-referencing) for hierarchy.
+
+  - name: subsidiary
+    type: INTEGER
+    description: FK to subsidiary table. Which subsidiary this department belongs to.

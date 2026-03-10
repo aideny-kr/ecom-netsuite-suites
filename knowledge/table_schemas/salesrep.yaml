@@ -1,0 +1,35 @@
+table_name: salesrep
+description: >
+  Sales representative records. Sales reps are typically employees who are flagged as
+  sales reps in NetSuite. They appear as FK references on transactions and customer
+  records. This is a view/subset of the employee table filtered to sales-enabled
+  employees. Paginate with `FETCH FIRST N ROWS ONLY`.
+
+columns:
+  - name: id
+    type: INTEGER
+    description: Internal ID (primary key).
+
+  - name: entityid
+    type: VARCHAR
+    description: Sales rep display ID/number.
+
+  - name: firstname
+    type: VARCHAR
+    description: First name.
+
+  - name: lastname
+    type: VARCHAR
+    description: Last name.
+
+  - name: email
+    type: VARCHAR
+    description: Email address.
+
+  - name: isinactive
+    type: VARCHAR
+    description: "'T' if inactive, 'F' if active."
+
+  - name: subsidiary
+    type: INTEGER
+    description: FK to subsidiary table.

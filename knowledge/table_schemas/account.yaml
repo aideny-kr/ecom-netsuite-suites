@@ -1,0 +1,59 @@
+table_name: account
+description: >
+  Chart of accounts. Each row is one GL account. The `accttype` column determines
+  the account's classification for financial reporting. Used extensively in
+  transactionaccountingline JOINs for P&L, Balance Sheet, and Trial Balance reports.
+  Paginate with `FETCH FIRST N ROWS ONLY`.
+
+columns:
+  - name: id
+    type: INTEGER
+    description: Internal ID (primary key).
+
+  - name: acctnumber
+    type: VARCHAR
+    description: Account number (e.g., "1000", "4010", "6200").
+
+  - name: acctname
+    type: VARCHAR
+    description: Account name (e.g., "Accounts Receivable", "Sales Revenue").
+
+  - name: accttype
+    type: VARCHAR
+    description: >
+      Account type for financial classification. Values: Bank, AcctRec, OthCurrAsset,
+      FixedAsset, OthAsset, AcctPay, CreditCard, OthCurrLiab, LongTermLiab, Equity,
+      Income, COGS, Expense, OthIncome, OthExpense, NonPosting, DeferRevenue, DeferExpense.
+
+  - name: generalrate
+    type: VARCHAR
+    description: >
+      General rate type for currency consolidation. Values: Current, Average, Historical.
+
+  - name: cashflowrate
+    type: VARCHAR
+    description: Cash flow rate type for consolidation reporting.
+
+  - name: isinactive
+    type: VARCHAR
+    description: "'T' if inactive, 'F' if active."
+
+  - name: parent
+    type: INTEGER
+    description: FK to parent account (self-referencing) for account hierarchy.
+
+  - name: subsidiary
+    type: INTEGER
+    description: FK to subsidiary table. Which subsidiary this account belongs to.
+
+  - name: description
+    type: VARCHAR
+    description: Account description text.
+
+common_joins:
+  - partner: transactionaccountingline
+    alias: tal
+    on: tal.account = a.id
+    use_when: >
+      Need GL posting data by account. Essential for financial reports. Always filter
+      tal.posting = 'T' for actual postings.

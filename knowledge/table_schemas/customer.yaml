@@ -1,0 +1,81 @@
+table_name: customer
+description: >
+  Customer and company records in NetSuite. Includes both individual (person) and
+  company customers. Use `isperson = 'T'` to filter individuals vs companies. The
+  `entityid` is the customer's display ID (e.g., "CUST-001"), while `companyname` is
+  the company name. Use BUILTIN.DF() for FK display names. Paginate with
+  `FETCH FIRST N ROWS ONLY`.
+
+columns:
+  - name: id
+    type: INTEGER
+    description: Internal ID (primary key).
+
+  - name: companyname
+    type: VARCHAR
+    description: Company name. NULL for person records.
+
+  - name: entityid
+    type: VARCHAR
+    description: Customer display ID/number (e.g., "CUST-001"). User-visible identifier.
+
+  - name: email
+    type: VARCHAR
+    description: Primary email address.
+
+  - name: phone
+    type: VARCHAR
+    description: Primary phone number.
+
+  - name: category
+    type: INTEGER
+    description: FK to customer category. Use BUILTIN.DF(c.category) for display name.
+
+  - name: subsidiary
+    type: INTEGER
+    description: FK to subsidiary table. Use BUILTIN.DF(c.subsidiary) for name.
+
+  - name: datecreated
+    type: TIMESTAMP
+    description: When the customer record was created.
+
+  - name: lastmodifieddate
+    type: TIMESTAMP
+    description: When the customer record was last modified.
+
+  - name: isinactive
+    type: VARCHAR
+    description: "'T' if inactive, 'F' if active."
+
+  - name: isperson
+    type: VARCHAR
+    description: "'T' for individual person, 'F' for company."
+
+  - name: salesrep
+    type: INTEGER
+    description: FK to employee/salesrep. Use BUILTIN.DF(c.salesrep) for name.
+
+  - name: terms
+    type: INTEGER
+    description: FK to payment terms. Use BUILTIN.DF(c.terms) for display (e.g., "Net 30").
+
+  - name: url
+    type: VARCHAR
+    description: Customer website URL.
+
+  - name: defaultaddress
+    type: VARCHAR
+    description: Default address as formatted text.
+
+  - name: custentity_*
+    type: varies
+    description: >
+      Dynamic custom entity fields. Tenant-specific, discovered via netsuite_get_metadata.
+      Always verify field existence before querying.
+    dynamic: true
+
+common_joins:
+  - partner: transaction
+    alias: t
+    on: t.entity = c.id
+    use_when: Need customer's transactions. Filter by transaction type as entity FK is shared.

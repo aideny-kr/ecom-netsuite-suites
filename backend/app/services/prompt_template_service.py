@@ -174,6 +174,57 @@ def _build_netsuite_customizations_section(metadata: NetSuiteMetadata | None) ->
     return "\n".join(parts)
 
 
+def _build_table_schema_section(
+    metadata: "NetSuiteMetadata | None" = None,
+    relevant_tables: list[str] | None = None,
+) -> str:
+    """Build <standard_table_schemas> XML block from curated schemas + tenant custom fields.
+
+    Args:
+        metadata: Tenant metadata for custom field merging.
+        relevant_tables: Table names to include (from schema_context_selector).
+                        If None, includes all schemas.
+    """
+    from app.services.table_schema_loader import (
+        load_standard_schemas,
+        merge_custom_fields,
+        format_schemas_as_xml,
+    )
+
+    all_schemas = load_standard_schemas()
+
+    # Filter to relevant tables if specified
+    if relevant_tables:
+        relevant_set = set(relevant_tables)
+        schemas = [s for s in all_schemas if s.table_name in relevant_set]
+    else:
+        schemas = all_schemas
+
+    # Merge tenant custom fields if metadata available
+    if metadata:
+        _FIELD_MAP = {
+            "transaction": ("transaction_body_fields", metadata.transaction_body_fields),
+            "transactionline": ("transaction_column_fields", metadata.transaction_column_fields),
+            "customer": ("entity_custom_fields", metadata.entity_custom_fields),
+            "vendor": ("entity_custom_fields", metadata.entity_custom_fields),
+            "employee": ("entity_custom_fields", metadata.entity_custom_fields),
+            "item": ("item_custom_fields", metadata.item_custom_fields),
+        }
+        merged_schemas = []
+        for schema in schemas:
+            mapping = _FIELD_MAP.get(schema.table_name)
+            if mapping and mapping[1] and isinstance(mapping[1], list):
+                merged_schemas.append(merge_custom_fields(schema, mapping[0], mapping[1]))
+            else:
+                merged_schemas.append(schema)
+        schemas = merged_schemas
+
+    if not schemas:
+        return ""
+
+    return format_schemas_as_xml(schemas)
+
+
 def _build_suiteql_rules_section(profile: TenantProfile) -> str:
     parts = [
         "SUITEQL SYNTAX RULES (Oracle-style SQL):",

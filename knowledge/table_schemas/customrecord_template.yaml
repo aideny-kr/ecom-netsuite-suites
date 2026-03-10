@@ -1,0 +1,43 @@
+table_name: customrecord_template
+description: >
+  TEMPLATE for custom record tables. In NetSuite, custom records are created by admins
+  and have table names following the pattern `customrecord_*` (e.g., customrecord_projects,
+  customrecord_product_lines). Custom record schemas are tenant-specific and MUST be
+  discovered via the `netsuite_get_metadata` tool before querying — never assume field
+  names exist. Custom fields on these records follow the pattern `custrecord_*`. This
+  template shows the standard system columns present on all custom records; actual
+  tenant-specific fields will vary. Paginate with `FETCH FIRST N ROWS ONLY`.
+
+columns:
+  - name: id
+    type: INTEGER
+    description: Internal ID (primary key). Present on all custom records.
+
+  - name: name
+    type: VARCHAR
+    description: Name/label field. Present on most custom records (unless renamed).
+
+  - name: isinactive
+    type: VARCHAR
+    description: "'T' if inactive, 'F' if active. Standard on all custom records."
+
+  - name: created
+    type: TIMESTAMP
+    description: When the record was created. Standard system field.
+
+  - name: lastmodified
+    type: TIMESTAMP
+    description: When the record was last modified. Standard system field.
+
+  - name: owner
+    type: INTEGER
+    description: FK to employee table. The record owner. Standard system field.
+
+  - name: custrecord_*
+    type: varies
+    description: >
+      Dynamic custom fields on the custom record. These are entirely tenant-specific
+      and MUST be discovered via netsuite_get_metadata before use. Never guess or
+      assume custom field names. Examples might include custrecord_project_status,
+      custrecord_priority, custrecord_related_customer, etc.
+    dynamic: true

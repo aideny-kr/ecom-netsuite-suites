@@ -1,0 +1,57 @@
+table_name: inventoryitemlocations
+description: >
+  Inventory quantities by item and location. Each row represents one item's inventory
+  status at one location. Use this for stock level queries, reorder analysis, and
+  inventory valuation by location. Paginate with `FETCH FIRST N ROWS ONLY`.
+
+columns:
+  - name: id
+    type: INTEGER
+    description: Internal ID (primary key).
+
+  - name: item
+    type: INTEGER
+    description: FK to item table.
+
+  - name: location
+    type: INTEGER
+    description: FK to location table. Use BUILTIN.DF(iil.location) for name.
+
+  - name: quantityonhand
+    type: FLOAT
+    description: Current quantity physically on hand at this location.
+
+  - name: quantityavailable
+    type: FLOAT
+    description: Quantity available for sale/use (on hand minus committed).
+
+  - name: quantityonorder
+    type: FLOAT
+    description: Quantity on open purchase orders not yet received.
+
+  - name: quantityintransit
+    type: FLOAT
+    description: Quantity in transit between locations (transfer orders).
+
+  - name: reorderpoint
+    type: FLOAT
+    description: Reorder point threshold. When on-hand drops below this, reorder is needed.
+
+  - name: preferredstocklevel
+    type: FLOAT
+    description: Target stock level for this item at this location.
+
+  - name: lastpurchasepricemli
+    type: CURRENCY
+    description: Last purchase price for this item at this location.
+
+common_joins:
+  - partner: item
+    alias: i
+    on: i.id = iil.item
+    use_when: Need item details (itemid, displayname, type) alongside inventory levels.
+
+  - partner: location
+    alias: loc
+    on: loc.id = iil.location
+    use_when: Need full location details beyond what BUILTIN.DF provides.

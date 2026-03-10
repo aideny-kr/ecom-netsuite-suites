@@ -1,0 +1,124 @@
+table_name: transactionline
+description: >
+  Line items on transactions. Each row is one line on a sales order, invoice, PO, etc.
+  CRITICAL: The `itemtype` column does NOT exist on this table — to get item type, JOIN
+  to the item table and use `i.type`. The `quantityreceived` column does NOT exist —
+  use `quantityshiprecv` instead. The `expectedreceiptdate` column exists HERE on
+  transactionline, NOT on the transaction header. The `foreignamount` column is NEGATIVE
+  for revenue lines (sales) — multiply by -1 to get positive revenue figures. Filter
+  with `mainline = 'F'` and `taxline = 'F'` to get actual item lines only. Paginate
+  with `FETCH FIRST N ROWS ONLY` — LIMIT is not supported.
+
+columns:
+  - name: id
+    type: INTEGER
+    description: Internal ID of the line (primary key).
+
+  - name: transaction
+    type: INTEGER
+    description: FK to transaction table. The parent transaction header.
+
+  - name: item
+    type: INTEGER
+    description: FK to item table. Use BUILTIN.DF(tl.item) for display name.
+
+  - name: quantity
+    type: FLOAT
+    description: Ordered/invoiced quantity on this line.
+
+  - name: rate
+    type: CURRENCY
+    description: Unit price/rate for this line item.
+
+  - name: amount
+    type: CURRENCY
+    description: Line amount in BASE currency (quantity * rate, converted).
+
+  - name: foreignamount
+    type: CURRENCY
+    description: >
+      Line amount in TRANSACTION currency. IMPORTANT: This is NEGATIVE for revenue
+      lines (sales orders, invoices). Multiply by -1 to get positive revenue:
+      `SUM(tl.foreignamount * -1) AS revenue`.
+
+  - name: mainline
+    type: VARCHAR
+    description: >
+      'T' for the summary/header line, 'F' for actual item lines.
+      Always filter `mainline = 'F'` to exclude summary lines.
+
+  - name: taxline
+    type: VARCHAR
+    description: >
+      'T' for tax lines, 'F' for non-tax lines.
+      Always filter `taxline = 'F'` to exclude tax-only lines.
+
+  - name: iscogs
+    type: VARCHAR
+    description: "'T' if this is a COGS line, 'F' otherwise."
+
+  - name: linesequencenumber
+    type: INTEGER
+    description: Display order of the line on the transaction.
+
+  - name: class
+    type: INTEGER
+    description: FK to classification table (line-level override).
+
+  - name: department
+    type: INTEGER
+    description: FK to department table (line-level override).
+
+  - name: location
+    type: INTEGER
+    description: FK to location table (line-level override).
+
+  - name: quantityshiprecv
+    type: FLOAT
+    description: >
+      Quantity shipped (for sales) or received (for purchases). NOTE: There is
+      no `quantityreceived` column — use this column instead.
+
+  - name: quantitybilled
+    type: FLOAT
+    description: Quantity that has been billed for this line.
+
+  - name: memo
+    type: VARCHAR
+    description: Line-level memo/description.
+
+  - name: createdfrom
+    type: INTEGER
+    description: >
+      FK to the source transaction this line was created from (e.g., SO that
+      generated an invoice). Use BUILTIN.DF(tl.createdfrom) for display.
+
+  - name: expenseaccount
+    type: INTEGER
+    description: FK to account table. The expense account for this line (purchase-side).
+
+  - name: expectedreceiptdate
+    type: DATE
+    description: >
+      Expected receipt date for purchase order lines. NOTE: This field exists
+      on transactionline ONLY, not on the transaction header.
+
+  - name: custcol_*
+    type: varies
+    description: >
+      Dynamic custom column fields. Tenant-specific, discovered via netsuite_get_metadata.
+      Always verify field existence before querying.
+    dynamic: true
+
+common_joins:
+  - partner: transaction
+    alias: t
+    on: t.id = tl.transaction
+    use_when: Need transaction header info (tranid, trandate, status, entity).
+
+  - partner: item
+    alias: i
+    on: i.id = tl.item
+    use_when: >
+      Need item details (itemid, displayname, type). REQUIRED to get item type —
+      there is no itemtype column on transactionline.

@@ -1,0 +1,143 @@
+table_name: transaction
+description: >
+  Core transaction header table covering all NetSuite transaction types including
+  sales orders, invoices, purchase orders, vendor bills, credit memos, item receipts,
+  journal entries, and more. Each row represents one transaction header. Use the `type`
+  column to filter by transaction type. Status codes are single-letter ('B' = Pending Billing,
+  'H' = Pending Fulfillment, 'C' = Closed) — NOT compound codes like 'SalesOrd:B'.
+  The `total` column is always in base currency (USD); use `foreigntotal` for the
+  transaction's native currency amount. Use `BUILTIN.DF(field)` to get display names
+  for foreign key fields like entity, subsidiary, etc. Paginate with
+  `FETCH FIRST N ROWS ONLY` — LIMIT is not supported in SuiteQL.
+
+columns:
+  - name: id
+    type: INTEGER
+    description: Internal ID (primary key).
+
+  - name: tranid
+    type: VARCHAR
+    description: Transaction number (e.g., "SO-12345", "INV-6789"). User-visible document number.
+
+  - name: trandate
+    type: DATE
+    description: Transaction date. Filter with `TO_DATE('2025-01-01', 'YYYY-MM-DD')`.
+
+  - name: type
+    type: VARCHAR
+    description: >
+      Transaction type code. Common values: SalesOrd, CustInvc, PurchOrd, VendBill,
+      CustCred, ItemRcpt, Journal, CashSale, VendPymt, CustPymt, RtnAuth, ItemShip.
+
+  - name: status
+    type: VARCHAR
+    description: >
+      Single-letter status code. CRITICAL: REST API returns single-letter codes only.
+      Common: 'A' = Pending Approval, 'B' = Pending Billing, 'C' = Closed,
+      'D' = Declined, 'E' = Partially Fulfilled, 'F' = Fully Billed,
+      'H' = Pending Fulfillment. Never use compound codes like 'SalesOrd:B'.
+
+  - name: entity
+    type: INTEGER
+    description: >
+      FK to customer, vendor, or employee depending on transaction type.
+      Use BUILTIN.DF(t.entity) for the display name.
+
+  - name: total
+    type: CURRENCY
+    description: >
+      Transaction total in BASE currency (typically USD). For multi-currency
+      transactions, this is the converted amount. Use foreigntotal for native currency.
+      SIGN CONVENTION: PO and bill totals are stored as NEGATIVE. When presenting
+      totals for PurchOrd or VendBill, use SUM(t.total) * -1 to show positive amounts.
+      For SalesOrd and CustInvc, total is positive.
+
+  - name: foreigntotal
+    type: CURRENCY
+    description: >
+      Transaction total in the TRANSACTION currency (native currency amount).
+      Same sign convention as `total` — may be negative for POs/bills.
+
+  - name: subsidiary
+    type: INTEGER
+    description: FK to subsidiary table. Use BUILTIN.DF(t.subsidiary) for name.
+
+  - name: department
+    type: INTEGER
+    description: FK to department table. Use BUILTIN.DF(t.department) for name.
+
+  - name: class
+    type: INTEGER
+    description: FK to classification table. Use BUILTIN.DF(t.class) for name.
+
+  - name: location
+    type: INTEGER
+    description: FK to location table. Use BUILTIN.DF(t.location) for name.
+
+  - name: memo
+    type: VARCHAR
+    description: Transaction-level memo/notes.
+
+  - name: createddate
+    type: TIMESTAMP
+    description: When the transaction was created in NetSuite.
+
+  - name: lastmodifieddate
+    type: TIMESTAMP
+    description: When the transaction was last modified.
+
+  - name: currency
+    type: INTEGER
+    description: FK to currency table. The transaction's native currency.
+
+  - name: exchangerate
+    type: FLOAT
+    description: Exchange rate from transaction currency to base currency at time of transaction.
+
+  - name: duedate
+    type: DATE
+    description: Payment due date (invoices, bills).
+
+  - name: shipdate
+    type: DATE
+    description: Ship date. Available on sales orders, item fulfillments, etc.
+
+  - name: terms
+    type: INTEGER
+    description: FK to payment terms record. Use BUILTIN.DF(t.terms) for name (e.g., "Net 30").
+
+  - name: approvalstatus
+    type: INTEGER
+    description: Approval status. 1 = Pending, 2 = Approved, 3 = Rejected.
+
+  - name: postingperiod
+    type: INTEGER
+    description: FK to accountingperiod table. The period this transaction posts to.
+
+  - name: custbody_*
+    type: varies
+    description: >
+      Dynamic custom body fields. Tenant-specific, discovered via netsuite_get_metadata.
+      Always verify field existence before querying. Example: custbody_fw_platform.
+    dynamic: true
+
+common_joins:
+  - partner: transactionline
+    alias: tl
+    on: tl.transaction = t.id
+    use_when: Need line-level detail (items, quantities, amounts).
+
+  - partner: customer
+    alias: c
+    on: c.id = t.entity
+    use_when: Need customer details (name, email). Only valid when transaction type involves customers.
+
+  - partner: vendor
+    alias: v
+    on: v.id = t.entity
+    use_when: Need vendor details. Only valid for PurchOrd, VendBill, etc.
+
+  - partner: accountingperiod
+    alias: ap
+    on: ap.id = t.postingperiod
+    use_when: Need period name, start/end dates for financial reporting.

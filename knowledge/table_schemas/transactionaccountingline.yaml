@@ -1,0 +1,90 @@
+table_name: transactionaccountingline
+description: >
+  General ledger posting lines for transactions. Each row represents one debit or credit
+  entry in the accounting books. Used for financial reporting (P&L, Balance Sheet, Trial
+  Balance). Only rows with `posting = 'T'` are actual GL postings. For multi-currency
+  accounts, use BUILTIN.CONSOLIDATE() to convert amounts — raw SUM(tal.amount) mixes
+  currencies and produces incorrect totals. Always filter by `accountingbook` for the
+  primary book in multi-subsidiary environments. Paginate with `FETCH FIRST N ROWS ONLY`.
+
+columns:
+  - name: id
+    type: INTEGER
+    description: Internal ID (primary key).
+
+  - name: transaction
+    type: INTEGER
+    description: FK to transaction table. The parent transaction.
+
+  - name: account
+    type: INTEGER
+    description: FK to account table. The GL account for this posting line.
+
+  - name: amount
+    type: CURRENCY
+    description: >
+      Net amount in the account's currency. Positive = debit, negative = credit
+      (for most account types). For consolidated/converted amounts, use
+      BUILTIN.CONSOLIDATE().
+
+  - name: debit
+    type: CURRENCY
+    description: Debit amount (NULL if this is a credit entry).
+
+  - name: credit
+    type: CURRENCY
+    description: Credit amount (NULL if this is a debit entry).
+
+  - name: posting
+    type: VARCHAR
+    description: >
+      'T' if this line actually posts to the GL, 'F' otherwise.
+      ALWAYS filter `posting = 'T'` for financial reports.
+
+  - name: accountingbook
+    type: INTEGER
+    description: >
+      FK to accountingbook table. MANDATORY filter for multi-subsidiary companies.
+      Use the primary accounting book ID (typically 1).
+
+  - name: subsidiary
+    type: INTEGER
+    description: FK to subsidiary table for this accounting line.
+
+  - name: department
+    type: INTEGER
+    description: FK to department table.
+
+  - name: class
+    type: INTEGER
+    description: FK to classification table.
+
+  - name: location
+    type: INTEGER
+    description: FK to location table.
+
+  - name: netamount
+    type: CURRENCY
+    description: Net amount after adjustments.
+
+  - name: exchangerate
+    type: FLOAT
+    description: Exchange rate applied to this accounting line.
+
+common_joins:
+  - partner: transaction
+    alias: t
+    on: t.id = tal.transaction
+    use_when: Need transaction header info (trandate, type, entity, status).
+
+  - partner: account
+    alias: a
+    on: a.id = tal.account
+    use_when: Need account details (acctnumber, acctname, accttype) for financial reporting.
+
+  - partner: accountingperiod
+    alias: ap
+    on: ap.id = t.postingperiod
+    use_when: >
+      Need period name/dates for financial reports. Requires JOIN to transaction first.
+      Essential for P&L and Balance Sheet period filtering.

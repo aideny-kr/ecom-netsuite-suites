@@ -1,0 +1,39 @@
+table_name: location
+description: >
+  Location records representing warehouses, stores, offices, or other physical locations.
+  Locations can be hierarchical (parent/child). Used as a classification dimension on
+  transactions, transaction lines, accounting lines, and inventory records. Paginate
+  with `FETCH FIRST N ROWS ONLY`.
+
+columns:
+  - name: id
+    type: INTEGER
+    description: Internal ID (primary key).
+
+  - name: name
+    type: VARCHAR
+    description: Location name.
+
+  - name: namenohi
+    type: VARCHAR
+    description: Name without hierarchy prefix.
+
+  - name: fullname
+    type: VARCHAR
+    description: "Full hierarchical name (e.g., 'US : East Coast Warehouse')."
+
+  - name: isinactive
+    type: VARCHAR
+    description: "'T' if inactive, 'F' if active."
+
+  - name: parent
+    type: INTEGER
+    description: FK to parent location (self-referencing) for hierarchy.
+
+  - name: subsidiary
+    type: INTEGER
+    description: FK to subsidiary table.
+
+  - name: mainaddress
+    type: VARCHAR
+    description: Main address of the location as formatted text.

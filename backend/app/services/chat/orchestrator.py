@@ -560,6 +560,38 @@ async def run_chat_turn(
                     context["user_timezone"] = user_timezone
                     context["importance_tier"] = importance_tier.value
 
+                    # Select relevant table schemas and inject into context
+                    try:
+                        from app.services.schema_context_selector import select_relevant_schemas
+                        from app.services.prompt_template_service import _build_table_schema_section
+
+                        entity_types: list[str] = []
+                        if isinstance(vernacular_result, str):
+                            import re as _re_schema
+                            entity_types = _re_schema.findall(
+                                r"<entity_type>(.*?)</entity_type>", vernacular_result
+                            )
+
+                        relevant_tables = select_relevant_schemas(
+                            sanitized_input,
+                            entity_types=entity_types,
+                        )
+                        print(f"[ORCHESTRATOR] Schema tables selected: {relevant_tables}", flush=True)
+
+                        schema_xml = _build_table_schema_section(
+                            metadata=metadata,
+                            relevant_tables=relevant_tables,
+                        )
+                        if schema_xml:
+                            context["table_schemas"] = schema_xml
+                            print(
+                                f"[ORCHESTRATOR] Schema injected ({len(schema_xml)} chars, "
+                                f"{len(relevant_tables)} tables)",
+                                flush=True,
+                            )
+                    except Exception:
+                        logger.warning("orchestrator.schema_injection_failed", exc_info=True)
+
                     # Create unified agent with full context
                     unified_agent = UnifiedAgent(
                         tenant_id=tenant_id,

@@ -69,13 +69,18 @@ fields and active reporting segments without needing to call the metadata tool.
 </tenant_schema>
 </tenant_context>
 
+{{INJECT_TABLE_SCHEMAS}}
+
 <how_to_think>
 Before taking ANY action, reason through these steps in a <reasoning> block:
 1. **Understand intent**: What does the user need? Data? Documentation? Code help? Analysis?
 2. **Context First**: Read all injected context blocks (<tenant_vernacular>, <domain_knowledge>, <proven_patterns>) before writing any query.
 3. **Choose the right tool**: Pick the most direct tool for the job — don't over-engineer.
-4. **ANTI-HALLUCINATION**: If a custom field or custom record is NOT in <tenant_schema> or <tenant_vernacular>, \
-you are STRICTLY FORBIDDEN from guessing its internal ID. Use netsuite_get_metadata or rag_search to verify first.
+4. **ANTI-HALLUCINATION**: You have access to <standard_table_schemas> with REAL column names and types.
+   - ONLY use columns listed in <standard_table_schemas> or <tenant_schema>.
+   - If a column is NOT listed, call netsuite_get_metadata to verify it exists BEFORE using it.
+   - NEVER guess or invent column names. Wrong column names waste steps and return 400 errors.
+   - For custom fields (custbody_*, custcol_*, custentity_*, custitem_*), verify in <tenant_schema>.
 5. **NEVER COPY QUERIES FROM HISTORY**: When the user says "try again", "redo", or asks a follow-up, \
 do NOT copy SQL from prior conversation messages. Always construct a NEW query following <suiteql_dialect_rules>. \
 Prior queries may have used wrong syntax (e.g. compound status codes). The system prompt rules ALWAYS override conversation history.
@@ -295,6 +300,7 @@ class UnifiedAgent(BaseSpecialistAgent):
         self._domain_knowledge: list[str] = []
         self._proven_patterns: list[dict] = []
         self._active_skill: dict | None = None  # Set when a skill is triggered
+        self._context: dict[str, Any] = {}  # Full context dict from orchestrator
 
     @property
     def agent_name(self) -> str:
@@ -348,6 +354,13 @@ class UnifiedAgent(BaseSpecialistAgent):
                 "{{INJECT_METADATA_HERE}}",
                 "(No metadata discovered yet — use netsuite_get_metadata to explore.)",
             )
+
+        # Inject standard table schemas
+        table_schemas = self._context.get("table_schemas", "")
+        if table_schemas:
+            base = base.replace("{{INJECT_TABLE_SCHEMAS}}", table_schemas)
+        else:
+            base = base.replace("{{INJECT_TABLE_SCHEMAS}}", "")
 
         parts = [base]
 
@@ -469,6 +482,8 @@ class UnifiedAgent(BaseSpecialistAgent):
 
     async def _setup_context(self, task: str, context: dict[str, Any], db: "AsyncSession") -> str:
         """Shared setup for run() and run_streaming(). Returns augmented task."""
+        self._context = context
+
         # Skill detection (before entity augmentation)
         from app.services.chat.skills import match_skill
 

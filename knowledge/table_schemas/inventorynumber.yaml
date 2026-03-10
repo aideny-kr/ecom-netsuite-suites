@@ -1,0 +1,43 @@
+table_name: inventorynumber
+description: >
+  Serial numbers and lot numbers for inventory items. Each row represents one unique
+  serial or lot number. Used for traceability, expiration tracking, and inventory
+  management of serialized/lot-numbered items. Paginate with
+  `FETCH FIRST N ROWS ONLY`.
+
+columns:
+  - name: id
+    type: INTEGER
+    description: Internal ID (primary key).
+
+  - name: inventorynumber
+    type: VARCHAR
+    description: The serial number or lot number string.
+
+  - name: item
+    type: INTEGER
+    description: FK to item table. The item this serial/lot belongs to.
+
+  - name: expirationdate
+    type: DATE
+    description: Expiration date for lot-numbered items. NULL for non-expiring items.
+
+  - name: memo
+    type: VARCHAR
+    description: Memo/notes for this serial or lot number.
+
+  - name: status
+    type: VARCHAR
+    description: Status of the serial/lot number.
+
+  - name: quantityonhand
+    type: FLOAT
+    description: Current quantity on hand for this serial/lot (1 for serial, variable for lot).
+
+  - name: quantityavailable
+    type: FLOAT
+    description: Quantity available (on hand minus committed).
+
+  - name: isinactive
+    type: VARCHAR
+    description: "'T' if inactive, 'F' if active."

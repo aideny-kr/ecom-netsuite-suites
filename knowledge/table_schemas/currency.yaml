@@ -1,0 +1,32 @@
+table_name: currency
+description: >
+  Currency definitions in NetSuite. Each row is one currency configured in the account.
+  Referenced as FK on transactions (transaction currency), subsidiaries (base currency),
+  and other records. The `exchangerate` here is the current/default rate — actual
+  transaction rates are on the transaction header. Paginate with
+  `FETCH FIRST N ROWS ONLY`.
+
+columns:
+  - name: id
+    type: INTEGER
+    description: Internal ID (primary key).
+
+  - name: name
+    type: VARCHAR
+    description: Currency name (e.g., "US Dollar", "Euro", "British Pound").
+
+  - name: symbol
+    type: VARCHAR
+    description: Currency symbol (e.g., "$", "€", "£").
+
+  - name: currencycode
+    type: VARCHAR
+    description: ISO 4217 currency code (e.g., "USD", "EUR", "GBP").
+
+  - name: exchangerate
+    type: FLOAT
+    description: Current default exchange rate relative to base currency.
+
+  - name: isinactive
+    type: VARCHAR
+    description: "'T' if inactive, 'F' if active."

@@ -319,8 +319,23 @@ function toReadableHeader(value: string): string {
 
 function formatCellValue(value: unknown): string {
   if (value == null) return "—";
-  if (typeof value === "string") return value;
-  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (typeof value === "boolean") return String(value);
+  // Handle numbers — avoid scientific notation, use locale formatting
+  if (typeof value === "number") {
+    if (Number.isInteger(value)) return value.toLocaleString();
+    return value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+  // Handle string values that look like scientific notation (e.g., "1.23E7")
+  if (typeof value === "string") {
+    if (/^-?\d+\.?\d*[eE][+-]?\d+$/.test(value)) {
+      const num = Number(value);
+      if (!isNaN(num)) {
+        if (Number.isInteger(num)) return num.toLocaleString();
+        return num.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      }
+    }
+    return value;
+  }
   try {
     return JSON.stringify(value);
   } catch {

@@ -1,0 +1,36 @@
+table_name: classification
+description: >
+  Class/classification records for segmentation and reporting. The "class" dimension in
+  NetSuite. Classes can be hierarchical (parent/child). Referenced as `class` on
+  transactions, transaction lines, and accounting lines. Note: the SuiteQL table name
+  is `classification` but the FK column on other tables is `class`. Paginate with
+  `FETCH FIRST N ROWS ONLY`.
+
+columns:
+  - name: id
+    type: INTEGER
+    description: Internal ID (primary key).
+
+  - name: name
+    type: VARCHAR
+    description: Classification name.
+
+  - name: namenohi
+    type: VARCHAR
+    description: Name without hierarchy prefix.
+
+  - name: fullname
+    type: VARCHAR
+    description: "Full hierarchical name (e.g., 'Channel : Wholesale')."
+
+  - name: isinactive
+    type: VARCHAR
+    description: "'T' if inactive, 'F' if active."
+
+  - name: parent
+    type: INTEGER
+    description: FK to parent classification (self-referencing) for hierarchy.
+
+  - name: subsidiary
+    type: INTEGER
+    description: FK to subsidiary table.

@@ -1,0 +1,66 @@
+table_name: employee
+description: >
+  Employee records in NetSuite. Includes active and inactive employees. Employees can
+  appear as sales reps on transactions, supervisors, or as entities on expense reports
+  and time entries. Use BUILTIN.DF() for FK display names. Paginate with
+  `FETCH FIRST N ROWS ONLY`.
+
+columns:
+  - name: id
+    type: INTEGER
+    description: Internal ID (primary key).
+
+  - name: entityid
+    type: VARCHAR
+    description: Employee display ID/number. User-visible identifier.
+
+  - name: firstname
+    type: VARCHAR
+    description: First name.
+
+  - name: lastname
+    type: VARCHAR
+    description: Last name.
+
+  - name: email
+    type: VARCHAR
+    description: Primary email address.
+
+  - name: title
+    type: VARCHAR
+    description: Job title.
+
+  - name: supervisor
+    type: INTEGER
+    description: FK to employee table (self-referencing). Direct supervisor.
+
+  - name: department
+    type: INTEGER
+    description: FK to department table. Use BUILTIN.DF(e.department) for name.
+
+  - name: subsidiary
+    type: INTEGER
+    description: FK to subsidiary table.
+
+  - name: location
+    type: INTEGER
+    description: FK to location table.
+
+  - name: isinactive
+    type: VARCHAR
+    description: "'T' if inactive, 'F' if active."
+
+  - name: hiredate
+    type: DATE
+    description: Date the employee was hired.
+
+  - name: releasedate
+    type: DATE
+    description: Date the employee was terminated/released. NULL if still active.
+
+  - name: custentity_*
+    type: varies
+    description: >
+      Dynamic custom entity fields. Tenant-specific, discovered via netsuite_get_metadata.
+      Always verify field existence before querying.
+    dynamic: true
