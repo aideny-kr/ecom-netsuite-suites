@@ -275,6 +275,8 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 17. **Production secrets validated at startup** — `_validate_production_secrets()` in `main.py` refuses to start if `APP_ENV != "development"` and JWT_SECRET_KEY or ENCRYPTION_KEY are defaults.
 18. **Swagger docs disabled in production** — `docs_url` and `redoc_url` are `None` when `APP_ENV != "development"`.
 19. **Migrations run in CI, not container startup** — `entrypoint.sh` no longer runs `alembic upgrade head`. Run migrations via deploy.yml workflow.
+20. **Two databases locally** — `.venv/bin/alembic` runs against Supabase (remote). Docker containers use `postgres:5432` (local). After adding a model column, run `docker exec ecom-netsuite-suites-backend-1 alembic upgrade head` to migrate the local Docker Postgres too, or the backend will crash with `UndefinedColumnError`.
+21. **Alembic revision ID max 32 chars** — `alembic_version.version_num` is `VARCHAR(32)`. Keep revision IDs short (e.g. `039_confidence_score`, not `039_chat_message_confidence_score`).
 
 ## Chat Architecture
 
@@ -297,7 +299,7 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 
 ## Current State (update after each major change)
 
-- **Latest migration**: 038_chat_message_content_summary
+- **Latest migration**: 039_chat_message_confidence_score
 - **Entity mappings**: 2,109 seeded for test tenant (bf92d059), seeder runs in metadata discovery pipeline
 - **Golden dataset**: 9 files, 85 chunks (added `financial-statements.md` for GL/P&L/BS; status code + REST API behavior docs)
 - **Doc chunk embeddings**: 3,198/3,198 embedded with OpenAI (was 2/3,198 with Voyage AI)

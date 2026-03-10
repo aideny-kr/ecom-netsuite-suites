@@ -107,6 +107,8 @@ def _serialize_message(msg: ChatMessage) -> dict:
         result["provider_used"] = msg.provider_used
     if msg.is_byok is not None:
         result["is_byok"] = msg.is_byok
+    if msg.confidence_score is not None:
+        result["confidence_score"] = float(msg.confidence_score)
     return result
 
 

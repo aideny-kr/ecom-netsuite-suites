@@ -52,6 +52,17 @@ def _sanitize_assistant_text(text: str) -> str:
     return text.strip()
 
 
+def _get_confidence_explanation(score: float) -> str:
+    """Return a human-readable explanation for a confidence score."""
+    if score >= 4.5:
+        return "Very high confidence — used proven patterns and all tools succeeded"
+    if score >= 3.5:
+        return "High confidence — data looks correct"
+    if score >= 2.5:
+        return "Moderate confidence — results may need verification"
+    return "Low confidence — please verify this data before acting on it"
+
+
 from app.models.chat import ChatMessage, ChatSession
 from app.services.audit_service import log_event
 from app.services.chat.billing import deduct_chat_credits
@@ -503,18 +514,35 @@ async def run_chat_turn(
                     elif vernacular_result:
                         context["tenant_vernacular"] = vernacular_result
                         print(f"[UNIFIED] Vernacular injected ({len(vernacular_result)} chars)", flush=True)
+                        # Extract entity resolution confidence from XML
+                        import re as _re
+
+                        conf_scores = [
+                            float(s)
+                            for s in _re.findall(
+                                r"<confidence_score>([\d.]+)</confidence_score>",
+                                vernacular_result,
+                            )
+                        ]
+                        if conf_scores:
+                            context["entity_resolution_confidence"] = max(conf_scores)
 
                     if isinstance(dk_result, Exception):
                         logger.warning("unified_agent.domain_knowledge_failed", exc_info=dk_result)
                     elif dk_result:
                         context["domain_knowledge"] = [r["raw_text"] for r in dk_result]
                         print(f"[UNIFIED] Domain knowledge injected ({len(dk_result)} chunks)", flush=True)
+                        sims = [r["similarity"] for r in dk_result if r.get("similarity")]
+                        if sims:
+                            context["domain_knowledge_similarity"] = sum(sims) / len(sims)
 
                     if isinstance(patterns_result, Exception):
                         logger.warning("unified_agent.proven_patterns_failed", exc_info=patterns_result)
                     elif patterns_result:
                         context["proven_patterns"] = patterns_result
                         print(f"[UNIFIED] Proven patterns injected ({len(patterns_result)} patterns)", flush=True)
+                        context["matched_pattern_similarity"] = patterns_result[0].get("similarity", 0.0)
+                        context["matched_pattern_success_count"] = patterns_result[0].get("success_count", 0)
 
                     context["user_timezone"] = user_timezone
 
@@ -595,6 +623,19 @@ async def run_chat_turn(
                     )
                     coord_result_tool_calls = agent_result.tool_calls_log
 
+                # Extract confidence score from agent result
+                confidence_val = (
+                    agent_result.confidence_score
+                    if agent_result and agent_result.confidence_score is not None
+                    else None
+                )
+                if confidence_val is not None:
+                    yield {
+                        "type": "confidence",
+                        "score": confidence_val,
+                        "explanation": _get_confidence_explanation(confidence_val),
+                    }
+
                 assistant_msg = ChatMessage(
                     tenant_id=tenant_id,
                     session_id=session.id,
@@ -608,6 +649,7 @@ async def run_chat_turn(
                     model_used=settings.MULTI_AGENT_SQL_MODEL,
                     provider_used=settings.MULTI_AGENT_SPECIALIST_PROVIDER,
                     is_byok=is_byok,
+                    confidence_score=confidence_val,
                     created_at=datetime.now(timezone.utc),
                 )
                 db.add(assistant_msg)
@@ -675,6 +717,8 @@ async def run_chat_turn(
                 }
                 if hasattr(assistant_msg, "created_at") and assistant_msg.created_at:
                     result_msg["created_at"] = assistant_msg.created_at.isoformat()
+                if confidence_val is not None:
+                    result_msg["confidence_score"] = confidence_val
                 yield {"type": "message", "message": result_msg}
                 return
 

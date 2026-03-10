@@ -1,7 +1,8 @@
 import uuid
+from decimal import Decimal
 
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import Boolean, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import Boolean, ForeignKey, Index, Integer, Numeric, String, Text
 from sqlalchemy.dialects.postgresql import JSON, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -45,6 +46,9 @@ class ChatMessage(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
     # Factual summary for history compaction (generated async after each turn)
     content_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Composite confidence score (1.0-5.0) for assistant responses
+    confidence_score: Mapped[Decimal | None] = mapped_column(Numeric(precision=3, scale=1), nullable=True)
 
     session: Mapped["ChatSession"] = relationship(back_populates="messages")
 

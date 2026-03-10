@@ -5,6 +5,7 @@ import type { ChatMessage } from "@/lib/types";
 export type ChatStreamEvent =
   | { type: "text"; content: string }
   | { type: "tool_status"; content: string }
+  | { type: "confidence"; score: number; explanation: string }
   | { type: "error"; error: string }
   | { type: "message"; message: ChatMessage };
 
@@ -16,6 +17,7 @@ interface ParsedSseBuffer {
 type StreamHandlers = {
   onText?: (content: string) => void;
   onToolStatus?: (content: string) => void;
+  onConfidence?: (score: number, explanation: string) => void;
   onError?: (error: string) => void;
   onMessage?: (message: ChatMessage) => void;
 };
@@ -41,6 +43,7 @@ export function normalizeStreamMessage(raw: Record<string, unknown>): ChatMessag
     model_used: typeof raw.model_used === "string" ? raw.model_used : undefined,
     provider_used: typeof raw.provider_used === "string" ? raw.provider_used : undefined,
     is_byok: typeof raw.is_byok === "boolean" ? raw.is_byok : undefined,
+    confidence_score: typeof raw.confidence_score === "number" ? raw.confidence_score : undefined,
   };
 }
 
@@ -101,6 +104,8 @@ export async function consumeChatStream(
         handlers.onText?.(event.content);
       } else if (event.type === "tool_status") {
         handlers.onToolStatus?.(event.content);
+      } else if (event.type === "confidence") {
+        handlers.onConfidence?.(event.score, event.explanation);
       } else if (event.type === "error") {
         handlers.onError?.(event.error);
       } else if (event.type === "message") {
@@ -118,6 +123,9 @@ function normalizeStreamEvent(data: Record<string, unknown>): ChatStreamEvent | 
   }
   if (type === "tool_status" && typeof data.content === "string") {
     return { type, content: data.content };
+  }
+  if (type === "confidence" && typeof data.score === "number") {
+    return { type, score: data.score, explanation: String(data.explanation || "") };
   }
   if (type === "error" && typeof data.error === "string") {
     return { type, error: data.error };

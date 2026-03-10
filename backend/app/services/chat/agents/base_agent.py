@@ -21,6 +21,7 @@ from app.services.chat.tool_call_results import (
     tool_call_had_error,
     tool_call_row_count,
 )
+from app.services.confidence_service import CompositeScorer
 
 if TYPE_CHECKING:
     import uuid
@@ -200,6 +201,35 @@ class AgentResult:
     tool_calls_log: list[dict] = field(default_factory=list)
     tokens_used: TokenUsage = field(default_factory=TokenUsage)
     agent_name: str = ""
+    confidence_score: float | None = None
+
+
+def _compute_confidence(
+    llm_confidence: int | None,
+    context: dict[str, Any],
+    tool_calls_log: list[dict],
+) -> float:
+    """Build a composite confidence score from all available signals."""
+    llm_norm = (llm_confidence / 5.0) if llm_confidence else 0.0
+
+    total_tools = len(tool_calls_log)
+    successful_tools = sum(1 for t in tool_calls_log if not tool_call_had_error(t))
+    tool_rate = (successful_tools / total_tools) if total_tools > 0 else 0.0
+
+    # Any data tool call means the query required tools
+    data_tools = {"netsuite_suiteql", "rag_search", "web_search"}
+    required = any(t.get("tool_name") in data_tools for t in tool_calls_log)
+
+    return CompositeScorer(
+        llm_score=llm_norm,
+        query_pattern_similarity=context.get("matched_pattern_similarity", 0.0),
+        query_pattern_success_count=context.get("matched_pattern_success_count", 0),
+        domain_knowledge_similarity=context.get("domain_knowledge_similarity", 0.0),
+        entity_resolution_confidence=context.get("entity_resolution_confidence", 0.0),
+        tool_success_rate=tool_rate,
+        num_tool_calls=total_tools,
+        required_tool_calls=required,
+    ).compute()
 
 
 class BaseSpecialistAgent(abc.ABC):
@@ -341,6 +371,8 @@ class BaseSpecialistAgent(abc.ABC):
                             final_text += _LOW_CONFIDENCE_DISCLAIMER
                         logger.info("agent.confidence agent=%s score=%d", self.agent_name, confidence)
 
+                    composite = _compute_confidence(confidence, context, tool_calls_log)
+
                     # Auto-extract query patterns (fire-and-forget)
                     await _maybe_store_query_pattern(db, self.tenant_id, task, tool_calls_log)
 
@@ -352,6 +384,7 @@ class BaseSpecialistAgent(abc.ABC):
                             total_input_tokens, total_output_tokens, total_cache_creation, total_cache_read
                         ),
                         agent_name=self.agent_name,
+                        confidence_score=composite,
                     )
 
                 # Process tool calls
@@ -452,6 +485,8 @@ class BaseSpecialistAgent(abc.ABC):
                     final_text += _LOW_CONFIDENCE_DISCLAIMER
                 logger.info("agent.confidence agent=%s score=%d", self.agent_name, confidence)
 
+            composite = _compute_confidence(confidence, context, tool_calls_log)
+
             await _maybe_store_query_pattern(db, self.tenant_id, task, tool_calls_log)
 
             return AgentResult(
@@ -460,6 +495,7 @@ class BaseSpecialistAgent(abc.ABC):
                 tool_calls_log=tool_calls_log,
                 tokens_used=TokenUsage(total_input_tokens, total_output_tokens, total_cache_creation, total_cache_read),
                 agent_name=self.agent_name,
+                confidence_score=composite,
             )
 
         except Exception as exc:
@@ -569,6 +605,8 @@ class BaseSpecialistAgent(abc.ABC):
                             final_text += _LOW_CONFIDENCE_DISCLAIMER
                         logger.info("agent.confidence agent=%s score=%d", self.agent_name, confidence)
 
+                    composite = _compute_confidence(confidence, context, tool_calls_log)
+
                     await _maybe_store_query_pattern(db, self.tenant_id, task, tool_calls_log)
 
                     yield (
@@ -581,6 +619,7 @@ class BaseSpecialistAgent(abc.ABC):
                                 total_input_tokens, total_output_tokens, total_cache_creation, total_cache_read
                             ),
                             agent_name=self.agent_name,
+                            confidence_score=composite,
                         ),
                     )
                     return
@@ -682,6 +721,8 @@ class BaseSpecialistAgent(abc.ABC):
                     final_text += _LOW_CONFIDENCE_DISCLAIMER
                 logger.info("agent.confidence agent=%s score=%d", self.agent_name, confidence)
 
+            composite = _compute_confidence(confidence, context, tool_calls_log)
+
             await _maybe_store_query_pattern(db, self.tenant_id, task, tool_calls_log)
 
             yield (
@@ -694,6 +735,7 @@ class BaseSpecialistAgent(abc.ABC):
                         total_input_tokens, total_output_tokens, total_cache_creation, total_cache_read
                     ),
                     agent_name=self.agent_name,
+                    confidence_score=composite,
                 ),
             )
 

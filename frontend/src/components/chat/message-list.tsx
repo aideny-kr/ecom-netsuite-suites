@@ -14,6 +14,7 @@ import { ChangeProposalCard } from "@/components/chat/change-proposal-card";
 import { WorkspaceToolCard } from "@/components/chat/workspace-tool-card";
 import { SuiteQLToolCard } from "@/components/chat/suiteql-tool-card";
 import { FileCode, Bookmark, Check, Loader2, Copy } from "lucide-react";
+import { ConfidenceBadge } from "@/components/chat/confidence-badge";
 
 /** Framework-inspired gear/module icon used as AI assistant avatar.
  *  A square with notches on each side — resembles the Framework Computer logo. */
@@ -694,6 +695,12 @@ function AssistantMessageRow({
               <>
                 <span className="ml-1">·</span>
                 <span>{(message.input_tokens + message.output_tokens).toLocaleString()} tokens</span>
+              </>
+            )}
+            {message.confidence_score != null && (
+              <>
+                <span className="ml-1">·</span>
+                <ConfidenceBadge score={message.confidence_score} />
               </>
             )}
           </div>

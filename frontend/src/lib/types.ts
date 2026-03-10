@@ -342,6 +342,7 @@ export interface ChatMessage {
   model_used?: string;
   provider_used?: string;
   is_byok?: boolean;
+  confidence_score?: number;
   created_at: string;
 }
 
