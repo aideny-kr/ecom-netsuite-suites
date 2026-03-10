@@ -34,8 +34,10 @@ const mdComponents: Components = {
   code({ className, children, ...props }) {
     const match = /language-(\w+)/.exec(className || "");
     const codeString = String(children).replace(/\n$/, "");
+    const isMultiline = codeString.includes("\n");
 
-    if (!match) {
+    // Inline code (single line, no language tag)
+    if (!match && !isMultiline) {
       return (
         <code
           className="rounded bg-muted px-1.5 py-0.5 text-[13px] font-mono text-foreground"
@@ -46,10 +48,12 @@ const mdComponents: Components = {
       );
     }
 
+    const language = match?.[1] || "text";
+
     return (
       <div className="group relative my-0 overflow-hidden rounded-xl border border-border/50">
         <div className="flex items-center justify-between bg-muted/80 px-3 py-1.5 text-[11px] font-medium text-muted-foreground">
-          <span>{match[1]}</span>
+          <span>{language}</span>
           <button
             onClick={() => navigator.clipboard.writeText(codeString)}
             className="opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1 hover:text-foreground"
@@ -61,7 +65,7 @@ const mdComponents: Components = {
         <div className="overflow-x-auto scrollbar-thin">
           <SyntaxHighlighter
             style={oneDark}
-            language={match[1]}
+            language={language}
             PreTag="div"
             customStyle={{
               margin: 0,
