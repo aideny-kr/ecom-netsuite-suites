@@ -13,9 +13,10 @@ import { ToolCallStepCard } from "@/components/chat/tool-call-step";
 import { ChangeProposalCard } from "@/components/chat/change-proposal-card";
 import { WorkspaceToolCard } from "@/components/chat/workspace-tool-card";
 import { SuiteQLToolCard } from "@/components/chat/suiteql-tool-card";
-import { FileCode, Bookmark, Check, Loader2, Copy } from "lucide-react";
+import { FileCode, Bookmark, Check, Loader2, Copy, ThumbsUp, ThumbsDown } from "lucide-react";
 import { ConfidenceBadge } from "@/components/chat/confidence-badge";
 import { ImportanceBanner } from "@/components/chat/importance-banner";
+import { useChatFeedback } from "@/hooks/use-chat-feedback";
 
 /** Framework-inspired gear/module icon used as AI assistant avatar.
  *  A square with notches on each side — resembles the Framework Computer logo. */
@@ -691,6 +692,10 @@ function AssistantMessageRow({
           />
         )}
 
+        {!isStreamingPreview && message.tool_calls && message.tool_calls.length > 0 && (
+          <FeedbackButtons message={message} />
+        )}
+
         {!isStreamingPreview && message.model_used && (
           <div className="mt-1.5 flex items-center gap-1.5 text-[11px] text-muted-foreground/60">
             {message.is_byok ? (
@@ -787,6 +792,56 @@ function InlineSaveLink({
           Failed to save
         </span>
       )}
+    </div>
+  );
+}
+
+function FeedbackButtons({ message }: { message: ChatMessage }) {
+  const feedbackMutation = useChatFeedback();
+  const [localFeedback, setLocalFeedback] = useState<"helpful" | "not_helpful" | null>(
+    message.user_feedback ?? null,
+  );
+
+  const feedback = localFeedback ?? message.user_feedback ?? null;
+  const hasFeedback = feedback != null;
+
+  const handleClick = (value: "helpful" | "not_helpful") => {
+    setLocalFeedback(value);
+    feedbackMutation.mutate({ messageId: message.id, feedback: value });
+  };
+
+  return (
+    <div className="flex items-center gap-1 mt-1">
+      <button
+        onClick={() => handleClick("helpful")}
+        disabled={hasFeedback || feedbackMutation.isPending}
+        aria-label="Helpful"
+        className={cn(
+          "p-1 rounded-md text-muted-foreground/50 transition-colors",
+          feedback === "helpful"
+            ? "text-emerald-500 bg-emerald-50 dark:bg-emerald-950/30"
+            : hasFeedback
+              ? "opacity-30 cursor-not-allowed"
+              : "hover:text-foreground hover:bg-muted",
+        )}
+      >
+        <ThumbsUp className="h-3.5 w-3.5" />
+      </button>
+      <button
+        onClick={() => handleClick("not_helpful")}
+        disabled={hasFeedback || feedbackMutation.isPending}
+        aria-label="Not helpful"
+        className={cn(
+          "p-1 rounded-md text-muted-foreground/50 transition-colors",
+          feedback === "not_helpful"
+            ? "text-rose-500 bg-rose-50 dark:bg-rose-950/30"
+            : hasFeedback
+              ? "opacity-30 cursor-not-allowed"
+              : "hover:text-foreground hover:bg-muted",
+        )}
+      >
+        <ThumbsDown className="h-3.5 w-3.5" />
+      </button>
     </div>
   );
 }

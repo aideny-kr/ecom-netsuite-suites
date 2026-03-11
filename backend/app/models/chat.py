@@ -53,6 +53,9 @@ class ChatMessage(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     # Query importance tier (1=Casual, 2=Operational, 3=Reporting, 4=Audit Critical)
     query_importance: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
+    # User feedback: "helpful", "not_helpful", or None
+    user_feedback: Mapped[str | None] = mapped_column(String(20), nullable=True)
+
     session: Mapped["ChatSession"] = relationship(back_populates="messages")
 
 

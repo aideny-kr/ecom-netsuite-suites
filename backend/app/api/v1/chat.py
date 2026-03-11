@@ -6,7 +6,7 @@ from typing import Annotated
 
 import anthropic
 import openai
-from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query as FastAPIQuery, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -54,6 +54,7 @@ class MessageResponse(BaseModel):
     is_byok: bool | None = None
     confidence_score: float | None = None
     query_importance: int | None = None
+    user_feedback: str | None = None
     created_at: str
 
     model_config = {"from_attributes": True}
@@ -118,6 +119,8 @@ def _serialize_message(msg: ChatMessage) -> dict:
         result["confidence_score"] = float(msg.confidence_score)
     if msg.query_importance is not None:
         result["query_importance"] = msg.query_importance
+    if msg.user_feedback is not None:
+        result["user_feedback"] = msg.user_feedback
     return result
 
 
@@ -346,6 +349,51 @@ async def update_message_importance(
     )
     await db.commit()
     return {"id": str(msg.id), "query_importance": msg.query_importance}
+
+
+@router.patch("/messages/{message_id}/feedback")
+async def set_message_feedback(
+    message_id: uuid.UUID,
+    feedback: str = FastAPIQuery(..., pattern=r"^(helpful|not_helpful)$"),
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Set user feedback (helpful/not_helpful) on an assistant message."""
+    result = await db.execute(
+        select(ChatMessage).where(
+            ChatMessage.id == message_id,
+            ChatMessage.tenant_id == user.tenant_id,
+        )
+    )
+    msg = result.scalar_one_or_none()
+    if not msg:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Message not found")
+
+    old_feedback = msg.user_feedback
+    msg.user_feedback = feedback
+
+    from app.services.query_pattern_service import process_feedback
+
+    await process_feedback(
+        db=db,
+        tenant_id=user.tenant_id,
+        message=msg,
+        feedback=feedback,
+    )
+
+    await audit_service.log_event(
+        db=db,
+        tenant_id=user.tenant_id,
+        category="chat",
+        action="chat.feedback",
+        actor_id=user.id,
+        resource_type="chat_message",
+        resource_id=str(message_id),
+        payload={"feedback": feedback, "old_feedback": old_feedback},
+    )
+    await db.commit()
+
+    return {"id": str(msg.id), "feedback": feedback}
 
 
 @router.delete("/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)

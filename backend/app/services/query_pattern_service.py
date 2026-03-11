@@ -142,6 +142,47 @@ async def extract_and_store_pattern(
     return stored
 
 
+async def process_feedback(
+    db: AsyncSession,
+    tenant_id: uuid.UUID,
+    message: "ChatMessage",
+    feedback: str,
+) -> None:
+    """Update pattern success_count based on user feedback.
+
+    - "helpful" → increment success_count
+    - "not_helpful" → decrement success_count (floor at 0)
+    """
+    from sqlalchemy import select as sa_select
+
+    if not message.tool_calls:
+        return
+
+    for call in message.tool_calls:
+        if call.get("tool") != "netsuite_suiteql":
+            continue
+
+        sql = call.get("params", {}).get("query", "")
+        if not sql:
+            continue
+
+        result = await db.execute(
+            sa_select(TenantQueryPattern).where(
+                TenantQueryPattern.tenant_id == tenant_id,
+                TenantQueryPattern.working_sql == sql,
+            )
+        )
+        pattern = result.scalar_one_or_none()
+        if not pattern:
+            continue
+
+        if feedback == "helpful":
+            pattern.success_count += 1
+            pattern.last_used_at = datetime.now(timezone.utc)
+        elif feedback == "not_helpful":
+            pattern.success_count = max(0, pattern.success_count - 1)
+
+
 async def retrieve_similar_patterns(
     db: AsyncSession,
     tenant_id: uuid.UUID,
@@ -167,6 +208,7 @@ async def retrieve_similar_patterns(
             FROM tenant_query_patterns
             WHERE tenant_id = CAST(:tenant_id AS uuid)
               AND intent_embedding IS NOT NULL
+              AND success_count > 0
             ORDER BY intent_embedding <=> CAST(:embedding AS vector)
             LIMIT :top_k
         """),

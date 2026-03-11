@@ -345,6 +345,7 @@ export interface ChatMessage {
   is_byok?: boolean;
   confidence_score?: number;
   query_importance?: number; // 1=Casual, 2=Operational, 3=Reporting, 4=Audit Critical
+  user_feedback?: "helpful" | "not_helpful" | null;
   created_at: string;
 }
 
