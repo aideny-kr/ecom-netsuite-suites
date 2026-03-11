@@ -325,9 +325,10 @@ function formatCellValue(value: unknown): string {
     if (Number.isInteger(value)) return value.toLocaleString();
     return value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   }
-  // Handle string values that look like scientific notation (e.g., "1.23E7")
+  // Handle string values that are numeric (NetSuite returns numbers as strings)
   if (typeof value === "string") {
-    if (/^-?\d+\.?\d*[eE][+-]?\d+$/.test(value)) {
+    // Scientific notation (e.g., "1.23E7") or plain numeric strings (e.g., "2832400", "837140.18")
+    if (/^-?\d+\.?\d*([eE][+-]?\d+)?$/.test(value) && value.length > 0) {
       const num = Number(value);
       if (!isNaN(num)) {
         if (Number.isInteger(num)) return num.toLocaleString();
