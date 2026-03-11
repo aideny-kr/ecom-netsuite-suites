@@ -1,0 +1,302 @@
+[
+    {
+        "id": "gq-001",
+        "tier": 1,
+        "category": "casual",
+        "question": "how many orders today",
+        "sample_sql": "SELECT COUNT(*) as cnt FROM transaction WHERE trandate = TRUNC(SYSDATE) AND type = 'SalesOrd'",
+        "expected_sql_contains": ["transaction", "COUNT"],
+        "expected_sql_not_contains": ["DELETE", "UPDATE", "DROP"],
+        "expected_tables": ["transaction"]
+    },
+    {
+        "id": "gq-002",
+        "tier": 1,
+        "category": "casual",
+        "question": "what is order SO-12345",
+        "sample_sql": "SELECT t.id, t.tranid, t.trandate, t.status, t.total FROM transaction t WHERE t.tranid = 'SO-12345'",
+        "expected_sql_contains": ["transaction", "tranid"],
+        "expected_sql_not_contains": ["DELETE", "UPDATE"],
+        "expected_tables": ["transaction"]
+    },
+    {
+        "id": "gq-003",
+        "tier": 1,
+        "category": "casual",
+        "question": "is customer Acme Corp in the system",
+        "sample_sql": "SELECT id, companyname, email FROM customer WHERE LOWER(companyname) LIKE '%acme%'",
+        "expected_sql_contains": ["customer", "companyname"],
+        "expected_sql_not_contains": ["DELETE", "UPDATE"],
+        "expected_tables": ["customer"]
+    },
+    {
+        "id": "gq-004",
+        "tier": 1,
+        "category": "casual",
+        "question": "how many items do we have",
+        "sample_sql": "SELECT COUNT(*) as item_count FROM item",
+        "expected_sql_contains": ["item", "COUNT"],
+        "expected_sql_not_contains": ["DELETE"],
+        "expected_tables": ["item"]
+    },
+    {
+        "id": "gq-005",
+        "tier": 1,
+        "category": "casual",
+        "question": "who is vendor 12345",
+        "sample_sql": "SELECT id, companyname, email FROM vendor WHERE id = 12345",
+        "expected_sql_contains": ["vendor"],
+        "expected_sql_not_contains": ["DELETE"],
+        "expected_tables": ["vendor"]
+    },
+    {
+        "id": "gq-006",
+        "tier": 1,
+        "category": "casual",
+        "question": "any new orders yesterday",
+        "sample_sql": "SELECT t.tranid, t.trandate, t.total FROM transaction t WHERE t.trandate = TRUNC(SYSDATE) - 1 AND t.type = 'SalesOrd' ORDER BY t.id DESC FETCH FIRST 20 ROWS ONLY",
+        "expected_sql_contains": ["transaction", "SYSDATE"],
+        "expected_sql_not_contains": ["DELETE"],
+        "expected_tables": ["transaction"]
+    },
+    {
+        "id": "gq-007",
+        "tier": 1,
+        "category": "casual",
+        "question": "latest 5 invoices",
+        "sample_sql": "SELECT t.tranid, t.trandate, t.total FROM transaction t WHERE t.type = 'CustInvc' ORDER BY t.id DESC FETCH FIRST 5 ROWS ONLY",
+        "expected_sql_contains": ["transaction", "CustInvc", "FETCH FIRST"],
+        "expected_sql_not_contains": ["DELETE"],
+        "expected_tables": ["transaction"]
+    },
+    {
+        "id": "gq-008",
+        "tier": 1,
+        "category": "casual",
+        "question": "check if PO-9876 exists",
+        "sample_sql": "SELECT t.id, t.tranid, t.status FROM transaction t WHERE t.tranid = 'PO-9876' AND t.type = 'PurchOrd'",
+        "expected_sql_contains": ["transaction", "PurchOrd"],
+        "expected_sql_not_contains": ["DELETE"],
+        "expected_tables": ["transaction"]
+    },
+    {
+        "id": "gq-009",
+        "tier": 2,
+        "category": "operational",
+        "question": "show me unfulfilled orders by vendor",
+        "sample_sql": "SELECT BUILTIN.DF(t.entity) as vendor_name, COUNT(*) as order_count FROM transaction t WHERE t.type = 'PurchOrd' AND t.status NOT IN ('G', 'H') GROUP BY BUILTIN.DF(t.entity) ORDER BY order_count DESC",
+        "expected_sql_contains": ["transaction", "GROUP BY", "status NOT IN"],
+        "expected_sql_not_contains": ["DELETE", "UPDATE"],
+        "expected_tables": ["transaction"]
+    },
+    {
+        "id": "gq-010",
+        "tier": 2,
+        "category": "operational",
+        "question": "which customers have pending orders",
+        "sample_sql": "SELECT BUILTIN.DF(t.entity) as customer_name, COUNT(*) as pending FROM transaction t WHERE t.type = 'SalesOrd' AND t.status = 'B' GROUP BY BUILTIN.DF(t.entity)",
+        "expected_sql_contains": ["transaction", "GROUP BY", "SalesOrd"],
+        "expected_sql_not_contains": ["DELETE"],
+        "expected_tables": ["transaction"]
+    },
+    {
+        "id": "gq-011",
+        "tier": 2,
+        "category": "operational",
+        "question": "top 10 items by quantity sold this month",
+        "sample_sql": "SELECT i.displayname, SUM(tl.quantity) as qty_sold FROM transactionline tl JOIN transaction t ON t.id = tl.transaction JOIN item i ON i.id = tl.item WHERE t.type = 'SalesOrd' AND t.trandate >= TRUNC(SYSDATE, 'MONTH') AND tl.mainline = 'F' GROUP BY i.displayname ORDER BY qty_sold DESC FETCH FIRST 10 ROWS ONLY",
+        "expected_sql_contains": ["transactionline", "item", "GROUP BY", "FETCH FIRST"],
+        "expected_sql_not_contains": ["DELETE"],
+        "expected_tables": ["transaction", "transactionline", "item"]
+    },
+    {
+        "id": "gq-012",
+        "tier": 2,
+        "category": "operational",
+        "question": "list all overdue purchase orders",
+        "sample_sql": "SELECT t.tranid, BUILTIN.DF(t.entity) as vendor, t.duedate, t.total FROM transaction t WHERE t.type = 'PurchOrd' AND t.status NOT IN ('G', 'H') AND t.duedate < TRUNC(SYSDATE) ORDER BY t.duedate",
+        "expected_sql_contains": ["transaction", "PurchOrd", "duedate"],
+        "expected_sql_not_contains": ["DELETE"],
+        "expected_tables": ["transaction"]
+    },
+    {
+        "id": "gq-013",
+        "tier": 2,
+        "category": "operational",
+        "question": "show me pending approvals sorted by amount",
+        "sample_sql": "SELECT t.tranid, BUILTIN.DF(t.type) as type, t.total, BUILTIN.DF(t.entity) as entity FROM transaction t WHERE t.status = 'A' ORDER BY t.total DESC",
+        "expected_sql_contains": ["transaction", "status", "ORDER BY"],
+        "expected_sql_not_contains": ["DELETE"],
+        "expected_tables": ["transaction"]
+    },
+    {
+        "id": "gq-014",
+        "tier": 2,
+        "category": "operational",
+        "question": "inventory by warehouse for item SKU-100",
+        "sample_sql": "SELECT BUILTIN.DF(iil.location) as warehouse, iil.quantityavailable, iil.quantityonhand FROM inventoryitemlocations iil JOIN item i ON i.id = iil.item WHERE i.itemid = 'SKU-100'",
+        "expected_sql_contains": ["inventoryitemlocations", "item", "quantityavailable"],
+        "expected_sql_not_contains": ["DELETE"],
+        "expected_tables": ["inventoryitemlocations", "item"]
+    },
+    {
+        "id": "gq-015",
+        "tier": 2,
+        "category": "operational",
+        "question": "orders grouped by subsidiary this week",
+        "sample_sql": "SELECT BUILTIN.DF(t.subsidiary) as subsidiary, COUNT(*) as order_count, SUM(t.total) as total FROM transaction t WHERE t.type = 'SalesOrd' AND t.trandate >= TRUNC(SYSDATE) - 7 GROUP BY BUILTIN.DF(t.subsidiary)",
+        "expected_sql_contains": ["transaction", "subsidiary", "GROUP BY"],
+        "expected_sql_not_contains": ["DELETE"],
+        "expected_tables": ["transaction"]
+    },
+    {
+        "id": "gq-016",
+        "tier": 2,
+        "category": "operational",
+        "question": "compare fulfillment rates between locations",
+        "sample_sql": "SELECT BUILTIN.DF(t.location) as loc, COUNT(*) as total_orders, SUM(CASE WHEN t.status = 'G' THEN 1 ELSE 0 END) as fulfilled FROM transaction t WHERE t.type = 'SalesOrd' GROUP BY BUILTIN.DF(t.location)",
+        "expected_sql_contains": ["transaction", "location", "GROUP BY"],
+        "expected_sql_not_contains": ["DELETE"],
+        "expected_tables": ["transaction"]
+    },
+    {
+        "id": "gq-017",
+        "tier": 3,
+        "category": "reporting",
+        "question": "total revenue by month this quarter",
+        "sample_sql": "SELECT TO_CHAR(t.trandate, 'YYYY-MM') as month, SUM(t.total) as revenue FROM transaction t WHERE t.type = 'CustInvc' AND t.trandate >= ADD_MONTHS(TRUNC(SYSDATE, 'Q'), 0) GROUP BY TO_CHAR(t.trandate, 'YYYY-MM') ORDER BY month",
+        "expected_sql_contains": ["transaction", "SUM", "GROUP BY", "CustInvc"],
+        "expected_sql_not_contains": ["DELETE", "UPDATE"],
+        "expected_tables": ["transaction"]
+    },
+    {
+        "id": "gq-018",
+        "tier": 3,
+        "category": "reporting",
+        "question": "monthly sales summary for the dashboard",
+        "sample_sql": "SELECT TO_CHAR(t.trandate, 'YYYY-MM') as month, COUNT(*) as order_count, SUM(t.total) as total_sales FROM transaction t WHERE t.type = 'SalesOrd' AND t.trandate >= ADD_MONTHS(TRUNC(SYSDATE), -6) GROUP BY TO_CHAR(t.trandate, 'YYYY-MM') ORDER BY month",
+        "expected_sql_contains": ["transaction", "SUM", "GROUP BY"],
+        "expected_sql_not_contains": ["DELETE"],
+        "expected_tables": ["transaction"]
+    },
+    {
+        "id": "gq-019",
+        "tier": 3,
+        "category": "reporting",
+        "question": "quarterly revenue trend year over year",
+        "sample_sql": "SELECT TO_CHAR(t.trandate, 'YYYY') as year, TO_CHAR(t.trandate, 'Q') as quarter, SUM(t.total) as revenue FROM transaction t WHERE t.type = 'CustInvc' GROUP BY TO_CHAR(t.trandate, 'YYYY'), TO_CHAR(t.trandate, 'Q') ORDER BY year, quarter",
+        "expected_sql_contains": ["transaction", "SUM", "GROUP BY", "CustInvc"],
+        "expected_sql_not_contains": ["DELETE"],
+        "expected_tables": ["transaction"]
+    },
+    {
+        "id": "gq-020",
+        "tier": 3,
+        "category": "reporting",
+        "question": "KPI report: average order value by department",
+        "sample_sql": "SELECT BUILTIN.DF(t.department) as dept, COUNT(*) as orders, SUM(t.total) as revenue, ROUND(SUM(t.total)/COUNT(*), 2) as avg_order FROM transaction t WHERE t.type = 'SalesOrd' GROUP BY BUILTIN.DF(t.department)",
+        "expected_sql_contains": ["transaction", "department", "GROUP BY", "SUM"],
+        "expected_sql_not_contains": ["DELETE"],
+        "expected_tables": ["transaction"]
+    },
+    {
+        "id": "gq-021",
+        "tier": 3,
+        "category": "reporting",
+        "question": "sales by item category for the monthly report",
+        "sample_sql": "SELECT BUILTIN.DF(tl.class) as category, SUM(tl.amount * -1) as revenue FROM transactionline tl JOIN transaction t ON t.id = tl.transaction WHERE t.type = 'CustInvc' AND tl.mainline = 'F' AND tl.taxline = 'F' GROUP BY BUILTIN.DF(tl.class) ORDER BY revenue DESC",
+        "expected_sql_contains": ["transactionline", "transaction", "GROUP BY", "SUM"],
+        "expected_sql_not_contains": ["DELETE"],
+        "expected_tables": ["transaction", "transactionline"]
+    },
+    {
+        "id": "gq-022",
+        "tier": 3,
+        "category": "reporting",
+        "question": "expense totals by month for budget comparison",
+        "sample_sql": "SELECT TO_CHAR(t.trandate, 'YYYY-MM') as month, SUM(t.total) as actual_expense FROM transaction t WHERE t.type = 'VendBill' GROUP BY TO_CHAR(t.trandate, 'YYYY-MM') ORDER BY month",
+        "expected_sql_contains": ["transaction", "VendBill", "SUM", "GROUP BY"],
+        "expected_sql_not_contains": ["DELETE"],
+        "expected_tables": ["transaction"]
+    },
+    {
+        "id": "gq-023",
+        "tier": 3,
+        "category": "reporting",
+        "question": "export customer purchase history for the quarterly review",
+        "sample_sql": "SELECT BUILTIN.DF(t.entity) as customer, COUNT(*) as orders, SUM(t.total) as total_spent FROM transaction t WHERE t.type = 'CustInvc' AND t.trandate >= ADD_MONTHS(TRUNC(SYSDATE, 'Q'), 0) GROUP BY BUILTIN.DF(t.entity) ORDER BY total_spent DESC",
+        "expected_sql_contains": ["transaction", "CustInvc", "GROUP BY", "SUM"],
+        "expected_sql_not_contains": ["DELETE"],
+        "expected_tables": ["transaction"]
+    },
+    {
+        "id": "gq-024",
+        "tier": 3,
+        "category": "reporting",
+        "question": "inventory turnover report by location",
+        "sample_sql": "SELECT BUILTIN.DF(iil.location) as location, COUNT(*) as items, SUM(iil.quantityonhand) as total_onhand FROM inventoryitemlocations iil WHERE iil.quantityonhand > 0 GROUP BY BUILTIN.DF(iil.location) ORDER BY total_onhand DESC",
+        "expected_sql_contains": ["inventoryitemlocations", "GROUP BY", "quantityonhand"],
+        "expected_sql_not_contains": ["DELETE"],
+        "expected_tables": ["inventoryitemlocations"]
+    },
+    {
+        "id": "gq-025",
+        "tier": 4,
+        "category": "audit_critical",
+        "question": "net income by account for Q4 audit",
+        "sample_sql": "SELECT a.acctnumber, a.acctname, BUILTIN.DF(a.accttype) as account_type, SUM(tal.amount) as net_amount FROM transactionaccountingline tal JOIN transaction t ON t.id = tal.transaction JOIN account a ON a.id = tal.account WHERE t.trandate BETWEEN TO_DATE('2025-10-01','YYYY-MM-DD') AND TO_DATE('2025-12-31','YYYY-MM-DD') GROUP BY a.acctnumber, a.acctname, BUILTIN.DF(a.accttype) ORDER BY a.acctnumber",
+        "expected_sql_contains": ["transactionaccountingline", "account", "GROUP BY", "SUM"],
+        "expected_sql_not_contains": ["DELETE", "UPDATE", "DROP"],
+        "expected_tables": ["transactionaccountingline", "account", "transaction"]
+    },
+    {
+        "id": "gq-026",
+        "tier": 4,
+        "category": "audit_critical",
+        "question": "P&L by department for board presentation",
+        "sample_sql": "SELECT BUILTIN.DF(tal.department) as department, BUILTIN.DF(a.accttype) as type, SUM(tal.amount) as amount FROM transactionaccountingline tal JOIN account a ON a.id = tal.account JOIN transaction t ON t.id = tal.transaction WHERE a.accttype IN ('Income', 'COGS', 'Expense') GROUP BY BUILTIN.DF(tal.department), BUILTIN.DF(a.accttype)",
+        "expected_sql_contains": ["transactionaccountingline", "account", "accttype", "GROUP BY"],
+        "expected_sql_not_contains": ["DELETE", "UPDATE"],
+        "expected_tables": ["transactionaccountingline", "account", "transaction"]
+    },
+    {
+        "id": "gq-027",
+        "tier": 4,
+        "category": "audit_critical",
+        "question": "balance sheet accounts for year-end close",
+        "sample_sql": "SELECT a.acctnumber, a.acctname, BUILTIN.DF(a.accttype) as type, SUM(tal.debit) as total_debit, SUM(tal.credit) as total_credit FROM transactionaccountingline tal JOIN account a ON a.id = tal.account WHERE a.accttype IN ('Bank', 'AcctRec', 'OthCurrAsset', 'FixedAsset', 'AcctPay', 'OthCurrLiab', 'LongTermLiab', 'Equity') GROUP BY a.acctnumber, a.acctname, BUILTIN.DF(a.accttype) ORDER BY a.acctnumber",
+        "expected_sql_contains": ["transactionaccountingline", "account", "debit", "credit", "GROUP BY"],
+        "expected_sql_not_contains": ["DELETE", "UPDATE"],
+        "expected_tables": ["transactionaccountingline", "account"]
+    },
+    {
+        "id": "gq-028",
+        "tier": 4,
+        "category": "audit_critical",
+        "question": "revenue recognition report for SEC filing",
+        "sample_sql": "SELECT TO_CHAR(t.trandate, 'YYYY-MM') as month, BUILTIN.DF(t.subsidiary) as subsidiary, SUM(tl.amount * -1) as recognized_revenue FROM transactionline tl JOIN transaction t ON t.id = tl.transaction WHERE t.type = 'CustInvc' AND tl.mainline = 'F' AND tl.taxline = 'F' GROUP BY TO_CHAR(t.trandate, 'YYYY-MM'), BUILTIN.DF(t.subsidiary) ORDER BY month, subsidiary",
+        "expected_sql_contains": ["transactionline", "transaction", "CustInvc", "SUM", "GROUP BY"],
+        "expected_sql_not_contains": ["DELETE", "UPDATE"],
+        "expected_tables": ["transaction", "transactionline"]
+    },
+    {
+        "id": "gq-029",
+        "tier": 4,
+        "category": "audit_critical",
+        "question": "cash flow statement for investor deck",
+        "sample_sql": "SELECT a.acctnumber, a.acctname, SUM(tal.debit) as debit, SUM(tal.credit) as credit, SUM(tal.amount) as net FROM transactionaccountingline tal JOIN account a ON a.id = tal.account JOIN transaction t ON t.id = tal.transaction WHERE a.accttype = 'Bank' GROUP BY a.acctnumber, a.acctname ORDER BY a.acctnumber",
+        "expected_sql_contains": ["transactionaccountingline", "account", "Bank", "GROUP BY"],
+        "expected_sql_not_contains": ["DELETE"],
+        "expected_tables": ["transactionaccountingline", "account", "transaction"]
+    },
+    {
+        "id": "gq-030",
+        "tier": 4,
+        "category": "audit_critical",
+        "question": "gross margin by product line for materiality assessment",
+        "sample_sql": "SELECT BUILTIN.DF(tl.class) as product_line, SUM(CASE WHEN a.accttype = 'Income' THEN tal.amount ELSE 0 END) as revenue, SUM(CASE WHEN a.accttype = 'COGS' THEN tal.amount ELSE 0 END) as cogs FROM transactionaccountingline tal JOIN account a ON a.id = tal.account JOIN transaction t ON t.id = tal.transaction JOIN transactionline tl ON tl.transaction = t.id AND tl.id = tal.transactionline GROUP BY BUILTIN.DF(tl.class)",
+        "expected_sql_contains": ["transactionaccountingline", "account", "Income", "COGS", "GROUP BY"],
+        "expected_sql_not_contains": ["DELETE"],
+        "expected_tables": ["transactionaccountingline", "account", "transaction", "transactionline"]
+    }
+]
