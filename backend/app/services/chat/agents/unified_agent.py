@@ -555,10 +555,11 @@ class UnifiedAgent(BaseSpecialistAgent):
         db: "AsyncSession",
         adapter: "BaseLLMAdapter",
         model: str,
+        tool_choice: dict | str | None = None,
     ):
         """Override to inject context and discover external MCP tools."""
         task = await self._setup_context(task, context, db)
-        return await super().run(task, context, db, adapter, model)
+        return await super().run(task, context, db, adapter, model, tool_choice=tool_choice)
 
     async def run_streaming(
         self,
@@ -568,8 +569,11 @@ class UnifiedAgent(BaseSpecialistAgent):
         adapter: "BaseLLMAdapter",
         model: str,
         conversation_history: list[dict] | None = None,
+        tool_choice: dict | str | None = None,
     ):
         """Override to inject context before streaming."""
         task = await self._setup_context(task, context, db)
-        async for event in super().run_streaming(task, context, db, adapter, model, conversation_history):
+        async for event in super().run_streaming(
+            task, context, db, adapter, model, conversation_history, tool_choice=tool_choice
+        ):
             yield event
