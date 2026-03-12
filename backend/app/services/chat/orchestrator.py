@@ -639,7 +639,61 @@ async def run_chat_turn(
                 # Augment task for financial report queries
                 unified_task = sanitized_input
                 if not _is_chitchat and is_financial:
-                    unified_task = _build_financial_mode_task(sanitized_input)
+                    # Try to pre-execute the financial report deterministically
+                    from app.mcp.tools.netsuite_financial_report import parse_report_intent, execute as fin_execute
+
+                    parsed = parse_report_intent(sanitized_input)
+                    if parsed:
+                        print(
+                            f"[FINANCIAL_REPORT] Pre-executing: {parsed['report_type']} "
+                            f"period={parsed['period']}",
+                            flush=True,
+                        )
+                        try:
+                            fin_result = await fin_execute(
+                                report_type=parsed["report_type"],
+                                period=parsed["period"],
+                                tenant_id=str(tenant_id),
+                                db=db,
+                            )
+                            if fin_result.get("success") and fin_result.get("items"):
+                                import json as _json
+
+                                # Format results as a data block for the agent to present
+                                items_json = _json.dumps(fin_result["items"][:200], default=str)
+                                unified_task = (
+                                    f"{sanitized_input}\n\n"
+                                    f"[{_FINANCIAL_MODE_TAG}] — DATA ALREADY FETCHED\n"
+                                    f"Report: {fin_result['description']}\n"
+                                    f"Period: {parsed['period']}\n"
+                                    f"Rows: {fin_result['total_rows']}\n\n"
+                                    f"The data below was fetched using a verified SQL template "
+                                    f"with correct TAL joins, sign conventions, and period filters. "
+                                    f"DO NOT re-query — just present this data clearly.\n\n"
+                                    f"Columns: {fin_result['columns']}\n"
+                                    f"Data:\n{items_json}\n\n"
+                                    f"Present with sections (Revenue, COGS, Expenses) and totals.\n"
+                                    f"Calculate Net Income = Revenue + Other Income - COGS "
+                                    f"- Operating Expenses - Other Expenses.\n"
+                                    f"For trend reports, show period-by-period comparison."
+                                )
+                                print(
+                                    f"[FINANCIAL_REPORT] Pre-executed successfully: "
+                                    f"{fin_result['total_rows']} rows",
+                                    flush=True,
+                                )
+                            else:
+                                # Pre-execution failed — fall back to tool instruction
+                                error = fin_result.get("error", "unknown error")
+                                print(f"[FINANCIAL_REPORT] Pre-execution failed: {error}", flush=True)
+                                unified_task = _build_financial_mode_task(sanitized_input)
+                        except Exception as e:
+                            print(f"[FINANCIAL_REPORT] Pre-execution error: {e}", flush=True)
+                            unified_task = _build_financial_mode_task(sanitized_input)
+                    else:
+                        # Could not parse report type/period — fall back to tool instruction
+                        print("[FINANCIAL_REPORT] Could not parse intent, falling back to tool instruction", flush=True)
+                        unified_task = _build_financial_mode_task(sanitized_input)
                     print("[UNIFIED] Financial report mode activated", flush=True)
 
                 streamed_text_parts: list[str] = []

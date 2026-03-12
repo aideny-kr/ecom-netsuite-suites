@@ -6,7 +6,9 @@ The only variable is the period filter, which is substituted safely.
 
 from __future__ import annotations
 
+import calendar
 import re
+from datetime import datetime, timedelta
 
 # Strict validation: only allow "Mon YYYY" format or "YYYY-MM-DD" date format
 _PERIOD_NAME_RE = re.compile(r"^[A-Z][a-z]{2}\s\d{4}$")
@@ -327,3 +329,136 @@ async def execute(
         "total_rows": result.get("total_rows", 0),
         "error": result.get("error") or result.get("message"),
     }
+
+
+# ---------------------------------------------------------------------------
+# Intent parser — detect report type + period from natural language
+# ---------------------------------------------------------------------------
+
+_MONTH_NAMES = list(_MONTH_END.keys())
+_MONTH_RE = re.compile(
+    r"\b(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|"
+    r"Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
+    r"\s+(\d{4})\b",
+    re.IGNORECASE,
+)
+_RELATIVE_PERIOD_RE = re.compile(
+    r"\b(last|previous|prior|this|current)\s+(month|quarter|year)\b", re.IGNORECASE
+)
+_Q_RE = re.compile(r"\bQ([1-4])\s+(\d{4})\b", re.IGNORECASE)
+
+
+def _normalize_month(month_str: str) -> str:
+    """Convert 'January' → 'Jan', 'february' → 'Feb', etc."""
+    return month_str[:3].capitalize()
+
+
+def _resolve_relative_period(ref: str, unit: str) -> str:
+    """Resolve 'last month' → 'Feb 2026', 'this quarter' → 'Jan 2026, Feb 2026, Mar 2026'."""
+    now = datetime.now(tz=None)
+
+    if unit.lower() == "month":
+        if ref.lower() in ("last", "previous", "prior"):
+            first_of_month = now.replace(day=1)
+            last_month = first_of_month - timedelta(days=1)
+            return f"{_MONTH_NAMES[last_month.month - 1]} {last_month.year}"
+        else:  # this/current
+            return f"{_MONTH_NAMES[now.month - 1]} {now.year}"
+
+    elif unit.lower() == "quarter":
+        if ref.lower() in ("last", "previous", "prior"):
+            q = (now.month - 1) // 3  # current quarter 0-indexed
+            if q == 0:
+                # Last quarter of previous year
+                months = [10, 11, 12]
+                year = now.year - 1
+            else:
+                first_month = (q - 1) * 3 + 1
+                months = [first_month, first_month + 1, first_month + 2]
+                year = now.year
+        else:  # this/current
+            q = (now.month - 1) // 3
+            first_month = q * 3 + 1
+            months = [first_month, first_month + 1, first_month + 2]
+            year = now.year
+        return ", ".join(f"{_MONTH_NAMES[m - 1]} {year}" for m in months)
+
+    elif unit.lower() == "year":
+        if ref.lower() in ("last", "previous", "prior"):
+            year = now.year - 1
+        else:
+            year = now.year
+        return ", ".join(f"{_MONTH_NAMES[m]} {year}" for m in range(12))
+
+    return f"{_MONTH_NAMES[now.month - 1]} {now.year}"
+
+
+def _resolve_quarter(q_num: str, year: str) -> str:
+    """Resolve 'Q1 2026' → 'Jan 2026, Feb 2026, Mar 2026'."""
+    q = int(q_num)
+    first_month = (q - 1) * 3 + 1
+    months = [first_month, first_month + 1, first_month + 2]
+    return ", ".join(f"{_MONTH_NAMES[m - 1]} {year}" for m in months)
+
+
+def parse_report_intent(user_message: str) -> dict | None:
+    """Parse a user message to extract report_type and period.
+
+    Returns {"report_type": ..., "period": ...} or None if not parseable.
+    """
+    msg = user_message.lower()
+
+    # Determine report type
+    report_type = None
+    if any(kw in msg for kw in ("balance sheet", "bs ")):
+        if any(kw in msg for kw in ("trend", "month over month", "by month", "by period", "compare")):
+            report_type = "balance_sheet_trend"
+        else:
+            report_type = "balance_sheet"
+    elif any(kw in msg for kw in ("trial balance", "tb ")):
+        report_type = "trial_balance"
+    elif any(kw in msg for kw in (
+        "income statement", "p&l", "profit and loss", "profit & loss",
+        "p/l", "pl ", "revenue", "expense", "cogs", "net income",
+    )):
+        if any(kw in msg for kw in ("trend", "month over month", "by month", "by period", "compare")):
+            report_type = "income_statement_trend"
+        else:
+            report_type = "income_statement"
+    else:
+        # Generic financial — default to income statement
+        report_type = "income_statement"
+
+    # Determine period
+    period = None
+
+    # Try explicit months: "Feb 2026", "January 2025"
+    month_matches = _MONTH_RE.findall(user_message)
+    if month_matches:
+        periods = [f"{_normalize_month(m)} {y}" for m, y in month_matches]
+        period = ", ".join(periods)
+        # Multiple months → auto-upgrade to trend if not already
+        if len(periods) > 1 and "_trend" not in report_type:
+            report_type += "_trend"
+
+    # Try quarter: "Q1 2026"
+    if not period:
+        q_match = _Q_RE.search(user_message)
+        if q_match:
+            period = _resolve_quarter(q_match.group(1), q_match.group(2))
+            if "_trend" not in report_type:
+                report_type += "_trend"
+
+    # Try relative: "last month", "this quarter"
+    if not period:
+        rel_match = _RELATIVE_PERIOD_RE.search(user_message)
+        if rel_match:
+            period = _resolve_relative_period(rel_match.group(1), rel_match.group(2))
+            # If quarter/year → trend
+            if rel_match.group(2).lower() in ("quarter", "year") and "_trend" not in report_type:
+                report_type += "_trend"
+
+    if not period:
+        return None  # Can't determine period — let the agent handle it
+
+    return {"report_type": report_type, "period": period}

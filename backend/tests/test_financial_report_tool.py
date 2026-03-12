@@ -309,3 +309,77 @@ def test_financial_mode_prompt_mentions_trend():
     task = _build_financial_mode_task("Show revenue trend Q1 2026")
     assert "income_statement_trend" in task
     assert "balance_sheet_trend" in task
+
+
+# --- Intent parser tests ---
+
+
+def test_parse_income_statement_explicit_month():
+    from app.mcp.tools.netsuite_financial_report import parse_report_intent
+
+    result = parse_report_intent("Show me the income statement for February 2026")
+    assert result is not None
+    assert result["report_type"] == "income_statement"
+    assert result["period"] == "Feb 2026"
+
+
+def test_parse_balance_sheet():
+    from app.mcp.tools.netsuite_financial_report import parse_report_intent
+
+    result = parse_report_intent("Pull the balance sheet for March 2026")
+    assert result is not None
+    assert result["report_type"] == "balance_sheet"
+    assert result["period"] == "Mar 2026"
+
+
+def test_parse_last_month():
+    from app.mcp.tools.netsuite_financial_report import parse_report_intent
+    from datetime import datetime, timedelta
+
+    result = parse_report_intent("Show me the income statement for last month")
+    assert result is not None
+    assert result["report_type"] == "income_statement"
+    # Should resolve to previous month
+    now = datetime.utcnow()
+    first = now.replace(day=1)
+    last = first - timedelta(days=1)
+    expected_month = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                      "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][last.month - 1]
+    assert expected_month in result["period"]
+
+
+def test_parse_quarter():
+    from app.mcp.tools.netsuite_financial_report import parse_report_intent
+
+    result = parse_report_intent("P&L for Q1 2026")
+    assert result is not None
+    assert result["report_type"] == "income_statement_trend"
+    assert result["period"] == "Jan 2026, Feb 2026, Mar 2026"
+
+
+def test_parse_trend_multi_month():
+    from app.mcp.tools.netsuite_financial_report import parse_report_intent
+
+    result = parse_report_intent("Show revenue trend Jan 2026 Feb 2026 Mar 2026")
+    assert result is not None
+    assert result["report_type"] == "income_statement_trend"
+    assert "Jan 2026" in result["period"]
+    assert "Feb 2026" in result["period"]
+    assert "Mar 2026" in result["period"]
+
+
+def test_parse_no_period_returns_none():
+    from app.mcp.tools.netsuite_financial_report import parse_report_intent
+
+    result = parse_report_intent("Show me the income statement")
+    assert result is None
+
+
+def test_parse_last_quarter():
+    from app.mcp.tools.netsuite_financial_report import parse_report_intent
+
+    result = parse_report_intent("Show me income statement for last quarter")
+    assert result is not None
+    assert result["report_type"] == "income_statement_trend"
+    # Should have 3 months
+    assert len(result["period"].split(", ")) == 3
