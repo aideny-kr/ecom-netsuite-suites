@@ -287,3 +287,25 @@ def test_tool_in_allowed_chat_tools():
     from app.services.chat.nodes import ALLOWED_CHAT_TOOLS
 
     assert "netsuite.financial_report" in ALLOWED_CHAT_TOOLS
+
+
+# --- Orchestrator integration tests ---
+
+
+def test_financial_mode_prompt_references_tool():
+    """The financial mode augmentation should instruct agent to use the tool, not raw SQL."""
+    from app.services.chat.orchestrator import _build_financial_mode_task
+
+    task = _build_financial_mode_task("Show me the income statement for February 2026")
+    assert "netsuite.financial_report" in task
+    assert "income_statement" in task or "report_type" in task
+    # Should NOT contain raw SQL templates
+    assert "transactionaccountingline" not in task
+
+
+def test_financial_mode_prompt_mentions_trend():
+    from app.services.chat.orchestrator import _build_financial_mode_task
+
+    task = _build_financial_mode_task("Show revenue trend Q1 2026")
+    assert "income_statement_trend" in task
+    assert "balance_sheet_trend" in task

@@ -28,6 +28,36 @@ _REASONING_RE = re.compile(r"<reasoning>.*?</reasoning>\s*", re.DOTALL)
 # Short-circuits expensive context assembly (entity resolution, domain knowledge, etc.)
 _FINANCIAL_MODE_TAG = "FINANCIAL REPORT MODE"
 
+
+def _build_financial_mode_task(user_message: str) -> str:
+    """Build the augmented task for financial report queries.
+
+    Instead of injecting SQL templates (which the LLM ignores or mangles),
+    instruct the agent to call the deterministic netsuite.financial_report tool.
+    """
+    return (
+        f"{user_message}\n\n"
+        f"[{_FINANCIAL_MODE_TAG}]\n"
+        "For this financial report request, you MUST use the `netsuite.financial_report` tool.\n"
+        "DO NOT write raw SuiteQL for income statements, balance sheets, or trial balances.\n\n"
+        "Tool parameters:\n"
+        "- report_type: 'income_statement', 'balance_sheet', 'trial_balance', "
+        "'income_statement_trend', or 'balance_sheet_trend'\n"
+        "- period: The accounting period name, e.g. 'Feb 2026' or "
+        "'Jan 2026, Feb 2026, Mar 2026' for trend/multi-month\n"
+        "- subsidiary_id: (optional) filter to a specific subsidiary\n\n"
+        "Use '_trend' variants when the user asks for trends, comparisons, "
+        "month-over-month, or multi-period breakdowns.\n"
+        "The tool runs verified SQL with correct TAL joins, sign conventions, "
+        "and period filters.\n"
+        "Present the results clearly with sections (Revenue, COGS, Expenses) and totals.\n"
+        "For trend reports, present as a period-by-period table and highlight "
+        "significant changes.\n"
+        "Calculate Net Income = Revenue + Other Income - COGS - Operating Expenses "
+        "- Other Expenses."
+    )
+
+
 _CHITCHAT_FILLER = r"(?:\s+(?:bro|man|dude|mate|buddy|guys?|y'?all|there))?"
 _CHITCHAT_SEP = r"[!.\s,]*"
 _CHITCHAT_RE = re.compile(
@@ -604,30 +634,7 @@ async def run_chat_turn(
                 # Augment task for financial report queries
                 unified_task = sanitized_input
                 if not _is_chitchat and is_financial:
-                    unified_task = (
-                        f"{sanitized_input}\n\n"
-                        f"[{_FINANCIAL_MODE_TAG}] Use TransactionAccountingLine (TAL) joined to Account "
-                        "and AccountingPeriod for this query.\n"
-                        "EXACT COLUMN NAMES (do NOT guess — these are verified):\n"
-                        "- Account: a.accttype (NOT a.type), a.acctnumber (NOT a.acctnum), a.acctname\n"
-                        "- TAL: tal.amount, tal.posting, tal.accountingbook, tal.account, tal.transaction\n"
-                        "- Period: ap.periodname (e.g. 'Jan 2026'), ap.startdate, ap.enddate\n"
-                        "MANDATORY FILTERS:\n"
-                        "- tal.accountingbook = (SELECT id FROM accountingbook WHERE isprimary = 'T')\n"
-                        "- tal.posting = 'T'\n"
-                        "- JOIN AccountingPeriod ap ON ap.id = t.postingperiod\n"
-                        "- ap.isquarter = 'F' AND ap.isyear = 'F' (exclude rollup periods)\n"
-                        "- COALESCE(a.eliminate, 'F') = 'F' (exclude intercompany elimination accounts)\n"
-                        "MANDATORY CURRENCY TRANSLATION (multi-subsidiary multi-currency tenant):\n"
-                        "- Do NOT use raw SUM(tal.amount) — it mixes USD and EUR amounts.\n"
-                        "- MUST wrap amounts: BUILTIN.CONSOLIDATE(tal.amount, 'INCOME', 'DEFAULT', 'DEFAULT', 1, ap.id, 'DEFAULT') for P&L\n"
-                        "- MUST wrap amounts: BUILTIN.CONSOLIDATE(tal.amount, 'LEDGER', 'DEFAULT', 'DEFAULT', 1, ap.id, 'DEFAULT') for Balance Sheet\n"
-                        "P&L account types: a.accttype IN ('Income','OthIncome','COGS','Expense','OthExpense')\n"
-                        "Revenue is NEGATIVE in TAL — multiply consolidated result by -1.\n"
-                        "For Balance Sheet: inception-to-date (NO start date filter).\n"
-                        "TIMEZONE: For date filters, prefer BUILTIN.RELATIVE_RANGES('TODAY','START') over TRUNC(SYSDATE) — it respects company timezone and matches saved search boundaries.\n"
-                        "Check <domain_knowledge> for exact query templates."
-                    )
+                    unified_task = _build_financial_mode_task(sanitized_input)
                     print("[UNIFIED] Financial report mode activated", flush=True)
 
                 streamed_text_parts: list[str] = []
@@ -786,7 +793,10 @@ async def run_chat_turn(
                 return
 
             # ── Legacy multi-agent path ──
+            from app.services.importance_classifier import ImportanceTier, classify_importance
             from app.services.chat.coordinator import MultiAgentCoordinator
+
+            importance_tier = classify_importance(sanitized_input)
 
             coordinator = MultiAgentCoordinator(
                 db=db,
