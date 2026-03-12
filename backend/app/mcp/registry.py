@@ -2,6 +2,7 @@ from app.mcp.tools import (
     data_sample,
     health,
     netsuite_connectivity,
+    netsuite_financial_report,
     netsuite_metadata_tool,
     netsuite_suiteql,
     rag_search,
@@ -39,6 +40,41 @@ TOOL_REGISTRY = {
         "params_schema": {
             "query": {"type": "string", "required": True, "description": "SuiteQL query to execute"},
             "limit": {"type": "integer", "required": False, "default": 100, "description": "Max rows to return"},
+        },
+    },
+    "netsuite.financial_report": {
+        "description": (
+            "Run a verified financial report (Income Statement, Balance Sheet, Trial Balance, or Trend). "
+            "Use this instead of writing raw SuiteQL for financial statements — it guarantees correct "
+            "TAL joins, sign conventions, account type filters, and period handling."
+        ),
+        "execute": netsuite_financial_report.execute,
+        "params_schema": {
+            "report_type": {
+                "type": "string",
+                "required": True,
+                "description": (
+                    "Report type: 'income_statement', 'balance_sheet', 'trial_balance', "
+                    "'income_statement_trend', or 'balance_sheet_trend'"
+                ),
+                "enum": [
+                    "income_statement", "balance_sheet", "trial_balance",
+                    "income_statement_trend", "balance_sheet_trend",
+                ],
+            },
+            "period": {
+                "type": "string",
+                "required": True,
+                "description": (
+                    "Period name like 'Feb 2026' or comma-separated 'Jan 2026, Feb 2026, Mar 2026' "
+                    "for multi-month/trend reports. For balance_sheet, this is the as-of period."
+                ),
+            },
+            "subsidiary_id": {
+                "type": "integer",
+                "required": False,
+                "description": "Optional subsidiary ID to filter to a single subsidiary.",
+            },
         },
     },
     "netsuite.connectivity": {

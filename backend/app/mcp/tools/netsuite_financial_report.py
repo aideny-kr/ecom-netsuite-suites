@@ -258,25 +258,35 @@ async def _execute_suiteql(*, query: str, tenant_id: str, db, limit: int = 500) 
 
 
 async def execute(
+    params: dict | None = None,
+    context: dict | None = None,
     *,
-    report_type: str,
-    period: str,
-    tenant_id: str,
-    db,
+    report_type: str | None = None,
+    period: str | None = None,
+    tenant_id: str | None = None,
+    db=None,
     subsidiary_id: int | None = None,
 ) -> dict:
     """Run a verified financial report template.
 
-    Args:
-        report_type: One of the keys in REPORT_TEMPLATES
-        period: Period name like "Feb 2026" or comma-separated for multi-period
-        tenant_id: Tenant UUID string
-        db: AsyncSession
-        subsidiary_id: Optional — filter to a single subsidiary
-
-    Returns:
-        Dict with success, report_type, period, columns, items, total_rows
+    Supports two calling conventions:
+    1. MCP registry: execute(params_dict, context=context_dict)
+    2. Direct: execute(report_type=..., period=..., tenant_id=..., db=...)
     """
+    # Unpack MCP registry calling convention
+    if params is not None:
+        report_type = report_type or params.get("report_type", "")
+        period = period or params.get("period", "")
+        subsidiary_id = subsidiary_id or params.get("subsidiary_id")
+    if context is not None:
+        tenant_id = tenant_id or context.get("tenant_id")
+        db = db or context.get("db")
+
+    if not report_type or not period:
+        return {"success": False, "error": "report_type and period are required."}
+    if not tenant_id or not db:
+        return {"success": False, "error": "tenant_id and db are required (via context)."}
+
     if report_type not in REPORT_TEMPLATES:
         valid = ", ".join(sorted(REPORT_TEMPLATES.keys()))
         return {

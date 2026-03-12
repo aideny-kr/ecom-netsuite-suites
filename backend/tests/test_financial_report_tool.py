@@ -267,3 +267,23 @@ async def test_execute_handles_suiteql_exception():
 
     assert result["success"] is False
     assert "Connection timeout" in result["error"]
+
+
+# --- MCP registry + allowed tools tests ---
+
+
+def test_tool_registered_in_mcp_registry():
+    from app.mcp.registry import TOOL_REGISTRY
+
+    assert "netsuite.financial_report" in TOOL_REGISTRY
+    entry = TOOL_REGISTRY["netsuite.financial_report"]
+    assert "execute" in entry
+    assert "params_schema" in entry
+    assert "report_type" in entry["params_schema"]
+    assert "period" in entry["params_schema"]
+
+
+def test_tool_in_allowed_chat_tools():
+    from app.services.chat.nodes import ALLOWED_CHAT_TOOLS
+
+    assert "netsuite.financial_report" in ALLOWED_CHAT_TOOLS
