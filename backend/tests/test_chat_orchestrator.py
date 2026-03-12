@@ -29,6 +29,7 @@ class TestAllowedChatToolsFromOld:
     def test_contains_only_read_tools(self):
         expected = {
             "netsuite.suiteql",
+            "netsuite.financial_report",
             "netsuite.connectivity",
             "netsuite.get_metadata",
             "netsuite.refresh_metadata",
