@@ -63,3 +63,63 @@ def test_trend_templates_use_multi_period_mode():
 
     assert REPORT_TEMPLATES["income_statement_trend"]["period_mode"] == "multi_period"
     assert REPORT_TEMPLATES["balance_sheet_trend"]["period_mode"] == "multi_period"
+
+
+# --- Period filter builder tests ---
+
+
+def test_build_period_filter_single_month():
+    from app.mcp.tools.netsuite_financial_report import build_period_filter
+
+    result = build_period_filter("single_period", "Feb 2026")
+    assert result == "ap.periodname = 'Feb 2026'"
+
+
+def test_build_period_filter_multi_month():
+    from app.mcp.tools.netsuite_financial_report import build_period_filter
+
+    result = build_period_filter("single_period", "Jan 2026, Feb 2026, Mar 2026")
+    assert result == "ap.periodname IN ('Jan 2026', 'Feb 2026', 'Mar 2026')"
+
+
+def test_build_period_filter_inception_to_date():
+    from app.mcp.tools.netsuite_financial_report import build_period_filter
+
+    result = build_period_filter("inception_to_date", "Feb 2026")
+    assert "ap.enddate <=" in result
+    assert "ap.startdate" not in result
+
+
+def test_build_period_filter_inception_to_date_with_explicit_date():
+    from app.mcp.tools.netsuite_financial_report import build_period_filter
+
+    result = build_period_filter("inception_to_date", "2026-01-31")
+    assert "ap.enddate <= TO_DATE('2026-01-31'" in result
+
+
+def test_build_period_filter_multi_period():
+    from app.mcp.tools.netsuite_financial_report import build_period_filter
+
+    result = build_period_filter("multi_period", "Jan 2026, Feb 2026, Mar 2026")
+    assert result == "ap.periodname IN ('Jan 2026', 'Feb 2026', 'Mar 2026')"
+
+
+def test_build_period_filter_multi_period_single():
+    from app.mcp.tools.netsuite_financial_report import build_period_filter
+
+    result = build_period_filter("multi_period", "Jan 2026")
+    assert result == "ap.periodname = 'Jan 2026'"
+
+
+def test_build_period_filter_rejects_sql_injection():
+    from app.mcp.tools.netsuite_financial_report import build_period_filter
+
+    with pytest.raises(ValueError, match="Invalid period"):
+        build_period_filter("single_period", "'; DROP TABLE account; --")
+
+
+def test_build_period_filter_rejects_empty():
+    from app.mcp.tools.netsuite_financial_report import build_period_filter
+
+    with pytest.raises(ValueError, match="Period.*required"):
+        build_period_filter("single_period", "")

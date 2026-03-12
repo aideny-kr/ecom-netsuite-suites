@@ -6,6 +6,80 @@ The only variable is the period filter, which is substituted safely.
 
 from __future__ import annotations
 
+import re
+
+# Strict validation: only allow "Mon YYYY" format or "YYYY-MM-DD" date format
+_PERIOD_NAME_RE = re.compile(r"^[A-Z][a-z]{2}\s\d{4}$")
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+_MONTH_END: dict[str, str] = {
+    "Jan": "31", "Feb": "28", "Mar": "31", "Apr": "30",
+    "May": "31", "Jun": "30", "Jul": "31", "Aug": "31",
+    "Sep": "30", "Oct": "31", "Nov": "30", "Dec": "31",
+}
+
+
+def _validate_period_name(period: str) -> None:
+    """Validate a single period name against injection attacks."""
+    period = period.strip()
+    if not _PERIOD_NAME_RE.match(period) and not _DATE_RE.match(period):
+        raise ValueError(
+            f"Invalid period format: '{period}'. "
+            "Expected 'Mon YYYY' (e.g., 'Feb 2026') or 'YYYY-MM-DD' (e.g., '2026-02-28')."
+        )
+
+
+def _period_to_end_date(period: str) -> str:
+    """Convert 'Mon YYYY' to the last day of that month as 'YYYY-MM-DD'."""
+    parts = period.strip().split()
+    month_abbr, year = parts[0], parts[1]
+    month_num = list(_MONTH_END.keys()).index(month_abbr) + 1
+
+    day = _MONTH_END[month_abbr]
+    if month_abbr == "Feb":
+        y = int(year)
+        if (y % 4 == 0 and y % 100 != 0) or (y % 400 == 0):
+            day = "29"
+
+    return f"{year}-{month_num:02d}-{day}"
+
+
+def build_period_filter(period_mode: str, period: str) -> str:
+    """Build a safe SQL WHERE fragment for the given period.
+
+    Args:
+        period_mode: "single_period", "multi_period", or "inception_to_date"
+        period: Period name(s) like "Feb 2026" or "Jan 2026, Feb 2026"
+                or a date like "2026-01-31"
+
+    Returns:
+        SQL fragment like "ap.periodname = 'Feb 2026'" or
+        "ap.enddate <= TO_DATE('2026-02-28', 'YYYY-MM-DD')"
+    """
+    if not period or not period.strip():
+        raise ValueError("Period is required — provide e.g., 'Feb 2026' or '2026-02-28'.")
+
+    period = period.strip()
+
+    if period_mode == "inception_to_date":
+        if _DATE_RE.match(period):
+            return f"ap.enddate <= TO_DATE('{period}', 'YYYY-MM-DD')"
+        _validate_period_name(period)
+        end_date = _period_to_end_date(period)
+        return f"ap.enddate <= TO_DATE('{end_date}', 'YYYY-MM-DD')"
+
+    # single_period and multi_period both use ap.periodname
+    periods = [p.strip() for p in period.split(",")]
+    for p in periods:
+        _validate_period_name(p)
+
+    if len(periods) == 1:
+        return f"ap.periodname = '{periods[0]}'"
+    else:
+        quoted = ", ".join(f"'{p}'" for p in periods)
+        return f"ap.periodname IN ({quoted})"
+
+
 REPORT_TEMPLATES: dict[str, dict] = {
     "income_statement": {
         "description": "Income Statement (P&L) for a specific period or date range",
