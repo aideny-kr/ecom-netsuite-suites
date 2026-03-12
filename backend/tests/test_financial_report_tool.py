@@ -123,3 +123,147 @@ def test_build_period_filter_rejects_empty():
 
     with pytest.raises(ValueError, match="Period.*required"):
         build_period_filter("single_period", "")
+
+
+# --- Execute function tests ---
+
+from unittest.mock import AsyncMock, patch
+
+
+@pytest.mark.asyncio
+async def test_execute_income_statement_delegates_to_suiteql():
+    """execute() should build SQL from template + period, then call netsuite_suiteql.execute()."""
+    from app.mcp.tools.netsuite_financial_report import execute
+
+    mock_suiteql_result = {
+        "success": True,
+        "columns": ["acctnumber", "acctname", "accttype", "section", "amount"],
+        "items": [
+            {"acctnumber": "4000", "acctname": "Revenue", "accttype": "Income", "section": "1-Revenue", "amount": 100000},
+        ],
+        "total_rows": 1,
+    }
+
+    with patch("app.mcp.tools.netsuite_financial_report._execute_suiteql", new_callable=AsyncMock) as mock_exec:
+        mock_exec.return_value = mock_suiteql_result
+
+        result = await execute(
+            report_type="income_statement",
+            period="Feb 2026",
+            tenant_id="test-tenant",
+            db=AsyncMock(),
+        )
+
+    assert result["success"] is True
+    assert result["report_type"] == "income_statement"
+    assert result["period"] == "Feb 2026"
+    assert "items" in result
+
+    called_query = mock_exec.call_args[1]["query"]
+    assert "ap.periodname = 'Feb 2026'" in called_query
+    assert "{period_filter}" not in called_query
+
+
+@pytest.mark.asyncio
+async def test_execute_balance_sheet_uses_inception_to_date():
+    from app.mcp.tools.netsuite_financial_report import execute
+
+    with patch("app.mcp.tools.netsuite_financial_report._execute_suiteql", new_callable=AsyncMock) as mock_exec:
+        mock_exec.return_value = {"success": True, "columns": [], "items": [], "total_rows": 0}
+
+        await execute(
+            report_type="balance_sheet",
+            period="Feb 2026",
+            tenant_id="test-tenant",
+            db=AsyncMock(),
+        )
+
+    called_query = mock_exec.call_args[1]["query"]
+    assert "ap.enddate <=" in called_query
+    assert "ap.startdate >=" not in called_query
+
+
+@pytest.mark.asyncio
+async def test_execute_trend_uses_multi_period():
+    from app.mcp.tools.netsuite_financial_report import execute
+
+    with patch("app.mcp.tools.netsuite_financial_report._execute_suiteql", new_callable=AsyncMock) as mock_exec:
+        mock_exec.return_value = {"success": True, "columns": [], "items": [], "total_rows": 0}
+
+        await execute(
+            report_type="income_statement_trend",
+            period="Jan 2026, Feb 2026, Mar 2026",
+            tenant_id="test-tenant",
+            db=AsyncMock(),
+        )
+
+    called_query = mock_exec.call_args[1]["query"]
+    assert "ap.periodname IN ('Jan 2026', 'Feb 2026', 'Mar 2026')" in called_query
+    assert "ap.periodname" in called_query  # In SELECT for grouping
+
+
+@pytest.mark.asyncio
+async def test_execute_with_subsidiary_filter():
+    from app.mcp.tools.netsuite_financial_report import execute
+
+    with patch("app.mcp.tools.netsuite_financial_report._execute_suiteql", new_callable=AsyncMock) as mock_exec:
+        mock_exec.return_value = {"success": True, "columns": [], "items": [], "total_rows": 0}
+
+        await execute(
+            report_type="income_statement",
+            period="Feb 2026",
+            tenant_id="test-tenant",
+            db=AsyncMock(),
+            subsidiary_id=3,
+        )
+
+    called_query = mock_exec.call_args[1]["query"]
+    assert "t.subsidiary = 3" in called_query
+
+
+@pytest.mark.asyncio
+async def test_execute_invalid_report_type():
+    from app.mcp.tools.netsuite_financial_report import execute
+
+    result = await execute(
+        report_type="cash_flow",
+        period="Feb 2026",
+        tenant_id="test-tenant",
+        db=AsyncMock(),
+    )
+
+    assert result["success"] is False
+    assert "Unknown report type" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_execute_invalid_period():
+    from app.mcp.tools.netsuite_financial_report import execute
+
+    result = await execute(
+        report_type="income_statement",
+        period="'; DROP TABLE --",
+        tenant_id="test-tenant",
+        db=AsyncMock(),
+    )
+
+    assert result["success"] is False
+    assert "Invalid period" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_execute_handles_suiteql_exception():
+    from app.mcp.tools.netsuite_financial_report import execute
+
+    with patch("app.mcp.tools.netsuite_financial_report._execute_suiteql", new_callable=AsyncMock) as mock_exec:
+        mock_exec.side_effect = Exception("Connection timeout")
+
+        result = await execute(
+            report_type="income_statement",
+            period="Feb 2026",
+            tenant_id="test-tenant",
+            db=AsyncMock(),
+        )
+
+    assert result["success"] is False
+    assert "Connection timeout" in result["error"]

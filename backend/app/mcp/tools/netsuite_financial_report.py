@@ -240,3 +240,80 @@ ORDER BY a.acctnumber, ap_period.startdate
 FETCH FIRST 2000 ROWS ONLY""",
     },
 }
+
+
+# ---------------------------------------------------------------------------
+# Execute
+# ---------------------------------------------------------------------------
+
+from app.mcp.tools import netsuite_suiteql as _suiteql_mod
+
+
+async def _execute_suiteql(*, query: str, tenant_id: str, db, limit: int = 500) -> dict:
+    """Thin wrapper around suiteql.execute() — exists for easy test mocking."""
+    return await _suiteql_mod.execute(
+        params={"query": query, "limit": limit},
+        context={"tenant_id": tenant_id, "db": db},
+    )
+
+
+async def execute(
+    *,
+    report_type: str,
+    period: str,
+    tenant_id: str,
+    db,
+    subsidiary_id: int | None = None,
+) -> dict:
+    """Run a verified financial report template.
+
+    Args:
+        report_type: One of the keys in REPORT_TEMPLATES
+        period: Period name like "Feb 2026" or comma-separated for multi-period
+        tenant_id: Tenant UUID string
+        db: AsyncSession
+        subsidiary_id: Optional — filter to a single subsidiary
+
+    Returns:
+        Dict with success, report_type, period, columns, items, total_rows
+    """
+    if report_type not in REPORT_TEMPLATES:
+        valid = ", ".join(sorted(REPORT_TEMPLATES.keys()))
+        return {
+            "success": False,
+            "error": f"Unknown report type: '{report_type}'. Valid types: {valid}",
+        }
+
+    template = REPORT_TEMPLATES[report_type]
+
+    try:
+        period_filter = build_period_filter(template["period_mode"], period)
+    except ValueError as e:
+        return {"success": False, "error": str(e)}
+
+    sql = template["sql_template"].replace("{period_filter}", period_filter)
+
+    if subsidiary_id is not None:
+        sql = sql.replace(
+            "WHERE tal.posting = 'T'",
+            f"WHERE tal.posting = 'T'\n    AND t.subsidiary = {int(subsidiary_id)}",
+        )
+
+    print(f"[FINANCIAL_REPORT] type={report_type} period={period}", flush=True)
+    print(f"[FINANCIAL_REPORT] SQL:\n{sql}", flush=True)
+
+    try:
+        result = await _execute_suiteql(query=sql, tenant_id=tenant_id, db=db)
+    except Exception as e:
+        return {"success": False, "error": f"SuiteQL execution failed: {str(e)}"}
+
+    return {
+        "success": result.get("success", not result.get("error", False)),
+        "report_type": report_type,
+        "period": period,
+        "description": template["description"],
+        "columns": result.get("columns", []),
+        "items": result.get("items", []),
+        "total_rows": result.get("total_rows", 0),
+        "error": result.get("error") or result.get("message"),
+    }
