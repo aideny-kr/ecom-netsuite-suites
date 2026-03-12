@@ -436,6 +436,11 @@ async def run_chat_turn(
     provider, model, api_key, is_byok = await get_tenant_ai_config(db, tenant_id)
     adapter = get_adapter(provider, api_key)
 
+    # ── Importance tier default (overridden in unified/legacy paths) ──
+    from app.services.importance_classifier import ImportanceTier, classify_importance
+
+    importance_tier = classify_importance(sanitized_input)
+
     # ── Multi-agent routing (opt-in per tenant or globally) ──
     if not is_onboarding and not workspace_context:
         from sqlalchemy import select as sa_select
