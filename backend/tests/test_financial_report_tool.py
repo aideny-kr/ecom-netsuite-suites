@@ -269,6 +269,27 @@ async def test_execute_handles_suiteql_exception():
     assert "Connection timeout" in result["error"]
 
 
+@pytest.mark.asyncio
+async def test_execute_propagates_error_message_not_boolean():
+    """When suiteql returns {"error": True, "message": "..."}, execute() should surface the message string."""
+    from app.mcp.tools.netsuite_financial_report import execute
+
+    with patch("app.mcp.tools.netsuite_financial_report._execute_suiteql", new_callable=AsyncMock) as mock_exec:
+        mock_exec.return_value = {"error": True, "message": "No active NetSuite connection found for this tenant."}
+
+        result = await execute(
+            report_type="income_statement",
+            period="Feb 2026",
+            tenant_id="test-tenant",
+            db=AsyncMock(),
+        )
+
+    assert result["success"] is False
+    assert isinstance(result["error"], str)
+    assert "No active NetSuite connection" in result["error"]
+    assert result["error"] is not True  # Must not be boolean
+
+
 # --- MCP registry + allowed tools tests ---
 
 

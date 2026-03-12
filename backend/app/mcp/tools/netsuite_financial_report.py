@@ -327,7 +327,7 @@ async def execute(
         "columns": result.get("columns", []),
         "items": result.get("items", []),
         "total_rows": result.get("total_rows", 0),
-        "error": result.get("error") or result.get("message"),
+        "error": result.get("message") or result.get("error"),
     }
 
 
