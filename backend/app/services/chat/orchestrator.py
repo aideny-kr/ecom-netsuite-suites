@@ -638,6 +638,7 @@ async def run_chat_turn(
 
                 # Augment task for financial report queries
                 unified_task = sanitized_input
+                pre_executed_successfully = False
                 if not _is_chitchat and is_financial:
                     # Try to pre-execute the financial report deterministically
                     from app.mcp.tools.netsuite_financial_report import parse_report_intent, execute as fin_execute
@@ -677,6 +678,7 @@ async def run_chat_turn(
                                     f"- Operating Expenses - Other Expenses.\n"
                                     f"For trend reports, show period-by-period comparison."
                                 )
+                                pre_executed_successfully = True
                                 print(
                                     f"[FINANCIAL_REPORT] Pre-executed successfully: "
                                     f"{fin_result['total_rows']} rows",
@@ -706,6 +708,7 @@ async def run_chat_turn(
                     adapter=specialist_adapter,
                     model=settings.MULTI_AGENT_SQL_MODEL,
                     conversation_history=history_messages,
+                    tool_choice={"type": "tool", "name": "netsuite_financial_report"} if (is_financial and not pre_executed_successfully) else None,
                 ):
                     if event_type == "text":
                         streamed_text_parts.append(payload)

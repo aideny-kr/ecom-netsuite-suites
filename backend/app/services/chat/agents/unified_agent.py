@@ -40,6 +40,7 @@ _UNIFIED_TOOL_NAMES = frozenset(
         # SuiteQL agent tools
         "netsuite_suiteql",
         "netsuite_get_metadata",
+        "netsuite_financial_report",
         # RAG agent tools
         "rag_search",
         "web_search",
@@ -92,6 +93,7 @@ CHOOSE THE RIGHT TOOL:
 FOR DATA QUESTIONS (orders, invoices, customers, items, inventory, financial data):
 → Use netsuite_suiteql (local REST API, full permissions). This is your DEFAULT for all data queries.
 → Use netsuite_get_metadata to discover column names if unsure about schema.
+→ Use netsuite_financial_report for standard financial statements (income_statement, balance_sheet, trial_balance, income_statement_trend, balance_sheet_trend). Uses verified SQL templates with correct TAL joins, sign conventions, and period handling. ALWAYS prefer this over writing raw SuiteQL for financial statements.
 
 FOR DOCUMENTATION / HOW-TO / ERROR LOOKUPS:
 → Use rag_search first (internal docs, custom field metadata, SuiteScript source code).
