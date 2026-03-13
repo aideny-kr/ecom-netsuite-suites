@@ -95,7 +95,7 @@ def _intercept_financial_report(
     For any other tool or unsuccessful result, returns (None, result_str)
     unchanged.
     """
-    if tool_name != "netsuite.financial_report":
+    if tool_name not in ("netsuite.financial_report", "netsuite_financial_report"):
         return None, result_str
 
     try:

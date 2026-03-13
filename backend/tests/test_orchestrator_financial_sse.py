@@ -83,6 +83,19 @@ class TestInterceptFinancialReportSuccess:
         assert "table" in parsed["note"].lower() or "rebuild" in parsed["note"].lower()
 
 
+    def test_intercept_with_underscore_tool_name(self):
+        """The tool name sent by the LLM uses underscores, not dots."""
+        result_str = _result_str(SAMPLE_FINANCIAL_RESULT)
+        sse_event, condensed = _intercept_financial_report(
+            "netsuite_financial_report", result_str
+        )
+
+        assert sse_event is not None
+        assert sse_event["report_type"] == "income_statement"
+        parsed = json.loads(condensed)
+        assert parsed["success"] is True
+
+
 class TestInterceptFinancialReportNoOp:
     """Cases where interception should be a no-op."""
 

@@ -55,14 +55,14 @@ const INCOME_COMPUTED: ComputedRowDef[] = [
 ];
 
 const BALANCE_SECTIONS: SectionDef[] = [
-  { key: "Assets", label: "Assets", subtotalKey: "total_assets" },
-  { key: "Liabilities", label: "Liabilities", subtotalKey: "total_liabilities" },
-  { key: "Equity", label: "Equity", subtotalKey: "total_equity" },
+  { key: "1-Assets", label: "Assets", subtotalKey: "total_assets" },
+  { key: "2-Liabilities", label: "Liabilities", subtotalKey: "total_liabilities" },
+  { key: "3-Equity", label: "Equity", subtotalKey: "total_equity" },
 ];
 
 const BALANCE_COMPUTED: ComputedRowDef[] = [
-  { afterSection: "Assets", label: "Total Assets", summaryKey: "total_assets" },
-  { afterSection: "Equity", label: "Total Liabilities & Equity", summaryKey: "total_liabilities_and_equity" },
+  { afterSection: "1-Assets", label: "Total Assets", summaryKey: "total_assets" },
+  { afterSection: "3-Equity", label: "Total Liabilities & Equity", summaryKey: "total_liabilities_and_equity" },
 ];
 
 // ---------------------------------------------------------------------------
