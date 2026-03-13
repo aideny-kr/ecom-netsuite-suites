@@ -23,6 +23,9 @@
 - **Chat**: Multi-agent coordinator in `coordinator.py` with semantic routing (heuristic → LLM fallback). Specialist agents: SuiteQL, RAG, analysis, workspace. SSE streaming with `<thinking>` tags (collapsed in UI).
 - **Entity Resolution**: Fast NER (Haiku) → pg_trgm fuzzy matching → `<tenant_vernacular>` XML injection into agent prompts. Table: `tenant_entity_mapping` with composite GIN index. Seeded from metadata discovery pipeline.
 - **Two SuiteQL paths**: Local REST API (`netsuite_suiteql` tool) supports all tables including `customrecord_*`. External MCP (`ns_runCustomSuiteQL`) works only for standard tables. Agent prompt guides tool selection.
+- **MCP Standard Tools SuiteApp**: ~11 tools across 4 categories (Record CRUD, Reports, Saved Searches, SuiteQL). Tool visibility is **role-permission based** — same SuiteApp version on two accounts can expose different tools depending on OAuth role permissions. NOT a SuiteApp version issue. After changing role permissions, must reconnect MCP to trigger `discover_tools()` refresh.
+- **MCP Tool Permissions**: Record Tools require `REST Web Services (Full)` + per-record-type Create/Edit. Saved Search Tools require `Perform Search (Full)`. SuiteQL Tools require `SuiteQL` permission. Administrator role CANNOT be used — Oracle prohibits it. See `skills/netsuite-mcp/SKILL.md` for full permission matrix.
+- **MCP CRUD Capability**: `ns_createRecord`, `ns_getRecord`, `ns_updateRecord`, `ns_getRecordTypeMetadata` enable the agent to CREATE and MODIFY NetSuite records (journal entries, customers, orders, etc.) — not just query. GUARDRAILS REQUIRED: always show payload + get user confirmation before create/update, log via audit_service, enforce record type allowlist per tenant.
 - **react-resizable-panels v4**: Imports are `Panel`, `Group as PanelGroup`, `Separator as PanelResizeHandle`. Uses `orientation` prop (not `direction`).
 - **White-Label Branding**: Per-tenant brand_name, brand_color_hsl, brand_logo_url, brand_favicon_url in `tenant_configs`. Frontend `BrandingProvider` injects `--primary` CSS variable at runtime. Sidebar/login dynamically render tenant brand.
 - **Custom Domains**: `custom_domain` + `domain_verified` on `tenant_configs`. DNS TXT verification via `domain_service.py`. Public resolver endpoint `GET /api/v1/settings/resolve-domain?domain=`.
@@ -277,13 +280,17 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 19. **Migrations run in CI, not container startup** — `entrypoint.sh` no longer runs `alembic upgrade head`. Run migrations via deploy.yml workflow.
 20. **Two databases locally** — `.venv/bin/alembic` runs against Supabase (remote). Docker containers use `postgres:5432` (local). After adding a model column, run `docker exec ecom-netsuite-suites-backend-1 alembic upgrade head` to migrate the local Docker Postgres too, or the backend will crash with `UndefinedColumnError`.
 21. **Alembic revision ID max 32 chars** — `alembic_version.version_num` is `VARCHAR(32)`. Keep revision IDs short (e.g. `039_confidence_score`, not `039_chat_message_confidence_score`).
+22. **MCP tool visibility is role-permission based** — If a tenant is missing MCP tools (e.g., no Record Tools, no Saved Search Tools), it's because their OAuth role lacks the required permissions — NOT a SuiteApp version issue. Fix: update the role in NetSuite (Setup > Users/Roles > Manage Roles), then reconnect MCP. Record Tools need `REST Web Services (Full)` + record-type Create/Edit. Saved Search Tools need `Perform Search (Full)`.
+23. **MCP CRUD requires guardrails** — `ns_createRecord` and `ns_updateRecord` MUST NOT auto-execute. Always: (1) show the full payload to the user, (2) get explicit confirmation, (3) for updates, show before/after diff via `ns_getRecord` first, (4) log via `audit_service`, (5) check record type allowlist. The agent is now an action agent, not just read-only.
 
 ## Chat Architecture
 
 - **Orchestrator** (`orchestrator.py`): SSE streaming endpoint, routes to single-agent or multi-agent
 - **Coordinator** (`coordinator.py`): Semantic router with heuristic classifier (`classify_intent()`), LLM fallback for ambiguous queries. Dispatches specialist agents, handles retries, streams synthesis.
 - **Intent types**: DOCUMENTATION, DATA_QUERY, FINANCIAL_REPORT, CODE_UNDERSTANDING, WORKSPACE_DEV, ANALYSIS, AMBIGUOUS. Heuristic regex rules checked first; AMBIGUOUS falls back to LLM planner.
-- **Financial report routing**: FINANCIAL_REPORT intent → suiteql + analysis (sequential). SuiteQL task augmented with GL framing (TAL, account types, sign conventions). Domain knowledge top_k bumped to 5 for financial queries. Golden dataset `financial-statements.md` provides P&L/BS/GL templates.
+- **Financial report routing**: FINANCIAL_REPORT intent → local `netsuite.financial_report` tool (SuiteQL-first with BUILTIN.CONSOLIDATE for posting-time FX rates). MCP `ns_runReport` as fallback only (uses real-time FX, diverges on multi-currency tenants). Server-side `_compute_summary()` pre-computes section totals — single-period returns flat dict, trend returns `summary.by_period` keyed by periodname. LLM presents numbers, never computes. Financial reports bypass `NETSUITE_SUITEQL_MAX_ROWS` cap via `_skip_limit_cap` kwarg.
+- **Hybrid MCP architecture**: Three layers — (1) Context Layer: entity resolution, tenant schema, RAG, learned rules, proven patterns (always active), (2) Execution Layer: local `netsuite.financial_report` for P&L/BS/TB (verified templates), MCP tools for discovery/saved searches/ad-hoc (`ns_runSavedSearch` → `ns_runCustomSuiteQL`), local `netsuite_suiteql` as fallback, (3) Knowledge Layer: `rag_search` + `web_search`.
+- **MCP tool detection**: Orchestrator uses `_MCP_TOOL_PATTERNS` dict to detect all ~11 tool types from `ext__` prefixed names. Patterns: runreport, runsavedsearch, listallreports, listsavedsearches, suiteql, getsuiteqlmetadata, getsubsidiaries, createrecord, getrecord, updaterecord, getrecordtypemetadata.
 - **Specialist agents** (`agents/`): Each runs a mini agentic loop with tools (max_steps varies per agent)
   - `SuiteQLAgent`: max_steps=6, tenant metadata + entity vernacular injected into prompt
   - `RAGAgent`: max_steps=2, strict tool budget (2 rag_search + 1 web_search). Handles docs, script logic, AND online research.
@@ -299,15 +306,16 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 
 ## Current State (update after each major change)
 
-- **Latest migration**: 039_chat_message_confidence_score
+- **Latest migration**: 042_mcp_financial_flag
+- **Financial reports**: Deterministic via `netsuite.financial_report` tool with BUILTIN.CONSOLIDATE. Verified penny-accurate against NetSuite CSV exports (Framework + Rails). Trend reports return per-period summaries. Row limit bypassed for financial queries (5000 vs default 1000).
 - **Entity mappings**: 2,109 seeded for test tenant (bf92d059), seeder runs in metadata discovery pipeline
 - **Golden dataset**: 9 files, 85 chunks (added `financial-statements.md` for GL/P&L/BS; status code + REST API behavior docs)
 - **Doc chunk embeddings**: 3,198/3,198 embedded with OpenAI (was 2/3,198 with Voyage AI)
 - **Utility scripts**: `scripts/sanitize_doc_chunks.py`, `scripts/reembed_doc_chunks.py`, `scripts/export_tenant.py`, `scripts/import_tenant.py`, `scripts/reencrypt_tenant.py`
 - **Security hardening**: SET LOCAL UUID validation, Redis denylist/rate limiter, SSL verification, production secret validation, security headers, Swagger disabled in prod, Sentry integration
 - **CI/CD**: `deploy.yml` (staging auto + production manual), `rollback.yml` (manual)
+- **MCP tools**: Both Framework (6738075) and Rails (9745435) now expose full ~11 tool set (Record CRUD + Reports + Saved Searches + SuiteQL) after OAuth role permission fix. See `docs/netsuite-mcp-tool-gap-analysis.md`.
 - **Known gap**: OAuth reconnect just flips status, doesn't re-initiate browser flow (refresh token expired for tenant 9745435)
-- **Known gap**: `inputRef` in workspace-chat-panel never attached to ChatInput
 - **Known gap**: structlog setup doesn't surface stdlib `logging.getLogger()` — use `print(flush=True)` for docker log visibility
-- **Deferred**: SDF CI/CD pipeline, bundle versioning strategy, RESTlet rate limiting
+- **Deferred**: Financial DataFrame frontend component (plan in `prompts/financial-dataframe-component.md`), SDF CI/CD pipeline, bundle versioning strategy, RESTlet rate limiting
 - **Researched**: Celigo flow integration — API sync + ZIP upload into DocChunk RAG. Awaiting prioritization. See `memory/celigo-research.md`.
