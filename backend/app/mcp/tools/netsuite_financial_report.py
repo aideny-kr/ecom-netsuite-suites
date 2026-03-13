@@ -10,8 +10,8 @@ import calendar
 import re
 from datetime import datetime, timedelta
 
-# Strict validation: only allow "Mon YYYY" format or "YYYY-MM-DD" date format
-_PERIOD_NAME_RE = re.compile(r"^[A-Z][a-z]{2}\s\d{4}$")
+# Strict validation: only allow valid "Mon YYYY" format or "YYYY-MM-DD" date format
+_PERIOD_NAME_RE = re.compile(r"^(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s\d{4}$")
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 _MONTH_END: dict[str, str] = {
@@ -261,8 +261,9 @@ async def _execute_suiteql(
     so we bypass the global NETSUITE_SUITEQL_MAX_ROWS cap.
     """
     return await _suiteql_mod.execute(
-        params={"query": query, "limit": limit, "timeout_seconds": timeout_seconds, "skip_limit_cap": True},
+        params={"query": query, "limit": limit, "timeout_seconds": timeout_seconds},
         context={"tenant_id": tenant_id, "db": db},
+        _skip_limit_cap=True,
     )
 
 
@@ -313,9 +314,13 @@ async def execute(
     sql = template["sql_template"].replace("{period_filter}", period_filter)
 
     if subsidiary_id is not None:
+        try:
+            sub_id = int(subsidiary_id)
+        except (TypeError, ValueError):
+            return {"success": False, "error": f"Invalid subsidiary_id: '{subsidiary_id}'. Must be an integer."}
         sql = sql.replace(
             "WHERE tal.posting = 'T'",
-            f"WHERE tal.posting = 'T'\n    AND t.subsidiary = {int(subsidiary_id)}",
+            f"WHERE tal.posting = 'T'\n    AND t.subsidiary = {sub_id}",
         )
 
     print(f"[FINANCIAL_REPORT] type={report_type} period={period}", flush=True)

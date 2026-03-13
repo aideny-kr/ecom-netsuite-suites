@@ -357,8 +357,9 @@ async def execute(params: dict, context: dict | None = None, **kwargs) -> dict:
 
     # --- Enforce limit ---
     # Internal callers (e.g. financial_report tool) can set skip_limit_cap=True
-    # to bypass the global max and use their own FETCH FIRST in the SQL template.
-    skip_cap = params.get("skip_limit_cap", False)
+    # via **kwargs to bypass the global max. NOT read from params to prevent
+    # external MCP callers from bypassing the cap.
+    skip_cap = kwargs.get("_skip_limit_cap", False)
     max_rows = limit if skip_cap else min(limit, settings.NETSUITE_SUITEQL_MAX_ROWS)
     query = enforce_limit(query, max_rows)
 
