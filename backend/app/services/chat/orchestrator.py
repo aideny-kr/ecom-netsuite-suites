@@ -780,12 +780,15 @@ async def run_chat_turn(
                     model=settings.MULTI_AGENT_SQL_MODEL,
                     conversation_history=history_messages,
                     tool_choice=None,
+                    tool_result_interceptor=_intercept_financial_report,
                 ):
                     if event_type == "text":
                         streamed_text_parts.append(payload)
                         yield {"type": "text", "content": payload}
                     elif event_type == "tool_status":
                         yield {"type": "tool_status", "content": payload}
+                    elif event_type == "tool_intercept":
+                        yield {"type": "financial_report", "data": payload}
                     elif event_type == "response":
                         agent_result = payload
 

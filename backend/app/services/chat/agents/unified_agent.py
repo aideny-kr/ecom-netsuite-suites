@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 import re
 import uuid
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from app.services.chat.agents.base_agent import BaseSpecialistAgent
 from app.services.chat.tools import build_local_tool_definitions
@@ -633,12 +633,15 @@ class UnifiedAgent(BaseSpecialistAgent):
         conversation_history: list[dict] | None = None,
         tool_choice: dict | str | None = None,
         financial_mode: bool = False,
+        tool_result_interceptor: Callable[[str, str], tuple[dict | None, str]] | None = None,
     ):
         """Override to inject context before streaming."""
         task = await self._setup_context(task, context, db)
         if financial_mode:
             self._tool_defs = self.financial_tool_definitions
         async for event in super().run_streaming(
-            task, context, db, adapter, model, conversation_history, tool_choice=tool_choice
+            task, context, db, adapter, model, conversation_history,
+            tool_choice=tool_choice,
+            tool_result_interceptor=tool_result_interceptor,
         ):
             yield event
