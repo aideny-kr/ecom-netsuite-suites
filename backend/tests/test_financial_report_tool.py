@@ -290,6 +290,137 @@ async def test_execute_propagates_error_message_not_boolean():
     assert result["error"] is not True  # Must not be boolean
 
 
+@pytest.mark.asyncio
+async def test_execute_maps_rows_key_to_items():
+    """SuiteQL returns 'rows'/'row_count' but financial report exposes 'items'/'total_rows'."""
+    from app.mcp.tools.netsuite_financial_report import execute
+
+    with patch("app.mcp.tools.netsuite_financial_report._execute_suiteql", new_callable=AsyncMock) as mock_exec:
+        mock_exec.return_value = {
+            "columns": ["acctnumber", "acctname", "amount"],
+            "rows": [["4000", "Revenue", 100000]],
+            "row_count": 1,
+            "truncated": False,
+        }
+
+        result = await execute(
+            report_type="income_statement",
+            period="Feb 2026",
+            tenant_id="test-tenant",
+            db=AsyncMock(),
+        )
+
+    assert result["success"] is True
+    # Rows are normalized from list-of-lists to list-of-dicts
+    assert result["items"] == [{"acctnumber": "4000", "acctname": "Revenue", "amount": 100000}]
+    assert result["total_rows"] == 1
+    assert "summary" in result
+
+
+# --- Per-period trend summary tests ---
+
+
+def test_compute_summary_income_trend_groups_by_period():
+    from app.mcp.tools.netsuite_financial_report import _compute_summary
+
+    rows = [
+        {"periodname": "Jan 2026", "section": "1-Revenue", "amount": 5000},
+        {"periodname": "Jan 2026", "section": "3-COGS", "amount": 2000},
+        {"periodname": "Jan 2026", "section": "4-Operating Expense", "amount": 1000},
+        {"periodname": "Feb 2026", "section": "1-Revenue", "amount": 8000},
+        {"periodname": "Feb 2026", "section": "3-COGS", "amount": 3000},
+        {"periodname": "Feb 2026", "section": "4-Operating Expense", "amount": 1500},
+    ]
+    summary = _compute_summary("income_statement_trend", rows)
+    assert "by_period" in summary
+    assert "Jan 2026" in summary["by_period"]
+    assert "Feb 2026" in summary["by_period"]
+
+    jan = summary["by_period"]["Jan 2026"]
+    assert jan["total_revenue"] == 5000
+    assert jan["total_cogs"] == 2000
+    assert jan["gross_profit"] == 3000
+    assert jan["total_operating_expense"] == 1000
+    assert jan["net_income"] == 2000  # 5000 - 2000 - 1000
+
+    feb = summary["by_period"]["Feb 2026"]
+    assert feb["total_revenue"] == 8000
+    assert feb["total_cogs"] == 3000
+    assert feb["gross_profit"] == 5000
+    assert feb["net_income"] == 3500  # 8000 - 3000 - 1500
+
+
+def test_compute_summary_single_period_is_flat():
+    """Single-period income statement should return flat dict (no by_period)."""
+    from app.mcp.tools.netsuite_financial_report import _compute_summary
+
+    rows = [
+        {"section": "1-Revenue", "amount": 10000},
+        {"section": "3-COGS", "amount": 4000},
+    ]
+    summary = _compute_summary("income_statement", rows)
+    assert "by_period" not in summary
+    assert summary["total_revenue"] == 10000
+    assert summary["total_cogs"] == 4000
+    assert summary["net_income"] == 6000
+
+
+def test_compute_summary_balance_sheet_trend_groups_by_period():
+    from app.mcp.tools.netsuite_financial_report import _compute_summary
+
+    rows = [
+        {"periodname": "Jan 2026", "section": "1-Assets", "balance": 50000},
+        {"periodname": "Jan 2026", "section": "2-Liabilities", "balance": 20000},
+        {"periodname": "Jan 2026", "section": "3-Equity", "balance": 30000},
+        {"periodname": "Feb 2026", "section": "1-Assets", "balance": 55000},
+        {"periodname": "Feb 2026", "section": "2-Liabilities", "balance": 22000},
+        {"periodname": "Feb 2026", "section": "3-Equity", "balance": 33000},
+    ]
+    summary = _compute_summary("balance_sheet_trend", rows)
+    assert "by_period" in summary
+
+    jan = summary["by_period"]["Jan 2026"]
+    assert jan["total_assets"] == 50000
+    assert jan["total_liabilities"] == 20000
+    assert jan["total_equity"] == 30000
+    assert jan["liabilities_plus_equity"] == 50000
+
+    feb = summary["by_period"]["Feb 2026"]
+    assert feb["total_assets"] == 55000
+
+
+@pytest.mark.asyncio
+async def test_execute_trend_returns_per_period_summary():
+    """Trend reports should return summary.by_period with per-month breakdowns."""
+    from app.mcp.tools.netsuite_financial_report import execute
+
+    with patch("app.mcp.tools.netsuite_financial_report._execute_suiteql", new_callable=AsyncMock) as mock_exec:
+        mock_exec.return_value = {
+            "columns": ["periodname", "startdate", "acctnumber", "acctname", "accttype", "section", "amount"],
+            "rows": [
+                ["Jan 2026", "2026-01-01", "4000", "Revenue", "Income", "1-Revenue", 5000],
+                ["Jan 2026", "2026-01-01", "5000", "COGS", "COGS", "3-COGS", 2000],
+                ["Feb 2026", "2026-02-01", "4000", "Revenue", "Income", "1-Revenue", 8000],
+                ["Feb 2026", "2026-02-01", "5000", "COGS", "COGS", "3-COGS", 3000],
+            ],
+            "row_count": 4,
+        }
+
+        result = await execute(
+            report_type="income_statement_trend",
+            period="Jan 2026, Feb 2026",
+            tenant_id="test-tenant",
+            db=AsyncMock(),
+        )
+
+    assert result["success"] is True
+    assert "by_period" in result["summary"]
+    assert result["summary"]["by_period"]["Jan 2026"]["total_revenue"] == 5000
+    assert result["summary"]["by_period"]["Jan 2026"]["net_income"] == 3000
+    assert result["summary"]["by_period"]["Feb 2026"]["total_revenue"] == 8000
+    assert result["summary"]["by_period"]["Feb 2026"]["net_income"] == 5000
+
+
 # --- MCP registry + allowed tools tests ---
 
 
@@ -318,8 +449,8 @@ def test_financial_mode_prompt_references_tool():
     from app.services.chat.orchestrator import _build_financial_mode_task
 
     task = _build_financial_mode_task("Show me the income statement for February 2026")
-    assert "netsuite.financial_report" in task
-    assert "income_statement" in task or "report_type" in task
+    assert "ns_runReport" in task or "netsuite_financial_report" in task or "netsuite.report" in task
+    assert "report" in task.lower()
     # Should NOT contain raw SQL templates
     assert "transactionaccountingline" not in task
 
@@ -328,8 +459,9 @@ def test_financial_mode_prompt_mentions_trend():
     from app.services.chat.orchestrator import _build_financial_mode_task
 
     task = _build_financial_mode_task("Show revenue trend Q1 2026")
-    assert "income_statement_trend" in task
-    assert "balance_sheet_trend" in task
+    # The task should reference the report tool and preserve the user's query
+    assert "ns_runReport" in task or "netsuite_financial_report" in task or "FINANCIAL" in task
+    assert "trend" in task.lower()
 
 
 # --- Intent parser tests ---

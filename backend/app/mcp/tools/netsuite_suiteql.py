@@ -301,6 +301,7 @@ async def execute(params: dict, context: dict | None = None, **kwargs) -> dict:
     query: str = params.get("query", "")
     limit: int = params.get("limit", 100)
     user_question: str | None = params.get("user_question")
+    timeout_seconds: int = params.get("timeout_seconds", settings.NETSUITE_SUITEQL_TIMEOUT)
 
     if not query:
         return {"error": True, "message": "No query provided."}
@@ -355,7 +356,10 @@ async def execute(params: dict, context: dict | None = None, **kwargs) -> dict:
         return {"error": True, "message": str(exc)}
 
     # --- Enforce limit ---
-    max_rows = min(limit, settings.NETSUITE_SUITEQL_MAX_ROWS)
+    # Internal callers (e.g. financial_report tool) can set skip_limit_cap=True
+    # to bypass the global max and use their own FETCH FIRST in the SQL template.
+    skip_cap = params.get("skip_limit_cap", False)
+    max_rows = limit if skip_cap else min(limit, settings.NETSUITE_SUITEQL_MAX_ROWS)
     query = enforce_limit(query, max_rows)
 
     print(f"[SUITEQL] Final query after enforce_limit (max_rows={max_rows}):\n{query}", flush=True)
@@ -376,7 +380,10 @@ async def execute(params: dict, context: dict | None = None, **kwargs) -> dict:
             }
 
         try:
-            result = await execute_suiteql(access_token, account_id, query, max_rows)
+            result = await execute_suiteql(
+                access_token, account_id, query, max_rows,
+                timeout_seconds=timeout_seconds,
+            )
         except Exception as exc:
             error_msg = str(exc)
             hint = ""
@@ -408,7 +415,7 @@ async def execute(params: dict, context: dict | None = None, **kwargs) -> dict:
     }
 
     try:
-        async with httpx.AsyncClient(timeout=settings.NETSUITE_SUITEQL_TIMEOUT) as client:
+        async with httpx.AsyncClient(timeout=timeout_seconds) as client:
             response = await client.post(url, headers=headers, json={"q": query})
             response.raise_for_status()
     except httpx.HTTPStatusError as exc:

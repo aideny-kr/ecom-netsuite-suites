@@ -22,6 +22,7 @@ EXPECTED_TOOLS = {
     "netsuite.suiteql",
     "netsuite.suiteql_stub",
     "netsuite.financial_report",
+    "netsuite.report",
     "netsuite.connectivity",
     "netsuite.get_metadata",
     "netsuite.refresh_metadata",

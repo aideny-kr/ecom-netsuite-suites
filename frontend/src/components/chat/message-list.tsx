@@ -631,7 +631,7 @@ function AssistantMessageRow({
                   />
                 );
               }
-              if (tc.tool === "netsuite_suiteql") {
+              if (tc.tool === "netsuite_suiteql" || tc.result_payload?.kind === "table") {
                 const msgIndex = messages.indexOf(message);
                 const prevUserMsg = messages
                   .slice(0, msgIndex)

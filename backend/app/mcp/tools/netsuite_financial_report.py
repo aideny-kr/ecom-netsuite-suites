@@ -97,7 +97,9 @@ REPORT_TEMPLATES: dict[str, dict] = {
         WHEN a.accttype = 'Expense'    THEN '4-Operating Expense'
         WHEN a.accttype = 'OthExpense' THEN '5-Other Expense'
     END AS section,
-    SUM(tal.amount) * CASE WHEN a.accttype IN ('Income', 'OthIncome') THEN -1 ELSE 1 END AS amount
+    SUM(BUILTIN.CONSOLIDATE(tal.amount, 'INCOME', 'DEFAULT', 'DEFAULT', 1, ap.id, 'DEFAULT')
+        * CASE WHEN a.accttype IN ('Income', 'OthIncome') THEN -1 ELSE 1 END
+    ) AS amount
 FROM transactionaccountingline tal
     JOIN transaction t ON t.id = tal.transaction
     JOIN account a ON a.id = tal.account
@@ -105,11 +107,10 @@ FROM transactionaccountingline tal
 WHERE tal.posting = 'T'
     AND tal.accountingbook = (SELECT id FROM accountingbook WHERE isprimary = 'T')
     AND a.accttype IN ('Income', 'OthIncome', 'COGS', 'Expense', 'OthExpense')
-    AND (COALESCE(a.eliminate, 'F') = 'F' OR a.acctnumber = '4990')
     AND ap.isquarter = 'F' AND ap.isyear = 'F'
     AND {period_filter}
 GROUP BY a.acctnumber, a.acctname, a.accttype
-HAVING SUM(tal.amount) <> 0
+HAVING SUM(BUILTIN.CONSOLIDATE(tal.amount, 'INCOME', 'DEFAULT', 'DEFAULT', 1, ap.id, 'DEFAULT')) <> 0
 ORDER BY section, a.acctnumber
 FETCH FIRST 500 ROWS ONLY""",
     },
@@ -125,10 +126,9 @@ FETCH FIRST 500 ROWS ONLY""",
         WHEN a.accttype IN ('AcctPay','CreditCard','OthCurrLiab','LongTermLiab','DeferRevenue') THEN '2-Liabilities'
         WHEN a.accttype = 'Equity' THEN '3-Equity'
     END AS section,
-    SUM(tal.amount * CASE
-        WHEN a.accttype IN ('AcctPay','CreditCard','OthCurrLiab','LongTermLiab','DeferRevenue','Equity') THEN -1
-        ELSE 1
-    END) AS balance
+    SUM(BUILTIN.CONSOLIDATE(tal.amount, 'LEDGER', 'DEFAULT', 'DEFAULT', 1, ap.id, 'DEFAULT')
+        * CASE WHEN a.accttype IN ('AcctPay','CreditCard','OthCurrLiab','LongTermLiab','DeferRevenue','Equity') THEN -1 ELSE 1 END
+    ) AS balance
 FROM transactionaccountingline tal
     JOIN transaction t ON t.id = tal.transaction
     JOIN account a ON a.id = tal.account
@@ -141,7 +141,7 @@ WHERE tal.posting = 'T'
     AND COALESCE(a.eliminate, 'F') = 'F'
     AND {period_filter}
 GROUP BY a.acctnumber, a.acctname, a.accttype
-HAVING SUM(tal.amount) <> 0
+HAVING SUM(BUILTIN.CONSOLIDATE(tal.amount, 'LEDGER', 'DEFAULT', 'DEFAULT', 1, ap.id, 'DEFAULT')) <> 0
 ORDER BY section, a.acctnumber
 FETCH FIRST 500 ROWS ONLY""",
     },
@@ -152,9 +152,9 @@ FETCH FIRST 500 ROWS ONLY""",
     a.acctnumber,
     a.acctname,
     a.accttype,
-    SUM(tal.debit) AS total_debit,
-    SUM(tal.credit) AS total_credit,
-    SUM(tal.amount) AS net_amount
+    SUM(BUILTIN.CONSOLIDATE(tal.debit, 'INCOME', 'DEFAULT', 'DEFAULT', 1, ap.id, 'DEFAULT')) AS total_debit,
+    SUM(BUILTIN.CONSOLIDATE(tal.credit, 'INCOME', 'DEFAULT', 'DEFAULT', 1, ap.id, 'DEFAULT')) AS total_credit,
+    SUM(BUILTIN.CONSOLIDATE(tal.amount, 'INCOME', 'DEFAULT', 'DEFAULT', 1, ap.id, 'DEFAULT')) AS net_amount
 FROM transactionaccountingline tal
     JOIN transaction t ON t.id = tal.transaction
     JOIN account a ON a.id = tal.account
@@ -165,7 +165,8 @@ WHERE tal.posting = 'T'
     AND a.accttype != 'Statistical'
     AND {period_filter}
 GROUP BY a.acctnumber, a.acctname, a.accttype
-HAVING SUM(tal.debit) <> 0 OR SUM(tal.credit) <> 0
+HAVING SUM(BUILTIN.CONSOLIDATE(tal.debit, 'INCOME', 'DEFAULT', 'DEFAULT', 1, ap.id, 'DEFAULT')) <> 0
+    OR SUM(BUILTIN.CONSOLIDATE(tal.credit, 'INCOME', 'DEFAULT', 'DEFAULT', 1, ap.id, 'DEFAULT')) <> 0
 ORDER BY a.acctnumber
 FETCH FIRST 500 ROWS ONLY""",
     },
@@ -185,7 +186,9 @@ FETCH FIRST 500 ROWS ONLY""",
         WHEN a.accttype = 'Expense'    THEN '4-Operating Expense'
         WHEN a.accttype = 'OthExpense' THEN '5-Other Expense'
     END AS section,
-    SUM(tal.amount) * CASE WHEN a.accttype IN ('Income', 'OthIncome') THEN -1 ELSE 1 END AS amount
+    SUM(BUILTIN.CONSOLIDATE(tal.amount, 'INCOME', 'DEFAULT', 'DEFAULT', 1, ap.id, 'DEFAULT')
+        * CASE WHEN a.accttype IN ('Income', 'OthIncome') THEN -1 ELSE 1 END
+    ) AS amount
 FROM transactionaccountingline tal
     JOIN transaction t ON t.id = tal.transaction
     JOIN account a ON a.id = tal.account
@@ -193,13 +196,12 @@ FROM transactionaccountingline tal
 WHERE tal.posting = 'T'
     AND tal.accountingbook = (SELECT id FROM accountingbook WHERE isprimary = 'T')
     AND a.accttype IN ('Income', 'OthIncome', 'COGS', 'Expense', 'OthExpense')
-    AND (COALESCE(a.eliminate, 'F') = 'F' OR a.acctnumber = '4990')
     AND ap.isquarter = 'F' AND ap.isyear = 'F'
     AND {period_filter}
 GROUP BY ap.periodname, ap.startdate, a.acctnumber, a.acctname, a.accttype
-HAVING SUM(tal.amount) <> 0
+HAVING SUM(BUILTIN.CONSOLIDATE(tal.amount, 'INCOME', 'DEFAULT', 'DEFAULT', 1, ap.id, 'DEFAULT')) <> 0
 ORDER BY a.acctnumber, ap.startdate
-FETCH FIRST 2000 ROWS ONLY""",
+FETCH FIRST 5000 ROWS ONLY""",
     },
     "balance_sheet_trend": {
         "description": "Balance Sheet trend by period — inception-to-date balances recalculated at each period end",
@@ -215,10 +217,9 @@ FETCH FIRST 2000 ROWS ONLY""",
         WHEN a.accttype IN ('AcctPay','CreditCard','OthCurrLiab','LongTermLiab','DeferRevenue') THEN '2-Liabilities'
         WHEN a.accttype = 'Equity' THEN '3-Equity'
     END AS section,
-    SUM(tal.amount * CASE
-        WHEN a.accttype IN ('AcctPay','CreditCard','OthCurrLiab','LongTermLiab','DeferRevenue','Equity') THEN -1
-        ELSE 1
-    END) AS balance
+    SUM(BUILTIN.CONSOLIDATE(tal.amount, 'LEDGER', 'DEFAULT', 'DEFAULT', 1, ap.id, 'DEFAULT')
+        * CASE WHEN a.accttype IN ('AcctPay','CreditCard','OthCurrLiab','LongTermLiab','DeferRevenue','Equity') THEN -1 ELSE 1 END
+    ) AS balance
 FROM transactionaccountingline tal
     JOIN transaction t ON t.id = tal.transaction
     JOIN account a ON a.id = tal.account
@@ -237,9 +238,9 @@ WHERE tal.posting = 'T'
                         'AcctPay','CreditCard','OthCurrLiab','LongTermLiab','DeferRevenue','Equity')
     AND COALESCE(a.eliminate, 'F') = 'F'
 GROUP BY ap_period.periodname, ap_period.startdate, a.acctnumber, a.acctname, a.accttype
-HAVING SUM(tal.amount) <> 0
+HAVING SUM(BUILTIN.CONSOLIDATE(tal.amount, 'LEDGER', 'DEFAULT', 'DEFAULT', 1, ap.id, 'DEFAULT')) <> 0
 ORDER BY a.acctnumber, ap_period.startdate
-FETCH FIRST 2000 ROWS ONLY""",
+FETCH FIRST 5000 ROWS ONLY""",
     },
 }
 
@@ -251,10 +252,16 @@ FETCH FIRST 2000 ROWS ONLY""",
 from app.mcp.tools import netsuite_suiteql as _suiteql_mod
 
 
-async def _execute_suiteql(*, query: str, tenant_id: str, db, limit: int = 500) -> dict:
-    """Thin wrapper around suiteql.execute() — exists for easy test mocking."""
+async def _execute_suiteql(
+    *, query: str, tenant_id: str, db, limit: int = 5000, timeout_seconds: int = 90
+) -> dict:
+    """Thin wrapper around suiteql.execute() — exists for easy test mocking.
+
+    Financial reports control their own FETCH FIRST in SQL templates,
+    so we bypass the global NETSUITE_SUITEQL_MAX_ROWS cap.
+    """
     return await _suiteql_mod.execute(
-        params={"query": query, "limit": limit},
+        params={"query": query, "limit": limit, "timeout_seconds": timeout_seconds, "skip_limit_cap": True},
         context={"tenant_id": tenant_id, "db": db},
     )
 
@@ -317,18 +324,145 @@ async def execute(
     try:
         result = await _execute_suiteql(query=sql, tenant_id=tenant_id, db=db)
     except Exception as e:
+        print(f"[FINANCIAL_REPORT] Exception: {e}", flush=True)
         return {"success": False, "error": f"SuiteQL execution failed: {str(e)}"}
 
+    # Detect error from SuiteQL result
+    error_val = result.get("error")
+    error_msg = result.get("message")
+    has_error = (error_val is True) or (isinstance(error_val, str) and error_val.strip())
+
+    if has_error:
+        detail = error_msg if isinstance(error_msg, str) else (error_val if isinstance(error_val, str) else "Query failed")
+        print(f"[FINANCIAL_REPORT] SuiteQL error: {detail}", flush=True)
+        return {"success": False, "error": detail}
+
+    columns = result.get("columns", [])
+    raw_rows = result.get("items") or result.get("rows", [])
+    row_count = result.get("total_rows") or result.get("row_count", 0)
+    print(f"[FINANCIAL_REPORT] Success: {row_count} rows, {len(columns)} columns", flush=True)
+
+    # Normalize list-of-lists to list-of-dicts for consistent downstream processing
+    if raw_rows and columns and isinstance(raw_rows[0], (list, tuple)):
+        rows = [dict(zip(columns, row)) for row in raw_rows]
+    else:
+        rows = raw_rows
+
+    # Compute section subtotals server-side so the AI doesn't do arithmetic
+    summary = _compute_summary(report_type, rows)
+    if summary:
+        print(f"[FINANCIAL_REPORT] Summary: {summary}", flush=True)
+
     return {
-        "success": result.get("success", not result.get("error", False)),
+        "success": True,
         "report_type": report_type,
         "period": period,
         "description": template["description"],
-        "columns": result.get("columns", []),
-        "items": result.get("items", []),
-        "total_rows": result.get("total_rows", 0),
-        "error": result.get("message") or result.get("error"),
+        "columns": columns,
+        "items": rows,
+        "total_rows": row_count,
+        "summary": summary,
     }
+
+
+def _compute_income_summary(rows: list[dict], amount_key: str = "amount") -> dict:
+    """Compute income statement section totals from a list of row dicts."""
+    sections: dict[str, float] = {}
+    for row in rows:
+        section = row.get("section", "")
+        try:
+            amt = float(row.get(amount_key, 0))
+        except (TypeError, ValueError):
+            continue
+        sections[section] = sections.get(section, 0.0) + amt
+
+    revenue = round(sections.get("1-Revenue", 0.0), 2)
+    other_income = round(sections.get("2-Other Income", 0.0), 2)
+    cogs = round(sections.get("3-COGS", 0.0), 2)
+    opex = round(sections.get("4-Operating Expense", 0.0), 2)
+    other_expense = round(sections.get("5-Other Expense", 0.0), 2)
+    gross_profit = round(revenue - cogs, 2)
+    operating_income = round(gross_profit - opex, 2)
+    net_income = round(operating_income + other_income - other_expense, 2)
+
+    return {
+        "total_revenue": revenue,
+        "total_other_income": other_income,
+        "total_cogs": cogs,
+        "gross_profit": gross_profit,
+        "total_operating_expense": opex,
+        "operating_income": operating_income,
+        "total_other_expense": other_expense,
+        "net_income": net_income,
+    }
+
+
+def _compute_balance_summary(rows: list[dict], amount_key: str = "balance") -> dict:
+    """Compute balance sheet section totals from a list of row dicts."""
+    sections: dict[str, float] = {}
+    for row in rows:
+        section = row.get("section", "")
+        try:
+            amt = float(row.get(amount_key, 0))
+        except (TypeError, ValueError):
+            continue
+        sections[section] = sections.get(section, 0.0) + amt
+
+    assets = round(sections.get("1-Assets", 0.0), 2)
+    liabilities = round(sections.get("2-Liabilities", 0.0), 2)
+    equity = round(sections.get("3-Equity", 0.0), 2)
+
+    return {
+        "total_assets": assets,
+        "total_liabilities": liabilities,
+        "total_equity": equity,
+        "liabilities_plus_equity": round(liabilities + equity, 2),
+    }
+
+
+def _compute_summary(report_type: str, rows: list) -> dict:
+    """Pre-compute section totals and net income/balance so the AI presents exact numbers.
+
+    For trend reports (_trend suffix), returns per-period breakdowns keyed by periodname.
+    For single-period reports, returns a flat summary dict.
+    """
+    # Rows can be dicts or lists; summary only works with dict rows (keyed by column name)
+    if not rows or not isinstance(rows[0], dict):
+        return {}
+
+    if report_type == "income_statement":
+        return _compute_income_summary(rows)
+
+    if report_type == "income_statement_trend":
+        # Group rows by periodname, compute summary per period
+        periods: dict[str, list[dict]] = {}
+        for row in rows:
+            pname = row.get("periodname", "Unknown")
+            periods.setdefault(pname, []).append(row)
+        return {
+            "by_period": {
+                pname: _compute_income_summary(period_rows)
+                for pname, period_rows in periods.items()
+            }
+        }
+
+    if report_type == "balance_sheet":
+        return _compute_balance_summary(rows)
+
+    if report_type == "balance_sheet_trend":
+        # Group rows by periodname, compute summary per period
+        periods: dict[str, list[dict]] = {}
+        for row in rows:
+            pname = row.get("periodname", "Unknown")
+            periods.setdefault(pname, []).append(row)
+        return {
+            "by_period": {
+                pname: _compute_balance_summary(period_rows)
+                for pname, period_rows in periods.items()
+            }
+        }
+
+    return {}
 
 
 # ---------------------------------------------------------------------------

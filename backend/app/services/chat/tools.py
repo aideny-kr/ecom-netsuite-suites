@@ -217,6 +217,7 @@ async def _execute_external_tool(
     db: "AsyncSession",
 ) -> dict:
     """Execute a tool on an external MCP connector."""
+    print(f"[EXT_MCP] Calling {raw_tool_name} with params: {tool_input}", flush=True)
     try:
         from app.services.mcp_connector_service import get_mcp_connector
 

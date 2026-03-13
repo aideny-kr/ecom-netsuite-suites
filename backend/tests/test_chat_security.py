@@ -26,6 +26,7 @@ class TestAllowedChatTools:
         expected = {
             "netsuite.suiteql",
             "netsuite.financial_report",
+            "netsuite.report",
             "netsuite.connectivity",
             "netsuite.get_metadata",
             "netsuite.refresh_metadata",

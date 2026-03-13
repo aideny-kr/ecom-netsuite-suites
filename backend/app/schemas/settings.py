@@ -36,3 +36,13 @@ class FeatureFlagsResponse(BaseModel):
 
 class FeatureFlagsUpdate(BaseModel):
     flags: dict[str, bool]
+
+
+class ChatSettingsResponse(BaseModel):
+    use_mcp_financial_reports: bool = True
+
+    model_config = {"from_attributes": True}
+
+
+class ChatSettingsUpdate(BaseModel):
+    use_mcp_financial_reports: bool | None = None

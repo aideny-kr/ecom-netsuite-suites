@@ -30,31 +30,35 @@ _FINANCIAL_MODE_TAG = "FINANCIAL REPORT MODE"
 
 
 def _build_financial_mode_task(user_message: str) -> str:
-    """Build the augmented task for financial report queries.
+    """Build task for financial report queries.
 
-    Instead of injecting SQL templates (which the LLM ignores or mangles),
-    instruct the agent to call the deterministic netsuite.financial_report tool.
+    Always uses the LOCAL netsuite_financial_report tool which uses BUILTIN.CONSOLIDATE
+    for correct multi-currency consolidation at posting-time exchange rates.
+    MCP ns_runReport uses real-time FX rates which diverge from NetSuite UI numbers
+    on multi-currency tenants — not suitable for penny-perfect financial statements.
     """
     return (
         f"{user_message}\n\n"
-        f"[{_FINANCIAL_MODE_TAG}]\n"
-        "For this financial report request, you MUST use the `netsuite.financial_report` tool.\n"
-        "DO NOT write raw SuiteQL for income statements, balance sheets, or trial balances.\n\n"
-        "Tool parameters:\n"
-        "- report_type: 'income_statement', 'balance_sheet', 'trial_balance', "
-        "'income_statement_trend', or 'balance_sheet_trend'\n"
-        "- period: The accounting period name, e.g. 'Feb 2026' or "
-        "'Jan 2026, Feb 2026, Mar 2026' for trend/multi-month\n"
-        "- subsidiary_id: (optional) filter to a specific subsidiary\n\n"
-        "Use '_trend' variants when the user asks for trends, comparisons, "
-        "month-over-month, or multi-period breakdowns.\n"
-        "The tool runs verified SQL with correct TAL joins, sign conventions, "
-        "and period filters.\n"
-        "Present the results clearly with sections (Revenue, COGS, Expenses) and totals.\n"
-        "For trend reports, present as a period-by-period table and highlight "
-        "significant changes.\n"
-        "Calculate Net Income = Revenue + Other Income - COGS - Operating Expenses "
-        "- Other Expenses."
+        f"[{_FINANCIAL_MODE_TAG}] Use the LOCAL netsuite_financial_report tool.\n\n"
+        "Parameters:\n"
+        '  report_type: "income_statement" | "balance_sheet" | "trial_balance" | "income_statement_trend" | "balance_sheet_trend"\n'
+        '  period: "Feb 2026" (single) or "Jan 2026, Feb 2026, Mar 2026" (trend/quarter)\n'
+        "  subsidiary_id: number (optional, use <tenant_vernacular> to resolve names to IDs)\n\n"
+        "For quarters: use income_statement_trend with all 3 months.\n\n"
+        "SINGLE-PERIOD reports: The tool returns a 'summary' object with pre-computed totals\n"
+        "(total_revenue, total_cogs, gross_profit, total_operating_expense, operating_income,\n"
+        "total_other_expense, net_income). Use ONLY these values — do NOT calculate totals yourself.\n\n"
+        "TREND reports (_trend): The tool returns summary.by_period — a dict keyed by period name,\n"
+        "each containing the same breakdown (total_revenue, gross_profit, net_income, etc.).\n"
+        "Use ONLY these per-period pre-computed values for each month's subtotals.\n\n"
+        "OUTPUT FORMAT — markdown table:\n"
+        "- Single-period: | Acct# | Name | Amount |. Group by section, subtotals from summary.\n"
+        "- Trend: | Acct# | Name | Period1 | Period2 | ... |. One amount column per period.\n"
+        "  CRITICAL for trend tables: subtotal/summary rows (Total Revenue, Gross Profit, Net Income, etc.)\n"
+        "  MUST have empty cells for Acct# and Name columns so amounts stay aligned under the correct period.\n"
+        "  Example: | | **Total Revenue** | $10,304,258 | $5,288,116 | $8,813,572 | $10,628,261 |\n"
+        "  WRONG:   | **Total Revenue** | $10,304,258 | $5,288,116 | $8,813,572 | $10,628,261 |\n"
+        "FALLBACK: MCP ns_runReport if local tool errors (note: MCP may show slight FX differences)."
     )
 
 
@@ -360,31 +364,100 @@ async def run_chat_turn(
     # ── Inject dynamic tool inventory into system prompt ──
     # This ensures the model always knows the exact tool names it can call,
     # regardless of whether the base prompt matches.
+    # Detect ALL NetSuite MCP tools by pattern matching the tool name
+    _MCP_TOOL_PATTERNS = {
+        "runreport": "REPORTS",
+        "runsavedsearch": "SAVED_SEARCHES",
+        "listallreports": "REPORT_DISCOVERY",
+        "listsavedsearches": "SEARCH_DISCOVERY",
+        "suiteql": "SUITEQL",
+        "getsuiteqlmetadata": "METADATA",
+        "getsubsidiaries": "SUBSIDIARIES",
+    }
+
     if not is_onboarding and tool_definitions:
         tool_inventory_lines = ["\nAVAILABLE TOOLS (use these exact names when calling tools):"]
-        ext_suiteql_tools = []
+        ext_mcp_tools: dict[str, str] = {}  # category → tool_name
         for td in tool_definitions:
             tool_inventory_lines.append(f"- {td['name']}: {td.get('description', '')}")
-            # Detect external MCP tools that can run SuiteQL
-            if td["name"].startswith("ext__") and "suiteql" in td["name"].lower():
-                ext_suiteql_tools.append(td["name"])
+            if td["name"].startswith("ext__"):
+                lower_name = td["name"].lower()
+                for pattern, category in _MCP_TOOL_PATTERNS.items():
+                    if pattern in lower_name:
+                        ext_mcp_tools[category] = td["name"]
 
-        # If external MCP SuiteQL tools are available, guide the LLM to prefer them
-        if ext_suiteql_tools:
-            tool_inventory_lines.append(
-                "\n\nIMPORTANT — NETSUITE MCP TOOLS:\n"
-                "You have access to NetSuite's native MCP tools (prefixed with 'ext__'). "
-                "These connect DIRECTLY to NetSuite and are more reliable than the local "
-                "netsuite_suiteql tool.\n"
+        if ext_mcp_tools:
+            guidance = [
+                "\n\nNETSUITE MCP TOOLS (connect directly to NetSuite — prefer these for execution):",
+            ]
+
+            if "REPORTS" in ext_mcp_tools:
+                guidance.append(
+                    f"\n• FINANCIAL REPORTS: `{ext_mcp_tools['REPORTS']}`"
+                    "\n  For Income Statement, Balance Sheet, Trial Balance, Aging, GL, etc."
+                    '\n  Parameters: {"reportId": <number>, "dateTo": "YYYY-MM-DD", "dateFrom": "YYYY-MM-DD", "subsidiaryId": <number>}'
+                    "\n  → reportId must be a NUMBER (e.g. -200), not a string."
+                    "\n  → dateTo is always required. dateFrom is required for P&L, optional for Balance Sheet."
+                    "\n  → Call ns_listAllReports FIRST to get reportId and check has_subsidiary_filter / as_of_date_format."
+                    "\n  → If has_subsidiary_filter=true, call ns_getSubsidiaries and pass subsidiaryId."
+                    "\n  → NetSuite handles sign conventions, consolidation, currency natively."
+                )
+
+            if "REPORT_DISCOVERY" in ext_mcp_tools:
+                guidance.append(
+                    f"\n• DISCOVER REPORTS: `{ext_mcp_tools['REPORT_DISCOVERY']}`"
+                    "\n  Lists all available reports with IDs. Call FIRST before ns_runReport."
+                )
+
+            if "SAVED_SEARCHES" in ext_mcp_tools:
+                guidance.append(
+                    f"\n• SAVED SEARCHES: `{ext_mcp_tools['SAVED_SEARCHES']}`"
+                    "\n  Run pre-built searches with custom columns, formulas, and filters."
+                    '\n  Parameters: {"savedSearchId": "<id>", "filters": [...]}'
+                )
+
+            if "SEARCH_DISCOVERY" in ext_mcp_tools:
+                guidance.append(
+                    f"\n• DISCOVER SEARCHES: `{ext_mcp_tools['SEARCH_DISCOVERY']}`"
+                    "\n  Lists saved searches. Use when user asks 'do we have a report for X?'"
+                )
+
+            if "SUITEQL" in ext_mcp_tools:
+                guidance.append(
+                    f"\n• SUITEQL (MCP): `{ext_mcp_tools['SUITEQL']}`"
+                    "\n  Ad-hoc SuiteQL queries inside NetSuite. Prefer over local netsuite_suiteql."
+                    '\n  Parameters: {"sqlQuery": "SELECT ...", "description": "..."}'
+                    "\n  STILL FOLLOW all <suiteql_dialect_rules> — they apply to MCP SuiteQL too."
+                )
+
+            if "METADATA" in ext_mcp_tools:
+                guidance.append(
+                    f"\n• SCHEMA (MCP): `{ext_mcp_tools['METADATA']}`"
+                    "\n  Ground-truth column metadata from NetSuite. Use alongside netsuite_get_metadata."
+                )
+
+            if "SUBSIDIARIES" in ext_mcp_tools:
+                guidance.append(
+                    f"\n• SUBSIDIARIES: `{ext_mcp_tools['SUBSIDIARIES']}`"
+                    "\n  Subsidiary hierarchy with base currencies."
+                )
+
+            guidance.append(
+                "\n\nEXECUTION PRIORITY (pick the first that fits):"
+                "\n  Financial statements → ns_runReport"
+                "\n  Pre-built business reports → ns_runSavedSearch"
+                "\n  Ad-hoc data queries → ns_runCustomSuiteQL (MCP) → netsuite_suiteql (local fallback)"
+                "\n  Schema verification → ns_getSuiteQLMetadata + netsuite_get_metadata (use both)"
+                "\n  Documentation/how-to → rag_search → web_search"
                 "\n"
-                "PREFERRED TOOL FOR SUITEQL QUERIES:\n"
-                f"Use `{ext_suiteql_tools[0]}` instead of `netsuite_suiteql` for all "
-                "SuiteQL data queries. This tool runs queries directly inside NetSuite "
-                "via the MCP protocol.\n"
-                'Parameters: {"sqlQuery": "SELECT ...", "description": "Brief description"}\n'
-                "\n"
-                "Only fall back to `netsuite_suiteql` if the MCP tool is unavailable or errors."
+                "\nIMPORTANT: MCP tools handle EXECUTION. But you still have rich tenant context"
+                "\n(entity vernacular, custom field schema, learned rules, proven patterns) injected"
+                "\ninto your system prompt. USE THIS CONTEXT when constructing parameters for MCP tools."
+                "\nFor example, if <tenant_vernacular> resolves 'FW' to subsidiary ID 5, pass"
+                "\nsubsidiaryId: 5 to ns_runReport."
             )
+
+            tool_inventory_lines.append("\n".join(guidance))
 
         system_prompt += "\n".join(tool_inventory_lines)
 
@@ -575,7 +648,9 @@ async def run_chat_turn(
                         if conf_scores:
                             context["entity_resolution_confidence"] = max(conf_scores)
 
-                    if isinstance(dk_result, Exception):
+                    if is_financial:
+                        context["domain_knowledge"] = []
+                    elif isinstance(dk_result, Exception):
                         logger.warning("unified_agent.domain_knowledge_failed", exc_info=dk_result)
                     elif dk_result:
                         context["domain_knowledge"] = [r["raw_text"] for r in dk_result]
@@ -595,37 +670,40 @@ async def run_chat_turn(
                     context["user_timezone"] = user_timezone
                     context["importance_tier"] = importance_tier.value
 
-                    # Select relevant table schemas and inject into context
-                    try:
-                        from app.services.schema_context_selector import select_relevant_schemas
-                        from app.services.prompt_template_service import _build_table_schema_section
+                    # Select relevant table schemas and inject into context (skip for financial)
+                    if is_financial:
+                        print("[ORCHESTRATOR] Skipping schema injection for financial query", flush=True)
+                    else:
+                        try:
+                            from app.services.schema_context_selector import select_relevant_schemas
+                            from app.services.prompt_template_service import _build_table_schema_section
 
-                        entity_types: list[str] = []
-                        if isinstance(vernacular_result, str):
-                            import re as _re_schema
-                            entity_types = _re_schema.findall(
-                                r"<entity_type>(.*?)</entity_type>", vernacular_result
+                            entity_types: list[str] = []
+                            if isinstance(vernacular_result, str):
+                                import re as _re_schema
+                                entity_types = _re_schema.findall(
+                                    r"<entity_type>(.*?)</entity_type>", vernacular_result
+                                )
+
+                            relevant_tables = select_relevant_schemas(
+                                sanitized_input,
+                                entity_types=entity_types,
                             )
+                            print(f"[ORCHESTRATOR] Schema tables selected: {relevant_tables}", flush=True)
 
-                        relevant_tables = select_relevant_schemas(
-                            sanitized_input,
-                            entity_types=entity_types,
-                        )
-                        print(f"[ORCHESTRATOR] Schema tables selected: {relevant_tables}", flush=True)
-
-                        schema_xml = _build_table_schema_section(
-                            metadata=metadata,
-                            relevant_tables=relevant_tables,
-                        )
-                        if schema_xml:
-                            context["table_schemas"] = schema_xml
-                            print(
-                                f"[ORCHESTRATOR] Schema injected ({len(schema_xml)} chars, "
-                                f"{len(relevant_tables)} tables)",
-                                flush=True,
+                            schema_xml = _build_table_schema_section(
+                                metadata=metadata,
+                                relevant_tables=relevant_tables,
                             )
-                    except Exception:
-                        logger.warning("orchestrator.schema_injection_failed", exc_info=True)
+                            if schema_xml:
+                                context["table_schemas"] = schema_xml
+                                print(
+                                    f"[ORCHESTRATOR] Schema injected ({len(schema_xml)} chars, "
+                                    f"{len(relevant_tables)} tables)",
+                                    flush=True,
+                                )
+                        except Exception:
+                            logger.warning("orchestrator.schema_injection_failed", exc_info=True)
 
                     # Create unified agent with full context
                     unified_agent = UnifiedAgent(
@@ -638,65 +716,9 @@ async def run_chat_turn(
 
                 # Augment task for financial report queries
                 unified_task = sanitized_input
-                pre_executed_successfully = False
                 if not _is_chitchat and is_financial:
-                    # Try to pre-execute the financial report deterministically
-                    from app.mcp.tools.netsuite_financial_report import parse_report_intent, execute as fin_execute
-
-                    parsed = parse_report_intent(sanitized_input)
-                    if parsed:
-                        print(
-                            f"[FINANCIAL_REPORT] Pre-executing: {parsed['report_type']} "
-                            f"period={parsed['period']}",
-                            flush=True,
-                        )
-                        try:
-                            fin_result = await fin_execute(
-                                report_type=parsed["report_type"],
-                                period=parsed["period"],
-                                tenant_id=str(tenant_id),
-                                db=db,
-                            )
-                            if fin_result.get("success") and fin_result.get("items"):
-                                import json as _json
-
-                                # Format results as a data block for the agent to present
-                                items_json = _json.dumps(fin_result["items"][:200], default=str)
-                                unified_task = (
-                                    f"{sanitized_input}\n\n"
-                                    f"[{_FINANCIAL_MODE_TAG}] — DATA ALREADY FETCHED\n"
-                                    f"Report: {fin_result['description']}\n"
-                                    f"Period: {parsed['period']}\n"
-                                    f"Rows: {fin_result['total_rows']}\n\n"
-                                    f"The data below was fetched using a verified SQL template "
-                                    f"with correct TAL joins, sign conventions, and period filters. "
-                                    f"DO NOT re-query — just present this data clearly.\n\n"
-                                    f"Columns: {fin_result['columns']}\n"
-                                    f"Data:\n{items_json}\n\n"
-                                    f"Present with sections (Revenue, COGS, Expenses) and totals.\n"
-                                    f"Calculate Net Income = Revenue + Other Income - COGS "
-                                    f"- Operating Expenses - Other Expenses.\n"
-                                    f"For trend reports, show period-by-period comparison."
-                                )
-                                pre_executed_successfully = True
-                                print(
-                                    f"[FINANCIAL_REPORT] Pre-executed successfully: "
-                                    f"{fin_result['total_rows']} rows",
-                                    flush=True,
-                                )
-                            else:
-                                # Pre-execution failed — fall back to tool instruction
-                                error = fin_result.get("error", "unknown error")
-                                print(f"[FINANCIAL_REPORT] Pre-execution failed: {error}", flush=True)
-                                unified_task = _build_financial_mode_task(sanitized_input)
-                        except Exception as e:
-                            print(f"[FINANCIAL_REPORT] Pre-execution error: {e}", flush=True)
-                            unified_task = _build_financial_mode_task(sanitized_input)
-                    else:
-                        # Could not parse report type/period — fall back to tool instruction
-                        print("[FINANCIAL_REPORT] Could not parse intent, falling back to tool instruction", flush=True)
-                        unified_task = _build_financial_mode_task(sanitized_input)
-                    print("[UNIFIED] Financial report mode activated", flush=True)
+                    unified_task = _build_financial_mode_task(sanitized_input)
+                    print("[UNIFIED] Financial report mode activated (SuiteQL + CONSOLIDATE)", flush=True)
 
                 streamed_text_parts: list[str] = []
                 agent_result = None
@@ -708,7 +730,7 @@ async def run_chat_turn(
                     adapter=specialist_adapter,
                     model=settings.MULTI_AGENT_SQL_MODEL,
                     conversation_history=history_messages,
-                    tool_choice={"type": "tool", "name": "netsuite_financial_report"} if (is_financial and not pre_executed_successfully) else None,
+                    tool_choice=None,
                 ):
                     if event_type == "text":
                         streamed_text_parts.append(payload)

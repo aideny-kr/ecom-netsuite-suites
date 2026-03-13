@@ -109,7 +109,10 @@ ORDER BY startdate
 
 ## Income Statement (P&L) Query
 
-Revenue sign convention: `tal.amount` is NEGATIVE for Income/OthIncome accounts (credit normal balance). Multiply by `-1` to get positive revenue figures.
+**TAL sign conventions (universal NetSuite rule — applies to ALL tenants):**
+- `Income` / `OthIncome`: credits stored as **NEGATIVE** in `tal.amount`. Multiply by `-1` to display as positive revenue.
+- `COGS` / `Expense` / `OthExpense`: debits stored as **POSITIVE** in `tal.amount`. Do NOT multiply by `-1`. Use `SUM(tal.amount)` directly.
+- **Always use a per-accttype CASE** to handle sign correctly — never apply a blanket `* -1` to all accounts.
 
 ```sql
 -- P&L for a date range (e.g., January 2025)

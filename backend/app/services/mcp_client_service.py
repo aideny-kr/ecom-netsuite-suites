@@ -116,14 +116,19 @@ async def discover_tools(connector: McpConnector, db: AsyncSession | None = None
     """Connect to an external MCP server and discover available tools."""
     headers = await _build_headers(connector, db)
 
-    async with streamablehttp_client(url=connector.server_url, headers=headers) as (
-        read_stream,
-        write_stream,
-        _get_session_id,
-    ):
-        async with ClientSession(read_stream, write_stream) as session:
-            await session.initialize()
-            result = await session.list_tools()
+    result = None
+    try:
+        async with streamablehttp_client(url=connector.server_url, headers=headers) as (
+            read_stream,
+            write_stream,
+            _get_session_id,
+        ):
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+                result = await session.list_tools()
+    except (BaseExceptionGroup, ExceptionGroup):
+        if result is None:
+            raise
 
     tools = []
     for tool in result.tools:
@@ -159,25 +164,65 @@ async def call_external_mcp_tool(
         sql = tool_params["sqlQuery"].strip().rstrip(";")
         sql_upper = sql.upper()
         if "ROWNUM" not in sql_upper and "FETCH" not in sql_upper:
-            # Append FETCH FIRST to enforce max rows without breaking field access
             sql = f"{sql} FETCH FIRST 50 ROWS ONLY"
             tool_params["sqlQuery"] = sql
+
+    # Coerce ns_runReport params — LLM sometimes sends strings instead of numbers
+    # and may hallucinate extra params like "filters"
+    if tool_name == "ns_runReport":
+        _ALLOWED_REPORT_PARAMS = {"reportId", "dateTo", "dateFrom", "subsidiaryId"}
+        tool_params = {k: v for k, v in tool_params.items() if k in _ALLOWED_REPORT_PARAMS}
+        for num_field in ("reportId", "subsidiaryId"):
+            if num_field in tool_params:
+                try:
+                    tool_params[num_field] = int(float(str(tool_params[num_field])))
+                except (ValueError, TypeError):
+                    pass
+        print(f"[EXT_MCP] ns_runReport coerced params: {tool_params}", flush=True)
+
+    # Coerce ns_runSavedSearch numeric params
+    if tool_name == "ns_runSavedSearch":
+        for num_field in ("searchId", "range_start", "range_end"):
+            if num_field in tool_params:
+                try:
+                    tool_params[num_field] = int(float(str(tool_params[num_field])))
+                except (ValueError, TypeError):
+                    pass
     # ----------------------------
 
     headers = await _build_headers(connector, db)
 
-    async with streamablehttp_client(url=connector.server_url, headers=headers) as (
-        read_stream,
-        write_stream,
-        _get_session_id,
-    ):
-        async with ClientSession(read_stream, write_stream) as session:
-            await session.initialize()
-            try:
-                result = await asyncio.wait_for(session.call_tool(tool_name, tool_params), timeout=15.0)
-            except asyncio.TimeoutError:
-                logger.error("mcp_client.tool_timeout", server_url=connector.server_url, tool_name=tool_name)
-                return {"error": "Tool execution exceeded 15-second strict timeout limit"}
+    # Reports and saved searches can take longer than simple queries
+    timeout = 60.0 if tool_name in ("ns_runReport", "ns_runSavedSearch") else 15.0
+    result = None
+
+    try:
+        async with streamablehttp_client(url=connector.server_url, headers=headers) as (
+            read_stream,
+            write_stream,
+            _get_session_id,
+        ):
+            async with ClientSession(read_stream, write_stream) as session:
+                await session.initialize()
+                try:
+                    result = await asyncio.wait_for(session.call_tool(tool_name, tool_params), timeout=timeout)
+                except asyncio.TimeoutError:
+                    logger.error("mcp_client.tool_timeout", server_url=connector.server_url, tool_name=tool_name)
+                    return {"error": f"Tool execution exceeded {int(timeout)}-second timeout limit"}
+    except (BaseExceptionGroup, ExceptionGroup) as eg:
+        # The MCP streamable HTTP client sometimes raises on cleanup even
+        # after a successful call_tool. If we got a result, use it.
+        if result is not None:
+            logger.warning(
+                "mcp_client.cleanup_error_after_success",
+                tool_name=tool_name,
+                error=str(eg),
+            )
+        else:
+            raise
+
+    if result is None:
+        return {"error": f"Tool '{tool_name}' returned no result"}
 
     if result.isError:
         error_text = str(result.content)

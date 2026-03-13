@@ -40,7 +40,8 @@ def _mcp_url(account_id: str) -> str:
 
 
 async def execute_suiteql_via_rest(
-    access_token: str, account_id: str, query: str, limit: int = 1000, *, paginate: bool = False
+    access_token: str, account_id: str, query: str, limit: int = 1000,
+    *, paginate: bool = False, timeout_seconds: int | None = None,
 ) -> dict:
     """Execute a SuiteQL query via the NetSuite REST API.
 
@@ -59,7 +60,7 @@ async def execute_suiteql_via_rest(
     offset = 0
     page_size = 1000  # NetSuite max per request
 
-    async with httpx.AsyncClient(timeout=settings.NETSUITE_SUITEQL_TIMEOUT) as client:
+    async with httpx.AsyncClient(timeout=timeout_seconds or settings.NETSUITE_SUITEQL_TIMEOUT) as client:
         while True:
             url = f"{base_url}?limit={page_size}&offset={offset}" if paginate else base_url
             resp = await client.post(url, headers=headers, json={"q": query})
@@ -153,6 +154,7 @@ async def execute_suiteql(
     *,
     use_mcp: bool = False,
     paginate: bool = False,
+    timeout_seconds: int | None = None,
 ) -> dict:
     """Execute SuiteQL — uses REST API by default, MCP only when explicitly requested.
 
@@ -171,4 +173,7 @@ async def execute_suiteql(
                 account_id=account_id,
             )
 
-    return await execute_suiteql_via_rest(access_token, account_id, query, limit, paginate=paginate)
+    return await execute_suiteql_via_rest(
+        access_token, account_id, query, limit,
+        paginate=paginate, timeout_seconds=timeout_seconds,
+    )
