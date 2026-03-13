@@ -550,19 +550,20 @@ class BaseSpecialistAgent(abc.ABC):
         model: str,
         conversation_history: list[dict] | None = None,
         tool_choice: dict | str | None = None,
-        tool_result_interceptor: Callable[[str, str], tuple[dict | None, str]] | None = None,
+        tool_result_interceptor: Callable[[str, str], tuple[tuple[str, dict] | None, str]] | None = None,
     ):
         """Execute the agentic loop with streaming text output.
 
         Yields events:
         - ("text", chunk) — text token from the LLM stream
         - ("tool_status", message) — tool execution status
-        - ("tool_intercept", data) — intercepted tool result data (e.g. financial report)
+        - ("tool_intercept", data) — intercepted tool result (event_type, event_data) tuple
         - ("response", AgentResult) — final result when done
 
-        ``tool_result_interceptor`` is an optional callback ``(tool_name, result_str) -> (event_data | None, result_str)``.
-        When it returns non-None event_data, a ``("tool_intercept", event_data)`` event is yielded
-        and the (possibly modified) result_str is used for subsequent LLM context.
+        ``tool_result_interceptor`` is an optional callback
+        ``(tool_name, result_str) -> ((event_type, event_data) | None, result_str)``.
+        When it returns non-None, a ``("tool_intercept", (event_type, event_data))`` event
+        is yielded and the (possibly modified) result_str is used for subsequent LLM context.
         """
         from app.services.chat.tools import execute_tool_call
         from app.services.policy_service import evaluate_tool_call as policy_evaluate

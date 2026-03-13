@@ -82,57 +82,109 @@ def _sanitize_assistant_text(text: str) -> str:
     return text.strip()
 
 
-def _intercept_financial_report(
+_FINANCIAL_TOOLS = frozenset({"netsuite.financial_report", "netsuite_financial_report"})
+_SUITEQL_TOOLS = frozenset({"netsuite.suiteql", "netsuite_suiteql"})
+
+
+def _intercept_tool_result(
     tool_name: str, result_str: str
-) -> tuple[dict | None, str]:
-    """Intercept financial report tool results for SSE streaming.
+) -> tuple[str | None, dict | None, str]:
+    """Intercept data-producing tool results for frontend DataFrame rendering.
 
-    If the tool is ``netsuite.financial_report`` and the result indicates
-    success, returns a tuple of (sse_event_data, condensed_result_str).
-    The SSE event carries the full row data for frontend rendering while
-    the condensed result omits the rows to save LLM tokens.
-
-    For any other tool or unsuccessful result, returns (None, result_str)
-    unchanged.
+    Returns ``(event_type, sse_event_data, result_str_for_llm)``.
+    - Financial reports → ``("financial_report", {...}, condensed)``
+    - SuiteQL queries  → ``("data_table", {...}, condensed)``
+    - Everything else  → ``(None, None, original_result_str)``
     """
-    if tool_name not in ("netsuite.financial_report", "netsuite_financial_report"):
-        return None, result_str
 
-    try:
-        parsed = json.loads(result_str)
-    except (json.JSONDecodeError, TypeError):
-        return None, result_str
+    # --- Financial report path ---
+    if tool_name in _FINANCIAL_TOOLS:
+        try:
+            parsed = json.loads(result_str)
+        except (json.JSONDecodeError, TypeError):
+            return None, None, result_str
+        if not parsed.get("success"):
+            return None, None, result_str
 
-    if not parsed.get("success"):
-        return None, result_str
-
-    rows = parsed.get("items", [])
-
-    sse_event_data = {
-        "report_type": parsed.get("report_type"),
-        "period": parsed.get("period"),
-        "columns": parsed.get("columns", []),
-        "rows": rows,
-        "summary": parsed.get("summary"),
-    }
-
-    condensed = json.dumps(
-        {
-            "success": True,
+        rows = parsed.get("items", [])
+        sse_event_data = {
             "report_type": parsed.get("report_type"),
             "period": parsed.get("period"),
-            "total_rows": len(rows),
+            "columns": parsed.get("columns", []),
+            "rows": rows,
             "summary": parsed.get("summary"),
-            "note": (
-                "The full table has been sent to the frontend for rendering. "
-                "Do NOT rebuild or reproduce the table in your response. "
-                "Provide commentary and analysis only."
-            ),
-        },
-        default=str,
-    )
+        }
+        condensed = json.dumps(
+            {
+                "success": True,
+                "report_type": parsed.get("report_type"),
+                "period": parsed.get("period"),
+                "total_rows": len(rows),
+                "summary": parsed.get("summary"),
+                "note": (
+                    "The full table has been sent to the frontend for rendering. "
+                    "Do NOT rebuild or reproduce the table in your response. "
+                    "Provide commentary and analysis only."
+                ),
+            },
+            default=str,
+        )
+        return "financial_report", sse_event_data, condensed
 
-    return sse_event_data, condensed
+    # --- SuiteQL query path ---
+    if tool_name in _SUITEQL_TOOLS:
+        try:
+            parsed = json.loads(result_str)
+        except (json.JSONDecodeError, TypeError):
+            return None, None, result_str
+
+        # Error results pass through
+        if isinstance(parsed, dict) and (
+            parsed.get("error") is True or isinstance(parsed.get("error"), str)
+        ):
+            return None, None, result_str
+
+        columns = parsed.get("columns")
+        rows = parsed.get("rows")
+        if not isinstance(columns, list) or not isinstance(rows, list):
+            return None, None, result_str
+
+        row_count = parsed.get("row_count", len(rows))
+        query = parsed.get("query", "")
+        truncated = parsed.get("truncated", False)
+
+        sse_event_data = {
+            "columns": columns,
+            "rows": rows,
+            "row_count": row_count,
+            "query": query,
+            "truncated": truncated,
+        }
+        condensed = json.dumps(
+            {
+                "columns": columns,
+                "row_count": row_count,
+                "truncated": truncated,
+                "note": (
+                    "The full data table has been sent to the frontend for rendering. "
+                    "Do NOT rebuild or reproduce the table in your response. "
+                    "Provide commentary, insights, and analysis only."
+                ),
+            },
+            default=str,
+        )
+        return "data_table", sse_event_data, condensed
+
+    # --- Not a data tool ---
+    return None, None, result_str
+
+
+def _tool_interceptor(tool_name: str, result_str: str) -> tuple[tuple[str, dict] | None, str]:
+    """Adapter: wraps _intercept_tool_result for the agent callback interface."""
+    event_type, event_data, new_result_str = _intercept_tool_result(tool_name, result_str)
+    if event_type is not None and event_data is not None:
+        return (event_type, event_data), new_result_str
+    return None, new_result_str
 
 
 def _get_confidence_explanation(score: float) -> str:
@@ -780,7 +832,7 @@ async def run_chat_turn(
                     model=settings.MULTI_AGENT_SQL_MODEL,
                     conversation_history=history_messages,
                     tool_choice=None,
-                    tool_result_interceptor=_intercept_financial_report,
+                    tool_result_interceptor=_tool_interceptor,
                 ):
                     if event_type == "text":
                         streamed_text_parts.append(payload)
@@ -788,7 +840,8 @@ async def run_chat_turn(
                     elif event_type == "tool_status":
                         yield {"type": "tool_status", "content": payload}
                     elif event_type == "tool_intercept":
-                        yield {"type": "financial_report", "data": payload}
+                        # payload is (event_type_str, event_data_dict)
+                        yield {"type": payload[0], "data": payload[1]}
                     elif event_type == "response":
                         agent_result = payload
 
@@ -1164,11 +1217,11 @@ async def run_chat_turn(
                         except (json.JSONDecodeError, TypeError):
                             pass  # Non-JSON result, skip redaction
 
-            # Intercept financial report: emit SSE event with full data,
+            # Intercept data tool results: emit SSE event with full data,
             # condense result_str to summary-only for the LLM.
-            fin_sse, result_str = _intercept_financial_report(block.name, result_str)
-            if fin_sse is not None:
-                yield {"type": "financial_report", "data": fin_sse}
+            intercept_type, intercept_data, result_str = _intercept_tool_result(block.name, result_str)
+            if intercept_type is not None:
+                yield {"type": intercept_type, "data": intercept_data}
 
             tool_results_content.append(
                 {
