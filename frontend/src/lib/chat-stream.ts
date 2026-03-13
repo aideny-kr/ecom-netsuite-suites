@@ -2,11 +2,20 @@
 
 import type { ChatMessage } from "@/lib/types";
 
+export interface FinancialReportData {
+  report_type: string;
+  period: string;
+  columns: string[];
+  rows: Record<string, any>[];
+  summary: Record<string, any>;
+}
+
 export type ChatStreamEvent =
   | { type: "text"; content: string }
   | { type: "tool_status"; content: string }
   | { type: "confidence"; score: number; explanation: string }
   | { type: "importance"; tier: number; label: string; needs_review: boolean }
+  | { type: "financial_report"; data: FinancialReportData }
   | { type: "error"; error: string }
   | { type: "message"; message: ChatMessage };
 
@@ -20,6 +29,7 @@ type StreamHandlers = {
   onToolStatus?: (content: string) => void;
   onConfidence?: (score: number, explanation: string) => void;
   onImportance?: (tier: number, label: string, needsReview: boolean) => void;
+  onFinancialReport?: (data: FinancialReportData) => void;
   onError?: (error: string) => void;
   onMessage?: (message: ChatMessage) => void;
 };
@@ -111,6 +121,8 @@ export async function consumeChatStream(
         handlers.onConfidence?.(event.score, event.explanation);
       } else if (event.type === "importance") {
         handlers.onImportance?.(event.tier, event.label, event.needs_review);
+      } else if (event.type === "financial_report") {
+        handlers.onFinancialReport?.(event.data);
       } else if (event.type === "error") {
         handlers.onError?.(event.error);
       } else if (event.type === "message") {
@@ -138,6 +150,19 @@ function normalizeStreamEvent(data: Record<string, unknown>): ChatStreamEvent | 
       tier: data.tier,
       label: String(data.label || ""),
       needs_review: Boolean(data.needs_review),
+    };
+  }
+  if (type === "financial_report" && data.data && typeof data.data === "object") {
+    const d = data.data as Record<string, unknown>;
+    return {
+      type,
+      data: {
+        report_type: String(d.report_type || ""),
+        period: String(d.period || ""),
+        columns: Array.isArray(d.columns) ? d.columns : [],
+        rows: Array.isArray(d.rows) ? d.rows : [],
+        summary: (d.summary && typeof d.summary === "object" ? d.summary : {}) as Record<string, any>,
+      },
     };
   }
   if (type === "error" && typeof data.error === "string") {
