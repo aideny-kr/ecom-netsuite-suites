@@ -18,6 +18,7 @@ from sqlalchemy import func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
+from app.services.chat.prompt_cache import split_system_prompt
 
 # Regex to strip leaked Anthropic tool-call XML from assistant text
 _TOOL_XML_RE = re.compile(r"</?(?:invoke|parameter|tool_use)[^>]*>", re.DOTALL)
@@ -921,6 +922,9 @@ async def run_chat_turn(
                 yield {"type": "message", "message": result_msg}
             return
 
+    # ── Split system prompt for Anthropic prompt caching ──
+    prompt_parts = split_system_prompt(system_prompt)
+
     # ── Single-agent agentic loop (default path) ──
     tool_calls_log: list[dict] = []
     final_text = ""
@@ -935,7 +939,8 @@ async def run_chat_turn(
         async for event_type, payload in adapter.stream_message(
             model=model,
             max_tokens=16384,
-            system=system_prompt,
+            system=prompt_parts.static,
+            system_dynamic=prompt_parts.dynamic,
             messages=messages,
             tools=tool_definitions if tool_definitions else None,
         ):
@@ -1046,7 +1051,8 @@ async def run_chat_turn(
         async for event_type, payload in adapter.stream_message(
             model=model,
             max_tokens=8192,
-            system=system_prompt,
+            system=prompt_parts.static,
+            system_dynamic=prompt_parts.dynamic,
             messages=messages,
         ):
             if event_type == "text":
