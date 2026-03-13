@@ -34,12 +34,19 @@ _SCRIPT_KEYWORDS = re.compile(
     re.IGNORECASE,
 )
 
+# Financial-mode tools — only these are exposed when handling financial queries
+_FINANCIAL_TOOL_NAMES = frozenset({
+    "netsuite_report",
+    "rag_search",
+})
+
 # Superset of all specialist tools
 _UNIFIED_TOOL_NAMES = frozenset(
     {
         # SuiteQL agent tools
         "netsuite_suiteql",
         "netsuite_get_metadata",
+        "netsuite_financial_report",
         # RAG agent tools
         "rag_search",
         "web_search",
@@ -87,22 +94,60 @@ Prior queries may have used wrong syntax (e.g. compound status codes). The syste
 </how_to_think>
 
 <tool_selection>
-CHOOSE THE RIGHT TOOL:
+CHOOSE THE RIGHT TOOL — HYBRID APPROACH:
 
-FOR DATA QUESTIONS (orders, invoices, customers, items, inventory, financial data):
-→ Use netsuite_suiteql (local REST API, full permissions). This is your DEFAULT for all data queries.
-→ Use netsuite_get_metadata to discover column names if unsure about schema.
+You have TWO types of tools:
+  • MCP tools (ext__... prefixed) — execute directly inside NetSuite. Best for data retrieval.
+  • Local tools — our backend tools. Best for context, docs, workspace, and fallback.
 
-FOR DOCUMENTATION / HOW-TO / ERROR LOOKUPS:
-→ Use rag_search first (internal docs, custom field metadata, SuiteScript source code).
-→ Use web_search as fallback for NetSuite API reference or SuiteQL syntax not in internal docs.
+Use BOTH together. MCP tools run the query; your injected context (<tenant_vernacular>,
+<tenant_schema>, <proven_patterns>, <learned_rules>) tells you HOW to construct the query.
 
-FOR WORKSPACE / CODE TASKS:
-→ Use workspace_list_files, workspace_read_file, workspace_search, workspace_propose_patch.
+FINANCIAL STATEMENTS (P&L, Balance Sheet, Trial Balance, Aging, GL):
+→ Follow the [FINANCIAL REPORT] task instructions — they specify which tool to use (MCP or local).
+→ MCP path: ns_runReport (call ns_listAllReports first to find reportId).
+→ Local path: netsuite_financial_report (uses accounting period joins for exact numbers).
+   Parameters: report_type, period ("Feb 2026" or "Jan 2026, Feb 2026, Mar 2026"), subsidiary_id (optional)
+   report_type values: "income_statement", "balance_sheet", "trial_balance", "income_statement_trend", "balance_sheet_trend"
+→ ALWAYS use accounting period names (e.g. "Feb 2026"), NEVER date ranges.
+→ Use <tenant_vernacular> to resolve subsidiary names to IDs.
+
+PRE-BUILT BUSINESS REPORTS:
+→ Use MCP ns_runSavedSearch. Call ns_listSavedSearches to discover what's available.
+→ Saved searches have custom columns and filters built by the NetSuite admin.
+→ Great for tenant-specific reports that don't map to standard financial statements.
+
+AD-HOC DATA QUERIES (orders, invoices, customers, items, inventory):
+→ Use MCP ns_runCustomSuiteQL (preferred) or local netsuite_suiteql (fallback).
+→ CHECK <tenant_schema> and <standard_table_schemas> for valid column names BEFORE querying.
+→ CHECK <tenant_vernacular> to resolve entity names to internal IDs.
+→ CHECK <proven_patterns> — if a similar query succeeded before, use its pattern.
+→ CHECK <learned_rules> — tenant may have standing rules (e.g., "exclude cancelled orders").
+→ FOLLOW ALL <suiteql_dialect_rules> — they apply to BOTH MCP and local SuiteQL.
+
+SCHEMA/COLUMN DISCOVERY:
+→ First check <tenant_schema> and <standard_table_schemas> (already in your context).
+→ If a column is not listed, use netsuite_get_metadata (local, cached) for quick lookup.
+→ Use MCP ns_getSuiteQLMetadata for ground-truth verification from NetSuite itself.
+→ NEVER guess column names — wrong columns cause 400 errors or silent 0-row results.
+→ CUSTOM RECORDS (customrecord_*): MANDATORY DISCOVERY STEP —
+  Your VERY FIRST query MUST be: "SELECT * FROM customrecord_xxx FETCH FIRST 1 ROWS ONLY"
+  with NO WHERE clause using custom fields. Only filter by `id` if you have it, or use no WHERE.
+  Do NOT guess custom field names — they have typos and naming variations.
+  Only use column names that appear in the SELECT * result. Ignore field names from conversation history.
+  System date fields: `created` and `lastmodified` (NOT datecreated/lastmodifieddate).
+  A 400 error means ANY column in your query could be wrong, not just the one you suspect.
+
+DOCUMENTATION / HOW-TO / ERROR LOOKUPS:
+→ rag_search first (internal docs, custom field metadata, SuiteScript source code).
+→ web_search as fallback for NetSuite API reference, SuiteQL syntax, community answers.
+
+WORKSPACE / CODE TASKS:
+→ workspace_list_files, workspace_read_file, workspace_search, workspace_propose_patch.
 → Always read the target file before proposing changes.
 
-FOR LEARNING / CORRECTIONS:
-→ Use tenant_save_learned_rule when the user gives a standing instruction or correction.
+LEARNING / CORRECTIONS:
+→ tenant_save_learned_rule when the user gives a standing instruction or correction.
 </tool_selection>
 
 <suiteql_dialect_rules>
@@ -196,6 +241,13 @@ SELECT COLUMN ORDER — for readable table output, order columns logically:
 5. Quantities grouped: ordered, received, billed, pending
 6. Amounts grouped: rate, amount, total
 7. Dimensions last: location, subsidiary, department, class
+
+FINANCIAL AGGREGATION — CRITICAL:
+- NEVER return raw financial rows for the LLM to sum. Use SQL GROUP BY + SUM().
+- WRONG: "Show me all revenue accounts" → returns 78 rows → LLM hallucinates total
+- RIGHT: "Show me revenue by account type" → SUM(amount) GROUP BY accttype → 5 rows with pre-computed totals
+- For net income: compute in SQL → SUM(CASE WHEN accttype IN ('Income','OthIncome') THEN amount * -1 ELSE amount END)
+- The LLM should PRESENT numbers, never COMPUTE them. All math happens in SQL or in tool-provided summary objects.
 </suiteql_dialect_rules>
 
 <rag_search_tips>
@@ -253,8 +305,9 @@ Output reasoning in a <reasoning> block (hidden from user).
 
 FORMAT RESULTS:
 1. If you used `netsuite_suiteql` successfully, return ONLY ONE sentence summarizing the result. Do NOT include a markdown table, raw JSON, or SQL — the UI renders the structured query result separately.
-2. For other tool paths, use a markdown table only when tabular output is still needed in the text response.
-3. Nothing else — no disclaimers, no SQL, no "let me know if you need more".
+2. If you used `netsuite_financial_report`, present ALL rows faithfully in a markdown table grouped by section (Revenue, COGS, Expenses, Other Income, Other Expenses). Include every account row — do NOT group, skip, or summarize into "Other adjustments". The tool result includes a "summary" object with pre-computed totals (total_revenue, total_cogs, gross_profit, total_operating_expense, operating_income, total_other_expense, net_income). Use ONLY these pre-computed values for subtotals and Net Income — do NOT calculate totals yourself.
+3. For other tool paths, use a markdown table only when tabular output is still needed in the text response.
+4. Nothing else — no disclaimers, no SQL, no "let me know if you need more".
 
 If 0 rows found, say so clearly and suggest possible reasons.
 If the question is about documentation, provide the relevant info with source paths.
@@ -480,6 +533,12 @@ class UnifiedAgent(BaseSpecialistAgent):
             self._tool_defs = [t for t in all_tools if t["name"] in _UNIFIED_TOOL_NAMES]
         return self._tool_defs
 
+    @property
+    def financial_tool_definitions(self) -> list[dict]:
+        """Return only the tools allowed in financial mode."""
+        all_tools = build_local_tool_definitions()
+        return [t for t in all_tools if t["name"] in _FINANCIAL_TOOL_NAMES]
+
     async def _setup_context(self, task: str, context: dict[str, Any], db: "AsyncSession") -> str:
         """Shared setup for run() and run_streaming(). Returns augmented task."""
         self._context = context
@@ -555,10 +614,14 @@ class UnifiedAgent(BaseSpecialistAgent):
         db: "AsyncSession",
         adapter: "BaseLLMAdapter",
         model: str,
+        tool_choice: dict | str | None = None,
+        financial_mode: bool = False,
     ):
         """Override to inject context and discover external MCP tools."""
         task = await self._setup_context(task, context, db)
-        return await super().run(task, context, db, adapter, model)
+        if financial_mode:
+            self._tool_defs = self.financial_tool_definitions
+        return await super().run(task, context, db, adapter, model, tool_choice=tool_choice)
 
     async def run_streaming(
         self,
@@ -568,8 +631,14 @@ class UnifiedAgent(BaseSpecialistAgent):
         adapter: "BaseLLMAdapter",
         model: str,
         conversation_history: list[dict] | None = None,
+        tool_choice: dict | str | None = None,
+        financial_mode: bool = False,
     ):
         """Override to inject context before streaming."""
         task = await self._setup_context(task, context, db)
-        async for event in super().run_streaming(task, context, db, adapter, model, conversation_history):
+        if financial_mode:
+            self._tool_defs = self.financial_tool_definitions
+        async for event in super().run_streaming(
+            task, context, db, adapter, model, conversation_history, tool_choice=tool_choice
+        ):
             yield event

@@ -25,10 +25,12 @@ export function SuiteQLToolCard({ step, userQuestion }: SuiteQLToolCardProps) {
   const [saveMode, setSaveMode] = useState<"idle" | "editing" | "saved">("idle");
   const [name, setName] = useState(userQuestion?.slice(0, 120) ?? "");
 
-  const queryText = (step.params?.query as string) ?? "";
+  const queryText = (step.params?.query as string) ?? (step.params?.sqlQuery as string) ?? "";
   const resultPayload = getTablePayload(step);
   const hasStructuredRows = !!resultPayload;
   const isError = !hasStructuredRows && !!step.result_summary;
+  const isMcpTool = step.tool !== "netsuite_suiteql";
+  const toolLabel = isMcpTool ? formatMcpToolName(step.tool) : "SuiteQL Query";
 
   const mutation = useCreateSavedQuery();
 
@@ -60,7 +62,7 @@ export function SuiteQLToolCard({ step, userQuestion }: SuiteQLToolCardProps) {
             )}
           />
           <Database className="h-3 w-3 shrink-0 text-primary/70" />
-          <span className="font-medium truncate">SuiteQL Query</span>
+          <span className="font-medium truncate">{toolLabel}</span>
           <span className="ml-auto shrink-0 rounded-md bg-muted px-1.5 py-0.5 text-[11px] tabular-nums text-muted-foreground">
             {step.duration_ms}ms
           </span>
@@ -315,6 +317,23 @@ function toReadableHeader(value: string): string {
     .replace(/\s+/g, " ")
     .trim()
     .replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function formatMcpToolName(tool: string): string {
+  // External MCP tools: ext__{hex}__ns_runReport → "Report"
+  const raw = tool.includes("__") ? tool.split("__").pop() ?? tool : tool;
+  const LABELS: Record<string, string> = {
+    ns_runReport: "Report",
+    ns_runSavedSearch: "Saved Search",
+    ns_listAllReports: "Report List",
+    ns_listSavedSearches: "Saved Search List",
+    ns_runCustomSuiteQL: "SuiteQL (MCP)",
+    ns_getSuiteQLMetadata: "Metadata",
+    ns_getSubsidiaries: "Subsidiaries",
+    netsuite_suiteql: "SuiteQL Query",
+    netsuite_financial_report: "Financial Report",
+  };
+  return LABELS[raw] ?? raw.replace(/_/g, " ");
 }
 
 function formatCellValue(value: unknown): string {

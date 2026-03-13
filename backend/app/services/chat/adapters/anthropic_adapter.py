@@ -18,6 +18,7 @@ class AnthropicAdapter(BaseLLMAdapter):
         system_dynamic: str = "",
         messages: list[dict],
         tools: list[dict] | None = None,
+        tool_choice: dict | str | None = None,
     ) -> LLMResponse:
         system_blocks = [
             {
@@ -41,6 +42,8 @@ class AnthropicAdapter(BaseLLMAdapter):
             if cached_tools:
                 cached_tools[-1] = {**cached_tools[-1], "cache_control": {"type": "ephemeral"}}
             kwargs["tools"] = cached_tools
+        if tool_choice is not None:
+            kwargs["tool_choice"] = tool_choice
 
         response = await self._client.messages.create(**kwargs)
 
@@ -75,6 +78,7 @@ class AnthropicAdapter(BaseLLMAdapter):
         system_dynamic: str = "",
         messages: list[dict],
         tools: list[dict] | None = None,
+        tool_choice: dict | str | None = None,
     ):
         system_blocks = [
             {
@@ -97,6 +101,8 @@ class AnthropicAdapter(BaseLLMAdapter):
             if cached_tools:
                 cached_tools[-1] = {**cached_tools[-1], "cache_control": {"type": "ephemeral"}}
             kwargs["tools"] = cached_tools
+        if tool_choice is not None:
+            kwargs["tool_choice"] = tool_choice
 
         async with self._client.messages.stream(**kwargs) as stream:
             async for text in stream.text_stream:

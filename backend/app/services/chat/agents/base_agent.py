@@ -280,6 +280,7 @@ class BaseSpecialistAgent(abc.ABC):
         db: AsyncSession,
         adapter: BaseLLMAdapter,
         model: str,
+        tool_choice: dict | str | None = None,
     ) -> AgentResult:
         """Execute the specialist's mini agentic loop.
 
@@ -332,6 +333,7 @@ class BaseSpecialistAgent(abc.ABC):
 
         try:
             for step in range(self.max_steps):
+                step_tool_choice = tool_choice if step == 0 else None
                 response: LLMResponse = await adapter.create_message(
                     model=model,
                     max_tokens=16384,
@@ -339,6 +341,7 @@ class BaseSpecialistAgent(abc.ABC):
                     system_dynamic=prompt_parts.dynamic,
                     messages=messages,
                     tools=tools,
+                    tool_choice=step_tool_choice,
                 )
                 total_input_tokens += response.usage.input_tokens
                 total_output_tokens += response.usage.output_tokens
@@ -546,6 +549,7 @@ class BaseSpecialistAgent(abc.ABC):
         adapter: "BaseLLMAdapter",
         model: str,
         conversation_history: list[dict] | None = None,
+        tool_choice: dict | str | None = None,
     ):
         """Execute the agentic loop with streaming text output.
 
@@ -586,6 +590,7 @@ class BaseSpecialistAgent(abc.ABC):
         try:
             for step in range(self.max_steps):
                 # Stream the LLM response
+                step_tool_choice = tool_choice if step == 0 else None
                 response = None
                 async for event_type, payload in adapter.stream_message(
                     model=model,
@@ -594,6 +599,7 @@ class BaseSpecialistAgent(abc.ABC):
                     system_dynamic=prompt_parts.dynamic,
                     messages=messages,
                     tools=tools,
+                    tool_choice=step_tool_choice,
                 ):
                     if event_type == "text":
                         yield "text", payload

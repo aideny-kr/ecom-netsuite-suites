@@ -11,6 +11,24 @@ class OpenAIAdapter(BaseLLMAdapter):
     def __init__(self, api_key: str):
         self._client = openai.AsyncOpenAI(api_key=api_key)
 
+    @staticmethod
+    def _convert_tool_choice(tool_choice: dict | str | None) -> dict | str | None:
+        """Convert Anthropic-style tool_choice to OpenAI format."""
+        if tool_choice is None:
+            return None
+        if isinstance(tool_choice, str):
+            return tool_choice
+        tc_type = tool_choice.get("type")
+        if tc_type == "auto":
+            return "auto"
+        if tc_type == "any":
+            return "required"
+        if tc_type == "tool":
+            return {"type": "function", "function": {"name": tool_choice["name"]}}
+        if tc_type == "none":
+            return "none"
+        return None
+
     def _convert_tools(self, tools: list[dict]) -> list[dict]:
         """Convert Anthropic tool format to OpenAI function format."""
         openai_tools = []
@@ -93,6 +111,7 @@ class OpenAIAdapter(BaseLLMAdapter):
         system_dynamic: str = "",
         messages: list[dict],
         tools: list[dict] | None = None,
+        tool_choice: dict | str | None = None,
     ) -> LLMResponse:
         full_system = f"{system}\n\n{system_dynamic}".strip() if system_dynamic else system
         openai_messages = self._convert_messages(messages, full_system)
@@ -104,6 +123,10 @@ class OpenAIAdapter(BaseLLMAdapter):
         }
         if tools:
             kwargs["tools"] = self._convert_tools(tools)
+
+        converted_tc = self._convert_tool_choice(tool_choice)
+        if converted_tc is not None:
+            kwargs["tool_choice"] = converted_tc
 
         response = await self._client.chat.completions.create(**kwargs)
 
@@ -144,6 +167,7 @@ class OpenAIAdapter(BaseLLMAdapter):
         system_dynamic: str = "",
         messages: list[dict],
         tools: list[dict] | None = None,
+        tool_choice: dict | str | None = None,
     ):
         """Stream tokens from OpenAI and yield ('text', chunk) events."""
         full_system = f"{system}\n\n{system_dynamic}".strip() if system_dynamic else system
@@ -158,6 +182,10 @@ class OpenAIAdapter(BaseLLMAdapter):
         }
         if tools:
             kwargs["tools"] = self._convert_tools(tools)
+
+        converted_tc = self._convert_tool_choice(tool_choice)
+        if converted_tc is not None:
+            kwargs["tool_choice"] = converted_tc
 
         text_blocks: list[str] = []
         tool_use_blocks: list[ToolUseBlock] = []

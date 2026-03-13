@@ -87,6 +87,14 @@ TOOL_CONFIGS = {
         "requires_entitlement": "mcp_tools",
         "allowlisted_params": ["schedule_id"],
     },
+    "netsuite.report": {
+        "default_limit": None,
+        "max_limit": None,
+        "timeout_seconds": 60,
+        "rate_limit_per_minute": 15,
+        "requires_entitlement": "mcp_tools",
+        "allowlisted_params": ["report_type", "period", "subsidiary_id"],
+    },
     "netsuite.connectivity": {
         "default_limit": None,
         "max_limit": None,

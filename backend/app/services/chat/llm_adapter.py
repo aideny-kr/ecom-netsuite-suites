@@ -43,6 +43,7 @@ class BaseLLMAdapter(abc.ABC):
         system_dynamic: str = "",
         messages: list[dict],
         tools: list[dict] | None = None,
+        tool_choice: dict | str | None = None,
     ) -> LLMResponse:
         """Send a message to the LLM and return a normalized response."""
 
@@ -55,6 +56,7 @@ class BaseLLMAdapter(abc.ABC):
         system_dynamic: str = "",
         messages: list[dict],
         tools: list[dict] | None = None,
+        tool_choice: dict | str | None = None,
     ):
         """Send a message to the LLM and yield streaming events, finishing with LLMResponse.
 

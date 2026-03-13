@@ -779,6 +779,101 @@ function AiConfigSection() {
 }
 
 // ---------------------------------------------------------------------------
+// Chat Settings Section (MCP Financial toggle)
+// ---------------------------------------------------------------------------
+
+function ChatSettingsSection() {
+  const [useMcp, setUseMcp] = useState<boolean | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const [isSaving, setIsSaving] = useState(false);
+  const { toast } = useToast();
+
+  useEffect(() => {
+    apiClient
+      .get<{ use_mcp_financial_reports: boolean }>("/api/v1/settings/chat")
+      .then((data) => {
+        setUseMcp(data.use_mcp_financial_reports);
+      })
+      .catch(() => {
+        setUseMcp(true); // default
+      })
+      .finally(() => setIsLoading(false));
+  }, []);
+
+  async function handleToggle() {
+    const newValue = !useMcp;
+    setUseMcp(newValue);
+    setIsSaving(true);
+    try {
+      await apiClient.patch("/api/v1/settings/chat", {
+        use_mcp_financial_reports: newValue,
+      });
+      toast({
+        title: "Chat settings updated",
+        description: newValue
+          ? "Financial reports will use MCP (NetSuite native reports)"
+          : "Financial reports will use local SuiteQL queries",
+      });
+    } catch (err) {
+      setUseMcp(!newValue); // revert
+      toast({
+        title: "Failed to update",
+        description: err instanceof Error ? err.message : "Unknown error",
+        variant: "destructive",
+      });
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  if (isLoading) {
+    return <Skeleton className="h-[120px] rounded-xl" />;
+  }
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <h3 className="text-lg font-semibold">Chat Settings</h3>
+        <p className="mt-0.5 text-[13px] text-muted-foreground">
+          Configure how the AI handles financial queries
+        </p>
+      </div>
+
+      <div className="rounded-xl border bg-card p-6 shadow-soft">
+        <div className="flex items-center justify-between">
+          <div className="space-y-1">
+            <p className="text-[14px] font-medium text-foreground">
+              Use MCP for Financial Reporting
+            </p>
+            <p className="text-[13px] text-muted-foreground max-w-lg">
+              When enabled, financial reports (Income Statement, Balance Sheet, etc.) use
+              NetSuite&apos;s native MCP reports. When disabled, reports use local SuiteQL
+              queries with accounting period joins.
+            </p>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={!!useMcp}
+            disabled={isSaving}
+            onClick={handleToggle}
+            className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 ${
+              useMcp ? "bg-primary" : "bg-muted"
+            }`}
+          >
+            <span
+              className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-background shadow-lg ring-0 transition duration-200 ease-in-out ${
+                useMcp ? "translate-x-5" : "translate-x-0"
+              }`}
+            />
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Tenant Profile Section
 // ---------------------------------------------------------------------------
 
@@ -2671,6 +2766,9 @@ export default function SettingsPage() {
 
       {/* AI Configuration Section */}
       <AiConfigSection />
+
+      {/* Chat Settings (MCP Financial toggle) */}
+      <ChatSettingsSection />
 
       {/* Tenant Profile Section */}
       <TenantProfileSection />

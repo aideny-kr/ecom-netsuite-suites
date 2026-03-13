@@ -95,6 +95,7 @@ class GeminiAdapter(BaseLLMAdapter):
         system_dynamic: str = "",
         messages: list[dict],
         tools: list[dict] | None = None,
+        tool_choice: dict | str | None = None,
     ) -> LLMResponse:
         gemini_contents = self._convert_messages(messages)
         full_system = f"{system}\n\n{system_dynamic}".strip() if system_dynamic else system
@@ -105,6 +106,24 @@ class GeminiAdapter(BaseLLMAdapter):
         )
         if tools:
             config.tools = self._convert_tools(tools)
+
+        if tool_choice is not None:
+            tc_type = tool_choice.get("type") if isinstance(tool_choice, dict) else tool_choice
+            if tc_type == "tool" and isinstance(tool_choice, dict):
+                config.tool_config = genai_types.ToolConfig(
+                    function_calling_config=genai_types.FunctionCallingConfig(
+                        mode="ANY",
+                        allowed_function_names=[tool_choice["name"]],
+                    )
+                )
+            elif tc_type == "any":
+                config.tool_config = genai_types.ToolConfig(
+                    function_calling_config=genai_types.FunctionCallingConfig(mode="ANY")
+                )
+            elif tc_type == "none":
+                config.tool_config = genai_types.ToolConfig(
+                    function_calling_config=genai_types.FunctionCallingConfig(mode="NONE")
+                )
 
         response = await self._client.aio.models.generate_content(
             model=model,

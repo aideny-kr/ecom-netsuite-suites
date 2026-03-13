@@ -52,7 +52,7 @@ class TenantConfig(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
     # Multi-agent orchestration
     multi_agent_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
-    unified_agent_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    unified_agent_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
 
     # Onboarding
     onboarding_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -66,5 +66,8 @@ class TenantConfig(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     # Custom domain mapping
     custom_domain: Mapped[str | None] = mapped_column(String(255), nullable=True, unique=True)
     domain_verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+
+    # Financial reporting preference
+    use_mcp_financial_reports: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
 
     tenant: Mapped["Tenant"] = relationship("Tenant", back_populates="config")

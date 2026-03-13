@@ -14,6 +14,8 @@ from app.models.user import User
 from app.schemas.settings import (
     BrandingResponse,
     BrandingUpdate,
+    ChatSettingsResponse,
+    ChatSettingsUpdate,
     DomainVerifyRequest,
     DomainVerifyResponse,
     FeatureFlagsResponse,
@@ -181,6 +183,54 @@ async def update_features(
 
     flags = await get_all_flags(db, user.tenant_id)
     return FeatureFlagsResponse(flags=flags)
+
+
+# ---------------------------------------------------------------------------
+# Chat settings
+# ---------------------------------------------------------------------------
+
+
+@router.get("/chat", response_model=ChatSettingsResponse)
+async def get_chat_settings(
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Get tenant chat/AI settings."""
+    config = await _get_tenant_config(db, user.tenant_id)
+    return ChatSettingsResponse(
+        use_mcp_financial_reports=config.use_mcp_financial_reports,
+    )
+
+
+@router.patch("/chat", response_model=ChatSettingsResponse)
+async def update_chat_settings(
+    request: ChatSettingsUpdate,
+    user: Annotated[User, Depends(require_permission("tenant.manage"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Update tenant chat/AI settings."""
+    config = await _get_tenant_config(db, user.tenant_id)
+
+    update_data = request.model_dump(exclude_unset=True)
+    for field, value in update_data.items():
+        setattr(config, field, value)
+
+    await audit_service.log_event(
+        db=db,
+        tenant_id=user.tenant_id,
+        category="settings",
+        action="settings.chat_update",
+        actor_id=user.id,
+        resource_type="tenant_config",
+        resource_id=str(config.id),
+        payload=update_data,
+    )
+    await db.commit()
+    await db.refresh(config)
+
+    return ChatSettingsResponse(
+        use_mcp_financial_reports=config.use_mcp_financial_reports,
+    )
 
 
 # ---------------------------------------------------------------------------
