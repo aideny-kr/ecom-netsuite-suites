@@ -46,19 +46,14 @@ def _build_financial_mode_task(user_message: str) -> str:
         '  period: "Feb 2026" (single) or "Jan 2026, Feb 2026, Mar 2026" (trend/quarter)\n'
         "  subsidiary_id: number (optional, use <tenant_vernacular> to resolve names to IDs)\n\n"
         "For quarters: use income_statement_trend with all 3 months.\n\n"
-        "SINGLE-PERIOD reports: The tool returns a 'summary' object with pre-computed totals\n"
-        "(total_revenue, total_cogs, gross_profit, total_operating_expense, operating_income,\n"
-        "total_other_expense, net_income). Use ONLY these values — do NOT calculate totals yourself.\n\n"
-        "TREND reports (_trend): The tool returns summary.by_period — a dict keyed by period name,\n"
-        "each containing the same breakdown (total_revenue, gross_profit, net_income, etc.).\n"
-        "Use ONLY these per-period pre-computed values for each month's subtotals.\n\n"
-        "OUTPUT FORMAT — markdown table:\n"
-        "- Single-period: | Acct# | Name | Amount |. Group by section, subtotals from summary.\n"
-        "- Trend: | Acct# | Name | Period1 | Period2 | ... |. One amount column per period.\n"
-        "  CRITICAL for trend tables: subtotal/summary rows (Total Revenue, Gross Profit, Net Income, etc.)\n"
-        "  MUST have empty cells for Acct# and Name columns so amounts stay aligned under the correct period.\n"
-        "  Example: | | **Total Revenue** | $10,304,258 | $5,288,116 | $8,813,572 | $10,628,261 |\n"
-        "  WRONG:   | **Total Revenue** | $10,304,258 | $5,288,116 | $8,813,572 | $10,628,261 |\n"
+        "The financial report tool renders data directly in a visual table component.\n"
+        "Do NOT format tables yourself. Do NOT rebuild or reproduce the data as markdown tables.\n"
+        "Instead, provide COMMENTARY ONLY:\n"
+        "1. A brief summary of the key findings\n"
+        "2. Notable trends or anomalies\n"
+        "3. Comparisons if the user asked for them\n"
+        "Reference the pre-computed summary numbers (total_revenue, gross_profit, net_income, etc.) for your analysis.\n"
+        "For trend reports, summary.by_period contains per-period breakdowns — compare across periods.\n\n"
         "FALLBACK: MCP ns_runReport if local tool errors (note: MCP may show slight FX differences)."
     )
 
@@ -85,6 +80,59 @@ def _sanitize_assistant_text(text: str) -> str:
     text = _TOOL_TAG_RE.sub("", text)
     text = _REASONING_RE.sub("", text)
     return text.strip()
+
+
+def _intercept_financial_report(
+    tool_name: str, result_str: str
+) -> tuple[dict | None, str]:
+    """Intercept financial report tool results for SSE streaming.
+
+    If the tool is ``netsuite.financial_report`` and the result indicates
+    success, returns a tuple of (sse_event_data, condensed_result_str).
+    The SSE event carries the full row data for frontend rendering while
+    the condensed result omits the rows to save LLM tokens.
+
+    For any other tool or unsuccessful result, returns (None, result_str)
+    unchanged.
+    """
+    if tool_name not in ("netsuite.financial_report", "netsuite_financial_report"):
+        return None, result_str
+
+    try:
+        parsed = json.loads(result_str)
+    except (json.JSONDecodeError, TypeError):
+        return None, result_str
+
+    if not parsed.get("success"):
+        return None, result_str
+
+    rows = parsed.get("items", [])
+
+    sse_event_data = {
+        "report_type": parsed.get("report_type"),
+        "period": parsed.get("period"),
+        "columns": parsed.get("columns", []),
+        "rows": rows,
+        "summary": parsed.get("summary"),
+    }
+
+    condensed = json.dumps(
+        {
+            "success": True,
+            "report_type": parsed.get("report_type"),
+            "period": parsed.get("period"),
+            "total_rows": len(rows),
+            "summary": parsed.get("summary"),
+            "note": (
+                "The full table has been sent to the frontend for rendering. "
+                "Do NOT rebuild or reproduce the table in your response. "
+                "Provide commentary and analysis only."
+            ),
+        },
+        default=str,
+    )
+
+    return sse_event_data, condensed
 
 
 def _get_confidence_explanation(score: float) -> str:
@@ -732,12 +780,15 @@ async def run_chat_turn(
                     model=settings.MULTI_AGENT_SQL_MODEL,
                     conversation_history=history_messages,
                     tool_choice=None,
+                    tool_result_interceptor=_intercept_financial_report,
                 ):
                     if event_type == "text":
                         streamed_text_parts.append(payload)
                         yield {"type": "text", "content": payload}
                     elif event_type == "tool_status":
                         yield {"type": "tool_status", "content": payload}
+                    elif event_type == "tool_intercept":
+                        yield {"type": "financial_report", "data": payload}
                     elif event_type == "response":
                         agent_result = payload
 
@@ -1112,6 +1163,12 @@ async def run_chat_turn(
                             result_str = json.dumps(parsed, default=str)
                         except (json.JSONDecodeError, TypeError):
                             pass  # Non-JSON result, skip redaction
+
+            # Intercept financial report: emit SSE event with full data,
+            # condense result_str to summary-only for the LLM.
+            fin_sse, result_str = _intercept_financial_report(block.name, result_str)
+            if fin_sse is not None:
+                yield {"type": "financial_report", "data": fin_sse}
 
             tool_results_content.append(
                 {

@@ -9,6 +9,8 @@ import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { useCreateSavedQuery } from "@/hooks/use-saved-queries";
 import { cn } from "@/lib/utils";
 import type { ChatMessage } from "@/lib/types";
+import type { FinancialReportData } from "@/lib/chat-stream";
+import { FinancialReport } from "@/components/chat/financial-report";
 import { ToolCallStepCard } from "@/components/chat/tool-call-step";
 import { ChangeProposalCard } from "@/components/chat/change-proposal-card";
 import { WorkspaceToolCard } from "@/components/chat/workspace-tool-card";
@@ -422,6 +424,8 @@ interface MessageListProps {
   streamingContent?: string | null;
   streamingStatus?: string | null;
   streamingMessage?: ChatMessage | null;
+  financialReport?: FinancialReportData | null;
+  financialReports?: Map<string, FinancialReportData>;
   onImportanceOverride?: (messageId: string, newTier: number) => void;
 }
 
@@ -437,6 +441,8 @@ export function MessageList({
   streamingContent,
   streamingStatus,
   streamingMessage,
+  financialReport,
+  financialReports,
   onImportanceOverride,
 }: MessageListProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -507,6 +513,7 @@ export function MessageList({
             onViewDiff={onViewDiff}
             onChangesetAction={onChangesetAction}
             onImportanceOverride={onImportanceOverride}
+            financialReportData={financialReports?.get(message.id) ?? null}
           />
         ) : (
           <div key={message.id} className="flex max-w-full justify-end gap-3">
@@ -563,6 +570,10 @@ export function MessageList({
               </span>
             ) : null}
 
+            {financialReport && (
+              <FinancialReport data={financialReport} />
+            )}
+
             {streamingContent && (() => {
               const parsed = parseStreamingThinking(streamingContent);
               return (
@@ -598,6 +609,7 @@ function AssistantMessageRow({
   onChangesetAction,
   isStreamingPreview = false,
   onImportanceOverride,
+  financialReportData = null,
 }: {
   message: ChatMessage;
   messages: ChatMessage[];
@@ -606,6 +618,7 @@ function AssistantMessageRow({
   onChangesetAction?: () => void;
   isStreamingPreview?: boolean;
   onImportanceOverride?: (messageId: string, newTier: number) => void;
+  financialReportData?: FinancialReportData | null;
 }) {
   return (
     <div className="flex min-w-0 justify-start gap-3">
@@ -651,6 +664,10 @@ function AssistantMessageRow({
               return <ToolCallStepCard key={idx} step={tc} />;
             })}
           </div>
+        )}
+
+        {financialReportData && (
+          <FinancialReport data={financialReportData} />
         )}
 
         <div className="flex min-w-0 flex-col gap-2">

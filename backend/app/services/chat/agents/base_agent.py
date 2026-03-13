@@ -13,7 +13,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from app.services.chat.llm_adapter import BaseLLMAdapter, LLMResponse, TokenUsage
 from app.services.chat.prompt_cache import split_system_prompt
@@ -550,16 +550,19 @@ class BaseSpecialistAgent(abc.ABC):
         model: str,
         conversation_history: list[dict] | None = None,
         tool_choice: dict | str | None = None,
+        tool_result_interceptor: Callable[[str, str], tuple[dict | None, str]] | None = None,
     ):
         """Execute the agentic loop with streaming text output.
 
         Yields events:
         - ("text", chunk) — text token from the LLM stream
         - ("tool_status", message) — tool execution status
+        - ("tool_intercept", data) — intercepted tool result data (e.g. financial report)
         - ("response", AgentResult) — final result when done
 
-        This allows the orchestrator to stream directly to the client
-        without a separate synthesis step.
+        ``tool_result_interceptor`` is an optional callback ``(tool_name, result_str) -> (event_data | None, result_str)``.
+        When it returns non-None event_data, a ``("tool_intercept", event_data)`` event is yielded
+        and the (possibly modified) result_str is used for subsequent LLM context.
         """
         from app.services.chat.tools import execute_tool_call
         from app.services.policy_service import evaluate_tool_call as policy_evaluate
@@ -716,6 +719,16 @@ class BaseSpecialistAgent(abc.ABC):
                     result_str = _truncate_tool_result(result_str)
                     elapsed_ms = int((time.monotonic() - t0) * 1000)
 
+                    # Allow orchestrator to intercept specific tool results
+                    # (e.g. financial reports → SSE event + condensed LLM context)
+                    llm_result_str = result_str
+                    if tool_result_interceptor is not None:
+                        intercept_data, llm_result_str = tool_result_interceptor(
+                            block.name, result_str
+                        )
+                        if intercept_data is not None:
+                            yield "tool_intercept", intercept_data
+
                     tool_calls_log.append(
                         build_tool_call_log_entry(
                             step=step,
@@ -731,7 +744,7 @@ class BaseSpecialistAgent(abc.ABC):
                         {
                             "type": "tool_result",
                             "tool_use_id": block.id,
-                            "content": result_str,
+                            "content": llm_result_str,
                         }
                     )
 

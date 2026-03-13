@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiClient } from "@/lib/api-client";
 import { consumeChatStream } from "@/lib/chat-stream";
+import type { FinancialReportData } from "@/lib/chat-stream";
 import type { ChatSession, ChatSessionDetail, ChatMessage } from "@/lib/types";
 import { SessionSidebar } from "@/components/chat/session-sidebar";
 import { MessageList } from "@/components/chat/message-list";
@@ -20,6 +21,8 @@ export default function ChatPage() {
   const [streamingStatus, setStreamingStatus] = useState<string | null>(null);
   const [streamingMessage, setStreamingMessage] = useState<ChatMessage | null>(null);
   const [isStreaming, setIsStreaming] = useState(false);
+  const [financialReport, setFinancialReport] = useState<FinancialReportData | null>(null);
+  const financialReportsRef = useRef<Map<string, FinancialReportData>>(new Map());
   const queryClient = useQueryClient();
   const router = useRouter();
   const { data: workspaces = [] } = useWorkspaces();
@@ -62,6 +65,7 @@ export default function ChatPage() {
       setStreamingContent("");
       setStreamingStatus(null);
       setStreamingMessage(null);
+      setFinancialReport(null);
 
       let sessionId = activeSessionId;
       if (!sessionId) {
@@ -87,8 +91,16 @@ export default function ChatPage() {
             setStreamingStatus(null);
           },
           onToolStatus: (status) => setStreamingStatus(status),
+          onFinancialReport: (data) => setFinancialReport(data),
           onError: (streamError) => setError(streamError),
           onMessage: (message) => {
+            // Associate any in-flight financial report with this message
+            setFinancialReport((current) => {
+              if (current) {
+                financialReportsRef.current.set(message.id, current);
+              }
+              return null;
+            });
             setStreamingMessage(message);
             setStreamingContent(null);
             setStreamingStatus(null);
@@ -109,6 +121,7 @@ export default function ChatPage() {
         setStreamingContent(null);
         setStreamingStatus(null);
         setStreamingMessage(null);
+        setFinancialReport(null);
       }
     },
     [activeSessionId, createSession, isStreaming, queryClient],
@@ -150,6 +163,8 @@ export default function ChatPage() {
             streamingContent={streamingContent}
             streamingStatus={streamingStatus}
             streamingMessage={streamingMessage}
+            financialReport={financialReport}
+            financialReports={financialReportsRef.current}
             onMentionClick={handleMentionClick}
             onImportanceOverride={(messageId, newTier) => {
               queryClient.setQueryData<ChatSessionDetail>(
