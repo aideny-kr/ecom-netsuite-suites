@@ -87,6 +87,59 @@ def _sanitize_assistant_text(text: str) -> str:
     return text.strip()
 
 
+def _intercept_financial_report(
+    tool_name: str, result_str: str
+) -> tuple[dict | None, str]:
+    """Intercept financial report tool results for SSE streaming.
+
+    If the tool is ``netsuite.financial_report`` and the result indicates
+    success, returns a tuple of (sse_event_data, condensed_result_str).
+    The SSE event carries the full row data for frontend rendering while
+    the condensed result omits the rows to save LLM tokens.
+
+    For any other tool or unsuccessful result, returns (None, result_str)
+    unchanged.
+    """
+    if tool_name != "netsuite.financial_report":
+        return None, result_str
+
+    try:
+        parsed = json.loads(result_str)
+    except (json.JSONDecodeError, TypeError):
+        return None, result_str
+
+    if not parsed.get("success"):
+        return None, result_str
+
+    rows = parsed.get("items", [])
+
+    sse_event_data = {
+        "report_type": parsed.get("report_type"),
+        "period": parsed.get("period"),
+        "columns": parsed.get("columns", []),
+        "rows": rows,
+        "summary": parsed.get("summary"),
+    }
+
+    condensed = json.dumps(
+        {
+            "success": True,
+            "report_type": parsed.get("report_type"),
+            "period": parsed.get("period"),
+            "total_rows": len(rows),
+            "summary": parsed.get("summary"),
+            "note": (
+                "The full table has been sent to the frontend for rendering. "
+                "Do NOT rebuild or reproduce the table in your response. "
+                "Provide commentary and analysis only."
+            ),
+        },
+        default=str,
+    )
+
+    return sse_event_data, condensed
+
+
 def _get_confidence_explanation(score: float) -> str:
     """Return a human-readable explanation for a confidence score."""
     if score >= 4.5:
@@ -1112,6 +1165,12 @@ async def run_chat_turn(
                             result_str = json.dumps(parsed, default=str)
                         except (json.JSONDecodeError, TypeError):
                             pass  # Non-JSON result, skip redaction
+
+            # Intercept financial report: emit SSE event with full data,
+            # condense result_str to summary-only for the LLM.
+            fin_sse, result_str = _intercept_financial_report(block.name, result_str)
+            if fin_sse is not None:
+                yield {"type": "financial_report", "data": fin_sse}
 
             tool_results_content.append(
                 {
