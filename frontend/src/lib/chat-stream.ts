@@ -10,12 +10,21 @@ export interface FinancialReportData {
   summary: Record<string, any>;
 }
 
+export interface DataTableData {
+  columns: string[];
+  rows: unknown[][];
+  row_count: number;
+  query: string;
+  truncated: boolean;
+}
+
 export type ChatStreamEvent =
   | { type: "text"; content: string }
   | { type: "tool_status"; content: string }
   | { type: "confidence"; score: number; explanation: string }
   | { type: "importance"; tier: number; label: string; needs_review: boolean }
   | { type: "financial_report"; data: FinancialReportData }
+  | { type: "data_table"; data: DataTableData }
   | { type: "error"; error: string }
   | { type: "message"; message: ChatMessage };
 
@@ -30,6 +39,7 @@ type StreamHandlers = {
   onConfidence?: (score: number, explanation: string) => void;
   onImportance?: (tier: number, label: string, needsReview: boolean) => void;
   onFinancialReport?: (data: FinancialReportData) => void;
+  onDataTable?: (data: DataTableData) => void;
   onError?: (error: string) => void;
   onMessage?: (message: ChatMessage) => void;
 };
@@ -123,6 +133,8 @@ export async function consumeChatStream(
         handlers.onImportance?.(event.tier, event.label, event.needs_review);
       } else if (event.type === "financial_report") {
         handlers.onFinancialReport?.(event.data);
+      } else if (event.type === "data_table") {
+        handlers.onDataTable?.(event.data);
       } else if (event.type === "error") {
         handlers.onError?.(event.error);
       } else if (event.type === "message") {
@@ -162,6 +174,19 @@ function normalizeStreamEvent(data: Record<string, unknown>): ChatStreamEvent | 
         columns: Array.isArray(d.columns) ? d.columns : [],
         rows: Array.isArray(d.rows) ? d.rows : [],
         summary: (d.summary && typeof d.summary === "object" ? d.summary : {}) as Record<string, any>,
+      },
+    };
+  }
+  if (type === "data_table" && data.data && typeof data.data === "object") {
+    const d = data.data as Record<string, unknown>;
+    return {
+      type,
+      data: {
+        columns: Array.isArray(d.columns) ? d.columns : [],
+        rows: Array.isArray(d.rows) ? d.rows : [],
+        row_count: typeof d.row_count === "number" ? d.row_count : 0,
+        query: typeof d.query === "string" ? d.query : "",
+        truncated: Boolean(d.truncated),
       },
     };
   }

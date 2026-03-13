@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiClient } from "@/lib/api-client";
 import { consumeChatStream } from "@/lib/chat-stream";
-import type { FinancialReportData } from "@/lib/chat-stream";
+import type { FinancialReportData, DataTableData } from "@/lib/chat-stream";
 import type { ChatSession, ChatSessionDetail, ChatMessage } from "@/lib/types";
 import { SessionSidebar } from "@/components/chat/session-sidebar";
 import { MessageList } from "@/components/chat/message-list";
@@ -23,6 +23,8 @@ export default function ChatPage() {
   const [isStreaming, setIsStreaming] = useState(false);
   const [financialReport, setFinancialReport] = useState<FinancialReportData | null>(null);
   const financialReportsRef = useRef<Map<string, FinancialReportData>>(new Map());
+  const [dataTable, setDataTable] = useState<DataTableData | null>(null);
+  const dataTablesRef = useRef<Map<string, DataTableData>>(new Map());
   const queryClient = useQueryClient();
   const router = useRouter();
   const { data: workspaces = [] } = useWorkspaces();
@@ -66,6 +68,7 @@ export default function ChatPage() {
       setStreamingStatus(null);
       setStreamingMessage(null);
       setFinancialReport(null);
+      setDataTable(null);
 
       let sessionId = activeSessionId;
       if (!sessionId) {
@@ -92,12 +95,20 @@ export default function ChatPage() {
           },
           onToolStatus: (status) => setStreamingStatus(status),
           onFinancialReport: (data) => setFinancialReport(data),
+          onDataTable: (data) => setDataTable(data),
           onError: (streamError) => setError(streamError),
           onMessage: (message) => {
             // Associate any in-flight financial report with this message
             setFinancialReport((current) => {
               if (current) {
                 financialReportsRef.current.set(message.id, current);
+              }
+              return null;
+            });
+            // Associate any in-flight data table with this message
+            setDataTable((current) => {
+              if (current) {
+                dataTablesRef.current.set(message.id, current);
               }
               return null;
             });
@@ -122,6 +133,7 @@ export default function ChatPage() {
         setStreamingStatus(null);
         setStreamingMessage(null);
         setFinancialReport(null);
+        setDataTable(null);
       }
     },
     [activeSessionId, createSession, isStreaming, queryClient],
@@ -165,6 +177,8 @@ export default function ChatPage() {
             streamingMessage={streamingMessage}
             financialReport={financialReport}
             financialReports={financialReportsRef.current}
+            dataTable={dataTable}
+            dataTables={dataTablesRef.current}
             onMentionClick={handleMentionClick}
             onImportanceOverride={(messageId, newTier) => {
               queryClient.setQueryData<ChatSessionDetail>(

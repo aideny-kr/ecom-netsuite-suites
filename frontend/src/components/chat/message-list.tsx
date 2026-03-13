@@ -9,8 +9,9 @@ import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { useCreateSavedQuery } from "@/hooks/use-saved-queries";
 import { cn } from "@/lib/utils";
 import type { ChatMessage } from "@/lib/types";
-import type { FinancialReportData } from "@/lib/chat-stream";
+import type { FinancialReportData, DataTableData } from "@/lib/chat-stream";
 import { FinancialReport } from "@/components/chat/financial-report";
+import { DataFrameTable } from "@/components/chat/data-frame-table";
 import { ToolCallStepCard } from "@/components/chat/tool-call-step";
 import { ChangeProposalCard } from "@/components/chat/change-proposal-card";
 import { WorkspaceToolCard } from "@/components/chat/workspace-tool-card";
@@ -426,6 +427,8 @@ interface MessageListProps {
   streamingMessage?: ChatMessage | null;
   financialReport?: FinancialReportData | null;
   financialReports?: Map<string, FinancialReportData>;
+  dataTable?: DataTableData | null;
+  dataTables?: Map<string, DataTableData>;
   onImportanceOverride?: (messageId: string, newTier: number) => void;
 }
 
@@ -443,6 +446,8 @@ export function MessageList({
   streamingMessage,
   financialReport,
   financialReports,
+  dataTable,
+  dataTables,
   onImportanceOverride,
 }: MessageListProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -514,6 +519,7 @@ export function MessageList({
             onChangesetAction={onChangesetAction}
             onImportanceOverride={onImportanceOverride}
             financialReportData={financialReports?.get(message.id) ?? null}
+            dataTableData={dataTables?.get(message.id) ?? null}
           />
         ) : (
           <div key={message.id} className="flex max-w-full justify-end gap-3">
@@ -574,6 +580,10 @@ export function MessageList({
               <FinancialReport data={financialReport} />
             )}
 
+            {dataTable && (
+              <DataFrameTable data={dataTable} queryText={dataTable.query} />
+            )}
+
             {streamingContent && (() => {
               const parsed = parseStreamingThinking(streamingContent);
               return (
@@ -610,6 +620,7 @@ function AssistantMessageRow({
   isStreamingPreview = false,
   onImportanceOverride,
   financialReportData = null,
+  dataTableData = null,
 }: {
   message: ChatMessage;
   messages: ChatMessage[];
@@ -619,6 +630,7 @@ function AssistantMessageRow({
   isStreamingPreview?: boolean;
   onImportanceOverride?: (messageId: string, newTier: number) => void;
   financialReportData?: FinancialReportData | null;
+  dataTableData?: DataTableData | null;
 }) {
   return (
     <div className="flex min-w-0 justify-start gap-3">
@@ -668,6 +680,10 @@ function AssistantMessageRow({
 
         {financialReportData && (
           <FinancialReport data={financialReportData} />
+        )}
+
+        {dataTableData && (
+          <DataFrameTable data={dataTableData} queryText={dataTableData.query} />
         )}
 
         <div className="flex min-w-0 flex-col gap-2">
