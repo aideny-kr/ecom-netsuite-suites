@@ -207,12 +207,13 @@ def _detect_column_types(
     CURRENCY_PATTERNS = {"amount", "balance", "total", "price", "cost", "revenue", "income", "expense", "debit", "credit", "net", "gross", "payment", "refund"}
     PERCENT_PATTERNS = {"rate", "margin", "percent", "pct", "ratio"}
     DATE_PATTERNS = {"date", "created", "modified", "updated", "posted", "period"}
-    ID_PATTERNS = {"id", "internalid", "tranid", "acctnumber", "number", "num", "code"}
+    ID_PATTERNS = {"id", "internalid", "tranid", "acctnumber", "acct", "account", "number", "num", "code", "sku", "ref", "zip", "postal", "phone", "fax"}
 
     types: dict[str, str] = {}
 
     for col_idx, col_name in enumerate(columns):
-        lower = col_name.lower().replace("_", "").replace(" ", "")
+        # Strip underscores, spaces, and non-alphanumeric chars (e.g., "Acct #" → "acct")
+        lower = re.sub(r'[^a-z0-9]', '', col_name.lower())
 
         # Name-based heuristics first
         if any(p in lower for p in ID_PATTERNS):
