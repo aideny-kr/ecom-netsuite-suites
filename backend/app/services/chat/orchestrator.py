@@ -215,6 +215,8 @@ def _tool_interceptor(tool_name: str, result_str: str) -> tuple[tuple[str, dict]
     """Adapter: wraps _intercept_tool_result for the agent callback interface."""
     event_type, event_data, new_result_str = _intercept_tool_result(tool_name, result_str)
     if event_type is not None and event_data is not None:
+        row_count = event_data.get("row_count", len(event_data.get("rows", [])))
+        print(f"[INTERCEPT] {event_type} from {tool_name} ({row_count} rows)", flush=True)
         return (event_type, event_data), new_result_str
     return None, new_result_str
 
