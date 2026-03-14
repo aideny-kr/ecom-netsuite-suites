@@ -18,7 +18,8 @@ import {
   DialogDescription,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
-import { Loader2, Download, CheckCircle2, AlertCircle } from "lucide-react";
+import { Loader2, Download, CheckCircle2, AlertCircle, FileSpreadsheet } from "lucide-react";
+import { useExcelExport } from "@/hooks/use-excel-export";
 import {
   useReactTable,
   getCoreRowModel,
@@ -57,6 +58,7 @@ export function QueryPreviewModal({
   });
 
   const [exportState, setExportState] = useState<ExportState>({ phase: "idle" });
+  const { exportFromQuery, isExporting: isExcelExporting } = useExcelExport();
 
   // -- Build TanStack Table columns from dynamic column names ----------------
   const columns = useMemo<ColumnDef<unknown[]>[]>(() => {
@@ -103,7 +105,7 @@ export function QueryPreviewModal({
             if (fileName) {
               setExportState({ phase: "done", fileName });
               window.open(
-                `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/v1/skills/exports/${fileName}`,
+                `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/v1/exports/${fileName}`,
                 "_blank",
               );
             } else {
@@ -155,7 +157,26 @@ export function QueryPreviewModal({
             </DialogDescription>
           </div>
 
-          {/* Export CTA — Electric Indigo */}
+          {/* Export buttons */}
+          <Button
+            onClick={() =>
+              exportFromQuery({
+                queryText: query.query_text,
+                title: query.name,
+                format: "xlsx",
+              })
+            }
+            disabled={isExcelExporting}
+            variant="outline"
+            className="shrink-0"
+          >
+            {isExcelExporting ? (
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+            ) : (
+              <FileSpreadsheet className="mr-2 h-4 w-4" />
+            )}
+            Export Excel
+          </Button>
           <Button
             onClick={handleExport}
             disabled={isExportBusy || exportState.phase === "done"}
