@@ -14,6 +14,7 @@ export interface SavedQueryCreatePayload {
   name: string;
   description?: string | null;
   query_text: string;
+  result_data?: { columns: string[]; rows: unknown[][]; row_count: number } | null;
 }
 
 /** PATCH /api/v1/skills/:id — update a saved query */
@@ -29,6 +30,7 @@ export interface SavedQueryResponse {
   name: string;
   description: string | null;
   query_text: string;
+  result_data?: { columns: string[]; rows: unknown[][]; row_count: number } | null;
   created_at: string;
 }
 

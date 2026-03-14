@@ -277,7 +277,7 @@ export function DataFrameTable({ data, queryText }: DataFrameTableProps) {
             ? `Showing ${rows.length} of ${row_count} rows`
             : `${row_count} row${row_count === 1 ? "" : "s"} returned`}
         </p>
-        {queryText && <SaveQueryButton queryText={queryText} />}
+        {queryText && <SaveQueryButton queryText={queryText} columns={columns} rows={rows} rowCount={row_count} />}
       </div>
     </div>
   );
@@ -287,7 +287,7 @@ export function DataFrameTable({ data, queryText }: DataFrameTableProps) {
 // Save Query button
 // ---------------------------------------------------------------------------
 
-function SaveQueryButton({ queryText }: { queryText: string }) {
+function SaveQueryButton({ queryText, columns, rows, rowCount }: { queryText: string; columns: string[]; rows: unknown[][]; rowCount: number }) {
   const [mode, setMode] = useState<"idle" | "editing" | "saved">("idle");
   const [name, setName] = useState("");
   const mutation = useCreateSavedQuery();
@@ -295,7 +295,11 @@ function SaveQueryButton({ queryText }: { queryText: string }) {
   const handleSave = () => {
     if (!name.trim() || !queryText.trim()) return;
     mutation.mutate(
-      { name: name.trim(), query_text: queryText.trim() },
+      {
+        name: name.trim(),
+        query_text: queryText.trim(),
+        result_data: { columns, rows, row_count: rowCount },
+      },
       { onSuccess: () => setMode("saved") },
     );
   };

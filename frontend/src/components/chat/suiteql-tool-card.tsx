@@ -42,7 +42,13 @@ export function SuiteQLToolCard({ step, userQuestion }: SuiteQLToolCardProps) {
   const handleSave = () => {
     if (!name.trim() || !queryText.trim()) return;
     mutation.mutate(
-      { name: name.trim(), query_text: queryText.trim() },
+      {
+        name: name.trim(),
+        query_text: queryText.trim(),
+        result_data: resultPayload
+          ? { columns: resultPayload.columns, rows: resultPayload.rows, row_count: resultPayload.row_count }
+          : undefined,
+      },
       { onSuccess: handleMutationSuccess },
     );
   };

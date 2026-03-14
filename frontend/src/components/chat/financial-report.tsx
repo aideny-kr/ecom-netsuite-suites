@@ -746,9 +746,13 @@ export function FinancialReport(props: FinancialReportUnionProps) {
                     const lines = buildTsvRows(rows, summary, sections, computed, trend, periods);
                     const headerRow = lines[0];
                     const dataRows = lines.slice(1);
-                    const queryText = `-- ${reportLabel(reportType)} — ${period}\n-- Generated from financial report tool\nSELECT ${headerRow.map((h) => `'${h}'`).join(", ")}`;
+                    const queryText = `-- ${reportLabel(reportType)} — ${period}\n-- Generated from financial report tool`;
                     saveMutation.mutate(
-                      { name: saveName.trim(), query_text: queryText },
+                      {
+                        name: saveName.trim(),
+                        query_text: queryText,
+                        result_data: { columns: headerRow, rows: dataRows, row_count: dataRows.length },
+                      },
                       { onSuccess: () => setSaveMode("saved") },
                     );
                   }
@@ -762,9 +766,14 @@ export function FinancialReport(props: FinancialReportUnionProps) {
                 if (!saveName.trim()) return;
                 const lines = buildTsvRows(rows, summary, sections, computed, trend, periods);
                 const headerRow = lines[0];
-                const queryText = `-- ${reportLabel(reportType)} — ${period}\n-- Generated from financial report tool\nSELECT ${headerRow.map((h) => `'${h}'`).join(", ")}`;
+                const dataRows = lines.slice(1);
+                const queryText = `-- ${reportLabel(reportType)} — ${period}\n-- Generated from financial report tool`;
                 saveMutation.mutate(
-                  { name: saveName.trim(), query_text: queryText },
+                  {
+                    name: saveName.trim(),
+                    query_text: queryText,
+                    result_data: { columns: headerRow, rows: dataRows, row_count: dataRows.length },
+                  },
                   { onSuccess: () => setSaveMode("saved") },
                 );
               }}

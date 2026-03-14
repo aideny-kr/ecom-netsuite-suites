@@ -58,7 +58,7 @@ export function QueryPreviewModal({
   });
 
   const [exportState, setExportState] = useState<ExportState>({ phase: "idle" });
-  const { exportFromQuery, isExporting: isExcelExporting } = useExcelExport();
+  const { exportToExcel, exportFromQuery, isExporting: isExcelExporting } = useExcelExport();
 
   // -- Build TanStack Table columns from dynamic column names ----------------
   const columns = useMemo<ColumnDef<unknown[]>[]>(() => {
@@ -159,13 +159,22 @@ export function QueryPreviewModal({
 
           {/* Export buttons */}
           <Button
-            onClick={() =>
-              exportFromQuery({
-                queryText: query.query_text,
-                title: query.name,
-                format: "xlsx",
-              })
-            }
+            onClick={() => {
+              const isSnapshot = query.query_text.trimStart().startsWith("--") && query.result_data;
+              if (isSnapshot && query.result_data) {
+                exportToExcel({
+                  columns: query.result_data.columns,
+                  rows: query.result_data.rows as unknown[][],
+                  title: query.name,
+                });
+              } else {
+                exportFromQuery({
+                  queryText: query.query_text,
+                  title: query.name,
+                  format: "xlsx",
+                });
+              }
+            }}
             disabled={isExcelExporting}
             variant="outline"
             className="shrink-0"

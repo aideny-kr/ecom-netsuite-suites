@@ -53,6 +53,7 @@ class SavedQueryCreate(BaseModel):
     name: str = Field(min_length=1, max_length=255)
     description: str | None = None
     query_text: str = Field(min_length=1)
+    result_data: dict | None = None  # Snapshot: {columns, rows, row_count}
 
 
 class SavedQueryResponse(BaseModel):
@@ -61,6 +62,7 @@ class SavedQueryResponse(BaseModel):
     name: str
     description: str | None
     query_text: str
+    result_data: dict | None = None
     created_at: str
 
     model_config = {"from_attributes": True}
@@ -161,6 +163,7 @@ async def list_saved_queries(
             name=q.name,
             description=q.description,
             query_text=q.query_text,
+            result_data=q.result_data,
             created_at=q.created_at.isoformat(),
         )
         for q in queries
@@ -178,6 +181,7 @@ async def create_saved_query(
         name=request.name,
         description=request.description,
         query_text=request.query_text,
+        result_data=request.result_data,
     )
     db.add(query)
 
@@ -218,6 +222,19 @@ async def preview_query(
     if not saved_query:
         raise HTTPException(status_code=404, detail="Saved query not found.")
 
+    # If query is a snapshot (non-executable, e.g. financial reports), return stored data
+    is_snapshot = saved_query.query_text.lstrip().startswith("--") or saved_query.result_data is not None
+    if is_snapshot and saved_query.result_data:
+        rd = saved_query.result_data
+        rows = rd.get("rows", [])
+        return PreviewResponse(
+            columns=rd.get("columns", []),
+            rows=rows[:500],
+            row_count=rd.get("row_count", len(rows)),
+            truncated=len(rows) > 500,
+        )
+
+    # Live execution for real SuiteQL queries
     limited_sql = inject_fetch_limit(saved_query.query_text, limit=500)
     result = await execute_suiteql_for_tenant(db=db, tenant_id=user.tenant_id, query=limited_sql)
 
@@ -257,6 +274,34 @@ async def trigger_export(
         resource_id=str(saved_query.id),
     )
     await db.commit()
+
+    # If snapshot data exists (financial reports), export directly without Celery
+    is_snapshot = saved_query.query_text.lstrip().startswith("--") or saved_query.result_data is not None
+    if is_snapshot and saved_query.result_data:
+        import csv
+        import io
+        import os
+        from datetime import datetime, timezone
+        from pathlib import Path
+        from uuid import uuid4
+
+        rd = saved_query.result_data
+        columns = rd.get("columns", [])
+        rows = rd.get("rows", [])
+
+        export_dir = Path(os.environ.get("EXPORT_DIR", "/tmp/exports"))
+        export_dir.mkdir(parents=True, exist_ok=True)
+        safe_name = "".join(c if c.isalnum() or c in "-_" else "_" for c in saved_query.name)
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+        filename = f"{safe_name}_{timestamp}_{uuid4().hex[:8]}.csv"
+        filepath = export_dir / filename
+
+        with open(filepath, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(columns)
+            writer.writerows(rows)
+
+        return ExportResponse(task_id=f"snapshot_{filename}", status="queued")
 
     task = export_suiteql_to_csv.delay(
         tenant_id=str(user.tenant_id),
