@@ -69,7 +69,19 @@ export function QueryPreviewModal({
       accessorFn: (row: unknown[]) => row[idx],
       cell: (info) => {
         const val = info.getValue();
-        return val == null ? "—" : String(val);
+        if (val == null || val === "") return "—";
+        if (typeof val === "number") {
+          if (Number.isInteger(val)) return val.toLocaleString();
+          return val.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        }
+        if (typeof val === "string" && /^-?\d+\.?\d*$/.test(val) && val.length > 0) {
+          const num = Number(val);
+          if (!isNaN(num)) {
+            if (Number.isInteger(num)) return num.toLocaleString();
+            return num.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+          }
+        }
+        return String(val);
       },
     }));
   }, [previewData?.columns]);
@@ -158,56 +170,59 @@ export function QueryPreviewModal({
           </div>
 
           {/* Export buttons */}
-          <Button
-            onClick={() => {
-              const isSnapshot = query.query_text.trimStart().startsWith("--") && query.result_data;
-              if (isSnapshot && query.result_data) {
-                exportToExcel({
-                  columns: query.result_data.columns,
-                  rows: query.result_data.rows as unknown[][],
-                  title: query.name,
-                });
-              } else {
-                exportFromQuery({
-                  queryText: query.query_text,
-                  title: query.name,
-                  format: "xlsx",
-                });
-              }
-            }}
-            disabled={isExcelExporting}
-            variant="outline"
-            className="shrink-0"
-          >
-            {isExcelExporting ? (
-              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-            ) : (
-              <FileSpreadsheet className="mr-2 h-4 w-4" />
-            )}
-            Export Excel
-          </Button>
-          <Button
-            onClick={handleExport}
-            disabled={isExportBusy || exportState.phase === "done"}
-            className="shrink-0"
-          >
-            {isExportBusy ? (
-              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-            ) : exportState.phase === "done" ? (
-              <CheckCircle2 className="mr-2 h-4 w-4" />
-            ) : exportState.phase === "error" ? (
-              <AlertCircle className="mr-2 h-4 w-4" />
-            ) : (
-              <Download className="mr-2 h-4 w-4" />
-            )}
-            {isExportBusy
-              ? "Exporting…"
-              : exportState.phase === "done"
-                ? "Exported"
-                : exportState.phase === "error"
-                  ? "Retry Export"
-                  : "Export to CSV"}
-          </Button>
+          <div className="flex items-center gap-2 shrink-0">
+            <Button
+              onClick={() => {
+                const isSnapshot = query.query_text.trimStart().startsWith("--") && query.result_data;
+                if (isSnapshot && query.result_data) {
+                  exportToExcel({
+                    columns: query.result_data.columns,
+                    rows: query.result_data.rows as unknown[][],
+                    title: query.name,
+                  });
+                } else {
+                  exportFromQuery({
+                    queryText: query.query_text,
+                    title: query.name,
+                    format: "xlsx",
+                  });
+                }
+              }}
+              disabled={isExcelExporting}
+              variant="outline"
+              size="sm"
+            >
+              {isExcelExporting ? (
+                <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <FileSpreadsheet className="mr-1.5 h-3.5 w-3.5" />
+              )}
+              Excel
+            </Button>
+            <Button
+              onClick={handleExport}
+              disabled={isExportBusy || exportState.phase === "done"}
+              variant="outline"
+              size="sm"
+            >
+              {isExportBusy ? (
+                <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+              ) : exportState.phase === "done" ? (
+                <CheckCircle2 className="mr-1.5 h-3.5 w-3.5 text-green-500" />
+              ) : exportState.phase === "error" ? (
+                <AlertCircle className="mr-1.5 h-3.5 w-3.5 text-destructive" />
+              ) : (
+                <Download className="mr-1.5 h-3.5 w-3.5" />
+              )}
+              {isExportBusy
+                ? "Exporting…"
+                : exportState.phase === "done"
+                  ? "Exported"
+                  : exportState.phase === "error"
+                    ? "Retry"
+                    : "CSV"}
+            </Button>
+          </div>
         </DialogHeader>
 
         {/* ── Error banner ─────────────────────────────────────── */}
@@ -252,10 +267,13 @@ export function QueryPreviewModal({
                       key={row.id}
                       className="hover:bg-muted/30 transition-colors"
                     >
-                      {row.getVisibleCells().map((cell) => (
+                      {row.getVisibleCells().map((cell) => {
+                        const rawVal = cell.getValue();
+                        const isNum = typeof rawVal === "number" || (typeof rawVal === "string" && /^-?\d+\.?\d*$/.test(rawVal));
+                        return (
                         <td
                           key={cell.id}
-                          className="px-4 py-2.5 text-muted-foreground text-[13px] max-w-xs truncate"
+                          className={`px-4 py-2.5 text-muted-foreground text-[13px] max-w-xs truncate ${isNum ? "text-right tabular-nums" : ""}`}
                         >
                           {
                             flexRender(
@@ -264,7 +282,8 @@ export function QueryPreviewModal({
                             ) as React.ReactNode
                           }
                         </td>
-                      ))}
+                        );
+                      })}
                     </tr>
                   ))}
                 </tbody>
