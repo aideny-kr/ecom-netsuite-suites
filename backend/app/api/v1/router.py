@@ -8,6 +8,7 @@ from app.api.v1 import (
     chat_api_keys,
     chat_integration,
     connections,
+    exports,
     health,
     jobs,
     mcp_connectors,
@@ -55,3 +56,4 @@ api_router.include_router(suitescript_sync.router)
 api_router.include_router(netsuite_api_logs.router)
 api_router.include_router(settings.router)
 api_router.include_router(skills.router)
+api_router.include_router(exports.router)
