@@ -20,7 +20,7 @@
 - **File Cabinet I/O**: Custom RESTlet (`ecom_file_cabinet_restlet.js`) replaces broken REST API PATCH. RESTlet does in-place load-update-save (preserves file ID).
 - **SuiteQL**: Via REST API POST `/services/rest/query/v1/suiteql` with Bearer token. Also available via MCP at `/services/mcp/v1/all`.
 - **Mock Data**: MockData RESTlet runs SuiteQL inside NetSuite with server-side PII masking. Never transmit real PII to our backend.
-- **Chat**: Multi-agent coordinator in `coordinator.py` with semantic routing (heuristic → LLM fallback). Specialist agents: SuiteQL, RAG, analysis, workspace. SSE streaming with `<thinking>` tags (collapsed in UI).
+- **Chat**: Dual-path agent system. `unified_agent_enabled` per-tenant flag routes to either (1) `UnifiedAgent` — single agent with all tools and full SuiteQL rules, or (2) `MultiAgentCoordinator` — semantic routing to specialist agents (SuiteQL, RAG, analysis, workspace). SSE streaming with `<thinking>` tags (collapsed in UI).
 - **Entity Resolution**: Fast NER (Haiku) → pg_trgm fuzzy matching → `<tenant_vernacular>` XML injection into agent prompts. Table: `tenant_entity_mapping` with composite GIN index. Seeded from metadata discovery pipeline.
 - **Two SuiteQL paths**: Local REST API (`netsuite_suiteql` tool) supports all tables including `customrecord_*`. External MCP (`ns_runCustomSuiteQL`) works only for standard tables. Agent prompt guides tool selection.
 - **MCP Standard Tools SuiteApp**: ~11 tools across 4 categories (Record CRUD, Reports, Saved Searches, SuiteQL). Tool visibility is **role-permission based** — same SuiteApp version on two accounts can expose different tools depending on OAuth role permissions. NOT a SuiteApp version issue. After changing role permissions, must reconnect MCP to trigger `discover_tools()` refresh.
@@ -31,6 +31,7 @@
 - **Custom Domains**: `custom_domain` + `domain_verified` on `tenant_configs`. DNS TXT verification via `domain_service.py`. Public resolver endpoint `GET /api/v1/settings/resolve-domain?domain=`.
 - **Feature Flags**: `tenant_feature_flags` table with TTL-cached service (`feature_flag_service.py`). `require_feature(flag_key)` FastAPI dependency returns 403 when disabled. Default flags seeded on tenant creation.
 - **Soul Seeding**: `seed_default_soul()` auto-populates soul.md with tenant-specific defaults on registration. Called from `auth_service.register_tenant()`.
+- **Tool Result Interception**: `_intercept_tool_result()` in orchestrator intercepts SuiteQL/financial tool results, emits SSE `data_table` or `financial_report` events for frontend rendering (`DataFrameTable` component), and condenses the result for the LLM (strips rows, keeps columns + row_count). Handles three formats: local SuiteQL (`columns`/`rows`), external MCP (`data` list-of-dicts with `queryExecuted`/`resultCount`), and financial reports (`items`/`summary`).
 
 ## Backend Patterns — FOLLOW EXACTLY
 
@@ -282,24 +283,28 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 21. **Alembic revision ID max 32 chars** — `alembic_version.version_num` is `VARCHAR(32)`. Keep revision IDs short (e.g. `039_confidence_score`, not `039_chat_message_confidence_score`).
 22. **MCP tool visibility is role-permission based** — If a tenant is missing MCP tools (e.g., no Record Tools, no Saved Search Tools), it's because their OAuth role lacks the required permissions — NOT a SuiteApp version issue. Fix: update the role in NetSuite (Setup > Users/Roles > Manage Roles), then reconnect MCP. Record Tools need `REST Web Services (Full)` + record-type Create/Edit. Saved Search Tools need `Perform Search (Full)`.
 23. **MCP CRUD requires guardrails** — `ns_createRecord` and `ns_updateRecord` MUST NOT auto-execute. Always: (1) show the full payload to the user, (2) get explicit confirmation, (3) for updates, show before/after diff via `ns_getRecord` first, (4) log via `audit_service`, (5) check record type allowlist. The agent is now an action agent, not just read-only.
+24. **Unified agent prompt MUST stay in sync with SuiteQL agent** — `unified_agent.py` and `suiteql_agent.py` both contain SuiteQL dialect rules. When adding a new rule to one, add it to both. Copy rules verbatim — do NOT paraphrase or "simplify" when porting. Each rule was added because of a specific production failure; losing details causes regressions (e.g., missing `assemblycomponent = 'F'` caused double-counting).
+25. **External MCP response format differs from local** — `ns_runCustomSuiteQL` returns `{"data": [{col: val}, ...], "queryExecuted": "...", "resultCount": N}`, NOT `{"columns": [], "rows": []}`. The `_intercept_tool_result()` function handles both formats. When adding new interception logic, test with both local and external MCP tool names.
 
 ## Chat Architecture
 
-- **Orchestrator** (`orchestrator.py`): SSE streaming endpoint, routes to single-agent or multi-agent
-- **Coordinator** (`coordinator.py`): Semantic router with heuristic classifier (`classify_intent()`), LLM fallback for ambiguous queries. Dispatches specialist agents, handles retries, streams synthesis.
+- **Orchestrator** (`orchestrator.py`): SSE streaming endpoint. Checks `TenantConfig.unified_agent_enabled` to route to `UnifiedAgent` or `MultiAgentCoordinator`.
+- **Unified Agent** (`unified_agent.py`): Single agent with all tools (SuiteQL, RAG, workspace, financial). Used by Framework tenant. Has full SuiteQL dialect rules + `<common_queries>` section embedded in its system prompt.
+- **Coordinator** (`coordinator.py`): Legacy multi-agent path. Semantic router with heuristic classifier (`classify_intent()`), LLM fallback for ambiguous queries. Dispatches specialist agents, handles retries, streams synthesis. Used by Rails tenant.
 - **Intent types**: DOCUMENTATION, DATA_QUERY, FINANCIAL_REPORT, CODE_UNDERSTANDING, WORKSPACE_DEV, ANALYSIS, AMBIGUOUS. Heuristic regex rules checked first; AMBIGUOUS falls back to LLM planner.
 - **Financial report routing**: FINANCIAL_REPORT intent → local `netsuite.financial_report` tool (SuiteQL-first with BUILTIN.CONSOLIDATE for posting-time FX rates). MCP `ns_runReport` as fallback only (uses real-time FX, diverges on multi-currency tenants). Server-side `_compute_summary()` pre-computes section totals — single-period returns flat dict, trend returns `summary.by_period` keyed by periodname. LLM presents numbers, never computes. Financial reports bypass `NETSUITE_SUITEQL_MAX_ROWS` cap via `_skip_limit_cap` kwarg.
 - **Hybrid MCP architecture**: Three layers — (1) Context Layer: entity resolution, tenant schema, RAG, learned rules, proven patterns (always active), (2) Execution Layer: local `netsuite.financial_report` for P&L/BS/TB (verified templates), MCP tools for discovery/saved searches/ad-hoc (`ns_runSavedSearch` → `ns_runCustomSuiteQL`), local `netsuite_suiteql` as fallback, (3) Knowledge Layer: `rag_search` + `web_search`.
 - **MCP tool detection**: Orchestrator uses `_MCP_TOOL_PATTERNS` dict to detect all ~11 tool types from `ext__` prefixed names. Patterns: runreport, runsavedsearch, listallreports, listsavedsearches, suiteql, getsuiteqlmetadata, getsubsidiaries, createrecord, getrecord, updaterecord, getrecordtypemetadata.
-- **Specialist agents** (`agents/`): Each runs a mini agentic loop with tools (max_steps varies per agent)
-  - `SuiteQLAgent`: max_steps=6, tenant metadata + entity vernacular injected into prompt
+- **Specialist agents** (`agents/`): Used by multi-agent coordinator path only. Each runs a mini agentic loop with tools (max_steps varies per agent)
+  - `SuiteQLAgent`: max_steps=6, has comprehensive SuiteQL rules (the canonical source — unified agent rules must mirror these)
   - `RAGAgent`: max_steps=2, strict tool budget (2 rag_search + 1 web_search). Handles docs, script logic, AND online research.
   - `DataAnalysisAgent`: requires prior data from SuiteQL agent
   - `WorkspaceAgent`: file ops, propose_patch, search workspace
+  - `UnifiedAgent`: Single agent with all capabilities. Replaces coordinator routing for `unified_agent_enabled=True` tenants.
 - **LLM adapters** (`adapters/`): Anthropic, OpenAI, Gemini — all implement `create_message()` and `stream_message()`
 - **Entity resolution** (`tenant_resolver.py`): Runs before SuiteQL agent dispatch. Haiku extracts entities → pg_trgm resolves to script IDs → XML block injected via `context["tenant_vernacular"]`
 - **Route registry**: Add new agents via `ROUTE_REGISTRY` dict + `_create_agent()` factory in coordinator
-- **History compaction**: Full history loaded → compacted via LLM summary (if >12 messages) → keeps last 4 verbatim. Hard-truncate as fallback only.
+- **History compaction**: Per-message `content_summary` generated at write-time (Haiku). Orchestrator loads summaries for older messages, full content for last 8. No read-time LLM compaction.
 - **Session ordering**: Sorted by `updated_at DESC`. Session `updated_at` bumped on every message. Frontend auto-selects most recent session on page load.
 - **Doc chunk embeddings**: OpenAI `text-embedding-3-small` (1024-dim) primary, Voyage AI fallback. 3,198 chunks embedded. UTF-8 sanitized on ingest.
 - **Logging**: Coordinator/orchestrator use `print(flush=True)` for docker visibility (structlog doesn't surface stdlib `logger.info` calls).
@@ -315,7 +320,9 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 - **Security hardening**: SET LOCAL UUID validation, Redis denylist/rate limiter, SSL verification, production secret validation, security headers, Swagger disabled in prod, Sentry integration
 - **CI/CD**: `deploy.yml` (staging auto + production manual), `rollback.yml` (manual)
 - **MCP tools**: Both Framework (6738075) and Rails (9745435) now expose full ~11 tool set (Record CRUD + Reports + Saved Searches + SuiteQL) after OAuth role permission fix. See `docs/netsuite-mcp-tool-gap-analysis.md`.
+- **Generic DataFrame**: `DataFrameTable` component renders SuiteQL query results with Copy, CSV export, and Save Query buttons. Tool result interception handles local SuiteQL, external MCP (`data` key), and financial report formats. SSE `data_table` event streams structured data to frontend.
+- **Unified agent rules**: Fully synced with SuiteQL agent as of 2026-03-13. Added: `BUILTIN.RELATIVE_RANGES()`, custom list fields, transaction prefix mapping, join patterns, line amount sign convention, full multi-currency, `<common_queries>` section (aggregation discipline, double-counting, examples, item table gotcha), detailed error recovery with budget awareness.
 - **Known gap**: OAuth reconnect just flips status, doesn't re-initiate browser flow (refresh token expired for tenant 9745435)
 - **Known gap**: structlog setup doesn't surface stdlib `logging.getLogger()` — use `print(flush=True)` for docker log visibility
-- **Deferred**: Financial DataFrame frontend component (plan in `prompts/financial-dataframe-component.md`), SDF CI/CD pipeline, bundle versioning strategy, RESTlet rate limiting
+- **Deferred**: Financial DataFrame frontend component (dedicated `<FinancialReport />` with section grouping — plan in `prompts/financial-dataframe-component.md`), SDF CI/CD pipeline, bundle versioning strategy, RESTlet rate limiting
 - **Researched**: Celigo flow integration — API sync + ZIP upload into DocChunk RAG. Awaiting prioritization. See `memory/celigo-research.md`.

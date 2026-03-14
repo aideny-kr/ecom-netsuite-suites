@@ -14,6 +14,9 @@ import {
   Loader2,
   Pencil,
   X,
+  ChevronDown,
+  ChevronUp,
+  Code2,
 } from "lucide-react";
 import {
   TableBody,
@@ -36,6 +39,7 @@ export function DataFrameTable({ data, queryText }: DataFrameTableProps) {
   const [sortCol, setSortCol] = useState<number | null>(null);
   const [sortDir, setSortDir] = useState<SortDirection>(null);
   const [copied, setCopied] = useState(false);
+  const [showQuery, setShowQuery] = useState(false);
 
   const handleSort = useCallback(
     (colIndex: number) => {
@@ -155,6 +159,29 @@ export function DataFrameTable({ data, queryText }: DataFrameTableProps) {
           </button>
         </div>
       </div>
+
+      {/* Query */}
+      {queryText && (
+        <div className="border-b">
+          <button
+            onClick={() => setShowQuery((v) => !v)}
+            className="flex w-full items-center gap-1.5 px-4 py-2 text-[11px] font-medium text-muted-foreground transition-colors hover:text-foreground"
+          >
+            <Code2 className="h-3 w-3" />
+            SuiteQL Query
+            {showQuery ? (
+              <ChevronUp className="ml-auto h-3 w-3" />
+            ) : (
+              <ChevronDown className="ml-auto h-3 w-3" />
+            )}
+          </button>
+          {showQuery && (
+            <pre className="overflow-x-auto bg-muted/50 px-4 py-3 text-[11px] leading-relaxed text-foreground">
+              <code>{queryText}</code>
+            </pre>
+          )}
+        </div>
+      )}
 
       {/* Table */}
       <div className="max-h-[600px] overflow-auto scrollbar-thin">
