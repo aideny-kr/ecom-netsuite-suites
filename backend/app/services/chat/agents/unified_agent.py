@@ -633,7 +633,7 @@ class UnifiedAgent(BaseSpecialistAgent):
         conversation_history: list[dict] | None = None,
         tool_choice: dict | str | None = None,
         financial_mode: bool = False,
-        tool_result_interceptor: Callable[[str, str], tuple[dict | None, str]] | None = None,
+        tool_result_interceptor: Callable[[str, str], tuple[tuple[str, dict] | None, str]] | None = None,
     ):
         """Override to inject context before streaming."""
         task = await self._setup_context(task, context, db)
