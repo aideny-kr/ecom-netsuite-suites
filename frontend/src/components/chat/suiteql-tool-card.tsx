@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useCreateSavedQuery } from "@/hooks/use-saved-queries";
+import { useExcelExport } from "@/hooks/use-excel-export";
 import type { ToolCallStep, ToolCallTableResultPayload } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import {
@@ -9,6 +10,7 @@ import {
   Database,
   Bookmark,
   Check,
+  FileSpreadsheet,
   Loader2,
   X,
   Pencil,
@@ -33,13 +35,20 @@ export function SuiteQLToolCard({ step, userQuestion }: SuiteQLToolCardProps) {
   const toolLabel = isMcpTool ? formatMcpToolName(step.tool) : "SuiteQL Query";
 
   const mutation = useCreateSavedQuery();
+  const { exportToExcel, exportFromQuery, isExporting } = useExcelExport();
 
   const handleMutationSuccess = () => setSaveMode("saved");
 
   const handleSave = () => {
     if (!name.trim() || !queryText.trim()) return;
     mutation.mutate(
-      { name: name.trim(), query_text: queryText.trim() },
+      {
+        name: name.trim(),
+        query_text: queryText.trim(),
+        result_data: resultPayload
+          ? { columns: resultPayload.columns, rows: resultPayload.rows, row_count: resultPayload.row_count }
+          : undefined,
+      },
       { onSuccess: handleMutationSuccess },
     );
   };
@@ -179,14 +188,42 @@ export function SuiteQLToolCard({ step, userQuestion }: SuiteQLToolCardProps) {
           </pre>
         )}
 
-        <SaveQueryBar
-          saveMode={saveMode}
-          setSaveMode={setSaveMode}
-          name={name}
-          setName={setName}
-          mutation={mutation}
-          onSave={handleSave}
-        />
+        <div className="flex items-center gap-3">
+          <button
+            onClick={() => {
+              if (!resultPayload) return;
+              if (resultPayload.truncated && queryText) {
+                exportFromQuery({
+                  queryText,
+                  title: userQuestion?.slice(0, 80) ?? toolLabel,
+                });
+              } else {
+                exportToExcel({
+                  columns: resultPayload.columns,
+                  rows: resultPayload.rows,
+                  title: userQuestion?.slice(0, 80) ?? toolLabel,
+                });
+              }
+            }}
+            disabled={isExporting || !resultPayload}
+            className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground hover:text-primary transition-colors disabled:opacity-50"
+          >
+            {isExporting ? (
+              <Loader2 className="h-3 w-3 animate-spin" />
+            ) : (
+              <FileSpreadsheet className="h-3 w-3" />
+            )}
+            Export Excel
+          </button>
+          <SaveQueryBar
+            saveMode={saveMode}
+            setSaveMode={setSaveMode}
+            name={name}
+            setName={setName}
+            mutation={mutation}
+            onSave={handleSave}
+          />
+        </div>
       </div>
     </div>
   );

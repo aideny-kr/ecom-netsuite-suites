@@ -858,6 +858,7 @@ async def run_chat_turn(
 
                 streamed_text_parts: list[str] = []
                 agent_result = None
+                last_structured_output: dict | None = None
 
                 async for event_type, payload in unified_agent.run_streaming(
                     task=unified_task,
@@ -876,6 +877,7 @@ async def run_chat_turn(
                         yield {"type": "tool_status", "content": payload}
                     elif event_type == "tool_intercept":
                         # payload is (event_type_str, event_data_dict)
+                        last_structured_output = {"type": payload[0], "data": payload[1]}
                         yield {"type": payload[0], "data": payload[1]}
                     elif event_type == "response":
                         agent_result = payload
@@ -943,6 +945,7 @@ async def run_chat_turn(
                     is_byok=is_byok,
                     confidence_score=confidence_val,
                     query_importance=importance_tier.value,
+                    structured_output=last_structured_output,
                     created_at=datetime.now(timezone.utc),
                 )
                 db.add(assistant_msg)
@@ -1041,6 +1044,7 @@ async def run_chat_turn(
 
             # Stream multi-agent: dispatch agents first, then stream synthesis
             streamed_text_parts: list[str] = []
+            coord_structured_output: dict | None = None
             async for event in coordinator.run_streaming(
                 user_message=sanitized_input,
                 conversation_history=history_messages,
@@ -1048,6 +1052,8 @@ async def run_chat_turn(
             ):
                 if event["type"] == "text":
                     streamed_text_parts.append(event["content"])
+                if event["type"] in ("data_table", "financial_report"):
+                    coord_structured_output = {"type": event["type"], "data": event["data"]}
                 yield event
                 if event["type"] == "message":
                     # Final message already yielded — save and return
@@ -1082,6 +1088,7 @@ async def run_chat_turn(
                 provider_used=provider,
                 is_byok=is_byok,
                 query_importance=importance_tier.value,
+                structured_output=coord_structured_output,
                 created_at=datetime.now(timezone.utc),
             )
             db.add(assistant_msg)
@@ -1163,6 +1170,7 @@ async def run_chat_turn(
     final_text = ""
     total_input_tokens = 0
     total_output_tokens = 0
+    last_structured_output: dict | None = None
 
     for step in range(MAX_STEPS):
         response = None
@@ -1256,6 +1264,7 @@ async def run_chat_turn(
             # condense result_str to summary-only for the LLM.
             intercept_type, intercept_data, result_str = _intercept_tool_result(block.name, result_str)
             if intercept_type is not None:
+                last_structured_output = {"type": intercept_type, "data": intercept_data}
                 yield {"type": intercept_type, "data": intercept_data}
 
             tool_results_content.append(
@@ -1323,6 +1332,7 @@ async def run_chat_turn(
         provider_used=provider,
         is_byok=is_byok,
         query_importance=importance_tier.value,
+        structured_output=last_structured_output,
         created_at=datetime.now(timezone.utc),
     )
     db.add(assistant_msg)

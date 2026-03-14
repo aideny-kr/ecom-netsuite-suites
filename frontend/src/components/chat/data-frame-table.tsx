@@ -10,6 +10,7 @@ import {
   Copy,
   Check,
   Download,
+  FileSpreadsheet,
   Bookmark,
   Loader2,
   Pencil,
@@ -26,6 +27,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { useCreateSavedQuery } from "@/hooks/use-saved-queries";
+import { useExcelExport } from "@/hooks/use-excel-export";
 
 interface DataFrameTableProps {
   data: DataTableData;
@@ -36,6 +38,7 @@ type SortDirection = "asc" | "desc" | null;
 
 export function DataFrameTable({ data, queryText }: DataFrameTableProps) {
   const { columns, rows, row_count, truncated } = data;
+  const { exportToExcel, exportFromQuery, isExporting } = useExcelExport();
   const [sortCol, setSortCol] = useState<number | null>(null);
   const [sortDir, setSortDir] = useState<SortDirection>(null);
   const [copied, setCopied] = useState(false);
@@ -157,6 +160,32 @@ export function DataFrameTable({ data, queryText }: DataFrameTableProps) {
             <Download className="h-3 w-3" />
             CSV
           </button>
+          <button
+            onClick={() => {
+              if (truncated && queryText) {
+                exportFromQuery({
+                  queryText,
+                  title: queryText.slice(0, 80),
+                });
+              } else {
+                exportToExcel({
+                  columns,
+                  rows: rows as unknown[][],
+                  title: queryText?.slice(0, 80) ?? "Query Results",
+                });
+              }
+            }}
+            disabled={isExporting}
+            className="inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-50"
+            title="Export as Excel"
+          >
+            {isExporting ? (
+              <Loader2 className="h-3 w-3 animate-spin" />
+            ) : (
+              <FileSpreadsheet className="h-3 w-3" />
+            )}
+            Excel
+          </button>
         </div>
       </div>
 
@@ -248,7 +277,7 @@ export function DataFrameTable({ data, queryText }: DataFrameTableProps) {
             ? `Showing ${rows.length} of ${row_count} rows`
             : `${row_count} row${row_count === 1 ? "" : "s"} returned`}
         </p>
-        {queryText && <SaveQueryButton queryText={queryText} />}
+        {queryText && <SaveQueryButton queryText={queryText} columns={columns} rows={rows} rowCount={row_count} />}
       </div>
     </div>
   );
@@ -258,7 +287,7 @@ export function DataFrameTable({ data, queryText }: DataFrameTableProps) {
 // Save Query button
 // ---------------------------------------------------------------------------
 
-function SaveQueryButton({ queryText }: { queryText: string }) {
+function SaveQueryButton({ queryText, columns, rows, rowCount }: { queryText: string; columns: string[]; rows: unknown[][]; rowCount: number }) {
   const [mode, setMode] = useState<"idle" | "editing" | "saved">("idle");
   const [name, setName] = useState("");
   const mutation = useCreateSavedQuery();
@@ -266,7 +295,11 @@ function SaveQueryButton({ queryText }: { queryText: string }) {
   const handleSave = () => {
     if (!name.trim() || !queryText.trim()) return;
     mutation.mutate(
-      { name: name.trim(), query_text: queryText.trim() },
+      {
+        name: name.trim(),
+        query_text: queryText.trim(),
+        result_data: { columns, rows, row_count: rowCount },
+      },
       { onSuccess: () => setMode("saved") },
     );
   };

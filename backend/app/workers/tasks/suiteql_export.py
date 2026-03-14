@@ -63,30 +63,26 @@ def export_suiteql_to_csv(
         if not access_token:
             raise ValueError("No access token available. Please re-authorize.")
 
-    # Paginate in chunks
-    chunk_size = 1000
-    offset = 0
-    all_rows: list[list] = []
-    columns: list[str] = []
+    # Strip trailing FETCH FIRST to avoid double-up (but preserve subquery FETCH FIRST)
+    import re
+
+    base_query = re.sub(
+        r'\s+FETCH\s+FIRST\s+\d+\s+ROWS\s+ONLY\s*$',
+        '',
+        query_text.rstrip().rstrip(';'),
+        flags=re.IGNORECASE,
+    )
 
     loop = asyncio.new_event_loop()
     try:
-        while True:
-            base_query = query_text.rstrip().rstrip(";").rstrip()
-            paginated_query = f"{base_query} OFFSET {offset} FETCH FIRST {chunk_size} ROWS ONLY"
-
-            result = loop.run_until_complete(execute_suiteql_via_rest(access_token, account_id, paginated_query))
-
-            if not columns and result.get("columns"):
-                columns = result["columns"]
-
-            rows = result.get("rows", [])
-            all_rows.extend(rows)
-
-            if len(rows) < chunk_size:
-                break
-
-            offset += len(rows)
+        result = loop.run_until_complete(
+            execute_suiteql_via_rest(
+                access_token, account_id, base_query,
+                limit=100_000, paginate=True,
+            )
+        )
+        columns = result.get("columns", [])
+        all_rows = result.get("rows", [])
     finally:
         loop.close()
 

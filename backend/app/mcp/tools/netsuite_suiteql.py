@@ -383,6 +383,7 @@ async def execute(params: dict, context: dict | None = None, **kwargs) -> dict:
         try:
             result = await execute_suiteql(
                 access_token, account_id, query, max_rows,
+                paginate=True,
                 timeout_seconds=timeout_seconds,
             )
         except Exception as exc:

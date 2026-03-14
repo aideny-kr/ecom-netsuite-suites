@@ -2,8 +2,10 @@
 
 import { useCallback, useMemo, useState } from "react";
 import { cn } from "@/lib/utils";
-import { FileSpreadsheet, Download, ClipboardCopy, Check, ChevronRight } from "lucide-react";
+import { FileSpreadsheet, Download, ClipboardCopy, Check, ChevronRight, Loader2, Bookmark, Pencil, X } from "lucide-react";
 import type { FinancialReportData } from "@/lib/chat-stream";
+import { useExcelExport } from "@/hooks/use-excel-export";
+import { useCreateSavedQuery } from "@/hooks/use-saved-queries";
 import {
   TableBody,
   TableCell,
@@ -610,6 +612,10 @@ export function FinancialReport(props: FinancialReportUnionProps) {
   const periods = useMemo(() => (trend ? pivotTrendRows(rows).periods : []), [rows, trend]);
   const [copied, setCopied] = useState(false);
   const [collapsedSections, setCollapsedSections] = useState<Set<string>>(new Set());
+  const { exportToExcel, isExporting } = useExcelExport();
+  const [saveMode, setSaveMode] = useState<"idle" | "editing" | "saved">("idle");
+  const [saveName, setSaveName] = useState(`${reportLabel(reportType)} — ${period}`);
+  const saveMutation = useCreateSavedQuery();
 
   const toggleSection = useCallback((key: string) => {
     setCollapsedSections((prev) => {
@@ -626,6 +632,18 @@ export function FinancialReport(props: FinancialReportUnionProps) {
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   }, [rows, summary, sections, computed, trend, periods]);
+
+  const handleExcelExport = useCallback(() => {
+    const lines = buildTsvRows(rows, summary, sections, computed, trend, periods);
+    const headerRow = lines[0];
+    const dataRows = lines.slice(1);
+    exportToExcel({
+      columns: headerRow,
+      rows: dataRows,
+      title: `${reportLabel(reportType)} — ${period}`,
+      metadata: { "Report": reportLabel(reportType), "Period": period },
+    });
+  }, [rows, summary, sections, computed, trend, periods, reportType, period, exportToExcel]);
 
   const handleDownloadCsv = useCallback(() => {
     const lines = buildTsvRows(rows, summary, sections, computed, trend, periods);
@@ -667,6 +685,15 @@ export function FinancialReport(props: FinancialReportUnionProps) {
             <Download className="h-3 w-3" />
             CSV
           </button>
+          <button
+            onClick={handleExcelExport}
+            disabled={isExporting}
+            className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] text-muted-foreground hover:bg-muted hover:text-foreground transition-colors disabled:opacity-50"
+            title="Export as Excel"
+          >
+            {isExporting ? <Loader2 className="h-3 w-3 animate-spin" /> : <FileSpreadsheet className="h-3 w-3" />}
+            Excel
+          </button>
         </div>
       </div>
 
@@ -690,6 +717,81 @@ export function FinancialReport(props: FinancialReportUnionProps) {
             collapsedSections={collapsedSections}
             onToggle={toggleSection}
           />
+        )}
+      </div>
+
+      {/* Footer — Save to Analytics */}
+      <div className="flex items-center justify-end border-t px-4 py-2">
+        {saveMode === "idle" && (
+          <button
+            onClick={() => setSaveMode("editing")}
+            className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground hover:text-primary transition-colors"
+          >
+            <Bookmark className="h-3 w-3" />
+            Save to Analytics
+          </button>
+        )}
+        {saveMode === "editing" && (
+          <div className="flex items-center gap-2">
+            <div className="relative min-w-0 flex-1">
+              <input
+                type="text"
+                value={saveName}
+                onChange={(e) => setSaveName(e.target.value)}
+                placeholder="Query name..."
+                className="w-full rounded-md border bg-background px-2.5 py-1 pr-7 text-[11px] text-foreground placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+                autoFocus
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && saveName.trim()) {
+                    const lines = buildTsvRows(rows, summary, sections, computed, trend, periods);
+                    const headerRow = lines[0];
+                    const dataRows = lines.slice(1);
+                    const queryText = `-- ${reportLabel(reportType)} — ${period}\n-- Generated from financial report tool`;
+                    saveMutation.mutate(
+                      {
+                        name: saveName.trim(),
+                        query_text: queryText,
+                        result_data: { columns: headerRow, rows: dataRows, row_count: dataRows.length },
+                      },
+                      { onSuccess: () => setSaveMode("saved") },
+                    );
+                  }
+                  if (e.key === "Escape") setSaveMode("idle");
+                }}
+              />
+              <Pencil className="absolute right-2 top-1/2 h-3 w-3 -translate-y-1/2 text-muted-foreground/50" />
+            </div>
+            <button
+              onClick={() => {
+                if (!saveName.trim()) return;
+                const lines = buildTsvRows(rows, summary, sections, computed, trend, periods);
+                const headerRow = lines[0];
+                const dataRows = lines.slice(1);
+                const queryText = `-- ${reportLabel(reportType)} — ${period}\n-- Generated from financial report tool`;
+                saveMutation.mutate(
+                  {
+                    name: saveName.trim(),
+                    query_text: queryText,
+                    result_data: { columns: headerRow, rows: dataRows, row_count: dataRows.length },
+                  },
+                  { onSuccess: () => setSaveMode("saved") },
+                );
+              }}
+              disabled={!saveName.trim() || saveMutation.isPending}
+              className="flex shrink-0 items-center gap-1 rounded-md bg-primary px-2.5 py-1 text-[11px] font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-50"
+            >
+              {saveMutation.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : "Save"}
+            </button>
+            <button onClick={() => setSaveMode("idle")} className="shrink-0 rounded p-0.5 text-muted-foreground transition-colors hover:text-foreground">
+              <X className="h-3 w-3" />
+            </button>
+          </div>
+        )}
+        {saveMode === "saved" && (
+          <div className="flex items-center gap-1.5 text-[11px] font-medium text-green-600 dark:text-green-400">
+            <Check className="h-3 w-3" />
+            Saved to Analytics
+          </div>
         )}
       </div>
     </div>
