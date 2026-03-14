@@ -210,8 +210,36 @@ class TestInterceptSuiteQL:
         assert sse_event is not None
         assert sse_event["columns"] == SAMPLE_SUITEQL_RESULT["columns"]
 
+    def test_ext_mcp_data_format(self):
+        """External MCP returns {data: [{col: val}, ...], queryExecuted: ...} — real format."""
+        mcp_result = {
+            "method": "custom_suiteql",
+            "description": "Get top sales orders",
+            "queryExecuted": "SELECT t.tranid, t.total FROM transaction t",
+            "resultCount": 2,
+            "data": [
+                {"tranid": "SO-1001", "total": 5000.00},
+                {"tranid": "SO-1002", "total": 3200.50},
+            ],
+            "pageSize": 1000,
+            "numberOfPages": 1,
+        }
+        result_str = _result_str(mcp_result)
+        event_type, sse_event, condensed = _intercept_tool_result(
+            "ext__abc123def__ns_runcustomsuiteql", result_str
+        )
+        assert event_type == "data_table"
+        assert sse_event is not None
+        assert sse_event["columns"] == ["tranid", "total"]
+        assert sse_event["rows"] == [
+            ["SO-1001", 5000.00],
+            ["SO-1002", 3200.50],
+        ]
+        assert sse_event["row_count"] == 2
+        assert sse_event["query"] == "SELECT t.tranid, t.total FROM transaction t"
+
     def test_ext_mcp_items_format(self):
-        """External MCP returns {items: [{col: val}, ...]} — should convert to columns/rows."""
+        """External MCP returns {items: [{col: val}, ...]} — fallback format."""
         mcp_result = {
             "items": [
                 {"tranid": "SO-1001", "entity": "Acme Corp", "amount": 5000.00},
@@ -230,6 +258,16 @@ class TestInterceptSuiteQL:
             ["SO-1002", "Globex Inc", 3200.50],
         ]
         assert sse_event["row_count"] == 2
+
+    def test_ext_mcp_empty_data_is_noop(self):
+        """External MCP with empty data list should not be intercepted."""
+        result_str = _result_str({"data": []})
+        event_type, sse_event, returned = _intercept_tool_result(
+            "ext__abc123def__ns_runcustomsuiteql", result_str
+        )
+        assert event_type is None
+        assert sse_event is None
+        assert returned == result_str
 
     def test_ext_mcp_empty_items_is_noop(self):
         """External MCP with empty items list should not be intercepted."""

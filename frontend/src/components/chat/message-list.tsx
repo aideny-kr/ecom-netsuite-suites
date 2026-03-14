@@ -657,6 +657,8 @@ function AssistantMessageRow({
                 );
               }
               if (tc.tool === "netsuite_suiteql" || tc.result_payload?.kind === "table") {
+                // Skip SuiteQLToolCard when DataFrameTable is handling the display
+                if (dataTableData) return null;
                 const msgIndex = messages.indexOf(message);
                 const prevUserMsg = messages
                   .slice(0, msgIndex)

@@ -165,9 +165,12 @@ def _intercept_tool_result(
         columns = parsed.get("columns")
         rows = parsed.get("rows")
 
-        # Handle external MCP format: {"items": [{col: val, ...}, ...]}
+        # Handle external MCP format: {"data"|"items": [{col: val, ...}, ...]}
         if not isinstance(columns, list) or not isinstance(rows, list):
-            items = parsed.get("items") if isinstance(parsed, dict) else None
+            # External MCP uses "data" or "items" key for list-of-dicts
+            items = None
+            if isinstance(parsed, dict):
+                items = parsed.get("data") or parsed.get("items")
             if isinstance(items, list) and len(items) > 0 and isinstance(items[0], dict):
                 # Derive columns from union of all item keys (preserving order)
                 seen: set[str] = set()
@@ -181,8 +184,8 @@ def _intercept_tool_result(
             else:
                 return None, None, result_str
 
-        row_count = parsed.get("row_count", len(rows))
-        query = parsed.get("query", "")
+        row_count = parsed.get("row_count") or parsed.get("resultCount") or len(rows)
+        query = parsed.get("query") or parsed.get("queryExecuted") or ""
         truncated = parsed.get("truncated", False)
 
         sse_event_data = {
@@ -215,8 +218,6 @@ def _tool_interceptor(tool_name: str, result_str: str) -> tuple[tuple[str, dict]
     """Adapter: wraps _intercept_tool_result for the agent callback interface."""
     event_type, event_data, new_result_str = _intercept_tool_result(tool_name, result_str)
     if event_type is not None and event_data is not None:
-        row_count = event_data.get("row_count", len(event_data.get("rows", [])))
-        print(f"[INTERCEPT] {event_type} from {tool_name} ({row_count} rows)", flush=True)
         return (event_type, event_data), new_result_str
     return None, new_result_str
 
