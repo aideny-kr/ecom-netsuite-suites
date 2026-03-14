@@ -346,6 +346,7 @@ export interface ChatMessage {
   confidence_score?: number;
   query_importance?: number; // 1=Casual, 2=Operational, 3=Reporting, 4=Audit Critical
   user_feedback?: "helpful" | "not_helpful" | null;
+  structured_output?: { type: string; data: Record<string, unknown> } | null;
   created_at: string;
 }
 

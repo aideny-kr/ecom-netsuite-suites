@@ -55,6 +55,7 @@ class MessageResponse(BaseModel):
     confidence_score: float | None = None
     query_importance: int | None = None
     user_feedback: str | None = None
+    structured_output: dict | None = None
     created_at: str
 
     model_config = {"from_attributes": True}
