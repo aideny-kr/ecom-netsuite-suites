@@ -200,6 +200,47 @@ class TestInterceptSuiteQL:
         assert sse_event is None
         assert returned == result_str
 
+    def test_ext_mcp_suiteql_tool(self):
+        """External MCP SuiteQL tools (ext__<hex>__...) should be intercepted."""
+        result_str = _result_str(SAMPLE_SUITEQL_RESULT)
+        event_type, sse_event, condensed = _intercept_tool_result(
+            "ext__abc123def__ns_runcustomsuiteql", result_str
+        )
+        assert event_type == "data_table"
+        assert sse_event is not None
+        assert sse_event["columns"] == SAMPLE_SUITEQL_RESULT["columns"]
+
+    def test_ext_mcp_items_format(self):
+        """External MCP returns {items: [{col: val}, ...]} — should convert to columns/rows."""
+        mcp_result = {
+            "items": [
+                {"tranid": "SO-1001", "entity": "Acme Corp", "amount": 5000.00},
+                {"tranid": "SO-1002", "entity": "Globex Inc", "amount": 3200.50},
+            ]
+        }
+        result_str = _result_str(mcp_result)
+        event_type, sse_event, condensed = _intercept_tool_result(
+            "ext__abc123def__ns_runcustomsuiteql", result_str
+        )
+        assert event_type == "data_table"
+        assert sse_event is not None
+        assert sse_event["columns"] == ["tranid", "entity", "amount"]
+        assert sse_event["rows"] == [
+            ["SO-1001", "Acme Corp", 5000.00],
+            ["SO-1002", "Globex Inc", 3200.50],
+        ]
+        assert sse_event["row_count"] == 2
+
+    def test_ext_mcp_empty_items_is_noop(self):
+        """External MCP with empty items list should not be intercepted."""
+        result_str = _result_str({"items": []})
+        event_type, sse_event, returned = _intercept_tool_result(
+            "ext__abc123def__ns_runcustomsuiteql", result_str
+        )
+        assert event_type is None
+        assert sse_event is None
+        assert returned == result_str
+
 
 class TestInterceptNonMatchingTool:
     """Non-data tools should be untouched."""

@@ -86,6 +86,24 @@ _FINANCIAL_TOOLS = frozenset({"netsuite.financial_report", "netsuite_financial_r
 _SUITEQL_TOOLS = frozenset({"netsuite.suiteql", "netsuite_suiteql"})
 
 
+def _is_financial_tool(tool_name: str) -> bool:
+    """Match local financial tools and external MCP runReport tools."""
+    if tool_name in _FINANCIAL_TOOLS:
+        return True
+    if tool_name.startswith("ext__") and "runreport" in tool_name.lower():
+        return True
+    return False
+
+
+def _is_suiteql_tool(tool_name: str) -> bool:
+    """Match local SuiteQL tools and external MCP SuiteQL tools."""
+    if tool_name in _SUITEQL_TOOLS:
+        return True
+    if tool_name.startswith("ext__") and "suiteql" in tool_name.lower():
+        return True
+    return False
+
+
 def _intercept_tool_result(
     tool_name: str, result_str: str
 ) -> tuple[str | None, dict | None, str]:
@@ -98,7 +116,7 @@ def _intercept_tool_result(
     """
 
     # --- Financial report path ---
-    if tool_name in _FINANCIAL_TOOLS:
+    if _is_financial_tool(tool_name):
         try:
             parsed = json.loads(result_str)
         except (json.JSONDecodeError, TypeError):
@@ -132,7 +150,7 @@ def _intercept_tool_result(
         return "financial_report", sse_event_data, condensed
 
     # --- SuiteQL query path ---
-    if tool_name in _SUITEQL_TOOLS:
+    if _is_suiteql_tool(tool_name):
         try:
             parsed = json.loads(result_str)
         except (json.JSONDecodeError, TypeError):
@@ -146,8 +164,22 @@ def _intercept_tool_result(
 
         columns = parsed.get("columns")
         rows = parsed.get("rows")
+
+        # Handle external MCP format: {"items": [{col: val, ...}, ...]}
         if not isinstance(columns, list) or not isinstance(rows, list):
-            return None, None, result_str
+            items = parsed.get("items") if isinstance(parsed, dict) else None
+            if isinstance(items, list) and len(items) > 0 and isinstance(items[0], dict):
+                # Derive columns from union of all item keys (preserving order)
+                seen: set[str] = set()
+                columns = []
+                for item in items:
+                    for key in item:
+                        if key not in seen:
+                            seen.add(key)
+                            columns.append(key)
+                rows = [[item.get(col) for col in columns] for item in items]
+            else:
+                return None, None, result_str
 
         row_count = parsed.get("row_count", len(rows))
         query = parsed.get("query", "")
