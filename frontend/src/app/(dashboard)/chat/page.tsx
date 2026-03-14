@@ -59,17 +59,22 @@ export default function ChatPage() {
   }, [sessions, activeSessionId]);
 
   // Hydrate structured output refs from persisted messages on session load
+  const [, forceRender] = useState(0);
   useEffect(() => {
     if (!sessionDetail?.messages) return;
+    let hydrated = false;
     for (const msg of sessionDetail.messages) {
       if (!msg.structured_output) continue;
       const { type, data } = msg.structured_output;
       if (type === "financial_report" && data) {
         financialReportsRef.current.set(msg.id, data as unknown as FinancialReportData);
+        hydrated = true;
       } else if (type === "data_table" && data) {
         dataTablesRef.current.set(msg.id, data as unknown as DataTableData);
+        hydrated = true;
       }
     }
+    if (hydrated) forceRender((n) => n + 1);
   }, [sessionDetail]);
 
   const handleSend = useCallback(
