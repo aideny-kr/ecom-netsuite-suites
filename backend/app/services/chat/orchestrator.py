@@ -718,6 +718,20 @@ async def run_chat_turn(
                     detected_intent = classify_intent(sanitized_input)
                     is_financial = detected_intent == IntentType.FINANCIAL_REPORT
 
+                    # Gate financial reports by permission
+                    if is_financial:
+                        from app.core.dependencies import has_permission
+                        can_access_financial = await has_permission(db, user_id, "chat.financial_reports")
+                        if not can_access_financial:
+                            is_financial = False
+                            sanitized_input = (
+                                sanitized_input
+                                + "\n\n[SYSTEM: Financial reports are restricted for your role. "
+                                "Respond to the user that financial reports require Admin or User role access. "
+                                "Do NOT attempt to call netsuite_financial_report.]"
+                            )
+                            print("[ORCHESTRATOR] Financial report blocked — user lacks chat.financial_reports permission", flush=True)
+
                     importance_tier = classify_importance(
                         sanitized_input,
                         intent_hint=detected_intent.value if is_financial else None,
