@@ -43,8 +43,8 @@ export type RoleName = "admin" | "finance" | "ops" | "readonly";
 
 export const ROLE_DISPLAY_NAMES: Record<RoleName, string> = {
   admin: "Admin",
-  finance: "User",
-  ops: "Operations Only",
+  finance: "Finance",
+  ops: "Operations",
   readonly: "Read Only",
 };
 

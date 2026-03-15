@@ -19,8 +19,8 @@ logger = structlog.get_logger()
 VALID_INVITE_ROLES = {"admin", "finance", "ops"}
 ROLE_DISPLAY_NAMES = {
     "admin": "Admin",
-    "finance": "User",
-    "ops": "Operations Only",
+    "finance": "Finance",
+    "ops": "Operations",
     "readonly": "Read Only",
 }
 INVITE_EXPIRY_DAYS = 7

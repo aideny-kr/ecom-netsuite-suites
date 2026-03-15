@@ -21,8 +21,8 @@ class TestConstants:
 
     def test_role_display_names(self):
         assert ROLE_DISPLAY_NAMES["admin"] == "Admin"
-        assert ROLE_DISPLAY_NAMES["finance"] == "User"
-        assert ROLE_DISPLAY_NAMES["ops"] == "Operations Only"
+        assert ROLE_DISPLAY_NAMES["finance"] == "Finance"
+        assert ROLE_DISPLAY_NAMES["ops"] == "Operations"
 
 
 class TestCreateInvite:
