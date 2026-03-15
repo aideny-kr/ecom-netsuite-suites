@@ -99,6 +99,26 @@ async def assign_roles(
     if not target_user:
         raise HTTPException(status_code=404, detail="User not found")
 
+    # Cannot change your own roles
+    if target_user.id == user.id:
+        raise HTTPException(status_code=400, detail="Cannot change your own roles.")
+
+    # Last-admin protection
+    current_roles = {ur.role.name for ur in target_user.user_roles}
+    if "admin" in current_roles and "admin" not in request.role_names:
+        from sqlalchemy import func
+
+        admin_count_result = await db.execute(
+            select(func.count(UserRole.id))
+            .join(Role, UserRole.role_id == Role.id)
+            .where(UserRole.tenant_id == user.tenant_id, Role.name == "admin")
+        )
+        if (admin_count_result.scalar() or 0) <= 1:
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot remove the last admin. Assign another admin first.",
+            )
+
     # Remove existing roles
     for ur in target_user.user_roles:
         await db.delete(ur)
@@ -139,6 +159,9 @@ async def deactivate_user(
     target_user = result.scalar_one_or_none()
     if not target_user:
         raise HTTPException(status_code=404, detail="User not found")
+
+    if target_user.id == user.id:
+        raise HTTPException(status_code=400, detail="Cannot deactivate yourself.")
 
     target_user.is_active = False
     await audit_service.log_event(
