@@ -3,6 +3,7 @@ import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, BackgroundTasks, Cookie, Depends, HTTPException, Request, Response, status
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -131,6 +132,72 @@ async def _check_connection_health(tenant_id: uuid.UUID) -> None:
             await db.commit()
     except Exception:
         _logger.warning("connection_health.background_check_failed", exc_info=True)
+
+
+class GoogleLoginRequest(BaseModel):
+    google_id_token: str
+
+
+@router.post("/google", response_model=AuthResponse)
+async def google_login(
+    request: GoogleLoginRequest,
+    response: Response,
+    background_tasks: BackgroundTasks,
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Login or link account with Google. Works for existing users (any auth_provider)."""
+    from app.services.google_auth_service import verify_google_token
+    from app.core.security import create_access_token, create_refresh_token
+    from sqlalchemy.orm import selectinload
+    from app.models.user import UserRole
+
+    id_token = request.google_id_token
+
+    try:
+        google_info = await verify_google_token(id_token)
+    except ValueError as e:
+        raise HTTPException(status_code=401, detail=str(e))
+
+    email = google_info["email"].lower()
+    google_sub = google_info["sub"]
+
+    # Find user by email
+    result = await db.execute(
+        select(User)
+        .options(selectinload(User.user_roles).selectinload(UserRole.role))
+        .where(User.email == email, User.is_active.is_(True))
+    )
+    user = result.scalar_one_or_none()
+
+    if not user:
+        raise HTTPException(
+            status_code=404,
+            detail="No account found with this Google account. Ask your admin for an invite.",
+        )
+
+    # Link Google sub if not already set
+    if not user.google_sub:
+        user.google_sub = google_sub
+        user.auth_provider = "google"
+
+    tokens = {
+        "access_token": create_access_token({"sub": str(user.id)}),
+        "refresh_token": create_refresh_token({"sub": str(user.id)}),
+    }
+
+    await audit_service.log_event(
+        db=db,
+        tenant_id=user.tenant_id,
+        category="auth",
+        action="user.google_login",
+        actor_id=user.id,
+    )
+    await db.commit()
+
+    background_tasks.add_task(_check_connection_health, user.tenant_id)
+
+    _set_refresh_cookie(response, tokens["refresh_token"])
+    return AuthResponse(access_token=tokens["access_token"], token_type="bearer")
 
 
 @router.post("/login", response_model=AuthResponse)

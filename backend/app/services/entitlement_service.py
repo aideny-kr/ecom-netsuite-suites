@@ -15,6 +15,7 @@ PLAN_LIMITS = {
         "max_connections": 2,
         "max_schedules": 5,
         "max_exports_per_day": 10,
+        "max_users": 20,
         "mcp_tools": False,
         "chat": True,
         "byok_ai": False,
@@ -27,6 +28,7 @@ PLAN_LIMITS = {
         "max_connections": 50,
         "max_schedules": 50,
         "max_exports_per_day": 1000,
+        "max_users": 50,
         "mcp_tools": True,
         "chat": True,
         "byok_ai": True,
@@ -39,6 +41,7 @@ PLAN_LIMITS = {
         "max_connections": -1,
         "max_schedules": 500,
         "max_exports_per_day": -1,
+        "max_users": 999,
         "mcp_tools": True,
         "chat": True,
         "byok_ai": True,
@@ -95,6 +98,21 @@ async def check_entitlement(
             return True
         return current_count < max_allowed
 
+    if feature == "users":
+        from app.models.user import User
+
+        count_result = await db.execute(
+            select(func.count(User.id)).where(
+                User.tenant_id == tenant_id,
+                User.is_active.is_(True),
+            )
+        )
+        current_count = count_result.scalar() or 0
+        max_allowed = limits["max_users"]
+        if max_allowed == -1:
+            return True
+        return current_count < max_allowed
+
     if feature == "mcp_tools":
         return limits["mcp_tools"]
 
@@ -145,7 +163,18 @@ async def get_usage_summary(db: AsyncSession, tenant_id: uuid.UUID) -> dict:
     )
     schedules = sched_result.scalar() or 0
 
+    from app.models.user import User
+
+    users_result = await db.execute(
+        select(func.count(User.id)).where(
+            User.tenant_id == tenant_id,
+            User.is_active.is_(True),
+        )
+    )
+    users = users_result.scalar() or 0
+
     return {
         "connections": connections,
         "schedules": schedules,
+        "users": users,
     }

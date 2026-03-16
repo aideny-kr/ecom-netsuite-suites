@@ -61,6 +61,7 @@ import { SyncLoader } from "@/components/ui/sync-loader";
 import { useQueryClient } from "@tanstack/react-query";
 import { apiClient } from "@/lib/api-client";
 import { useFeature } from "@/hooks/use-features";
+import { TeamSection } from "@/components/settings/team-section";
 import { AI_PROVIDERS, AI_MODELS } from "@/lib/constants";
 import type { NetSuiteMetadataCategories } from "@/lib/types";
 import {
@@ -2775,6 +2776,9 @@ export default function SettingsPage() {
 
       {/* AI Personality & Core Logic (Soul) Section */}
       <SoulSection />
+
+      {/* Team Section */}
+      <TeamSection />
 
       {/* NetSuite Connection Section */}
       <NetSuiteConnectionSection />

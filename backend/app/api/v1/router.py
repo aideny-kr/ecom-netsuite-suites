@@ -10,6 +10,7 @@ from app.api.v1 import (
     connections,
     exports,
     health,
+    invites,
     jobs,
     mcp_connectors,
     netsuite_api_logs,
@@ -57,3 +58,4 @@ api_router.include_router(netsuite_api_logs.router)
 api_router.include_router(settings.router)
 api_router.include_router(skills.router)
 api_router.include_router(exports.router)
+api_router.include_router(invites.router)

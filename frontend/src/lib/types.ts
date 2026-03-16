@@ -39,6 +39,22 @@ export interface User {
 
 export type Role = "owner" | "admin" | "member" | "viewer";
 
+export type RoleName = "admin" | "finance" | "ops" | "readonly";
+
+export const ROLE_DISPLAY_NAMES: Record<RoleName, string> = {
+  admin: "Admin",
+  finance: "Finance",
+  ops: "Operations",
+  readonly: "Read Only",
+};
+
+export const ROLE_DESCRIPTIONS: Record<RoleName, string> = {
+  admin: "Full access including settings, user management, and finance",
+  finance: "Chat, analytics, finance reports, and data export",
+  ops: "Chat, connections, schedules — no finance reports",
+  readonly: "View-only access (reserved)",
+};
+
 export interface Connection {
   id: string;
   tenant_id: string;

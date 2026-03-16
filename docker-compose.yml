@@ -39,6 +39,8 @@ services:
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/1
       CELERY_RESULT_BACKEND: redis://redis:6379/2
+      GOOGLE_CLIENT_ID: "840124956248-2e21n3ilk0a93osaiffihuei6pof7jfm.apps.googleusercontent.com"
+      FRONTEND_URL: "http://localhost:3002"
     ports:
       - "8000:8000"
     depends_on:
@@ -82,6 +84,7 @@ services:
       - "3002:3000"
     environment:
       NEXT_PUBLIC_API_URL: http://localhost:8000
+      NEXT_PUBLIC_GOOGLE_CLIENT_ID: "840124956248-2e21n3ilk0a93osaiffihuei6pof7jfm.apps.googleusercontent.com"
     volumes:
       - ./frontend:/app
       - /app/node_modules

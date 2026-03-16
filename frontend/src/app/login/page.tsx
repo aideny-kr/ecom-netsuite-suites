@@ -2,19 +2,25 @@
 
 import { useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { useAuth } from "@/providers/auth-provider";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useToast } from "@/hooks/use-toast";
 import { Zap } from "lucide-react";
+import { GoogleLogin } from "@react-oauth/google";
+import { apiClient } from "@/lib/api-client";
+import { Loader2 } from "lucide-react";
 
 export default function LoginPage() {
   const { login } = useAuth();
   const { toast } = useToast();
+  const router = useRouter();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  const [isGoogleLoading, setIsGoogleLoading] = useState(false);
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -119,6 +125,62 @@ export default function LoginPage() {
               {isLoading ? "Signing in..." : "Sign in"}
             </Button>
           </form>
+
+          <div className="relative my-6">
+            <div className="absolute inset-0 flex items-center">
+              <span className="w-full border-t" />
+            </div>
+            <div className="relative flex justify-center text-xs uppercase">
+              <span className="bg-background px-2 text-muted-foreground">or</span>
+            </div>
+          </div>
+
+          {isGoogleLoading ? (
+            <Button
+              variant="outline"
+              className="h-11 w-full text-[14px] font-medium"
+              disabled
+            >
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              Signing in with Google...
+            </Button>
+          ) : (
+            <div className="flex justify-center">
+              <GoogleLogin
+                onSuccess={async (credentialResponse) => {
+                  if (!credentialResponse.credential) return;
+                  setIsGoogleLoading(true);
+                  try {
+                    const res = await apiClient.post<{ access_token: string; refresh_token: string }>(
+                      "/api/v1/auth/google",
+                      { google_id_token: credentialResponse.credential },
+                    );
+                    localStorage.setItem("access_token", res.access_token);
+                    document.cookie = `access_token=${res.access_token}; path=/; max-age=604800; samesite=lax`;
+                    window.location.href = "/chat";
+                  } catch (err) {
+                    toast({
+                      title: "Google sign-in failed",
+                      description: err instanceof Error ? err.message : "Could not sign in with Google",
+                      variant: "destructive",
+                    });
+                  } finally {
+                    setIsGoogleLoading(false);
+                  }
+                }}
+                onError={() => {
+                  toast({
+                    title: "Google sign-in failed",
+                    description: "Google authentication was cancelled or failed",
+                    variant: "destructive",
+                  });
+                }}
+                text="signin_with"
+                shape="rectangular"
+                width={380}
+              />
+            </div>
+          )}
 
           <p className="mt-6 text-center text-[13px] text-muted-foreground">
             Don&apos;t have an account?{" "}
