@@ -3,6 +3,7 @@ import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, BackgroundTasks, Cookie, Depends, HTTPException, Request, Response, status
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -133,9 +134,13 @@ async def _check_connection_health(tenant_id: uuid.UUID) -> None:
         _logger.warning("connection_health.background_check_failed", exc_info=True)
 
 
+class GoogleLoginRequest(BaseModel):
+    google_id_token: str
+
+
 @router.post("/google", response_model=AuthResponse)
 async def google_login(
-    raw_request: Request,
+    request: GoogleLoginRequest,
     response: Response,
     background_tasks: BackgroundTasks,
     db: Annotated[AsyncSession, Depends(get_db)],
@@ -146,10 +151,7 @@ async def google_login(
     from sqlalchemy.orm import selectinload
     from app.models.user import UserRole
 
-    body = await raw_request.json()
-    id_token = body.get("google_id_token")
-    if not id_token:
-        raise HTTPException(status_code=400, detail="google_id_token is required")
+    id_token = request.google_id_token
 
     try:
         google_info = await verify_google_token(id_token)
@@ -179,8 +181,8 @@ async def google_login(
         user.auth_provider = "google"
 
     tokens = {
-        "access_token": create_access_token(str(user.id)),
-        "refresh_token": create_refresh_token(str(user.id)),
+        "access_token": create_access_token({"sub": str(user.id)}),
+        "refresh_token": create_refresh_token({"sub": str(user.id)}),
     }
 
     await audit_service.log_event(

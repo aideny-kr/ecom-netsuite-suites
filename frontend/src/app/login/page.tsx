@@ -11,6 +11,7 @@ import { useToast } from "@/hooks/use-toast";
 import { Zap } from "lucide-react";
 import { GoogleLogin } from "@react-oauth/google";
 import { apiClient } from "@/lib/api-client";
+import { Loader2 } from "lucide-react";
 
 export default function LoginPage() {
   const { login } = useAuth();
@@ -134,41 +135,52 @@ export default function LoginPage() {
             </div>
           </div>
 
-          <div className="flex justify-center">
-            <GoogleLogin
-              onSuccess={async (credentialResponse) => {
-                if (!credentialResponse.credential) return;
-                setIsGoogleLoading(true);
-                try {
-                  const res = await apiClient.post<{ access_token: string; refresh_token: string }>(
-                    "/api/v1/auth/google",
-                    { google_id_token: credentialResponse.credential },
-                  );
-                  localStorage.setItem("access_token", res.access_token);
-                  document.cookie = `access_token=${res.access_token}; path=/; max-age=604800; samesite=lax`;
-                  router.push("/chat");
-                } catch (err) {
+          {isGoogleLoading ? (
+            <Button
+              variant="outline"
+              className="h-11 w-full text-[14px] font-medium"
+              disabled
+            >
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              Signing in with Google...
+            </Button>
+          ) : (
+            <div className="flex justify-center">
+              <GoogleLogin
+                onSuccess={async (credentialResponse) => {
+                  if (!credentialResponse.credential) return;
+                  setIsGoogleLoading(true);
+                  try {
+                    const res = await apiClient.post<{ access_token: string; refresh_token: string }>(
+                      "/api/v1/auth/google",
+                      { google_id_token: credentialResponse.credential },
+                    );
+                    localStorage.setItem("access_token", res.access_token);
+                    document.cookie = `access_token=${res.access_token}; path=/; max-age=604800; samesite=lax`;
+                    router.push("/chat");
+                  } catch (err) {
+                    toast({
+                      title: "Google sign-in failed",
+                      description: err instanceof Error ? err.message : "Could not sign in with Google",
+                      variant: "destructive",
+                    });
+                  } finally {
+                    setIsGoogleLoading(false);
+                  }
+                }}
+                onError={() => {
                   toast({
                     title: "Google sign-in failed",
-                    description: err instanceof Error ? err.message : "Could not sign in with Google",
+                    description: "Google authentication was cancelled or failed",
                     variant: "destructive",
                   });
-                } finally {
-                  setIsGoogleLoading(false);
-                }
-              }}
-              onError={() => {
-                toast({
-                  title: "Google sign-in failed",
-                  description: "Google authentication was cancelled or failed",
-                  variant: "destructive",
-                });
-              }}
-              text="signin_with"
-              shape="rectangular"
-              width={380}
-            />
-          </div>
+                }}
+                text="signin_with"
+                shape="rectangular"
+                width={380}
+              />
+            </div>
+          )}
 
           <p className="mt-6 text-center text-[13px] text-muted-foreground">
             Don&apos;t have an account?{" "}
