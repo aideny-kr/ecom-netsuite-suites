@@ -3,9 +3,6 @@
 import { useState, useEffect, useCallback } from "react";
 import {
   useMcpConnectors,
-  useDeleteMcpConnector,
-  useTestMcpConnector,
-  useReauthorizeMcpConnector,
 } from "@/hooks/use-mcp-connectors";
 import {
   useConnections,
@@ -30,7 +27,6 @@ import {
 } from "@/hooks/use-suitescript-sync";
 import { usePlanInfo } from "@/hooks/use-plan";
 import { PLAN_TIERS } from "@/lib/constants";
-import { AddMcpConnectorDialog } from "@/components/add-mcp-connector-dialog";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -62,6 +58,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { apiClient } from "@/lib/api-client";
 import { useFeature } from "@/hooks/use-features";
 import { TeamSection } from "@/components/settings/team-section";
+import { NetSuiteConnectionsSection } from "@/components/settings/netsuite-connections-section";
 import { usePermissions } from "@/hooks/use-permissions";
 import { useAuth } from "@/providers/auth-provider";
 import { ROLE_DISPLAY_NAMES } from "@/lib/types";
@@ -2777,58 +2774,9 @@ function ConnectionStatusSection() {
 // ---------------------------------------------------------------------------
 
 export default function SettingsPage() {
-  const { data: connectors, isLoading } = useMcpConnectors();
-  const deleteConnector = useDeleteMcpConnector();
-  const testConnector = useTestMcpConnector();
-  const reauthorize = useReauthorizeMcpConnector();
-  const { toast } = useToast();
   const showBranding = useFeature("custom_branding");
   const { isAdmin } = usePermissions();
   const { user } = useAuth();
-
-  async function handleDelete(id: string) {
-    try {
-      await deleteConnector.mutateAsync(id);
-      toast({ title: "MCP connector deleted" });
-    } catch (err) {
-      toast({
-        title: "Failed to delete connector",
-        description: err instanceof Error ? err.message : "Unknown error",
-        variant: "destructive",
-      });
-    }
-  }
-
-  async function handleReauthorize(id: string) {
-    try {
-      await reauthorize.mutateAsync(id);
-      toast({ title: "Re-authorization successful", description: "MCP connector tokens refreshed" });
-    } catch (err) {
-      toast({
-        title: "Re-authorization failed",
-        description: err instanceof Error ? err.message : "Unknown error",
-        variant: "destructive",
-      });
-    }
-  }
-
-  async function handleTest(id: string) {
-    try {
-      const result = await testConnector.mutateAsync(id);
-      toast({
-        title:
-          result.status === "ok" ? "Connection successful" : "Connection failed",
-        description: result.message,
-        variant: result.status === "ok" ? "default" : "destructive",
-      });
-    } catch (err) {
-      toast({
-        title: "Test failed",
-        description: err instanceof Error ? err.message : "Unknown error",
-        variant: "destructive",
-      });
-    }
-  }
 
   return (
     <div className="space-y-8 animate-fade-in">
@@ -2893,156 +2841,13 @@ export default function SettingsPage() {
           <TeamSection />
 
           {/* Connection & integration sections */}
-          <NetSuiteConnectionSection />
+          <NetSuiteConnectionsSection />
           <NetSuiteMetadataSection />
           <SuiteScriptFilesSection />
           <GovernancePolicySection />
         </>
       )}
 
-      {/* MCP Connectors Section — admin only */}
-      {!isAdmin ? null : (
-      <div className="space-y-4">
-        <div className="flex items-center justify-between">
-          <div>
-            <h3 className="text-lg font-semibold">MCP Connectors</h3>
-            <p className="mt-0.5 text-[13px] text-muted-foreground">
-              Connect external MCP servers for real-time data queries in Chat
-            </p>
-          </div>
-          <AddMcpConnectorDialog />
-        </div>
-
-        {isLoading ? (
-          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-            {[1, 2, 3].map((i) => (
-              <Skeleton key={i} className="h-[180px] rounded-xl" />
-            ))}
-          </div>
-        ) : !connectors?.length ? (
-          <div className="flex flex-col items-center justify-center rounded-xl border border-dashed bg-card py-16">
-            <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-muted">
-              <Settings className="h-6 w-6 text-muted-foreground" />
-            </div>
-            <p className="mt-4 text-[15px] font-medium text-foreground">
-              No MCP connectors yet
-            </p>
-            <p className="mt-1 mb-5 text-[13px] text-muted-foreground">
-              Add an MCP server to enable real-time external queries.
-            </p>
-            <AddMcpConnectorDialog />
-          </div>
-        ) : (
-          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-            {connectors.map((conn) => {
-              const meta = providerMeta[conn.provider] || {
-                icon: Server,
-                color: "text-muted-foreground",
-                bg: "bg-muted",
-                label: conn.provider,
-              };
-              const ProviderIcon = meta.icon;
-              const toolCount = conn.discovered_tools?.length ?? 0;
-
-              return (
-                <div
-                  key={conn.id}
-                  className="group rounded-xl border bg-card p-5 shadow-soft transition-all duration-200 hover:shadow-soft-md"
-                >
-                  <div className="flex items-start justify-between">
-                    <div className="flex items-center gap-3">
-                      <div
-                        className={`flex h-10 w-10 items-center justify-center rounded-lg ${meta.bg}`}
-                      >
-                        <ProviderIcon className={`h-5 w-5 ${meta.color}`} />
-                      </div>
-                      <div>
-                        <p className="text-[15px] font-semibold text-foreground">
-                          {conn.label}
-                        </p>
-                        <p className="text-[13px] text-muted-foreground">
-                          {meta.label}
-                        </p>
-                      </div>
-                    </div>
-                    <Badge
-                      variant={
-                        conn.status === "active"
-                          ? "default"
-                          : conn.status === "error"
-                            ? "destructive"
-                            : "secondary"
-                      }
-                      className="text-[11px]"
-                    >
-                      {conn.status}
-                    </Badge>
-                  </div>
-
-                  <p className="mt-3 truncate text-[12px] text-muted-foreground">
-                    {conn.server_url}
-                  </p>
-
-                  {toolCount > 0 && (
-                    <div className="mt-2 flex items-center gap-1 text-[12px] text-muted-foreground">
-                      <Wrench className="h-3 w-3" />
-                      {toolCount} tool{toolCount !== 1 ? "s" : ""} discovered
-                    </div>
-                  )}
-
-                  <div className="mt-4 flex items-center justify-between border-t pt-3">
-                    <div className="flex items-center gap-1">
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="h-8 text-[12px]"
-                        onClick={() => handleTest(conn.id)}
-                        disabled={testConnector.isPending}
-                      >
-                        <FlaskConical className="mr-1.5 h-3.5 w-3.5" />
-                        {testConnector.isPending ? "Testing..." : "Test"}
-                      </Button>
-                      {conn.status === "revoked" || conn.status === "error" ? (
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="h-8 text-[12px] text-primary"
-                          onClick={() => handleReauthorize(conn.id)}
-                          disabled={reauthorize.isPending}
-                        >
-                          <RefreshCw className={`mr-1.5 h-3.5 w-3.5 ${reauthorize.isPending ? "animate-spin" : ""}`} />
-                          {reauthorize.isPending ? "Authorizing..." : "Re-authorize"}
-                        </Button>
-                      ) : (
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          className="h-8 text-[12px] text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100"
-                          onClick={() => handleReauthorize(conn.id)}
-                          disabled={reauthorize.isPending}
-                        >
-                          <RefreshCw className={`mr-1.5 h-3.5 w-3.5 ${reauthorize.isPending ? "animate-spin" : ""}`} />
-                          Re-authorize
-                        </Button>
-                      )}
-                    </div>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-8 w-8 opacity-0 transition-opacity group-hover:opacity-100"
-                      onClick={() => handleDelete(conn.id)}
-                      disabled={deleteConnector.isPending}
-                    >
-                      <Trash2 className="h-4 w-4 text-muted-foreground hover:text-destructive" />
-                    </Button>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        )}
-      </div>
-      )}
     </div>
   );
 }

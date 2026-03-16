@@ -87,3 +87,26 @@ export function useTestConnection() {
       ),
   });
 }
+
+export function useUpdateClientId() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, client_id }: { id: string; client_id: string }) =>
+      apiClient.patch(`/api/v1/connections/${id}/client-id`, { client_id }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["connections"] });
+      queryClient.invalidateQueries({ queryKey: ["connection-health"] });
+    },
+  });
+}
+
+export function useUpdateRestletUrl() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, restlet_url }: { id: string; restlet_url: string }) =>
+      apiClient.patch(`/api/v1/connections/${id}/restlet-url`, { restlet_url }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["connections"] });
+    },
+  });
+}
