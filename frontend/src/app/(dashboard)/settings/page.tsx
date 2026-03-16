@@ -2711,13 +2711,13 @@ function ConnectionStatusSection() {
 
   const oauthStatus = oauthConns.length === 0
     ? "none"
-    : oauthConns.every((c) => c.status === "active")
+    : oauthConns.some((c) => c.status === "active")
       ? "active"
       : "error";
 
   const mcpStatus = mcpConns.length === 0
     ? "none"
-    : mcpConns.every((c) => c.status === "active")
+    : mcpConns.some((c) => c.status === "active")
       ? "active"
       : "error";
 
