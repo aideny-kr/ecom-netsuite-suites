@@ -57,6 +57,18 @@ export function useTestMcpConnector() {
   });
 }
 
+export function useUpdateMcpClientId() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, client_id }: { id: string; client_id: string }) =>
+      apiClient.patch(`/api/v1/mcp-connectors/${id}/client-id`, { client_id }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["mcp-connectors"] });
+      queryClient.invalidateQueries({ queryKey: ["connection-health"] });
+    },
+  });
+}
+
 export function useReauthorizeMcpConnector() {
   const queryClient = useQueryClient();
 

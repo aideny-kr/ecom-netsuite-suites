@@ -1,11 +1,19 @@
+import time
 import uuid
+from datetime import datetime, timezone
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel, Field
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import flag_modified
 
 from app.core.database import get_db
 from app.core.dependencies import require_permission
+from app.core.encryption import decrypt_credentials, encrypt_credentials
+from app.models.connection import Connection
+from app.models.mcp_connector import McpConnector
 from app.models.user import User
 from app.schemas.connection import (
     ConnectionCreate,
@@ -16,6 +24,130 @@ from app.schemas.connection import (
 from app.services import audit_service, connection_service, entitlement_service
 
 router = APIRouter(prefix="/connections", tags=["connections"])
+
+
+# ---------------------------------------------------------------------------
+# Pydantic models for new endpoints
+# ---------------------------------------------------------------------------
+
+
+class ConnectionHealthItem(BaseModel):
+    id: str
+    label: str
+    provider: str
+    status: str
+    auth_type: str | None = None
+    token_expired: bool = False
+    last_health_check: str | None = None
+    tool_count: int | None = None  # MCP only
+    client_id: str | None = None  # OAuth Client ID (public, not secret)
+    restlet_url: str | None = None  # RESTlet URL (OAuth connections only)
+
+
+class ConnectionHealthResponse(BaseModel):
+    connections: list[ConnectionHealthItem]
+    mcp_connectors: list[ConnectionHealthItem]
+
+
+class ClientIdUpdate(BaseModel):
+    client_id: str = Field(min_length=1)
+
+
+class RestletUrlUpdate(BaseModel):
+    restlet_url: str = Field(min_length=1)
+
+
+# ---------------------------------------------------------------------------
+# Health check — MUST be before /{connection_id} routes
+# ---------------------------------------------------------------------------
+
+
+@router.get("/health", response_model=ConnectionHealthResponse)
+async def check_connection_health(
+    user: Annotated[User, Depends(require_permission("connections.view"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Check health of all OAuth connections and MCP connectors for the tenant."""
+    # Check OAuth connections
+    result = await db.execute(
+        select(Connection)
+        .where(Connection.tenant_id == user.tenant_id, Connection.status != "revoked")
+        .order_by(Connection.created_at.desc())
+    )
+    connections = result.scalars().all()
+
+    conn_items = []
+    now = time.time()
+    for conn in connections:
+        token_expired = False
+        client_id = None
+        if conn.auth_type == "oauth2" and conn.encrypted_credentials:
+            try:
+                creds = decrypt_credentials(conn.encrypted_credentials)
+                expires_at = creds.get("expires_at", 0)
+                client_id = creds.get("client_id")
+                if expires_at and now > expires_at:
+                    token_expired = True
+                    if conn.status == "active":
+                        conn.status = "needs_reauth"
+                        conn.error_reason = "OAuth token expired"
+            except Exception:
+                pass
+        restlet_url = (conn.metadata_json or {}).get("restlet_url") if conn.metadata_json else None
+        conn.last_health_check_at = datetime.now(timezone.utc)
+        conn_items.append(ConnectionHealthItem(
+            id=str(conn.id),
+            label=conn.label or conn.provider,
+            provider=conn.provider,
+            status=conn.status,
+            auth_type=conn.auth_type,
+            token_expired=token_expired,
+            last_health_check=conn.last_health_check_at.isoformat() if conn.last_health_check_at else None,
+            client_id=client_id,
+            restlet_url=restlet_url,
+        ))
+
+    # Check MCP connectors
+    mcp_result = await db.execute(
+        select(McpConnector)
+        .where(McpConnector.tenant_id == user.tenant_id, McpConnector.status != "revoked")
+        .order_by(McpConnector.created_at.desc())
+    )
+    mcp_connectors = mcp_result.scalars().all()
+
+    mcp_items = []
+    for mcp in mcp_connectors:
+        token_expired = False
+        mcp_client_id = (mcp.metadata_json or {}).get("client_id")
+        if mcp.auth_type == "oauth2" and mcp.encrypted_credentials:
+            try:
+                creds = decrypt_credentials(mcp.encrypted_credentials)
+                expires_at = creds.get("expires_at", 0)
+                if not mcp_client_id:
+                    mcp_client_id = creds.get("client_id")
+                if expires_at and now > expires_at:
+                    token_expired = True
+                    if mcp.status == "active":
+                        mcp.status = "needs_reauth"
+                        mcp.error_reason = "OAuth token expired"
+            except Exception:
+                pass
+        mcp.last_health_check_at = datetime.now(timezone.utc)
+        tools = mcp.discovered_tools or []
+        mcp_items.append(ConnectionHealthItem(
+            id=str(mcp.id),
+            label=mcp.label or mcp.provider,
+            provider=mcp.provider,
+            status=mcp.status,
+            auth_type=mcp.auth_type,
+            token_expired=token_expired,
+            last_health_check=mcp.last_health_check_at.isoformat() if mcp.last_health_check_at else None,
+            client_id=mcp_client_id,
+            tool_count=len(tools),
+        ))
+
+    await db.commit()
+    return ConnectionHealthResponse(connections=conn_items, mcp_connectors=mcp_items)
 
 
 @router.get("", response_model=list[ConnectionResponse])
@@ -257,3 +389,60 @@ async def test_connection(
 ):
     result = await connection_service.test_connection(db, connection_id, user.tenant_id)
     return ConnectionTestResponse(**result)
+
+
+# ---------------------------------------------------------------------------
+# Credential / metadata update endpoints
+# ---------------------------------------------------------------------------
+
+
+@router.patch("/{connection_id}/client-id")
+async def update_client_id(
+    connection_id: uuid.UUID,
+    request: ClientIdUpdate,
+    user: Annotated[User, Depends(require_permission("connections.manage"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Update the OAuth Client ID for a connection."""
+    conn = await connection_service.get_connection(db, connection_id, user.tenant_id)
+    if not conn:
+        raise HTTPException(status_code=404, detail="Connection not found")
+
+    creds = decrypt_credentials(conn.encrypted_credentials)
+    creds["client_id"] = request.client_id
+    conn.encrypted_credentials = encrypt_credentials(creds)
+
+    await audit_service.log_event(
+        db=db, tenant_id=user.tenant_id, category="connection",
+        action="connection.update_client_id", actor_id=user.id,
+        resource_type="connection", resource_id=str(connection_id),
+    )
+    await db.commit()
+    return {"status": "ok", "client_id": request.client_id}
+
+
+@router.patch("/{connection_id}/restlet-url")
+async def update_restlet_url(
+    connection_id: uuid.UUID,
+    request: RestletUrlUpdate,
+    user: Annotated[User, Depends(require_permission("connections.manage"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Update the RESTlet URL for a connection."""
+    conn = await connection_service.get_connection(db, connection_id, user.tenant_id)
+    if not conn:
+        raise HTTPException(status_code=404, detail="Connection not found")
+
+    metadata = conn.metadata_json or {}
+    metadata["restlet_url"] = request.restlet_url
+    conn.metadata_json = metadata
+    # Force SQLAlchemy to detect the change on JSON column
+    flag_modified(conn, "metadata_json")
+
+    await audit_service.log_event(
+        db=db, tenant_id=user.tenant_id, category="connection",
+        action="connection.update_restlet_url", actor_id=user.id,
+        resource_type="connection", resource_id=str(connection_id),
+    )
+    await db.commit()
+    return {"status": "ok", "restlet_url": request.restlet_url}

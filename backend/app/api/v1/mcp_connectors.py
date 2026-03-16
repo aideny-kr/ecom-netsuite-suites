@@ -5,6 +5,7 @@ import redis.asyncio as aioredis
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import HTMLResponse
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -321,6 +322,51 @@ async def reauthorize_mcp_connector(
 
     url = build_mcp_authorize_url(account_id, client_id, redirect_uri, state, code_challenge)
     return {"authorize_url": url, "state": state}
+
+
+# ---------------------------------------------------------------------------
+# Credential update endpoints
+# ---------------------------------------------------------------------------
+
+
+class McpClientIdUpdate(BaseModel):
+    client_id: str = Field(min_length=1)
+
+
+@router.patch("/{connector_id}/client-id")
+async def update_mcp_client_id(
+    connector_id: uuid.UUID,
+    request: McpClientIdUpdate,
+    user: Annotated[User, Depends(require_permission("connections.manage"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Update the OAuth Client ID for an MCP connector."""
+    from app.core.encryption import decrypt_credentials, encrypt_credentials
+    from sqlalchemy.orm.attributes import flag_modified
+
+    mcp = await mcp_connector_service.get_mcp_connector(db, connector_id, user.tenant_id)
+    if not mcp:
+        raise HTTPException(status_code=404, detail="MCP connector not found")
+
+    # Update encrypted credentials
+    if mcp.encrypted_credentials:
+        creds = decrypt_credentials(mcp.encrypted_credentials)
+        creds["client_id"] = request.client_id
+        mcp.encrypted_credentials = encrypt_credentials(creds)
+
+    # Update metadata
+    metadata = mcp.metadata_json or {}
+    metadata["client_id"] = request.client_id
+    mcp.metadata_json = metadata
+    flag_modified(mcp, "metadata_json")
+
+    await audit_service.log_event(
+        db=db, tenant_id=user.tenant_id, category="mcp_connector",
+        action="mcp_connector.update_client_id", actor_id=user.id,
+        resource_type="mcp_connector", resource_id=str(connector_id),
+    )
+    await db.commit()
+    return {"status": "ok", "client_id": request.client_id}
 
 
 # ---------------------------------------------------------------------------
