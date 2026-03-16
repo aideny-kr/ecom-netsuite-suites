@@ -67,11 +67,13 @@ export function useReconnectConnection() {
       ),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["connections"] });
+      queryClient.invalidateQueries({ queryKey: ["connection-health"] });
     },
   });
 }
 
 export function useTestConnection() {
+  const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (id: string) =>
       apiClient.post<{
@@ -85,6 +87,10 @@ export function useTestConnection() {
         `/api/v1/connections/${id}/test`,
         {},
       ),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["connections"] });
+      queryClient.invalidateQueries({ queryKey: ["connection-health"] });
+    },
   });
 }
 

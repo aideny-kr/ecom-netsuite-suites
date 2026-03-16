@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useCallback } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import {
   useConnectionHealth,
   type ConnectionHealthItem,
@@ -338,6 +339,7 @@ export function NetSuiteConnectionsSection() {
   const { toast } = useToast();
 
   // Data
+  const queryClient = useQueryClient();
   const { data: health } = useConnectionHealth();
   const { data: connections } = useConnections();
   const { data: mcpConnectors } = useMcpConnectors();
@@ -381,6 +383,15 @@ export function NetSuiteConnectionsSection() {
     mcpHealthItem?.client_id ?? (activeMcp?.metadata_json?.client_id as string) ?? "";
 
   // Handlers with toast feedback
+  function refreshHealthAfterDelay() {
+    // Refresh health + connections after popup closes (give callback time to complete)
+    setTimeout(() => {
+      queryClient.invalidateQueries({ queryKey: ["connections"] });
+      queryClient.invalidateQueries({ queryKey: ["mcp-connectors"] });
+      queryClient.invalidateQueries({ queryKey: ["connection-health"] });
+    }, 3000);
+  }
+
   async function handleOAuthReauth(id: string) {
     try {
       const result = await reconnectConn.mutateAsync(id);
@@ -389,13 +400,23 @@ export function NetSuiteConnectionsSection() {
         const height = 700;
         const left = window.screenX + (window.innerWidth - width) / 2;
         const top = window.screenY + (window.innerHeight - height) / 2;
-        window.open(
+        const popup = window.open(
           result.authorize_url,
           "netsuite_oauth_reauth",
           `width=${width},height=${height},left=${left},top=${top},popup=yes`,
         );
+        // Refresh data when popup closes
+        if (popup) {
+          const interval = setInterval(() => {
+            if (popup.closed) {
+              clearInterval(interval);
+              refreshHealthAfterDelay();
+            }
+          }, 500);
+        }
       } else {
         toast({ title: "Connection refreshed" });
+        refreshHealthAfterDelay();
       }
     } catch (err) {
       toast({
@@ -440,6 +461,7 @@ export function NetSuiteConnectionsSection() {
     try {
       await reauthorizeMcp.mutateAsync(id);
       toast({ title: "Re-authorization successful", description: "MCP connector tokens refreshed" });
+      refreshHealthAfterDelay();
     } catch (err) {
       toast({
         title: "Re-authorization failed",
