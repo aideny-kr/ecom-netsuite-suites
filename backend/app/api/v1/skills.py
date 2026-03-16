@@ -161,7 +161,6 @@ async def list_saved_queries(
             or_(
                 SavedSuiteQLQuery.created_by == user.id,
                 SavedSuiteQLQuery.is_public.is_(True),
-                SavedSuiteQLQuery.created_by.is_(None),  # Legacy queries without created_by
             ),
         )
         .order_by(SavedSuiteQLQuery.created_at.desc())
