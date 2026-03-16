@@ -99,7 +99,7 @@ export default function InviteAcceptPage() {
       }
       document.cookie = `access_token=${data.access_token}; path=/; max-age=${60 * 60 * 24 * 7}; samesite=lax`;
 
-      router.push("/chat");
+      window.location.href = "/chat";
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Failed to create account.";
       setFormError(msg);
@@ -336,7 +336,7 @@ export default function InviteAcceptPage() {
                       );
                       localStorage.setItem("access_token", res.access_token);
                       document.cookie = `access_token=${res.access_token}; path=/; max-age=604800; samesite=lax`;
-                      router.push("/chat");
+                      window.location.href = "/chat";
                     } catch (err) {
                       setError(err instanceof Error ? err.message : "Google sign-up failed");
                     } finally {

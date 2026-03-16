@@ -157,7 +157,7 @@ export default function LoginPage() {
                     );
                     localStorage.setItem("access_token", res.access_token);
                     document.cookie = `access_token=${res.access_token}; path=/; max-age=604800; samesite=lax`;
-                    router.push("/chat");
+                    window.location.href = "/chat";
                   } catch (err) {
                     toast({
                       title: "Google sign-in failed",
