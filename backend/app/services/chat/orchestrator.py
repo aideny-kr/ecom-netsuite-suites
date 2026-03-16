@@ -671,10 +671,14 @@ async def run_chat_turn(
             from app.services.chat.llm_adapter import get_adapter as get_specialist_adapter
             from app.services.netsuite_metadata_service import get_active_metadata
 
-            specialist_adapter = get_specialist_adapter(
-                settings.MULTI_AGENT_SPECIALIST_PROVIDER,
-                api_key if settings.MULTI_AGENT_SPECIALIST_PROVIDER == provider else settings.ANTHROPIC_API_KEY,
-            )
+            if is_byok:
+                # BYOK: use tenant's own provider + API key
+                specialist_adapter = get_specialist_adapter(provider, api_key)
+            else:
+                specialist_adapter = get_specialist_adapter(
+                    settings.MULTI_AGENT_SPECIALIST_PROVIDER,
+                    settings.ANTHROPIC_API_KEY,
+                )
             metadata = await get_active_metadata(db, tenant_id)
 
             # ── Check for unified agent flag (Phase 2) ──
@@ -874,12 +878,14 @@ async def run_chat_turn(
                 agent_result = None
                 last_structured_output: dict | None = None
 
+                unified_model = model if is_byok else settings.MULTI_AGENT_SQL_MODEL
+
                 async for event_type, payload in unified_agent.run_streaming(
                     task=unified_task,
                     context=context,
                     db=db,
                     adapter=specialist_adapter,
-                    model=settings.MULTI_AGENT_SQL_MODEL,
+                    model=unified_model,
                     conversation_history=history_messages,
                     tool_choice=None,
                     tool_result_interceptor=_tool_interceptor,
@@ -954,8 +960,8 @@ async def run_chat_turn(
                     token_count=coord_result_tokens[0] + coord_result_tokens[1],
                     input_tokens=coord_result_tokens[0],
                     output_tokens=coord_result_tokens[1],
-                    model_used=settings.MULTI_AGENT_SQL_MODEL,
-                    provider_used=settings.MULTI_AGENT_SPECIALIST_PROVIDER,
+                    model_used=unified_model,
+                    provider_used=provider if is_byok else settings.MULTI_AGENT_SPECIALIST_PROVIDER,
                     is_byok=is_byok,
                     confidence_score=confidence_val,
                     query_importance=importance_tier.value,
