@@ -62,6 +62,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { apiClient } from "@/lib/api-client";
 import { useFeature } from "@/hooks/use-features";
 import { TeamSection } from "@/components/settings/team-section";
+import { usePermissions } from "@/hooks/use-permissions";
 import { AI_PROVIDERS, AI_MODELS } from "@/lib/constants";
 import type { NetSuiteMetadataCategories } from "@/lib/types";
 import {
@@ -2705,6 +2706,7 @@ export default function SettingsPage() {
   const reauthorize = useReauthorizeMcpConnector();
   const { toast } = useToast();
   const showBranding = useFeature("custom_branding");
+  const { isAdmin } = usePermissions();
 
   async function handleDelete(id: string) {
     try {
@@ -2759,40 +2761,44 @@ export default function SettingsPage() {
         </p>
       </div>
 
-      {/* Plan Info Section */}
+      {/* Plan Info Section — visible to all */}
       <PlanInfoSection />
 
-      {/* Branding Section */}
-      {showBranding && <BrandingSection />}
+      {/* Admin-only sections */}
+      {isAdmin && (
+        <>
+          {/* Branding Section */}
+          {showBranding && <BrandingSection />}
 
-      {/* AI Configuration Section */}
-      <AiConfigSection />
+          {/* AI Configuration Section */}
+          <AiConfigSection />
 
-      {/* Chat Settings (MCP Financial toggle) */}
-      <ChatSettingsSection />
+          {/* Chat Settings (MCP Financial toggle) */}
+          <ChatSettingsSection />
 
-      {/* Tenant Profile Section */}
-      <TenantProfileSection />
+          {/* Tenant Profile Section */}
+          <TenantProfileSection />
 
-      {/* AI Personality & Core Logic (Soul) Section */}
-      <SoulSection />
+          {/* AI Personality & Core Logic (Soul) Section */}
+          <SoulSection />
 
-      {/* Team Section */}
-      <TeamSection />
+          {/* Team Section */}
+          <TeamSection />
+        </>
+      )
 
-      {/* NetSuite Connection Section */}
-      <NetSuiteConnectionSection />
+      {/* Connection & integration sections — admin only */}
+      {isAdmin && (
+        <>
+          <NetSuiteConnectionSection />
+          <NetSuiteMetadataSection />
+          <SuiteScriptFilesSection />
+          <GovernancePolicySection />
+        </>
+      )}
 
-      {/* NetSuite Metadata Discovery Section */}
-      <NetSuiteMetadataSection />
-
-      {/* SuiteScript Files Section */}
-      <SuiteScriptFilesSection />
-
-      {/* Governance Policy Section */}
-      <GovernancePolicySection />
-
-      {/* MCP Connectors Section */}
+      {/* MCP Connectors Section — admin only */}
+      {!isAdmin ? null : (
       <div className="space-y-4">
         <div className="flex items-center justify-between">
           <div>
@@ -2933,6 +2939,7 @@ export default function SettingsPage() {
           </div>
         )}
       </div>
+      )}
     </div>
   );
 }

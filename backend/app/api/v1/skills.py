@@ -63,6 +63,8 @@ class SavedQueryResponse(BaseModel):
     description: str | None
     query_text: str
     result_data: dict | None = None
+    created_by: str | None = None
+    is_public: bool = False
     created_at: str
 
     model_config = {"from_attributes": True}
@@ -149,10 +151,19 @@ async def list_saved_queries(
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
-    """List all saved queries for the tenant."""
+    """List saved queries: user's own + public queries from the tenant."""
+    from sqlalchemy import or_
+
     result = await db.execute(
         select(SavedSuiteQLQuery)
-        .where(SavedSuiteQLQuery.tenant_id == user.tenant_id)
+        .where(
+            SavedSuiteQLQuery.tenant_id == user.tenant_id,
+            or_(
+                SavedSuiteQLQuery.created_by == user.id,
+                SavedSuiteQLQuery.is_public.is_(True),
+                SavedSuiteQLQuery.created_by.is_(None),  # Legacy queries without created_by
+            ),
+        )
         .order_by(SavedSuiteQLQuery.created_at.desc())
     )
     queries = result.scalars().all()
@@ -164,6 +175,8 @@ async def list_saved_queries(
             description=q.description,
             query_text=q.query_text,
             result_data=q.result_data,
+            created_by=str(q.created_by) if q.created_by else None,
+            is_public=q.is_public,
             created_at=q.created_at.isoformat(),
         )
         for q in queries
@@ -182,6 +195,8 @@ async def create_saved_query(
         description=request.description,
         query_text=request.query_text,
         result_data=request.result_data,
+        created_by=user.id,
+        is_public=False,
     )
     db.add(query)
 
@@ -202,6 +217,9 @@ async def create_saved_query(
         name=query.name,
         description=query.description,
         query_text=query.query_text,
+        result_data=query.result_data,
+        created_by=str(query.created_by) if query.created_by else None,
+        is_public=query.is_public,
         created_at=query.created_at.isoformat(),
     )
 
@@ -347,7 +365,59 @@ async def update_saved_query_endpoint(
         name=updated.name,
         description=updated.description,
         query_text=updated.query_text,
+        result_data=updated.result_data,
+        created_by=str(updated.created_by) if updated.created_by else None,
+        is_public=updated.is_public,
         created_at=updated.created_at.isoformat(),
+    )
+
+
+@router.patch("/{query_id}/publish", response_model=SavedQueryResponse)
+async def toggle_publish(
+    query_id: uuid.UUID,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Toggle a saved query between public and private. Owner or admin only."""
+    result = await db.execute(
+        select(SavedSuiteQLQuery).where(
+            SavedSuiteQLQuery.id == query_id,
+            SavedSuiteQLQuery.tenant_id == user.tenant_id,
+        )
+    )
+    sq = result.scalar_one_or_none()
+    if not sq:
+        raise HTTPException(status_code=404, detail="Saved query not found.")
+
+    is_owner = sq.created_by == user.id
+    is_admin = any(ur.role.name == "admin" for ur in user.user_roles)
+    if not is_owner and not is_admin:
+        raise HTTPException(status_code=403, detail="Only the query owner or an admin can publish/unpublish.")
+
+    sq.is_public = not sq.is_public
+
+    await audit_service.log_event(
+        db=db,
+        tenant_id=user.tenant_id,
+        category="skills",
+        action="skills.query_publish" if sq.is_public else "skills.query_unpublish",
+        actor_id=user.id,
+        resource_type="saved_suiteql_query",
+        resource_id=str(query_id),
+    )
+    await db.commit()
+    await db.refresh(sq)
+
+    return SavedQueryResponse(
+        id=str(sq.id),
+        tenant_id=str(sq.tenant_id),
+        name=sq.name,
+        description=sq.description,
+        query_text=sq.query_text,
+        result_data=sq.result_data,
+        created_by=str(sq.created_by) if sq.created_by else None,
+        is_public=sq.is_public,
+        created_at=sq.created_at.isoformat(),
     )
 
 

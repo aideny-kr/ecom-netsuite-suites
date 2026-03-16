@@ -31,6 +31,8 @@ export interface SavedQueryResponse {
   description: string | null;
   query_text: string;
   result_data?: { columns: string[]; rows: unknown[][]; row_count: number } | null;
+  created_by?: string | null;
+  is_public: boolean;
   created_at: string;
 }
 

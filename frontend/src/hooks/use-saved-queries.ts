@@ -47,3 +47,14 @@ export function useDeleteSavedQuery() {
     },
   });
 }
+
+export function useTogglePublishQuery() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) =>
+      apiClient.patch<SavedQueryResponse>(`/api/v1/skills/${id}/publish`),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["saved-queries"] });
+    },
+  });
+}
