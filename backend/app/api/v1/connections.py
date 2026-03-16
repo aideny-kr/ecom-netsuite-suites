@@ -40,6 +40,8 @@ class ConnectionHealthItem(BaseModel):
     token_expired: bool = False
     last_health_check: str | None = None
     tool_count: int | None = None  # MCP only
+    client_id: str | None = None  # OAuth Client ID (public, not secret)
+    restlet_url: str | None = None  # RESTlet URL (OAuth connections only)
 
 
 class ConnectionHealthResponse(BaseModel):
@@ -78,10 +80,12 @@ async def check_connection_health(
     now = time.time()
     for conn in connections:
         token_expired = False
+        client_id = None
         if conn.auth_type == "oauth2" and conn.encrypted_credentials:
             try:
                 creds = decrypt_credentials(conn.encrypted_credentials)
                 expires_at = creds.get("expires_at", 0)
+                client_id = creds.get("client_id")
                 if expires_at and now > expires_at:
                     token_expired = True
                     if conn.status == "active":
@@ -89,6 +93,7 @@ async def check_connection_health(
                         conn.error_reason = "OAuth token expired"
             except Exception:
                 pass
+        restlet_url = (conn.metadata_json or {}).get("restlet_url") if conn.metadata_json else None
         conn.last_health_check_at = datetime.now(timezone.utc)
         conn_items.append(ConnectionHealthItem(
             id=str(conn.id),
@@ -98,6 +103,8 @@ async def check_connection_health(
             auth_type=conn.auth_type,
             token_expired=token_expired,
             last_health_check=conn.last_health_check_at.isoformat() if conn.last_health_check_at else None,
+            client_id=client_id,
+            restlet_url=restlet_url,
         ))
 
     # Check MCP connectors
@@ -111,10 +118,13 @@ async def check_connection_health(
     mcp_items = []
     for mcp in mcp_connectors:
         token_expired = False
+        mcp_client_id = (mcp.metadata_json or {}).get("client_id")
         if mcp.auth_type == "oauth2" and mcp.encrypted_credentials:
             try:
                 creds = decrypt_credentials(mcp.encrypted_credentials)
                 expires_at = creds.get("expires_at", 0)
+                if not mcp_client_id:
+                    mcp_client_id = creds.get("client_id")
                 if expires_at and now > expires_at:
                     token_expired = True
                     if mcp.status == "active":
@@ -132,6 +142,7 @@ async def check_connection_health(
             auth_type=mcp.auth_type,
             token_expired=token_expired,
             last_health_check=mcp.last_health_check_at.isoformat() if mcp.last_health_check_at else None,
+            client_id=mcp_client_id,
             tool_count=len(tools),
         ))
 

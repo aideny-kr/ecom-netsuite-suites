@@ -369,12 +369,16 @@ export function NetSuiteConnectionsSection() {
   const activeOAuth = oauthConns.find((c) => c.status === "active") ?? oauthConns[0];
   const activeMcp = mcpConns.find((c) => c.status === "active") ?? mcpConns[0];
 
+  // Get Client IDs and RESTlet URL from health data (decrypted on server)
+  const oauthHealthItem = health?.connections.find((h) => h.id === activeOAuth?.id);
+  const mcpHealthItem = health?.mcp_connectors.find((h) => h.id === activeMcp?.id);
+
   const oauthClientId =
-    (activeOAuth?.metadata_json?.client_id as string) ?? "";
+    oauthHealthItem?.client_id ?? (activeOAuth?.metadata_json?.client_id as string) ?? "";
   const restletUrl =
-    (activeOAuth?.metadata_json?.restlet_url as string) ?? "";
+    oauthHealthItem?.restlet_url ?? (activeOAuth?.metadata_json?.restlet_url as string) ?? "";
   const mcpClientId =
-    (activeMcp?.metadata_json?.client_id as string) ?? "";
+    mcpHealthItem?.client_id ?? (activeMcp?.metadata_json?.client_id as string) ?? "";
 
   // Handlers with toast feedback
   async function handleOAuthReauth(id: string) {

@@ -12,6 +12,8 @@ interface ConnectionHealthItem {
   token_expired: boolean;
   last_health_check: string | null;
   tool_count: number | null;
+  client_id: string | null;
+  restlet_url: string | null;
 }
 
 interface ConnectionHealthResponse {
