@@ -2784,12 +2784,8 @@ export default function SettingsPage() {
 
           {/* Team Section */}
           <TeamSection />
-        </>
-      )
 
-      {/* Connection & integration sections — admin only */}
-      {isAdmin && (
-        <>
+          {/* Connection & integration sections */}
           <NetSuiteConnectionSection />
           <NetSuiteMetadataSection />
           <SuiteScriptFilesSection />

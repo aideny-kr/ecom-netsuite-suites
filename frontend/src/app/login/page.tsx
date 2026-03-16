@@ -9,7 +9,11 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useToast } from "@/hooks/use-toast";
 import { Zap } from "lucide-react";
-import { GoogleLogin } from "@react-oauth/google";
+import dynamic from "next/dynamic";
+const GoogleLogin = dynamic(
+  () => import("@react-oauth/google").then((m) => m.GoogleLogin),
+  { ssr: false },
+);
 import { apiClient } from "@/lib/api-client";
 import { Loader2 } from "lucide-react";
 
