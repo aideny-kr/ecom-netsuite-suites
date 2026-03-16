@@ -62,6 +62,10 @@ import { useQueryClient } from "@tanstack/react-query";
 import { apiClient } from "@/lib/api-client";
 import { useFeature } from "@/hooks/use-features";
 import { TeamSection } from "@/components/settings/team-section";
+import { usePermissions } from "@/hooks/use-permissions";
+import { useAuth } from "@/providers/auth-provider";
+import { ROLE_DISPLAY_NAMES } from "@/lib/types";
+import type { RoleName } from "@/lib/types";
 import { AI_PROVIDERS, AI_MODELS } from "@/lib/constants";
 import type { NetSuiteMetadataCategories } from "@/lib/types";
 import {
@@ -2695,6 +2699,57 @@ function ToggleSwitch({
 }
 
 // ---------------------------------------------------------------------------
+// Connection Status (visible to all users)
+// ---------------------------------------------------------------------------
+
+function ConnectionStatusSection() {
+  const { data: connections } = useConnections();
+  const { data: mcpConnectors } = useMcpConnectors();
+
+  const oauthConns = (connections ?? []).filter((c) => c.provider === "netsuite");
+  const mcpConns = mcpConnectors ?? [];
+
+  const oauthStatus = oauthConns.length === 0
+    ? "none"
+    : oauthConns.every((c) => c.status === "active")
+      ? "active"
+      : "error";
+
+  const mcpStatus = mcpConns.length === 0
+    ? "none"
+    : mcpConns.every((c) => c.status === "active")
+      ? "active"
+      : "error";
+
+  return (
+    <div className="rounded-xl border bg-card p-5 shadow-soft">
+      <h3 className="text-lg font-semibold">Connection Status</h3>
+      <p className="mt-0.5 text-[13px] text-muted-foreground">NetSuite connectivity health</p>
+      <div className="mt-4 grid gap-4 sm:grid-cols-2">
+        <div className="flex items-center gap-3 rounded-lg border p-3">
+          <div className={`h-3 w-3 rounded-full ${oauthStatus === "active" ? "bg-green-500" : oauthStatus === "error" ? "bg-red-500 animate-pulse" : "bg-muted-foreground/30"}`} />
+          <div>
+            <p className="text-[13px] font-medium">OAuth Connection</p>
+            <p className="text-[11px] text-muted-foreground">
+              {oauthStatus === "active" ? "Connected" : oauthStatus === "error" ? "Disconnected — contact your admin" : "Not configured"}
+            </p>
+          </div>
+        </div>
+        <div className="flex items-center gap-3 rounded-lg border p-3">
+          <div className={`h-3 w-3 rounded-full ${mcpStatus === "active" ? "bg-green-500" : mcpStatus === "error" ? "bg-red-500 animate-pulse" : "bg-muted-foreground/30"}`} />
+          <div>
+            <p className="text-[13px] font-medium">MCP Connection</p>
+            <p className="text-[11px] text-muted-foreground">
+              {mcpStatus === "active" ? `Connected (${mcpConns.filter((c) => c.status === "active").length} active)` : mcpStatus === "error" ? "Disconnected — contact your admin" : "Not configured"}
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Main Settings Page
 // ---------------------------------------------------------------------------
 
@@ -2705,6 +2760,8 @@ export default function SettingsPage() {
   const reauthorize = useReauthorizeMcpConnector();
   const { toast } = useToast();
   const showBranding = useFeature("custom_branding");
+  const { isAdmin } = usePermissions();
+  const { user } = useAuth();
 
   async function handleDelete(id: string) {
     try {
@@ -2759,40 +2816,69 @@ export default function SettingsPage() {
         </p>
       </div>
 
-      {/* Plan Info Section */}
+      {/* My Account — visible to all */}
+      {user && (
+        <div className="rounded-xl border bg-card p-5 shadow-soft">
+          <h3 className="text-lg font-semibold">My Account</h3>
+          <p className="mt-0.5 text-[13px] text-muted-foreground">Your profile and access level</p>
+          <div className="mt-4 grid gap-4 sm:grid-cols-3">
+            <div>
+              <p className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">Name</p>
+              <p className="mt-1 text-[15px] text-foreground">{(user as any).full_name || "—"}</p>
+            </div>
+            <div>
+              <p className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">Email</p>
+              <p className="mt-1 text-[15px] text-foreground">{(user as any).email || "—"}</p>
+            </div>
+            <div>
+              <p className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">Role</p>
+              <p className="mt-1 text-[15px] text-foreground">
+                {((user as any).roles as RoleName[] | undefined)
+                  ?.map((r) => ROLE_DISPLAY_NAMES[r] || r)
+                  .join(", ") || "No role assigned"}
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Connection Status — visible to all */}
+      <ConnectionStatusSection />
+
+      {/* Plan Info Section — visible to all */}
       <PlanInfoSection />
 
-      {/* Branding Section */}
-      {showBranding && <BrandingSection />}
+      {/* Admin-only sections */}
+      {isAdmin && (
+        <>
+          {/* Branding Section */}
+          {showBranding && <BrandingSection />}
 
-      {/* AI Configuration Section */}
-      <AiConfigSection />
+          {/* AI Configuration Section */}
+          <AiConfigSection />
 
-      {/* Chat Settings (MCP Financial toggle) */}
-      <ChatSettingsSection />
+          {/* Chat Settings (MCP Financial toggle) */}
+          <ChatSettingsSection />
 
-      {/* Tenant Profile Section */}
-      <TenantProfileSection />
+          {/* Tenant Profile Section */}
+          <TenantProfileSection />
 
-      {/* AI Personality & Core Logic (Soul) Section */}
-      <SoulSection />
+          {/* AI Personality & Core Logic (Soul) Section */}
+          <SoulSection />
 
-      {/* Team Section */}
-      <TeamSection />
+          {/* Team Section */}
+          <TeamSection />
 
-      {/* NetSuite Connection Section */}
-      <NetSuiteConnectionSection />
+          {/* Connection & integration sections */}
+          <NetSuiteConnectionSection />
+          <NetSuiteMetadataSection />
+          <SuiteScriptFilesSection />
+          <GovernancePolicySection />
+        </>
+      )}
 
-      {/* NetSuite Metadata Discovery Section */}
-      <NetSuiteMetadataSection />
-
-      {/* SuiteScript Files Section */}
-      <SuiteScriptFilesSection />
-
-      {/* Governance Policy Section */}
-      <GovernancePolicySection />
-
-      {/* MCP Connectors Section */}
+      {/* MCP Connectors Section — admin only */}
+      {!isAdmin ? null : (
       <div className="space-y-4">
         <div className="flex items-center justify-between">
           <div>
@@ -2933,6 +3019,7 @@ export default function SettingsPage() {
           </div>
         )}
       </div>
+      )}
     </div>
   );
 }

@@ -6,6 +6,7 @@ import {
   useCreateSavedQuery,
   useDeleteSavedQuery,
   useUpdateSavedQuery,
+  useTogglePublishQuery,
 } from "@/hooks/use-saved-queries";
 import { QueryPreviewModal } from "@/components/analytics/QueryPreviewModal";
 import { Button } from "@/components/ui/button";
@@ -22,12 +23,16 @@ import {
   Loader2,
   Pencil,
   Check,
+  Globe,
+  Lock,
 } from "lucide-react";
+import { Badge } from "@/components/ui/badge";
 
 export default function QueriesPage() {
   const { data: queries, isLoading } = useSavedQueries();
   const deleteMutation = useDeleteSavedQuery();
   const updateMutation = useUpdateSavedQuery();
+  const publishMutation = useTogglePublishQuery();
   const { toast } = useToast();
 
   const [selectedQuery, setSelectedQuery] = useState<SavedQueryResponse | null>(
@@ -203,12 +208,40 @@ export default function QueriesPage() {
 
               {/* Footer */}
               <div className="mt-4 flex items-center justify-between border-t pt-3">
-                <div className="flex items-center gap-1.5 text-[12px] text-muted-foreground">
-                  <Calendar className="h-3.5 w-3.5" />
-                  {new Date(query.created_at).toLocaleDateString()}
+                <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-1.5 text-[12px] text-muted-foreground">
+                    <Calendar className="h-3.5 w-3.5" />
+                    {new Date(query.created_at).toLocaleDateString()}
+                  </div>
+                  <Badge
+                    variant={query.is_public ? "default" : "secondary"}
+                    className="h-5 px-1.5 text-[10px] gap-1"
+                  >
+                    {query.is_public ? <Globe className="h-2.5 w-2.5" /> : <Lock className="h-2.5 w-2.5" />}
+                    {query.is_public ? "Public" : "Private"}
+                  </Badge>
                 </div>
 
                 <div className="flex items-center gap-1">
+                  {/* Publish/Unpublish button */}
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-8 w-8 opacity-0 transition-opacity group-hover:opacity-100"
+                    title={query.is_public ? "Make private" : "Publish to team"}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      publishMutation.mutate(query.id);
+                    }}
+                    disabled={publishMutation.isPending}
+                  >
+                    {query.is_public ? (
+                      <Lock className="h-4 w-4 text-muted-foreground hover:text-foreground" />
+                    ) : (
+                      <Globe className="h-4 w-4 text-muted-foreground hover:text-primary" />
+                    )}
+                  </Button>
+
                   {/* Edit button */}
                   {editingId !== query.id && (
                     <Button

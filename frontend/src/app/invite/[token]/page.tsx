@@ -338,12 +338,12 @@ export default function InviteAcceptPage() {
                       document.cookie = `access_token=${res.access_token}; path=/; max-age=604800; samesite=lax`;
                       window.location.href = "/chat";
                     } catch (err) {
-                      setError(err instanceof Error ? err.message : "Google sign-up failed");
+                      setFormError(err instanceof Error ? err.message : "Google sign-up failed");
                     } finally {
                       setIsSubmitting(false);
                     }
                   }}
-                  onError={() => setError("Google authentication failed")}
+                  onError={() => setFormError("Google authentication failed")}
                   text="signup_with"
                   shape="rectangular"
                 />
