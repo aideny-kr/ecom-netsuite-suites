@@ -63,6 +63,9 @@ import { apiClient } from "@/lib/api-client";
 import { useFeature } from "@/hooks/use-features";
 import { TeamSection } from "@/components/settings/team-section";
 import { usePermissions } from "@/hooks/use-permissions";
+import { useAuth } from "@/providers/auth-provider";
+import { ROLE_DISPLAY_NAMES } from "@/lib/types";
+import type { RoleName } from "@/lib/types";
 import { AI_PROVIDERS, AI_MODELS } from "@/lib/constants";
 import type { NetSuiteMetadataCategories } from "@/lib/types";
 import {
@@ -2707,6 +2710,7 @@ export default function SettingsPage() {
   const { toast } = useToast();
   const showBranding = useFeature("custom_branding");
   const { isAdmin } = usePermissions();
+  const { user } = useAuth();
 
   async function handleDelete(id: string) {
     try {
@@ -2760,6 +2764,32 @@ export default function SettingsPage() {
           Configure your workspace and integrations
         </p>
       </div>
+
+      {/* My Account — visible to all */}
+      {user && (
+        <div className="rounded-xl border bg-card p-5 shadow-soft">
+          <h3 className="text-lg font-semibold">My Account</h3>
+          <p className="mt-0.5 text-[13px] text-muted-foreground">Your profile and access level</p>
+          <div className="mt-4 grid gap-4 sm:grid-cols-3">
+            <div>
+              <p className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">Name</p>
+              <p className="mt-1 text-[15px] text-foreground">{(user as any).full_name || "—"}</p>
+            </div>
+            <div>
+              <p className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">Email</p>
+              <p className="mt-1 text-[15px] text-foreground">{(user as any).email || "—"}</p>
+            </div>
+            <div>
+              <p className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">Role</p>
+              <p className="mt-1 text-[15px] text-foreground">
+                {((user as any).roles as RoleName[] | undefined)
+                  ?.map((r) => ROLE_DISPLAY_NAMES[r] || r)
+                  .join(", ") || "No role assigned"}
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Plan Info Section — visible to all */}
       <PlanInfoSection />
