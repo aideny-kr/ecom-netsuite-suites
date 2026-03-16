@@ -146,17 +146,29 @@ async def accept_invite(
     if not password and not google_id_token:
         raise ValueError("Must provide either a password or Google ID token to accept invitation")
 
+    # Determine auth method
+    auth_provider = "email"
+    google_sub = None
     if google_id_token:
-        raise NotImplementedError("Google sign-up via invite is planned for Phase 2")
+        from app.services.google_auth_service import verify_google_token
+        import asyncio
+        google_info = await verify_google_token(google_id_token)
+        if google_info["email"].lower() != invite.email.lower():
+            raise ValueError("Google account email does not match the invitation email.")
+        auth_provider = "google"
+        google_sub = google_info["sub"]
+        if not full_name or full_name.strip() == "":
+            full_name = google_info.get("name", invite.email)
 
-    # Create user with password auth
-    hashed = hash_password(password)
+    # Create user
+    hashed = hash_password(password) if password else hash_password(secrets.token_urlsafe(32))
     user = User(
         tenant_id=invite.tenant_id,
         email=invite.email,
         hashed_password=hashed,
         full_name=full_name,
-        auth_provider="email",
+        auth_provider=auth_provider,
+        google_sub=google_sub,
         is_active=True,
     )
     db.add(user)

@@ -7,6 +7,7 @@ import { BrandingProvider } from "@/providers/branding-provider";
 import { ThemeProvider } from "@/providers/theme-provider";
 import { Toaster } from "@/components/ui/toaster";
 import { ImpersonationBanner } from "@/components/impersonation-banner";
+import { GoogleOAuthWrapper } from "@/providers/google-oauth-provider";
 
 const inter = Inter({ subsets: ["latin"] });
 
@@ -24,15 +25,17 @@ export default function RootLayout({
     <html lang="en" suppressHydrationWarning>
       <body className={inter.className}>
         <ThemeProvider attribute="class" defaultTheme="system" enableSystem>
-          <QueryProvider>
-            <AuthProvider>
-              <BrandingProvider>
-                <ImpersonationBanner />
-                {children}
-              </BrandingProvider>
-              <Toaster />
-            </AuthProvider>
-          </QueryProvider>
+          <GoogleOAuthWrapper>
+            <QueryProvider>
+              <AuthProvider>
+                <BrandingProvider>
+                  <ImpersonationBanner />
+                  {children}
+                </BrandingProvider>
+                <Toaster />
+              </AuthProvider>
+            </QueryProvider>
+          </GoogleOAuthWrapper>
         </ThemeProvider>
       </body>
     </html>
