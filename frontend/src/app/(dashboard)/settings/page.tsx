@@ -2813,8 +2813,8 @@ export default function SettingsPage() {
         </div>
       )}
 
-      {/* Connection Status — visible to all */}
-      <ConnectionStatusSection />
+      {/* Connection Status — non-admin only (admins see full management section) */}
+      {!isAdmin && <ConnectionStatusSection />}
 
       {/* Plan Info Section — visible to all */}
       <PlanInfoSection />
