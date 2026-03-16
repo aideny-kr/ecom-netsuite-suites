@@ -2699,6 +2699,57 @@ function ToggleSwitch({
 }
 
 // ---------------------------------------------------------------------------
+// Connection Status (visible to all users)
+// ---------------------------------------------------------------------------
+
+function ConnectionStatusSection() {
+  const { data: connections } = useConnections();
+  const { data: mcpConnectors } = useMcpConnectors();
+
+  const oauthConns = (connections ?? []).filter((c) => c.provider === "netsuite");
+  const mcpConns = mcpConnectors ?? [];
+
+  const oauthStatus = oauthConns.length === 0
+    ? "none"
+    : oauthConns.every((c) => c.status === "active")
+      ? "active"
+      : "error";
+
+  const mcpStatus = mcpConns.length === 0
+    ? "none"
+    : mcpConns.every((c) => c.status === "active")
+      ? "active"
+      : "error";
+
+  return (
+    <div className="rounded-xl border bg-card p-5 shadow-soft">
+      <h3 className="text-lg font-semibold">Connection Status</h3>
+      <p className="mt-0.5 text-[13px] text-muted-foreground">NetSuite connectivity health</p>
+      <div className="mt-4 grid gap-4 sm:grid-cols-2">
+        <div className="flex items-center gap-3 rounded-lg border p-3">
+          <div className={`h-3 w-3 rounded-full ${oauthStatus === "active" ? "bg-green-500" : oauthStatus === "error" ? "bg-red-500 animate-pulse" : "bg-muted-foreground/30"}`} />
+          <div>
+            <p className="text-[13px] font-medium">OAuth Connection</p>
+            <p className="text-[11px] text-muted-foreground">
+              {oauthStatus === "active" ? "Connected" : oauthStatus === "error" ? "Disconnected — contact your admin" : "Not configured"}
+            </p>
+          </div>
+        </div>
+        <div className="flex items-center gap-3 rounded-lg border p-3">
+          <div className={`h-3 w-3 rounded-full ${mcpStatus === "active" ? "bg-green-500" : mcpStatus === "error" ? "bg-red-500 animate-pulse" : "bg-muted-foreground/30"}`} />
+          <div>
+            <p className="text-[13px] font-medium">MCP Connection</p>
+            <p className="text-[11px] text-muted-foreground">
+              {mcpStatus === "active" ? `Connected (${mcpConns.filter((c) => c.status === "active").length} active)` : mcpStatus === "error" ? "Disconnected — contact your admin" : "Not configured"}
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Main Settings Page
 // ---------------------------------------------------------------------------
 
@@ -2790,6 +2841,9 @@ export default function SettingsPage() {
           </div>
         </div>
       )}
+
+      {/* Connection Status — visible to all */}
+      <ConnectionStatusSection />
 
       {/* Plan Info Section — visible to all */}
       <PlanInfoSection />
