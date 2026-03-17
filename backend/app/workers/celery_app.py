@@ -1,4 +1,5 @@
 from celery import Celery
+from celery.schedules import crontab
 
 from app.core.config import settings
 
@@ -26,15 +27,17 @@ celery_app.conf.update(
 
 celery_app.conf.include = [
     "app.workers.tasks.audit_retention",
+    "app.workers.tasks.auto_learning",
     "app.workers.tasks.billing_sync",
+    "app.workers.tasks.connection_health",
     "app.workers.tasks.example_sync",
+    "app.workers.tasks.knowledge_crawler",
     "app.workers.tasks.metadata_discovery",
     "app.workers.tasks.shopify_sync",
     "app.workers.tasks.stripe_sync",
     "app.workers.tasks.suitescript_sync",
-    "app.workers.tasks.workspace_run",
     "app.workers.tasks.suiteql_export",
-    "app.workers.tasks.connection_health",
+    "app.workers.tasks.workspace_run",
 ]
 
 celery_app.conf.beat_schedule = {
@@ -45,5 +48,13 @@ celery_app.conf.beat_schedule = {
     "check-connection-health": {
         "task": "tasks.connection_health",
         "schedule": 900.0,  # every 15 minutes
+    },
+    "knowledge-crawler": {
+        "task": "tasks.knowledge_crawler",
+        "schedule": crontab(hour=3, minute=0),
+    },
+    "auto-learning": {
+        "task": "tasks.auto_learning",
+        "schedule": crontab(hour=4, minute=0),
     },
 }
