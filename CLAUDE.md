@@ -336,6 +336,40 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 - **Golden dataset**: 10 files, 89 chunks (added `transaction-relationships.md` for createdfrom, transaction chains, RMA patterns).
 - **Settings visibility**: Non-admin users see My Account + Connection Status only. Admins see full management (Team, Connections, Jobs, AI, Branding, etc.).
 - **Dark mode**: Default theme.
-- **Known gap**: OAuth reconnect just flips status, doesn't re-initiate browser flow. Discovery queries need `rest_webservices` scope.
-- **Known gap**: structlog doesn't surface stdlib `logging.getLogger()` — use `print(flush=True)` for docker logs.
-- **Deferred**: Resend email for production, billing/payment gateway, production deploy, Celigo integration.
+
+## Known Issues
+
+1. **OAuth scope mismatch** — REST API connections lack `rest_webservices` scope, so Onboarding Discovery queries return 400. Chat agent works fine via MCP path. Fix: re-auth connections with proper scope, or wire discovery to use MCP tools.
+2. **OAuth reconnect doesn't re-initiate browser flow** — just flips status. Expired refresh tokens (e.g., Rails 9745435) require full re-authorization.
+3. **structlog doesn't surface stdlib logging** — `logging.getLogger()` calls don't appear in docker logs. Use `print(flush=True)` for visibility.
+4. **Token storage duplication** — `localStorage.setItem` + `document.cookie` pattern in 3 places (login, invite, Google). Should use shared `setTokens()` from auth-provider.
+5. **Onboarding profile XML duplicated** — identical 50-line builder in orchestrator.py and coordinator.py. Should extract to shared `context_builders.py`.
+6. **SYSTEM_TENANT_ID constant scattered** — defined in 5+ files. Should consolidate to `app/core/constants.py`.
+7. **Celery async boilerplate** — `asyncio.new_event_loop()` pattern repeated in 8+ tasks. Should extract `run_async()` helper.
+8. **Team section MAX_SEATS hardcoded** — Currently `20`, should come from entitlement API.
+9. **CI failures** — `test_security_hardening.py` SSL tests fail in CI. Not blocking but noisy.
+
+## Roadmap
+
+### Go-live blockers
+- [ ] Resend email provider for production invite emails
+- [ ] Production deployment (Supabase, Caddy, `suitestudio.ai` domain)
+- [ ] Billing/payment gateway (Stripe — model TBD)
+- [ ] Fix OAuth scope for discovery (re-auth with `rest_webservices` or wire MCP path)
+- [ ] Google OAuth consent verification (remove "unverified app" warning)
+
+### Short-term (quality + UX)
+- [ ] Settings: read-only team list for non-admins
+- [ ] Onboarding Discovery via MCP (bypass scope issue)
+- [ ] Refactor token storage (shared `setTokens()`)
+- [ ] Extract shared context builders (profile XML, domain knowledge)
+- [ ] Celery `run_async()` helper to eliminate boilerplate
+- [ ] Knowledge Crawler: admin-configurable custom sources
+
+### Medium-term (features)
+- [ ] Financial DataFrame component (`<FinancialReport />` with section grouping)
+- [ ] Onboarding Discovery Phase 3/5/6 (custom fields, sample queries, saved searches)
+- [ ] Auto-trigger discovery on new OAuth connection
+- [ ] Celigo integration (research complete, see `memory/celigo-research.md`)
+- [ ] SDF CI/CD pipeline for SuiteScript deployment
+- [ ] SYSTEM_TENANT_ID consolidation to `app/core/constants.py`
