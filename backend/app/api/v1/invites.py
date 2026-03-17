@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,6 +13,7 @@ from app.core.database import get_db
 from app.core.dependencies import get_current_user, require_permission
 from app.models.tenant import Tenant, TenantConfig
 from app.models.user import User
+from app.schemas.auth import AuthResponse
 from app.services import audit_service, invite_service
 from app.services.invite_service import ROLE_DISPLAY_NAMES
 
@@ -53,12 +54,6 @@ class InviteAcceptInfo(BaseModel):
     tenant_name: str
     status: str
     expired: bool
-
-
-class AuthResponse(BaseModel):
-    access_token: str
-    refresh_token: str
-    token_type: str = "bearer"
 
 
 # ---------- Helpers ----------
@@ -198,6 +193,7 @@ async def get_invite_info(
 async def accept_invite_endpoint(
     token: str,
     request: InviteAcceptRequest,
+    response: Response,
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     """Accept an invitation and create a user account (public)."""
@@ -225,8 +221,18 @@ async def accept_invite_endpoint(
     )
     await db.commit()
 
+    # Set refresh token as HttpOnly cookie (matching auth.py pattern)
+    response.set_cookie(
+        key="refresh_token",
+        value=tokens["refresh_token"],
+        httponly=True,
+        secure=True,
+        samesite="lax",
+        path="/api/v1/auth",
+        max_age=7 * 24 * 60 * 60,
+    )
+
     return AuthResponse(
         access_token=tokens["access_token"],
-        refresh_token=tokens["refresh_token"],
         token_type=tokens.get("token_type", "bearer"),
     )

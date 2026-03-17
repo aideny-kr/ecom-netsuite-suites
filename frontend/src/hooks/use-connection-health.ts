@@ -28,6 +28,7 @@ export function useConnectionHealth(enabled = true) {
     queryKey: ["connection-health"],
     queryFn: () => apiClient.get<ConnectionHealthResponse>("/api/v1/connections/health"),
     enabled,
-    staleTime: 30_000,
+    staleTime: 120_000,
+    refetchOnWindowFocus: false,
   });
 }

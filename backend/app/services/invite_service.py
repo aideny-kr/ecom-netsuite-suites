@@ -39,7 +39,7 @@ async def create_invite(
     email = email.strip().lower()
 
     if role_name not in VALID_INVITE_ROLES:
-        raise ValueError(f"Invalid role: {role_name}. Must be one of {VALID_INVITE_ROLES}")
+        raise ValueError(f"Invalid role: {role_name}. Must be one of: {', '.join(sorted(VALID_INVITE_ROLES))}")
 
     # Check if email is already an active user in this tenant
     existing_user = await db.execute(
@@ -151,7 +151,6 @@ async def accept_invite(
     google_sub = None
     if google_id_token:
         from app.services.google_auth_service import verify_google_token
-        import asyncio
         google_info = await verify_google_token(google_id_token)
         if google_info["email"].lower() != invite.email.lower():
             raise ValueError("Google account email does not match the invitation email.")

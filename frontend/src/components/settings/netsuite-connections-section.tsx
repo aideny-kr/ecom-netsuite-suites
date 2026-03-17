@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import {
   useConnectionHealth,
@@ -338,6 +338,17 @@ export function NetSuiteConnectionsSection() {
   const { isAdmin } = usePermissions();
   const { toast } = useToast();
 
+  // Refs for cleanup on unmount
+  const popupIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const refreshTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (popupIntervalRef.current) clearInterval(popupIntervalRef.current);
+      if (refreshTimeoutRef.current) clearTimeout(refreshTimeoutRef.current);
+    };
+  }, []);
+
   // Data
   const queryClient = useQueryClient();
   const { data: health } = useConnectionHealth();
@@ -385,7 +396,7 @@ export function NetSuiteConnectionsSection() {
   // Handlers with toast feedback
   function refreshHealthAfterDelay() {
     // Refresh health + connections after popup closes (give callback time to complete)
-    setTimeout(() => {
+    refreshTimeoutRef.current = setTimeout(() => {
       queryClient.invalidateQueries({ queryKey: ["connections"] });
       queryClient.invalidateQueries({ queryKey: ["mcp-connectors"] });
       queryClient.invalidateQueries({ queryKey: ["connection-health"] });
@@ -407,9 +418,10 @@ export function NetSuiteConnectionsSection() {
         );
         // Refresh data when popup closes
         if (popup) {
-          const interval = setInterval(() => {
+          popupIntervalRef.current = setInterval(() => {
             if (popup.closed) {
-              clearInterval(interval);
+              if (popupIntervalRef.current) clearInterval(popupIntervalRef.current);
+              popupIntervalRef.current = null;
               refreshHealthAfterDelay();
             }
           }, 500);

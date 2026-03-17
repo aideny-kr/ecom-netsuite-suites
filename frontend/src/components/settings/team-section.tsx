@@ -61,6 +61,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 
+// TODO: MAX_SEATS should come from the API (entitlement_service.get_plan_limits)
 const MAX_SEATS = 20;
 
 const ASSIGNABLE_ROLES: { value: RoleName; label: string }[] = [
