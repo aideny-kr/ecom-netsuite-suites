@@ -244,53 +244,63 @@ async def send_message(
     async def stream_generator():
         import asyncio
 
-        # Track streamed text so we can save a partial message on disconnect
+        _SENTINEL = object()
         partial_text_parts: list[str] = []
         stream_completed = False
+        queue: asyncio.Queue = asyncio.Queue()
+
+        async def _producer():
+            """Run the chat pipeline and put chunks into the queue."""
+            try:
+                async for chunk in run_chat_turn(
+                    db=db,
+                    session=session,
+                    user_message=body.content,
+                    user_id=user.id,
+                    tenant_id=user.tenant_id,
+                    user_msg=user_msg,
+                    wizard_step=wizard_step,
+                    user_timezone=x_timezone,
+                ):
+                    await queue.put(chunk)
+            except ValueError as exc:
+                await db.commit()
+                logger.warning("Chat configuration error: %s", exc)
+                await queue.put({"type": "error", "error": "Chat service is not configured. Contact your administrator."})
+            except (anthropic.AuthenticationError, openai.AuthenticationError):
+                await db.commit()
+                logger.warning("AI provider API key is invalid")
+                await queue.put({"type": "error", "error": "Chat API key is invalid."})
+            except (anthropic.APIError, openai.APIError, Exception) as exc:
+                await db.commit()
+                logger.exception("Chat pipeline error: %s", exc)
+                await queue.put({"type": "error", "error": "Chat service temporarily unavailable. Please try again."})
+            finally:
+                await queue.put(_SENTINEL)
+
+        producer_task = asyncio.create_task(_producer())
 
         # Send padding to force Cloudflare Tunnel to start streaming
         yield f": {' ' * 2048}\n\n"
         try:
-            # Wrap the chat generator with keepalive heartbeats every 15s
-            # to prevent Cloudflare Tunnel from killing the SSE connection
-            chat_iter = run_chat_turn(
-                db=db,
-                session=session,
-                user_message=body.content,
-                user_id=user.id,
-                tenant_id=user.tenant_id,
-                user_msg=user_msg,
-                wizard_step=wizard_step,
-                user_timezone=x_timezone,
-            ).__aiter__()
-
             while True:
                 try:
-                    chunk = await asyncio.wait_for(chat_iter.__anext__(), timeout=15.0)
-                    # Track text chunks for partial save on disconnect
-                    if isinstance(chunk, dict) and chunk.get("type") == "text":
-                        partial_text_parts.append(chunk.get("content", ""))
-                    yield f"data: {json.dumps(chunk)}\n\n"
+                    chunk = await asyncio.wait_for(queue.get(), timeout=15.0)
                 except asyncio.TimeoutError:
-                    # No data for 15s — send SSE comment as keepalive
                     yield ": heartbeat\n\n"
-                except StopAsyncIteration:
+                    continue
+
+                if chunk is _SENTINEL:
                     stream_completed = True
                     break
-        except ValueError as exc:
-            await db.commit()  # persist user message
-            logger.warning("Chat configuration error: %s", exc)
-            yield f"data: {json.dumps({'type': 'error', 'error': 'Chat service is not configured. Contact your administrator.'})}\n\n"
-        except (anthropic.AuthenticationError, openai.AuthenticationError):
-            await db.commit()
-            logger.warning("AI provider API key is invalid")
-            yield f"data: {json.dumps({'type': 'error', 'error': 'Chat API key is invalid.'})}\n\n"
-        except (anthropic.APIError, openai.APIError, Exception) as exc:
-            await db.commit()
-            logger.exception("Chat pipeline error: %s", exc)
-            yield f"data: {json.dumps({'type': 'error', 'error': 'Chat service temporarily unavailable. Please try again.'})}\n\n"
+
+                if isinstance(chunk, dict) and chunk.get("type") == "text":
+                    partial_text_parts.append(chunk.get("content", ""))
+
+                yield f"data: {json.dumps(chunk)}\n\n"
         finally:
-            # Save partial assistant message if stream was interrupted (user navigated away)
+            producer_task.cancel()
+            # Save partial assistant message if stream was interrupted
             if not stream_completed and partial_text_parts:
                 try:
                     partial_content = "".join(partial_text_parts).strip()
