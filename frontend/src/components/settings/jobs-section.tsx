@@ -15,6 +15,7 @@ import {
   Bot,
   Search,
   Database,
+  Telescope,
 } from "lucide-react";
 
 const JOB_CARDS = [
@@ -41,6 +42,14 @@ const JOB_CARDS = [
     taskName: "metadata_discovery",
     icon: Database,
     schedule: "On-demand",
+  },
+  {
+    name: "Deep Discovery",
+    description:
+      "Run aggressive 6-phase discovery for your NetSuite account. Discovers transaction types, relationships, status codes, and more.",
+    taskName: "onboarding_discovery",
+    icon: Telescope,
+    schedule: "On first connection + manual trigger",
   },
 ];
 

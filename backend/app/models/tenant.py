@@ -70,4 +70,7 @@ class TenantConfig(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     # Financial reporting preference
     use_mcp_financial_reports: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
 
+    # Onboarding deep discovery profile
+    onboarding_profile: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
     tenant: Mapped["Tenant"] = relationship("Tenant", back_populates="config")

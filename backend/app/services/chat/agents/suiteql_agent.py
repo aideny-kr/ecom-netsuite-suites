@@ -318,6 +318,7 @@ class SuiteQLAgent(BaseSpecialistAgent):
         self._policy = policy
         self._tool_defs: list[dict] | None = None
         self._tenant_vernacular: str = ""
+        self._onboarding_profile: str = ""
         self._soul_quirks: str = ""
         self._user_timezone: str | None = None
         self._current_task: str = ""
@@ -364,6 +365,11 @@ class SuiteQLAgent(BaseSpecialistAgent):
             parts.append(
                 "\n**ACTION REQUIRED**: For each resolved entity of type 'customrecord', your FIRST query MUST be: `SELECT * FROM <internal_script_id> WHERE ROWNUM <= 5` using the netsuite_suiteql tool. Do NOT skip this step."
             )
+
+        # Onboarding discovery profile (transaction landscape, relationships, status codes)
+        if self._onboarding_profile:
+            parts.append("\n## TENANT DISCOVERY PROFILE")
+            parts.append(self._onboarding_profile)
 
         if self._soul_quirks:
             parts.append("\n## TENANT NETSUITE QUIRKS AND BUSINESS LOGIC")
@@ -424,6 +430,7 @@ class SuiteQLAgent(BaseSpecialistAgent):
         self._tenant_vernacular = context.get("tenant_vernacular", "")
         self._user_timezone = context.get("user_timezone")
         self._domain_knowledge = context.get("domain_knowledge", [])
+        self._onboarding_profile = context.get("onboarding_profile", "")
 
         try:
             from app.services.soul_service import get_soul_config

@@ -825,6 +825,60 @@ class MultiAgentCoordinator:
         context: dict[str, Any] = {}
         if self.user_timezone:
             context["user_timezone"] = self.user_timezone
+
+        # Inject onboarding profile if available
+        try:
+            from sqlalchemy import select as _sa_select
+            from app.models.tenant import TenantConfig as _TC
+
+            _op_result = await self.db.execute(
+                _sa_select(_TC.onboarding_profile).where(_TC.tenant_id == self.tenant_id)
+            )
+            _onboarding_profile = _op_result.scalar_one_or_none()
+            if _onboarding_profile and isinstance(_onboarding_profile, dict):
+                profile_parts: list[str] = []
+
+                txn_types = _onboarding_profile.get("transaction_types", [])
+                if txn_types:
+                    txn_summary = "\n".join(
+                        f"  - {t['type']}: {t['count']} records ({t.get('earliest', '?')} to {t.get('latest', '?')})"
+                        for t in txn_types[:15]
+                    )
+                    profile_parts.append(
+                        f"<tenant_transaction_landscape>\nThis tenant uses these transaction types:\n{txn_summary}\n</tenant_transaction_landscape>"
+                    )
+
+                rels = _onboarding_profile.get("transaction_relationships", [])
+                if rels:
+                    rel_summary = "\n".join(
+                        f"  - {r['source']} -> {r['target']} ({r['count']} links)"
+                        for r in rels[:20]
+                    )
+                    profile_parts.append(
+                        f"<transaction_relationships>\n{rel_summary}\n</transaction_relationships>"
+                    )
+
+                status_map = _onboarding_profile.get("status_codes", {})
+                if status_map:
+                    status_lines: list[str] = []
+                    for _txn_type, codes in list(status_map.items())[:10]:
+                        for c in codes[:8]:
+                            status_lines.append(
+                                f"  - {_txn_type} status '{c['code']}' = {c['display']} ({c['count']})"
+                            )
+                    if status_lines:
+                        profile_parts.append(
+                            "<tenant_status_codes>\n" + "\n".join(status_lines) + "\n</tenant_status_codes>"
+                        )
+
+                if profile_parts:
+                    profile_xml = "\n".join(profile_parts)
+                    context["onboarding_profile"] = profile_xml
+                    print(f"[COORDINATOR] Onboarding profile injected ({len(profile_xml)} chars)", flush=True)
+        except Exception:
+            import logging as _logging
+            _logging.getLogger(__name__).warning("coordinator.onboarding_profile_failed", exc_info=True)
+
         if prior_results:
             context["prior_results"] = [
                 {"agent": r.agent_name, "success": r.success, "data": r.data, "error": r.error} for r in prior_results

@@ -859,6 +859,60 @@ async def run_chat_turn(
                         except Exception:
                             logger.warning("orchestrator.schema_injection_failed", exc_info=True)
 
+                    # Inject onboarding profile if available
+                    try:
+                        from app.models.tenant import TenantConfig as _TC
+
+                        _op_result = await db.execute(
+                            sa_select(_TC.onboarding_profile).where(_TC.tenant_id == tenant_id)
+                        )
+                        _onboarding_profile = _op_result.scalar_one_or_none()
+                        if _onboarding_profile and isinstance(_onboarding_profile, dict):
+                            profile_parts: list[str] = []
+
+                            # Transaction landscape
+                            txn_types = _onboarding_profile.get("transaction_types", [])
+                            if txn_types:
+                                txn_summary = "\n".join(
+                                    f"  - {t['type']}: {t['count']} records ({t.get('earliest', '?')} to {t.get('latest', '?')})"
+                                    for t in txn_types[:15]
+                                )
+                                profile_parts.append(
+                                    f"<tenant_transaction_landscape>\nThis tenant uses these transaction types:\n{txn_summary}\n</tenant_transaction_landscape>"
+                                )
+
+                            # Relationship map
+                            rels = _onboarding_profile.get("transaction_relationships", [])
+                            if rels:
+                                rel_summary = "\n".join(
+                                    f"  - {r['source']} -> {r['target']} ({r['count']} links)"
+                                    for r in rels[:20]
+                                )
+                                profile_parts.append(
+                                    f"<transaction_relationships>\n{rel_summary}\n</transaction_relationships>"
+                                )
+
+                            # Status codes
+                            status_map = _onboarding_profile.get("status_codes", {})
+                            if status_map:
+                                status_lines: list[str] = []
+                                for _txn_type, codes in list(status_map.items())[:10]:
+                                    for c in codes[:8]:
+                                        status_lines.append(
+                                            f"  - {_txn_type} status '{c['code']}' = {c['display']} ({c['count']})"
+                                        )
+                                if status_lines:
+                                    profile_parts.append(
+                                        "<tenant_status_codes>\n" + "\n".join(status_lines) + "\n</tenant_status_codes>"
+                                    )
+
+                            if profile_parts:
+                                profile_xml = "\n".join(profile_parts)
+                                context["onboarding_profile"] = profile_xml
+                                print(f"[ORCHESTRATOR] Onboarding profile injected ({len(profile_xml)} chars)", flush=True)
+                    except Exception:
+                        logger.warning("orchestrator.onboarding_profile_injection_failed", exc_info=True)
+
                     # Create unified agent with full context
                     unified_agent = UnifiedAgent(
                         tenant_id=tenant_id,
