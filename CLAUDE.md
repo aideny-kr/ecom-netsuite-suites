@@ -251,12 +251,22 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 | Domain service | `backend/app/services/domain_service.py` |
 | Branding provider | `frontend/src/providers/branding-provider.tsx` |
 | Feature hooks | `frontend/src/hooks/use-features.ts` |
+| Knowledge crawler | `backend/app/services/knowledge/` |
+| Celery tasks | `backend/app/workers/tasks/` |
+| Celery Beat config | `backend/app/workers/celery_app.py` |
+| Invite service | `backend/app/services/invite_service.py` |
+| Google auth | `backend/app/services/google_auth_service.py` |
+| Excel export | `backend/app/services/excel_export_service.py` |
+| Export endpoints | `backend/app/api/v1/exports.py` |
+| Invite endpoints | `backend/app/api/v1/invites.py` |
 | SuiteScripts | `suiteapp/src/FileCabinet/SuiteScripts/` |
 | SDF Objects | `suiteapp/src/Objects/` |
 | SuiteScript tests | `suiteapp/__tests__/` |
 | Backend tests | `backend/tests/` |
 | E2E tests | `frontend/e2e/` |
 | Docs | `docs/` |
+| Specs | `docs/superpowers/specs/` |
+| Plans | `docs/superpowers/plans/` |
 
 ## Common Mistakes to Avoid
 
@@ -309,20 +319,23 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 - **Doc chunk embeddings**: OpenAI `text-embedding-3-small` (1024-dim) primary, Voyage AI fallback. 3,198 chunks embedded. UTF-8 sanitized on ingest.
 - **Logging**: Coordinator/orchestrator use `print(flush=True)` for docker visibility (structlog doesn't surface stdlib `logger.info` calls).
 
-## Current State (update after each major change)
+## Current State (updated 2026-03-17)
 
-- **Latest migration**: 042_mcp_financial_flag
-- **Financial reports**: Deterministic via `netsuite.financial_report` tool with BUILTIN.CONSOLIDATE. Verified penny-accurate against NetSuite CSV exports (Framework + Rails). Trend reports return per-period summaries. Row limit bypassed for financial queries (5000 vs default 1000).
-- **Entity mappings**: 2,109 seeded for test tenant (bf92d059), seeder runs in metadata discovery pipeline
-- **Golden dataset**: 9 files, 85 chunks (added `financial-statements.md` for GL/P&L/BS; status code + REST API behavior docs)
-- **Doc chunk embeddings**: 3,198/3,198 embedded with OpenAI (was 2/3,198 with Voyage AI)
-- **Utility scripts**: `scripts/sanitize_doc_chunks.py`, `scripts/reembed_doc_chunks.py`, `scripts/export_tenant.py`, `scripts/import_tenant.py`, `scripts/reencrypt_tenant.py`
-- **Security hardening**: SET LOCAL UUID validation, Redis denylist/rate limiter, SSL verification, production secret validation, security headers, Swagger disabled in prod, Sentry integration
-- **CI/CD**: `deploy.yml` (staging auto + production manual), `rollback.yml` (manual)
-- **MCP tools**: Both Framework (6738075) and Rails (9745435) now expose full ~11 tool set (Record CRUD + Reports + Saved Searches + SuiteQL) after OAuth role permission fix. See `docs/netsuite-mcp-tool-gap-analysis.md`.
-- **Generic DataFrame**: `DataFrameTable` component renders SuiteQL query results with Copy, CSV export, and Save Query buttons. Tool result interception handles local SuiteQL, external MCP (`data` key), and financial report formats. SSE `data_table` event streams structured data to frontend.
-- **Unified agent rules**: Fully synced with SuiteQL agent as of 2026-03-13. Added: `BUILTIN.RELATIVE_RANGES()`, custom list fields, transaction prefix mapping, join patterns, line amount sign convention, full multi-currency, `<common_queries>` section (aggregation discipline, double-counting, examples, item table gotcha), detailed error recovery with budget awareness.
-- **Known gap**: OAuth reconnect just flips status, doesn't re-initiate browser flow (refresh token expired for tenant 9745435)
-- **Known gap**: structlog setup doesn't surface stdlib `logging.getLogger()` — use `print(flush=True)` for docker log visibility
-- **Deferred**: Financial DataFrame frontend component (dedicated `<FinancialReport />` with section grouping — plan in `prompts/financial-dataframe-component.md`), SDF CI/CD pipeline, bundle versioning strategy, RESTlet rate limiting
-- **Researched**: Celigo flow integration — API sync + ZIP upload into DocChunk RAG. Awaiting prioritization. See `memory/celigo-research.md`.
+- **Latest migration**: 048_onboarding_profile
+- **Staging**: `staging.suitestudio.ai` (Vercel frontend) + `api-staging.suitestudio.ai` (GCP VM backend). Auto-deploys from main via GitHub Actions. SSH deploy key configured.
+- **RBAC**: 3 user-facing roles (Admin/Finance/Operations). `chat.financial_reports` permission gates financial reports. Invite flow with email (console/Resend) + Google Sign-In.
+- **Google Sign-In**: `@react-oauth/google` on login + invite pages. Backend `POST /auth/google` verifies ID token, auto-links Google account. Client ID: `840124956248-*.apps.googleusercontent.com` (suite-studio-ai project).
+- **BYOK**: Tenants with `ai_api_key_encrypted` use their own provider + model for the unified agent. Non-BYOK tenants use platform defaults. Credits not deducted for BYOK.
+- **Excel export**: `POST /exports/excel` (direct data), `POST /exports/query-export` (server-side re-execution with pagination). openpyxl with auto-type detection, branded styling. `apiClient.download()` for blob responses.
+- **Structured output persistence**: `structured_output` JSONB on `chat_messages` persists financial reports and data tables across page refresh. Frontend hydrates refs on session load.
+- **Saved queries**: Private by default (`created_by` + `is_public`). Publish/unpublish via `PATCH /skills/{id}/publish`. Snapshot data stored in `result_data` JSONB for financial reports.
+- **Connection management**: Grouped "NetSuite Connections" section in Settings. Per-connection health check (`GET /connections/health`), editable Client IDs, RESTlet URL. Token expiry detection flips status to `needs_reauth`.
+- **Knowledge Crawler**: 4 sources (Oracle Help, Tim Dietrich, SuiteRep, Reddit r/Netsuite). Daily at 3am UTC via Celery Beat. Incremental (content hash dedup). 108+ crawled chunks embedded.
+- **Auto-Learning**: Gap detector (thumbs-down + tool errors) → web search → chunk → embed. Daily at 4am UTC. 30-day staleness check refreshes tenant onboarding profiles.
+- **Onboarding Discovery**: 6-phase tenant deep discovery (transaction landscape, relationships, status codes). Stores `onboarding_profile` JSON in `tenant_configs`. Injected into agent prompt as XML blocks. Known: needs `rest_webservices` OAuth scope to work.
+- **Golden dataset**: 10 files, 89 chunks (added `transaction-relationships.md` for createdfrom, transaction chains, RMA patterns).
+- **Settings visibility**: Non-admin users see My Account + Connection Status only. Admins see full management (Team, Connections, Jobs, AI, Branding, etc.).
+- **Dark mode**: Default theme.
+- **Known gap**: OAuth reconnect just flips status, doesn't re-initiate browser flow. Discovery queries need `rest_webservices` scope.
+- **Known gap**: structlog doesn't surface stdlib `logging.getLogger()` — use `print(flush=True)` for docker logs.
+- **Deferred**: Resend email for production, billing/payment gateway, production deploy, Celigo integration.
