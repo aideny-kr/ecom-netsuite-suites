@@ -16,6 +16,7 @@ router = APIRouter(prefix="/jobs", tags=["jobs"])
 ALLOWED_TASKS = {
     "knowledge_crawler": "tasks.knowledge_crawler",
     "auto_learning": "tasks.auto_learning",
+    "onboarding_discovery": "tasks.onboarding_discovery",
 }
 
 
@@ -99,7 +100,29 @@ async def trigger_job(
             detail=f"Unknown task: {task_name}. Allowed: {', '.join(ALLOWED_TASKS.keys())}",
         )
 
-    result = celery_app.send_task(celery_task_name)
+    if task_name == "onboarding_discovery":
+        # Find active NetSuite connection for this tenant
+        from app.models.connection import Connection
+
+        conn_result = await db.execute(
+            select(Connection).where(
+                Connection.tenant_id == user.tenant_id,
+                Connection.provider == "netsuite",
+                Connection.status == "active",
+            ).limit(1)
+        )
+        conn = conn_result.scalar_one_or_none()
+        if not conn:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No active NetSuite connection found.",
+            )
+        result = celery_app.send_task(
+            celery_task_name,
+            kwargs={"tenant_id": str(user.tenant_id), "connection_id": str(conn.id)},
+        )
+    else:
+        result = celery_app.send_task(celery_task_name)
 
     await audit_service.log_event(
         db=db,

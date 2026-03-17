@@ -33,6 +33,7 @@ celery_app.conf.include = [
     "app.workers.tasks.example_sync",
     "app.workers.tasks.knowledge_crawler",
     "app.workers.tasks.metadata_discovery",
+    "app.workers.tasks.onboarding_discovery",
     "app.workers.tasks.shopify_sync",
     "app.workers.tasks.stripe_sync",
     "app.workers.tasks.suitescript_sync",

@@ -28,6 +28,9 @@ def auto_learning_task(self):
     try:
         async def _run():
             async with async_session_factory() as db:
+                # Staleness check: re-run partial discovery for tenants with >30 day profiles
+                await _refresh_stale_profiles(db)
+
                 gaps = await detect_knowledge_gaps(db, since_hours=24, max_gaps=5)
 
                 if not gaps:
@@ -119,3 +122,85 @@ def auto_learning_task(self):
         return loop.run_until_complete(_run())
     finally:
         loop.close()
+
+
+async def _refresh_stale_profiles(db):
+    """Check all tenants for stale onboarding profiles (>30 days) and refresh Phases 1+4."""
+    from datetime import datetime, timedelta, timezone
+
+    from sqlalchemy import select
+
+    from app.core.encryption import decrypt_credentials
+    from app.models.connection import Connection
+    from app.models.tenant import TenantConfig
+    from app.services.knowledge.onboarding_discovery import (
+        _discover_status_codes,
+        _discover_transaction_types,
+    )
+    from app.services.netsuite_oauth_service import get_valid_token
+
+    import structlog
+    logger = structlog.get_logger()
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=30)
+
+    result = await db.execute(
+        select(TenantConfig).where(TenantConfig.onboarding_profile.isnot(None))
+    )
+    configs = result.scalars().all()
+
+    for tc in configs:
+        profile = tc.onboarding_profile or {}
+        discovered_at = profile.get("discovered_at")
+        if not discovered_at:
+            continue
+
+        try:
+            disc_dt = datetime.fromisoformat(discovered_at)
+            if disc_dt > cutoff:
+                continue  # Fresh enough
+        except (ValueError, TypeError):
+            continue
+
+        # Stale — refresh Phase 1 + Phase 4
+        conn_result = await db.execute(
+            select(Connection).where(
+                Connection.tenant_id == tc.tenant_id,
+                Connection.provider == "netsuite",
+                Connection.status == "active",
+            ).limit(1)
+        )
+        connection = conn_result.scalar_one_or_none()
+        if not connection:
+            continue
+
+        try:
+            access_token = await get_valid_token(db, connection)
+            if not access_token:
+                continue
+
+            creds = decrypt_credentials(connection.encrypted_credentials)
+            account_id = (creds.get("account_id") or "").replace("_", "-").lower()
+
+            # Phase 1: Transaction landscape
+            phase1 = await _discover_transaction_types(access_token, account_id)
+            if phase1.success and phase1.data:
+                profile["transaction_types"] = phase1.data
+
+            # Phase 4: Status codes for top types
+            top_types = [t["type"] for t in (phase1.data or [])[:10] if t.get("count", 0) > 10]
+            if top_types:
+                phase4 = await _discover_status_codes(access_token, account_id, top_types)
+                if phase4.success and phase4.data:
+                    profile["status_codes"] = phase4.data
+
+            profile["discovered_at"] = datetime.now(timezone.utc).isoformat()
+            profile["last_refresh_reason"] = "staleness_30d"
+
+            from sqlalchemy.orm.attributes import flag_modified
+            tc.onboarding_profile = profile
+            flag_modified(tc, "onboarding_profile")
+
+            logger.info("auto_learning.stale_profile_refreshed", tenant_id=str(tc.tenant_id))
+        except Exception as e:
+            logger.warning("auto_learning.stale_refresh_failed", tenant_id=str(tc.tenant_id), error=str(e))

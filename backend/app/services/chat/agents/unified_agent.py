@@ -446,6 +446,7 @@ class UnifiedAgent(BaseSpecialistAgent):
         self._policy = policy
         self._tool_defs: list[dict] | None = None
         self._tenant_vernacular: str = ""
+        self._onboarding_profile: str = ""
         self._soul_quirks: str = ""
         self._soul_tone: str = ""
         self._brand_name: str = ""
@@ -570,6 +571,11 @@ class UnifiedAgent(BaseSpecialistAgent):
             )
             parts.append(self._soul_quirks)
 
+        # Onboarding discovery profile (transaction landscape, relationships, status codes)
+        if self._onboarding_profile:
+            parts.append("\n## TENANT DISCOVERY PROFILE")
+            parts.append(self._onboarding_profile)
+
         # User timezone
         if self._user_timezone:
             from datetime import datetime, timedelta
@@ -659,6 +665,7 @@ class UnifiedAgent(BaseSpecialistAgent):
         self._user_timezone = context.get("user_timezone")
         self._domain_knowledge = context.get("domain_knowledge", [])
         self._proven_patterns = context.get("proven_patterns", [])
+        self._onboarding_profile = context.get("onboarding_profile", "")
 
         # Load soul config
         try:
