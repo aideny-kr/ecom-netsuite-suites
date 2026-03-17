@@ -1,7 +1,7 @@
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -12,6 +12,11 @@ from app.models.user import User
 from app.schemas.common import JobResponse, PaginatedResponse
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
+
+ALLOWED_TASKS = {
+    "knowledge_crawler": "tasks.knowledge_crawler",
+    "auto_learning": "tasks.auto_learning",
+}
 
 
 @router.get("", response_model=PaginatedResponse[JobResponse])
@@ -81,3 +86,55 @@ async def get_job(
         error_message=job.error_message,
         celery_task_id=job.celery_task_id,
     )
+
+
+@router.post("/trigger/{task_name}", status_code=status.HTTP_202_ACCEPTED)
+async def trigger_job(
+    task_name: str,
+    user: Annotated[User, Depends(require_permission("tenant.manage"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Manually trigger a scheduled job. Admin only."""
+    from app.services import audit_service
+    from app.workers.celery_app import celery_app
+
+    celery_task_name = ALLOWED_TASKS.get(task_name)
+    if not celery_task_name:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unknown task: {task_name}. Allowed: {', '.join(ALLOWED_TASKS.keys())}",
+        )
+
+    result = celery_app.send_task(celery_task_name)
+
+    await audit_service.log_event(
+        db=db,
+        tenant_id=user.tenant_id,
+        category="jobs",
+        action=f"jobs.trigger.{task_name}",
+        actor_id=user.id,
+    )
+    await db.commit()
+
+    return {"task_name": task_name, "celery_task_id": result.id, "status": "queued"}
+
+
+@router.get("/schedules")
+async def list_schedules(
+    user: Annotated[User, Depends(require_permission("tenant.manage"))],
+):
+    """List all Celery Beat schedules."""
+    from app.workers.celery_app import celery_app
+
+    schedules = []
+    for name, config in (celery_app.conf.beat_schedule or {}).items():
+        schedule = config.get("schedule")
+        schedule_str = str(schedule) if schedule else "unknown"
+        schedules.append({
+            "name": name,
+            "task": config.get("task", ""),
+            "schedule": schedule_str,
+            "enabled": True,
+        })
+
+    return schedules
