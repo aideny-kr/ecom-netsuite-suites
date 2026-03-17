@@ -172,8 +172,10 @@ async def get_valid_token(db: AsyncSession, connection) -> str | None:
         return None
 
     try:
-        # Use stored client_id if available, fallback to global setting
-        client_id = credentials.get("client_id", settings.NETSUITE_OAUTH_CLIENT_ID)
+        # Use global NETSUITE_OAUTH_CLIENT_ID (what the user configures in Settings).
+        # The per-connection stored client_id may be stale from migration.
+        # For MCP connectors, the per-connection client_id is used (set via separate flow).
+        client_id = settings.NETSUITE_OAUTH_CLIENT_ID or credentials.get("client_id", "")
         token_data = await refresh_tokens_with_client(account_id, refresh_token, client_id)
         credentials["access_token"] = token_data["access_token"]
         credentials["refresh_token"] = token_data.get("refresh_token", refresh_token)
