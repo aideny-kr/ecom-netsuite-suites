@@ -32,8 +32,11 @@ SOURCES = [
         name="tim_dietrich_suiteql",
         base_url="https://timdietrich.me/blog",
         url_patterns=[
-            "/netsuite-suiteql-*",      # SuiteQL specific posts
-            "/netsuite-analytics-*",    # Analytics posts
+            "/netsuite-*",              # All NetSuite posts
+            "/suiteql-*",              # SuiteQL specific posts
+            "/suitescript-*",          # SuiteScript posts
+            "/ai-*netsuite*",          # AI + NetSuite posts
+            "/a-developers-netsuite-*", # Developer journey posts
         ],
         parser="blog",
         priority=1,
