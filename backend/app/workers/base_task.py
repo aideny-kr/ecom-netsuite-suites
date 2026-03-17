@@ -35,11 +35,12 @@ class InstrumentedTask(Task):
     _job_id: uuid.UUID | None = None
     _correlation_id: str | None = None
 
+    # System-wide tasks (no tenant) use this sentinel ID for job tracking
+    SYSTEM_TENANT_ID = "00000000-0000-0000-0000-000000000000"
+
     def before_start(self, task_id, args, kwargs):
         self._correlation_id = kwargs.pop("correlation_id", None) or str(uuid.uuid4())
-        tenant_id = kwargs.get("tenant_id")
-        if not tenant_id:
-            return
+        tenant_id = kwargs.get("tenant_id") or self.SYSTEM_TENANT_ID
 
         with tenant_session(tenant_id) as session:
             job = Job(
@@ -72,8 +73,8 @@ class InstrumentedTask(Task):
             session.commit()
 
     def on_success(self, retval, task_id, args, kwargs):
-        tenant_id = kwargs.get("tenant_id")
-        if not tenant_id or not self._job_id:
+        tenant_id = kwargs.get("tenant_id") or self.SYSTEM_TENANT_ID
+        if not self._job_id:
             return
 
         with tenant_session(tenant_id) as session:
@@ -99,8 +100,8 @@ class InstrumentedTask(Task):
             session.commit()
 
     def on_failure(self, exc, task_id, args, kwargs, einfo):
-        tenant_id = kwargs.get("tenant_id")
-        if not tenant_id or not self._job_id:
+        tenant_id = kwargs.get("tenant_id") or self.SYSTEM_TENANT_ID
+        if not self._job_id:
             return
 
         with tenant_session(tenant_id) as session:

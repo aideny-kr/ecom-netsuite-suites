@@ -27,13 +27,19 @@ async def list_jobs(
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=500),
 ):
-    count_result = await db.execute(select(func.count()).select_from(Job).where(Job.tenant_id == user.tenant_id))
+    from sqlalchemy import or_
+    import uuid as _uuid
+
+    SYSTEM_TENANT = _uuid.UUID("00000000-0000-0000-0000-000000000000")
+    tenant_filter = or_(Job.tenant_id == user.tenant_id, Job.tenant_id == SYSTEM_TENANT)
+
+    count_result = await db.execute(select(func.count()).select_from(Job).where(tenant_filter))
     total = count_result.scalar() or 0
 
     offset = (page - 1) * page_size
     result = await db.execute(
         select(Job)
-        .where(Job.tenant_id == user.tenant_id)
+        .where(tenant_filter)
         .order_by(Job.created_at.desc())
         .offset(offset)
         .limit(page_size)
