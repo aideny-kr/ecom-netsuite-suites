@@ -396,7 +396,10 @@ export function NetSuiteConnectionsSection() {
 
   // Handlers with toast feedback
   function refreshHealthAfterDelay() {
-    // Refresh health + connections after popup closes (give callback time to complete)
+    // Refresh immediately + again after 3s (callback may still be processing)
+    queryClient.invalidateQueries({ queryKey: ["connections"] });
+    queryClient.invalidateQueries({ queryKey: ["mcp-connectors"] });
+    queryClient.invalidateQueries({ queryKey: ["connection-health"] });
     refreshTimeoutRef.current = setTimeout(() => {
       queryClient.invalidateQueries({ queryKey: ["connections"] });
       queryClient.invalidateQueries({ queryKey: ["mcp-connectors"] });
