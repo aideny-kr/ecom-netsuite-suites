@@ -93,7 +93,6 @@ async def check_connection_health(
             except Exception:
                 pass
         restlet_url = (conn.metadata_json or {}).get("restlet_url") if conn.metadata_json else None
-        conn.last_health_check_at = datetime.now(timezone.utc)
         conn_items.append(ConnectionHealthItem(
             id=str(conn.id),
             label=conn.label or conn.provider,
@@ -101,7 +100,7 @@ async def check_connection_health(
             status=conn.status,
             auth_type=conn.auth_type,
             token_expired=token_expired,
-            last_health_check=conn.last_health_check_at.isoformat() if conn.last_health_check_at else None,
+            last_health_check=datetime.now(timezone.utc).isoformat(),
             client_id=client_id,
             restlet_url=restlet_url,
         ))
@@ -130,7 +129,6 @@ async def check_connection_health(
                     token_expired = True
             except Exception:
                 pass
-        mcp.last_health_check_at = datetime.now(timezone.utc)
         tools = mcp.discovered_tools or []
         mcp_items.append(ConnectionHealthItem(
             id=str(mcp.id),
@@ -139,12 +137,12 @@ async def check_connection_health(
             status=mcp.status,
             auth_type=mcp.auth_type,
             token_expired=token_expired,
-            last_health_check=mcp.last_health_check_at.isoformat() if mcp.last_health_check_at else None,
+            last_health_check=datetime.now(timezone.utc).isoformat(),
             client_id=mcp_client_id,
             tool_count=len(tools),
         ))
 
-    await db.commit()
+    # Read-only endpoint — do NOT commit (prevents accidental status corruption)
     return ConnectionHealthResponse(connections=conn_items, mcp_connectors=mcp_items)
 
 
