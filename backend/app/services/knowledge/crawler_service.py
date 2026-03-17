@@ -237,19 +237,29 @@ async def discover_urls(source: KnowledgeSource, client: httpx.AsyncClient) -> l
     except Exception:
         pass
 
-    # Fallback: try listing page / index
-    try:
-        resp = await client.get(source.base_url, timeout=10)
-        if resp.status_code == 200:
-            soup = BeautifulSoup(resp.text, "lxml")
-            for a in soup.find_all("a", href=True):
-                href = a["href"]
-                if not href.startswith("http"):
-                    href = source.base_url.rstrip("/") + "/" + href.lstrip("/")
-                if any(re.match(source.base_url + pat.replace("*", ".*"), href) for pat in source.url_patterns):
-                    urls.append(href)
-    except Exception:
-        pass
+    # Fallback: try listing pages (base URL + common listing paths)
+    listing_urls = [source.base_url]
+    # Add common blog tag/category pages for broader discovery
+    if "timdietrich" in source.base_url:
+        listing_urls.extend([
+            f"{source.base_url}/blog/?tag=NetSuite",
+            f"{source.base_url}/blog/?tag=SuiteQL",
+            f"{source.base_url}/blog/?tag=SuiteScript",
+        ])
+
+    for listing_url in listing_urls:
+        try:
+            resp = await client.get(listing_url, timeout=10)
+            if resp.status_code == 200:
+                soup = BeautifulSoup(resp.text, "lxml")
+                for a in soup.find_all("a", href=True):
+                    href = a["href"]
+                    if not href.startswith("http"):
+                        href = source.base_url.rstrip("/") + "/" + href.lstrip("/")
+                    if any(re.match(source.base_url + pat.replace("*", ".*"), href) for pat in source.url_patterns):
+                        urls.append(href)
+        except Exception:
+            pass
 
     return list(dict.fromkeys(urls))[:source.max_pages_per_run]  # dedupe, cap
 

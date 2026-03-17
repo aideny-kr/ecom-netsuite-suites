@@ -30,13 +30,13 @@ SOURCES = [
     ),
     KnowledgeSource(
         name="tim_dietrich_suiteql",
-        base_url="https://timdietrich.me/blog",
+        base_url="https://timdietrich.me",
         url_patterns=[
-            "/netsuite-*",              # All NetSuite posts
-            "/suiteql-*",              # SuiteQL specific posts
-            "/suitescript-*",          # SuiteScript posts
-            "/ai-*netsuite*",          # AI + NetSuite posts
-            "/a-developers-netsuite-*", # Developer journey posts
+            "/blog/netsuite-*",              # All NetSuite posts
+            "/blog/suiteql-*",              # SuiteQL specific posts
+            "/blog/suitescript-*",          # SuiteScript posts
+            "/blog/ai-*netsuite*",          # AI + NetSuite posts
+            "/blog/a-developers-netsuite-*", # Developer journey posts
         ],
         parser="blog",
         priority=1,
