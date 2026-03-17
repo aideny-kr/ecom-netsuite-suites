@@ -242,10 +242,14 @@ async def send_message(
     await db.flush()
 
     async def stream_generator():
+        import asyncio
+
         # Send padding to force Cloudflare Tunnel to start streaming
         yield f": {' ' * 2048}\n\n"
         try:
-            async for chunk in run_chat_turn(
+            # Wrap the chat generator with keepalive heartbeats every 15s
+            # to prevent Cloudflare Tunnel from killing the SSE connection
+            chat_iter = run_chat_turn(
                 db=db,
                 session=session,
                 user_message=body.content,
@@ -254,8 +258,17 @@ async def send_message(
                 user_msg=user_msg,
                 wizard_step=wizard_step,
                 user_timezone=x_timezone,
-            ):
-                yield f"data: {json.dumps(chunk)}\n\n"
+            ).__aiter__()
+
+            while True:
+                try:
+                    chunk = await asyncio.wait_for(chat_iter.__anext__(), timeout=15.0)
+                    yield f"data: {json.dumps(chunk)}\n\n"
+                except asyncio.TimeoutError:
+                    # No data for 15s — send SSE comment as keepalive
+                    yield ": heartbeat\n\n"
+                except StopAsyncIteration:
+                    break
         except ValueError as exc:
             await db.commit()  # persist user message
             logger.warning("Chat configuration error: %s", exc)
