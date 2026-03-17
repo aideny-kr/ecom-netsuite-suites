@@ -55,4 +55,15 @@ SOURCES = [
         max_pages_per_run=20,
         crawl_delay_seconds=2.0,
     ),
+    KnowledgeSource(
+        name="reddit_netsuite",
+        base_url="https://old.reddit.com",
+        url_patterns=[
+            "/r/Netsuite/comments/*",   # All r/Netsuite discussion posts
+        ],
+        parser="blog",
+        priority=2,
+        max_pages_per_run=25,
+        crawl_delay_seconds=2.0,
+    ),
 ]

@@ -246,6 +246,13 @@ async def discover_urls(source: KnowledgeSource, client: httpx.AsyncClient) -> l
             f"{source.base_url}/blog/?tag=SuiteQL",
             f"{source.base_url}/blog/?tag=SuiteScript",
         ])
+    if "reddit" in source.base_url:
+        listing_urls.extend([
+            f"{source.base_url}/r/Netsuite/top/?t=year",
+            f"{source.base_url}/r/Netsuite/search?q=suiteql&restrict_sr=on&sort=top&t=all",
+            f"{source.base_url}/r/Netsuite/search?q=suitescript&restrict_sr=on&sort=top&t=all",
+            f"{source.base_url}/r/Netsuite/search?q=custom+record&restrict_sr=on&sort=top&t=all",
+        ])
 
     for listing_url in listing_urls:
         try:
