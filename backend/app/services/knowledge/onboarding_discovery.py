@@ -126,13 +126,13 @@ async def _discover_transaction_types(access_token: str, account_id: str) -> Pha
     try:
         query = """
         SELECT type, COUNT(*) as cnt,
-               TO_CHAR(MIN(trandate), 'YYYY-MM-DD') as earliest,
-               TO_CHAR(MAX(trandate), 'YYYY-MM-DD') as latest
+               MIN(trandate) as earliest,
+               MAX(trandate) as latest
         FROM transaction
         GROUP BY type
         ORDER BY cnt DESC
         """
-        result = await execute_suiteql_via_rest(access_token, account_id, query, limit=50)
+        result = await execute_suiteql_via_rest(access_token, account_id, query, limit=50, timeout_seconds=60)
         rows = result.get("rows", [])
 
         types = []
@@ -167,17 +167,15 @@ async def _discover_relationships(access_token: str, account_id: str) -> PhaseRe
     t0 = time.monotonic()
     try:
         query = """
-        SELECT parent.type as source_type,
-               child.type as created_type,
-               COUNT(*) as link_count
+        SELECT parent.type, child.type, COUNT(*) as cnt
         FROM transaction child
         JOIN transaction parent ON parent.id = child.createdfrom
         WHERE child.createdfrom IS NOT NULL
         GROUP BY parent.type, child.type
-        ORDER BY link_count DESC
+        ORDER BY cnt DESC
         FETCH FIRST 50 ROWS ONLY
         """
-        result = await execute_suiteql_via_rest(access_token, account_id, query, limit=50)
+        result = await execute_suiteql_via_rest(access_token, account_id, query, limit=50, timeout_seconds=60)
         rows = result.get("rows", [])
 
         relationships = []
@@ -223,7 +221,7 @@ async def _discover_status_codes(
             ORDER BY cnt DESC
             FETCH FIRST 15 ROWS ONLY
             """
-            result = await execute_suiteql_via_rest(access_token, account_id, query, limit=15)
+            result = await execute_suiteql_via_rest(access_token, account_id, query, limit=15, timeout_seconds=60)
             rows = result.get("rows", [])
 
             codes = []
