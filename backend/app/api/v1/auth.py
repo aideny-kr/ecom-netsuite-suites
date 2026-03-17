@@ -181,8 +181,8 @@ async def google_login(
         user.auth_provider = "google"
 
     tokens = {
-        "access_token": create_access_token({"sub": str(user.id)}),
-        "refresh_token": create_refresh_token({"sub": str(user.id)}),
+        "access_token": create_access_token({"sub": str(user.id), "tenant_id": str(user.tenant_id)}),
+        "refresh_token": create_refresh_token({"sub": str(user.id), "tenant_id": str(user.tenant_id)}),
     }
 
     await audit_service.log_event(

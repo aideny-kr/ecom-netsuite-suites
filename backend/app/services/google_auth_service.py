@@ -1,5 +1,6 @@
 """Google OAuth ID token verification."""
 
+import asyncio
 import os
 
 from google.auth.transport import requests as google_requests
@@ -18,7 +19,8 @@ async def verify_google_token(token: str) -> dict:
         raise ValueError("Google Sign-In is not configured (GOOGLE_CLIENT_ID not set).")
 
     try:
-        id_info = google_id_token_lib.verify_oauth2_token(
+        id_info = await asyncio.to_thread(
+            google_id_token_lib.verify_oauth2_token,
             token,
             google_requests.Request(),
             GOOGLE_CLIENT_ID,
