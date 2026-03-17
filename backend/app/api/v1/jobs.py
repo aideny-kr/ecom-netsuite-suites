@@ -61,31 +61,25 @@ async def list_jobs(
     return PaginatedResponse(items=items, total=total, page=page, page_size=page_size, pages=pages)
 
 
-@router.get("/{job_id}", response_model=JobResponse)
-async def get_job(
-    job_id: uuid.UUID,
-    user: Annotated[User, Depends(require_permission("tables.view"))],
-    db: Annotated[AsyncSession, Depends(get_db)],
+@router.get("/schedules")
+async def list_schedules(
+    user: Annotated[User, Depends(require_permission("tenant.manage"))],
 ):
-    result = await db.execute(select(Job).where(Job.id == job_id, Job.tenant_id == user.tenant_id))
-    job = result.scalar_one_or_none()
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
+    """List all Celery Beat schedules."""
+    from app.workers.celery_app import celery_app
 
-    return JobResponse(
-        id=str(job.id),
-        tenant_id=str(job.tenant_id),
-        job_type=job.job_type,
-        status=job.status,
-        correlation_id=job.correlation_id,
-        connection_id=str(job.connection_id) if job.connection_id else None,
-        started_at=job.started_at.isoformat() if job.started_at else None,
-        completed_at=job.completed_at.isoformat() if job.completed_at else None,
-        parameters=job.parameters,
-        result_summary=job.result_summary,
-        error_message=job.error_message,
-        celery_task_id=job.celery_task_id,
-    )
+    schedules = []
+    for name, config in (celery_app.conf.beat_schedule or {}).items():
+        schedule = config.get("schedule")
+        schedule_str = str(schedule) if schedule else "unknown"
+        schedules.append({
+            "name": name,
+            "task": config.get("task", ""),
+            "schedule": schedule_str,
+            "enabled": True,
+        })
+
+    return schedules
 
 
 @router.post("/trigger/{task_name}", status_code=status.HTTP_202_ACCEPTED)
@@ -119,22 +113,28 @@ async def trigger_job(
     return {"task_name": task_name, "celery_task_id": result.id, "status": "queued"}
 
 
-@router.get("/schedules")
-async def list_schedules(
-    user: Annotated[User, Depends(require_permission("tenant.manage"))],
+@router.get("/{job_id}", response_model=JobResponse)
+async def get_job(
+    job_id: uuid.UUID,
+    user: Annotated[User, Depends(require_permission("tables.view"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
 ):
-    """List all Celery Beat schedules."""
-    from app.workers.celery_app import celery_app
+    result = await db.execute(select(Job).where(Job.id == job_id, Job.tenant_id == user.tenant_id))
+    job = result.scalar_one_or_none()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
 
-    schedules = []
-    for name, config in (celery_app.conf.beat_schedule or {}).items():
-        schedule = config.get("schedule")
-        schedule_str = str(schedule) if schedule else "unknown"
-        schedules.append({
-            "name": name,
-            "task": config.get("task", ""),
-            "schedule": schedule_str,
-            "enabled": True,
-        })
-
-    return schedules
+    return JobResponse(
+        id=str(job.id),
+        tenant_id=str(job.tenant_id),
+        job_type=job.job_type,
+        status=job.status,
+        correlation_id=job.correlation_id,
+        connection_id=str(job.connection_id) if job.connection_id else None,
+        started_at=job.started_at.isoformat() if job.started_at else None,
+        completed_at=job.completed_at.isoformat() if job.completed_at else None,
+        parameters=job.parameters,
+        result_summary=job.result_summary,
+        error_message=job.error_message,
+        celery_task_id=job.celery_task_id,
+    )

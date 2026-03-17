@@ -58,6 +58,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { apiClient } from "@/lib/api-client";
 import { useFeature } from "@/hooks/use-features";
 import { TeamSection } from "@/components/settings/team-section";
+import { JobsSection } from "@/components/settings/jobs-section";
 import { NetSuiteConnectionsSection } from "@/components/settings/netsuite-connections-section";
 import { usePermissions } from "@/hooks/use-permissions";
 import { useAuth } from "@/providers/auth-provider";
@@ -2839,6 +2840,9 @@ export default function SettingsPage() {
 
           {/* Team Section */}
           <TeamSection />
+
+          {/* Scheduled Jobs */}
+          <JobsSection />
 
           {/* Connection & integration sections */}
           <NetSuiteConnectionsSection />
