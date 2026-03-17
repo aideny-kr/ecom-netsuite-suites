@@ -173,7 +173,8 @@ function EditableField({
 // ---------------------------------------------------------------------------
 
 function statusColor(status: string, tokenExpired: boolean) {
-  if (tokenExpired) return "bg-yellow-500";
+  // Status takes priority — if active, it's green regardless of token_expired
+  // (access tokens expire hourly but auto-refresh on use)
   switch (status) {
     case "active":
       return "bg-green-500";
@@ -185,12 +186,12 @@ function statusColor(status: string, tokenExpired: boolean) {
     case "error":
       return "bg-red-500 animate-pulse";
     default:
+      if (tokenExpired) return "bg-yellow-500";
       return "bg-muted-foreground/40";
   }
 }
 
 function statusLabel(status: string, tokenExpired: boolean) {
-  if (tokenExpired) return "Token Expired";
   switch (status) {
     case "active":
       return "Active";
