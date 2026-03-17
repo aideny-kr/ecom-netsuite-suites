@@ -348,6 +348,7 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 7. **Celery async boilerplate** — `asyncio.new_event_loop()` pattern repeated in 8+ tasks. Should extract `run_async()` helper.
 8. **Team section MAX_SEATS hardcoded** — Currently `20`, should come from entitlement API.
 9. **CI failures** — `test_security_hardening.py` SSL tests fail in CI. Not blocking but noisy.
+10. **OAuth/MCP tokens expire frequently** — Both REST API and MCP OAuth tokens expire and don't auto-refresh reliably. `get_valid_token()` refreshes 60s before expiry, but if the refresh token itself expires (NetSuite default: 7 days), the connection goes dead silently. Symptoms: chat queries fail, health check shows `needs_reauth`. No proactive notification to admin. Fix needed: (a) background token refresh job that runs before expiry, (b) alert/notification when a connection goes stale, (c) consider longer-lived refresh tokens via NetSuite integration record settings.
 
 ## Roadmap
 
@@ -357,6 +358,7 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 - [ ] Billing/payment gateway (Stripe — model TBD)
 - [ ] Fix OAuth scope for discovery (re-auth with `rest_webservices` or wire MCP path)
 - [ ] Google OAuth consent verification (remove "unverified app" warning)
+- [ ] **Proactive token refresh** — background Celery job that refreshes OAuth tokens before expiry + alerts admin when refresh fails
 
 ### Short-term (quality + UX)
 - [ ] Settings: read-only team list for non-admins
