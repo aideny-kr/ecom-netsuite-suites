@@ -4,8 +4,12 @@ import asyncio
 import hashlib
 import uuid
 
+import structlog
+
 from app.workers.base_task import InstrumentedTask
 from app.workers.celery_app import celery_app
+
+logger = structlog.get_logger()
 
 # System-level knowledge uses a fixed tenant ID (not tenant-scoped)
 SYSTEM_TENANT_ID = uuid.UUID("00000000-0000-0000-0000-000000000000")
@@ -56,57 +60,59 @@ def auto_learning_task(self):
 
                         with DDGS() as ddgs:
                             search_results = list(ddgs.text(search_query, max_results=3))
-                    except Exception:
+                    except Exception as e:
+                        logger.warning("auto_learning.search_failed", query=search_query, error=str(e))
                         search_results = []
 
-                    for sr in search_results[:3]:
-                        url = sr.get("href") or sr.get("link", "")
-                        if not url:
-                            continue
+                    async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+                        for sr in search_results[:3]:
+                            url = sr.get("href") or sr.get("link", "")
+                            if not url:
+                                continue
 
-                        try:
-                            async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+                            try:
                                 resp = await client.get(url)
                                 if resp.status_code != 200:
                                     continue
 
-                            parsed = parse_blog(resp.text)
-                            if not parsed.body_text or len(parsed.body_text) < 100:
+                                parsed = parse_blog(resp.text)
+                                if not parsed.body_text or len(parsed.body_text) < 100:
+                                    continue
+
+                                chunks = chunk_parsed_content(parsed, "auto_learned", url)
+                                if not chunks:
+                                    continue
+
+                                texts = [c.content for c in chunks]
+                                embeddings = await embed_texts(texts)
+
+                                topic_slug = gap.topic[:40].replace(" ", "_")
+                                url_hash = hashlib.sha256(url.encode()).hexdigest()[:12]
+                                source_path = f"auto_learned/{topic_slug}/{url_hash}"
+
+                                for i, chunk in enumerate(chunks):
+                                    embedding = embeddings[i] if embeddings and i < len(embeddings) else None
+                                    doc_chunk = DocChunk(
+                                        tenant_id=SYSTEM_TENANT_ID,
+                                        source_path=source_path,
+                                        title=parsed.title,
+                                        chunk_index=i,
+                                        content=chunk.content,
+                                        token_count=chunk.token_count,
+                                        embedding=embedding if embedding else None,
+                                        metadata_={
+                                            **chunk.metadata,
+                                            "source_type": "auto_learned",
+                                            "gap_topic": gap.topic,
+                                            "gap_score": gap.gap_score,
+                                        },
+                                    )
+                                    db.add(doc_chunk)
+                                    total_chunks += 1
+
+                            except Exception as e:
+                                logger.warning("auto_learning.url_failed", url=url, error=str(e))
                                 continue
-
-                            chunks = chunk_parsed_content(parsed, "auto_learned", url)
-                            if not chunks:
-                                continue
-
-                            texts = [c.content for c in chunks]
-                            embeddings = await embed_texts(texts)
-
-                            topic_slug = gap.topic[:40].replace(" ", "_")
-                            url_hash = hashlib.md5(url.encode()).hexdigest()[:12]
-                            source_path = f"auto_learned/{topic_slug}/{url_hash}"
-
-                            for i, chunk in enumerate(chunks):
-                                embedding = embeddings[i] if embeddings and i < len(embeddings) else None
-                                doc_chunk = DocChunk(
-                                    tenant_id=SYSTEM_TENANT_ID,
-                                    source_path=source_path,
-                                    title=parsed.title,
-                                    chunk_index=i,
-                                    content=chunk.content,
-                                    token_count=chunk.token_count,
-                                    embedding=embedding if embedding else None,
-                                    metadata_={
-                                        **chunk.metadata,
-                                        "source_type": "auto_learned",
-                                        "gap_topic": gap.topic,
-                                        "gap_score": gap.gap_score,
-                                    },
-                                )
-                                db.add(doc_chunk)
-                                total_chunks += 1
-
-                        except Exception:
-                            continue
 
                     topics_filled.append(gap.topic)
 
@@ -145,7 +151,10 @@ async def _refresh_stale_profiles(db):
     cutoff = datetime.now(timezone.utc) - timedelta(days=30)
 
     result = await db.execute(
-        select(TenantConfig).where(TenantConfig.onboarding_profile.isnot(None))
+        select(TenantConfig)
+        .where(TenantConfig.onboarding_profile.isnot(None))
+        .order_by(TenantConfig.updated_at.asc())
+        .limit(10)
     )
     configs = result.scalars().all()
 

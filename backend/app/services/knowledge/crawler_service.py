@@ -58,17 +58,17 @@ def parse_oracle_help(html: str) -> ParsedContent:
     """Parse Oracle NetSuite Help Center pages."""
     soup = BeautifulSoup(html, "lxml")
 
-    # Remove nav, header, footer, scripts
-    for tag in soup.find_all(["nav", "header", "footer", "script", "style", "aside"]):
-        tag.decompose()
-
     # Extract title
     title_tag = soup.find("h1") or soup.find("title")
     title = title_tag.get_text(strip=True) if title_tag else "Untitled"
 
-    # Extract breadcrumb
+    # Extract breadcrumb BEFORE decomposing nav tags
     breadcrumb_tag = soup.find("nav", class_="breadcrumb") or soup.find("ol", class_="breadcrumb")
     breadcrumb = breadcrumb_tag.get_text(" > ", strip=True) if breadcrumb_tag else None
+
+    # Remove nav, header, footer, scripts
+    for tag in soup.find_all(["nav", "header", "footer", "script", "style", "aside"]):
+        tag.decompose()
 
     # Extract main content
     main = (
@@ -234,8 +234,8 @@ async def discover_urls(source: KnowledgeSource, client: httpx.AsyncClient) -> l
                     urls.append(url)
             if urls:
                 return urls[:source.max_pages_per_run]
-    except Exception:
-        pass
+    except Exception as e:
+        logger.debug("crawler.url_discovery_failed", url=sitemap_url, error=str(e))
 
     # Fallback: try listing pages (base URL + common listing paths)
     listing_urls = [source.base_url]
@@ -265,8 +265,8 @@ async def discover_urls(source: KnowledgeSource, client: httpx.AsyncClient) -> l
                         href = source.base_url.rstrip("/") + "/" + href.lstrip("/")
                     if any(re.match(source.base_url + pat.replace("*", ".*"), href) for pat in source.url_patterns):
                         urls.append(href)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug("crawler.url_discovery_failed", url=listing_url, error=str(e))
 
     return list(dict.fromkeys(urls))[:source.max_pages_per_run]  # dedupe, cap
 
@@ -289,7 +289,7 @@ async def crawl_source(source: KnowledgeSource, db: AsyncSession) -> CrawlResult
         for url in urls:
             try:
                 # Check if already crawled (by source_path)
-                url_hash = hashlib.md5(url.encode()).hexdigest()[:12]
+                url_hash = hashlib.sha256(url.encode()).hexdigest()[:12]
                 source_path = f"crawled/{source.name}/{url_hash}"
 
                 existing = await db.execute(
@@ -303,7 +303,8 @@ async def crawl_source(source: KnowledgeSource, db: AsyncSession) -> CrawlResult
                 await asyncio.sleep(source.crawl_delay_seconds)
                 resp = await client.get(url)
                 if resp.status_code != 200:
-                    result.errors.append(f"{url}: HTTP {resp.status_code}")
+                    if len(result.errors) < 20:
+                        result.errors.append(f"{url}: HTTP {resp.status_code}")
                     continue
 
                 result.pages_crawled += 1
@@ -362,7 +363,8 @@ async def crawl_source(source: KnowledgeSource, db: AsyncSession) -> CrawlResult
                 await db.flush()
 
             except Exception as e:
-                result.errors.append(f"{url}: {str(e)[:100]}")
+                if len(result.errors) < 20:
+                    result.errors.append(f"{url}: {str(e)[:100]}")
                 logger.warning("crawler.page_error", url=url, error=str(e))
 
     await db.commit()

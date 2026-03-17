@@ -1,7 +1,7 @@
 "use client";
 
 import { usePermissions } from "@/hooks/use-permissions";
-import { useJobHistory, useJobSchedules, useTriggerJob } from "@/hooks/use-jobs";
+import { useJobHistory, useTriggerJob } from "@/hooks/use-jobs";
 import type { JobHistoryItem } from "@/hooks/use-jobs";
 import { useToast } from "@/hooks/use-toast";
 import { Button } from "@/components/ui/button";
@@ -174,7 +174,6 @@ function JobCard({
 export function JobsSection() {
   const { isAdmin } = usePermissions();
   const { data: jobsData } = useJobHistory(10);
-  useJobSchedules();
 
   if (!isAdmin) return null;
 

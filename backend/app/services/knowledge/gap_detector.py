@@ -104,8 +104,9 @@ async def detect_knowledge_gaps(
 
         if topic not in gaps:
             gaps[topic] = KnowledgeGap(topic=topic)
-        gaps[topic].record_types.extend(record_types)
-        gaps[topic].failed_queries.append(user_question.content[:200])
+        gaps[topic].record_types = (gaps[topic].record_types + record_types)[:10]
+        if len(gaps[topic].failed_queries) < 5:
+            gaps[topic].failed_queries.append(user_question.content[:200])
         gaps[topic].gap_score += 2.0  # thumbs-down is strong signal
         gaps[topic].message_count += 1
 
@@ -151,8 +152,9 @@ async def detect_knowledge_gaps(
 
         if topic not in gaps:
             gaps[topic] = KnowledgeGap(topic=topic)
-        gaps[topic].record_types.extend(record_types)
-        gaps[topic].failed_queries.append(user_question.content[:200])
+        gaps[topic].record_types = (gaps[topic].record_types + record_types)[:10]
+        if len(gaps[topic].failed_queries) < 5:
+            gaps[topic].failed_queries.append(user_question.content[:200])
         gaps[topic].gap_score += 1.0  # tool error is moderate signal
         gaps[topic].message_count += 1
 
@@ -160,9 +162,10 @@ async def detect_knowledge_gaps(
     filtered_gaps = []
     for gap in sorted(gaps.values(), key=lambda g: g.gap_score, reverse=True)[:max_gaps * 2]:
         # Search for existing coverage
+        topic_escaped = gap.topic[:30].replace("%", "\\%").replace("_", "\\_")
         coverage = await db.execute(
             select(func.count(DocChunk.id))
-            .where(DocChunk.content.ilike(f"%{gap.topic[:30]}%"))
+            .where(DocChunk.content.ilike(f"%{topic_escaped}%"))
         )
         chunk_count = coverage.scalar() or 0
         if chunk_count < 2:

@@ -1,5 +1,6 @@
 """Tenant Onboarding Deep Discovery — eliminates cold start for new tenants."""
 
+import re
 import uuid
 import time
 from dataclasses import dataclass, field
@@ -212,6 +213,10 @@ async def _discover_status_codes(
     status_map: dict[str, list[dict]] = {}
 
     for txn_type in transaction_types:
+        # Validate txn_type to prevent SQL injection
+        if not re.match(r'^[A-Za-z]+$', txn_type):
+            continue
+
         try:
             query = f"""
             SELECT status, BUILTIN.DF(status) as status_display, COUNT(*) as cnt
