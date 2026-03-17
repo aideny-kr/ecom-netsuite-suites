@@ -1,27 +1,64 @@
 "use client";
 
+import { useMemo } from "react";
+import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
+import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
+
 interface CodeViewerProps {
   content: string;
   filePath: string;
 }
 
+const EXT_TO_LANGUAGE: Record<string, string> = {
+  ".js": "javascript",
+  ".ts": "typescript",
+  ".tsx": "tsx",
+  ".jsx": "jsx",
+  ".json": "json",
+  ".xml": "xml",
+  ".html": "html",
+  ".css": "css",
+  ".sql": "sql",
+  ".py": "python",
+  ".md": "markdown",
+  ".yml": "yaml",
+  ".yaml": "yaml",
+  ".sh": "bash",
+  ".txt": "text",
+};
+
+function getLanguage(filePath: string): string {
+  const ext = filePath.slice(filePath.lastIndexOf(".")).toLowerCase();
+  return EXT_TO_LANGUAGE[ext] || "javascript";
+}
+
 export function CodeViewer({ content, filePath }: CodeViewerProps) {
-  const lines = content.split("\n");
+  const language = useMemo(() => getLanguage(filePath), [filePath]);
 
   return (
-    <div className="h-full overflow-auto bg-[#1e1e1e] text-[13px] font-mono">
-      <div className="p-4">
-        {lines.map((line, i) => (
-          <div key={i} className="flex">
-            <span className="inline-block w-12 shrink-0 select-none pr-4 text-right text-[#858585]">
-              {i + 1}
-            </span>
-            <span className="text-[#d4d4d4] whitespace-pre-wrap break-all">
-              {line || "\n"}
-            </span>
-          </div>
-        ))}
-      </div>
+    <div className="h-full overflow-auto">
+      <SyntaxHighlighter
+        language={language}
+        style={oneDark}
+        showLineNumbers
+        wrapLongLines
+        customStyle={{
+          margin: 0,
+          padding: "1rem",
+          fontSize: "13px",
+          lineHeight: "1.6",
+          background: "#1e1e1e",
+          minHeight: "100%",
+        }}
+        lineNumberStyle={{
+          minWidth: "3em",
+          paddingRight: "1em",
+          color: "#858585",
+          userSelect: "none",
+        }}
+      >
+        {content}
+      </SyntaxHighlighter>
     </div>
   );
 }
