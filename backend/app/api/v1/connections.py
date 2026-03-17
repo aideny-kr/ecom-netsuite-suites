@@ -87,26 +87,9 @@ async def check_connection_health(
                 expires_at = creds.get("expires_at", 0)
                 client_id = creds.get("client_id")
                 if expires_at and now > expires_at:
-                    # Access token expired — try to refresh before marking as needs_reauth
-                    from app.services.netsuite_oauth_service import get_valid_token
-                    try:
-                        refreshed = await get_valid_token(db, conn)
-                        if refreshed:
-                            # Refresh succeeded — token is valid, re-read expires_at
-                            token_expired = False
-                            if conn.status == "needs_reauth":
-                                conn.status = "active"
-                                conn.error_reason = None
-                        else:
-                            token_expired = True
-                            if conn.status == "active":
-                                conn.status = "needs_reauth"
-                                conn.error_reason = "OAuth token refresh failed"
-                    except Exception:
-                        token_expired = True
-                        if conn.status == "active":
-                            conn.status = "needs_reauth"
-                            conn.error_reason = "OAuth token refresh failed"
+                    # Access token expired — this is normal (1hr lifetime).
+                    # Don't flip status — get_valid_token() auto-refreshes on next use.
+                    token_expired = True
             except Exception:
                 pass
         restlet_url = (conn.metadata_json or {}).get("restlet_url") if conn.metadata_json else None
