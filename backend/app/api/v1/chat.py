@@ -244,6 +244,10 @@ async def send_message(
     async def stream_generator():
         import asyncio
 
+        # Track streamed text so we can save a partial message on disconnect
+        partial_text_parts: list[str] = []
+        stream_completed = False
+
         # Send padding to force Cloudflare Tunnel to start streaming
         yield f": {' ' * 2048}\n\n"
         try:
@@ -263,11 +267,15 @@ async def send_message(
             while True:
                 try:
                     chunk = await asyncio.wait_for(chat_iter.__anext__(), timeout=15.0)
+                    # Track text chunks for partial save on disconnect
+                    if isinstance(chunk, dict) and chunk.get("type") == "text":
+                        partial_text_parts.append(chunk.get("content", ""))
                     yield f"data: {json.dumps(chunk)}\n\n"
                 except asyncio.TimeoutError:
                     # No data for 15s — send SSE comment as keepalive
                     yield ": heartbeat\n\n"
                 except StopAsyncIteration:
+                    stream_completed = True
                     break
         except ValueError as exc:
             await db.commit()  # persist user message
@@ -281,6 +289,24 @@ async def send_message(
             await db.commit()
             logger.exception("Chat pipeline error: %s", exc)
             yield f"data: {json.dumps({'type': 'error', 'error': 'Chat service temporarily unavailable. Please try again.'})}\n\n"
+        finally:
+            # Save partial assistant message if stream was interrupted (user navigated away)
+            if not stream_completed and partial_text_parts:
+                try:
+                    partial_content = "".join(partial_text_parts).strip()
+                    if partial_content and len(partial_content) > 10:
+                        partial_msg = ChatMessage(
+                            tenant_id=user.tenant_id,
+                            session_id=session.id,
+                            role="assistant",
+                            content=partial_content + "\n\n*(Response interrupted)*",
+                            created_at=datetime.now(timezone.utc),
+                        )
+                        db.add(partial_msg)
+                        await db.commit()
+                        logger.info("Saved partial assistant message on disconnect (%d chars)", len(partial_content))
+                except Exception:
+                    logger.warning("Failed to save partial message on disconnect", exc_info=True)
 
     return StreamingResponse(
         stream_generator(),
