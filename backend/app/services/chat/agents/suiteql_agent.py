@@ -75,35 +75,32 @@ Before writing ANY query, reason through these steps in a <reasoning> block:
 <suiteql_dialect_rules>
 SuiteQL is Oracle-based with NetSuite-specific behaviors:
 
-PAGINATION & THE "LATEST" RULE — CRITICAL:
-- ALWAYS use `ORDER BY ... FETCH FIRST N ROWS ONLY` for "latest", "top N", or "recent" queries. This is the ONLY correct way.
-- NEVER use `WHERE ROWNUM <= N` with `ORDER BY` — ROWNUM is evaluated BEFORE sorting, so you get N random rows sorted, NOT the latest N rows.
-- ROWNUM is only safe for unordered result limiting (e.g., `SELECT * FROM customer WHERE ROWNUM <= 100`).
-- DO NOT use LIMIT — it is not supported.
+# Prevents: wrong "latest N" results — ROWNUM filters before ORDER BY (2025)
+PAGINATION:
+- `FETCH FIRST N ROWS ONLY` for "latest"/"top N". NEVER `ROWNUM` with `ORDER BY`. `LIMIT` not supported.
 
 COLUMN NAMING:
 - Primary key is `id` (NOT `internalid`).
 - `id` is sequential — higher id = more recently created. Use `ORDER BY t.id DESC` for "latest" queries. This is more reliable than date columns.
 - Transaction date is `trandate`. Created date is `createddate`. For "latest order" queries, prefer `ORDER BY t.id DESC`.
 
+# Prevents: 0-row results from wrong date functions (recurring since 2025)
 DATE FUNCTIONS — CRITICAL:
-- For "today": prefer `BUILTIN.RELATIVE_RANGES('TODAY', 'START')` — it respects company timezone and matches saved search date boundaries.
-- Fallback for "today": `TRUNC(SYSDATE)` works but uses server time (Pacific), which may differ from company timezone by hours.
-- For "yesterday": use `TRUNC(SYSDATE) - 1`.
-- For date ranges: `WHERE t.trandate >= TRUNC(SYSDATE) - 7` (last 7 days)
-- For specific dates: `WHERE t.trandate = TO_DATE('2026-01-15', 'YYYY-MM-DD')`
-- For matching saved search periods: use `BUILTIN.RELATIVE_RANGES('THIS_MONTH', 'START')` / `BUILTIN.RELATIVE_RANGES('THIS_MONTH', 'END')`.
-- NEVER use `BUILTIN.DATE(SYSDATE)` — it does NOT work for date comparisons and returns 0 rows.
-- NEVER use `CURRENT_DATE` — not reliably supported in SuiteQL.
+- "today": `BUILTIN.RELATIVE_RANGES('TODAY', 'START')` (preferred) or `TRUNC(SYSDATE)` (fallback, server time).
+- "yesterday": `TRUNC(SYSDATE) - 1`.
+- Date ranges: `WHERE t.trandate >= TRUNC(SYSDATE) - 7`
+- Specific dates: `WHERE t.trandate = TO_DATE('2026-01-15', 'YYYY-MM-DD')`
+- Saved search periods: `BUILTIN.RELATIVE_RANGES('THIS_MONTH', 'START')` / `BUILTIN.RELATIVE_RANGES('THIS_MONTH', 'END')`.
+- NEVER use `BUILTIN.DATE(SYSDATE)` — returns 0 rows.
+- NEVER use `CURRENT_DATE` — not supported in SuiteQL.
 
 TEXT RESOLUTION:
 - For List/Record fields, use `BUILTIN.DF(field_name)` to return the display text.
 
+# Prevents: filtering custom list fields by string instead of ID (2025)
 CUSTOM LIST FIELDS:
-- Fields with type SELECT store integer IDs referencing custom lists.
-- Check the Custom List Values section in the tenant schema for ID → name mappings.
-- To filter: use `WHERE field = <id>` (fastest) or `BUILTIN.DF(field) = 'Value Name'` (readable).
-- The field-to-list linkage is shown as `(SELECT → customlist_name)` in the field listing.
+- SELECT-type fields store integer IDs. Filter: `WHERE field = <id>` (fastest) or `BUILTIN.DF(field) = 'Value Name'` (readable).
+- ID → name mappings in tenant schema Custom List Values. Linkage shown as `(SELECT → customlist_name)`.
 
 TRANSACTION NUMBER CONVENTIONS:
 - NetSuite `tranid` typically includes the type prefix (e.g., "RMA61214", "SO865732", "PO12345").
@@ -164,14 +161,8 @@ MULTI-CURRENCY — CRITICAL:
 - For line-level amounts in base currency: Use `SUM(tl.amount) * -1` (base currency, negated for revenue).
 - For line-level amounts in transaction currency: Use `SUM(tl.foreignamount) * -1` (transaction currency, negated for revenue).
 
-SELECT COLUMN ORDER — for readable table output, order columns logically:
-1. Identifiers first: PO/SO number (tranid), entity/vendor name
-2. Item details: item name, itemid, description
-3. Dates grouped together: order date, due date, expected date
-4. Status fields: status, approval status
-5. Quantities grouped: ordered, received, billed, pending
-6. Amounts grouped: rate, amount, total
-7. Dimensions last: location, subsidiary, department, class
+SELECT COLUMN ORDER — for readable output:
+- Identifiers (tranid, entity) → items → dates → status → quantities → amounts → dimensions (location, subsidiary, class).
 </suiteql_dialect_rules>
 
 <common_queries>

@@ -74,6 +74,80 @@ _CHITCHAT_RE = re.compile(
 )
 
 
+# ---------------------------------------------------------------------------
+# Smart context injection — classify how much context each query needs
+# ---------------------------------------------------------------------------
+
+class ContextNeed:
+    """How much dynamic context to inject into the agent prompt."""
+    FULL = "full"           # Custom fields, complex joins — inject everything
+    DATA = "data"           # Standard tables, no custom fields — skip onboarding profile
+    DOCS = "docs"           # Documentation question — skip schemas, inject RAG only
+    WORKSPACE = "workspace" # Script question — skip all NetSuite schemas
+    FINANCIAL = "financial" # Financial report — inject only vernacular + onboarding
+
+
+_WORKSPACE_RE = re.compile(
+    r"\b(?:scripts?|deploy(?:ment)?s?|triggers?|automation|scheduled|user\s*events?|"
+    r"suitelets?|restlets?|map\s*reduce|client\s*scripts?|mass\s*updates?|portlets?|"
+    r"bundles?|sdf|customscript\w*|fix\s+(?:the|my|this)\s+\w*script|write\s+a?\s*(?:suite)?script|"
+    r"workflow\s*action\s*scripts?)\b",
+    re.IGNORECASE,
+)
+
+_FINANCIAL_RE = re.compile(
+    r"\b(?:p\s*&?\s*l|profit\s*(?:and|&)\s*loss|income\s*statement|balance\s*sheet|"
+    r"trial\s*balance|aging|financial\s*(?:report|statement))\b",
+    re.IGNORECASE,
+)
+
+_DOCS_RE = re.compile(
+    r"\b(?:how\s+(?:do|does|can|should|to)|what\s+is|what\s+are|explain|documentation|"
+    r"workflow|error\s+(?:message|code)|tutorial)\b",
+    re.IGNORECASE,
+)
+
+_DATA_KEYWORDS = re.compile(
+    r"(?:\b(?:show|list|find|get|pull|fetch|look\s*up|search|query|"
+    r"how\s+many|total|count|sum|average|revenue|sales|orders?|"
+    r"inventory|customers?|vendors?|invoices?|purchase\s*orders?)\b"
+    r"|(?:^|\s)(?:RMA|PO|SO|INV|VB|WO|TO|IF|IR|#)\d)",
+    re.IGNORECASE,
+)
+
+
+def _classify_context_need(user_message: str, is_financial: bool = False) -> str:
+    """Classify how much dynamic context a query needs.
+
+    Returns one of ContextNeed.FULL/DATA/DOCS/WORKSPACE/FINANCIAL.
+    When uncertain, returns FULL — never risk under-injecting.
+    """
+    if is_financial:
+        return ContextNeed.FINANCIAL
+
+    msg = user_message.strip()
+
+    # Workspace: script/deploy/SuiteScript keywords
+    if _WORKSPACE_RE.search(msg):
+        # But if it also has data keywords, it might be mixed — use FULL
+        if _DATA_KEYWORDS.search(msg):
+            return ContextNeed.FULL
+        return ContextNeed.WORKSPACE
+
+    # Docs: how-to/explain/documentation without data keywords
+    if _DOCS_RE.search(msg):
+        if _DATA_KEYWORDS.search(msg):
+            return ContextNeed.FULL  # Mixed intent — safe fallback
+        return ContextNeed.DOCS
+
+    # Data: most common path — orders, inventory, revenue, etc.
+    if _DATA_KEYWORDS.search(msg):
+        return ContextNeed.DATA
+
+    # Uncertain — always default to FULL
+    return ContextNeed.FULL
+
+
 def _sanitize_assistant_text(text: str) -> str:
     """Remove leaked tool-call XML, tool tags, and reasoning blocks from assistant response text."""
     text = _TOOL_XML_RE.sub("", text)
@@ -765,68 +839,112 @@ async def run_chat_turn(
 
                     dk_top_k = 5 if is_financial else None  # default from settings
 
-                    # Assemble context concurrently (entity resolution + domain knowledge + proven patterns)
+                    # ── Smart context injection: classify how much context this query needs ──
+                    context_need = _classify_context_need(sanitized_input, is_financial=is_financial)
+                    print(f"[ORCHESTRATOR] Context need: {context_need}", flush=True)
+
+                    # Injection matrix:
+                    #   Block              FULL  DATA  DOCS  WORKSPACE  FINANCIAL
+                    #   tenant_schema       ✅    ✅    ❌      ❌        ❌
+                    #   table_schemas       ✅    ✅    ❌      ❌        ❌
+                    #   tenant_vernacular   ✅    ✅    ❌      ❌        ✅
+                    #   domain_knowledge    ✅    ✅    ✅      ❌        ❌
+                    #   onboarding_profile  ✅    ❌    ❌      ❌        ✅
+                    #   proven_patterns     ✅    ✅    ❌      ❌        ❌
+
+                    _need_vernacular = context_need in (ContextNeed.FULL, ContextNeed.DATA, ContextNeed.FINANCIAL)
+                    _need_domain_knowledge = context_need in (ContextNeed.FULL, ContextNeed.DATA, ContextNeed.DOCS)
+                    _need_patterns = context_need in (ContextNeed.FULL, ContextNeed.DATA)
+                    _need_schemas = context_need in (ContextNeed.FULL, ContextNeed.DATA)
+                    _need_onboarding = context_need in (ContextNeed.FULL, ContextNeed.FINANCIAL)
+
+                    # Assemble context concurrently (only fetch what we need)
                     from app.services.chat.domain_knowledge import retrieve_domain_knowledge
                     from app.services.chat.tenant_resolver import TenantEntityResolver
                     from app.services.query_pattern_service import retrieve_similar_patterns
 
-                    vernacular_result, dk_result, patterns_result = await asyncio.gather(
-                        TenantEntityResolver.resolve_entities(
-                            user_message=sanitized_input,
-                            tenant_id=tenant_id,
-                            db=db,
-                            adapter=specialist_adapter,
-                            model=settings.MULTI_AGENT_SPECIALIST_MODEL,
-                        ),
-                        retrieve_domain_knowledge(db=db, query_text=sanitized_input, top_k=dk_top_k),
-                        retrieve_similar_patterns(db, tenant_id, sanitized_input),
-                        return_exceptions=True,
-                    )
+                    # Build the list of concurrent tasks dynamically
+                    _gather_tasks = []
+                    _gather_keys = []
+
+                    if _need_vernacular:
+                        _gather_tasks.append(
+                            TenantEntityResolver.resolve_entities(
+                                user_message=sanitized_input,
+                                tenant_id=tenant_id,
+                                db=db,
+                                adapter=specialist_adapter,
+                                model=settings.MULTI_AGENT_SPECIALIST_MODEL,
+                            )
+                        )
+                        _gather_keys.append("vernacular")
+                    if _need_domain_knowledge:
+                        _gather_tasks.append(
+                            retrieve_domain_knowledge(db=db, query_text=sanitized_input, top_k=dk_top_k)
+                        )
+                        _gather_keys.append("dk")
+                    if _need_patterns:
+                        _gather_tasks.append(
+                            retrieve_similar_patterns(db, tenant_id, sanitized_input)
+                        )
+                        _gather_keys.append("patterns")
+
+                    _gather_results = await asyncio.gather(*_gather_tasks, return_exceptions=True)
+                    _results = dict(zip(_gather_keys, _gather_results))
+
+                    vernacular_result = _results.get("vernacular")
+                    dk_result = _results.get("dk")
+                    patterns_result = _results.get("patterns")
 
                     context: dict[str, Any] = {}
-                    if isinstance(vernacular_result, Exception):
-                        logger.warning("unified_agent.entity_resolution_failed", exc_info=vernacular_result)
-                    elif vernacular_result:
-                        context["tenant_vernacular"] = vernacular_result
-                        print(f"[UNIFIED] Vernacular injected ({len(vernacular_result)} chars)", flush=True)
-                        # Extract entity resolution confidence from XML
-                        import re as _re
 
-                        conf_scores = [
-                            float(s)
-                            for s in _re.findall(
-                                r"<confidence_score>([\d.]+)</confidence_score>",
-                                vernacular_result,
-                            )
-                        ]
-                        if conf_scores:
-                            context["entity_resolution_confidence"] = max(conf_scores)
+                    # tenant_vernacular (FULL, DATA, FINANCIAL)
+                    if vernacular_result is not None:
+                        if isinstance(vernacular_result, Exception):
+                            logger.warning("unified_agent.entity_resolution_failed", exc_info=vernacular_result)
+                        elif vernacular_result:
+                            context["tenant_vernacular"] = vernacular_result
+                            print(f"[UNIFIED] Vernacular injected ({len(vernacular_result)} chars)", flush=True)
+                            import re as _re
+                            conf_scores = [
+                                float(s)
+                                for s in _re.findall(
+                                    r"<confidence_score>([\d.]+)</confidence_score>",
+                                    vernacular_result,
+                                )
+                            ]
+                            if conf_scores:
+                                context["entity_resolution_confidence"] = max(conf_scores)
 
-                    if is_financial:
-                        context["domain_knowledge"] = []
-                    elif isinstance(dk_result, Exception):
-                        logger.warning("unified_agent.domain_knowledge_failed", exc_info=dk_result)
-                    elif dk_result:
-                        context["domain_knowledge"] = [r["raw_text"] for r in dk_result]
-                        print(f"[UNIFIED] Domain knowledge injected ({len(dk_result)} chunks)", flush=True)
-                        sims = [r["similarity"] for r in dk_result if r.get("similarity")]
-                        if sims:
-                            context["domain_knowledge_similarity"] = sum(sims) / len(sims)
+                    # domain_knowledge (FULL, DATA, DOCS — skip for FINANCIAL & WORKSPACE)
+                    if dk_result is not None:
+                        if is_financial:
+                            context["domain_knowledge"] = []
+                        elif isinstance(dk_result, Exception):
+                            logger.warning("unified_agent.domain_knowledge_failed", exc_info=dk_result)
+                        elif dk_result:
+                            context["domain_knowledge"] = [r["raw_text"] for r in dk_result]
+                            print(f"[UNIFIED] Domain knowledge injected ({len(dk_result)} chunks)", flush=True)
+                            sims = [r["similarity"] for r in dk_result if r.get("similarity")]
+                            if sims:
+                                context["domain_knowledge_similarity"] = sum(sims) / len(sims)
 
-                    if isinstance(patterns_result, Exception):
-                        logger.warning("unified_agent.proven_patterns_failed", exc_info=patterns_result)
-                    elif patterns_result:
-                        context["proven_patterns"] = patterns_result
-                        print(f"[UNIFIED] Proven patterns injected ({len(patterns_result)} patterns)", flush=True)
-                        context["matched_pattern_similarity"] = patterns_result[0].get("similarity", 0.0)
-                        context["matched_pattern_success_count"] = patterns_result[0].get("success_count", 0)
+                    # proven_patterns (FULL, DATA — skip for DOCS, WORKSPACE, FINANCIAL)
+                    if patterns_result is not None:
+                        if isinstance(patterns_result, Exception):
+                            logger.warning("unified_agent.proven_patterns_failed", exc_info=patterns_result)
+                        elif patterns_result:
+                            context["proven_patterns"] = patterns_result
+                            print(f"[UNIFIED] Proven patterns injected ({len(patterns_result)} patterns)", flush=True)
+                            context["matched_pattern_similarity"] = patterns_result[0].get("similarity", 0.0)
+                            context["matched_pattern_success_count"] = patterns_result[0].get("success_count", 0)
 
                     context["user_timezone"] = user_timezone
                     context["importance_tier"] = importance_tier.value
 
-                    # Select relevant table schemas and inject into context (skip for financial)
-                    if is_financial:
-                        print("[ORCHESTRATOR] Skipping schema injection for financial query", flush=True)
+                    # table_schemas (FULL, DATA — skip for DOCS, WORKSPACE, FINANCIAL)
+                    if not _need_schemas:
+                        print(f"[ORCHESTRATOR] Skipping schema injection for {context_need} query", flush=True)
                     else:
                         try:
                             from app.services.schema_context_selector import select_relevant_schemas
@@ -859,66 +977,69 @@ async def run_chat_turn(
                         except Exception:
                             logger.warning("orchestrator.schema_injection_failed", exc_info=True)
 
-                    # Inject onboarding profile if available
-                    try:
-                        from app.models.tenant import TenantConfig as _TC
+                    # onboarding_profile (FULL, FINANCIAL — skip for DATA, DOCS, WORKSPACE)
+                    if not _need_onboarding:
+                        print(f"[ORCHESTRATOR] Skipping onboarding profile for {context_need} query", flush=True)
+                    else:
+                        try:
+                            from app.models.tenant import TenantConfig as _TC
 
-                        _op_result = await db.execute(
-                            sa_select(_TC.onboarding_profile).where(_TC.tenant_id == tenant_id)
-                        )
-                        _onboarding_profile = _op_result.scalar_one_or_none()
-                        if _onboarding_profile and isinstance(_onboarding_profile, dict):
-                            profile_parts: list[str] = []
+                            _op_result = await db.execute(
+                                sa_select(_TC.onboarding_profile).where(_TC.tenant_id == tenant_id)
+                            )
+                            _onboarding_profile = _op_result.scalar_one_or_none()
+                            if _onboarding_profile and isinstance(_onboarding_profile, dict):
+                                profile_parts: list[str] = []
 
-                            # Transaction landscape
-                            txn_types = _onboarding_profile.get("transaction_types", [])
-                            if txn_types:
-                                txn_summary = "\n".join(
-                                    f"  - {t['type']}: {t['count']} records ({t.get('earliest', '?')} to {t.get('latest', '?')})"
-                                    for t in txn_types[:15]
-                                )
-                                profile_parts.append(
-                                    f"<tenant_transaction_landscape>\nThis tenant uses these transaction types:\n{txn_summary}\n</tenant_transaction_landscape>"
-                                )
-
-                            # Relationship map
-                            rels = _onboarding_profile.get("transaction_relationships", [])
-                            if rels:
-                                rel_summary = "\n".join(
-                                    f"  - {r['source']} -> {r['target']} ({r['count']} links)"
-                                    for r in rels[:20]
-                                )
-                                profile_parts.append(
-                                    f"<transaction_relationships>\n{rel_summary}\n</transaction_relationships>"
-                                )
-
-                            # Status codes
-                            status_map = _onboarding_profile.get("status_codes", {})
-                            if status_map:
-                                status_lines: list[str] = []
-                                for _txn_type, codes in list(status_map.items())[:10]:
-                                    for c in codes[:8]:
-                                        status_lines.append(
-                                            f"  - {_txn_type} status '{c['code']}' = {c['display']} ({c['count']})"
-                                        )
-                                if status_lines:
+                                # Transaction landscape
+                                txn_types = _onboarding_profile.get("transaction_types", [])
+                                if txn_types:
+                                    txn_summary = "\n".join(
+                                        f"  - {t['type']}: {t['count']} records ({t.get('earliest', '?')} to {t.get('latest', '?')})"
+                                        for t in txn_types[:15]
+                                    )
                                     profile_parts.append(
-                                        "<tenant_status_codes>\n" + "\n".join(status_lines) + "\n</tenant_status_codes>"
+                                        f"<tenant_transaction_landscape>\nThis tenant uses these transaction types:\n{txn_summary}\n</tenant_transaction_landscape>"
                                     )
 
-                            if profile_parts:
-                                profile_xml = "\n".join(profile_parts)
-                                context["onboarding_profile"] = profile_xml
-                                print(f"[ORCHESTRATOR] Onboarding profile injected ({len(profile_xml)} chars)", flush=True)
-                    except Exception:
-                        logger.warning("orchestrator.onboarding_profile_injection_failed", exc_info=True)
+                                # Relationship map
+                                rels = _onboarding_profile.get("transaction_relationships", [])
+                                if rels:
+                                    rel_summary = "\n".join(
+                                        f"  - {r['source']} -> {r['target']} ({r['count']} links)"
+                                        for r in rels[:20]
+                                    )
+                                    profile_parts.append(
+                                        f"<transaction_relationships>\n{rel_summary}\n</transaction_relationships>"
+                                    )
 
-                    # Create unified agent with full context
+                                # Status codes
+                                status_map = _onboarding_profile.get("status_codes", {})
+                                if status_map:
+                                    status_lines: list[str] = []
+                                    for _txn_type, codes in list(status_map.items())[:10]:
+                                        for c in codes[:8]:
+                                            status_lines.append(
+                                                f"  - {_txn_type} status '{c['code']}' = {c['display']} ({c['count']})"
+                                            )
+                                    if status_lines:
+                                        profile_parts.append(
+                                            "<tenant_status_codes>\n" + "\n".join(status_lines) + "\n</tenant_status_codes>"
+                                        )
+
+                                if profile_parts:
+                                    profile_xml = "\n".join(profile_parts)
+                                    context["onboarding_profile"] = profile_xml
+                                    print(f"[ORCHESTRATOR] Onboarding profile injected ({len(profile_xml)} chars)", flush=True)
+                        except Exception:
+                            logger.warning("orchestrator.onboarding_profile_injection_failed", exc_info=True)
+
+                    # Create unified agent — pass metadata only when schemas are needed
                     unified_agent = UnifiedAgent(
                         tenant_id=tenant_id,
                         user_id=user_id,
                         correlation_id=correlation_id,
-                        metadata=metadata,
+                        metadata=metadata if _need_schemas else None,
                         policy=active_policy,
                     )
 

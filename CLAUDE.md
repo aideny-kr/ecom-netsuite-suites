@@ -20,7 +20,7 @@
 - **File Cabinet I/O**: Custom RESTlet (`ecom_file_cabinet_restlet.js`) replaces broken REST API PATCH. RESTlet does in-place load-update-save (preserves file ID).
 - **SuiteQL**: Via REST API POST `/services/rest/query/v1/suiteql` with Bearer token. Also available via MCP at `/services/mcp/v1/all`.
 - **Mock Data**: MockData RESTlet runs SuiteQL inside NetSuite with server-side PII masking. Never transmit real PII to our backend.
-- **Chat**: Dual-path agent system. `unified_agent_enabled` per-tenant flag routes to either (1) `UnifiedAgent` — single agent with all tools and full SuiteQL rules, or (2) `MultiAgentCoordinator` — semantic routing to specialist agents (SuiteQL, RAG, analysis, workspace). SSE streaming with `<thinking>` tags (collapsed in UI).
+- **Chat**: Dual-path agent system. `unified_agent_enabled` per-tenant flag routes to either (1) `UnifiedAgent` — single agent with all tools and full SuiteQL rules (~4K token base prompt, down from ~7K after prompt optimization), or (2) `MultiAgentCoordinator` — semantic routing to specialist agents (SuiteQL, RAG, analysis, workspace). SSE streaming with `<thinking>` tags (collapsed in UI). Inline SQL examples moved to RAG golden dataset (`knowledge/golden_dataset/suiteql-example-queries.md`, 11 chunks).
 - **Entity Resolution**: Fast NER (Haiku) → pg_trgm fuzzy matching → `<tenant_vernacular>` XML injection into agent prompts. Table: `tenant_entity_mapping` with composite GIN index. Seeded from metadata discovery pipeline.
 - **Two SuiteQL paths**: Local REST API (`netsuite_suiteql` tool) supports all tables including `customrecord_*`. External MCP (`ns_runCustomSuiteQL`) works only for standard tables. Agent prompt guides tool selection.
 - **MCP Standard Tools SuiteApp**: ~11 tools across 4 categories (Record CRUD, Reports, Saved Searches, SuiteQL). Tool visibility is **role-permission based** — same SuiteApp version on two accounts can expose different tools depending on OAuth role permissions. NOT a SuiteApp version issue. After changing role permissions, must reconnect MCP to trigger `discover_tools()` refresh.
@@ -32,6 +32,7 @@
 - **Feature Flags**: `tenant_feature_flags` table with TTL-cached service (`feature_flag_service.py`). `require_feature(flag_key)` FastAPI dependency returns 403 when disabled. Default flags seeded on tenant creation.
 - **Soul Seeding**: `seed_default_soul()` auto-populates soul.md with tenant-specific defaults on registration. Called from `auth_service.register_tenant()`.
 - **Tool Result Interception**: `_intercept_tool_result()` in orchestrator intercepts SuiteQL/financial tool results, emits SSE `data_table` or `financial_report` events for frontend rendering (`DataFrameTable` component), and condenses the result for the LLM (strips rows, keeps columns + row_count). Handles three formats: local SuiteQL (`columns`/`rows`), external MCP (`data` list-of-dicts with `queryExecuted`/`resultCount`), and financial reports (`items`/`summary`).
+- **Smart Context Injection**: `_classify_context_need()` in `orchestrator.py` classifies each query into 5 levels (FULL, DATA, DOCS, WORKSPACE, FINANCIAL) using regex-first heuristics. Each level injects only the context blocks the query needs (e.g., DOCS skips schemas/vernacular/patterns, WORKSPACE skips all NetSuite schemas). Always falls back to FULL when uncertain — never risks under-injecting.
 
 ## Backend Patterns — FOLLOW EXACTLY
 
@@ -310,7 +311,7 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
   - `RAGAgent`: max_steps=2, strict tool budget (2 rag_search + 1 web_search). Handles docs, script logic, AND online research.
   - `DataAnalysisAgent`: requires prior data from SuiteQL agent
   - `WorkspaceAgent`: file ops, propose_patch, search workspace
-  - `UnifiedAgent`: Single agent with all capabilities. Replaces coordinator routing for `unified_agent_enabled=True` tenants.
+  - `UnifiedAgent`: Single agent with all capabilities. Replaces coordinator routing for `unified_agent_enabled=True` tenants. Prompt optimized: KGP removed, 4 conflicting directives unified into DECISION ORDER, SuiteQL rules compressed with failure annotations, inline examples moved to RAG. Dynamic context injection via `_classify_context_need()` skips unnecessary blocks per query type.
 - **LLM adapters** (`adapters/`): Anthropic, OpenAI, Gemini — all implement `create_message()` and `stream_message()`
 - **Entity resolution** (`tenant_resolver.py`): Runs before SuiteQL agent dispatch. Haiku extracts entities → pg_trgm resolves to script IDs → XML block injected via `context["tenant_vernacular"]`
 - **Route registry**: Add new agents via `ROUTE_REGISTRY` dict + `_create_agent()` factory in coordinator
