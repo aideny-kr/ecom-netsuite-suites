@@ -97,11 +97,9 @@ def _refresh_single(db, record, lock_prefix, stats, now, settings):
         if not refresh_token or not account_id:
             return  # Can't refresh — health check will flag this
 
-        # For REST connections, prefer global client_id (same as get_valid_token)
-        if lock_prefix == "oauth_refresh":
-            client_id = settings.NETSUITE_OAUTH_CLIENT_ID or creds.get("client_id", "")
-        else:
-            client_id = creds.get("client_id", "")
+        # Always use stored per-connection client_id — each connection has its own
+        # Integration Record in NetSuite with its own Client ID.
+        client_id = creds.get("client_id", "")
 
         if not client_id:
             return

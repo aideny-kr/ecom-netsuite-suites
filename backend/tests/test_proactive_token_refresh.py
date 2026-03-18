@@ -116,8 +116,8 @@ class TestProactiveRefresh:
 
         assert stats["refreshed"] == 0
 
-    def test_uses_global_client_id_for_rest(self):
-        """REST connections should use global NETSUITE_OAUTH_CLIENT_ID."""
+    def test_uses_stored_client_id_for_rest(self):
+        """REST connections should use stored per-connection client_id."""
         record, creds = _make_record(expires_in_seconds=300)
         stats = {"checked": 0, "refreshed": 0, "errors": 0, "skipped_locked": 0}
         settings = MagicMock()
@@ -134,8 +134,8 @@ class TestProactiveRefresh:
         ):
             _refresh_single(MagicMock(), record, "oauth_refresh", stats, datetime.now(timezone.utc), settings)
 
-        # Should use global client_id, not per-connection
-        mock_refresh.assert_called_once_with("1234567", "refresh_tok", "global_client")
+        # Must use stored per-connection client_id, NOT global
+        mock_refresh.assert_called_once_with("1234567", "refresh_tok", "test_client_id")
 
     def test_uses_stored_client_id_for_mcp(self):
         """MCP connectors should use stored per-connection client_id."""

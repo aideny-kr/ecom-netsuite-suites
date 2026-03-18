@@ -74,28 +74,34 @@ async def _get_redis() -> aioredis.Redis:
 async def authorize(
     account_id: str,
     user: Annotated[User, Depends(require_permission("connections.manage"))],
+    client_id: str = "",
     restlet_url: str = "",
 ):
-    """Start the OAuth 2.0 PKCE flow — returns the authorize URL."""
-    if not settings.NETSUITE_OAUTH_CLIENT_ID:
+    """Start the OAuth 2.0 PKCE flow — returns the authorize URL.
+
+    Each connection requires its own client_id from a NetSuite Integration Record.
+    Falls back to settings.NETSUITE_OAUTH_CLIENT_ID only for backwards compatibility.
+    """
+    resolved_client_id = client_id or settings.NETSUITE_OAUTH_CLIENT_ID
+    if not resolved_client_id:
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="NETSUITE_OAUTH_CLIENT_ID is not configured",
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="client_id is required — provide the Client ID from your NetSuite Integration Record",
         )
 
     code_verifier, code_challenge = generate_pkce_pair()
     state = uuid.uuid4().hex
 
-    # Store PKCE verifier in Redis with 10-min TTL
+    # Store PKCE verifier + client_id in Redis with 10-min TTL
     r = await _get_redis()
     await r.setex(
         f"netsuite_oauth:{state}",
         600,
-        f"{code_verifier}:{account_id}:{user.tenant_id}:{user.id}:{restlet_url}",
+        f"{code_verifier}:{account_id}:{user.tenant_id}:{user.id}:{restlet_url}:{resolved_client_id}",
     )
     await r.aclose()
 
-    url = build_authorize_url(account_id, state, code_challenge)
+    url = build_authorize_url(account_id, state, code_challenge, client_id=resolved_client_id)
     return {"authorize_url": url, "state": state}
 
 
@@ -169,18 +175,22 @@ async def callback(
             status_code=400,
         )
 
-    stored_parts = stored.split(":", maxsplit=4)
+    stored_parts = stored.split(":", maxsplit=5)
     code_verifier = stored_parts[0]
     account_id = stored_parts[1]
     tenant_id_str = stored_parts[2]
     user_id_str = stored_parts[3]
     restlet_url = stored_parts[4] if len(stored_parts) > 4 else ""
+    stored_client_id = stored_parts[5] if len(stored_parts) > 5 else ""
 
     tenant_id = uuid.UUID(tenant_id_str)
     user_id = uuid.UUID(user_id_str)
 
+    # Use the client_id that was provided during authorization
+    resolved_client_id = stored_client_id or settings.NETSUITE_OAUTH_CLIENT_ID
+
     try:
-        token_data = await exchange_code(account_id, code, code_verifier)
+        token_data = await exchange_code(account_id, code, code_verifier, client_id=resolved_client_id)
     except Exception as exc:
         logger.error("netsuite.oauth2.exchange_failed", error=str(exc))
         return HTMLResponse(
@@ -198,7 +208,7 @@ async def callback(
 
     credentials = {
         "auth_type": "oauth2",
-        "client_id": settings.NETSUITE_OAUTH_CLIENT_ID,
+        "client_id": resolved_client_id,
         "access_token": token_data["access_token"],
         "refresh_token": token_data.get("refresh_token", ""),
         "expires_at": time.time() + int(token_data.get("expires_in", 3600)),

@@ -22,6 +22,7 @@ import {
   useUpdateMcpClientId,
 } from "@/hooks/use-mcp-connectors";
 import { usePermissions } from "@/hooks/use-permissions";
+import { apiClient } from "@/lib/api-client";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -339,6 +340,14 @@ export function NetSuiteConnectionsSection() {
   const { isAdmin } = usePermissions();
   const { toast } = useToast();
 
+  // Connect dialog state
+  const [showConnectOAuth, setShowConnectOAuth] = useState(false);
+  const [showConnectMcp, setShowConnectMcp] = useState(false);
+  const [connectAccountId, setConnectAccountId] = useState("");
+  const [connectClientId, setConnectClientId] = useState("");
+  const [connectRestletUrl, setConnectRestletUrl] = useState("");
+  const [isConnecting, setIsConnecting] = useState(false);
+
   // Refs for cleanup on unmount
   const popupIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const refreshTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -393,6 +402,102 @@ export function NetSuiteConnectionsSection() {
     oauthHealthItem?.restlet_url ?? (activeOAuth?.metadata_json?.restlet_url as string) ?? "";
   const mcpClientId =
     mcpHealthItem?.client_id ?? (activeMcp?.metadata_json?.client_id as string) ?? "";
+
+  // ── Connect new OAuth connection ──
+  async function handleConnectOAuth() {
+    if (!connectAccountId.trim() || !connectClientId.trim()) {
+      toast({ title: "Account ID and Client ID are required", variant: "destructive" });
+      return;
+    }
+    setIsConnecting(true);
+    try {
+      const params = new URLSearchParams({
+        account_id: connectAccountId.trim(),
+        client_id: connectClientId.trim(),
+        restlet_url: connectRestletUrl.trim(),
+      });
+      const result = await apiClient.get<{ authorize_url: string; state: string }>(
+        `/api/v1/connections/netsuite/authorize?${params}`,
+      );
+      const width = 600;
+      const height = 700;
+      const left = window.screenX + (window.innerWidth - width) / 2;
+      const top = window.screenY + (window.innerHeight - height) / 2;
+      const popup = window.open(
+        result.authorize_url,
+        "netsuite_oauth_connect",
+        `width=${width},height=${height},left=${left},top=${top},popup=yes`,
+      );
+      if (popup) {
+        popupIntervalRef.current = setInterval(() => {
+          if (popup.closed) {
+            if (popupIntervalRef.current) clearInterval(popupIntervalRef.current);
+            popupIntervalRef.current = null;
+            refreshHealthAfterDelay();
+            setShowConnectOAuth(false);
+            setConnectAccountId("");
+            setConnectClientId("");
+            setConnectRestletUrl("");
+          }
+        }, 500);
+      }
+    } catch (err) {
+      toast({
+        title: "Connection failed",
+        description: err instanceof Error ? err.message : "Unknown error",
+        variant: "destructive",
+      });
+    } finally {
+      setIsConnecting(false);
+    }
+  }
+
+  // ── Connect new MCP connection ──
+  async function handleConnectMcp() {
+    if (!connectAccountId.trim() || !connectClientId.trim()) {
+      toast({ title: "Account ID and Client ID are required", variant: "destructive" });
+      return;
+    }
+    setIsConnecting(true);
+    try {
+      const params = new URLSearchParams({
+        account_id: connectAccountId.trim(),
+        client_id: connectClientId.trim(),
+      });
+      const result = await apiClient.get<{ authorize_url: string; state: string }>(
+        `/api/v1/mcp-connectors/netsuite/authorize?${params}`,
+      );
+      const width = 600;
+      const height = 700;
+      const left = window.screenX + (window.innerWidth - width) / 2;
+      const top = window.screenY + (window.innerHeight - height) / 2;
+      const popup = window.open(
+        result.authorize_url,
+        "netsuite_mcp_connect",
+        `width=${width},height=${height},left=${left},top=${top},popup=yes`,
+      );
+      if (popup) {
+        popupIntervalRef.current = setInterval(() => {
+          if (popup.closed) {
+            if (popupIntervalRef.current) clearInterval(popupIntervalRef.current);
+            popupIntervalRef.current = null;
+            refreshHealthAfterDelay();
+            setShowConnectMcp(false);
+            setConnectAccountId("");
+            setConnectClientId("");
+          }
+        }, 500);
+      }
+    } catch (err) {
+      toast({
+        title: "Connection failed",
+        description: err instanceof Error ? err.message : "Unknown error",
+        variant: "destructive",
+      });
+    } finally {
+      setIsConnecting(false);
+    }
+  }
 
   // Handlers with toast feedback
   function refreshHealthAfterDelay() {
@@ -641,13 +746,60 @@ export function NetSuiteConnectionsSection() {
           />
         )}
 
-        {/* Connect button */}
-        <Button variant="outline" size="sm" asChild>
-          <a href="/onboarding/netsuite">
-            <Plus className="mr-1.5 h-3.5 w-3.5" />
-            Connect NetSuite
-          </a>
+        {/* Connect OAuth button + dialog */}
+        <Button variant="outline" size="sm" onClick={() => { setShowConnectOAuth(true); setConnectAccountId(""); setConnectClientId(""); setConnectRestletUrl(""); }}>
+          <Plus className="mr-1.5 h-3.5 w-3.5" />
+          Connect NetSuite
         </Button>
+        <AlertDialog open={showConnectOAuth} onOpenChange={setShowConnectOAuth}>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Connect NetSuite (REST API)</AlertDialogTitle>
+              <AlertDialogDescription>
+                Enter your NetSuite Account ID, Client ID from your Integration Record (REST Web Services scope), and RESTlet URL.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <div className="space-y-3 py-2">
+              <div>
+                <label className="text-[13px] font-medium text-foreground">Account ID</label>
+                <input
+                  type="text"
+                  value={connectAccountId}
+                  onChange={(e) => setConnectAccountId(e.target.value)}
+                  placeholder="e.g. 6738075"
+                  className="mt-1 w-full rounded-md border bg-background px-3 py-2 text-[14px]"
+                />
+              </div>
+              <div>
+                <label className="text-[13px] font-medium text-foreground">Client ID</label>
+                <input
+                  type="text"
+                  value={connectClientId}
+                  onChange={(e) => setConnectClientId(e.target.value)}
+                  placeholder="From NetSuite Integration Record"
+                  className="mt-1 w-full rounded-md border bg-background px-3 py-2 text-[14px]"
+                />
+              </div>
+              <div>
+                <label className="text-[13px] font-medium text-foreground">RESTlet URL <span className="text-muted-foreground">(optional)</span></label>
+                <input
+                  type="text"
+                  value={connectRestletUrl}
+                  onChange={(e) => setConnectRestletUrl(e.target.value)}
+                  placeholder="https://..."
+                  className="mt-1 w-full rounded-md border bg-background px-3 py-2 text-[14px]"
+                />
+              </div>
+            </div>
+            <AlertDialogFooter>
+              <AlertDialogCancel>Cancel</AlertDialogCancel>
+              <Button onClick={handleConnectOAuth} disabled={isConnecting || !connectAccountId.trim() || !connectClientId.trim()}>
+                {isConnecting ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <Lock className="mr-1.5 h-3.5 w-3.5" />}
+                Authorize
+              </Button>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
       </div>
 
       <div className="border-t" />
@@ -709,13 +861,50 @@ export function NetSuiteConnectionsSection() {
           </div>
         )}
 
-        {/* Connect MCP button */}
-        <Button variant="outline" size="sm" asChild>
-          <a href="/onboarding/netsuite">
-            <Plus className="mr-1.5 h-3.5 w-3.5" />
-            Connect MCP
-          </a>
+        {/* Connect MCP button + dialog */}
+        <Button variant="outline" size="sm" onClick={() => { setShowConnectMcp(true); setConnectAccountId(""); setConnectClientId(""); }}>
+          <Plus className="mr-1.5 h-3.5 w-3.5" />
+          Connect MCP
         </Button>
+        <AlertDialog open={showConnectMcp} onOpenChange={setShowConnectMcp}>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Connect NetSuite MCP</AlertDialogTitle>
+              <AlertDialogDescription>
+                Enter your NetSuite Account ID and Client ID from your MCP Integration Record (NetSuite AI Connector Service scope).
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <div className="space-y-3 py-2">
+              <div>
+                <label className="text-[13px] font-medium text-foreground">Account ID</label>
+                <input
+                  type="text"
+                  value={connectAccountId}
+                  onChange={(e) => setConnectAccountId(e.target.value)}
+                  placeholder="e.g. 6738075"
+                  className="mt-1 w-full rounded-md border bg-background px-3 py-2 text-[14px]"
+                />
+              </div>
+              <div>
+                <label className="text-[13px] font-medium text-foreground">Client ID</label>
+                <input
+                  type="text"
+                  value={connectClientId}
+                  onChange={(e) => setConnectClientId(e.target.value)}
+                  placeholder="From NetSuite MCP Integration Record"
+                  className="mt-1 w-full rounded-md border bg-background px-3 py-2 text-[14px]"
+                />
+              </div>
+            </div>
+            <AlertDialogFooter>
+              <AlertDialogCancel>Cancel</AlertDialogCancel>
+              <Button onClick={handleConnectMcp} disabled={isConnecting || !connectAccountId.trim() || !connectClientId.trim()}>
+                {isConnecting ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <Lock className="mr-1.5 h-3.5 w-3.5" />}
+                Authorize
+              </Button>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
       </div>
     </div>
   );

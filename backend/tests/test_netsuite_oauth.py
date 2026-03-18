@@ -136,12 +136,14 @@ class TestGetValidToken:
     @pytest.mark.asyncio
     async def test_refreshes_when_expired(self):
         connection = MagicMock()
+        stored_client_id = "per_connection_client_id"
         credentials = {
             "auth_type": "oauth2",
             "access_token": "expired_token",
             "refresh_token": "rt_valid",
             "expires_at": time.time() - 100,  # already expired
             "account_id": "12345",
+            "client_id": stored_client_id,
         }
 
         with (
@@ -150,6 +152,8 @@ class TestGetValidToken:
                 "app.services.netsuite_oauth_service.refresh_tokens_with_client", new_callable=AsyncMock
             ) as mock_refresh,
             patch("app.services.netsuite_oauth_service.encrypt_credentials", return_value="encrypted"),
+            patch("app.core.redis_lock.acquire_lock", return_value=True),
+            patch("app.core.redis_lock.release_lock"),
         ):
             mock_refresh.return_value = {
                 "access_token": "new_token",
@@ -160,7 +164,7 @@ class TestGetValidToken:
             token = await get_valid_token(db, connection)
 
             assert token == "new_token"
-            mock_refresh.assert_awaited_once_with("12345", "rt_valid", settings.NETSUITE_OAUTH_CLIENT_ID)
+            mock_refresh.assert_awaited_once_with("12345", "rt_valid", stored_client_id)
 
     @pytest.mark.asyncio
     async def test_returns_none_for_oauth1_credentials(self):

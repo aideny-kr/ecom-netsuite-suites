@@ -34,11 +34,20 @@ def generate_pkce_pair() -> tuple[str, str]:
     return code_verifier, code_challenge
 
 
-def build_authorize_url(account_id: str, state: str, code_challenge: str) -> str:
-    """Construct the NetSuite OAuth 2.0 authorize URL."""
+def build_authorize_url(
+    account_id: str,
+    state: str,
+    code_challenge: str,
+    client_id: str = "",
+) -> str:
+    """Construct the NetSuite OAuth 2.0 authorize URL.
+
+    Uses provided client_id (per-connection) or falls back to global setting.
+    """
+    resolved_client_id = client_id or settings.NETSUITE_OAUTH_CLIENT_ID
     params = {
         "response_type": "code",
-        "client_id": settings.NETSUITE_OAUTH_CLIENT_ID,
+        "client_id": resolved_client_id,
         "redirect_uri": settings.NETSUITE_OAUTH_REDIRECT_URI,
         "scope": settings.NETSUITE_OAUTH_SCOPE,
         "state": state,
@@ -48,15 +57,24 @@ def build_authorize_url(account_id: str, state: str, code_challenge: str) -> str
     return f"{AUTHORIZE_URL}?{urllib.parse.urlencode(params)}"
 
 
-async def exchange_code(account_id: str, code: str, code_verifier: str) -> dict:
-    """Exchange an authorization code for tokens."""
+async def exchange_code(
+    account_id: str,
+    code: str,
+    code_verifier: str,
+    client_id: str = "",
+) -> dict:
+    """Exchange an authorization code for tokens.
+
+    Uses provided client_id (per-connection) or falls back to global setting.
+    """
+    resolved_client_id = client_id or settings.NETSUITE_OAUTH_CLIENT_ID
     url = _token_url(account_id)
     form_data = {
         "grant_type": "authorization_code",
         "code": code,
         "redirect_uri": settings.NETSUITE_OAUTH_REDIRECT_URI,
         "code_verifier": code_verifier,
-        "client_id": settings.NETSUITE_OAUTH_CLIENT_ID,
+        "client_id": resolved_client_id,
     }
     headers = {"Content-Type": "application/x-www-form-urlencoded"}
     async with httpx.AsyncClient(timeout=30) as client:
@@ -192,9 +210,12 @@ async def get_valid_token(db: AsyncSession, connection) -> str | None:
             logger.warning("netsuite.oauth2.missing_refresh_info", connection_id=str(connection.id))
             return None
 
-        # Use global NETSUITE_OAUTH_CLIENT_ID (what the user configures in Settings).
-        # The per-connection stored client_id may be stale from migration.
-        client_id = settings.NETSUITE_OAUTH_CLIENT_ID or credentials.get("client_id", "")
+        # Always use the stored per-connection client_id — each connection has its
+        # own Integration Record in NetSuite with its own Client ID.
+        client_id = credentials.get("client_id", "")
+        if not client_id:
+            logger.warning("netsuite.oauth2.no_client_id", connection_id=str(connection.id))
+            return None
         token_data = await refresh_tokens_with_client(account_id, refresh_token, client_id)
         credentials["access_token"] = token_data["access_token"]
         credentials["refresh_token"] = token_data.get("refresh_token", refresh_token)
