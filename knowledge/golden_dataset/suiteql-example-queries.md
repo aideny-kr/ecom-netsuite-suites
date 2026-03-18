@@ -147,6 +147,41 @@ ORDER BY t.id DESC
 FETCH FIRST 50 ROWS ONLY
 ```
 
+## Received RMAs (simple status filter)
+
+RMAs with items received — use status codes D/E/F, NOT an ItemRcpt join. Status already tells you whether items were received.
+
+```sql
+SELECT t.tranid, t.trandate,
+       BUILTIN.DF(t.entity) as customer,
+       BUILTIN.DF(t.status) as status,
+       t.foreigntotal
+FROM transaction t
+WHERE t.type = 'RtnAuth'
+  AND t.status IN ('D', 'E', 'F')
+ORDER BY t.trandate DESC
+FETCH FIRST 50 ROWS ONLY
+```
+
+## Received RMAs at a specific location
+
+Filter by location using LEFT JOIN — still no ItemRcpt join needed. Location is on the transaction header.
+
+```sql
+SELECT t.tranid, t.trandate,
+       BUILTIN.DF(t.entity) as customer,
+       BUILTIN.DF(t.status) as status,
+       loc.name as location,
+       t.foreigntotal
+FROM transaction t
+  LEFT JOIN location loc ON t.location = loc.id
+WHERE t.type = 'RtnAuth'
+  AND t.status IN ('D', 'E', 'F')
+  AND UPPER(loc.name) LIKE '%PANURGY%'
+ORDER BY t.trandate DESC
+FETCH FIRST 50 ROWS ONLY
+```
+
 ## Line-level revenue with assembly component filter
 
 For line-level breakdown, use tl.amount * -1 (base currency, negated for positive revenue). Always filter mainline='F', taxline='F', assemblycomponent='F' to avoid double-counting assembly kit components.

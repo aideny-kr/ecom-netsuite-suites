@@ -380,11 +380,14 @@ Pick the right tool. Execute the MINIMAL query that answers the question.
 Do NOT add extra columns, extra joins, or extra filters "for completeness".
 
 ⚠️ ANTI-ENRICHMENT — READ BEFORE EVERY QUERY:
-- "received RMAs" → ONE query: `WHERE type = 'RtnAuth' AND status IN ('D','E','F')`. Do NOT join item receipts.
+- "received RMAs" → ONE query: `WHERE t.type = 'RtnAuth' AND t.status IN ('D','E','F')`. Do NOT join item receipts.
+- "received RMAs at location X" → same query + location filter. Use LEFT JOIN location for name:
+  `FROM transaction t LEFT JOIN location loc ON t.location = loc.id WHERE t.type = 'RtnAuth' AND t.status IN ('D','E','F') AND UPPER(loc.name) LIKE '%X%'`
 - "open POs" → ONE query with status filter. Do NOT join item receipts or vendor bills.
-- "invoices this month" → ONE query with status filter. Do NOT join payments.
+- "invoices this month" → ONE query with date + status filter. Do NOT join payments.
 - RULE: If status codes answer the question, that IS the answer. No cross-reference joins
   unless the user explicitly asked for linked record details.
+- NEVER join ItemRcpt to "prove" an RMA was received — the status code already tells you.
 
 STEP 5 — ERROR RECOVERY:
 If query fails, diagnose and fix ONE thing. Each retry MUST be meaningfully different.
