@@ -9,6 +9,7 @@ import { Sidebar } from "@/components/sidebar";
 import { OnboardingWizard } from "@/components/onboarding/onboarding-wizard";
 import { AlertTriangle, X } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { ConnectionAlertBanner } from "@/components/connection-alert-banner";
 
 export default function DashboardLayout({
   children,
@@ -124,6 +125,7 @@ export default function DashboardLayout({
       )}
       <Sidebar />
       <main className="flex-1 overflow-auto bg-background scrollbar-thin">
+        <ConnectionAlertBanner />
         {/* Connection warning banner — missing */}
         {connectionHealth.state === "missing" && !bannerDismissed && (
           <div className="mx-8 mt-6 flex items-center justify-between gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 dark:border-amber-800 dark:bg-amber-950/50">

@@ -7,6 +7,7 @@ from app.api.v1 import (
     chat,
     chat_api_keys,
     chat_integration,
+    connection_alerts,
     connections,
     exports,
     health,
@@ -59,3 +60,4 @@ api_router.include_router(settings.router)
 api_router.include_router(skills.router)
 api_router.include_router(exports.router)
 api_router.include_router(invites.router)
+api_router.include_router(connection_alerts.router)

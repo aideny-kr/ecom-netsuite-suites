@@ -34,6 +34,7 @@ celery_app.conf.include = [
     "app.workers.tasks.knowledge_crawler",
     "app.workers.tasks.metadata_discovery",
     "app.workers.tasks.onboarding_discovery",
+    "app.workers.tasks.proactive_token_refresh",
     "app.workers.tasks.shopify_sync",
     "app.workers.tasks.stripe_sync",
     "app.workers.tasks.suitescript_sync",
@@ -57,5 +58,9 @@ celery_app.conf.beat_schedule = {
     "auto-learning": {
         "task": "tasks.auto_learning",
         "schedule": crontab(hour=4, minute=0),
+    },
+    "proactive-token-refresh": {
+        "task": "tasks.proactive_token_refresh",
+        "schedule": 300.0,  # every 5 minutes
     },
 }
