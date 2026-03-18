@@ -122,7 +122,11 @@ async def get_tenant_ai_config(db: AsyncSession, tenant_id: uuid.UUID) -> tuple[
 
 
 async def retriever_node(state: OrchestratorState, db: AsyncSession) -> None:
-    """Retrieve relevant doc chunks via vector similarity search."""
+    """Retrieve relevant doc chunks via vector similarity search.
+
+    Queries BOTH doc_chunks (tenant + system, 1024-dim) AND domain_knowledge_chunks
+    (golden dataset, 1536-dim), merges results by score, takes top-k.
+    """
     if not state.route or not state.route.get("needs_docs"):
         return
 
@@ -133,17 +137,39 @@ async def retriever_node(state: OrchestratorState, db: AsyncSession) -> None:
             return
         top_k = settings.CHAT_RAG_TOP_K
 
-        # pgvector cosine similarity search
+        # Source 1: doc_chunks (tenant-scoped, 1024-dim)
         result = await db.execute(
             select(DocChunk)
             .where((DocChunk.tenant_id == state.tenant_id) | (DocChunk.tenant_id == SYSTEM_TENANT_ID))
             .order_by(DocChunk.embedding.cosine_distance(query_embedding))
             .limit(top_k)
         )
-        chunks = result.scalars().all()
+        doc_results = result.scalars().all()
 
-        if not chunks:
-            # Keyword fallback
+        # Source 2: domain_knowledge_chunks (golden dataset, 1536-dim)
+        dk_results: list[dict] = []
+        try:
+            from app.services.chat.domain_knowledge import retrieve_domain_knowledge
+
+            dk_results = await retrieve_domain_knowledge(db, state.user_message, top_k=top_k)
+        except Exception:
+            logger.warning("retriever_node: domain_knowledge query failed", exc_info=True)
+
+        # Merge both sources
+        merged = []
+        for c in doc_results:
+            merged.append({"title": c.title, "content": c.content, "source_path": c.source_path})
+        for dk in dk_results:
+            # Convert domain_knowledge format to doc_chunk format
+            source = dk.get("source_uri", "")
+            merged.append({
+                "title": source.replace("golden_dataset/", "").replace(".md", "").replace("-", " ").title(),
+                "content": dk["raw_text"],
+                "source_path": source,
+            })
+
+        if not merged:
+            # Keyword fallback on doc_chunks only
             search_term = f"%{state.user_message[:100]}%"
             result = await db.execute(
                 select(DocChunk)
@@ -154,8 +180,10 @@ async def retriever_node(state: OrchestratorState, db: AsyncSession) -> None:
                 .limit(top_k)
             )
             chunks = result.scalars().all()
+            merged = [{"title": c.title, "content": c.content, "source_path": c.source_path} for c in chunks]
 
-        state.doc_chunks = [{"title": c.title, "content": c.content, "source_path": c.source_path} for c in chunks]
+        # Take top_k from merged (domain_knowledge results are already re-ranked by keyword boost)
+        state.doc_chunks = merged[:top_k]
     except Exception:
         logger.warning("retriever_node failed, continuing without docs", exc_info=True)
         state.doc_chunks = []

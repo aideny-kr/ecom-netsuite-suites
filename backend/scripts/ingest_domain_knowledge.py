@@ -85,9 +85,15 @@ def chunk_markdown(content: str, source_uri: str) -> list[dict]:
         if re.match(r"^#\s+", section) and "\n" not in section.strip():
             continue
 
+        # Extract H2 title from this section for better embedding context
+        h2_match = re.match(r"^##\s+(.+)$", section, re.MULTILINE)
+        h2_title = h2_match.group(1).strip() if h2_match else None
+        # Prepend both H1 and H2 for richer semantic signal in embeddings
+        title_prefix = f"# {h1_title} — {h2_title}" if h2_title else f"# {h1_title}"
+
         # Check if section is too large and needs splitting
         if estimate_tokens(section) > CHUNK_MAX_TOKENS:
-            sub_chunks = _split_large_section(section, h1_title)
+            sub_chunks = _split_large_section(section, h1_title, h2_title)
             for sc in sub_chunks:
                 chunks.append(
                     {
@@ -101,8 +107,8 @@ def chunk_markdown(content: str, source_uri: str) -> list[dict]:
                 )
                 chunk_index += 1
         else:
-            # Prepend H1 title for context
-            chunk_text = f"# {h1_title}\n\n{section}"
+            # Prepend H1 + H2 title for context
+            chunk_text = f"{title_prefix}\n\n{section}"
             chunks.append(
                 {
                     "source_uri": source_uri,
@@ -118,7 +124,7 @@ def chunk_markdown(content: str, source_uri: str) -> list[dict]:
     return chunks
 
 
-def _split_large_section(section: str, h1_title: str) -> list[str]:
+def _split_large_section(section: str, h1_title: str, h2_title: str | None = None) -> list[str]:
     """Split a large section at paragraph boundaries without severing code blocks.
 
     A 'paragraph' is a block of text separated by blank lines, but we treat
@@ -155,7 +161,7 @@ def _split_large_section(section: str, h1_title: str) -> list[str]:
     result: list[str] = []
     current_parts: list[str] = []
     current_tokens = 0
-    header_prefix = f"# {h1_title}\n\n"
+    header_prefix = f"# {h1_title} — {h2_title}\n\n" if h2_title else f"# {h1_title}\n\n"
 
     for para in merged:
         para_tokens = estimate_tokens(para)
