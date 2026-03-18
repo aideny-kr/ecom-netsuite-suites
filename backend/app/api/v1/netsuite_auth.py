@@ -93,11 +93,12 @@ async def authorize(
     state = uuid.uuid4().hex
 
     # Store PKCE verifier + client_id in Redis with 10-min TTL
+    # Use pipe delimiter for restlet_url and client_id since URLs contain colons
     r = await _get_redis()
     await r.setex(
         f"netsuite_oauth:{state}",
         600,
-        f"{code_verifier}:{account_id}:{user.tenant_id}:{user.id}:{restlet_url}:{resolved_client_id}",
+        f"{code_verifier}:{account_id}:{user.tenant_id}:{user.id}|{restlet_url}|{resolved_client_id}",
     )
     await r.aclose()
 
@@ -175,13 +176,25 @@ async def callback(
             status_code=400,
         )
 
-    stored_parts = stored.split(":", maxsplit=5)
-    code_verifier = stored_parts[0]
-    account_id = stored_parts[1]
-    tenant_id_str = stored_parts[2]
-    user_id_str = stored_parts[3]
-    restlet_url = stored_parts[4] if len(stored_parts) > 4 else ""
-    stored_client_id = stored_parts[5] if len(stored_parts) > 5 else ""
+    # Parse: verifier:account_id:tenant_id:user_id|restlet_url|client_id
+    # First split on colon (max 4 parts) for the fixed fields, then pipe for URL-safe fields
+    colon_parts = stored.split(":", maxsplit=3)
+    code_verifier = colon_parts[0]
+    account_id = colon_parts[1]
+    tenant_id_str = colon_parts[2]
+    remainder = colon_parts[3] if len(colon_parts) > 3 else ""
+
+    # remainder = "user_id|restlet_url|client_id" or "user_id:restlet_url" (legacy)
+    pipe_parts = remainder.split("|")
+    user_id_str = pipe_parts[0]
+    restlet_url = pipe_parts[1] if len(pipe_parts) > 1 else ""
+    stored_client_id = pipe_parts[2] if len(pipe_parts) > 2 else ""
+
+    # Legacy fallback: old format was "user_id:restlet_url" with colon
+    if not restlet_url and ":" in user_id_str:
+        legacy_parts = user_id_str.split(":", maxsplit=1)
+        user_id_str = legacy_parts[0]
+        restlet_url = legacy_parts[1] if len(legacy_parts) > 1 else ""
 
     tenant_id = uuid.UUID(tenant_id_str)
     user_id = uuid.UUID(user_id_str)
