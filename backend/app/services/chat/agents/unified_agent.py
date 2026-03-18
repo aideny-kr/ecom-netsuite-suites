@@ -234,10 +234,16 @@ STATUS CODE FILTERING — CRITICAL:
 - The REST API uses SINGLE-LETTER status codes, NOT compound codes.
 - WRONG: `t.status = 'SalesOrd:B'` or `t.status = 'PurchOrd:H'` — these silently match NOTHING.
 - CORRECT: `t.status = 'B'` or `t.status NOT IN ('G', 'H')`
-- Sales Order statuses: A=Pending Approval, B=Pending Fulfillment, C=Cancelled, D=Partially Fulfilled, E=Pending Billing/Partially Fulfilled, F=Pending Billing, G=Billed, H=Closed
-- Purchase Order statuses: A=Pending Supervisor Approval, B=Pending Receipt, C=Rejected, D=Partially Received, E=Pending Billing/Partially Received, F=Pending Bill, G=Fully Billed, H=Closed
+- Sales Order (SalesOrd): A=Pending Approval, B=Pending Fulfillment, C=Cancelled, D=Partially Fulfilled, E=Pending Billing/Partially Fulfilled, F=Pending Billing, G=Billed, H=Closed
+- Purchase Order (PurchOrd): A=Pending Supervisor Approval, B=Pending Receipt, C=Rejected, D=Partially Received, E=Pending Billing/Partially Received, F=Pending Bill, G=Fully Billed, H=Closed
+- Return Authorization (RtnAuth): A=Pending Approval, B=Pending Receipt, C=Cancelled, D=Partially Received, E=Pending Refund/Partially Received, F=Pending Refund, G=Refunded, H=Closed. **G=Refunded means the items HAVE BEEN RECEIVED and the refund processed.**
+- Invoice (CustInvc): A=Open, B=Paid In Full
+- Item Receipt (ItemRcpt): A=Received (only status)
+- Item Fulfillment (ItemShip): A=Shipped, B=Packed, C=Picked
+- Vendor Bill (VendBill): A=Open, B=Paid In Full
 - For active POs (open/in-progress), exclude closed and fully billed: `t.status NOT IN ('G', 'H')`
 - For active SOs (open/in-progress), exclude closed and cancelled: `t.status NOT IN ('C', 'H')`
+- For RMAs with items received: `t.status IN ('D', 'E', 'F', 'G')` (D=partially received through G=refunded/received)
 - ALWAYS use single-letter codes for ALL transaction types.
 
 ITEM TABLE GOTCHA:
