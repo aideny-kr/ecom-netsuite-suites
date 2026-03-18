@@ -361,6 +361,8 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 - [ ] **Proactive token refresh** — background Celery job that refreshes OAuth tokens before expiry + alerts admin when refresh fails
 
 ### Short-term (quality + UX)
+- [ ] **Persistent chat across navigation** — keep SSE stream alive when switching to Dev Workspace/other tabs. Either persistent layout (tab system) or global SSE context provider. Currently navigation unmounts chat, kills stream, loses in-progress responses.
+- [ ] **Save placeholder on stream cancel** — when user navigates away before any text streams, save "(Processing interrupted — please ask again)" so the session isn't lost
 - [ ] Settings: read-only team list for non-admins
 - [ ] Onboarding Discovery via MCP (bypass scope issue)
 - [ ] Refactor token storage (shared `setTokens()`)
