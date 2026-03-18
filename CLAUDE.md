@@ -324,7 +324,7 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 
 ## Current State (updated 2026-03-17)
 
-- **Latest migration**: 048_onboarding_profile
+- **Latest migration**: 049_connection_alerts
 - **Staging**: `staging.suitestudio.ai` (Vercel frontend) + `api-staging.suitestudio.ai` (GCP VM backend). Auto-deploys from main via GitHub Actions. SSH deploy key configured.
 - **RBAC**: 3 user-facing roles (Admin/Finance/Operations). `chat.financial_reports` permission gates financial reports. Invite flow with email (console/Resend) + Google Sign-In.
 - **Google Sign-In**: `@react-oauth/google` on login + invite pages. Backend `POST /auth/google` verifies ID token, auto-links Google account. Client ID: `840124956248-*.apps.googleusercontent.com` (suite-studio-ai project).
@@ -351,8 +351,8 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 7. **Celery async boilerplate** — `asyncio.new_event_loop()` pattern repeated in 8+ tasks. Should extract `run_async()` helper.
 8. **Team section MAX_SEATS hardcoded** — Currently `20`, should come from entitlement API.
 9. **CI failures** — `test_security_hardening.py` SSL tests fail in CI. Not blocking but noisy.
-10. **OAuth/MCP token refresh uses wrong client_id** — `get_valid_token()` uses `settings.NETSUITE_OAUTH_CLIENT_ID` (global env var) instead of the stored per-connection `client_id`. This causes `invalid_grant` / 400 errors on refresh when the global doesn't match what was used during OAuth flow. **Root cause of all token expiry issues.** Fix: always use stored per-connection `client_id` for refresh — never the global env var. Proactive refresh task (every 5 min) and Redis lock are deployed but ineffective until client_id routing is fixed. NetSuite Integration Records now set to 720-hour token duration.
-11. **Stale/duplicate connections on staging** — Multiple revoked connections with wrong encryption keys or consumed refresh tokens. Clean up by revoking dead connections. Force-recreate deploys can consume refresh tokens mid-restart — use sequential restarts (stop beat/worker first, then restart).
+10. **OAuth token refresh — FIXED 2026-03-18** — Root cause was threefold: (a) `get_valid_token()` used global `settings.NETSUITE_OAUTH_CLIENT_ID` instead of stored per-connection `client_id` → fixed, now always uses stored. (b) Proactive refresh task batch-committed after all connections → fixed, now commits immediately per-connection. (c) OAuth callback only matched `status='active'` for upsert → fixed, now matches any non-revoked. Proactive refresh runs every 5 min (Celery Beat), Redis distributed lock prevents race conditions, 720-hour refresh token validity configured in NetSuite.
+11. **Deploy procedure** — MUST stop beat/worker first, then pull, then start sequentially. Never `--force-recreate` all at once — kills workers mid-refresh, consuming single-use refresh tokens. See `memory/feedback_deploy_caution.md`.
 
 ## Roadmap
 
@@ -362,7 +362,7 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 - [ ] Billing/payment gateway (Stripe — model TBD)
 - [ ] Fix OAuth scope for discovery (re-auth with `rest_webservices` or wire MCP path)
 - [ ] Google OAuth consent verification (remove "unverified app" warning)
-- [ ] **Proactive token refresh** — background Celery job that refreshes OAuth tokens before expiry + alerts admin when refresh fails
+- [x] ~~Proactive token refresh~~ — DONE (PR #15 + hotfixes). Redis lock, 5-min Celery task, per-connection client_id, immediate commit, connection alerts + frontend banner.
 
 ### Short-term (quality + UX)
 - [ ] **Native-first field resolution** — agent prompt rule: always check standard NetSuite fields/records first before looking at custom fields (custbody_*, custitem_*, customrecord_*). Only use custom fields when (a) user explicitly mentions them, (b) standard fields don't have the data, or (c) tenant_vernacular maps to a custom field. Add to both unified_agent.py and suiteql_agent.py SuiteQL rules.
