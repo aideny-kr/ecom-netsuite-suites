@@ -165,7 +165,7 @@ FETCH FIRST 50 ROWS ONLY
 
 ## Received RMAs at a specific location
 
-Filter by location using LEFT JOIN — still no ItemRcpt join needed. Location is on the transaction header.
+Filter by location on TRANSACTIONLINE (not transaction header). `t.location` is often empty — always use `tl.location` for location filtering.
 
 ```sql
 SELECT t.tranid, t.trandate,
@@ -174,10 +174,14 @@ SELECT t.tranid, t.trandate,
        loc.name as location,
        t.foreigntotal
 FROM transaction t
-  LEFT JOIN location loc ON t.location = loc.id
+  JOIN transactionline tl ON tl.transaction = t.id
+    AND tl.mainline = 'F' AND tl.taxline = 'F'
+  JOIN location loc ON loc.id = tl.location
 WHERE t.type = 'RtnAuth'
   AND t.status IN ('D', 'E', 'F')
   AND UPPER(loc.name) LIKE '%PANURGY%'
+  AND t.trandate >= TO_DATE('2026-02-01', 'YYYY-MM-DD')
+  AND t.trandate <= TO_DATE('2026-02-28', 'YYYY-MM-DD')
 ORDER BY t.trandate DESC
 FETCH FIRST 50 ROWS ONLY
 ```

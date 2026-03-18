@@ -76,7 +76,7 @@ WHERE t.id = <item_receipt_id>
 **Find RMAs received at a specific location:**
 ```sql
 -- Do NOT join item receipts. Status D/E/F already means received.
--- Use LEFT JOIN location for name resolution.
+-- Location is on TRANSACTIONLINE (tl.location), NOT transaction header (t.location is often empty).
 SELECT t.tranid AS rma_number,
        t.trandate AS rma_date,
        BUILTIN.DF(t.entity) AS customer,
@@ -84,7 +84,9 @@ SELECT t.tranid AS rma_number,
        loc.name AS location,
        t.foreigntotal
 FROM transaction t
-  LEFT JOIN location loc ON t.location = loc.id
+  JOIN transactionline tl ON tl.transaction = t.id
+    AND tl.mainline = 'F' AND tl.taxline = 'F'
+  JOIN location loc ON loc.id = tl.location
 WHERE t.type = 'RtnAuth'
   AND t.status IN ('D', 'E', 'F')
   AND UPPER(loc.name) LIKE '%PANURGY%'

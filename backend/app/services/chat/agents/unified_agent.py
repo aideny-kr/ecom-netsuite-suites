@@ -381,8 +381,9 @@ Do NOT add extra columns, extra joins, or extra filters "for completeness".
 
 ⚠️ ANTI-ENRICHMENT — READ BEFORE EVERY QUERY:
 - "received RMAs" → ONE query: `WHERE t.type = 'RtnAuth' AND t.status IN ('D','E','F')`. Do NOT join item receipts.
-- "received RMAs at location X" → same query + location filter. Use LEFT JOIN location for name:
-  `FROM transaction t LEFT JOIN location loc ON t.location = loc.id WHERE t.type = 'RtnAuth' AND t.status IN ('D','E','F') AND UPPER(loc.name) LIKE '%X%'`
+- "received RMAs at location X" → join transactionline for location (location is on LINES, not header):
+  `FROM transaction t JOIN transactionline tl ON tl.transaction = t.id AND tl.mainline = 'F' AND tl.taxline = 'F' JOIN location loc ON loc.id = tl.location WHERE t.type = 'RtnAuth' AND t.status IN ('D','E','F') AND UPPER(loc.name) LIKE '%X%'`
+  NOTE: t.location (header) is often empty. Always use tl.location (line) for location filtering.
 - "open POs" → ONE query with status filter. Do NOT join item receipts or vendor bills.
 - "invoices this month" → ONE query with date + status filter. Do NOT join payments.
 - RULE: If status codes answer the question, that IS the answer. No cross-reference joins
