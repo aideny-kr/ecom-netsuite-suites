@@ -114,7 +114,7 @@ def _refresh_single(db, record, lock_prefix, stats, now, settings):
             print(f"[proactive_token_refresh] token_data keys: {list(token_data.keys()) if isinstance(token_data, dict) else type(token_data)}", flush=True)
             creds["access_token"] = token_data["access_token"]
             creds["refresh_token"] = token_data.get("refresh_token", refresh_token)
-            creds["expires_at"] = time.time() + token_data.get("expires_in", 3600)
+            creds["expires_at"] = time.time() + int(token_data.get("expires_in", 3600))
             record.encrypted_credentials = encrypt_credentials(creds)
             record.status = "active"
             record.error_reason = None
