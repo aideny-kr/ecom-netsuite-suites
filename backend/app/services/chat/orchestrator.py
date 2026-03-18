@@ -856,7 +856,7 @@ async def run_chat_turn(
                     _need_domain_knowledge = context_need in (ContextNeed.FULL, ContextNeed.DATA, ContextNeed.DOCS)
                     _need_patterns = context_need in (ContextNeed.FULL, ContextNeed.DATA)
                     _need_schemas = context_need in (ContextNeed.FULL, ContextNeed.DATA)
-                    _need_onboarding = context_need in (ContextNeed.FULL, ContextNeed.FINANCIAL)
+                    _need_onboarding = context_need in (ContextNeed.FULL, ContextNeed.DATA, ContextNeed.FINANCIAL)
 
                     # Assemble context concurrently (only fetch what we need)
                     from app.services.chat.domain_knowledge import retrieve_domain_knowledge
