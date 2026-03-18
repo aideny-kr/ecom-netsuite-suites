@@ -264,6 +264,76 @@ def _build_rows(
                 }
             )
 
+    # ── Locations ─────────────────────────────────────────────────
+    if getattr(metadata, "locations", None) and isinstance(metadata.locations, list):
+        for loc in metadata.locations:
+            loc_id = str(loc.get("id", ""))
+            name = loc.get("name", "")
+            if not loc_id or not name:
+                continue
+            parent = loc.get("parent", "")
+            desc = f"Parent: {parent}" if parent else None
+            rows.append(
+                {
+                    "tenant_id": tenant_id,
+                    "entity_type": "location",
+                    "natural_name": _truncate(name),
+                    "script_id": _truncate(loc_id),
+                    "description": desc,
+                }
+            )
+
+    # ── Subsidiaries ──────────────────────────────────────────────
+    if getattr(metadata, "subsidiaries", None) and isinstance(metadata.subsidiaries, list):
+        for sub in metadata.subsidiaries:
+            sub_id = str(sub.get("id", ""))
+            name = sub.get("name", "")
+            if not sub_id or not name:
+                continue
+            rows.append(
+                {
+                    "tenant_id": tenant_id,
+                    "entity_type": "subsidiary",
+                    "natural_name": _truncate(name),
+                    "script_id": _truncate(sub_id),
+                    "description": sub.get("currency") or None,
+                }
+            )
+
+    # ── Departments ───────────────────────────────────────────────
+    if getattr(metadata, "departments", None) and isinstance(metadata.departments, list):
+        for dept in metadata.departments:
+            dept_id = str(dept.get("id", ""))
+            name = dept.get("name", "")
+            if not dept_id or not name:
+                continue
+            rows.append(
+                {
+                    "tenant_id": tenant_id,
+                    "entity_type": "department",
+                    "natural_name": _truncate(name),
+                    "script_id": _truncate(dept_id),
+                    "description": None,
+                }
+            )
+
+    # ── Classifications (Classes) ─────────────────────────────────
+    if getattr(metadata, "classifications", None) and isinstance(metadata.classifications, list):
+        for cls in metadata.classifications:
+            cls_id = str(cls.get("id", ""))
+            name = cls.get("name", "")
+            if not cls_id or not name:
+                continue
+            rows.append(
+                {
+                    "tenant_id": tenant_id,
+                    "entity_type": "classification",
+                    "natural_name": _truncate(name),
+                    "script_id": _truncate(cls_id),
+                    "description": None,
+                }
+            )
+
     return rows
 
 
