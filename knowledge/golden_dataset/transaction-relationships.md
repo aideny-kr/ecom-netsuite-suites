@@ -63,41 +63,40 @@ WHERE t.id = <item_receipt_id>
 | Code | Meaning |
 |------|---------|
 | A | Pending Approval |
-| B | Pending Receipt |
+| B | Pending Receipt — approved, waiting for goods to arrive |
 | C | Cancelled |
-| D | Partially Received |
-| E | Pending Refund/Partially Received |
-| F | Pending Refund |
-| G | Refunded (items HAVE BEEN received, refund processed) |
-| H | Closed |
+| D | Partially Received — some lines received |
+| E | Received — all lines received |
+| F | Closed — closed after receipt + credit/refund issued |
+| G | Refunded |
+| H | Cancelled |
 
-**IMPORTANT:** G=Refunded means the return items HAVE BEEN RECEIVED and the refund is complete. When the user asks about "received" RMAs, include status G. For RMAs with items received: `t.status IN ('D', 'E', 'F', 'G')`.
+**"Received" RMAs = status IN ('D', 'E', 'F').** Include F (Closed) because closed RMAs were also received. Do NOT use ItemRcpt join to determine receipt — the status code already tells you.
 
 **Find RMAs received at a specific location:**
 ```sql
--- This is a simple query — do NOT join item receipts.
--- Status G=Refunded already confirms receipt. Just filter by location on transactionline.
+-- Do NOT join item receipts. Status D/E/F already means received.
+-- Use LEFT JOIN location for name resolution.
 SELECT t.tranid AS rma_number,
        t.trandate AS rma_date,
        BUILTIN.DF(t.entity) AS customer,
        BUILTIN.DF(t.status) AS rma_status,
-       BUILTIN.DF(tl.item) AS item_name,
-       ABS(tl.quantity) AS qty,
-       BUILTIN.DF(tl.location) AS location
+       loc.name AS location,
+       t.foreigntotal
 FROM transaction t
-JOIN transactionline tl ON tl.transaction = t.id
-  AND tl.mainline = 'F' AND tl.taxline = 'F'
+  LEFT JOIN location loc ON t.location = loc.id
 WHERE t.type = 'RtnAuth'
-  AND tl.location = <location_id>
-  AND t.status IN ('D', 'E', 'F', 'G')
-  AND t.trandate >= TO_DATE('2026-01-01', 'YYYY-MM-DD')
+  AND t.status IN ('D', 'E', 'F')
+  AND UPPER(loc.name) LIKE '%PANURGY%'
+  AND t.trandate >= TO_DATE('2026-02-01', 'YYYY-MM-DD')
+  AND t.trandate <= TO_DATE('2026-02-28', 'YYYY-MM-DD')
 ORDER BY t.trandate DESC
 FETCH FIRST 100 ROWS ONLY
 ```
 
 **Find open RMAs with pending receipts:**
 ```sql
-SELECT t.id, t.tranid, t.trandate, t.status,
+SELECT t.id, t.tranid, t.trandate,
        BUILTIN.DF(t.entity) as customer,
        BUILTIN.DF(t.status) as status_display
 FROM transaction t
