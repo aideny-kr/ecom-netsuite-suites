@@ -6,8 +6,6 @@ the SuiteQL agent, anti-enrichment rules, and correct RMA status codes.
 
 import uuid
 
-import pytest
-
 from app.services.chat.agents.unified_agent import UnifiedAgent
 
 
