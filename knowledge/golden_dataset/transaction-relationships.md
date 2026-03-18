@@ -1,5 +1,5 @@
 ---
-topic: transaction_relationships
+topic_tags: ["transaction_relationships", "createdfrom", "joins"]
 source_type: curated
 priority: high
 ---

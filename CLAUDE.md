@@ -1,7 +1,6 @@
 # Ecom NetSuite Suites — Project Intelligence
 
-> This file is read by Claude Code at the start of every session.
-> It encodes the project's patterns, conventions, and decisions so the AI doesn't have to rediscover them.
+> Read by Claude Code at session start. Encodes patterns, conventions, and decisions.
 
 ## Tech Stack
 
@@ -16,25 +15,20 @@
 ## Architecture Decisions
 
 - **Multi-tenant**: All tables have `tenant_id`. RLS enforced via `SET LOCAL app.current_tenant_id`.
-- **NetSuite Auth**: OAuth 2.0 Authorization Code flow with PKCE. **Each connector (REST API and MCP) requires its own Client ID** from a separate Integration Record in NetSuite. Client IDs are per-tenant, per-connector — NOT a global env var. Both onboarding and Settings UI must collect Client ID + Account ID per connector. Token refresh handled by `get_valid_token()` (REST) and `_get_oauth2_token()` (MCP) — both MUST use the stored per-connection `client_id`, never a global fallback. RESTlet URL is also per-connection (stored in `metadata_json.restlet_url`).
-- **Connection Setup Requirements**: REST API connection needs: Account ID, Client ID (from Integration Record), RESTlet URL (for file cabinet operations). MCP connection needs: Account ID, Client ID (separate Integration Record from REST API). These are collected during onboarding (`step-connection.tsx`) and editable in Settings (`netsuite-connections-section.tsx`). Connections are stored in `connections` table (REST) and `mcp_connectors` table (MCP) with encrypted credentials containing `{access_token, refresh_token, expires_at, account_id, client_id}`.
-- **NetSuite Integration Records** (two per tenant): (1) REST API record — scopes: RESTlets + REST Web Services + SuiteAnalytics Connect. Used for SuiteQL queries, RESTlet file cabinet operations, and onboarding discovery. (2) MCP record — scope: NetSuite AI Connector Service only. Used for MCP tool execution. Both are Public Client (PKCE, no client secret), Authorization Code Grant, 720-hour refresh token validity. Each has its own Client ID — never shared between REST and MCP.
-- **File Cabinet I/O**: Custom RESTlet (`ecom_file_cabinet_restlet.js`) replaces broken REST API PATCH. RESTlet does in-place load-update-save (preserves file ID).
-- **SuiteQL**: Via REST API POST `/services/rest/query/v1/suiteql` with Bearer token. Also available via MCP at `/services/mcp/v1/all`.
+- **NetSuite Auth**: OAuth 2.0 PKCE flow. Two Integration Records per tenant: (1) REST API — scopes: RESTlets + REST Web Services + SuiteAnalytics Connect, (2) MCP — scope: NetSuite AI Connector Service only. Both Public Client, 720-hour refresh tokens. Each has its own Client ID stored per-connection — **never shared, never a global env var**. Token refresh via `get_valid_token()` (REST) and `_get_oauth2_token()` (MCP) MUST use stored per-connection `client_id`. Connections in `connections` (REST) and `mcp_connectors` (MCP) with encrypted `{access_token, refresh_token, expires_at, account_id, client_id}`.
+- **Connection Setup**: REST API needs Account ID, Client ID, RESTlet URL (`metadata_json.restlet_url`). MCP needs Account ID, Client ID (separate Integration Record). Collected in onboarding (`step-connection.tsx`), editable in Settings (`netsuite-connections-section.tsx`).
+- **File Cabinet I/O**: Custom RESTlet (`ecom_file_cabinet_restlet.js`) — in-place load-update-save (preserves file ID).
+- **SuiteQL**: Via REST API POST `/services/rest/query/v1/suiteql` with Bearer token. Also via MCP at `/services/mcp/v1/all`.
+- **Two SuiteQL paths**: Local REST API (`netsuite_suiteql` tool) supports all tables including `customrecord_*`. External MCP (`ns_runCustomSuiteQL`) works only for standard tables.
+- **Chat**: Dual-path agent system. `unified_agent_enabled` per-tenant flag routes to `UnifiedAgent` or `MultiAgentCoordinator`. SSE streaming with `<thinking>` tags. See `memory/chat-architecture.md` for full details.
+- **Entity Resolution**: Fast NER (Haiku) → pg_trgm fuzzy matching → `<tenant_vernacular>` XML injection. Table: `tenant_entity_mapping` with composite GIN index.
+- **MCP Tools**: ~11 tools across 4 categories (Record CRUD, Reports, Saved Searches, SuiteQL). Visibility is role-permission based — see Mistakes #22. CRUD guardrails — see Mistakes #23.
+- **Tool Result Interception**: `_intercept_tool_result()` in orchestrator emits SSE `data_table`/`financial_report` events, condenses results for LLM. Handles 3 formats: local SuiteQL (`columns`/`rows`), external MCP (`data` list-of-dicts), financial reports (`items`/`summary`).
+- **Smart Context Injection**: `_classify_context_need()` classifies queries into 5 levels (FULL, DATA, DOCS, WORKSPACE, FINANCIAL). Falls back to FULL when uncertain.
 - **Mock Data**: MockData RESTlet runs SuiteQL inside NetSuite with server-side PII masking. Never transmit real PII to our backend.
-- **Chat**: Dual-path agent system. `unified_agent_enabled` per-tenant flag routes to either (1) `UnifiedAgent` — single agent with all tools and full SuiteQL rules (~4K token base prompt, down from ~7K after prompt optimization), or (2) `MultiAgentCoordinator` — semantic routing to specialist agents (SuiteQL, RAG, analysis, workspace). SSE streaming with `<thinking>` tags (collapsed in UI). Inline SQL examples moved to RAG golden dataset (`knowledge/golden_dataset/suiteql-example-queries.md`, 11 chunks).
-- **Entity Resolution**: Fast NER (Haiku) → pg_trgm fuzzy matching → `<tenant_vernacular>` XML injection into agent prompts. Table: `tenant_entity_mapping` with composite GIN index. Seeded from metadata discovery pipeline.
-- **Two SuiteQL paths**: Local REST API (`netsuite_suiteql` tool) supports all tables including `customrecord_*`. External MCP (`ns_runCustomSuiteQL`) works only for standard tables. Agent prompt guides tool selection.
-- **MCP Standard Tools SuiteApp**: ~11 tools across 4 categories (Record CRUD, Reports, Saved Searches, SuiteQL). Tool visibility is **role-permission based** — same SuiteApp version on two accounts can expose different tools depending on OAuth role permissions. NOT a SuiteApp version issue. After changing role permissions, must reconnect MCP to trigger `discover_tools()` refresh.
-- **MCP Tool Permissions**: Record Tools require `REST Web Services (Full)` + per-record-type Create/Edit. Saved Search Tools require `Perform Search (Full)`. SuiteQL Tools require `SuiteQL` permission. Administrator role CANNOT be used — Oracle prohibits it. See `skills/netsuite-mcp/SKILL.md` for full permission matrix.
-- **MCP CRUD Capability**: `ns_createRecord`, `ns_getRecord`, `ns_updateRecord`, `ns_getRecordTypeMetadata` enable the agent to CREATE and MODIFY NetSuite records (journal entries, customers, orders, etc.) — not just query. GUARDRAILS REQUIRED: always show payload + get user confirmation before create/update, log via audit_service, enforce record type allowlist per tenant.
-- **react-resizable-panels v4**: Imports are `Panel`, `Group as PanelGroup`, `Separator as PanelResizeHandle`. Uses `orientation` prop (not `direction`).
-- **White-Label Branding**: Per-tenant brand_name, brand_color_hsl, brand_logo_url, brand_favicon_url in `tenant_configs`. Frontend `BrandingProvider` injects `--primary` CSS variable at runtime. Sidebar/login dynamically render tenant brand.
-- **Custom Domains**: `custom_domain` + `domain_verified` on `tenant_configs`. DNS TXT verification via `domain_service.py`. Public resolver endpoint `GET /api/v1/settings/resolve-domain?domain=`.
-- **Feature Flags**: `tenant_feature_flags` table with TTL-cached service (`feature_flag_service.py`). `require_feature(flag_key)` FastAPI dependency returns 403 when disabled. Default flags seeded on tenant creation.
-- **Soul Seeding**: `seed_default_soul()` auto-populates soul.md with tenant-specific defaults on registration. Called from `auth_service.register_tenant()`.
-- **Tool Result Interception**: `_intercept_tool_result()` in orchestrator intercepts SuiteQL/financial tool results, emits SSE `data_table` or `financial_report` events for frontend rendering (`DataFrameTable` component), and condenses the result for the LLM (strips rows, keeps columns + row_count). Handles three formats: local SuiteQL (`columns`/`rows`), external MCP (`data` list-of-dicts with `queryExecuted`/`resultCount`), and financial reports (`items`/`summary`).
-- **Smart Context Injection**: `_classify_context_need()` in `orchestrator.py` classifies each query into 5 levels (FULL, DATA, DOCS, WORKSPACE, FINANCIAL) using regex-first heuristics. Each level injects only the context blocks the query needs (e.g., DOCS skips schemas/vernacular/patterns, WORKSPACE skips all NetSuite schemas). Always falls back to FULL when uncertain — never risks under-injecting.
+- **react-resizable-panels v4**: Imports: `Panel`, `Group as PanelGroup`, `Separator as PanelResizeHandle`. Uses `orientation` prop (not `direction`).
+- **White-Label Branding**: Per-tenant brand_name/color/logo/favicon in `tenant_configs`. `BrandingProvider` injects `--primary` CSS variable.
+- **Feature Flags**: `tenant_feature_flags` table, TTL-cached. `require_feature(flag_key)` dependency returns 403 when disabled.
 
 ## Backend Patterns — FOLLOW EXACTLY
 
@@ -89,12 +83,6 @@ class ResourceCreate(BaseModel):
     name: str = Field(min_length=1, max_length=255)
     type: Literal["type_a", "type_b"]
 
-    @field_validator("name")
-    @classmethod
-    def validate_name(cls, v: str) -> str:
-        # validation logic
-        return v
-
 class ResourceResponse(BaseModel):
     id: str
     tenant_id: str
@@ -122,8 +110,6 @@ import sqlalchemy as sa
 
 revision = "NNN"
 down_revision = "previous"
-branch_labels = None
-depends_on = None
 
 def upgrade() -> None:
     op.add_column("table", sa.Column("field", sa.String(50), nullable=True))
@@ -140,7 +126,6 @@ def downgrade() -> None:
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiClient } from "@/lib/api-client";
 
-// Read hook — always conditional with enabled
 export function useResource(id: string | null) {
   return useQuery<Resource>({
     queryKey: ["resources", id],
@@ -149,7 +134,6 @@ export function useResource(id: string | null) {
   });
 }
 
-// Mutation hook — always invalidate related queries
 export function useCreateResource() {
   const queryClient = useQueryClient();
   return useMutation({
@@ -163,35 +147,13 @@ export function useCreateResource() {
 ```
 
 **Rules:**
-- Always `"use client"` at top
+- Always `"use client"` at top of files using hooks
 - Always use `apiClient` from `@/lib/api-client` — never raw `fetch()`
 - Query keys: `["entity"]` for lists, `["entity", id]` for single, `["entity", id, "sub"]` for nested
 - Mutations always invalidate parent query on success
 - Use `enabled: !!id` for conditional queries
-- Use `keepPreviousData` (import as `placeholderData`) for paginated queries
 
-### Page Component
-```typescript
-"use client";
-import { useAuth } from "@/providers/auth-provider";
-import { SomeIcon } from "lucide-react";
-
-export default function ResourcePage() {
-  const { user } = useAuth();
-  // hooks, state, handlers
-  return (
-    <div className="space-y-8 animate-fade-in">
-      <div>
-        <h2 className="text-2xl font-semibold tracking-tight text-foreground">Title</h2>
-        <p className="mt-1 text-[15px] text-muted-foreground">Subtitle</p>
-      </div>
-      {/* Content */}
-    </div>
-  );
-}
-```
-
-**Rules:**
+### Page Component Rules
 - Icons from `lucide-react` only
 - Spacing: `space-y-8` for page sections, `gap-4` for grids
 - Text sizes: `text-2xl` for page titles, `text-[15px]` for body, `text-[13px]` for labels/captions
@@ -230,155 +192,63 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 - Always report `remainingUsage` for governance monitoring
 - Always wrap in try/catch — RESTlets must not throw unhandled errors
 
-## File Locations
+## Key File Locations
 
 | What | Where |
 |------|-------|
-| API routes | `backend/app/api/v1/` |
-| Services | `backend/app/services/` |
 | Chat agents | `backend/app/services/chat/agents/` |
 | Chat adapters | `backend/app/services/chat/adapters/` |
 | Entity resolver | `backend/app/services/chat/tenant_resolver.py` |
 | Entity seeder | `backend/app/services/tenant_entity_seeder.py` |
-| Models | `backend/app/models/` |
-| Schemas | `backend/app/schemas/` |
-| Migrations | `backend/alembic/versions/` |
-| Frontend pages | `frontend/src/app/(dashboard)/` |
-| Frontend hooks | `frontend/src/hooks/` |
-| Frontend components | `frontend/src/components/` |
-| UI primitives (shadcn) | `frontend/src/components/ui/` |
 | Types | `frontend/src/lib/types.ts` |
 | API client | `frontend/src/lib/api-client.ts` |
 | Settings API | `backend/app/api/v1/settings.py` |
 | Feature flags | `backend/app/services/feature_flag_service.py` |
-| Domain service | `backend/app/services/domain_service.py` |
 | Branding provider | `frontend/src/providers/branding-provider.tsx` |
-| Feature hooks | `frontend/src/hooks/use-features.ts` |
 | Knowledge crawler | `backend/app/services/knowledge/` |
-| Celery tasks | `backend/app/workers/tasks/` |
-| Celery Beat config | `backend/app/workers/celery_app.py` |
-| Invite service | `backend/app/services/invite_service.py` |
-| Google auth | `backend/app/services/google_auth_service.py` |
+| Celery tasks/Beat | `backend/app/workers/tasks/`, `backend/app/workers/celery_app.py` |
 | Excel export | `backend/app/services/excel_export_service.py` |
-| Export endpoints | `backend/app/api/v1/exports.py` |
-| Invite endpoints | `backend/app/api/v1/invites.py` |
 | SuiteScripts | `suiteapp/src/FileCabinet/SuiteScripts/` |
 | SDF Objects | `suiteapp/src/Objects/` |
-| SuiteScript tests | `suiteapp/__tests__/` |
-| Backend tests | `backend/tests/` |
-| E2E tests | `frontend/e2e/` |
-| Docs | `docs/` |
-| Specs | `docs/superpowers/specs/` |
-| Plans | `docs/superpowers/plans/` |
+| Specs / Plans | `docs/superpowers/specs/`, `docs/superpowers/plans/` |
 
 ## Common Mistakes to Avoid
 
-1. **Don't use `Column()` in models** — use `mapped_column()` (SQLAlchemy 2.0 style)
+1. **Don't use `Column()` in models** — use `mapped_column()` (SQLAlchemy 2.0)
 2. **Don't use bare `Depends()`** — use `Annotated[Type, Depends()]`
-3. **Don't use `PanelGroup` from react-resizable-panels** — it's `Group` (aliased as `PanelGroup`)
+3. **Don't use `PanelGroup` directly** — import `Group` aliased as `PanelGroup`
 4. **Don't use `direction` prop** — it's `orientation` in react-resizable-panels v4
 5. **Don't forget `await db.commit()`** after mutations
 6. **Don't forget audit logging** on create/update/delete endpoints
 7. **Don't use raw `fetch()`** in frontend — use `apiClient`
 8. **Don't forget `"use client"`** on any file using hooks
 9. **Don't use `WidthType.PERCENTAGE`** in docx — use DXA
-10. **RESTlet PUT preserves file IDs** — in-place update via load → set `.contents` → `.save()`
-11. **SuiteQL pagination** — use `FETCH FIRST N ROWS ONLY`, not `LIMIT` (not supported in SuiteQL)
+10. **RESTlet PUT preserves file IDs** — in-place load → set `.contents` → `.save()`
+11. **SuiteQL pagination** — use `FETCH FIRST N ROWS ONLY`, not `LIMIT`
 12. **NetSuite account IDs** — normalize with `replace("_", "-").lower()` for URLs
-13. **SuiteQL status codes via REST API** — REST API returns single-letter status codes (`'B'`, `'H'`), NOT compound codes (`'SalesOrd:B'`). Always use single-letter codes in WHERE filters: `t.status NOT IN ('C', 'H')`. Compound codes silently fail via REST API.
-14. **Agent hallucination from history** — The LLM may answer data queries from conversation memory without calling tools. `_task_contains_query()` guard in `base_agent.py` forces tool execution when step==0 and no tools called.
-15. **SET LOCAL doesn't support bind params** — PostgreSQL `SET LOCAL` rejects `$1` placeholders. Use `set_tenant_context()` from `database.py` which validates UUID before interpolation. Never use raw f-string with user input.
-16. **Token denylist and rate limiter use Redis** — `token_denylist.py` and `rate_limit.py` are Redis-backed. Falls back to in-memory in dev if Redis unavailable. Must have Redis in production.
-17. **Production secrets validated at startup** — `_validate_production_secrets()` in `main.py` refuses to start if `APP_ENV != "development"` and JWT_SECRET_KEY or ENCRYPTION_KEY are defaults.
-18. **Swagger docs disabled in production** — `docs_url` and `redoc_url` are `None` when `APP_ENV != "development"`.
-19. **Migrations run in CI, not container startup** — `entrypoint.sh` no longer runs `alembic upgrade head`. Run migrations via deploy.yml workflow.
-20. **Two databases locally** — `.venv/bin/alembic` runs against Supabase (remote). Docker containers use `postgres:5432` (local). After adding a model column, run `docker exec ecom-netsuite-suites-backend-1 alembic upgrade head` to migrate the local Docker Postgres too, or the backend will crash with `UndefinedColumnError`.
-21. **Alembic revision ID max 32 chars** — `alembic_version.version_num` is `VARCHAR(32)`. Keep revision IDs short (e.g. `039_confidence_score`, not `039_chat_message_confidence_score`).
-22. **MCP tool visibility is role-permission based** — If a tenant is missing MCP tools (e.g., no Record Tools, no Saved Search Tools), it's because their OAuth role lacks the required permissions — NOT a SuiteApp version issue. Fix: update the role in NetSuite (Setup > Users/Roles > Manage Roles), then reconnect MCP. Record Tools need `REST Web Services (Full)` + record-type Create/Edit. Saved Search Tools need `Perform Search (Full)`.
-23. **MCP CRUD requires guardrails** — `ns_createRecord` and `ns_updateRecord` MUST NOT auto-execute. Always: (1) show the full payload to the user, (2) get explicit confirmation, (3) for updates, show before/after diff via `ns_getRecord` first, (4) log via `audit_service`, (5) check record type allowlist. The agent is now an action agent, not just read-only.
-24. **Unified agent prompt MUST stay in sync with SuiteQL agent** — `unified_agent.py` and `suiteql_agent.py` both contain SuiteQL dialect rules. When adding a new rule to one, add it to both. Copy rules verbatim — do NOT paraphrase or "simplify" when porting. Each rule was added because of a specific production failure; losing details causes regressions (e.g., missing `assemblycomponent = 'F'` caused double-counting).
-25. **External MCP response format differs from local** — `ns_runCustomSuiteQL` returns `{"data": [{col: val}, ...], "queryExecuted": "...", "resultCount": N}`, NOT `{"columns": [], "rows": []}`. The `_intercept_tool_result()` function handles both formats. When adding new interception logic, test with both local and external MCP tool names.
+13. **SuiteQL status codes** — REST API returns single-letter codes (`'B'`, `'H'`), NOT compound (`'SalesOrd:B'`). Compound codes silently fail.
+14. **Agent hallucination guard** — `_task_contains_query()` in `base_agent.py` forces tool execution at step==0
+15. **SET LOCAL doesn't support bind params** — use `set_tenant_context()` from `database.py` (validates UUID). Never raw f-string with user input.
+16. **Redis required in production** — `token_denylist.py` and `rate_limit.py` are Redis-backed. In-memory fallback in dev only.
+17. **Production secrets validated at startup** — `_validate_production_secrets()` refuses to start with default keys
+18. **Swagger docs disabled in production** — `docs_url`/`redoc_url` are `None` when `APP_ENV != "development"`
+19. **Migrations run in CI, not container startup** — `entrypoint.sh` doesn't run `alembic upgrade head`
+20. **Two databases locally** — `.venv/bin/alembic` → Supabase (remote). Docker → `postgres:5432` (local). After adding columns, also run `docker exec ecom-netsuite-suites-backend-1 alembic upgrade head`.
+21. **Alembic revision ID max 32 chars** — keep short (e.g. `039_confidence_score`)
+22. **MCP tool visibility is role-permission based** — missing tools = OAuth role lacks permissions, NOT SuiteApp version. Fix: update role in NetSuite, reconnect MCP. Record Tools need `REST Web Services (Full)` + Create/Edit. Saved Search needs `Perform Search (Full)`. Administrator role CANNOT be used.
+23. **MCP CRUD requires guardrails** — `ns_createRecord`/`ns_updateRecord` MUST NOT auto-execute. Always: (1) show payload, (2) get confirmation, (3) for updates show before/after via `ns_getRecord`, (4) audit log, (5) check record type allowlist.
+24. **Unified agent prompt MUST stay in sync with SuiteQL agent** — both contain SuiteQL dialect rules. Copy verbatim — never paraphrase. Each rule prevents a specific production failure.
+25. **External MCP response format differs** — `ns_runCustomSuiteQL` returns `{"data": [{col: val}], "queryExecuted": "...", "resultCount": N}`, NOT `{"columns": [], "rows": []}`. Test interception with both formats.
+26. **Use `print(flush=True)` for docker logging** — structlog doesn't surface stdlib `logger.info` in docker logs.
 
-## Chat Architecture
-
-- **Orchestrator** (`orchestrator.py`): SSE streaming endpoint. Checks `TenantConfig.unified_agent_enabled` to route to `UnifiedAgent` or `MultiAgentCoordinator`.
-- **Unified Agent** (`unified_agent.py`): Single agent with all tools (SuiteQL, RAG, workspace, financial). Used by Framework tenant. Has full SuiteQL dialect rules + `<common_queries>` section embedded in its system prompt.
-- **Coordinator** (`coordinator.py`): Legacy multi-agent path. Semantic router with heuristic classifier (`classify_intent()`), LLM fallback for ambiguous queries. Dispatches specialist agents, handles retries, streams synthesis. Used by Rails tenant.
-- **Intent types**: DOCUMENTATION, DATA_QUERY, FINANCIAL_REPORT, CODE_UNDERSTANDING, WORKSPACE_DEV, ANALYSIS, AMBIGUOUS. Heuristic regex rules checked first; AMBIGUOUS falls back to LLM planner.
-- **Financial report routing**: FINANCIAL_REPORT intent → local `netsuite.financial_report` tool (SuiteQL-first with BUILTIN.CONSOLIDATE for posting-time FX rates). MCP `ns_runReport` as fallback only (uses real-time FX, diverges on multi-currency tenants). Server-side `_compute_summary()` pre-computes section totals — single-period returns flat dict, trend returns `summary.by_period` keyed by periodname. LLM presents numbers, never computes. Financial reports bypass `NETSUITE_SUITEQL_MAX_ROWS` cap via `_skip_limit_cap` kwarg.
-- **Hybrid MCP architecture**: Three layers — (1) Context Layer: entity resolution, tenant schema, RAG, learned rules, proven patterns (always active), (2) Execution Layer: local `netsuite.financial_report` for P&L/BS/TB (verified templates), MCP tools for discovery/saved searches/ad-hoc (`ns_runSavedSearch` → `ns_runCustomSuiteQL`), local `netsuite_suiteql` as fallback, (3) Knowledge Layer: `rag_search` + `web_search`.
-- **MCP tool detection**: Orchestrator uses `_MCP_TOOL_PATTERNS` dict to detect all ~11 tool types from `ext__` prefixed names. Patterns: runreport, runsavedsearch, listallreports, listsavedsearches, suiteql, getsuiteqlmetadata, getsubsidiaries, createrecord, getrecord, updaterecord, getrecordtypemetadata.
-- **Specialist agents** (`agents/`): Used by multi-agent coordinator path only. Each runs a mini agentic loop with tools (max_steps varies per agent)
-  - `SuiteQLAgent`: max_steps=6, has comprehensive SuiteQL rules (the canonical source — unified agent rules must mirror these)
-  - `RAGAgent`: max_steps=2, strict tool budget (2 rag_search + 1 web_search). Handles docs, script logic, AND online research.
-  - `DataAnalysisAgent`: requires prior data from SuiteQL agent
-  - `WorkspaceAgent`: file ops, propose_patch, search workspace
-  - `UnifiedAgent`: Single agent with all capabilities. Replaces coordinator routing for `unified_agent_enabled=True` tenants. Prompt optimized: KGP removed, 4 conflicting directives unified into DECISION ORDER, SuiteQL rules compressed with failure annotations, inline examples moved to RAG. Dynamic context injection via `_classify_context_need()` skips unnecessary blocks per query type.
-- **LLM adapters** (`adapters/`): Anthropic, OpenAI, Gemini — all implement `create_message()` and `stream_message()`
-- **Entity resolution** (`tenant_resolver.py`): Runs before SuiteQL agent dispatch. Haiku extracts entities → pg_trgm resolves to script IDs → XML block injected via `context["tenant_vernacular"]`
-- **Route registry**: Add new agents via `ROUTE_REGISTRY` dict + `_create_agent()` factory in coordinator
-- **History compaction**: Per-message `content_summary` generated at write-time (Haiku). Orchestrator loads summaries for older messages, full content for last 8. No read-time LLM compaction.
-- **Session ordering**: Sorted by `updated_at DESC`. Session `updated_at` bumped on every message. Frontend auto-selects most recent session on page load.
-- **Doc chunk embeddings**: OpenAI `text-embedding-3-small` (1024-dim) primary, Voyage AI fallback. 3,198 chunks embedded. UTF-8 sanitized on ingest.
-- **Logging**: Coordinator/orchestrator use `print(flush=True)` for docker visibility (structlog doesn't surface stdlib `logger.info` calls).
-
-## Current State (updated 2026-03-17)
+## Current State
 
 - **Latest migration**: 049_connection_alerts
-- **Staging**: `staging.suitestudio.ai` (Vercel frontend) + `api-staging.suitestudio.ai` (GCP VM backend). Auto-deploys from main via GitHub Actions. SSH deploy key configured.
-- **RBAC**: 3 user-facing roles (Admin/Finance/Operations). `chat.financial_reports` permission gates financial reports. Invite flow with email (console/Resend) + Google Sign-In.
-- **Google Sign-In**: `@react-oauth/google` on login + invite pages. Backend `POST /auth/google` verifies ID token, auto-links Google account. Client ID: `840124956248-*.apps.googleusercontent.com` (suite-studio-ai project).
-- **BYOK**: Tenants with `ai_api_key_encrypted` use their own provider + model for the unified agent. Non-BYOK tenants use platform defaults. Credits not deducted for BYOK.
-- **Excel export**: `POST /exports/excel` (direct data), `POST /exports/query-export` (server-side re-execution with pagination). openpyxl with auto-type detection, branded styling. `apiClient.download()` for blob responses.
-- **Structured output persistence**: `structured_output` JSONB on `chat_messages` persists financial reports and data tables across page refresh. Frontend hydrates refs on session load.
-- **Saved queries**: Private by default (`created_by` + `is_public`). Publish/unpublish via `PATCH /skills/{id}/publish`. Snapshot data stored in `result_data` JSONB for financial reports.
-- **Connection management**: Grouped "NetSuite Connections" section in Settings. Per-connection health check (`GET /connections/health`), editable Client IDs, RESTlet URL. Token expiry detection flips status to `needs_reauth`.
-- **Knowledge Crawler**: 4 sources (Oracle Help, Tim Dietrich, SuiteRep, Reddit r/Netsuite). Daily at 3am UTC via Celery Beat. Incremental (content hash dedup). 108+ crawled chunks embedded.
-- **Auto-Learning**: Gap detector (thumbs-down + tool errors) → web search → chunk → embed. Daily at 4am UTC. 30-day staleness check refreshes tenant onboarding profiles.
-- **Onboarding Discovery**: 6-phase tenant deep discovery (transaction landscape, relationships, status codes). Stores `onboarding_profile` JSON in `tenant_configs`. Injected into agent prompt as XML blocks. Known: needs `rest_webservices` OAuth scope to work.
-- **Golden dataset**: 10 files, 89 chunks (added `transaction-relationships.md` for createdfrom, transaction chains, RMA patterns).
-- **Settings visibility**: Non-admin users see My Account + Connection Status only. Admins see full management (Team, Connections, Jobs, AI, Branding, etc.).
-- **Dark mode**: Default theme.
+- **Staging**: `api-staging.suitestudio.ai` (backend) + `staging.suitestudio.ai` (Vercel frontend). Auto-deploys from main.
+- **Deploy**: Stop beat/worker first, pull, start sequentially. Never `--force-recreate` all at once — kills workers mid-refresh, consuming single-use refresh tokens.
 
 ## Known Issues
 
-1. **OAuth scope mismatch** — REST API connections lack `rest_webservices` scope, so Onboarding Discovery queries return 400. Chat agent works fine via MCP path. Fix: re-auth connections with proper scope, or wire discovery to use MCP tools.
-2. **OAuth reconnect doesn't re-initiate browser flow** — just flips status. Expired refresh tokens (e.g., Rails 9745435) require full re-authorization.
-3. **structlog doesn't surface stdlib logging** — `logging.getLogger()` calls don't appear in docker logs. Use `print(flush=True)` for visibility.
-4. **Token storage duplication** — `localStorage.setItem` + `document.cookie` pattern in 3 places (login, invite, Google). Should use shared `setTokens()` from auth-provider.
-5. **Onboarding profile XML duplicated** — identical 50-line builder in orchestrator.py and coordinator.py. Should extract to shared `context_builders.py`.
-6. **SYSTEM_TENANT_ID constant scattered** — defined in 5+ files. Should consolidate to `app/core/constants.py`.
-7. **Celery async boilerplate** — `asyncio.new_event_loop()` pattern repeated in 8+ tasks. Should extract `run_async()` helper.
-8. **Team section MAX_SEATS hardcoded** — Currently `20`, should come from entitlement API.
-9. **CI failures** — `test_security_hardening.py` SSL tests fail in CI. Not blocking but noisy.
-10. **OAuth token refresh — FIXED 2026-03-18** — Root cause was threefold: (a) `get_valid_token()` used global `settings.NETSUITE_OAUTH_CLIENT_ID` instead of stored per-connection `client_id` → fixed, now always uses stored. (b) Proactive refresh task batch-committed after all connections → fixed, now commits immediately per-connection. (c) OAuth callback only matched `status='active'` for upsert → fixed, now matches any non-revoked. Proactive refresh runs every 5 min (Celery Beat), Redis distributed lock prevents race conditions, 720-hour refresh token validity configured in NetSuite.
-11. **Deploy procedure** — MUST stop beat/worker first, then pull, then start sequentially. Never `--force-recreate` all at once — kills workers mid-refresh, consuming single-use refresh tokens. See `memory/feedback_deploy_caution.md`.
-
-## Roadmap
-
-### Go-live blockers
-- [ ] Resend email provider for production invite emails
-- [ ] Production deployment (Supabase, Caddy, `suitestudio.ai` domain)
-- [ ] Billing/payment gateway (Stripe — model TBD)
-- [ ] Fix OAuth scope for discovery (re-auth with `rest_webservices` or wire MCP path)
-- [ ] Google OAuth consent verification (remove "unverified app" warning)
-- [x] ~~Proactive token refresh~~ — DONE (PR #15 + hotfixes). Redis lock, 5-min Celery task, per-connection client_id, immediate commit, connection alerts + frontend banner.
-
-### Short-term (quality + UX)
-- [ ] **Native-first field resolution** — agent prompt rule: always check standard NetSuite fields/records first before looking at custom fields (custbody_*, custitem_*, customrecord_*). Only use custom fields when (a) user explicitly mentions them, (b) standard fields don't have the data, or (c) tenant_vernacular maps to a custom field. Add to both unified_agent.py and suiteql_agent.py SuiteQL rules.
-- [ ] **Persistent chat across navigation** — keep SSE stream alive when switching to Dev Workspace/other tabs. Either persistent layout (tab system) or global SSE context provider. Currently navigation unmounts chat, kills stream, loses in-progress responses.
-- [ ] **Save placeholder on stream cancel** — when user navigates away before any text streams, save "(Processing interrupted — please ask again)" so the session isn't lost
-- [ ] Settings: read-only team list for non-admins
-- [ ] Onboarding Discovery via MCP (bypass scope issue)
-- [ ] Refactor token storage (shared `setTokens()`)
-- [ ] Extract shared context builders (profile XML, domain knowledge)
-- [ ] Celery `run_async()` helper to eliminate boilerplate
-- [ ] Knowledge Crawler: admin-configurable custom sources
-
-### Medium-term (features)
-- [ ] Financial DataFrame component (`<FinancialReport />` with section grouping)
-- [ ] Onboarding Discovery Phase 3/5/6 (custom fields, sample queries, saved searches)
-- [ ] Auto-trigger discovery on new OAuth connection
-- [ ] Celigo integration (research complete, see `memory/celigo-research.md`)
-- [ ] SDF CI/CD pipeline for SuiteScript deployment
-- [ ] SYSTEM_TENANT_ID consolidation to `app/core/constants.py`
+1. **OAuth scope mismatch** — REST connections lack `rest_webservices` scope. Onboarding Discovery returns 400. Chat works via MCP path.
+2. **OAuth reconnect doesn't re-initiate browser flow** — just flips status. Expired refresh tokens require full re-authorization.
+3. **CI failures** — `test_security_hardening.py` SSL tests fail. Not blocking.

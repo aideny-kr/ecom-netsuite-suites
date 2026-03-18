@@ -75,6 +75,97 @@ _CHITCHAT_RE = re.compile(
 
 
 # ---------------------------------------------------------------------------
+# Connection health check — prevent wasted tool calls on dead connections
+# ---------------------------------------------------------------------------
+
+_BROKEN_STATUSES = frozenset({"needs_reauth", "error", "expired"})
+
+# Local tools that require a healthy REST API connection
+_REST_TOOLS = frozenset({"netsuite_suiteql", "netsuite_financial_report"})
+
+
+async def _check_connection_health(
+    db: AsyncSession, tenant_id: uuid.UUID
+) -> list[str]:
+    """Check REST API and MCP connection health for a tenant.
+
+    Returns a list of warning strings for broken connections.
+    Fail-open: returns [] on any DB error so chat is never blocked.
+    """
+    try:
+        from sqlalchemy import select as sa_select
+
+        from app.models.connection import Connection
+        from app.models.mcp_connector import McpConnector
+
+        warnings: list[str] = []
+
+        # Check REST API connections
+        conn_result = await db.execute(
+            sa_select(Connection.label, Connection.status, Connection.error_reason)
+            .where(Connection.tenant_id == tenant_id)
+            .where(Connection.provider == "netsuite")
+        )
+        for conn in conn_result.all():
+            if conn.status in _BROKEN_STATUSES:
+                warnings.append(f"REST API ({conn.label}): {conn.status}")
+
+        # Check MCP connections
+        mcp_result = await db.execute(
+            sa_select(McpConnector.label, McpConnector.status)
+            .where(McpConnector.tenant_id == tenant_id)
+            .where(McpConnector.is_enabled == True)  # noqa: E712
+        )
+        for mcp in mcp_result.all():
+            if mcp.status in _BROKEN_STATUSES:
+                warnings.append(f"MCP ({mcp.label}): {mcp.status}")
+
+        return warnings
+    except Exception:
+        # Fail-open — don't block chat if health check fails
+        return []
+
+
+def _filter_tools_for_dead_connections(
+    tool_definitions: list[dict], connection_warnings: list[str]
+) -> list[dict]:
+    """Remove tools whose backing connection is broken.
+
+    - REST dead → strip local netsuite_suiteql, netsuite_financial_report
+    - MCP dead → strip all ext__ prefixed tools
+    """
+    if not connection_warnings:
+        return tool_definitions
+
+    rest_dead = any("REST API" in w for w in connection_warnings)
+    mcp_dead = any("MCP" in w for w in connection_warnings)
+
+    filtered = []
+    for t in tool_definitions:
+        name = t["name"]
+        if rest_dead and name in _REST_TOOLS:
+            continue
+        if mcp_dead and name.startswith("ext__"):
+            continue
+        filtered.append(t)
+    return filtered
+
+
+def _build_connection_warning_block(connection_warnings: list[str]) -> str:
+    """Build a system prompt block warning the agent about broken connections."""
+    if not connection_warnings:
+        return ""
+
+    warning_lines = "\n".join(f"  - {w}" for w in connection_warnings)
+    return (
+        f"\n\n⚠️ CONNECTION STATUS — BROKEN:\n{warning_lines}\n"
+        "IMMEDIATELY tell the user which connections are down. "
+        "Do NOT attempt queries against broken connections — they will fail. "
+        "Direct user to Settings > Connections to re-authorize."
+    )
+
+
+# ---------------------------------------------------------------------------
 # Smart context injection — classify how much context each query needs
 # ---------------------------------------------------------------------------
 
@@ -522,10 +613,18 @@ async def run_chat_turn(
     messages.append({"role": "user", "content": user_content})
 
     # ── Build tool definitions (with policy-based filtering) ──
+    connection_warnings: list[str] = []
     if is_onboarding:
         tool_definitions = list(ONBOARDING_TOOL_DEFINITIONS)
     else:
         tool_definitions = await build_all_tool_definitions(db, tenant_id)
+
+        # Pre-flight connection health check — strip tools for dead connections
+        connection_warnings = await _check_connection_health(db, tenant_id)
+        if connection_warnings:
+            tool_definitions = _filter_tools_for_dead_connections(
+                tool_definitions, connection_warnings
+            )
 
     # ── Resolve tenant-specific system prompt ──
     if is_onboarding:
@@ -670,6 +769,10 @@ async def run_chat_turn(
             tool_inventory_lines.append("\n".join(guidance))
 
         system_prompt += "\n".join(tool_inventory_lines)
+
+    # ── Connection health warning (appended after tool inventory) ──
+    if connection_warnings:
+        system_prompt += _build_connection_warning_block(connection_warnings)
 
     # ── Workspace context injection ──
     workspace_context: dict | None = None

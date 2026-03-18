@@ -88,6 +88,97 @@ Common sales order statuses (use single-letter code in WHERE filters):
 - `G` → Closed
 - `H` → Cancelled
 
+## Return Authorization (RMA) Statuses — `type = 'RtnAuth'`
+
+```sql
+WHERE t.type = 'RtnAuth' AND t.status IN ('D', 'E', 'F')  -- received RMAs
+```
+
+- `A` → Pending Approval
+- `B` → Pending Receipt  ← RMA approved, waiting for goods to arrive
+- `C` → Cancelled
+- `D` → Partially Received  ← some lines received, use for "received" filter
+- `E` → Received  ← all lines received, primary status for "received" filter
+- `F` → Closed  ← closed after receipt + credit/refund issued
+
+**"Received" RMAs = status IN ('D', 'E', 'F')** — include F (Closed) because closed RMAs were also received.
+
+RMA → Item Receipt join:
+```sql
+-- Find item receipts linked to RMAs
+JOIN transaction ir ON ir.createdfrom = rma.id AND ir.type = 'ItemRcpt'
+```
+
+## Customer Invoice Statuses — `type = 'CustInvc'`
+
+- `A` → Open  ← unpaid, due
+- `B` → Paid in Full
+- `C` → Partially Paid  ← some payment applied
+- `D` → Overdue  ← past due date and unpaid
+- `E` → Disputed
+- `G` → Voided
+
+```sql
+-- Unpaid invoices
+WHERE t.type = 'CustInvc' AND t.status = 'A'
+
+-- Overdue invoices
+WHERE t.type = 'CustInvc' AND t.status IN ('A', 'D')
+```
+
+## Item Receipt Statuses — `type = 'ItemRcpt'`
+
+Item Receipts do not have user-editable statuses — they are always `A` (Open/Posted) once created. Filter by existence, not status.
+
+```sql
+-- All item receipts for a PO
+SELECT ir.tranid, ir.trandate, BUILTIN.DF(irl.item), ABS(irl.quantity)
+FROM transaction ir
+JOIN transactionline irl ON irl.transaction = ir.id AND irl.mainline = 'F' AND irl.taxline = 'F'
+WHERE ir.type = 'ItemRcpt' AND ir.createdfrom = :po_id
+```
+
+## Vendor Bill Statuses — `type = 'VendBill'`
+
+- `A` → Open  ← unpaid
+- `B` → Paid in Full
+- `C` → Partially Paid
+- `D` → Pending Approval (if approval routing enabled)
+- `E` → Rejected
+- `G` → Voided
+
+```sql
+-- Unpaid vendor bills
+WHERE t.type = 'VendBill' AND t.status = 'A'
+```
+
+## Purchase Order Statuses — `type = 'PurchOrd'`
+
+- `A` → Pending Supervisor Approval
+- `B` → Pending Receipt  ← ordered, not yet received
+- `C` → Partially Received
+- `D` → Pending Billing/Partially Received
+- `E` → Pending Bill  ← received, not yet billed
+- `F` → Fully Billed
+- `G` → Closed
+- `H` → Cancelled
+
+```sql
+-- Open POs (not fully received)
+WHERE t.type = 'PurchOrd' AND t.status IN ('B', 'C', 'D', 'E')
+```
+
+## Transfer Order Statuses — `type = 'TrnfrOrd'`
+
+- `A` → Pending Approval
+- `B` → Pending Fulfillment
+- `C` → Partially Fulfilled
+- `D` → Pending Receipt
+- `E` → Partially Received
+- `F` → Received
+- `G` → Closed
+- `H` → Cancelled
+
 ## Common Date-Based Queries
 
 ```sql

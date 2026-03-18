@@ -71,6 +71,42 @@ def _task_contains_query(task: str) -> bool:
     return any(kw in task_lower for kw in _DATA_QUESTION_KEYWORDS)
 
 
+def _has_successful_data_result(result_strings: list[str]) -> bool:
+    """Check if any tool result string contains successful data rows.
+
+    Checks three formats: local SuiteQL (rows), external MCP (data), financial (items).
+    Returns False on errors or empty results so we don't nudge prematurely.
+    """
+    for result_str in result_strings:
+        try:
+            parsed = json.loads(result_str)
+            if not isinstance(parsed, dict):
+                continue
+            # Skip errors
+            if parsed.get("error"):
+                continue
+            # Local SuiteQL format
+            if isinstance(parsed.get("rows"), list) and len(parsed["rows"]) > 0:
+                return True
+            # External MCP format
+            if isinstance(parsed.get("data"), list) and len(parsed["data"]) > 0:
+                return True
+            # Financial report format
+            if isinstance(parsed.get("items"), list) and len(parsed["items"]) > 0:
+                return True
+        except (json.JSONDecodeError, TypeError, AttributeError):
+            continue
+    return False
+
+
+_DATA_SUCCESS_NUDGE = (
+    "\n\n⚠️ SYSTEM: A query returned data successfully. "
+    "You SHOULD present these results to the user now. "
+    "Do NOT run additional queries unless the data is clearly wrong "
+    "or missing what the user asked for."
+)
+
+
 def _truncate_tool_result(result_str: str) -> str:
     """Truncate tool results to prevent token bloat.
 
@@ -683,6 +719,7 @@ class BaseSpecialistAgent(abc.ABC):
                 # Process tool calls
                 messages.append(adapter.build_assistant_message(response))
                 tool_results_content = []
+                raw_result_strings: list[str] = []  # Track originals for stop-when-done check
 
                 for block in response.tool_use_blocks:
                     if block.name.startswith("workspace_"):
@@ -718,6 +755,7 @@ class BaseSpecialistAgent(abc.ABC):
                                 pass
 
                     result_str = _truncate_tool_result(result_str)
+                    raw_result_strings.append(result_str)
                     elapsed_ms = int((time.monotonic() - t0) * 1000)
 
                     # Allow orchestrator to intercept specific tool results
@@ -748,6 +786,13 @@ class BaseSpecialistAgent(abc.ABC):
                             "content": llm_result_str,
                         }
                     )
+
+                # Soft enforcement: nudge LLM to stop if data was already returned
+                if step >= 1 and _has_successful_data_result(raw_result_strings):
+                    tool_results_content.append({
+                        "type": "text",
+                        "text": _DATA_SUCCESS_NUDGE,
+                    })
 
                 messages.append(adapter.build_tool_result_message(tool_results_content))
 
