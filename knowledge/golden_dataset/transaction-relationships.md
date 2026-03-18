@@ -71,7 +71,7 @@ WHERE t.id = <item_receipt_id>
 | G | Refunded |
 | H | Cancelled |
 
-**"Received" RMAs = status IN ('D', 'E', 'F', 'G').** G=Refunded confirms items were received and refund processed. F=Closed also means received. Do NOT use ItemRcpt join — the status code already tells you.
+**"Received" RMAs = status IN ('D', 'E', 'F', 'G', 'H').** G=Refunded confirms items were received and refund processed. F=Closed also means received. Do NOT use ItemRcpt join — the status code already tells you.
 
 **Find RMAs received at a specific location:**
 ```sql
@@ -88,7 +88,7 @@ FROM transaction t
     AND tl.mainline = 'F' AND tl.taxline = 'F'
   JOIN location loc ON loc.id = tl.location
 WHERE t.type = 'RtnAuth'
-  AND t.status IN ('D', 'E', 'F', 'G')
+  AND t.status IN ('D', 'E', 'F', 'G', 'H')
   AND UPPER(loc.name) LIKE '%PANURGY%'
   AND t.trandate >= TO_DATE('2026-02-01', 'YYYY-MM-DD')
   AND t.trandate <= TO_DATE('2026-02-28', 'YYYY-MM-DD')

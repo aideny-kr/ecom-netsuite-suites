@@ -132,10 +132,10 @@ class TestRMAStatusCodes:
         assert "F=Closed" in prompt
 
     def test_rma_received_filter(self):
-        """'Received' RMAs should use status IN ('D', 'E', 'F', 'G')."""
+        """'Received' RMAs should use status IN ('D', 'E', 'F', 'G', 'H')."""
         agent = _make_agent()
         prompt = agent.system_prompt
-        assert "IN ('D', 'E', 'F', 'G')" in prompt or "IN ('D','E','F','G')" in prompt
+        assert "IN ('D', 'E', 'F', 'G', 'H')" in prompt or "IN ('D','E','F','G','H')" in prompt
 
 
 class TestPromptSyncWithSuiteQLAgent:

@@ -329,7 +329,7 @@ class TestTransactionStatusCoverage:
         """RMA status codes D, E, F must be documented for 'received' filter."""
         content = self._read_statuses_file()
         assert "type = 'RtnAuth'" in content
-        assert "status IN ('D', 'E', 'F', 'G')" in content
+        assert "status IN ('D', 'E', 'F', 'G', 'H')" in content
 
     def test_rma_received_meaning(self):
         """Golden dataset must explain that D=Partially Received, E=Received, F=Closed."""
