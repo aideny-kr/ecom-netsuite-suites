@@ -3,6 +3,7 @@
 import csv
 import io
 import os
+import re
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -131,8 +132,17 @@ async def query_export(
     creds = decrypt_credentials(connection.encrypted_credentials)
     account_id = (creds.get("account_id") or "").replace("_", "-").lower()
 
+    # Strip FETCH FIRST N ROWS ONLY so the export gets the full dataset.
+    # The export endpoint provides its own pagination (limit=50_000).
+    export_sql = re.sub(
+        r"\bFETCH\s+FIRST\s+\d+\s+ROWS\s+ONLY\b",
+        "",
+        request.query_text,
+        flags=re.IGNORECASE,
+    ).strip()
+
     result = await execute_suiteql_via_rest(
-        access_token, account_id, request.query_text,
+        access_token, account_id, export_sql,
         limit=50_000, paginate=True, timeout_seconds=120,
     )
 

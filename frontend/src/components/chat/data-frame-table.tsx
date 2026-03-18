@@ -87,6 +87,16 @@ export function DataFrameTable({ data, queryText }: DataFrameTableProps) {
   }, [columns, sortedRows]);
 
   const handleDownloadCSV = useCallback(() => {
+    // If we have the query, re-execute server-side for full results (up to 50K rows)
+    if (queryText) {
+      exportFromQuery({
+        queryText,
+        title: queryText.slice(0, 80),
+        format: "csv",
+      });
+      return;
+    }
+    // Otherwise export client-side rows
     const escape = (v: unknown) => {
       const s = String(v ?? "");
       return s.includes(",") || s.includes('"') || s.includes("\n")
@@ -104,7 +114,7 @@ export function DataFrameTable({ data, queryText }: DataFrameTableProps) {
     a.download = `query-results-${new Date().toISOString().slice(0, 10)}.csv`;
     a.click();
     URL.revokeObjectURL(url);
-  }, [columns, rows]);
+  }, [columns, rows, truncated, queryText, exportFromQuery]);
 
   if (columns.length === 0) return null;
 

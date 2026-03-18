@@ -103,6 +103,19 @@ class TenantEntityResolver:
                     f"[TENANT_RESOLVER] MATCH: '{entity}' → {match.script_id} ({match.entity_type}, sim={score:.3f})",
                     flush=True,
                 )
+                # Filter low-confidence matches to prevent wrong field injection
+                if score < 0.70:
+                    logger.info(
+                        "tenant_resolver.low_confidence_skipped",
+                        user_term=entity,
+                        script_id=match.script_id,
+                        similarity=round(score, 3),
+                    )
+                    print(
+                        f"[TENANT_RESOLVER] SKIPPED (low confidence {score:.3f} < 0.70): '{entity}' → {match.script_id}",
+                        flush=True,
+                    )
+                    continue
                 resolved.append(
                     {
                         "user_term": entity,
@@ -140,7 +153,7 @@ class TenantEntityResolver:
             "<tenant_vernacular>",
             "    <instruction_context>",
             "        The following entities and rules have been mapped to their specific internal NetSuite constraints for this particular tenant. ",
-            "        You MUST use these exact inner script IDs and rules when constructing your SuiteQL FROM and WHERE clauses.",
+            "        Prefer these internal script IDs and rules when constructing your SuiteQL FROM and WHERE clauses.",
             "    </instruction_context>",
         ]
 

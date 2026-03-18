@@ -147,6 +147,45 @@ ORDER BY t.id DESC
 FETCH FIRST 50 ROWS ONLY
 ```
 
+## Received RMAs (simple status filter)
+
+RMAs with items received — use status codes D/E/F/G, NOT an ItemRcpt join. G=Refunded confirms receipt. Status already tells you whether items were received.
+
+```sql
+SELECT t.tranid, t.trandate,
+       BUILTIN.DF(t.entity) as customer,
+       BUILTIN.DF(t.status) as status,
+       t.foreigntotal
+FROM transaction t
+WHERE t.type = 'RtnAuth'
+  AND t.status IN ('D', 'E', 'F', 'G', 'H')
+ORDER BY t.trandate DESC
+FETCH FIRST 50 ROWS ONLY
+```
+
+## Received RMAs at a specific location
+
+Filter by location on TRANSACTIONLINE (not transaction header). `t.location` is often empty — always use `tl.location` for location filtering.
+
+```sql
+SELECT t.tranid, t.trandate,
+       BUILTIN.DF(t.entity) as customer,
+       BUILTIN.DF(t.status) as status,
+       loc.name as location,
+       t.foreigntotal
+FROM transaction t
+  JOIN transactionline tl ON tl.transaction = t.id
+    AND tl.mainline = 'F' AND tl.taxline = 'F'
+  JOIN location loc ON loc.id = tl.location
+WHERE t.type = 'RtnAuth'
+  AND t.status IN ('D', 'E', 'F', 'G', 'H')
+  AND UPPER(loc.name) LIKE '%PANURGY%'
+  AND t.trandate >= TO_DATE('2026-02-01', 'YYYY-MM-DD')
+  AND t.trandate <= TO_DATE('2026-02-28', 'YYYY-MM-DD')
+ORDER BY t.trandate DESC
+FETCH FIRST 50 ROWS ONLY
+```
+
 ## Line-level revenue with assembly component filter
 
 For line-level breakdown, use tl.amount * -1 (base currency, negated for positive revenue). Always filter mainline='F', taxline='F', assemblycomponent='F' to avoid double-counting assembly kit components.

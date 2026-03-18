@@ -267,11 +267,11 @@ class TestRetrievalService:
 class TestGoldenDataset:
     """Validate the golden dataset files themselves."""
 
-    def test_all_9_files_exist(self):
+    def test_all_files_exist(self):
         golden_dir = Path(__file__).resolve().parents[1].parent / "knowledge" / "golden_dataset"
         md_files = list(golden_dir.glob("*.md"))
-        assert len(md_files) == 9, (
-            f"Expected 9 golden dataset files, found {len(md_files)}: {[f.name for f in md_files]}"
+        assert len(md_files) >= 11, (
+            f"Expected at least 11 golden dataset files, found {len(md_files)}: {[f.name for f in md_files]}"
         )
 
     def test_all_files_have_frontmatter(self):
@@ -313,6 +313,52 @@ class TestGoldenDataset:
             total_chunks += len(chunks)
         print(f"\nTotal golden dataset chunks: {total_chunks}")
         assert total_chunks >= 20  # Expect at least 20 total chunks from 8 files
+
+
+# ── RMA and transaction status validation ──
+
+
+class TestTransactionStatusCoverage:
+    """Validate the golden dataset covers key transaction status codes."""
+
+    def _read_statuses_file(self) -> str:
+        golden_dir = Path(__file__).resolve().parents[1].parent / "knowledge" / "golden_dataset"
+        return (golden_dir / "transaction-types-and-statuses.md").read_text()
+
+    def test_rma_statuses_present(self):
+        """RMA status codes D, E, F must be documented for 'received' filter."""
+        content = self._read_statuses_file()
+        assert "type = 'RtnAuth'" in content
+        assert "status IN ('D', 'E', 'F', 'G', 'H')" in content
+
+    def test_rma_received_meaning(self):
+        """Golden dataset must explain that D=Partially Received, E=Received, F=Closed."""
+        content = self._read_statuses_file()
+        assert "Partially Received" in content
+        assert "Received" in content
+
+    def test_invoice_statuses_present(self):
+        content = self._read_statuses_file()
+        assert "type = 'CustInvc'" in content
+
+    def test_vendor_bill_statuses_present(self):
+        content = self._read_statuses_file()
+        assert "type = 'VendBill'" in content
+
+    def test_purchase_order_statuses_present(self):
+        content = self._read_statuses_file()
+        assert "type = 'PurchOrd'" in content
+
+    def test_transfer_order_statuses_present(self):
+        content = self._read_statuses_file()
+        assert "type = 'TrnfrOrd'" in content
+
+    def test_rma_chunk_produced(self):
+        """The RMA section should produce at least one chunk."""
+        content = self._read_statuses_file()
+        chunks = chunk_markdown(content, "golden_dataset/transaction-types-and-statuses.md")
+        rma_chunks = [c for c in chunks if "RtnAuth" in c["raw_text"]]
+        assert len(rma_chunks) >= 1, "No chunk contains RMA (RtnAuth) status codes"
 
 
 # ── Ingestion idempotency ──
