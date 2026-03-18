@@ -91,7 +91,7 @@ export function DataFrameTable({ data, queryText }: DataFrameTableProps) {
     if (queryText) {
       exportFromQuery({
         queryText,
-        title: queryText.slice(0, 80),
+        title: `query-results-${new Date().toISOString().slice(0, 10)}`,
         format: "csv",
       });
       return;
@@ -172,16 +172,18 @@ export function DataFrameTable({ data, queryText }: DataFrameTableProps) {
           </button>
           <button
             onClick={() => {
-              if (truncated && queryText) {
+              const title = `query-results-${new Date().toISOString().slice(0, 10)}`;
+              if (queryText) {
                 exportFromQuery({
                   queryText,
-                  title: queryText.slice(0, 80),
+                  title,
+                  format: "xlsx",
                 });
               } else {
                 exportToExcel({
                   columns,
                   rows: rows as unknown[][],
-                  title: queryText?.slice(0, 80) ?? "Query Results",
+                  title,
                 });
               }
             }}
