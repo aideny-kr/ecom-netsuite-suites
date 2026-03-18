@@ -228,13 +228,15 @@ async def callback(
         "account_id": account_id,
     }
 
-    # Upsert: update existing active netsuite connection or create new one
+    # Upsert: update existing netsuite connection (any non-revoked status) or create new one
     result = await db.execute(
         select(Connection).where(
             Connection.tenant_id == tenant_id,
             Connection.provider == "netsuite",
-            Connection.status == "active",
+            Connection.status != "revoked",
         )
+        .order_by(Connection.updated_at.desc())
+        .limit(1)
     )
     connection = result.scalars().first()
 
@@ -246,6 +248,8 @@ async def callback(
         connection.encrypted_credentials = encrypt_credentials(credentials)
         connection.encryption_key_version = get_current_key_version()
         connection.auth_type = "oauth2"
+        connection.status = "active"
+        connection.error_reason = None
         connection.metadata_json = metadata_json
     else:
         connection = Connection(
