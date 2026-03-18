@@ -82,12 +82,17 @@ class TestWorkflowStructure:
 
 
 class TestAntiEnrichmentRules:
-    """The unified agent should have explicit anti-enrichment rules."""
+    """The unified agent should have explicit anti-enrichment rules in STEP 4."""
 
-    def test_query_discipline_present(self):
+    def test_anti_enrichment_in_step_4(self):
+        """Anti-enrichment rules must be inside STEP 4, not at the bottom."""
         agent = _make_agent()
         prompt = agent.system_prompt
-        assert "QUERY DISCIPLINE" in prompt
+        step_4_pos = prompt.index("STEP 4")
+        step_5_pos = prompt.index("STEP 5")
+        anti_enrichment_pos = prompt.index("ANTI-ENRICHMENT")
+        # Anti-enrichment must be between STEP 4 and STEP 5
+        assert step_4_pos < anti_enrichment_pos < step_5_pos
 
     def test_rma_anti_enrichment(self):
         """Should NOT join item receipts to 'prove' receipt status."""
@@ -99,7 +104,7 @@ class TestAntiEnrichmentRules:
         """General rule: if status filter answers the question, stop."""
         agent = _make_agent()
         prompt = agent.system_prompt
-        assert "do not cross-reference" in prompt.lower() or "GENERAL RULE" in prompt
+        assert "No cross-reference joins" in prompt or "No cross-reference" in prompt
 
 
 class TestRMAStatusCodes:

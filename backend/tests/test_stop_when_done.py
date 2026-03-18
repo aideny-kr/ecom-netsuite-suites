@@ -106,3 +106,32 @@ class TestStopNudgeMessage:
         from app.services.chat.agents.base_agent import _DATA_SUCCESS_NUDGE
         assert "SYSTEM" in _DATA_SUCCESS_NUDGE
         assert "present" in _DATA_SUCCESS_NUDGE.lower() or "results" in _DATA_SUCCESS_NUDGE.lower()
+
+
+class TestEarlyExitWithinBatch:
+    """When one tool in a batch returns data, remaining tools should be skipped."""
+
+    def test_successful_result_triggers_early_exit_check(self):
+        """_has_successful_data_result with a single result_str (not wrapped in dict)."""
+        result_str = json.dumps({
+            "columns": ["tranid", "status"],
+            "rows": [["RMA123", "E"]],
+            "row_count": 1,
+        })
+        # The early exit code calls _has_successful_data_result([result_str])
+        # with the raw string, not wrapped in a dict
+        assert _has_successful_data_result([result_str]) is True
+
+    def test_error_result_does_not_trigger_early_exit(self):
+        """Error results should not trigger early exit."""
+        result_str = json.dumps({"error": "Unknown identifier 'badcol'"})
+        assert _has_successful_data_result([result_str]) is False
+
+    def test_zero_rows_does_not_trigger_early_exit(self):
+        """0-row results should not trigger early exit — agent needs to retry."""
+        result_str = json.dumps({
+            "columns": ["tranid"],
+            "rows": [],
+            "row_count": 0,
+        })
+        assert _has_successful_data_result([result_str]) is False

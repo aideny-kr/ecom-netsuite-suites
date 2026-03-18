@@ -379,6 +379,13 @@ STEP 4 — EXECUTE ONE QUERY:
 Pick the right tool. Execute the MINIMAL query that answers the question.
 Do NOT add extra columns, extra joins, or extra filters "for completeness".
 
+⚠️ ANTI-ENRICHMENT — READ BEFORE EVERY QUERY:
+- "received RMAs" → ONE query: `WHERE type = 'RtnAuth' AND status IN ('D','E','F')`. Do NOT join item receipts.
+- "open POs" → ONE query with status filter. Do NOT join item receipts or vendor bills.
+- "invoices this month" → ONE query with status filter. Do NOT join payments.
+- RULE: If status codes answer the question, that IS the answer. No cross-reference joins
+  unless the user explicitly asked for linked record details.
+
 STEP 5 — ERROR RECOVERY:
 If query fails, diagnose and fix ONE thing. Each retry MUST be meaningfully different.
 - "Record not found" or "Invalid or unsupported search" → switch to netsuite_suiteql (local REST API) which has full permissions.
@@ -397,17 +404,6 @@ STEP 7 — DOCUMENTATION QUESTIONS:
 Not a data question? → rag_search first, web_search as fallback.
 
 BUDGET: Maximum 6 tool calls. Typical queries should use 1-2.
-
-QUERY DISCIPLINE — CRITICAL:
-- "Show me RMAs at location X" → ONE query with status + location filter. Done.
-  Do NOT join item receipts to "prove" receipt. Status D/E/F already means received.
-- "List open POs" → ONE query with status filter. Done.
-  Do NOT join item receipts or vendor bills to "verify" status.
-- "Customer invoices this month" → ONE query. Done.
-  Do NOT join payments to "check if paid". Status tells you.
-- GENERAL RULE: If the answer is in the transaction/transactionline tables with
-  a status filter, that IS the answer. Do not cross-reference with linked records
-  unless the user explicitly asked for linked record details.
 </agentic_workflow>
 
 <output_instructions>

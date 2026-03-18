@@ -721,7 +721,7 @@ class BaseSpecialistAgent(abc.ABC):
                 tool_results_content = []
                 raw_result_strings: list[str] = []  # Track originals for stop-when-done check
 
-                for block in response.tool_use_blocks:
+                for i, block in enumerate(response.tool_use_blocks):
                     if block.name.startswith("workspace_"):
                         ws_id = block.input.get("workspace_id", "")
                         if not ws_id or not _is_valid_uuid(ws_id):
@@ -786,6 +786,28 @@ class BaseSpecialistAgent(abc.ABC):
                             "content": llm_result_str,
                         }
                     )
+
+                    # Early exit: if this tool returned data and there are more
+                    # tools queued, skip them — present results instead of over-enriching
+                    remaining_blocks = response.tool_use_blocks[i + 1:]
+                    if remaining_blocks and _has_successful_data_result([result_str]):
+                        print(
+                            f"[AGENT] {self.agent_name} data returned, skipping "
+                            f"{len(remaining_blocks)} remaining tool calls",
+                            flush=True,
+                        )
+                        for skipped in remaining_blocks:
+                            tool_results_content.append(
+                                {
+                                    "type": "tool_result",
+                                    "tool_use_id": skipped.id,
+                                    "content": json.dumps({
+                                        "skipped": "Previous tool returned data. "
+                                        "Present those results instead of running more queries."
+                                    }),
+                                }
+                            )
+                        break
 
                 # Soft enforcement: nudge LLM to stop if data was already returned
                 if step >= 1 and _has_successful_data_result(raw_result_strings):
