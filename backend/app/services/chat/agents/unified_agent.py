@@ -452,7 +452,7 @@ class UnifiedAgent(BaseSpecialistAgent):
 
     @property
     def max_steps(self) -> int:
-        return 10
+        return 6
 
     @property
     def system_prompt(self) -> str:
