@@ -81,23 +81,29 @@ async def check_connection_health(
     for conn in connections:
         token_expired = False
         client_id = None
+        decrypt_failed = False
         if conn.auth_type == "oauth2" and conn.encrypted_credentials:
             try:
                 creds = decrypt_credentials(conn.encrypted_credentials)
                 expires_at = creds.get("expires_at", 0)
                 client_id = creds.get("client_id")
                 if expires_at and now > expires_at:
-                    # Access token expired — this is normal (1hr lifetime).
-                    # Don't flip status — get_valid_token() auto-refreshes on next use.
                     token_expired = True
             except Exception:
-                pass
+                decrypt_failed = True
+        # Report real status: if token is expired or credentials can't be decrypted,
+        # show "error" regardless of what the DB status field says.
+        reported_status = conn.status
+        if decrypt_failed:
+            reported_status = "error"
+        elif token_expired and conn.status == "active":
+            reported_status = "needs_reauth"
         restlet_url = (conn.metadata_json or {}).get("restlet_url") if conn.metadata_json else None
         conn_items.append(ConnectionHealthItem(
             id=str(conn.id),
             label=conn.label or conn.provider,
             provider=conn.provider,
-            status=conn.status,
+            status=reported_status,
             auth_type=conn.auth_type,
             token_expired=token_expired,
             last_health_check=datetime.now(timezone.utc).isoformat(),
@@ -116,6 +122,7 @@ async def check_connection_health(
     mcp_items = []
     for mcp in mcp_connectors:
         token_expired = False
+        decrypt_failed = False
         mcp_client_id = (mcp.metadata_json or {}).get("client_id")
         if mcp.auth_type == "oauth2" and mcp.encrypted_credentials:
             try:
@@ -124,17 +131,20 @@ async def check_connection_health(
                 if not mcp_client_id:
                     mcp_client_id = creds.get("client_id")
                 if expires_at and now > expires_at:
-                    # Access token expired but MCP may still work via internal refresh
-                    # Don't flip status — only mark token_expired for UI indicator
                     token_expired = True
             except Exception:
-                pass
+                decrypt_failed = True
+        reported_status = mcp.status
+        if decrypt_failed:
+            reported_status = "error"
+        elif token_expired and mcp.status == "active":
+            reported_status = "needs_reauth"
         tools = mcp.discovered_tools or []
         mcp_items.append(ConnectionHealthItem(
             id=str(mcp.id),
             label=mcp.label or mcp.provider,
             provider=mcp.provider,
-            status=mcp.status,
+            status=reported_status,
             auth_type=mcp.auth_type,
             token_expired=token_expired,
             last_health_check=datetime.now(timezone.utc).isoformat(),
