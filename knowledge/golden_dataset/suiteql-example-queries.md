@@ -149,7 +149,7 @@ FETCH FIRST 50 ROWS ONLY
 
 ## Received RMAs (simple status filter)
 
-RMAs with items received — use status codes D/E/F, NOT an ItemRcpt join. Status already tells you whether items were received.
+RMAs with items received — use status codes D/E/F/G, NOT an ItemRcpt join. G=Refunded confirms receipt. Status already tells you whether items were received.
 
 ```sql
 SELECT t.tranid, t.trandate,
@@ -158,7 +158,7 @@ SELECT t.tranid, t.trandate,
        t.foreigntotal
 FROM transaction t
 WHERE t.type = 'RtnAuth'
-  AND t.status IN ('D', 'E', 'F')
+  AND t.status IN ('D', 'E', 'F', 'G')
 ORDER BY t.trandate DESC
 FETCH FIRST 50 ROWS ONLY
 ```
@@ -178,7 +178,7 @@ FROM transaction t
     AND tl.mainline = 'F' AND tl.taxline = 'F'
   JOIN location loc ON loc.id = tl.location
 WHERE t.type = 'RtnAuth'
-  AND t.status IN ('D', 'E', 'F')
+  AND t.status IN ('D', 'E', 'F', 'G')
   AND UPPER(loc.name) LIKE '%PANURGY%'
   AND t.trandate >= TO_DATE('2026-02-01', 'YYYY-MM-DD')
   AND t.trandate <= TO_DATE('2026-02-28', 'YYYY-MM-DD')

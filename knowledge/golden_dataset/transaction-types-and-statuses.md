@@ -91,7 +91,7 @@ Common sales order statuses (use single-letter code in WHERE filters):
 ## Return Authorization (RMA) Statuses — `type = 'RtnAuth'`
 
 ```sql
-WHERE t.type = 'RtnAuth' AND t.status IN ('D', 'E', 'F')  -- received RMAs
+WHERE t.type = 'RtnAuth' AND t.status IN ('D', 'E', 'F', 'G')  -- received RMAs
 ```
 
 - `A` → Pending Approval
@@ -101,7 +101,7 @@ WHERE t.type = 'RtnAuth' AND t.status IN ('D', 'E', 'F')  -- received RMAs
 - `E` → Received  ← all lines received, primary status for "received" filter
 - `F` → Closed  ← closed after receipt + credit/refund issued
 
-**"Received" RMAs = status IN ('D', 'E', 'F')** — include F (Closed) because closed RMAs were also received.
+**"Received" RMAs = status IN ('D', 'E', 'F', 'G')** — G=Refunded confirms items were received and refund processed. F=Closed also means received.
 
 RMA → Item Receipt join:
 ```sql

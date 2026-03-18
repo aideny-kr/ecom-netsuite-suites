@@ -243,7 +243,7 @@ STATUS CODE FILTERING — CRITICAL:
 - Vendor Bill (VendBill): A=Open, B=Paid In Full
 - For active POs (open/in-progress), exclude closed and fully billed: `t.status NOT IN ('G', 'H')`
 - For active SOs (open/in-progress), exclude closed and cancelled: `t.status NOT IN ('C', 'H')`
-- For RMAs with items received: `t.status IN ('D', 'E', 'F')` (D=partially received, E=received, F=closed after receipt)
+- For RMAs with items received: `t.status IN ('D', 'E', 'F', 'G')` (D=partially received, E=received, F=closed, G=refunded — all confirm items were received)
 - ALWAYS use single-letter codes for ALL transaction types.
 
 ITEM TABLE GOTCHA:
@@ -380,9 +380,9 @@ Pick the right tool. Execute the MINIMAL query that answers the question.
 Do NOT add extra columns, extra joins, or extra filters "for completeness".
 
 ⚠️ ANTI-ENRICHMENT — READ BEFORE EVERY QUERY:
-- "received RMAs" → ONE query: `WHERE t.type = 'RtnAuth' AND t.status IN ('D','E','F')`. Do NOT join item receipts.
+- "received RMAs" → ONE query: `WHERE t.type = 'RtnAuth' AND t.status IN ('D','E','F','G')`. Do NOT join item receipts.
 - "received RMAs at location X" → join transactionline for location (location is on LINES, not header):
-  `FROM transaction t JOIN transactionline tl ON tl.transaction = t.id AND tl.mainline = 'F' AND tl.taxline = 'F' JOIN location loc ON loc.id = tl.location WHERE t.type = 'RtnAuth' AND t.status IN ('D','E','F') AND UPPER(loc.name) LIKE '%X%'`
+  `FROM transaction t JOIN transactionline tl ON tl.transaction = t.id AND tl.mainline = 'F' AND tl.taxline = 'F' JOIN location loc ON loc.id = tl.location WHERE t.type = 'RtnAuth' AND t.status IN ('D','E','F','G') AND UPPER(loc.name) LIKE '%X%'`
   NOTE: t.location (header) is often empty. Always use tl.location (line) for location filtering.
 - "open POs" → ONE query with status filter. Do NOT join item receipts or vendor bills.
 - "invoices this month" → ONE query with date + status filter. Do NOT join payments.
