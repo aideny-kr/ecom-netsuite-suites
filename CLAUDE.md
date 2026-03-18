@@ -361,6 +361,7 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 - [ ] **Proactive token refresh** — background Celery job that refreshes OAuth tokens before expiry + alerts admin when refresh fails
 
 ### Short-term (quality + UX)
+- [ ] **Native-first field resolution** — agent prompt rule: always check standard NetSuite fields/records first before looking at custom fields (custbody_*, custitem_*, customrecord_*). Only use custom fields when (a) user explicitly mentions them, (b) standard fields don't have the data, or (c) tenant_vernacular maps to a custom field. Add to both unified_agent.py and suiteql_agent.py SuiteQL rules.
 - [ ] **Persistent chat across navigation** — keep SSE stream alive when switching to Dev Workspace/other tabs. Either persistent layout (tab system) or global SSE context provider. Currently navigation unmounts chat, kills stream, loses in-progress responses.
 - [ ] **Save placeholder on stream cancel** — when user navigates away before any text streams, save "(Processing interrupted — please ask again)" so the session isn't lost
 - [ ] Settings: read-only team list for non-admins
