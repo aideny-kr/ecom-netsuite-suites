@@ -119,6 +119,10 @@ def _refresh_single(db, record, lock_prefix, stats, now, settings):
             record.status = "active"
             record.error_reason = None
             record.last_health_check_at = now
+            # Commit immediately after each refresh — if the worker is killed
+            # before the final commit, the new tokens are already persisted.
+            # NetSuite refresh tokens are single-use; losing them = dead connection.
+            db.commit()
             stats["refreshed"] += 1
             logger.info(
                 "proactive_token_refresh.refreshed",
