@@ -62,7 +62,27 @@ async def _get_oauth2_token(connector: McpConnector, db: AsyncSession | None) ->
         )
         return None  # Fail explicitly — cannot refresh without DB session
 
+    # ── Lock: prevent concurrent refresh of same MCP connector ──
+    from app.core.redis_lock import acquire_lock, release_lock
+
+    lock_key = f"oauth_refresh:mcp:{connector.id}"
+
+    if not acquire_lock(lock_key, timeout=30):
+        # Another process is refreshing — wait briefly, then re-read
+        import asyncio
+
+        await asyncio.sleep(2)
+        await db.refresh(connector)
+        credentials = decrypt_credentials(connector.encrypted_credentials)
+        return credentials.get("access_token")
+
     try:
+        # Re-check after acquiring lock (another process may have finished)
+        await db.refresh(connector)
+        credentials = decrypt_credentials(connector.encrypted_credentials)
+        if time.time() < (credentials.get("expires_at", 0) - 60):
+            return credentials["access_token"]
+
         from app.services.netsuite_oauth_service import refresh_tokens_with_client
 
         token_data = await refresh_tokens_with_client(account_id, refresh_token, client_id)
@@ -78,6 +98,8 @@ async def _get_oauth2_token(connector: McpConnector, db: AsyncSession | None) ->
     except Exception:
         logger.exception("mcp_client.oauth2.refresh_failed", connector_id=str(connector.id))
         return None  # Fail explicitly so callers know auth is broken
+    finally:
+        release_lock(lock_key)
 
 
 async def _build_headers(connector: McpConnector, db: AsyncSession | None = None) -> dict[str, str]:

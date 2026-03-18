@@ -164,17 +164,36 @@ async def get_valid_token(db: AsyncSession, connection) -> str | None:
     if time.time() < (expires_at - 60):
         return access_token
 
-    # Need to refresh
-    refresh_token = credentials.get("refresh_token")
-    account_id = credentials.get("account_id")
-    if not refresh_token or not account_id:
-        logger.warning("netsuite.oauth2.missing_refresh_info", connection_id=str(connection.id))
-        return None
+    # ── Lock: prevent concurrent refresh of same connection ──
+    from app.core.redis_lock import acquire_lock, release_lock
+
+    lock_key = f"oauth_refresh:{connection.id}"
+
+    if not acquire_lock(lock_key, timeout=30):
+        # Another process is refreshing — wait briefly, then re-read
+        import asyncio
+
+        await asyncio.sleep(2)
+        await db.refresh(connection)
+        credentials = decrypt_credentials(connection.encrypted_credentials)
+        return credentials.get("access_token")
 
     try:
+        # Re-check after acquiring lock (another process may have finished)
+        await db.refresh(connection)
+        credentials = decrypt_credentials(connection.encrypted_credentials)
+        if time.time() < (credentials.get("expires_at", 0) - 60):
+            return credentials["access_token"]
+
+        # Need to refresh
+        refresh_token = credentials.get("refresh_token")
+        account_id = credentials.get("account_id")
+        if not refresh_token or not account_id:
+            logger.warning("netsuite.oauth2.missing_refresh_info", connection_id=str(connection.id))
+            return None
+
         # Use global NETSUITE_OAUTH_CLIENT_ID (what the user configures in Settings).
         # The per-connection stored client_id may be stale from migration.
-        # For MCP connectors, the per-connection client_id is used (set via separate flow).
         client_id = settings.NETSUITE_OAUTH_CLIENT_ID or credentials.get("client_id", "")
         token_data = await refresh_tokens_with_client(account_id, refresh_token, client_id)
         credentials["access_token"] = token_data["access_token"]
@@ -189,3 +208,5 @@ async def get_valid_token(db: AsyncSession, connection) -> str | None:
     except Exception:
         logger.exception("netsuite.oauth2.refresh_failed", connection_id=str(connection.id))
         return None
+    finally:
+        release_lock(lock_key)

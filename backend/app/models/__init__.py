@@ -12,6 +12,7 @@ from app.models.canonical import (
 from app.models.chat import ChatMessage, ChatSession, DocChunk
 from app.models.chat_api_key import ChatApiKey
 from app.models.connection import Connection
+from app.models.connection_alert import ConnectionAlert
 from app.models.domain_knowledge import DomainKnowledgeChunk
 from app.models.job import Job
 from app.models.mcp_connector import McpConnector
@@ -83,4 +84,5 @@ __all__ = [
     "TenantWallet",
     "DomainKnowledgeChunk",
     "SavedSuiteQLQuery",
+    "ConnectionAlert",
 ]
