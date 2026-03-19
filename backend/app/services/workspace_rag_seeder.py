@@ -142,6 +142,18 @@ def _chunk_by_entry_points(
 
     chunks: list[tuple[str, str, str]] = []
 
+    # Capture preamble: code before the first entry point (constants, config, helpers)
+    # Skip if it's just JSDoc + define() boilerplate (no business logic)
+    first_offset = entry_points[0][1]
+    preamble = content[:first_offset].rstrip()
+    _has_business_logic = bool(re.search(
+        r"\b(?:const|let|var)\s+\w+\s*=\s*(?:\{|\[|['\"]|function|\d)",
+        preamble,
+    ))
+    if _has_business_logic and len(preamble) > 50:
+        preamble_chunk = _build_chunk_content(preamble, filepath, script_type, "preamble")
+        chunks.append((f"{filepath}#preamble", f"{filepath}#preamble", preamble_chunk))
+
     for i, (name, offset) in enumerate(entry_points):
         # Extract from this entry point to the next (or end of file)
         end = entry_points[i + 1][1] if i + 1 < len(entry_points) else len(content)
