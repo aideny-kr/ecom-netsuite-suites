@@ -788,15 +788,22 @@ class BaseSpecialistAgent(abc.ABC):
                     )
 
                     # Early exit: if this tool returned data and there are more
-                    # tools queued, skip them — present results instead of over-enriching
+                    # tools queued, skip redundant DATA tools — but always allow
+                    # knowledge/context tools (workspace_search, rag_search, web_search)
                     remaining_blocks = response.tool_use_blocks[i + 1:]
-                    if remaining_blocks and _has_successful_data_result([result_str]):
+                    _KNOWLEDGE_TOOLS = frozenset({
+                        "workspace_search", "workspace_read_file", "workspace_list_files",
+                        "rag_search", "web_search",
+                    })
+                    skippable = [b for b in remaining_blocks if b.name not in _KNOWLEDGE_TOOLS]
+                    must_run = [b for b in remaining_blocks if b.name in _KNOWLEDGE_TOOLS]
+                    if skippable and _has_successful_data_result([result_str]):
                         print(
                             f"[AGENT] {self.agent_name} data returned, skipping "
-                            f"{len(remaining_blocks)} remaining tool calls",
+                            f"{len(skippable)} data tools, keeping {len(must_run)} knowledge tools",
                             flush=True,
                         )
-                        for skipped in remaining_blocks:
+                        for skipped in skippable:
                             tool_results_content.append(
                                 {
                                     "type": "tool_result",
@@ -807,7 +814,8 @@ class BaseSpecialistAgent(abc.ABC):
                                     }),
                                 }
                             )
-                        break
+                        if not must_run:
+                            break
 
                 # Soft enforcement: nudge LLM to stop if data was already returned
                 if step >= 1 and _has_successful_data_result(raw_result_strings):
