@@ -37,6 +37,84 @@ Output a concise summary (max 300 words).
 """
 
 
+def condense_tool_results(content: str, max_result_chars: int = 500) -> str:
+    """Replace large JSON blocks in message content with short summaries.
+
+    Finds JSON objects/arrays embedded in content that exceed max_result_chars
+    and replaces them with a condensed description (row count, column names).
+    """
+    import json
+    import re
+
+    if len(content) <= max_result_chars:
+        return content
+
+    def _summarize_json(match: re.Match) -> str:
+        raw = match.group(0)
+        if len(raw) <= max_result_chars:
+            return raw
+        try:
+            data = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return raw[:max_result_chars] + "... (truncated)"
+
+        if isinstance(data, dict):
+            rows = data.get("rows", data.get("data", data.get("items", [])))
+            cols = data.get("columns", [])
+            row_count = data.get("row_count", len(rows) if isinstance(rows, list) else 0)
+            if not cols and isinstance(rows, list) and rows and isinstance(rows[0], dict):
+                cols = list(rows[0].keys())[:8]
+            col_str = ", ".join(str(c) for c in cols[:8]) if cols else "unknown"
+            return f"[Tool result: {row_count} rows, columns: {col_str} — condensed for history]"
+        elif isinstance(data, list) and len(data) > 5:
+            if data and isinstance(data[0], dict):
+                cols = list(data[0].keys())[:8]
+                col_str = ", ".join(cols)
+                return f"[Tool result: {len(data)} items, fields: {col_str} — condensed for history]"
+            return f"[Tool result: {len(data)} items — condensed for history]"
+        return raw[:max_result_chars] + "... (truncated)"
+
+    # Match JSON objects and arrays (greedy, but bounded by braces/brackets)
+    condensed = re.sub(
+        r'(?s)\{[^{}]{500,}\}|\[[^\[\]]{500,}\]',
+        _summarize_json,
+        content,
+    )
+    return condensed
+
+
+def build_condensed_history(
+    messages: list[dict],
+    keep_recent: int = 4,
+    max_result_chars: int = 500,
+) -> list[dict]:
+    """Build history with condensed tool results for older messages.
+
+    Last `keep_recent` messages are kept verbatim. Older assistant messages
+    with large content get their JSON tool results condensed.
+    User messages are never condensed.
+    """
+    if len(messages) <= keep_recent:
+        return list(messages)
+
+    result = []
+    cutoff = len(messages) - keep_recent
+
+    for i, msg in enumerate(messages):
+        if i >= cutoff:
+            # Recent — keep verbatim
+            result.append(dict(msg))
+        elif msg.get("role") == "user":
+            # User messages — never condense
+            result.append(dict(msg))
+        else:
+            # Older assistant message — condense tool results
+            condensed_content = condense_tool_results(msg.get("content", ""), max_result_chars)
+            result.append({**msg, "content": condensed_content})
+
+    return result
+
+
 async def compact_history(
     history: list[dict],
     adapter: BaseLLMAdapter,

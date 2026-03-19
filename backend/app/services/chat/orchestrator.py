@@ -75,6 +75,48 @@ _CHITCHAT_RE = re.compile(
 
 
 # ---------------------------------------------------------------------------
+# Simple lookup detection — route to Haiku for 10x faster, 10x cheaper
+# ---------------------------------------------------------------------------
+
+HAIKU_MODEL = "claude-haiku-4-5-20251001"
+
+# Patterns that indicate a simple single-entity lookup or count
+_SIMPLE_LOOKUP_RE = re.compile(
+    r"(?i)^(?:"
+    r"(?:show|find|get|look\s*up|pull|what(?:'s|\s+is))\s+(?:me\s+)?(?:the\s+)?"
+    r"(?:(?:status|details?)\s+(?:of|for)\s+)?"
+    r"(?:(?:item|order|invoice|customer|vendor|po|so|rma|inv|vb)\s+)?"
+    r"[\w\-#][\w\-#\s]{2,30}"  # ID/SKU/number or name (up to 30 chars)
+    r"|(?:how\s+many|count|total\s+number\s+of)\s+(?:open\s+|active\s+|pending\s+)?"
+    r"(?:sales\s+orders?|purchase\s+orders?|invoices?|rmas?|pos?|sos?|items?|customers?|vendors?)"
+    r"|(?:SO|PO|RMA|INV|VB|WO|TO|IF|IR)[\s\-#]?\d+"
+    r"|#\d+"
+    r")\s*\??$",
+)
+
+# Patterns that indicate complex analysis — should NOT use Haiku
+_COMPLEX_QUERY_RE = re.compile(
+    r"(?i)(?:compar|vs\.?|versus|trend|month.over.month|year.over|breakdown|analyz|analysis"
+    r"|all\s+\w+\s+with\s+their|why\s+|how\s+do\s+i|explain|create|write|fix|deploy"
+    r"|refactor|p\s*&\s*l|income\s+statement|balance\s+sheet)",
+)
+
+
+def _is_simple_lookup(query: str) -> bool:
+    """Detect simple single-entity lookups or counts.
+
+    Conservative: only matches clearly simple queries. Returns False
+    when uncertain — better to use Sonnet than give a bad Haiku answer.
+    """
+    query = query.strip()
+    if not query or len(query) > 120:
+        return False
+    if _COMPLEX_QUERY_RE.search(query):
+        return False
+    return bool(_SIMPLE_LOOKUP_RE.match(query))
+
+
+# ---------------------------------------------------------------------------
 # Connection health check — prevent wasted tool calls on dead connections
 # ---------------------------------------------------------------------------
 
@@ -553,6 +595,15 @@ async def run_chat_turn(
 
     # Hard cap at max_turns * 2 messages
     history_messages = all_messages[-(max_turns * 2) :]
+
+    # Condense large tool results in older messages to reduce token bloat
+    from app.services.chat.history_compactor import build_condensed_history
+
+    original_chars = sum(len(m.get("content", "")) for m in history_messages)
+    history_messages = build_condensed_history(history_messages, keep_recent=4)
+    condensed_chars = sum(len(m.get("content", "")) for m in history_messages)
+    if original_chars != condensed_chars:
+        print(f"[ORCHESTRATOR] history condensed: {original_chars} -> {condensed_chars} chars", flush=True)
     print(f"[ORCHESTRATOR] history loaded: {len(history_messages)} messages ({summarised} summarised)", flush=True)
 
     # ── Save user message (if not already saved by caller) ──
@@ -1157,6 +1208,18 @@ async def run_chat_turn(
                 last_structured_output: dict | None = None
 
                 unified_model = model if is_byok else settings.MULTI_AGENT_SQL_MODEL
+
+                # Route simple lookups to Haiku for 10x speed + cost savings
+                # Only for non-BYOK tenants (BYOK users chose their model)
+                if (
+                    not is_byok
+                    and not _is_chitchat
+                    and not is_financial
+                    and importance_tier.value <= 2
+                    and _is_simple_lookup(sanitized_input)
+                ):
+                    unified_model = HAIKU_MODEL
+                    print(f"[ORCHESTRATOR] Simple lookup detected — routing to Haiku", flush=True)
 
                 async for event_type, payload in unified_agent.run_streaming(
                     task=unified_task,
