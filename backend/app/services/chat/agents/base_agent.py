@@ -191,8 +191,12 @@ def parse_confidence(text: str) -> int | None:
     return None
 
 
+_REASONING_RE = re.compile(r"<reasoning>.*?</reasoning>\s*", re.DOTALL)
+
+
 def strip_confidence_tag(text: str) -> str:
-    """Remove <confidence>N</confidence> tag from text."""
+    """Remove <confidence>N</confidence> and <reasoning>...</reasoning> from text."""
+    text = _REASONING_RE.sub("", text)
     return _CONFIDENCE_RE.sub("", text).strip()
 
 
