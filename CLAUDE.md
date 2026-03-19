@@ -250,5 +250,12 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 ## Known Issues
 
 1. **OAuth scope mismatch** — REST connections lack `rest_webservices` scope. Onboarding Discovery returns 400. Chat works via MCP path.
-2. **OAuth reconnect doesn't re-initiate browser flow** — just flips status. Expired refresh tokens require full re-authorization.
-3. **CI failures** — `test_security_hardening.py` SSL tests fail. Not blocking.
+2. **CI failures** — `test_security_hardening.py` SSL tests fail. Not blocking.
+
+## Resolved (2026-03-18)
+
+- **Token refresh** — per-connection client_id, immediate commit per-connection, Redis lock, proactive 5-min task. `expires_in` cast to int (NetSuite returns string). Confirmed self-sustaining on both staging and local.
+- **OAuth re-auth** — upsert matches any non-revoked connection (was only matching `active`, creating duplicates). Resets status + error_reason.
+- **Entity seeder** — now seeds locations, subsidiaries, departments, classes from metadata (was missing, causing "Panurgy" to match custom fields).
+- **RMA status codes** — added to static prompt + golden dataset. G=Refunded means received.
+- **History summaries** — backfilled 204 messages. New messages auto-summarize at write-time (Haiku).
