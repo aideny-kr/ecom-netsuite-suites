@@ -214,19 +214,24 @@ async def _resolve_default_workspace(
     db: "AsyncSession",
     tenant_id: "uuid.UUID",
 ) -> str | None:
-    """Find the most recent active workspace for a tenant."""
-    from sqlalchemy import select
+    """Find the best active workspace for a tenant — prefers the one with most files."""
+    from sqlalchemy import func, select
 
-    from app.models.workspace import Workspace
+    from app.models.workspace import Workspace, WorkspaceFile
 
     result = await db.execute(
-        select(Workspace.id)
+        select(Workspace.id, func.count(WorkspaceFile.id).label("file_count"))
+        .outerjoin(WorkspaceFile, WorkspaceFile.workspace_id == Workspace.id)
         .where(Workspace.tenant_id == tenant_id, Workspace.status == "active")
-        .order_by(Workspace.created_at.desc())
+        .group_by(Workspace.id)
+        .order_by(func.count(WorkspaceFile.id).desc())
         .limit(1)
     )
-    ws = result.scalar_one_or_none()
-    return str(ws) if ws else None
+    row = result.first()
+    if row is None:
+        return None
+    print(f"[WORKSPACE] Resolved workspace {row[0]} ({row[1]} files)", flush=True)
+    return str(row[0])
 
 
 @dataclass
@@ -451,7 +456,19 @@ class BaseSpecialistAgent(abc.ABC):
                     # Auto-inject workspace_id for workspace tools
                     if block.name.startswith("workspace_"):
                         ws_id = block.input.get("workspace_id", "")
+                        needs_resolve = False
                         if not ws_id or not _is_valid_uuid(ws_id):
+                            needs_resolve = True
+                        else:
+                            from sqlalchemy import select as _sel
+                            from app.models.workspace import Workspace as _Ws
+                            _ws_check = await db.execute(
+                                _sel(_Ws.id).where(_Ws.id == ws_id, _Ws.tenant_id == self.tenant_id)
+                            )
+                            if _ws_check.scalar_one_or_none() is None:
+                                print(f"[WORKSPACE] LLM provided invalid workspace_id {ws_id}, resolving", flush=True)
+                                needs_resolve = True
+                        if needs_resolve:
                             resolved = await _resolve_default_workspace(db, self.tenant_id)
                             if resolved:
                                 block.input["workspace_id"] = resolved
@@ -724,7 +741,23 @@ class BaseSpecialistAgent(abc.ABC):
                 for i, block in enumerate(response.tool_use_blocks):
                     if block.name.startswith("workspace_"):
                         ws_id = block.input.get("workspace_id", "")
+                        needs_resolve = False
                         if not ws_id or not _is_valid_uuid(ws_id):
+                            needs_resolve = True
+                        else:
+                            # Validate workspace exists for this tenant
+                            from sqlalchemy import select as _sel
+                            from app.models.workspace import Workspace as _Ws
+                            _ws_check = await db.execute(
+                                _sel(_Ws.id).where(_Ws.id == ws_id, _Ws.tenant_id == self.tenant_id)
+                            )
+                            if _ws_check.scalar_one_or_none() is None:
+                                print(
+                                    f"[WORKSPACE] LLM provided invalid workspace_id {ws_id}, resolving",
+                                    flush=True,
+                                )
+                                needs_resolve = True
+                        if needs_resolve:
                             resolved = await _resolve_default_workspace(db, self.tenant_id)
                             if resolved:
                                 block.input["workspace_id"] = resolved
