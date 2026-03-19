@@ -104,15 +104,11 @@ class TenantEntityResolver:
                     flush=True,
                 )
                 # Filter low-confidence matches to prevent wrong field injection
-                if score < 0.70:
-                    logger.info(
-                        "tenant_resolver.low_confidence_skipped",
-                        user_term=entity,
-                        script_id=match.script_id,
-                        similarity=round(score, 3),
-                    )
+                from app.services.chat.agents.base_agent import _MIN_ENTITY_CONFIDENCE
+
+                if score < _MIN_ENTITY_CONFIDENCE:
                     print(
-                        f"[TENANT_RESOLVER] SKIPPED (low confidence {score:.3f} < 0.70): '{entity}' → {match.script_id}",
+                        f"[TENANT_RESOLVER] SKIPPED (low confidence {score:.3f} < {_MIN_ENTITY_CONFIDENCE}): '{entity}' → {match.script_id}",
                         flush=True,
                     )
                     continue

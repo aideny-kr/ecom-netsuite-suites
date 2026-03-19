@@ -71,6 +71,15 @@ def _task_contains_query(task: str) -> bool:
     return any(kw in task_lower for kw in _DATA_QUESTION_KEYWORDS)
 
 
+_MIN_ENTITY_CONFIDENCE = 0.70  # Minimum pg_trgm similarity for entity resolver matches
+
+# Tools that should never be skipped by early exit (knowledge/context, not data)
+_KNOWLEDGE_TOOLS = frozenset({
+    "workspace_search", "workspace_read_file", "workspace_list_files",
+    "rag_search", "web_search",
+})
+
+
 def _has_successful_data_result(result_strings: list[str]) -> bool:
     """Check if any tool result string contains successful data rows.
 
@@ -232,6 +241,37 @@ async def _resolve_default_workspace(
         return None
     print(f"[WORKSPACE] Resolved workspace {row[0]} ({row[1]} files)", flush=True)
     return str(row[0])
+
+
+async def _ensure_valid_workspace_id(
+    block_input: dict,
+    db: "AsyncSession",
+    tenant_id: "uuid.UUID",
+) -> None:
+    """Validate and resolve workspace_id on a tool call input dict.
+
+    If the LLM-provided workspace_id is missing, invalid UUID, or doesn't
+    belong to the tenant, resolves it to the best workspace (most files).
+    """
+    ws_id = block_input.get("workspace_id", "")
+    needs_resolve = False
+    if not ws_id or not _is_valid_uuid(ws_id):
+        needs_resolve = True
+    else:
+        from sqlalchemy import select as _sel
+
+        from app.models.workspace import Workspace as _Ws
+
+        _ws_check = await db.execute(
+            _sel(_Ws.id).where(_Ws.id == ws_id, _Ws.tenant_id == tenant_id)
+        )
+        if _ws_check.scalar_one_or_none() is None:
+            print(f"[WORKSPACE] LLM provided invalid workspace_id {ws_id}, resolving", flush=True)
+            needs_resolve = True
+    if needs_resolve:
+        resolved = await _resolve_default_workspace(db, tenant_id)
+        if resolved:
+            block_input["workspace_id"] = resolved
 
 
 @dataclass
@@ -453,25 +493,8 @@ class BaseSpecialistAgent(abc.ABC):
 
                 tool_results_content = []
                 for block in response.tool_use_blocks:
-                    # Auto-inject workspace_id for workspace tools
                     if block.name.startswith("workspace_"):
-                        ws_id = block.input.get("workspace_id", "")
-                        needs_resolve = False
-                        if not ws_id or not _is_valid_uuid(ws_id):
-                            needs_resolve = True
-                        else:
-                            from sqlalchemy import select as _sel
-                            from app.models.workspace import Workspace as _Ws
-                            _ws_check = await db.execute(
-                                _sel(_Ws.id).where(_Ws.id == ws_id, _Ws.tenant_id == self.tenant_id)
-                            )
-                            if _ws_check.scalar_one_or_none() is None:
-                                print(f"[WORKSPACE] LLM provided invalid workspace_id {ws_id}, resolving", flush=True)
-                                needs_resolve = True
-                        if needs_resolve:
-                            resolved = await _resolve_default_workspace(db, self.tenant_id)
-                            if resolved:
-                                block.input["workspace_id"] = resolved
+                        await _ensure_valid_workspace_id(block.input, db, self.tenant_id)
 
                     t0 = time.monotonic()
 
@@ -741,27 +764,7 @@ class BaseSpecialistAgent(abc.ABC):
 
                 for i, block in enumerate(response.tool_use_blocks):
                     if block.name.startswith("workspace_"):
-                        ws_id = block.input.get("workspace_id", "")
-                        needs_resolve = False
-                        if not ws_id or not _is_valid_uuid(ws_id):
-                            needs_resolve = True
-                        else:
-                            # Validate workspace exists for this tenant
-                            from sqlalchemy import select as _sel
-                            from app.models.workspace import Workspace as _Ws
-                            _ws_check = await db.execute(
-                                _sel(_Ws.id).where(_Ws.id == ws_id, _Ws.tenant_id == self.tenant_id)
-                            )
-                            if _ws_check.scalar_one_or_none() is None:
-                                print(
-                                    f"[WORKSPACE] LLM provided invalid workspace_id {ws_id}, resolving",
-                                    flush=True,
-                                )
-                                needs_resolve = True
-                        if needs_resolve:
-                            resolved = await _resolve_default_workspace(db, self.tenant_id)
-                            if resolved:
-                                block.input["workspace_id"] = resolved
+                        await _ensure_valid_workspace_id(block.input, db, self.tenant_id)
 
                     # Dedup: skip duplicate workspace_propose_patch for same file
                     if block.name == "workspace_propose_patch":
@@ -841,10 +844,6 @@ class BaseSpecialistAgent(abc.ABC):
                     # tools queued, skip redundant DATA tools — but always allow
                     # knowledge/context tools (workspace_search, rag_search, web_search)
                     remaining_blocks = response.tool_use_blocks[i + 1:]
-                    _KNOWLEDGE_TOOLS = frozenset({
-                        "workspace_search", "workspace_read_file", "workspace_list_files",
-                        "rag_search", "web_search",
-                    })
                     skippable = [b for b in remaining_blocks if b.name not in _KNOWLEDGE_TOOLS]
                     must_run = [b for b in remaining_blocks if b.name in _KNOWLEDGE_TOOLS]
                     if skippable and _has_successful_data_result([result_str]):
