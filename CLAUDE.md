@@ -20,8 +20,8 @@
 - **File Cabinet I/O**: Custom RESTlet (`ecom_file_cabinet_restlet.js`) — in-place load-update-save (preserves file ID).
 - **SuiteQL**: Via REST API POST `/services/rest/query/v1/suiteql` with Bearer token. Also via MCP at `/services/mcp/v1/all`.
 - **Two SuiteQL paths**: Local REST API (`netsuite_suiteql` tool) supports all tables including `customrecord_*`. External MCP (`ns_runCustomSuiteQL`) works only for standard tables.
-- **Chat**: Dual-path agent system. `unified_agent_enabled` per-tenant flag routes to `UnifiedAgent` or `MultiAgentCoordinator`. SSE streaming with `<thinking>` tags. See `memory/chat-architecture.md` for full details.
-- **Entity Resolution**: Fast NER (Haiku) → pg_trgm fuzzy matching → `<tenant_vernacular>` XML injection. Table: `tenant_entity_mapping` with composite GIN index.
+- **Chat**: Dual-path agent system. `unified_agent_enabled` per-tenant flag routes to `UnifiedAgent` or `MultiAgentCoordinator`. SSE streaming with `<thinking>` tags. Connection-aware orchestrator checks REST/MCP health pre-flight and strips tools for dead connections. See `memory/chat-architecture.md` for full details.
+- **Entity Resolution**: Fast NER (Haiku) → pg_trgm fuzzy matching (threshold `_MIN_ENTITY_CONFIDENCE = 0.70`) → `<tenant_vernacular>` XML injection. Table: `tenant_entity_mapping` with composite GIN index. Matches below 0.70 are skipped to prevent wrong field injection.
 - **MCP Tools**: ~11 tools across 4 categories (Record CRUD, Reports, Saved Searches, SuiteQL). Visibility is role-permission based — see Mistakes #22. CRUD guardrails — see Mistakes #23.
 - **Tool Result Interception**: `_intercept_tool_result()` in orchestrator emits SSE `data_table`/`financial_report` events, condenses results for LLM. Handles 3 formats: local SuiteQL (`columns`/`rows`), external MCP (`data` list-of-dicts), financial reports (`items`/`summary`).
 - **Smart Context Injection**: `_classify_context_need()` classifies queries into 5 levels (FULL, DATA, DOCS, WORKSPACE, FINANCIAL). Falls back to FULL when uncertain.
@@ -226,7 +226,7 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 10. **RESTlet PUT preserves file IDs** — in-place load → set `.contents` → `.save()`
 11. **SuiteQL pagination** — use `FETCH FIRST N ROWS ONLY`, not `LIMIT`
 12. **NetSuite account IDs** — normalize with `replace("_", "-").lower()` for URLs
-13. **SuiteQL status codes** — REST API returns single-letter codes (`'B'`, `'H'`), NOT compound (`'SalesOrd:B'`). Compound codes silently fail.
+13. **SuiteQL status codes** — REST API returns single-letter codes (`'B'`, `'H'`), NOT compound (`'SalesOrd:B'`). Compound codes silently fail. RMA received = `status IN ('D','E','F','G','H')`. See `knowledge/golden_dataset/transaction-types-and-statuses.md` for all types.
 14. **Agent hallucination guard** — `_task_contains_query()` in `base_agent.py` forces tool execution at step==0
 15. **SET LOCAL doesn't support bind params** — use `set_tenant_context()` from `database.py` (validates UUID). Never raw f-string with user input.
 16. **Redis required in production** — `token_denylist.py` and `rate_limit.py` are Redis-backed. In-memory fallback in dev only.
@@ -250,12 +250,15 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 ## Known Issues
 
 1. **OAuth scope mismatch** — REST connections lack `rest_webservices` scope. Onboarding Discovery returns 400. Chat works via MCP path.
-2. **CI failures** — `test_security_hardening.py` SSL tests fail. Not blocking.
+2. **CI failures** — `test_security_hardening.py` SSL tests fail + pre-existing ruff lint errors (126). Not blocking deploy (manual `workflow_dispatch` bypasses CI gate).
+3. **Workspace RAG chunking** — preamble code (constants before first entry point) now captured as `#preamble` chunk. Force re-seed after changing chunking logic: `seed_workspace_scripts(db, tenant_id, force=True)`.
+4. **CSV/Excel export** — strips `FETCH FIRST N ROWS ONLY` before re-executing server-side (up to 50K rows). Filenames are `query-results-YYYY-MM-DD`.
 
 ## Resolved (2026-03-18)
 
 - **Token refresh** — per-connection client_id, immediate commit per-connection, Redis lock, proactive 5-min task. `expires_in` cast to int (NetSuite returns string). Confirmed self-sustaining on both staging and local.
 - **OAuth re-auth** — upsert matches any non-revoked connection (was only matching `active`, creating duplicates). Resets status + error_reason.
 - **Entity seeder** — now seeds locations, subsidiaries, departments, classes from metadata (was missing, causing "Panurgy" to match custom fields).
-- **RMA status codes** — added to static prompt + golden dataset. G=Refunded means received.
+- **RMA status codes** — added to static prompt + golden dataset. Received = `D,E,F,G,H`. Status codes discovered from live NetSuite REST API.
 - **History summaries** — backfilled 204 messages. New messages auto-summarize at write-time (Haiku).
+- **10x agent quality** (PRs #16-20) — connection-aware orchestrator, entity resolver 0.70 threshold, 7-step workflow with anti-enrichment, programmatic stop-when-done, early exit preserves knowledge tools, RAG keyword boosting + H2 titles, preamble chunking, workspace ID routing, change request dedup. Cost per query: $2.29 → $0.29 (87% reduction).
