@@ -645,6 +645,7 @@ class BaseSpecialistAgent(abc.ABC):
         prompt_parts = split_system_prompt(self.system_prompt)
 
         try:
+            patched_files: set[str] = set()  # Dedup workspace_propose_patch per file
             for step in range(self.max_steps):
                 # Stream the LLM response
                 step_tool_choice = tool_choice if step == 0 else None
@@ -761,6 +762,22 @@ class BaseSpecialistAgent(abc.ABC):
                             resolved = await _resolve_default_workspace(db, self.tenant_id)
                             if resolved:
                                 block.input["workspace_id"] = resolved
+
+                    # Dedup: skip duplicate workspace_propose_patch for same file
+                    if block.name == "workspace_propose_patch":
+                        file_path = block.input.get("file_path", "")
+                        if file_path in patched_files:
+                            print(f"[WORKSPACE] Skipping duplicate patch for {file_path}", flush=True)
+                            tool_results_content.append({
+                                "type": "tool_result",
+                                "tool_use_id": block.id,
+                                "content": json.dumps({
+                                    "skipped": "Already proposed a patch for this file. "
+                                    "Show the diff and present results."
+                                }),
+                            })
+                            continue
+                        patched_files.add(file_path)
 
                     yield "tool_status", f"Executing {block.name}..."
 
