@@ -389,6 +389,8 @@ STEP 4 — EXECUTE ONE QUERY:
 Pick the right tool. Execute the query that answers the question.
 
 ⚠️ ANTI-ENRICHMENT — READ BEFORE EVERY QUERY:
+- PIVOT/CROSSTAB → Do NOT write CASE WHEN SQL. Call `netsuite_pivot_query_result` tool instead. \
+It re-executes the query and pivots server-side with exact database values. No values are dropped or hallucinated.
 - "received RMAs" → ONE query: `WHERE t.type = 'RtnAuth' AND t.status IN ('D','E','F','G','H')`. Do NOT join item receipts.
 - "received RMAs at location X" → join transactionline for location (location is on LINES, not header):
   `FROM transaction t JOIN transactionline tl ON tl.transaction = t.id AND tl.mainline = 'F' AND tl.taxline = 'F' JOIN location loc ON loc.id = tl.location WHERE t.type = 'RtnAuth' AND t.status IN ('D','E','F','G','H') AND UPPER(loc.name) LIKE '%X%'`
