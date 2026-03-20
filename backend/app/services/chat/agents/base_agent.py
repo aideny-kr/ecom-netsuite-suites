@@ -19,7 +19,6 @@ from app.services.chat.llm_adapter import BaseLLMAdapter, LLMResponse, TokenUsag
 from app.services.chat.prompt_cache import split_system_prompt
 from app.services.chat.tool_call_results import (
     build_tool_call_log_entry,
-    extract_distinct_values,
     tool_call_had_error,
     tool_call_row_count,
 )
@@ -531,22 +530,6 @@ class BaseSpecialistAgent(abc.ABC):
                     # Truncate error payloads to prevent token bloat on retries
                     result_str = _truncate_error_payload(result_str)
 
-                    # Extract distinct values for follow-up pivots
-                    _dv_note = ""
-                    if block.name in ("netsuite_suiteql", "ext__ns_runCustomSuiteQL"):
-                        try:
-                            _parsed = json.loads(result_str)
-                            _dv = extract_distinct_values(_parsed) if isinstance(_parsed, dict) else {}
-                            if _dv:
-                                _dv_lines = [f"  {col}: {vals}" for col, vals in _dv.items()]
-                                _dv_note = (
-                                    "\n\n[DISTINCT VALUES from this result — use ONLY these for follow-up "
-                                    "CASE WHEN pivots, do not add or remove values:\n"
-                                    + "\n".join(_dv_lines) + "]"
-                                )
-                        except (json.JSONDecodeError, TypeError):
-                            pass
-
                     elapsed_ms = int((time.monotonic() - t0) * 1000)
                     tool_calls_log.append(
                         build_tool_call_log_entry(
@@ -563,7 +546,7 @@ class BaseSpecialistAgent(abc.ABC):
                         {
                             "type": "tool_result",
                             "tool_use_id": block.id,
-                            "content": result_str + _dv_note,
+                            "content": result_str,
                         }
                     )
 
@@ -830,22 +813,6 @@ class BaseSpecialistAgent(abc.ABC):
 
                     result_str = _truncate_tool_result(result_str)
 
-                    # Extract distinct values for follow-up pivots
-                    _dv_note = ""
-                    if block.name in ("netsuite_suiteql", "ext__ns_runCustomSuiteQL"):
-                        try:
-                            _parsed = json.loads(result_str)
-                            _dv = extract_distinct_values(_parsed) if isinstance(_parsed, dict) else {}
-                            if _dv:
-                                _dv_lines = [f"  {col}: {vals}" for col, vals in _dv.items()]
-                                _dv_note = (
-                                    "\n\n[DISTINCT VALUES from this result — use ONLY these for follow-up "
-                                    "CASE WHEN pivots, do not add or remove values:\n"
-                                    + "\n".join(_dv_lines) + "]"
-                                )
-                        except (json.JSONDecodeError, TypeError):
-                            pass
-
                     raw_result_strings.append(result_str)
                     elapsed_ms = int((time.monotonic() - t0) * 1000)
 
@@ -874,7 +841,7 @@ class BaseSpecialistAgent(abc.ABC):
                         {
                             "type": "tool_result",
                             "tool_use_id": block.id,
-                            "content": llm_result_str + _dv_note,
+                            "content": llm_result_str,
                         }
                     )
 
