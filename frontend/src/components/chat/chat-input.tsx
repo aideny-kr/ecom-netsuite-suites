@@ -293,9 +293,9 @@ export function ChatInput({ onSend, isLoading, workspaceId, variant }: ChatInput
           {commandOpen && filteredCommands.length > 0 && (
             <div
               className={cn(
-                "absolute bottom-full mb-2 left-2 z-50 w-80 p-1 shadow-lg overflow-hidden",
+                "absolute bottom-full mb-2 left-2 z-50 w-80 p-1 shadow-lg overflow-hidden max-h-[400px] overflow-y-auto",
                 isTerminal
-                  ? "rounded-none border bg-[var(--card)] border-[var(--chat-surface-mid)]"
+                  ? "rounded-sm border bg-[#131313] border-[var(--chat-surface-mid)] backdrop-blur-none"
                   : "rounded-xl border bg-card",
               )}
             >
