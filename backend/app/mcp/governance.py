@@ -357,6 +357,28 @@ async def governed_execute(
         except Exception:
             logger.exception("mcp.audit_write_failed", tool=tool_name)
 
+    # 2c. Pre-execution validation for SuiteQL queries
+    if tool_name in ("netsuite.suiteql", "netsuite_suiteql"):
+        from app.services.suiteql_validator import validate_suiteql_query
+
+        query = validated_params.get("query", "")
+        validation_result = validate_suiteql_query(query)
+        if not validation_result.is_valid:
+            error_msg = "Pre-execution validation failed: " + "; ".join(validation_result.errors)
+            if validation_result.suggested_fix:
+                error_msg += f". Suggested fix: {validation_result.suggested_fix}"
+            print(f"[GOVERNANCE] SuiteQL validation failed: {validation_result.errors}", flush=True)
+            duration_ms = (time.monotonic() - start) * 1000
+            logger.warning(
+                "mcp.tool_call",
+                tool=tool_name,
+                tenant_id=tenant_id,
+                correlation_id=correlation_id,
+                duration_ms=round(duration_ms, 2),
+                status="validation_failed",
+            )
+            return {"success": False, "error": "VALIDATION_FAILED", "message": error_msg}
+
     # 3. Execute
     try:
         context = {
