@@ -377,7 +377,7 @@ async def governed_execute(
                 duration_ms=round(duration_ms, 2),
                 status="validation_failed",
             )
-            return {"success": False, "error": "VALIDATION_FAILED", "message": error_msg}
+            return {"error": "VALIDATION_FAILED", "message": error_msg, "tool": tool_name}
 
     # 3. Execute
     try:
