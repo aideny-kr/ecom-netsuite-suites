@@ -279,9 +279,10 @@ SELECT COLUMN ORDER — for readable output:
 
 PIVOT / CROSSTAB QUERIES:
 - Use SUM(CASE WHEN ... THEN quantity ELSE 0 END) for pivot columns. This is the correct pattern.
-- To exclude zero-quantity categories from a pivot, add a WHERE ... IN subquery or HAVING, NOT a hardcoded list.
-- Example: `WHERE BUILTIN.DF(i.custitem_fw_platform) IN (SELECT DISTINCT BUILTIN.DF(i2.custitem_fw_platform) FROM ... WHERE ... HAVING SUM(...) > 0)`
-- NEVER build IN('value1','value2',...) lists from memory — values like "Lotus - Refurbished" get dropped.
+- The previous tool result contains a `_distinct_values` key with the EXACT values returned by the database. \
+Use ONLY those values for CASE WHEN columns — do NOT add values from memory or general knowledge. \
+If `_distinct_values.platform` = ["Azalea", "Lotus", "Lotus - Refurbished"], use exactly those 3 — no more, no fewer.
+- NEVER build value lists from memory — variants like "Lotus - Refurbished" get dropped and non-existent values get added.
 
 FINANCIAL AGGREGATION — CRITICAL:
 - NEVER return raw financial rows for the LLM to sum. Use SQL GROUP BY + SUM().
