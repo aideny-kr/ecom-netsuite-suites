@@ -49,7 +49,7 @@ export function SessionSidebar({
     <div
       className={cn(
         "flex w-[280px] flex-col border-r",
-        isTerminal ? "bg-zinc-900 border-zinc-800/50" : "bg-muted/30",
+        isTerminal ? "bg-[var(--card)] border-[var(--chat-surface-mid)]" : "bg-muted/30",
       )}
     >
       {/* New Chat button */}
@@ -57,7 +57,7 @@ export function SessionSidebar({
         {isTerminal ? (
           <button
             onClick={onNewChat}
-            className="w-full bg-[var(--chat-accent)] text-black py-3 rounded-sm font-headline font-bold text-xs tracking-widest uppercase flex items-center justify-center gap-2 hover:bg-[var(--chat-accent-hover)] transition-all"
+            className="w-full bg-[var(--chat-accent)] text-white py-3 rounded-sm font-headline font-bold text-xs tracking-widest uppercase flex items-center justify-center gap-2 hover:bg-[var(--chat-accent-hover)] transition-all"
           >
             <Plus className="h-3.5 w-3.5" /> NEW CHAT
           </button>
@@ -92,13 +92,13 @@ export function SessionSidebar({
             <MessageSquare
               className={cn(
                 "h-8 w-8",
-                isTerminal ? "text-zinc-700" : "text-muted-foreground/40",
+                isTerminal ? "text-muted-foreground" : "text-muted-foreground/40",
               )}
             />
             <p
               className={cn(
                 "mt-3 text-[13px]",
-                isTerminal ? "text-zinc-600" : "text-muted-foreground",
+                isTerminal ? "text-muted-foreground" : "text-muted-foreground",
               )}
             >
               No conversations yet
@@ -108,13 +108,13 @@ export function SessionSidebar({
       </div>
 
       {/* Saved Queries — pinned at bottom, own scroll */}
-      <div className={cn("border-t", isTerminal && "border-zinc-800/50")}>
+      <div className={cn("border-t", isTerminal && "border-[var(--chat-surface-mid)]")}>
         <button
           onClick={() => setQueriesExpanded(!queriesExpanded)}
           className={cn(
             "flex w-full items-center gap-1.5 px-5 py-2.5 font-semibold uppercase transition-colors",
             isTerminal
-              ? "text-[11px] tracking-widest text-zinc-500 hover:text-zinc-400"
+              ? "text-[11px] tracking-widest text-muted-foreground hover:text-foreground"
               : "text-[11px] tracking-wider text-muted-foreground hover:text-foreground",
           )}
         >
@@ -285,8 +285,8 @@ function SessionItem({
         "group flex items-center px-3 py-2.5 text-left transition-all duration-150 cursor-pointer",
         isTerminal
           ? isActive
-            ? "bg-zinc-800 text-[var(--chat-accent)] border-l-4 border-[var(--chat-accent)] rounded-none"
-            : "hover:bg-zinc-800/50 text-zinc-500 rounded-none"
+            ? "bg-[var(--chat-surface)] text-[var(--chat-accent)] border-l-4 border-[var(--chat-accent)] rounded-none"
+            : "hover:bg-[var(--chat-surface-high)]/50 text-muted-foreground rounded-none"
           : cn(
               "rounded-lg",
               isActive
@@ -316,7 +316,7 @@ function SessionItem({
           className={cn(
             "truncate mt-0.5",
             isTerminal
-              ? "text-[10px] text-zinc-600"
+              ? "text-[10px] text-muted-foreground"
               : "text-[11px] text-muted-foreground",
           )}
         >
