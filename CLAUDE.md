@@ -25,6 +25,9 @@
 - **MCP Tools**: ~11 tools across 4 categories (Record CRUD, Reports, Saved Searches, SuiteQL). Visibility is role-permission based — see Mistakes #22. CRUD guardrails — see Mistakes #23.
 - **Tool Result Interception**: `_intercept_tool_result()` in orchestrator emits SSE `data_table`/`financial_report` events, condenses results for LLM. Handles 3 formats: local SuiteQL (`columns`/`rows`), external MCP (`data` list-of-dicts), financial reports (`items`/`summary`).
 - **Smart Context Injection**: `_classify_context_need()` classifies queries into 5 levels (FULL, DATA, DOCS, WORKSPACE, FINANCIAL). Falls back to FULL when uncertain.
+- **Pivot Tool**: `netsuite_pivot_query_result` — server-side deterministic pivoting. Agent runs flat GROUP BY, then calls pivot tool which re-executes without row limit and pivots in Python. Only values in the data become columns — no LLM judgment on value lists. Do NOT build CASE WHEN pivot SQL manually.
+- **History Condensation**: `build_condensed_history()` replaces large JSON blocks in older messages with summaries. Last 4 messages kept verbatim. Reduces follow-up tokens from ~100K to ~40K.
+- **Haiku Routing**: Simple lookups (single entity, simple counts) route to `claude-haiku-4-5-20251001` for 10x speed. Only for non-BYOK tenants. Conservative regex — FULL model when uncertain.
 - **Mock Data**: MockData RESTlet runs SuiteQL inside NetSuite with server-side PII masking. Never transmit real PII to our backend.
 - **react-resizable-panels v4**: Imports: `Panel`, `Group as PanelGroup`, `Separator as PanelResizeHandle`. Uses `orientation` prop (not `direction`).
 - **White-Label Branding**: Per-tenant brand_name/color/logo/favicon in `tenant_configs`. `BrandingProvider` injects `--primary` CSS variable.
@@ -208,6 +211,10 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 | Knowledge crawler | `backend/app/services/knowledge/` |
 | Celery tasks/Beat | `backend/app/workers/tasks/`, `backend/app/workers/celery_app.py` |
 | Excel export | `backend/app/services/excel_export_service.py` |
+| Pivot service | `backend/app/services/pivot_service.py` |
+| Redis lock | `backend/app/core/redis_lock.py` |
+| Proactive refresh | `backend/app/workers/tasks/proactive_token_refresh.py` |
+| Connection alerts | `backend/app/api/v1/connection_alerts.py` |
 | SuiteScripts | `suiteapp/src/FileCabinet/SuiteScripts/` |
 | SDF Objects | `suiteapp/src/Objects/` |
 | Specs / Plans | `docs/superpowers/specs/`, `docs/superpowers/plans/` |
@@ -249,10 +256,11 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 
 ## Known Issues
 
-1. **OAuth scope mismatch** — REST connections lack `rest_webservices` scope. Onboarding Discovery returns 400. Chat works via MCP path.
-2. **CI failures** — `test_security_hardening.py` SSL tests fail + pre-existing ruff lint errors (126). Not blocking deploy (manual `workflow_dispatch` bypasses CI gate).
-3. **Workspace RAG chunking** — preamble code (constants before first entry point) now captured as `#preamble` chunk. Force re-seed after changing chunking logic: `seed_workspace_scripts(db, tenant_id, force=True)`.
-4. **CSV/Excel export** — strips `FETCH FIRST N ROWS ONLY` before re-executing server-side (up to 50K rows). Filenames are `query-results-YYYY-MM-DD`.
+1. **CI failures** — `test_security_hardening.py` SSL tests fail + pre-existing ruff lint errors (126). Not blocking deploy (manual `workflow_dispatch` bypasses CI gate).
+2. **Workspace RAG chunking** — preamble code (constants before first entry point) now captured as `#preamble` chunk. Force re-seed after changing chunking logic: `seed_workspace_scripts(db, tenant_id, force=True)`.
+3. **CSV/Excel export** — strips `FETCH FIRST N ROWS ONLY` before re-executing server-side (up to 50K rows). Filenames are `query-results-YYYY-MM-DD`.
+4. **LLM pivot limitation** — the LLM cannot reliably build CASE WHEN pivot SQL (drops variants, adds non-existent values). Always use `netsuite_pivot_query_result` tool instead. Prompt says this but LLM occasionally ignores it.
+5. **Proven patterns can poison** — bad query patterns auto-saved from failed attempts get injected into follow-up queries. If the agent produces consistently wrong queries, check `tenant_query_patterns` table and delete bad patterns.
 
 ## Resolved (2026-03-18)
 
@@ -262,3 +270,10 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 - **RMA status codes** — added to static prompt + golden dataset. Received = `D,E,F,G,H`. Status codes discovered from live NetSuite REST API.
 - **History summaries** — backfilled 204 messages. New messages auto-summarize at write-time (Haiku).
 - **10x agent quality** (PRs #16-20) — connection-aware orchestrator, entity resolver 0.70 threshold, 7-step workflow with anti-enrichment, programmatic stop-when-done, early exit preserves knowledge tools, RAG keyword boosting + H2 titles, preamble chunking, workspace ID routing, change request dedup. Cost per query: $2.29 → $0.29 (87% reduction).
+
+## Resolved (2026-03-19)
+
+- **Pivot queries** — new `pivot_query_result` tool for deterministic server-side pivoting. No more LLM-built CASE WHEN SQL.
+- **Token condensation** — `build_condensed_history()` reduces follow-up tokens from ~100K to ~40K.
+- **Haiku routing** — simple lookups route to Haiku for 10x speed (non-BYOK only).
+- **Saved query CSV export** — was downloading stale files from disk (wiped by Docker restarts). Now re-executes query on demand.
