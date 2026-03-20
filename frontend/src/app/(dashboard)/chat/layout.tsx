@@ -15,7 +15,7 @@ export default function ChatLayout({
 }) {
   return (
     <div
-      className={`${spaceGrotesk.variable} dark chat-container h-full min-h-0`}
+      className={`${spaceGrotesk.variable} chat-container h-full min-h-0`}
     >
       {children}
     </div>
