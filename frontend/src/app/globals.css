@@ -52,7 +52,7 @@
     --card-foreground: 0 0% 95%;
     --popover: 240 10% 8%;
     --popover-foreground: 0 0% 95%;
-    --primary: 155 100% 50%;
+    --primary: 142 70% 45%;
     --primary-foreground: 0 0% 100%;
     --accent: 354.8 100% 63.9%;
     --accent-foreground: 0 0% 100%;
@@ -176,10 +176,10 @@
   animation: thinking-fade 2s ease-in-out infinite;
 }
 
-/* Matrix-green breathing glow on focus rings */
+/* Matrix-green breathing glow on focus rings (#00ff94) */
 @keyframes ring-breathe {
-  0%, 100% { box-shadow: 0 0 0 2px hsl(var(--ring) / 0.5); }
-  50% { box-shadow: 0 0 8px 2px hsl(var(--ring) / 0.3); }
+  0%, 100% { box-shadow: 0 0 0 2px rgba(0, 255, 148, 0.5); }
+  50% { box-shadow: 0 0 8px 2px rgba(0, 255, 148, 0.3); }
 }
 
 *:focus-visible {
