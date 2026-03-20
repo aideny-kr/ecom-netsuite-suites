@@ -264,17 +264,21 @@ export function DataFrameTable({ data, queryText }: DataFrameTableProps) {
             ) : (
               sortedRows.map((row, ri) => (
                 <TableRow key={ri} className="border-b border-border/50">
-                  {(row as unknown[]).map((cell, ci) => (
-                    <TableCell
-                      key={`${ri}-${ci}`}
-                      className={cn(
-                        "max-w-[320px] whitespace-nowrap px-3 py-2 text-[12px]",
-                        isNumeric(cell) && "text-right tabular-nums",
-                      )}
-                    >
-                      {formatCellValue(cell)}
-                    </TableCell>
-                  ))}
+                  {(row as unknown[]).map((cell, ci) => {
+                    const colName = columns[ci]?.toLowerCase() ?? "";
+                    const isIdCol = colName === "id" || colName === "internalid" || colName.endsWith("_id") || colName === "tranid";
+                    return (
+                      <TableCell
+                        key={`${ri}-${ci}`}
+                        className={cn(
+                          "max-w-[320px] whitespace-nowrap px-3 py-2 text-[12px]",
+                          isNumeric(cell) && !isIdCol && "text-right tabular-nums",
+                        )}
+                      >
+                        {isIdCol ? String(cell ?? "\u2014") : formatCellValue(cell)}
+                      </TableCell>
+                    );
+                  })}
                 </TableRow>
               ))
             )}
