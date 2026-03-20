@@ -190,7 +190,7 @@ export function ChatInput({ onSend, isLoading, workspaceId, variant }: ChatInput
     <div
       className={cn(
         isTerminal
-          ? "shrink-0 bg-zinc-950/40 backdrop-blur-md border-t border-zinc-900/50 px-10 py-6"
+          ? "shrink-0 bg-[var(--card)]/60 backdrop-blur-md border-t border-[var(--chat-surface-mid)] px-10 py-6"
           : "shrink-0 border-t bg-card px-6 py-4",
       )}
     >
@@ -204,7 +204,7 @@ export function ChatInput({ onSend, isLoading, workspaceId, variant }: ChatInput
                 className={cn(
                   "inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-medium",
                   isTerminal
-                    ? "rounded-sm bg-zinc-800 text-[var(--chat-accent)]"
+                    ? "rounded-sm bg-[var(--chat-surface-high)] text-[var(--chat-accent)]"
                     : "rounded-full bg-primary/10 text-primary",
                 )}
               >
@@ -223,7 +223,7 @@ export function ChatInput({ onSend, isLoading, workspaceId, variant }: ChatInput
         <div
           className={cn(
             isTerminal
-              ? "relative flex items-end gap-3 p-2 bg-[var(--chat-surface-low)] shadow-2xl group"
+              ? "relative flex items-end gap-3 p-2 bg-[var(--card)] border border-[var(--chat-surface-mid)] shadow-2xl group"
               : "relative flex items-end gap-3 rounded-2xl border bg-background p-2 shadow-soft transition-shadow focus-within:shadow-soft-md focus-within:ring-1 focus-within:ring-ring",
           )}
         >
@@ -272,7 +272,7 @@ export function ChatInput({ onSend, isLoading, workspaceId, variant }: ChatInput
               disabled={!value.trim() || isLoading}
               aria-label="Send message"
               title="Send message"
-              className="w-10 h-10 flex items-center justify-center bg-[var(--chat-accent)] text-black hover:bg-[var(--chat-accent-hover)] transition-all active:scale-95 disabled:opacity-50"
+              className="w-10 h-10 flex items-center justify-center bg-[var(--chat-accent)] text-white hover:bg-[var(--chat-accent-hover)] transition-all active:scale-95 disabled:opacity-50"
             >
               <ArrowRight className="h-4 w-4" />
             </button>
@@ -295,7 +295,7 @@ export function ChatInput({ onSend, isLoading, workspaceId, variant }: ChatInput
               className={cn(
                 "absolute bottom-full mb-2 left-2 z-50 w-80 p-1 shadow-lg overflow-hidden",
                 isTerminal
-                  ? "rounded-none border bg-zinc-900 border-zinc-800"
+                  ? "rounded-none border bg-[var(--card)] border-[var(--chat-surface-mid)]"
                   : "rounded-xl border bg-card",
               )}
             >
@@ -311,7 +311,7 @@ export function ChatInput({ onSend, isLoading, workspaceId, variant }: ChatInput
                     isTerminal ? "rounded-none" : "rounded-lg",
                     idx === selectedIndex
                       ? isTerminal
-                        ? "bg-[var(--chat-accent)] text-black"
+                        ? "bg-[var(--chat-accent)] text-white"
                         : "bg-primary text-primary-foreground"
                       : "text-foreground hover:bg-muted",
                   )}
@@ -325,7 +325,7 @@ export function ChatInput({ onSend, isLoading, workspaceId, variant }: ChatInput
                         "block text-[13px] font-medium",
                         idx === selectedIndex
                           ? isTerminal
-                            ? "text-black"
+                            ? "text-white"
                             : "text-primary-foreground"
                           : "text-foreground",
                       )}
@@ -351,7 +351,7 @@ export function ChatInput({ onSend, isLoading, workspaceId, variant }: ChatInput
           )}
         </div>
         {isTerminal && (
-          <div className="h-[2px] bg-zinc-800 transition-colors duration-500 group-focus-within:bg-[var(--chat-accent)]" />
+          <div className="h-[2px] bg-[var(--chat-surface-mid)] transition-colors duration-500 group-focus-within:bg-[var(--chat-accent)]" />
         )}
         {!isTerminal && (
           <p className="mt-1.5 text-right text-[11px] tabular-nums text-muted-foreground">
@@ -360,12 +360,12 @@ export function ChatInput({ onSend, isLoading, workspaceId, variant }: ChatInput
         )}
         {isTerminal && (
           <div className="flex justify-between items-center mt-3">
-            <span className="text-[9px] font-label text-zinc-600 uppercase tracking-widest">
+            <span className="text-[9px] font-label text-muted-foreground uppercase tracking-widest">
               Tokens: {value.length}
             </span>
             <div className="flex gap-4">
-              <button className="text-[9px] font-label text-zinc-500 hover:text-[var(--chat-accent)] uppercase tracking-widest">Clear History</button>
-              <button className="text-[9px] font-label text-zinc-500 hover:text-[var(--chat-accent)] uppercase tracking-widest">Export Log</button>
+              <button className="text-[9px] font-label text-muted-foreground hover:text-[var(--chat-accent)] uppercase tracking-widest">Clear History</button>
+              <button className="text-[9px] font-label text-muted-foreground hover:text-[var(--chat-accent)] uppercase tracking-widest">Export Log</button>
             </div>
           </div>
         )}
