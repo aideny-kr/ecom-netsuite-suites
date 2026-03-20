@@ -66,12 +66,12 @@ export function Sidebar() {
           {logoUrl ? (
             <img src={logoUrl} alt={brandName} className="h-8 w-8 rounded-lg object-contain" />
           ) : (
-            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-[hsl(var(--sidebar-active))]">
-              <Zap className="h-4 w-4 text-white" />
+            <div className="flex h-8 w-8 items-center justify-center rounded-sm bg-[hsl(var(--sidebar-active))]">
+              <Zap className="h-4 w-4 text-black" />
             </div>
           )}
           <div>
-            <h1 className="text-[15px] font-semibold tracking-tight text-white">
+            <h1 className="text-[15px] font-bold tracking-tighter text-[hsl(var(--sidebar-active))]">
               {brandName}
             </h1>
           </div>
@@ -126,13 +126,13 @@ export function Sidebar() {
               key={item.href}
               href={item.href}
               className={cn(
-                "group flex items-center gap-3 rounded-lg px-3 py-2 text-[13px] font-medium transition-all duration-150",
+                "group flex items-center gap-3 px-4 py-2.5 text-[13px] font-medium tracking-wide uppercase transition-all duration-150",
                 isActive
-                  ? "bg-[hsl(var(--sidebar-active))] text-white shadow-sm"
-                  : "text-[hsl(var(--sidebar-foreground))] hover:bg-[hsl(var(--sidebar-hover))] hover:text-white",
+                  ? "bg-[hsl(var(--sidebar-hover))] text-[hsl(var(--sidebar-active))] border-l-4 border-[hsl(var(--sidebar-active))]"
+                  : "text-[hsl(var(--sidebar-foreground))] hover:bg-[hsl(var(--sidebar-hover))/0.5] hover:text-[hsl(var(--sidebar-active))/0.7]",
               )}
             >
-              <Icon className={cn("h-4 w-4", isActive ? "text-white" : "text-[hsl(var(--sidebar-muted))] group-hover:text-white")} />
+              <Icon className={cn("h-4 w-4", isActive ? "text-[hsl(var(--sidebar-active))]" : "text-[hsl(var(--sidebar-muted))] group-hover:text-[hsl(var(--sidebar-active))/0.7]")} />
               {item.label}
             </Link>
           );
@@ -145,13 +145,13 @@ export function Sidebar() {
           <button
             onClick={() => setTablesExpanded(!tablesExpanded)}
             className={cn(
-              "group flex w-full items-center gap-3 rounded-lg px-3 py-2 text-[13px] font-medium transition-all duration-150",
+              "group flex w-full items-center gap-3 px-4 py-2.5 text-[13px] font-medium tracking-wide uppercase transition-all duration-150",
               pathname.startsWith("/tables")
-                ? "bg-[hsl(var(--sidebar-hover))] text-white"
-                : "text-[hsl(var(--sidebar-foreground))] hover:bg-[hsl(var(--sidebar-hover))] hover:text-white",
+                ? "bg-[hsl(var(--sidebar-hover))] text-[hsl(var(--sidebar-active))] border-l-4 border-[hsl(var(--sidebar-active))]"
+                : "text-[hsl(var(--sidebar-foreground))] hover:bg-[hsl(var(--sidebar-hover))/0.5] hover:text-[hsl(var(--sidebar-active))/0.7]",
             )}
           >
-            <Table2 className={cn("h-4 w-4", pathname.startsWith("/tables") ? "text-white" : "text-[hsl(var(--sidebar-muted))] group-hover:text-white")} />
+            <Table2 className={cn("h-4 w-4", pathname.startsWith("/tables") ? "text-[hsl(var(--sidebar-active))]" : "text-[hsl(var(--sidebar-muted))] group-hover:text-[hsl(var(--sidebar-active))/0.7]")} />
             Tables
             <ChevronDown
               className={cn(
@@ -175,10 +175,10 @@ export function Sidebar() {
                     key={table.name}
                     href={href}
                     className={cn(
-                      "block rounded-md px-3 py-1.5 text-[13px] transition-all duration-150",
+                      "block px-3 py-1.5 text-[12px] tracking-wide uppercase transition-all duration-150",
                       isActive
-                        ? "bg-[hsl(var(--sidebar-active))/0.15] font-medium text-[hsl(var(--sidebar-active))]"
-                        : "text-[hsl(var(--sidebar-foreground))] hover:bg-[hsl(var(--sidebar-hover))] hover:text-white",
+                        ? "font-medium text-[hsl(var(--sidebar-active))]"
+                        : "text-[hsl(var(--sidebar-foreground))] hover:text-[hsl(var(--sidebar-active))/0.7]",
                     )}
                   >
                     {table.label}
