@@ -345,7 +345,7 @@ function AssistantNarrativeBubble({ content, isTerminal = false }: { content: st
   return (
     <div className={cn(
       isTerminal
-        ? "max-w-full bg-zinc-800/40 backdrop-blur-xl p-8 rounded-sm shadow-[0_20px_40px_rgba(255,102,0,0.04)] relative overflow-hidden md:max-w-[75%]"
+        ? "max-w-full bg-[var(--card)] border border-[var(--chat-surface-mid)] shadow-sm p-8 rounded-sm shadow-[0_20px_40px_rgba(255,102,0,0.04)] relative overflow-hidden md:max-w-[75%]"
         : "max-w-full rounded-2xl bg-muted/60 px-4 py-3 md:max-w-[75%]",
     )}>
       {isTerminal && (
@@ -362,7 +362,7 @@ function AssistantRichBlock({ content, isTerminal = false }: { content: string; 
       className={cn(
         "w-full overflow-hidden",
         isTerminal
-          ? "rounded-sm border border-zinc-800/50 bg-zinc-900/80"
+          ? "rounded-sm border border-[var(--chat-surface-mid)] bg-[var(--chat-surface)]"
           : "rounded-2xl border border-border/60 bg-background/80",
       )}
       data-testid="assistant-rich-block"
@@ -396,7 +396,7 @@ function ThinkingBlock({ content, isTerminal = false }: { content: string; isTer
     <details className={cn(
       "mb-2 text-[12px] group",
       isTerminal
-        ? "rounded-sm border border-zinc-800/50 bg-zinc-900/40"
+        ? "rounded-sm border border-[var(--chat-surface-mid)] bg-[var(--chat-surface-variant)]/50"
         : "rounded-lg border border-muted/50 bg-muted/20",
     )}>
       <summary className="cursor-pointer select-none px-3 py-2 text-muted-foreground/60 hover:text-muted-foreground font-medium flex items-center gap-2 transition-colors">
@@ -416,7 +416,7 @@ function StreamingThinkingBlock({ content, isActive, isTerminal = false }: { con
     <div className={cn(
       "mb-2 overflow-hidden",
       isTerminal
-        ? "rounded-sm border border-zinc-800/50 bg-zinc-900/40"
+        ? "rounded-sm border border-[var(--chat-surface-mid)] bg-[var(--chat-surface-variant)]/50"
         : "rounded-lg border border-primary/10 bg-primary/[0.03]",
     )}>
       <div className="flex items-center gap-2 px-3 py-2">
@@ -524,7 +524,7 @@ export function MessageList({
       return (
         <div className="flex h-full items-start px-0 py-4">
           <div className="max-w-4xl">
-            <h1 className="font-headline font-black text-[3.5rem] leading-none -tracking-[0.02em] text-white mb-4">
+            <h1 className="font-headline font-black text-[3.5rem] leading-none -tracking-[0.02em] text-foreground mb-4">
               {(() => {
                 const name = brandName || "Suite Studio AI";
                 const aiIndex = name.indexOf("AI");
@@ -540,7 +540,7 @@ export function MessageList({
                 return name;
               })()}
             </h1>
-            <p className="text-zinc-500 text-base max-w-xl leading-relaxed">
+            <p className="text-muted-foreground text-base max-w-xl leading-relaxed">
               Ask questions about your business operations, data, or docs.
             </p>
           </div>
@@ -603,13 +603,13 @@ export function MessageList({
           />
         ) : isTerminal ? (
           <div key={message.id} className="flex max-w-full justify-end gap-4">
-            <div className="max-w-full bg-zinc-800/50 p-6 rounded-sm border border-zinc-700/40 md:max-w-[75%]">
-              <p className="text-[14px] leading-relaxed whitespace-pre-wrap break-words text-zinc-200">
+            <div className="max-w-full bg-[var(--chat-surface-low)] p-6 rounded-sm border border-[var(--chat-surface-mid)] md:max-w-[75%]">
+              <p className="text-[14px] leading-relaxed whitespace-pre-wrap break-words text-foreground">
                 {renderWithMentions(message.content, onMentionClick)}
               </p>
             </div>
-            <div className="w-10 h-10 bg-zinc-800 flex-shrink-0 flex items-center justify-center border border-zinc-700/50">
-              <User className="h-4 w-4 text-zinc-400" />
+            <div className="w-10 h-10 bg-[var(--chat-surface-high)] flex-shrink-0 flex items-center justify-center border border-[var(--chat-surface-mid)]">
+              <User className="h-4 w-4 text-muted-foreground" />
             </div>
           </div>
         ) : (
@@ -627,13 +627,13 @@ export function MessageList({
       {pendingUserMessage && (
         isTerminal ? (
           <div className="flex max-w-full justify-end gap-4">
-            <div className="max-w-full bg-zinc-800/50 p-6 rounded-sm border border-zinc-700/40 md:max-w-[75%]">
-              <p className="text-[14px] leading-relaxed whitespace-pre-wrap text-zinc-200">
+            <div className="max-w-full bg-[var(--chat-surface-low)] p-6 rounded-sm border border-[var(--chat-surface-mid)] md:max-w-[75%]">
+              <p className="text-[14px] leading-relaxed whitespace-pre-wrap text-foreground">
                 {pendingUserMessage}
               </p>
             </div>
-            <div className="w-10 h-10 bg-zinc-800 flex-shrink-0 flex items-center justify-center border border-zinc-700/50">
-              <User className="h-4 w-4 text-zinc-400" />
+            <div className="w-10 h-10 bg-[var(--chat-surface-high)] flex-shrink-0 flex items-center justify-center border border-[var(--chat-surface-mid)]">
+              <User className="h-4 w-4 text-muted-foreground" />
             </div>
           </div>
         ) : (
@@ -663,7 +663,7 @@ export function MessageList({
       {!shouldRenderStreamingMessage && (isWaitingForReply || streamingContent || streamingStatus) && (
         <div className="flex min-w-0 justify-start gap-3">
           {isTerminal ? (
-            <div className="w-10 h-10 bg-zinc-800 flex-shrink-0 flex items-center justify-center border border-zinc-800/50">
+            <div className="w-10 h-10 bg-[var(--card)] flex-shrink-0 flex items-center justify-center border border-[var(--chat-surface-mid)]">
               <Zap className="h-4 w-4 text-[var(--chat-accent)]" />
             </div>
           ) : (
@@ -675,7 +675,7 @@ export function MessageList({
             <div className={cn(
               "min-w-0 overflow-hidden",
               isTerminal
-                ? "rounded-sm border border-zinc-800/50 bg-zinc-900/80"
+                ? "rounded-sm border border-[var(--chat-surface-mid)] bg-[var(--chat-surface)]"
                 : "rounded-2xl border border-border/50 bg-muted/40",
             )}>
               <div className="flex max-h-[60vh] min-w-0 flex-col gap-2 overflow-auto px-4 py-3 scrollbar-thin">
@@ -773,7 +773,7 @@ function AssistantMessageRow({
   return (
     <div className="flex min-w-0 justify-start gap-3">
       {isTerminal ? (
-        <div className="w-10 h-10 bg-zinc-800 flex-shrink-0 flex items-center justify-center border border-zinc-800/50">
+        <div className="w-10 h-10 bg-[var(--card)] flex-shrink-0 flex items-center justify-center border border-[var(--chat-surface-mid)]">
           <Zap className="h-4 w-4 text-[var(--chat-accent)]" />
         </div>
       ) : (
@@ -787,7 +787,7 @@ function AssistantMessageRow({
             <span className="text-[10px] tracking-widest text-[var(--chat-accent)] uppercase font-medium">
               {(agentName || "SUITE_STUDIO").toUpperCase().replace(/\s+/g, "_")} [AGENT]
             </span>
-            <span className="text-[10px] tracking-widest text-zinc-600">
+            <span className="text-[10px] tracking-widest text-muted-foreground">
               {new Date(message.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
             </span>
           </div>
@@ -861,7 +861,7 @@ function AssistantMessageRow({
                 className={cn(
                   "inline-flex items-center px-2.5 py-1 text-[11px] font-medium",
                   isTerminal
-                    ? "rounded-sm bg-zinc-900/60"
+                    ? "rounded-sm bg-[var(--chat-surface)]"
                     : "rounded-full bg-background/60",
                 )}
                 title={citation.snippet}
