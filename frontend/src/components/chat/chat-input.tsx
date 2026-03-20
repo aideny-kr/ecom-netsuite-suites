@@ -1,7 +1,8 @@
 "use client";
 
 import { useState, useCallback, useMemo, useEffect, useRef, type KeyboardEvent } from "react";
-import { ArrowUp, AtSign, X, Slash } from "lucide-react";
+import { ArrowUp, ArrowRight, AtSign, X, Slash } from "lucide-react";
+import { cn } from "@/lib/utils";
 import { useQuery } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { FileMentionPicker } from "@/components/chat/file-mention-picker";
@@ -13,9 +14,11 @@ interface ChatInputProps {
   onSend: (content: string) => void;
   isLoading: boolean;
   workspaceId?: string | null;
+  variant?: "default" | "terminal";
 }
 
-export function ChatInput({ onSend, isLoading, workspaceId }: ChatInputProps) {
+export function ChatInput({ onSend, isLoading, workspaceId, variant }: ChatInputProps) {
+  const isTerminal = variant === "terminal";
   const [value, setValue] = useState("");
   const [mentionOpen, setMentionOpen] = useState(false);
   const [commandOpen, setCommandOpen] = useState(false);
@@ -175,7 +178,13 @@ export function ChatInput({ onSend, isLoading, workspaceId }: ChatInputProps) {
   );
 
   return (
-    <div className="shrink-0 border-t bg-card px-6 py-4">
+    <div
+      className={cn(
+        isTerminal
+          ? "shrink-0 bg-zinc-950/40 backdrop-blur-md border-t border-zinc-900/50 px-10 py-6"
+          : "shrink-0 border-t bg-card px-6 py-4",
+      )}
+    >
       <div className="mx-auto max-w-3xl">
         {/* Attachment chips */}
         {mentions.length > 0 && (
@@ -183,7 +192,12 @@ export function ChatInput({ onSend, isLoading, workspaceId }: ChatInputProps) {
             {mentions.map((path) => (
               <span
                 key={path}
-                className="inline-flex items-center gap-1 rounded-full bg-primary/10 px-2 py-0.5 text-[11px] font-medium text-primary"
+                className={cn(
+                  "inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-medium",
+                  isTerminal
+                    ? "rounded-sm bg-zinc-800 text-[var(--chat-accent)]"
+                    : "rounded-full bg-primary/10 text-primary",
+                )}
               >
                 {path.split("/").pop()}
                 <button
@@ -197,7 +211,13 @@ export function ChatInput({ onSend, isLoading, workspaceId }: ChatInputProps) {
             ))}
           </div>
         )}
-        <div className="relative flex items-end gap-3 rounded-2xl border bg-background p-2 shadow-soft transition-shadow focus-within:shadow-soft-md focus-within:ring-1 focus-within:ring-ring">
+        <div
+          className={cn(
+            isTerminal
+              ? "relative flex items-end gap-3 p-2 bg-[var(--chat-surface-low)] shadow-2xl group"
+              : "relative flex items-end gap-3 rounded-2xl border bg-background p-2 shadow-soft transition-shadow focus-within:shadow-soft-md focus-within:ring-1 focus-within:ring-ring",
+          )}
+        >
           <textarea
             ref={textareaRef}
             value={value}
@@ -237,20 +257,39 @@ export function ChatInput({ onSend, isLoading, workspaceId }: ChatInputProps) {
               </Button>
             </FileMentionPicker>
           )}
-          <Button
-            size="icon"
-            className="h-8 w-8 shrink-0 rounded-xl"
-            onClick={handleSend}
-            disabled={!value.trim() || isLoading}
-            aria-label="Send message"
-            title="Send message"
-          >
-            <ArrowUp className="h-4 w-4" />
-          </Button>
+          {isTerminal ? (
+            <button
+              onClick={handleSend}
+              disabled={!value.trim() || isLoading}
+              aria-label="Send message"
+              title="Send message"
+              className="w-10 h-10 flex items-center justify-center bg-[var(--chat-accent)] text-black hover:bg-[var(--chat-accent-hover)] transition-all active:scale-95 disabled:opacity-50"
+            >
+              <ArrowRight className="h-4 w-4" />
+            </button>
+          ) : (
+            <Button
+              size="icon"
+              className="h-8 w-8 shrink-0 rounded-xl"
+              onClick={handleSend}
+              disabled={!value.trim() || isLoading}
+              aria-label="Send message"
+              title="Send message"
+            >
+              <ArrowUp className="h-4 w-4" />
+            </Button>
+          )}
 
           {/* Skill / Command popover */}
           {commandOpen && filteredCommands.length > 0 && (
-            <div className="absolute bottom-full mb-2 left-2 z-50 w-80 rounded-xl border bg-card p-1 shadow-lg overflow-hidden">
+            <div
+              className={cn(
+                "absolute bottom-full mb-2 left-2 z-50 w-80 p-1 shadow-lg overflow-hidden",
+                isTerminal
+                  ? "rounded-none border bg-zinc-900 border-zinc-800"
+                  : "rounded-xl border bg-card",
+              )}
+            >
               <div className="px-2 py-1.5 text-xs font-semibold text-muted-foreground flex items-center gap-1.5">
                 <Slash className="h-3 w-3" />
                 Skills & Commands
@@ -258,20 +297,42 @@ export function ChatInput({ onSend, isLoading, workspaceId }: ChatInputProps) {
               {filteredCommands.map((cmd, idx) => (
                 <button
                   key={cmd.trigger}
-                  className={`flex w-full items-start gap-2 rounded-lg px-2 py-2 text-sm transition-colors ${
+                  className={cn(
+                    "flex w-full items-start gap-2 px-2 py-2 text-sm transition-colors",
+                    isTerminal ? "rounded-none" : "rounded-lg",
                     idx === selectedIndex
-                      ? "bg-primary text-primary-foreground"
-                      : "text-foreground hover:bg-muted"
-                  }`}
+                      ? isTerminal
+                        ? "bg-[var(--chat-accent)] text-black"
+                        : "bg-primary text-primary-foreground"
+                      : "text-foreground hover:bg-muted",
+                  )}
                   onClick={() => handleCommandSelect(cmd)}
                   onMouseEnter={() => setSelectedIndex(idx)}
                 >
                   <span className="font-mono text-xs shrink-0 mt-0.5">{cmd.trigger}</span>
                   <span className="text-left">
-                    <span className={`block text-[13px] font-medium ${idx === selectedIndex ? "text-primary-foreground" : "text-foreground"}`}>
+                    <span
+                      className={cn(
+                        "block text-[13px] font-medium",
+                        idx === selectedIndex
+                          ? isTerminal
+                            ? "text-black"
+                            : "text-primary-foreground"
+                          : "text-foreground",
+                      )}
+                    >
                       {cmd.name}
                     </span>
-                    <span className={`block text-[11px] leading-tight ${idx === selectedIndex ? "text-primary-foreground/70" : "text-muted-foreground"}`}>
+                    <span
+                      className={cn(
+                        "block text-[11px] leading-tight",
+                        idx === selectedIndex
+                          ? isTerminal
+                            ? "text-black/70"
+                            : "text-primary-foreground/70"
+                          : "text-muted-foreground",
+                      )}
+                    >
                       {cmd.description.length > 80 ? cmd.description.slice(0, 80) + "…" : cmd.description}
                     </span>
                   </span>
@@ -280,9 +341,25 @@ export function ChatInput({ onSend, isLoading, workspaceId }: ChatInputProps) {
             </div>
           )}
         </div>
-        <p className="mt-1.5 text-right text-[11px] tabular-nums text-muted-foreground">
-          {value.length}/4000
-        </p>
+        {isTerminal && (
+          <div className="h-[2px] bg-zinc-800 transition-colors duration-500 group-focus-within:bg-[var(--chat-accent)]" />
+        )}
+        {!isTerminal && (
+          <p className="mt-1.5 text-right text-[11px] tabular-nums text-muted-foreground">
+            {value.length}/4000
+          </p>
+        )}
+        {isTerminal && (
+          <div className="flex justify-between items-center mt-3">
+            <span className="text-[9px] font-label text-zinc-600 uppercase tracking-widest">
+              Tokens: {value.length}
+            </span>
+            <div className="flex gap-4">
+              <button className="text-[9px] font-label text-zinc-500 hover:text-[var(--chat-accent)] uppercase tracking-widest">Clear History</button>
+              <button className="text-[9px] font-label text-zinc-500 hover:text-[var(--chat-accent)] uppercase tracking-widest">Export Log</button>
+            </div>
+          </div>
+        )}
       </div>
 
       <AnalyticsDashboard open={analyticsOpen} onOpenChange={setAnalyticsOpen} />
