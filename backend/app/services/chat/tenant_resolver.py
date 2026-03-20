@@ -79,16 +79,38 @@ class TenantEntityResolver:
 
         resolved = []
         for entity in extracted_entities:
-            # High-speed pg_trgm lookup combining tenant_id strict equality with fuzzy matching
-            query = (
+            # High-speed pg_trgm lookup — search BOTH natural_name and script_id,
+            # take the best match. This allows users to reference fields by either
+            # display name ("FW Platform") or script ID ("custbody_fw_platform").
+            name_query = (
                 select(TenantEntityMapping, func.similarity(TenantEntityMapping.natural_name, entity).label("sim"))
                 .where(TenantEntityMapping.tenant_id == tenant_id)
                 .where(TenantEntityMapping.natural_name.op("%")(entity))
                 .order_by(func.similarity(TenantEntityMapping.natural_name, entity).desc())
                 .limit(1)
             )
-            result = await db.execute(query)
-            row = result.first()
+            name_result = await db.execute(name_query)
+            name_row = name_result.first()
+
+            # Also search script_id (e.g., "custbody_fw_platform")
+            script_query = (
+                select(TenantEntityMapping, func.similarity(TenantEntityMapping.script_id, entity).label("sim"))
+                .where(TenantEntityMapping.tenant_id == tenant_id)
+                .where(TenantEntityMapping.script_id.op("%")(entity))
+                .order_by(func.similarity(TenantEntityMapping.script_id, entity).desc())
+                .limit(1)
+            )
+            script_result = await db.execute(script_query)
+            script_row = script_result.first()
+
+            # Pick the best match
+            row = None
+            if name_row and script_row:
+                row = name_row if name_row.sim >= script_row.sim else script_row
+            elif name_row:
+                row = name_row
+            elif script_row:
+                row = script_row
             if row:
                 match = row.TenantEntityMapping
                 score = row.sim
