@@ -8,6 +8,7 @@ import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { useCreateSavedQuery } from "@/hooks/use-saved-queries";
 import { cn } from "@/lib/utils";
+import { useBranding } from "@/providers/branding-provider";
 import type { ChatMessage } from "@/lib/types";
 import type { FinancialReportData, DataTableData } from "@/lib/chat-stream";
 import { FinancialReport } from "@/components/chat/financial-report";
@@ -496,6 +497,7 @@ export function MessageList({
 }: MessageListProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const isTerminal = variant === "terminal";
+  const { brandName } = useBranding();
 
   // Use instant scroll during streaming (smooth can't keep up with rapid updates),
   // smooth scroll for message list changes (new messages loaded, pending message shown).
@@ -523,11 +525,23 @@ export function MessageList({
         <div className="flex h-full items-start px-0 py-4">
           <div className="max-w-4xl">
             <h1 className="font-headline font-black text-[3.5rem] leading-none -tracking-[0.02em] text-white mb-4">
-              SUITE<br />
-              <span className="text-[var(--chat-accent)]">STUDIO_</span>AI
+              {(() => {
+                const name = brandName || "Suite Studio AI";
+                const aiIndex = name.indexOf("AI");
+                if (aiIndex >= 0) {
+                  return (
+                    <>
+                      {name.slice(0, aiIndex)}
+                      <span className="text-[var(--chat-accent)]">AI</span>
+                      {name.slice(aiIndex + 2)}
+                    </>
+                  );
+                }
+                return name;
+              })()}
             </h1>
             <p className="text-zinc-500 text-base max-w-xl leading-relaxed">
-              Ask questions about your data, docs, or NetSuite operations.
+              Ask questions about your business operations, data, or docs.
             </p>
           </div>
         </div>
@@ -543,7 +557,7 @@ export function MessageList({
             How can I help?
           </h3>
           <p className="mt-1.5 max-w-xs text-[14px] leading-relaxed text-muted-foreground">
-            Ask questions about your data, docs, or NetSuite operations.
+            Ask questions about your business operations, data, or docs.
           </p>
         </div>
       </div>
@@ -588,14 +602,14 @@ export function MessageList({
             isTerminal={isTerminal}
           />
         ) : isTerminal ? (
-          <div key={message.id} className="flex max-w-full justify-start gap-4">
-            <div className="w-10 h-10 bg-zinc-800 flex-shrink-0 flex items-center justify-center border border-zinc-700/50">
-              <User className="h-4 w-4 text-zinc-400" />
-            </div>
-            <div className="max-w-full bg-[var(--chat-surface-low)] p-6 rounded-sm border-r-2 border-zinc-800 md:max-w-[75%]">
-              <p className="text-[14px] leading-relaxed whitespace-pre-wrap break-words text-zinc-300">
+          <div key={message.id} className="flex max-w-full justify-end gap-4">
+            <div className="max-w-full bg-zinc-800/50 p-6 rounded-sm border border-zinc-700/40 md:max-w-[75%]">
+              <p className="text-[14px] leading-relaxed whitespace-pre-wrap break-words text-zinc-200">
                 {renderWithMentions(message.content, onMentionClick)}
               </p>
+            </div>
+            <div className="w-10 h-10 bg-zinc-800 flex-shrink-0 flex items-center justify-center border border-zinc-700/50">
+              <User className="h-4 w-4 text-zinc-400" />
             </div>
           </div>
         ) : (
@@ -612,14 +626,14 @@ export function MessageList({
       {/* Optimistic pending user message */}
       {pendingUserMessage && (
         isTerminal ? (
-          <div className="flex max-w-full justify-start gap-4">
-            <div className="w-10 h-10 bg-zinc-800 flex-shrink-0 flex items-center justify-center border border-zinc-700/50">
-              <User className="h-4 w-4 text-zinc-400" />
-            </div>
-            <div className="max-w-full bg-[var(--chat-surface-low)] p-6 rounded-sm border-r-2 border-zinc-800 md:max-w-[75%]">
-              <p className="text-[14px] leading-relaxed whitespace-pre-wrap text-zinc-300">
+          <div className="flex max-w-full justify-end gap-4">
+            <div className="max-w-full bg-zinc-800/50 p-6 rounded-sm border border-zinc-700/40 md:max-w-[75%]">
+              <p className="text-[14px] leading-relaxed whitespace-pre-wrap text-zinc-200">
                 {pendingUserMessage}
               </p>
+            </div>
+            <div className="w-10 h-10 bg-zinc-800 flex-shrink-0 flex items-center justify-center border border-zinc-700/50">
+              <User className="h-4 w-4 text-zinc-400" />
             </div>
           </div>
         ) : (
@@ -755,6 +769,7 @@ function AssistantMessageRow({
   dataTableData?: DataTableData | null;
   isTerminal?: boolean;
 }) {
+  const { brandName: agentName } = useBranding();
   return (
     <div className="flex min-w-0 justify-start gap-3">
       {isTerminal ? (
@@ -770,7 +785,7 @@ function AssistantMessageRow({
         {isTerminal && (
           <div className="flex justify-between mb-1">
             <span className="text-[10px] tracking-widest text-[var(--chat-accent)] uppercase font-medium">
-              SUITE_STUDIO [AGENT]
+              {(agentName || "SUITE_STUDIO").toUpperCase().replace(/\s+/g, "_")} [AGENT]
             </span>
             <span className="text-[10px] tracking-widest text-zinc-600">
               {new Date(message.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
