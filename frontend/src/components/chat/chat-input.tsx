@@ -86,7 +86,11 @@ export function ChatInput({ onSend, isLoading, workspaceId, variant }: ChatInput
     if (!trimmed || isLoading) return;
     onSend(trimmed);
     setValue("");
+    setCommandOpen(false);
   }, [value, isLoading, onSend]);
+
+  // Track when a command was just selected to prevent popover from reopening
+  const commandJustSelected = useRef(false);
 
   const handleCommandSelect = useCallback(
     (cmd: (typeof commands)[0]) => {
@@ -98,6 +102,7 @@ export function ChatInput({ onSend, isLoading, workspaceId, variant }: ChatInput
       }
 
       // Agent skill — autocomplete the trigger into the input
+      commandJustSelected.current = true;
       setValue(cmd.trigger + " ");
       setCommandOpen(false);
       textareaRef.current?.focus();
@@ -168,9 +173,13 @@ export function ChatInput({ onSend, isLoading, workspaceId, variant }: ChatInput
       }
 
       // Detect / at the start of input to trigger command picker
-      if (newVal.startsWith("/")) {
+      if (commandJustSelected.current) {
+        // Don't reopen popover right after selecting a command
+        commandJustSelected.current = false;
+      } else if (newVal === "/") {
+        // Only open on a fresh "/" keystroke (not when value already has /command text)
         setCommandOpen(true);
-      } else {
+      } else if (!newVal.startsWith("/")) {
         setCommandOpen(false);
       }
     },
