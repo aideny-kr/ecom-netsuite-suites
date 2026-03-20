@@ -13,8 +13,8 @@
     --popover: 0 0% 100%;
     --popover-foreground: 240 10% 3.9%;
 
-    /* Primary Punch - Electric Indigo */
-    --primary: 243.4 75.4% 58.6%;
+    /* Primary Punch - Matrix Green */
+    --primary: 142 70% 45%;
     --primary-foreground: 0 0% 100%;
 
     /* Secondary Punch - Hot Coral */
@@ -31,7 +31,7 @@
 
     --border: 240 5.9% 90%;
     --input: 240 5.9% 90%;
-    --ring: 243.4 75.4% 58.6%;
+    --ring: 142 70% 45%;
     --radius: 0.5rem;
 
     --sidebar-bg: 240 11% 4%;
@@ -52,7 +52,7 @@
     --card-foreground: 0 0% 95%;
     --popover: 240 10% 8%;
     --popover-foreground: 0 0% 95%;
-    --primary: 142 70% 45%;
+    --primary: 20 100% 61%;
     --primary-foreground: 0 0% 100%;
     --accent: 354.8 100% 63.9%;
     --accent-foreground: 0 0% 100%;
@@ -64,7 +64,7 @@
     --muted-foreground: 240 5% 65%;
     --border: 240 4% 16%;
     --input: 240 4% 16%;
-    --ring: 183 100% 50%;
+    --ring: 20 100% 61%;
 
     --sidebar-bg: 240 11% 4%;
     --sidebar-foreground: 240 5% 65%;
@@ -233,6 +233,8 @@
   --card: 0 0% 7.5%;
   --muted: 0 0% 10%;
   --border: 0 0% 15%;
+  --foreground: 0 0% 95%;
+  --muted-foreground: 240 5% 65%;
 }
 
 /* Dark mode scrollbar */

@@ -603,7 +603,8 @@ export function MessageList({
           />
         ) : isTerminal ? (
           <div key={message.id} className="flex max-w-full justify-end gap-4">
-            <div className="max-w-full bg-[var(--chat-surface-low)] p-6 rounded-sm border border-[var(--chat-surface-mid)] md:max-w-[75%]">
+            <div className="max-w-full bg-[var(--chat-surface-low)] p-6 rounded-sm border border-[var(--chat-surface-variant)] relative overflow-hidden md:max-w-[75%]">
+              <div className="absolute top-0 right-0 w-1 h-full bg-muted-foreground/40" />
               <p className="text-[14px] leading-relaxed whitespace-pre-wrap break-words text-foreground">
                 {renderWithMentions(message.content, onMentionClick)}
               </p>
@@ -627,7 +628,8 @@ export function MessageList({
       {pendingUserMessage && (
         isTerminal ? (
           <div className="flex max-w-full justify-end gap-4">
-            <div className="max-w-full bg-[var(--chat-surface-low)] p-6 rounded-sm border border-[var(--chat-surface-mid)] md:max-w-[75%]">
+            <div className="max-w-full bg-[var(--chat-surface-low)] p-6 rounded-sm border border-[var(--chat-surface-variant)] relative overflow-hidden md:max-w-[75%]">
+              <div className="absolute top-0 right-0 w-1 h-full bg-muted-foreground/40" />
               <p className="text-[14px] leading-relaxed whitespace-pre-wrap text-foreground">
                 {pendingUserMessage}
               </p>
