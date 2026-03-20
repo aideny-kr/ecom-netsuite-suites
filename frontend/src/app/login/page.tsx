@@ -44,58 +44,58 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="flex min-h-screen">
+    <div className="flex min-h-screen dark bg-[#0e0e0e]">
       {/* Left Panel - Branding */}
-      <div className="hidden lg:flex lg:w-[480px] lg:flex-col lg:justify-between bg-[hsl(240_11%_4%)] p-10 text-white">
-        <div className="flex items-center gap-2.5">
-          <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary">
-            <Zap className="h-5 w-5 text-white" />
+      <div className="hidden lg:flex lg:w-[480px] lg:flex-col lg:justify-between bg-zinc-950 p-10 text-white border-r border-zinc-800/50">
+        <div className="flex items-center gap-3">
+          <div className="flex h-9 w-9 items-center justify-center rounded-sm bg-[#ff7936]">
+            <Zap className="h-5 w-5 text-black" />
           </div>
-          <span className="text-lg font-semibold tracking-tight">
+          <span className="text-lg font-bold tracking-tight">
             Suite Studio AI
           </span>
         </div>
         <div>
-          <h2 className="text-3xl font-semibold leading-tight tracking-tight">
-            Streamline your
+          <h2 className="text-4xl font-black leading-none tracking-tight">
+            STREAMLINE
             <br />
-            e-commerce operations
+            <span className="text-[#ff7936]">YOUR OPS_</span>
           </h2>
-          <p className="mt-4 text-[15px] leading-relaxed text-white/50">
+          <p className="mt-6 text-[15px] leading-relaxed text-zinc-500">
             Connect Shopify, Stripe, and NetSuite in one unified platform.
             Automate data syncing, reconciliation, and journal postings.
           </p>
         </div>
-        <p className="text-xs text-white/30">
-          Suite Studio AI
+        <p className="text-[10px] text-zinc-700 uppercase tracking-widest">
+          © Suite Studio AI — Modular Precision
         </p>
       </div>
 
       {/* Right Panel - Form */}
-      <div className="flex flex-1 items-center justify-center px-6">
+      <div className="flex flex-1 items-center justify-center px-6 bg-[#0e0e0e]">
         <div className="w-full max-w-[380px]">
           {/* Mobile logo */}
-          <div className="mb-8 flex items-center gap-2.5 lg:hidden">
-            <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary">
-              <Zap className="h-5 w-5 text-white" />
+          <div className="mb-8 flex items-center gap-3 lg:hidden">
+            <div className="flex h-9 w-9 items-center justify-center rounded-sm bg-[#ff7936]">
+              <Zap className="h-5 w-5 text-black" />
             </div>
-            <span className="text-lg font-semibold tracking-tight">
+            <span className="text-lg font-bold tracking-tight text-white">
               Suite Studio AI
             </span>
           </div>
 
           <div className="mb-8">
-            <h1 className="text-2xl font-semibold tracking-tight">
+            <h1 className="text-2xl font-bold tracking-tight text-white">
               Sign in
             </h1>
-            <p className="mt-1.5 text-[15px] text-muted-foreground">
+            <p className="mt-1.5 text-[15px] text-zinc-500">
               Enter your credentials to access your account
             </p>
           </div>
 
           <form onSubmit={onSubmit} className="space-y-5">
             <div className="space-y-2">
-              <Label htmlFor="email" className="text-[13px] font-medium">
+              <Label htmlFor="email" className="text-[13px] font-medium text-zinc-400 uppercase tracking-wider">
                 Email
               </Label>
               <Input
@@ -105,11 +105,11 @@ export default function LoginPage() {
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 required
-                className="h-11"
+                className="h-11 bg-zinc-900 border-zinc-800 text-white rounded-sm placeholder:text-zinc-600 focus:ring-[#ff7936] focus:border-[#ff7936]"
               />
             </div>
             <div className="space-y-2">
-              <Label htmlFor="password" className="text-[13px] font-medium">
+              <Label htmlFor="password" className="text-[13px] font-medium text-zinc-400 uppercase tracking-wider">
                 Password
               </Label>
               <Input
@@ -118,24 +118,24 @@ export default function LoginPage() {
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 required
-                className="h-11"
+                className="h-11 bg-zinc-900 border-zinc-800 text-white rounded-sm placeholder:text-zinc-600 focus:ring-[#ff7936] focus:border-[#ff7936]"
               />
             </div>
-            <Button
+            <button
               type="submit"
-              className="h-11 w-full text-[14px] font-medium"
+              className="h-11 w-full text-[14px] font-bold uppercase tracking-widest bg-[#ff7936] text-black rounded-sm hover:bg-[#ff915d] transition-all disabled:opacity-50"
               disabled={isLoading}
             >
               {isLoading ? "Signing in..." : "Sign in"}
-            </Button>
+            </button>
           </form>
 
           <div className="relative my-6">
             <div className="absolute inset-0 flex items-center">
-              <span className="w-full border-t" />
+              <span className="w-full border-t border-zinc-800" />
             </div>
             <div className="relative flex justify-center text-xs uppercase">
-              <span className="bg-background px-2 text-muted-foreground">or</span>
+              <span className="bg-[#0e0e0e] px-2 text-zinc-600 tracking-widest">or</span>
             </div>
           </div>
 
@@ -186,11 +186,11 @@ export default function LoginPage() {
             </div>
           )}
 
-          <p className="mt-6 text-center text-[13px] text-muted-foreground">
+          <p className="mt-6 text-center text-[13px] text-zinc-500">
             Don&apos;t have an account?{" "}
             <Link
               href="/register"
-              className="font-medium text-primary hover:underline"
+              className="font-medium text-[#ff7936] hover:underline"
             >
               Create one
             </Link>

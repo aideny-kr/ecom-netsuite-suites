@@ -1,0 +1,2291 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI-den AI — Platform Architecture</title>
+  <style>
+    :root {
+      --primary: #6366f1;
+      --primary-dark: #4f46e5;
+      --accent: #f43f5e;
+      --bg: #0f0f14;
+      --bg-card: #18181f;
+      --bg-card-hover: #1e1e28;
+      --bg-section: #131318;
+      --border: #2a2a35;
+      --text: #e4e4e7;
+      --text-muted: #9ca3af;
+      --text-dim: #6b7280;
+      --green: #22c55e;
+      --green-bg: rgba(34, 197, 94, 0.12);
+      --yellow: #eab308;
+      --yellow-bg: rgba(234, 179, 8, 0.12);
+      --blue: #3b82f6;
+      --blue-bg: rgba(59, 130, 246, 0.12);
+      --orange: #f97316;
+      --orange-bg: rgba(249, 115, 22, 0.12);
+      --purple: #a855f7;
+      --purple-bg: rgba(168, 85, 247, 0.12);
+      --cyan: #06b6d4;
+      --cyan-bg: rgba(6, 182, 212, 0.12);
+      --red: #ef4444;
+      --red-bg: rgba(239, 68, 68, 0.12);
+    }
+
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+    }
+
+    /* Header */
+    .header {
+      padding: 48px 40px 24px;
+      max-width: 1400px;
+      margin: 0 auto;
+    }
+
+    .header h1 {
+      font-size: 32px;
+      font-weight: 700;
+      letter-spacing: -0.5px;
+    }
+
+    .header h1 span {
+      color: var(--primary);
+    }
+
+    .header .subtitle {
+      color: var(--text-muted);
+      font-size: 15px;
+      margin-top: 6px;
+      max-width: 800px;
+    }
+
+    .header .badge-row {
+      display: flex;
+      gap: 10px;
+      margin-top: 16px;
+      flex-wrap: wrap;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 12px;
+      border-radius: 20px;
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    .badge-green {
+      background: var(--green-bg);
+      color: var(--green);
+    }
+
+    .badge-blue {
+      background: var(--blue-bg);
+      color: var(--blue);
+    }
+
+    .badge-purple {
+      background: var(--purple-bg);
+      color: var(--purple);
+    }
+
+    .badge-orange {
+      background: var(--orange-bg);
+      color: var(--orange);
+    }
+
+    .badge-yellow {
+      background: var(--yellow-bg);
+      color: var(--yellow);
+    }
+
+    .badge-cyan {
+      background: var(--cyan-bg);
+      color: var(--cyan);
+    }
+
+    /* Tab Navigation */
+    .tab-nav {
+      display: flex;
+      gap: 0;
+      border-bottom: 1px solid var(--border);
+      padding: 0 40px;
+      max-width: 1400px;
+      margin: 24px auto 0;
+      overflow-x: auto;
+    }
+
+    .tab-btn {
+      padding: 12px 24px;
+      background: none;
+      border: none;
+      color: var(--text-muted);
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      border-bottom: 2px solid transparent;
+      transition: all .2s;
+      white-space: nowrap;
+    }
+
+    .tab-btn:hover {
+      color: var(--text);
+    }
+
+    .tab-btn.active {
+      color: var(--primary);
+      border-bottom-color: var(--primary);
+    }
+
+    /* Content */
+    .content {
+      max-width: 1400px;
+      margin: 0 auto;
+      padding: 32px 40px 80px;
+    }
+
+    .tab-panel {
+      display: none;
+    }
+
+    .tab-panel.active {
+      display: block;
+    }
+
+    /* Section */
+    .section {
+      margin-bottom: 40px;
+    }
+
+    .section-title {
+      font-size: 20px;
+      font-weight: 600;
+      margin-bottom: 16px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .section-title .icon {
+      width: 28px;
+      height: 28px;
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 14px;
+    }
+
+    /* Flow Diagram */
+    .flow {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .flow-step {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 20px 24px;
+      position: relative;
+    }
+
+    .flow-step::before {
+      content: '';
+      position: absolute;
+      left: 32px;
+      top: -16px;
+      width: 2px;
+      height: 16px;
+      background: var(--border);
+    }
+
+    .flow-step:first-child::before {
+      display: none;
+    }
+
+    .flow-step .step-header {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 8px;
+    }
+
+    .flow-step .step-num {
+      width: 28px;
+      height: 28px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 13px;
+      font-weight: 700;
+      flex-shrink: 0;
+    }
+
+    .flow-step .step-title {
+      font-size: 15px;
+      font-weight: 600;
+    }
+
+    .flow-step .step-body {
+      color: var(--text-muted);
+      font-size: 13px;
+      padding-left: 40px;
+    }
+
+    .flow-step .step-detail {
+      background: var(--bg-section);
+      border-radius: 8px;
+      padding: 12px 16px;
+      margin-top: 10px;
+      font-family: 'SF Mono', 'Fira Code', monospace;
+      font-size: 12px;
+      color: var(--text-dim);
+      line-height: 1.8;
+    }
+
+    /* Card Grid */
+    .card-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+      gap: 16px;
+    }
+
+    .card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 20px;
+      transition: border-color .2s;
+    }
+
+    .card:hover {
+      border-color: var(--primary);
+    }
+
+    .card .card-header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 10px;
+    }
+
+    .card .card-icon {
+      width: 32px;
+      height: 32px;
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 16px;
+      flex-shrink: 0;
+    }
+
+    .card .card-title {
+      font-size: 14px;
+      font-weight: 600;
+    }
+
+    .card .card-subtitle {
+      font-size: 11px;
+      color: var(--text-dim);
+      font-family: monospace;
+    }
+
+    .card .card-body {
+      font-size: 13px;
+      color: var(--text-muted);
+    }
+
+    .card .card-body ul {
+      list-style: none;
+      padding: 0;
+    }
+
+    .card .card-body li {
+      padding: 3px 0;
+      display: flex;
+      align-items: flex-start;
+      gap: 6px;
+    }
+
+    .card .card-body li::before {
+      content: '›';
+      color: var(--text-dim);
+      flex-shrink: 0;
+    }
+
+    /* Table */
+    .arch-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+
+    .arch-table th {
+      text-align: left;
+      padding: 10px 14px;
+      background: var(--bg-section);
+      color: var(--text-muted);
+      font-weight: 600;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .arch-table td {
+      padding: 10px 14px;
+      border-bottom: 1px solid var(--border);
+      vertical-align: top;
+    }
+
+    .arch-table tr:hover td {
+      background: var(--bg-card-hover);
+    }
+
+    .arch-table code {
+      background: var(--bg-section);
+      padding: 2px 6px;
+      border-radius: 4px;
+      font-size: 12px;
+      font-family: 'SF Mono', monospace;
+      color: var(--cyan);
+    }
+
+    /* Callout */
+    .callout {
+      border-radius: 10px;
+      padding: 16px 20px;
+      margin: 16px 0;
+      font-size: 13px;
+    }
+
+    .callout-blue {
+      background: var(--blue-bg);
+      border-left: 3px solid var(--blue);
+    }
+
+    .callout-green {
+      background: var(--green-bg);
+      border-left: 3px solid var(--green);
+    }
+
+    .callout-yellow {
+      background: var(--yellow-bg);
+      border-left: 3px solid var(--yellow);
+    }
+
+    .callout-red {
+      background: var(--red-bg);
+      border-left: 3px solid var(--red);
+    }
+
+    .callout strong {
+      color: var(--text);
+    }
+
+    /* Diagram */
+    .diagram {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 24px;
+      font-family: 'SF Mono', 'Fira Code', monospace;
+      font-size: 12px;
+      line-height: 1.7;
+      color: var(--text-muted);
+      overflow-x: auto;
+      white-space: pre;
+    }
+
+    /* Mini stats */
+    .stats-row {
+      display: flex;
+      gap: 16px;
+      flex-wrap: wrap;
+      margin-bottom: 24px;
+    }
+
+    .stat {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 16px 20px;
+      min-width: 160px;
+      flex: 1;
+    }
+
+    .stat .stat-value {
+      font-size: 28px;
+      font-weight: 700;
+    }
+
+    .stat .stat-label {
+      font-size: 12px;
+      color: var(--text-muted);
+      margin-top: 2px;
+    }
+
+    /* Pill */
+    .pill {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 10px;
+      font-size: 11px;
+      font-weight: 600;
+    }
+
+    .pill-green {
+      background: var(--green-bg);
+      color: var(--green);
+    }
+
+    .pill-blue {
+      background: var(--blue-bg);
+      color: var(--blue);
+    }
+
+    .pill-purple {
+      background: var(--purple-bg);
+      color: var(--purple);
+    }
+
+    .pill-orange {
+      background: var(--orange-bg);
+      color: var(--orange);
+    }
+
+    .pill-cyan {
+      background: var(--cyan-bg);
+      color: var(--cyan);
+    }
+
+    .pill-red {
+      background: var(--red-bg);
+      color: var(--red);
+    }
+
+    .pill-yellow {
+      background: var(--yellow-bg);
+      color: var(--yellow);
+    }
+
+    /* Responsive */
+    @media (max-width: 768px) {
+
+      .header,
+      .tab-nav,
+      .content {
+        padding-left: 20px;
+        padding-right: 20px;
+      }
+
+      .card-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .stats-row {
+        flex-direction: column;
+      }
+
+      .header h1 {
+        font-size: 24px;
+      }
+    }
+  </style>
+</head>
+
+<body>
+
+  <!-- Header -->
+  <div class="header">
+    <h1>AI-den <span>AI</span> — Platform Architecture</h1>
+    <p class="subtitle">A proprietary AI platform for business operations. Comprehensive engineer-level documentation
+      covering AI orchestration, backend infrastructure, frontend architecture, and security model.</p>
+    <div class="badge-row">
+      <span class="badge badge-green">● Production Ready</span>
+      <span class="badge badge-blue">39 Migrations</span>
+      <span class="badge badge-purple">3 LLM Providers</span>
+      <span class="badge badge-orange">10 AI Tools</span>
+      <span class="badge badge-cyan">3,198 Doc Chunks</span>
+      <span class="badge badge-yellow">Multi-Tenant RLS</span>
+    </div>
+  </div>
+
+  <!-- Tab Navigation -->
+  <div class="tab-nav">
+    <button class="tab-btn active" data-tab="orchestration">AI Orchestration</button>
+    <button class="tab-btn" data-tab="backend">Backend Architecture</button>
+    <button class="tab-btn" data-tab="frontend">Frontend Architecture</button>
+    <button class="tab-btn" data-tab="security">Security Model</button>
+    <button class="tab-btn" data-tab="data">Data Models</button>
+    <button class="tab-btn" data-tab="infra">Infrastructure</button>
+  </div>
+
+  <!-- Content -->
+  <div class="content">
+
+    <!-- ============================================ -->
+    <!-- TAB 1: AI ORCHESTRATION                       -->
+    <!-- ============================================ -->
+    <div class="tab-panel active" id="orchestration">
+
+      <div class="stats-row">
+        <div class="stat">
+          <div class="stat-value" style="color:var(--primary)">10</div>
+          <div class="stat-label">AI Tools</div>
+        </div>
+        <div class="stat">
+          <div class="stat-value" style="color:var(--green)">6</div>
+          <div class="stat-label">Knowledge Sources</div>
+        </div>
+        <div class="stat">
+          <div class="stat-value" style="color:var(--cyan)">3,198</div>
+          <div class="stat-label">Embedded Doc Chunks</div>
+        </div>
+        <div class="stat">
+          <div class="stat-value" style="color:var(--orange)">2,109</div>
+          <div class="stat-label">Entity Mappings</div>
+        </div>
+        <div class="stat">
+          <div class="stat-value" style="color:var(--purple)">3</div>
+          <div class="stat-label">LLM Providers</div>
+        </div>
+      </div>
+
+      <!-- Orchestration Pipeline -->
+      <div class="section">
+        <div class="section-title">
+          <div class="icon" style="background:var(--primary-dark);color:#fff;">⚡</div> Request-to-Response Pipeline
+        </div>
+        <p style="color:var(--text-muted);font-size:13px;margin-bottom:20px;">Every chat message passes through a
+          6-stage pipeline. The orchestrator (<code
+            style="background:var(--bg-card);padding:2px 6px;border-radius:4px;font-size:12px;color:var(--cyan);">orchestrator.py</code>
+          — 1,085 LOC) coordinates all stages.</p>
+
+        <div class="flow">
+          <div class="flow-step">
+            <div class="step-header">
+              <div class="step-num" style="background:var(--blue-bg);color:var(--blue);">1</div>
+              <div class="step-title">Input Sanitization & Chitchat Detection</div>
+            </div>
+            <div class="step-body">
+              Control characters stripped, message capped at 500 chars. <code>_CHITCHAT_RE</code> regex detects
+              greetings, compliments, and affirmations — these skip the entire context assembly pipeline for instant
+              response. <code>_sanitize_assistant_text()</code> strips any leaked Anthropic tool-call XML from prior
+              responses.
+            </div>
+          </div>
+
+          <div class="flow-step">
+            <div class="step-header">
+              <div class="step-num" style="background:var(--green-bg);color:var(--green);">2</div>
+              <div class="step-title">History Loading & Compaction</div>
+            </div>
+            <div class="step-body">
+              Full message history loaded for session. If &gt;12 messages, <code>history_compactor.py</code> summarizes
+              older messages via fast LLM call (keeps last 4 verbatim). Summary stored in <code>content_summary</code>
+              field. Hard-truncate as final fallback.
+              <div class="step-detail">Threshold: 12 messages → compact<br>Keep recent: 4 messages verbatim<br>Summary:
+                max 300 words via Haiku</div>
+            </div>
+          </div>
+
+          <div class="flow-step">
+            <div class="step-header">
+              <div class="step-num" style="background:var(--purple-bg);color:var(--purple);">3</div>
+              <div class="step-title">Concurrent Context Assembly</div>
+            </div>
+            <div class="step-body">
+              Three retrieval tasks fire in parallel via <code>asyncio.gather()</code>:
+              <div class="step-detail"><strong style="color:var(--cyan)">Entity Resolution</strong> — Haiku NER extracts
+                business entities → pg_trgm fuzzy match against 2,109 tenant_entity_mappings → &lt;tenant_vernacular&gt;
+                XML injection<br><br><strong style="color:var(--green)">Domain Knowledge</strong> — OpenAI
+                text-embedding-3-small (1536-dim) embeds query → pgvector cosine search on domain_knowledge_chunks →
+                top-K results + keyword ILIKE fallback<br><br><strong style="color:var(--orange)">Proven
+                  Patterns</strong> — Embed query → pgvector cosine search on tenant_query_patterns → return SQL
+                templates with success_count<br><br><strong style="color:var(--purple)">Brand Identity</strong> —
+                TenantConfig.brand_name injected into system prompt so AI identifies as the white-labeled
+                brand<br><br><strong style="color:var(--yellow)">Soul.md</strong> — Tenant personality, tone
+                preferences, and NetSuite quirks parsed from markdown<br><br><strong style="color:var(--blue)">Financial
+                  Mode Detection</strong> — classify_intent() checks for financial report queries → augments task with
+                verified TAL column names, CONSOLIDATE functions, mandatory filters</div>
+            </div>
+          </div>
+
+          <div class="flow-step">
+            <div class="step-header">
+              <div class="step-num" style="background:var(--orange-bg);color:var(--orange);">4</div>
+              <div class="step-title">Agent Execution</div>
+            </div>
+            <div class="step-body">
+              <strong>Primary: Unified Agent</strong> (unified_agent.py — 560 LOC) — single agent with 10 tools, up to
+              10 reasoning steps. Anti-hallucination guardrail forces tool execution when step==0 and no tools called
+              for data queries.<br><br>
+              <strong>Fallback: Multi-Agent Coordinator</strong> (coordinator.py — 1,262 LOC) — heuristic regex
+              classifier → LLM fallback for ambiguous queries → dispatch specialist agents (SuiteQL max 6 steps, RAG max
+              2 steps, Workspace, Analysis).
+              <div class="step-detail"><strong style="color:var(--text)">Tool Inventory (10
+                  tools):</strong><br>netsuite_suiteql — Execute SuiteQL queries via REST API<br>netsuite_get_metadata —
+                Schema introspection &amp; field lookup<br>rag_search — Vector + keyword doc chunk
+                retrieval<br>web_search — Brave Search API for online research<br>workspace_list_files — Browse
+                workspace file tree<br>workspace_read_file — Read file content<br>workspace_search — Full-text search
+                across workspace<br>workspace_propose_patch — Generate unified diff patches<br>tenant_save_learned_rule
+                — Persist user corrections<br>netsuite_get_record — Fetch individual NetSuite records</div>
+            </div>
+          </div>
+
+          <div class="flow-step">
+            <div class="step-header">
+              <div class="step-num" style="background:var(--cyan-bg);color:var(--cyan);">5</div>
+              <div class="step-title">Confidence Scoring</div>
+            </div>
+            <div class="step-body">
+              <code>CompositeScorer</code> (confidence_service.py) aggregates 6 weighted signals into a 1.0–5.0 score:
+              <div class="step-detail">LLM self-assessment (0.40) — &lt;confidence&gt; tag extracted from
+                response<br>Query pattern similarity (0.15) — pgvector cosine match to proven patterns<br>Pattern
+                success boost (0.10) — success_count / 50 (capped at 0.1)<br>Domain knowledge similarity (0.10) — mean
+                cosine of top-3 chunks<br>Entity resolution confidence (0.15) — pg_trgm similarity score<br>Tool success
+                rate (0.10) — successful / total tool calls<br><br>Penalties: -0.2 if tools needed but none called, -0.3
+                if any tool failed<br>Final: clamp(weighted_sum, 0, 1) × 4 + 1 → 1.0–5.0</div>
+            </div>
+          </div>
+
+          <div class="flow-step">
+            <div class="step-header">
+              <div class="step-num" style="background:var(--green-bg);color:var(--green);">6</div>
+              <div class="step-title">SSE Streaming & Persistence</div>
+            </div>
+            <div class="step-body">
+              Response streamed via Server-Sent Events with 5 event types: <code>text</code> (token-by-token),
+              <code>tool_status</code> (tool progress), <code>confidence</code> (score + explanation),
+              <code>error</code> (failures), <code>message</code> (final complete message). ChatMessage persisted with
+              confidence_score, token counts, model/provider metadata. Memory updater fires async (regex-gated for
+              corrections). Successful SuiteQL patterns saved for self-learning.
+              <div class="step-detail">SSE format: data: {"type":"text","content":"..."}\n\n<br>Cloudflare padding: 2KB
+                space prefix forces stream start<br>Output sanitization: strips leaked &lt;invoke&gt;,
+                &lt;parameter&gt;, &lt;tool_use&gt; tags</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- LLM Adapter Layer -->
+      <div class="section">
+        <div class="section-title">
+          <div class="icon" style="background:var(--purple-bg);color:var(--purple);">🧠</div> LLM Adapter Layer
+        </div>
+        <div class="card-grid">
+          <div class="card">
+            <div class="card-header">
+              <div class="card-icon" style="background:var(--orange-bg);color:var(--orange);">A</div>
+              <div>
+                <div class="card-title">Anthropic Adapter</div>
+                <div class="card-subtitle">adapters/anthropic_adapter.py</div>
+              </div>
+            </div>
+            <div class="card-body">
+              <ul>
+                <li>Claude Opus 4.6, Sonnet 4.5, Haiku 4.5</li>
+                <li>Prompt caching (ephemeral blocks)</li>
+                <li>Native tool_use format</li>
+                <li>Streaming with cache token tracking</li>
+              </ul>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-header">
+              <div class="card-icon" style="background:var(--green-bg);color:var(--green);">O</div>
+              <div>
+                <div class="card-title">OpenAI Adapter</div>
+                <div class="card-subtitle">adapters/openai_adapter.py</div>
+              </div>
+            </div>
+            <div class="card-body">
+              <ul>
+                <li>GPT-5.2, GPT-5.2-Pro</li>
+                <li>Function calling format</li>
+                <li>Parallel tool execution support</li>
+              </ul>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-header">
+              <div class="card-icon" style="background:var(--blue-bg);color:var(--blue);">G</div>
+              <div>
+                <div class="card-title">Gemini Adapter</div>
+                <div class="card-subtitle">adapters/gemini_adapter.py</div>
+              </div>
+            </div>
+            <div class="card-body">
+              <ul>
+                <li>Gemini 2.5 Flash, Gemini 2.5 Pro</li>
+                <li>Google AI function calling</li>
+                <li>Response format normalization</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+        <div class="callout callout-blue" style="margin-top:16px">
+          <strong>Adapter Pattern:</strong> All adapters implement <code>create_message()</code> and
+          <code>stream_message()</code> from <code>BaseLLMAdapter</code>. The orchestrator selects adapter based on
+          <code>TenantConfig.ai_provider</code>. BYOK (Bring Your Own Key) supported — tenants can supply their own API
+          keys, encrypted via Fernet at rest.
+        </div>
+      </div>
+
+      <!-- Self-Learning Systems -->
+      <div class="section">
+        <div class="section-title">
+          <div class="icon" style="background:var(--green-bg);color:var(--green);">📚</div> Self-Learning Systems
+        </div>
+        <div class="card-grid">
+          <div class="card">
+            <div class="card-header">
+              <div class="card-icon" style="background:var(--cyan-bg);color:var(--cyan);">Q</div>
+              <div>
+                <div class="card-title">Query Pattern Learning</div>
+                <div class="card-subtitle">query_pattern_service.py</div>
+              </div>
+            </div>
+            <div class="card-body">
+              <ul>
+                <li>After successful SuiteQL → extract SQL, tables, columns</li>
+                <li>Embed user question (1536-dim OpenAI)</li>
+                <li>Upsert via SQL hash — increment success_count</li>
+                <li>Next similar query → retrieve proven SQL template</li>
+                <li>Fire-and-forget: zero latency impact on response</li>
+              </ul>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-header">
+              <div class="card-icon" style="background:var(--yellow-bg);color:var(--yellow);">M</div>
+              <div>
+                <div class="card-title">Memory Updater</div>
+                <div class="card-subtitle">memory_updater.py — 243 LOC</div>
+              </div>
+            </div>
+            <div class="card-body">
+              <ul>
+                <li>Regex-gated: "actually…", "remember that…", "always use…", "the field is…"</li>
+                <li>Zero LLM tokens for ~95% of messages</li>
+                <li>Triggered → LLM extracts entity/field mappings</li>
+                <li>Saves to tenant_learned_rules + tenant_entity_mapping</li>
+                <li>Next query → correction injected into prompt</li>
+              </ul>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-header">
+              <div class="card-icon" style="background:var(--purple-bg);color:var(--purple);">E</div>
+              <div>
+                <div class="card-title">Entity Resolution</div>
+                <div class="card-subtitle">tenant_resolver.py — 180 LOC</div>
+              </div>
+            </div>
+            <div class="card-body">
+              <ul>
+                <li>Fast NER via Haiku (extract custom records, fields, scripts)</li>
+                <li>pg_trgm fuzzy matching against 2,109 seeded mappings</li>
+                <li>Confidence score per entity (0.0–1.0)</li>
+                <li>XML block injected as &lt;tenant_vernacular&gt;</li>
+                <li>Seeded by metadata discovery pipeline</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============================================ -->
+    <!-- TAB 2: BACKEND ARCHITECTURE                   -->
+    <!-- ============================================ -->
+    <div class="tab-panel" id="backend">
+
+      <div class="stats-row">
+        <div class="stat">
+          <div class="stat-value" style="color:var(--primary)">~130</div>
+          <div class="stat-label">API Endpoints</div>
+        </div>
+        <div class="stat">
+          <div class="stat-value" style="color:var(--green)">26</div>
+          <div class="stat-label">API Routers</div>
+        </div>
+        <div class="stat">
+          <div class="stat-value" style="color:var(--cyan)">34</div>
+          <div class="stat-label">Services</div>
+        </div>
+        <div class="stat">
+          <div class="stat-value" style="color:var(--orange)">27</div>
+          <div class="stat-label">Data Models</div>
+        </div>
+        <div class="stat">
+          <div class="stat-value" style="color:var(--purple)">39</div>
+          <div class="stat-label">Migrations</div>
+        </div>
+      </div>
+
+      <!-- Tech Stack -->
+      <div class="section">
+        <div class="section-title">
+          <div class="icon" style="background:var(--blue-bg);color:var(--blue);">⚙</div> Tech Stack
+        </div>
+        <div class="diagram">┌─────────────────────────────────────────────────────────────────────┐
+          │ FastAPI (async) + SQLAlchemy 2.0 (async) + Pydantic v2 │
+          │ PostgreSQL (Supabase) + pgvector + pg_trgm │
+          │ Redis (token denylist, rate limiting, Celery broker) │
+          │ Celery + Beat (background tasks, periodic jobs) │
+          │ Alembic (migrations) + Fernet (encryption at rest) │
+          └─────────────────────────────────────────────────────────────────────┘</div>
+      </div>
+
+      <!-- API Routers -->
+      <div class="section">
+        <div class="section-title">
+          <div class="icon" style="background:var(--green-bg);color:var(--green);">🔌</div> API Routers (26 routers)
+        </div>
+        <div style="overflow-x:auto;">
+          <table class="arch-table">
+            <thead>
+              <tr>
+                <th>Router</th>
+                <th>Prefix</th>
+                <th>Endpoints</th>
+                <th>Auth</th>
+                <th>Purpose</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>auth</code></td>
+                <td>/auth</td>
+                <td>7</td>
+                <td>Mixed</td>
+                <td>Register, login, refresh, logout, profile, tenant switching</td>
+              </tr>
+              <tr>
+                <td><code>chat</code></td>
+                <td>/chat</td>
+                <td>7</td>
+                <td>JWT + Feature</td>
+                <td>SSE streaming, sessions, messages, health</td>
+              </tr>
+              <tr>
+                <td><code>connections</code></td>
+                <td>/connections</td>
+                <td>6</td>
+                <td>Permission</td>
+                <td>OAuth connection CRUD, test, reconnect</td>
+              </tr>
+              <tr>
+                <td><code>workspaces</code></td>
+                <td>/workspaces</td>
+                <td>12+</td>
+                <td>Permission</td>
+                <td>Workspace files, changesets, runs, deploy</td>
+              </tr>
+              <tr>
+                <td><code>settings</code></td>
+                <td>/settings</td>
+                <td>4</td>
+                <td>Permission</td>
+                <td>Branding, features, domain verification</td>
+              </tr>
+              <tr>
+                <td><code>onboarding</code></td>
+                <td>/onboarding</td>
+                <td>16</td>
+                <td>JWT</td>
+                <td>Wizard steps, profile, soul, checklist</td>
+              </tr>
+              <tr>
+                <td><code>netsuite_auth</code></td>
+                <td>/netsuite</td>
+                <td>3</td>
+                <td>JWT</td>
+                <td>OAuth 2.0 authorization code flow</td>
+              </tr>
+              <tr>
+                <td><code>netsuite_metadata</code></td>
+                <td>/metadata</td>
+                <td>3</td>
+                <td>Permission</td>
+                <td>Schema discovery, field introspection</td>
+              </tr>
+              <tr>
+                <td><code>tenants</code></td>
+                <td>/tenants</td>
+                <td>7</td>
+                <td>JWT</td>
+                <td>Tenant config, plan, AI settings</td>
+              </tr>
+              <tr>
+                <td><code>users</code></td>
+                <td>/users</td>
+                <td>4</td>
+                <td>Permission</td>
+                <td>User CRUD, role assignment</td>
+              </tr>
+              <tr>
+                <td><code>skills</code></td>
+                <td>/analytics/queries</td>
+                <td>7</td>
+                <td>JWT</td>
+                <td>Saved SuiteQL queries CRUD, export</td>
+              </tr>
+              <tr>
+                <td><code>tables</code></td>
+                <td>/tables</td>
+                <td>2</td>
+                <td>JWT</td>
+                <td>Table introspection, CSV export</td>
+              </tr>
+              <tr>
+                <td><code>audit</code></td>
+                <td>/audit</td>
+                <td>2</td>
+                <td>Permission</td>
+                <td>Audit log retrieval, retention stats</td>
+              </tr>
+              <tr>
+                <td><code>admin</code></td>
+                <td>/admin</td>
+                <td>8</td>
+                <td>Superadmin</td>
+                <td>Platform management, wallet ops</td>
+              </tr>
+              <tr>
+                <td><code>mcp_connectors</code></td>
+                <td>/mcp-connectors</td>
+                <td>7</td>
+                <td>Permission</td>
+                <td>MCP connector CRUD, testing</td>
+              </tr>
+              <tr>
+                <td><code>policies</code></td>
+                <td>/policies</td>
+                <td>5</td>
+                <td>Permission</td>
+                <td>Reconciliation policy profiles</td>
+              </tr>
+              <tr>
+                <td><code>health</code></td>
+                <td>/health</td>
+                <td>1</td>
+                <td>None</td>
+                <td>Liveness probe</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Dependency Injection -->
+      <div class="section">
+        <div class="section-title">
+          <div class="icon" style="background:var(--purple-bg);color:var(--purple);">💉</div> FastAPI Dependency
+          Injection
+        </div>
+        <div class="card-grid">
+          <div class="card">
+            <div class="card-header">
+              <div class="card-icon" style="background:var(--blue-bg);color:var(--blue);">🔑</div>
+              <div>
+                <div class="card-title">get_current_user()</div>
+                <div class="card-subtitle">core/dependencies.py</div>
+              </div>
+            </div>
+            <div class="card-body">
+              <ul>
+                <li>Extracts JWT from Authorization header</li>
+                <li>Validates token (expiry, JTI denylist, type)</li>
+                <li>Calls <code>set_tenant_context()</code> for RLS</li>
+                <li>Checks tenant is_active and plan not expired</li>
+                <li>Returns <code>User</code> model instance</li>
+              </ul>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-header">
+              <div class="card-icon" style="background:var(--orange-bg);color:var(--orange);">🛡</div>
+              <div>
+                <div class="card-title">require_permission(codename)</div>
+                <div class="card-subtitle">core/dependencies.py</div>
+              </div>
+            </div>
+            <div class="card-body">
+              <ul>
+                <li>Factory function → returns dependency</li>
+                <li>Calls get_current_user() first</li>
+                <li>Traverses: User → UserRole → Role → RolePermission → Permission</li>
+                <li>Raises 403 if codename not found</li>
+                <li>Pattern: <code>Annotated[User, Depends(require_permission("resource.manage"))]</code></li>
+              </ul>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-header">
+              <div class="card-icon" style="background:var(--green-bg);color:var(--green);">🏷</div>
+              <div>
+                <div class="card-title">require_feature(flag_key)</div>
+                <div class="card-subtitle">core/dependencies.py</div>
+              </div>
+            </div>
+            <div class="card-body">
+              <ul>
+                <li>Checks TenantFeatureFlag.enabled for flag_key</li>
+                <li>TTL-cached (60s) in feature_flag_service</li>
+                <li>Returns 403 with message when disabled</li>
+                <li>Used for: chat, workspace, reconciliation</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Services -->
+      <div class="section">
+        <div class="section-title">
+          <div class="icon" style="background:var(--cyan-bg);color:var(--cyan);">🏗</div> Service Layer (34 services)
+        </div>
+        <div style="overflow-x:auto;">
+          <table class="arch-table">
+            <thead>
+              <tr>
+                <th>Category</th>
+                <th>Service</th>
+                <th>Key Functions</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td rowspan="3"><span class="pill pill-blue">Auth</span></td>
+                <td><code>auth_service</code></td>
+                <td>register_tenant(), login(), refresh_token(), logout()</td>
+              </tr>
+              <tr>
+                <td><code>entitlement_service</code></td>
+                <td>check_entitlement(db, tenant_id, feature)</td>
+              </tr>
+              <tr>
+                <td><code>feature_flag_service</code></td>
+                <td>is_enabled(), get_all_flags(), set_flag(), seed_defaults()</td>
+              </tr>
+              <tr>
+                <td rowspan="2"><span class="pill pill-green">Audit</span></td>
+                <td><code>audit_service</code></td>
+                <td>log_event() — append-only, all mutations audited</td>
+              </tr>
+              <tr>
+                <td><code>audit_retention</code></td>
+                <td>cleanup_old_events() — async retention policy</td>
+              </tr>
+              <tr>
+                <td rowspan="4"><span class="pill pill-orange">NetSuite</span></td>
+                <td><code>netsuite_client</code></td>
+                <td>execute_suiteql_via_rest(), execute_suiteql_via_mcp()</td>
+              </tr>
+              <tr>
+                <td><code>netsuite_oauth_service</code></td>
+                <td>get_valid_token(), refresh_oauth_token()</td>
+              </tr>
+              <tr>
+                <td><code>netsuite_metadata_service</code></td>
+                <td>discover_metadata(), get_field_info()</td>
+              </tr>
+              <tr>
+                <td><code>connection_service</code></td>
+                <td>create/test/refresh_connection()</td>
+              </tr>
+              <tr>
+                <td rowspan="4"><span class="pill pill-purple">AI Chat</span></td>
+                <td><code>orchestrator</code></td>
+                <td>run_chat_turn() — main SSE generator</td>
+              </tr>
+              <tr>
+                <td><code>coordinator</code></td>
+                <td>classify_intent(), dispatch_agents(), synthesize()</td>
+              </tr>
+              <tr>
+                <td><code>confidence_service</code></td>
+                <td>CompositeScorer.compute() — 6-signal scoring</td>
+              </tr>
+              <tr>
+                <td><code>prompt_template_service</code></td>
+                <td>get_active_template(), build_netsuite_section()</td>
+              </tr>
+              <tr>
+                <td rowspan="3"><span class="pill pill-cyan">Workspace</span></td>
+                <td><code>workspace_service</code></td>
+                <td>create_workspace(), import_sdf(), reindex()</td>
+              </tr>
+              <tr>
+                <td><code>suitescript_sync_service</code></td>
+                <td>pull_scripts(), push_scripts(), sync_file()</td>
+              </tr>
+              <tr>
+                <td><code>runner_service</code></td>
+                <td>run_validation(), run_tests(), deploy_sandbox()</td>
+              </tr>
+              <tr>
+                <td rowspan="2"><span class="pill pill-yellow">Learning</span></td>
+                <td><code>query_pattern_service</code></td>
+                <td>extract_and_store_pattern(), retrieve_similar_patterns()</td>
+              </tr>
+              <tr>
+                <td><code>tenant_entity_seeder</code></td>
+                <td>seed_entity_mappings() — 2,109 per tenant</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- MCP Governance -->
+      <div class="section">
+        <div class="section-title">
+          <div class="icon" style="background:var(--orange-bg);color:var(--orange);">🔧</div> MCP Tool Governance
+        </div>
+        <div class="callout callout-yellow">
+          <strong>Every tool call passes through <code>governed_execute()</code></strong> (governance.py — 439 LOC):
+          rate limit check → param validation (allowlist + defaults) → pre-audit → execute → redact sensitive fields →
+          post-audit → return.
+        </div>
+        <div style="overflow-x:auto;">
+          <table class="arch-table">
+            <thead>
+              <tr>
+                <th>Tool</th>
+                <th>Rate Limit</th>
+                <th>Timeout</th>
+                <th>Entitlement</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>netsuite.suiteql</code></td>
+                <td>30/min</td>
+                <td>30s</td>
+                <td>mcp_tools</td>
+              </tr>
+              <tr>
+                <td><code>netsuite.connectivity</code></td>
+                <td>10/min</td>
+                <td>15s</td>
+                <td>mcp_tools</td>
+              </tr>
+              <tr>
+                <td><code>rag.search</code></td>
+                <td>60/min</td>
+                <td>10s</td>
+                <td>mcp_tools</td>
+              </tr>
+              <tr>
+                <td><code>web.search</code></td>
+                <td>10/min</td>
+                <td>15s</td>
+                <td>mcp_tools</td>
+              </tr>
+              <tr>
+                <td><code>recon.run</code></td>
+                <td>10/min</td>
+                <td>120s</td>
+                <td>mcp_tools</td>
+              </tr>
+              <tr>
+                <td><code>workspace.propose_patch</code></td>
+                <td>10/min</td>
+                <td>10s</td>
+                <td>workspace</td>
+              </tr>
+              <tr>
+                <td><code>workspace.deploy_sandbox</code></td>
+                <td>2/min</td>
+                <td>600s</td>
+                <td>workspace</td>
+              </tr>
+              <tr>
+                <td><code>schedule.create</code></td>
+                <td>10/min</td>
+                <td>10s</td>
+                <td>mcp_tools</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============================================ -->
+    <!-- TAB 3: FRONTEND ARCHITECTURE                  -->
+    <!-- ============================================ -->
+    <div class="tab-panel" id="frontend">
+
+      <div class="stats-row">
+        <div class="stat">
+          <div class="stat-value" style="color:var(--primary)">13</div>
+          <div class="stat-label">Pages</div>
+        </div>
+        <div class="stat">
+          <div class="stat-value" style="color:var(--green)">58</div>
+          <div class="stat-label">Components</div>
+        </div>
+        <div class="stat">
+          <div class="stat-value" style="color:var(--cyan)">21</div>
+          <div class="stat-label">Custom Hooks</div>
+        </div>
+        <div class="stat">
+          <div class="stat-value" style="color:var(--orange)">4</div>
+          <div class="stat-label">Providers</div>
+        </div>
+        <div class="stat">
+          <div class="stat-value" style="color:var(--purple)">17</div>
+          <div class="stat-label">UI Primitives</div>
+        </div>
+      </div>
+
+      <!-- Tech Stack -->
+      <div class="section">
+        <div class="section-title">
+          <div class="icon" style="background:var(--blue-bg);color:var(--blue);">⚙</div> Tech Stack
+        </div>
+        <div class="diagram">Next.js 14 (App Router) + TypeScript strict
+          TanStack React Query v5 + Tailwind CSS 3.4
+          shadcn/ui (Radix primitives) + lucide-react (icons)
+          Monaco Editor (code editing) + react-resizable-panels v4
+          react-markdown + Prism (syntax highlighting)
+          next-themes (dark mode) + framer-motion (animations)</div>
+      </div>
+
+      <!-- Provider Architecture -->
+      <div class="section">
+        <div class="section-title">
+          <div class="icon" style="background:var(--purple-bg);color:var(--purple);">🎯</div> Provider Architecture
+        </div>
+        <div class="diagram">RootLayout
+          ├── ThemeProvider (next-themes: light/dark/system)
+          │ ├── QueryProvider (TanStack React Query, staleTime: 60s)
+          │ │ ├── AuthProvider (JWT lifecycle, tenant switching, token refresh)
+          │ │ │ ├── BrandingProvider (CSS variable injection, dynamic favicon)
+          │ │ │ │ ├── ImpersonationBanner (admin indicator)
+          │ │ │ │ └── DashboardLayout
+          │ │ │ │ ├── Sidebar (navigation, tenant switcher)
+          │ │ │ │ └── Page Content
+          │ │ │ └── Toaster (notifications)
+        </div>
+        <div class="card-grid" style="margin-top:16px;">
+          <div class="card">
+            <div class="card-header">
+              <div class="card-icon" style="background:var(--blue-bg);color:var(--blue);">🔐</div>
+              <div>
+                <div class="card-title">AuthProvider</div>
+                <div class="card-subtitle">providers/auth-provider.tsx</div>
+              </div>
+            </div>
+            <div class="card-body">
+              <ul>
+                <li>JWT access token in localStorage + HttpOnly cookie</li>
+                <li>Proactive refresh: 5-min interval, refreshes 2 min before expiry</li>
+                <li>Silent 401 retry with new token (deduplicates concurrent refreshes)</li>
+                <li>Multi-tenant: switchTenant() swaps JWT context</li>
+                <li>Exports: user, tenants, isLoading, login, register, logout</li>
+              </ul>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-header">
+              <div class="card-icon" style="background:var(--orange-bg);color:var(--orange);">🎨</div>
+              <div>
+                <div class="card-title">BrandingProvider</div>
+                <div class="card-subtitle">providers/branding-provider.tsx</div>
+              </div>
+            </div>
+            <div class="card-body">
+              <ul>
+                <li>Fetches /api/v1/settings/branding on mount</li>
+                <li>Injects --primary and --sidebar-active CSS variables</li>
+                <li>Dynamic favicon and document.title update</li>
+                <li>staleTime: Infinity (refetch on window focus)</li>
+                <li>White-label: each tenant sees their own brand</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Route Map -->
+      <div class="section">
+        <div class="section-title">
+          <div class="icon" style="background:var(--green-bg);color:var(--green);">🗺</div> Route Map
+        </div>
+        <div style="overflow-x:auto;">
+          <table class="arch-table">
+            <thead>
+              <tr>
+                <th>Route</th>
+                <th>Page</th>
+                <th>Feature Flag</th>
+                <th>Key Components</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>/dashboard</code></td>
+                <td>Dashboard</td>
+                <td>—</td>
+                <td>Stats cards, connection health, quick actions</td>
+              </tr>
+              <tr>
+                <td><code>/connections</code></td>
+                <td>Connections</td>
+                <td>—</td>
+                <td>OAuth cards, MCP connectors, test/reconnect</td>
+              </tr>
+              <tr>
+                <td><code>/chat</code></td>
+                <td>Chat</td>
+                <td><span class="pill pill-green">chat</span></td>
+                <td>SessionSidebar, MessageList, ChatInput, SSE streaming</td>
+              </tr>
+              <tr>
+                <td><code>/workspace</code></td>
+                <td>Dev Workspace</td>
+                <td><span class="pill pill-green">workspace</span></td>
+                <td>FileTree, Monaco editor, DiffViewer, ChatPanel, RunsPanel</td>
+              </tr>
+              <tr>
+                <td><code>/queries</code></td>
+                <td>Saved Queries</td>
+                <td>—</td>
+                <td>AnalyticsDashboard, QueryPreviewModal</td>
+              </tr>
+              <tr>
+                <td><code>/settings</code></td>
+                <td>Settings</td>
+                <td>—</td>
+                <td>Branding, features, AI config, domain verification</td>
+              </tr>
+              <tr>
+                <td><code>/audit</code></td>
+                <td>Audit Log</td>
+                <td>—</td>
+                <td>DataTable, audit filters, row detail drawer</td>
+              </tr>
+              <tr>
+                <td><code>/tables/[name]</code></td>
+                <td>Table Viewer</td>
+                <td>—</td>
+                <td>Dynamic table, CSV export, pagination</td>
+              </tr>
+              <tr>
+                <td><code>/onboarding</code></td>
+                <td>Onboarding</td>
+                <td>—</td>
+                <td>Wizard steps, embedded chat copilot</td>
+              </tr>
+              <tr>
+                <td><code>/admin/dashboard</code></td>
+                <td>Admin</td>
+                <td><span class="pill pill-red">superadmin</span></td>
+                <td>Tenant management, wallet ops, platform stats</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- API Client -->
+      <div class="section">
+        <div class="section-title">
+          <div class="icon" style="background:var(--cyan-bg);color:var(--cyan);">🌐</div> API Client & SSE Streaming
+        </div>
+        <div class="card-grid">
+          <div class="card">
+            <div class="card-header">
+              <div class="card-icon" style="background:var(--blue-bg);color:var(--blue);">📡</div>
+              <div>
+                <div class="card-title">apiClient</div>
+                <div class="card-subtitle">lib/api-client.ts</div>
+              </div>
+            </div>
+            <div class="card-body">
+              <ul>
+                <li>Methods: get, post, patch, delete, stream</li>
+                <li>Auto-attaches Bearer token from localStorage</li>
+                <li>credentials: "include" (sends HttpOnly cookies)</li>
+                <li>401 → silent token refresh → retry (deduplicated)</li>
+                <li>Parses Pydantic validation errors (array format)</li>
+                <li>Never use raw fetch() — always use apiClient</li>
+              </ul>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-header">
+              <div class="card-icon" style="background:var(--green-bg);color:var(--green);">📺</div>
+              <div>
+                <div class="card-title">SSE Stream Parser</div>
+                <div class="card-subtitle">lib/chat-stream.ts</div>
+              </div>
+            </div>
+            <div class="card-body">
+              <ul>
+                <li>Event types: text, tool_status, confidence, error, message</li>
+                <li>parseSseBuffer() extracts events from raw stream</li>
+                <li>consumeChatStream() invokes typed handlers</li>
+                <li>normalizeStreamMessage() ensures type safety</li>
+                <li>Cloudflare padding handled (2KB space prefix)</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Design System -->
+      <div class="section">
+        <div class="section-title">
+          <div class="icon" style="background:var(--orange-bg);color:var(--orange);">🎨</div> Design System
+        </div>
+        <div class="callout callout-blue">
+          <strong>CSS Variable Branding:</strong> Colors use HSL via CSS variables. BrandingProvider dynamically sets
+          <code>--primary</code> at runtime, enabling per-tenant white-labeling without rebuild. Dark mode via
+          <code>.dark</code> class prefix.
+        </div>
+        <div style="overflow-x:auto;">
+          <table class="arch-table">
+            <thead>
+              <tr>
+                <th>Pattern</th>
+                <th>Value</th>
+                <th>Usage</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Page titles</td>
+                <td><code>text-2xl font-semibold tracking-tight</code></td>
+                <td>h2 on every page</td>
+              </tr>
+              <tr>
+                <td>Body text</td>
+                <td><code>text-[15px] text-foreground</code></td>
+                <td>Primary content</td>
+              </tr>
+              <tr>
+                <td>Labels</td>
+                <td><code>text-[13px] text-muted-foreground</code></td>
+                <td>Captions, metadata</td>
+              </tr>
+              <tr>
+                <td>Cards</td>
+                <td><code>rounded-xl border bg-card p-5 shadow-soft</code></td>
+                <td>Content containers</td>
+              </tr>
+              <tr>
+                <td>Page spacing</td>
+                <td><code>space-y-8</code></td>
+                <td>Between page sections</td>
+              </tr>
+              <tr>
+                <td>Grid gaps</td>
+                <td><code>gap-4</code></td>
+                <td>Within grids</td>
+              </tr>
+              <tr>
+                <td>Page animation</td>
+                <td><code>animate-fade-in</code></td>
+                <td>Root div on every page</td>
+              </tr>
+              <tr>
+                <td>Sidebar</td>
+                <td><code>--sidebar-bg: 240 11% 4%</code></td>
+                <td>Dark charcoal sidebar</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============================================ -->
+    <!-- TAB 4: SECURITY MODEL                         -->
+    <!-- ============================================ -->
+    <div class="tab-panel" id="security">
+
+      <div class="section">
+        <div class="section-title">
+          <div class="icon" style="background:var(--red-bg);color:var(--red);">🔒</div> Security Architecture
+        </div>
+        <div class="diagram">┌─────────────────────────────────────────────────────────────┐
+          │ SECURITY LAYERS │
+          ├─────────────────────────────────────────────────────────────┤
+          │ Layer 1: Transport HTTPS + HSTS + Security Headers │
+          │ Layer 2: Authentication JWT (HS256) + HttpOnly Cookies │
+          │ Layer 3: Authorization RBAC + Feature Flags + RLS │
+          │ Layer 4: Data Isolation PostgreSQL Row-Level Security │
+          │ Layer 5: Encryption Fernet (AES-256-CBC + HMAC) │
+          │ Layer 6: Rate Limiting Redis sliding window per IP │
+          │ Layer 7: Input Validation Pydantic v2 + sanitization │
+          │ Layer 8: Audit Trail Append-only event logging │
+          │ Layer 9: Token Revocation Redis JTI denylist + TTL │
+          │ Layer 10: Prod Safeguards Secret validation at startup │
+          └─────────────────────────────────────────────────────────────┘</div>
+      </div>
+
+      <div class="section">
+        <div class="section-title">
+          <div class="icon" style="background:var(--blue-bg);color:var(--blue);">🔑</div> Authentication Flow
+        </div>
+        <div class="card-grid">
+          <div class="card">
+            <div class="card-header">
+              <div class="card-icon" style="background:var(--blue-bg);color:var(--blue);">🎟</div>
+              <div>
+                <div class="card-title">JWT Token Structure</div>
+                <div class="card-subtitle">core/security.py</div>
+              </div>
+            </div>
+            <div class="card-body">
+              <ul>
+                <li><code>sub</code> — User UUID</li>
+                <li><code>exp</code> — Expiry (30min access, 7d refresh)</li>
+                <li><code>type</code> — "access" or "refresh"</li>
+                <li><code>jti</code> — Unique token ID (UUID hex)</li>
+                <li>Signed: HS256 with JWT_SECRET_KEY</li>
+                <li>Access token: localStorage + cookie for middleware</li>
+                <li>Refresh token: HttpOnly cookie only</li>
+              </ul>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-header">
+              <div class="card-icon" style="background:var(--red-bg);color:var(--red);">🚫</div>
+              <div>
+                <div class="card-title">Token Revocation</div>
+                <div class="card-subtitle">core/token_denylist.py</div>
+              </div>
+            </div>
+            <div class="card-body">
+              <ul>
+                <li>JTI-based revocation via Redis</li>
+                <li>Key: <code>jwt:denied:{jti}</code></li>
+                <li>TTL = token expiry - now (auto-cleanup)</li>
+                <li>Checked on every authenticated request</li>
+                <li>Logout → adds both access + refresh JTIs</li>
+                <li>Fallback: in-memory dict (dev only)</li>
+              </ul>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-header">
+              <div class="card-icon" style="background:var(--orange-bg);color:var(--orange);">🔄</div>
+              <div>
+                <div class="card-title">Token Refresh Flow</div>
+                <div class="card-subtitle">api-client.ts + auth_service.py</div>
+              </div>
+            </div>
+            <div class="card-body">
+              <ul>
+                <li>Frontend: 5-min interval proactive check</li>
+                <li>Refreshes 2 min before expiry</li>
+                <li>On 401: silent refresh → retry request</li>
+                <li>Concurrent refresh attempts deduplicated</li>
+                <li>Backend: old refresh JTI added to denylist</li>
+                <li>Failure: redirect to /login, clear all tokens</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="section-title">
+          <div class="icon" style="background:var(--green-bg);color:var(--green);">🏢</div> Multi-Tenant Data Isolation
+        </div>
+        <div class="callout callout-green">
+          <strong>Row-Level Security (RLS):</strong> Every authenticated request calls
+          <code>SET LOCAL app.current_tenant_id = '{uuid}'</code> on the database session. All tenant-scoped tables
+          enforce RLS policies matching <code>tenant_id</code> to this session variable. UUID is validated before
+          interpolation (no bind params allowed by SET LOCAL).
+        </div>
+        <div class="card-grid">
+          <div class="card">
+            <div class="card-header">
+              <div class="card-icon" style="background:var(--green-bg);color:var(--green);">🗄</div>
+              <div>
+                <div class="card-title">RLS Implementation</div>
+                <div class="card-subtitle">core/database.py</div>
+              </div>
+            </div>
+            <div class="card-body">
+              <ul>
+                <li><code>set_tenant_context(session, tenant_id)</code></li>
+                <li>UUID validation: <code>str(uuid.UUID(tenant_id))</code></li>
+                <li>SET LOCAL scoped to transaction</li>
+                <li>Every table has <code>tenant_id</code> indexed column</li>
+                <li>Prevents cross-tenant data access at DB level</li>
+              </ul>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-header">
+              <div class="card-icon" style="background:var(--purple-bg);color:var(--purple);">🔐</div>
+              <div>
+                <div class="card-title">Encryption at Rest</div>
+                <div class="card-subtitle">core/encryption.py</div>
+              </div>
+            </div>
+            <div class="card-body">
+              <ul>
+                <li>Fernet symmetric encryption (AES-256-CBC + HMAC)</li>
+                <li>OAuth access/refresh tokens encrypted</li>
+                <li>BYOK AI provider API keys encrypted</li>
+                <li>NetSuite credentials encrypted</li>
+                <li>Key stored in ENCRYPTION_KEY env var</li>
+                <li>Production: validated at startup (no defaults)</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="section-title">
+          <div class="icon" style="background:var(--yellow-bg);color:var(--yellow);">⚡</div> Rate Limiting & Input
+          Validation
+        </div>
+        <div class="card-grid">
+          <div class="card">
+            <div class="card-header">
+              <div class="card-icon" style="background:var(--yellow-bg);color:var(--yellow);">🚦</div>
+              <div>
+                <div class="card-title">Rate Limiting</div>
+                <div class="card-subtitle">core/rate_limit.py</div>
+              </div>
+            </div>
+            <div class="card-body">
+              <ul>
+                <li>Redis-backed sliding window (sorted sets)</li>
+                <li>Login: 10 attempts / 60 seconds per IP</li>
+                <li>MCP tools: per-tool limits (2-120/min)</li>
+                <li>Auto-cleanup via Redis TTL expiry</li>
+                <li>Fallback: in-memory dict (dev only)</li>
+              </ul>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-header">
+              <div class="card-icon" style="background:var(--cyan-bg);color:var(--cyan);">🧹</div>
+              <div>
+                <div class="card-title">Input Sanitization</div>
+                <div class="card-subtitle">Multiple layers</div>
+              </div>
+            </div>
+            <div class="card-body">
+              <ul>
+                <li>Pydantic v2 validates all API request bodies</li>
+                <li>Chat input: control chars stripped, 500 char cap</li>
+                <li>MCP params: allowlist validation per tool</li>
+                <li>SQL injection: parameterized queries (except SET LOCAL)</li>
+                <li>Output: <code>_sanitize_assistant_text()</code> strips leaked XML</li>
+                <li>MCP: sensitive fields redacted (password, secret, token)</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="section-title">
+          <div class="icon" style="background:var(--purple-bg);color:var(--purple);">🛡</div> Production Safeguards
+        </div>
+        <div class="card-grid">
+          <div class="card">
+            <div class="card-header">
+              <div class="card-icon" style="background:var(--red-bg);color:var(--red);">🚨</div>
+              <div>
+                <div class="card-title">Startup Validation</div>
+                <div class="card-subtitle">main.py</div>
+              </div>
+            </div>
+            <div class="card-body">
+              <ul>
+                <li>FATAL: refuses start if JWT_SECRET_KEY is default</li>
+                <li>FATAL: refuses start if ENCRYPTION_KEY is default</li>
+                <li>Only applies when APP_ENV != "development"</li>
+                <li>Swagger/ReDoc disabled in production</li>
+              </ul>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-header">
+              <div class="card-icon" style="background:var(--blue-bg);color:var(--blue);">📋</div>
+              <div>
+                <div class="card-title">Security Headers</div>
+                <div class="card-subtitle">core/middleware.py</div>
+              </div>
+            </div>
+            <div class="card-body">
+              <ul>
+                <li>X-Content-Type-Options: nosniff</li>
+                <li>X-Frame-Options: DENY</li>
+                <li>Referrer-Policy: strict-origin-when-cross-origin</li>
+                <li>Strict-Transport-Security: max-age=31536000 (prod)</li>
+                <li>X-Correlation-ID: auto-generated per request</li>
+              </ul>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-header">
+              <div class="card-icon" style="background:var(--green-bg);color:var(--green);">📝</div>
+              <div>
+                <div class="card-title">Audit Trail</div>
+                <div class="card-subtitle">services/audit_service.py</div>
+              </div>
+            </div>
+            <div class="card-body">
+              <ul>
+                <li>Every mutation logged: create/update/delete</li>
+                <li>Every tool call audited via MCP governance</li>
+                <li>Append-only (insert, never update/delete)</li>
+                <li>Fields: actor, action, resource, payload, status</li>
+                <li>Correlation ID links request → audit events</li>
+                <li>Retention policy: async cleanup of old events</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============================================ -->
+    <!-- TAB 5: DATA MODELS                            -->
+    <!-- ============================================ -->
+    <div class="tab-panel" id="data">
+
+      <div class="section">
+        <div class="section-title">
+          <div class="icon" style="background:var(--cyan-bg);color:var(--cyan);">🗃</div> Database Schema (27 tables, 39
+          migrations)
+        </div>
+
+        <h3 style="font-size:16px;margin:24px 0 12px;color:var(--text);">Core Models</h3>
+        <div style="overflow-x:auto;">
+          <table class="arch-table">
+            <thead>
+              <tr>
+                <th>Model</th>
+                <th>Table</th>
+                <th>Key Fields</th>
+                <th>Notes</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>Tenant</code></td>
+                <td>tenants</td>
+                <td>id, name, slug (unique), plan, is_active</td>
+                <td>Organization root</td>
+              </tr>
+              <tr>
+                <td><code>TenantConfig</code></td>
+                <td>tenant_configs</td>
+                <td>tenant_id (FK unique), branding_*, ai_*, multi_agent_*</td>
+                <td>1:1 with tenant</td>
+              </tr>
+              <tr>
+                <td><code>User</code></td>
+                <td>users</td>
+                <td>id, tenant_id, email, hashed_password, global_role</td>
+                <td>Unique: (tenant_id, email)</td>
+              </tr>
+              <tr>
+                <td><code>Role</code></td>
+                <td>roles</td>
+                <td>id, name (unique)</td>
+                <td>admin, user, viewer</td>
+              </tr>
+              <tr>
+                <td><code>Permission</code></td>
+                <td>permissions</td>
+                <td>id, codename (unique)</td>
+                <td>e.g., resource.manage</td>
+              </tr>
+              <tr>
+                <td><code>UserRole</code></td>
+                <td>user_roles</td>
+                <td>tenant_id, user_id, role_id</td>
+                <td>Many-to-many junction</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3 style="font-size:16px;margin:24px 0 12px;color:var(--text);">Chat & AI Models</h3>
+        <div style="overflow-x:auto;">
+          <table class="arch-table">
+            <thead>
+              <tr>
+                <th>Model</th>
+                <th>Table</th>
+                <th>Key Fields</th>
+                <th>Notes</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>ChatSession</code></td>
+                <td>chat_sessions</td>
+                <td>id, tenant_id, user_id, title, workspace_id</td>
+                <td>Ordered by updated_at DESC</td>
+              </tr>
+              <tr>
+                <td><code>ChatMessage</code></td>
+                <td>chat_messages</td>
+                <td>role, content, tool_calls (JSON), citations, confidence_score</td>
+                <td>Numeric(3,1) for confidence</td>
+              </tr>
+              <tr>
+                <td><code>DocChunk</code></td>
+                <td>doc_chunks</td>
+                <td>source_path, content, embedding (1024-dim)</td>
+                <td>3,198 chunks embedded</td>
+              </tr>
+              <tr>
+                <td><code>DomainKnowledgeChunk</code></td>
+                <td>domain_knowledge_chunks</td>
+                <td>raw_text, embedding (1536-dim), topic_tags</td>
+                <td>Expert rules + golden docs</td>
+              </tr>
+              <tr>
+                <td><code>TenantEntityMapping</code></td>
+                <td>tenant_entity_mapping</td>
+                <td>entity_type, natural_name, script_id, confidence</td>
+                <td>GIN index, 2,109 seeded</td>
+              </tr>
+              <tr>
+                <td><code>TenantLearnedRule</code></td>
+                <td>tenant_learned_rules</td>
+                <td>rule_pattern, correction, created_by</td>
+                <td>User corrections</td>
+              </tr>
+              <tr>
+                <td><code>TenantQueryPattern</code></td>
+                <td>tenant_query_patterns</td>
+                <td>intent_embedding (1536-dim), working_sql, success_count</td>
+                <td>Self-learning patterns</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3 style="font-size:16px;margin:24px 0 12px;color:var(--text);">NetSuite Integration Models</h3>
+        <div style="overflow-x:auto;">
+          <table class="arch-table">
+            <thead>
+              <tr>
+                <th>Model</th>
+                <th>Table</th>
+                <th>Key Fields</th>
+                <th>Notes</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>Connection</code></td>
+                <td>connections</td>
+                <td>oauth_access_token_encrypted, status</td>
+                <td>Fernet-encrypted credentials</td>
+              </tr>
+              <tr>
+                <td><code>McpConnector</code></td>
+                <td>mcp_connectors</td>
+                <td>auth_token_encrypted, ns_account_id</td>
+                <td>MCP transport config</td>
+              </tr>
+              <tr>
+                <td><code>NetSuiteMetadata</code></td>
+                <td>netsuite_metadata</td>
+                <td>table_name, field_name, field_type, is_custom</td>
+                <td>Schema cache</td>
+              </tr>
+              <tr>
+                <td><code>SavedQuery</code></td>
+                <td>saved_queries</td>
+                <td>title, suiteql, category, export_format</td>
+                <td>Reusable analytics</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3 style="font-size:16px;margin:24px 0 12px;color:var(--text);">Workspace & Config Models</h3>
+        <div style="overflow-x:auto;">
+          <table class="arch-table">
+            <thead>
+              <tr>
+                <th>Model</th>
+                <th>Table</th>
+                <th>Key Fields</th>
+                <th>Notes</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>Workspace</code></td>
+                <td>workspaces</td>
+                <td>name, status</td>
+                <td>SDF project root</td>
+              </tr>
+              <tr>
+                <td><code>WorkspaceFile</code></td>
+                <td>workspace_files</td>
+                <td>file_path, file_id, content, is_locked</td>
+                <td>Full-text indexed</td>
+              </tr>
+              <tr>
+                <td><code>Changeset</code></td>
+                <td>changesets</td>
+                <td>unified_diff, status, created_by</td>
+                <td>Unified diff format</td>
+              </tr>
+              <tr>
+                <td><code>AuditEvent</code></td>
+                <td>audit_events</td>
+                <td>actor_id, category, action, payload (JSON)</td>
+                <td>Append-only</td>
+              </tr>
+              <tr>
+                <td><code>TenantFeatureFlag</code></td>
+                <td>tenant_feature_flags</td>
+                <td>flag_key, enabled</td>
+                <td>TTL cached (60s)</td>
+              </tr>
+              <tr>
+                <td><code>TenantWallet</code></td>
+                <td>tenant_wallet</td>
+                <td>credits_available, credits_used</td>
+                <td>Metered billing</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="section-title">
+          <div class="icon" style="background:var(--purple-bg);color:var(--purple);">📐</div> Embedding Dimensions
+        </div>
+        <div style="overflow-x:auto;">
+          <table class="arch-table">
+            <thead>
+              <tr>
+                <th>Data Type</th>
+                <th>Model</th>
+                <th>Dimensions</th>
+                <th>Index</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Doc Chunks (RAG)</td>
+                <td>OpenAI text-embedding-3-small</td>
+                <td>1,024</td>
+                <td>pgvector cosine</td>
+              </tr>
+              <tr>
+                <td>Domain Knowledge</td>
+                <td>OpenAI text-embedding-3-small</td>
+                <td>1,536</td>
+                <td>pgvector cosine + ILIKE fallback</td>
+              </tr>
+              <tr>
+                <td>Query Patterns</td>
+                <td>OpenAI text-embedding-3-small</td>
+                <td>1,536</td>
+                <td>pgvector cosine</td>
+              </tr>
+              <tr>
+                <td>Entity Mappings</td>
+                <td>—</td>
+                <td>—</td>
+                <td>pg_trgm fuzzy (GIN index)</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- ============================================ -->
+    <!-- TAB 6: INFRASTRUCTURE                         -->
+    <!-- ============================================ -->
+    <div class="tab-panel" id="infra">
+
+      <div class="section">
+        <div class="section-title">
+          <div class="icon" style="background:var(--blue-bg);color:var(--blue);">☁</div> Infrastructure Overview
+        </div>
+        <div class="diagram">┌─────────────────────────────────────────────────────────┐
+          │ CLIENT LAYER │
+          │ Next.js 14 (Vercel) → SSE → FastAPI │
+          └────────────────────────┬────────────────────────────────┘
+          │ HTTPS
+          ┌────────────────────────▼────────────────────────────────┐
+          │ API LAYER │
+          │ FastAPI (async) + Uvicorn + Gunicorn │
+          │ CORS → SecurityHeaders → CorrelationId middleware │
+          └──────┬──────────────┬───────────────────┬───────────────┘
+          │ │ │
+          ┌──────▼──────┐ ┌─────▼──────┐ ┌─────────▼──────────┐
+          │ PostgreSQL │ │ Redis │ │ Celery Workers │
+          │ (Supabase) │ │ │ │ │
+          │ + pgvector │ │ Denylist │ │ sync, recon, │
+          │ + pg_trgm │ │ Rate Lim │ │ export, default │
+          │ + RLS │ │ Broker │ │ queues │
+          └─────────────┘ └────────────┘ └────────────────────┘
+          │
+          ┌──────────▼──────────┐
+          │ External Services │
+          │ NetSuite REST API │
+          │ Brave Search API │
+          │ OpenAI Embeddings │
+          │ Anthropic/Gemini │
+          │ Sentry (errors) │
+          │ Stripe (billing) │
+          └─────────────────────┘</div>
+      </div>
+
+      <div class="section">
+        <div class="section-title">
+          <div class="icon" style="background:var(--green-bg);color:var(--green);">🗄</div> Database Configuration
+        </div>
+        <div class="card-grid">
+          <div class="card">
+            <div class="card-header">
+              <div class="card-icon" style="background:var(--green-bg);color:var(--green);">🐘</div>
+              <div>
+                <div class="card-title">PostgreSQL (Supabase)</div>
+                <div class="card-subtitle">core/database.py</div>
+              </div>
+            </div>
+            <div class="card-body">
+              <ul>
+                <li>Pool: 5 (remote) / 20 (local) connections</li>
+                <li>Max overflow: 5 (remote) / 10 (local)</li>
+                <li>pool_pre_ping: True (connection validation)</li>
+                <li>pool_recycle: 300s (remote) / disabled (local)</li>
+                <li>expire_on_commit: False (async safety)</li>
+                <li>Extensions: pgvector, pg_trgm</li>
+              </ul>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-header">
+              <div class="card-icon" style="background:var(--red-bg);color:var(--red);">🔴</div>
+              <div>
+                <div class="card-title">Redis</div>
+                <div class="card-subtitle">3 databases</div>
+              </div>
+            </div>
+            <div class="card-body">
+              <ul>
+                <li>DB 0: Token denylist (jwt:denied:{jti})</li>
+                <li>DB 1: Celery broker</li>
+                <li>DB 2: Celery result backend</li>
+                <li>Rate limiting: sorted sets with TTL</li>
+                <li>Required in production (in-memory fallback for dev)</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="section-title">
+          <div class="icon" style="background:var(--orange-bg);color:var(--orange);">⏰</div> Background Workers (Celery)
+        </div>
+        <div style="overflow-x:auto;">
+          <table class="arch-table">
+            <thead>
+              <tr>
+                <th>Task</th>
+                <th>Queue</th>
+                <th>Schedule</th>
+                <th>Purpose</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><code>billing_sync</code></td>
+                <td>default</td>
+                <td>Hourly</td>
+                <td>Metered billing sync to Stripe</td>
+              </tr>
+              <tr>
+                <td><code>connection_health</code></td>
+                <td>default</td>
+                <td>Every 15 min</td>
+                <td>Test OAuth token validity</td>
+              </tr>
+              <tr>
+                <td><code>metadata_discovery</code></td>
+                <td>default</td>
+                <td>On-demand</td>
+                <td>NetSuite schema introspection</td>
+              </tr>
+              <tr>
+                <td><code>suitescript_sync</code></td>
+                <td>sync</td>
+                <td>On-demand</td>
+                <td>Pull/push SuiteScript files</td>
+              </tr>
+              <tr>
+                <td><code>shopify_sync</code></td>
+                <td>sync</td>
+                <td>On-demand</td>
+                <td>Shopify order ingestion</td>
+              </tr>
+              <tr>
+                <td><code>suiteql_export</code></td>
+                <td>export</td>
+                <td>On-demand</td>
+                <td>Background query exports</td>
+              </tr>
+              <tr>
+                <td><code>workspace_run</code></td>
+                <td>default</td>
+                <td>On-demand</td>
+                <td>SDF validation, tests, deploy</td>
+              </tr>
+              <tr>
+                <td><code>audit_retention</code></td>
+                <td>default</td>
+                <td>On-demand</td>
+                <td>Clean old audit events</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="section">
+        <div class="section-title">
+          <div class="icon" style="background:var(--purple-bg);color:var(--purple);">🚀</div> CI/CD & Deployment
+        </div>
+        <div class="card-grid">
+          <div class="card">
+            <div class="card-header">
+              <div class="card-icon" style="background:var(--blue-bg);color:var(--blue);">🔄</div>
+              <div>
+                <div class="card-title">Deployment Pipeline</div>
+                <div class="card-subtitle">deploy.yml</div>
+              </div>
+            </div>
+            <div class="card-body">
+              <ul>
+                <li>Staging: auto-deploy on merge to main</li>
+                <li>Production: manual approval required</li>
+                <li>Migrations: run in CI, not container startup</li>
+                <li>Rollback: manual via rollback.yml workflow</li>
+              </ul>
+            </div>
+          </div>
+          <div class="card">
+            <div class="card-header">
+              <div class="card-icon" style="background:var(--green-bg);color:var(--green);">📊</div>
+              <div>
+                <div class="card-title">Monitoring</div>
+                <div class="card-subtitle">Sentry + Structlog</div>
+              </div>
+            </div>
+            <div class="card-body">
+              <ul>
+                <li>Sentry: error tracking (if SENTRY_DSN set)</li>
+                <li>Structlog: structured JSON logging</li>
+                <li>Correlation IDs: per-request tracing</li>
+                <li>Docker: print(flush=True) for log visibility</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- File Locations -->
+      <div class="section">
+        <div class="section-title">
+          <div class="icon" style="background:var(--cyan-bg);color:var(--cyan);">📁</div> Project File Map
+        </div>
+        <div class="diagram">backend/
+          ├── app/
+          │ ├── api/v1/ # 26 API routers (~130 endpoints)
+          │ ├── core/ # database, security, dependencies, config, middleware
+          │ ├── models/ # 27 SQLAlchemy models
+          │ ├── schemas/ # Pydantic request/response schemas
+          │ ├── services/ # 34 service modules
+          │ │ └── chat/ # AI orchestration layer
+          │ │ ├── orchestrator.py # 1,085 LOC — main pipeline
+          │ │ ├── coordinator.py # 1,262 LOC — multi-agent routing
+          │ │ ├── agents/ # Specialist agents
+          │ │ │ ├── base_agent.py # Agentic loop, tool execution
+          │ │ │ ├── unified_agent.py # 560 LOC — single agent + 10 tools
+          │ │ │ ├── suiteql_agent.py # 643 LOC — SuiteQL specialist
+          │ │ │ └── rag_agent.py # RAG + web search
+          │ │ ├── adapters/ # LLM adapters (Anthropic, OpenAI, Gemini)
+          │ │ ├── domain_knowledge.py # Vector + keyword RAG
+          │ │ ├── tenant_resolver.py # Entity resolution (NER + fuzzy)
+          │ │ ├── memory_updater.py # Correction learning
+          │ │ └── history_compactor.py # Message compaction
+          │ ├── mcp/ # MCP tool registry, governance, tools/
+          │ └── workers/ # Celery tasks
+          ├── alembic/versions/ # 39 migrations
+          └── tests/ # pytest (async)
+
+          frontend/
+          ├── src/
+          │ ├── app/ # Next.js 14 App Router (13 pages)
+          │ ├── providers/ # Auth, Branding, Query, Theme
+          │ ├── components/ # 58 components (chat, workspace, ui, analytics)
+          │ ├── hooks/ # 21 custom hooks
+          │ └── lib/ # api-client, chat-stream, types, constants
+
+          suiteapp/
+          ├── src/FileCabinet/SuiteScripts/ # RESTlets, user events
+          ├── src/Objects/ # SDF customization objects
+          └── __tests__/ # Jest unit tests</div>
+      </div>
+    </div>
+
+  </div>
+
+  <script>
+    // Tab switching
+    document.querySelectorAll('.tab-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+        document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+        btn.classList.add('active');
+        document.getElementById(btn.dataset.tab).classList.add('active');
+      });
+    });
+  </script>
+</body>
+
+</html>

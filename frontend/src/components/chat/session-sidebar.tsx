@@ -32,6 +32,7 @@ interface SessionSidebarProps {
   activeSessionId: string | null;
   onSelectSession: (id: string) => void;
   onNewChat: () => void;
+  variant?: "default" | "terminal";
 }
 
 export function SessionSidebar({
@@ -39,21 +40,37 @@ export function SessionSidebar({
   activeSessionId,
   onSelectSession,
   onNewChat,
+  variant,
 }: SessionSidebarProps) {
+  const isTerminal = variant === "terminal";
   const [queriesExpanded, setQueriesExpanded] = useState(true);
 
   return (
-    <div className="flex w-[280px] flex-col border-r bg-muted/30">
+    <div
+      className={cn(
+        "flex w-[280px] flex-col border-r",
+        isTerminal ? "bg-zinc-900 border-zinc-800/50" : "bg-muted/30",
+      )}
+    >
       {/* New Chat button */}
       <div className="p-4">
-        <Button
-          variant="outline"
-          className="w-full justify-start gap-2 bg-card text-[13px] font-medium shadow-soft"
-          onClick={onNewChat}
-        >
-          <Plus className="h-4 w-4" />
-          New Chat
-        </Button>
+        {isTerminal ? (
+          <button
+            onClick={onNewChat}
+            className="w-full bg-[var(--chat-accent)] text-black py-3 rounded-sm font-headline font-bold text-xs tracking-widest uppercase flex items-center justify-center gap-2 hover:bg-[var(--chat-accent-hover)] transition-all"
+          >
+            <Plus className="h-3.5 w-3.5" /> NEW CHAT
+          </button>
+        ) : (
+          <Button
+            variant="outline"
+            className="w-full justify-start gap-2 bg-card text-[13px] font-medium shadow-soft"
+            onClick={onNewChat}
+          >
+            <Plus className="h-4 w-4" />
+            New Chat
+          </Button>
+        )}
       </div>
 
       {/* Chat Sessions — scrollable */}
@@ -67,12 +84,23 @@ export function SessionSidebar({
             onDeleted={() => {
               if (activeSessionId === session.id) onNewChat();
             }}
+            isTerminal={isTerminal}
           />
         ))}
         {sessions.length === 0 && (
           <div className="flex flex-col items-center py-12 text-center">
-            <MessageSquare className="h-8 w-8 text-muted-foreground/40" />
-            <p className="mt-3 text-[13px] text-muted-foreground">
+            <MessageSquare
+              className={cn(
+                "h-8 w-8",
+                isTerminal ? "text-zinc-700" : "text-muted-foreground/40",
+              )}
+            />
+            <p
+              className={cn(
+                "mt-3 text-[13px]",
+                isTerminal ? "text-zinc-600" : "text-muted-foreground",
+              )}
+            >
               No conversations yet
             </p>
           </div>
@@ -80,10 +108,15 @@ export function SessionSidebar({
       </div>
 
       {/* Saved Queries — pinned at bottom, own scroll */}
-      <div className="border-t">
+      <div className={cn("border-t", isTerminal && "border-zinc-800/50")}>
         <button
           onClick={() => setQueriesExpanded(!queriesExpanded)}
-          className="flex w-full items-center gap-1.5 px-5 py-2.5 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground hover:text-foreground transition-colors"
+          className={cn(
+            "flex w-full items-center gap-1.5 px-5 py-2.5 font-semibold uppercase transition-colors",
+            isTerminal
+              ? "text-[11px] tracking-widest text-zinc-500 hover:text-zinc-400"
+              : "text-[11px] tracking-wider text-muted-foreground hover:text-foreground",
+          )}
         >
           {queriesExpanded ? (
             <ChevronDown className="h-3 w-3" />
@@ -112,11 +145,13 @@ function SessionItem({
   isActive,
   onSelect,
   onDeleted,
+  isTerminal = false,
 }: {
   session: ChatSession;
   isActive: boolean;
   onSelect: () => void;
   onDeleted: () => void;
+  isTerminal?: boolean;
 }) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
@@ -247,23 +282,44 @@ function SessionItem({
   return (
     <div
       className={cn(
-        "group flex items-center rounded-lg px-3 py-2.5 text-left transition-all duration-150 cursor-pointer",
-        isActive
-          ? "bg-primary/10 border border-primary/20 shadow-soft"
-          : "hover:bg-card/50",
+        "group flex items-center px-3 py-2.5 text-left transition-all duration-150 cursor-pointer",
+        isTerminal
+          ? isActive
+            ? "bg-zinc-800 text-[var(--chat-accent)] border-l-4 border-[var(--chat-accent)] rounded-none"
+            : "hover:bg-zinc-800/50 text-zinc-500 rounded-none"
+          : cn(
+              "rounded-lg",
+              isActive
+                ? "bg-primary/10 border border-primary/20 shadow-soft"
+                : "hover:bg-card/50",
+            ),
       )}
       onClick={onSelect}
     >
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-1.5">
-          <p className="truncate text-[13px] font-medium text-foreground">
+          <p
+            className={cn(
+              "truncate font-medium",
+              isTerminal
+                ? "text-[12px] tracking-wide uppercase"
+                : "text-[13px] text-foreground",
+            )}
+          >
             {session.title || "New Chat"}
           </p>
           {session.session_type === "workspace" && (
             <Code2 className="h-3 w-3 flex-shrink-0 text-muted-foreground" />
           )}
         </div>
-        <p className="truncate text-[11px] text-muted-foreground mt-0.5">
+        <p
+          className={cn(
+            "truncate mt-0.5",
+            isTerminal
+              ? "text-[10px] text-zinc-600"
+              : "text-[11px] text-muted-foreground",
+          )}
+        >
           {new Date(session.updated_at).toLocaleDateString()}
         </p>
       </div>

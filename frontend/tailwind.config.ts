@@ -45,6 +45,11 @@ const config: Config = {
         hot: {
           coral: "hsl(354.8 100% 63.9%)",
         },
+        'chat-accent': {
+          DEFAULT: 'var(--chat-accent)',
+          hover: 'var(--chat-accent-hover)',
+          dim: 'var(--chat-accent-dim)',
+        },
       },
       borderRadius: {
         lg: "var(--radius)",

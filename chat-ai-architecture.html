@@ -1,0 +1,1088 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Suite Studio AI — Chat Intelligence Architecture</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  :root {
+    --bg: #0a0e1a;
+    --surface: #111827;
+    --surface-2: #1a2235;
+    --border: #1e293b;
+    --border-glow: #334155;
+    --text: #f1f5f9;
+    --text-muted: #94a3b8;
+    --text-dim: #64748b;
+    --accent-blue: #3b82f6;
+    --accent-cyan: #06b6d4;
+    --accent-purple: #8b5cf6;
+    --accent-green: #10b981;
+    --accent-amber: #f59e0b;
+    --accent-rose: #f43f5e;
+    --accent-indigo: #6366f1;
+    --glow-blue: rgba(59, 130, 246, 0.15);
+    --glow-purple: rgba(139, 92, 246, 0.15);
+    --glow-cyan: rgba(6, 182, 212, 0.15);
+    --glow-green: rgba(16, 185, 129, 0.15);
+  }
+
+  body {
+    font-family: 'Inter', -apple-system, system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  /* Background grid */
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background-image:
+      linear-gradient(rgba(59, 130, 246, 0.03) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(59, 130, 246, 0.03) 1px, transparent 1px);
+    background-size: 60px 60px;
+    z-index: 0;
+  }
+
+  .container {
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: 40px 32px;
+    position: relative;
+    z-index: 1;
+  }
+
+  /* Header */
+  .header {
+    text-align: center;
+    margin-bottom: 48px;
+  }
+
+  .header-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 16px;
+    background: linear-gradient(135deg, rgba(99, 102, 241, 0.15), rgba(139, 92, 246, 0.15));
+    border: 1px solid rgba(99, 102, 241, 0.3);
+    border-radius: 100px;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--accent-indigo);
+    margin-bottom: 20px;
+    letter-spacing: 0.5px;
+  }
+
+  .header-badge .dot {
+    width: 6px; height: 6px;
+    background: var(--accent-green);
+    border-radius: 50%;
+    animation: pulse 2s infinite;
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.4; }
+  }
+
+  h1 {
+    font-size: 42px;
+    font-weight: 800;
+    letter-spacing: -0.02em;
+    background: linear-gradient(135deg, #f1f5f9, #94a3b8);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    margin-bottom: 12px;
+  }
+
+  .subtitle {
+    font-size: 17px;
+    color: var(--text-muted);
+    font-weight: 400;
+    max-width: 700px;
+    margin: 0 auto;
+    line-height: 1.6;
+  }
+
+  /* Tab navigation */
+  .tabs {
+    display: flex;
+    justify-content: center;
+    gap: 4px;
+    margin-bottom: 40px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 4px;
+    width: fit-content;
+    margin-left: auto;
+    margin-right: auto;
+  }
+
+  .tab {
+    padding: 10px 24px;
+    border-radius: 8px;
+    border: none;
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s;
+    font-family: inherit;
+  }
+
+  .tab:hover { color: var(--text); background: var(--surface-2); }
+  .tab.active {
+    background: var(--accent-blue);
+    color: white;
+    box-shadow: 0 2px 8px rgba(59, 130, 246, 0.3);
+  }
+
+  /* View panels */
+  .view { display: none; }
+  .view.active { display: block; }
+
+  /* ─── VIEW 1: Agent Flow ─── */
+  .flow-container {
+    display: flex;
+    flex-direction: column;
+    gap: 32px;
+    align-items: center;
+  }
+
+  .flow-stage {
+    width: 100%;
+    max-width: 1200px;
+  }
+
+  .stage-label {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    margin-bottom: 12px;
+    padding-left: 4px;
+  }
+
+  .flow-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 28px;
+    position: relative;
+    overflow: hidden;
+    transition: border-color 0.3s, box-shadow 0.3s;
+  }
+
+  .flow-card:hover {
+    border-color: var(--border-glow);
+  }
+
+  .flow-card::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    height: 2px;
+  }
+
+  .flow-card.blue::before { background: linear-gradient(90deg, var(--accent-blue), var(--accent-cyan)); }
+  .flow-card.purple::before { background: linear-gradient(90deg, var(--accent-purple), var(--accent-indigo)); }
+  .flow-card.green::before { background: linear-gradient(90deg, var(--accent-green), var(--accent-cyan)); }
+  .flow-card.amber::before { background: linear-gradient(90deg, var(--accent-amber), var(--accent-rose)); }
+  .flow-card.rose::before { background: linear-gradient(90deg, var(--accent-rose), var(--accent-purple)); }
+
+  .card-header {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin-bottom: 16px;
+  }
+
+  .card-icon {
+    width: 44px; height: 44px;
+    border-radius: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 20px;
+    flex-shrink: 0;
+  }
+
+  .card-icon.blue { background: var(--glow-blue); }
+  .card-icon.purple { background: var(--glow-purple); }
+  .card-icon.green { background: var(--glow-green); }
+  .card-icon.cyan { background: var(--glow-cyan); }
+  .card-icon.amber { background: rgba(245, 158, 11, 0.15); }
+  .card-icon.rose { background: rgba(244, 63, 94, 0.15); }
+
+  .card-title {
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--text);
+  }
+
+  .card-subtitle {
+    font-size: 13px;
+    color: var(--text-dim);
+    margin-top: 2px;
+  }
+
+  .card-body {
+    font-size: 14px;
+    line-height: 1.7;
+    color: var(--text-muted);
+  }
+
+  /* Horizontal items inside flow cards */
+  .flow-items {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 16px;
+    margin-top: 16px;
+  }
+
+  .flow-item {
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 16px;
+    transition: border-color 0.2s;
+  }
+
+  .flow-item:hover { border-color: var(--border-glow); }
+
+  .flow-item-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text);
+    margin-bottom: 6px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .flow-item-desc {
+    font-size: 12px;
+    color: var(--text-dim);
+    line-height: 1.5;
+  }
+
+  .tag {
+    display: inline-flex;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+  }
+
+  .tag.blue { background: rgba(59, 130, 246, 0.15); color: var(--accent-blue); }
+  .tag.purple { background: rgba(139, 92, 246, 0.15); color: var(--accent-purple); }
+  .tag.green { background: rgba(16, 185, 129, 0.15); color: var(--accent-green); }
+  .tag.cyan { background: rgba(6, 182, 212, 0.15); color: var(--accent-cyan); }
+  .tag.amber { background: rgba(245, 158, 11, 0.15); color: var(--accent-amber); }
+  .tag.rose { background: rgba(244, 63, 94, 0.15); color: var(--accent-rose); }
+
+  /* Arrow between stages */
+  .flow-arrow {
+    display: flex;
+    justify-content: center;
+    padding: 4px 0;
+  }
+
+  .flow-arrow svg {
+    color: var(--text-dim);
+    opacity: 0.5;
+  }
+
+  /* ─── VIEW 2: Knowledge Architecture ─── */
+  .knowledge-grid {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 24px;
+    max-width: 1200px;
+    margin: 0 auto;
+  }
+
+  .knowledge-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    padding: 28px;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .knowledge-card.full-width {
+    grid-column: 1 / -1;
+  }
+
+  .knowledge-card::before {
+    content: '';
+    position: absolute;
+    top: 0; left: 0;
+    width: 4px;
+    height: 100%;
+  }
+
+  .knowledge-card.blue::before { background: var(--accent-blue); }
+  .knowledge-card.purple::before { background: var(--accent-purple); }
+  .knowledge-card.green::before { background: var(--accent-green); }
+  .knowledge-card.amber::before { background: var(--accent-amber); }
+  .knowledge-card.cyan::before { background: var(--accent-cyan); }
+  .knowledge-card.rose::before { background: var(--accent-rose); }
+
+  .k-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 16px;
+  }
+
+  .k-icon {
+    width: 40px; height: 40px;
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 18px;
+    flex-shrink: 0;
+  }
+
+  .k-title {
+    font-size: 16px;
+    font-weight: 700;
+  }
+
+  .k-subtitle {
+    font-size: 12px;
+    color: var(--text-dim);
+  }
+
+  .k-body {
+    font-size: 13px;
+    color: var(--text-muted);
+    line-height: 1.7;
+  }
+
+  .k-table {
+    width: 100%;
+    margin-top: 12px;
+    border-collapse: collapse;
+  }
+
+  .k-table th {
+    text-align: left;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-dim);
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .k-table td {
+    font-size: 13px;
+    color: var(--text-muted);
+    padding: 10px 12px;
+    border-bottom: 1px solid rgba(30, 41, 59, 0.5);
+  }
+
+  .k-table tr:last-child td { border-bottom: none; }
+
+  .k-table .mono {
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    font-size: 12px;
+    color: var(--accent-cyan);
+  }
+
+  /* ─── VIEW 3: Live Data Flow ─── */
+  .flow-timeline {
+    max-width: 800px;
+    margin: 0 auto;
+    position: relative;
+  }
+
+  .flow-timeline::before {
+    content: '';
+    position: absolute;
+    left: 28px;
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    background: linear-gradient(to bottom, var(--accent-blue), var(--accent-purple), var(--accent-green), var(--accent-amber));
+    border-radius: 2px;
+  }
+
+  .timeline-step {
+    display: flex;
+    gap: 24px;
+    margin-bottom: 24px;
+    position: relative;
+  }
+
+  .timeline-dot {
+    width: 56px;
+    height: 56px;
+    border-radius: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 22px;
+    flex-shrink: 0;
+    z-index: 1;
+    border: 2px solid var(--border);
+  }
+
+  .timeline-content {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px 24px;
+    flex: 1;
+    transition: border-color 0.2s;
+  }
+
+  .timeline-content:hover { border-color: var(--border-glow); }
+
+  .timeline-title {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text);
+    margin-bottom: 4px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .timeline-desc {
+    font-size: 13px;
+    color: var(--text-muted);
+    line-height: 1.6;
+  }
+
+  .timeline-tech {
+    margin-top: 8px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .tech-tag {
+    padding: 3px 10px;
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--text-dim);
+    font-family: 'SF Mono', monospace;
+  }
+
+  /* Stat row */
+  .stats-row {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 16px;
+    max-width: 1200px;
+    margin: 0 auto 40px;
+  }
+
+  .stat-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+    text-align: center;
+  }
+
+  .stat-value {
+    font-size: 32px;
+    font-weight: 800;
+    letter-spacing: -0.02em;
+  }
+
+  .stat-value.blue { color: var(--accent-blue); }
+  .stat-value.purple { color: var(--accent-purple); }
+  .stat-value.green { color: var(--accent-green); }
+  .stat-value.amber { color: var(--accent-amber); }
+
+  .stat-label {
+    font-size: 12px;
+    color: var(--text-dim);
+    margin-top: 4px;
+    font-weight: 500;
+  }
+
+  /* Footer */
+  .footer {
+    text-align: center;
+    margin-top: 60px;
+    padding: 24px;
+    border-top: 1px solid var(--border);
+    color: var(--text-dim);
+    font-size: 13px;
+  }
+
+  @media (max-width: 768px) {
+    .knowledge-grid { grid-template-columns: 1fr; }
+    .stats-row { grid-template-columns: repeat(2, 1fr); }
+    h1 { font-size: 28px; }
+    .flow-items { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<div class="container">
+  <!-- Header -->
+  <div class="header">
+    <div class="header-badge"><span class="dot"></span> Suite Studio AI</div>
+    <h1>Chat Intelligence Architecture</h1>
+    <p class="subtitle">A proprietary AI platform for business operations — unified agent orchestration with entity resolution, domain knowledge retrieval, self-learning memory, and financial intelligence. No LangChain. No framework dependencies. Purpose-built from the ground up.</p>
+  </div>
+
+  <!-- Stats -->
+  <div class="stats-row">
+    <div class="stat-card">
+      <div class="stat-value blue">10</div>
+      <div class="stat-label">AI Tools</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-value purple">6</div>
+      <div class="stat-label">Knowledge Sources</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-value green">3,198</div>
+      <div class="stat-label">Embedded Doc Chunks</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-value amber">2,109</div>
+      <div class="stat-label">Entity Mappings</div>
+    </div>
+  </div>
+
+  <!-- Tabs -->
+  <div class="tabs">
+    <button class="tab active" onclick="switchView('flow')">Agent Flow</button>
+    <button class="tab" onclick="switchView('knowledge')">Knowledge Architecture</button>
+    <button class="tab" onclick="switchView('dataflow')">Live Data Flow</button>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════ -->
+  <!-- VIEW 1: Agent Flow                             -->
+  <!-- ═══════════════════════════════════════════════ -->
+  <div class="view active" id="view-flow">
+    <div class="flow-container">
+
+      <!-- Stage 1: User Input -->
+      <div class="flow-stage">
+        <div class="stage-label">Stage 1 — Input Processing</div>
+        <div class="flow-card blue">
+          <div class="card-header">
+            <div class="card-icon blue">💬</div>
+            <div>
+              <div class="card-title">User Message Intake</div>
+              <div class="card-subtitle">Sanitization, history loading, and RAG pre-retrieval</div>
+            </div>
+          </div>
+          <div class="flow-items">
+            <div class="flow-item">
+              <div class="flow-item-title">🛡️ Input Sanitizer</div>
+              <div class="flow-item-desc">Strips prompt injection tags (<code>&lt;system&gt;</code>, <code>&lt;instructions&gt;</code>, <code>&lt;tool_call&gt;</code>) and dangerous control characters. Also sanitizes assistant output via <code>_sanitize_assistant_text()</code> to strip leaked tool-call XML.</div>
+            </div>
+            <div class="flow-item">
+              <div class="flow-item-title">⚡ Chitchat Short-Circuit</div>
+              <div class="flow-item-desc">Regex detects greetings, compliments, and affirmations ("thanks", "awesome", "hi"). Short-circuits expensive context assembly — skips entity resolution, domain knowledge, and pattern retrieval for conversational messages.</div>
+            </div>
+            <div class="flow-item">
+              <div class="flow-item-title">📜 History Loader</div>
+              <div class="flow-item-desc">Loads full conversation history from PostgreSQL. If >12 messages, compacts old turns into a dense summary via fast LLM call while keeping last 4 messages verbatim.</div>
+            </div>
+            <div class="flow-item">
+              <div class="flow-item-title">📚 RAG Pre-Retrieval</div>
+              <div class="flow-item-desc">Embeds the user question (OpenAI text-embedding-3-small, 1024-dim) and retrieves top-K similar doc chunks via pgvector cosine similarity. Injected as <code>&lt;context&gt;</code> block.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="flow-arrow">
+        <svg width="24" height="32" viewBox="0 0 24 32"><path d="M12 0v28M4 20l8 8 8-8" stroke="currentColor" stroke-width="2" fill="none"/></svg>
+      </div>
+
+      <!-- Stage 2: Context Assembly -->
+      <div class="flow-stage">
+        <div class="stage-label">Stage 2 — Context Assembly (Concurrent)</div>
+        <div class="flow-card purple">
+          <div class="card-header">
+            <div class="card-icon purple">🧠</div>
+            <div>
+              <div class="card-title">Parallel Context Enrichment</div>
+              <div class="card-subtitle">Three knowledge sources queried concurrently via asyncio.gather</div>
+            </div>
+          </div>
+          <div class="flow-items">
+            <div class="flow-item">
+              <div class="flow-item-title">
+                <span class="tag purple">NER</span> Entity Resolution
+              </div>
+              <div class="flow-item-desc">Fast LLM call (Haiku) extracts business entities from the user message → pg_trgm fuzzy matches against 2,109 tenant entity mappings → produces <code>&lt;tenant_vernacular&gt;</code> XML block mapping names to NetSuite script IDs.</div>
+            </div>
+            <div class="flow-item">
+              <div class="flow-item-title">
+                <span class="tag cyan">EMBED</span> Domain Knowledge
+              </div>
+              <div class="flow-item-desc">Embeds user query → pgvector cosine search over curated domain knowledge chunks (SuiteQL syntax rules, NetSuite data model patterns, field-type reference). Results injected as <code>&lt;domain_knowledge&gt;</code>.</div>
+            </div>
+            <div class="flow-item">
+              <div class="flow-item-title">
+                <span class="tag green">MATCH</span> Proven Patterns
+              </div>
+              <div class="flow-item-desc">Finds previously successful SuiteQL queries for similar questions via embedding similarity. Injects them as <code>&lt;proven_patterns&gt;</code> — the agent learns from its own past successes.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="flow-arrow">
+        <svg width="24" height="32" viewBox="0 0 24 32"><path d="M12 0v28M4 20l8 8 8-8" stroke="currentColor" stroke-width="2" fill="none"/></svg>
+      </div>
+
+      <!-- Stage 3: System Prompt Construction -->
+      <div class="flow-stage">
+        <div class="stage-label">Stage 3 — System Prompt Construction</div>
+        <div class="flow-card green">
+          <div class="card-header">
+            <div class="card-icon green">⚙️</div>
+            <div>
+              <div class="card-title">Dynamic Prompt Assembly</div>
+              <div class="card-subtitle">Tenant-specific system prompt built from 8 layered sources</div>
+            </div>
+          </div>
+          <div class="flow-items">
+            <div class="flow-item">
+              <div class="flow-item-title">📋 Base Template</div>
+              <div class="flow-item-desc">Active system prompt template from <code>prompt_template_service</code>. Includes SuiteQL rules, tool guidance, output formatting, and ROWNUM pagination directives.</div>
+            </div>
+            <div class="flow-item">
+              <div class="flow-item-title">🏢 Tenant Profile</div>
+              <div class="flow-item-desc">Industry, subsidiaries, chart of accounts, item types, fiscal calendar, custom segments — all discovered via metadata pipeline.</div>
+            </div>
+            <div class="flow-item">
+              <div class="flow-item-title">🔧 Custom Fields</div>
+              <div class="flow-item-desc">Discovered <code>custbody_*</code>, <code>custcol_*</code>, <code>custitem_*</code>, <code>custrecord_*</code> fields with their labels and types. Up to 60 fields per section.</div>
+            </div>
+            <div class="flow-item">
+              <div class="flow-item-title">🪪 Brand Identity</div>
+              <div class="flow-item-desc">Injects the tenant's brand name so the AI knows its own identity. When asked "what's your name?" the agent responds with the white-labeled brand, not "Claude" or "Suite Studio AI".</div>
+            </div>
+            <div class="flow-item">
+              <div class="flow-item-title">🎭 Soul Config</div>
+              <div class="flow-item-desc">Tenant-specific AI tone (formal vs. casual) and NetSuite quirks from <code>soul.md</code>. Shapes how the agent communicates and handles edge cases.</div>
+            </div>
+            <div class="flow-item">
+              <div class="flow-item-title">🛠️ Tool Inventory</div>
+              <div class="flow-item-desc">Dynamic list of all available tools (local + external MCP). If external SuiteQL MCP tools exist, the prompt guides the agent to prefer them over local REST.</div>
+            </div>
+            <div class="flow-item">
+              <div class="flow-item-title">📁 Workspace Context</div>
+              <div class="flow-item-desc">If the user is in an IDE workspace: file listing (up to 50 files), workspace ID, and instructions for file operations and viewing context.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="flow-arrow">
+        <svg width="24" height="32" viewBox="0 0 24 32"><path d="M12 0v28M4 20l8 8 8-8" stroke="currentColor" stroke-width="2" fill="none"/></svg>
+      </div>
+
+      <!-- Stage 4: Agent Execution -->
+      <div class="flow-stage">
+        <div class="stage-label">Stage 4 — Agent Execution</div>
+        <div class="flow-card amber">
+          <div class="card-header">
+            <div class="card-icon amber">🤖</div>
+            <div>
+              <div class="card-title">Unified Agent Execution</div>
+              <div class="card-subtitle">Single agent with 10 tools, up to 10 reasoning steps per turn</div>
+            </div>
+          </div>
+          <div class="card-body" style="margin-bottom: 16px;">
+            A single unified agent receives all context blocks and the full tool inventory. The LLM decides which tools to call based on the user's question — no explicit routing step needed. Streams tokens via SSE as they're generated. Financial queries are automatically detected and augmented with accounting-specific SuiteQL rules (TAL joins, CONSOLIDATE functions, account type filters).
+          </div>
+          <div class="flow-items">
+            <div class="flow-item" style="border-color: var(--accent-amber);">
+              <div class="flow-item-title">
+                <span class="tag amber">PRIMARY</span> Unified Agent
+              </div>
+              <div class="flow-item-desc">Single agent with all 10 tools and max 10 steps. Context blocks (vernacular, domain knowledge, proven patterns) injected into system prompt. Anti-hallucination guard: forbidden from guessing custom field IDs without verification.</div>
+            </div>
+            <div class="flow-item" style="border-color: var(--accent-rose);">
+              <div class="flow-item-title">
+                <span class="tag rose">AUTO-DETECT</span> Financial Report Mode
+              </div>
+              <div class="flow-item-desc">Intent classifier detects financial queries (P&amp;L, Balance Sheet, GL). Augments the task with verified column names, mandatory filters (posting=T, primary book), currency consolidation rules, and accounting period joins. Domain knowledge top-K boosted to 5.</div>
+            </div>
+            <div class="flow-item">
+              <div class="flow-item-title">
+                <span class="tag blue">FALLBACK</span> Multi-Agent Coordinator
+              </div>
+              <div class="flow-item-desc">Legacy path available per tenant flag. Heuristic regex classifier → specialist agent dispatch → result synthesis. Routes: SuiteQL, RAG, Analysis, Workspace.</div>
+            </div>
+          </div>
+
+          <div style="margin-top: 20px;">
+            <div class="stage-label" style="margin-bottom: 8px;">Tool Inventory (10 Tools)</div>
+            <div class="flow-items">
+              <div class="flow-item">
+                <div class="flow-item-title">🔍 netsuite_suiteql</div>
+                <div class="flow-item-desc">Execute SuiteQL queries against tenant's NetSuite via REST API (OAuth 2.0). Read-only validation, row limit enforcement, pagination, and permission diagnostics for empty results.</div>
+              </div>
+              <div class="flow-item">
+                <div class="flow-item-title">📋 netsuite_get_metadata</div>
+                <div class="flow-item-desc">Retrieve discovered custom fields, records, lists, scripts, and org structure. Used by the agent to verify field names before constructing queries.</div>
+              </div>
+              <div class="flow-item">
+                <div class="flow-item-title">📖 rag_search</div>
+                <div class="flow-item-desc">Vector search over 3,198 embedded doc chunks. Returns relevant NetSuite documentation, SuiteQL syntax guides, and platform knowledge.</div>
+              </div>
+              <div class="flow-item">
+                <div class="flow-item-title">🌐 web_search</div>
+                <div class="flow-item-desc">Fallback web search for current information not in the doc store. Rate-limited to 10 req/min with 15s timeout.</div>
+              </div>
+              <div class="flow-item">
+                <div class="flow-item-title">💻 workspace_* (4 tools)</div>
+                <div class="flow-item-desc"><code>list_files</code>, <code>read_file</code>, <code>search</code>, <code>propose_patch</code> — IDE file operations with auto-injected workspace ID.</div>
+              </div>
+              <div class="flow-item">
+                <div class="flow-item-title">💡 tenant_save_learned_rule</div>
+                <div class="flow-item-desc">Persists user corrections and preferences as tenant-specific rules. Available for future sessions across all agents.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="flow-arrow">
+        <svg width="24" height="32" viewBox="0 0 24 32"><path d="M12 0v28M4 20l8 8 8-8" stroke="currentColor" stroke-width="2" fill="none"/></svg>
+      </div>
+
+      <!-- Stage 5: Post-Processing -->
+      <div class="flow-stage">
+        <div class="stage-label">Stage 5 — Post-Processing & Learning</div>
+        <div class="flow-card rose">
+          <div class="card-header">
+            <div class="card-icon rose">✨</div>
+            <div>
+              <div class="card-title">Response Delivery & Memory Update</div>
+              <div class="card-subtitle">Streaming output, audit logging, billing, and background learning</div>
+            </div>
+          </div>
+          <div class="flow-items">
+            <div class="flow-item">
+              <div class="flow-item-title">📡 SSE Streaming</div>
+              <div class="flow-item-desc">Tokens stream to the frontend in real-time via Server-Sent Events. Three event types: <code>text</code> (tokens), <code>tool_status</code> (progress), <code>message</code> (final result). Output sanitized to strip any leaked tool-call XML before delivery.</div>
+            </div>
+            <div class="flow-item">
+              <div class="flow-item-title">📝 Audit & Billing</div>
+              <div class="flow-item-desc">Every turn logged with: mode, provider, model, step count, token usage, tools called, doc chunks used. Credits deducted for non-BYOK tenants.</div>
+            </div>
+            <div class="flow-item">
+              <div class="flow-item-title">🧩 Memory Updater</div>
+              <div class="flow-item-desc">Fire-and-forget background task. Regex-gated (zero cost for 95% of messages). When user says "actually..." or "remember that...", extracts correction → persists as <code>TenantLearnedRule</code>.</div>
+            </div>
+            <div class="flow-item">
+              <div class="flow-item-title">📈 Pattern Extraction</div>
+              <div class="flow-item-desc">After successful SuiteQL queries, extracts the SQL pattern, embeds the user question, and upserts into <code>tenant_query_patterns</code> — building a self-improving query library.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════ -->
+  <!-- VIEW 2: Knowledge Architecture                 -->
+  <!-- ═══════════════════════════════════════════════ -->
+  <div class="view" id="view-knowledge">
+    <div class="knowledge-grid">
+
+      <!-- Doc Chunks (RAG) -->
+      <div class="knowledge-card blue">
+        <div class="k-header">
+          <div class="k-icon" style="background: var(--glow-blue);">📚</div>
+          <div>
+            <div class="k-title">Documentation Chunks</div>
+            <div class="k-subtitle">Vector store for RAG retrieval</div>
+          </div>
+        </div>
+        <div class="k-body">
+          3,198 curated chunks of NetSuite documentation, SuiteQL syntax guides, SuiteScript API references, and platform-specific knowledge. Embedded with OpenAI <code>text-embedding-3-small</code> (1024-dim). Stored in PostgreSQL via pgvector. UTF-8 sanitized on ingest.
+        </div>
+        <table class="k-table">
+          <tr><th>Property</th><th>Value</th></tr>
+          <tr><td>Embedding Model</td><td class="mono">text-embedding-3-small</td></tr>
+          <tr><td>Dimensions</td><td class="mono">1024</td></tr>
+          <tr><td>Total Chunks</td><td>3,198</td></tr>
+          <tr><td>Similarity</td><td>Cosine (pgvector)</td></tr>
+          <tr><td>Fallback</td><td>Voyage AI</td></tr>
+        </table>
+      </div>
+
+      <!-- Entity Mappings -->
+      <div class="knowledge-card purple">
+        <div class="k-header">
+          <div class="k-icon" style="background: var(--glow-purple);">🏷️</div>
+          <div>
+            <div class="k-title">Entity Mappings</div>
+            <div class="k-subtitle">Natural language → NetSuite script IDs</div>
+          </div>
+        </div>
+        <div class="k-body">
+          2,109 mappings for the test tenant, seeded from the metadata discovery pipeline. Maps human-readable names ("Inventory Processor", "Rush flag") to NetSuite internal IDs (<code>customrecord_inv_proc</code>, <code>custbody_rush</code>). Indexed with composite GIN + pg_trgm for sub-millisecond fuzzy matching.
+        </div>
+        <table class="k-table">
+          <tr><th>Property</th><th>Value</th></tr>
+          <tr><td>Table</td><td class="mono">tenant_entity_mapping</td></tr>
+          <tr><td>Index</td><td>Composite GIN (pg_trgm)</td></tr>
+          <tr><td>Seeded From</td><td>Metadata discovery pipeline</td></tr>
+          <tr><td>Extraction</td><td>Haiku NER → fuzzy match</td></tr>
+        </table>
+      </div>
+
+      <!-- Domain Knowledge -->
+      <div class="knowledge-card cyan">
+        <div class="k-header">
+          <div class="k-icon" style="background: var(--glow-cyan);">🌐</div>
+          <div>
+            <div class="k-title">Domain Knowledge</div>
+            <div class="k-subtitle">Curated SuiteQL rules and data model patterns</div>
+          </div>
+        </div>
+        <div class="k-body">
+          Handcrafted knowledge chunks about SuiteQL syntax quirks, NetSuite data model relationships, join patterns, and common pitfalls. Embedded with OpenAI <code>text-embedding-3-small</code> (1536-dim) and retrieved via pgvector cosine similarity. Acts as the agent's "textbook" for query construction.
+        </div>
+        <table class="k-table">
+          <tr><th>Property</th><th>Value</th></tr>
+          <tr><td>Table</td><td class="mono">domain_knowledge_chunks</td></tr>
+          <tr><td>Embedding</td><td class="mono">text-embedding-3-small</td></tr>
+          <tr><td>Dimensions</td><td class="mono">1536</td></tr>
+          <tr><td>Fallback</td><td>Keyword search (ILIKE)</td></tr>
+        </table>
+      </div>
+
+      <!-- Proven Query Patterns -->
+      <div class="knowledge-card green">
+        <div class="k-header">
+          <div class="k-icon" style="background: var(--glow-green);">✅</div>
+          <div>
+            <div class="k-title">Proven Query Patterns</div>
+            <div class="k-subtitle">Self-improving query library</div>
+          </div>
+        </div>
+        <div class="k-body">
+          After every successful SuiteQL execution, the system extracts the SQL, tables, and columns used, embeds the original user question, and upserts the pattern. Success count is incremented for repeated patterns. At query time, similar patterns are retrieved and injected as examples for the agent.
+        </div>
+        <table class="k-table">
+          <tr><th>Property</th><th>Value</th></tr>
+          <tr><td>Table</td><td class="mono">tenant_query_patterns</td></tr>
+          <tr><td>Trigger</td><td>Successful SuiteQL execution</td></tr>
+          <tr><td>Dedup</td><td>SQL hash → increment success_count</td></tr>
+          <tr><td>Retrieval</td><td>Embedding similarity</td></tr>
+        </table>
+      </div>
+
+      <!-- Learned Rules -->
+      <div class="knowledge-card amber">
+        <div class="k-header">
+          <div class="k-icon" style="background: rgba(245, 158, 11, 0.15);">💡</div>
+          <div>
+            <div class="k-title">Learned Rules</div>
+            <div class="k-subtitle">Corrections extracted from user feedback</div>
+          </div>
+        </div>
+        <div class="k-body">
+          When a user says "No, the platform field is custitem_fw_platform" or "always use ROWNUM for pagination," the memory updater extracts the correction and persists it. Future sessions automatically apply these rules. Regex-gated — zero LLM cost for 95% of messages, only triggers on correction signals.
+        </div>
+        <table class="k-table">
+          <tr><th>Property</th><th>Value</th></tr>
+          <tr><td>Table</td><td class="mono">tenant_learned_rules</td></tr>
+          <tr><td>Trigger</td><td>Regex: "actually...", "remember that..."</td></tr>
+          <tr><td>Extraction</td><td>Fast LLM (Haiku)</td></tr>
+          <tr><td>Types</td><td>Entity mapping, behavioral rule</td></tr>
+        </table>
+      </div>
+
+      <!-- Tenant Metadata -->
+      <div class="knowledge-card rose">
+        <div class="k-header">
+          <div class="k-icon" style="background: rgba(244, 63, 94, 0.15);">🔑</div>
+          <div>
+            <div class="k-title">NetSuite Metadata</div>
+            <div class="k-subtitle">Live schema discovery from tenant's account</div>
+          </div>
+        </div>
+        <div class="k-body">
+          Celery worker runs 14 SuiteQL discovery queries against the tenant's NetSuite account to catalog: custom body fields, column fields, item fields, entity fields, CRM fields, custom records, custom lists, saved searches, scripts, deployments, workflows, subsidiaries, departments, and locations. Stored as structured JSON in PostgreSQL.
+        </div>
+        <table class="k-table">
+          <tr><th>Property</th><th>Value</th></tr>
+          <tr><td>Discovery</td><td>14 SuiteQL queries via Celery</td></tr>
+          <tr><td>Storage</td><td>JSONB columns in PostgreSQL</td></tr>
+          <tr><td>Refresh</td><td>Manual trigger or scheduled</td></tr>
+          <tr><td>Auth</td><td>OAuth 2.0 (token auto-refresh)</td></tr>
+        </table>
+      </div>
+
+      <!-- How they connect -->
+      <div class="knowledge-card full-width" style="border-color: var(--border-glow);">
+        <div class="k-header">
+          <div class="k-icon" style="background: rgba(99, 102, 241, 0.15);">🔗</div>
+          <div>
+            <div class="k-title">How Knowledge Flows Into Every Chat Turn</div>
+          </div>
+        </div>
+        <div class="k-body">
+          Every user message triggers a concurrent knowledge assembly pipeline. Entity Resolution, Domain Knowledge, and Proven Patterns run in parallel via <code>asyncio.gather()</code>, injecting their results as XML context blocks into the agent's system prompt. Meanwhile, RAG doc chunks are pre-retrieved and injected into the user message itself. The Tenant Metadata and Soul Config are loaded at prompt construction time. Learned Rules feed back into Entity Mappings and are available for the next session. The result: the agent starts every turn with the full context of who this tenant is, what their NetSuite looks like, what's worked before, and what corrections the user has made.
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══════════════════════════════════════════════ -->
+  <!-- VIEW 3: Live Data Flow                         -->
+  <!-- ═══════════════════════════════════════════════ -->
+  <div class="view" id="view-dataflow">
+    <div class="flow-timeline">
+
+      <div class="timeline-step">
+        <div class="timeline-dot" style="background: var(--glow-blue);">💬</div>
+        <div class="timeline-content">
+          <div class="timeline-title">User: "Show me last month's top 10 customers by revenue"</div>
+          <div class="timeline-desc">Message enters the orchestrator. Input is sanitized, conversation history loaded and compacted if needed.</div>
+          <div class="timeline-tech">
+            <span class="tech-tag">sanitize_user_input()</span>
+            <span class="tech-tag">history_compactor</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="timeline-step">
+        <div class="timeline-dot" style="background: var(--glow-purple);">🔍</div>
+        <div class="timeline-content">
+          <div class="timeline-title">RAG Pre-Retrieval <span class="tag blue">ASYNC</span></div>
+          <div class="timeline-desc">User question embedded → pgvector finds relevant doc chunks about SuiteQL customer queries, revenue calculation patterns. Results injected as context.</div>
+          <div class="timeline-tech">
+            <span class="tech-tag">embed_query()</span>
+            <span class="tech-tag">retriever_node()</span>
+            <span class="tech-tag">pgvector cosine</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="timeline-step">
+        <div class="timeline-dot" style="background: var(--glow-purple);">🧠</div>
+        <div class="timeline-content">
+          <div class="timeline-title">Concurrent Context Assembly <span class="tag purple">PARALLEL</span></div>
+          <div class="timeline-desc">Three operations fire simultaneously:<br>
+            <strong>1. Entity Resolution:</strong> Haiku extracts "customers", "revenue" → fuzzy matches find no custom entities (these are standard NetSuite terms).<br>
+            <strong>2. Domain Knowledge:</strong> Retrieves chunks about Transaction table joins, revenue field locations, and date filtering in SuiteQL.<br>
+            <strong>3. Proven Patterns:</strong> Finds a similar past query "top customers by sales" → injects the working SQL as an example.
+          </div>
+          <div class="timeline-tech">
+            <span class="tech-tag">asyncio.gather()</span>
+            <span class="tech-tag">TenantEntityResolver</span>
+            <span class="tech-tag">retrieve_domain_knowledge()</span>
+            <span class="tech-tag">retrieve_similar_patterns()</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="timeline-step">
+        <div class="timeline-dot" style="background: var(--glow-green);">⚙️</div>
+        <div class="timeline-content">
+          <div class="timeline-title">System Prompt Assembly</div>
+          <div class="timeline-desc">Base template + tenant profile + custom fields (custbody_*, custcol_*) + soul tone + tool inventory + workspace context (if any) + all context blocks from step 3. The agent now knows this tenant's exact NetSuite schema.</div>
+          <div class="timeline-tech">
+            <span class="tech-tag">get_active_template()</span>
+            <span class="tech-tag">soul_service</span>
+            <span class="tech-tag">tool_inventory</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="timeline-step">
+        <div class="timeline-dot" style="background: rgba(245, 158, 11, 0.15);">🤖</div>
+        <div class="timeline-content">
+          <div class="timeline-title">Unified Agent Execution <span class="tag amber">STREAMING</span></div>
+          <div class="timeline-desc">
+            The agent reasons in a <code>&lt;reasoning&gt;</code> block, plans the query approach, then calls <code>netsuite_suiteql</code> with:<br>
+            <code style="font-size: 12px; color: var(--accent-cyan); display: block; margin-top: 8px; line-height: 1.6;">SELECT c.companyname, SUM(t.amount) AS total_revenue<br>FROM transaction t JOIN customer c ON t.entity = c.id<br>WHERE t.type = 'CustInvc' AND t.trandate >= TRUNC(ADD_MONTHS(SYSDATE, -1), 'MONTH')<br>GROUP BY c.companyname ORDER BY total_revenue DESC<br>WHERE ROWNUM <= 10</code>
+          </div>
+          <div class="timeline-tech">
+            <span class="tech-tag">UnifiedAgent.run_streaming()</span>
+            <span class="tech-tag">netsuite_suiteql</span>
+            <span class="tech-tag">SSE text events</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="timeline-step">
+        <div class="timeline-dot" style="background: rgba(16, 185, 129, 0.15);">🌐</div>
+        <div class="timeline-content">
+          <div class="timeline-title">NetSuite REST API Call</div>
+          <div class="timeline-desc">The <code>netsuite_suiteql</code> tool validates the query, enforces row limits, then sends it to NetSuite via REST API (<code>/services/rest/query/v1/suiteql</code>) with OAuth 2.0 Bearer token. Token auto-refreshes if expired. Results returned as JSON.</div>
+          <div class="timeline-tech">
+            <span class="tech-tag">execute_suiteql()</span>
+            <span class="tech-tag">OAuth 2.0 Bearer</span>
+            <span class="tech-tag">REST API</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="timeline-step">
+        <div class="timeline-dot" style="background: rgba(244, 63, 94, 0.15);">📊</div>
+        <div class="timeline-content">
+          <div class="timeline-title">Response Streaming + Post-Processing</div>
+          <div class="timeline-desc">Agent formats results into a readable table, streams tokens to frontend via SSE. After completion: message saved to DB, audit logged (tokens, tools, duration), credits deducted, and the memory updater checks for corrections. The successful query pattern is extracted and saved for future use.</div>
+          <div class="timeline-tech">
+            <span class="tech-tag">SSE yield</span>
+            <span class="tech-tag">audit_service.log_event()</span>
+            <span class="tech-tag">deduct_chat_credits()</span>
+            <span class="tech-tag">maybe_extract_correction()</span>
+            <span class="tech-tag">upsert_pattern()</span>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <div class="footer">
+    Suite Studio AI — Chat Intelligence Architecture &nbsp;·&nbsp; March 2026
+  </div>
+</div>
+
+<script>
+function switchView(view) {
+  document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.getElementById('view-' + view).classList.add('active');
+  event.target.classList.add('active');
+}
+</script>
+
+</body>
+</html>

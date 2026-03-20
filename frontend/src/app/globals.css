@@ -36,7 +36,7 @@
 
     --sidebar-bg: 240 11% 4%;
     --sidebar-foreground: 240 5% 65%;
-    --sidebar-active: 243.4 75.4% 58.6%;
+    --sidebar-active: 20 100% 61%;
     --sidebar-hover: 240 6% 10%;
     --sidebar-border: 240 6% 12%;
     --sidebar-muted: 240 5% 40%;
@@ -52,7 +52,7 @@
     --card-foreground: 0 0% 95%;
     --popover: 240 10% 8%;
     --popover-foreground: 0 0% 95%;
-    --primary: 243.4 75.4% 58.6%;
+    --primary: 142 70% 45%;
     --primary-foreground: 0 0% 100%;
     --accent: 354.8 100% 63.9%;
     --accent-foreground: 0 0% 100%;
@@ -64,11 +64,11 @@
     --muted-foreground: 240 5% 65%;
     --border: 240 4% 16%;
     --input: 240 4% 16%;
-    --ring: 243.4 75.4% 58.6%;
+    --ring: 142 70% 45%;
 
     --sidebar-bg: 240 11% 4%;
     --sidebar-foreground: 240 5% 65%;
-    --sidebar-active: 243.4 75.4% 58.6%;
+    --sidebar-active: 20 100% 61%;
     --sidebar-hover: 240 6% 12%;
     --sidebar-border: 240 4% 12%;
     --sidebar-muted: 240 5% 40%;
@@ -175,3 +175,43 @@
 .animate-thinking-fade {
   animation: thinking-fade 2s ease-in-out infinite;
 }
+
+/* Matrix-green breathing glow on focus rings */
+@keyframes ring-breathe {
+  0%, 100% { box-shadow: 0 0 0 2px hsl(var(--ring) / 0.5); }
+  50% { box-shadow: 0 0 8px 2px hsl(var(--ring) / 0.3); }
+}
+
+*:focus-visible {
+  animation: ring-breathe 2.5s ease-in-out infinite;
+}
+
+/* ── Chat Terminal Theme (scoped to .chat-container) ── */
+.chat-container {
+  --chat-accent: #ff7936;
+  --chat-accent-hover: #ff915d;
+  --chat-accent-dim: #ff742d;
+  --chat-accent-glow: rgba(255, 102, 0, 0.04);
+
+  --chat-surface: #0e0e0e;
+  --chat-surface-low: #131313;
+  --chat-surface-mid: #1a1919;
+  --chat-surface-high: #201f1f;
+  --chat-surface-variant: #262626;
+
+  /* Override standard dark-mode tokens to be darker inside chat */
+  --background: 0 0% 5.5%;
+  --card: 0 0% 7.5%;
+  --muted: 0 0% 10%;
+  --border: 0 0% 15%;
+}
+
+/* Scoped scrollbar — chat only */
+.chat-container ::-webkit-scrollbar { width: 4px; }
+.chat-container ::-webkit-scrollbar-track { background: var(--chat-surface); }
+.chat-container ::-webkit-scrollbar-thumb { background: var(--chat-surface-variant); }
+.chat-container ::-webkit-scrollbar-thumb:hover { background: var(--chat-accent); }
+.chat-container { scrollbar-width: thin; scrollbar-color: var(--chat-surface-variant) var(--chat-surface); }
+
+/* Headline font utility */
+.font-headline { font-family: var(--font-headline, 'Space Grotesk'), sans-serif; }

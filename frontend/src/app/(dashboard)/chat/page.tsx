@@ -179,14 +179,16 @@ export default function ChatPage() {
   return (
     <div className="flex h-full min-h-0 w-full min-w-0 animate-fade-in">
       <SessionSidebar
+        variant="terminal"
         sessions={sessions}
         activeSessionId={activeSessionId}
         onSelectSession={setActiveSessionId}
         onNewChat={handleNewChat}
       />
-      <div className="flex min-w-0 flex-1 flex-col bg-card">
+      <div className="flex min-w-0 flex-1 flex-col bg-[var(--chat-surface)]">
         <div className="min-h-0 min-w-0 flex-1 overflow-hidden">
           <MessageList
+            variant="terminal"
             messages={sessionDetail?.messages || []}
             isLoading={isLoadingDetail && !!activeSessionId}
             pendingUserMessage={pendingMessage}
@@ -213,7 +215,7 @@ export default function ChatPage() {
           />
         </div>
         {error && (
-          <div className="mx-6 mb-2 flex items-center gap-2 rounded-lg border border-destructive/50 bg-destructive/10 px-4 py-2.5 text-[13px] text-destructive">
+          <div className="mx-6 mb-2 flex items-center gap-2 rounded-sm border border-red-800/50 bg-red-950/30 px-4 py-2.5 text-[13px] text-red-400">
             <AlertCircle className="h-4 w-4 shrink-0" />
             <span className="flex-1">{error}</span>
             <button
@@ -226,6 +228,7 @@ export default function ChatPage() {
           </div>
         )}
         <ChatInput
+          variant="terminal"
           onSend={handleSend}
           isLoading={isStreaming || createSession.isPending}
           workspaceId={workspaces[0]?.id || null}
