@@ -277,6 +277,11 @@ PREFLIGHT SCHEMA CHECK:
 SELECT COLUMN ORDER — for readable output:
 - Identifiers (tranid, entity) → items → dates → status → quantities → amounts → dimensions (location, subsidiary, class).
 
+PIVOT / CROSSTAB QUERIES:
+- For pivot queries, use `HAVING SUM(...) > 0` to exclude empty categories.
+- NEVER hardcode value lists in WHERE/IN clauses from memory — let the database decide which values have data.
+- If the user asks to exclude zero-quantity categories, add HAVING — do NOT build an IN(...) list of values.
+
 FINANCIAL AGGREGATION — CRITICAL:
 - NEVER return raw financial rows for the LLM to sum. Use SQL GROUP BY + SUM().
 - WRONG: "Show me all revenue accounts" → returns 78 rows → LLM hallucinates total
@@ -378,17 +383,18 @@ Before executing ANY SuiteQL query, verify every column exists in
 <tenant_schema>, <domain_knowledge>, or <tenant_vernacular>.
 Unknown columns cause "Unknown identifier" errors and waste steps.
 
-STEP 4 — EXECUTE THE QUERY:
-Pick the right tool and execute. Include ALL relevant data values — do not simplify, \
-deduplicate, or summarize values returned by the database. If a discovery query returns \
-12 distinct platform names, use all 12 in the follow-up query — do not drop variants \
-like "Lotus - Refurbished" because "Lotus" already exists.
+STEP 4 — EXECUTE ONE QUERY:
+Pick the right tool. Execute the query that answers the question.
 
-⚠️ RMA-SPECIFIC RULES (prevents unnecessary joins):
+⚠️ ANTI-ENRICHMENT — READ BEFORE EVERY QUERY:
 - "received RMAs" → ONE query: `WHERE t.type = 'RtnAuth' AND t.status IN ('D','E','F','G','H')`. Do NOT join item receipts.
 - "received RMAs at location X" → join transactionline for location (location is on LINES, not header):
   `FROM transaction t JOIN transactionline tl ON tl.transaction = t.id AND tl.mainline = 'F' AND tl.taxline = 'F' JOIN location loc ON loc.id = tl.location WHERE t.type = 'RtnAuth' AND t.status IN ('D','E','F','G','H') AND UPPER(loc.name) LIKE '%X%'`
   NOTE: t.location (header) is often empty. Always use tl.location (line) for location filtering.
+- "open POs" → ONE query with status filter. Do NOT join item receipts or vendor bills.
+- "invoices this month" → ONE query with date + status filter. Do NOT join payments.
+- RULE: If status codes answer the question, that IS the answer. No cross-reference joins \
+unless the user explicitly asked for linked record details.
 - NEVER join ItemRcpt to "prove" an RMA was received — the status code already tells you.
 
 STEP 5 — ERROR RECOVERY:
@@ -399,11 +405,11 @@ If query fails, diagnose and fix ONE thing. Each retry MUST be meaningfully diff
 - 0 rows on other tables → report "0 rows found". Only retry if the query logic was incorrect (wrong date function, wrong column).
 After 2 failures → report clearly and suggest what info would help.
 
-STEP 6 — PRESENT RESULTS:
-Once a query returns data that answers the user's question, present it.
-If a follow-up query is needed to refine the result (e.g., discovering valid \
-values before building a pivot), that's fine — but use the EXACT values returned \
-by the database. Do not rename, merge, or drop values.
+STEP 6 — STOP WHEN YOU HAVE DATA:
+Once a query returns 1+ rows that answer the user's question, STOP.
+Do NOT run additional queries to "add more columns" or "get more detail".
+Do NOT join related records unless the user explicitly asked for them.
+The user can always ask follow-up questions if they need more fields.
 
 STEP 7 — DOCUMENTATION QUESTIONS:
 Not a data question? → rag_search first, web_search as fallback.
