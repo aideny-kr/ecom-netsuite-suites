@@ -215,7 +215,7 @@ export default function ChatPage() {
           />
         </div>
         {error && (
-          <div className="mx-6 mb-2 flex items-center gap-2 rounded-sm border border-red-800/50 bg-red-950/30 px-4 py-2.5 text-[13px] text-red-400">
+          <div className="mx-6 mb-2 flex items-center gap-2 rounded-sm border border-destructive/20 bg-destructive/5 px-4 py-2.5 text-[13px] text-destructive">
             <AlertCircle className="h-4 w-4 shrink-0" />
             <span className="flex-1">{error}</span>
             <button
