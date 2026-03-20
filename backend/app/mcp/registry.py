@@ -6,6 +6,7 @@ from app.mcp.tools import (
     netsuite_metadata_tool,
     netsuite_report,
     netsuite_suiteql,
+    pivot_tool,
     rag_search,
     recon_run,
     report_export,
@@ -73,6 +74,49 @@ TOOL_REGISTRY = {
                 "description": (
                     "Subsidiary ID to filter. Defaults to -1 (consolidated parent)."
                 ),
+            },
+        },
+    },
+    "netsuite.pivot_query_result": {
+        "description": (
+            "Pivot a SuiteQL query result into a crosstab table. Re-executes the query "
+            "without row limits and pivots server-side. Use this INSTEAD of building "
+            "CASE WHEN pivot SQL manually. The tool determines which values become columns "
+            "from the actual data — no hallucinated or missing values."
+        ),
+        "execute": pivot_tool.execute,
+        "params_schema": {
+            "query": {
+                "type": "string",
+                "required": True,
+                "description": "The SuiteQL query to re-execute. FETCH FIRST will be stripped automatically.",
+            },
+            "row_field": {
+                "type": "string",
+                "required": True,
+                "description": "Column name for row grouping (e.g., 'week_start_date')",
+            },
+            "column_field": {
+                "type": "string",
+                "required": True,
+                "description": "Column name whose distinct values become pivot columns (e.g., 'platform')",
+            },
+            "value_field": {
+                "type": "string",
+                "required": True,
+                "description": "Column name to aggregate into cells (e.g., 'total_qty')",
+            },
+            "aggregation": {
+                "type": "string",
+                "required": False,
+                "default": "sum",
+                "description": "Aggregation: 'sum', 'count', 'avg', 'max', 'min'",
+            },
+            "include_total": {
+                "type": "boolean",
+                "required": False,
+                "default": True,
+                "description": "Add a Total column",
             },
         },
     },

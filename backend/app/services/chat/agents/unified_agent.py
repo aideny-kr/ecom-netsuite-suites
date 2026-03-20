@@ -45,6 +45,7 @@ _UNIFIED_TOOL_NAMES = frozenset(
     {
         # SuiteQL agent tools
         "netsuite_suiteql",
+        "netsuite_pivot_query_result",
         "netsuite_get_metadata",
         "netsuite_financial_report",
         # RAG agent tools
@@ -122,6 +123,12 @@ AD-HOC DATA QUERIES (orders, invoices, customers, items, inventory):
 → CHECK <proven_patterns> — if a similar query succeeded before, use its pattern.
 → CHECK <learned_rules> — tenant may have standing rules (e.g., "exclude cancelled orders").
 → FOLLOW ALL <suiteql_dialect_rules> — they apply to BOTH MCP and local SuiteQL.
+
+PIVOT / CROSSTAB:
+→ Do NOT build CASE WHEN pivot SQL manually — use netsuite_pivot_query_result tool.
+→ First run a flat GROUP BY query, then call netsuite_pivot_query_result with the same query.
+→ The tool re-executes the query and pivots server-side with exact database values.
+→ Parameters: query (the GROUP BY SQL), row_field, column_field, value_field, aggregation (sum/count/avg).
 
 SCHEMA/COLUMN DISCOVERY:
 → First check <tenant_schema> and <standard_table_schemas> (already in your context).

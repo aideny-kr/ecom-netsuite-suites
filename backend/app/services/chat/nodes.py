@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 ALLOWED_CHAT_TOOLS: frozenset[str] = frozenset(
     {
         "netsuite.suiteql",
+        "netsuite.pivot_query_result",
         "netsuite.financial_report",
         "netsuite.report",
         "netsuite.connectivity",
