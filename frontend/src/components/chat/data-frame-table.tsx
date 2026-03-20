@@ -152,7 +152,7 @@ export function DataFrameTable({ data, queryText }: DataFrameTableProps) {
         <div className="flex items-center gap-1">
           <button
             onClick={handleCopy}
-            className="inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            className="inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-[var(--chat-accent)] hover:text-white"
             title="Copy to clipboard (tab-separated for Excel)"
           >
             {copied ? (
@@ -164,7 +164,7 @@ export function DataFrameTable({ data, queryText }: DataFrameTableProps) {
           </button>
           <button
             onClick={handleDownloadCSV}
-            className="inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            className="inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-[var(--chat-accent)] hover:text-white"
             title="Download as CSV"
           >
             <Download className="h-3 w-3" />
@@ -188,7 +188,7 @@ export function DataFrameTable({ data, queryText }: DataFrameTableProps) {
               }
             }}
             disabled={isExporting}
-            className="inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground disabled:opacity-50"
+            className="inline-flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-[var(--chat-accent)] hover:text-white disabled:opacity-50"
             title="Export as Excel"
           >
             {isExporting ? (
