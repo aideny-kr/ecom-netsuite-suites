@@ -92,58 +92,24 @@ export function QueryPreviewModal({
     getCoreRowModel: getCoreRowModel(),
   });
 
-  // -- Export flow: trigger → poll → download --------------------------------
+  // -- Export flow: re-execute query and download directly --------------------
   const handleExport = useCallback(async () => {
-    setExportState({ phase: "queuing" });
-
-    try {
-      const res = await apiClient.post<ExportResponse>(
-        "/api/v1/skills/export",
-        { query_id: query.id } as ExportRequest,
-      );
-      const taskId = res.task_id;
-      setExportState({ phase: "polling", taskId });
-
-      const poll = async () => {
-        try {
-          const job = await apiClient.get<{
-            status: string;
-            result_summary?: { file_name?: string; file_path?: string };
-            error_message?: string;
-          }>(`/api/v1/jobs/${taskId}`);
-
-          if (job.status === "completed") {
-            const fileName = job.result_summary?.file_name;
-            if (fileName) {
-              setExportState({ phase: "done", fileName });
-              window.open(
-                `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/v1/exports/${fileName}`,
-                "_blank",
-              );
-            } else {
-              setExportState({ phase: "done", fileName: "export.csv" });
-            }
-          } else if (job.status === "failed") {
-            setExportState({
-              phase: "error",
-              message: job.error_message || "Export failed.",
-            });
-          } else {
-            setTimeout(poll, 2000);
-          }
-        } catch {
-          setExportState({
-            phase: "error",
-            message: "Lost connection while checking export status.",
-          });
-        }
-      };
-
-      poll();
-    } catch {
-      setExportState({ phase: "error", message: "Failed to start export." });
+    if (!query.query_text) {
+      setExportState({ phase: "error", message: "No query text available." });
+      return;
     }
-  }, [query.id]);
+    setExportState({ phase: "queuing" });
+    try {
+      await exportFromQuery({
+        queryText: query.query_text,
+        title: query.name || "query-export",
+        format: "csv",
+      });
+      setExportState({ phase: "done", fileName: `${query.name || "export"}.csv` });
+    } catch {
+      setExportState({ phase: "error", message: "Failed to export." });
+    }
+  }, [query.query_text, query.name, exportFromQuery]);
 
   // -- Derived UI helpers ----------------------------------------------------
   const isExportBusy =
