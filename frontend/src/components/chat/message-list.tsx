@@ -16,7 +16,7 @@ import { ToolCallStepCard } from "@/components/chat/tool-call-step";
 import { ChangeProposalCard } from "@/components/chat/change-proposal-card";
 import { WorkspaceToolCard } from "@/components/chat/workspace-tool-card";
 import { SuiteQLToolCard } from "@/components/chat/suiteql-tool-card";
-import { FileCode, Bookmark, Check, Loader2, Copy, ThumbsUp, ThumbsDown } from "lucide-react";
+import { FileCode, Bookmark, Check, Loader2, Copy, ThumbsUp, ThumbsDown, User, Zap } from "lucide-react";
 import { ConfidenceBadge } from "@/components/chat/confidence-badge";
 import { ImportanceBanner } from "@/components/chat/importance-banner";
 import { useChatFeedback } from "@/hooks/use-chat-feedback";
@@ -36,57 +36,65 @@ function FrameworkIcon({ className }: { className?: string }) {
 }
 
 /** Shared markdown components with syntax-highlighted code blocks */
-const mdComponents: Components = {
-  code({ className, children, ...props }) {
-    const match = /language-(\w+)/.exec(className || "");
-    const codeString = String(children).replace(/\n$/, "");
-    const isMultiline = codeString.includes("\n");
+function makeMdComponents(isTerminal: boolean): Components {
+  return {
+    code({ className, children, ...props }) {
+      const match = /language-(\w+)/.exec(className || "");
+      const codeString = String(children).replace(/\n$/, "");
+      const isMultiline = codeString.includes("\n");
 
-    // Inline code (single line, no language tag)
-    if (!match && !isMultiline) {
+      // Inline code (single line, no language tag)
+      if (!match && !isMultiline) {
+        return (
+          <code
+            className="rounded bg-muted px-1.5 py-0.5 text-[13px] font-mono text-foreground"
+            {...props}
+          >
+            {children}
+          </code>
+        );
+      }
+
+      const language = match?.[1] || "text";
+
       return (
-        <code
-          className="rounded bg-muted px-1.5 py-0.5 text-[13px] font-mono text-foreground"
-          {...props}
-        >
-          {children}
-        </code>
+        <div className={cn(
+          "group relative my-0 overflow-hidden border border-border/50",
+          isTerminal ? "rounded-sm" : "rounded-xl",
+        )}>
+          <div className="flex items-center justify-between bg-muted/80 px-3 py-1.5 text-[11px] font-medium text-muted-foreground">
+            <span>{language}</span>
+            <button
+              onClick={() => navigator.clipboard.writeText(codeString)}
+              className="opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1 hover:text-foreground"
+            >
+              <Copy className="h-3 w-3" />
+              Copy
+            </button>
+          </div>
+          <div className="overflow-x-auto scrollbar-thin">
+            <SyntaxHighlighter
+              style={oneDark}
+              language={language}
+              PreTag="div"
+              customStyle={{
+                margin: 0,
+                borderRadius: 0,
+                fontSize: "13px",
+                lineHeight: "1.5",
+              }}
+            >
+              {codeString}
+            </SyntaxHighlighter>
+          </div>
+        </div>
       );
-    }
+    },
+  };
+}
 
-    const language = match?.[1] || "text";
-
-    return (
-      <div className="group relative my-0 overflow-hidden rounded-xl border border-border/50">
-        <div className="flex items-center justify-between bg-muted/80 px-3 py-1.5 text-[11px] font-medium text-muted-foreground">
-          <span>{language}</span>
-          <button
-            onClick={() => navigator.clipboard.writeText(codeString)}
-            className="opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1 hover:text-foreground"
-          >
-            <Copy className="h-3 w-3" />
-            Copy
-          </button>
-        </div>
-        <div className="overflow-x-auto scrollbar-thin">
-          <SyntaxHighlighter
-            style={oneDark}
-            language={language}
-            PreTag="div"
-            customStyle={{
-              margin: 0,
-              borderRadius: 0,
-              fontSize: "13px",
-              lineHeight: "1.5",
-            }}
-          >
-            {codeString}
-          </SyntaxHighlighter>
-        </div>
-      </div>
-    );
-  },
-};
+/** Static default markdown components (no terminal styling) */
+const mdComponents: Components = makeMdComponents(false);
 
 function renderWithMentions(
   content: string,
@@ -316,50 +324,65 @@ function isIndentedCodeStart(lines: string[], index: number): boolean {
 function MarkdownRenderer({
   content,
   className,
+  isTerminal = false,
 }: {
   content: string;
   className?: string;
+  isTerminal?: boolean;
 }) {
+  const components = isTerminal ? makeMdComponents(true) : mdComponents;
   return (
     <div className={cn("chat-markdown text-[14px] leading-relaxed", className)}>
-      <ReactMarkdown remarkPlugins={[remarkGfm]} components={mdComponents}>
+      <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
         {content}
       </ReactMarkdown>
     </div>
   );
 }
 
-function AssistantNarrativeBubble({ content }: { content: string }) {
+function AssistantNarrativeBubble({ content, isTerminal = false }: { content: string; isTerminal?: boolean }) {
   return (
-    <div className="max-w-full rounded-2xl bg-muted/60 px-4 py-3 md:max-w-[75%]">
-      <MarkdownRenderer content={content} />
+    <div className={cn(
+      isTerminal
+        ? "max-w-full bg-zinc-800/40 backdrop-blur-xl p-8 rounded-sm shadow-[0_20px_40px_rgba(255,102,0,0.04)] relative overflow-hidden md:max-w-[75%]"
+        : "max-w-full rounded-2xl bg-muted/60 px-4 py-3 md:max-w-[75%]",
+    )}>
+      {isTerminal && (
+        <div className="absolute top-0 left-0 w-1 h-full bg-[var(--chat-accent)]" />
+      )}
+      <MarkdownRenderer content={content} isTerminal={isTerminal} />
     </div>
   );
 }
 
-function AssistantRichBlock({ content }: { content: string }) {
+function AssistantRichBlock({ content, isTerminal = false }: { content: string; isTerminal?: boolean }) {
   return (
     <div
-      className="w-full overflow-hidden rounded-2xl border border-border/60 bg-background/80"
+      className={cn(
+        "w-full overflow-hidden",
+        isTerminal
+          ? "rounded-sm border border-zinc-800/50 bg-zinc-900/80"
+          : "rounded-2xl border border-border/60 bg-background/80",
+      )}
       data-testid="assistant-rich-block"
     >
       <div className="max-h-[60vh] overflow-auto p-4 scrollbar-thin">
-        <MarkdownRenderer content={content} className="chat-markdown-rich" />
+        <MarkdownRenderer content={content} className="chat-markdown-rich" isTerminal={isTerminal} />
       </div>
     </div>
   );
 }
 
-function AssistantTextBlocks({ content }: { content: string }) {
+function AssistantTextBlocks({ content, isTerminal = false }: { content: string; isTerminal?: boolean }) {
   const blocks = splitMarkdownDisplayBlocks(content);
 
   return (
     <>
       {blocks.map((block, index) =>
         block.kind === "rich" ? (
-          <AssistantRichBlock key={index} content={block.content} />
+          <AssistantRichBlock key={index} content={block.content} isTerminal={isTerminal} />
         ) : (
-          <AssistantNarrativeBubble key={index} content={block.content} />
+          <AssistantNarrativeBubble key={index} content={block.content} isTerminal={isTerminal} />
         ),
       )}
     </>
@@ -367,32 +390,51 @@ function AssistantTextBlocks({ content }: { content: string }) {
 }
 
 /** Collapsed thinking block for completed messages */
-function ThinkingBlock({ content }: { content: string }) {
+function ThinkingBlock({ content, isTerminal = false }: { content: string; isTerminal?: boolean }) {
   return (
-    <details className="mb-2 rounded-lg border border-muted/50 bg-muted/20 text-[12px] group">
+    <details className={cn(
+      "mb-2 text-[12px] group",
+      isTerminal
+        ? "rounded-sm border border-zinc-800/50 bg-zinc-900/40"
+        : "rounded-lg border border-muted/50 bg-muted/20",
+    )}>
       <summary className="cursor-pointer select-none px-3 py-2 text-muted-foreground/60 hover:text-muted-foreground font-medium flex items-center gap-2 transition-colors">
         <FrameworkIcon className="h-3 w-3" />
         Thought process
       </summary>
       <div className="px-3 pb-2.5 text-muted-foreground/70 text-[12px] leading-relaxed">
-        <MarkdownRenderer content={content} className="text-[12px] text-muted-foreground/70" />
+        <MarkdownRenderer content={content} className="text-[12px] text-muted-foreground/70" isTerminal={isTerminal} />
       </div>
     </details>
   );
 }
 
 /** Live thinking block shown during streaming — Gemini-style animation */
-function StreamingThinkingBlock({ content, isActive }: { content: string | null; isActive: boolean }) {
+function StreamingThinkingBlock({ content, isActive, isTerminal = false }: { content: string | null; isActive: boolean; isTerminal?: boolean }) {
   return (
-    <div className="mb-2 rounded-lg border border-primary/10 bg-primary/[0.03] overflow-hidden">
+    <div className={cn(
+      "mb-2 overflow-hidden",
+      isTerminal
+        ? "rounded-sm border border-zinc-800/50 bg-zinc-900/40"
+        : "rounded-lg border border-primary/10 bg-primary/[0.03]",
+    )}>
       <div className="flex items-center gap-2 px-3 py-2">
         {isActive && (
           <span className="relative flex h-2 w-2">
-            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-primary/40" />
-            <span className="relative inline-flex h-2 w-2 rounded-full bg-primary/60" />
+            <span className={cn(
+              "absolute inline-flex h-full w-full animate-ping rounded-full",
+              isTerminal ? "bg-[var(--chat-accent)]/40" : "bg-primary/40",
+            )} />
+            <span className={cn(
+              "relative inline-flex h-2 w-2 rounded-full",
+              isTerminal ? "bg-[var(--chat-accent)]/60" : "bg-primary/60",
+            )} />
           </span>
         )}
-        <span className="text-[12px] font-medium text-primary/70">
+        <span className={cn(
+          "text-[12px] font-medium",
+          isTerminal ? "text-[var(--chat-accent)]/70" : "text-primary/70",
+        )}>
           {isActive ? "Thinking..." : "Thought process"}
         </span>
       </div>
@@ -405,7 +447,7 @@ function StreamingThinkingBlock({ content, isActive }: { content: string | null;
           {isActive ? (
             <p className="whitespace-pre-wrap">{content}</p>
           ) : (
-            <MarkdownRenderer content={content} className="text-[12px] text-muted-foreground/60" />
+            <MarkdownRenderer content={content} className="text-[12px] text-muted-foreground/60" isTerminal={isTerminal} />
           )}
         </div>
       )}
@@ -430,6 +472,7 @@ interface MessageListProps {
   dataTable?: DataTableData | null;
   dataTables?: Map<string, DataTableData>;
   onImportanceOverride?: (messageId: string, newTier: number) => void;
+  variant?: "default" | "terminal";
 }
 
 export function MessageList({
@@ -449,8 +492,10 @@ export function MessageList({
   dataTable,
   dataTables,
   onImportanceOverride,
+  variant,
 }: MessageListProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
+  const isTerminal = variant === "terminal";
 
   // Use instant scroll during streaming (smooth can't keep up with rapid updates),
   // smooth scroll for message list changes (new messages loaded, pending message shown).
@@ -473,6 +518,21 @@ export function MessageList({
   }
 
   if (messages.length === 0 && !pendingUserMessage) {
+    if (isTerminal) {
+      return (
+        <div className="flex h-full items-start px-0 py-4">
+          <div className="max-w-4xl">
+            <h1 className="font-headline font-black text-[3.5rem] leading-none -tracking-[0.02em] text-white mb-4">
+              SUITE<br />
+              <span className="text-[var(--chat-accent)]">STUDIO_</span>AI
+            </h1>
+            <p className="text-zinc-500 text-base max-w-xl leading-relaxed">
+              Ask questions about your data, docs, or NetSuite operations.
+            </p>
+          </div>
+        </div>
+      );
+    }
     return (
       <div className="flex h-full items-center justify-center">
         <div className="text-center">
@@ -505,7 +565,12 @@ export function MessageList({
 
   return (
     <div
-      className="h-full min-h-0 min-w-0 overflow-auto px-6 py-6 space-y-5 scrollbar-thin"
+      className={cn(
+        "h-full min-h-0 min-w-0 overflow-auto",
+        isTerminal
+          ? "px-10 py-8 space-y-8"
+          : "px-6 py-6 space-y-5 scrollbar-thin",
+      )}
       data-testid="message-list"
     >
       {messages.map((message) => (
@@ -520,7 +585,19 @@ export function MessageList({
             onImportanceOverride={onImportanceOverride}
             financialReportData={financialReports?.get(message.id) ?? null}
             dataTableData={dataTables?.get(message.id) ?? null}
+            isTerminal={isTerminal}
           />
+        ) : isTerminal ? (
+          <div key={message.id} className="flex max-w-full justify-start gap-4">
+            <div className="w-10 h-10 bg-zinc-800 flex-shrink-0 flex items-center justify-center border border-zinc-700/50">
+              <User className="h-4 w-4 text-zinc-400" />
+            </div>
+            <div className="max-w-full bg-[var(--chat-surface-low)] p-6 rounded-sm border-r-2 border-zinc-800 md:max-w-[75%]">
+              <p className="text-[14px] leading-relaxed whitespace-pre-wrap break-words text-zinc-300">
+                {renderWithMentions(message.content, onMentionClick)}
+              </p>
+            </div>
+          </div>
         ) : (
           <div key={message.id} className="flex max-w-full justify-end gap-3">
             <div className="max-w-full rounded-2xl bg-primary px-4 py-2.5 text-primary-foreground md:max-w-[75%]">
@@ -534,13 +611,26 @@ export function MessageList({
 
       {/* Optimistic pending user message */}
       {pendingUserMessage && (
-        <div className="flex max-w-full justify-end gap-3">
-          <div className="max-w-full rounded-2xl bg-primary px-4 py-2.5 text-primary-foreground md:max-w-[75%]">
-            <p className="text-[14px] leading-relaxed whitespace-pre-wrap">
-              {pendingUserMessage}
-            </p>
+        isTerminal ? (
+          <div className="flex max-w-full justify-start gap-4">
+            <div className="w-10 h-10 bg-zinc-800 flex-shrink-0 flex items-center justify-center border border-zinc-700/50">
+              <User className="h-4 w-4 text-zinc-400" />
+            </div>
+            <div className="max-w-full bg-[var(--chat-surface-low)] p-6 rounded-sm border-r-2 border-zinc-800 md:max-w-[75%]">
+              <p className="text-[14px] leading-relaxed whitespace-pre-wrap text-zinc-300">
+                {pendingUserMessage}
+              </p>
+            </div>
           </div>
-        </div>
+        ) : (
+          <div className="flex max-w-full justify-end gap-3">
+            <div className="max-w-full rounded-2xl bg-primary px-4 py-2.5 text-primary-foreground md:max-w-[75%]">
+              <p className="text-[14px] leading-relaxed whitespace-pre-wrap">
+                {pendingUserMessage}
+              </p>
+            </div>
+          </div>
+        )
       )}
 
       {/* Thinking indicator / Streaming */}
@@ -552,28 +642,58 @@ export function MessageList({
           onViewDiff={onViewDiff}
           onChangesetAction={onChangesetAction}
           isStreamingPreview
+          isTerminal={isTerminal}
         />
       )}
 
       {!shouldRenderStreamingMessage && (isWaitingForReply || streamingContent || streamingStatus) && (
         <div className="flex min-w-0 justify-start gap-3">
-          <div className="mt-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-primary/10">
-            <FrameworkIcon className="h-3.5 w-3.5 text-primary" />
-          </div>
+          {isTerminal ? (
+            <div className="w-10 h-10 bg-zinc-800 flex-shrink-0 flex items-center justify-center border border-zinc-800/50">
+              <Zap className="h-4 w-4 text-[var(--chat-accent)]" />
+            </div>
+          ) : (
+            <div className="mt-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-primary/10">
+              <FrameworkIcon className="h-3.5 w-3.5 text-primary" />
+            </div>
+          )}
           <div className="min-w-0 flex-1">
-            <div className="min-w-0 overflow-hidden rounded-2xl border border-border/50 bg-muted/40">
+            <div className={cn(
+              "min-w-0 overflow-hidden",
+              isTerminal
+                ? "rounded-sm border border-zinc-800/50 bg-zinc-900/80"
+                : "rounded-2xl border border-border/50 bg-muted/40",
+            )}>
               <div className="flex max-h-[60vh] min-w-0 flex-col gap-2 overflow-auto px-4 py-3 scrollbar-thin">
             {streamingStatus ? (
-              <div className="text-[12px] font-medium text-muted-foreground flex items-center gap-2">
-                <span className="h-1.5 w-1.5 rounded-full bg-primary animate-pulse" />
-                {streamingStatus}
-              </div>
+              isTerminal ? (
+                <div className="flex items-center gap-4">
+                  <div className="h-2 w-2 bg-[var(--chat-accent)] animate-pulse" />
+                  <span className="text-[10px] tracking-widest text-[var(--chat-accent)] uppercase">
+                    {streamingStatus}
+                  </span>
+                </div>
+              ) : (
+                <div className="text-[12px] font-medium text-muted-foreground flex items-center gap-2">
+                  <span className="h-1.5 w-1.5 rounded-full bg-primary animate-pulse" />
+                  {streamingStatus}
+                </div>
+              )
             ) : !streamingContent ? (
-              <span className="inline-flex gap-1 h-[20px] items-center">
-                <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/60 animate-bounce [animation-delay:0ms]" />
-                <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/60 animate-bounce [animation-delay:150ms]" />
-                <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/60 animate-bounce [animation-delay:300ms]" />
-              </span>
+              isTerminal ? (
+                <div className="flex items-center gap-4">
+                  <div className="h-2 w-2 bg-[var(--chat-accent)] animate-pulse" />
+                  <span className="text-[10px] tracking-widest text-[var(--chat-accent)] uppercase">
+                    PROCESSING...
+                  </span>
+                </div>
+              ) : (
+                <span className="inline-flex gap-1 h-[20px] items-center">
+                  <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/60 animate-bounce [animation-delay:0ms]" />
+                  <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/60 animate-bounce [animation-delay:150ms]" />
+                  <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/60 animate-bounce [animation-delay:300ms]" />
+                </span>
+              )
             ) : null}
 
             {financialReport && (
@@ -592,10 +712,11 @@ export function MessageList({
                     <StreamingThinkingBlock
                       content={parsed.thinking}
                       isActive={parsed.isThinking}
+                      isTerminal={isTerminal}
                     />
                   )}
                   {parsed.text && (
-                    <MarkdownRenderer content={parsed.text} />
+                    <MarkdownRenderer content={parsed.text} isTerminal={isTerminal} />
                   )}
                 </>
               );
@@ -621,6 +742,7 @@ function AssistantMessageRow({
   onImportanceOverride,
   financialReportData = null,
   dataTableData = null,
+  isTerminal = false,
 }: {
   message: ChatMessage;
   messages: ChatMessage[];
@@ -631,13 +753,31 @@ function AssistantMessageRow({
   onImportanceOverride?: (messageId: string, newTier: number) => void;
   financialReportData?: FinancialReportData | null;
   dataTableData?: DataTableData | null;
+  isTerminal?: boolean;
 }) {
   return (
     <div className="flex min-w-0 justify-start gap-3">
-      <div className="mt-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-primary/10">
-        <FrameworkIcon className="h-3.5 w-3.5 text-primary" />
-      </div>
+      {isTerminal ? (
+        <div className="w-10 h-10 bg-zinc-800 flex-shrink-0 flex items-center justify-center border border-zinc-800/50">
+          <Zap className="h-4 w-4 text-[var(--chat-accent)]" />
+        </div>
+      ) : (
+        <div className="mt-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-primary/10">
+          <FrameworkIcon className="h-3.5 w-3.5 text-primary" />
+        </div>
+      )}
       <div className="flex min-w-0 flex-1 flex-col gap-2">
+        {isTerminal && (
+          <div className="flex justify-between mb-1">
+            <span className="text-[10px] tracking-widest text-[var(--chat-accent)] uppercase font-medium">
+              SUITE_STUDIO [AGENT]
+            </span>
+            <span className="text-[10px] tracking-widest text-zinc-600">
+              {new Date(message.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+            </span>
+          </div>
+        )}
+
         {message.tool_calls && message.tool_calls.length > 0 && (
           <div className="space-y-1.5">
             {message.tool_calls.map((tc, idx) => {
@@ -691,9 +831,9 @@ function AssistantMessageRow({
         <div className="flex min-w-0 flex-col gap-2">
           {parseThinkingBlocks(message.content).map((part, index) =>
             part.type === "thinking" ? (
-              <ThinkingBlock key={index} content={part.content} />
+              <ThinkingBlock key={index} content={part.content} isTerminal={isTerminal} />
             ) : (
-              <AssistantTextBlocks key={index} content={part.content} />
+              <AssistantTextBlocks key={index} content={part.content} isTerminal={isTerminal} />
             ),
           )}
         </div>
@@ -703,7 +843,12 @@ function AssistantMessageRow({
             {message.citations.map((citation, idx) => (
               <span
                 key={idx}
-                className="inline-flex items-center rounded-full bg-background/60 px-2.5 py-1 text-[11px] font-medium"
+                className={cn(
+                  "inline-flex items-center px-2.5 py-1 text-[11px] font-medium",
+                  isTerminal
+                    ? "rounded-sm bg-zinc-900/60"
+                    : "rounded-full bg-background/60",
+                )}
                 title={citation.snippet}
               >
                 {citation.type === "doc" ? "\u{1F4C4}" : "\u{1F4CA}"} {citation.title}
