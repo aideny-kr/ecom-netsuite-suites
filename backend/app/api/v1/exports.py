@@ -132,17 +132,10 @@ async def query_export(
     creds = decrypt_credentials(connection.encrypted_credentials)
     account_id = (creds.get("account_id") or "").replace("_", "-").lower()
 
-    # Strip FETCH FIRST N ROWS ONLY so the export gets the full dataset.
-    # The export endpoint provides its own pagination (limit=50_000).
-    export_sql = re.sub(
-        r"\bFETCH\s+FIRST\s+\d+\s+ROWS\s+ONLY\b",
-        "",
-        request.query_text,
-        flags=re.IGNORECASE,
-    ).strip()
-
+    # Preserve the original FETCH FIRST limit if present — user expects
+    # the same row count they saw in the chat. Only use 50K as a safety cap.
     result = await execute_suiteql_via_rest(
-        access_token, account_id, export_sql,
+        access_token, account_id, request.query_text.strip(),
         limit=50_000, paginate=True, timeout_seconds=120,
     )
 
