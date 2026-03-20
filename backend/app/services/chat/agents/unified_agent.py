@@ -26,6 +26,102 @@ if TYPE_CHECKING:
 
 _logger = logging.getLogger(__name__)
 
+
+# ---------------------------------------------------------------------------
+# Provider descriptions for connected systems awareness
+# ---------------------------------------------------------------------------
+_PROVIDER_DESCRIPTIONS: dict[str, str | None] = {
+    "netsuite_mcp": (
+        "NetSuite ERP — financial reports, saved searches, SuiteQL queries, "
+        "record CRUD, and subsidiary management. Primary source of truth for "
+        "transactions, GL, inventory, and customer/vendor records."
+    ),
+    "shopify_mcp": (
+        "Shopify eCommerce — online orders, products, customers, inventory levels, "
+        "and fulfillments. Use for ecommerce-specific queries."
+    ),
+    "stripe_mcp": (
+        "Stripe Payments — charges, subscriptions, invoices, refunds, and payouts. "
+        "Use for payment and billing queries."
+    ),
+    "custom": None,  # Falls back to connector.label
+}
+
+
+def _build_role_prompt(connectors: list | None, brand_name: str) -> str:
+    """Build a dynamic role prompt based on connected systems.
+
+    NetSuite-only tenants get the familiar expert prompt.
+    Multi-MCP tenants get a systems-aware role.
+    """
+    if not connectors:
+        return (
+            f"You are an AI operations assistant for {brand_name}. "
+            "You have access to NetSuite via SuiteQL queries and can analyze data, "
+            "review SuiteScript code, and search documentation."
+        )
+
+    providers = set()
+    for c in connectors:
+        if c.provider == "netsuite_mcp":
+            providers.add("NetSuite")
+        elif c.provider == "shopify_mcp":
+            providers.add("Shopify")
+        elif c.provider == "stripe_mcp":
+            providers.add("Stripe")
+        elif c.provider == "custom":
+            providers.add(c.label)
+
+    systems_str = ", ".join(sorted(providers))
+
+    return (
+        f"You are an AI operations assistant for {brand_name}. "
+        f"You have access to the following connected systems: {systems_str}. "
+        "You can query data across these systems, analyze results, review code, "
+        "and help with operational questions. When the user asks WHY something happened, "
+        "investigate — don't just report the current value. Check automation scripts, "
+        "business rules, and cross-system data flows to find the root cause."
+    )
+
+
+def _build_connected_systems_block(connectors: list | None) -> str:
+    """Build a <connected_systems> prompt block describing each connected MCP."""
+    if not connectors:
+        return ""
+
+    systems = []
+    for connector in connectors:
+        if not connector.discovered_tools:
+            continue
+
+        tool_names = [t.get("name", "unknown") for t in connector.discovered_tools]
+        tool_count = len(tool_names)
+        provider_desc = _PROVIDER_DESCRIPTIONS.get(connector.provider)
+        if provider_desc is None:
+            provider_desc = f"{connector.label} — custom integration."
+        tool_list = ", ".join(tool_names[:15])
+        if len(tool_names) > 15:
+            tool_list += f" (+{len(tool_names) - 15} more)"
+
+        systems.append(
+            f"<system provider='{connector.provider}' label='{connector.label}'>\n"
+            f"  Description: {provider_desc}\n"
+            f"  Tools ({tool_count}): {tool_list}\n"
+            f"</system>"
+        )
+
+    if not systems:
+        return ""
+
+    return (
+        "\n<connected_systems>\n"
+        "The following external systems are connected. "
+        "Each system's tools are prefixed with 'ext__' in the tool list.\n\n"
+        + "\n\n".join(systems)
+        + "\n</connected_systems>"
+    )
+
+
 # Keywords that indicate the user's query is about scripts/automation/workflows.
 _SCRIPT_KEYWORDS = re.compile(
     r"\b(?:scripts?|deploy(?:ment)?s?|workflows?|triggers?|automation|scheduled|user\s*events?|"
@@ -64,10 +160,13 @@ _UNIFIED_TOOL_NAMES = frozenset(
 
 _SYSTEM_PROMPT = """\
 <role>
-You are an expert NetSuite AI assistant. You combine deep knowledge of SuiteQL (Oracle-based SQL dialect), \
+{{INJECT_ROLE_PROMPT}}
+You combine deep knowledge of SuiteQL (Oracle-based SQL dialect), \
 NetSuite documentation, SuiteScript development, and data analysis. Your job is to understand what the user \
 needs and use the right tools to get the answer efficiently.
 </role>
+
+{{INJECT_CONNECTED_SYSTEMS}}
 
 <tenant_context>
 Below is the pre-compiled schema for this specific NetSuite tenant. Use this to immediately identify custom \
@@ -179,6 +278,11 @@ DATE FUNCTIONS — CRITICAL:
 
 TEXT RESOLUTION:
 - Use `BUILTIN.DF(field_name)` for List/Record fields to get display text.
+
+BOOLEAN FIELDS — CRITICAL:
+- NetSuite stores booleans as 'T' (true) and 'F' (false), NOT true/false.
+- In query results: 'T' = Yes/True/Enabled, 'F' = No/False/Disabled, '' or NULL = not set.
+- When presenting results: ALWAYS interpret 'T' as YES and 'F' as NO. Do NOT say a field is "empty/false" when it contains 'T'.
 
 # Prevents: filtering custom list fields by string instead of ID (2025)
 CUSTOM LIST FIELDS:
@@ -421,6 +525,36 @@ Not a data question? → rag_search first, web_search as fallback.
 BUDGET: Maximum 6 tool calls. Typical queries should use 1-2.
 </agentic_workflow>
 
+<investigation_protocol>
+When the user asks WHY a field has a certain value, why something didn't happen,
+or how a process works:
+
+1. Query the data to confirm the current value/state. Read boolean values correctly: 'T' = Yes, 'F' = No.
+2. Check system notes for the record to see WHEN and WHO changed the field: \
+`SELECT t.tranid, sn.date, sn.name AS changed_by, sn.field, sn.oldvalue, sn.newvalue \
+FROM systemnote sn JOIN transaction t ON t.id = sn.recordid \
+WHERE sn.recordid = <id> AND sn.recordtypeid = -30 ORDER BY sn.date DESC FETCH FIRST 20 ROWS ONLY`
+3. Search workspace scripts for the field's script_id or process name \
+(use workspace_search with the field name like "custbody_fw_sent_to_techdata" or "3PL")
+4. Read the relevant script to understand the automation logic
+5. If no script found in workspace, use web_search to find NetSuite documentation \
+or community answers about the field or process
+6. Explain the conditions and why this specific record matched or didn't match
+7. Save what you learned for future reference (use tenant_save_learned_rule)
+
+Do NOT answer "why" questions with just the field value.
+Investigate the logic behind it.
+
+Examples of "why" questions:
+- "Why wasn't this order sent to 3PL?" → check field → system notes → find router script → explain
+- "Why is this field empty?" → system notes for history → find User Event → explain trigger criteria
+- "How does the approval workflow work?" → find workflow script → explain steps
+
+Examples that are NOT "why" questions (don't investigate):
+- "Why is NetSuite slow?" → general question, not field investigation
+- "Why do you recommend this?" → about your reasoning, not business logic
+</investigation_protocol>
+
 <output_instructions>
 LANGUAGE: Always respond in English unless the user asks in another language but do not get the lanugage mixed when output.
 
@@ -479,6 +613,7 @@ class UnifiedAgent(BaseSpecialistAgent):
         self._proven_patterns: list[dict] = []
         self._active_skill: dict | None = None  # Set when a skill is triggered
         self._context: dict[str, Any] = {}  # Full context dict from orchestrator
+        self._connectors: list = []  # Active MCP connectors for this tenant
 
     @property
     def agent_name(self) -> str:
@@ -512,6 +647,19 @@ class UnifiedAgent(BaseSpecialistAgent):
     @property
     def system_prompt(self) -> str:
         base = _SYSTEM_PROMPT
+
+        # Inject dynamic role prompt based on connected systems
+        role_prompt = _build_role_prompt(
+            self._connectors if self._connectors else None,
+            self._brand_name or "Suite Studio AI",
+        )
+        base = base.replace("{{INJECT_ROLE_PROMPT}}", role_prompt)
+
+        # Inject connected systems block
+        systems_block = _build_connected_systems_block(
+            self._connectors if self._connectors else None,
+        )
+        base = base.replace("{{INJECT_CONNECTED_SYSTEMS}}", systems_block)
 
         # Inject tenant metadata
         if self._metadata:
@@ -719,19 +867,20 @@ class UnifiedAgent(BaseSpecialistAgent):
         except Exception:
             _logger.warning("unified_agent.brand_fetch_failed", exc_info=True)
 
-        # Discover external MCP tools
+        # Discover external MCP tools — load ALL tools from ALL active connectors
         try:
             from app.services.chat.tools import build_external_tool_definitions
             from app.services.mcp_connector_service import get_active_connectors_for_tenant
 
             connectors = await get_active_connectors_for_tenant(db, self.tenant_id)
+            self._connectors = connectors or []
             if connectors:
                 ext_tools = build_external_tool_definitions(connectors)
-                ext_ns = [t for t in ext_tools if "suiteql" in t["name"].lower() or "metadata" in t["name"].lower()]
-                if ext_ns:
+                if ext_tools:
                     _ = self.tool_definitions  # ensure local tools built
-                    for et in ext_ns:
-                        if et["name"] not in {t["name"] for t in self._tool_defs}:
+                    existing_names = {t["name"] for t in self._tool_defs}
+                    for et in ext_tools:
+                        if et["name"] not in existing_names:
                             self._tool_defs.append(et)
         except Exception:
             _logger.warning("unified_agent.ext_tool_discovery_failed", exc_info=True)
