@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any, Callable
 from app.services.chat.llm_adapter import BaseLLMAdapter, LLMResponse, TokenUsage
 from app.services.chat.prompt_cache import split_system_prompt
 from app.services.chat.tool_call_results import (
+    append_distinct_values,
     build_tool_call_log_entry,
     tool_call_had_error,
     tool_call_row_count,
@@ -530,6 +531,10 @@ class BaseSpecialistAgent(abc.ABC):
                     # Truncate error payloads to prevent token bloat on retries
                     result_str = _truncate_error_payload(result_str)
 
+                    # Append distinct values so LLM uses exact values for follow-up pivots
+                    if block.name in ("netsuite_suiteql", "ext__ns_runCustomSuiteQL"):
+                        result_str = append_distinct_values(result_str)
+
                     elapsed_ms = int((time.monotonic() - t0) * 1000)
                     tool_calls_log.append(
                         build_tool_call_log_entry(
@@ -812,6 +817,11 @@ class BaseSpecialistAgent(abc.ABC):
                                 pass
 
                     result_str = _truncate_tool_result(result_str)
+
+                    # Append distinct values so LLM uses exact values for follow-up pivots
+                    if block.name in ("netsuite_suiteql", "ext__ns_runCustomSuiteQL"):
+                        result_str = append_distinct_values(result_str)
+
                     raw_result_strings.append(result_str)
                     elapsed_ms = int((time.monotonic() - t0) * 1000)
 

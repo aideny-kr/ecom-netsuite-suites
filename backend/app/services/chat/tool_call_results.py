@@ -274,3 +274,87 @@ def _extract_error_message(parsed: dict[str, Any]) -> str | None:
         return error
 
     return None
+
+
+# ---------------------------------------------------------------------------
+# Distinct value extraction — prevents LLM from building IN(...) from memory
+# ---------------------------------------------------------------------------
+
+import re
+
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}")
+_NUMERIC_RE = re.compile(r"^-?\d+\.?\d*$")
+_MAX_DISTINCT = 30  # Skip high-cardinality columns
+
+
+def extract_distinct_values(result: Any) -> dict[str, list[str]]:
+    """Extract distinct string values from categorical columns in a SuiteQL result.
+
+    Returns {column_name: [sorted distinct values]} for columns that are:
+    - String-typed (not all numeric, not date-like)
+    - Low cardinality (≤ 30 distinct values)
+    - Have 2+ distinct values (single-value columns aren't useful)
+
+    Used to inject exact database values into follow-up prompts so the LLM
+    doesn't reconstruct value lists from memory (dropping variants).
+    """
+    if not isinstance(result, dict):
+        return {}
+
+    columns = result.get("columns", [])
+    rows = result.get("rows", [])
+
+    if not columns or not rows or len(rows) < 2:
+        return {}
+
+    distinct: dict[str, set[str]] = {col: set() for col in columns}
+
+    for row in rows:
+        if not isinstance(row, (list, tuple)):
+            continue
+        for i, val in enumerate(row):
+            if i < len(columns) and val is not None:
+                distinct[columns[i]].add(str(val))
+
+    output: dict[str, list[str]] = {}
+    for col, vals in distinct.items():
+        if len(vals) < 2 or len(vals) > _MAX_DISTINCT:
+            continue
+        # Skip numeric columns
+        if all(_NUMERIC_RE.match(v) for v in vals):
+            continue
+        # Skip date columns
+        if all(_DATE_RE.match(v) for v in vals):
+            continue
+        output[col] = sorted(vals)
+
+    return output
+
+
+def append_distinct_values(result_str: str) -> str:
+    """Append _distinct_values to a SuiteQL result JSON string.
+
+    If the result has categorical columns with ≤ 30 distinct values,
+    appends them as a _distinct_values key so the LLM can use exact
+    values for follow-up CASE WHEN pivots.
+
+    Returns the original string unchanged if no values to add.
+    """
+    try:
+        parsed = json.loads(result_str)
+    except (json.JSONDecodeError, TypeError):
+        return result_str
+
+    if not isinstance(parsed, dict):
+        return result_str
+
+    rows = parsed.get("rows", [])
+    if not isinstance(rows, list) or len(rows) < 2:
+        return result_str
+
+    values = extract_distinct_values(parsed)
+    if not values:
+        return result_str
+
+    parsed["_distinct_values"] = values
+    return json.dumps(parsed, default=str)
