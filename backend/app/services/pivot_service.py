@@ -55,13 +55,12 @@ def pivot_rows(
     col_idx = columns.index(column_field)
     val_idx = columns.index(value_field)
 
-    # Collect distinct column values in order of first appearance
-    seen_cols: dict[str, None] = {}
+    # Collect distinct column values, sorted alphabetically
+    seen_cols: set[str] = set()
     for row in rows:
         val = str(row[col_idx]) if row[col_idx] is not None else ""
-        if val not in seen_cols:
-            seen_cols[val] = None
-    pivot_cols = list(seen_cols.keys())
+        seen_cols.add(val)
+    pivot_cols = sorted(seen_cols)
 
     # Build pivot: {row_key: {col_value: [values]}}
     pivot: dict[str, dict[str, list[float]]] = defaultdict(lambda: defaultdict(list))

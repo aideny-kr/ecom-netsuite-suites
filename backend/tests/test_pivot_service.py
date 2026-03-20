@@ -28,6 +28,7 @@ class TestPivotBasic:
             row_field="week", column_field="platform", value_field="qty",
         )
 
+        # Columns sorted alphabetically
         assert out_cols == ["week", "Azalea", "Lotus", "Tulip", "Total"]
         assert len(out_rows) == 2
         assert out_rows[0] == ["W01", 100.0, 50.0, 30.0, 180.0]
