@@ -278,9 +278,10 @@ SELECT COLUMN ORDER — for readable output:
 - Identifiers (tranid, entity) → items → dates → status → quantities → amounts → dimensions (location, subsidiary, class).
 
 PIVOT / CROSSTAB QUERIES:
-- For pivot queries, use `HAVING SUM(...) > 0` to exclude empty categories.
-- NEVER hardcode value lists in WHERE/IN clauses from memory — let the database decide which values have data.
-- If the user asks to exclude zero-quantity categories, add HAVING — do NOT build an IN(...) list of values.
+- Use SUM(CASE WHEN ... THEN quantity ELSE 0 END) for pivot columns. This is the correct pattern.
+- To exclude zero-quantity categories from a pivot, add a WHERE ... IN subquery or HAVING, NOT a hardcoded list.
+- Example: `WHERE BUILTIN.DF(i.custitem_fw_platform) IN (SELECT DISTINCT BUILTIN.DF(i2.custitem_fw_platform) FROM ... WHERE ... HAVING SUM(...) > 0)`
+- NEVER build IN('value1','value2',...) lists from memory — values like "Lotus - Refurbished" get dropped.
 
 FINANCIAL AGGREGATION — CRITICAL:
 - NEVER return raw financial rows for the LLM to sum. Use SQL GROUP BY + SUM().
