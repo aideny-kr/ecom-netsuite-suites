@@ -853,7 +853,7 @@ class BaseSpecialistAgent(abc.ABC):
                     remaining_blocks = response.tool_use_blocks[i + 1:]
                     skippable = [b for b in remaining_blocks if b.name not in _KNOWLEDGE_TOOLS]
                     must_run = [b for b in remaining_blocks if b.name in _KNOWLEDGE_TOOLS]
-                    if skippable and _has_successful_data_result([result_str]):
+                    if self._context_need != "full" and skippable and _has_successful_data_result([result_str]):
                         print(
                             f"[AGENT] {self.agent_name} data returned, skipping "
                             f"{len(skippable)} data tools, keeping {len(must_run)} knowledge tools",
@@ -874,7 +874,7 @@ class BaseSpecialistAgent(abc.ABC):
                             break
 
                 # Soft enforcement: nudge LLM to stop if data was already returned
-                if step >= 1 and _has_successful_data_result(raw_result_strings):
+                if self._context_need != "full" and step >= 1 and _has_successful_data_result(raw_result_strings):
                     tool_results_content.append({
                         "type": "text",
                         "text": _DATA_SUCCESS_NUDGE,
