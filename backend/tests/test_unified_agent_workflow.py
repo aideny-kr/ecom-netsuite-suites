@@ -177,3 +177,53 @@ class TestPromptSyncWithSuiteQLAgent:
 
         assert "MANDATORY EXECUTION RULE" in unified
         assert "MANDATORY EXECUTION RULE" in suiteql
+
+
+class TestInvestigationMode:
+    """Investigation mode should have different prompt and higher step budget."""
+
+    def test_max_steps_investigation(self):
+        agent = _make_agent()
+        agent._context_need = "full"
+        assert agent.max_steps == 12
+
+    def test_max_steps_data(self):
+        agent = _make_agent()
+        agent._context_need = "data"
+        assert agent.max_steps == 6
+
+    def test_max_steps_default(self):
+        agent = _make_agent()
+        assert agent.max_steps == 6
+
+    def test_investigation_prompt_has_progressive_output(self):
+        agent = _make_agent()
+        agent._context_need = "full"
+        prompt = agent.system_prompt
+        assert "progressively" in prompt
+        assert "chronological narrative" in prompt
+
+    def test_investigation_prompt_no_one_sentence(self):
+        agent = _make_agent()
+        agent._context_need = "full"
+        prompt = agent.system_prompt
+        assert "ONLY ONE sentence" not in prompt
+
+    def test_data_prompt_keeps_one_sentence(self):
+        agent = _make_agent()
+        agent._context_need = "data"
+        prompt = agent.system_prompt
+        assert "ONLY ONE sentence" in prompt
+
+    def test_investigation_has_systemnote_expertise(self):
+        agent = _make_agent()
+        agent._context_need = "full"
+        prompt = agent.system_prompt
+        assert "systemnote_expertise" in prompt
+        assert "recordtypeid = -30" in prompt
+
+    def test_data_no_systemnote_expertise(self):
+        agent = _make_agent()
+        agent._context_need = "data"
+        prompt = agent.system_prompt
+        assert "systemnote_expertise" not in prompt

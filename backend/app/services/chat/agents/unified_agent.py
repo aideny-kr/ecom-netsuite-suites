@@ -559,6 +559,38 @@ Output: <confidence>N</confidence> in your response (this tag is parsed and logg
 </output_instructions>
 """
 
+_INVESTIGATION_OUTPUT_INSTRUCTIONS = (
+    "<output_instructions>\n"
+    "LANGUAGE: Always respond in English unless the user asks in another language "
+    "but do not get the language mixed when output.\n\n"
+    "Present your findings progressively as you investigate.\n"
+    "After each tool result, share what you learned before continuing.\n"
+    "Build a chronological narrative — explain what happened, when, and why.\n"
+    "When you've found the root cause, present a clear summary.\n\n"
+    "CONFIDENCE SCORING:\n"
+    "Before your final answer, rate your confidence (1-5):\n"
+    "5 = Clear root cause found with evidence\n"
+    "4 = Strong evidence, minor gaps\n"
+    "3 = Partial evidence, some assumptions\n"
+    "2 = Limited evidence, uncertain conclusion\n"
+    "1 = Guessing, insufficient data\n"
+    "Output: <confidence>N</confidence> in your response (this tag is parsed and logged).\n"
+    "</output_instructions>"
+)
+
+_SYSTEMNOTE_EXPERTISE = (
+    "\n<systemnote_expertise>\n"
+    "To investigate 'why' questions, query the systemnote table:\n"
+    "- Filter: recordtypeid = -30 (transactions), recordid = <internal_id>\n"
+    "- BUILTIN.DF(sn.field) does NOT work (static list error) — read raw field names\n"
+    "- Field names use internal notation: TRANDOC.KSTATUS (status), CUSTBODY_* (custom body fields)\n"
+    "- Infer meaning from naming conventions: CUSTBODY_FW_HOLD_EDI_TRANSMIT = EDI hold flag\n"
+    "- context column: SLT=Suitelet, MPR=Map/Reduce, UIF=User Interface, CSV=Import\n"
+    "- name = -4 means system/script action, positive numbers are user IDs\n"
+    "- Order results by date ASC for chronological narrative\n"
+    "</systemnote_expertise>\n"
+)
+
 
 class UnifiedAgent(BaseSpecialistAgent):
     """Single unified agent with access to all tools.
@@ -622,7 +654,7 @@ class UnifiedAgent(BaseSpecialistAgent):
     @property
     def max_steps(self) -> int:
         # Investigation queries get more budget to follow evidence chains
-        return 10 if self._context_need == "full" else 6
+        return 12 if self._context_need == "full" else 6
 
     @property
     def system_prompt(self) -> str:
@@ -728,6 +760,17 @@ class UnifiedAgent(BaseSpecialistAgent):
                 base,
                 flags=_re.DOTALL,
             )
+
+            # Replace output_instructions with progressive investigation format
+            base = _re.sub(
+                r"<output_instructions>.*?</output_instructions>",
+                _INVESTIGATION_OUTPUT_INSTRUCTIONS,
+                base,
+                flags=_re.DOTALL,
+            )
+
+            # Add systemnote expertise at the end (highest attention per U-curve research)
+            base += _SYSTEMNOTE_EXPERTISE
 
             print(f"[UNIFIED] Investigation mode: prompt stripped for free reasoning", flush=True)
 
