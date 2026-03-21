@@ -748,6 +748,9 @@ class TestContextNeedClassifier:
     def test_investigation_audit_trail(self):
         assert self._classify("show me the audit trail") == "full"
 
+    def test_investigation_history_get_verb(self):
+        assert self._classify("get order R850152063 history") == "full"
+
     def test_data_purchase_history_not_investigation(self):
         """'purchase history' without a record reference is DATA, not investigation."""
         assert self._classify("show me purchase history for Acme") == "data"
