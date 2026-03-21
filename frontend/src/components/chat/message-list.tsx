@@ -681,16 +681,38 @@ export function MessageList({
                 : "rounded-2xl border border-border/50 bg-muted/40",
             )}>
               <div className="flex max-h-[60vh] min-w-0 flex-col gap-2 overflow-auto px-4 py-3 scrollbar-thin">
+            {/* 1. Always show streaming text first */}
+            {streamingContent && (() => {
+              const parsed = parseStreamingThinking(streamingContent);
+              return (
+                <>
+                  {(parsed.thinking !== null || parsed.isThinking) && (
+                    <StreamingThinkingBlock
+                      content={parsed.thinking}
+                      isActive={parsed.isThinking}
+                      isTerminal={isTerminal}
+                    />
+                  )}
+                  {parsed.text && (
+                    <pre className="whitespace-pre-wrap font-sans text-[15px] leading-relaxed">
+                      {parsed.text}
+                    </pre>
+                  )}
+                </>
+              );
+            })()}
+
+            {/* 2. Tool status BELOW text */}
             {streamingStatus ? (
               isTerminal ? (
-                <div className="flex items-center gap-4">
+                <div className="mt-2 flex items-center gap-4">
                   <div className="h-2 w-2 bg-[var(--chat-accent)] animate-pulse" />
                   <span className="text-[10px] tracking-widest text-[var(--chat-accent)] uppercase">
                     {streamingStatus}
                   </span>
                 </div>
               ) : (
-                <div className="text-[12px] font-medium text-muted-foreground flex items-center gap-2">
+                <div className="mt-2 text-[12px] font-medium text-muted-foreground flex items-center gap-2">
                   <span className="h-1.5 w-1.5 rounded-full bg-primary animate-pulse" />
                   {streamingStatus}
                 </div>
@@ -712,31 +734,18 @@ export function MessageList({
               )
             ) : null}
 
+            {/* 3. Data tables with fade-in animation */}
             {financialReport && (
-              <FinancialReport data={financialReport} />
+              <div className="animate-table-appear">
+                <FinancialReport data={financialReport} />
+              </div>
             )}
 
             {dataTable && (
-              <DataFrameTable data={dataTable} queryText={dataTable.query} />
+              <div className="animate-table-appear">
+                <DataFrameTable data={dataTable} queryText={dataTable.query} />
+              </div>
             )}
-
-            {streamingContent && (() => {
-              const parsed = parseStreamingThinking(streamingContent);
-              return (
-                <>
-                  {(parsed.thinking !== null || parsed.isThinking) && (
-                    <StreamingThinkingBlock
-                      content={parsed.thinking}
-                      isActive={parsed.isThinking}
-                      isTerminal={isTerminal}
-                    />
-                  )}
-                  {parsed.text && (
-                    <MarkdownRenderer content={parsed.text} isTerminal={isTerminal} />
-                  )}
-                </>
-              );
-            })()}
               </div>
             </div>
           </div>
