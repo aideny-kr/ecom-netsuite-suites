@@ -14,7 +14,9 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.chat import DocChunk
+from app.models.domain_knowledge import DomainKnowledgeChunk
 from app.services.chat.embeddings import embed_query
+from app.services.chat.domain_knowledge import embed_domain_query
 
 logger = logging.getLogger(__name__)
 
@@ -99,14 +101,58 @@ async def execute(params: dict[str, Any], context: dict[str, Any] | None = None,
             )
             seen_paths.add(chunk.source_path)
 
-        # 2. Always supplement with keyword search for tenant docs
+        # 2. Domain knowledge search (golden dataset — 1536-dim embeddings)
+        try:
+            dk_embedding = await embed_domain_query(query_text)
+            if dk_embedding is not None:
+                dk_stmt = (
+                    select(
+                        DomainKnowledgeChunk,
+                        DomainKnowledgeChunk.embedding.cosine_distance(dk_embedding).label("distance"),
+                    )
+                    .where(
+                        DomainKnowledgeChunk.is_deprecated.is_(False),
+                        DomainKnowledgeChunk.embedding.isnot(None),
+                    )
+                    .order_by("distance")
+                    .limit(top_k)
+                )
+                dk_result = await db.execute(dk_stmt)
+                dk_rows = dk_result.all()
+
+                # Keyword boosting for domain knowledge (same as domain_knowledge.py)
+                query_keywords = [w.lower() for w in query_text.split() if len(w) >= 3]
+                for row in dk_rows:
+                    chunk = row[0]
+                    distance = float(row[1]) if row[1] is not None else 1.0
+                    similarity = round(1.0 - distance, 4)
+
+                    # Count keyword hits for boosting
+                    kw_hits = sum(1 for kw in query_keywords if kw in chunk.raw_text.lower()) if query_keywords else 0
+
+                    if chunk.source_uri not in seen_paths:
+                        results.append({
+                            "title": f"[Knowledge] {chunk.source_uri.split('/')[-1].replace('.md', '').replace('-', ' ').title()}",
+                            "content": chunk.raw_text[:2000],
+                            "source_path": chunk.source_uri,
+                            "similarity_score": similarity,
+                            "keyword_hits": kw_hits,
+                        })
+                        seen_paths.add(chunk.source_uri)
+        except Exception:
+            logger.warning("rag_search: domain knowledge search failed, continuing with doc results", exc_info=True)
+
+        # 3. Always supplement with keyword search for tenant docs
         # (many tenant docs have NULL embeddings and are invisible to vector search)
         if tenant_id:
-            kw_result = await _keyword_search(db, tenant_id, query_text, top_k, source_filter)
-            for kr in kw_result.get("results", []):
-                if kr["source_path"] not in seen_paths:
-                    results.append(kr)
-                    seen_paths.add(kr["source_path"])
+            try:
+                kw_result = await _keyword_search(db, tenant_id, query_text, top_k, source_filter)
+                for kr in kw_result.get("results", []):
+                    if kr["source_path"] not in seen_paths:
+                        results.append(kr)
+                        seen_paths.add(kr["source_path"])
+            except Exception:
+                logger.warning("rag_search: keyword supplement failed, continuing with vector/domain results", exc_info=True)
 
         # Prioritise keyword-matched tenant docs over low-similarity system docs
         # by sorting: tenant keyword hits first, then vector similarity
@@ -115,6 +161,7 @@ async def execute(params: dict[str, Any], context: dict[str, Any] | None = None,
             sim = r.get("similarity_score") or 0
             return (-kw_hits, -sim)
 
+        # Re-sort after adding domain knowledge results
         results.sort(key=_sort_key)
         results = results[:top_k]
 
