@@ -499,11 +499,23 @@ export function MessageList({
   const isTerminal = variant === "terminal";
   const { brandName } = useBranding();
 
-  // Use instant scroll during streaming (smooth can't keep up with rapid updates),
+  // Smooth scroll during streaming with debounce to avoid janky rapid scrolls,
   // smooth scroll for message list changes (new messages loaded, pending message shown).
   const isStreamingNow = !!(streamingContent || isWaitingForReply);
+  const scrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: isStreamingNow ? "auto" : "smooth" });
+    if (isStreamingNow) {
+      // Debounce scroll during streaming to avoid janky rapid scrolls
+      if (scrollTimerRef.current) clearTimeout(scrollTimerRef.current);
+      scrollTimerRef.current = setTimeout(() => {
+        bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+      }, 50);
+    } else {
+      bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    }
+    return () => {
+      if (scrollTimerRef.current) clearTimeout(scrollTimerRef.current);
+    };
   }, [messages, pendingUserMessage, isWaitingForReply, streamingContent, isStreamingNow]);
 
   if (isLoading) {
