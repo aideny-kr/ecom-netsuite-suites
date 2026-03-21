@@ -46,7 +46,7 @@ class Settings(BaseSettings):
     OPENAI_EMBEDDING_API_KEY: str = ""
     OPENAI_EMBEDDING_MODEL: str = "text-embedding-3-small"
     OPENAI_EMBEDDING_DIMENSIONS: int = 1536
-    DOMAIN_KNOWLEDGE_TOP_K: int = 3
+    DOMAIN_KNOWLEDGE_TOP_K: int = 6
     CHAT_MAX_HISTORY_TURNS: int = 20
     CHAT_MAX_TOOL_CALLS_PER_TURN: int = 5
     CHAT_RAG_TOP_K: int = 5

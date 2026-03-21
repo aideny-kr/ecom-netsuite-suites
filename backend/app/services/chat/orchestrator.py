@@ -248,6 +248,15 @@ _DATA_KEYWORDS = re.compile(
     re.IGNORECASE,
 )
 
+# Investigation queries — "why" questions that need FULL context (data + workspace tools)
+_INVESTIGATION_RE = re.compile(
+    r"why\s+(?:is|was|isn't|wasn't|did|didn't|does|doesn't|aren't|weren't)|"
+    r"how\s+(?:does|did|is)\s+\w+\s+(?:set|triggered|controlled|determined|calculated|routed|sent)|"
+    r"what\s+(?:controls|triggers|sets|determines|calculates|routes)|"
+    r"root\s+cause|investigate|dig\s+into",
+    re.IGNORECASE,
+)
+
 
 def _classify_context_need(user_message: str, is_financial: bool = False) -> str:
     """Classify how much dynamic context a query needs.
@@ -259,6 +268,10 @@ def _classify_context_need(user_message: str, is_financial: bool = False) -> str
         return ContextNeed.FINANCIAL
 
     msg = user_message.strip()
+
+    # Investigation: "why" questions need FULL context (data tools + workspace tools)
+    if _INVESTIGATION_RE.search(msg):
+        return ContextNeed.FULL
 
     # Workspace: script/deploy/SuiteScript keywords
     if _WORKSPACE_RE.search(msg):
@@ -818,6 +831,25 @@ async def run_chat_turn(
             )
 
             tool_inventory_lines.append("\n".join(guidance))
+
+        # Non-NetSuite tools guidance
+        non_ns_tools = [
+            td for td in tool_definitions
+            if td["name"].startswith("ext__")
+            and not any(p in td["name"].lower() for p in _MCP_TOOL_PATTERNS)
+        ]
+        if non_ns_tools:
+            tool_inventory_lines.append(
+                "\n\nOTHER CONNECTED SYSTEM TOOLS:"
+            )
+            for td in non_ns_tools:
+                tool_inventory_lines.append(
+                    f"- {td['name']}: {td.get('description', '')}"
+                )
+            tool_inventory_lines.append(
+                "\nUse these tools when the user's question relates to the system they belong to. "
+                "Check the tool description prefix (e.g., [shopify_mcp]) to identify which system."
+            )
 
         system_prompt += "\n".join(tool_inventory_lines)
 
