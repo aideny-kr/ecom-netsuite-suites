@@ -25,6 +25,7 @@
 - **MCP Tools**: ~11 tools across 4 categories (Record CRUD, Reports, Saved Searches, SuiteQL). Visibility is role-permission based — see Mistakes #22. CRUD guardrails — see Mistakes #23.
 - **Tool Result Interception**: `_intercept_tool_result()` in orchestrator emits SSE `data_table`/`financial_report` events, condenses results for LLM. Handles 3 formats: local SuiteQL (`columns`/`rows`), external MCP (`data` list-of-dicts), financial reports (`items`/`summary`).
 - **Smart Context Injection**: `_classify_context_need()` classifies queries into 5 levels (FULL, DATA, DOCS, WORKSPACE, FINANCIAL). Falls back to FULL when uncertain.
+- **Investigation Mode**: When `context_need == FULL`, conditional guards activate: 12-step budget (vs 6), no early exit, no data nudge, progressive output (replaces "ONLY ONE sentence"), systemnote expertise appended. `_INVESTIGATION_RE` regex classifies history/timeline/audit/why queries as FULL. Outperforms Claude + native MCP on investigation queries.
 - **Pivot Tool**: `netsuite_pivot_query_result` — server-side deterministic pivoting. Agent runs flat GROUP BY, then calls pivot tool which re-executes without row limit and pivots in Python. Only values in the data become columns — no LLM judgment on value lists. Do NOT build CASE WHEN pivot SQL manually.
 - **History Condensation**: `build_condensed_history()` replaces large JSON blocks in older messages with summaries. Last 4 messages kept verbatim. Reduces follow-up tokens from ~100K to ~40K.
 - **Haiku Routing**: Simple lookups (single entity, simple counts) route to `claude-haiku-4-5-20251001` for 10x speed. Only for non-BYOK tenants. Conservative regex — FULL model when uncertain.
@@ -277,3 +278,7 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 - **Token condensation** — `build_condensed_history()` reduces follow-up tokens from ~100K to ~40K.
 - **Haiku routing** — simple lookups route to Haiku for 10x speed (non-BYOK only).
 - **Saved query CSV export** — was downloading stale files from disk (wiped by Docker restarts). Now re-executes query on demand.
+
+## Resolved (2026-03-21)
+
+- **Investigation mode** — conditional on `context_need == FULL`: expanded `_INVESTIGATION_RE` regex (history/timeline/audit trail/what happened/how long/when was), 12-step budget, disabled early exit + data nudge, progressive output instructions (replaces one-sentence constraint), systemnote expertise block (`recordtypeid = -30`, raw field names, context codes). 3 files changed (~30 lines), 12 new tests. Beats Claude + native MCP on R850152063 benchmark.
