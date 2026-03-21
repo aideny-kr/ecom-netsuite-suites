@@ -499,22 +499,29 @@ export function MessageList({
   const isTerminal = variant === "terminal";
   const { brandName } = useBranding();
 
-  // Smooth scroll during streaming with debounce to avoid janky rapid scrolls,
-  // smooth scroll for message list changes (new messages loaded, pending message shown).
+  // Scroll to bottom: use rAF to wait for DOM layout to settle before scrolling.
+  // This prevents the "message appears at bottom then shoots up" visual jump.
   const isStreamingNow = !!(streamingContent || isWaitingForReply);
   const scrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const rafRef = useRef<number | null>(null);
   useEffect(() => {
+    const scrollToBottom = () => {
+      bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    };
+
     if (isStreamingNow) {
       // Debounce scroll during streaming to avoid janky rapid scrolls
       if (scrollTimerRef.current) clearTimeout(scrollTimerRef.current);
       scrollTimerRef.current = setTimeout(() => {
-        bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+        rafRef.current = requestAnimationFrame(scrollToBottom);
       }, 50);
     } else {
-      bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+      // Wait for layout to settle before scrolling (fixes jump on new message)
+      rafRef.current = requestAnimationFrame(scrollToBottom);
     }
     return () => {
       if (scrollTimerRef.current) clearTimeout(scrollTimerRef.current);
+      if (rafRef.current) cancelAnimationFrame(rafRef.current);
     };
   }, [messages, pendingUserMessage, isWaitingForReply, streamingContent, isStreamingNow]);
 
