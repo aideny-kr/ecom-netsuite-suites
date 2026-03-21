@@ -281,7 +281,7 @@ async def send_message(
         producer_task = asyncio.create_task(_producer())
 
         # Send padding to force Cloudflare Tunnel to start streaming
-        yield f": {' ' * 2048}\n\n"
+        yield f": {' ' * 8192}\n\n"
         try:
             while True:
                 try:
