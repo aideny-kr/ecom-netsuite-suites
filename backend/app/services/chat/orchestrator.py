@@ -996,6 +996,7 @@ async def run_chat_turn(
 
                 if _is_chitchat:
                     print("[UNIFIED] Chitchat detected — skipping context assembly", flush=True)
+                    context_need = ContextNeed.DOCS  # chitchat needs no data context
                     context: dict[str, Any] = {"user_timezone": user_timezone}
                     unified_agent = UnifiedAgent(
                         tenant_id=tenant_id,
