@@ -52,7 +52,7 @@ class Settings(BaseSettings):
     CHAT_RAG_TOP_K: int = 5
 
     NETSUITE_SUITEQL_MAX_ROWS: int = 1000
-    NETSUITE_SUITEQL_TIMEOUT: int = 30
+    NETSUITE_SUITEQL_TIMEOUT: int = 60
     NETSUITE_SUITEQL_ALLOWED_TABLES: str = (
         "transaction,transactionline,transactionaccountingline,customer,item,account,subsidiary,"
         "accountingperiod,accountingbook,"
@@ -60,7 +60,8 @@ class Settings(BaseSettings):
         "inventoryitemlocations,inventorybalance,aggregateitemlocation,inventorynumber,"
         "customtransactionbodyfield,customtransactioncolumnfield,"
         "entitycustomfield,itemcustomfield,crmcustomfield,othercustomfield,"
-        "customrecordtype,customlist"
+        "customrecordtype,customlist,"
+        "systemnote"
     )
 
     # OAuth for regular API connection (SuiteQL, file sync, metadata)
