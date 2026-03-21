@@ -414,9 +414,10 @@ TOOL_REGISTRY = {
     },
     "rag.search": {
         "description": (
-            "Search the documentation and knowledge base using vector similarity. "
-            "Returns relevant document excerpts ranked by relevance. Use to look up "
-            "field names, NetSuite documentation, platform guides, or any stored knowledge."
+            "Search documentation, SuiteQL reference rules, and domain knowledge. "
+            "Use PROACTIVELY when: a query fails with syntax errors, you need correct "
+            "column names, date functions, status codes, or record type IDs. "
+            "This searches the golden dataset of expert-verified rules."
         ),
         "execute": rag_search.execute,
         "params_schema": {
