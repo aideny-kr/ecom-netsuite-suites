@@ -254,7 +254,10 @@ _INVESTIGATION_RE = re.compile(
     r"how\s+(?:does|did|is)\s+\w+\s+(?:set|triggered|controlled|determined|calculated|routed|sent)|"
     r"what\s+(?:controls|triggers|sets|determines|calculates|routes)|"
     r"root\s+cause|investigate|dig\s+into|"
-    r"(?:give\s+me|show\s+me|get)\s+\S+\s+[A-Z0-9]\S*\s+history|timeline|audit.?trail|what.?happened|how.?long|when.?was",
+    r"(?:give\s+me|show\s+me|get)\s+.*?\bhistory\b(?!\s+(?:for\s+|by\s+))|"
+    r"(?:brief|full|complete)\s+history|"
+    r"\bhistory\b.*(?:RMA|PO|SO|INV|WO|TO|IF|IR|#|[A-Z]\d{4,})|(?:RMA|PO|SO|INV|WO|TO|IF|IR|#|[A-Z]\d{4,}).*\bhistory\b|"
+    r"timeline|audit.?trail|what.?happened|how.?long|when.?was",
     re.IGNORECASE,
 )
 

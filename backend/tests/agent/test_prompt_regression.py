@@ -751,6 +751,15 @@ class TestContextNeedClassifier:
     def test_investigation_history_get_verb(self):
         assert self._classify("get order R850152063 history") == "full"
 
+    def test_investigation_brief_history(self):
+        assert self._classify("this order R210606477 can you give me brief history?") == "full"
+
+    def test_investigation_rma_history(self):
+        assert self._classify("RMA61214 history") == "full"
+
+    def test_investigation_history_of_po(self):
+        assert self._classify("history of PO12345") == "full"
+
     def test_data_purchase_history_not_investigation(self):
         """'purchase history' without a record reference is DATA, not investigation."""
         assert self._classify("show me purchase history for Acme") == "data"
