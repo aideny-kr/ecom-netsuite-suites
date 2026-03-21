@@ -358,6 +358,7 @@ async def execute(params: dict, context: dict | None = None, **kwargs) -> dict:
     except ValueError as exc:
         return {"error": True, "message": str(exc)}
 
+
     # --- Enforce limit ---
     # Internal callers (e.g. financial_report tool) can set skip_limit_cap=True
     # via **kwargs to bypass the global max. NOT read from params to prevent

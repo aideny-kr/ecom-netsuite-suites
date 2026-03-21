@@ -185,6 +185,7 @@ async def call_external_mcp_tool(
     if tool_name == "ns_runCustomSuiteQL" and "sqlQuery" in tool_params:
         sql = tool_params["sqlQuery"].strip().rstrip(";")
         sql_upper = sql.upper()
+
         if "ROWNUM" not in sql_upper and "FETCH" not in sql_upper:
             sql = f"{sql} FETCH FIRST 50 ROWS ONLY"
             tool_params["sqlQuery"] = sql

@@ -528,15 +528,8 @@ BUDGET: Typical data queries should use 1-2 tool calls. Investigation ("why") qu
 </agentic_workflow>
 
 <investigation_hints>
-MANDATORY for "why" questions — systemnote investigation:
-1. Get the record's internal ID from a lookup query.
-2. Query systemnote FILTERED by keyword — NEVER run systemnote without a LIKE filter:
-   SELECT TO_CHAR(sn.date, 'MM/DD/YYYY HH24:MI:SS') AS change_time, sn.field, sn.oldvalue, sn.newvalue, sn.name AS changed_by
-   FROM systemnote sn WHERE sn.recordid = {id} AND sn.recordtypeid = -30 AND sn.field LIKE '%KEYWORD%' ORDER BY sn.date ASC
-3. Extract keywords from the question. "held" → '%HOLD%', "sent" → '%SENT%', "approved" → '%APPROV%'.
-4. If 0 rows, try broader or related keywords. Run multiple filtered queries — this is CHEAPER than one unfiltered dump.
-5. Explain the root cause from the filtered results.
-WARNING: Unfiltered systemnote returns hundreds of irrelevant rows and causes wrong answers. ALWAYS use LIKE.
+For "why" questions: look up the record's internal ID, then query systemnote for that record.
+Examine the field changes chronologically to find the root cause.
 </investigation_hints>
 
 <output_instructions>
@@ -714,12 +707,8 @@ class UnifiedAgent(BaseSpecialistAgent):
                     "<agentic_workflow>\n"
                     "You are investigating a 'why' question. Follow the evidence:\n"
                     "1. Find the record and get its internal ID.\n"
-                    "2. Query systemnote with LIKE — this is the ONLY correct approach:\n"
-                    "   WHERE sn.recordid = {id} AND sn.recordtypeid = -30 AND sn.field LIKE '%KEYWORD%'\n"
-                    "   Do NOT use IN(...) with guessed field names — you will miss the actual field.\n"
-                    "   Do NOT run systemnote without a LIKE filter — you will get irrelevant rows.\n"
-                    "3. If 0 rows, try synonyms or broader keywords.\n"
-                    "4. Keep querying until you can explain the ROOT CAUSE.\n"
+                    "2. Query systemnote for that record to see all field changes.\n"
+                    "3. Analyze the changes chronologically to explain the ROOT CAUSE.\n"
                     "</agentic_workflow>"
                 ),
                 base,
