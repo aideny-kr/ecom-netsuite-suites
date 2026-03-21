@@ -27,6 +27,18 @@ export default function ChatPage() {
   const dataTablesRef = useRef<Map<string, DataTableData>>(new Map());
   const queryClient = useQueryClient();
   const router = useRouter();
+
+  const bufferRef = useRef<string[]>([]);
+  const rafRef = useRef<number | null>(null);
+
+  const flushBuffer = useCallback(() => {
+    if (bufferRef.current.length === 0) return;
+    const text = bufferRef.current.join("");
+    bufferRef.current = [];
+    setStreamingContent((prev) => (prev || "") + text);
+    rafRef.current = null;
+  }, []);
+
   const { data: workspaces = [] } = useWorkspaces();
 
   const { data: sessions = [] } = useQuery<ChatSession[]>({
@@ -109,8 +121,11 @@ export default function ChatPage() {
         );
         await consumeChatStream(res, {
           onText: (chunk) => {
-            setStreamingContent((prev) => (prev || "") + chunk);
+            bufferRef.current.push(chunk);
             setStreamingStatus(null);
+            if (rafRef.current === null) {
+              rafRef.current = requestAnimationFrame(flushBuffer);
+            }
           },
           onToolStatus: (status) => setStreamingStatus(status),
           onFinancialReport: (data) => setFinancialReport(data),
@@ -140,6 +155,16 @@ export default function ChatPage() {
         const message = err instanceof Error ? err.message : "Failed to send message. Please try again.";
         setError(message);
       } finally {
+        // Flush any remaining buffered text and cancel pending RAF
+        if (rafRef.current !== null) {
+          cancelAnimationFrame(rafRef.current);
+          rafRef.current = null;
+        }
+        if (bufferRef.current.length > 0) {
+          const remaining = bufferRef.current.join("");
+          bufferRef.current = [];
+          setStreamingContent((prev) => (prev || "") + remaining);
+        }
         // Refetch persisted messages BEFORE clearing streaming state
         // so there's no blank gap between streaming text disappearing
         // and the saved message appearing.
@@ -155,7 +180,7 @@ export default function ChatPage() {
         setDataTable(null);
       }
     },
-    [activeSessionId, createSession, isStreaming, queryClient],
+    [activeSessionId, createSession, flushBuffer, isStreaming, queryClient],
   );
 
   const handleNewChat = useCallback(() => {

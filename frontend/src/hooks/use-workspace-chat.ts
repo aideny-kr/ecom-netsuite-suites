@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiClient } from "@/lib/api-client";
 import { consumeChatStream } from "@/lib/chat-stream";
@@ -15,6 +15,17 @@ export function useWorkspaceChat(workspaceId: string | null) {
   const [streamingStatus, setStreamingStatus] = useState<string | null>(null);
   const [streamingMessage, setStreamingMessage] = useState<ChatMessage | null>(null);
   const queryClient = useQueryClient();
+
+  const bufferRef = useRef<string[]>([]);
+  const rafRef = useRef<number | null>(null);
+
+  const flushBuffer = useCallback(() => {
+    if (bufferRef.current.length === 0) return;
+    const text = bufferRef.current.join("");
+    bufferRef.current = [];
+    setStreamingContent((prev) => (prev || "") + text);
+    rafRef.current = null;
+  }, []);
 
   // Show only sessions for this workspace
   const { data: sessions = [] } = useQuery<ChatSession[]>({
@@ -76,8 +87,11 @@ export function useWorkspaceChat(workspaceId: string | null) {
         );
         await consumeChatStream(res, {
           onText: (chunk) => {
-            setStreamingContent((prev) => (prev || "") + chunk);
+            bufferRef.current.push(chunk);
             setStreamingStatus(null);
+            if (rafRef.current === null) {
+              rafRef.current = requestAnimationFrame(flushBuffer);
+            }
           },
           onToolStatus: (status) => setStreamingStatus(status),
           onError: (streamError) => setError(streamError),
@@ -94,6 +108,16 @@ export function useWorkspaceChat(workspaceId: string | null) {
             : "Failed to send message. Please try again.";
         setError(message);
       } finally {
+        // Flush any remaining buffered text and cancel pending RAF
+        if (rafRef.current !== null) {
+          cancelAnimationFrame(rafRef.current);
+          rafRef.current = null;
+        }
+        if (bufferRef.current.length > 0) {
+          const remaining = bufferRef.current.join("");
+          bufferRef.current = [];
+          setStreamingContent((prev) => (prev || "") + remaining);
+        }
         await queryClient.invalidateQueries({
           queryKey: ["chat-session", sessionId],
         });
@@ -107,7 +131,7 @@ export function useWorkspaceChat(workspaceId: string | null) {
         setStreamingMessage(null);
       }
     },
-    [activeSessionId, createSession, isStreaming, queryClient],
+    [activeSessionId, createSession, flushBuffer, isStreaming, queryClient],
   );
 
   const handleNewChat = useCallback(() => {
