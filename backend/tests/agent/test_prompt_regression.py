@@ -726,3 +726,32 @@ class TestContextNeedClassifier:
 
     def test_po_number_data(self):
         assert self._classify("PO12345 status") == "data"
+
+    def test_investigation_why_held(self):
+        assert self._classify("why was this order held") == "full"
+
+    def test_investigation_history(self):
+        assert self._classify("give me order R850152063 history") == "full"
+
+    def test_investigation_what_happened(self):
+        assert self._classify("what happened to this RMA") == "full"
+
+    def test_investigation_how_long(self):
+        assert self._classify("how long was this order on hold") == "full"
+
+    def test_investigation_when_was(self):
+        assert self._classify("when was this sent to 3PL") == "full"
+
+    def test_investigation_timeline(self):
+        assert self._classify("show me the timeline for order 12345") == "full"
+
+    def test_investigation_audit_trail(self):
+        assert self._classify("show me the audit trail") == "full"
+
+    def test_data_purchase_history_not_investigation(self):
+        """'purchase history' without a record reference is DATA, not investigation."""
+        assert self._classify("show me purchase history for Acme") == "data"
+
+    def test_data_order_history_not_investigation(self):
+        """'order history' without investigation signal is DATA."""
+        assert self._classify("show me order history by month") == "data"
