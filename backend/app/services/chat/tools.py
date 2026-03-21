@@ -160,6 +160,7 @@ async def execute_tool_call(
     actor_id: uuid.UUID,
     correlation_id: str,
     db: "AsyncSession",
+    context_need: str | None = None,
 ) -> str:
     """Execute a tool call and return the result as a JSON string.
 
@@ -194,6 +195,7 @@ async def execute_tool_call(
             actor_id=str(actor_id),
             correlation_id=correlation_id,
             db=db,
+            context_need=context_need,
         )
         duration_ms = int((time.monotonic() - start) * 1000)
         logger.info(

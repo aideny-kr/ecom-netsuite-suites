@@ -301,7 +301,10 @@ async def execute(params: dict, context: dict | None = None, **kwargs) -> dict:
     query: str = params.get("query", "")
     limit: int = params.get("limit", 100)
     user_question: str | None = params.get("user_question")
-    timeout_seconds: int = params.get("timeout_seconds", settings.NETSUITE_SUITEQL_TIMEOUT)
+    # Investigation queries (FULL context) get 120s timeout for systemnote and complex JOINs
+    context_need = context.get("context_need") if context else None
+    default_timeout = 120 if context_need == "full" else settings.NETSUITE_SUITEQL_TIMEOUT
+    timeout_seconds: int = params.get("timeout_seconds", default_timeout)
 
     if not query:
         return {"error": True, "message": "No query provided."}

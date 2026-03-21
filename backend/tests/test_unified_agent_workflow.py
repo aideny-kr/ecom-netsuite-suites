@@ -76,7 +76,7 @@ class TestWorkflowStructure:
         agent = _make_agent()
         prompt = agent.system_prompt
         assert "BUDGET" in prompt
-        assert "6 tool calls" in prompt or "Maximum 6" in prompt
+        assert "tool calls" in prompt or "tool call" in prompt
 
 
 class TestAntiEnrichmentRules:

@@ -220,8 +220,12 @@ def check_rate_limit(tenant_id: str, tool_name: str) -> bool:
     return True
 
 
-def validate_params(tool_name: str, params: dict[str, Any]) -> dict[str, Any]:
-    """Validate and filter parameters against allowlist."""
+def validate_params(tool_name: str, params: dict[str, Any], context_need: str | None = None) -> dict[str, Any]:
+    """Validate and filter parameters against allowlist.
+
+    When context_need is FULL (investigation queries), use max_limit as default
+    instead of the conservative default_limit — lets the LLM see all rows.
+    """
     config = TOOL_CONFIGS.get(tool_name, {})
     allowed = config.get("allowlisted_params", [])
     if not allowed:
@@ -229,12 +233,13 @@ def validate_params(tool_name: str, params: dict[str, Any]) -> dict[str, Any]:
 
     filtered = {k: v for k, v in params.items() if k in allowed}
 
-    # Apply default limit
+    # Apply default limit — FULL context uses max_limit so investigations see all rows
     default_limit = config.get("default_limit")
     max_limit = config.get("max_limit")
     if default_limit is not None and "limit" in allowed:
+        effective_default = max_limit if (context_need == "full" and max_limit) else default_limit
         if "limit" not in filtered:
-            filtered["limit"] = default_limit
+            filtered["limit"] = effective_default
         elif max_limit and filtered["limit"] > max_limit:
             filtered["limit"] = max_limit
 
@@ -287,6 +292,7 @@ async def governed_execute(
     execute_fn: Callable,
     correlation_id: str | None = None,
     db: AsyncSession | None = None,
+    context_need: str | None = None,
 ) -> dict[str, Any]:
     """
     Governance wrapper: entitlement → rate limit → param validation → execute → redact → audit.
@@ -334,7 +340,7 @@ async def governed_execute(
         return {"error": "Rate limit exceeded", "tool": tool_name}
 
     # 2. Param validation
-    validated_params = validate_params(tool_name, params)
+    validated_params = validate_params(tool_name, params, context_need=context_need)
 
     # 2b. Pre-execution audit event
     if db is not None:
@@ -386,6 +392,7 @@ async def governed_execute(
             "actor_id": actor_id,
             "db": db,
             "correlation_id": correlation_id,
+            "context_need": context_need,
         }
         result = await execute_fn(validated_params, context=context)
     except Exception as e:

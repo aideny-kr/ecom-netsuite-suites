@@ -516,6 +516,7 @@ class BaseSpecialistAgent(abc.ABC):
                             actor_id=self.user_id,
                             correlation_id=self.correlation_id,
                             db=db,
+                            context_need=getattr(self, "_context_need", None),
                         )
 
                         # Output redaction
@@ -802,6 +803,7 @@ class BaseSpecialistAgent(abc.ABC):
                             actor_id=self.user_id,
                             correlation_id=self.correlation_id,
                             db=db,
+                            context_need=getattr(self, "_context_need", None),
                         )
                         if active_policy and active_policy.blocked_fields:
                             try:

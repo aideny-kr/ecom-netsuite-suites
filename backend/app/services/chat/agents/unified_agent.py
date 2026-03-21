@@ -479,8 +479,7 @@ If the query mentions a custom record, query it FIRST using the resolved script_
 STEP 1 — CHECK CONTEXT:
 Is the answer in <tenant_schema>, <tenant_vernacular>, <proven_patterns>, or <domain_knowledge>?
 → For simple lookups (field names, status codes, syntax): answer directly. No tool call needed.
-→ For "why" questions or investigation queries: ALWAYS use tools even if context seems sufficient. \
-Query the data first, then search workspace scripts to verify your understanding.
+→ For "why" questions: ALWAYS use tools. Include t.id in SELECT for system notes lookup.
 
 STEP 2 — CHECK DOMAIN KNOWLEDGE:
 If a <domain_knowledge> block contains a relevant query pattern or status code mapping, USE IT.
@@ -521,46 +520,24 @@ Once a query returns 1+ rows that answer the user's question, STOP.
 Do NOT run additional queries to "add more columns" or "get more detail".
 Do NOT join related records unless the user explicitly asked for them.
 The user can always ask follow-up questions if they need more fields.
-EXCEPTION: For "why" questions or investigation queries, continue to STEP 7 even after getting data.
-
-STEP 7 — DOCUMENTATION & INVESTIGATION:
+EXCEPTION: For investigation ("why") questions, do NOT stop after retrieving raw data. Continue investigating until you can explain the root cause.
+STEP 7 — DOCUMENTATION:
 Not a data question? → rag_search first, web_search as fallback.
-"Why" or "how does this work" question? → After getting data (Step 4), ALSO search workspace scripts \
-and documentation with rag_search or workspace_search. The data tells you WHAT happened; \
-the scripts and docs tell you WHY.
 
-BUDGET: Maximum 6 tool calls. Typical data queries should use 1-2. Investigation queries may use 3-4.
+BUDGET: Typical data queries should use 1-2 tool calls. Investigation ("why") queries may use more to follow the evidence chain.
 </agentic_workflow>
 
-<investigation_protocol>
-When the user asks WHY a field has a certain value, why something didn't happen,
-or how a process works:
-
-1. Query the data to confirm the current value/state. Read boolean values correctly: 'T' = Yes, 'F' = No.
-2. Check system notes for the record to see WHEN and WHO changed the field: \
-`SELECT t.tranid, sn.date, sn.name AS changed_by, sn.field, sn.oldvalue, sn.newvalue \
-FROM systemnote sn JOIN transaction t ON t.id = sn.recordid \
-WHERE sn.recordid = <id> AND sn.recordtypeid = -30 ORDER BY sn.date DESC FETCH FIRST 20 ROWS ONLY`
-3. Search workspace scripts for the field's script_id or process name \
-(use workspace_search with the field name like "custbody_fw_sent_to_techdata" or "3PL")
-4. Read the relevant script to understand the automation logic
-5. If no script found in workspace, use web_search to find NetSuite documentation \
-or community answers about the field or process
-6. Explain the conditions and why this specific record matched or didn't match
-7. Save what you learned for future reference (use tenant_save_learned_rule)
-
-Do NOT answer "why" questions with just the field value.
-Investigate the logic behind it.
-
-Examples of "why" questions:
-- "Why wasn't this order sent to 3PL?" → check field → system notes → find router script → explain
-- "Why is this field empty?" → system notes for history → find User Event → explain trigger criteria
-- "How does the approval workflow work?" → find workflow script → explain steps
-
-Examples that are NOT "why" questions (don't investigate):
-- "Why is NetSuite slow?" → general question, not field investigation
-- "Why do you recommend this?" → about your reasoning, not business logic
-</investigation_protocol>
+<investigation_hints>
+MANDATORY for "why" questions — systemnote investigation:
+1. Get the record's internal ID from a lookup query.
+2. Query systemnote FILTERED by keyword — NEVER run systemnote without a LIKE filter:
+   SELECT TO_CHAR(sn.date, 'MM/DD/YYYY HH24:MI:SS') AS change_time, sn.field, sn.oldvalue, sn.newvalue, sn.name AS changed_by
+   FROM systemnote sn WHERE sn.recordid = {id} AND sn.recordtypeid = -30 AND sn.field LIKE '%KEYWORD%' ORDER BY sn.date ASC
+3. Extract keywords from the question. "held" → '%HOLD%', "sent" → '%SENT%', "approved" → '%APPROV%'.
+4. If 0 rows, try broader or related keywords. Run multiple filtered queries — this is CHEAPER than one unfiltered dump.
+5. Explain the root cause from the filtered results.
+WARNING: Unfiltered systemnote returns hundreds of irrelevant rows and causes wrong answers. ALWAYS use LIKE.
+</investigation_hints>
 
 <output_instructions>
 LANGUAGE: Always respond in English unless the user asks in another language but do not get the lanugage mixed when output.
@@ -604,10 +581,12 @@ class UnifiedAgent(BaseSpecialistAgent):
         correlation_id: str,
         metadata: NetSuiteMetadata | None = None,
         policy: PolicyProfile | None = None,
+        context_need: str = "FULL",
     ) -> None:
         super().__init__(tenant_id, user_id, correlation_id)
         self._metadata = metadata
         self._policy = policy
+        self._context_need = context_need
         self._tool_defs: list[dict] | None = None
         self._tenant_vernacular: str = ""
         self._onboarding_profile: str = ""
@@ -649,7 +628,8 @@ class UnifiedAgent(BaseSpecialistAgent):
 
     @property
     def max_steps(self) -> int:
-        return 6
+        # Investigation queries get more budget to follow evidence chains
+        return 10 if self._context_need == "full" else 6
 
     @property
     def system_prompt(self) -> str:
@@ -694,6 +674,73 @@ class UnifiedAgent(BaseSpecialistAgent):
             base = base.replace("{{INJECT_TABLE_SCHEMAS}}", table_schemas)
         else:
             base = base.replace("{{INJECT_TABLE_SCHEMAS}}", "")
+
+        # ── Investigation mode: strip verbose sections so the LLM can think freely ──
+        # Claude + native MCP solves investigation queries perfectly with zero SuiteQL rules.
+        # Our 400-line prompt drowns the investigation hints in noise. Strip it down.
+        if self._context_need == "full":
+            import re as _re
+
+            # Remove entire XML blocks that add noise for investigation
+            for tag in (
+                "common_queries",      # anti-enrichment, aggregation discipline, item gotchas
+                "workspace_rules",     # SuiteScript rules — not relevant
+                "rag_search_tips",     # search tips — not relevant
+            ):
+                base = _re.sub(rf"<{tag}>.*?</{tag}>", "", base, flags=_re.DOTALL)
+
+            # Replace heavy suiteql_dialect_rules with minimal essentials
+            base = _re.sub(
+                r"<suiteql_dialect_rules>.*?</suiteql_dialect_rules>",
+                (
+                    "<suiteql_dialect_rules>\n"
+                    "SuiteQL essentials:\n"
+                    "- Pagination: FETCH FIRST N ROWS ONLY (not LIMIT).\n"
+                    "- Dates: TO_DATE('2026-01-15', 'YYYY-MM-DD'), TRUNC(SYSDATE) for today.\n"
+                    "- Booleans: 'T' = true, 'F' = false.\n"
+                    "- Display values: BUILTIN.DF(field) for list/record fields.\n"
+                    "- Primary key: id (not internalid). Higher id = more recent.\n"
+                    "- Status codes: single-letter only (e.g. 'B'), never compound ('SalesOrd:B').\n"
+                    "</suiteql_dialect_rules>"
+                ),
+                base,
+                flags=_re.DOTALL,
+            )
+
+            # Replace verbose agentic_workflow with lean investigation workflow
+            base = _re.sub(
+                r"<agentic_workflow>.*?</agentic_workflow>",
+                (
+                    "<agentic_workflow>\n"
+                    "You are investigating a 'why' question. Follow the evidence:\n"
+                    "1. Find the record and get its internal ID.\n"
+                    "2. Query systemnote with LIKE — this is the ONLY correct approach:\n"
+                    "   WHERE sn.recordid = {id} AND sn.recordtypeid = -30 AND sn.field LIKE '%KEYWORD%'\n"
+                    "   Do NOT use IN(...) with guessed field names — you will miss the actual field.\n"
+                    "   Do NOT run systemnote without a LIKE filter — you will get irrelevant rows.\n"
+                    "3. If 0 rows, try synonyms or broader keywords.\n"
+                    "4. Keep querying until you can explain the ROOT CAUSE.\n"
+                    "</agentic_workflow>"
+                ),
+                base,
+                flags=_re.DOTALL,
+            )
+
+            # Slim down tool_selection — keep only SuiteQL and schema discovery
+            base = _re.sub(
+                r"<tool_selection>.*?</tool_selection>",
+                (
+                    "<tool_selection>\n"
+                    "Use MCP ns_runCustomSuiteQL (preferred) or local netsuite_suiteql for data queries.\n"
+                    "Check <tenant_schema> for valid column names before querying.\n"
+                    "Use netsuite_get_metadata for column discovery if needed.\n"
+                    "</tool_selection>"
+                ),
+                base,
+                flags=_re.DOTALL,
+            )
+
+            print(f"[UNIFIED] Investigation mode: prompt stripped for free reasoning", flush=True)
 
         parts = [base]
 

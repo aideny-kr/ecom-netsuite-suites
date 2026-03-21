@@ -264,14 +264,15 @@ def _classify_context_need(user_message: str, is_financial: bool = False) -> str
     Returns one of ContextNeed.FULL/DATA/DOCS/WORKSPACE/FINANCIAL.
     When uncertain, returns FULL — never risk under-injecting.
     """
-    if is_financial:
-        return ContextNeed.FINANCIAL
-
     msg = user_message.strip()
 
     # Investigation: "why" questions need FULL context (data tools + workspace tools)
+    # Must check BEFORE financial — a "why" follow-up in a financial session still needs investigation
     if _INVESTIGATION_RE.search(msg):
         return ContextNeed.FULL
+
+    if is_financial:
+        return ContextNeed.FINANCIAL
 
     # Workspace: script/deploy/SuiteScript keywords
     if _WORKSPACE_RE.search(msg):
@@ -325,7 +326,7 @@ def _is_suiteql_tool(tool_name: str) -> bool:
 
 
 def _intercept_tool_result(
-    tool_name: str, result_str: str
+    tool_name: str, result_str: str, context_need: str = ContextNeed.DATA
 ) -> tuple[str | None, dict | None, str]:
     """Intercept data-producing tool results for frontend DataFrame rendering.
 
@@ -333,6 +334,9 @@ def _intercept_tool_result(
     - Financial reports → ``("financial_report", {...}, condensed)``
     - SuiteQL queries  → ``("data_table", {...}, condensed)``
     - Everything else  → ``(None, None, original_result_str)``
+
+    When context_need == FULL (investigation queries), the LLM receives full
+    row data so it can reason over system notes, field changes, etc.
     """
 
     # --- Financial report path ---
@@ -415,31 +419,56 @@ def _intercept_tool_result(
             "query": query,
             "truncated": truncated,
         }
-        condensed = json.dumps(
-            {
-                "columns": columns,
-                "row_count": row_count,
-                "truncated": truncated,
-                "note": (
-                    "The full data table has been sent to the frontend for rendering. "
-                    "Do NOT rebuild or reproduce the table in your response. "
-                    "Provide commentary, insights, and analysis only."
-                ),
-            },
-            default=str,
-        )
+        # Investigation queries (FULL context): send all rows so LLM can reason
+        # over system notes, field changes, timelines, etc.
+        # Standard queries: 5-row preview to save tokens.
+        if context_need == ContextNeed.FULL:
+            condensed = json.dumps(
+                {
+                    "columns": columns,
+                    "row_count": row_count,
+                    "rows": rows,
+                    "truncated": truncated,
+                    "note": (
+                        "The data table is also rendered in the frontend. "
+                        "Do NOT reproduce the table. Analyze the data and explain findings."
+                    ),
+                },
+                default=str,
+            )
+        else:
+            row_preview = rows[:5]
+            condensed = json.dumps(
+                {
+                    "columns": columns,
+                    "row_count": row_count,
+                    "rows_preview": row_preview,
+                    "truncated": truncated,
+                    "note": (
+                        "The full data table has been sent to the frontend for rendering. "
+                        "Do NOT rebuild or reproduce the table in your response. "
+                        "Provide commentary, insights, and analysis only. "
+                        "Use rows_preview to extract values you need for follow-up queries."
+                    ),
+                },
+                default=str,
+            )
         return "data_table", sse_event_data, condensed
 
     # --- Not a data tool ---
     return None, None, result_str
 
 
-def _tool_interceptor(tool_name: str, result_str: str) -> tuple[tuple[str, dict] | None, str]:
-    """Adapter: wraps _intercept_tool_result for the agent callback interface."""
-    event_type, event_data, new_result_str = _intercept_tool_result(tool_name, result_str)
-    if event_type is not None and event_data is not None:
-        return (event_type, event_data), new_result_str
-    return None, new_result_str
+def _make_tool_interceptor(context_need: str = ContextNeed.DATA):
+    """Create a tool interceptor closure that captures context_need."""
+    def interceptor(tool_name: str, result_str: str) -> tuple[tuple[str, dict] | None, str]:
+        event_type, event_data, new_result_str = _intercept_tool_result(
+            tool_name, result_str, context_need=context_need
+        )
+        if event_type is not None and event_data is not None:
+            return (event_type, event_data), new_result_str
+        return None, new_result_str
+    return interceptor
 
 
 def _get_confidence_explanation(score: float) -> str:
@@ -1227,6 +1256,7 @@ async def run_chat_turn(
                         correlation_id=correlation_id,
                         metadata=metadata if _need_schemas else None,
                         policy=active_policy,
+                        context_need=context_need,
                     )
 
                 # Augment task for financial report queries
@@ -1261,7 +1291,7 @@ async def run_chat_turn(
                     model=unified_model,
                     conversation_history=history_messages,
                     tool_choice=None,
-                    tool_result_interceptor=_tool_interceptor,
+                    tool_result_interceptor=_make_tool_interceptor(context_need),
                 ):
                     if event_type == "text":
                         streamed_text_parts.append(payload)
@@ -1655,7 +1685,7 @@ async def run_chat_turn(
 
             # Intercept data tool results: emit SSE event with full data,
             # condense result_str to summary-only for the LLM.
-            intercept_type, intercept_data, result_str = _intercept_tool_result(block.name, result_str)
+            intercept_type, intercept_data, result_str = _intercept_tool_result(block.name, result_str, context_need=ContextNeed.FULL)
             if intercept_type is not None:
                 last_structured_output = {"type": intercept_type, "data": intercept_data}
                 yield {"type": intercept_type, "data": intercept_data}

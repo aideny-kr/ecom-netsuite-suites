@@ -215,7 +215,8 @@ async def call_external_mcp_tool(
     headers = await _build_headers(connector, db)
 
     # Reports and saved searches can take longer than simple queries
-    timeout = 60.0 if tool_name in ("ns_runReport", "ns_runSavedSearch") else 15.0
+    # SuiteQL needs 60s too — systemnote and complex JOINs can exceed 15s
+    timeout = 60.0 if tool_name in ("ns_runReport", "ns_runSavedSearch", "ns_runCustomSuiteQL") else 15.0
     result = None
 
     try:
