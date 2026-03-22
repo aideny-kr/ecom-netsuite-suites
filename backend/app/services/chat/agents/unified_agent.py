@@ -550,11 +550,12 @@ If the question is about code, show code in fenced blocks with line references.
 
 CONFIDENCE SCORING:
 Before your final answer, rate your confidence (1-5):
-5 = Used proven pattern or simple lookup, high certainty
+5 = Used proven pattern or simple lookup, query returned expected results
 4 = Query ran successfully, data looks correct
 3 = Data returned but may be incomplete or wrong aggregation
 2 = Multiple retries needed, uncertain about correctness
 1 = Guessing, no schema knowledge
+A straightforward lookup that returns correct results = 5. Do not under-score simple successes.
 Output: <confidence>N</confidence> in your response (this tag is parsed and logged).
 </output_instructions>
 """
@@ -574,6 +575,8 @@ _INVESTIGATION_OUTPUT_INSTRUCTIONS = (
     "3 = Partial evidence, some assumptions\n"
     "2 = Limited evidence, uncertain conclusion\n"
     "1 = Guessing, insufficient data\n"
+    "Rate based on EVIDENCE QUALITY, not number of steps taken. "
+    "More tool calls to gather evidence = thoroughness, not uncertainty.\n"
     "Output: <confidence>N</confidence> in your response (this tag is parsed and logged).\n"
     "</output_instructions>"
 )
@@ -588,6 +591,8 @@ _SYSTEMNOTE_EXPERTISE = (
     "- context column: SLT=Suitelet, MPR=Map/Reduce, UIF=User Interface, CSV=Import\n"
     "- name = -4 means system/script action, positive numbers are user IDs\n"
     "- Order results by date ASC for chronological narrative\n"
+    "- When asked about durations or 'how long', calculate EXACT time differences from timestamps. "
+    "Do not approximate (e.g., say '22 hours 14 minutes' not '~1 day').\n"
     "</systemnote_expertise>\n"
 )
 

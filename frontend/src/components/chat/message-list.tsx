@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useMemo, memo } from "react";
 import ReactMarkdown from "react-markdown";
 import type { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -340,6 +340,18 @@ function MarkdownRenderer({
     </div>
   );
 }
+
+/** Streaming-aware markdown — re-renders only when content grows by 50+ chars. */
+const StreamingMarkdown = memo(
+  function StreamingMarkdown({ content, isTerminal = false }: { content: string; isTerminal?: boolean }) {
+    return <MarkdownRenderer content={content} isTerminal={isTerminal} />;
+  },
+  (prev, next) => {
+    // Skip re-render if content grew by fewer than 50 chars (batches visual updates)
+    if (prev.isTerminal !== next.isTerminal) return false;
+    return Math.abs(next.content.length - prev.content.length) < 50;
+  },
+);
 
 function AssistantNarrativeBubble({ content, isTerminal = false }: { content: string; isTerminal?: boolean }) {
   return (
@@ -713,9 +725,7 @@ export function MessageList({
                     />
                   )}
                   {parsed.text && (
-                    <pre className="whitespace-pre-wrap font-sans text-[15px] leading-relaxed">
-                      {parsed.text}
-                    </pre>
+                    <StreamingMarkdown content={parsed.text} isTerminal={isTerminal} />
                   )}
                 </>
               );
