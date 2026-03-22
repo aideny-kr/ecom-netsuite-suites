@@ -282,3 +282,11 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 ## Resolved (2026-03-21)
 
 - **Investigation mode** — conditional on `context_need == FULL`: expanded `_INVESTIGATION_RE` regex (history/timeline/audit trail/what happened/how long/when was), 12-step budget, disabled early exit + data nudge, progressive output instructions (replaces one-sentence constraint), systemnote expertise block (`recordtypeid = -30`, raw field names, context codes). 3 files changed (~30 lines), 12 new tests. Beats Claude + native MCP on R850152063 benchmark.
+
+## Resolved (2026-03-22)
+
+- **Streaming markdown jump** — replaced `<pre>` with memoized `StreamingMarkdown` component during streaming. Uses `React.memo` with 50-char threshold to batch visual updates. No more reformatting jump when stream completes.
+- **Confidence miscalibration** — `strip_confidence_tag()` was removing the agent's `<confidence>N</confidence>` BEFORE `extract_structured_confidence()` could read it, forcing Haiku fallback with a generic rubric every time. Fix: extract → strip → display. Agent self-scores now respected; Haiku only fires when tag missing.
+- **Duration precision** — added exact timestamp calculation hint to `_SYSTEMNOTE_EXPERTISE`. Agent now computes "22 hours 14 minutes" instead of "~1 day".
+- **Cloudflare SSE buffering** — removed `no-chunked-encoding: true` from `/etc/cloudflared/config.yml` on staging VM. SSE now streams progressively instead of snapshotting.
+- **Chat scroll jump** — wrapped `scrollIntoView` in `requestAnimationFrame` to wait for DOM layout to settle before scrolling. Fixes "message appears at bottom then shoots up".
