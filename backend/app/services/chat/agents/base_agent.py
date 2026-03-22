@@ -455,10 +455,8 @@ class BaseSpecialistAgent(abc.ABC):
 
                     final_text = "\n".join(response.text_blocks) if response.text_blocks else ""
 
-                    # Always strip confidence tags from displayed text
-                    final_text = strip_confidence_tag(final_text)
-
-                    # Structured confidence extraction
+                    # Extract confidence BEFORE stripping tag so agent self-score is used
+                    # (Haiku fallback only fires when tag is missing)
                     tools_used = [c.get("tool", "") for c in tool_calls_log]
                     tool_ok = sum(1 for c in tool_calls_log if not tool_call_had_error(c))
                     tool_rate = tool_ok / len(tool_calls_log) if tool_calls_log else 0.0
@@ -470,6 +468,7 @@ class BaseSpecialistAgent(abc.ABC):
                         tool_success_rate=tool_rate,
                     )
                     confidence = assessment.score
+                    final_text = strip_confidence_tag(final_text)
                     if confidence <= 2:
                         final_text += _LOW_CONFIDENCE_DISCLAIMER
                     logger.info(
@@ -580,10 +579,8 @@ class BaseSpecialistAgent(abc.ABC):
             total_output_tokens += response.usage.output_tokens
             final_text = "\n".join(response.text_blocks) if response.text_blocks else ""
 
-            # Always strip confidence tags from displayed text
-            final_text = strip_confidence_tag(final_text)
-
-            # Structured confidence extraction
+            # Extract confidence BEFORE stripping tag so agent self-score is used
+            # (Haiku fallback only fires when tag is missing)
             tools_used = [c.get("tool", "") for c in tool_calls_log]
             tool_ok = sum(1 for c in tool_calls_log if not tool_call_had_error(c))
             tool_rate = tool_ok / len(tool_calls_log) if tool_calls_log else 0.0
@@ -595,6 +592,7 @@ class BaseSpecialistAgent(abc.ABC):
                 tool_success_rate=tool_rate,
             )
             confidence = assessment.score
+            final_text = strip_confidence_tag(final_text)
             if confidence <= 2:
                 final_text += _LOW_CONFIDENCE_DISCLAIMER
             logger.info("agent.confidence agent=%s score=%d source=%s", self.agent_name, confidence, assessment.source)
@@ -722,10 +720,8 @@ class BaseSpecialistAgent(abc.ABC):
 
                     final_text = "\n".join(response.text_blocks) if response.text_blocks else ""
 
-                    # Always strip confidence tags from displayed text
-                    final_text = strip_confidence_tag(final_text)
-
-                    # Structured confidence extraction
+                    # Extract confidence BEFORE stripping tag so agent self-score is used
+                    # (Haiku fallback only fires when tag is missing)
                     tools_used = [c.get("tool", "") for c in tool_calls_log]
                     tool_ok = sum(1 for c in tool_calls_log if not tool_call_had_error(c))
                     tool_rate = tool_ok / len(tool_calls_log) if tool_calls_log else 0.0
@@ -737,6 +733,7 @@ class BaseSpecialistAgent(abc.ABC):
                         tool_success_rate=tool_rate,
                     )
                     confidence = assessment.score
+                    final_text = strip_confidence_tag(final_text)
                     if confidence <= 2:
                         final_text += _LOW_CONFIDENCE_DISCLAIMER
                     logger.info(
@@ -912,10 +909,8 @@ class BaseSpecialistAgent(abc.ABC):
 
             final_text = "\n".join(response.text_blocks) if response and response.text_blocks else ""
 
-            # Always strip confidence tags from displayed text
-            final_text = strip_confidence_tag(final_text)
-
-            # Structured confidence extraction
+            # Extract confidence BEFORE stripping tag so agent self-score is used
+            # (Haiku fallback only fires when tag is missing)
             tools_used = [c.get("tool", "") for c in tool_calls_log]
             tool_ok = sum(1 for c in tool_calls_log if not tool_call_had_error(c))
             tool_rate = tool_ok / len(tool_calls_log) if tool_calls_log else 0.0
@@ -927,6 +922,7 @@ class BaseSpecialistAgent(abc.ABC):
                 tool_success_rate=tool_rate,
             )
             confidence = assessment.score
+            final_text = strip_confidence_tag(final_text)
             if confidence <= 2:
                 final_text += _LOW_CONFIDENCE_DISCLAIMER
             logger.info("agent.confidence agent=%s score=%d source=%s", self.agent_name, confidence, assessment.source)
