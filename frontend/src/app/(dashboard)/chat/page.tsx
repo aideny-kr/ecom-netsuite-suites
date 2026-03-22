@@ -217,7 +217,7 @@ export default function ChatPage() {
         {chatSidebarCollapsed && (
           <button
             onClick={() => setChatSidebarCollapsed(false)}
-            className="absolute left-2 top-2 z-10 rounded-md p-1.5 text-[var(--chat-accent)] transition-colors hover:bg-[var(--chat-surface-mid)]"
+            className="absolute left-10 top-2 z-10 rounded-md p-1.5 text-[var(--chat-accent)] transition-colors hover:bg-[var(--chat-surface-mid)]"
             aria-label="Open chat history"
           >
             <PanelLeftOpen className="h-4 w-4" />
