@@ -523,7 +523,7 @@ export function MessageList({
       if (scrollTimerRef.current) clearTimeout(scrollTimerRef.current);
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
     };
-  }, [messages, pendingUserMessage, isWaitingForReply, streamingContent, isStreamingNow]);
+  }, [messages, pendingUserMessage, isWaitingForReply, streamingContent]);
 
   if (isLoading) {
     return (

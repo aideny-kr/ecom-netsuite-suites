@@ -704,18 +704,16 @@ class UnifiedAgent(BaseSpecialistAgent):
         # Claude + native MCP solves investigation queries perfectly with zero SuiteQL rules.
         # Our 400-line prompt drowns the investigation hints in noise. Strip it down.
         if self._context_need == "full":
-            import re as _re
-
             # Remove entire XML blocks that add noise for investigation
             for tag in (
                 "common_queries",      # anti-enrichment, aggregation discipline, item gotchas
                 "workspace_rules",     # SuiteScript rules — not relevant
                 "rag_search_tips",     # search tips — not relevant
             ):
-                base = _re.sub(rf"<{tag}>.*?</{tag}>", "", base, flags=_re.DOTALL)
+                base = re.sub(rf"<{tag}>.*?</{tag}>", "", base, flags=re.DOTALL)
 
             # Replace heavy suiteql_dialect_rules with minimal essentials
-            base = _re.sub(
+            base = re.sub(
                 r"<suiteql_dialect_rules>.*?</suiteql_dialect_rules>",
                 (
                     "<suiteql_dialect_rules>\n"
@@ -729,11 +727,11 @@ class UnifiedAgent(BaseSpecialistAgent):
                     "</suiteql_dialect_rules>"
                 ),
                 base,
-                flags=_re.DOTALL,
+                flags=re.DOTALL,
             )
 
             # Replace verbose agentic_workflow with lean investigation workflow
-            base = _re.sub(
+            base = re.sub(
                 r"<agentic_workflow>.*?</agentic_workflow>",
                 (
                     "<agentic_workflow>\n"
@@ -744,11 +742,11 @@ class UnifiedAgent(BaseSpecialistAgent):
                     "</agentic_workflow>"
                 ),
                 base,
-                flags=_re.DOTALL,
+                flags=re.DOTALL,
             )
 
             # Slim down tool_selection — keep only SuiteQL and schema discovery
-            base = _re.sub(
+            base = re.sub(
                 r"<tool_selection>.*?</tool_selection>",
                 (
                     "<tool_selection>\n"
@@ -758,15 +756,15 @@ class UnifiedAgent(BaseSpecialistAgent):
                     "</tool_selection>"
                 ),
                 base,
-                flags=_re.DOTALL,
+                flags=re.DOTALL,
             )
 
             # Replace output_instructions with progressive investigation format
-            base = _re.sub(
+            base = re.sub(
                 r"<output_instructions>.*?</output_instructions>",
                 _INVESTIGATION_OUTPUT_INSTRUCTIONS,
                 base,
-                flags=_re.DOTALL,
+                flags=re.DOTALL,
             )
 
             # Add systemnote expertise at the end (highest attention per U-curve research)
