@@ -10,6 +10,7 @@ import {
   Database,
   ChevronDown,
   ChevronRight,
+  ChevronsLeft,
   Pencil,
   Trash2,
   Check,
@@ -33,6 +34,8 @@ interface SessionSidebarProps {
   onSelectSession: (id: string) => void;
   onNewChat: () => void;
   variant?: "default" | "terminal";
+  collapsed?: boolean;
+  onToggle?: () => void;
 }
 
 export function SessionSidebar({
@@ -41,6 +44,8 @@ export function SessionSidebar({
   onSelectSession,
   onNewChat,
   variant,
+  collapsed = false,
+  onToggle,
 }: SessionSidebarProps) {
   const isTerminal = variant === "terminal";
   const [queriesExpanded, setQueriesExpanded] = useState(true);
@@ -48,28 +53,45 @@ export function SessionSidebar({
   return (
     <div
       className={cn(
-        "flex w-[280px] flex-col border-r",
+        "flex shrink-0 flex-col border-r transition-[width] duration-200 overflow-hidden",
+        collapsed ? "w-0 border-r-0" : "w-[280px]",
         isTerminal ? "bg-[var(--card)] border-[var(--chat-surface-mid)]" : "bg-muted/30",
       )}
     >
-      {/* New Chat button */}
-      <div className="p-4">
-        {isTerminal ? (
+      {/* New Chat button + collapse toggle */}
+      <div className="flex items-center gap-2 p-4">
+        <div className="flex-1">
+          {isTerminal ? (
+            <button
+              onClick={onNewChat}
+              className="w-full bg-[var(--chat-accent)] text-white py-3 rounded-sm font-headline font-bold text-xs tracking-widest uppercase flex items-center justify-center gap-2 hover:bg-[var(--chat-accent-hover)] transition-all"
+            >
+              <Plus className="h-3.5 w-3.5" /> NEW CHAT
+            </button>
+          ) : (
+            <Button
+              variant="outline"
+              className="w-full justify-start gap-2 bg-card text-[13px] font-medium shadow-soft"
+              onClick={onNewChat}
+            >
+              <Plus className="h-4 w-4" />
+              New Chat
+            </Button>
+          )}
+        </div>
+        {onToggle && (
           <button
-            onClick={onNewChat}
-            className="w-full bg-[var(--chat-accent)] text-white py-3 rounded-sm font-headline font-bold text-xs tracking-widest uppercase flex items-center justify-center gap-2 hover:bg-[var(--chat-accent-hover)] transition-all"
+            onClick={onToggle}
+            className={cn(
+              "shrink-0 rounded-md p-1.5 transition-colors",
+              isTerminal
+                ? "text-[var(--chat-accent)] hover:bg-[var(--chat-surface-mid)]"
+                : "text-muted-foreground hover:bg-accent",
+            )}
+            aria-label="Collapse chat history"
           >
-            <Plus className="h-3.5 w-3.5" /> NEW CHAT
+            <ChevronsLeft className="h-4 w-4" />
           </button>
-        ) : (
-          <Button
-            variant="outline"
-            className="w-full justify-start gap-2 bg-card text-[13px] font-medium shadow-soft"
-            onClick={onNewChat}
-          >
-            <Plus className="h-4 w-4" />
-            New Chat
-          </Button>
         )}
       </div>
 

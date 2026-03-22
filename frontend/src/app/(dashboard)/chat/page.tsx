@@ -11,10 +11,11 @@ import { SessionSidebar } from "@/components/chat/session-sidebar";
 import { MessageList } from "@/components/chat/message-list";
 import { ChatInput } from "@/components/chat/chat-input";
 import { useWorkspaces } from "@/hooks/use-workspace";
-import { AlertCircle, X } from "lucide-react";
+import { AlertCircle, X, PanelLeftOpen } from "lucide-react";
 
 export default function ChatPage() {
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [chatSidebarCollapsed, setChatSidebarCollapsed] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pendingMessage, setPendingMessage] = useState<string | null>(null);
   const [streamingContent, setStreamingContent] = useState<string | null>(null);
@@ -209,8 +210,19 @@ export default function ChatPage() {
         activeSessionId={activeSessionId}
         onSelectSession={setActiveSessionId}
         onNewChat={handleNewChat}
+        collapsed={chatSidebarCollapsed}
+        onToggle={() => setChatSidebarCollapsed(!chatSidebarCollapsed)}
       />
-      <div className="flex min-w-0 flex-1 flex-col bg-[var(--chat-surface)]">
+      <div className="relative flex min-w-0 flex-1 flex-col bg-[var(--chat-surface)]">
+        {chatSidebarCollapsed && (
+          <button
+            onClick={() => setChatSidebarCollapsed(false)}
+            className="absolute left-2 top-2 z-10 rounded-md p-1.5 text-[var(--chat-accent)] transition-colors hover:bg-[var(--chat-surface-mid)]"
+            aria-label="Open chat history"
+          >
+            <PanelLeftOpen className="h-4 w-4" />
+          </button>
+        )}
         <div className="min-h-0 min-w-0 flex-1 overflow-hidden">
           <MessageList
             variant="terminal"

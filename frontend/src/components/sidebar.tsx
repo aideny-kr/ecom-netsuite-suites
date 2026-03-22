@@ -14,6 +14,7 @@ import {
   Settings,
   Table2,
   ChevronDown,
+  ChevronsLeft,
   LogOut,
   ChevronsUpDown,
   Check,
@@ -43,7 +44,7 @@ const iconMap = {
   Settings,
 } as const;
 
-export function Sidebar() {
+export function Sidebar({ collapsed = false, onToggle }: { collapsed?: boolean; onToggle?: () => void }) {
   const pathname = usePathname();
   const { user, tenants, switchTenant, logout } = useAuth();
   const { brandName, logoUrl } = useBranding();
@@ -59,7 +60,10 @@ export function Sidebar() {
   }, []);
 
   return (
-    <aside className="flex h-full w-[260px] flex-col bg-[hsl(var(--sidebar-bg))] text-[hsl(var(--sidebar-foreground))]">
+    <aside className={cn(
+      "flex h-full shrink-0 flex-col bg-[hsl(var(--sidebar-bg))] text-[hsl(var(--sidebar-foreground))] transition-[width] duration-200 overflow-hidden",
+      collapsed ? "w-0" : "w-[260px]"
+    )}>
       {/* Brand */}
       <div className="border-b border-[hsl(var(--sidebar-border))] px-5 py-5">
         <div className="flex items-center gap-2.5">
@@ -75,6 +79,15 @@ export function Sidebar() {
               {brandName}
             </h1>
           </div>
+          {onToggle && (
+            <button
+              onClick={onToggle}
+              className="ml-auto shrink-0 rounded-md p-1 text-[hsl(var(--sidebar-muted))] transition-colors hover:bg-[hsl(var(--sidebar-hover))] hover:text-[hsl(var(--sidebar-active))]"
+              aria-label="Collapse sidebar"
+            >
+              <ChevronsLeft className="h-4 w-4" />
+            </button>
+          )}
         </div>
         {user && tenants.length > 1 ? (
           <DropdownMenu>

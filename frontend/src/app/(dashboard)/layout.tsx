@@ -7,7 +7,7 @@ import { useAuth } from "@/providers/auth-provider";
 import { apiClient } from "@/lib/api-client";
 import { Sidebar } from "@/components/sidebar";
 import { OnboardingWizard } from "@/components/onboarding/onboarding-wizard";
-import { AlertTriangle, X } from "lucide-react";
+import { AlertTriangle, X, Menu } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { ConnectionAlertBanner } from "@/components/connection-alert-banner";
 
@@ -27,6 +27,7 @@ export default function DashboardLayout({
     | { state: "expired"; reason: string }
   >({ state: "ok" });
   const [bannerDismissed, setBannerDismissed] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
   useEffect(() => {
     if (!user) {
@@ -123,8 +124,17 @@ export default function DashboardLayout({
       {showOnboarding && (
         <OnboardingWizard onComplete={handleOnboardingComplete} />
       )}
-      <Sidebar />
+      <Sidebar collapsed={sidebarCollapsed} onToggle={() => setSidebarCollapsed(!sidebarCollapsed)} />
       <main className="flex-1 overflow-auto bg-background scrollbar-thin">
+        {sidebarCollapsed && (
+          <button
+            onClick={() => setSidebarCollapsed(false)}
+            className="fixed left-3 top-3 z-30 rounded-md border border-border bg-background p-1.5 shadow-sm transition-colors hover:bg-accent"
+            aria-label="Open sidebar"
+          >
+            <Menu className="h-4 w-4 text-muted-foreground" />
+          </button>
+        )}
         <ConnectionAlertBanner />
         {/* Connection warning banner — missing */}
         {connectionHealth.state === "missing" && !bannerDismissed && (
