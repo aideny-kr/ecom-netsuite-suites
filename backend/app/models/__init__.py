@@ -1,3 +1,4 @@
+from app.models.agent_config import AgentConfig
 from app.models.audit import AuditEvent
 from app.models.base import Base
 from app.models.canonical import (
@@ -85,4 +86,5 @@ __all__ = [
     "DomainKnowledgeChunk",
     "SavedSuiteQLQuery",
     "ConnectionAlert",
+    "AgentConfig",
 ]
