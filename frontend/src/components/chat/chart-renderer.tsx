@@ -1,10 +1,10 @@
 "use client";
 
-import { useState } from "react";
+import React, { useState } from "react";
 import {
   BarChart,
   Bar,
-  LineChart,
+  ComposedChart,
   Line,
   PieChart,
   Pie,
@@ -22,16 +22,146 @@ import {
 } from "recharts";
 import type { ChartData } from "@/lib/types";
 
-const COLORS = [
-  "#3b82f6",
-  "#ef4444",
-  "#22c55e",
-  "#f59e0b",
-  "#8b5cf6",
-  "#ec4899",
-  "#06b6d4",
-  "#f97316",
+// ── AI-native color palette ──────────────────────────────────────────────────
+
+const CHART_COLORS = [
+  "#6366f1", // indigo
+  "#8b5cf6", // violet
+  "#06b6d4", // cyan
+  "#f59e0b", // amber
+  "#10b981", // emerald
+  "#ec4899", // pink
+  "#f97316", // orange
+  "#14b8a6", // teal
 ];
+
+// ── Smart number formatting ──────────────────────────────────────────────────
+
+function formatValue(value: number, label?: string): string {
+  const isCurrency =
+    /revenue|amount|cost|price|sales|profit|spend|budget|total_revenue|netamount/i.test(
+      label || "",
+    );
+
+  const abs = Math.abs(value);
+
+  if (abs >= 1_000_000_000) {
+    const formatted = (value / 1_000_000_000).toFixed(1).replace(/\.0$/, "");
+    return isCurrency ? `$${formatted}B` : `${formatted}B`;
+  }
+  if (abs >= 1_000_000) {
+    const formatted = (value / 1_000_000).toFixed(1).replace(/\.0$/, "");
+    return isCurrency ? `$${formatted}M` : `${formatted}M`;
+  }
+  if (abs >= 1_000) {
+    const formatted = (value / 1_000).toFixed(1).replace(/\.0$/, "");
+    return isCurrency ? `$${formatted}K` : `${formatted}K`;
+  }
+
+  return isCurrency ? `$${value.toLocaleString()}` : value.toLocaleString();
+}
+
+function formatTooltipValue(value: number, label?: string): string {
+  const isCurrency =
+    /revenue|amount|cost|price|sales|profit|spend|budget|total_revenue|netamount/i.test(
+      label || "",
+    );
+
+  if (isCurrency) {
+    return `$${value.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
+  }
+  return value.toLocaleString();
+}
+
+// ── Custom tooltip ───────────────────────────────────────────────────────────
+
+function CustomTooltip({ active, payload, label, yAxes }: any) {
+  if (!active || !payload?.length) return null;
+
+  return (
+    <div className="rounded-xl border border-white/[0.08] bg-[hsl(240,10%,10%)]/95 backdrop-blur-md px-4 py-3 shadow-[0_8px_32px_rgba(0,0,0,0.4)]">
+      <p className="mb-1.5 text-[11px] font-medium text-muted-foreground">
+        {label}
+      </p>
+      {payload.map((entry: any, i: number) => (
+        <div key={i} className="flex items-center gap-2 text-[13px]">
+          <div
+            className="h-2 w-2 rounded-full"
+            style={{ backgroundColor: entry.color }}
+          />
+          <span className="text-muted-foreground">{entry.name}:</span>
+          <span className="font-semibold text-foreground">
+            {formatTooltipValue(
+              entry.value,
+              yAxes?.find((y: any) => y.key === entry.dataKey)?.label,
+            )}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ── Shared axis/grid props ───────────────────────────────────────────────────
+
+function SharedGrid() {
+  return (
+    <CartesianGrid
+      strokeDasharray="none"
+      stroke="hsl(240, 5%, 20%)"
+      strokeOpacity={0.4}
+      vertical={false}
+    />
+  );
+}
+
+function SharedXAxis({ dataKey }: { dataKey: string }) {
+  return (
+    <XAxis
+      dataKey={dataKey}
+      tick={{ fontSize: 11, fill: "hsl(240, 5%, 55%)" }}
+      axisLine={{ stroke: "hsl(240, 5%, 20%)" }}
+      tickLine={false}
+      dy={8}
+    />
+  );
+}
+
+function SharedYAxis({ label }: { label?: string }) {
+  return (
+    <YAxis
+      tick={{ fontSize: 11, fill: "hsl(240, 5%, 55%)" }}
+      axisLine={false}
+      tickLine={false}
+      tickFormatter={(value) => formatValue(value, label)}
+      width={65}
+      dx={-5}
+    />
+  );
+}
+
+function SharedLegend() {
+  return (
+    <Legend
+      wrapperStyle={{ paddingTop: "16px" }}
+      iconType="circle"
+      iconSize={8}
+      formatter={(value: string) => (
+        <span
+          style={{
+            color: "hsl(240, 5%, 65%)",
+            fontSize: "11px",
+            marginLeft: "4px",
+          }}
+        >
+          {value}
+        </span>
+      )}
+    />
+  );
+}
+
+// ── Main component ───────────────────────────────────────────────────────────
 
 export function ChartRenderer({ data }: { data: ChartData }) {
   const [showData, setShowData] = useState(false);
@@ -42,26 +172,78 @@ export function ChartRenderer({ data }: { data: ChartData }) {
     );
   }
 
+  const tooltipProps = {
+    content: <CustomTooltip yAxes={data.y_axes} />,
+    cursor: { fill: "hsl(240, 5%, 15%)", fillOpacity: 0.5 },
+  };
+
   const renderChart = () => {
     switch (data.chart_type) {
       case "line":
         return (
-          <LineChart data={data.data}>
-            <CartesianGrid strokeDasharray="3 3" />
-            <XAxis dataKey={data.x_axis.key} />
-            <YAxis />
-            <Tooltip />
-            {data.options?.show_legend !== false && <Legend />}
+          <ComposedChart data={data.data}>
+            <defs>
+              {data.y_axes.map((y, i) => (
+                <linearGradient
+                  key={`lineGrad-${i}`}
+                  id={`lineGrad-${i}`}
+                  x1="0"
+                  y1="0"
+                  x2="0"
+                  y2="1"
+                >
+                  <stop
+                    offset="0%"
+                    stopColor={y.color || CHART_COLORS[i % CHART_COLORS.length]}
+                    stopOpacity={0.15}
+                  />
+                  <stop
+                    offset="100%"
+                    stopColor={y.color || CHART_COLORS[i % CHART_COLORS.length]}
+                    stopOpacity={0}
+                  />
+                </linearGradient>
+              ))}
+            </defs>
+            <SharedGrid />
+            <SharedXAxis dataKey={data.x_axis.key} />
+            <SharedYAxis label={data.y_axes[0]?.label} />
+            <Tooltip {...tooltipProps} />
+            {data.options?.show_legend !== false && <SharedLegend />}
             {data.y_axes.map((y, i) => (
-              <Line
-                key={y.key}
-                type="monotone"
-                dataKey={y.key}
-                stroke={y.color || COLORS[i % COLORS.length]}
-                name={y.label}
-              />
+              <React.Fragment key={y.key}>
+                <Area
+                  type="monotone"
+                  dataKey={y.key}
+                  fill={`url(#lineGrad-${i})`}
+                  stroke="none"
+                />
+                <Line
+                  type="monotone"
+                  dataKey={y.key}
+                  stroke={y.color || CHART_COLORS[i % CHART_COLORS.length]}
+                  strokeWidth={2.5}
+                  dot={{
+                    r: 3,
+                    fill: "hsl(240, 10%, 8%)",
+                    strokeWidth: 2,
+                    stroke:
+                      y.color || CHART_COLORS[i % CHART_COLORS.length],
+                  }}
+                  activeDot={{
+                    r: 6,
+                    fill:
+                      y.color || CHART_COLORS[i % CHART_COLORS.length],
+                    stroke: "hsl(240, 10%, 8%)",
+                    strokeWidth: 2,
+                  }}
+                  name={y.label}
+                  animationDuration={1000}
+                  animationEasing="ease-out"
+                />
+              </React.Fragment>
             ))}
-          </LineChart>
+          </ComposedChart>
         );
       case "pie":
       case "donut":
@@ -73,35 +255,69 @@ export function ChartRenderer({ data }: { data: ChartData }) {
               nameKey={data.x_axis.key}
               cx="50%"
               cy="50%"
-              innerRadius={data.chart_type === "donut" ? 60 : 0}
-              outerRadius={80}
-              label
+              innerRadius={data.chart_type === "donut" ? "55%" : 0}
+              outerRadius="80%"
+              paddingAngle={2}
+              strokeWidth={0}
+              animationDuration={1000}
+              label={({ name, value }) =>
+                `${name}: ${formatValue(value, data.y_axes[0]?.label)}`
+              }
             >
               {data.data.map((_, i) => (
-                <Cell key={i} fill={COLORS[i % COLORS.length]} />
+                <Cell
+                  key={i}
+                  fill={CHART_COLORS[i % CHART_COLORS.length]}
+                  fillOpacity={0.9}
+                />
               ))}
             </Pie>
-            <Tooltip />
-            <Legend />
+            <Tooltip {...tooltipProps} />
+            <SharedLegend />
           </PieChart>
         );
       case "area":
         return (
           <AreaChart data={data.data}>
-            <CartesianGrid strokeDasharray="3 3" />
-            <XAxis dataKey={data.x_axis.key} />
-            <YAxis />
-            <Tooltip />
-            {data.options?.show_legend !== false && <Legend />}
+            <defs>
+              {data.y_axes.map((y, i) => (
+                <linearGradient
+                  key={`chartGradient-${i}`}
+                  id={`chartGradient-${i}`}
+                  x1="0"
+                  y1="0"
+                  x2="0"
+                  y2="1"
+                >
+                  <stop
+                    offset="0%"
+                    stopColor={y.color || CHART_COLORS[i % CHART_COLORS.length]}
+                    stopOpacity={0.3}
+                  />
+                  <stop
+                    offset="100%"
+                    stopColor={y.color || CHART_COLORS[i % CHART_COLORS.length]}
+                    stopOpacity={0.02}
+                  />
+                </linearGradient>
+              ))}
+            </defs>
+            <SharedGrid />
+            <SharedXAxis dataKey={data.x_axis.key} />
+            <SharedYAxis label={data.y_axes[0]?.label} />
+            <Tooltip {...tooltipProps} />
+            {data.options?.show_legend !== false && <SharedLegend />}
             {data.y_axes.map((y, i) => (
               <Area
                 key={y.key}
                 type="monotone"
                 dataKey={y.key}
-                fill={y.color || COLORS[i % COLORS.length]}
-                stroke={y.color || COLORS[i % COLORS.length]}
-                fillOpacity={0.3}
+                fill={`url(#chartGradient-${i})`}
+                stroke={y.color || CHART_COLORS[i % CHART_COLORS.length]}
+                strokeWidth={2}
+                fillOpacity={1}
                 name={y.label}
+                animationDuration={1000}
               />
             ))}
           </AreaChart>
@@ -109,30 +325,40 @@ export function ChartRenderer({ data }: { data: ChartData }) {
       case "scatter":
         return (
           <ScatterChart>
-            <CartesianGrid />
-            <XAxis dataKey={data.x_axis.key} name={data.x_axis.label} />
-            <YAxis
-              dataKey={data.y_axes[0]?.key}
-              name={data.y_axes[0]?.label}
+            <SharedGrid />
+            <SharedXAxis dataKey={data.x_axis.key} />
+            <SharedYAxis label={data.y_axes[0]?.label} />
+            <Tooltip {...tooltipProps} />
+            <Scatter
+              data={data.data}
+              fill={CHART_COLORS[0]}
+              animationDuration={800}
             />
-            <Tooltip cursor={{ strokeDasharray: "3 3" }} />
-            <Scatter data={data.data} fill={COLORS[0]} />
           </ScatterChart>
         );
       default: // bar, histogram
         return (
           <BarChart data={data.data}>
-            <CartesianGrid strokeDasharray="3 3" />
-            <XAxis dataKey={data.x_axis.key} />
-            <YAxis />
-            <Tooltip />
-            {data.options?.show_legend !== false && <Legend />}
+            <SharedGrid />
+            <SharedXAxis dataKey={data.x_axis.key} />
+            <SharedYAxis label={data.y_axes[0]?.label} />
+            <Tooltip {...tooltipProps} />
+            {data.options?.show_legend !== false && <SharedLegend />}
             {data.y_axes.map((y, i) => (
               <Bar
                 key={y.key}
                 dataKey={y.key}
-                fill={y.color || COLORS[i % COLORS.length]}
+                fill={y.color || CHART_COLORS[i % CHART_COLORS.length]}
                 name={y.label}
+                radius={[4, 4, 0, 0]}
+                animationDuration={800}
+                animationEasing="ease-out"
+                fillOpacity={0.85}
+                activeBar={{
+                  fillOpacity: 1,
+                  stroke: y.color || CHART_COLORS[i % CHART_COLORS.length],
+                  strokeWidth: 1,
+                }}
                 stackId={data.options?.stacked ? "stack" : undefined}
               />
             ))}
@@ -142,36 +368,46 @@ export function ChartRenderer({ data }: { data: ChartData }) {
   };
 
   return (
-    <div className="my-3 rounded-xl border bg-card p-4 shadow-soft">
-      <div className="mb-2 flex items-center justify-between">
-        <div>
-          <h4 className="text-[14px] font-semibold">{data.title}</h4>
-          {data.subtitle && (
-            <p className="text-[12px] text-muted-foreground">
-              {data.subtitle}
-            </p>
-          )}
+    <div className="my-4 rounded-2xl border border-white/[0.06] bg-[hsl(240,10%,8%)]/80 backdrop-blur-sm p-5 shadow-[0_4px_24px_rgba(0,0,0,0.3)]">
+      <div className="mb-4 flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <div className="h-4 w-1 rounded-full bg-indigo-500" />
+          <div>
+            <h4 className="text-[14px] font-semibold text-foreground">
+              {data.title}
+            </h4>
+            {data.subtitle && (
+              <p className="mt-0.5 text-[11px] text-muted-foreground">
+                {data.subtitle}
+              </p>
+            )}
+          </div>
         </div>
         <button
           onClick={() => setShowData(!showData)}
-          className="text-[11px] text-muted-foreground hover:text-foreground"
+          className="rounded-md px-2 py-1 text-[11px] text-muted-foreground transition-colors hover:bg-white/[0.05] hover:text-foreground"
         >
-          {showData ? "Hide Data" : "View Data"}
+          {showData ? "View Chart" : "View Data"}
         </button>
       </div>
 
       {!showData ? (
-        <ResponsiveContainer width="100%" height={300}>
+        <ResponsiveContainer width="100%" height={340}>
           {renderChart()}
         </ResponsiveContainer>
       ) : (
-        <div className="max-h-[300px] overflow-auto">
+        <div className="max-h-[340px] overflow-auto rounded-lg border border-white/[0.06]">
           <table className="w-full text-[12px]">
-            <thead>
+            <thead className="sticky top-0 bg-[hsl(240,10%,10%)]">
               <tr>
-                <th className="text-left p-1">{data.x_axis.label}</th>
+                <th className="border-b border-white/[0.06] p-2 text-left text-[11px] font-medium text-muted-foreground">
+                  {data.x_axis.label}
+                </th>
                 {data.y_axes.map((y) => (
-                  <th key={y.key} className="text-right p-1">
+                  <th
+                    key={y.key}
+                    className="border-b border-white/[0.06] p-2 text-right text-[11px] font-medium text-muted-foreground"
+                  >
                     {y.label}
                   </th>
                 ))}
@@ -179,13 +415,21 @@ export function ChartRenderer({ data }: { data: ChartData }) {
             </thead>
             <tbody>
               {data.data.map((row, i) => (
-                <tr key={i} className="border-t">
-                  <td className="p-1">
+                <tr
+                  key={i}
+                  className="border-b border-white/[0.03] transition-colors hover:bg-white/[0.02]"
+                >
+                  <td className="p-2 text-foreground">
                     {String(row[data.x_axis.key] ?? "")}
                   </td>
                   {data.y_axes.map((y) => (
-                    <td key={y.key} className="text-right p-1">
-                      {String(row[y.key] ?? "")}
+                    <td
+                      key={y.key}
+                      className="p-2 text-right font-mono text-foreground"
+                    >
+                      {typeof row[y.key] === "number"
+                        ? formatTooltipValue(row[y.key] as number, y.label)
+                        : String(row[y.key] ?? "")}
                     </td>
                   ))}
                 </tr>
