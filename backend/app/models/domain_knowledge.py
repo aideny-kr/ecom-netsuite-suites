@@ -35,4 +35,4 @@ class DomainKnowledgeChunk(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         default="expert_rules",
     )
     is_deprecated: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    partition_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    partition_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
