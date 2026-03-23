@@ -20,7 +20,9 @@
 - **File Cabinet I/O**: Custom RESTlet (`ecom_file_cabinet_restlet.js`) — in-place load-update-save (preserves file ID).
 - **SuiteQL**: Via REST API POST `/services/rest/query/v1/suiteql` with Bearer token. Also via MCP at `/services/mcp/v1/all`.
 - **Two SuiteQL paths**: Local REST API (`netsuite_suiteql` tool) supports all tables including `customrecord_*`. External MCP (`ns_runCustomSuiteQL`) works only for standard tables.
-- **Chat**: Dual-path agent system. `unified_agent_enabled` per-tenant flag routes to `UnifiedAgent` or `MultiAgentCoordinator`. SSE streaming with `<thinking>` tags. Connection-aware orchestrator checks REST/MCP health pre-flight and strips tools for dead connections. See `memory/chat-architecture.md` for full details.
+- **Chat**: Unified agent system. `unified_agent_enabled` per-tenant flag routes to `UnifiedAgent`. SSE streaming with `<thinking>` tags. Connection-aware orchestrator checks REST/MCP health pre-flight and strips tools for dead connections. See `memory/chat-architecture.md` for full details.
+- **Agent Framework (v1.1)**: Composition + hooks architecture for specialized agents. `SpecializedAgent` extends `BaseSpecialistAgent` via YAML config + prompt files + `HookManager`. Three-tier routing: (1) regex rule-based < 1ms, (2) Haiku semantic classification ~50ms, (3) UnifiedAgent fallback. Agent Registry manages lifecycle, health checks (circuit breaker at 5% error rate), and per-tenant overrides via `agent_configs` table. RAG partitions isolate knowledge per agent. Every specialized agent must beat native Claude + MCP on its domain. See `memory/agent-framework.md` for full architecture and `docs/superpowers/specs/2026-03-22-custom-agent-architecture.md` for implementation plan.
+- **BigQuery BI Agent (v1.1)**: First specialized agent — natural language → BigQuery SQL → charts. Service account auth (not OAuth). Connector stored in `mcp_connectors` with `provider: "bigquery"`. Tools: `bigquery_sql` (read-only, cost-guardrailed), `bigquery_schema` (discover tables/columns), `bigquery_cost_estimate` (dry-run). Chart specs emitted via `<chart>` XML tags in agent response, extracted by orchestrator into `chart` SSE events. Frontend renders with recharts. Schema auto-seeded into RAG partitions on connection. See `docs/superpowers/specs/2026-03-22-bigquery-bi-agent.md`.
 - **Entity Resolution**: Fast NER (Haiku) → pg_trgm fuzzy matching (threshold `_MIN_ENTITY_CONFIDENCE = 0.70`) → `<tenant_vernacular>` XML injection. Table: `tenant_entity_mapping` with composite GIN index. Matches below 0.70 are skipped to prevent wrong field injection.
 - **MCP Tools**: ~11 tools across 4 categories (Record CRUD, Reports, Saved Searches, SuiteQL). Visibility is role-permission based — see Mistakes #22. CRUD guardrails — see Mistakes #23.
 - **Tool Result Interception**: `_intercept_tool_result()` in orchestrator emits SSE `data_table`/`financial_report` events, condenses results for LLM. Handles 3 formats: local SuiteQL (`columns`/`rows`), external MCP (`data` list-of-dicts), financial reports (`items`/`summary`).
@@ -33,6 +35,7 @@
 - **react-resizable-panels v4**: Imports: `Panel`, `Group as PanelGroup`, `Separator as PanelResizeHandle`. Uses `orientation` prop (not `direction`).
 - **White-Label Branding**: Per-tenant brand_name/color/logo/favicon in `tenant_configs`. `BrandingProvider` injects `--primary` CSS variable.
 - **Feature Flags**: `tenant_feature_flags` table, TTL-cached. `require_feature(flag_key)` dependency returns 403 when disabled.
+- **Write-Back Confirmation**: All mutation-path agents use shared confirmation flow: agent builds payload → SSE `confirmation_required` event → frontend `ConfirmationDialog` component → user approves → agent executes → audit log with before/after snapshots. Never auto-execute writes.
 
 ## Backend Patterns — FOLLOW EXACTLY
 
@@ -218,7 +221,13 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 | Connection alerts | `backend/app/api/v1/connection_alerts.py` |
 | SuiteScripts | `suiteapp/src/FileCabinet/SuiteScripts/` |
 | SDF Objects | `suiteapp/src/Objects/` |
+| Agent configs (YAML) | `backend/app/services/chat/agents/configs/` |
+| Agent prompts | `backend/app/services/chat/agents/prompts/` |
+| Agent registry | `backend/app/services/chat/agents/agent_registry.py` |
+| Agent routing | `backend/app/services/chat/routing/` |
+| Agent benchmarks | `backend/tests/agent_benchmarks/` |
 | Specs / Plans | `docs/superpowers/specs/`, `docs/superpowers/plans/` |
+| Architecture memory | `memory/` |
 
 ## Common Mistakes to Avoid
 
@@ -248,10 +257,17 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 24. **Unified agent prompt MUST stay in sync with SuiteQL agent** — both contain SuiteQL dialect rules. Copy verbatim — never paraphrase. Each rule prevents a specific production failure.
 25. **External MCP response format differs** — `ns_runCustomSuiteQL` returns `{"data": [{col: val}], "queryExecuted": "...", "resultCount": N}`, NOT `{"columns": [], "rows": []}`. Test interception with both formats.
 26. **Use `print(flush=True)` for docker logging** — structlog doesn't surface stdlib `logger.info` in docker logs.
+27. **Agent framework uses composition, not inheritance** — `SpecializedAgent` is driven by YAML config + hooks. Do NOT create deep inheritance chains. Each agent is a config file + prompt file + optional hook functions.
+28. **Three-tier routing order matters** — Tier 1 (regex) → Tier 2 (Haiku semantic) → Tier 3 (UnifiedAgent fallback). Never skip tiers. Ambiguous Tier 1 matches (2+ agents) escalate to Tier 2, not pick first.
+29. **Agent tool filtering is per-agent** — each agent's YAML `tools:` list controls visibility. Don't expose all tools to all agents. Use `get_tools_for_agent(agent_id)`.
+30. **RAG partitions are per-agent** — add `partition_id` filter when querying `domain_knowledge_chunks`. Never mix partitions across agents.
+31. **Every specialized agent benchmarks against native Claude + MCP** — pass@5 consistency test, not single-run. Circuit breaker auto-disables at 5% error rate over last 100 queries.
 
 ## Current State
 
-- **Latest migration**: 049_connection_alerts
+- **Product**: AI-den v1.0 shipped 2026-03-22. Agent surpasses native Claude + MCP. Next: v1.1 (agent framework + BigQuery BI agent).
+- **Roadmap**: v1.1 Mid-Apr (agent framework + BigQuery BI, ~3wk) → v1.2 Early May (NetSuite read-write, ~2wk) → v1.3 Late May (cross-system intelligence, ~3wk) → v1.4 Mid-Jun (ETL pipelines, ~3wk). See `docs/superpowers/specs/2026-03-22-custom-agent-architecture.md` and `docs/superpowers/specs/2026-03-22-bigquery-bi-agent.md`.
+- **Latest migration**: 052_rag_partition_id
 - **Staging**: `api-staging.suitestudio.ai` (backend) + `staging.suitestudio.ai` (Vercel frontend). Auto-deploys from main.
 - **Deploy**: Stop beat/worker first, pull, start sequentially. Never `--force-recreate` all at once — kills workers mid-refresh, consuming single-use refresh tokens.
 
