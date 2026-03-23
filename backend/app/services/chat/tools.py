@@ -137,6 +137,12 @@ def build_external_tool_definitions(connectors: list) -> list[dict]:
     return tools
 
 
+# Tools that require an active connector to be included (provider → tool name prefixes)
+_CONNECTOR_GATED_TOOLS: dict[str, set[str]] = {
+    "bigquery": {"bigquery_sql", "bigquery_schema", "bigquery_cost_estimate"},
+}
+
+
 async def build_all_tool_definitions(db: "AsyncSession", tenant_id: uuid.UUID) -> list[dict]:
     """Build combined local + external tool definitions for Claude."""
     tools = build_local_tool_definitions()
@@ -145,9 +151,20 @@ async def build_all_tool_definitions(db: "AsyncSession", tenant_id: uuid.UUID) -
         from app.services.mcp_connector_service import get_active_connectors_for_tenant
 
         connectors = await get_active_connectors_for_tenant(db, tenant_id)
+
+        # Determine which connector-gated tools to include
+        active_providers = {c.provider for c in connectors} if connectors else set()
+        gated_tools_to_remove: set[str] = set()
+        for provider, tool_names in _CONNECTOR_GATED_TOOLS.items():
+            if provider not in active_providers:
+                gated_tools_to_remove.update(tool_names)
+
+        if gated_tools_to_remove:
+            tools = [t for t in tools if t["name"] not in gated_tools_to_remove]
+
         if connectors:
             # Skip connectors whose tools are registered locally (e.g. BigQuery)
-            _LOCAL_TOOL_PROVIDERS = {"bigquery"}
+            _LOCAL_TOOL_PROVIDERS = set(_CONNECTOR_GATED_TOOLS.keys())
             external = [c for c in connectors if c.provider not in _LOCAL_TOOL_PROVIDERS]
             tools.extend(build_external_tool_definitions(external))
     except Exception:
