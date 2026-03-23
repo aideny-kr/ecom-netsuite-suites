@@ -957,6 +957,17 @@ async def run_chat_turn(
                 "Check the tool description prefix (e.g., [shopify_mcp]) to identify which system."
             )
 
+        # BigQuery tools hint (if available for this tenant)
+        _has_bq = any(td["name"].startswith("bigquery_") for td in tool_definitions)
+        if _has_bq:
+            tool_inventory_lines.append(
+                "\n\nBIGQUERY DATA WAREHOUSE:"
+                "\nThis tenant has BigQuery connected. Use `bigquery_sql` for ad-hoc queries, "
+                "`bigquery_schema` to discover datasets/tables, `bigquery_cost_estimate` for dry-run cost checks."
+                "\nBigQuery uses Standard SQL — use backtick identifiers (`dataset.table`) and LIMIT (not FETCH FIRST)."
+                "\nDo NOT confuse BigQuery SQL with SuiteQL — they are different dialects."
+            )
+
         system_prompt += "\n".join(tool_inventory_lines)
 
     # ── Connection health warning (appended after tool inventory) ──
