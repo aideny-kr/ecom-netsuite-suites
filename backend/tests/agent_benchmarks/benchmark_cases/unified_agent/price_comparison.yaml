@@ -1,0 +1,8 @@
+query: "Compare prices across all product lines"
+expected_tools: ["netsuite_suiteql", "netsuite_pivot_query_result"]
+expected_answer_contains: ["price", "product"]
+expected_accuracy: 0.7
+max_cost: 0.40
+max_latency_ms: 15000
+tags: ["complex", "pricing", "pivot"]
+notes: "Requires pivot for cross-product comparison — unified agent baseline"

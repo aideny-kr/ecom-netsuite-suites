@@ -1,0 +1,8 @@
+query: "How does the 25% tariff affect our landed cost for imported items?"
+expected_tools: ["netsuite_suiteql"]
+expected_answer_contains: ["tariff", "landed", "cost", "25%"]
+expected_accuracy: 0.7
+max_cost: 0.30
+max_latency_ms: 15000
+tags: ["complex", "pricing", "tariff"]
+notes: "Multi-step analysis requiring cost components"

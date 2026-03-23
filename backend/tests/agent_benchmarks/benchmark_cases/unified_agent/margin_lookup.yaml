@@ -1,0 +1,8 @@
+query: "What's the margin on SKU-1234?"
+expected_tools: ["netsuite_suiteql"]
+expected_answer_contains: ["margin", "percent", "SKU-1234"]
+expected_accuracy: 0.8
+max_cost: 0.10
+max_latency_ms: 10000
+tags: ["simple", "pricing"]
+notes: "Basic single-item margin lookup — unified agent baseline"

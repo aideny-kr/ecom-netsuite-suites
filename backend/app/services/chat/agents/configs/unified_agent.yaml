@@ -1,0 +1,17 @@
+agent_id: unified-agent
+display_name: AI-den Assistant
+description: >
+  General-purpose NetSuite assistant. Handles any query type including
+  data lookups, investigations, SuiteQL, financial reports, workspace
+  questions, and documentation. Falls back here when no specialist matches.
+version: "1.0.0"
+routing_rules: []
+semantic_examples: []
+tool_ids: []
+rag_partitions: []
+model_preference: null
+max_steps: 6
+cost_budget: null
+prompt_file: null
+requires_confirmation: false
+enabled_by_default: true

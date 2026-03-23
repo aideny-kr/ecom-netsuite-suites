@@ -1,0 +1,8 @@
+query: "What is the status of SO-12345?"
+expected_tools: ["netsuite_suiteql"]
+expected_answer_contains: ["status", "SO-12345"]
+expected_accuracy: 0.8
+max_cost: 0.10
+max_latency_ms: 10000
+tags: ["simple", "lookup"]
+notes: "Basic order status lookup — unified agent baseline"
