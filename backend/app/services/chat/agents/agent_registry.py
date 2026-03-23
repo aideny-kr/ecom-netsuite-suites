@@ -87,6 +87,7 @@ class AgentRegistry:
         user_id: uuid.UUID,
         correlation_id: str,
         overrides: dict[str, Any] | None = None,
+        knowledge: list[str] | None = None,
     ) -> SpecializedAgent:
         """Create a SpecializedAgent instance from a registered config.
 
@@ -107,7 +108,7 @@ class AgentRegistry:
         return SpecializedAgent(
             config=config,
             prompt_text=prompt_text,
-            knowledge=[],
+            knowledge=knowledge or [],
             tenant_id=tenant_id,
             user_id=user_id,
             correlation_id=correlation_id,
