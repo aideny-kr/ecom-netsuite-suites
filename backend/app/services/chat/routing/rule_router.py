@@ -62,4 +62,9 @@ class RuleRouter:
             return top_matches[0]
 
         # Same priority, multiple agents — ambiguous, escalate
+        print(
+            f"[ROUTING] Tier 1 ambiguous: {len(top_matches)} agents matched "
+            f"at priority {max_priority}: {top_matches} — escalating to Tier 2",
+            flush=True,
+        )
         return None

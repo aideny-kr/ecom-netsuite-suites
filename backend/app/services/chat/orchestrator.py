@@ -244,6 +244,7 @@ async def _select_agent(
     try:
         enabled_agents = await _agent_registry.get_enabled_agents(db, tenant_id)
     except Exception:
+        print("[ROUTING] Failed to load enabled agents, falling back to unified-agent", flush=True)
         return None
 
     if not enabled_agents:
@@ -256,17 +257,25 @@ async def _select_agent(
     if tier1_result and tier1_result != "unified-agent":
         # Check health before using
         if _agent_registry.is_healthy(error_count=0, success_count=0):
+            print(f"[ROUTING] Tier 1 (regex) → {tier1_result} | matched patterns for query: {query[:80]}", flush=True)
             return tier1_result
+        print(f"[ROUTING] Tier 1 matched {tier1_result} but agent unhealthy, falling back", flush=True)
         return None
+
+    if tier1_result is None:
+        agent_count = len(enabled_agents)
+        print(f"[ROUTING] Tier 1 no match, escalating to Tier 2 (semantic) | {agent_count} agents | query: {query[:80]}", flush=True)
 
     # Tier 2: Semantic routing via Haiku (~50ms)
     semantic_router = SemanticRouter()
     tier2_result = await semantic_router.route(query, enabled_agents, adapter)
 
     if tier2_result and tier2_result != "unified-agent":
+        print(f"[ROUTING] Tier 2 (semantic) → {tier2_result} | query: {query[:80]}", flush=True)
         return tier2_result
 
     # Tier 3: UnifiedAgent fallback
+    print(f"[ROUTING] Tier 3 (fallback) → unified-agent | query: {query[:80]}", flush=True)
     return None
 
 
