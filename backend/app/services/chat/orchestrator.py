@@ -1392,6 +1392,10 @@ async def run_chat_turn(
                     unified_model = HAIKU_MODEL
                     print(f"[ORCHESTRATOR] Simple lookup detected — routing to Haiku", flush=True)
 
+                # Track whether we're inside a <chart> block during streaming
+                _in_chart_block = False
+                _chart_buffer = ""
+
                 async for event_type, payload in unified_agent.run_streaming(
                     task=unified_task,
                     context=context,
@@ -1404,7 +1408,33 @@ async def run_chat_turn(
                 ):
                     if event_type == "text":
                         streamed_text_parts.append(payload)
-                        yield {"type": "text", "content": payload}
+                        # Suppress <chart> blocks from streaming text output
+                        _chart_buffer += payload
+                        while True:
+                            if not _in_chart_block:
+                                # Look for <chart> tag start
+                                idx = _chart_buffer.find("<chart>")
+                                if idx == -1:
+                                    # No chart tag — yield buffered text (keep last 7 chars in case of partial tag)
+                                    safe = _chart_buffer[:-7] if len(_chart_buffer) > 7 else ""
+                                    _chart_buffer = _chart_buffer[len(safe):]
+                                    if safe:
+                                        yield {"type": "text", "content": safe}
+                                    break
+                                else:
+                                    # Yield text before the chart tag
+                                    if idx > 0:
+                                        yield {"type": "text", "content": _chart_buffer[:idx]}
+                                    _chart_buffer = _chart_buffer[idx:]
+                                    _in_chart_block = True
+                            else:
+                                # Inside chart block — look for </chart>
+                                end_idx = _chart_buffer.find("</chart>")
+                                if end_idx == -1:
+                                    break  # Wait for more data
+                                # Found end — discard the entire <chart>...</chart> block
+                                _chart_buffer = _chart_buffer[end_idx + 8:]
+                                _in_chart_block = False
                     elif event_type == "tool_status":
                         yield {"type": "tool_status", "content": payload}
                     elif event_type == "tool_intercept":
@@ -1413,6 +1443,10 @@ async def run_chat_turn(
                         yield {"type": payload[0], "data": payload[1]}
                     elif event_type == "response":
                         agent_result = payload
+
+                # Flush remaining buffered text (non-chart content)
+                if _chart_buffer and not _in_chart_block:
+                    yield {"type": "text", "content": _chart_buffer}
 
                 if agent_result is None:
                     final_text = (
