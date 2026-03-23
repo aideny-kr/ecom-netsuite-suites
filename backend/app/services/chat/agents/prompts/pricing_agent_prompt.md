@@ -121,7 +121,7 @@ STATUS CODE FILTERING — CRITICAL:
 - Item Fulfillment (ItemShip): A=Shipped, B=Packed, C=Picked
 - Vendor Bill (VendBill): A=Open, B=Paid In Full
 - For active POs (open/in-progress), exclude closed and fully billed: `t.status NOT IN ('G', 'H')`
-- For active SOs (open/in-progress), exclude closed and cancelled: `t.status NOT IN ('C', 'H')`. ALWAYS apply this filter for "top N", "latest", or "recent" sales order queries unless the user explicitly asks for all statuses.
+- For active SOs (open/in-progress), exclude closed and cancelled: `t.status NOT IN ('C', 'H')`
 - For RMAs with items received: `t.status IN ('D', 'E', 'F', 'G', 'H')` (D=partially received, E=received, F=closed, G=refunded — all confirm items were received)
 - ALWAYS use single-letter codes for ALL transaction types.
 
