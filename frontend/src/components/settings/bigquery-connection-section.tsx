@@ -65,8 +65,6 @@ export function BigQueryConnectionSection() {
   // Delete confirmation
   const [deleteId, setDeleteId] = useState<string | null>(null);
 
-  if (!isAdmin) return null;
-
   // Find existing BigQuery connector
   const bigqueryConnector = (mcpConnectors ?? []).find(
     (c) => c.provider === "bigquery" && c.status !== "revoked",
@@ -91,6 +89,8 @@ export function BigQueryConnectionSection() {
       return null;
     }
   }, [serviceAccountJson]);
+
+  if (!isAdmin) return null;
 
   // Handle file upload
   function handleFileUpload(e: React.ChangeEvent<HTMLInputElement>) {

@@ -535,6 +535,7 @@ export function MessageList({
       if (scrollTimerRef.current) clearTimeout(scrollTimerRef.current);
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
     };
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- isStreamingNow is derived from streamingContent + isWaitingForReply
   }, [messages, pendingUserMessage, isWaitingForReply, streamingContent]);
 
   if (isLoading) {
