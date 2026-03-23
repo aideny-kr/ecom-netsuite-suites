@@ -1,0 +1,54 @@
+agent_id: bi-agent
+display_name: BI Analyst
+description: >
+  Translates natural language business questions into SQL queries against
+  BigQuery, visualizes results as charts, and provides analytical narratives.
+  Handles revenue analysis, trend detection, cohort analysis, KPI tracking,
+  and ad-hoc data exploration.
+version: "1.0.0"
+
+routing_rules:
+  - pattern: "(?i)(revenue|sales|growth|trend|churn|retention|cohort|conversion)"
+    priority: 0
+  - pattern: "(?i)(dashboard|chart|graph|plot|visuali[sz]e)"
+    priority: 0
+  - pattern: "(?i)show me.*(chart|graph|plot|trend|dashboard|data|metric|number)"
+    priority: 0
+  - pattern: "(?i)(bigquery|big.?query|bq|data.?warehouse)"
+    priority: 10
+  - pattern: "(?i)(kpi|metric|measure|breakdown|by region|by month|by quarter)"
+    priority: 0
+  - pattern: "(?i)(year.over.year|month.over.month|compare|vs|versus)"
+    priority: 0
+  - pattern: "(?i)(top \\d+|bottom \\d+|ranking|leaderboard)"
+    priority: 0
+  - pattern: "(?i)(average|median|percentile|distribution|histogram)"
+    priority: 0
+  - pattern: "(?i)(forecast|predict|projection|run.?rate)"
+    priority: 0
+
+semantic_examples:
+  - "What's our revenue by region this quarter?"
+  - "Show me a chart of monthly sales trends"
+  - "Compare year-over-year retention by cohort"
+  - "What are the top 10 customers by lifetime value?"
+  - "Build a dashboard showing key KPIs"
+
+tool_ids:
+  - bigquery_sql
+  - bigquery_schema
+  - bigquery_cost_estimate
+  - netsuite_pivot_query_result
+  - rag_search
+
+rag_partitions:
+  - bi/schema-docs
+  - bi/common-queries
+  - bi/metric-definitions
+
+model_preference: null
+max_steps: 10
+cost_budget: 0.50
+prompt_file: bi_agent_prompt.md
+requires_confirmation: false
+enabled_by_default: true
