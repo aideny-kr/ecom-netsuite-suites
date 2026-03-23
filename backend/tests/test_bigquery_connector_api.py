@@ -147,7 +147,9 @@ class TestBigQueryCreateConnector:
             assert "service_account_json" in call_arg
 
     @pytest.mark.asyncio
-    async def test_create_connector_discovered_tools(self):
+    async def test_create_connector_no_discovered_tools(self):
+        """BigQuery tools are local — discovered_tools should be None to avoid
+        double-registration as external MCP tools."""
         from app.api.v1.mcp_connectors import create_bigquery_connector
 
         request = BigQueryConnectorCreate(
@@ -174,10 +176,7 @@ class TestBigQueryCreateConnector:
             await create_bigquery_connector(request, mock_user, mock_db)
 
         connector = mock_db.add.call_args[0][0]
-        tool_names = [t["name"] for t in connector.discovered_tools]
-        assert "bigquery_sql" in tool_names
-        assert "bigquery_schema" in tool_names
-        assert "bigquery_cost_estimate" in tool_names
+        assert connector.discovered_tools is None
 
     @pytest.mark.asyncio
     async def test_create_connector_discovers_schema(self):

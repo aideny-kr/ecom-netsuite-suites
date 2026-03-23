@@ -146,7 +146,10 @@ async def build_all_tool_definitions(db: "AsyncSession", tenant_id: uuid.UUID) -
 
         connectors = await get_active_connectors_for_tenant(db, tenant_id)
         if connectors:
-            tools.extend(build_external_tool_definitions(connectors))
+            # Skip connectors whose tools are registered locally (e.g. BigQuery)
+            _LOCAL_TOOL_PROVIDERS = {"bigquery"}
+            external = [c for c in connectors if c.provider not in _LOCAL_TOOL_PROVIDERS]
+            tools.extend(build_external_tool_definitions(external))
     except Exception:
         logger.warning("Failed to fetch external MCP connectors for tools", exc_info=True)
 

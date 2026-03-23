@@ -470,11 +470,9 @@ async def create_bigquery_connector(
             "default_dataset": request.default_dataset,
             "datasets_discovered": dataset_names,
         },
-        discovered_tools=[
-            {"name": "bigquery_sql", "description": "Execute BigQuery SQL query"},
-            {"name": "bigquery_schema", "description": "Discover datasets and tables"},
-            {"name": "bigquery_cost_estimate", "description": "Estimate query cost"},
-        ],
+        # BigQuery tools are registered locally in TOOL_REGISTRY — don't put them
+        # in discovered_tools or they'll be double-registered as external MCP tools
+        discovered_tools=None,
     )
     db.add(connector)
 
