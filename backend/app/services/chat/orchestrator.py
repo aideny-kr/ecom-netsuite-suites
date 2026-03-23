@@ -1327,15 +1327,34 @@ async def run_chat_turn(
                         except Exception:
                             logger.warning("orchestrator.onboarding_profile_injection_failed", exc_info=True)
 
-                    # Create unified agent — pass metadata only when schemas are needed
-                    unified_agent = UnifiedAgent(
+                    # Three-tier routing: try specialized agent first, fall back to UnifiedAgent
+                    _selected_agent_id = await _select_agent(
+                        query=sanitized_input,
                         tenant_id=tenant_id,
-                        user_id=user_id,
-                        correlation_id=correlation_id,
-                        metadata=metadata if _need_schemas else None,
-                        policy=active_policy,
-                        context_need=context_need,
+                        db=db,
+                        adapter=specialist_adapter,
                     )
+
+                    if _selected_agent_id:
+                        # Route to specialized agent
+                        _dk_chunks = context.get("domain_knowledge", [])
+                        unified_agent = _agent_registry.instantiate(
+                            agent_id=_selected_agent_id,
+                            tenant_id=tenant_id,
+                            user_id=user_id,
+                            correlation_id=correlation_id,
+                            knowledge=_dk_chunks,
+                        )
+                    else:
+                        # Fallback: create UnifiedAgent (existing behavior)
+                        unified_agent = UnifiedAgent(
+                            tenant_id=tenant_id,
+                            user_id=user_id,
+                            correlation_id=correlation_id,
+                            metadata=metadata if _need_schemas else None,
+                            policy=active_policy,
+                            context_need=context_need,
+                        )
 
                 # Augment task for financial report queries
                 unified_task = sanitized_input
