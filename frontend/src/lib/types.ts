@@ -240,10 +240,10 @@ export interface PlanInfo {
 export interface McpConnector {
   id: string;
   tenant_id: string;
-  provider: "netsuite_mcp" | "shopify_mcp" | "stripe_mcp" | "custom";
+  provider: "netsuite_mcp" | "shopify_mcp" | "stripe_mcp" | "bigquery" | "custom";
   label: string;
   server_url: string;
-  auth_type: "bearer" | "api_key" | "none" | "oauth2";
+  auth_type: "bearer" | "api_key" | "none" | "oauth2" | "service_account";
   status: string;
   discovered_tools: McpDiscoveredTool[] | null;
   is_enabled: boolean;
@@ -408,6 +408,7 @@ export interface FileTreeNode {
   is_directory: boolean;
   children?: FileTreeNode[];
   size_bytes?: number;
+  script_type?: string | null;
 }
 
 export interface FileReadResponse {

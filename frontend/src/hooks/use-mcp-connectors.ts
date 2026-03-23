@@ -69,6 +69,46 @@ export function useUpdateMcpClientId() {
   });
 }
 
+// ---------------------------------------------------------------------------
+// BigQuery-specific hooks
+// ---------------------------------------------------------------------------
+
+interface BigQueryTestPayload {
+  project_id: string;
+  service_account_json: Record<string, unknown>;
+}
+
+interface BigQueryTestResponse {
+  valid: boolean;
+  datasets: string[];
+  error: string | null;
+}
+
+interface BigQueryCreatePayload {
+  project_id: string;
+  service_account_json: Record<string, unknown>;
+  default_dataset?: string;
+}
+
+export function useTestBigQueryConnection() {
+  return useMutation({
+    mutationFn: (data: BigQueryTestPayload) =>
+      apiClient.post<BigQueryTestResponse>("/api/v1/mcp-connectors/bigquery/test", data),
+  });
+}
+
+export function useCreateBigQueryConnector() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (data: BigQueryCreatePayload) =>
+      apiClient.post("/api/v1/mcp-connectors/bigquery", data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["mcp-connectors"] });
+      queryClient.invalidateQueries({ queryKey: ["connection-health"] });
+    },
+  });
+}
+
 export function useReauthorizeMcpConnector() {
   const queryClient = useQueryClient();
 

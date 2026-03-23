@@ -36,3 +36,20 @@ class McpConnectorTestResponse(BaseModel):
     status: str
     message: str
     discovered_tools: list[dict] | None = None
+
+
+class BigQueryTestRequest(BaseModel):
+    project_id: str = Field(min_length=1, max_length=255)
+    service_account_json: dict
+
+
+class BigQueryTestResponse(BaseModel):
+    valid: bool
+    datasets: list[str] = Field(default_factory=list)
+    error: str | None = None
+
+
+class BigQueryConnectorCreate(BaseModel):
+    project_id: str = Field(min_length=1, max_length=255)
+    service_account_json: dict
+    default_dataset: str | None = None

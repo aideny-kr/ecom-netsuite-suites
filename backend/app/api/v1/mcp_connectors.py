@@ -12,8 +12,17 @@ from app.core.config import settings
 from app.core.database import get_db
 from app.core.dependencies import require_permission
 from app.models.user import User
-from app.schemas.mcp_connector import McpConnectorCreate, McpConnectorResponse, McpConnectorTestResponse
+from app.schemas.mcp_connector import (
+    BigQueryConnectorCreate,
+    BigQueryTestRequest,
+    BigQueryTestResponse,
+    McpConnectorCreate,
+    McpConnectorResponse,
+    McpConnectorTestResponse,
+)
 from app.services import audit_service, mcp_connector_service
+from app.services.bigquery_service import discover_schema, validate_connection
+from app.core.encryption import encrypt_credentials
 from app.services.netsuite_oauth_service import (
     build_mcp_authorize_url,
     exchange_code_with_client,
@@ -367,6 +376,122 @@ async def update_mcp_client_id(
     )
     await db.commit()
     return {"status": "ok", "client_id": request.client_id}
+
+
+# ---------------------------------------------------------------------------
+# BigQuery connector endpoints
+# ---------------------------------------------------------------------------
+
+
+@router.post("/bigquery/test")
+async def test_bigquery_connection(
+    request: BigQueryTestRequest,
+    user: Annotated[User, Depends(require_permission("connections.manage"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> BigQueryTestResponse:
+    """Test BigQuery connection with service account credentials."""
+    validation = await validate_connection(
+        credentials=request.service_account_json,
+        project_id=request.project_id,
+    )
+
+    if not validation["valid"]:
+        return BigQueryTestResponse(valid=False, error=validation["error"])
+
+    # Discover datasets
+    schema = await discover_schema(
+        credentials=request.service_account_json,
+        project_id=request.project_id,
+    )
+    dataset_names = [ds["dataset_id"] for ds in schema.get("datasets", [])]
+
+    return BigQueryTestResponse(valid=True, datasets=dataset_names)
+
+
+@router.post("/bigquery", status_code=status.HTTP_201_CREATED)
+async def create_bigquery_connector(
+    request: BigQueryConnectorCreate,
+    user: Annotated[User, Depends(require_permission("connections.manage"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Create a BigQuery MCP connector."""
+    from sqlalchemy import select
+
+    from app.models.mcp_connector import McpConnector
+
+    # 1. Validate connection
+    validation = await validate_connection(
+        credentials=request.service_account_json,
+        project_id=request.project_id,
+    )
+    if not validation["valid"]:
+        raise HTTPException(status_code=400, detail=f"Connection failed: {validation['error']}")
+
+    # 2. Check for existing bigquery connector — deactivate if exists
+    existing_result = await db.execute(
+        select(McpConnector).where(
+            McpConnector.tenant_id == user.tenant_id,
+            McpConnector.provider == "bigquery",
+            McpConnector.status == "active",
+        )
+    )
+    existing = existing_result.scalars().first()
+    if existing:
+        existing.status = "revoked"
+
+    # 3. Discover schema
+    schema = await discover_schema(
+        credentials=request.service_account_json,
+        project_id=request.project_id,
+    )
+    dataset_names = [ds["dataset_id"] for ds in schema.get("datasets", [])]
+
+    # 4. Encrypt credentials
+    encrypted = encrypt_credentials({
+        "service_account_json": request.service_account_json,
+        "project_id": request.project_id,
+        "default_dataset": request.default_dataset,
+    })
+
+    # 5. Create connector
+    connector = McpConnector(
+        tenant_id=user.tenant_id,
+        provider="bigquery",
+        label=f"BigQuery {request.project_id}",
+        server_url="https://bigquery.googleapis.com",
+        auth_type="service_account",
+        encrypted_credentials=encrypted,
+        encryption_key_version=1,
+        status="active",
+        is_enabled=True,
+        created_by=user.id,
+        metadata_json={
+            "project_id": request.project_id,
+            "default_dataset": request.default_dataset,
+            "datasets_discovered": dataset_names,
+        },
+        discovered_tools=[
+            {"name": "bigquery_sql", "description": "Execute BigQuery SQL query"},
+            {"name": "bigquery_schema", "description": "Discover datasets and tables"},
+            {"name": "bigquery_cost_estimate", "description": "Estimate query cost"},
+        ],
+    )
+    db.add(connector)
+
+    # 6. Audit log
+    await audit_service.log_event(
+        db=db,
+        tenant_id=user.tenant_id,
+        category="mcp_connector",
+        action="mcp_connector.create",
+        actor_id=user.id,
+        resource_type="mcp_connector",
+        resource_id=str(connector.id),
+        payload={"provider": "bigquery", "project_id": request.project_id},
+    )
+
+    await db.commit()
+    return connector
 
 
 # ---------------------------------------------------------------------------
