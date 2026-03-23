@@ -6,6 +6,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiClient } from "@/lib/api-client";
 import { consumeChatStream } from "@/lib/chat-stream";
 import type { FinancialReportData, DataTableData } from "@/lib/chat-stream";
+import type { ChartData } from "@/lib/types";
 import type { ChatSession, ChatSessionDetail, ChatMessage } from "@/lib/types";
 import { SessionSidebar } from "@/components/chat/session-sidebar";
 import { MessageList } from "@/components/chat/message-list";
@@ -26,6 +27,8 @@ export default function ChatPage() {
   const financialReportsRef = useRef<Map<string, FinancialReportData>>(new Map());
   const [dataTable, setDataTable] = useState<DataTableData | null>(null);
   const dataTablesRef = useRef<Map<string, DataTableData>>(new Map());
+  const [charts, setCharts] = useState<ChartData[]>([]);
+  const chartsRef = useRef<Map<string, ChartData[]>>(new Map());
   const queryClient = useQueryClient();
   const router = useRouter();
 
@@ -85,6 +88,11 @@ export default function ChatPage() {
       } else if (type === "data_table" && data) {
         dataTablesRef.current.set(msg.id, data as unknown as DataTableData);
         hydrated = true;
+      } else if (type === "chart" && data) {
+        const existing = chartsRef.current.get(msg.id) || [];
+        existing.push(data as unknown as ChartData);
+        chartsRef.current.set(msg.id, existing);
+        hydrated = true;
       }
     }
     if (hydrated) forceRender((n) => n + 1);
@@ -101,6 +109,7 @@ export default function ChatPage() {
       setStreamingMessage(null);
       setFinancialReport(null);
       setDataTable(null);
+      setCharts([]);
 
       let sessionId = activeSessionId;
       if (!sessionId) {
@@ -131,6 +140,7 @@ export default function ChatPage() {
           onToolStatus: (status) => setStreamingStatus(status),
           onFinancialReport: (data) => setFinancialReport(data),
           onDataTable: (data) => setDataTable(data),
+          onChart: (data) => setCharts((prev) => [...prev, data]),
           onError: (streamError) => setError(streamError),
           onMessage: (message) => {
             // Associate any in-flight financial report with this message
@@ -146,6 +156,13 @@ export default function ChatPage() {
                 dataTablesRef.current.set(message.id, current);
               }
               return null;
+            });
+            // Associate any in-flight charts with this message
+            setCharts((current) => {
+              if (current.length > 0) {
+                chartsRef.current.set(message.id, current);
+              }
+              return [];
             });
             setStreamingMessage(message);
             setStreamingContent(null);
@@ -179,6 +196,7 @@ export default function ChatPage() {
         setStreamingMessage(null);
         setFinancialReport(null);
         setDataTable(null);
+        setCharts([]);
       }
     },
     [activeSessionId, createSession, flushBuffer, isStreaming, queryClient],
@@ -237,6 +255,8 @@ export default function ChatPage() {
             financialReports={financialReportsRef.current}
             dataTable={dataTable}
             dataTables={dataTablesRef.current}
+            charts={charts}
+            chartsByMessage={chartsRef.current}
             onMentionClick={handleMentionClick}
             onImportanceOverride={(messageId, newTier) => {
               queryClient.setQueryData<ChatSessionDetail>(

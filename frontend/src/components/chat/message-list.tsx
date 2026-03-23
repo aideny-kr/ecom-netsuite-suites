@@ -11,8 +11,10 @@ import { cn } from "@/lib/utils";
 import { useBranding } from "@/providers/branding-provider";
 import type { ChatMessage } from "@/lib/types";
 import type { FinancialReportData, DataTableData } from "@/lib/chat-stream";
+import type { ChartData } from "@/lib/types";
 import { FinancialReport } from "@/components/chat/financial-report";
 import { DataFrameTable } from "@/components/chat/data-frame-table";
+import { ChartRenderer } from "@/components/chat/chart-renderer";
 import { ToolCallStepCard } from "@/components/chat/tool-call-step";
 import { ChangeProposalCard } from "@/components/chat/change-proposal-card";
 import { WorkspaceToolCard } from "@/components/chat/workspace-tool-card";
@@ -484,6 +486,8 @@ interface MessageListProps {
   financialReports?: Map<string, FinancialReportData>;
   dataTable?: DataTableData | null;
   dataTables?: Map<string, DataTableData>;
+  charts?: ChartData[];
+  chartsByMessage?: Map<string, ChartData[]>;
   onImportanceOverride?: (messageId: string, newTier: number) => void;
   variant?: "default" | "terminal";
 }
@@ -504,6 +508,8 @@ export function MessageList({
   financialReports,
   dataTable,
   dataTables,
+  charts,
+  chartsByMessage,
   onImportanceOverride,
   variant,
 }: MessageListProps) {
@@ -631,6 +637,7 @@ export function MessageList({
             onImportanceOverride={onImportanceOverride}
             financialReportData={financialReports?.get(message.id) ?? null}
             dataTableData={dataTables?.get(message.id) ?? null}
+            chartDataList={chartsByMessage?.get(message.id) ?? null}
             isTerminal={isTerminal}
           />
         ) : isTerminal ? (
@@ -776,6 +783,12 @@ export function MessageList({
                 <DataFrameTable data={dataTable} queryText={dataTable.query} />
               </div>
             )}
+
+            {charts && charts.length > 0 && charts.map((chart, idx) => (
+              <div key={idx} className="animate-table-appear">
+                <ChartRenderer data={chart} />
+              </div>
+            ))}
               </div>
             </div>
           </div>
@@ -797,6 +810,7 @@ function AssistantMessageRow({
   onImportanceOverride,
   financialReportData = null,
   dataTableData = null,
+  chartDataList = null,
   isTerminal = false,
 }: {
   message: ChatMessage;
@@ -808,6 +822,7 @@ function AssistantMessageRow({
   onImportanceOverride?: (messageId: string, newTier: number) => void;
   financialReportData?: FinancialReportData | null;
   dataTableData?: DataTableData | null;
+  chartDataList?: ChartData[] | null;
   isTerminal?: boolean;
 }) {
   const { brandName: agentName } = useBranding();
@@ -883,6 +898,10 @@ function AssistantMessageRow({
         {dataTableData && (
           <DataFrameTable data={dataTableData} queryText={dataTableData.query} />
         )}
+
+        {chartDataList && chartDataList.length > 0 && chartDataList.map((chart, idx) => (
+          <ChartRenderer key={idx} data={chart} />
+        ))}
 
         <div className="flex min-w-0 flex-col gap-2">
           {parseThinkingBlocks(message.content).map((part, index) =>

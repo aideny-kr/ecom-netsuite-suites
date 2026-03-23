@@ -734,3 +734,24 @@ export interface BrandingConfig {
 export interface FeatureFlagsResponse {
   flags: Record<string, boolean>;
 }
+
+// ---------------------------------------------------------------------------
+// Chart Data (BigQuery BI Agent)
+// ---------------------------------------------------------------------------
+
+export interface ChartData {
+  chart_type: "bar" | "line" | "pie" | "area" | "scatter" | "donut" | "histogram";
+  title: string;
+  subtitle?: string;
+  x_axis: { label: string; key: string };
+  y_axes: Array<{ label: string; key: string; color?: string }>;
+  data: Record<string, unknown>[];
+  options?: {
+    stacked?: boolean;
+    show_legend?: boolean;
+    show_values?: boolean;
+    percentage_mode?: boolean;
+    sort_by?: string;
+    orientation?: "vertical" | "horizontal";
+  };
+}

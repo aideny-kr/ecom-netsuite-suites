@@ -1,6 +1,6 @@
 "use client";
 
-import type { ChatMessage } from "@/lib/types";
+import type { ChatMessage, ChartData } from "@/lib/types";
 
 export interface FinancialReportData {
   report_type: string;
@@ -25,6 +25,7 @@ export type ChatStreamEvent =
   | { type: "importance"; tier: number; label: string; needs_review: boolean }
   | { type: "financial_report"; data: FinancialReportData }
   | { type: "data_table"; data: DataTableData }
+  | { type: "chart"; data: ChartData }
   | { type: "error"; error: string }
   | { type: "message"; message: ChatMessage };
 
@@ -40,6 +41,7 @@ type StreamHandlers = {
   onImportance?: (tier: number, label: string, needsReview: boolean) => void;
   onFinancialReport?: (data: FinancialReportData) => void;
   onDataTable?: (data: DataTableData) => void;
+  onChart?: (data: ChartData) => void;
   onError?: (error: string) => void;
   onMessage?: (message: ChatMessage) => void;
 };
@@ -135,6 +137,8 @@ export async function consumeChatStream(
         handlers.onFinancialReport?.(event.data);
       } else if (event.type === "data_table") {
         handlers.onDataTable?.(event.data);
+      } else if (event.type === "chart") {
+        handlers.onChart?.(event.data);
       } else if (event.type === "error") {
         handlers.onError?.(event.error);
       } else if (event.type === "message") {
@@ -188,6 +192,21 @@ function normalizeStreamEvent(data: Record<string, unknown>): ChatStreamEvent | 
         query: typeof d.query === "string" ? d.query : "",
         truncated: Boolean(d.truncated),
       },
+    };
+  }
+  if (type === "chart" && data.data && typeof data.data === "object") {
+    const d = data.data as Record<string, unknown>;
+    return {
+      type,
+      data: {
+        chart_type: String(d.chart_type || "bar"),
+        title: String(d.title || ""),
+        subtitle: typeof d.subtitle === "string" ? d.subtitle : undefined,
+        x_axis: (d.x_axis && typeof d.x_axis === "object" ? d.x_axis : { label: "", key: "" }) as ChartData["x_axis"],
+        y_axes: Array.isArray(d.y_axes) ? d.y_axes : [],
+        data: Array.isArray(d.data) ? d.data : [],
+        options: (d.options && typeof d.options === "object" ? d.options : undefined) as ChartData["options"],
+      } as ChartData,
     };
   }
   if (type === "error" && typeof data.error === "string") {
