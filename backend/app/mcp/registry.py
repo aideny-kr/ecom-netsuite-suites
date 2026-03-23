@@ -1,4 +1,5 @@
 from app.mcp.tools import (
+    bigquery_tools,
     data_sample,
     health,
     netsuite_connectivity,
@@ -428,6 +429,47 @@ TOOL_REGISTRY = {
                 "required": False,
                 "description": "Filter by source path prefix (e.g. 'netsuite_metadata/')",
             },
+        },
+    },
+    "bigquery.sql": {
+        "description": (
+            "Execute a read-only BigQuery SQL query. Returns columns, rows, and metadata. "
+            "Cost-guardrailed via max_bytes_billed. Use for analytics and BI queries."
+        ),
+        "execute": bigquery_tools.bigquery_sql_execute,
+        "params_schema": {
+            "query": {"type": "string", "required": True, "description": "BigQuery SQL query (SELECT/WITH only)"},
+            "max_rows": {
+                "type": "integer",
+                "required": False,
+                "default": 1000,
+                "description": "Maximum rows to return (default 1000)",
+            },
+        },
+    },
+    "bigquery.schema": {
+        "description": (
+            "Discover BigQuery datasets, tables, and columns. "
+            "Use to explore available data before writing queries."
+        ),
+        "execute": bigquery_tools.bigquery_schema_execute,
+        "params_schema": {
+            "dataset": {
+                "type": "string",
+                "required": False,
+                "description": "Specific dataset to inspect (omit for all datasets)",
+            },
+        },
+    },
+    "bigquery.cost_estimate": {
+        "description": (
+            "Estimate the cost of a BigQuery query via dry run. "
+            "Returns estimated bytes and USD cost ($5/TB). "
+            "Use before running expensive queries."
+        ),
+        "execute": bigquery_tools.bigquery_cost_estimate_execute,
+        "params_schema": {
+            "query": {"type": "string", "required": True, "description": "BigQuery SQL query to estimate"},
         },
     },
 }

@@ -563,6 +563,7 @@ from app.services.audit_service import log_event
 from app.services.chat.billing import deduct_chat_credits
 from app.services.chat.llm_adapter import get_adapter
 from app.services.chat.nodes import (
+    ALLOWED_CHAT_TOOLS,
     OrchestratorState,
     get_tenant_ai_config,
     retriever_node,

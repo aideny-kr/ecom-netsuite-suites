@@ -199,6 +199,30 @@ TOOL_CONFIGS = {
         "requires_entitlement": "workspace",
         "allowlisted_params": ["changeset_id", "sandbox_id", "override_reason", "require_assertions"],
     },
+    "bigquery.sql": {
+        "default_limit": 1000,
+        "max_limit": 10000,
+        "timeout_seconds": 30,
+        "rate_limit_per_minute": 30,
+        "requires_entitlement": "mcp_tools",
+        "allowlisted_params": ["query", "max_rows"],
+    },
+    "bigquery.schema": {
+        "default_limit": None,
+        "max_limit": None,
+        "timeout_seconds": 15,
+        "rate_limit_per_minute": 30,
+        "requires_entitlement": "mcp_tools",
+        "allowlisted_params": ["dataset"],
+    },
+    "bigquery.cost_estimate": {
+        "default_limit": None,
+        "max_limit": None,
+        "timeout_seconds": 15,
+        "rate_limit_per_minute": 30,
+        "requires_entitlement": "mcp_tools",
+        "allowlisted_params": ["query"],
+    },
 }
 
 

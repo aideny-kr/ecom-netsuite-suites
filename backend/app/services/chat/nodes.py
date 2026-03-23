@@ -47,6 +47,9 @@ ALLOWED_CHAT_TOOLS: frozenset[str] = frozenset(
         "workspace.propose_patch",
         "suitescript.sync",
         "tenant.save_learned_rule",
+        "bigquery.sql",
+        "bigquery.schema",
+        "bigquery.cost_estimate",
     }
 )
 
