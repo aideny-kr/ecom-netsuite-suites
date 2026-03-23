@@ -28,8 +28,8 @@ def _build_connect_args(url: str) -> dict:
 # Prefer direct connection (bypasses PgBouncer) when available
 _db_url = settings.DATABASE_URL_DIRECT or settings.DATABASE_URL
 _is_remote = _is_supabase(_db_url)
-_pool_size = 5 if _is_remote else 20
-_max_overflow = 5 if _is_remote else 10
+_pool_size = 20 if _is_remote else 20
+_max_overflow = 30 if _is_remote else 10
 
 engine = create_async_engine(
     _db_url,

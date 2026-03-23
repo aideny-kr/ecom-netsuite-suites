@@ -280,6 +280,9 @@ async def send_message(
 
         producer_task = asyncio.create_task(_producer())
 
+        from app.api.v1.health import increment_sse, decrement_sse
+        increment_sse()
+
         # Send padding to force Cloudflare Tunnel to start streaming
         yield f": {' ' * 8192}\n\n"
         try:
@@ -299,6 +302,7 @@ async def send_message(
 
                 yield f"data: {json.dumps(chunk)}\n\n"
         finally:
+            decrement_sse()
             producer_task.cancel()
             # Save partial assistant message if stream was interrupted
             if not stream_completed and partial_text_parts:
