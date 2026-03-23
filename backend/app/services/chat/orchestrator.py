@@ -1434,6 +1434,15 @@ async def run_chat_turn(
                     )
                     coord_result_tool_calls = agent_result.tool_calls_log
 
+                # Extract charts from agent response text → emit as SSE events
+                from app.services.chat.chart_extractor import extract_charts
+
+                final_text, charts = extract_charts(final_text)
+                for chart in charts:
+                    yield {"type": "chart", "data": chart.model_dump()}
+                if charts:
+                    print(f"[ORCHESTRATOR] Extracted {len(charts)} chart(s) from agent response", flush=True)
+
                 # Extract confidence score from agent result
                 confidence_val = (
                     agent_result.confidence_score
