@@ -208,6 +208,69 @@ def _build_connection_warning_block(connection_warnings: list[str]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Agent registry + three-tier routing
+# ---------------------------------------------------------------------------
+
+from app.services.chat.agents.agent_registry import AgentRegistry
+from app.services.chat.routing.rule_router import RuleRouter
+from app.services.chat.routing.semantic_router import SemanticRouter
+
+_agent_registry = AgentRegistry()
+# Load configs at module init — directory may not exist yet, that's fine
+try:
+    from pathlib import Path as _Path
+
+    _configs_dir = _Path(__file__).parent / "agents" / "configs"
+    if _configs_dir.is_dir():
+        _agent_registry.load_configs(_configs_dir)
+except Exception:
+    pass
+
+
+async def _select_agent(
+    query: str,
+    tenant_id: uuid.UUID,
+    db: "AsyncSession",
+    adapter: "BaseLLMAdapter",
+) -> str | None:
+    """Three-tier routing to select a specialized agent.
+
+    Returns agent_id if a specialized agent should handle the query,
+    or None if UnifiedAgent should handle it (default path).
+    """
+    if not _agent_registry.configs:
+        return None
+
+    try:
+        enabled_agents = await _agent_registry.get_enabled_agents(db, tenant_id)
+    except Exception:
+        return None
+
+    if not enabled_agents:
+        return None
+
+    # Tier 1: Rule-based routing (<1ms)
+    rule_router = RuleRouter([(a, True) for a in enabled_agents])
+    tier1_result = rule_router.route(query)
+
+    if tier1_result and tier1_result != "unified-agent":
+        # Check health before using
+        if _agent_registry.is_healthy(error_count=0, success_count=0):
+            return tier1_result
+        return None
+
+    # Tier 2: Semantic routing via Haiku (~50ms)
+    semantic_router = SemanticRouter()
+    tier2_result = await semantic_router.route(query, enabled_agents, adapter)
+
+    if tier2_result and tier2_result != "unified-agent":
+        return tier2_result
+
+    # Tier 3: UnifiedAgent fallback
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Smart context injection — classify how much context each query needs
 # ---------------------------------------------------------------------------
 

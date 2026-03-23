@@ -1,192 +1,99 @@
-"""Tests for the semantic routing engine in coordinator.py.
-
-Tests the heuristic classifier (classify_intent) and route registry
-to ensure user messages are routed to the correct specialist agent
-without unnecessary LLM calls.
-"""
+"""Tests for Tier 2 semantic routing via Haiku classification."""
 
 import pytest
+from unittest.mock import AsyncMock, MagicMock
 
-from app.services.chat.coordinator import (
-    ROUTE_REGISTRY,
-    IntentType,
-    classify_intent,
-)
-
-# ── DATA_QUERY intent ──────────────────────────────────────────────────────
+from app.services.chat.agents.agent_yaml_config import AgentYAMLConfig
+from app.services.chat.routing.semantic_router import SemanticRouter
 
 
-class TestDataQueryClassification:
-    """Messages that should route to the SuiteQL agent."""
-
-    @pytest.mark.parametrize(
-        "message",
-        [
-            "show me the latest 10 sales orders",
-            "get order #865732",
-            "find customer Acme Corp",
-            "what's the total revenue this month",
-            "pull the last 5 invoices",
-            "look up SO12345",
-            "tell me about #865732 shopify order",
-            "how many orders were placed today",
-            "latest order from netsuite",
-            "fetch all open purchase orders",
-            "show me pending invoices",
-            "sales total for last quarter",
-            "revenue by subsidiary this year",
-            "inventory levels for SKU-1234",
-            "accounts receivable balance",
-            "run a suiteql query for customers",
-            "#12345",
-            "INV90032",
-            "SO8228253",
-            "find the shopify order number 898657326",
-        ],
+def _make_config(agent_id: str, desc: str) -> AgentYAMLConfig:
+    return AgentYAMLConfig(
+        agent_id=agent_id,
+        display_name=agent_id.replace("-", " ").title(),
+        description=desc,
     )
-    def test_data_query_classified(self, message: str) -> None:
-        assert classify_intent(message) == IntentType.DATA_QUERY
 
 
-# ── DOCUMENTATION intent ───────────────────────────────────────────────────
-
-
-class TestDocumentationClassification:
-    """Messages that should route to the RAG agent."""
-
-    @pytest.mark.parametrize(
-        "message",
-        [
-            "how do I use the N/record module",
-            "what is SuiteQL syntax for date filtering",
-            "explain the difference between saved search and SuiteQL",
-            "SuiteScript API reference for N/file",
-            "what does error code INVALID_FLD_VALUE mean",
-            "netsuite documentation for custom records",
-            "how can I use BUILTIN.DF in SuiteQL",
-            "what tables are available in SuiteQL",
-            "governance limit for scheduled scripts",
-            "how can I query dates in SuiteQL",
-        ],
+def _mock_adapter(response_text: str) -> AsyncMock:
+    """Create a mock adapter that returns the given text."""
+    adapter = AsyncMock()
+    mock_response = MagicMock()
+    mock_response.text_blocks = [response_text]
+    mock_response.tool_use_blocks = []
+    mock_response.usage = MagicMock(
+        input_tokens=100, output_tokens=10,
+        cache_creation_input_tokens=0, cache_read_input_tokens=0,
     )
-    def test_documentation_classified(self, message: str) -> None:
-        assert classify_intent(message) == IntentType.DOCUMENTATION
+    adapter.create_message = AsyncMock(return_value=mock_response)
+    return adapter
 
 
-# ── WORKSPACE_DEV intent ───────────────────────────────────────────────────
+class TestSemanticRouter:
 
+    @pytest.mark.asyncio
+    async def test_returns_agent_id_from_llm(self):
+        adapter = _mock_adapter("pricing-agent")
+        agents = [_make_config("pricing-agent", "Handles pricing queries")]
+        router = SemanticRouter()
+        result = await router.route("what's the price", agents, adapter)
+        assert result == "pricing-agent"
 
-class TestWorkspaceDevClassification:
-    """Messages that should route to the workspace agent."""
+    @pytest.mark.asyncio
+    async def test_returns_unified_for_unclear(self):
+        adapter = _mock_adapter("unified-agent")
+        agents = [_make_config("pricing-agent", "Handles pricing")]
+        router = SemanticRouter()
+        result = await router.route("hello", agents, adapter)
+        assert result == "unified-agent"
 
-    @pytest.mark.parametrize(
-        "message",
-        [
-            "write a SuiteScript user event script for order validation",
-            "review the changeset for the RESTlet update",
-            "create a jest test for the file cabinet module",
-            "refactor the scheduled script to use map/reduce",
-            "list the files in my workspace",
-            "read the restlet file",
-            "search the workspace for custbody references",
-            "propose a patch to fix the error handler",
-            "write a unit test for the sync logic",
-            "search the scripts for entity references",
-            "create a suitelet for the custom report",
-            "write a client script for field validation",
-        ],
-    )
-    def test_workspace_classified(self, message: str) -> None:
-        assert classify_intent(message) == IntentType.WORKSPACE_DEV
+    @pytest.mark.asyncio
+    async def test_prompt_includes_all_agent_descriptions(self):
+        adapter = _mock_adapter("pricing-agent")
+        agents = [
+            _make_config("pricing-agent", "Handles pricing queries"),
+            _make_config("recon-agent", "Handles reconciliation"),
+            _make_config("inventory-agent", "Handles inventory lookups"),
+        ]
+        router = SemanticRouter()
+        await router.route("test query", agents, adapter)
+        # Check the prompt sent to the adapter
+        call_kwargs = adapter.create_message.call_args.kwargs
+        system_prompt = call_kwargs.get("system", "")
+        assert "pricing" in system_prompt.lower()
+        assert "reconciliation" in system_prompt.lower()
+        assert "inventory" in system_prompt.lower()
 
+    @pytest.mark.asyncio
+    async def test_uses_haiku_model(self):
+        adapter = _mock_adapter("pricing-agent")
+        agents = [_make_config("pricing-agent", "Pricing")]
+        router = SemanticRouter()
+        await router.route("price check", agents, adapter)
+        call_kwargs = adapter.create_message.call_args.kwargs
+        assert call_kwargs["model"] == "claude-haiku-4-5-20251001"
 
-# ── ANALYSIS intent ────────────────────────────────────────────────────────
+    @pytest.mark.asyncio
+    async def test_strips_whitespace_from_response(self):
+        adapter = _mock_adapter("  pricing-agent\n")
+        agents = [_make_config("pricing-agent", "Pricing")]
+        router = SemanticRouter()
+        result = await router.route("price check", agents, adapter)
+        assert result == "pricing-agent"
 
+    @pytest.mark.asyncio
+    async def test_invalid_agent_id_returns_unified(self):
+        adapter = _mock_adapter("nonexistent-agent")
+        agents = [_make_config("pricing-agent", "Pricing")]
+        router = SemanticRouter()
+        result = await router.route("test", agents, adapter)
+        assert result == "unified-agent"
 
-class TestAnalysisClassification:
-    """Messages that should route to suiteql → analysis pipeline."""
-
-    @pytest.mark.parametrize(
-        "message",
-        [
-            "compare sales between Q1 and Q2",
-            "month-over-month revenue trend",
-            "top 10 customers by order volume",
-            "analyze the sales data by category",
-            "year-over-year growth rate",
-            "breakdown of revenue by subsidiary",
-        ],
-    )
-    def test_analysis_classified(self, message: str) -> None:
-        assert classify_intent(message) == IntentType.ANALYSIS
-
-
-# ── AMBIGUOUS intent ───────────────────────────────────────────────────────
-
-
-class TestAmbiguousClassification:
-    """Messages that don't match any heuristic and need LLM fallback."""
-
-    @pytest.mark.parametrize(
-        "message",
-        [
-            "hello",
-            "thanks",
-            "can you help me with something",
-            "what should I do next",
-            "tell me more",
-        ],
-    )
-    def test_ambiguous_classified(self, message: str) -> None:
-        assert classify_intent(message) == IntentType.AMBIGUOUS
-
-
-# ── Route registry ─────────────────────────────────────────────────────────
-
-
-class TestRouteRegistry:
-    """Verify the route registry maps intents to the right agents."""
-
-    def test_documentation_route(self) -> None:
-        route = ROUTE_REGISTRY[IntentType.DOCUMENTATION]
-        assert route.agents == ["rag"]
-        assert route.parallel is False
-
-    def test_data_query_route(self) -> None:
-        route = ROUTE_REGISTRY[IntentType.DATA_QUERY]
-        assert route.agents == ["suiteql"]
-        assert route.parallel is False
-
-    def test_workspace_route(self) -> None:
-        route = ROUTE_REGISTRY[IntentType.WORKSPACE_DEV]
-        assert route.agents == ["workspace"]
-        assert route.parallel is False
-
-    def test_analysis_route(self) -> None:
-        route = ROUTE_REGISTRY[IntentType.ANALYSIS]
-        assert route.agents == ["suiteql", "analysis"]
-        assert route.parallel is False
-
-    def test_all_intents_have_routes(self) -> None:
-        """Every non-AMBIGUOUS intent should have a route config."""
-        for intent in IntentType:
-            if intent != IntentType.AMBIGUOUS:
-                assert intent in ROUTE_REGISTRY, f"Missing route for {intent}"
-
-
-# ── Bare number shortcut ──────────────────────────────────────────────────
-
-
-class TestBareNumberShortcut:
-    """Bare number inputs (like order IDs) should fast-path to DATA_QUERY."""
-
-    @pytest.mark.parametrize(
-        "message",
-        [
-            "#12345",
-            "12345678",
-            "#898657326",
-        ],
-    )
-    def test_bare_number(self, message: str) -> None:
-        assert classify_intent(message) == IntentType.DATA_QUERY
+    @pytest.mark.asyncio
+    async def test_timeout_returns_unified(self):
+        adapter = AsyncMock()
+        adapter.create_message = AsyncMock(side_effect=TimeoutError("timeout"))
+        agents = [_make_config("pricing-agent", "Pricing")]
+        router = SemanticRouter()
+        result = await router.route("test", agents, adapter)
+        assert result == "unified-agent"

@@ -1,0 +1,126 @@
+"""AgentRegistry — lifecycle management of specialized agents.
+
+Loads YAML configs at startup, merges per-tenant DB overrides at runtime,
+instantiates SpecializedAgent instances, and provides health checking.
+"""
+
+from __future__ import annotations
+
+import logging
+import uuid
+from pathlib import Path
+from typing import Any
+
+from sqlalchemy import select, text
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.services.chat.agents.agent_yaml_config import AgentYAMLConfig
+from app.services.chat.agents.specialized_agent import SpecializedAgent
+
+logger = logging.getLogger(__name__)
+
+
+class AgentRegistry:
+    """Central registry for specialized agent configs."""
+
+    def __init__(self) -> None:
+        self.configs: dict[str, AgentYAMLConfig] = {}
+
+    def load_configs(self, config_dir: Path) -> None:
+        """Load all YAML agent configs from a directory."""
+        self.configs.clear()
+        for path in sorted(config_dir.glob("*.yaml")):
+            try:
+                config = AgentYAMLConfig.from_yaml(path)
+                self.configs[config.agent_id] = config
+                logger.info("Loaded agent config: %s", config.agent_id)
+            except Exception:
+                logger.exception("Failed to load agent config: %s", path)
+
+    async def get_enabled_agents(
+        self, db: AsyncSession, tenant_id: uuid.UUID
+    ) -> list[AgentYAMLConfig]:
+        """Return configs for agents enabled for this tenant.
+
+        Merges YAML defaults with DB overrides from agent_configs table.
+        Agents disabled in DB (is_enabled=False) are excluded.
+        """
+        # Query DB for tenant-specific overrides
+        try:
+            result = await db.execute(
+                text(
+                    "SELECT agent_id, is_enabled, override_config "
+                    "FROM agent_configs WHERE tenant_id = :tid"
+                ),
+                {"tid": str(tenant_id)},
+            )
+            db_rows = result.all()
+        except Exception:
+            logger.warning("agent_configs table not available, using YAML defaults")
+            db_rows = []
+
+        # Build override map
+        overrides: dict[str, Any] = {}
+        disabled: set[str] = set()
+        for row in db_rows:
+            agent_id = row.agent_id
+            if not row.is_enabled:
+                disabled.add(agent_id)
+            if row.override_config:
+                overrides[agent_id] = row.override_config
+
+        # Merge and filter
+        enabled: list[AgentYAMLConfig] = []
+        for agent_id, config in self.configs.items():
+            if agent_id in disabled:
+                continue
+            if agent_id in overrides:
+                config = config.merge(overrides[agent_id])
+            enabled.append(config)
+
+        return enabled
+
+    def instantiate(
+        self,
+        agent_id: str,
+        tenant_id: uuid.UUID,
+        user_id: uuid.UUID,
+        correlation_id: str,
+        overrides: dict[str, Any] | None = None,
+    ) -> SpecializedAgent:
+        """Create a SpecializedAgent instance from a registered config.
+
+        Raises KeyError if agent_id is not registered.
+        """
+        config = self.configs[agent_id]  # KeyError if not found
+
+        if overrides:
+            config = config.merge(overrides)
+
+        # Load prompt text from file if configured
+        prompt_text = ""
+        if config.prompt_file:
+            prompt_path = Path(__file__).parent / "prompts" / config.prompt_file
+            if prompt_path.is_file():
+                prompt_text = prompt_path.read_text()
+
+        return SpecializedAgent(
+            config=config,
+            prompt_text=prompt_text,
+            knowledge=[],
+            tenant_id=tenant_id,
+            user_id=user_id,
+            correlation_id=correlation_id,
+        )
+
+    def is_healthy(self, error_count: int, success_count: int) -> bool:
+        """Check if an agent is healthy based on error rate.
+
+        Circuit breaker trips at >5% error rate over recent calls.
+        """
+        total = error_count + success_count
+        if total == 0:
+            return True
+        if error_count / total > 0.05:
+            return False
+        return True
