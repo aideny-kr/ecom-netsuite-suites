@@ -273,15 +273,16 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 
 ## Current State
 
-- **Product**: AI-den v1.0 shipped 2026-03-22. Agent surpasses native Claude + MCP. Next: v1.1 (agent framework + BigQuery BI agent).
-- **Roadmap**: v1.1 Mid-Apr (agent framework + BigQuery BI, ~3wk) → v1.2 Early May (NetSuite read-write, ~2wk) → v1.3 Late May (cross-system intelligence, ~3wk) → v1.4 Mid-Jun (ETL pipelines, ~3wk). See `docs/superpowers/specs/2026-03-22-custom-agent-architecture.md` and `docs/superpowers/specs/2026-03-22-bigquery-bi-agent.md`.
+- **Product**: AI-den v1.1 deployed to staging 2026-03-23. Agent framework + BigQuery BI agent + chart rendering all live.
+- **Roadmap**: v1.1 shipped (agent framework + BigQuery BI) → v1.2 Early May (NetSuite read-write, ~2wk) → v1.3 Late May (cross-system intelligence, ~3wk) → v1.4 Mid-Jun (ETL pipelines, ~3wk).
 - **Latest migration**: 052_rag_partition_id
+- **New test count**: 200+ new tests added in v1.1 (agent framework, BigQuery, routing, benchmarks, charts)
 - **Staging**: `api-staging.suitestudio.ai` (backend) + `staging.suitestudio.ai` (Vercel frontend). Auto-deploys from main.
 - **Deploy**: Stop beat/worker first, pull, start sequentially. Never `--force-recreate` all at once — kills workers mid-refresh, consuming single-use refresh tokens.
 
 ## Known Issues
 
-1. **CI failures** — `test_security_hardening.py` SSL tests fail + pre-existing ruff lint errors (126). Not blocking deploy (manual `workflow_dispatch` bypasses CI gate).
+1. **CI failures** — `test_security_hardening.py` SSL tests fail + pre-existing ruff lint errors (223). Not blocking deploy (manual `workflow_dispatch` bypasses CI gate).
 2. **Workspace RAG chunking** — preamble code (constants before first entry point) now captured as `#preamble` chunk. Force re-seed after changing chunking logic: `seed_workspace_scripts(db, tenant_id, force=True)`.
 3. **CSV/Excel export** — strips `FETCH FIRST N ROWS ONLY` before re-executing server-side (up to 50K rows). Filenames are `query-results-YYYY-MM-DD`.
 4. **LLM pivot limitation** — the LLM cannot reliably build CASE WHEN pivot SQL (drops variants, adds non-existent values). Always use `netsuite_pivot_query_result` tool instead. Prompt says this but LLM occasionally ignores it.
@@ -314,3 +315,14 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 - **Duration precision** — added exact timestamp calculation hint to `_SYSTEMNOTE_EXPERTISE`. Agent now computes "22 hours 14 minutes" instead of "~1 day".
 - **Cloudflare SSE buffering** — removed `no-chunked-encoding: true` from `/etc/cloudflared/config.yml` on staging VM. SSE now streams progressively instead of snapshotting.
 - **Chat scroll jump** — wrapped `scrollIntoView` in `requestAnimationFrame` to wait for DOM layout to settle before scrolling. Fixes "message appears at bottom then shoots up".
+
+## Resolved (2026-03-23)
+
+- **v1.1 Agent Framework** — Full Week 1 shipped: AgentProtocol, SpecializedAgent (composition-based), HookManager, AgentYAMLConfig, AgentRegistry, three-tier routing (RuleRouter + SemanticRouter + UnifiedAgent fallback), tool filtering, RAG partitions. 131 new tests.
+- **v1.1 BigQuery BI Agent** — Full Week 2 shipped: BigQuery service (read-only, cost-guardrailed), 3 tools (sql/schema/cost_estimate), connector API + frontend settings UI, BI agent YAML config + prompt, schema RAG seeder, table selector with search. 70+ BigQuery tests.
+- **Chart pipeline** — `<chart>` XML extraction from agent text, SSE chart events, recharts frontend renderer (bar/line/pie/area/scatter), premium UX (smart $M formatting, gradients, glassmorphism). Chart suppression during streaming.
+- **Financial report auto-charts** — Deterministic post-processing (no LLM): income statement trend → grouped bar (revenue/COGS/opex/net income), balance sheet trend → grouped bar (assets/liabilities/equity). Only for 2+ period reports.
+- **Financial routing fix** — `_select_agent(is_financial=True)` bypasses agent routing for financial statements, forcing UnifiedAgent with NetSuite tools. Prevents income statement going to BigQuery BI agent.
+- **Scalability Sprint 0** — DB pool 5→20 + overflow 30, gunicorn 4 workers, `/health/detailed` endpoint with pool stats + SSE counter. Stress tested to 25 concurrent chats at 100% success.
+- **BigQuery connector encryption fix** — Staging connector created with wrong Fernet key. Re-encrypted with staging `ENCRYPTION_KEY`.
+- **BigQuery `asyncio.to_thread()`** — All 4 service functions wrapped to prevent event loop blocking. Schema endpoint returns 502 with message on failure instead of 503 timeout.
