@@ -81,7 +81,7 @@ export default function ChatPage() {
     let hydrated = false;
     for (const msg of sessionDetail.messages) {
       if (!msg.structured_output) continue;
-      const { type, data } = msg.structured_output;
+      const { type, data, charts: persistedCharts } = msg.structured_output as any;
       if (type === "financial_report" && data) {
         financialReportsRef.current.set(msg.id, data as unknown as FinancialReportData);
         hydrated = true;
@@ -91,6 +91,15 @@ export default function ChatPage() {
       } else if (type === "chart" && data) {
         const existing = chartsRef.current.get(msg.id) || [];
         existing.push(data as unknown as ChartData);
+        chartsRef.current.set(msg.id, existing);
+        hydrated = true;
+      }
+      // Hydrate persisted charts array (from v1.1 chart persistence)
+      if (Array.isArray(persistedCharts) && persistedCharts.length > 0) {
+        const existing = chartsRef.current.get(msg.id) || [];
+        for (const c of persistedCharts) {
+          existing.push(c as unknown as ChartData);
+        }
         chartsRef.current.set(msg.id, existing);
         hydrated = true;
       }

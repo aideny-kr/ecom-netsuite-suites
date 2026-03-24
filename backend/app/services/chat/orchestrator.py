@@ -1385,6 +1385,7 @@ async def run_chat_turn(
                 streamed_text_parts: list[str] = []
                 agent_result = None
                 last_structured_output: dict | None = None
+                _charts_output: list[dict] = []
 
                 unified_model = model if is_byok else settings.MULTI_AGENT_SQL_MODEL
 
@@ -1460,7 +1461,9 @@ async def run_chat_turn(
                                 summary=_fr_data.get("summary", {}),
                             )
                             if _fr_chart:
-                                yield {"type": "chart", "data": _fr_chart.model_dump()}
+                                _chart_dict = _fr_chart.model_dump()
+                                yield {"type": "chart", "data": _chart_dict}
+                                _charts_output.append(_chart_dict)
                                 print(
                                     f"[ORCHESTRATOR] Auto-generated chart for {_fr_data.get('report_type')}", flush=True
                                 )
@@ -1496,7 +1499,9 @@ async def run_chat_turn(
 
                 final_text, charts = extract_charts(final_text)
                 for chart in charts:
-                    yield {"type": "chart", "data": chart.model_dump()}
+                    _chart_dict = chart.model_dump()
+                    yield {"type": "chart", "data": _chart_dict}
+                    _charts_output.append(_chart_dict)
                 if charts:
                     print(f"[ORCHESTRATOR] Extracted {len(charts)} chart(s) from agent response", flush=True)
 
@@ -1528,6 +1533,14 @@ async def run_chat_turn(
                     ),
                 }
 
+                # Persist charts alongside structured_output (backward compatible)
+                _persisted_output = last_structured_output
+                if _charts_output:
+                    if _persisted_output:
+                        _persisted_output = {**_persisted_output, "charts": _charts_output}
+                    else:
+                        _persisted_output = {"charts": _charts_output}
+
                 assistant_msg = ChatMessage(
                     tenant_id=tenant_id,
                     session_id=session.id,
@@ -1543,7 +1556,7 @@ async def run_chat_turn(
                     is_byok=is_byok,
                     confidence_score=confidence_val,
                     query_importance=importance_tier.value,
-                    structured_output=last_structured_output,
+                    structured_output=_persisted_output,
                     created_at=datetime.now(timezone.utc),
                 )
                 db.add(assistant_msg)
