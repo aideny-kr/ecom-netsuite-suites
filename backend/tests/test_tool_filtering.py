@@ -2,7 +2,6 @@
 
 from app.services.chat.agents.tool_filter import get_tools_for_agent
 
-
 # Sample tool definitions matching Anthropic format
 SAMPLE_TOOLS = [
     {"name": "netsuite_suiteql", "description": "Run SuiteQL", "input_schema": {}},

@@ -7,9 +7,10 @@ Revision ID: 049_connection_alerts
 Revises: 048_onboarding_profile
 """
 
-from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import UUID
+
+from alembic import op
 
 revision = "049_connection_alerts"
 down_revision = "048_onboarding_profile"

@@ -8,8 +8,9 @@ Create Date: 2026-02-25 12:00:00.000000
 from typing import Sequence, Union
 
 import sqlalchemy as sa
-from alembic import op
 from pgvector.sqlalchemy import Vector
+
+from alembic import op
 
 # revision identifiers, used by Alembic.
 revision: str = "031_domain_knowledge_chunks"

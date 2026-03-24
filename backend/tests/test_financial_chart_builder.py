@@ -1,10 +1,8 @@
 """Tests for auto-generating charts from NetSuite financial reports."""
 
-import pytest
 
-from app.services.chat.financial_chart_builder import build_financial_chart
 from app.schemas.chart import ChartData
-
+from app.services.chat.financial_chart_builder import build_financial_chart
 
 INCOME_TREND_SUMMARY = {
     "by_period": {

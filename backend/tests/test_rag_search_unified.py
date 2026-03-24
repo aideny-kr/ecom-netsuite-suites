@@ -5,7 +5,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-
 FAKE_TENANT_ID = str(uuid.uuid4())
 
 

@@ -3,7 +3,6 @@
 import csv
 import io
 import os
-import re
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -42,6 +41,7 @@ class QueryExportRequest(BaseModel):
 async def _get_netsuite_connection(db: AsyncSession, tenant_id):
     """Resolve active NetSuite connection for a tenant."""
     from sqlalchemy import select as sa_select
+
     from app.models.connection import Connection
 
     result = await db.execute(
@@ -102,10 +102,10 @@ async def query_export(
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     """Re-execute a SuiteQL query with full pagination and export."""
+    from app.core.encryption import decrypt_credentials
     from app.mcp.tools.netsuite_suiteql import is_read_only_sql
     from app.services.netsuite_client import execute_suiteql_via_rest
     from app.services.netsuite_oauth_service import get_valid_token
-    from app.core.encryption import decrypt_credentials
 
     # Validate read-only
     if not is_read_only_sql(request.query_text):

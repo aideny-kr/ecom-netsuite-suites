@@ -1,8 +1,9 @@
 """Create tenant_feature_flags table."""
 
-from alembic import op
 import sqlalchemy as sa
-from sqlalchemy.dialects.postgresql import UUID, JSONB
+from sqlalchemy.dialects.postgresql import JSONB, UUID
+
+from alembic import op
 
 revision = "037_tenant_feature_flags"
 down_revision = "036_tenant_branding_and_domains"

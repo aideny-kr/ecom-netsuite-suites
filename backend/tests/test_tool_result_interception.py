@@ -4,7 +4,6 @@ import json
 
 from app.services.chat.orchestrator import _intercept_tool_result
 
-
 # -- Fixtures --
 
 SAMPLE_FINANCIAL_RESULT = {

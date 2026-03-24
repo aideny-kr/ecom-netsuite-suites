@@ -821,3 +821,42 @@ async def list_workspace_runs(
 ):
     runs = await runner_service.list_runs(db, workspace_id, user.tenant_id)
     return [_serialize_run(r) for r in runs]
+
+
+# --- Reorganize ---
+
+
+@router.post("/{workspace_id}/reorganize")
+async def reorganize_workspace(
+    workspace_id: uuid.UUID,
+    user: User = Depends(require_permission("workspace.manage")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Reorganize workspace files into script-type-based folders.
+
+    Detects each file's SuiteScript type (UserEventScript, Restlet, etc.)
+    and moves it to the appropriate folder. Preserves netsuite_file_id for push/pull.
+    Idempotent — files already in the correct folder are skipped.
+    """
+    from app.services.workspace_reorganizer import reorganize_workspace as reorg
+
+    # Verify workspace belongs to tenant
+    ws = await ws_svc.get_workspace(db, workspace_id, user.tenant_id)
+    if not ws:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+
+    result = await reorg(db, workspace_id)
+
+    await audit_service.log_event(
+        db=db,
+        tenant_id=user.tenant_id,
+        category="workspace",
+        action="workspace.reorganize",
+        actor_id=user.id,
+        resource_type="workspace",
+        resource_id=str(workspace_id),
+        details=result,
+    )
+    await db.commit()
+
+    return result

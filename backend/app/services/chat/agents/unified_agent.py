@@ -775,7 +775,7 @@ class UnifiedAgent(BaseSpecialistAgent):
             # Add systemnote expertise at the end (highest attention per U-curve research)
             base += _SYSTEMNOTE_EXPERTISE
 
-            print(f"[UNIFIED] Investigation mode: prompt stripped for free reasoning", flush=True)
+            print("[UNIFIED] Investigation mode: prompt stripped for free reasoning", flush=True)
 
         parts = [base]
 

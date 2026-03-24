@@ -16,13 +16,15 @@ from app.workers.celery_app import celery_app
 )
 def onboarding_discovery_task(self, tenant_id: str, connection_id: str):
     """Run deep tenant discovery on first NetSuite connection."""
+    import uuid
+
+    from sqlalchemy import select
+
     from app.core.database import async_session_factory
     from app.core.encryption import decrypt_credentials
     from app.models.connection import Connection
-    from app.services.netsuite_oauth_service import get_valid_token
     from app.services.knowledge.onboarding_discovery import run_onboarding_discovery
-    from sqlalchemy import select
-    import uuid
+    from app.services.netsuite_oauth_service import get_valid_token
 
     loop = asyncio.new_event_loop()
     try:

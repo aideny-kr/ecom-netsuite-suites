@@ -5,7 +5,6 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-
 SAMPLE_SCHEMA = {
     "datasets": [
         {

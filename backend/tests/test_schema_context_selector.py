@@ -1,6 +1,5 @@
 """Tests for the schema context selector (TDD Cycle 3)."""
 
-import pytest
 from app.services.schema_context_selector import select_relevant_schemas
 
 

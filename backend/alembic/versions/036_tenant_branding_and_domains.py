@@ -1,7 +1,8 @@
 """Add branding and custom domain columns to tenant_configs."""
 
-from alembic import op
 import sqlalchemy as sa
+
+from alembic import op
 
 revision = "036_tenant_branding_and_domains"
 down_revision = "035_tenant_unified_agent_flag"

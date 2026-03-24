@@ -7,10 +7,11 @@ Revision ID: 034_tenant_query_patterns
 Revises: 033_connection_health_fields
 """
 
-from alembic import op
 import sqlalchemy as sa
-from sqlalchemy.dialects.postgresql import UUID, ARRAY
 from pgvector.sqlalchemy import Vector
+from sqlalchemy.dialects.postgresql import ARRAY, UUID
+
+from alembic import op
 
 revision = "034_tenant_query_patterns"
 down_revision = "033_connection_health_fields"

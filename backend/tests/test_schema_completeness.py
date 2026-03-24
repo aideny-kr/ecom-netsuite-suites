@@ -1,8 +1,8 @@
 """Schema file completeness checks (TDD Cycle 8)."""
 
 import os
+
 import yaml
-import pytest
 
 SCHEMA_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "knowledge", "table_schemas")
 

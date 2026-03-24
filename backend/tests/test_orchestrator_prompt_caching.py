@@ -1,6 +1,5 @@
 """Tests that the orchestrator uses prompt caching correctly."""
 
-import pytest
 
 from app.services.chat.prompt_cache import split_system_prompt
 
@@ -57,6 +56,7 @@ class TestOrchestratorPromptCaching:
     def test_import_exists_in_orchestrator(self):
         """Verify the orchestrator imports split_system_prompt."""
         import inspect
+
         from app.services.chat import orchestrator
 
         source = inspect.getsource(orchestrator)
@@ -65,6 +65,7 @@ class TestOrchestratorPromptCaching:
     def test_orchestrator_does_not_pass_raw_system_prompt_to_stream(self):
         """Verify the orchestrator uses prompt_parts, not system_prompt, in stream_message calls."""
         import inspect
+
         from app.services.chat import orchestrator
 
         source = inspect.getsource(orchestrator)

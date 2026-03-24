@@ -1,7 +1,8 @@
 """Tests for tool_choice parameter support across LLM adapters."""
 
 import pytest
-from app.services.chat.llm_adapter import BaseLLMAdapter, LLMResponse, TokenUsage
+
+from app.services.chat.llm_adapter import BaseLLMAdapter
 
 
 def test_create_message_accepts_tool_choice():

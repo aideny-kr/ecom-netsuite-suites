@@ -5,8 +5,6 @@ Only depends on AgentResult from base_agent.py — no routing, no registry.
 """
 from __future__ import annotations
 
-import textwrap
-from dataclasses import field
 from pathlib import Path
 
 import pytest
@@ -19,7 +17,6 @@ from tests.agent_benchmarks.benchmark_runner import (
     BenchmarkRunner,
     BenchmarkScore,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures

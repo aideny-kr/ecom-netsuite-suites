@@ -1,7 +1,9 @@
 """Tests for tool_choice threading through the agentic loop."""
 
+from unittest.mock import AsyncMock, MagicMock, patch
+
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch, call
+
 from app.services.chat.llm_adapter import LLMResponse, TokenUsage, ToolUseBlock
 
 
@@ -109,6 +111,7 @@ async def test_run_without_tool_choice_passes_none():
 async def test_unified_agent_forwards_tool_choice():
     """UnifiedAgent.run_streaming() must accept and forward tool_choice."""
     import inspect
+
     from app.services.chat.agents.unified_agent import UnifiedAgent
 
     # Verify the signature accepts tool_choice

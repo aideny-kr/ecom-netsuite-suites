@@ -1,7 +1,8 @@
 """Tests for Tier 2 semantic routing via Haiku classification."""
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 from app.services.chat.agents.agent_yaml_config import AgentYAMLConfig
 from app.services.chat.routing.semantic_router import SemanticRouter

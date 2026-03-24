@@ -7,14 +7,13 @@ The orchestrator should check connection health before the agentic loop and:
 """
 
 import uuid
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from app.services.chat.orchestrator import (
     _check_connection_health,
 )
-
 
 TENANT_ID = uuid.uuid4()
 

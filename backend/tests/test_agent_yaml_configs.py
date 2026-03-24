@@ -8,7 +8,6 @@ import re
 from pathlib import Path
 
 import pytest
-import yaml
 
 from app.services.chat.agents.agent_yaml_config import AgentYAMLConfig
 

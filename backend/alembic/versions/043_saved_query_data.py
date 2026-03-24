@@ -1,8 +1,9 @@
 """Add result_data JSONB to saved_suiteql_queries for snapshot storage."""
 
-from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import JSON
+
+from alembic import op
 
 revision = "043_saved_query_data"
 down_revision = "042_structured_output"

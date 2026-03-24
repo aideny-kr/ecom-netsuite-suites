@@ -27,8 +27,9 @@ async def list_jobs(
     page: int = Query(1, ge=1),
     page_size: int = Query(50, ge=1, le=500),
 ):
-    from sqlalchemy import or_
     import uuid as _uuid
+
+    from sqlalchemy import or_
 
     SYSTEM_TENANT = _uuid.UUID("00000000-0000-0000-0000-000000000000")
     tenant_filter = or_(Job.tenant_id == user.tenant_id, Job.tenant_id == SYSTEM_TENANT)

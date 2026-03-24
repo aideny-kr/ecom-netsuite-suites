@@ -1,13 +1,12 @@
 """Tests for BigQuery connector API endpoints — test, create, list, delete."""
 
-import json
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 # These will be imported from the new schemas
-from app.schemas.mcp_connector import BigQueryTestRequest, BigQueryConnectorCreate
+from app.schemas.mcp_connector import BigQueryConnectorCreate, BigQueryTestRequest
 
 
 class TestBigQueryTestConnection:
@@ -105,7 +104,7 @@ class TestBigQueryCreateConnector:
             mock_encrypt.return_value = "encrypted_blob"
             mock_audit.log_event = AsyncMock()
 
-            result = await create_bigquery_connector(request, mock_user, mock_db)
+            await create_bigquery_connector(request, mock_user, mock_db)
 
         # Verify connector was added to DB
         mock_db.add.assert_called_once()

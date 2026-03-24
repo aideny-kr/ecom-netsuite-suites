@@ -1,8 +1,9 @@
 """Add created_by and is_public to saved_suiteql_queries."""
 
-from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import UUID
+
+from alembic import op
 
 revision = "047_private_queries"
 down_revision = "046_user_auth_provider"

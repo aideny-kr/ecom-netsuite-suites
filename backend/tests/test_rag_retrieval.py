@@ -3,7 +3,6 @@
 Tests keyword boosting, H2 title prepending, and merged retrieval.
 """
 
-import re
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 

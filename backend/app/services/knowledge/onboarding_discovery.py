@@ -1,8 +1,8 @@
 """Tenant Onboarding Deep Discovery — eliminates cold start for new tenants."""
 
 import re
-import uuid
 import time
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -95,9 +95,10 @@ async def run_onboarding_discovery(
         "queries_executed": result.queries_executed,
     }
 
-    from app.models.tenant import TenantConfig
     from sqlalchemy import select
     from sqlalchemy.orm.attributes import flag_modified
+
+    from app.models.tenant import TenantConfig
 
     tc_result = await db.execute(
         select(TenantConfig).where(TenantConfig.tenant_id == tenant_id)

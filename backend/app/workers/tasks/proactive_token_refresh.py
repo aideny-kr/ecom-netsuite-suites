@@ -24,8 +24,6 @@ REFRESH_BUFFER_SECONDS = 600  # Refresh if expiring within 10 minutes
 def proactive_token_refresh():
     """Proactively refresh OAuth tokens about to expire."""
     from app.core.config import settings
-    from app.core.encryption import decrypt_credentials, encrypt_credentials
-    from app.core.redis_lock import acquire_lock, release_lock
     from app.models.connection import Connection
     from app.models.mcp_connector import McpConnector
     from app.workers.base_task import sync_engine

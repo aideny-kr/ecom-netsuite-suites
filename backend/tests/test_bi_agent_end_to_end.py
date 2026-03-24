@@ -2,14 +2,13 @@
 
 import uuid
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from app.services.chat.agents.agent_registry import AgentRegistry
-from app.services.chat.agents.specialized_agent import SpecializedAgent
-from app.services.chat.routing.rule_router import RuleRouter
 from app.services.chat.chart_extractor import extract_charts
+from app.services.chat.routing.rule_router import RuleRouter
 
 CONFIGS_DIR = (
     Path(__file__).resolve().parent.parent

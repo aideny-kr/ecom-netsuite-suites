@@ -1,9 +1,6 @@
 """Tests for SpecializedAgent — composition-based agent driven by YAML config."""
 
 import uuid
-from unittest.mock import AsyncMock, MagicMock, patch
-
-import pytest
 
 from app.services.chat.agents.agent_protocol import AgentProtocol
 from app.services.chat.agents.agent_yaml_config import AgentYAMLConfig

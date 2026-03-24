@@ -6,7 +6,8 @@ from typing import Annotated
 
 import anthropic
 import openai
-from fastapi import APIRouter, Depends, Header, HTTPException, Query as FastAPIQuery, status
+from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi import Query as FastAPIQuery
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -280,7 +281,7 @@ async def send_message(
 
         producer_task = asyncio.create_task(_producer())
 
-        from app.api.v1.health import increment_sse, decrement_sse
+        from app.api.v1.health import decrement_sse, increment_sse
         increment_sse()
 
         # Send padding to force Cloudflare Tunnel to start streaming

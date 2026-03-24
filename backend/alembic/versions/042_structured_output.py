@@ -1,9 +1,10 @@
 """Add structured_output JSONB column to chat_messages for persisting
 financial report and data table payloads across page refreshes."""
 
-from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import JSON
+
+from alembic import op
 
 revision = "042_structured_output"
 down_revision = "041_user_feedback"

@@ -1,11 +1,10 @@
 """Tests for agent configuration YAML loading and merge."""
 
-import tempfile
 from pathlib import Path
 
 import yaml
 
-from app.services.chat.agents.agent_yaml_config import AgentYAMLConfig, RoutingRule
+from app.services.chat.agents.agent_yaml_config import AgentYAMLConfig
 
 
 class TestAgentYAMLConfig:

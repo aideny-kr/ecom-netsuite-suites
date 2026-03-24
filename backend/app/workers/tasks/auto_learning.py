@@ -134,6 +134,7 @@ async def _refresh_stale_profiles(db):
     """Check all tenants for stale onboarding profiles (>30 days) and refresh Phases 1+4."""
     from datetime import datetime, timedelta, timezone
 
+    import structlog
     from sqlalchemy import select
 
     from app.core.encryption import decrypt_credentials
@@ -144,8 +145,6 @@ async def _refresh_stale_profiles(db):
         _discover_transaction_types,
     )
     from app.services.netsuite_oauth_service import get_valid_token
-
-    import structlog
     logger = structlog.get_logger()
 
     cutoff = datetime.now(timezone.utc) - timedelta(days=30)

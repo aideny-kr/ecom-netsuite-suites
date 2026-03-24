@@ -1,7 +1,8 @@
 """Add partition_id to domain_knowledge_chunks for per-agent RAG isolation."""
 
-from alembic import op
 import sqlalchemy as sa
+
+from alembic import op
 
 revision = "052_rag_partition_id"
 down_revision = "051_agent_configs"

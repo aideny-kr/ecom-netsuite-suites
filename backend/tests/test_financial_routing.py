@@ -7,7 +7,7 @@ The BI agent handles BigQuery analytics only.
 
 import uuid
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -54,7 +54,7 @@ class TestFinancialReportsRouteToUnified:
     async def test_mixed_financial_bi_keywords_still_use_unified(self, query):
         """Queries with both financial AND BI keywords are financial-first.
         RuleRouter might match BI, but _select_agent pre-filter forces unified."""
-        from app.services.chat.orchestrator import _select_agent, _agent_registry
+        from app.services.chat.orchestrator import _agent_registry, _select_agent
 
         _agent_registry.load_configs(CONFIGS_DIR)
         try:
@@ -94,7 +94,7 @@ class TestSelectAgentFinancialPreFilter:
 
     @pytest.mark.asyncio
     async def test_financial_query_bypasses_routing(self):
-        from app.services.chat.orchestrator import _select_agent, _agent_registry
+        from app.services.chat.orchestrator import _agent_registry, _select_agent
 
         _agent_registry.load_configs(CONFIGS_DIR)
         try:
@@ -117,7 +117,7 @@ class TestSelectAgentFinancialPreFilter:
 
     @pytest.mark.asyncio
     async def test_non_financial_query_routes_normally(self):
-        from app.services.chat.orchestrator import _select_agent, _agent_registry
+        from app.services.chat.orchestrator import _agent_registry, _select_agent
 
         _agent_registry.load_configs(CONFIGS_DIR)
         try:

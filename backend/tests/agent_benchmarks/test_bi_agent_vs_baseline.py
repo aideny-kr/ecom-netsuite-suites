@@ -6,10 +6,8 @@ All LLM and BigQuery calls are mocked — no real API calls.
 
 from pathlib import Path
 
-import pytest
-
 from app.services.chat.chart_extractor import extract_charts
-from tests.agent_benchmarks.benchmark_runner import BenchmarkRunner, BenchmarkCase, BenchmarkScore
+from tests.agent_benchmarks.benchmark_runner import BenchmarkCase, BenchmarkRunner
 
 CASES_DIR = Path(__file__).resolve().parent / "benchmark_cases"
 

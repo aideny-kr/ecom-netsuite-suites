@@ -6,7 +6,6 @@ The only variable is the period filter, which is substituted safely.
 
 from __future__ import annotations
 
-import calendar
 import re
 from datetime import datetime, timedelta
 

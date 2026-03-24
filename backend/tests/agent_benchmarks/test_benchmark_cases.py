@@ -7,7 +7,6 @@ from __future__ import annotations
 from collections import defaultdict
 from pathlib import Path
 
-import pytest
 import yaml
 
 from tests.agent_benchmarks.benchmark_runner import BenchmarkCase

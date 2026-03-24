@@ -146,10 +146,11 @@ async def google_login(
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     """Login or link account with Google. Works for existing users (any auth_provider)."""
-    from app.services.google_auth_service import verify_google_token
-    from app.core.security import create_access_token, create_refresh_token
     from sqlalchemy.orm import selectinload
+
+    from app.core.security import create_access_token, create_refresh_token
     from app.models.user import UserRole
+    from app.services.google_auth_service import verify_google_token
 
     id_token = request.google_id_token
 

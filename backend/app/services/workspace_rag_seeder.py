@@ -97,9 +97,13 @@ _ENTRY_POINT_RE = re.compile(
 
 
 def _detect_script_type(content: str) -> str | None:
-    """Extract @NScriptType from JSDoc annotation."""
-    m = re.search(r"@NScriptType\s+(\w+)", content)
-    return m.group(1) if m else None
+    """Extract @NScriptType from JSDoc annotation.
+
+    Delegates to shared detector; kept as thin wrapper for backward compat.
+    """
+    from app.services.script_type_detector import detect_from_content
+
+    return detect_from_content(content)
 
 
 def _find_entry_points(content: str) -> list[tuple[str, int]]:

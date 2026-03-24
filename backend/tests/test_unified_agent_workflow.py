@@ -231,6 +231,7 @@ class TestInvestigationMode:
     def test_early_exit_guard_exists_in_base_agent(self):
         """base_agent.py must check _context_need before early exit."""
         import inspect
+
         from app.services.chat.agents.base_agent import BaseSpecialistAgent
 
         source = inspect.getsource(BaseSpecialistAgent.run_streaming)
@@ -240,6 +241,7 @@ class TestInvestigationMode:
     def test_nudge_guard_exists_in_base_agent(self):
         """base_agent.py must check _context_need before nudging to stop."""
         import inspect
+
         from app.services.chat.agents.base_agent import BaseSpecialistAgent
 
         source = inspect.getsource(BaseSpecialistAgent.run_streaming)

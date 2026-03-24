@@ -296,7 +296,6 @@ async def trigger_export(
     is_snapshot = saved_query.query_text.lstrip().startswith("--") or saved_query.result_data is not None
     if is_snapshot and saved_query.result_data:
         import csv
-        import io
         import os
         from datetime import datetime, timezone
         from pathlib import Path

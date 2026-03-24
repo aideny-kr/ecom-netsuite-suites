@@ -1,7 +1,8 @@
 """Add unified_agent_enabled to tenant_configs."""
 
-from alembic import op
 import sqlalchemy as sa
+
+from alembic import op
 
 revision = "035_tenant_unified_agent_flag"
 down_revision = "034_tenant_query_patterns"

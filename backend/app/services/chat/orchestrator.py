@@ -569,7 +569,6 @@ from app.services.audit_service import log_event
 from app.services.chat.billing import deduct_chat_credits
 from app.services.chat.llm_adapter import get_adapter
 from app.services.chat.nodes import (
-    ALLOWED_CHAT_TOOLS,
     OrchestratorState,
     get_tenant_ai_config,
     retriever_node,
@@ -1258,8 +1257,8 @@ async def run_chat_turn(
                         print(f"[ORCHESTRATOR] Skipping schema injection for {context_need} query", flush=True)
                     else:
                         try:
-                            from app.services.schema_context_selector import select_relevant_schemas
                             from app.services.prompt_template_service import _build_table_schema_section
+                            from app.services.schema_context_selector import select_relevant_schemas
 
                             entity_types: list[str] = []
                             if isinstance(vernacular_result, str):
@@ -1398,7 +1397,7 @@ async def run_chat_turn(
                     and _is_simple_lookup(sanitized_input)
                 ):
                     unified_model = HAIKU_MODEL
-                    print(f"[ORCHESTRATOR] Simple lookup detected — routing to Haiku", flush=True)
+                    print("[ORCHESTRATOR] Simple lookup detected — routing to Haiku", flush=True)
 
                 # Track whether we're inside a <chart> block during streaming
                 _in_chart_block = False
@@ -1615,8 +1614,8 @@ async def run_chat_turn(
                 return
 
             # ── Legacy multi-agent path ──
-            from app.services.importance_classifier import ImportanceTier, classify_importance
             from app.services.chat.coordinator import MultiAgentCoordinator
+            from app.services.importance_classifier import ImportanceTier, classify_importance
 
             importance_tier = classify_importance(sanitized_input)
 

@@ -394,7 +394,7 @@ class TestT09SchemaLookup:
                   "custbody_platform, custbody_shopify_order, custbody_channel..."),
         ]
 
-        with _run_patches() as mocks:
+        with _run_patches():
             result = await agent.run(
                 "What custom fields are on transactions?",
                 {"tenant_vernacular": "<tenant_vernacular></tenant_vernacular>"},

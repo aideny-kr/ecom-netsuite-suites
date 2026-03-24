@@ -1,6 +1,5 @@
 """Tests for Tier 1 rule-based routing."""
 
-import pytest
 
 from app.services.chat.agents.agent_yaml_config import AgentYAMLConfig, RoutingRule
 from app.services.chat.routing.rule_router import RuleRouter

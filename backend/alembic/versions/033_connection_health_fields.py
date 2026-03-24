@@ -4,8 +4,9 @@ Revision ID: 033_connection_health_fields
 Revises: 032_saved_suiteql_queries
 """
 
-from alembic import op
 import sqlalchemy as sa
+
+from alembic import op
 
 revision = "033_connection_health_fields"
 down_revision = "032_saved_suiteql_queries"

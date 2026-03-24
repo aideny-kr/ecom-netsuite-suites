@@ -6,12 +6,8 @@ a fallback for backwards compatibility.
 """
 
 import uuid
-from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from httpx import ASGITransport, AsyncClient
-
-from app.main import app
 
 
 @pytest.fixture
@@ -50,6 +46,7 @@ class TestAuthorizeEndpointClientId:
     async def test_authorize_url_builder_accepts_client_id_param(self):
         """build_authorize_url must accept an optional client_id parameter."""
         import inspect
+
         from app.services.netsuite_oauth_service import build_authorize_url
 
         sig = inspect.signature(build_authorize_url)

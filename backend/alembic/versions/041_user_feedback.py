@@ -1,7 +1,8 @@
 """041_user_feedback"""
 
-from alembic import op
 import sqlalchemy as sa
+
+from alembic import op
 
 revision = "041_user_feedback"
 down_revision = "040_query_importance"

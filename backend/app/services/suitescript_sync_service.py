@@ -321,22 +321,45 @@ def _sha256(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
 
 
-def _build_file_path(file_meta: dict[str, Any]) -> str:
-    """Build a workspace path from file metadata."""
+def _sanitize_filename(name: str) -> str:
+    """Sanitize a filename: only alphanumeric, dots, underscores, hyphens."""
+    safe = "".join(c if c.isalnum() or c in "._- " else "_" for c in name)
+    if not safe.endswith(".js"):
+        safe = f"{safe}.js"
+    return safe
+
+
+def _build_file_path(
+    file_meta: dict[str, Any],
+    script_type: str | None = None,
+) -> str:
+    """Build a workspace path from file metadata, organized by script type.
+
+    When script_type is provided, files go into type-based folders:
+        SuiteScripts/{TypeFolder}/{safe_name}.js
+
+    Falls back to original folder structure when script_type is None.
+    """
+    from app.services.script_type_detector import get_folder_for_type
+
     name = file_meta.get("name", "unknown.js")
-    # Sanitize name: only alphanumeric, dots, underscores, hyphens
-    safe_name = "".join(c if c.isalnum() or c in "._- " else "_" for c in name)
-    if not safe_name.endswith(".js"):
-        safe_name = f"{safe_name}.js"
+    safe_name = _sanitize_filename(name)
 
     source = file_meta.get("source", "file_cabinet")
     if source == "custom_script":
         script_id = file_meta.get("script_id", "")
         prefix = f"{script_id}_" if script_id else ""
-        return f"CustomScripts/{prefix}{safe_name}"
-    else:
-        folder_path = file_meta.get("folder_path", "Uncategorized")
-        return f"SuiteScripts/{folder_path}/{safe_name}"
+        safe_name = f"{prefix}{safe_name}"
+
+    if script_type:
+        folder = get_folder_for_type(script_type)
+        return f"SuiteScripts/{folder}/{safe_name}"
+
+    # Legacy fallback: original folder structure
+    if source == "custom_script":
+        return f"CustomScripts/{safe_name}"
+    folder_path = file_meta.get("folder_path", "Uncategorized")
+    return f"SuiteScripts/{folder_path}/{safe_name}"
 
 
 async def _get_or_create_workspace(
@@ -375,15 +398,29 @@ async def _upsert_workspace_file(
     path: str,
     content: str,
     netsuite_file_id: str | None = None,
+    script_type: str | None = None,
 ) -> WorkspaceFile:
     """Create or update a workspace file by path."""
-    result = await db.execute(
-        select(WorkspaceFile).where(
-            WorkspaceFile.workspace_id == workspace_id,
-            WorkspaceFile.path == path,
+    # Check for existing file — match by netsuite_file_id first (handles renames/moves),
+    # then fall back to path match
+    existing = None
+    if netsuite_file_id:
+        result = await db.execute(
+            select(WorkspaceFile).where(
+                WorkspaceFile.workspace_id == workspace_id,
+                WorkspaceFile.netsuite_file_id == netsuite_file_id,
+            )
         )
-    )
-    existing = result.scalar_one_or_none()
+        existing = result.scalar_one_or_none()
+
+    if not existing:
+        result = await db.execute(
+            select(WorkspaceFile).where(
+                WorkspaceFile.workspace_id == workspace_id,
+                WorkspaceFile.path == path,
+            )
+        )
+        existing = result.scalar_one_or_none()
 
     sha = _sha256(content)
     file_name = PurePosixPath(path).name
@@ -394,8 +431,15 @@ async def _upsert_workspace_file(
             existing.sha256_hash = sha
             existing.size_bytes = len(content.encode("utf-8"))
             existing.updated_at = datetime.now(timezone.utc)
+        # Update path if file was reorganized (type-based folders)
+        if existing.path != path:
+            existing.path = path
+            existing.file_name = file_name
+            existing.updated_at = datetime.now(timezone.utc)
         if netsuite_file_id:
             existing.netsuite_file_id = netsuite_file_id
+        if script_type:
+            existing.script_type = script_type
         return existing
 
     wf = WorkspaceFile(
@@ -409,6 +453,7 @@ async def _upsert_workspace_file(
         mime_type="application/javascript",
         is_directory=False,
         netsuite_file_id=netsuite_file_id,
+        script_type=script_type,
     )
     db.add(wf)
     return wf
@@ -526,7 +571,9 @@ async def sync_scripts_to_workspace(
             restlet_url=restlet_url,
         )
 
-        # 5. Build file paths and upsert
+        # 5. Build file paths and upsert (with script type detection)
+        from app.services.script_type_detector import resolve_script_type
+
         file_paths: set[str] = set()
         loaded = 0
 
@@ -536,7 +583,16 @@ async def sync_scripts_to_workspace(
             if content is None:
                 continue
 
-            path = _build_file_path(file_meta)
+            # Detect script type: content > metadata > filename
+            metadata_type = file_meta.get("script_type")
+            filename = file_meta.get("name", "unknown.js")
+            stype = resolve_script_type(
+                content=content,
+                filename=filename,
+                metadata_type=metadata_type,
+            )
+
+            path = _build_file_path(file_meta, script_type=stype)
             file_paths.add(path)
             await _upsert_workspace_file(
                 db,
@@ -545,6 +601,7 @@ async def sync_scripts_to_workspace(
                 path,
                 content,
                 netsuite_file_id=fid,
+                script_type=stype,
             )
             loaded += 1
 

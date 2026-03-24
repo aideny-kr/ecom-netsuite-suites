@@ -1,8 +1,9 @@
 """Add onboarding_profile JSON column to tenant_configs."""
 
-from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import JSON
+
+from alembic import op
 
 revision = "048_onboarding_profile"
 down_revision = "047_private_queries"

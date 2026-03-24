@@ -2,7 +2,7 @@
 
 import uuid
 from datetime import datetime, timedelta, timezone
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -46,8 +46,8 @@ class TestCreateInvite:
 class TestAcceptInvite:
     @pytest.mark.asyncio
     async def test_expired_invite_raises(self):
-        from app.services.invite_service import accept_invite
         from app.models.invite import Invite
+        from app.services.invite_service import accept_invite
 
         mock_db = AsyncMock()
         expired_invite = MagicMock(spec=Invite)
@@ -68,8 +68,8 @@ class TestAcceptInvite:
 
     @pytest.mark.asyncio
     async def test_already_accepted_raises(self):
-        from app.services.invite_service import accept_invite
         from app.models.invite import Invite
+        from app.services.invite_service import accept_invite
 
         mock_db = AsyncMock()
         accepted_invite = MagicMock(spec=Invite)
@@ -89,8 +89,8 @@ class TestAcceptInvite:
 
     @pytest.mark.asyncio
     async def test_no_auth_method_raises(self):
-        from app.services.invite_service import accept_invite
         from app.models.invite import Invite
+        from app.services.invite_service import accept_invite
 
         mock_db = AsyncMock()
         invite = MagicMock(spec=Invite)
@@ -112,8 +112,8 @@ class TestAcceptInvite:
 class TestRevokeInvite:
     @pytest.mark.asyncio
     async def test_revoke_sets_status(self):
-        from app.services.invite_service import revoke_invite
         from app.models.invite import Invite
+        from app.services.invite_service import revoke_invite
 
         mock_db = AsyncMock()
         invite = MagicMock(spec=Invite)
@@ -128,8 +128,8 @@ class TestRevokeInvite:
 
     @pytest.mark.asyncio
     async def test_revoke_non_pending_raises(self):
-        from app.services.invite_service import revoke_invite
         from app.models.invite import Invite
+        from app.services.invite_service import revoke_invite
 
         mock_db = AsyncMock()
         invite = MagicMock(spec=Invite)

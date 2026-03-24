@@ -7,7 +7,6 @@ import pytest
 
 from app.schemas.mcp_connector import BigQueryTableSelection
 
-
 SAMPLE_SCHEMA = {
     "datasets": [
         {
@@ -106,7 +105,7 @@ class TestUpdateTablesEndpoint:
             mock_audit.log_event = AsyncMock()
             mock_seed.return_value = 1
 
-            result = await update_bigquery_table_selection(
+            await update_bigquery_table_selection(
                 str(uuid.uuid4()), request, mock_user, mock_db
             )
 

@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.database import get_db
 from app.core.dependencies import require_permission
+from app.core.encryption import decrypt_credentials, encrypt_credentials
 from app.models.user import User
 from app.schemas.mcp_connector import (
     BigQueryConnectorCreate,
@@ -22,9 +23,8 @@ from app.schemas.mcp_connector import (
     McpConnectorTestResponse,
 )
 from app.services import audit_service, mcp_connector_service
-from app.services.bigquery_service import discover_schema, validate_connection
-from app.core.encryption import decrypt_credentials, encrypt_credentials
 from app.services.bigquery_schema_seeder import seed_bigquery_schema
+from app.services.bigquery_service import discover_schema, validate_connection
 from app.services.netsuite_oauth_service import (
     build_mcp_authorize_url,
     exchange_code_with_client,
@@ -352,8 +352,9 @@ async def update_mcp_client_id(
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     """Update the OAuth Client ID for an MCP connector."""
-    from app.core.encryption import decrypt_credentials, encrypt_credentials
     from sqlalchemy.orm.attributes import flag_modified
+
+    from app.core.encryption import decrypt_credentials, encrypt_credentials
 
     mcp = await mcp_connector_service.get_mcp_connector(db, connector_id, user.tenant_id)
     if not mcp:
@@ -515,6 +516,7 @@ async def get_bigquery_schema(
 ):
     """Return full BigQuery schema with selected flags per table."""
     from sqlalchemy import select
+
     from app.models.mcp_connector import McpConnector
 
     result = await db.execute(
@@ -572,6 +574,7 @@ async def update_bigquery_table_selection(
     """Update which BigQuery tables are visible to the BI agent and re-seed RAG."""
     from sqlalchemy import select
     from sqlalchemy.orm.attributes import flag_modified
+
     from app.models.mcp_connector import McpConnector
 
     result = await db.execute(

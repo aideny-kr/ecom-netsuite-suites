@@ -2,8 +2,6 @@
 
 from pathlib import Path
 
-import pytest
-
 from tests.agent_benchmarks.benchmark_runner import BenchmarkRunner
 
 CASES_DIR = Path(__file__).resolve().parent / "benchmark_cases"

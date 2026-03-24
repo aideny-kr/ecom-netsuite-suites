@@ -5,13 +5,12 @@ Does NOT implement run_benchmark() — that needs the agent registry (Prompt 3).
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from statistics import mean
 
 import yaml
 from pydantic import BaseModel, Field
-
 
 # ---------------------------------------------------------------------------
 # Data models

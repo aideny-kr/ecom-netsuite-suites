@@ -6,8 +6,6 @@ to present results instead of running more queries.
 
 import json
 
-import pytest
-
 from app.services.chat.agents.base_agent import _has_successful_data_result
 
 

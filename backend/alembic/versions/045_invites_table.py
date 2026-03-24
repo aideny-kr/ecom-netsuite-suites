@@ -1,8 +1,9 @@
 """Create invites table for team member invitations."""
 
-from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects.postgresql import UUID
+
+from alembic import op
 
 revision = "045_invites_table"
 down_revision = "044_financial_perm"

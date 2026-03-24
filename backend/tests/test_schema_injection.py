@@ -1,7 +1,6 @@
 """Tests for schema section builder in prompt_template_service (TDD Cycle 4)."""
 
-import pytest
-from app.services.table_schema_loader import load_standard_schemas, merge_custom_fields, format_schemas_as_xml
+from app.services.table_schema_loader import format_schemas_as_xml, load_standard_schemas, merge_custom_fields
 
 
 def test_build_schema_section_with_custom_fields():

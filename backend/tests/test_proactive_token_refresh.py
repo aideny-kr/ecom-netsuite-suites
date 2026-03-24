@@ -5,9 +5,7 @@ import uuid
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
-import pytest
-
-from app.workers.tasks.proactive_token_refresh import REFRESH_BUFFER_SECONDS, _refresh_single
+from app.workers.tasks.proactive_token_refresh import _refresh_single
 
 
 def _make_record(expires_in_seconds: int, auth_type: str = "oauth2"):

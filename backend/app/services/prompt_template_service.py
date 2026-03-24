@@ -186,9 +186,9 @@ def _build_table_schema_section(
                         If None, includes all schemas.
     """
     from app.services.table_schema_loader import (
+        format_schemas_as_xml,
         load_standard_schemas,
         merge_custom_fields,
-        format_schemas_as_xml,
     )
 
     all_schemas = load_standard_schemas()

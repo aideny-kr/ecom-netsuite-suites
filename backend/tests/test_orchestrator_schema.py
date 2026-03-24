@@ -1,6 +1,5 @@
 """Tests for schema injection in the orchestrator (TDD Cycle 5)."""
 
-import pytest
 from app.services.schema_context_selector import select_relevant_schemas
 
 

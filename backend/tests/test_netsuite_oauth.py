@@ -7,7 +7,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.core.config import settings
 from app.services.netsuite_oauth_service import (
     build_authorize_url,
     exchange_code,

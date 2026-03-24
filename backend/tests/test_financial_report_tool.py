@@ -486,8 +486,9 @@ def test_parse_balance_sheet():
 
 
 def test_parse_last_month():
-    from app.mcp.tools.netsuite_financial_report import parse_report_intent
     from datetime import datetime, timedelta
+
+    from app.mcp.tools.netsuite_financial_report import parse_report_intent
 
     result = parse_report_intent("Show me the income statement for last month")
     assert result is not None

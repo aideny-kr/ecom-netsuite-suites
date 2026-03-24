@@ -1,6 +1,5 @@
 """Tests that BigQuery tools are properly registered and discoverable."""
 
-import pytest
 
 
 class TestBigqueryToolRegistration:

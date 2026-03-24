@@ -1,7 +1,6 @@
 """Tests for the importance tier override endpoint (PATCH /messages/{id}/importance)."""
 
 import uuid
-from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest

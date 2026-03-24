@@ -7,8 +7,6 @@ IN(...) lists from memory (which drops variants like "Lotus - Refurbished").
 
 import json
 
-import pytest
-
 from app.services.chat.tool_call_results import extract_distinct_values
 
 

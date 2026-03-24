@@ -829,6 +829,7 @@ class MultiAgentCoordinator:
         # Inject onboarding profile if available
         try:
             from sqlalchemy import select as _sa_select
+
             from app.models.tenant import TenantConfig as _TC
 
             _op_result = await self.db.execute(

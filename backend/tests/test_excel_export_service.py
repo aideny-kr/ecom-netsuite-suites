@@ -3,14 +3,12 @@
 import io
 
 import openpyxl
-import pytest
 
 from app.services.excel_export_service import (
-    ExcelExportConfig,
-    generate_excel,
-    _humanize_header,
     _detect_column_types,
+    _humanize_header,
     _to_number,
+    generate_excel,
 )
 
 

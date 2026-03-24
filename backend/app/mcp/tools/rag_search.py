@@ -15,8 +15,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.chat import DocChunk
 from app.models.domain_knowledge import DomainKnowledgeChunk
-from app.services.chat.embeddings import embed_query
 from app.services.chat.domain_knowledge import embed_domain_query
+from app.services.chat.embeddings import embed_query
 
 logger = logging.getLogger(__name__)
 

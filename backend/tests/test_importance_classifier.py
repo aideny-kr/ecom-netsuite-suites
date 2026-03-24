@@ -1,5 +1,4 @@
-import pytest
-from app.services.importance_classifier import classify_importance, ImportanceTier
+from app.services.importance_classifier import ImportanceTier, classify_importance
 
 
 def test_casual_lookup():

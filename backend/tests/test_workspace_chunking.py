@@ -10,7 +10,6 @@ from app.services.workspace_rag_seeder import (
     _find_entry_points,
 )
 
-
 # ── Sample SuiteScript with constants before entry points ──
 
 SCRIPT_WITH_PREAMBLE = """\

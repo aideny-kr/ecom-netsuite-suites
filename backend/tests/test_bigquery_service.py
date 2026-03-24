@@ -1,7 +1,6 @@
 """Tests for BigQuery service — query execution, schema discovery, cost estimation."""
 
-import asyncio
-from unittest.mock import MagicMock, patch, AsyncMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -323,6 +322,6 @@ class TestServiceAccountCredentials:
         sa_json = {"type": "service_account", "project_id": "test"}
         with patch("app.services.bigquery_service.service_account.Credentials.from_service_account_info") as mock_creds:
             mock_creds.return_value = MagicMock()
-            with patch("app.services.bigquery_service.bigquery.Client") as mock_bq:
+            with patch("app.services.bigquery_service.bigquery.Client"):
                 _get_client(sa_json, "test")
                 mock_creds.assert_called_once()

@@ -7,8 +7,9 @@ Revision ID: 050_ws_script_type
 Revises: 049_connection_alerts
 """
 
-from alembic import op
 import sqlalchemy as sa
+
+from alembic import op
 
 revision = "050_ws_script_type"
 down_revision = "049_connection_alerts"

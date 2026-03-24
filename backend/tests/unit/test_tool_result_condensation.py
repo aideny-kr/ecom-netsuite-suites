@@ -8,8 +8,6 @@ for older messages while keeping recent results intact.
 
 import json
 
-import pytest
-
 from app.services.chat.history_compactor import condense_tool_results
 
 

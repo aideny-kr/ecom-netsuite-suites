@@ -1,7 +1,8 @@
 """Add confidence_score to chat_messages."""
 
-from alembic import op
 import sqlalchemy as sa
+
+from alembic import op
 
 revision = "039_confidence_score"
 down_revision = "038_chat_message_content_summary"

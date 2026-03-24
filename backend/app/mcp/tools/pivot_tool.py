@@ -6,13 +6,10 @@ in Python. Only values that exist in the data become columns.
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 from typing import Any
 from uuid import UUID
-
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.services.pivot_service import pivot_rows
 
@@ -37,10 +34,11 @@ async def execute(params: dict, context: dict | None = None, **kwargs: Any) -> d
     3. Pivot using pivot_rows()
     4. Return pivoted table
     """
+    from sqlalchemy import select
+
     from app.models.connection import Connection
     from app.services.netsuite_client import execute_suiteql_via_rest
     from app.services.netsuite_oauth_service import get_valid_token
-    from sqlalchemy import select
 
     ctx = context or {}
     query = params.get("query", "")
@@ -58,7 +56,6 @@ async def execute(params: dict, context: dict | None = None, **kwargs: Any) -> d
     if not db or not tenant_id_str:
         return {"error": "Database session and tenant_id required"}
 
-    from uuid import UUID
     tenant_id = UUID(tenant_id_str) if isinstance(tenant_id_str, str) else tenant_id_str
 
     # Get active connection

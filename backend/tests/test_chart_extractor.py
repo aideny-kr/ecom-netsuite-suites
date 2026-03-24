@@ -1,10 +1,8 @@
 """Tests for chart extraction from agent response text."""
 
-import pytest
 
-from app.services.chat.chart_extractor import extract_charts
 from app.schemas.chart import ChartData
-
+from app.services.chat.chart_extractor import extract_charts
 
 VALID_CHART_JSON = '{"chart_type": "bar", "title": "Revenue by Region", "x_axis": {"label": "Region", "key": "region"}, "y_axes": [{"label": "Revenue", "key": "revenue"}], "data": [{"region": "US", "revenue": 1000}, {"region": "EU", "revenue": 800}]}'
 

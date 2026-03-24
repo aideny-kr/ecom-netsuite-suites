@@ -12,7 +12,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-
 # ---------------------------------------------------------------------------
 # Test 1: get_valid_token() uses STORED client_id, not global
 # ---------------------------------------------------------------------------
@@ -114,7 +113,7 @@ class TestGetValidTokenClientId:
         ):
             mock_settings.NETSUITE_OAUTH_CLIENT_ID = ""  # Empty global
 
-            result = await get_valid_token(db, connection)
+            await get_valid_token(db, connection)
 
         mock_refresh.assert_awaited_once()
         actual_client_id = mock_refresh.call_args[0][2]
@@ -163,8 +162,9 @@ class TestProactiveRefreshClientId:
     def test_rest_connection_uses_stored_client_id(self):
         """Proactive refresh for REST connections must use the stored
         per-connection client_id, not settings.NETSUITE_OAUTH_CLIENT_ID."""
-        from app.workers.tasks.proactive_token_refresh import _refresh_single
         from datetime import datetime, timezone
+
+        from app.workers.tasks.proactive_token_refresh import _refresh_single
 
         stored_client_id = "stored_rest_client_id_abc"
 
@@ -210,8 +210,9 @@ class TestProactiveRefreshClientId:
     def test_mcp_connection_uses_stored_client_id(self):
         """MCP connectors must also use stored client_id (already correct,
         but verify it stays correct)."""
-        from app.workers.tasks.proactive_token_refresh import _refresh_single
         from datetime import datetime, timezone
+
+        from app.workers.tasks.proactive_token_refresh import _refresh_single
 
         stored_client_id = "stored_mcp_client_id_xyz"
 
@@ -258,8 +259,9 @@ class TestProactiveRefreshErrorLogging:
     def test_logs_error_details_on_refresh_failure(self):
         """When refresh fails, the task must log the actual error message
         (e.g., 'invalid_grant'), not just 'refresh_failed'."""
-        from app.workers.tasks.proactive_token_refresh import _refresh_single
         from datetime import datetime, timezone
+
+        from app.workers.tasks.proactive_token_refresh import _refresh_single
 
         record = MagicMock()
         record.id = uuid.uuid4()

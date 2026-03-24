@@ -11,10 +11,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from app.services.chat.agents.agent_registry import AgentRegistry
-from app.services.chat.agents.agent_yaml_config import AgentYAMLConfig
 from app.services.chat.agents.specialized_agent import SpecializedAgent
 from app.services.chat.routing.rule_router import RuleRouter
-
 
 CONFIGS_DIR = (
     Path(__file__).resolve().parent.parent

@@ -1,6 +1,7 @@
 """Tests for financial report permission gating."""
 
 from unittest.mock import AsyncMock, patch
+
 import pytest
 
 

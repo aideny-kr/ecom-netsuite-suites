@@ -1,8 +1,9 @@
 """Agent configuration table for per-tenant agent overrides and metrics."""
 
-from alembic import op
 import sqlalchemy as sa
-from sqlalchemy.dialects.postgresql import UUID, JSONB
+from sqlalchemy.dialects.postgresql import JSONB, UUID
+
+from alembic import op
 
 revision = "051_agent_configs"
 down_revision = "050_ws_script_type"

@@ -10,7 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.dependencies import get_current_user, require_permission
+from app.core.dependencies import require_permission
 from app.models.tenant import Tenant, TenantConfig
 from app.models.user import User
 from app.schemas.auth import AuthResponse

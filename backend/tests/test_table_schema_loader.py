@@ -1,12 +1,11 @@
 """Tests for the table schema loader service (TDD Cycle 2)."""
 
-import pytest
 from app.services.table_schema_loader import (
-    load_standard_schemas,
-    TableSchema,
     ColumnDef,
-    merge_custom_fields,
+    TableSchema,
     format_schemas_as_xml,
+    load_standard_schemas,
+    merge_custom_fields,
 )
 
 

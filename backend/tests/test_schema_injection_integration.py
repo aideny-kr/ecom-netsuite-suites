@@ -1,8 +1,7 @@
 """Integration tests for the full schema injection pipeline (TDD Cycle 7)."""
 
-import pytest
-from app.services.table_schema_loader import load_standard_schemas, format_schemas_as_xml
 from app.services.schema_context_selector import select_relevant_schemas
+from app.services.table_schema_loader import format_schemas_as_xml, load_standard_schemas
 
 
 def test_full_schema_pipeline():

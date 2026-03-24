@@ -3,8 +3,6 @@
 import re
 from pathlib import Path
 
-import pytest
-
 from app.services.chat.agents.agent_yaml_config import AgentYAMLConfig
 
 CONFIGS_DIR = Path(__file__).resolve().parent.parent / "app" / "services" / "chat" / "agents" / "configs"

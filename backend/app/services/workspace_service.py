@@ -264,6 +264,7 @@ def _build_tree(files: list[WorkspaceFile]) -> list[dict]:
             "path": f.path,
             "is_directory": f.is_directory,
             "size_bytes": f.size_bytes if not f.is_directory else None,
+            "script_type": getattr(f, "script_type", None) if not f.is_directory else None,
             "children": [] if f.is_directory else None,
         }
         nodes[f.path] = node

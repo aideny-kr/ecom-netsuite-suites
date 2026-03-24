@@ -1,7 +1,8 @@
 """Add auth_provider and google_sub columns to users."""
 
-from alembic import op
 import sqlalchemy as sa
+
+from alembic import op
 
 revision = "046_user_auth_provider"
 down_revision = "045_invites_table"

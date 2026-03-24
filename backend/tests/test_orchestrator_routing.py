@@ -5,9 +5,6 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from app.services.chat.agents.specialized_agent import SpecializedAgent
-from app.services.chat.agents.unified_agent import UnifiedAgent
-
 
 class TestSelectAgent:
 

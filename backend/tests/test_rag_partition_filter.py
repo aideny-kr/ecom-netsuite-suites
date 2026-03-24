@@ -1,6 +1,5 @@
 """Tests for RAG partition filtering on domain_knowledge_chunks."""
 
-import pytest
 
 from app.services.chat.agents.tool_filter import filter_knowledge_by_partition
 

@@ -2,13 +2,12 @@
 
 import uuid
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import yaml
 
 from app.services.chat.agents.agent_registry import AgentRegistry
-from app.services.chat.agents.agent_yaml_config import AgentYAMLConfig
 from app.services.chat.agents.specialized_agent import SpecializedAgent
 
 

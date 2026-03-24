@@ -4,7 +4,6 @@ Catches known syntax errors before they hit NetSuite — saves 1-3 wasted
 tool calls per bad query. Fail-open: uncertain queries pass through.
 """
 
-import pytest
 
 from app.services.suiteql_validator import validate_suiteql_query
 

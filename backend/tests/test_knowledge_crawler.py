@@ -1,12 +1,13 @@
 """Tests for knowledge crawler parsing and chunking."""
 
 import pytest
+
 from app.services.knowledge.crawler_service import (
-    parse_oracle_help,
-    parse_blog,
-    chunk_parsed_content,
     ParsedContent,
     _estimate_tokens,
+    chunk_parsed_content,
+    parse_blog,
+    parse_oracle_help,
 )
 
 
@@ -86,6 +87,7 @@ class TestGapDetector:
     @pytest.mark.asyncio
     async def test_returns_list(self):
         from unittest.mock import AsyncMock, MagicMock
+
         from app.services.knowledge.gap_detector import detect_knowledge_gaps
 
         mock_db = AsyncMock()
@@ -101,6 +103,7 @@ class TestRelationshipDiscovery:
     @pytest.mark.asyncio
     async def test_returns_list(self):
         from unittest.mock import AsyncMock, patch
+
         from app.services.knowledge.relationship_discovery import discover_transaction_relationships
 
         with patch("app.services.netsuite_client.execute_suiteql_via_rest", new_callable=AsyncMock) as mock:
