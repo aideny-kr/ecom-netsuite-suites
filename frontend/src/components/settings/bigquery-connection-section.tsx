@@ -68,24 +68,22 @@ function BigQueryTableSelector({
   // Local selection state: dataset_id -> Set<table_id>
   const [selection, setSelection] = useState<Record<string, Set<string>>>({});
   const [expandedDatasets, setExpandedDatasets] = useState<Set<string>>(new Set());
+  const [search, setSearch] = useState("");
 
-  // Initialize selection from server data
+  // Initialize selection from server data — collapsed by default, expand only datasets with selections
   useEffect(() => {
     if (!schemaData) return;
     const initial: Record<string, Set<string>> = {};
+    const expanded = new Set<string>();
     for (const ds of schemaData.datasets) {
       const selected = new Set<string>();
       for (const tbl of ds.tables) {
         if (tbl.selected) selected.add(tbl.table_id);
       }
       initial[ds.dataset_id] = selected;
+      if (selected.size > 0) expanded.add(ds.dataset_id);
     }
     setSelection(initial);
-    // Auto-expand datasets that have selections
-    const expanded = new Set<string>();
-    for (const ds of schemaData.datasets) {
-      expanded.add(ds.dataset_id);
-    }
     setExpandedDatasets(expanded);
   }, [schemaData]);
 
@@ -167,12 +165,22 @@ function BigQueryTableSelector({
           </DialogDescription>
         </DialogHeader>
 
-        <div className="flex-1 overflow-y-auto space-y-1 py-2 min-h-0">
+        {/* Search */}
+        <div className="px-1 pb-2">
+          <Input
+            placeholder="Search datasets and tables..."
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            className="h-8 text-[13px]"
+          />
+        </div>
+
+        <div className="flex-1 overflow-y-auto space-y-1 min-h-0">
           {isLoading ? (
             <div className="flex items-center justify-center py-8">
               <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
               <span className="ml-2 text-[13px] text-muted-foreground">
-                Loading schema...
+                Loading schema from BigQuery...
               </span>
             </div>
           ) : schemaData?.datasets.length === 0 ? (
@@ -180,83 +188,103 @@ function BigQueryTableSelector({
               No datasets found in this BigQuery project.
             </p>
           ) : (
-            schemaData?.datasets.map((ds) => {
-              const dsSelection = selection[ds.dataset_id] ?? new Set();
-              const allSelected =
-                ds.tables.length > 0 &&
-                ds.tables.every((t) => dsSelection.has(t.table_id));
-              const someSelected =
-                !allSelected && ds.tables.some((t) => dsSelection.has(t.table_id));
-              const expanded = expandedDatasets.has(ds.dataset_id);
+            [...(schemaData?.datasets ?? [])]
+              .sort((a, b) => a.dataset_id.localeCompare(b.dataset_id))
+              .map((ds) => {
+                const searchLower = search.toLowerCase();
+                const dsMatches = ds.dataset_id.toLowerCase().includes(searchLower);
+                const matchingTables = search
+                  ? ds.tables.filter(
+                      (t) =>
+                        t.table_id.toLowerCase().includes(searchLower) || dsMatches,
+                    )
+                  : ds.tables;
 
-              return (
-                <div key={ds.dataset_id} className="rounded-lg border">
-                  {/* Dataset header */}
-                  <div className="flex items-center gap-2 px-3 py-2">
-                    <button
-                      type="button"
-                      onClick={() => toggleDatasetExpand(ds.dataset_id)}
-                      className="text-muted-foreground hover:text-foreground"
-                    >
-                      {expanded ? (
-                        <ChevronDown className="h-3.5 w-3.5" />
-                      ) : (
-                        <ChevronRight className="h-3.5 w-3.5" />
-                      )}
-                    </button>
-                    <input
-                      type="checkbox"
-                      checked={allSelected}
-                      ref={(el) => {
-                        if (el) el.indeterminate = someSelected;
-                      }}
-                      onChange={() =>
-                        toggleAllInDataset(
-                          ds.dataset_id,
-                          ds.tables.map((t) => t.table_id),
-                        )
-                      }
-                      className="h-3.5 w-3.5 rounded border-muted-foreground"
-                    />
-                    <span className="text-[13px] font-medium">
-                      {ds.dataset_id}
-                    </span>
-                    <span className="text-[11px] text-muted-foreground ml-auto">
-                      {dsSelection.size}/{ds.tables.length}
-                    </span>
-                  </div>
+                // Hide datasets with no matching tables when searching
+                if (search && !dsMatches && matchingTables.length === 0) return null;
 
-                  {/* Table list */}
-                  {expanded && (
-                    <div className="border-t px-3 py-1 space-y-0.5">
-                      {ds.tables.map((tbl) => (
-                        <label
-                          key={tbl.table_id}
-                          className="flex items-center gap-2 py-1 pl-6 cursor-pointer rounded hover:bg-muted/50"
-                        >
-                          <input
-                            type="checkbox"
-                            checked={dsSelection.has(tbl.table_id)}
-                            onChange={() =>
-                              toggleTable(ds.dataset_id, tbl.table_id)
-                            }
-                            className="h-3.5 w-3.5 rounded border-muted-foreground"
-                          />
-                          <span className="text-[13px] font-mono">
-                            {tbl.table_id}
-                          </span>
-                          {tbl.columns && (
-                            <span className="text-[11px] text-muted-foreground ml-auto">
-                              {tbl.columns.length} col{tbl.columns.length !== 1 ? "s" : ""}
-                            </span>
-                          )}
-                        </label>
-                      ))}
+                const dsSelection = selection[ds.dataset_id] ?? new Set();
+                const allSelected =
+                  ds.tables.length > 0 &&
+                  ds.tables.every((t) => dsSelection.has(t.table_id));
+                const someSelected =
+                  !allSelected &&
+                  ds.tables.some((t) => dsSelection.has(t.table_id));
+                // Auto-expand when searching and tables match
+                const expanded =
+                  expandedDatasets.has(ds.dataset_id) ||
+                  (!!search && matchingTables.length > 0 && !dsMatches);
+
+                return (
+                  <div key={ds.dataset_id} className="rounded-lg border">
+                    {/* Dataset header */}
+                    <div className="flex items-center gap-2 px-3 py-2">
+                      <button
+                        type="button"
+                        onClick={() => toggleDatasetExpand(ds.dataset_id)}
+                        className="text-muted-foreground hover:text-foreground transition-colors"
+                      >
+                        {expanded ? (
+                          <ChevronDown className="h-3.5 w-3.5" />
+                        ) : (
+                          <ChevronRight className="h-3.5 w-3.5" />
+                        )}
+                      </button>
+                      <input
+                        type="checkbox"
+                        checked={allSelected}
+                        ref={(el) => {
+                          if (el) el.indeterminate = someSelected;
+                        }}
+                        onChange={() =>
+                          toggleAllInDataset(
+                            ds.dataset_id,
+                            ds.tables.map((t) => t.table_id),
+                          )
+                        }
+                        className="h-3.5 w-3.5 rounded border-muted-foreground"
+                      />
+                      <span className="text-[15px] font-medium text-foreground">
+                        {ds.dataset_id}
+                      </span>
+                      <span className="text-[11px] text-muted-foreground ml-auto">
+                        {dsSelection.size > 0
+                          ? `${dsSelection.size} of ${ds.tables.length}`
+                          : `${ds.tables.length} table${ds.tables.length !== 1 ? "s" : ""}`}
+                      </span>
                     </div>
-                  )}
-                </div>
-              );
-            })
+
+                    {/* Table list — collapsible with transition */}
+                    {expanded && (
+                      <div className="border-t px-3 py-1 space-y-0.5 max-h-[300px] overflow-y-auto">
+                        {(search ? matchingTables : ds.tables).map((tbl) => (
+                          <label
+                            key={tbl.table_id}
+                            className="flex items-center gap-2 py-1 pl-6 cursor-pointer rounded hover:bg-muted/50 transition-colors"
+                          >
+                            <input
+                              type="checkbox"
+                              checked={dsSelection.has(tbl.table_id)}
+                              onChange={() =>
+                                toggleTable(ds.dataset_id, tbl.table_id)
+                              }
+                              className="h-3.5 w-3.5 rounded border-muted-foreground"
+                            />
+                            <span className="text-[13px] font-mono text-muted-foreground">
+                              {tbl.table_id}
+                            </span>
+                            {tbl.columns && (
+                              <span className="text-[11px] text-muted-foreground/60 ml-auto">
+                                {tbl.columns.length} col{tbl.columns.length !== 1 ? "s" : ""}
+                              </span>
+                            )}
+                          </label>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                );
+              })
           )}
         </div>
 
