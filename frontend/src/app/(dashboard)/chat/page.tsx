@@ -89,18 +89,15 @@ export default function ChatPage() {
         dataTablesRef.current.set(msg.id, data as unknown as DataTableData);
         hydrated = true;
       } else if (type === "chart" && data) {
-        const existing = chartsRef.current.get(msg.id) || [];
-        existing.push(data as unknown as ChartData);
-        chartsRef.current.set(msg.id, existing);
-        hydrated = true;
+        if (!chartsRef.current.has(msg.id)) {
+          chartsRef.current.set(msg.id, [data as unknown as ChartData]);
+          hydrated = true;
+        }
       }
       // Hydrate persisted charts array (from v1.1 chart persistence)
-      if (Array.isArray(persistedCharts) && persistedCharts.length > 0) {
-        const existing = chartsRef.current.get(msg.id) || [];
-        for (const c of persistedCharts) {
-          existing.push(c as unknown as ChartData);
-        }
-        chartsRef.current.set(msg.id, existing);
+      // Skip if charts already exist for this message (came from streaming)
+      if (Array.isArray(persistedCharts) && persistedCharts.length > 0 && !chartsRef.current.has(msg.id)) {
+        chartsRef.current.set(msg.id, persistedCharts as unknown as ChartData[]);
         hydrated = true;
       }
     }
