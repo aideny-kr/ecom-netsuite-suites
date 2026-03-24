@@ -128,7 +128,13 @@ class TestReorganizeWorkspace:
         mock_result_tenant2.scalar_one.return_value = uuid.uuid4()
 
         mock_db.execute = AsyncMock(
-            side_effect=[mock_result_files, mock_result_paths, mock_result_dirs, mock_result_tenant, mock_result_tenant2]
+            side_effect=[
+                mock_result_files,
+                mock_result_paths,
+                mock_result_dirs,
+                mock_result_tenant,
+                mock_result_tenant2,
+            ]
         )
 
         result = await reorganize_workspace(mock_db, uuid.uuid4())
@@ -164,7 +170,13 @@ class TestReorganizeWorkspace:
         mock_result_tenant2.scalar_one.return_value = uuid.uuid4()
 
         mock_db.execute = AsyncMock(
-            side_effect=[mock_result_files, mock_result_paths, mock_result_dirs, mock_result_tenant, mock_result_tenant2]
+            side_effect=[
+                mock_result_files,
+                mock_result_paths,
+                mock_result_dirs,
+                mock_result_tenant,
+                mock_result_tenant2,
+            ]
         )
 
         await reorganize_workspace(mock_db, uuid.uuid4())
