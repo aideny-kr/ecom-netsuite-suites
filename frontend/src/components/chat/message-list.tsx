@@ -349,9 +349,9 @@ const StreamingMarkdown = memo(
     return <MarkdownRenderer content={content} isTerminal={isTerminal} />;
   },
   (prev, next) => {
-    // Skip re-render if content grew by fewer than 50 chars (batches visual updates)
+    // Skip re-render if content grew by fewer than 15 chars (~1 word)
     if (prev.isTerminal !== next.isTerminal) return false;
-    return Math.abs(next.content.length - prev.content.length) < 50;
+    return Math.abs(next.content.length - prev.content.length) < 15;
   },
 );
 
@@ -532,7 +532,7 @@ export function MessageList({
       if (scrollTimerRef.current) clearTimeout(scrollTimerRef.current);
       scrollTimerRef.current = setTimeout(() => {
         rafRef.current = requestAnimationFrame(scrollToBottom);
-      }, 50);
+      }, 16);
     } else {
       // Wait for layout to settle before scrolling (fixes jump on new message)
       rafRef.current = requestAnimationFrame(scrollToBottom);
