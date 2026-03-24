@@ -1449,6 +1449,18 @@ async def run_chat_turn(
                         # payload is (event_type_str, event_data_dict)
                         last_structured_output = {"type": payload[0], "data": payload[1]}
                         yield {"type": payload[0], "data": payload[1]}
+
+                        # Auto-generate chart from financial reports (deterministic, no LLM)
+                        if payload[0] == "financial_report":
+                            from app.services.chat.financial_chart_builder import build_financial_chart
+                            _fr_data = payload[1]
+                            _fr_chart = build_financial_chart(
+                                report_type=_fr_data.get("report_type", ""),
+                                summary=_fr_data.get("summary", {}),
+                            )
+                            if _fr_chart:
+                                yield {"type": "chart", "data": _fr_chart.model_dump()}
+                                print(f"[ORCHESTRATOR] Auto-generated chart for {_fr_data.get('report_type')}", flush=True)
                     elif event_type == "response":
                         agent_result = payload
 
