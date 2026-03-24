@@ -29,6 +29,7 @@ def test_unified_agent_system_prompt_mentions_financial_report_tool():
     agent._correlation_id = "test"
     agent._metadata = None
     agent._policy = None
+    agent._connectors = None
     agent._tool_defs = None
     agent._tenant_vernacular = ""
     agent._soul_quirks = ""
