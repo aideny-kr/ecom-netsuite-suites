@@ -1,11 +1,13 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import {
   useMcpConnectors,
   useDeleteMcpConnector,
   useTestBigQueryConnection,
   useCreateBigQueryConnector,
+  useBigQuerySchema,
+  useUpdateBigQueryTables,
 } from "@/hooks/use-mcp-connectors";
 import { usePermissions } from "@/hooks/use-permissions";
 import { Button } from "@/components/ui/button";
@@ -22,6 +24,14 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { useToast } from "@/hooks/use-toast";
 import {
   Database,
@@ -33,7 +43,253 @@ import {
   Upload,
   Wifi,
   WifiOff,
+  TableProperties,
+  ChevronRight,
+  ChevronDown,
 } from "lucide-react";
+
+// ---------------------------------------------------------------------------
+// BigQuery Table Selector Dialog
+// ---------------------------------------------------------------------------
+
+function BigQueryTableSelector({
+  connectorId,
+  open,
+  onOpenChange,
+}: {
+  connectorId: string;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const { toast } = useToast();
+  const { data: schemaData, isLoading } = useBigQuerySchema(open ? connectorId : null);
+  const updateTables = useUpdateBigQueryTables();
+
+  // Local selection state: dataset_id -> Set<table_id>
+  const [selection, setSelection] = useState<Record<string, Set<string>>>({});
+  const [expandedDatasets, setExpandedDatasets] = useState<Set<string>>(new Set());
+
+  // Initialize selection from server data
+  useEffect(() => {
+    if (!schemaData) return;
+    const initial: Record<string, Set<string>> = {};
+    for (const ds of schemaData.datasets) {
+      const selected = new Set<string>();
+      for (const tbl of ds.tables) {
+        if (tbl.selected) selected.add(tbl.table_id);
+      }
+      initial[ds.dataset_id] = selected;
+    }
+    setSelection(initial);
+    // Auto-expand datasets that have selections
+    const expanded = new Set<string>();
+    for (const ds of schemaData.datasets) {
+      expanded.add(ds.dataset_id);
+    }
+    setExpandedDatasets(expanded);
+  }, [schemaData]);
+
+  function toggleTable(datasetId: string, tableId: string) {
+    setSelection((prev) => {
+      const ds = new Set(prev[datasetId] ?? []);
+      if (ds.has(tableId)) {
+        ds.delete(tableId);
+      } else {
+        ds.add(tableId);
+      }
+      return { ...prev, [datasetId]: ds };
+    });
+  }
+
+  function toggleAllInDataset(datasetId: string, tables: string[]) {
+    setSelection((prev) => {
+      const ds = prev[datasetId] ?? new Set();
+      const allSelected = tables.every((t) => ds.has(t));
+      const next = allSelected ? new Set<string>() : new Set(tables);
+      return { ...prev, [datasetId]: next };
+    });
+  }
+
+  function toggleDatasetExpand(datasetId: string) {
+    setExpandedDatasets((prev) => {
+      const next = new Set(prev);
+      if (next.has(datasetId)) {
+        next.delete(datasetId);
+      } else {
+        next.add(datasetId);
+      }
+      return next;
+    });
+  }
+
+  // Count totals
+  const totalTables =
+    schemaData?.datasets.reduce((acc, ds) => acc + ds.tables.length, 0) ?? 0;
+  const selectedCount = Object.values(selection).reduce(
+    (acc, s) => acc + s.size,
+    0,
+  );
+
+  async function handleSave() {
+    const payload: Record<string, string[]> = {};
+    for (const [dsId, tables] of Object.entries(selection)) {
+      if (tables.size > 0) {
+        payload[dsId] = Array.from(tables);
+      }
+    }
+    try {
+      await updateTables.mutateAsync({
+        connectorId,
+        selectedTables: payload,
+      });
+      toast({
+        title: "Tables updated",
+        description: `${selectedCount} table(s) selected for the BI agent`,
+      });
+      onOpenChange(false);
+    } catch (err) {
+      toast({
+        title: "Failed to update tables",
+        description: String(err),
+        variant: "destructive",
+      });
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-lg max-h-[80vh] flex flex-col">
+        <DialogHeader>
+          <DialogTitle>Manage Tables</DialogTitle>
+          <DialogDescription>
+            Select which BigQuery tables the BI agent can see and query. Unselected
+            tables will be hidden from the agent.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="flex-1 overflow-y-auto space-y-1 py-2 min-h-0">
+          {isLoading ? (
+            <div className="flex items-center justify-center py-8">
+              <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+              <span className="ml-2 text-[13px] text-muted-foreground">
+                Loading schema...
+              </span>
+            </div>
+          ) : schemaData?.datasets.length === 0 ? (
+            <p className="text-[13px] text-muted-foreground py-4 text-center">
+              No datasets found in this BigQuery project.
+            </p>
+          ) : (
+            schemaData?.datasets.map((ds) => {
+              const dsSelection = selection[ds.dataset_id] ?? new Set();
+              const allSelected =
+                ds.tables.length > 0 &&
+                ds.tables.every((t) => dsSelection.has(t.table_id));
+              const someSelected =
+                !allSelected && ds.tables.some((t) => dsSelection.has(t.table_id));
+              const expanded = expandedDatasets.has(ds.dataset_id);
+
+              return (
+                <div key={ds.dataset_id} className="rounded-lg border">
+                  {/* Dataset header */}
+                  <div className="flex items-center gap-2 px-3 py-2">
+                    <button
+                      type="button"
+                      onClick={() => toggleDatasetExpand(ds.dataset_id)}
+                      className="text-muted-foreground hover:text-foreground"
+                    >
+                      {expanded ? (
+                        <ChevronDown className="h-3.5 w-3.5" />
+                      ) : (
+                        <ChevronRight className="h-3.5 w-3.5" />
+                      )}
+                    </button>
+                    <input
+                      type="checkbox"
+                      checked={allSelected}
+                      ref={(el) => {
+                        if (el) el.indeterminate = someSelected;
+                      }}
+                      onChange={() =>
+                        toggleAllInDataset(
+                          ds.dataset_id,
+                          ds.tables.map((t) => t.table_id),
+                        )
+                      }
+                      className="h-3.5 w-3.5 rounded border-muted-foreground"
+                    />
+                    <span className="text-[13px] font-medium">
+                      {ds.dataset_id}
+                    </span>
+                    <span className="text-[11px] text-muted-foreground ml-auto">
+                      {dsSelection.size}/{ds.tables.length}
+                    </span>
+                  </div>
+
+                  {/* Table list */}
+                  {expanded && (
+                    <div className="border-t px-3 py-1 space-y-0.5">
+                      {ds.tables.map((tbl) => (
+                        <label
+                          key={tbl.table_id}
+                          className="flex items-center gap-2 py-1 pl-6 cursor-pointer rounded hover:bg-muted/50"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={dsSelection.has(tbl.table_id)}
+                            onChange={() =>
+                              toggleTable(ds.dataset_id, tbl.table_id)
+                            }
+                            className="h-3.5 w-3.5 rounded border-muted-foreground"
+                          />
+                          <span className="text-[13px] font-mono">
+                            {tbl.table_id}
+                          </span>
+                          {tbl.columns && (
+                            <span className="text-[11px] text-muted-foreground ml-auto">
+                              {tbl.columns.length} col{tbl.columns.length !== 1 ? "s" : ""}
+                            </span>
+                          )}
+                        </label>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })
+          )}
+        </div>
+
+        <DialogFooter className="flex items-center justify-between border-t pt-3">
+          <span className="text-[12px] text-muted-foreground">
+            {selectedCount} of {totalTables} table(s) selected
+          </span>
+          <div className="flex gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => onOpenChange(false)}
+            >
+              Cancel
+            </Button>
+            <Button
+              size="sm"
+              onClick={handleSave}
+              disabled={updateTables.isPending}
+            >
+              {updateTables.isPending ? (
+                <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <TableProperties className="mr-1.5 h-3.5 w-3.5" />
+              )}
+              Save Selection
+            </Button>
+          </div>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
 
 // ---------------------------------------------------------------------------
 // BigQuery Connection Section
@@ -64,6 +320,9 @@ export function BigQueryConnectionSection() {
 
   // Delete confirmation
   const [deleteId, setDeleteId] = useState<string | null>(null);
+
+  // Table selector dialog
+  const [tableDialogOpen, setTableDialogOpen] = useState(false);
 
   // Find existing BigQuery connector
   const bigqueryConnector = (mcpConnectors ?? []).find(
@@ -191,6 +450,14 @@ export function BigQueryConnectionSection() {
     }
   }
 
+  // Count selected tables from metadata
+  const selectedTables = bigqueryConnector?.metadata_json?.selected_tables as
+    | Record<string, string[]>
+    | undefined;
+  const selectedTableCount = selectedTables
+    ? Object.values(selectedTables).reduce((acc, arr) => acc + arr.length, 0)
+    : 0;
+
   return (
     <div className="space-y-4">
       <div>
@@ -250,6 +517,28 @@ export function BigQueryConnectionSection() {
               <p className="text-[12px] text-destructive">{bigqueryConnector.error_reason}</p>
             </div>
           )}
+
+          {/* Manage Tables button */}
+          <div className="rounded-lg border px-3 py-3">
+            <div className="flex items-center justify-between">
+              <div>
+                <p className="text-[13px] font-medium">Table Visibility</p>
+                <p className="text-[12px] text-muted-foreground mt-0.5">
+                  {selectedTableCount > 0
+                    ? `${selectedTableCount} table(s) visible to the BI agent`
+                    : "All tables visible to the BI agent"}
+                </p>
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setTableDialogOpen(true)}
+              >
+                <TableProperties className="mr-1.5 h-3.5 w-3.5" />
+                Manage Tables
+              </Button>
+            </div>
+          </div>
 
           {/* Remove button */}
           <div className="flex justify-end">
@@ -421,6 +710,15 @@ export function BigQueryConnectionSection() {
             </Button>
           </div>
         </div>
+      )}
+
+      {/* Table selector dialog */}
+      {bigqueryConnector && (
+        <BigQueryTableSelector
+          connectorId={bigqueryConnector.id}
+          open={tableDialogOpen}
+          onOpenChange={setTableDialogOpen}
+        />
       )}
 
       {/* Delete confirmation dialog */}

@@ -46,6 +46,7 @@ async def seed_bigquery_schema(
     db: AsyncSession,
     tenant_id: uuid.UUID,
     schema: dict,
+    selected_tables: dict[str, list[str]] | None = None,
 ) -> int:
     """Seed BigQuery schema into RAG partitions.
 
@@ -54,6 +55,9 @@ async def seed_bigquery_schema(
         tenant_id: Tenant owning the BigQuery connection.
         schema: Output from bigquery_service.discover_schema(),
                 shaped as ``{"datasets": [{"dataset_id": ..., "tables": [...]}]}``.
+        selected_tables: Optional filter — ``{dataset_id: [table_ids]}``.
+                         When provided, only matching tables are seeded.
+                         An empty dict seeds nothing.
 
     Returns:
         Number of chunks created.
@@ -74,8 +78,15 @@ async def seed_bigquery_schema(
         tables = dataset.get("tables", [])
 
         for table in tables:
-            raw_text = _build_table_chunk(dataset_id, table)
             table_id = table.get("table_id", "unknown")
+
+            # Filter by selected_tables if provided
+            if selected_tables is not None:
+                allowed = selected_tables.get(dataset_id, [])
+                if table_id not in allowed:
+                    continue
+
+            raw_text = _build_table_chunk(dataset_id, table)
 
             chunk = DomainKnowledgeChunk(
                 source_uri=f"bi/schema-docs/{dataset_id}.{table_id}",

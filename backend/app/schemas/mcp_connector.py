@@ -53,3 +53,7 @@ class BigQueryConnectorCreate(BaseModel):
     project_id: str = Field(min_length=1, max_length=255)
     service_account_json: dict
     default_dataset: str | None = None
+
+
+class BigQueryTableSelection(BaseModel):
+    selected_tables: dict[str, list[str]]  # dataset_id -> [table_ids]

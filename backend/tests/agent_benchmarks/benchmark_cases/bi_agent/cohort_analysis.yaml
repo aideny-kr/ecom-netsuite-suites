@@ -6,3 +6,8 @@ expected_accuracy: 0.7
 max_cost: 0.50
 max_latency_ms: 20000
 tags: ["analytics", "complex", "cohort"]
+bi_agent_advantages:
+  - "Uses DATE_TRUNC and SAFE_DIVIDE correctly"
+  - "Generates pivot without schema exploration"
+baseline_expected_tools: ["bigquery_schema", "bigquery_sql", "netsuite_pivot_query_result"]
+baseline_expected_accuracy: 0.4

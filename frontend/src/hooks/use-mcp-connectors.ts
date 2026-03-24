@@ -109,6 +109,56 @@ export function useCreateBigQueryConnector() {
   });
 }
 
+// ---------------------------------------------------------------------------
+// BigQuery table selector hooks
+// ---------------------------------------------------------------------------
+
+interface BigQuerySchemaDataset {
+  dataset_id: string;
+  tables: Array<{
+    table_id: string;
+    columns?: Array<{ name: string; type: string; description: string | null }>;
+    selected: boolean;
+  }>;
+}
+
+interface BigQuerySchemaResponse {
+  datasets: BigQuerySchemaDataset[];
+  selected_tables: Record<string, string[]>;
+}
+
+export function useBigQuerySchema(connectorId: string | null) {
+  return useQuery<BigQuerySchemaResponse>({
+    queryKey: ["bigquery-schema", connectorId],
+    queryFn: () =>
+      apiClient.get<BigQuerySchemaResponse>(
+        `/api/v1/mcp-connectors/bigquery/${connectorId}/schema`,
+      ),
+    enabled: !!connectorId,
+  });
+}
+
+export function useUpdateBigQueryTables() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      connectorId,
+      selectedTables,
+    }: {
+      connectorId: string;
+      selectedTables: Record<string, string[]>;
+    }) =>
+      apiClient.put(
+        `/api/v1/mcp-connectors/bigquery/${connectorId}/tables`,
+        { selected_tables: selectedTables },
+      ),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["mcp-connectors"] });
+      queryClient.invalidateQueries({ queryKey: ["bigquery-schema"] });
+    },
+  });
+}
+
 export function useReauthorizeMcpConnector() {
   const queryClient = useQueryClient();
 

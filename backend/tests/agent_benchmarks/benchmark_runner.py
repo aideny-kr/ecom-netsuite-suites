@@ -30,6 +30,10 @@ class BenchmarkCase(BaseModel):
     max_latency_ms: int = 15000
     tags: list[str] = Field(default_factory=list)
     notes: str = ""
+    # Baseline comparison fields (used by vs-baseline benchmarks)
+    bi_agent_advantages: list[str] = Field(default_factory=list)
+    baseline_expected_tools: list[str] = Field(default_factory=list)
+    baseline_expected_accuracy: float = 0.5
 
 
 @dataclass

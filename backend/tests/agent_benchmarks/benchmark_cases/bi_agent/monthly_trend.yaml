@@ -6,3 +6,8 @@ expected_accuracy: 0.8
 max_cost: 0.30
 max_latency_ms: 15000
 tags: ["analytics", "trend", "chart"]
+bi_agent_advantages:
+  - "Knows table structure from RAG"
+  - "Produces line chart"
+baseline_expected_tools: ["bigquery_schema", "bigquery_sql"]
+baseline_expected_accuracy: 0.5

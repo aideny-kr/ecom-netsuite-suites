@@ -14,6 +14,7 @@ from app.core.dependencies import require_permission
 from app.models.user import User
 from app.schemas.mcp_connector import (
     BigQueryConnectorCreate,
+    BigQueryTableSelection,
     BigQueryTestRequest,
     BigQueryTestResponse,
     McpConnectorCreate,
@@ -22,7 +23,8 @@ from app.schemas.mcp_connector import (
 )
 from app.services import audit_service, mcp_connector_service
 from app.services.bigquery_service import discover_schema, validate_connection
-from app.core.encryption import encrypt_credentials
+from app.core.encryption import decrypt_credentials, encrypt_credentials
+from app.services.bigquery_schema_seeder import seed_bigquery_schema
 from app.services.netsuite_oauth_service import (
     build_mcp_authorize_url,
     exchange_code_with_client,
@@ -492,14 +494,126 @@ async def create_bigquery_connector(
 
     # 7. Seed BigQuery schema into RAG partitions for the BI agent
     try:
-        from app.services.bigquery_schema_seeder import seed_bigquery_schema
-
         await seed_bigquery_schema(db=db, tenant_id=user.tenant_id, schema=schema)
         await db.commit()
     except Exception:
         logger.warning("bigquery_connector.schema_seeder_failed", exc_info=True)
 
     return connector
+
+
+# ---------------------------------------------------------------------------
+# BigQuery table selector endpoints
+# ---------------------------------------------------------------------------
+
+
+@router.get("/bigquery/{connector_id}/schema")
+async def get_bigquery_schema(
+    connector_id: str,
+    user: Annotated[User, Depends(require_permission("connections.view"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Return full BigQuery schema with selected flags per table."""
+    from sqlalchemy import select
+    from app.models.mcp_connector import McpConnector
+
+    result = await db.execute(
+        select(McpConnector).where(
+            McpConnector.id == uuid.UUID(connector_id),
+            McpConnector.tenant_id == user.tenant_id,
+            McpConnector.provider == "bigquery",
+        )
+    )
+    connector = result.scalars().first()
+    if not connector:
+        raise HTTPException(status_code=404, detail="BigQuery connector not found")
+
+    creds = decrypt_credentials(connector.encrypted_credentials)
+    sa_json = creds.get("service_account_json", {})
+    project_id = creds.get("project_id") or (connector.metadata_json or {}).get("project_id", "")
+
+    schema = await discover_schema(credentials=sa_json, project_id=project_id)
+
+    # Cross-reference with selected_tables to set selected flag
+    selected = (connector.metadata_json or {}).get("selected_tables", {})
+
+    enriched_datasets = []
+    for ds in schema.get("datasets", []):
+        ds_id = ds["dataset_id"]
+        selected_in_ds = selected.get(ds_id, [])
+        enriched_tables = []
+        for tbl in ds.get("tables", []):
+            enriched_tables.append({
+                **tbl,
+                "selected": tbl["table_id"] in selected_in_ds,
+            })
+        enriched_datasets.append({
+            "dataset_id": ds_id,
+            "tables": enriched_tables,
+        })
+
+    return {"datasets": enriched_datasets, "selected_tables": selected}
+
+
+@router.put("/bigquery/{connector_id}/tables")
+async def update_bigquery_table_selection(
+    connector_id: str,
+    request: BigQueryTableSelection,
+    user: Annotated[User, Depends(require_permission("connections.manage"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Update which BigQuery tables are visible to the BI agent and re-seed RAG."""
+    from sqlalchemy import select
+    from sqlalchemy.orm.attributes import flag_modified
+    from app.models.mcp_connector import McpConnector
+
+    result = await db.execute(
+        select(McpConnector).where(
+            McpConnector.id == uuid.UUID(connector_id),
+            McpConnector.tenant_id == user.tenant_id,
+            McpConnector.provider == "bigquery",
+        )
+    )
+    connector = result.scalars().first()
+    if not connector:
+        raise HTTPException(status_code=404, detail="BigQuery connector not found")
+
+    # Update metadata with selected_tables
+    metadata = connector.metadata_json or {}
+    metadata["selected_tables"] = request.selected_tables
+    connector.metadata_json = metadata
+    flag_modified(connector, "metadata_json")
+
+    # Re-discover schema and re-seed RAG with filtered tables
+    creds = decrypt_credentials(connector.encrypted_credentials)
+    sa_json = creds.get("service_account_json", {})
+    project_id = creds.get("project_id") or metadata.get("project_id", "")
+
+    schema = await discover_schema(credentials=sa_json, project_id=project_id)
+    seeded = await seed_bigquery_schema(
+        db=db,
+        tenant_id=user.tenant_id,
+        schema=schema,
+        selected_tables=request.selected_tables if request.selected_tables else None,
+    )
+
+    await audit_service.log_event(
+        db=db,
+        tenant_id=user.tenant_id,
+        category="mcp_connector",
+        action="mcp_connector.update_table_selection",
+        actor_id=user.id,
+        resource_type="mcp_connector",
+        resource_id=connector_id,
+        payload={"selected_tables": request.selected_tables, "seeded_chunks": seeded},
+    )
+    await db.commit()
+
+    return {
+        "status": "ok",
+        "selected_tables": request.selected_tables,
+        "seeded_chunks": seeded,
+    }
 
 
 # ---------------------------------------------------------------------------

@@ -93,6 +93,21 @@ async def bigquery_schema_execute(params: dict, context: dict, **kwargs: Any) ->
             project_id=project_id,
             dataset=dataset,
         )
+
+        # Filter to only show selected tables if configured
+        selected = (connector.metadata_json or {}).get("selected_tables") if connector.metadata_json else None
+        if selected:
+            filtered_datasets = []
+            for ds in result.get("datasets", []):
+                ds_tables = selected.get(ds["dataset_id"], [])
+                if ds_tables:
+                    filtered = {
+                        "dataset_id": ds["dataset_id"],
+                        "tables": [t for t in ds["tables"] if t["table_id"] in ds_tables],
+                    }
+                    filtered_datasets.append(filtered)
+            result = {"datasets": filtered_datasets}
+
         return result
     except Exception as exc:
         logger.warning("BigQuery schema discovery failed", exc_info=True)
