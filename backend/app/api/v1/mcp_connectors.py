@@ -532,7 +532,14 @@ async def get_bigquery_schema(
     sa_json = creds.get("service_account_json", {})
     project_id = creds.get("project_id") or (connector.metadata_json or {}).get("project_id", "")
 
-    schema = await discover_schema(credentials=sa_json, project_id=project_id)
+    try:
+        schema = await discover_schema(credentials=sa_json, project_id=project_id)
+    except Exception as e:
+        print(f"[BIGQUERY] Schema discovery failed for connector {connector_id}: {e}", flush=True)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Failed to fetch schema from BigQuery: {str(e)}",
+        )
 
     # Cross-reference with selected_tables to set selected flag
     selected = (connector.metadata_json or {}).get("selected_tables", {})

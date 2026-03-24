@@ -1,8 +1,8 @@
 """BigQuery service — query execution, schema discovery, cost estimation.
 
 All BigQuery client calls are synchronous (google-cloud-bigquery SDK).
-Async wrappers use asyncio.to_thread() for production; tests mock _get_client
-so the sync calls are instant.
+Async wrappers use asyncio.to_thread() to avoid blocking the event loop.
+Tests mock _get_client so the sync calls are instant.
 """
 
 from __future__ import annotations
@@ -16,8 +16,11 @@ from google.oauth2 import service_account
 
 def _get_client(credentials: dict, project_id: str) -> bigquery.Client:
     """Create a BigQuery client from service account JSON."""
-    creds = service_account.Credentials.from_service_account_info(credentials)
-    return bigquery.Client(credentials=creds, project=project_id)
+    try:
+        creds = service_account.Credentials.from_service_account_info(credentials)
+        return bigquery.Client(credentials=creds, project=project_id)
+    except Exception as e:
+        raise ValueError(f"Failed to initialize BigQuery client: {e}")
 
 
 def _validate_read_only(query: str) -> None:
@@ -43,29 +46,32 @@ async def execute_query(
     """
     _validate_read_only(query)
 
-    client = _get_client(credentials, project_id)
-    job_config = bigquery.QueryJobConfig(maximum_bytes_billed=max_bytes_billed)
-    job = client.query(query, job_config=job_config)
-    result = job.result(timeout=timeout_seconds)
+    def _sync_execute():
+        client = _get_client(credentials, project_id)
+        job_config = bigquery.QueryJobConfig(maximum_bytes_billed=max_bytes_billed)
+        job = client.query(query, job_config=job_config)
+        result = job.result(timeout=timeout_seconds)
 
-    columns = [field.name for field in result.schema]
-    rows: list[list[Any]] = []
-    truncated = False
-    for row in result:
-        if len(rows) >= max_rows:
-            truncated = True
-            break
-        rows.append(row.values())
+        columns = [field.name for field in result.schema]
+        rows: list[list[Any]] = []
+        truncated = False
+        for row in result:
+            if len(rows) >= max_rows:
+                truncated = True
+                break
+            rows.append(row.values())
 
-    return {
-        "columns": columns,
-        "rows": rows,
-        "row_count": len(rows),
-        "bytes_processed": job.total_bytes_processed,
-        "truncated": truncated,
-        "cache_hit": job.cache_hit,
-        "query": query,
-    }
+        return {
+            "columns": columns,
+            "rows": rows,
+            "row_count": len(rows),
+            "bytes_processed": job.total_bytes_processed,
+            "truncated": truncated,
+            "cache_hit": job.cache_hit,
+            "query": query,
+        }
+
+    return await asyncio.to_thread(_sync_execute)
 
 
 async def discover_schema(
@@ -78,32 +84,36 @@ async def discover_schema(
     If dataset is provided, returns columns for tables in that dataset.
     Otherwise, lists all datasets with their tables (no column detail).
     """
-    client = _get_client(credentials, project_id)
 
-    if dataset:
-        # Single dataset — include column details
-        tables_list = list(client.list_tables(dataset))
-        tables = []
-        for tbl in tables_list:
-            full_table = client.get_table(tbl)
-            columns = [
-                {
-                    "name": field.name,
-                    "type": field.field_type,
-                    "description": getattr(field, "description", None),
-                }
-                for field in full_table.schema
-            ]
-            tables.append({"table_id": tbl.table_id, "columns": columns})
-        return {"datasets": [{"dataset_id": dataset, "tables": tables}]}
+    def _sync_discover():
+        client = _get_client(credentials, project_id)
 
-    # All datasets
-    datasets = []
-    for ds in client.list_datasets():
-        tables_list = list(client.list_tables(ds.dataset_id))
-        tables = [{"table_id": t.table_id} for t in tables_list]
-        datasets.append({"dataset_id": ds.dataset_id, "tables": tables})
-    return {"datasets": datasets}
+        if dataset:
+            # Single dataset — include column details
+            tables_list = list(client.list_tables(dataset))
+            tables = []
+            for tbl in tables_list:
+                full_table = client.get_table(tbl)
+                columns = [
+                    {
+                        "name": field.name,
+                        "type": field.field_type,
+                        "description": getattr(field, "description", None),
+                    }
+                    for field in full_table.schema
+                ]
+                tables.append({"table_id": tbl.table_id, "columns": columns})
+            return {"datasets": [{"dataset_id": dataset, "tables": tables}]}
+
+        # All datasets
+        datasets = []
+        for ds in client.list_datasets():
+            tables_list = list(client.list_tables(ds.dataset_id))
+            tables = [{"table_id": t.table_id} for t in tables_list]
+            datasets.append({"dataset_id": ds.dataset_id, "tables": tables})
+        return {"datasets": datasets}
+
+    return await asyncio.to_thread(_sync_discover)
 
 
 async def validate_connection(
@@ -111,10 +121,14 @@ async def validate_connection(
     project_id: str,
 ) -> dict[str, Any]:
     """Validate BigQuery connectivity by running SELECT 1."""
-    try:
+
+    def _sync_validate():
         client = _get_client(credentials, project_id)
         job = client.query("SELECT 1")
         job.result()
+
+    try:
+        await asyncio.to_thread(_sync_validate)
         return {"valid": True, "error": None}
     except Exception as exc:
         return {"valid": False, "error": str(exc)}
@@ -131,11 +145,13 @@ async def estimate_query_cost(
     """
     _validate_read_only(query)
 
-    client = _get_client(credentials, project_id)
-    job_config = bigquery.QueryJobConfig(dry_run=True, use_query_cache=False)
-    job = client.query(query, job_config=job_config)
+    def _sync_estimate():
+        client = _get_client(credentials, project_id)
+        job_config = bigquery.QueryJobConfig(dry_run=True, use_query_cache=False)
+        job = client.query(query, job_config=job_config)
+        return job.total_bytes_processed
 
-    estimated_bytes = job.total_bytes_processed
+    estimated_bytes = await asyncio.to_thread(_sync_estimate)
     estimated_cost = estimated_bytes / 1_000_000_000_000 * 5
 
     return {
