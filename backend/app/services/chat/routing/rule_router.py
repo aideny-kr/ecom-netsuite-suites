@@ -27,9 +27,7 @@ class RuleRouter:
             if not enabled:
                 continue
             for rule in config.routing_rules:
-                self._compiled.append(
-                    (config.agent_id, re.compile(rule.pattern), rule.priority)
-                )
+                self._compiled.append((config.agent_id, re.compile(rule.pattern), rule.priority))
 
     def route(self, query: str) -> str | None:
         """Match query against compiled patterns.

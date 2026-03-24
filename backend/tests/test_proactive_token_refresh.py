@@ -128,7 +128,9 @@ class TestProactiveRefresh:
             patch("app.core.encryption.encrypt_credentials", return_value="enc"),
             patch("app.core.redis_lock.acquire_lock", return_value=True),
             patch("app.core.redis_lock.release_lock"),
-            patch("app.workers.tasks.proactive_token_refresh._run_async_refresh", return_value=token_data) as mock_refresh,
+            patch(
+                "app.workers.tasks.proactive_token_refresh._run_async_refresh", return_value=token_data
+            ) as mock_refresh,
         ):
             _refresh_single(MagicMock(), record, "oauth_refresh", stats, datetime.now(timezone.utc), settings)
 
@@ -149,7 +151,9 @@ class TestProactiveRefresh:
             patch("app.core.encryption.encrypt_credentials", return_value="enc"),
             patch("app.core.redis_lock.acquire_lock", return_value=True),
             patch("app.core.redis_lock.release_lock"),
-            patch("app.workers.tasks.proactive_token_refresh._run_async_refresh", return_value=token_data) as mock_refresh,
+            patch(
+                "app.workers.tasks.proactive_token_refresh._run_async_refresh", return_value=token_data
+            ) as mock_refresh,
         ):
             _refresh_single(MagicMock(), record, "oauth_refresh:mcp", stats, datetime.now(timezone.utc), settings)
 

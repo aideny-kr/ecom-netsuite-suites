@@ -230,7 +230,8 @@ async def callback(
 
     # Upsert: update existing netsuite connection (any non-revoked status) or create new one
     result = await db.execute(
-        select(Connection).where(
+        select(Connection)
+        .where(
             Connection.tenant_id == tenant_id,
             Connection.provider == "netsuite",
             Connection.status != "revoked",

@@ -118,16 +118,12 @@ class TestResolveScriptType:
         assert result == "Restlet"
 
     def test_metadata_wins_over_filename(self):
-        result = resolve_script_type(
-            content=None, filename="random.js", metadata_type="Suitelet"
-        )
+        result = resolve_script_type(content=None, filename="random.js", metadata_type="Suitelet")
         assert result == "Suitelet"
 
     def test_content_wins_over_metadata(self):
         content = "/** @NScriptType ClientScript */"
-        result = resolve_script_type(
-            content=content, filename="x.js", metadata_type="Restlet"
-        )
+        result = resolve_script_type(content=content, filename="x.js", metadata_type="Restlet")
         assert result == "ClientScript"
 
     def test_filename_fallback(self):

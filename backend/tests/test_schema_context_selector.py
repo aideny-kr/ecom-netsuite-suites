@@ -54,9 +54,7 @@ def test_entity_types_from_resolution():
 
 def test_max_tables_cap():
     # Even if many tables match, cap at reasonable number
-    tables = select_relevant_schemas(
-        "everything about orders, customers, vendors, items, inventory, employees, GL"
-    )
+    tables = select_relevant_schemas("everything about orders, customers, vendors, items, inventory, employees, GL")
     assert len(tables) <= 10
 
 

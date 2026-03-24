@@ -10,20 +10,13 @@ from app.services.chat.agents.agent_registry import AgentRegistry
 from app.services.chat.chart_extractor import extract_charts
 from app.services.chat.routing.rule_router import RuleRouter
 
-CONFIGS_DIR = (
-    Path(__file__).resolve().parent.parent
-    / "app"
-    / "services"
-    / "chat"
-    / "agents"
-    / "configs"
-)
+CONFIGS_DIR = Path(__file__).resolve().parent.parent / "app" / "services" / "chat" / "agents" / "configs"
 
-SAMPLE_CHART_RESPONSE = '''Revenue has grown 23% QoQ.
+SAMPLE_CHART_RESPONSE = """Revenue has grown 23% QoQ.
 
 <chart>{"chart_type": "bar", "title": "Revenue by Region", "x_axis": {"label": "Region", "key": "region"}, "y_axes": [{"label": "Revenue ($)", "key": "revenue"}], "data": [{"region": "US", "revenue": 1200000}, {"region": "EU", "revenue": 800000}]}</chart>
 
-The strongest growth was in the US market.'''
+The strongest growth was in the US market."""
 
 
 def _make_registry() -> AgentRegistry:
@@ -33,7 +26,6 @@ def _make_registry() -> AgentRegistry:
 
 
 class TestBiAgentRouting:
-
     def test_revenue_query_routes_to_bi_agent(self):
         registry = _make_registry()
         configs = list(registry.configs.values())
@@ -79,7 +71,6 @@ class TestBiAgentRouting:
 
 
 class TestBiAgentInstantiation:
-
     def test_bi_agent_uses_bigquery_tools(self):
         registry = _make_registry()
         agent = registry.instantiate(
@@ -137,7 +128,6 @@ class TestBiAgentInstantiation:
 
 
 class TestChartPipeline:
-
     def test_chart_extracted_from_response(self):
         cleaned, charts = extract_charts(SAMPLE_CHART_RESPONSE)
         assert len(charts) == 1
@@ -171,7 +161,7 @@ class TestChartPipeline:
         assert charts[1].chart_type == "line"
 
     def test_malformed_chart_json_skipped(self):
-        text = 'Some text <chart>{invalid json}</chart> more text'
+        text = "Some text <chart>{invalid json}</chart> more text"
         cleaned, charts = extract_charts(text)
         assert len(charts) == 0
         assert "Some text" in cleaned
@@ -189,7 +179,6 @@ class TestChartPipeline:
 
 
 class TestBigQueryToolGuardrails:
-
     @pytest.mark.asyncio
     async def test_read_only_enforced(self):
         from app.services.bigquery_service import execute_query
@@ -224,7 +213,6 @@ class TestBigQueryToolGuardrails:
 
 
 class TestSelectAgentIntegration:
-
     @pytest.mark.asyncio
     async def test_select_agent_bi_query(self):
         from app.services.chat.orchestrator import _agent_registry, _select_agent

@@ -72,8 +72,7 @@ class TestGoldenQuerySQL:
         sql_upper = spec["sample_sql"].upper()
         for keyword in spec["expected_sql_contains"]:
             assert keyword.upper() in sql_upper, (
-                f"Golden query {spec['id']} SQL missing '{keyword}': "
-                f"{spec['sample_sql'][:200]}"
+                f"Golden query {spec['id']} SQL missing '{keyword}': {spec['sample_sql'][:200]}"
             )
 
     @pytest.mark.parametrize("spec", GOLDEN_QUERIES, ids=lambda s: s["id"])
@@ -82,8 +81,7 @@ class TestGoldenQuerySQL:
         sql_upper = spec["sample_sql"].upper()
         for keyword in spec["expected_sql_not_contains"]:
             assert keyword.upper() not in sql_upper, (
-                f"Golden query {spec['id']} SQL contains forbidden '{keyword}': "
-                f"{spec['sample_sql'][:200]}"
+                f"Golden query {spec['id']} SQL contains forbidden '{keyword}': {spec['sample_sql'][:200]}"
             )
 
     @pytest.mark.parametrize("spec", GOLDEN_QUERIES, ids=lambda s: s["id"])
@@ -92,8 +90,7 @@ class TestGoldenQuerySQL:
         tables = parse_tables(spec["sample_sql"])
         for expected_table in spec["expected_tables"]:
             assert expected_table.lower() in tables, (
-                f"Golden query {spec['id']} SQL doesn't reference table '{expected_table}'. "
-                f"Found tables: {tables}"
+                f"Golden query {spec['id']} SQL doesn't reference table '{expected_table}'. Found tables: {tables}"
             )
 
     @pytest.mark.parametrize("spec", GOLDEN_QUERIES, ids=lambda s: s["id"])
@@ -102,8 +99,7 @@ class TestGoldenQuerySQL:
         compound_pattern = re.compile(r"(?:SalesOrd|PurchOrd|CustInvc|VendBill):[A-Z]")
         match = compound_pattern.search(spec["sample_sql"])
         assert match is None, (
-            f"Golden query {spec['id']} uses compound status code: {match.group()}. "
-            f"Use single-letter codes instead."
+            f"Golden query {spec['id']} uses compound status code: {match.group()}. Use single-letter codes instead."
         )
 
 
@@ -123,9 +119,7 @@ class TestGoldenQueryJudge:
     def test_tier_2_plus_has_judge_threshold(self, spec):
         """Tier 2+ queries should have meaningful judge thresholds."""
         tier = ImportanceTier(spec["tier"])
-        assert tier.judge_confidence_threshold > 0, (
-            f"Tier {spec['tier']} should have a non-zero judge threshold"
-        )
+        assert tier.judge_confidence_threshold > 0, f"Tier {spec['tier']} should have a non-zero judge threshold"
 
     def test_casual_passes_with_low_confidence(self):
         """Tier 1 queries should always pass regardless of confidence."""

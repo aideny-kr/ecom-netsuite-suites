@@ -3,6 +3,7 @@
 TDD Phase 1: All tests written BEFORE implementation.
 Only depends on AgentResult from base_agent.py — no routing, no registry.
 """
+
 from __future__ import annotations
 
 from pathlib import Path

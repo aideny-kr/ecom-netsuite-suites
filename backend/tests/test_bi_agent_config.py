@@ -19,7 +19,6 @@ def _read_bi_prompt() -> str:
 
 
 class TestBiAgentConfig:
-
     def test_bi_agent_yaml_parses(self):
         config = _load_bi_config()
         assert config is not None
@@ -83,7 +82,6 @@ class TestBiAgentConfig:
 
 
 class TestBiAgentPrompt:
-
     def test_has_bigquery_dialect(self):
         prompt = _read_bi_prompt()
         assert "Standard SQL" in prompt

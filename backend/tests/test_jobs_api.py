@@ -55,15 +55,15 @@ def override_deps(mock_admin, mock_db):
 class TestTriggerJob:
     @pytest.mark.asyncio
     async def test_trigger_knowledge_crawler(self):
-        with patch("app.workers.celery_app.celery_app") as mock_celery, \
-             patch("app.services.audit_service.log_event", new_callable=AsyncMock):
+        with (
+            patch("app.workers.celery_app.celery_app") as mock_celery,
+            patch("app.services.audit_service.log_event", new_callable=AsyncMock),
+        ):
             mock_result = MagicMock()
             mock_result.id = "test-task-id"
             mock_celery.send_task.return_value = mock_result
 
-            async with AsyncClient(
-                transport=ASGITransport(app=app), base_url="http://test"
-            ) as client:
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
                 response = await client.post(
                     "/api/v1/jobs/trigger/knowledge_crawler",
                     headers={"Authorization": "Bearer test"},
@@ -73,15 +73,15 @@ class TestTriggerJob:
 
     @pytest.mark.asyncio
     async def test_trigger_auto_learning(self):
-        with patch("app.workers.celery_app.celery_app") as mock_celery, \
-             patch("app.services.audit_service.log_event", new_callable=AsyncMock):
+        with (
+            patch("app.workers.celery_app.celery_app") as mock_celery,
+            patch("app.services.audit_service.log_event", new_callable=AsyncMock),
+        ):
             mock_result = MagicMock()
             mock_result.id = "test-task-id-2"
             mock_celery.send_task.return_value = mock_result
 
-            async with AsyncClient(
-                transport=ASGITransport(app=app), base_url="http://test"
-            ) as client:
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
                 response = await client.post(
                     "/api/v1/jobs/trigger/auto_learning",
                     headers={"Authorization": "Bearer test"},
@@ -91,9 +91,7 @@ class TestTriggerJob:
 
     @pytest.mark.asyncio
     async def test_trigger_invalid_task(self):
-        async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://test"
-        ) as client:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             response = await client.post(
                 "/api/v1/jobs/trigger/nonexistent_task",
                 headers={"Authorization": "Bearer test"},
@@ -103,9 +101,7 @@ class TestTriggerJob:
     @pytest.mark.asyncio
     async def test_requires_auth(self):
         app.dependency_overrides.clear()
-        async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://test"
-        ) as client:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             response = await client.post("/api/v1/jobs/trigger/knowledge_crawler")
         assert response.status_code in (401, 403)
 
@@ -125,9 +121,7 @@ class TestListSchedules:
                 },
             }
 
-            async with AsyncClient(
-                transport=ASGITransport(app=app), base_url="http://test"
-            ) as client:
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
                 response = await client.get(
                     "/api/v1/jobs/schedules",
                     headers={"Authorization": "Bearer test"},

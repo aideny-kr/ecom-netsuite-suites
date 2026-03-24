@@ -151,6 +151,7 @@ async def accept_invite(
     google_sub = None
     if google_id_token:
         from app.services.google_auth_service import verify_google_token
+
         google_info = await verify_google_token(google_id_token)
         if google_info["email"].lower() != invite.email.lower():
             raise ValueError("Google account email does not match the invitation email.")

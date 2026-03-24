@@ -27,29 +27,33 @@ def _load_configs() -> list[AgentYAMLConfig]:
 class TestFinancialReportsRouteToUnified:
     """Financial report queries must NOT route to bi-agent."""
 
-    @pytest.mark.parametrize("query", [
-        "Give me the income statement for the last 4 months",
-        "Show me the P&L report",
-        "Balance sheet as of March 2026",
-        "What's the profit and loss for Q1?",
-        "Trial balance for February 2026",
-        "Show me the financial statement for this quarter",
-        "Cash flow statement for 2026",
-        "P&L by subsidiary",
-    ])
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "Give me the income statement for the last 4 months",
+            "Show me the P&L report",
+            "Balance sheet as of March 2026",
+            "What's the profit and loss for Q1?",
+            "Trial balance for February 2026",
+            "Show me the financial statement for this quarter",
+            "Cash flow statement for 2026",
+            "P&L by subsidiary",
+        ],
+    )
     def test_pure_financial_does_not_route_to_bi_agent(self, query):
         """Financial queries without BI keywords don't match BI agent patterns."""
         configs = _load_configs()
         router = RuleRouter([(c, True) for c in configs])
         result = router.route(query)
-        assert result != "bi-agent", (
-            f"Financial query '{query}' routed to bi-agent — should be unified-agent"
-        )
+        assert result != "bi-agent", f"Financial query '{query}' routed to bi-agent — should be unified-agent"
 
-    @pytest.mark.parametrize("query", [
-        "Run the income statement with chart",
-        "Compare income statement month over month",
-    ])
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "Run the income statement with chart",
+            "Compare income statement month over month",
+        ],
+    )
     @pytest.mark.asyncio
     async def test_mixed_financial_bi_keywords_still_use_unified(self, query):
         """Queries with both financial AND BI keywords are financial-first.
@@ -74,19 +78,20 @@ class TestFinancialReportsRouteToUnified:
         finally:
             _agent_registry.configs.clear()
 
-    @pytest.mark.parametrize("query", [
-        "What's our revenue by region this quarter?",
-        "Show me monthly sales trends",
-        "Top 10 customers by lifetime value",
-        "Run a BigQuery query on sales data",
-    ])
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "What's our revenue by region this quarter?",
+            "Show me monthly sales trends",
+            "Top 10 customers by lifetime value",
+            "Run a BigQuery query on sales data",
+        ],
+    )
     def test_bi_queries_still_route_to_bi_agent(self, query):
         configs = _load_configs()
         router = RuleRouter([(c, True) for c in configs])
         result = router.route(query)
-        assert result == "bi-agent", (
-            f"BI query '{query}' should route to bi-agent, got '{result}'"
-        )
+        assert result == "bi-agent", f"BI query '{query}' should route to bi-agent, got '{result}'"
 
 
 class TestSelectAgentFinancialPreFilter:

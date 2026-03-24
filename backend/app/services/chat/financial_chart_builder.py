@@ -55,13 +55,15 @@ def _build_income_chart(periods: list[str], by_period: dict) -> ChartData:
     data = []
     for period in periods:
         p = by_period[period]
-        data.append({
-            "period": period,
-            "revenue": p.get("total_revenue", 0),
-            "cogs": p.get("total_cogs", 0),
-            "operating_expenses": p.get("total_operating_expense", 0),
-            "net_income": p.get("net_income", 0),
-        })
+        data.append(
+            {
+                "period": period,
+                "revenue": p.get("total_revenue", 0),
+                "cogs": p.get("total_cogs", 0),
+                "operating_expenses": p.get("total_operating_expense", 0),
+                "net_income": p.get("net_income", 0),
+            }
+        )
 
     return ChartData(
         chart_type="bar",
@@ -84,12 +86,14 @@ def _build_balance_chart(periods: list[str], by_period: dict) -> ChartData:
     data = []
     for period in periods:
         p = by_period[period]
-        data.append({
-            "period": period,
-            "assets": p.get("total_assets", 0),
-            "liabilities": p.get("total_liabilities", 0),
-            "equity": p.get("total_equity", 0),
-        })
+        data.append(
+            {
+                "period": period,
+                "assets": p.get("total_assets", 0),
+                "liabilities": p.get("total_liabilities", 0),
+                "equity": p.get("total_equity", 0),
+            }
+        )
 
     return ChartData(
         chart_type="bar",

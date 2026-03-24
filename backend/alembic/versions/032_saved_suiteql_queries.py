@@ -5,6 +5,7 @@ Revises: 031_domain_knowledge_chunks
 Create Date: 2026-03-02 12:00:00.000000
 
 """
+
 from typing import Sequence, Union
 
 import sqlalchemy as sa

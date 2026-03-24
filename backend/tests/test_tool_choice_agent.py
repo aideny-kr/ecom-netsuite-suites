@@ -15,9 +15,11 @@ async def test_run_passes_tool_choice_on_step_0_only():
     class TestAgent(BaseSpecialistAgent):
         agent_name = "test"
         max_steps = 3
+
         @property
         def system_prompt(self):
             return "test prompt"
+
         @property
         def tool_definitions(self):
             return [{"name": "test_tool", "description": "test", "input_schema": {"type": "object", "properties": {}}}]
@@ -41,12 +43,16 @@ async def test_run_passes_tool_choice_on_step_0_only():
     )
     mock_adapter.create_message = AsyncMock(side_effect=[tool_response, text_response])
     mock_adapter.build_assistant_message = MagicMock(return_value={"role": "assistant", "content": []})
-    mock_adapter.build_tool_result_message = MagicMock(return_value={"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}]})
+    mock_adapter.build_tool_result_message = MagicMock(
+        return_value={"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}]}
+    )
 
-    with patch("app.services.chat.tools.execute_tool_call", new_callable=AsyncMock) as mock_exec, \
-         patch("app.services.chat.agents.base_agent._maybe_store_query_pattern", new_callable=AsyncMock), \
-         patch("app.services.chat.agents.base_agent.extract_structured_confidence", new_callable=AsyncMock) as mock_conf, \
-         patch("app.services.policy_service.get_active_policy", new_callable=AsyncMock, return_value=None):
+    with (
+        patch("app.services.chat.tools.execute_tool_call", new_callable=AsyncMock) as mock_exec,
+        patch("app.services.chat.agents.base_agent._maybe_store_query_pattern", new_callable=AsyncMock),
+        patch("app.services.chat.agents.base_agent.extract_structured_confidence", new_callable=AsyncMock) as mock_conf,
+        patch("app.services.policy_service.get_active_policy", new_callable=AsyncMock, return_value=None),
+    ):
         mock_exec.return_value = '{"success": true, "data": "ok"}'
         mock_conf.return_value = MagicMock(score=4, source="mock")
 
@@ -72,9 +78,11 @@ async def test_run_without_tool_choice_passes_none():
     class TestAgent(BaseSpecialistAgent):
         agent_name = "test"
         max_steps = 1
+
         @property
         def system_prompt(self):
             return "test prompt"
+
         @property
         def tool_definitions(self):
             return []
@@ -85,15 +93,19 @@ async def test_run_without_tool_choice_passes_none():
     agent.correlation_id = "test"
 
     mock_adapter = MagicMock()
-    mock_adapter.create_message = AsyncMock(return_value=LLMResponse(
-        text_blocks=["answer"],
-        tool_use_blocks=[],
-        usage=TokenUsage(input_tokens=10, output_tokens=5),
-    ))
+    mock_adapter.create_message = AsyncMock(
+        return_value=LLMResponse(
+            text_blocks=["answer"],
+            tool_use_blocks=[],
+            usage=TokenUsage(input_tokens=10, output_tokens=5),
+        )
+    )
 
-    with patch("app.services.chat.agents.base_agent._maybe_store_query_pattern", new_callable=AsyncMock), \
-         patch("app.services.chat.agents.base_agent.extract_structured_confidence", new_callable=AsyncMock) as mock_conf, \
-         patch("app.services.policy_service.get_active_policy", new_callable=AsyncMock, return_value=None):
+    with (
+        patch("app.services.chat.agents.base_agent._maybe_store_query_pattern", new_callable=AsyncMock),
+        patch("app.services.chat.agents.base_agent.extract_structured_confidence", new_callable=AsyncMock) as mock_conf,
+        patch("app.services.policy_service.get_active_policy", new_callable=AsyncMock, return_value=None),
+    ):
         mock_conf.return_value = MagicMock(score=4, source="mock")
         await agent.run(
             task="test",

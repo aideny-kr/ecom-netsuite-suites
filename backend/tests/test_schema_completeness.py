@@ -9,10 +9,24 @@ SCHEMA_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "knowledge", "t
 
 def test_all_schema_files_exist():
     required = [
-        "transaction", "transactionline", "transactionaccountingline",
-        "customer", "vendor", "employee", "item", "inventoryitemlocations",
-        "account", "subsidiary", "department", "classification", "location",
-        "currency", "contact", "salesrep", "nexus", "inventorynumber",
+        "transaction",
+        "transactionline",
+        "transactionaccountingline",
+        "customer",
+        "vendor",
+        "employee",
+        "item",
+        "inventoryitemlocations",
+        "account",
+        "subsidiary",
+        "department",
+        "classification",
+        "location",
+        "currency",
+        "contact",
+        "salesrep",
+        "nexus",
+        "inventorynumber",
         "customrecord_template",
     ]
     for table in required:

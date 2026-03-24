@@ -14,14 +14,7 @@ from app.services.chat.agents.agent_registry import AgentRegistry
 from app.services.chat.agents.specialized_agent import SpecializedAgent
 from app.services.chat.routing.rule_router import RuleRouter
 
-CONFIGS_DIR = (
-    Path(__file__).resolve().parent.parent
-    / "app"
-    / "services"
-    / "chat"
-    / "agents"
-    / "configs"
-)
+CONFIGS_DIR = Path(__file__).resolve().parent.parent / "app" / "services" / "chat" / "agents" / "configs"
 
 
 def _make_registry() -> AgentRegistry:
@@ -32,7 +25,6 @@ def _make_registry() -> AgentRegistry:
 
 
 class TestPricingRouting:
-
     def test_pricing_query_routes_to_pricing_agent(self):
         """Real RuleRouter + real pricing config routes pricing queries correctly."""
         registry = _make_registry()
@@ -76,7 +68,6 @@ class TestPricingRouting:
 
 
 class TestPricingAgentInstantiation:
-
     def test_pricing_agent_instantiation(self):
         registry = _make_registry()
         agent = registry.instantiate(
@@ -173,7 +164,6 @@ class TestPricingAgentInstantiation:
 
 
 class TestSelectAgentIntegration:
-
     @pytest.mark.asyncio
     async def test_select_agent_pricing_query(self):
         from app.services.chat.orchestrator import _agent_registry, _select_agent
@@ -209,12 +199,8 @@ class TestSelectAgentIntegration:
             mock_db.execute = AsyncMock(return_value=mock_result)
 
             # Mock semantic router to return unified
-            with patch(
-                "app.services.chat.orchestrator.SemanticRouter"
-            ) as MockSem:
-                MockSem.return_value.route = AsyncMock(
-                    return_value="unified-agent"
-                )
+            with patch("app.services.chat.orchestrator.SemanticRouter") as MockSem:
+                MockSem.return_value.route = AsyncMock(return_value="unified-agent")
                 result = await _select_agent(
                     query="Hello, how are you?",
                     tenant_id=uuid.uuid4(),
@@ -241,7 +227,6 @@ class TestSelectAgentIntegration:
 
 
 class TestBackwardCompatibility:
-
     def test_no_configs_dir_registry_empty(self):
         registry = AgentRegistry()
         registry.load_configs(Path("/nonexistent/path"))

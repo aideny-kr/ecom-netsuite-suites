@@ -8,7 +8,6 @@ CASES_DIR = Path(__file__).resolve().parent / "benchmark_cases"
 
 
 class TestBenchmarkIntegration:
-
     def test_load_pricing_cases(self):
         runner = BenchmarkRunner()
         # Directory uses underscore: pricing_agent/
@@ -57,9 +56,7 @@ class TestBenchmarkIntegration:
             (),
             {
                 "data": " ".join(case.expected_answer_contains),
-                "tool_calls_log": [
-                    {"tool": t} for t in case.expected_tools
-                ],
+                "tool_calls_log": [{"tool": t} for t in case.expected_tools],
             },
         )()
 

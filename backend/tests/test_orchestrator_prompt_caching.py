@@ -1,6 +1,5 @@
 """Tests that the orchestrator uses prompt caching correctly."""
 
-
 from app.services.chat.prompt_cache import split_system_prompt
 
 
@@ -77,11 +76,9 @@ class TestOrchestratorPromptCaching:
         for i, line in enumerate(lines):
             if "adapter.stream_message(" in line:
                 # Grab the next few lines to check what system= is passed
-                context = "\n".join(lines[i:i + 8])
+                context = "\n".join(lines[i : i + 8])
                 stream_contexts.append(context)
 
         for ctx in stream_contexts:
-            assert "system=system_prompt" not in ctx, (
-                f"adapter.stream_message still uses raw system_prompt:\n{ctx}"
-            )
+            assert "system=system_prompt" not in ctx, f"adapter.stream_message still uses raw system_prompt:\n{ctx}"
             assert "prompt_parts.static" in ctx

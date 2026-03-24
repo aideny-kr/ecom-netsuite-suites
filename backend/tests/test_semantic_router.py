@@ -23,15 +23,16 @@ def _mock_adapter(response_text: str) -> AsyncMock:
     mock_response.text_blocks = [response_text]
     mock_response.tool_use_blocks = []
     mock_response.usage = MagicMock(
-        input_tokens=100, output_tokens=10,
-        cache_creation_input_tokens=0, cache_read_input_tokens=0,
+        input_tokens=100,
+        output_tokens=10,
+        cache_creation_input_tokens=0,
+        cache_read_input_tokens=0,
     )
     adapter.create_message = AsyncMock(return_value=mock_response)
     return adapter
 
 
 class TestSemanticRouter:
-
     @pytest.mark.asyncio
     async def test_returns_agent_id_from_llm(self):
         adapter = _mock_adapter("pricing-agent")

@@ -6,7 +6,6 @@ import pytest
 
 
 class TestExecuteQuery:
-
     @pytest.mark.asyncio
     async def test_returns_columns_and_rows(self):
         from app.services.bigquery_service import execute_query
@@ -87,48 +86,56 @@ class TestExecuteQuery:
     @pytest.mark.asyncio
     async def test_rejects_insert(self):
         from app.services.bigquery_service import execute_query
+
         with pytest.raises(ValueError, match="[Rr]ead.only"):
             await execute_query({"type": "service_account"}, "p", "INSERT INTO t VALUES (1)")
 
     @pytest.mark.asyncio
     async def test_rejects_update(self):
         from app.services.bigquery_service import execute_query
+
         with pytest.raises(ValueError, match="[Rr]ead.only"):
             await execute_query({"type": "service_account"}, "p", "UPDATE t SET x=1")
 
     @pytest.mark.asyncio
     async def test_rejects_delete(self):
         from app.services.bigquery_service import execute_query
+
         with pytest.raises(ValueError, match="[Rr]ead.only"):
             await execute_query({"type": "service_account"}, "p", "DELETE FROM t WHERE id=1")
 
     @pytest.mark.asyncio
     async def test_rejects_drop(self):
         from app.services.bigquery_service import execute_query
+
         with pytest.raises(ValueError, match="[Rr]ead.only"):
             await execute_query({"type": "service_account"}, "p", "DROP TABLE t")
 
     @pytest.mark.asyncio
     async def test_rejects_create(self):
         from app.services.bigquery_service import execute_query
+
         with pytest.raises(ValueError, match="[Rr]ead.only"):
             await execute_query({"type": "service_account"}, "p", "CREATE TABLE t (id INT)")
 
     @pytest.mark.asyncio
     async def test_rejects_merge(self):
         from app.services.bigquery_service import execute_query
+
         with pytest.raises(ValueError, match="[Rr]ead.only"):
             await execute_query({"type": "service_account"}, "p", "MERGE INTO t USING s ON t.id=s.id")
 
     @pytest.mark.asyncio
     async def test_rejects_truncate(self):
         from app.services.bigquery_service import execute_query
+
         with pytest.raises(ValueError, match="[Rr]ead.only"):
             await execute_query({"type": "service_account"}, "p", "TRUNCATE TABLE t")
 
     @pytest.mark.asyncio
     async def test_case_insensitive_reject(self):
         from app.services.bigquery_service import execute_query
+
         with pytest.raises(ValueError, match="[Rr]ead.only"):
             await execute_query({"type": "service_account"}, "p", "insert INTO t VALUES (1)")
 
@@ -165,7 +172,9 @@ class TestExecuteQuery:
 
         with patch("app.services.bigquery_service._get_client") as m:
             m.return_value.query.return_value = mock_job
-            result = await execute_query({"type": "service_account"}, "p", "WITH cte AS (SELECT 1 AS x) SELECT * FROM cte")
+            result = await execute_query(
+                {"type": "service_account"}, "p", "WITH cte AS (SELECT 1 AS x) SELECT * FROM cte"
+            )
         assert "columns" in result
 
     @pytest.mark.asyncio
@@ -208,7 +217,6 @@ class TestExecuteQuery:
 
 
 class TestDiscoverSchema:
-
     @pytest.mark.asyncio
     async def test_returns_datasets(self):
         from app.services.bigquery_service import discover_schema
@@ -256,7 +264,6 @@ class TestDiscoverSchema:
 
 
 class TestValidateConnection:
-
     @pytest.mark.asyncio
     async def test_success(self):
         from app.services.bigquery_service import validate_connection
@@ -284,7 +291,6 @@ class TestValidateConnection:
 
 
 class TestEstimateQueryCost:
-
     @pytest.mark.asyncio
     async def test_estimate_returns_bytes_and_cost(self):
         from app.services.bigquery_service import estimate_query_cost
@@ -314,7 +320,6 @@ class TestEstimateQueryCost:
 
 
 class TestServiceAccountCredentials:
-
     @pytest.mark.asyncio
     async def test_uses_service_account_info(self):
         from app.services.bigquery_service import _get_client

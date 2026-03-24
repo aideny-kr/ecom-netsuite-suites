@@ -25,7 +25,6 @@ def _write_yaml_config(tmp_path: Path, agent_id: str, **extra) -> Path:
 
 
 class TestAgentRegistryLoading:
-
     def test_load_configs_from_directory(self, tmp_path):
         _write_yaml_config(tmp_path, "pricing-agent")
         _write_yaml_config(tmp_path, "inventory-agent")
@@ -44,7 +43,6 @@ class TestAgentRegistryLoading:
 
 
 class TestAgentRegistryEnabled:
-
     @pytest.mark.asyncio
     async def test_get_enabled_agents_all_by_default(self, tmp_path):
         _write_yaml_config(tmp_path, "pricing-agent")
@@ -85,7 +83,6 @@ class TestAgentRegistryEnabled:
 
 
 class TestAgentRegistryInstantiate:
-
     def test_instantiate_returns_specialized_agent(self, tmp_path):
         _write_yaml_config(tmp_path, "pricing-agent", tool_ids=["netsuite_suiteql"])
         registry = AgentRegistry()
@@ -128,7 +125,6 @@ class TestAgentRegistryInstantiate:
 
 
 class TestAgentRegistryHealth:
-
     def test_agent_healthy_true_below_threshold(self):
         registry = AgentRegistry()
         assert registry.is_healthy(error_count=2, success_count=98) is True

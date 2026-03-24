@@ -81,7 +81,7 @@ def parse_oracle_help(html: str) -> ParsedContent:
 
     # Extract code blocks before getting text
     code_blocks = []
-    for pre in (main.find_all("pre") if main else []):
+    for pre in main.find_all("pre") if main else []:
         code_blocks.append(pre.get_text())
 
     body_text = main.get_text("\n", strip=True) if main else ""
@@ -114,7 +114,7 @@ def parse_blog(html: str) -> ParsedContent:
     )
 
     code_blocks = []
-    for pre in (article.find_all(["pre", "code"]) if article else []):
+    for pre in article.find_all(["pre", "code"]) if article else []:
         code_text = pre.get_text()
         if len(code_text) > 20:  # Skip tiny inline code
             code_blocks.append(code_text)
@@ -178,29 +178,35 @@ def chunk_parsed_content(
         if is_code and para_tokens > 600:
             # Code block exceeds max — still keep it intact (spec says never split SQL)
             if current_tokens > prefix_tokens:
-                chunks.append(ChunkData(
-                    content=current_chunk.strip(),
-                    token_count=current_tokens,
-                    metadata={"source": source_name, "url": url, "title": content.title},
-                ))
+                chunks.append(
+                    ChunkData(
+                        content=current_chunk.strip(),
+                        token_count=current_tokens,
+                        metadata={"source": source_name, "url": url, "title": content.title},
+                    )
+                )
                 current_chunk = prefix
                 current_tokens = prefix_tokens
 
-            chunks.append(ChunkData(
-                content=prefix + para,
-                token_count=prefix_tokens + para_tokens,
-                metadata={"source": source_name, "url": url, "title": content.title, "type": "code_block"},
-            ))
+            chunks.append(
+                ChunkData(
+                    content=prefix + para,
+                    token_count=prefix_tokens + para_tokens,
+                    metadata={"source": source_name, "url": url, "title": content.title, "type": "code_block"},
+                )
+            )
             continue
 
         if current_tokens + para_tokens > 600:
             # Flush current chunk
             if current_tokens > prefix_tokens:
-                chunks.append(ChunkData(
-                    content=current_chunk.strip(),
-                    token_count=current_tokens,
-                    metadata={"source": source_name, "url": url, "title": content.title},
-                ))
+                chunks.append(
+                    ChunkData(
+                        content=current_chunk.strip(),
+                        token_count=current_tokens,
+                        metadata={"source": source_name, "url": url, "title": content.title},
+                    )
+                )
             current_chunk = prefix + para + "\n\n"
             current_tokens = prefix_tokens + para_tokens
         else:
@@ -209,11 +215,13 @@ def chunk_parsed_content(
 
     # Flush remaining
     if current_tokens > prefix_tokens:
-        chunks.append(ChunkData(
-            content=current_chunk.strip(),
-            token_count=current_tokens,
-            metadata={"source": source_name, "url": url, "title": content.title},
-        ))
+        chunks.append(
+            ChunkData(
+                content=current_chunk.strip(),
+                token_count=current_tokens,
+                metadata={"source": source_name, "url": url, "title": content.title},
+            )
+        )
 
     return chunks
 
@@ -233,7 +241,7 @@ async def discover_urls(source: KnowledgeSource, client: httpx.AsyncClient) -> l
                 if any(re.match(source.base_url + pat.replace("*", ".*"), url) for pat in source.url_patterns):
                     urls.append(url)
             if urls:
-                return urls[:source.max_pages_per_run]
+                return urls[: source.max_pages_per_run]
     except Exception as e:
         logger.debug("crawler.url_discovery_failed", url=sitemap_url, error=str(e))
 
@@ -241,18 +249,22 @@ async def discover_urls(source: KnowledgeSource, client: httpx.AsyncClient) -> l
     listing_urls = [source.base_url]
     # Add common blog tag/category pages for broader discovery
     if "timdietrich" in source.base_url:
-        listing_urls.extend([
-            f"{source.base_url}/blog/?tag=NetSuite",
-            f"{source.base_url}/blog/?tag=SuiteQL",
-            f"{source.base_url}/blog/?tag=SuiteScript",
-        ])
+        listing_urls.extend(
+            [
+                f"{source.base_url}/blog/?tag=NetSuite",
+                f"{source.base_url}/blog/?tag=SuiteQL",
+                f"{source.base_url}/blog/?tag=SuiteScript",
+            ]
+        )
     if "reddit" in source.base_url:
-        listing_urls.extend([
-            f"{source.base_url}/r/Netsuite/top/?t=year",
-            f"{source.base_url}/r/Netsuite/search?q=suiteql&restrict_sr=on&sort=top&t=all",
-            f"{source.base_url}/r/Netsuite/search?q=suitescript&restrict_sr=on&sort=top&t=all",
-            f"{source.base_url}/r/Netsuite/search?q=custom+record&restrict_sr=on&sort=top&t=all",
-        ])
+        listing_urls.extend(
+            [
+                f"{source.base_url}/r/Netsuite/top/?t=year",
+                f"{source.base_url}/r/Netsuite/search?q=suiteql&restrict_sr=on&sort=top&t=all",
+                f"{source.base_url}/r/Netsuite/search?q=suitescript&restrict_sr=on&sort=top&t=all",
+                f"{source.base_url}/r/Netsuite/search?q=custom+record&restrict_sr=on&sort=top&t=all",
+            ]
+        )
 
     for listing_url in listing_urls:
         try:
@@ -268,7 +280,7 @@ async def discover_urls(source: KnowledgeSource, client: httpx.AsyncClient) -> l
         except Exception as e:
             logger.debug("crawler.url_discovery_failed", url=listing_url, error=str(e))
 
-    return list(dict.fromkeys(urls))[:source.max_pages_per_run]  # dedupe, cap
+    return list(dict.fromkeys(urls))[: source.max_pages_per_run]  # dedupe, cap
 
 
 async def crawl_source(source: KnowledgeSource, db: AsyncSession) -> CrawlResult:
@@ -292,11 +304,7 @@ async def crawl_source(source: KnowledgeSource, db: AsyncSession) -> CrawlResult
                 url_hash = hashlib.sha256(url.encode()).hexdigest()[:12]
                 source_path = f"crawled/{source.name}/{url_hash}"
 
-                existing = await db.execute(
-                    select(DocChunk)
-                    .where(DocChunk.source_path == source_path)
-                    .limit(1)
-                )
+                existing = await db.execute(select(DocChunk).where(DocChunk.source_path == source_path).limit(1))
                 existing_chunk = existing.scalar_one_or_none()
 
                 # Fetch page
@@ -331,9 +339,7 @@ async def crawl_source(source: KnowledgeSource, db: AsyncSession) -> CrawlResult
 
                 # Delete old chunks for this URL (if re-crawling)
                 if existing_chunk:
-                    old_chunks = await db.execute(
-                        select(DocChunk).where(DocChunk.source_path == source_path)
-                    )
+                    old_chunks = await db.execute(select(DocChunk).where(DocChunk.source_path == source_path))
                     for old in old_chunks.scalars():
                         await db.delete(old)
                     result.chunks_updated += len(chunks)

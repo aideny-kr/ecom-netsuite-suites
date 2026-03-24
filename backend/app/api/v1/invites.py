@@ -61,9 +61,7 @@ class InviteAcceptInfo(BaseModel):
 
 async def _get_tenant_name(db: AsyncSession, tenant_id: uuid.UUID) -> str:
     """Return the brand name or tenant name for display."""
-    config_result = await db.execute(
-        select(TenantConfig.brand_name).where(TenantConfig.tenant_id == tenant_id)
-    )
+    config_result = await db.execute(select(TenantConfig.brand_name).where(TenantConfig.tenant_id == tenant_id))
     brand_name = config_result.scalar_one_or_none()
     if brand_name:
         return brand_name

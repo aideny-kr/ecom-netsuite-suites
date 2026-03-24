@@ -166,11 +166,13 @@ async def retriever_node(state: OrchestratorState, db: AsyncSession) -> None:
         for dk in dk_results:
             # Convert domain_knowledge format to doc_chunk format
             source = dk.get("source_uri", "")
-            merged.append({
-                "title": source.replace("golden_dataset/", "").replace(".md", "").replace("-", " ").title(),
-                "content": dk["raw_text"],
-                "source_path": source,
-            })
+            merged.append(
+                {
+                    "title": source.replace("golden_dataset/", "").replace(".md", "").replace("-", " ").title(),
+                    "content": dk["raw_text"],
+                    "source_path": source,
+                }
+            )
 
         if not merged:
             # Keyword fallback on doc_chunks only

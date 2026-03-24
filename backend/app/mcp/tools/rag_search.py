@@ -131,13 +131,15 @@ async def execute(params: dict[str, Any], context: dict[str, Any] | None = None,
                     kw_hits = sum(1 for kw in query_keywords if kw in chunk.raw_text.lower()) if query_keywords else 0
 
                     if chunk.source_uri not in seen_paths:
-                        results.append({
-                            "title": f"[Knowledge] {chunk.source_uri.split('/')[-1].replace('.md', '').replace('-', ' ').title()}",
-                            "content": chunk.raw_text[:2000],
-                            "source_path": chunk.source_uri,
-                            "similarity_score": similarity,
-                            "keyword_hits": kw_hits,
-                        })
+                        results.append(
+                            {
+                                "title": f"[Knowledge] {chunk.source_uri.split('/')[-1].replace('.md', '').replace('-', ' ').title()}",
+                                "content": chunk.raw_text[:2000],
+                                "source_path": chunk.source_uri,
+                                "similarity_score": similarity,
+                                "keyword_hits": kw_hits,
+                            }
+                        )
                         seen_paths.add(chunk.source_uri)
         except Exception:
             logger.warning("rag_search: domain knowledge search failed, continuing with doc results", exc_info=True)
@@ -152,7 +154,9 @@ async def execute(params: dict[str, Any], context: dict[str, Any] | None = None,
                         results.append(kr)
                         seen_paths.add(kr["source_path"])
             except Exception:
-                logger.warning("rag_search: keyword supplement failed, continuing with vector/domain results", exc_info=True)
+                logger.warning(
+                    "rag_search: keyword supplement failed, continuing with vector/domain results", exc_info=True
+                )
 
         # Prioritise keyword-matched tenant docs over low-similarity system docs
         # by sorting: tenant keyword hits first, then vector similarity

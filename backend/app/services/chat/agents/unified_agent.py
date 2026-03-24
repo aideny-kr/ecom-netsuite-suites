@@ -41,8 +41,7 @@ _PROVIDER_DESCRIPTIONS: dict[str, str | None] = {
         "and fulfillments. Use for ecommerce-specific queries."
     ),
     "stripe_mcp": (
-        "Stripe Payments — charges, subscriptions, invoices, refunds, and payouts. "
-        "Use for payment and billing queries."
+        "Stripe Payments — charges, subscriptions, invoices, refunds, and payouts. Use for payment and billing queries."
     ),
     "custom": None,  # Falls back to connector.label
 }
@@ -131,10 +130,12 @@ _SCRIPT_KEYWORDS = re.compile(
 )
 
 # Financial-mode tools — only these are exposed when handling financial queries
-_FINANCIAL_TOOL_NAMES = frozenset({
-    "netsuite_report",
-    "rag_search",
-})
+_FINANCIAL_TOOL_NAMES = frozenset(
+    {
+        "netsuite_report",
+        "rag_search",
+    }
+)
 
 # Superset of all specialist tools
 _UNIFIED_TOOL_NAMES = frozenset(
@@ -711,9 +712,9 @@ class UnifiedAgent(BaseSpecialistAgent):
         if self._context_need == "full":
             # Remove entire XML blocks that add noise for investigation
             for tag in (
-                "common_queries",      # anti-enrichment, aggregation discipline, item gotchas
-                "workspace_rules",     # SuiteScript rules — not relevant
-                "rag_search_tips",     # search tips — not relevant
+                "common_queries",  # anti-enrichment, aggregation discipline, item gotchas
+                "workspace_rules",  # SuiteScript rules — not relevant
+                "rag_search_tips",  # search tips — not relevant
             ):
                 base = re.sub(rf"<{tag}>.*?</{tag}>", "", base, flags=re.DOTALL)
 
@@ -1009,7 +1010,12 @@ class UnifiedAgent(BaseSpecialistAgent):
         if financial_mode:
             self._tool_defs = self.financial_tool_definitions
         async for event in super().run_streaming(
-            task, context, db, adapter, model, conversation_history,
+            task,
+            context,
+            db,
+            adapter,
+            model,
+            conversation_history,
             tool_choice=tool_choice,
             tool_result_interceptor=tool_result_interceptor,
         ):

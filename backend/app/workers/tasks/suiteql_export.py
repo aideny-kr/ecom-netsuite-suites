@@ -67,9 +67,9 @@ def export_suiteql_to_csv(
     import re
 
     base_query = re.sub(
-        r'\s+FETCH\s+FIRST\s+\d+\s+ROWS\s+ONLY\s*$',
-        '',
-        query_text.rstrip().rstrip(';'),
+        r"\s+FETCH\s+FIRST\s+\d+\s+ROWS\s+ONLY\s*$",
+        "",
+        query_text.rstrip().rstrip(";"),
         flags=re.IGNORECASE,
     )
 
@@ -77,8 +77,11 @@ def export_suiteql_to_csv(
     try:
         result = loop.run_until_complete(
             execute_suiteql_via_rest(
-                access_token, account_id, base_query,
-                limit=100_000, paginate=True,
+                access_token,
+                account_id,
+                base_query,
+                limit=100_000,
+                paginate=True,
             )
         )
         columns = result.get("columns", [])

@@ -24,8 +24,11 @@ class TestPivotBasic:
         ]
 
         out_cols, out_rows = pivot_rows(
-            columns=columns, rows=rows,
-            row_field="week", column_field="platform", value_field="qty",
+            columns=columns,
+            rows=rows,
+            row_field="week",
+            column_field="platform",
+            value_field="qty",
         )
 
         # Columns sorted alphabetically
@@ -46,8 +49,11 @@ class TestRefurbishedVariants:
         ]
 
         out_cols, out_rows = pivot_rows(
-            columns=columns, rows=rows,
-            row_field="week", column_field="platform", value_field="qty",
+            columns=columns,
+            rows=rows,
+            row_field="week",
+            column_field="platform",
+            value_field="qty",
         )
 
         assert "Lotus" in out_cols
@@ -65,8 +71,11 @@ class TestZeroDataExcluded:
         ]
 
         out_cols, out_rows = pivot_rows(
-            columns=columns, rows=rows,
-            row_field="week", column_field="platform", value_field="qty",
+            columns=columns,
+            rows=rows,
+            row_field="week",
+            column_field="platform",
+            value_field="qty",
         )
 
         assert "Bamboo" not in out_cols
@@ -84,8 +93,11 @@ class TestAggregation:
         ]
 
         out_cols, out_rows = pivot_rows(
-            columns=columns, rows=rows,
-            row_field="week", column_field="platform", value_field="qty",
+            columns=columns,
+            rows=rows,
+            row_field="week",
+            column_field="platform",
+            value_field="qty",
             aggregation="sum",
         )
 
@@ -99,8 +111,11 @@ class TestAggregation:
         ]
 
         out_cols, out_rows = pivot_rows(
-            columns=columns, rows=rows,
-            row_field="week", column_field="platform", value_field="qty",
+            columns=columns,
+            rows=rows,
+            row_field="week",
+            column_field="platform",
+            value_field="qty",
             aggregation="count",
         )
 
@@ -113,8 +128,11 @@ class TestNoTotal:
         rows = [["W01", "Azalea", "100"]]
 
         out_cols, out_rows = pivot_rows(
-            columns=columns, rows=rows,
-            row_field="week", column_field="platform", value_field="qty",
+            columns=columns,
+            rows=rows,
+            row_field="week",
+            column_field="platform",
+            value_field="qty",
             include_total=False,
         )
 
@@ -127,8 +145,11 @@ class TestEdgeCases:
         rows = []
 
         out_cols, out_rows = pivot_rows(
-            columns=columns, rows=rows,
-            row_field="week", column_field="platform", value_field="qty",
+            columns=columns,
+            rows=rows,
+            row_field="week",
+            column_field="platform",
+            value_field="qty",
         )
 
         assert out_cols == ["week"]
@@ -140,8 +161,11 @@ class TestEdgeCases:
 
         with pytest.raises(ValueError, match="not found"):
             pivot_rows(
-                columns=columns, rows=rows,
-                row_field="week", column_field="NONEXISTENT", value_field="qty",
+                columns=columns,
+                rows=rows,
+                row_field="week",
+                column_field="NONEXISTENT",
+                value_field="qty",
             )
 
     def test_null_values_treated_as_zero(self):
@@ -152,8 +176,11 @@ class TestEdgeCases:
         ]
 
         out_cols, out_rows = pivot_rows(
-            columns=columns, rows=rows,
-            row_field="week", column_field="platform", value_field="qty",
+            columns=columns,
+            rows=rows,
+            row_field="week",
+            column_field="platform",
+            value_field="qty",
         )
 
         azalea_idx = out_cols.index("Azalea")
@@ -169,8 +196,11 @@ class TestEdgeCases:
         ]
 
         out_cols, out_rows = pivot_rows(
-            columns=columns, rows=rows,
-            row_field="week", column_field="platform", value_field="qty",
+            columns=columns,
+            rows=rows,
+            row_field="week",
+            column_field="platform",
+            value_field="qty",
         )
 
         assert [r[0] for r in out_rows] == ["W03", "W01", "W02"]

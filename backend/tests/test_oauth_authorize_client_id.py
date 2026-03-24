@@ -14,6 +14,7 @@ import pytest
 def auth_headers():
     """Create valid JWT auth headers for testing."""
     from app.core.security import create_access_token
+
     token = create_access_token(
         user_id=str(uuid.uuid4()),
         tenant_id=str(uuid.uuid4()),
@@ -50,9 +51,7 @@ class TestAuthorizeEndpointClientId:
         from app.services.netsuite_oauth_service import build_authorize_url
 
         sig = inspect.signature(build_authorize_url)
-        assert "client_id" in sig.parameters, (
-            "build_authorize_url must accept client_id parameter"
-        )
+        assert "client_id" in sig.parameters, "build_authorize_url must accept client_id parameter"
 
 
 class TestCallbackStoresClientId:

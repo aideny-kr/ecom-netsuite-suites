@@ -358,7 +358,6 @@ async def execute(params: dict, context: dict | None = None, **kwargs) -> dict:
     except ValueError as exc:
         return {"error": True, "message": str(exc)}
 
-
     # --- Enforce limit ---
     # Internal callers (e.g. financial_report tool) can set skip_limit_cap=True
     # via **kwargs to bypass the global max. NOT read from params to prevent
@@ -386,7 +385,10 @@ async def execute(params: dict, context: dict | None = None, **kwargs) -> dict:
 
         try:
             result = await execute_suiteql(
-                access_token, account_id, query, max_rows,
+                access_token,
+                account_id,
+                query,
+                max_rows,
                 paginate=True,
                 timeout_seconds=timeout_seconds,
             )

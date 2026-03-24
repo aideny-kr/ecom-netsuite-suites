@@ -37,7 +37,9 @@ class TestParseBlog:
         assert "Content" in result.body_text
 
     def test_extracts_published_date(self):
-        html = "<html><body><time datetime='2026-01-15'>Jan 15</time><article><h1>T</h1><p>C</p></article></body></html>"
+        html = (
+            "<html><body><time datetime='2026-01-15'>Jan 15</time><article><h1>T</h1><p>C</p></article></body></html>"
+        )
         result = parse_blog(html)
         assert result.published_date == "2026-01-15"
 

@@ -35,11 +35,13 @@ def _make_metadata(**kwargs):
 class TestLocationSeeding:
     def test_locations_are_seeded(self):
         """Location names must be seeded so 'Panurgy' resolves to a location, not a custom field."""
-        meta = _make_metadata(locations=[
-            {"id": 69, "name": "Panurgy"},
-            {"id": 20, "name": "Compal"},
-            {"id": 25, "name": "Goods In"},
-        ])
+        meta = _make_metadata(
+            locations=[
+                {"id": 69, "name": "Panurgy"},
+                {"id": 20, "name": "Compal"},
+                {"id": 25, "name": "Goods In"},
+            ]
+        )
         rows = _build_rows(uuid.uuid4(), meta)
         location_rows = [r for r in rows if r["entity_type"] == "location"]
         assert len(location_rows) == 3
@@ -49,9 +51,11 @@ class TestLocationSeeding:
 
     def test_location_with_parent(self):
         """Locations with parent (sublocation) should include full name."""
-        meta = _make_metadata(locations=[
-            {"id": 35, "name": "Consumables", "parent": "Dimerco"},
-        ])
+        meta = _make_metadata(
+            locations=[
+                {"id": 35, "name": "Consumables", "parent": "Dimerco"},
+            ]
+        )
         rows = _build_rows(uuid.uuid4(), meta)
         location_rows = [r for r in rows if r["entity_type"] == "location"]
         assert len(location_rows) == 1
@@ -60,10 +64,12 @@ class TestLocationSeeding:
 
 class TestSubsidiarySeeding:
     def test_subsidiaries_are_seeded(self):
-        meta = _make_metadata(subsidiaries=[
-            {"id": 1, "name": "Framework Computer Inc"},
-            {"id": 5, "name": "Framework Computer GmbH"},
-        ])
+        meta = _make_metadata(
+            subsidiaries=[
+                {"id": 1, "name": "Framework Computer Inc"},
+                {"id": 5, "name": "Framework Computer GmbH"},
+            ]
+        )
         rows = _build_rows(uuid.uuid4(), meta)
         sub_rows = [r for r in rows if r["entity_type"] == "subsidiary"]
         assert len(sub_rows) == 2
@@ -72,10 +78,12 @@ class TestSubsidiarySeeding:
 
 class TestDepartmentSeeding:
     def test_departments_are_seeded(self):
-        meta = _make_metadata(departments=[
-            {"id": 3, "name": "Engineering"},
-            {"id": 7, "name": "Operations"},
-        ])
+        meta = _make_metadata(
+            departments=[
+                {"id": 3, "name": "Engineering"},
+                {"id": 7, "name": "Operations"},
+            ]
+        )
         rows = _build_rows(uuid.uuid4(), meta)
         dept_rows = [r for r in rows if r["entity_type"] == "department"]
         assert len(dept_rows) == 2
@@ -83,10 +91,12 @@ class TestDepartmentSeeding:
 
 class TestClassificationSeeding:
     def test_classifications_are_seeded(self):
-        meta = _make_metadata(classifications=[
-            {"id": 1, "name": "Laptop"},
-            {"id": 2, "name": "Accessory"},
-        ])
+        meta = _make_metadata(
+            classifications=[
+                {"id": 1, "name": "Laptop"},
+                {"id": 2, "name": "Accessory"},
+            ]
+        )
         rows = _build_rows(uuid.uuid4(), meta)
         class_rows = [r for r in rows if r["entity_type"] == "classification"]
         assert len(class_rows) == 2

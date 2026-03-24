@@ -12,6 +12,7 @@ class TestFinancialPermissionGating:
         mock_hp = AsyncMock(return_value=True)
         with patch("app.core.dependencies.has_permission", mock_hp):
             from app.core.dependencies import has_permission
+
             result = await has_permission(AsyncMock(), "fake-user-id", "chat.financial_reports")
             assert result is True
             mock_hp.assert_called_once()
@@ -22,5 +23,6 @@ class TestFinancialPermissionGating:
         mock_hp = AsyncMock(return_value=False)
         with patch("app.core.dependencies.has_permission", mock_hp):
             from app.core.dependencies import has_permission
+
             result = await has_permission(AsyncMock(), "fake-user-id", "chat.financial_reports")
             assert result is False

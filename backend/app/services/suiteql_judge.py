@@ -175,9 +175,7 @@ def enforce_judge_threshold(
 
     # Casual tier: always pass (existing fail-open behavior)
     if tier == ImportanceTier.CASUAL:
-        return EnforcementResult(
-            passed=True, tier=tier.label, needs_review=False, reason=verdict.reason
-        )
+        return EnforcementResult(passed=True, tier=tier.label, needs_review=False, reason=verdict.reason)
 
     # Tier 2+: disapproved verdict always fails
     if not verdict.approved:
@@ -197,6 +195,4 @@ def enforce_judge_threshold(
     else:
         reason = f"Confidence {verdict.confidence:.2f} below threshold {threshold:.2f} for {tier.label} tier"
 
-    return EnforcementResult(
-        passed=passed, tier=tier.label, needs_review=needs_review, reason=reason
-    )
+    return EnforcementResult(passed=passed, tier=tier.label, needs_review=needs_review, reason=reason)

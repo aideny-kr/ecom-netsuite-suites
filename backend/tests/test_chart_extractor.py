@@ -1,6 +1,5 @@
 """Tests for chart extraction from agent response text."""
 
-
 from app.schemas.chart import ChartData
 from app.services.chat.chart_extractor import extract_charts
 
@@ -12,7 +11,6 @@ VALID_PIE_JSON = '{"chart_type": "pie", "title": "Market Share", "x_axis": {"lab
 
 
 class TestExtractCharts:
-
     def test_extract_single_chart(self):
         text = f"Here are the results.\n<chart>{VALID_CHART_JSON}</chart>\nSummary follows."
         cleaned, charts = extract_charts(text)
@@ -49,29 +47,29 @@ class TestExtractCharts:
         assert len(chart.data) == 2
 
     def test_chart_type_bar(self):
-        text = f'<chart>{VALID_CHART_JSON}</chart>'
+        text = f"<chart>{VALID_CHART_JSON}</chart>"
         _, charts = extract_charts(text)
         assert charts[0].chart_type == "bar"
 
     def test_chart_type_line(self):
-        text = f'<chart>{VALID_LINE_JSON}</chart>'
+        text = f"<chart>{VALID_LINE_JSON}</chart>"
         _, charts = extract_charts(text)
         assert charts[0].chart_type == "line"
 
     def test_chart_type_pie(self):
-        text = f'<chart>{VALID_PIE_JSON}</chart>'
+        text = f"<chart>{VALID_PIE_JSON}</chart>"
         _, charts = extract_charts(text)
         assert charts[0].chart_type == "pie"
 
     def test_chart_type_invalid_defaults_to_bar(self):
         bad_json = '{"chart_type": "sunburst", "title": "T", "x_axis": {"label": "X", "key": "x"}, "y_axes": [{"label": "Y", "key": "y"}], "data": [{"x": 1, "y": 2}]}'
-        text = f'<chart>{bad_json}</chart>'
+        text = f"<chart>{bad_json}</chart>"
         _, charts = extract_charts(text)
         assert len(charts) == 1
         assert charts[0].chart_type == "bar"
 
     def test_chart_data_array(self):
-        text = f'<chart>{VALID_CHART_JSON}</chart>'
+        text = f"<chart>{VALID_CHART_JSON}</chart>"
         _, charts = extract_charts(text)
         assert len(charts[0].data) == 2
 
@@ -89,13 +87,13 @@ class TestExtractCharts:
 
     def test_chart_options_parsed(self):
         json_with_opts = '{"chart_type": "bar", "title": "T", "x_axis": {"label": "X", "key": "x"}, "y_axes": [{"label": "Y", "key": "y"}], "data": [{"x": 1}], "options": {"stacked": true, "show_legend": false}}'
-        text = f'<chart>{json_with_opts}</chart>'
+        text = f"<chart>{json_with_opts}</chart>"
         _, charts = extract_charts(text)
         assert charts[0].options is not None
         assert charts[0].options.stacked is True
         assert charts[0].options.show_legend is False
 
     def test_chart_options_optional(self):
-        text = f'<chart>{VALID_CHART_JSON}</chart>'
+        text = f"<chart>{VALID_CHART_JSON}</chart>"
         _, charts = extract_charts(text)
         assert charts[0].options is None

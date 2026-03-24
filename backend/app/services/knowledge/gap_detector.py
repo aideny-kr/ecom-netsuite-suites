@@ -23,15 +23,39 @@ APOLOGY_MARKERS = [
 ]
 
 NETSUITE_RECORD_TYPES = [
-    "rma", "return authorization", "rtnauth",
-    "item receipt", "itemrcpt", "item fulfillment", "itemship",
-    "purchase order", "purchord", "vendor bill", "vendbill",
-    "sales order", "salesord", "invoice", "custinvc",
-    "credit memo", "custcred", "customer payment", "custpymt",
-    "transfer order", "trnfrord", "work order", "workord",
-    "assembly build", "journal entry", "deposit", "estimate",
-    "opportunity", "vendor credit", "inventory adjustment",
-    "inventory transfer", "bin transfer", "custom record",
+    "rma",
+    "return authorization",
+    "rtnauth",
+    "item receipt",
+    "itemrcpt",
+    "item fulfillment",
+    "itemship",
+    "purchase order",
+    "purchord",
+    "vendor bill",
+    "vendbill",
+    "sales order",
+    "salesord",
+    "invoice",
+    "custinvc",
+    "credit memo",
+    "custcred",
+    "customer payment",
+    "custpymt",
+    "transfer order",
+    "trnfrord",
+    "work order",
+    "workord",
+    "assembly build",
+    "journal entry",
+    "deposit",
+    "estimate",
+    "opportunity",
+    "vendor credit",
+    "inventory adjustment",
+    "inventory transfer",
+    "bin transfer",
+    "custom record",
 ]
 
 
@@ -160,13 +184,10 @@ async def detect_knowledge_gaps(
 
     # Check RAG coverage for each gap
     filtered_gaps = []
-    for gap in sorted(gaps.values(), key=lambda g: g.gap_score, reverse=True)[:max_gaps * 2]:
+    for gap in sorted(gaps.values(), key=lambda g: g.gap_score, reverse=True)[: max_gaps * 2]:
         # Search for existing coverage
         topic_escaped = gap.topic[:30].replace("%", "\\%").replace("_", "\\_")
-        coverage = await db.execute(
-            select(func.count(DocChunk.id))
-            .where(DocChunk.content.ilike(f"%{topic_escaped}%"))
-        )
+        coverage = await db.execute(select(func.count(DocChunk.id)).where(DocChunk.content.ilike(f"%{topic_escaped}%")))
         chunk_count = coverage.scalar() or 0
         if chunk_count < 2:
             gap.record_types = list(set(gap.record_types))

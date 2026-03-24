@@ -13,7 +13,6 @@ SAMPLE_TOOLS = [
 
 
 class TestToolFiltering:
-
     def test_get_tools_for_agent_filters_correctly(self):
         result = get_tools_for_agent(
             all_tools=SAMPLE_TOOLS,

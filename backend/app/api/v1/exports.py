@@ -45,11 +45,13 @@ async def _get_netsuite_connection(db: AsyncSession, tenant_id):
     from app.models.connection import Connection
 
     result = await db.execute(
-        sa_select(Connection).where(
+        sa_select(Connection)
+        .where(
             Connection.tenant_id == tenant_id,
             Connection.provider == "netsuite",
             Connection.status == "active",
-        ).limit(1)
+        )
+        .limit(1)
     )
     return result.scalar_one_or_none()
 
@@ -135,8 +137,12 @@ async def query_export(
     # Preserve the original FETCH FIRST limit if present — user expects
     # the same row count they saw in the chat. Only use 50K as a safety cap.
     result = await execute_suiteql_via_rest(
-        access_token, account_id, request.query_text.strip(),
-        limit=50_000, paginate=True, timeout_seconds=120,
+        access_token,
+        account_id,
+        request.query_text.strip(),
+        limit=50_000,
+        paginate=True,
+        timeout_seconds=120,
     )
 
     columns = result.get("columns", [])

@@ -34,7 +34,7 @@ class TestReorganizeWorkspace:
         ue_file = _make_file(
             "order_handler.js",
             "SuiteScripts/Uncategorized/order_handler.js",
-            content='/** @NScriptType UserEventScript */ define([], () => {});',
+            content="/** @NScriptType UserEventScript */ define([], () => {});",
         )
 
         mock_db = AsyncMock()
@@ -72,7 +72,7 @@ class TestReorganizeWorkspace:
         ue_file = _make_file(
             "order_handler.js",
             "SuiteScripts/User Event Scripts/order_handler.js",
-            content='/** @NScriptType UserEventScript */ define([], () => {});',
+            content="/** @NScriptType UserEventScript */ define([], () => {});",
             script_type="UserEventScript",
         )
 
@@ -139,7 +139,7 @@ class TestReorganizeWorkspace:
         f = _make_file(
             "order_ue.js",
             "SuiteScripts/old_folder/order_ue.js",
-            content='/** @NScriptType UserEventScript */',
+            content="/** @NScriptType UserEventScript */",
             netsuite_file_id="12345",
         )
 
@@ -171,7 +171,7 @@ class TestReorganizeWorkspace:
         f = _make_file(
             "handler.js",
             "SuiteScripts/User Event Scripts/handler.js",
-            content='/** @NScriptType UserEventScript */',
+            content="/** @NScriptType UserEventScript */",
             script_type="UserEventScript",
         )
 

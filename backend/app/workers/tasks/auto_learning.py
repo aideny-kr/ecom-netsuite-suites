@@ -30,6 +30,7 @@ def auto_learning_task(self):
 
     loop = asyncio.new_event_loop()
     try:
+
         async def _run():
             async with async_session_factory() as db:
                 # Staleness check: re-run partial discovery for tenants with >30 day profiles
@@ -145,6 +146,7 @@ async def _refresh_stale_profiles(db):
         _discover_transaction_types,
     )
     from app.services.netsuite_oauth_service import get_valid_token
+
     logger = structlog.get_logger()
 
     cutoff = datetime.now(timezone.utc) - timedelta(days=30)
@@ -172,11 +174,13 @@ async def _refresh_stale_profiles(db):
 
         # Stale — refresh Phase 1 + Phase 4
         conn_result = await db.execute(
-            select(Connection).where(
+            select(Connection)
+            .where(
                 Connection.tenant_id == tc.tenant_id,
                 Connection.provider == "netsuite",
                 Connection.status == "active",
-            ).limit(1)
+            )
+            .limit(1)
         )
         connection = conn_result.scalar_one_or_none()
         if not connection:
@@ -206,6 +210,7 @@ async def _refresh_stale_profiles(db):
             profile["last_refresh_reason"] = "staleness_30d"
 
             from sqlalchemy.orm.attributes import flag_modified
+
             tc.onboarding_profile = profile
             flag_modified(tc, "onboarding_profile")
 

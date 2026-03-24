@@ -39,11 +39,7 @@ async def list_jobs(
 
     offset = (page - 1) * page_size
     result = await db.execute(
-        select(Job)
-        .where(tenant_filter)
-        .order_by(Job.created_at.desc())
-        .offset(offset)
-        .limit(page_size)
+        select(Job).where(tenant_filter).order_by(Job.created_at.desc()).offset(offset).limit(page_size)
     )
     jobs = result.scalars().all()
 
@@ -80,12 +76,14 @@ async def list_schedules(
     for name, config in (celery_app.conf.beat_schedule or {}).items():
         schedule = config.get("schedule")
         schedule_str = str(schedule) if schedule else "unknown"
-        schedules.append({
-            "name": name,
-            "task": config.get("task", ""),
-            "schedule": schedule_str,
-            "enabled": True,
-        })
+        schedules.append(
+            {
+                "name": name,
+                "task": config.get("task", ""),
+                "schedule": schedule_str,
+                "enabled": True,
+            }
+        )
 
     return schedules
 
@@ -112,11 +110,13 @@ async def trigger_job(
         from app.models.connection import Connection
 
         conn_result = await db.execute(
-            select(Connection).where(
+            select(Connection)
+            .where(
                 Connection.tenant_id == user.tenant_id,
                 Connection.provider == "netsuite",
                 Connection.status == "active",
-            ).limit(1)
+            )
+            .limit(1)
         )
         conn = conn_result.scalar_one_or_none()
         if not conn:

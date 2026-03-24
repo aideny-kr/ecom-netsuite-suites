@@ -7,11 +7,11 @@ from dataclasses import dataclass
 class KnowledgeSource:
     name: str
     base_url: str
-    url_patterns: list[str]      # URL path patterns to crawl
-    parser: str                   # "oracle_help" | "blog" | "generic"
-    priority: int                 # 1=high, 3=low
-    max_pages_per_run: int        # Cap pages per crawl session
-    crawl_delay_seconds: float    # Politeness delay between requests
+    url_patterns: list[str]  # URL path patterns to crawl
+    parser: str  # "oracle_help" | "blog" | "generic"
+    priority: int  # 1=high, 3=low
+    max_pages_per_run: int  # Cap pages per crawl session
+    crawl_delay_seconds: float  # Politeness delay between requests
 
 
 SOURCES = [
@@ -19,9 +19,9 @@ SOURCES = [
         name="oracle_netsuite_help",
         base_url="https://docs.oracle.com/en/cloud/saas/netsuite/ns-online-help",
         url_patterns=[
-            "/section_N*.html",         # Record type docs
-            "/chapter_N*.html",         # Feature chapters
-            "/bridgehead_N*.html",      # SuiteQL reference
+            "/section_N*.html",  # Record type docs
+            "/chapter_N*.html",  # Feature chapters
+            "/bridgehead_N*.html",  # SuiteQL reference
         ],
         parser="oracle_help",
         priority=1,
@@ -32,11 +32,11 @@ SOURCES = [
         name="tim_dietrich_suiteql",
         base_url="https://timdietrich.me",
         url_patterns=[
-            "/blog/netsuite-*",              # All NetSuite posts
-            "/blog/suiteql-*",              # SuiteQL specific posts
-            "/blog/suitescript-*",          # SuiteScript posts
-            "/blog/ai-*netsuite*",          # AI + NetSuite posts
-            "/blog/a-developers-netsuite-*", # Developer journey posts
+            "/blog/netsuite-*",  # All NetSuite posts
+            "/blog/suiteql-*",  # SuiteQL specific posts
+            "/blog/suitescript-*",  # SuiteScript posts
+            "/blog/ai-*netsuite*",  # AI + NetSuite posts
+            "/blog/a-developers-netsuite-*",  # Developer journey posts
         ],
         parser="blog",
         priority=1,
@@ -59,7 +59,7 @@ SOURCES = [
         name="reddit_netsuite",
         base_url="https://old.reddit.com",
         url_patterns=[
-            "/r/Netsuite/comments/*",   # All r/Netsuite discussion posts
+            "/r/Netsuite/comments/*",  # All r/Netsuite discussion posts
         ],
         parser="blog",
         priority=2,

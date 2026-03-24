@@ -40,8 +40,13 @@ def _mcp_url(account_id: str) -> str:
 
 
 async def execute_suiteql_via_rest(
-    access_token: str, account_id: str, query: str, limit: int = 1000,
-    *, paginate: bool = False, timeout_seconds: int | None = None,
+    access_token: str,
+    account_id: str,
+    query: str,
+    limit: int = 1000,
+    *,
+    paginate: bool = False,
+    timeout_seconds: int | None = None,
 ) -> dict:
     """Execute a SuiteQL query via the NetSuite REST API.
 
@@ -174,6 +179,10 @@ async def execute_suiteql(
             )
 
     return await execute_suiteql_via_rest(
-        access_token, account_id, query, limit,
-        paginate=paginate, timeout_seconds=timeout_seconds,
+        access_token,
+        account_id,
+        query,
+        limit,
+        paginate=paginate,
+        timeout_seconds=timeout_seconds,
     )

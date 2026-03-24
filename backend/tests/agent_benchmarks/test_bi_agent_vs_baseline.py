@@ -16,7 +16,7 @@ CASES_DIR = Path(__file__).resolve().parent / "benchmark_cases"
 BI_AGENT_RESPONSES = {
     "revenue_by_region": {
         "data": (
-            'Revenue by region this quarter: US leads with $4.2M, followed by EU at $2.8M.\n\n'
+            "Revenue by region this quarter: US leads with $4.2M, followed by EU at $2.8M.\n\n"
             '<chart>{"chart_type": "bar", "title": "Revenue by Region Q1 2026", '
             '"x_axis": {"label": "Region", "key": "region"}, '
             '"y_axes": [{"label": "Revenue ($)", "key": "revenue"}], '
@@ -28,7 +28,7 @@ BI_AGENT_RESPONSES = {
     },
     "monthly_trend": {
         "data": (
-            'Monthly sales trends show steady growth over the last 12 months.\n\n'
+            "Monthly sales trends show steady growth over the last 12 months.\n\n"
             '<chart>{"chart_type": "line", "title": "Monthly Sales Trend", '
             '"x_axis": {"label": "Month", "key": "month"}, '
             '"y_axes": [{"label": "Sales ($)", "key": "sales"}], '
@@ -40,7 +40,7 @@ BI_AGENT_RESPONSES = {
     },
     "top_customers": {
         "data": (
-            'Top 10 customers by lifetime value: 1. Acme Corp ($1.2M), 2. Globex ($980K)...\n\n'
+            "Top 10 customers by lifetime value: 1. Acme Corp ($1.2M), 2. Globex ($980K)...\n\n"
             '<chart>{"chart_type": "bar", "title": "Top 10 Customers by LTV", '
             '"x_axis": {"label": "Customer", "key": "customer"}, '
             '"y_axes": [{"label": "Lifetime Value ($)", "key": "ltv"}], '
@@ -52,8 +52,8 @@ BI_AGENT_RESPONSES = {
     },
     "cohort_analysis": {
         "data": (
-            'Year-over-year retention by cohort shows 2024 cohort retains at 68%, '
-            'up from 62% in 2023.\n\n'
+            "Year-over-year retention by cohort shows 2024 cohort retains at 68%, "
+            "up from 62% in 2023.\n\n"
             '<chart>{"chart_type": "line", "title": "Retention by Cohort", '
             '"x_axis": {"label": "Year", "key": "year"}, '
             '"y_axes": [{"label": "Retention Rate (%)", "key": "retention"}], '
@@ -87,7 +87,12 @@ BASELINE_RESPONSES = {
     },
     "cohort_analysis": {
         "data": "Cohort analysis shows retention varies by year. The data is complex.",
-        "tool_calls_log": [{"tool": "bigquery_schema"}, {"tool": "bigquery_sql"}, {"tool": "bigquery_sql"}, {"tool": "netsuite_pivot_query_result"}],
+        "tool_calls_log": [
+            {"tool": "bigquery_schema"},
+            {"tool": "bigquery_sql"},
+            {"tool": "bigquery_sql"},
+            {"tool": "netsuite_pivot_query_result"},
+        ],
         "cost": 0.45,
         "latency_ms": 18000,
     },
@@ -96,10 +101,14 @@ BASELINE_RESPONSES = {
 
 def _make_result(resp: dict):
     """Create a duck-typed AgentResult from mock response dict."""
-    return type("MockResult", (), {
-        "data": resp["data"],
-        "tool_calls_log": resp["tool_calls_log"],
-    })()
+    return type(
+        "MockResult",
+        (),
+        {
+            "data": resp["data"],
+            "tool_calls_log": resp["tool_calls_log"],
+        },
+    )()
 
 
 # Map query substrings to response keys for reliable matching
@@ -141,9 +150,7 @@ class TestBiAgentVsBaseline:
         """BI agent doesn't need bigquery_schema — RAG knowledge has the table info."""
         for case_name, bi_resp in BI_AGENT_RESPONSES.items():
             bi_tools = [t["tool"] for t in bi_resp["tool_calls_log"]]
-            assert "bigquery_schema" not in bi_tools, (
-                f"{case_name}: BI agent shouldn't need schema exploration"
-            )
+            assert "bigquery_schema" not in bi_tools, f"{case_name}: BI agent shouldn't need schema exploration"
 
     def test_bi_agent_generates_valid_sql_first_try(self):
         """BI agent prompt prevents BigQuery SQL syntax errors."""
@@ -161,9 +168,7 @@ class TestBiAgentVsBaseline:
         for case_name in BI_AGENT_RESPONSES:
             bi_cost = BI_AGENT_RESPONSES[case_name]["cost"]
             baseline_cost = BASELINE_RESPONSES[case_name]["cost"]
-            assert bi_cost <= baseline_cost, (
-                f"{case_name}: BI agent cost ${bi_cost} > baseline ${baseline_cost}"
-            )
+            assert bi_cost <= baseline_cost, f"{case_name}: BI agent cost ${bi_cost} > baseline ${baseline_cost}"
 
     def test_bi_agent_produces_chart(self):
         """BI agent emits <chart> tags for visual queries; baseline does not."""
@@ -197,7 +202,9 @@ class TestBiAgentVsBaseline:
                     bi_passes += 1
 
                 baseline_resp = BASELINE_RESPONSES[matched_key]
-                baseline_score = runner.evaluate(_make_result(baseline_resp), case, baseline_resp["cost"], baseline_resp["latency_ms"])
+                baseline_score = runner.evaluate(
+                    _make_result(baseline_resp), case, baseline_resp["cost"], baseline_resp["latency_ms"]
+                )
                 if baseline_score.accuracy >= case.expected_accuracy:
                     baseline_passes += 1
 

@@ -84,7 +84,9 @@ class TestFeedbackEndpoint:
         user, headers = admin_user
         session = await _create_session(db, user.tenant_id, user.id)
         msg = await _create_assistant_msg(
-            db, user.tenant_id, session.id,
+            db,
+            user.tenant_id,
+            session.id,
             tool_calls=[{"tool": "netsuite_suiteql", "params": {"query": "SELECT 1"}}],
         )
         await db.flush()
@@ -102,7 +104,9 @@ class TestFeedbackEndpoint:
         user, headers = admin_user
         session = await _create_session(db, user.tenant_id, user.id)
         msg = await _create_assistant_msg(
-            db, user.tenant_id, session.id,
+            db,
+            user.tenant_id,
+            session.id,
             tool_calls=[{"tool": "netsuite_suiteql", "params": {"query": "SELECT 1"}}],
         )
         await db.flush()
@@ -218,7 +222,9 @@ class TestProcessFeedback:
         await db.flush()
 
         msg = await _create_assistant_msg(
-            db, user.tenant_id, session.id,
+            db,
+            user.tenant_id,
+            session.id,
             content="There are 42 sales orders.",
             tool_calls=[{"tool": "netsuite_suiteql", "params": {"query": sql}}],
         )
@@ -245,7 +251,9 @@ class TestProcessFeedback:
         await db.flush()
 
         msg = await _create_assistant_msg(
-            db, user.tenant_id, session.id,
+            db,
+            user.tenant_id,
+            session.id,
             content="The total is -$500,000.",
             tool_calls=[{"tool": "netsuite_suiteql", "params": {"query": sql}}],
         )
@@ -272,7 +280,9 @@ class TestProcessFeedback:
         await db.flush()
 
         msg = await _create_assistant_msg(
-            db, user.tenant_id, session.id,
+            db,
+            user.tenant_id,
+            session.id,
             content="No results.",
             tool_calls=[{"tool": "netsuite_suiteql", "params": {"query": sql}}],
         )
@@ -289,7 +299,9 @@ class TestProcessFeedback:
         session = await _create_session(db, user.tenant_id, user.id)
 
         msg = await _create_assistant_msg(
-            db, user.tenant_id, session.id,
+            db,
+            user.tenant_id,
+            session.id,
             content="Result: 1",
             tool_calls=[{"tool": "netsuite_suiteql", "params": {"query": "SELECT 1 FROM dual"}}],
         )
@@ -303,7 +315,9 @@ class TestProcessFeedback:
         session = await _create_session(db, user.tenant_id, user.id)
 
         msg = await _create_assistant_msg(
-            db, user.tenant_id, session.id,
+            db,
+            user.tenant_id,
+            session.id,
             content="Here is some documentation...",
             tool_calls=None,
         )
@@ -317,7 +331,9 @@ class TestProcessFeedback:
         session = await _create_session(db, user.tenant_id, user.id)
 
         msg = await _create_assistant_msg(
-            db, user.tenant_id, session.id,
+            db,
+            user.tenant_id,
+            session.id,
             content="Found docs.",
             tool_calls=[{"tool": "rag_search", "params": {"query": "netsuite"}}],
         )

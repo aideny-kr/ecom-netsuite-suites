@@ -37,7 +37,6 @@ def _make_agent(config=None, prompt_text="You are a test agent.", knowledge=None
 
 
 class TestSpecializedAgentProperties:
-
     def test_agent_name_delegates_to_config(self):
         agent = _make_agent(_make_config(agent_id="pricing-agent"))
         assert agent.agent_name == "pricing-agent"
@@ -78,7 +77,6 @@ class TestSpecializedAgentProperties:
 
 
 class TestSpecializedAgentModelPreference:
-
     def test_model_preference_overrides_default(self):
         config = _make_config(model_preference="claude-haiku-4-5-20251001")
         agent = _make_agent(config)
@@ -91,7 +89,6 @@ class TestSpecializedAgentModelPreference:
 
 
 class TestSpecializedAgentProtocol:
-
     def test_conforms_to_agent_protocol(self):
         agent = _make_agent()
         # AgentProtocol is @runtime_checkable

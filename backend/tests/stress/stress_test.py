@@ -48,6 +48,7 @@ except ImportError:
 
 # ── Data classes ──────────────────────────────────────────────────────────────
 
+
 class TestMode(Enum):
     NORMAL = "normal"
     POOL_SATURATION = "pool-saturation"
@@ -153,11 +154,11 @@ class StressTestReport:
         ]
         rate = self.successful_sessions / max(self.total_sessions, 1)
         if rate >= 0.95:
-            lines.append(f"    ✅ PASS — {rate*100:.0f}% success at {self.concurrency} concurrent")
+            lines.append(f"    ✅ PASS — {rate * 100:.0f}% success at {self.concurrency} concurrent")
         elif rate >= 0.80:
-            lines.append(f"    ⚠️  WARN — {rate*100:.0f}% success at {self.concurrency} concurrent")
+            lines.append(f"    ⚠️  WARN — {rate * 100:.0f}% success at {self.concurrency} concurrent")
         else:
-            lines.append(f"    ❌ FAIL — {rate*100:.0f}% success at {self.concurrency} concurrent")
+            lines.append(f"    ❌ FAIL — {rate * 100:.0f}% success at {self.concurrency} concurrent")
 
         lines.append("=" * 70)
         return "\n".join(lines)
@@ -178,6 +179,7 @@ STRESS_PROMPTS = [
 
 
 # ── Core test logic ──────────────────────────────────────────────────────────
+
 
 async def authenticate(client: httpx.AsyncClient, base_url: str, email: str, password: str) -> str:
     """Login and return access_token."""
@@ -266,9 +268,7 @@ async def run_chat_session(
                 result.messages_sent += 1
 
                 try:
-                    chunks, latency = await send_message_sse(
-                        client, base_url, token, result.session_id, prompt
-                    )
+                    chunks, latency = await send_message_sse(client, base_url, token, result.session_id, prompt)
                     result.messages_ok += 1
                     result.sse_chunks_received += chunks
                     if i == 0:
@@ -325,14 +325,13 @@ async def run_normal_test(
     stop_health = asyncio.Event()
     health_task = asyncio.create_task(poll_health(base_url, stop_health, report.health_snapshots))
 
-    print(f"\n  Launching {concurrency} concurrent chat sessions ({messages_per_session} messages each)...\n", flush=True)
+    print(
+        f"\n  Launching {concurrency} concurrent chat sessions ({messages_per_session} messages each)...\n", flush=True
+    )
     start = time.monotonic()
 
     # Launch all sessions concurrently
-    tasks = [
-        run_chat_session(base_url, token, messages_per_session, i)
-        for i in range(concurrency)
-    ]
+    tasks = [run_chat_session(base_url, token, messages_per_session, i) for i in range(concurrency)]
     results: list[SessionResult] = await asyncio.gather(*tasks)
 
     report.duration_seconds = time.monotonic() - start
@@ -459,6 +458,7 @@ async def run_health_monitor(base_url: str, duration: int):
 
 # ── Ramp-up test (gradually increases concurrency) ──────────────────────────
 
+
 async def run_ramp_test(
     base_url: str,
     token: str,
@@ -493,6 +493,7 @@ async def run_ramp_test(
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
+
 
 def main():
     parser = argparse.ArgumentParser(

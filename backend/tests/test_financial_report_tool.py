@@ -139,7 +139,13 @@ async def test_execute_income_statement_delegates_to_suiteql():
         "success": True,
         "columns": ["acctnumber", "acctname", "accttype", "section", "amount"],
         "items": [
-            {"acctnumber": "4000", "acctname": "Revenue", "accttype": "Income", "section": "1-Revenue", "amount": 100000},
+            {
+                "acctnumber": "4000",
+                "acctname": "Revenue",
+                "accttype": "Income",
+                "section": "1-Revenue",
+                "amount": 100000,
+            },
         ],
         "total_rows": 1,
     }
@@ -497,8 +503,9 @@ def test_parse_last_month():
     now = datetime.utcnow()
     first = now.replace(day=1)
     last = first - timedelta(days=1)
-    expected_month = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
-                      "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][last.month - 1]
+    expected_month = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][
+        last.month - 1
+    ]
     assert expected_month in result["period"]
 
 

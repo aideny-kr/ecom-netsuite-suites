@@ -74,10 +74,15 @@ def _task_contains_query(task: str) -> bool:
 _MIN_ENTITY_CONFIDENCE = 0.70  # Minimum pg_trgm similarity for entity resolver matches
 
 # Tools that should never be skipped by early exit (knowledge/context, not data)
-_KNOWLEDGE_TOOLS = frozenset({
-    "workspace_search", "workspace_read_file", "workspace_list_files",
-    "rag_search", "web_search",
-})
+_KNOWLEDGE_TOOLS = frozenset(
+    {
+        "workspace_search",
+        "workspace_read_file",
+        "workspace_list_files",
+        "rag_search",
+        "web_search",
+    }
+)
 
 
 def _has_successful_data_result(result_strings: list[str]) -> bool:
@@ -266,9 +271,7 @@ async def _ensure_valid_workspace_id(
 
         from app.models.workspace import Workspace as _Ws
 
-        _ws_check = await db.execute(
-            _sel(_Ws.id).where(_Ws.id == ws_id, _Ws.tenant_id == tenant_id)
-        )
+        _ws_check = await db.execute(_sel(_Ws.id).where(_Ws.id == ws_id, _Ws.tenant_id == tenant_id))
         if _ws_check.scalar_one_or_none() is None:
             print(f"[WORKSPACE] LLM provided invalid workspace_id {ws_id}, resolving", flush=True)
             needs_resolve = True
@@ -773,14 +776,18 @@ class BaseSpecialistAgent(abc.ABC):
                         file_path = block.input.get("file_path", "")
                         if file_path in patched_files:
                             print(f"[WORKSPACE] Skipping duplicate patch for {file_path}", flush=True)
-                            tool_results_content.append({
-                                "type": "tool_result",
-                                "tool_use_id": block.id,
-                                "content": json.dumps({
-                                    "skipped": "Already proposed a patch for this file. "
-                                    "Show the diff and present results."
-                                }),
-                            })
+                            tool_results_content.append(
+                                {
+                                    "type": "tool_result",
+                                    "tool_use_id": block.id,
+                                    "content": json.dumps(
+                                        {
+                                            "skipped": "Already proposed a patch for this file. "
+                                            "Show the diff and present results."
+                                        }
+                                    ),
+                                }
+                            )
                             continue
                         patched_files.add(file_path)
 
@@ -819,9 +826,7 @@ class BaseSpecialistAgent(abc.ABC):
                     # (e.g. financial reports → SSE event + condensed LLM context)
                     llm_result_str = result_str
                     if tool_result_interceptor is not None:
-                        intercept_data, llm_result_str = tool_result_interceptor(
-                            block.name, result_str
-                        )
+                        intercept_data, llm_result_str = tool_result_interceptor(block.name, result_str)
                         if intercept_data is not None:
                             yield "tool_intercept", intercept_data
 
@@ -847,10 +852,14 @@ class BaseSpecialistAgent(abc.ABC):
                     # Early exit: if this tool returned data and there are more
                     # tools queued, skip redundant DATA tools — but always allow
                     # knowledge/context tools (workspace_search, rag_search, web_search)
-                    remaining_blocks = response.tool_use_blocks[i + 1:]
+                    remaining_blocks = response.tool_use_blocks[i + 1 :]
                     skippable = [b for b in remaining_blocks if b.name not in _KNOWLEDGE_TOOLS]
                     must_run = [b for b in remaining_blocks if b.name in _KNOWLEDGE_TOOLS]
-                    if getattr(self, "_context_need", None) != "full" and skippable and _has_successful_data_result([result_str]):
+                    if (
+                        getattr(self, "_context_need", None) != "full"
+                        and skippable
+                        and _has_successful_data_result([result_str])
+                    ):
                         print(
                             f"[AGENT] {self.agent_name} data returned, skipping "
                             f"{len(skippable)} data tools, keeping {len(must_run)} knowledge tools",
@@ -861,21 +870,29 @@ class BaseSpecialistAgent(abc.ABC):
                                 {
                                     "type": "tool_result",
                                     "tool_use_id": skipped.id,
-                                    "content": json.dumps({
-                                        "skipped": "Previous tool returned data. "
-                                        "Present those results instead of running more queries."
-                                    }),
+                                    "content": json.dumps(
+                                        {
+                                            "skipped": "Previous tool returned data. "
+                                            "Present those results instead of running more queries."
+                                        }
+                                    ),
                                 }
                             )
                         if not must_run:
                             break
 
                 # Soft enforcement: nudge LLM to stop if data was already returned
-                if getattr(self, "_context_need", None) != "full" and step >= 1 and _has_successful_data_result(raw_result_strings):
-                    tool_results_content.append({
-                        "type": "text",
-                        "text": _DATA_SUCCESS_NUDGE,
-                    })
+                if (
+                    getattr(self, "_context_need", None) != "full"
+                    and step >= 1
+                    and _has_successful_data_result(raw_result_strings)
+                ):
+                    tool_results_content.append(
+                        {
+                            "type": "text",
+                            "text": _DATA_SUCCESS_NUDGE,
+                        }
+                    )
 
                 messages.append(adapter.build_tool_result_message(tool_results_content))
 

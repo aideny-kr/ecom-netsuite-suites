@@ -56,13 +56,13 @@ async def send_invite_email(
     html_body = _build_invite_html(inviter_name, tenant_brand_name, role_display_name, accept_url)
 
     if EMAIL_PROVIDER == "console":
-        print(f"\n{'='*60}", flush=True)
+        print(f"\n{'=' * 60}", flush=True)
         print("INVITE EMAIL (console mode)", flush=True)
         print(f"To: {to_email}", flush=True)
         print(f"Subject: {subject}", flush=True)
         print(f"Body:\n{text_body}", flush=True)
         print(f"Accept URL: {accept_url}", flush=True)
-        print(f"{'='*60}\n", flush=True)
+        print(f"{'=' * 60}\n", flush=True)
         return
 
     if EMAIL_PROVIDER == "resend":

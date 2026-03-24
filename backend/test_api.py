@@ -13,15 +13,21 @@ from app.services.suitescript_sync_service import sync_scripts_to_workspace
 
 async def main():
     async with worker_async_session() as db:
-        result = await db.execute(select(Connection).where(Connection.provider == 'netsuite', Connection.id == 'fcde67d0-f94c-4277-be33-fabac28862e2').limit(1))
+        result = await db.execute(
+            select(Connection)
+            .where(Connection.provider == "netsuite", Connection.id == "fcde67d0-f94c-4277-be33-fabac28862e2")
+            .limit(1)
+        )
         connection = result.scalar_one_or_none()
         if not connection:
             print("No connection found")
             return
 
         import app.services.suitescript_sync_service as ss
+
         orig_discover = ss.discover_scripts
         import app.services.netsuite_restlet_client as rlc
+
         orig_read = rlc.restlet_read_file
 
         async def mock_discover(*args, **kwargs):
@@ -56,6 +62,7 @@ async def main():
             ss.discover_scripts = orig_discover
             rlc.restlet_read_file = orig_read
             await db.commit()
+
 
 if __name__ == "__main__":
     asyncio.run(main())

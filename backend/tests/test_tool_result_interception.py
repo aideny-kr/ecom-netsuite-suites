@@ -45,9 +45,7 @@ class TestInterceptFinancialReport:
 
     def test_success(self):
         result_str = _result_str(SAMPLE_FINANCIAL_RESULT)
-        event_type, sse_event, condensed = _intercept_tool_result(
-            "netsuite.financial_report", result_str
-        )
+        event_type, sse_event, condensed = _intercept_tool_result("netsuite.financial_report", result_str)
         assert event_type == "financial_report"
         assert sse_event is not None
         assert sse_event["report_type"] == "income_statement"
@@ -63,35 +61,27 @@ class TestInterceptFinancialReport:
 
     def test_condensed_has_note(self):
         result_str = _result_str(SAMPLE_FINANCIAL_RESULT)
-        _, _, condensed = _intercept_tool_result(
-            "netsuite.financial_report", result_str
-        )
+        _, _, condensed = _intercept_tool_result("netsuite.financial_report", result_str)
         parsed = json.loads(condensed)
         assert "note" in parsed
         assert "table" in parsed["note"].lower() or "rebuild" in parsed["note"].lower()
 
     def test_underscore_tool_name(self):
         result_str = _result_str(SAMPLE_FINANCIAL_RESULT)
-        event_type, sse_event, condensed = _intercept_tool_result(
-            "netsuite_financial_report", result_str
-        )
+        event_type, sse_event, condensed = _intercept_tool_result("netsuite_financial_report", result_str)
         assert event_type == "financial_report"
         assert sse_event is not None
 
     def test_failure_is_noop(self):
         failed = {"success": False, "error": "Query failed"}
         result_str = _result_str(failed)
-        event_type, sse_event, returned = _intercept_tool_result(
-            "netsuite.financial_report", result_str
-        )
+        event_type, sse_event, returned = _intercept_tool_result("netsuite.financial_report", result_str)
         assert event_type is None
         assert sse_event is None
         assert returned == result_str
 
     def test_invalid_json_is_noop(self):
-        event_type, sse_event, returned = _intercept_tool_result(
-            "netsuite.financial_report", "Not JSON"
-        )
+        event_type, sse_event, returned = _intercept_tool_result("netsuite.financial_report", "Not JSON")
         assert event_type is None
         assert sse_event is None
         assert returned == "Not JSON"
@@ -105,9 +95,7 @@ class TestInterceptSuiteQL:
 
     def test_suiteql_success(self):
         result_str = _result_str(SAMPLE_SUITEQL_RESULT)
-        event_type, sse_event, condensed = _intercept_tool_result(
-            "netsuite_suiteql", result_str
-        )
+        event_type, sse_event, condensed = _intercept_tool_result("netsuite_suiteql", result_str)
         assert event_type == "data_table"
         assert sse_event is not None
         assert sse_event["columns"] == ["tranid", "entity", "amount", "status"]
@@ -117,17 +105,13 @@ class TestInterceptSuiteQL:
 
     def test_suiteql_dot_name(self):
         result_str = _result_str(SAMPLE_SUITEQL_RESULT)
-        event_type, sse_event, condensed = _intercept_tool_result(
-            "netsuite.suiteql", result_str
-        )
+        event_type, sse_event, condensed = _intercept_tool_result("netsuite.suiteql", result_str)
         assert event_type == "data_table"
         assert sse_event is not None
 
     def test_condensed_has_no_rows(self):
         result_str = _result_str(SAMPLE_SUITEQL_RESULT)
-        _, _, condensed = _intercept_tool_result(
-            "netsuite_suiteql", result_str
-        )
+        _, _, condensed = _intercept_tool_result("netsuite_suiteql", result_str)
         parsed = json.loads(condensed)
         assert "rows" not in parsed
         assert parsed["row_count"] == 3
@@ -136,18 +120,14 @@ class TestInterceptSuiteQL:
     def test_condensed_preserves_columns(self):
         """LLM should know the columns to provide meaningful commentary."""
         result_str = _result_str(SAMPLE_SUITEQL_RESULT)
-        _, _, condensed = _intercept_tool_result(
-            "netsuite_suiteql", result_str
-        )
+        _, _, condensed = _intercept_tool_result("netsuite_suiteql", result_str)
         parsed = json.loads(condensed)
         assert parsed["columns"] == ["tranid", "entity", "amount", "status"]
 
     def test_suiteql_error_is_noop(self):
         error_result = {"error": True, "message": "Invalid column name"}
         result_str = _result_str(error_result)
-        event_type, sse_event, returned = _intercept_tool_result(
-            "netsuite_suiteql", result_str
-        )
+        event_type, sse_event, returned = _intercept_tool_result("netsuite_suiteql", result_str)
         assert event_type is None
         assert sse_event is None
         assert returned == result_str
@@ -155,9 +135,7 @@ class TestInterceptSuiteQL:
     def test_suiteql_string_error_is_noop(self):
         error_result = {"error": "Something broke"}
         result_str = _result_str(error_result)
-        event_type, sse_event, returned = _intercept_tool_result(
-            "netsuite_suiteql", result_str
-        )
+        event_type, sse_event, returned = _intercept_tool_result("netsuite_suiteql", result_str)
         assert event_type is None
         assert sse_event is None
         assert returned == result_str
@@ -173,18 +151,14 @@ class TestInterceptSuiteQL:
             "limit": 1000,
         }
         result_str = _result_str(empty_result)
-        event_type, sse_event, condensed = _intercept_tool_result(
-            "netsuite_suiteql", result_str
-        )
+        event_type, sse_event, condensed = _intercept_tool_result("netsuite_suiteql", result_str)
         assert event_type == "data_table"
         assert sse_event is not None
         assert sse_event["rows"] == []
         assert sse_event["row_count"] == 0
 
     def test_suiteql_invalid_json_is_noop(self):
-        event_type, sse_event, returned = _intercept_tool_result(
-            "netsuite_suiteql", "Not JSON"
-        )
+        event_type, sse_event, returned = _intercept_tool_result("netsuite_suiteql", "Not JSON")
         assert event_type is None
         assert sse_event is None
         assert returned == "Not JSON"
@@ -192,9 +166,7 @@ class TestInterceptSuiteQL:
     def test_suiteql_missing_columns_is_noop(self):
         """Result without columns array should not be intercepted."""
         result_str = _result_str({"rows": [[1, 2]], "row_count": 1})
-        event_type, sse_event, returned = _intercept_tool_result(
-            "netsuite_suiteql", result_str
-        )
+        event_type, sse_event, returned = _intercept_tool_result("netsuite_suiteql", result_str)
         assert event_type is None
         assert sse_event is None
         assert returned == result_str
@@ -202,9 +174,7 @@ class TestInterceptSuiteQL:
     def test_ext_mcp_suiteql_tool(self):
         """External MCP SuiteQL tools (ext__<hex>__...) should be intercepted."""
         result_str = _result_str(SAMPLE_SUITEQL_RESULT)
-        event_type, sse_event, condensed = _intercept_tool_result(
-            "ext__abc123def__ns_runcustomsuiteql", result_str
-        )
+        event_type, sse_event, condensed = _intercept_tool_result("ext__abc123def__ns_runcustomsuiteql", result_str)
         assert event_type == "data_table"
         assert sse_event is not None
         assert sse_event["columns"] == SAMPLE_SUITEQL_RESULT["columns"]
@@ -224,9 +194,7 @@ class TestInterceptSuiteQL:
             "numberOfPages": 1,
         }
         result_str = _result_str(mcp_result)
-        event_type, sse_event, condensed = _intercept_tool_result(
-            "ext__abc123def__ns_runcustomsuiteql", result_str
-        )
+        event_type, sse_event, condensed = _intercept_tool_result("ext__abc123def__ns_runcustomsuiteql", result_str)
         assert event_type == "data_table"
         assert sse_event is not None
         assert sse_event["columns"] == ["tranid", "total"]
@@ -246,9 +214,7 @@ class TestInterceptSuiteQL:
             ]
         }
         result_str = _result_str(mcp_result)
-        event_type, sse_event, condensed = _intercept_tool_result(
-            "ext__abc123def__ns_runcustomsuiteql", result_str
-        )
+        event_type, sse_event, condensed = _intercept_tool_result("ext__abc123def__ns_runcustomsuiteql", result_str)
         assert event_type == "data_table"
         assert sse_event is not None
         assert sse_event["columns"] == ["tranid", "entity", "amount"]
@@ -261,9 +227,7 @@ class TestInterceptSuiteQL:
     def test_ext_mcp_empty_data_is_noop(self):
         """External MCP with empty data list should not be intercepted."""
         result_str = _result_str({"data": []})
-        event_type, sse_event, returned = _intercept_tool_result(
-            "ext__abc123def__ns_runcustomsuiteql", result_str
-        )
+        event_type, sse_event, returned = _intercept_tool_result("ext__abc123def__ns_runcustomsuiteql", result_str)
         assert event_type is None
         assert sse_event is None
         assert returned == result_str
@@ -271,9 +235,7 @@ class TestInterceptSuiteQL:
     def test_ext_mcp_empty_items_is_noop(self):
         """External MCP with empty items list should not be intercepted."""
         result_str = _result_str({"items": []})
-        event_type, sse_event, returned = _intercept_tool_result(
-            "ext__abc123def__ns_runcustomsuiteql", result_str
-        )
+        event_type, sse_event, returned = _intercept_tool_result("ext__abc123def__ns_runcustomsuiteql", result_str)
         assert event_type is None
         assert sse_event is None
         assert returned == result_str
@@ -284,18 +246,14 @@ class TestInterceptNonMatchingTool:
 
     def test_rag_search_is_noop(self):
         result_str = _result_str({"chunks": [{"text": "hello"}]})
-        event_type, sse_event, returned = _intercept_tool_result(
-            "rag_search", result_str
-        )
+        event_type, sse_event, returned = _intercept_tool_result("rag_search", result_str)
         assert event_type is None
         assert sse_event is None
         assert returned == result_str
 
     def test_workspace_tool_is_noop(self):
         result_str = _result_str({"files": ["a.js", "b.js"]})
-        event_type, sse_event, returned = _intercept_tool_result(
-            "workspace.list_files", result_str
-        )
+        event_type, sse_event, returned = _intercept_tool_result("workspace.list_files", result_str)
         assert event_type is None
         assert sse_event is None
         assert returned == result_str

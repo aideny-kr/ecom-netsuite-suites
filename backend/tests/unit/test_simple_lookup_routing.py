@@ -4,7 +4,6 @@ Simple queries like "show me SO-12345" or "how many open POs" don't need
 Sonnet. Route them to Haiku when importance_tier is CASUAL.
 """
 
-
 from app.services.chat.orchestrator import _is_simple_lookup
 
 
@@ -63,4 +62,5 @@ class TestIsSimpleLookup:
 class TestHaikuModelRouting:
     def test_haiku_model_constant_exists(self):
         from app.services.chat.orchestrator import HAIKU_MODEL
+
         assert "haiku" in HAIKU_MODEL.lower()

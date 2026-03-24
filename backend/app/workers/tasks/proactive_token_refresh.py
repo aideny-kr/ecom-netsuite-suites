@@ -109,7 +109,10 @@ def _refresh_single(db, record, lock_prefix, stats, now, settings):
 
         try:
             token_data = _run_async_refresh(account_id, refresh_token, client_id)
-            print(f"[proactive_token_refresh] token_data keys: {list(token_data.keys()) if isinstance(token_data, dict) else type(token_data)}", flush=True)
+            print(
+                f"[proactive_token_refresh] token_data keys: {list(token_data.keys()) if isinstance(token_data, dict) else type(token_data)}",
+                flush=True,
+            )
             creds["access_token"] = token_data["access_token"]
             creds["refresh_token"] = token_data.get("refresh_token", refresh_token)
             creds["expires_at"] = time.time() + int(token_data.get("expires_in", 3600))

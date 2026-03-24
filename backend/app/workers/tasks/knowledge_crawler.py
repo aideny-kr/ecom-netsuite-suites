@@ -30,18 +30,21 @@ def knowledge_crawler_task(self, source_name: str | None = None):
     try:
         results = []
         for source in sources:
+
             async def _crawl(src=source):
                 async with async_session_factory() as db:
                     return await crawl_source(src, db)
 
             result = loop.run_until_complete(_crawl())
-            results.append({
-                "source": result.source_name,
-                "pages_crawled": result.pages_crawled,
-                "chunks_created": result.chunks_created,
-                "chunks_updated": result.chunks_updated,
-                "errors": result.errors[:5],
-            })
+            results.append(
+                {
+                    "source": result.source_name,
+                    "pages_crawled": result.pages_crawled,
+                    "chunks_created": result.chunks_created,
+                    "chunks_updated": result.chunks_updated,
+                    "errors": result.errors[:5],
+                }
+            )
 
         total_pages = sum(r["pages_crawled"] for r in results)
         total_chunks = sum(r["chunks_created"] + r["chunks_updated"] for r in results)

@@ -14,9 +14,7 @@ from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
 
 class AgentConfig(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "agent_configs"
-    __table_args__ = (
-        UniqueConstraint("tenant_id", "agent_id", name="uq_agent_configs_tenant_agent"),
-    )
+    __table_args__ = (UniqueConstraint("tenant_id", "agent_id", name="uq_agent_configs_tenant_agent"),)
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False, index=True

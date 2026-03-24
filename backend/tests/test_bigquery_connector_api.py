@@ -25,12 +25,12 @@ class TestBigQueryTestConnection:
         mock_user.id = uuid.uuid4()
         mock_db = AsyncMock()
 
-        with patch("app.api.v1.mcp_connectors.validate_connection", new_callable=AsyncMock) as mock_validate, \
-             patch("app.api.v1.mcp_connectors.discover_schema", new_callable=AsyncMock) as mock_discover:
+        with (
+            patch("app.api.v1.mcp_connectors.validate_connection", new_callable=AsyncMock) as mock_validate,
+            patch("app.api.v1.mcp_connectors.discover_schema", new_callable=AsyncMock) as mock_discover,
+        ):
             mock_validate.return_value = {"valid": True, "error": None}
-            mock_discover.return_value = {
-                "datasets": [{"dataset_id": "analytics", "tables": []}]
-            }
+            mock_discover.return_value = {"datasets": [{"dataset_id": "analytics", "tables": []}]}
 
             result = await test_bigquery_connection(request, mock_user, mock_db)
 
@@ -93,14 +93,14 @@ class TestBigQueryCreateConnector:
         mock_result.scalars.return_value.first.return_value = None
         mock_db.execute = AsyncMock(return_value=mock_result)
 
-        with patch("app.api.v1.mcp_connectors.validate_connection", new_callable=AsyncMock) as mock_validate, \
-             patch("app.api.v1.mcp_connectors.discover_schema", new_callable=AsyncMock) as mock_discover, \
-             patch("app.api.v1.mcp_connectors.encrypt_credentials") as mock_encrypt, \
-             patch("app.api.v1.mcp_connectors.audit_service") as mock_audit:
+        with (
+            patch("app.api.v1.mcp_connectors.validate_connection", new_callable=AsyncMock) as mock_validate,
+            patch("app.api.v1.mcp_connectors.discover_schema", new_callable=AsyncMock) as mock_discover,
+            patch("app.api.v1.mcp_connectors.encrypt_credentials") as mock_encrypt,
+            patch("app.api.v1.mcp_connectors.audit_service") as mock_audit,
+        ):
             mock_validate.return_value = {"valid": True, "error": None}
-            mock_discover.return_value = {
-                "datasets": [{"dataset_id": "analytics", "tables": []}]
-            }
+            mock_discover.return_value = {"datasets": [{"dataset_id": "analytics", "tables": []}]}
             mock_encrypt.return_value = "encrypted_blob"
             mock_audit.log_event = AsyncMock()
 
@@ -130,10 +130,12 @@ class TestBigQueryCreateConnector:
         mock_result.scalars.return_value.first.return_value = None
         mock_db.execute = AsyncMock(return_value=mock_result)
 
-        with patch("app.api.v1.mcp_connectors.validate_connection", new_callable=AsyncMock) as mock_val, \
-             patch("app.api.v1.mcp_connectors.discover_schema", new_callable=AsyncMock) as mock_disc, \
-             patch("app.api.v1.mcp_connectors.encrypt_credentials") as mock_encrypt, \
-             patch("app.api.v1.mcp_connectors.audit_service") as mock_audit:
+        with (
+            patch("app.api.v1.mcp_connectors.validate_connection", new_callable=AsyncMock) as mock_val,
+            patch("app.api.v1.mcp_connectors.discover_schema", new_callable=AsyncMock) as mock_disc,
+            patch("app.api.v1.mcp_connectors.encrypt_credentials") as mock_encrypt,
+            patch("app.api.v1.mcp_connectors.audit_service") as mock_audit,
+        ):
             mock_val.return_value = {"valid": True, "error": None}
             mock_disc.return_value = {"datasets": []}
             mock_encrypt.return_value = "encrypted_blob"
@@ -163,10 +165,12 @@ class TestBigQueryCreateConnector:
         mock_result.scalars.return_value.first.return_value = None
         mock_db.execute = AsyncMock(return_value=mock_result)
 
-        with patch("app.api.v1.mcp_connectors.validate_connection", new_callable=AsyncMock) as mv, \
-             patch("app.api.v1.mcp_connectors.discover_schema", new_callable=AsyncMock) as md, \
-             patch("app.api.v1.mcp_connectors.encrypt_credentials") as me, \
-             patch("app.api.v1.mcp_connectors.audit_service") as ma:
+        with (
+            patch("app.api.v1.mcp_connectors.validate_connection", new_callable=AsyncMock) as mv,
+            patch("app.api.v1.mcp_connectors.discover_schema", new_callable=AsyncMock) as md,
+            patch("app.api.v1.mcp_connectors.encrypt_credentials") as me,
+            patch("app.api.v1.mcp_connectors.audit_service") as ma,
+        ):
             mv.return_value = {"valid": True, "error": None}
             md.return_value = {"datasets": []}
             me.return_value = "encrypted"
@@ -194,12 +198,16 @@ class TestBigQueryCreateConnector:
         mock_result.scalars.return_value.first.return_value = None
         mock_db.execute = AsyncMock(return_value=mock_result)
 
-        with patch("app.api.v1.mcp_connectors.validate_connection", new_callable=AsyncMock) as mv, \
-             patch("app.api.v1.mcp_connectors.discover_schema", new_callable=AsyncMock) as md, \
-             patch("app.api.v1.mcp_connectors.encrypt_credentials") as me, \
-             patch("app.api.v1.mcp_connectors.audit_service") as ma:
+        with (
+            patch("app.api.v1.mcp_connectors.validate_connection", new_callable=AsyncMock) as mv,
+            patch("app.api.v1.mcp_connectors.discover_schema", new_callable=AsyncMock) as md,
+            patch("app.api.v1.mcp_connectors.encrypt_credentials") as me,
+            patch("app.api.v1.mcp_connectors.audit_service") as ma,
+        ):
             mv.return_value = {"valid": True, "error": None}
-            md.return_value = {"datasets": [{"dataset_id": "analytics", "tables": []}, {"dataset_id": "raw", "tables": []}]}
+            md.return_value = {
+                "datasets": [{"dataset_id": "analytics", "tables": []}, {"dataset_id": "raw", "tables": []}]
+            }
             me.return_value = "encrypted"
             ma.log_event = AsyncMock()
 
@@ -225,10 +233,12 @@ class TestBigQueryCreateConnector:
         mock_result.scalars.return_value.first.return_value = None
         mock_db.execute = AsyncMock(return_value=mock_result)
 
-        with patch("app.api.v1.mcp_connectors.validate_connection", new_callable=AsyncMock) as mv, \
-             patch("app.api.v1.mcp_connectors.discover_schema", new_callable=AsyncMock) as md, \
-             patch("app.api.v1.mcp_connectors.encrypt_credentials") as me, \
-             patch("app.api.v1.mcp_connectors.audit_service") as mock_audit:
+        with (
+            patch("app.api.v1.mcp_connectors.validate_connection", new_callable=AsyncMock) as mv,
+            patch("app.api.v1.mcp_connectors.discover_schema", new_callable=AsyncMock) as md,
+            patch("app.api.v1.mcp_connectors.encrypt_credentials") as me,
+            patch("app.api.v1.mcp_connectors.audit_service") as mock_audit,
+        ):
             mv.return_value = {"valid": True, "error": None}
             md.return_value = {"datasets": []}
             me.return_value = "encrypted"
@@ -260,10 +270,12 @@ class TestBigQueryCreateConnector:
         mock_result.scalars.return_value.first.return_value = old_connector
         mock_db.execute = AsyncMock(return_value=mock_result)
 
-        with patch("app.api.v1.mcp_connectors.validate_connection", new_callable=AsyncMock) as mv, \
-             patch("app.api.v1.mcp_connectors.discover_schema", new_callable=AsyncMock) as md, \
-             patch("app.api.v1.mcp_connectors.encrypt_credentials") as me, \
-             patch("app.api.v1.mcp_connectors.audit_service") as ma:
+        with (
+            patch("app.api.v1.mcp_connectors.validate_connection", new_callable=AsyncMock) as mv,
+            patch("app.api.v1.mcp_connectors.discover_schema", new_callable=AsyncMock) as md,
+            patch("app.api.v1.mcp_connectors.encrypt_credentials") as me,
+            patch("app.api.v1.mcp_connectors.audit_service") as ma,
+        ):
             mv.return_value = {"valid": True, "error": None}
             md.return_value = {"datasets": []}
             me.return_value = "encrypted"

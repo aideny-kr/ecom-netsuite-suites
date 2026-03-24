@@ -72,9 +72,7 @@ TOOL_REGISTRY = {
             "subsidiary_id": {
                 "type": "integer",
                 "required": False,
-                "description": (
-                    "Subsidiary ID to filter. Defaults to -1 (consolidated parent)."
-                ),
+                "description": ("Subsidiary ID to filter. Defaults to -1 (consolidated parent)."),
             },
         },
     },
@@ -137,8 +135,11 @@ TOOL_REGISTRY = {
                     "'income_statement_trend', or 'balance_sheet_trend'"
                 ),
                 "enum": [
-                    "income_statement", "balance_sheet", "trial_balance",
-                    "income_statement_trend", "balance_sheet_trend",
+                    "income_statement",
+                    "balance_sheet",
+                    "trial_balance",
+                    "income_statement_trend",
+                    "balance_sheet_trend",
                 ],
             },
             "period": {
@@ -449,8 +450,7 @@ TOOL_REGISTRY = {
     },
     "bigquery.schema": {
         "description": (
-            "Discover BigQuery datasets, tables, and columns. "
-            "Use to explore available data before writing queries."
+            "Discover BigQuery datasets, tables, and columns. Use to explore available data before writing queries."
         ),
         "execute": bigquery_tools.bigquery_schema_execute,
         "params_schema": {

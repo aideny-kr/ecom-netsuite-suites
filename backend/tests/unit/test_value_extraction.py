@@ -116,11 +116,13 @@ class TestAppendDistinctValues:
         """Should append distinct values section to the result JSON."""
         from app.services.chat.tool_call_results import append_distinct_values
 
-        result_str = json.dumps({
-            "columns": ["platform", "qty"],
-            "rows": [["Azalea", "10"], ["Lotus", "20"], ["Lotus - Refurbished", "5"]],
-            "row_count": 3,
-        })
+        result_str = json.dumps(
+            {
+                "columns": ["platform", "qty"],
+                "rows": [["Azalea", "10"], ["Lotus", "20"], ["Lotus - Refurbished", "5"]],
+                "row_count": 3,
+            }
+        )
 
         enriched = append_distinct_values(result_str)
         parsed = json.loads(enriched)
@@ -132,11 +134,13 @@ class TestAppendDistinctValues:
         """Results with < 2 rows shouldn't get distinct values (not useful)."""
         from app.services.chat.tool_call_results import append_distinct_values
 
-        result_str = json.dumps({
-            "columns": ["name"],
-            "rows": [["one"]],
-            "row_count": 1,
-        })
+        result_str = json.dumps(
+            {
+                "columns": ["name"],
+                "rows": [["one"]],
+                "row_count": 1,
+            }
+        )
 
         enriched = append_distinct_values(result_str)
 

@@ -1,11 +1,9 @@
 """Tests for RAG partition filtering on domain_knowledge_chunks."""
 
-
 from app.services.chat.agents.tool_filter import filter_knowledge_by_partition
 
 
 class TestRagPartitionFilter:
-
     def test_partition_filter_single(self):
         chunks = [
             {"raw_text": "A", "partition_id": "pricing"},

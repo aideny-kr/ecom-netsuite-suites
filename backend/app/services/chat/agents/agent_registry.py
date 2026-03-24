@@ -37,9 +37,7 @@ class AgentRegistry:
             except Exception:
                 logger.exception("Failed to load agent config: %s", path)
 
-    async def get_enabled_agents(
-        self, db: AsyncSession, tenant_id: uuid.UUID
-    ) -> list[AgentYAMLConfig]:
+    async def get_enabled_agents(self, db: AsyncSession, tenant_id: uuid.UUID) -> list[AgentYAMLConfig]:
         """Return configs for agents enabled for this tenant.
 
         Merges YAML defaults with DB overrides from agent_configs table.
@@ -48,10 +46,7 @@ class AgentRegistry:
         # Query DB for tenant-specific overrides
         try:
             result = await db.execute(
-                text(
-                    "SELECT agent_id, is_enabled, override_config "
-                    "FROM agent_configs WHERE tenant_id = :tid"
-                ),
+                text("SELECT agent_id, is_enabled, override_config FROM agent_configs WHERE tenant_id = :tid"),
                 {"tid": str(tenant_id)},
             )
             db_rows = result.all()

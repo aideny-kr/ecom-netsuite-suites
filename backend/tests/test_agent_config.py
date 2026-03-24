@@ -88,6 +88,7 @@ class TestAgentYAMLConfig:
     def test_invalid_agent_id_rejected(self):
         """agent_id must be lowercase alphanumeric with hyphens/underscores."""
         import pytest
+
         with pytest.raises(Exception):
             AgentYAMLConfig(
                 agent_id="INVALID AGENT",
@@ -98,6 +99,7 @@ class TestAgentYAMLConfig:
     def test_max_steps_bounds(self):
         """max_steps must be 1-20."""
         import pytest
+
         with pytest.raises(Exception):
             AgentYAMLConfig(
                 agent_id="test",
@@ -112,9 +114,11 @@ class TestAgentProtocol:
 
     def test_protocol_is_importable(self):
         from app.services.chat.agents.agent_protocol import AgentProtocol
+
         assert AgentProtocol is not None
 
     def test_protocol_is_runtime_checkable(self):
         from app.services.chat.agents.agent_protocol import AgentProtocol
+
         # Protocol should be usable with isinstance checks
         assert hasattr(AgentProtocol, "__protocol_attrs__") or hasattr(AgentProtocol, "__abstractmethods__") or True

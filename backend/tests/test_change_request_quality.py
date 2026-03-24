@@ -52,5 +52,6 @@ class TestDuplicatePatchPrevention:
     def test_patched_files_tracked(self):
         """base_agent should have _PATCH_DEDUP logic."""
         from app.services.chat.agents import base_agent
+
         source = open(base_agent.__file__).read()
         assert "patched_files" in source or "_patched_files" in source

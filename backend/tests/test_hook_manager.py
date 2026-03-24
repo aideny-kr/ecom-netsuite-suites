@@ -6,7 +6,6 @@ from app.services.chat.agents.hooks import HookManager
 
 
 class TestHookManager:
-
     def test_fire_with_no_hooks_returns_input_unchanged(self):
         hm = HookManager()
         result = hm.fire_sync("pre_execute", task="hello", context={})
@@ -51,6 +50,7 @@ class TestHookManager:
 
         def strip_internal(response_text: str) -> str:
             import re
+
             return re.sub(r"<internal>.*?</internal>", "", response_text).strip()
 
         hm.register("pre_response", strip_internal)
@@ -86,6 +86,7 @@ class TestHookManager:
             "    return {'task': task.upper(), 'context': context}\n"
         )
         import sys
+
         sys.path.insert(0, str(tmp_path))
         try:
             hm = HookManager()
@@ -104,7 +105,6 @@ class TestHookManager:
 
 
 class TestHookManagerAsync:
-
     @pytest.mark.asyncio
     async def test_async_fire_pre_execute(self):
         hm = HookManager()

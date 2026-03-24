@@ -46,10 +46,7 @@ def validate_suiteql_query(query: str, context: dict | None = None) -> Validatio
 
     # 3. ROWNUM + ORDER BY anti-pattern
     if "ROWNUM" in upper_query and "ORDER BY" in upper_query:
-        errors.append(
-            "ROWNUM filters rows before ORDER BY is applied. "
-            "Use FETCH FIRST N ROWS ONLY instead."
-        )
+        errors.append("ROWNUM filters rows before ORDER BY is applied. Use FETCH FIRST N ROWS ONLY instead.")
 
     # 4. OFFSET syntax (not supported)
     if re.search(r"\bOFFSET\s+\d+", query, re.IGNORECASE):
@@ -60,9 +57,7 @@ def validate_suiteql_query(query: str, context: dict | None = None) -> Validatio
         errors.append("SuiteQL does not support ILIKE. Use LOWER(field) LIKE LOWER('%value%').")
 
     # 6. Boolean literals (SuiteQL uses 'T'/'F', not true/false)
-    if re.search(r"\b(true|false)\b", query, re.IGNORECASE) and not re.search(
-        r"'(true|false)'", query, re.IGNORECASE
-    ):
+    if re.search(r"\b(true|false)\b", query, re.IGNORECASE) and not re.search(r"'(true|false)'", query, re.IGNORECASE):
         errors.append("SuiteQL uses 'T'/'F' for boolean values, not true/false.")
 
     # 7. Double quotes for string literals

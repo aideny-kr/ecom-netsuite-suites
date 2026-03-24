@@ -373,9 +373,13 @@ async def update_mcp_client_id(
     flag_modified(mcp, "metadata_json")
 
     await audit_service.log_event(
-        db=db, tenant_id=user.tenant_id, category="mcp_connector",
-        action="mcp_connector.update_client_id", actor_id=user.id,
-        resource_type="mcp_connector", resource_id=str(connector_id),
+        db=db,
+        tenant_id=user.tenant_id,
+        category="mcp_connector",
+        action="mcp_connector.update_client_id",
+        actor_id=user.id,
+        resource_type="mcp_connector",
+        resource_id=str(connector_id),
     )
     await db.commit()
     return {"status": "ok", "client_id": request.client_id}
@@ -450,11 +454,13 @@ async def create_bigquery_connector(
     dataset_names = [ds["dataset_id"] for ds in schema.get("datasets", [])]
 
     # 4. Encrypt credentials
-    encrypted = encrypt_credentials({
-        "service_account_json": request.service_account_json,
-        "project_id": request.project_id,
-        "default_dataset": request.default_dataset,
-    })
+    encrypted = encrypt_credentials(
+        {
+            "service_account_json": request.service_account_json,
+            "project_id": request.project_id,
+            "default_dataset": request.default_dataset,
+        }
+    )
 
     # 5. Create connector
     connector = McpConnector(
@@ -552,14 +558,18 @@ async def get_bigquery_schema(
         selected_in_ds = selected.get(ds_id, [])
         enriched_tables = []
         for tbl in ds.get("tables", []):
-            enriched_tables.append({
-                **tbl,
-                "selected": tbl["table_id"] in selected_in_ds,
-            })
-        enriched_datasets.append({
-            "dataset_id": ds_id,
-            "tables": enriched_tables,
-        })
+            enriched_tables.append(
+                {
+                    **tbl,
+                    "selected": tbl["table_id"] in selected_in_ds,
+                }
+            )
+        enriched_datasets.append(
+            {
+                "dataset_id": ds_id,
+                "tables": enriched_tables,
+            }
+        )
 
     return {"datasets": enriched_datasets, "selected_tables": selected}
 

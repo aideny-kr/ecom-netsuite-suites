@@ -76,7 +76,7 @@ def condense_tool_results(content: str, max_result_chars: int = 500) -> str:
 
     # Match JSON objects and arrays (greedy, but bounded by braces/brackets)
     condensed = re.sub(
-        r'(?s)\{[^{}]{500,}\}|\[[^\[\]]{500,}\]',
+        r"(?s)\{[^{}]{500,}\}|\[[^\[\]]{500,}\]",
         _summarize_json,
         content,
     )

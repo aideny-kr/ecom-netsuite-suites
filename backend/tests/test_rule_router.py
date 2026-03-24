@@ -1,6 +1,5 @@
 """Tests for Tier 1 rule-based routing."""
 
-
 from app.services.chat.agents.agent_yaml_config import AgentYAMLConfig, RoutingRule
 from app.services.chat.routing.rule_router import RuleRouter
 
@@ -17,7 +16,6 @@ def _make_agent(agent_id: str, patterns: list[tuple[str, int]], enabled: bool = 
 
 
 class TestRuleRouter:
-
     def test_single_match_returns_agent_id(self):
         agents = [_make_agent("pricing-agent", [("(?i)(price|pricing|margin)", 0)])]
         router = RuleRouter(agents)
@@ -60,10 +58,15 @@ class TestRuleRouter:
         assert router.route("what's the price") is None
 
     def test_multiple_patterns_per_agent(self):
-        agents = [_make_agent("pricing-agent", [
-            ("(?i)price", 0),
-            ("(?i)margin", 0),
-            ("(?i)cost", 0),
-        ])]
+        agents = [
+            _make_agent(
+                "pricing-agent",
+                [
+                    ("(?i)price", 0),
+                    ("(?i)margin", 0),
+                    ("(?i)cost", 0),
+                ],
+            )
+        ]
         router = RuleRouter(agents)
         assert router.route("what's the margin") == "pricing-agent"

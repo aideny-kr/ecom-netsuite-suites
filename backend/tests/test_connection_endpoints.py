@@ -56,9 +56,7 @@ def override_deps(mock_admin, mock_db):
 class TestConnectionHealth:
     @pytest.mark.asyncio
     async def test_health_returns_items(self, mock_db):
-        async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://test"
-        ) as client:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             response = await client.get(
                 "/api/v1/connections/health",
                 headers={"Authorization": "Bearer test"},
@@ -71,9 +69,7 @@ class TestConnectionHealth:
     @pytest.mark.asyncio
     async def test_health_requires_auth(self):
         app.dependency_overrides.clear()
-        async with AsyncClient(
-            transport=ASGITransport(app=app), base_url="http://test"
-        ) as client:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             response = await client.get("/api/v1/connections/health")
         assert response.status_code in (401, 403)
 
@@ -99,9 +95,7 @@ class TestUpdateClientId:
                 patch("app.api.v1.connections.audit_service") as mock_audit,
             ):
                 mock_audit.log_event = AsyncMock()
-                async with AsyncClient(
-                    transport=ASGITransport(app=app), base_url="http://test"
-                ) as client:
+                async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
                     response = await client.patch(
                         f"/api/v1/connections/{uuid.uuid4()}/client-id",
                         json={"client_id": "new-client-id"},
@@ -114,9 +108,7 @@ class TestUpdateClientId:
     async def test_update_client_id_not_found(self, mock_db):
         with patch("app.api.v1.connections.connection_service") as mock_svc:
             mock_svc.get_connection = AsyncMock(return_value=None)
-            async with AsyncClient(
-                transport=ASGITransport(app=app), base_url="http://test"
-            ) as client:
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
                 response = await client.patch(
                     f"/api/v1/connections/{uuid.uuid4()}/client-id",
                     json={"client_id": "new-client-id"},
@@ -136,9 +128,7 @@ class TestUpdateRestletUrl:
 
             with patch("app.api.v1.connections.audit_service") as mock_audit:
                 mock_audit.log_event = AsyncMock()
-                async with AsyncClient(
-                    transport=ASGITransport(app=app), base_url="http://test"
-                ) as client:
+                async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
                     response = await client.patch(
                         f"/api/v1/connections/{uuid.uuid4()}/restlet-url",
                         json={"restlet_url": "https://example.com/restlet"},
@@ -151,9 +141,7 @@ class TestUpdateRestletUrl:
     async def test_update_restlet_url_not_found(self, mock_db):
         with patch("app.api.v1.connections.connection_service") as mock_svc:
             mock_svc.get_connection = AsyncMock(return_value=None)
-            async with AsyncClient(
-                transport=ASGITransport(app=app), base_url="http://test"
-            ) as client:
+            async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
                 response = await client.patch(
                     f"/api/v1/connections/{uuid.uuid4()}/restlet-url",
                     json={"restlet_url": "https://example.com/restlet"},

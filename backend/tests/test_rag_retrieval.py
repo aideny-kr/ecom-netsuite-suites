@@ -51,8 +51,12 @@ Content about beta.
         content = (golden_dir / "transaction-types-and-statuses.md").read_text()
         chunks = chunk_markdown(content, "golden_dataset/transaction-types-and-statuses.md")
         # Find the chunk with the RMA STATUS section (not just any mention of RtnAuth)
-        rma_status_chunks = [c for c in chunks if "Return Authorization (RMA) Statuses" in c["raw_text"]
-                             or "Return Authorization" in c["raw_text"].split("\n")[0]]
+        rma_status_chunks = [
+            c
+            for c in chunks
+            if "Return Authorization (RMA) Statuses" in c["raw_text"]
+            or "Return Authorization" in c["raw_text"].split("\n")[0]
+        ]
         assert len(rma_status_chunks) >= 1
         first_line = rma_status_chunks[0]["raw_text"].split("\n")[0]
         assert "—" in first_line  # H1 — H2 format

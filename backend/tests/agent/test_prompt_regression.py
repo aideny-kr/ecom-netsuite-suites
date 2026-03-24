@@ -62,11 +62,13 @@ def _llm(text: str = "", tools: list[ToolUseBlock] | None = None) -> LLMResponse
 
 
 def _suiteql_result(columns: list[str], rows: list[list] | None = None) -> str:
-    return json.dumps({
-        "columns": columns,
-        "rows": rows or [["1"]],
-        "row_count": len(rows) if rows else 1,
-    })
+    return json.dumps(
+        {
+            "columns": columns,
+            "rows": rows or [["1"]],
+            "row_count": len(rows) if rows else 1,
+        }
+    )
 
 
 def _text(msg: str) -> LLMResponse:
@@ -143,11 +145,14 @@ def _run_patches():
 class TestT01TopSalesOrders:
     @pytest.mark.asyncio
     async def test_uses_fetch_first_not_limit(self, agent, adapter, db):
-        call = _tool("netsuite_suiteql", {
-            "query": "SELECT t.id, t.tranid, t.trandate, BUILTIN.DF(t.entity) as customer, "
-                     "t.foreigntotal FROM transaction t WHERE t.type = 'SalesOrd' "
-                     "AND t.trandate = TRUNC(SYSDATE) ORDER BY t.id DESC FETCH FIRST 10 ROWS ONLY"
-        })
+        call = _tool(
+            "netsuite_suiteql",
+            {
+                "query": "SELECT t.id, t.tranid, t.trandate, BUILTIN.DF(t.entity) as customer, "
+                "t.foreigntotal FROM transaction t WHERE t.type = 'SalesOrd' "
+                "AND t.trandate = TRUNC(SYSDATE) ORDER BY t.id DESC FETCH FIRST 10 ROWS ONLY"
+            },
+        )
         adapter.create_message.side_effect = [
             _llm(tools=[call]),
             _text("Here are the top 10 sales orders today."),
@@ -174,11 +179,14 @@ class TestT01TopSalesOrders:
 class TestT02RMALookup:
     @pytest.mark.asyncio
     async def test_rma_lookup_and_linked_receipt(self, agent, adapter, db):
-        call = _tool("netsuite_suiteql", {
-            "query": "SELECT t.id, t.tranid, t.trandate, BUILTIN.DF(t.entity) as customer, "
-                     "BUILTIN.DF(t.status) as status, t.foreigntotal, t.createdfrom "
-                     "FROM transaction t WHERE t.tranid = 'RMA61214'"
-        })
+        call = _tool(
+            "netsuite_suiteql",
+            {
+                "query": "SELECT t.id, t.tranid, t.trandate, BUILTIN.DF(t.entity) as customer, "
+                "BUILTIN.DF(t.status) as status, t.foreigntotal, t.createdfrom "
+                "FROM transaction t WHERE t.tranid = 'RMA61214'"
+            },
+        )
         adapter.create_message.side_effect = [
             _llm(tools=[call]),
             _text("Found RMA61214."),
@@ -186,9 +194,7 @@ class TestT02RMALookup:
 
         with _run_patches() as mocks:
             mocks["execute_tool_call"].return_value = _suiteql_result(["id", "tranid", "status"])
-            result = await agent.run(
-                "Show me RMA61214 status and linked item receipt", {}, db, adapter, _MODEL
-            )
+            result = await agent.run("Show me RMA61214 status and linked item receipt", {}, db, adapter, _MODEL)
 
         assert result.success
         assert len(result.tool_calls_log) <= 2
@@ -204,12 +210,15 @@ class TestT02RMALookup:
 class TestT03RevenueByPlatform:
     @pytest.mark.asyncio
     async def test_revenue_by_platform_uses_group_by(self, agent, adapter, db):
-        call = _tool("netsuite_suiteql", {
-            "query": "SELECT BUILTIN.DF(t.custbody_platform) as platform, COUNT(*) as orders, "
-                     "SUM(t.foreigntotal) as total FROM transaction t "
-                     "WHERE t.type = 'SalesOrd' AND t.trandate >= TRUNC(SYSDATE, 'MONTH') "
-                     "GROUP BY BUILTIN.DF(t.custbody_platform) ORDER BY total DESC"
-        })
+        call = _tool(
+            "netsuite_suiteql",
+            {
+                "query": "SELECT BUILTIN.DF(t.custbody_platform) as platform, COUNT(*) as orders, "
+                "SUM(t.foreigntotal) as total FROM transaction t "
+                "WHERE t.type = 'SalesOrd' AND t.trandate >= TRUNC(SYSDATE, 'MONTH') "
+                "GROUP BY BUILTIN.DF(t.custbody_platform) ORDER BY total DESC"
+            },
+        )
         adapter.create_message.side_effect = [
             _llm(tools=[call]),
             _text("Revenue by platform this month."),
@@ -217,9 +226,7 @@ class TestT03RevenueByPlatform:
 
         with _run_patches() as mocks:
             mocks["execute_tool_call"].return_value = _suiteql_result(["platform", "orders", "total"])
-            result = await agent.run(
-                "Total revenue by platform this month", {}, db, adapter, _MODEL
-            )
+            result = await agent.run("Total revenue by platform this month", {}, db, adapter, _MODEL)
 
         assert result.success
         q = result.tool_calls_log[0]["params"]["query"].upper()
@@ -235,12 +242,15 @@ class TestT03RevenueByPlatform:
 class TestT04Inventory:
     @pytest.mark.asyncio
     async def test_uses_inventoryitemlocations(self, agent, adapter, db):
-        call = _tool("netsuite_suiteql", {
-            "query": "SELECT i.itemid, i.displayname, BUILTIN.DF(iil.location) as location, "
-                     "iil.quantityavailable, iil.quantityonhand "
-                     "FROM inventoryitemlocations iil JOIN item i ON i.id = iil.item "
-                     "WHERE LOWER(i.itemid) LIKE '%frafmk0006%'"
-        })
+        call = _tool(
+            "netsuite_suiteql",
+            {
+                "query": "SELECT i.itemid, i.displayname, BUILTIN.DF(iil.location) as location, "
+                "iil.quantityavailable, iil.quantityonhand "
+                "FROM inventoryitemlocations iil JOIN item i ON i.id = iil.item "
+                "WHERE LOWER(i.itemid) LIKE '%frafmk0006%'"
+            },
+        )
         adapter.create_message.side_effect = [
             _llm(tools=[call]),
             _text("Inventory for FRAFMK0006."),
@@ -248,9 +258,7 @@ class TestT04Inventory:
 
         with _run_patches() as mocks:
             mocks["execute_tool_call"].return_value = _suiteql_result(["itemid", "location", "qty"])
-            result = await agent.run(
-                "Show inventory for item FRAFMK0006 at all locations", {}, db, adapter, _MODEL
-            )
+            result = await agent.run("Show inventory for item FRAFMK0006 at all locations", {}, db, adapter, _MODEL)
 
         assert result.success
         q = result.tool_calls_log[0]["params"]["query"].upper()
@@ -266,16 +274,19 @@ class TestT04Inventory:
 class TestT05SalesByClassYoY:
     @pytest.mark.asyncio
     async def test_yoy_uses_salesord_and_limited_dimensions(self, agent, adapter, db):
-        call = _tool("netsuite_suiteql", {
-            "query": "SELECT CASE WHEN t.trandate >= TO_DATE('2026-01-01','YYYY-MM-DD') "
-                     "THEN 'FY2026' ELSE 'FY2025' END as fiscal_year, "
-                     "BUILTIN.DF(i.class) as product_class, "
-                     "COUNT(DISTINCT t.id) as orders, ROUND(SUM(tl.amount * -1), 2) as revenue "
-                     "FROM transactionline tl JOIN transaction t ON tl.transaction = t.id "
-                     "JOIN item i ON tl.item = i.id "
-                     "WHERE t.type = 'SalesOrd' AND tl.mainline = 'F' AND tl.taxline = 'F' "
-                     "GROUP BY fiscal_year, BUILTIN.DF(i.class) ORDER BY fiscal_year, revenue DESC"
-        })
+        call = _tool(
+            "netsuite_suiteql",
+            {
+                "query": "SELECT CASE WHEN t.trandate >= TO_DATE('2026-01-01','YYYY-MM-DD') "
+                "THEN 'FY2026' ELSE 'FY2025' END as fiscal_year, "
+                "BUILTIN.DF(i.class) as product_class, "
+                "COUNT(DISTINCT t.id) as orders, ROUND(SUM(tl.amount * -1), 2) as revenue "
+                "FROM transactionline tl JOIN transaction t ON tl.transaction = t.id "
+                "JOIN item i ON tl.item = i.id "
+                "WHERE t.type = 'SalesOrd' AND tl.mainline = 'F' AND tl.taxline = 'F' "
+                "GROUP BY fiscal_year, BUILTIN.DF(i.class) ORDER BY fiscal_year, revenue DESC"
+            },
+        )
         adapter.create_message.side_effect = [
             _llm(tools=[call]),
             _text("Sales by class YoY."),
@@ -283,9 +294,7 @@ class TestT05SalesByClassYoY:
 
         with _run_patches() as mocks:
             mocks["execute_tool_call"].return_value = _suiteql_result(["fy", "class", "revenue"])
-            result = await agent.run(
-                "Sales by class FY2025 vs FY2026", {}, db, adapter, _MODEL
-            )
+            result = await agent.run("Sales by class FY2025 vs FY2026", {}, db, adapter, _MODEL)
 
         assert result.success
         q = result.tool_calls_log[0]["params"]["query"].upper()
@@ -302,22 +311,21 @@ class TestT05SalesByClassYoY:
 class TestT06FinancialReport:
     @pytest.mark.asyncio
     async def test_pl_routes_to_financial_report_tool(self, agent, adapter, db):
-        call = _tool("netsuite_financial_report", {
-            "report_type": "income_statement",
-            "period": "Feb 2026",
-        })
+        call = _tool(
+            "netsuite_financial_report",
+            {
+                "report_type": "income_statement",
+                "period": "Feb 2026",
+            },
+        )
         adapter.create_message.side_effect = [
             _llm(tools=[call]),
             _text("Here is the P&L for February."),
         ]
 
         with _run_patches() as mocks:
-            mocks["execute_tool_call"].return_value = json.dumps({
-                "items": [], "summary": {"net_income": 50000}
-            })
-            result = await agent.run(
-                "What is our P&L for February?", {}, db, adapter, _MODEL
-            )
+            mocks["execute_tool_call"].return_value = json.dumps({"items": [], "summary": {"net_income": 50000}})
+            result = await agent.run("What is our P&L for February?", {}, db, adapter, _MODEL)
 
         assert result.success
         assert result.tool_calls_log[0]["tool"] == "netsuite_financial_report"
@@ -338,12 +346,10 @@ class TestT07DocsRouting:
         ]
 
         with _run_patches() as mocks:
-            mocks["execute_tool_call"].return_value = json.dumps({
-                "results": [{"content": "RMA workflow...", "source": "netsuite_docs/rma.md"}]
-            })
-            result = await agent.run(
-                "How does the RMA workflow work?", {}, db, adapter, _MODEL
+            mocks["execute_tool_call"].return_value = json.dumps(
+                {"results": [{"content": "RMA workflow...", "source": "netsuite_docs/rma.md"}]}
             )
+            result = await agent.run("How does the RMA workflow work?", {}, db, adapter, _MODEL)
 
         assert result.success
         assert result.tool_calls_log[0]["tool"] == "rag_search"
@@ -357,12 +363,15 @@ class TestT07DocsRouting:
 class TestT08OpenPOs:
     @pytest.mark.asyncio
     async def test_open_pos_uses_single_letter_status(self, agent, adapter, db):
-        call = _tool("netsuite_suiteql", {
-            "query": "SELECT t.id, t.tranid, t.trandate, BUILTIN.DF(t.entity) as vendor, "
-                     "BUILTIN.DF(t.status) as status, t.foreigntotal "
-                     "FROM transaction t WHERE t.type = 'PurchOrd' "
-                     "AND t.status NOT IN ('G', 'H') ORDER BY t.id DESC FETCH FIRST 50 ROWS ONLY"
-        })
+        call = _tool(
+            "netsuite_suiteql",
+            {
+                "query": "SELECT t.id, t.tranid, t.trandate, BUILTIN.DF(t.entity) as vendor, "
+                "BUILTIN.DF(t.status) as status, t.foreigntotal "
+                "FROM transaction t WHERE t.type = 'PurchOrd' "
+                "AND t.status NOT IN ('G', 'H') ORDER BY t.id DESC FETCH FIRST 50 ROWS ONLY"
+            },
+        )
         adapter.create_message.side_effect = [
             _llm(tools=[call]),
             _text("Here are all open POs."),
@@ -390,15 +399,19 @@ class TestT09SchemaLookup:
     async def test_schema_question_can_answer_from_context(self, agent, adapter, db):
         """When tenant_schema has the answer, agent can respond without a tool call."""
         adapter.create_message.side_effect = [
-            _text("Based on the tenant schema, the custom fields on transactions are: "
-                  "custbody_platform, custbody_shopify_order, custbody_channel..."),
+            _text(
+                "Based on the tenant schema, the custom fields on transactions are: "
+                "custbody_platform, custbody_shopify_order, custbody_channel..."
+            ),
         ]
 
         with _run_patches():
             result = await agent.run(
                 "What custom fields are on transactions?",
                 {"tenant_vernacular": "<tenant_vernacular></tenant_vernacular>"},
-                db, adapter, _MODEL,
+                db,
+                adapter,
+                _MODEL,
             )
 
         # This is a context-answerable question — 0 tool calls is acceptable
@@ -414,16 +427,19 @@ class TestT09SchemaLookup:
 class TestT10LineLevelRevenue:
     @pytest.mark.asyncio
     async def test_line_level_uses_amount_negation_and_assembly_filter(self, agent, adapter, db):
-        call = _tool("netsuite_suiteql", {
-            "query": "SELECT BUILTIN.DF(i.displayname) as item, "
-                     "SUM(tl.amount * -1) as revenue "
-                     "FROM transactionline tl JOIN transaction t ON tl.transaction = t.id "
-                     "JOIN item i ON tl.item = i.id "
-                     "WHERE t.type = 'SalesOrd' AND tl.mainline = 'F' AND tl.taxline = 'F' "
-                     "AND tl.assemblycomponent = 'F' "
-                     "GROUP BY BUILTIN.DF(i.displayname) ORDER BY revenue DESC "
-                     "FETCH FIRST 50 ROWS ONLY"
-        })
+        call = _tool(
+            "netsuite_suiteql",
+            {
+                "query": "SELECT BUILTIN.DF(i.displayname) as item, "
+                "SUM(tl.amount * -1) as revenue "
+                "FROM transactionline tl JOIN transaction t ON tl.transaction = t.id "
+                "JOIN item i ON tl.item = i.id "
+                "WHERE t.type = 'SalesOrd' AND tl.mainline = 'F' AND tl.taxline = 'F' "
+                "AND tl.assemblycomponent = 'F' "
+                "GROUP BY BUILTIN.DF(i.displayname) ORDER BY revenue DESC "
+                "FETCH FIRST 50 ROWS ONLY"
+            },
+        )
         adapter.create_message.side_effect = [
             _llm(tools=[call]),
             _text("Revenue by item, line-level."),
@@ -431,9 +447,7 @@ class TestT10LineLevelRevenue:
 
         with _run_patches() as mocks:
             mocks["execute_tool_call"].return_value = _suiteql_result(["item", "revenue"])
-            result = await agent.run(
-                "Total revenue for Q1 — show me line level", {}, db, adapter, _MODEL
-            )
+            result = await agent.run("Total revenue for Q1 — show me line level", {}, db, adapter, _MODEL)
 
         assert result.success
         q = result.tool_calls_log[0]["params"]["query"].upper()
@@ -451,11 +465,14 @@ class TestT10LineLevelRevenue:
 class TestT11NoDoubleCounting:
     @pytest.mark.asyncio
     async def test_does_not_mix_salesord_and_custinvc(self, agent, adapter, db):
-        call = _tool("netsuite_suiteql", {
-            "query": "SELECT t.tranid, t.trandate, BUILTIN.DF(t.entity) as customer, "
-                     "t.foreigntotal FROM transaction t "
-                     "WHERE t.type = 'SalesOrd' ORDER BY t.id DESC FETCH FIRST 20 ROWS ONLY"
-        })
+        call = _tool(
+            "netsuite_suiteql",
+            {
+                "query": "SELECT t.tranid, t.trandate, BUILTIN.DF(t.entity) as customer, "
+                "t.foreigntotal FROM transaction t "
+                "WHERE t.type = 'SalesOrd' ORDER BY t.id DESC FETCH FIRST 20 ROWS ONLY"
+            },
+        )
         adapter.create_message.side_effect = [
             _llm(tools=[call]),
             _text("Sales orders and their invoices."),
@@ -463,9 +480,7 @@ class TestT11NoDoubleCounting:
 
         with _run_patches() as mocks:
             mocks["execute_tool_call"].return_value = _suiteql_result(["tranid", "total"])
-            result = await agent.run(
-                "Show me sales orders and their invoices", {}, db, adapter, _MODEL
-            )
+            result = await agent.run("Show me sales orders and their invoices", {}, db, adapter, _MODEL)
 
         assert result.success
         q = result.tool_calls_log[0]["params"]["query"].upper()
@@ -474,8 +489,7 @@ class TestT11NoDoubleCounting:
             # If aggregating, must NOT have both types
             has_salesord = "SALESORD" in q
             has_custinvc = "CUSTINVC" in q
-            assert not (has_salesord and has_custinvc), \
-                "Double-counting: SUM with both SalesOrd and CustInvc"
+            assert not (has_salesord and has_custinvc), "Double-counting: SUM with both SalesOrd and CustInvc"
 
 
 # ---------------------------------------------------------------------------
@@ -486,10 +500,10 @@ class TestT11NoDoubleCounting:
 class TestT12CustomerLookup:
     @pytest.mark.asyncio
     async def test_customer_lookup_uses_like(self, agent, adapter, db):
-        call = _tool("netsuite_suiteql", {
-            "query": "SELECT id, companyname, email FROM customer "
-                     "WHERE LOWER(companyname) LIKE '%acme%'"
-        })
+        call = _tool(
+            "netsuite_suiteql",
+            {"query": "SELECT id, companyname, email FROM customer WHERE LOWER(companyname) LIKE '%acme%'"},
+        )
         adapter.create_message.side_effect = [
             _llm(tools=[call]),
             _text("Found Acme Corp."),
@@ -516,26 +530,21 @@ class TestT12CustomerLookup:
 class TestT13WorkspaceRouting:
     @pytest.mark.asyncio
     async def test_script_fix_routes_to_workspace(self, agent, adapter, db):
-        call = _tool("workspace_read_file", {
-            "workspace_id": "ws-1", "file_path": "createSalesOrder.js"
-        })
+        call = _tool("workspace_read_file", {"workspace_id": "ws-1", "file_path": "createSalesOrder.js"})
         adapter.create_message.side_effect = [
             _llm(tools=[call]),
             _text("Here's the script. I'll propose a fix."),
         ]
 
         with _run_patches() as mocks:
-            mocks["execute_tool_call"].return_value = json.dumps({
-                "content": "// script content", "path": "createSalesOrder.js"
-            })
-            result = await agent.run(
-                "Fix the createSalesOrder script", {}, db, adapter, _MODEL
+            mocks["execute_tool_call"].return_value = json.dumps(
+                {"content": "// script content", "path": "createSalesOrder.js"}
             )
+            result = await agent.run("Fix the createSalesOrder script", {}, db, adapter, _MODEL)
 
         assert result.success
         tool_used = result.tool_calls_log[0]["tool"]
-        assert tool_used.startswith("workspace_"), \
-            f"Expected workspace tool, got {tool_used}"
+        assert tool_used.startswith("workspace_"), f"Expected workspace tool, got {tool_used}"
         # Must NOT try to create a record
         for tc in result.tool_calls_log:
             assert tc["tool"] != "ns_createRecord"
@@ -551,11 +560,14 @@ class TestT14TryAgain:
     async def test_try_again_builds_fresh_query(self, agent, adapter, db):
         """When user says 'try again', agent should build a new query following
         system prompt rules, NOT copy from conversation history."""
-        call = _tool("netsuite_suiteql", {
-            "query": "SELECT t.id, t.tranid, t.trandate, BUILTIN.DF(t.entity) as customer, "
-                     "t.foreigntotal FROM transaction t WHERE t.type = 'SalesOrd' "
-                     "ORDER BY t.id DESC FETCH FIRST 10 ROWS ONLY"
-        })
+        call = _tool(
+            "netsuite_suiteql",
+            {
+                "query": "SELECT t.id, t.tranid, t.trandate, BUILTIN.DF(t.entity) as customer, "
+                "t.foreigntotal FROM transaction t WHERE t.type = 'SalesOrd' "
+                "ORDER BY t.id DESC FETCH FIRST 10 ROWS ONLY"
+            },
+        )
         adapter.create_message.side_effect = [
             _llm(tools=[call]),
             _text("Here are the latest orders."),
@@ -590,11 +602,14 @@ class TestT14TryAgain:
 class TestT15CustomFieldValues:
     @pytest.mark.asyncio
     async def test_custom_field_uses_builtin_df(self, agent, adapter, db):
-        call = _tool("netsuite_suiteql", {
-            "query": "SELECT BUILTIN.DF(t.custbody_platform) as platform, COUNT(*) as cnt "
-                     "FROM transaction t WHERE t.type = 'SalesOrd' "
-                     "GROUP BY BUILTIN.DF(t.custbody_platform) ORDER BY cnt DESC"
-        })
+        call = _tool(
+            "netsuite_suiteql",
+            {
+                "query": "SELECT BUILTIN.DF(t.custbody_platform) as platform, COUNT(*) as cnt "
+                "FROM transaction t WHERE t.type = 'SalesOrd' "
+                "GROUP BY BUILTIN.DF(t.custbody_platform) ORDER BY cnt DESC"
+            },
+        )
         adapter.create_message.side_effect = [
             _llm(tools=[call]),
             _text("Here are the custbody_platform values."),
@@ -602,9 +617,7 @@ class TestT15CustomFieldValues:
 
         with _run_patches() as mocks:
             mocks["execute_tool_call"].return_value = _suiteql_result(["platform", "cnt"])
-            result = await agent.run(
-                "Show me custbody_platform values", {}, db, adapter, _MODEL
-            )
+            result = await agent.run("Show me custbody_platform values", {}, db, adapter, _MODEL)
 
         assert result.success
         q = result.tool_calls_log[0]["params"]["query"].upper()
@@ -619,12 +632,15 @@ class TestT15CustomFieldValues:
 class TestT16SalesByPlatformLastWeek:
     @pytest.mark.asyncio
     async def test_uses_vernacular_mapping_and_limited_calls(self, agent, adapter, db):
-        call = _tool("netsuite_suiteql", {
-            "query": "SELECT BUILTIN.DF(t.custbody_platform) as platform, COUNT(*) as orders, "
-                     "SUM(t.foreigntotal) as total FROM transaction t "
-                     "WHERE t.type = 'SalesOrd' AND t.trandate >= TRUNC(SYSDATE) - 7 "
-                     "GROUP BY BUILTIN.DF(t.custbody_platform) ORDER BY total DESC"
-        })
+        call = _tool(
+            "netsuite_suiteql",
+            {
+                "query": "SELECT BUILTIN.DF(t.custbody_platform) as platform, COUNT(*) as orders, "
+                "SUM(t.foreigntotal) as total FROM transaction t "
+                "WHERE t.type = 'SalesOrd' AND t.trandate >= TRUNC(SYSDATE) - 7 "
+                "GROUP BY BUILTIN.DF(t.custbody_platform) ORDER BY total DESC"
+            },
+        )
         adapter.create_message.side_effect = [
             _llm(tools=[call]),
             _text("Sales by platform last week."),
@@ -646,7 +662,9 @@ class TestT16SalesByPlatformLastWeek:
             result = await agent.run(
                 "Sales last week by platform",
                 {"tenant_vernacular": vernacular},
-                db, adapter, _MODEL,
+                db,
+                adapter,
+                _MODEL,
             )
 
         assert result.success
@@ -665,6 +683,7 @@ class TestContextNeedClassifier:
 
     def _classify(self, msg: str, is_financial: bool = False) -> str:
         from app.services.chat.orchestrator import _classify_context_need
+
         return _classify_context_need(msg, is_financial=is_financial)
 
     def test_financial_explicit(self):

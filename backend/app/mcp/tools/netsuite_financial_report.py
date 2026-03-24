@@ -14,9 +14,18 @@ _PERIOD_NAME_RE = re.compile(r"^(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|D
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 _MONTH_END: dict[str, str] = {
-    "Jan": "31", "Feb": "28", "Mar": "31", "Apr": "30",
-    "May": "31", "Jun": "30", "Jul": "31", "Aug": "31",
-    "Sep": "30", "Oct": "31", "Nov": "30", "Dec": "31",
+    "Jan": "31",
+    "Feb": "28",
+    "Mar": "31",
+    "Apr": "30",
+    "May": "31",
+    "Jun": "30",
+    "Jul": "31",
+    "Aug": "31",
+    "Sep": "30",
+    "Oct": "31",
+    "Nov": "30",
+    "Dec": "31",
 }
 
 
@@ -251,9 +260,7 @@ FETCH FIRST 5000 ROWS ONLY""",
 from app.mcp.tools import netsuite_suiteql as _suiteql_mod
 
 
-async def _execute_suiteql(
-    *, query: str, tenant_id: str, db, limit: int = 5000, timeout_seconds: int = 90
-) -> dict:
+async def _execute_suiteql(*, query: str, tenant_id: str, db, limit: int = 5000, timeout_seconds: int = 90) -> dict:
     """Thin wrapper around suiteql.execute() — exists for easy test mocking.
 
     Financial reports control their own FETCH FIRST in SQL templates,
@@ -337,7 +344,9 @@ async def execute(
     has_error = (error_val is True) or (isinstance(error_val, str) and error_val.strip())
 
     if has_error:
-        detail = error_msg if isinstance(error_msg, str) else (error_val if isinstance(error_val, str) else "Query failed")
+        detail = (
+            error_msg if isinstance(error_msg, str) else (error_val if isinstance(error_val, str) else "Query failed")
+        )
         print(f"[FINANCIAL_REPORT] SuiteQL error: {detail}", flush=True)
         return {"success": False, "error": detail}
 
@@ -443,12 +452,7 @@ def _compute_summary(report_type: str, rows: list) -> dict:
         for row in rows:
             pname = row.get("periodname", "Unknown")
             periods.setdefault(pname, []).append(row)
-        return {
-            "by_period": {
-                pname: _compute_income_summary(period_rows)
-                for pname, period_rows in periods.items()
-            }
-        }
+        return {"by_period": {pname: _compute_income_summary(period_rows) for pname, period_rows in periods.items()}}
 
     if report_type == "balance_sheet":
         return _compute_balance_summary(rows)
@@ -459,12 +463,7 @@ def _compute_summary(report_type: str, rows: list) -> dict:
         for row in rows:
             pname = row.get("periodname", "Unknown")
             periods.setdefault(pname, []).append(row)
-        return {
-            "by_period": {
-                pname: _compute_balance_summary(period_rows)
-                for pname, period_rows in periods.items()
-            }
-        }
+        return {"by_period": {pname: _compute_balance_summary(period_rows) for pname, period_rows in periods.items()}}
 
     return {}
 
@@ -480,9 +479,7 @@ _MONTH_RE = re.compile(
     r"\s+(\d{4})\b",
     re.IGNORECASE,
 )
-_RELATIVE_PERIOD_RE = re.compile(
-    r"\b(last|previous|prior|this|current)\s+(month|quarter|year)\b", re.IGNORECASE
-)
+_RELATIVE_PERIOD_RE = re.compile(r"\b(last|previous|prior|this|current)\s+(month|quarter|year)\b", re.IGNORECASE)
 _Q_RE = re.compile(r"\bQ([1-4])\s+(\d{4})\b", re.IGNORECASE)
 
 
@@ -555,10 +552,21 @@ def parse_report_intent(user_message: str) -> dict | None:
             report_type = "balance_sheet"
     elif any(kw in msg for kw in ("trial balance", "tb ")):
         report_type = "trial_balance"
-    elif any(kw in msg for kw in (
-        "income statement", "p&l", "profit and loss", "profit & loss",
-        "p/l", "pl ", "revenue", "expense", "cogs", "net income",
-    )):
+    elif any(
+        kw in msg
+        for kw in (
+            "income statement",
+            "p&l",
+            "profit and loss",
+            "profit & loss",
+            "p/l",
+            "pl ",
+            "revenue",
+            "expense",
+            "cogs",
+            "net income",
+        )
+    ):
         if any(kw in msg for kw in ("trend", "month over month", "by month", "by period", "compare")):
             report_type = "income_statement_trend"
         else:

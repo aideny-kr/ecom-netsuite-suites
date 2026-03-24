@@ -7,7 +7,6 @@ import pytest
 
 
 class TestSelectAgent:
-
     @pytest.mark.asyncio
     async def test_no_configs_returns_unified(self):
         """When no YAML configs are loaded, _select_agent returns None (use UnifiedAgent)."""
@@ -30,9 +29,11 @@ class TestSelectAgent:
         with patch("app.services.chat.orchestrator._agent_registry") as mock_registry:
             # Setup: registry has configs, rule router matches
             mock_registry.configs = {"pricing-agent": MagicMock()}
-            mock_registry.get_enabled_agents = AsyncMock(return_value=[
-                MagicMock(agent_id="pricing-agent", routing_rules=[MagicMock(pattern="(?i)price", priority=0)]),
-            ])
+            mock_registry.get_enabled_agents = AsyncMock(
+                return_value=[
+                    MagicMock(agent_id="pricing-agent", routing_rules=[MagicMock(pattern="(?i)price", priority=0)]),
+                ]
+            )
             mock_registry.is_healthy = MagicMock(return_value=True)
 
             with patch("app.services.chat.orchestrator.RuleRouter") as MockRouter:
@@ -53,13 +54,17 @@ class TestSelectAgent:
 
         with patch("app.services.chat.orchestrator._agent_registry") as mock_registry:
             mock_registry.configs = {"pricing-agent": MagicMock()}
-            mock_registry.get_enabled_agents = AsyncMock(return_value=[
-                MagicMock(agent_id="pricing-agent"),
-            ])
+            mock_registry.get_enabled_agents = AsyncMock(
+                return_value=[
+                    MagicMock(agent_id="pricing-agent"),
+                ]
+            )
             mock_registry.is_healthy = MagicMock(return_value=True)
 
-            with patch("app.services.chat.orchestrator.RuleRouter") as MockRuleRouter, \
-                 patch("app.services.chat.orchestrator.SemanticRouter") as MockSemRouter:
+            with (
+                patch("app.services.chat.orchestrator.RuleRouter") as MockRuleRouter,
+                patch("app.services.chat.orchestrator.SemanticRouter") as MockSemRouter,
+            ):
                 MockRuleRouter.return_value.route.return_value = None
                 MockSemRouter.return_value.route = AsyncMock(return_value="pricing-agent")
 
@@ -78,12 +83,16 @@ class TestSelectAgent:
 
         with patch("app.services.chat.orchestrator._agent_registry") as mock_registry:
             mock_registry.configs = {"pricing-agent": MagicMock()}
-            mock_registry.get_enabled_agents = AsyncMock(return_value=[
-                MagicMock(agent_id="pricing-agent"),
-            ])
+            mock_registry.get_enabled_agents = AsyncMock(
+                return_value=[
+                    MagicMock(agent_id="pricing-agent"),
+                ]
+            )
 
-            with patch("app.services.chat.orchestrator.RuleRouter") as MockRuleRouter, \
-                 patch("app.services.chat.orchestrator.SemanticRouter") as MockSemRouter:
+            with (
+                patch("app.services.chat.orchestrator.RuleRouter") as MockRuleRouter,
+                patch("app.services.chat.orchestrator.SemanticRouter") as MockSemRouter,
+            ):
                 MockRuleRouter.return_value.route.return_value = None
                 MockSemRouter.return_value.route = AsyncMock(return_value="unified-agent")
 
@@ -102,9 +111,11 @@ class TestSelectAgent:
 
         with patch("app.services.chat.orchestrator._agent_registry") as mock_registry:
             mock_registry.configs = {"pricing-agent": MagicMock()}
-            mock_registry.get_enabled_agents = AsyncMock(return_value=[
-                MagicMock(agent_id="pricing-agent"),
-            ])
+            mock_registry.get_enabled_agents = AsyncMock(
+                return_value=[
+                    MagicMock(agent_id="pricing-agent"),
+                ]
+            )
             mock_registry.is_healthy = MagicMock(return_value=False)
 
             with patch("app.services.chat.orchestrator.RuleRouter") as MockRuleRouter:

@@ -43,7 +43,6 @@ SAMPLE_SCHEMA = {
 
 
 class TestBigQuerySchemaSeeder:
-
     @pytest.mark.asyncio
     async def test_seed_creates_chunks(self):
         from app.services.bigquery_schema_seeder import seed_bigquery_schema

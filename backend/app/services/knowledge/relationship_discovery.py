@@ -32,11 +32,13 @@ async def discover_transaction_relationships(
         relationships = []
         for row in rows:
             if len(row) >= 3:
-                relationships.append({
-                    "source_type": row[0],
-                    "created_type": row[1],
-                    "link_count": row[2],
-                })
+                relationships.append(
+                    {
+                        "source_type": row[0],
+                        "created_type": row[1],
+                        "link_count": row[2],
+                    }
+                )
 
         logger.info("relationship_discovery.complete", relationships=len(relationships))
         return relationships

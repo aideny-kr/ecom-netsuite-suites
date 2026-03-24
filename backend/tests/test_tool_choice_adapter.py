@@ -8,6 +8,7 @@ from app.services.chat.llm_adapter import BaseLLMAdapter
 def test_create_message_accepts_tool_choice():
     """BaseLLMAdapter.create_message signature must accept tool_choice param."""
     import inspect
+
     sig = inspect.signature(BaseLLMAdapter.create_message)
     assert "tool_choice" in sig.parameters
     param = sig.parameters["tool_choice"]
@@ -17,6 +18,7 @@ def test_create_message_accepts_tool_choice():
 def test_stream_message_accepts_tool_choice():
     """BaseLLMAdapter.stream_message signature must accept tool_choice param."""
     import inspect
+
     sig = inspect.signature(BaseLLMAdapter.stream_message)
     assert "tool_choice" in sig.parameters
     param = sig.parameters["tool_choice"]
@@ -38,10 +40,13 @@ async def test_anthropic_adapter_passes_tool_choice_to_kwargs():
         mock_anthropic.AsyncAnthropic.return_value = mock_client
 
         from app.services.chat.adapters.anthropic_adapter import AnthropicAdapter
+
         adapter = AnthropicAdapter(api_key="test-key")
 
         tool_choice = {"type": "tool", "name": "netsuite_suiteql"}
-        tools = [{"name": "netsuite_suiteql", "description": "test", "input_schema": {"type": "object", "properties": {}}}]
+        tools = [
+            {"name": "netsuite_suiteql", "description": "test", "input_schema": {"type": "object", "properties": {}}}
+        ]
 
         await adapter.create_message(
             model="claude-sonnet-4-20250514",
@@ -71,6 +76,7 @@ async def test_anthropic_adapter_omits_tool_choice_when_none():
         mock_anthropic.AsyncAnthropic.return_value = mock_client
 
         from app.services.chat.adapters.anthropic_adapter import AnthropicAdapter
+
         adapter = AnthropicAdapter(api_key="test-key")
 
         await adapter.create_message(
@@ -102,10 +108,13 @@ async def test_openai_adapter_converts_tool_choice_format():
         mock_openai.AsyncOpenAI.return_value = mock_client
 
         from app.services.chat.adapters.openai_adapter import OpenAIAdapter
+
         adapter = OpenAIAdapter(api_key="test-key")
 
         tool_choice_anthropic = {"type": "tool", "name": "netsuite_suiteql"}
-        tools = [{"name": "netsuite_suiteql", "description": "test", "input_schema": {"type": "object", "properties": {}}}]
+        tools = [
+            {"name": "netsuite_suiteql", "description": "test", "input_schema": {"type": "object", "properties": {}}}
+        ]
 
         await adapter.create_message(
             model="gpt-4o",
@@ -141,6 +150,7 @@ async def test_openai_adapter_converts_any_to_required():
         mock_openai.AsyncOpenAI.return_value = mock_client
 
         from app.services.chat.adapters.openai_adapter import OpenAIAdapter
+
         adapter = OpenAIAdapter(api_key="test-key")
 
         tools = [{"name": "test", "description": "test", "input_schema": {"type": "object", "properties": {}}}]
@@ -176,6 +186,7 @@ async def test_openai_adapter_converts_auto():
         mock_openai.AsyncOpenAI.return_value = mock_client
 
         from app.services.chat.adapters.openai_adapter import OpenAIAdapter
+
         adapter = OpenAIAdapter(api_key="test-key")
 
         tools = [{"name": "test", "description": "test", "input_schema": {"type": "object", "properties": {}}}]
@@ -214,10 +225,13 @@ async def test_gemini_adapter_converts_tool_choice_to_tool_config():
         mock_genai.Client.return_value = mock_client
 
         from app.services.chat.adapters.gemini_adapter import GeminiAdapter
+
         adapter = GeminiAdapter(api_key="test-key")
 
         tool_choice = {"type": "tool", "name": "netsuite_suiteql"}
-        tools = [{"name": "netsuite_suiteql", "description": "test", "input_schema": {"type": "object", "properties": {}}}]
+        tools = [
+            {"name": "netsuite_suiteql", "description": "test", "input_schema": {"type": "object", "properties": {}}}
+        ]
 
         await adapter.create_message(
             model="gemini-2.0-flash",

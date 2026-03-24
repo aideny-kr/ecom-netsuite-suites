@@ -2,6 +2,7 @@
 
 Only uses AgentYAMLConfig from agent_yaml_config.py — no registry needed.
 """
+
 from __future__ import annotations
 
 import re
@@ -46,23 +47,15 @@ class TestAllYAMLConfigs:
                 try:
                     re.compile(rule.pattern)
                 except re.error as e:
-                    pytest.fail(
-                        f"{filename}: invalid regex '{rule.pattern}': {e}"
-                    )
+                    pytest.fail(f"{filename}: invalid regex '{rule.pattern}': {e}")
 
     def test_no_identical_patterns_across_agents(self):
         """No exact same regex pattern appears in 2+ configs."""
         pattern_to_agents: dict[str, list[str]] = {}
         for filename, config in _load_all_configs():
             for rule in config.routing_rules:
-                pattern_to_agents.setdefault(rule.pattern, []).append(
-                    config.agent_id
-                )
-        dupes = {
-            p: agents
-            for p, agents in pattern_to_agents.items()
-            if len(agents) > 1
-        }
+                pattern_to_agents.setdefault(rule.pattern, []).append(config.agent_id)
+        dupes = {p: agents for p, agents in pattern_to_agents.items() if len(agents) > 1}
         assert not dupes, f"Duplicate patterns across agents: {dupes}"
 
     def test_all_prompt_files_exist(self):
@@ -71,25 +64,20 @@ class TestAllYAMLConfigs:
             if config.prompt_file:
                 prompt_path = PROMPTS_DIR / config.prompt_file
                 assert prompt_path.exists(), (
-                    f"{filename}: prompt_file '{config.prompt_file}' not found "
-                    f"at {prompt_path}"
+                    f"{filename}: prompt_file '{config.prompt_file}' not found at {prompt_path}"
                 )
 
     def test_unified_agent_config_exists(self):
         """A config file with agent_id='unified-agent' exists."""
         configs = _load_all_configs()
         agent_ids = [c.agent_id for _, c in configs]
-        assert "unified-agent" in agent_ids, (
-            "No config with agent_id='unified-agent' found"
-        )
+        assert "unified-agent" in agent_ids, "No config with agent_id='unified-agent' found"
 
     def test_unified_agent_has_no_routing_rules(self):
         """unified-agent config has empty routing_rules (it's the fallback)."""
         for _, config in _load_all_configs():
             if config.agent_id == "unified-agent":
-                assert config.routing_rules == [], (
-                    "unified-agent should have no routing_rules"
-                )
+                assert config.routing_rules == [], "unified-agent should have no routing_rules"
                 return
         pytest.fail("unified-agent config not found")
 
@@ -99,13 +87,10 @@ class TestAllYAMLConfigs:
             if config.agent_id == "unified-agent":
                 continue
             assert len(config.routing_rules) >= 1, (
-                f"{filename}: specialized agent '{config.agent_id}' has no "
-                f"routing_rules"
+                f"{filename}: specialized agent '{config.agent_id}' has no routing_rules"
             )
 
     def test_max_steps_within_bounds(self):
         """All configs have 1 <= max_steps <= 20."""
         for filename, config in _load_all_configs():
-            assert 1 <= config.max_steps <= 20, (
-                f"{filename}: max_steps={config.max_steps} out of bounds [1,20]"
-            )
+            assert 1 <= config.max_steps <= 20, f"{filename}: max_steps={config.max_steps} out of bounds [1,20]"

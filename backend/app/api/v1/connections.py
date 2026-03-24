@@ -99,17 +99,19 @@ async def check_connection_health(
         elif token_expired and conn.status == "active":
             reported_status = "needs_reauth"
         restlet_url = (conn.metadata_json or {}).get("restlet_url") if conn.metadata_json else None
-        conn_items.append(ConnectionHealthItem(
-            id=str(conn.id),
-            label=conn.label or conn.provider,
-            provider=conn.provider,
-            status=reported_status,
-            auth_type=conn.auth_type,
-            token_expired=token_expired,
-            last_health_check=datetime.now(timezone.utc).isoformat(),
-            client_id=client_id,
-            restlet_url=restlet_url,
-        ))
+        conn_items.append(
+            ConnectionHealthItem(
+                id=str(conn.id),
+                label=conn.label or conn.provider,
+                provider=conn.provider,
+                status=reported_status,
+                auth_type=conn.auth_type,
+                token_expired=token_expired,
+                last_health_check=datetime.now(timezone.utc).isoformat(),
+                client_id=client_id,
+                restlet_url=restlet_url,
+            )
+        )
 
     # Check MCP connectors
     mcp_result = await db.execute(
@@ -140,17 +142,19 @@ async def check_connection_health(
         elif token_expired and mcp.status == "active":
             reported_status = "needs_reauth"
         tools = mcp.discovered_tools or []
-        mcp_items.append(ConnectionHealthItem(
-            id=str(mcp.id),
-            label=mcp.label or mcp.provider,
-            provider=mcp.provider,
-            status=reported_status,
-            auth_type=mcp.auth_type,
-            token_expired=token_expired,
-            last_health_check=datetime.now(timezone.utc).isoformat(),
-            client_id=mcp_client_id,
-            tool_count=len(tools),
-        ))
+        mcp_items.append(
+            ConnectionHealthItem(
+                id=str(mcp.id),
+                label=mcp.label or mcp.provider,
+                provider=mcp.provider,
+                status=reported_status,
+                auth_type=mcp.auth_type,
+                token_expired=token_expired,
+                last_health_check=datetime.now(timezone.utc).isoformat(),
+                client_id=mcp_client_id,
+                tool_count=len(tools),
+            )
+        )
 
     # Read-only endpoint — do NOT commit (prevents accidental status corruption)
     return ConnectionHealthResponse(connections=conn_items, mcp_connectors=mcp_items)
@@ -419,9 +423,13 @@ async def update_client_id(
     conn.encrypted_credentials = encrypt_credentials(creds)
 
     await audit_service.log_event(
-        db=db, tenant_id=user.tenant_id, category="connection",
-        action="connection.update_client_id", actor_id=user.id,
-        resource_type="connection", resource_id=str(connection_id),
+        db=db,
+        tenant_id=user.tenant_id,
+        category="connection",
+        action="connection.update_client_id",
+        actor_id=user.id,
+        resource_type="connection",
+        resource_id=str(connection_id),
     )
     await db.commit()
     return {"status": "ok", "client_id": request.client_id}
@@ -446,9 +454,13 @@ async def update_restlet_url(
     flag_modified(conn, "metadata_json")
 
     await audit_service.log_event(
-        db=db, tenant_id=user.tenant_id, category="connection",
-        action="connection.update_restlet_url", actor_id=user.id,
-        resource_type="connection", resource_id=str(connection_id),
+        db=db,
+        tenant_id=user.tenant_id,
+        category="connection",
+        action="connection.update_restlet_url",
+        actor_id=user.id,
+        resource_type="connection",
+        resource_id=str(connection_id),
     )
     await db.commit()
     return {"status": "ok", "restlet_url": request.restlet_url}

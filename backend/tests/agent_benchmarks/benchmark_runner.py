@@ -3,6 +3,7 @@
 Provides scoring, pass@k computation, and comparison reports.
 Does NOT implement run_benchmark() — that needs the agent registry (Prompt 3).
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -96,21 +97,14 @@ class BenchmarkRunner:
         # Keyword accuracy (case-insensitive)
         data_lower = str(result.data or "").lower()
         if case.expected_answer_contains:
-            hits = sum(
-                1
-                for kw in case.expected_answer_contains
-                if kw.lower() in data_lower
-            )
+            hits = sum(1 for kw in case.expected_answer_contains if kw.lower() in data_lower)
             accuracy = hits / len(case.expected_answer_contains)
         else:
             accuracy = 1.0
 
         # Tool accuracy (superset OK — agent can use more tools than expected)
         if case.expected_tools:
-            used_tools = {
-                entry.get("tool", entry.get("name", ""))
-                for entry in (result.tool_calls_log or [])
-            }
+            used_tools = {entry.get("tool", entry.get("name", "")) for entry in (result.tool_calls_log or [])}
             hits = sum(1 for t in case.expected_tools if t in used_tools)
             tool_accuracy = hits / len(case.expected_tools)
         else:
@@ -157,9 +151,7 @@ class BenchmarkRunner:
 
         # Improvement percentage: (agent - baseline) / baseline * 100
         if baseline_accuracy > 0:
-            improvement_pct = (
-                (agent_accuracy - baseline_accuracy) / baseline_accuracy * 100
-            )
+            improvement_pct = (agent_accuracy - baseline_accuracy) / baseline_accuracy * 100
         else:
             improvement_pct = 0.0
 
@@ -172,9 +164,7 @@ class BenchmarkRunner:
             baseline_cost=baseline_cost,
             agent_latency=agent_latency,
             baseline_latency=baseline_latency,
-            agent_pass_at_5=self.compute_pass_at_k(
-                agent_scores, expected_accuracy, k=5
-            ),
+            agent_pass_at_5=self.compute_pass_at_k(agent_scores, expected_accuracy, k=5),
             improvement_pct=round(improvement_pct, 2),
             cases_run=len(agent_scores),
         )

@@ -1,6 +1,5 @@
 """Tests for script type integration in suitescript_sync_service."""
 
-
 from app.services.suitescript_sync_service import _build_file_path, _sanitize_filename
 
 # ──────────────────────────────────────────────────────────────

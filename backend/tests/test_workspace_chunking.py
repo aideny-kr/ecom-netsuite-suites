@@ -81,9 +81,7 @@ class TestPreambleChunkCapture:
         """File with constants before first entry point → preamble chunk exists."""
         chunks = _chunk_by_entry_points(SCRIPT_WITH_PREAMBLE, "test.js", "UserEventScript")
         chunk_names = [c[1] for c in chunks]
-        assert any("#preamble" in name for name in chunk_names), (
-            f"No preamble chunk found. Chunks: {chunk_names}"
-        )
+        assert any("#preamble" in name for name in chunk_names), f"No preamble chunk found. Chunks: {chunk_names}"
 
     def test_preamble_contains_constants(self):
         """The preamble chunk should include variable declarations and config."""

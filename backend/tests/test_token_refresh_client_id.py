@@ -16,6 +16,7 @@ import pytest
 # Test 1: get_valid_token() uses STORED client_id, not global
 # ---------------------------------------------------------------------------
 
+
 class TestGetValidTokenClientId:
     @pytest.mark.asyncio
     async def test_refresh_uses_stored_client_id_not_global(self):
@@ -53,7 +54,11 @@ class TestGetValidTokenClientId:
         with (
             patch("app.services.netsuite_oauth_service.decrypt_credentials", return_value=credentials),
             patch("app.services.netsuite_oauth_service.encrypt_credentials", return_value="new_encrypted"),
-            patch("app.services.netsuite_oauth_service.refresh_tokens_with_client", new_callable=AsyncMock, return_value=new_token_data) as mock_refresh,
+            patch(
+                "app.services.netsuite_oauth_service.refresh_tokens_with_client",
+                new_callable=AsyncMock,
+                return_value=new_token_data,
+            ) as mock_refresh,
             patch("app.services.netsuite_oauth_service.settings") as mock_settings,
             patch("app.core.redis_lock.acquire_lock", return_value=True),
             patch("app.core.redis_lock.release_lock"),
@@ -106,7 +111,11 @@ class TestGetValidTokenClientId:
         with (
             patch("app.services.netsuite_oauth_service.decrypt_credentials", return_value=credentials),
             patch("app.services.netsuite_oauth_service.encrypt_credentials", return_value="enc"),
-            patch("app.services.netsuite_oauth_service.refresh_tokens_with_client", new_callable=AsyncMock, return_value=new_token_data) as mock_refresh,
+            patch(
+                "app.services.netsuite_oauth_service.refresh_tokens_with_client",
+                new_callable=AsyncMock,
+                return_value=new_token_data,
+            ) as mock_refresh,
             patch("app.services.netsuite_oauth_service.settings") as mock_settings,
             patch("app.core.redis_lock.acquire_lock", return_value=True),
             patch("app.core.redis_lock.release_lock"),
@@ -158,6 +167,7 @@ class TestGetValidTokenClientId:
 # Test 2: Proactive refresh task uses STORED client_id for REST connections
 # ---------------------------------------------------------------------------
 
+
 class TestProactiveRefreshClientId:
     def test_rest_connection_uses_stored_client_id(self):
         """Proactive refresh for REST connections must use the stored
@@ -195,7 +205,9 @@ class TestProactiveRefreshClientId:
             patch("app.core.encryption.encrypt_credentials", return_value="enc"),
             patch("app.core.redis_lock.acquire_lock", return_value=True),
             patch("app.core.redis_lock.release_lock"),
-            patch("app.workers.tasks.proactive_token_refresh._run_async_refresh", return_value=token_data) as mock_refresh,
+            patch(
+                "app.workers.tasks.proactive_token_refresh._run_async_refresh", return_value=token_data
+            ) as mock_refresh,
         ):
             _refresh_single(MagicMock(), record, "oauth_refresh", stats, datetime.now(timezone.utc), mock_settings)
 
@@ -243,7 +255,9 @@ class TestProactiveRefreshClientId:
             patch("app.core.encryption.encrypt_credentials", return_value="enc"),
             patch("app.core.redis_lock.acquire_lock", return_value=True),
             patch("app.core.redis_lock.release_lock"),
-            patch("app.workers.tasks.proactive_token_refresh._run_async_refresh", return_value=token_data) as mock_refresh,
+            patch(
+                "app.workers.tasks.proactive_token_refresh._run_async_refresh", return_value=token_data
+            ) as mock_refresh,
         ):
             _refresh_single(MagicMock(), record, "oauth_refresh:mcp", stats, datetime.now(timezone.utc), mock_settings)
 
@@ -254,6 +268,7 @@ class TestProactiveRefreshClientId:
 # ---------------------------------------------------------------------------
 # Test 3: Proactive task logs actual error body on refresh failure
 # ---------------------------------------------------------------------------
+
 
 class TestProactiveRefreshErrorLogging:
     def test_logs_error_details_on_refresh_failure(self):
@@ -287,8 +302,10 @@ class TestProactiveRefreshErrorLogging:
             patch("app.core.encryption.decrypt_credentials", return_value=creds),
             patch("app.core.redis_lock.acquire_lock", return_value=True),
             patch("app.core.redis_lock.release_lock"),
-            patch("app.workers.tasks.proactive_token_refresh._run_async_refresh",
-                  side_effect=Exception('{"error":"invalid_grant"}')),
+            patch(
+                "app.workers.tasks.proactive_token_refresh._run_async_refresh",
+                side_effect=Exception('{"error":"invalid_grant"}'),
+            ),
             patch("app.workers.tasks.proactive_token_refresh.logger") as mock_logger,
         ):
             _refresh_single(MagicMock(), record, "oauth_refresh", stats, datetime.now(timezone.utc), mock_settings)

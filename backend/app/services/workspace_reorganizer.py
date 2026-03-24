@@ -143,9 +143,11 @@ async def _rebuild_directories(
         if dir_path not in existing_dirs:
             # Get tenant_id from any existing file
             sample = await db.execute(
-                select(WorkspaceFile.tenant_id).where(
+                select(WorkspaceFile.tenant_id)
+                .where(
                     WorkspaceFile.workspace_id == workspace_id,
-                ).limit(1)
+                )
+                .limit(1)
             )
             tenant_id = sample.scalar_one()
 

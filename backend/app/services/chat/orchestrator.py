@@ -126,9 +126,7 @@ _BROKEN_STATUSES = frozenset({"needs_reauth", "error", "expired"})
 _REST_TOOLS = frozenset({"netsuite_suiteql", "netsuite_financial_report"})
 
 
-async def _check_connection_health(
-    db: AsyncSession, tenant_id: uuid.UUID
-) -> list[str]:
+async def _check_connection_health(db: AsyncSession, tenant_id: uuid.UUID) -> list[str]:
     """Check REST API and MCP connection health for a tenant.
 
     Returns a list of warning strings for broken connections.
@@ -168,9 +166,7 @@ async def _check_connection_health(
         return []
 
 
-def _filter_tools_for_dead_connections(
-    tool_definitions: list[dict], connection_warnings: list[str]
-) -> list[dict]:
+def _filter_tools_for_dead_connections(tool_definitions: list[dict], connection_warnings: list[str]) -> list[dict]:
     """Remove tools whose backing connection is broken.
 
     - REST dead → strip local netsuite_suiteql, netsuite_financial_report
@@ -270,7 +266,10 @@ async def _select_agent(
 
     if tier1_result is None:
         agent_count = len(enabled_agents)
-        print(f"[ROUTING] Tier 1 no match, escalating to Tier 2 (semantic) | {agent_count} agents | query: {query[:80]}", flush=True)
+        print(
+            f"[ROUTING] Tier 1 no match, escalating to Tier 2 (semantic) | {agent_count} agents | query: {query[:80]}",
+            flush=True,
+        )
 
     # Tier 2: Semantic routing via Haiku (~50ms)
     semantic_router = SemanticRouter()
@@ -289,13 +288,15 @@ async def _select_agent(
 # Smart context injection — classify how much context each query needs
 # ---------------------------------------------------------------------------
 
+
 class ContextNeed:
     """How much dynamic context to inject into the agent prompt."""
-    FULL = "full"           # Custom fields, complex joins — inject everything
-    DATA = "data"           # Standard tables, no custom fields — skip onboarding profile
-    DOCS = "docs"           # Documentation question — skip schemas, inject RAG only
-    WORKSPACE = "workspace" # Script question — skip all NetSuite schemas
-    FINANCIAL = "financial" # Financial report — inject only vernacular + onboarding
+
+    FULL = "full"  # Custom fields, complex joins — inject everything
+    DATA = "data"  # Standard tables, no custom fields — skip onboarding profile
+    DOCS = "docs"  # Documentation question — skip schemas, inject RAG only
+    WORKSPACE = "workspace"  # Script question — skip all NetSuite schemas
+    FINANCIAL = "financial"  # Financial report — inject only vernacular + onboarding
 
 
 _WORKSPACE_RE = re.compile(
@@ -463,9 +464,7 @@ def _intercept_tool_result(
             return None, None, result_str
 
         # Error results pass through
-        if isinstance(parsed, dict) and (
-            parsed.get("error") is True or isinstance(parsed.get("error"), str)
-        ):
+        if isinstance(parsed, dict) and (parsed.get("error") is True or isinstance(parsed.get("error"), str)):
             return None, None, result_str
 
         columns = parsed.get("columns")
@@ -543,6 +542,7 @@ def _intercept_tool_result(
 
 def _make_tool_interceptor(context_need: str = ContextNeed.DATA):
     """Create a tool interceptor closure that captures context_need."""
+
     def interceptor(tool_name: str, result_str: str) -> tuple[tuple[str, dict] | None, str]:
         event_type, event_data, new_result_str = _intercept_tool_result(
             tool_name, result_str, context_need=context_need
@@ -550,6 +550,7 @@ def _make_tool_interceptor(context_need: str = ContextNeed.DATA):
         if event_type is not None and event_data is not None:
             return (event_type, event_data), new_result_str
         return None, new_result_str
+
     return interceptor
 
 
@@ -797,9 +798,7 @@ async def run_chat_turn(
         # Pre-flight connection health check — strip tools for dead connections
         connection_warnings = await _check_connection_health(db, tenant_id)
         if connection_warnings:
-            tool_definitions = _filter_tools_for_dead_connections(
-                tool_definitions, connection_warnings
-            )
+            tool_definitions = _filter_tools_for_dead_connections(tool_definitions, connection_warnings)
 
     # ── Resolve tenant-specific system prompt ──
     if is_onboarding:
@@ -922,8 +921,7 @@ async def run_chat_turn(
 
             if "SUBSIDIARIES" in ext_mcp_tools:
                 guidance.append(
-                    f"\n• SUBSIDIARIES: `{ext_mcp_tools['SUBSIDIARIES']}`"
-                    "\n  Subsidiary hierarchy with base currencies."
+                    f"\n• SUBSIDIARIES: `{ext_mcp_tools['SUBSIDIARIES']}`\n  Subsidiary hierarchy with base currencies."
                 )
 
             guidance.append(
@@ -945,18 +943,14 @@ async def run_chat_turn(
 
         # Non-NetSuite tools guidance
         non_ns_tools = [
-            td for td in tool_definitions
-            if td["name"].startswith("ext__")
-            and not any(p in td["name"].lower() for p in _MCP_TOOL_PATTERNS)
+            td
+            for td in tool_definitions
+            if td["name"].startswith("ext__") and not any(p in td["name"].lower() for p in _MCP_TOOL_PATTERNS)
         ]
         if non_ns_tools:
-            tool_inventory_lines.append(
-                "\n\nOTHER CONNECTED SYSTEM TOOLS:"
-            )
+            tool_inventory_lines.append("\n\nOTHER CONNECTED SYSTEM TOOLS:")
             for td in non_ns_tools:
-                tool_inventory_lines.append(
-                    f"- {td['name']}: {td.get('description', '')}"
-                )
+                tool_inventory_lines.append(f"- {td['name']}: {td.get('description', '')}")
             tool_inventory_lines.append(
                 "\nUse these tools when the user's question relates to the system they belong to. "
                 "Check the tool description prefix (e.g., [shopify_mcp]) to identify which system."
@@ -1108,16 +1102,19 @@ async def run_chat_turn(
                     # Gate financial reports by permission
                     if is_financial:
                         from app.core.dependencies import has_permission
+
                         can_access_financial = await has_permission(db, user_id, "chat.financial_reports")
                         if not can_access_financial:
                             is_financial = False
                             sanitized_input = (
-                                sanitized_input
-                                + "\n\n[SYSTEM: Financial reports are restricted for your role. "
+                                sanitized_input + "\n\n[SYSTEM: Financial reports are restricted for your role. "
                                 "Respond to the user that financial reports require Admin or User role access. "
                                 "Do NOT attempt to call netsuite_financial_report.]"
                             )
-                            print("[ORCHESTRATOR] Financial report blocked — user lacks chat.financial_reports permission", flush=True)
+                            print(
+                                "[ORCHESTRATOR] Financial report blocked — user lacks chat.financial_reports permission",
+                                flush=True,
+                            )
 
                     importance_tier = classify_importance(
                         sanitized_input,
@@ -1194,9 +1191,7 @@ async def run_chat_turn(
                         )
                         _gather_keys.append("dk")
                     if _need_patterns:
-                        _gather_tasks.append(
-                            retrieve_similar_patterns(db, tenant_id, sanitized_input)
-                        )
+                        _gather_tasks.append(retrieve_similar_patterns(db, tenant_id, sanitized_input))
                         _gather_keys.append("patterns")
 
                     _gather_results = await asyncio.gather(*_gather_tasks, return_exceptions=True)
@@ -1216,6 +1211,7 @@ async def run_chat_turn(
                             context["tenant_vernacular"] = vernacular_result
                             print(f"[UNIFIED] Vernacular injected ({len(vernacular_result)} chars)", flush=True)
                             import re as _re
+
                             conf_scores = [
                                 float(s)
                                 for s in _re.findall(
@@ -1263,6 +1259,7 @@ async def run_chat_turn(
                             entity_types: list[str] = []
                             if isinstance(vernacular_result, str):
                                 import re as _re_schema
+
                                 entity_types = _re_schema.findall(
                                     r"<entity_type>(.*?)</entity_type>", vernacular_result
                                 )
@@ -1316,8 +1313,7 @@ async def run_chat_turn(
                                 rels = _onboarding_profile.get("transaction_relationships", [])
                                 if rels:
                                     rel_summary = "\n".join(
-                                        f"  - {r['source']} -> {r['target']} ({r['count']} links)"
-                                        for r in rels[:20]
+                                        f"  - {r['source']} -> {r['target']} ({r['count']} links)" for r in rels[:20]
                                     )
                                     profile_parts.append(
                                         f"<transaction_relationships>\n{rel_summary}\n</transaction_relationships>"
@@ -1334,13 +1330,18 @@ async def run_chat_turn(
                                             )
                                     if status_lines:
                                         profile_parts.append(
-                                            "<tenant_status_codes>\n" + "\n".join(status_lines) + "\n</tenant_status_codes>"
+                                            "<tenant_status_codes>\n"
+                                            + "\n".join(status_lines)
+                                            + "\n</tenant_status_codes>"
                                         )
 
                                 if profile_parts:
                                     profile_xml = "\n".join(profile_parts)
                                     context["onboarding_profile"] = profile_xml
-                                    print(f"[ORCHESTRATOR] Onboarding profile injected ({len(profile_xml)} chars)", flush=True)
+                                    print(
+                                        f"[ORCHESTRATOR] Onboarding profile injected ({len(profile_xml)} chars)",
+                                        flush=True,
+                                    )
                         except Exception:
                             logger.warning("orchestrator.onboarding_profile_injection_failed", exc_info=True)
 
@@ -1424,7 +1425,7 @@ async def run_chat_turn(
                                 if idx == -1:
                                     # No chart tag — yield buffered text (keep last 7 chars in case of partial tag)
                                     safe = _chart_buffer[:-7] if len(_chart_buffer) > 7 else ""
-                                    _chart_buffer = _chart_buffer[len(safe):]
+                                    _chart_buffer = _chart_buffer[len(safe) :]
                                     if safe:
                                         yield {"type": "text", "content": safe}
                                     break
@@ -1440,7 +1441,7 @@ async def run_chat_turn(
                                 if end_idx == -1:
                                     break  # Wait for more data
                                 # Found end — discard the entire <chart>...</chart> block
-                                _chart_buffer = _chart_buffer[end_idx + 8:]
+                                _chart_buffer = _chart_buffer[end_idx + 8 :]
                                 _in_chart_block = False
                     elif event_type == "tool_status":
                         yield {"type": "tool_status", "content": payload}
@@ -1452,6 +1453,7 @@ async def run_chat_turn(
                         # Auto-generate chart from financial reports (deterministic, no LLM)
                         if payload[0] == "financial_report":
                             from app.services.chat.financial_chart_builder import build_financial_chart
+
                             _fr_data = payload[1]
                             _fr_chart = build_financial_chart(
                                 report_type=_fr_data.get("report_type", ""),
@@ -1459,7 +1461,9 @@ async def run_chat_turn(
                             )
                             if _fr_chart:
                                 yield {"type": "chart", "data": _fr_chart.model_dump()}
-                                print(f"[ORCHESTRATOR] Auto-generated chart for {_fr_data.get('report_type')}", flush=True)
+                                print(
+                                    f"[ORCHESTRATOR] Auto-generated chart for {_fr_data.get('report_type')}", flush=True
+                                )
                     elif event_type == "response":
                         agent_result = payload
 
@@ -1856,7 +1860,9 @@ async def run_chat_turn(
 
             # Intercept data tool results: emit SSE event with full data,
             # condense result_str to summary-only for the LLM.
-            intercept_type, intercept_data, result_str = _intercept_tool_result(block.name, result_str, context_need=ContextNeed.FULL)
+            intercept_type, intercept_data, result_str = _intercept_tool_result(
+                block.name, result_str, context_need=ContextNeed.FULL
+            )
             if intercept_type is not None:
                 last_structured_output = {"type": intercept_type, "data": intercept_data}
                 yield {"type": intercept_type, "data": intercept_data}

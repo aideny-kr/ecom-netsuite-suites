@@ -22,6 +22,7 @@ _DEFAULT_MAX_TOKENS = 5000
 @dataclass
 class ColumnDef:
     """A single column in a table schema."""
+
     name: str
     type: str = "text"
     description: str = ""
@@ -31,6 +32,7 @@ class ColumnDef:
 @dataclass
 class JoinDef:
     """A common JOIN partner for a table."""
+
     partner: str
     alias: str
     on: str
@@ -40,6 +42,7 @@ class JoinDef:
 @dataclass
 class TableSchema:
     """Schema definition for a single NetSuite table."""
+
     table_name: str
     description: str = ""
     columns: list[ColumnDef] = field(default_factory=list)
@@ -158,10 +161,7 @@ def format_schemas_as_xml(
         if schema.common_joins:
             parts.append("  <joins>")
             for j in schema.common_joins:
-                parts.append(
-                    f'    <join table="{j.partner}" alias="{j.alias}" '
-                    f'on="{j.on}">{j.use_when}</join>'
-                )
+                parts.append(f'    <join table="{j.partner}" alias="{j.alias}" on="{j.on}">{j.use_when}</join>')
                 token_estimate += 15
             parts.append("  </joins>")
 

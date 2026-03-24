@@ -100,9 +100,7 @@ async def run_onboarding_discovery(
 
     from app.models.tenant import TenantConfig
 
-    tc_result = await db.execute(
-        select(TenantConfig).where(TenantConfig.tenant_id == tenant_id)
-    )
+    tc_result = await db.execute(select(TenantConfig).where(TenantConfig.tenant_id == tenant_id))
     tenant_config = tc_result.scalar_one_or_none()
     if tenant_config:
         tenant_config.onboarding_profile = profile
@@ -140,12 +138,14 @@ async def _discover_transaction_types(access_token: str, account_id: str) -> Pha
         types = []
         for row in rows:
             if len(row) >= 4:
-                types.append({
-                    "type": row[0],
-                    "count": row[1],
-                    "earliest": row[2],
-                    "latest": row[3],
-                })
+                types.append(
+                    {
+                        "type": row[0],
+                        "count": row[1],
+                        "earliest": row[2],
+                        "latest": row[3],
+                    }
+                )
 
         return PhaseResult(
             name="transaction_landscape",
@@ -183,11 +183,13 @@ async def _discover_relationships(access_token: str, account_id: str) -> PhaseRe
         relationships = []
         for row in rows:
             if len(row) >= 3:
-                relationships.append({
-                    "source": row[0],
-                    "target": row[1],
-                    "count": row[2],
-                })
+                relationships.append(
+                    {
+                        "source": row[0],
+                        "target": row[1],
+                        "count": row[2],
+                    }
+                )
 
         return PhaseResult(
             name="transaction_relationships",
@@ -204,9 +206,7 @@ async def _discover_relationships(access_token: str, account_id: str) -> PhaseRe
         )
 
 
-async def _discover_status_codes(
-    access_token: str, account_id: str, transaction_types: list[str]
-) -> PhaseResult:
+async def _discover_status_codes(access_token: str, account_id: str, transaction_types: list[str]) -> PhaseResult:
     """Phase 4: What do status codes mean for each transaction type?"""
     from app.services.netsuite_client import execute_suiteql_via_rest
 
@@ -215,7 +215,7 @@ async def _discover_status_codes(
 
     for txn_type in transaction_types:
         # Validate txn_type to prevent SQL injection
-        if not re.match(r'^[A-Za-z]+$', txn_type):
+        if not re.match(r"^[A-Za-z]+$", txn_type):
             continue
 
         try:
@@ -233,11 +233,13 @@ async def _discover_status_codes(
             codes = []
             for row in rows:
                 if len(row) >= 3:
-                    codes.append({
-                        "code": row[0],
-                        "display": row[1],
-                        "count": row[2],
-                    })
+                    codes.append(
+                        {
+                            "code": row[0],
+                            "display": row[1],
+                            "count": row[2],
+                        }
+                    )
 
             if codes:
                 status_map[txn_type] = codes

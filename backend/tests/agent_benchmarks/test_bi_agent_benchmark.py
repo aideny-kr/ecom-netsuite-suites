@@ -8,7 +8,6 @@ CASES_DIR = Path(__file__).resolve().parent / "benchmark_cases"
 
 
 class TestBiAgentBenchmark:
-
     def test_bi_benchmark_cases_load(self):
         runner = BenchmarkRunner()
         cases = runner.load_cases("bi_agent", CASES_DIR)
@@ -23,10 +22,14 @@ class TestBiAgentBenchmark:
         revenue_case = next(c for c in cases if "revenue" in c.query.lower())
 
         # Mock a successful response
-        mock_result = type("R", (), {
-            "data": "Revenue by region: US $1.2M, EU $800K this quarter.",
-            "tool_calls_log": [{"tool": "bigquery_sql"}],
-        })()
+        mock_result = type(
+            "R",
+            (),
+            {
+                "data": "Revenue by region: US $1.2M, EU $800K this quarter.",
+                "tool_calls_log": [{"tool": "bigquery_sql"}],
+            },
+        )()
 
         score = runner.evaluate(mock_result, revenue_case, cost=0.15, latency_ms=5000)
         assert score.accuracy > 0  # Has "revenue", "region", "quarter"
@@ -40,10 +43,14 @@ class TestBiAgentBenchmark:
         cohort_case = next(c for c in cases if "cohort" in c.query.lower())
 
         # Mock a response that only uses bigquery_sql (missing pivot)
-        mock_result = type("R", (), {
-            "data": "Year-over-year retention by cohort shows improvement.",
-            "tool_calls_log": [{"tool": "bigquery_sql"}],
-        })()
+        mock_result = type(
+            "R",
+            (),
+            {
+                "data": "Year-over-year retention by cohort shows improvement.",
+                "tool_calls_log": [{"tool": "bigquery_sql"}],
+            },
+        )()
 
         score = runner.evaluate(mock_result, cohort_case, cost=0.30, latency_ms=10000)
         assert score.tool_accuracy == 0.5  # Only 1 of 2 expected tools
@@ -54,10 +61,14 @@ class TestBiAgentBenchmark:
         cases = runner.load_cases("bi_agent", CASES_DIR)
         top_case = next(c for c in cases if "top 10" in c.query.lower())
 
-        mock_result = type("R", (), {
-            "data": "Top 10 customers by lifetime value listed.",
-            "tool_calls_log": [{"tool": "bigquery_sql"}],
-        })()
+        mock_result = type(
+            "R",
+            (),
+            {
+                "data": "Top 10 customers by lifetime value listed.",
+                "tool_calls_log": [{"tool": "bigquery_sql"}],
+            },
+        )()
 
         score = runner.evaluate(mock_result, top_case, cost=0.50, latency_ms=5000)
         assert score.cost_ok is False  # max_cost is 0.20
@@ -80,11 +91,7 @@ class TestBiAgentBenchmark:
         runner = BenchmarkRunner()
         cases = runner.load_cases("unified_agent", CASES_DIR)
         # Should include the BI-related cases mirrored for baseline
-        bi_queries = [
-            c.query
-            for c in cases
-            if "revenue" in c.query.lower() or "retention" in c.query.lower()
-        ]
+        bi_queries = [c.query for c in cases if "revenue" in c.query.lower() or "retention" in c.query.lower()]
         assert len(bi_queries) >= 1
 
     def test_bi_vs_unified_report(self):

@@ -65,14 +65,18 @@ class TestEntityResolverThreshold:
     async def test_high_confidence_included(self):
         """Match with sim >= 0.70 should appear in the XML output."""
         adapter = _make_adapter(["Panurgy"])
-        db = _make_db_with_matches([
-            {"script_id": "custbody_location", "entity_type": "custom_field",
-             "sim": 0.85, "description": "Repair location"},
-        ])
-
-        result = await TenantEntityResolver.resolve_entities(
-            "RMAs at Panurgy", TENANT_ID, db, adapter, "haiku"
+        db = _make_db_with_matches(
+            [
+                {
+                    "script_id": "custbody_location",
+                    "entity_type": "custom_field",
+                    "sim": 0.85,
+                    "description": "Repair location",
+                },
+            ]
         )
+
+        result = await TenantEntityResolver.resolve_entities("RMAs at Panurgy", TENANT_ID, db, adapter, "haiku")
 
         assert "custbody_location" in result
         assert "<confidence_score>0.85</confidence_score>" in result
@@ -81,14 +85,18 @@ class TestEntityResolverThreshold:
     async def test_low_confidence_filtered(self):
         """Match with sim < 0.70 should NOT appear in the XML output."""
         adapter = _make_adapter(["platform"])
-        db = _make_db_with_matches([
-            {"script_id": "custitem_fw_platform", "entity_type": "custom_field",
-             "sim": 0.45, "description": "FW platform field"},
-        ])
-
-        result = await TenantEntityResolver.resolve_entities(
-            "show me open POs", TENANT_ID, db, adapter, "haiku"
+        db = _make_db_with_matches(
+            [
+                {
+                    "script_id": "custitem_fw_platform",
+                    "entity_type": "custom_field",
+                    "sim": 0.45,
+                    "description": "FW platform field",
+                },
+            ]
         )
+
+        result = await TenantEntityResolver.resolve_entities("show me open POs", TENANT_ID, db, adapter, "haiku")
 
         # Low confidence: filtered out, no entities resolved, returns empty
         assert "custitem_fw_platform" not in result
@@ -97,14 +105,18 @@ class TestEntityResolverThreshold:
     async def test_borderline_070_included(self):
         """Match at exactly 0.70 should be included (>= threshold)."""
         adapter = _make_adapter(["warehouse"])
-        db = _make_db_with_matches([
-            {"script_id": "custbody_warehouse", "entity_type": "custom_field",
-             "sim": 0.70, "description": "Warehouse field"},
-        ])
-
-        result = await TenantEntityResolver.resolve_entities(
-            "items by warehouse", TENANT_ID, db, adapter, "haiku"
+        db = _make_db_with_matches(
+            [
+                {
+                    "script_id": "custbody_warehouse",
+                    "entity_type": "custom_field",
+                    "sim": 0.70,
+                    "description": "Warehouse field",
+                },
+            ]
         )
+
+        result = await TenantEntityResolver.resolve_entities("items by warehouse", TENANT_ID, db, adapter, "haiku")
 
         assert "custbody_warehouse" in result
 
@@ -143,9 +155,7 @@ class TestEntityResolverThreshold:
 
         db.execute = AsyncMock(side_effect=[high_result, low_result, rules_result])
 
-        result = await TenantEntityResolver.resolve_entities(
-            "RMAs at Panurgy rush", TENANT_ID, db, adapter, "haiku"
-        )
+        result = await TenantEntityResolver.resolve_entities("RMAs at Panurgy rush", TENANT_ID, db, adapter, "haiku")
 
         assert "location_panurgy" in result
         assert "custbody_rush_flag" not in result
@@ -154,14 +164,13 @@ class TestEntityResolverThreshold:
     async def test_instruction_uses_prefer_not_must(self):
         """The XML instruction should say 'prefer' not 'MUST use'."""
         adapter = _make_adapter(["Panurgy"])
-        db = _make_db_with_matches([
-            {"script_id": "location_panurgy", "entity_type": "location",
-             "sim": 0.90, "description": "Panurgy"},
-        ])
-
-        result = await TenantEntityResolver.resolve_entities(
-            "RMAs at Panurgy", TENANT_ID, db, adapter, "haiku"
+        db = _make_db_with_matches(
+            [
+                {"script_id": "location_panurgy", "entity_type": "location", "sim": 0.90, "description": "Panurgy"},
+            ]
         )
+
+        result = await TenantEntityResolver.resolve_entities("RMAs at Panurgy", TENANT_ID, db, adapter, "haiku")
 
         assert "prefer" in result.lower()
         # Should NOT contain the old "MUST use" language

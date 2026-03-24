@@ -129,5 +129,5 @@ class HookManager:
                 continue
             fn = getattr(mod, attr_name)
             if callable(fn):
-                event_name = attr_name[len("hook_"):]
+                event_name = attr_name[len("hook_") :]
                 self.register(event_name, fn)

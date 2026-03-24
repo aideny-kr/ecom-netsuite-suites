@@ -150,10 +150,12 @@ def _chunk_by_entry_points(
     # Skip if it's just JSDoc + define() boilerplate (no business logic)
     first_offset = entry_points[0][1]
     preamble = content[:first_offset].rstrip()
-    _has_business_logic = bool(re.search(
-        r"\b(?:const|let|var)\s+\w+\s*=\s*(?:\{|\[|['\"]|function|\d)",
-        preamble,
-    ))
+    _has_business_logic = bool(
+        re.search(
+            r"\b(?:const|let|var)\s+\w+\s*=\s*(?:\{|\[|['\"]|function|\d)",
+            preamble,
+        )
+    )
     if _has_business_logic and len(preamble) > 50:
         preamble_chunk = _build_chunk_content(preamble, filepath, script_type, "preamble")
         chunks.append((f"{filepath}#preamble", f"{filepath}#preamble", preamble_chunk))

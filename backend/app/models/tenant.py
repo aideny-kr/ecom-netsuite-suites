@@ -68,7 +68,9 @@ class TenantConfig(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     domain_verified: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
 
     # Financial reporting preference
-    use_mcp_financial_reports: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
+    use_mcp_financial_reports: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default="true"
+    )
 
     # Onboarding deep discovery profile
     onboarding_profile: Mapped[dict | None] = mapped_column(JSON, nullable=True)

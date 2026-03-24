@@ -145,12 +145,9 @@ def test_endpoint_uses_chat_api_manage_permission():
 
     source = inspect.getsource(update_message_importance)
     assert "chat_api.manage" in source, (
-        "Endpoint should use require_permission('chat_api.manage'), "
-        f"but the source contains: {source}"
+        f"Endpoint should use require_permission('chat_api.manage'), but the source contains: {source}"
     )
-    assert "settings.manage" not in source, (
-        "Endpoint should NOT use require_permission('settings.manage')"
-    )
+    assert "settings.manage" not in source, "Endpoint should NOT use require_permission('settings.manage')"
 
 
 # --- Test 6: Response shape for optimistic cache update ---

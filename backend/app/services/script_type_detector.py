@@ -47,9 +47,7 @@ SCRIPT_TYPE_FOLDER_MAP: Final[dict[str, str]] = {
 }
 
 # @NScriptType value → canonical type (case-insensitive lookup)
-_ANNOTATION_MAP: Final[dict[str, str]] = {
-    k.lower(): k for k in SCRIPT_TYPES if k not in ("Library", "Other")
-}
+_ANNOTATION_MAP: Final[dict[str, str]] = {k.lower(): k for k in SCRIPT_TYPES if k not in ("Library", "Other")}
 
 # Filename heuristic patterns — order matters (first match wins)
 # Aligned with frontend suitescript-parser.ts fallback logic

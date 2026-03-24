@@ -23,7 +23,6 @@ def _mock_connector():
 
 
 class TestBigquerySqlTool:
-
     @pytest.mark.asyncio
     async def test_execute_returns_result(self):
         from app.mcp.tools.bigquery_tools import bigquery_sql_execute
@@ -33,8 +32,10 @@ class TestBigquerySqlTool:
         mock_result.scalars.return_value.first.return_value = _mock_connector()
         ctx["db"].execute = AsyncMock(return_value=mock_result)
 
-        with patch("app.mcp.tools.bigquery_tools.decrypt_credentials") as mock_decrypt, \
-             patch("app.mcp.tools.bigquery_tools.execute_query", new_callable=AsyncMock) as mock_exec:
+        with (
+            patch("app.mcp.tools.bigquery_tools.decrypt_credentials") as mock_decrypt,
+            patch("app.mcp.tools.bigquery_tools.execute_query", new_callable=AsyncMock) as mock_exec,
+        ):
             mock_decrypt.return_value = {"service_account_json": {}, "project_id": "test"}
             mock_exec.return_value = {"columns": ["x"], "rows": [[1]], "row_count": 1}
 
@@ -64,8 +65,10 @@ class TestBigquerySqlTool:
         mock_result.scalars.return_value.first.return_value = _mock_connector()
         ctx["db"].execute = AsyncMock(return_value=mock_result)
 
-        with patch("app.mcp.tools.bigquery_tools.decrypt_credentials") as mock_decrypt, \
-             patch("app.mcp.tools.bigquery_tools.execute_query", new_callable=AsyncMock) as mock_exec:
+        with (
+            patch("app.mcp.tools.bigquery_tools.decrypt_credentials") as mock_decrypt,
+            patch("app.mcp.tools.bigquery_tools.execute_query", new_callable=AsyncMock) as mock_exec,
+        ):
             mock_decrypt.return_value = {"service_account_json": {}, "project_id": "test"}
             mock_exec.return_value = {"columns": [], "rows": [], "row_count": 0}
 
@@ -82,8 +85,10 @@ class TestBigquerySqlTool:
         mock_result.scalars.return_value.first.return_value = _mock_connector()
         ctx["db"].execute = AsyncMock(return_value=mock_result)
 
-        with patch("app.mcp.tools.bigquery_tools.decrypt_credentials") as mock_decrypt, \
-             patch("app.mcp.tools.bigquery_tools.execute_query", new_callable=AsyncMock) as mock_exec:
+        with (
+            patch("app.mcp.tools.bigquery_tools.decrypt_credentials") as mock_decrypt,
+            patch("app.mcp.tools.bigquery_tools.execute_query", new_callable=AsyncMock) as mock_exec,
+        ):
             mock_decrypt.return_value = {"service_account_json": {}, "project_id": "test"}
             mock_exec.return_value = {"columns": [], "rows": [], "row_count": 0}
 
@@ -93,7 +98,6 @@ class TestBigquerySqlTool:
 
 
 class TestBigquerySchemaAndCostTools:
-
     @pytest.mark.asyncio
     async def test_schema_tool_execute(self):
         from app.mcp.tools.bigquery_tools import bigquery_schema_execute
@@ -103,8 +107,10 @@ class TestBigquerySchemaAndCostTools:
         mock_result.scalars.return_value.first.return_value = _mock_connector()
         ctx["db"].execute = AsyncMock(return_value=mock_result)
 
-        with patch("app.mcp.tools.bigquery_tools.decrypt_credentials") as mock_decrypt, \
-             patch("app.mcp.tools.bigquery_tools.discover_schema", new_callable=AsyncMock) as mock_disc:
+        with (
+            patch("app.mcp.tools.bigquery_tools.decrypt_credentials") as mock_decrypt,
+            patch("app.mcp.tools.bigquery_tools.discover_schema", new_callable=AsyncMock) as mock_disc,
+        ):
             mock_decrypt.return_value = {"service_account_json": {}, "project_id": "test"}
             mock_disc.return_value = {"datasets": []}
 
@@ -120,8 +126,10 @@ class TestBigquerySchemaAndCostTools:
         mock_result.scalars.return_value.first.return_value = _mock_connector()
         ctx["db"].execute = AsyncMock(return_value=mock_result)
 
-        with patch("app.mcp.tools.bigquery_tools.decrypt_credentials") as mock_decrypt, \
-             patch("app.mcp.tools.bigquery_tools.estimate_query_cost", new_callable=AsyncMock) as mock_est:
+        with (
+            patch("app.mcp.tools.bigquery_tools.decrypt_credentials") as mock_decrypt,
+            patch("app.mcp.tools.bigquery_tools.estimate_query_cost", new_callable=AsyncMock) as mock_est,
+        ):
             mock_decrypt.return_value = {"service_account_json": {}, "project_id": "test"}
             mock_est.return_value = {"estimated_bytes": 1000, "estimated_cost_usd": 0.000005}
 
@@ -137,8 +145,10 @@ class TestBigquerySchemaAndCostTools:
         mock_result.scalars.return_value.first.return_value = _mock_connector()
         ctx["db"].execute = AsyncMock(return_value=mock_result)
 
-        with patch("app.mcp.tools.bigquery_tools.decrypt_credentials") as mock_decrypt, \
-             patch("app.mcp.tools.bigquery_tools.execute_query", new_callable=AsyncMock) as mock_exec:
+        with (
+            patch("app.mcp.tools.bigquery_tools.decrypt_credentials") as mock_decrypt,
+            patch("app.mcp.tools.bigquery_tools.execute_query", new_callable=AsyncMock) as mock_exec,
+        ):
             mock_decrypt.return_value = {"service_account_json": {}, "project_id": "test"}
             mock_exec.return_value = {"columns": [], "rows": [], "row_count": 0}
 

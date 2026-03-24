@@ -2,6 +2,7 @@
 
 Only depends on BenchmarkCase pydantic model — no runtime imports.
 """
+
 from __future__ import annotations
 
 from collections import defaultdict
@@ -43,9 +44,7 @@ class TestAllCaseFilesParse:
         """Every case has a non-empty query field."""
         for agent_id, cases in _load_all_cases().items():
             for filename, case in cases:
-                assert case.query.strip(), (
-                    f"{agent_id}/{filename}: query is empty"
-                )
+                assert case.query.strip(), f"{agent_id}/{filename}: query is empty"
 
     def test_all_cases_have_expected_answer(self):
         """Every case has expected_answer_contains with >=1 keyword."""
@@ -60,21 +59,16 @@ class TestAllCaseFilesParse:
         for agent_id, cases in _load_all_cases().items():
             queries = [c.query for _, c in cases]
             dupes = [q for q in queries if queries.count(q) > 1]
-            assert not dupes, (
-                f"{agent_id}: duplicate queries found: {set(dupes)}"
-            )
+            assert not dupes, f"{agent_id}: duplicate queries found: {set(dupes)}"
 
     def test_baseline_mirrors_exist(self):
         """Every specialized agent case has a matching case in unified_agent/."""
         all_cases = _load_all_cases()
-        unified_queries = {
-            c.query for _, c in all_cases.get("unified_agent", [])
-        }
+        unified_queries = {c.query for _, c in all_cases.get("unified_agent", [])}
         for agent_id, cases in all_cases.items():
             if agent_id == "unified_agent":
                 continue
             for filename, case in cases:
                 assert case.query in unified_queries, (
-                    f"{agent_id}/{filename}: query '{case.query}' has no "
-                    f"matching baseline in unified_agent/"
+                    f"{agent_id}/{filename}: query '{case.query}' has no matching baseline in unified_agent/"
                 )

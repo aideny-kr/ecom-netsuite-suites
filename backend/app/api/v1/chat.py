@@ -267,7 +267,9 @@ async def send_message(
             except ValueError as exc:
                 await db.commit()
                 logger.warning("Chat configuration error: %s", exc)
-                await queue.put({"type": "error", "error": "Chat service is not configured. Contact your administrator."})
+                await queue.put(
+                    {"type": "error", "error": "Chat service is not configured. Contact your administrator."}
+                )
             except (anthropic.AuthenticationError, openai.AuthenticationError):
                 await db.commit()
                 logger.warning("AI provider API key is invalid")
@@ -282,6 +284,7 @@ async def send_message(
         producer_task = asyncio.create_task(_producer())
 
         from app.api.v1.health import decrement_sse, increment_sse
+
         increment_sse()
 
         # Send padding to force Cloudflare Tunnel to start streaming

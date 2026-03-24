@@ -18,6 +18,7 @@ from openpyxl.utils import get_column_letter
 
 class ExcelExportConfig:
     """Branding & style configuration per tenant."""
+
     brand_name: str = "SuiteStudio"
     brand_color_hex: str = "1a73e8"
     header_bg_hex: str = "1a73e8"
@@ -65,8 +66,10 @@ def generate_excel(
     )
     header_fill = PatternFill("solid", fgColor=cfg.header_bg_hex)
     header_font = Font(
-        name=cfg.font_name, size=cfg.header_font_size,
-        bold=True, color=cfg.header_font_color,
+        name=cfg.font_name,
+        size=cfg.header_font_size,
+        bold=True,
+        color=cfg.header_font_color,
     )
     header_alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
@@ -76,16 +79,20 @@ def generate_excel(
     number_alignment = Alignment(horizontal="right", vertical="center")
 
     title_font = Font(
-        name=cfg.font_name, size=cfg.title_font_size,
-        bold=True, color=cfg.brand_color_hex,
+        name=cfg.font_name,
+        size=cfg.title_font_size,
+        bold=True,
+        color=cfg.brand_color_hex,
     )
     meta_font = Font(name=cfg.font_name, size=9, color="666666")
 
     # --- Title block ---
     current_row = 1
     ws.merge_cells(
-        start_row=current_row, start_column=1,
-        end_row=current_row, end_column=min(len(columns), 6) if columns else 1,
+        start_row=current_row,
+        start_column=1,
+        end_row=current_row,
+        end_column=min(len(columns), 6) if columns else 1,
     )
     title_cell = ws.cell(row=current_row, column=1, value=title)
     title_cell.font = title_font
@@ -96,17 +103,24 @@ def generate_excel(
     if metadata:
         for key, value in metadata.items():
             ws.cell(row=current_row, column=1, value=f"{key}:").font = Font(
-                name=cfg.font_name, size=9, bold=True, color="333333",
+                name=cfg.font_name,
+                size=9,
+                bold=True,
+                color="333333",
             )
             ws.cell(row=current_row, column=2, value=value).font = meta_font
             current_row += 1
 
     # Timestamp
     ws.cell(row=current_row, column=1, value="Generated:").font = Font(
-        name=cfg.font_name, size=9, bold=True, color="333333",
+        name=cfg.font_name,
+        size=9,
+        bold=True,
+        color="333333",
     )
     ws.cell(
-        row=current_row, column=2,
+        row=current_row,
+        column=2,
         value=datetime.now(timezone.utc).strftime("%b %d, %Y %I:%M %p UTC"),
     ).font = meta_font
     current_row += 1
@@ -178,7 +192,10 @@ def generate_excel(
     # --- Footer ---
     footer_row = current_row + len(rows) + 1
     ws.cell(row=footer_row, column=1, value=f"{len(rows)} rows").font = Font(
-        name=cfg.font_name, size=9, italic=True, color="999999",
+        name=cfg.font_name,
+        size=9,
+        italic=True,
+        color="999999",
     )
 
     # Write to buffer
@@ -197,23 +214,52 @@ def _humanize_header(col: str) -> str:
     return col.strip().title()
 
 
-def _detect_column_types(
-    columns: list[str], rows: list[list[Any]]
-) -> dict[str, str]:
+def _detect_column_types(columns: list[str], rows: list[list[Any]]) -> dict[str, str]:
     """Auto-detect column types by sampling data.
 
     Returns dict of column_name -> type ("currency", "number", "percent", "date", "text")
     """
-    CURRENCY_PATTERNS = {"amount", "balance", "total", "price", "cost", "revenue", "income", "expense", "debit", "credit", "net", "gross", "payment", "refund"}
+    CURRENCY_PATTERNS = {
+        "amount",
+        "balance",
+        "total",
+        "price",
+        "cost",
+        "revenue",
+        "income",
+        "expense",
+        "debit",
+        "credit",
+        "net",
+        "gross",
+        "payment",
+        "refund",
+    }
     PERCENT_PATTERNS = {"rate", "margin", "percent", "pct", "ratio"}
     DATE_PATTERNS = {"date", "created", "modified", "updated", "posted", "period"}
-    ID_PATTERNS = {"id", "internalid", "tranid", "acctnumber", "acct", "account", "number", "num", "code", "sku", "ref", "zip", "postal", "phone", "fax"}
+    ID_PATTERNS = {
+        "id",
+        "internalid",
+        "tranid",
+        "acctnumber",
+        "acct",
+        "account",
+        "number",
+        "num",
+        "code",
+        "sku",
+        "ref",
+        "zip",
+        "postal",
+        "phone",
+        "fax",
+    }
 
     types: dict[str, str] = {}
 
     for col_idx, col_name in enumerate(columns):
         # Strip underscores, spaces, and non-alphanumeric chars (e.g., "Acct #" → "acct")
-        lower = re.sub(r'[^a-z0-9]', '', col_name.lower())
+        lower = re.sub(r"[^a-z0-9]", "", col_name.lower())
 
         # Name-based heuristics first
         if any(p in lower for p in ID_PATTERNS):

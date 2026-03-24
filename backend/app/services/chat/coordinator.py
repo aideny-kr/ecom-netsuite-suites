@@ -852,21 +852,16 @@ class MultiAgentCoordinator:
                 rels = _onboarding_profile.get("transaction_relationships", [])
                 if rels:
                     rel_summary = "\n".join(
-                        f"  - {r['source']} -> {r['target']} ({r['count']} links)"
-                        for r in rels[:20]
+                        f"  - {r['source']} -> {r['target']} ({r['count']} links)" for r in rels[:20]
                     )
-                    profile_parts.append(
-                        f"<transaction_relationships>\n{rel_summary}\n</transaction_relationships>"
-                    )
+                    profile_parts.append(f"<transaction_relationships>\n{rel_summary}\n</transaction_relationships>")
 
                 status_map = _onboarding_profile.get("status_codes", {})
                 if status_map:
                     status_lines: list[str] = []
                     for _txn_type, codes in list(status_map.items())[:10]:
                         for c in codes[:8]:
-                            status_lines.append(
-                                f"  - {_txn_type} status '{c['code']}' = {c['display']} ({c['count']})"
-                            )
+                            status_lines.append(f"  - {_txn_type} status '{c['code']}' = {c['display']} ({c['count']})")
                     if status_lines:
                         profile_parts.append(
                             "<tenant_status_codes>\n" + "\n".join(status_lines) + "\n</tenant_status_codes>"
@@ -878,6 +873,7 @@ class MultiAgentCoordinator:
                     print(f"[COORDINATOR] Onboarding profile injected ({len(profile_xml)} chars)", flush=True)
         except Exception:
             import logging as _logging
+
             _logging.getLogger(__name__).warning("coordinator.onboarding_profile_failed", exc_info=True)
 
         if prior_results:

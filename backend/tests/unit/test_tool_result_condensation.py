@@ -15,11 +15,13 @@ class TestCondenseToolResults:
     def test_large_suiteql_result_condensed(self):
         """A large SuiteQL result (20+ rows) should be condensed to a summary."""
         rows = [[f"SO-{i}", f"2026-01-{i:02d}", f"Customer {i}", f"{i * 100}"] for i in range(1, 21)]
-        result = json.dumps({
-            "columns": ["tranid", "trandate", "customer", "total"],
-            "rows": rows,
-            "row_count": 20,
-        })
+        result = json.dumps(
+            {
+                "columns": ["tranid", "trandate", "customer", "total"],
+                "rows": rows,
+                "row_count": 20,
+            }
+        )
         content = f"Here are the results.\n\n```json\n{result}\n```"
 
         condensed = condense_tool_results(content, max_result_chars=500)
@@ -59,7 +61,9 @@ class TestCondenseToolResults:
 
     def test_multiple_json_blocks_all_condensed(self):
         """Multiple large JSON blocks should all be condensed."""
-        block1 = json.dumps({"rows": [[i, f"name_{i}", f"desc_{i}"] for i in range(50)], "columns": ["id", "name", "desc"]})
+        block1 = json.dumps(
+            {"rows": [[i, f"name_{i}", f"desc_{i}"] for i in range(50)], "columns": ["id", "name", "desc"]}
+        )
         block2 = json.dumps({"data": [{"x": i, "y": f"val_{i}", "z": f"long_description_{i}"} for i in range(50)]})
         content = f"First:\n{block1}\n\nSecond:\n{block2}"
 
@@ -73,7 +77,9 @@ class TestHistoryCondensation:
         """The last 2 messages should never be condensed."""
         from app.services.chat.history_compactor import build_condensed_history
 
-        big_json = json.dumps({"rows": [[i, f"data_{i}"] for i in range(50)], "columns": ["id", "data"], "row_count": 50})
+        big_json = json.dumps(
+            {"rows": [[i, f"data_{i}"] for i in range(50)], "columns": ["id", "data"], "row_count": 50}
+        )
         messages = [
             {"role": "user", "content": "show me 100 orders"},
             {"role": "assistant", "content": f"Results:\n{big_json}"},  # Large JSON

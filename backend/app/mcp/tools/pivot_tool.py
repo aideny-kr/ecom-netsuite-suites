@@ -60,7 +60,8 @@ async def execute(params: dict, context: dict | None = None, **kwargs: Any) -> d
 
     # Get active connection
     result = await db.execute(
-        select(Connection).where(
+        select(Connection)
+        .where(
             Connection.tenant_id == tenant_id,
             Connection.provider == "netsuite",
             Connection.status == "active",
@@ -78,6 +79,7 @@ async def execute(params: dict, context: dict | None = None, **kwargs: Any) -> d
         return {"error": "OAuth token expired — re-authorize in Settings"}
 
     from app.core.encryption import decrypt_credentials
+
     creds = decrypt_credentials(connection.encrypted_credentials)
     account_id = creds.get("account_id", "")
 

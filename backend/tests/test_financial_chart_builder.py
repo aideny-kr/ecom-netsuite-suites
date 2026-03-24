@@ -1,6 +1,5 @@
 """Tests for auto-generating charts from NetSuite financial reports."""
 
-
 from app.schemas.chart import ChartData
 from app.services.chat.financial_chart_builder import build_financial_chart
 
@@ -55,7 +54,6 @@ BALANCE_TREND_SUMMARY = {
 
 
 class TestBuildFinancialChart:
-
     def test_income_trend_returns_chart(self):
         chart = build_financial_chart(
             report_type="income_statement_trend",

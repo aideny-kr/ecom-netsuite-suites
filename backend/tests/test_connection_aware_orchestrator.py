@@ -20,6 +20,7 @@ TENANT_ID = uuid.uuid4()
 
 # ── Helper to build fake DB rows ──
 
+
 def _make_conn_row(label: str, status: str, error_reason: str | None = None):
     """Simulate a Connection row (label, status, error_reason)."""
     row = MagicMock()
@@ -220,9 +221,7 @@ class TestBuildConnectionWarningBlock:
         """Warning should direct user to Settings > Connections."""
         from app.services.chat.orchestrator import _build_connection_warning_block
 
-        block = _build_connection_warning_block(
-            ["REST API (NetSuite REST): needs_reauth"]
-        )
+        block = _build_connection_warning_block(["REST API (NetSuite REST): needs_reauth"])
         assert "CONNECTION STATUS" in block
         assert "Settings" in block
         assert "needs_reauth" in block
@@ -231,10 +230,12 @@ class TestBuildConnectionWarningBlock:
         """All broken connections should appear in the warning."""
         from app.services.chat.orchestrator import _build_connection_warning_block
 
-        block = _build_connection_warning_block([
-            "REST API (NetSuite REST): expired",
-            "MCP (NetSuite MCP): needs_reauth",
-        ])
+        block = _build_connection_warning_block(
+            [
+                "REST API (NetSuite REST): expired",
+                "MCP (NetSuite MCP): needs_reauth",
+            ]
+        )
         assert "REST API" in block
         assert "MCP" in block
 
