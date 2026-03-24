@@ -2,6 +2,7 @@
 
 Previously applied directly to production DB without a migration file.
 This migration ensures CI and fresh environments have the column.
+Uses execute() with IF NOT EXISTS for idempotency on existing DBs.
 """
 
 from alembic import op
@@ -12,14 +13,9 @@ down_revision = "052_rag_partition_id"
 
 
 def upgrade() -> None:
-    op.add_column(
-        "tenant_configs",
-        sa.Column(
-            "use_mcp_financial_reports",
-            sa.Boolean(),
-            nullable=False,
-            server_default="true",
-        ),
+    # Use raw SQL with IF NOT EXISTS — column may already exist on prod/staging
+    op.execute(
+        "ALTER TABLE tenant_configs ADD COLUMN IF NOT EXISTS use_mcp_financial_reports BOOLEAN NOT NULL DEFAULT true"
     )
 
 
