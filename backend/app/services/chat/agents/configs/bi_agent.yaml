@@ -3,8 +3,9 @@ display_name: BI Analyst
 description: >
   Translates natural language business questions into SQL queries against
   BigQuery, visualizes results as charts, and provides analytical narratives.
-  Handles revenue analysis, trend detection, cohort analysis, KPI tracking,
-  and ad-hoc data exploration.
+  Handles revenue analytics, trend detection, cohort analysis, KPI tracking,
+  and ad-hoc data exploration. Does NOT handle financial statements
+  (income statement, balance sheet, P&L, trial balance) — those use NetSuite.
 version: "1.0.0"
 
 routing_rules:

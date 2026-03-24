@@ -232,12 +232,18 @@ async def _select_agent(
     tenant_id: uuid.UUID,
     db: "AsyncSession",
     adapter: "BaseLLMAdapter",
+    is_financial: bool = False,
 ) -> str | None:
     """Three-tier routing to select a specialized agent.
 
     Returns agent_id if a specialized agent should handle the query,
     or None if UnifiedAgent should handle it (default path).
     """
+    # Financial reports MUST use UnifiedAgent (NetSuite financial tools)
+    if is_financial:
+        print(f"[ROUTING] Financial report detected, forcing unified-agent | query: {query[:80]}", flush=True)
+        return None
+
     if not _agent_registry.configs:
         return None
 
@@ -1340,11 +1346,13 @@ async def run_chat_turn(
                             logger.warning("orchestrator.onboarding_profile_injection_failed", exc_info=True)
 
                     # Three-tier routing: try specialized agent first, fall back to UnifiedAgent
+                    # Financial reports bypass routing — must use UnifiedAgent with NetSuite tools
                     _selected_agent_id = await _select_agent(
                         query=sanitized_input,
                         tenant_id=tenant_id,
                         db=db,
                         adapter=specialist_adapter,
+                        is_financial=is_financial,
                     )
 
                     if _selected_agent_id:
