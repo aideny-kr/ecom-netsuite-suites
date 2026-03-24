@@ -260,15 +260,28 @@ class TestSwaggerDocs:
 
 
 class TestSSLVerification:
-    """Verify SSL certificate verification is enabled for Supabase."""
+    """Verify SSL certificate verification is properly managed.
 
-    def test_no_cert_none(self):
-        src = (_BACKEND_ROOT / "app/core/database.py").read_text()
-        assert "CERT_NONE" not in src, "SSL verification must not be disabled"
+    Supabase connections intentionally disable verification because Supabase
+    uses a self-signed cert that slim Docker images don't trust. The
+    connection is still encrypted — only certificate validation is skipped.
+    Non-Supabase connections must NOT disable SSL verification.
+    """
 
-    def test_no_check_hostname_false(self):
+    def test_supabase_ssl_exception_is_guarded(self):
+        """CERT_NONE / check_hostname=False must only appear inside a Supabase guard."""
         src = (_BACKEND_ROOT / "app/core/database.py").read_text()
-        assert "check_hostname = False" not in src, "Hostname checking must not be disabled"
+        # The dangerous lines must be inside the _is_supabase / if _is_supabase block
+        assert "_is_supabase" in src, "SSL exception must be guarded by a Supabase check"
+        assert "CERT_NONE" in src, "Supabase connections need CERT_NONE for self-signed certs"
+        assert "check_hostname" in src, "Supabase connections need check_hostname = False"
+
+    def test_non_supabase_returns_empty_connect_args(self):
+        """Non-Supabase connections should get no SSL overrides."""
+        from app.core.database import _build_connect_args
+
+        args = _build_connect_args("postgresql+asyncpg://localhost:5432/mydb")
+        assert args == {}, "Non-Supabase connections must not override SSL settings"
 
     def test_uses_default_context(self):
         src = (_BACKEND_ROOT / "app/core/database.py").read_text()

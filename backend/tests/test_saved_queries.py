@@ -113,8 +113,9 @@ class TestListEndpoint:
         user, _ = await create_test_user(db, tenant, role_name="admin")
         headers = make_auth_headers(user)
 
-        q1 = SavedSuiteQLQuery(tenant_id=tenant.id, name="Query 1", query_text="SELECT 1")
-        q2 = SavedSuiteQLQuery(tenant_id=tenant.id, name="Query 2", query_text="SELECT 2")
+        # List endpoint filters by created_by == user.id OR is_public == True
+        q1 = SavedSuiteQLQuery(tenant_id=tenant.id, name="Query 1", query_text="SELECT 1", created_by=user.id)
+        q2 = SavedSuiteQLQuery(tenant_id=tenant.id, name="Query 2", query_text="SELECT 2", created_by=user.id)
         db.add_all([q1, q2])
         await db.flush()
 
@@ -132,7 +133,7 @@ class TestListEndpoint:
         user_a, _ = await create_test_user(db, tenant_a, role_name="admin")
         headers_a = make_auth_headers(user_a)
 
-        db.add(SavedSuiteQLQuery(tenant_id=tenant_a.id, name="A query", query_text="SELECT 1"))
+        db.add(SavedSuiteQLQuery(tenant_id=tenant_a.id, name="A query", query_text="SELECT 1", created_by=user_a.id))
         db.add(SavedSuiteQLQuery(tenant_id=tenant_b.id, name="B query", query_text="SELECT 2"))
         await db.flush()
 

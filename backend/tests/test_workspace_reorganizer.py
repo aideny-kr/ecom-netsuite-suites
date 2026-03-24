@@ -120,11 +120,15 @@ class TestReorganizeWorkspace:
         mock_result_dirs = MagicMock()
         mock_result_dirs.scalars.return_value.all.return_value = []
 
+        # _rebuild_directories creates missing dirs; each needs a tenant_id lookup
+        # Dirs needed: "SuiteScripts", "SuiteScripts/RESTlets" = 2 lookups
         mock_result_tenant = MagicMock()
         mock_result_tenant.scalar_one.return_value = uuid.uuid4()
+        mock_result_tenant2 = MagicMock()
+        mock_result_tenant2.scalar_one.return_value = uuid.uuid4()
 
         mock_db.execute = AsyncMock(
-            side_effect=[mock_result_files, mock_result_paths, mock_result_dirs, mock_result_tenant]
+            side_effect=[mock_result_files, mock_result_paths, mock_result_dirs, mock_result_tenant, mock_result_tenant2]
         )
 
         result = await reorganize_workspace(mock_db, uuid.uuid4())
@@ -153,11 +157,14 @@ class TestReorganizeWorkspace:
         mock_result_dirs = MagicMock()
         mock_result_dirs.scalars.return_value.all.return_value = []
 
+        # Dirs needed: "SuiteScripts", "SuiteScripts/User Event Scripts" = 2 lookups
         mock_result_tenant = MagicMock()
         mock_result_tenant.scalar_one.return_value = uuid.uuid4()
+        mock_result_tenant2 = MagicMock()
+        mock_result_tenant2.scalar_one.return_value = uuid.uuid4()
 
         mock_db.execute = AsyncMock(
-            side_effect=[mock_result_files, mock_result_paths, mock_result_dirs, mock_result_tenant]
+            side_effect=[mock_result_files, mock_result_paths, mock_result_dirs, mock_result_tenant, mock_result_tenant2]
         )
 
         await reorganize_workspace(mock_db, uuid.uuid4())

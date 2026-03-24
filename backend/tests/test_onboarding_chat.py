@@ -266,7 +266,8 @@ class TestOrchestratorOnboardingRouting:
                 pass
 
             # Verify the system prompt used was the onboarding prompt
-            assert captured_kwargs["system"] == ONBOARDING_SYSTEM_PROMPT
+            # split_system_prompt().static strips whitespace, so compare stripped versions
+            assert captured_kwargs["system"].strip() == ONBOARDING_SYSTEM_PROMPT.strip()
 
     @pytest.mark.asyncio
     async def test_onboarding_skips_rag(self, db, user_and_headers, tenant):

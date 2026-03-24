@@ -70,7 +70,7 @@ class TestCreateInvite:
             assert response.status_code == 201
             data = response.json()
             assert data["email"] == "new@example.com"
-            assert data["role_display_name"] == "User"
+            assert data["role_display_name"] == "Finance"
 
     @pytest.mark.asyncio
     async def test_requires_auth(self):
@@ -142,4 +142,4 @@ class TestGetInviteInfo:
                 assert response.status_code == 200
                 data = response.json()
                 assert data["email"] == "new@example.com"
-                assert data["role_display_name"] == "User"
+                assert data["role_display_name"] == "Finance"

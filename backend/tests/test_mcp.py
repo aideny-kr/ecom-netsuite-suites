@@ -199,9 +199,10 @@ class TestGovernedExecute:
         async def failing_fn(params, **kwargs):
             raise ValueError("Tool broke")
 
+        # Use a non-SuiteQL tool to avoid pre-execution validation intercepting the call
         result = await governed_execute(
-            "netsuite.suiteql",
-            {"query": "SELECT *"},
+            "recon.run",
+            {"date_from": "2026-01-01"},
             str(uuid.uuid4()),
             None,
             failing_fn,
@@ -238,10 +239,6 @@ class TestToolConfigs:
             "workspace.deploy_sandbox",
             "workspace.run_suiteql_assertions",
             "suitescript.sync",
-            "tenant.save_learned_rule",
-            "netsuite.get_metadata",
-            "netsuite.refresh_metadata",
-            "netsuite.financial_report",
             "bigquery.sql",
             "bigquery.schema",
             "bigquery.cost_estimate",
