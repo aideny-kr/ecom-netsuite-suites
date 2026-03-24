@@ -237,7 +237,15 @@ class TestToolConfigs:
             "workspace.run_unit_tests",
             "workspace.deploy_sandbox",
             "workspace.run_suiteql_assertions",
+            "netsuite.pivot_query_result",
             "suitescript.sync",
+            "tenant.save_learned_rule",
+            "netsuite.get_metadata",
+            "netsuite.refresh_metadata",
+            "netsuite.financial_report",
+            "bigquery.sql",
+            "bigquery.schema",
+            "bigquery.cost_estimate",
         }
         assert set(TOOL_CONFIGS.keys()) == expected
 

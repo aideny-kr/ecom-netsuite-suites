@@ -43,7 +43,7 @@ class TestBigqueryToolRegistration:
 
     def test_bigquery_tools_in_security_allowlist(self):
         """Both allowlists must include BigQuery tools."""
-        from app.services.chat.orchestrator import ALLOWED_CHAT_TOOLS as ORCH_ALLOWLIST
+        from app.services.chat.nodes import ALLOWED_CHAT_TOOLS as ORCH_ALLOWLIST
 
         assert "bigquery.sql" in ORCH_ALLOWLIST
         assert "bigquery.schema" in ORCH_ALLOWLIST
