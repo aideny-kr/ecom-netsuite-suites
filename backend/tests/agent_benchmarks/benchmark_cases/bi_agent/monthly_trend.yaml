@@ -1,0 +1,8 @@
+query: "Show me monthly sales trends for the last 12 months"
+agent_id: bi-agent
+expected_tools: ["bigquery_sql"]
+expected_answer_contains: ["sales", "month", "trend"]
+expected_accuracy: 0.8
+max_cost: 0.30
+max_latency_ms: 15000
+tags: ["analytics", "trend", "chart"]

@@ -1,0 +1,8 @@
+query: "What's our revenue by region this quarter?"
+agent_id: bi-agent
+expected_tools: ["bigquery_sql"]
+expected_answer_contains: ["revenue", "region", "quarter"]
+expected_accuracy: 0.8
+max_cost: 0.30
+max_latency_ms: 15000
+tags: ["analytics", "revenue"]

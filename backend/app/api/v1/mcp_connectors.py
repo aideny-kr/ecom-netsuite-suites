@@ -489,6 +489,16 @@ async def create_bigquery_connector(
     )
 
     await db.commit()
+
+    # 7. Seed BigQuery schema into RAG partitions for the BI agent
+    try:
+        from app.services.bigquery_schema_seeder import seed_bigquery_schema
+
+        await seed_bigquery_schema(db=db, tenant_id=user.tenant_id, schema=schema)
+        await db.commit()
+    except Exception:
+        logger.warning("bigquery_connector.schema_seeder_failed", exc_info=True)
+
     return connector
 
 

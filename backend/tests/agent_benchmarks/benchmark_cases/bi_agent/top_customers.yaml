@@ -1,0 +1,8 @@
+query: "Who are our top 10 customers by lifetime value?"
+agent_id: bi-agent
+expected_tools: ["bigquery_sql"]
+expected_answer_contains: ["customer", "value", "top"]
+expected_accuracy: 0.8
+max_cost: 0.20
+max_latency_ms: 10000
+tags: ["analytics", "ranking"]

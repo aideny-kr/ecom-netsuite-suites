@@ -22,6 +22,7 @@ class BenchmarkCase(BaseModel):
     """A single benchmark test case loaded from YAML."""
 
     query: str
+    agent_id: str = ""
     expected_tools: list[str] = Field(default_factory=list)
     expected_answer_contains: list[str] = Field(default_factory=list)
     expected_accuracy: float = 0.8

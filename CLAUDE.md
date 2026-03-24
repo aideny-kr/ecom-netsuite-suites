@@ -226,6 +226,11 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 | Agent registry | `backend/app/services/chat/agents/agent_registry.py` |
 | Agent routing | `backend/app/services/chat/routing/` |
 | Agent benchmarks | `backend/tests/agent_benchmarks/` |
+| BigQuery service | `backend/app/services/bigquery_service.py` |
+| BigQuery tools | `backend/app/mcp/tools/bigquery_tools.py` |
+| BigQuery schema seeder | `backend/app/services/bigquery_schema_seeder.py` |
+| Chart extractor | `backend/app/services/chat/chart_extractor.py` |
+| Chart renderer | `frontend/src/components/chat/chart-renderer.tsx` |
 | Specs / Plans | `docs/superpowers/specs/`, `docs/superpowers/plans/` |
 | Architecture memory | `memory/` |
 
@@ -262,6 +267,9 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 29. **Agent tool filtering is per-agent** — each agent's YAML `tools:` list controls visibility. Don't expose all tools to all agents. Use `get_tools_for_agent(agent_id)`.
 30. **RAG partitions are per-agent** — add `partition_id` filter when querying `domain_knowledge_chunks`. Never mix partitions across agents.
 31. **Every specialized agent benchmarks against native Claude + MCP** — pass@5 consistency test, not single-run. Circuit breaker auto-disables at 5% error rate over last 100 queries.
+32. **BigQuery tool names use dots in registry but underscores in LLM** — `bigquery.sql` in tool registry becomes `bigquery_sql` for the LLM. The name sanitizer handles this automatically.
+33. **BigQuery uses LIMIT not FETCH FIRST** — `FETCH FIRST N ROWS ONLY` is SuiteQL syntax. BigQuery Standard SQL uses `LIMIT N`.
+34. **Chart extraction happens post-stream** — same pattern as confidence tag extraction. `extract_charts()` runs after full response, emits `chart` SSE events.
 
 ## Current State
 
