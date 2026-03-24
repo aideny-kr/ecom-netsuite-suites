@@ -275,7 +275,7 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 
 - **Product**: AI-den v1.1 deployed to staging 2026-03-23. Agent framework + BigQuery BI agent + chart rendering all live.
 - **Roadmap**: v1.1 shipped (agent framework + BigQuery BI) → v1.2 Early May (NetSuite read-write, ~2wk) → v1.3 Late May (cross-system intelligence, ~3wk) → v1.4 Mid-Jun (ETL pipelines, ~3wk).
-- **Latest migration**: 052_rag_partition_id
+- **Latest migration**: 053_mcp_financial_flag
 - **New test count**: 200+ new tests added in v1.1 (agent framework, BigQuery, routing, benchmarks, charts)
 - **Staging**: `api-staging.suitestudio.ai` (backend) + `staging.suitestudio.ai` (Vercel frontend). Auto-deploys from main.
 - **Deploy**: Stop beat/worker first, pull, start sequentially. Never `--force-recreate` all at once — kills workers mid-refresh, consuming single-use refresh tokens.
