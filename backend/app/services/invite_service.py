@@ -160,19 +160,37 @@ async def accept_invite(
         if not full_name or full_name.strip() == "":
             full_name = google_info.get("name", invite.email)
 
-    # Create user
-    hashed = hash_password(password) if password else hash_password(secrets.token_urlsafe(32))
-    user = User(
-        tenant_id=invite.tenant_id,
-        email=invite.email,
-        hashed_password=hashed,
-        full_name=full_name,
-        auth_provider=auth_provider,
-        google_sub=google_sub,
-        is_active=True,
+    # Check if user already exists (e.g., previously created but inactive)
+    existing_result = await db.execute(
+        select(User).where(User.email == invite.email, User.tenant_id == invite.tenant_id)
     )
-    db.add(user)
-    await db.flush()  # Get user.id
+    existing_user = existing_result.scalar_one_or_none()
+
+    if existing_user:
+        # Activate and update existing user
+        existing_user.is_active = True
+        existing_user.full_name = full_name or existing_user.full_name
+        existing_user.auth_provider = auth_provider
+        if google_sub:
+            existing_user.google_sub = google_sub
+        if password:
+            existing_user.hashed_password = hash_password(password)
+        user = existing_user
+        await db.flush()
+    else:
+        # Create new user
+        hashed = hash_password(password) if password else hash_password(secrets.token_urlsafe(32))
+        user = User(
+            tenant_id=invite.tenant_id,
+            email=invite.email,
+            hashed_password=hashed,
+            full_name=full_name,
+            auth_provider=auth_provider,
+            google_sub=google_sub,
+            is_active=True,
+        )
+        db.add(user)
+        await db.flush()  # Get user.id
 
     # Assign role
     role_result = await db.execute(select(Role).where(Role.name == invite.role_name))
