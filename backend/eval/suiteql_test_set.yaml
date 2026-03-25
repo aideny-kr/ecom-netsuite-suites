@@ -1,0 +1,107 @@
+# SuiteQL Eval Test Set — 15 cases
+# Dialects rules: FETCH FIRST N ROWS ONLY, BUILTIN.DF(), TRUNC(SYSDATE), single-letter status codes
+
+- question: "What are the top 10 sales orders by amount this month?"
+  dialect: suiteql
+  expected_keywords: ["sales", "order", "amount"]
+  expected_sql_contains: ["FETCH FIRST", "ORDER BY", "trandate"]
+  tables: ["transaction"]
+  difficulty: easy
+
+- question: "Show me all open purchase orders with their vendors"
+  dialect: suiteql
+  expected_keywords: ["purchase", "order", "vendor"]
+  expected_sql_contains: ["transaction", "entity", "type = 'PurchOrd'"]
+  tables: ["transaction", "vendor"]
+  difficulty: easy
+
+- question: "What is the total revenue by subsidiary this quarter?"
+  dialect: suiteql
+  expected_keywords: ["revenue", "subsidiary", "quarter"]
+  expected_sql_contains: ["SUM", "GROUP BY", "subsidiary"]
+  tables: ["transaction", "transactionline"]
+  difficulty: medium
+
+- question: "List all customers with overdue invoices older than 30 days"
+  dialect: suiteql
+  expected_keywords: ["customer", "invoice", "overdue"]
+  expected_sql_contains: ["duedate", "TRUNC(SYSDATE)", "type = 'CustInvc'"]
+  tables: ["transaction", "entity"]
+  difficulty: medium
+
+- question: "What are the inventory levels for active items below reorder point?"
+  dialect: suiteql
+  expected_keywords: ["inventory", "item", "reorder"]
+  expected_sql_contains: ["inventoryitem", "quantityonhand", "reorderpoint"]
+  tables: ["inventoryitem"]
+  difficulty: medium
+
+- question: "Show me all vendor bills pending approval in the last 7 days"
+  dialect: suiteql
+  expected_keywords: ["vendor", "bill", "approval"]
+  expected_sql_contains: ["type = 'VendBill'", "status", "trandate"]
+  tables: ["transaction"]
+  difficulty: easy
+
+- question: "What is the average order value by customer class?"
+  dialect: suiteql
+  expected_keywords: ["average", "order", "customer", "class"]
+  expected_sql_contains: ["AVG", "GROUP BY", "custcategory"]
+  tables: ["transaction", "entity"]
+  difficulty: medium
+
+- question: "Show me all GL transactions for account 4000 this year"
+  dialect: suiteql
+  expected_keywords: ["account", "transaction", "year"]
+  expected_sql_contains: ["accountingline", "account", "TRUNC(SYSDATE, 'YEAR')"]
+  tables: ["accountingline", "account"]
+  difficulty: medium
+
+- question: "Which items have been sold more than 100 times this month?"
+  dialect: suiteql
+  expected_keywords: ["item", "sold", "count"]
+  expected_sql_contains: ["COUNT", "GROUP BY", "item", "HAVING"]
+  tables: ["transactionline", "item"]
+  difficulty: medium
+
+- question: "Show revenue breakdown by department for Q1"
+  dialect: suiteql
+  expected_keywords: ["revenue", "department", "breakdown"]
+  expected_sql_contains: ["SUM", "department", "GROUP BY"]
+  tables: ["transaction", "transactionline", "department"]
+  difficulty: hard
+
+- question: "What are all received RMAs in the past 90 days?"
+  dialect: suiteql
+  expected_keywords: ["rma", "received"]
+  expected_sql_contains: ["type = 'RtnAuth'", "status IN", "trandate"]
+  tables: ["transaction"]
+  difficulty: medium
+
+- question: "List all employees with their department and base salary"
+  dialect: suiteql
+  expected_keywords: ["employee", "department", "salary"]
+  expected_sql_contains: ["employee", "department", "basewage"]
+  tables: ["employee"]
+  difficulty: easy
+
+- question: "What is the multi-currency AR balance by currency?"
+  dialect: suiteql
+  expected_keywords: ["currency", "balance", "accounts receivable"]
+  expected_sql_contains: ["foreignamount", "currency", "GROUP BY"]
+  tables: ["transaction", "transactionline"]
+  difficulty: hard
+
+- question: "Show all custom record entries for active promotions"
+  dialect: suiteql
+  expected_keywords: ["custom", "promotion", "active"]
+  expected_sql_contains: ["customrecord", "isinactive = 'F'"]
+  tables: ["customrecord"]
+  difficulty: hard
+
+- question: "What are the top 5 items by gross profit margin this quarter?"
+  dialect: suiteql
+  expected_keywords: ["item", "profit", "margin"]
+  expected_sql_contains: ["SUM", "GROUP BY", "FETCH FIRST 5 ROWS ONLY", "ORDER BY"]
+  tables: ["transactionline", "item"]
+  difficulty: hard
