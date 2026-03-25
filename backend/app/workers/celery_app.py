@@ -28,6 +28,7 @@ celery_app.conf.update(
 celery_app.conf.include = [
     "app.workers.tasks.audit_retention",
     "app.workers.tasks.auto_learning",
+    "app.workers.tasks.auto_query_improvement",
     "app.workers.tasks.billing_sync",
     "app.workers.tasks.connection_health",
     "app.workers.tasks.example_sync",
@@ -58,6 +59,10 @@ celery_app.conf.beat_schedule = {
     "auto-learning": {
         "task": "tasks.auto_learning",
         "schedule": crontab(hour=4, minute=0),
+    },
+    "auto-query-improvement": {
+        "task": "tasks.auto_query_improvement",
+        "schedule": crontab(hour=5, minute=0),
     },
     "proactive-token-refresh": {
         "task": "tasks.proactive_token_refresh",
