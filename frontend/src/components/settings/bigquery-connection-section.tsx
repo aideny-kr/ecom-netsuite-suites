@@ -583,8 +583,36 @@ export function BigQueryConnectionSection() {
             </div>
           </div>
 
-          {/* Remove button */}
-          <div className="flex justify-end">
+          {/* Actions */}
+          <div className="flex items-center justify-between">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={async () => {
+                try {
+                  const meta = bigqueryConnector.metadata_json as Record<string, any> | null;
+                  const connId = bigqueryConnector.id;
+                  const res = await fetch(
+                    `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000"}/api/v1/mcp-connectors/bigquery/${connId}/schema`,
+                    {
+                      headers: {
+                        Authorization: `Bearer ${localStorage.getItem("access_token")}`,
+                      },
+                    },
+                  );
+                  if (res.ok) {
+                    toast({ title: "Connection healthy", description: "BigQuery responded successfully" });
+                  } else {
+                    toast({ title: "Connection issue", description: `Status ${res.status}`, variant: "destructive" });
+                  }
+                } catch (err) {
+                  toast({ title: "Connection failed", description: String(err), variant: "destructive" });
+                }
+              }}
+            >
+              <FlaskConical className="mr-1.5 h-3.5 w-3.5" />
+              Test Connection
+            </Button>
             <Button
               variant="ghost"
               size="sm"
