@@ -1,15 +1,12 @@
 """Tests for query eval harness — scoring query quality."""
 
-import pytest
-
 from app.services.query_eval_harness import (
     EvalCase,
-    EvalScore,
-    score_syntax,
-    score_accuracy,
-    score_efficiency,
     composite_score,
     load_eval_cases,
+    score_accuracy,
+    score_efficiency,
+    score_syntax,
 )
 
 
