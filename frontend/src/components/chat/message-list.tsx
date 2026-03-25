@@ -506,24 +506,30 @@ export function MessageList({
   const isTerminal = variant === "terminal";
   const { brandName } = useBranding();
 
-  // Scroll to bottom: use rAF to wait for DOM layout to settle before scrolling.
-  // This prevents the "message appears at bottom then shoots up" visual jump.
+  // Scroll to bottom: instant for new messages, smooth during streaming.
   const isStreamingNow = !!(streamingContent || isWaitingForReply);
   const scrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const rafRef = useRef<number | null>(null);
+  const prevStreamingRef = useRef(false);
   useEffect(() => {
+    // Use instant scroll for new messages to avoid the "push down then hoist" visual.
+    // Only use smooth scroll during active streaming (content growing).
+    const wasStreaming = prevStreamingRef.current;
+    prevStreamingRef.current = isStreamingNow;
+
+    const behavior: ScrollBehavior = isStreamingNow && wasStreaming ? "smooth" : "instant";
     const scrollToBottom = () => {
-      bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+      bottomRef.current?.scrollIntoView({ behavior });
     };
 
-    if (isStreamingNow) {
-      // Debounce scroll during streaming to avoid janky rapid scrolls
+    if (isStreamingNow && wasStreaming) {
+      // During active streaming — debounce to avoid janky rapid scrolls
       if (scrollTimerRef.current) clearTimeout(scrollTimerRef.current);
       scrollTimerRef.current = setTimeout(() => {
         rafRef.current = requestAnimationFrame(scrollToBottom);
       }, 16);
     } else {
-      // Wait for layout to settle before scrolling (fixes jump on new message)
+      // New message or stream start — instant scroll, no animation
       rafRef.current = requestAnimationFrame(scrollToBottom);
     }
     return () => {
@@ -533,7 +539,8 @@ export function MessageList({
   // eslint-disable-next-line react-hooks/exhaustive-deps -- isStreamingNow is derived from streamingContent + isWaitingForReply
   }, [messages, pendingUserMessage, isWaitingForReply, streamingContent]);
 
-  if (isLoading) {
+  // Skip loading indicator if we have a pending message (just created session)
+  if (isLoading && !pendingUserMessage && !isWaitingForReply) {
     return (
       <div className="flex h-full items-center justify-center">
         <div className="flex flex-col items-center gap-3">
