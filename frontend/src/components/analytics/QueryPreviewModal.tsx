@@ -98,6 +98,37 @@ export function QueryPreviewModal({
       setExportState({ phase: "error", message: "No query text available." });
       return;
     }
+
+    // For saved searches (non-SQL queries), export from stored result_data
+    const isNonSqlQuery = query.query_text.startsWith("Saved Search:") || query.query_text.trimStart().startsWith("--");
+    if (isNonSqlQuery && query.result_data) {
+      setExportState({ phase: "queuing" });
+      try {
+        const cols = query.result_data.columns || [];
+        const rows = query.result_data.rows || [];
+        const escape = (v: unknown) => {
+          const s = String(v ?? "");
+          return s.includes(",") || s.includes('"') || s.includes("\n")
+            ? `"${s.replace(/"/g, '""')}"`
+            : s;
+        };
+        const header = cols.map(escape).join(",");
+        const body = rows.map((row: unknown[]) => (row as unknown[]).map(escape).join(",")).join("\n");
+        const blob = new Blob([`${header}\n${body}`], { type: "text/csv" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = `${(query.name || "export").replace(/[^a-zA-Z0-9\-_ ]/g, "_")}.csv`;
+        a.click();
+        URL.revokeObjectURL(url);
+        setExportState({ phase: "done", fileName: `${query.name || "export"}.csv` });
+      } catch {
+        setExportState({ phase: "error", message: "Failed to export." });
+      }
+      return;
+    }
+
+    // For real SQL queries, re-execute on the backend for full results
     setExportState({ phase: "queuing" });
     try {
       await exportFromQuery({
@@ -109,7 +140,7 @@ export function QueryPreviewModal({
     } catch {
       setExportState({ phase: "error", message: "Failed to export." });
     }
-  }, [query.query_text, query.name, exportFromQuery]);
+  }, [query.query_text, query.name, query.result_data, exportFromQuery]);
 
   // -- Derived UI helpers ----------------------------------------------------
   const isExportBusy =
@@ -139,7 +170,7 @@ export function QueryPreviewModal({
           <div className="flex items-center gap-2 shrink-0">
             <Button
               onClick={() => {
-                const isSnapshot = query.query_text.trimStart().startsWith("--") && query.result_data;
+                const isSnapshot = (query.query_text.trimStart().startsWith("--") || query.query_text.startsWith("Saved Search:")) && query.result_data;
                 if (isSnapshot && query.result_data) {
                   exportToExcel({
                     columns: query.result_data.columns,
