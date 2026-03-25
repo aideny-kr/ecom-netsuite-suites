@@ -15,6 +15,7 @@ from app.models.chat_api_key import ChatApiKey
 from app.models.connection import Connection
 from app.models.connection_alert import ConnectionAlert
 from app.models.domain_knowledge import DomainKnowledgeChunk
+from app.models.experiment_log import ExperimentLog
 from app.models.job import Job
 from app.models.mcp_connector import McpConnector
 from app.models.netsuite_api_log import NetSuiteApiLog
@@ -87,4 +88,5 @@ __all__ = [
     "SavedSuiteQLQuery",
     "ConnectionAlert",
     "AgentConfig",
+    "ExperimentLog",
 ]
