@@ -48,3 +48,10 @@ orchestral-emergence.*
 AI-den-*.docx
 memory/
 =*.*.*
+
+# Proprietary AI playbooks (not needed to run the app)
+CLAUDE.md
+GEMINI.md
+prompts/
+skills/
+vibe-coding-strategy.md
