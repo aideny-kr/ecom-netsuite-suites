@@ -87,8 +87,9 @@ export function DataFrameTable({ data, queryText }: DataFrameTableProps) {
   }, [columns, sortedRows]);
 
   const handleDownloadCSV = useCallback(() => {
-    // If we have the query, re-execute server-side for full results (up to 50K rows)
-    if (queryText) {
+    // If we have the query and it's a real SuiteQL query (not a saved search),
+    // re-execute server-side for full results (up to 50K rows)
+    if (queryText && !queryText.startsWith("Saved Search:")) {
       exportFromQuery({
         queryText,
         title: `query-results-${new Date().toISOString().slice(0, 10)}`,
@@ -96,7 +97,7 @@ export function DataFrameTable({ data, queryText }: DataFrameTableProps) {
       });
       return;
     }
-    // Otherwise export client-side rows
+    // Saved searches and no-query results: export client-side rows
     const escape = (v: unknown) => {
       const s = String(v ?? "");
       return s.includes(",") || s.includes('"') || s.includes("\n")

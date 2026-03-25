@@ -408,6 +408,18 @@ def _is_suiteql_tool(tool_name: str) -> bool:
     return False
 
 
+_SAVED_SEARCH_TOOLS = frozenset({"netsuite.saved_search", "netsuite_saved_search"})
+
+
+def _is_saved_search_tool(tool_name: str) -> bool:
+    """Match local saved search tools and external MCP saved search tools."""
+    if tool_name in _SAVED_SEARCH_TOOLS:
+        return True
+    if "savedsearch" in tool_name.lower() or "runsavedsearch" in tool_name.lower():
+        return True
+    return False
+
+
 def _intercept_tool_result(
     tool_name: str, result_str: str, context_need: str = ContextNeed.DATA
 ) -> tuple[str | None, dict | None, str]:
@@ -534,6 +546,64 @@ def _intercept_tool_result(
                 },
                 default=str,
             )
+        return "data_table", sse_event_data, condensed
+
+    # --- Saved search path ---
+    if _is_saved_search_tool(tool_name):
+        try:
+            parsed = json.loads(result_str)
+        except (json.JSONDecodeError, TypeError):
+            return None, None, result_str
+
+        # Error results pass through
+        if isinstance(parsed, dict) and (parsed.get("error") is True or isinstance(parsed.get("error"), str)):
+            return None, None, result_str
+
+        # Extract list-of-dicts from data, items, or results keys
+        items = None
+        if isinstance(parsed, dict):
+            items = parsed.get("data") or parsed.get("items") or parsed.get("results")
+        if not isinstance(items, list) or len(items) == 0 or not isinstance(items[0], dict):
+            return None, None, result_str
+
+        # Derive columns from union of all item keys (preserving order)
+        seen: set[str] = set()
+        columns = []
+        for item in items:
+            for key in item:
+                if key not in seen:
+                    seen.add(key)
+                    columns.append(key)
+        rows = [[item.get(col) for col in columns] for item in items]
+
+        search_id = parsed.get("searchId", "")
+        query = f"Saved Search: {search_id}" if search_id else "Saved Search"
+        row_count = parsed.get("resultCount") or len(rows)
+        truncated = parsed.get("truncated", False)
+
+        sse_event_data = {
+            "columns": columns,
+            "rows": rows,
+            "row_count": row_count,
+            "query": query,
+            "truncated": truncated,
+        }
+
+        row_preview = rows[:5]
+        condensed = json.dumps(
+            {
+                "columns": columns,
+                "row_count": row_count,
+                "rows_preview": row_preview,
+                "truncated": truncated,
+                "note": (
+                    "The full saved search results have been sent to the frontend for rendering. "
+                    "Do NOT rebuild or reproduce the table in your response. "
+                    "Provide commentary, insights, and analysis only."
+                ),
+            },
+            default=str,
+        )
         return "data_table", sse_event_data, condensed
 
     # --- Not a data tool ---
