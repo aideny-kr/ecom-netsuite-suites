@@ -385,7 +385,7 @@ export function NetSuiteConnectionsSection() {
     (c) => c.provider === "netsuite" && c.status !== "revoked",
   );
   const mcpConns = (mcpConnectors ?? []).filter(
-    (c) => c.status !== "revoked",
+    (c) => c.status !== "revoked" && c.provider !== "bigquery",
   );
 
   // Derive client IDs and restlet URL from first active connection metadata
