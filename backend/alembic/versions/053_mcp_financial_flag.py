@@ -6,7 +6,6 @@ Uses execute() with IF NOT EXISTS for idempotency on existing DBs.
 """
 
 from alembic import op
-import sqlalchemy as sa
 
 revision = "053_mcp_financial_flag"
 down_revision = "052_rag_partition_id"

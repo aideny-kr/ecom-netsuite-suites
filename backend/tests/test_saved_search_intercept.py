@@ -2,8 +2,6 @@
 
 import json
 
-import pytest
-
 from app.services.chat.orchestrator import _intercept_tool_result, _is_saved_search_tool
 
 
