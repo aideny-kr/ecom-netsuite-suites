@@ -550,31 +550,20 @@ def _intercept_tool_result(
 
     # --- Saved search path ---
     if _is_saved_search_tool(tool_name):
-        print(
-            f"[INTERCEPT] Saved search detected: {tool_name}, result_str length: {len(result_str)}, first 200: {result_str[:200]}",
-            flush=True,
-        )
         try:
             parsed = json.loads(result_str)
         except (json.JSONDecodeError, TypeError):
-            print(f"[INTERCEPT] Saved search JSON parse failed for {tool_name}", flush=True)
             return None, None, result_str
 
         # Error results pass through
         if isinstance(parsed, dict) and (parsed.get("error") is True or isinstance(parsed.get("error"), str)):
-            print(f"[INTERCEPT] Saved search error result, passing through", flush=True)
             return None, None, result_str
 
         # Extract list-of-dicts from data, items, or results keys
         items = None
         if isinstance(parsed, dict):
             items = parsed.get("data") or parsed.get("items") or parsed.get("results")
-            print(
-                f"[INTERCEPT] Saved search keys: {list(parsed.keys())}, items type: {type(items).__name__}, items len: {len(items) if isinstance(items, list) else 'N/A'}",
-                flush=True,
-            )
         if not isinstance(items, list) or len(items) == 0 or not isinstance(items[0], dict):
-            print(f"[INTERCEPT] Saved search items not valid list-of-dicts, passing through", flush=True)
             return None, None, result_str
 
         # Derive columns from union of all item keys (preserving order)
