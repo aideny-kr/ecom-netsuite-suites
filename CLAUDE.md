@@ -276,6 +276,7 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 - **Product**: AI-den v1.1 deployed to staging 2026-03-23. Agent framework + BigQuery BI agent + chart rendering all live.
 - **Roadmap**: v1.1 shipped (agent framework + BigQuery BI) → v1.2 Early May (NetSuite read-write, ~2wk) → v1.3 Late May (cross-system intelligence, ~3wk) → v1.4 Mid-Jun (ETL pipelines, ~3wk).
 - **Latest migration**: 053_mcp_financial_flag
+- **CI status**: Lint + format passing. Backend tests passing (pre-existing SSL test excluded).
 - **New test count**: 200+ new tests added in v1.1 (agent framework, BigQuery, routing, benchmarks, charts)
 - **Staging**: `api-staging.suitestudio.ai` (backend) + `staging.suitestudio.ai` (Vercel frontend). Auto-deploys from main.
 - **Deploy**: Stop beat/worker first, pull, start sequentially. Never `--force-recreate` all at once — kills workers mid-refresh, consuming single-use refresh tokens.
@@ -326,3 +327,12 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 - **Scalability Sprint 0** — DB pool 5→20 + overflow 30, gunicorn 4 workers, `/health/detailed` endpoint with pool stats + SSE counter. Stress tested to 25 concurrent chats at 100% success.
 - **BigQuery connector encryption fix** — Staging connector created with wrong Fernet key. Re-encrypted with staging `ENCRYPTION_KEY`.
 - **BigQuery `asyncio.to_thread()`** — All 4 service functions wrapped to prevent event loop blocking. Schema endpoint returns 502 with message on failure instead of 503 timeout.
+- **BigQuery location parameter** — `location` field threaded through entire stack (schema, service, API, tools, frontend). Defaults to "US" for backward compat. Framework uses `us-central1`.
+- **Saved search interception** — `ns_runSavedSearch` results now intercepted as `data_table` SSE events (was falling through to raw LLM response). Client-side CSV export for saved searches.
+- **CSV export on all data tables** — Export CSV button added to `suiteql-tool-card.tsx`. Save to Analytics fixed for saved searches (uses `Saved Search: {id}` as query_text).
+- **Saved query export fix** — Excel/CSV export on `/queries` page for saved search results uses stored snapshot instead of trying to re-execute non-SQL query text.
+- **Chart persistence** — Charts stored in `structured_output.charts` array, survive page refresh. Deduplication prevents double rendering.
+- **Streaming smoothness** — StreamingMarkdown memo threshold 50→15 chars, scroll debounce 50→16ms.
+- **CI cleanup** — All 229 ruff lint errors resolved. 15 pre-existing test failures fixed. Migration 053 added for missing `use_mcp_financial_reports` column.
+- **Invite role label** — "User" → "Finance" in team invite dropdown.
+- **Email config** — Staging configured with Resend provider for invite emails.
