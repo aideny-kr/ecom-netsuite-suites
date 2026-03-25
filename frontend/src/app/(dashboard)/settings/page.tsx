@@ -2735,7 +2735,7 @@ function ConnectionStatusSection() {
   const { data: mcpConnectors } = useMcpConnectors();
 
   const oauthConns = (connections ?? []).filter((c) => c.provider === "netsuite");
-  const mcpConns = mcpConnectors ?? [];
+  const mcpConns = (mcpConnectors ?? []).filter((c) => c.provider !== "bigquery");
 
   const hasAny = oauthConns.length > 0 || mcpConns.length > 0;
 
