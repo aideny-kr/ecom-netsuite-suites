@@ -40,3 +40,11 @@ docs/
 
 # MCP config (contains API keys)
 .mcp.json
+
+# Personal/internal files
+aiden-*.docx
+aiden-*.jsx
+orchestral-emergence.*
+AI-den-*.docx
+memory/
+=*.*.*
