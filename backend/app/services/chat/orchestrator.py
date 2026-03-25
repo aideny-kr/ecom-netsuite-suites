@@ -1227,6 +1227,7 @@ async def run_chat_turn(
                     #   domain_knowledge    ❌    ✅    ✅      ❌        ❌
                     #   onboarding_profile  ❌    ❌    ❌      ❌        ✅
                     #   proven_patterns     ❌    ✅    ❌      ❌        ❌
+                    #   learned_rules       ✅    ✅    ✅      ✅        ✅    (always)
                     # FULL = investigation ("why") — minimal context so agent reasons freely
 
                     _need_vernacular = context_need in (ContextNeed.DATA, ContextNeed.FINANCIAL)
@@ -1238,6 +1239,7 @@ async def run_chat_turn(
                     # Assemble context concurrently (only fetch what we need)
                     from app.services.chat.domain_knowledge import retrieve_domain_knowledge
                     from app.services.chat.tenant_resolver import TenantEntityResolver
+                    from app.services.learned_rules_service import retrieve_learned_rules
                     from app.services.query_pattern_service import retrieve_similar_patterns
 
                     # Build the list of concurrent tasks dynamically
@@ -1264,12 +1266,17 @@ async def run_chat_turn(
                         _gather_tasks.append(retrieve_similar_patterns(db, tenant_id, sanitized_input))
                         _gather_keys.append("patterns")
 
+                    # Learned rules — ALWAYS injected regardless of context_need
+                    _gather_tasks.append(retrieve_learned_rules(db=db, tenant_id=tenant_id))
+                    _gather_keys.append("learned_rules")
+
                     _gather_results = await asyncio.gather(*_gather_tasks, return_exceptions=True)
                     _results = dict(zip(_gather_keys, _gather_results))
 
                     vernacular_result = _results.get("vernacular")
                     dk_result = _results.get("dk")
                     patterns_result = _results.get("patterns")
+                    learned_rules_result = _results.get("learned_rules")
 
                     context: dict[str, Any] = {}
 
@@ -1314,6 +1321,16 @@ async def run_chat_turn(
                             print(f"[UNIFIED] Proven patterns injected ({len(patterns_result)} patterns)", flush=True)
                             context["matched_pattern_similarity"] = patterns_result[0].get("similarity", 0.0)
                             context["matched_pattern_success_count"] = patterns_result[0].get("success_count", 0)
+
+                    # learned_rules (ALL context needs — always injected)
+                    if learned_rules_result is not None:
+                        if isinstance(learned_rules_result, Exception):
+                            logger.warning("unified_agent.learned_rules_failed", exc_info=learned_rules_result)
+                        elif learned_rules_result:
+                            context["learned_rules"] = learned_rules_result
+                            print(
+                                f"[ORCHESTRATOR] Learned rules injected ({len(learned_rules_result)} rules)", flush=True
+                            )
 
                     context["user_timezone"] = user_timezone
                     context["importance_tier"] = importance_tier.value

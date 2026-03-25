@@ -796,6 +796,15 @@ class UnifiedAgent(BaseSpecialistAgent):
             pp_block += "</proven_patterns>"
             parts.append(pp_block)
 
+        # Learned rules — tenant-specific business logic (always injected)
+        _learned_rules = self._context.get("learned_rules", [])
+        if _learned_rules:
+            lr_block = "\n<learned_rules>\nTenant-specific business rules — FOLLOW THESE STRICTLY:\n"
+            for rule in _learned_rules:
+                lr_block += f"  [{rule['category']}] {rule['description']}\n"
+            lr_block += "</learned_rules>"
+            parts.append(lr_block)
+
         # Tenant vernacular (entity resolution)
         if self._tenant_vernacular:
             parts.append("\n## EXPLICIT TENANT ENTITY RESOLUTION — MANDATORY")
