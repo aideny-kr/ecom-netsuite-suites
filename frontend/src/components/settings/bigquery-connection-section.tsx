@@ -337,6 +337,7 @@ export function BigQueryConnectionSection() {
   const [projectId, setProjectId] = useState("");
   const [serviceAccountJson, setServiceAccountJson] = useState("");
   const [defaultDataset, setDefaultDataset] = useState("");
+  const [location, setLocation] = useState("");
   const [jsonError, setJsonError] = useState<string | null>(null);
 
   // Test result state
@@ -420,6 +421,7 @@ export function BigQueryConnectionSection() {
       const result = await testConnection.mutateAsync({
         project_id: projectId.trim(),
         service_account_json: parsed,
+        location: location.trim() || undefined,
       });
       setTestResult(result);
 
@@ -452,6 +454,7 @@ export function BigQueryConnectionSection() {
         project_id: projectId.trim(),
         service_account_json: parsed,
         default_dataset: defaultDataset.trim() || undefined,
+        location: location.trim() || undefined,
       });
       toast({ title: "BigQuery connected", description: "Connection saved successfully" });
 
@@ -459,6 +462,7 @@ export function BigQueryConnectionSection() {
       setProjectId("");
       setServiceAccountJson("");
       setDefaultDataset("");
+      setLocation("");
       setTestResult(null);
       setJsonError(null);
     } catch (err) {
@@ -535,6 +539,17 @@ export function BigQueryConnectionSection() {
                 </span>
                 <span className="text-[13px] text-foreground font-mono">
                   {bigqueryConnector.metadata_json.default_dataset as string}
+                </span>
+              </div>
+            ) : null}
+            {bigqueryConnector.metadata_json?.location ? (
+              <div className="flex items-center gap-2 rounded-lg border border-transparent px-3 py-2">
+                <Database className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                <span className="text-[12px] font-medium text-muted-foreground shrink-0">
+                  Location
+                </span>
+                <span className="text-[13px] text-foreground font-mono">
+                  {bigqueryConnector.metadata_json.location as string}
                 </span>
               </div>
             ) : null}
@@ -677,6 +692,24 @@ export function BigQueryConnectionSection() {
             )}
             <p className="text-[12px] text-muted-foreground">
               Test the connection first to discover available datasets
+            </p>
+          </div>
+
+          {/* Processing Location */}
+          <div className="space-y-1.5">
+            <Label htmlFor="bq-location" className="text-[13px]">
+              Processing Location{" "}
+              <span className="text-muted-foreground font-normal">(optional)</span>
+            </Label>
+            <Input
+              id="bq-location"
+              placeholder="e.g. us-central1, US, EU"
+              value={location}
+              onChange={(e) => setLocation(e.target.value)}
+              className="text-[13px] font-mono"
+            />
+            <p className="text-[12px] text-muted-foreground">
+              BigQuery processing location. Defaults to US if not specified.
             </p>
           </div>
 

@@ -14,11 +14,11 @@ from google.cloud import bigquery
 from google.oauth2 import service_account
 
 
-def _get_client(credentials: dict, project_id: str) -> bigquery.Client:
+def _get_client(credentials: dict, project_id: str, location: str | None = None) -> bigquery.Client:
     """Create a BigQuery client from service account JSON."""
     try:
         creds = service_account.Credentials.from_service_account_info(credentials)
-        return bigquery.Client(credentials=creds, project=project_id)
+        return bigquery.Client(credentials=creds, project=project_id, location=location or "US")
     except Exception as e:
         raise ValueError(f"Failed to initialize BigQuery client: {e}")
 
@@ -39,6 +39,7 @@ async def execute_query(
     max_rows: int = 1000,
     max_bytes_billed: int = 1_000_000_000,
     timeout_seconds: int = 30,
+    location: str | None = None,
 ) -> dict[str, Any]:
     """Execute a read-only BigQuery SQL query.
 
@@ -47,7 +48,7 @@ async def execute_query(
     _validate_read_only(query)
 
     def _sync_execute():
-        client = _get_client(credentials, project_id)
+        client = _get_client(credentials, project_id, location=location)
         job_config = bigquery.QueryJobConfig(maximum_bytes_billed=max_bytes_billed)
         job = client.query(query, job_config=job_config)
         result = job.result(timeout=timeout_seconds)
@@ -78,6 +79,7 @@ async def discover_schema(
     credentials: dict,
     project_id: str,
     dataset: str | None = None,
+    location: str | None = None,
 ) -> dict[str, Any]:
     """Discover BigQuery datasets and tables.
 
@@ -86,7 +88,7 @@ async def discover_schema(
     """
 
     def _sync_discover():
-        client = _get_client(credentials, project_id)
+        client = _get_client(credentials, project_id, location=location)
 
         if dataset:
             # Single dataset — include column details
@@ -119,11 +121,12 @@ async def discover_schema(
 async def validate_connection(
     credentials: dict,
     project_id: str,
+    location: str | None = None,
 ) -> dict[str, Any]:
     """Validate BigQuery connectivity by running SELECT 1."""
 
     def _sync_validate():
-        client = _get_client(credentials, project_id)
+        client = _get_client(credentials, project_id, location=location)
         job = client.query("SELECT 1")
         job.result()
 
@@ -138,6 +141,7 @@ async def estimate_query_cost(
     credentials: dict,
     project_id: str,
     query: str,
+    location: str | None = None,
 ) -> dict[str, Any]:
     """Dry-run a query to estimate cost.
 
@@ -146,7 +150,7 @@ async def estimate_query_cost(
     _validate_read_only(query)
 
     def _sync_estimate():
-        client = _get_client(credentials, project_id)
+        client = _get_client(credentials, project_id, location=location)
         job_config = bigquery.QueryJobConfig(dry_run=True, use_query_cache=False)
         job = client.query(query, job_config=job_config)
         return job.total_bytes_processed

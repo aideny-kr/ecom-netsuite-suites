@@ -76,6 +76,7 @@ export function useUpdateMcpClientId() {
 interface BigQueryTestPayload {
   project_id: string;
   service_account_json: Record<string, unknown>;
+  location?: string;
 }
 
 interface BigQueryTestResponse {
@@ -88,6 +89,7 @@ interface BigQueryCreatePayload {
   project_id: string;
   service_account_json: Record<string, unknown>;
   default_dataset?: string;
+  location?: string;
 }
 
 export function useTestBigQueryConnection() {

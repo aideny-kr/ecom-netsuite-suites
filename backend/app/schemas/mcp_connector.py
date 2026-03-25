@@ -41,6 +41,7 @@ class McpConnectorTestResponse(BaseModel):
 class BigQueryTestRequest(BaseModel):
     project_id: str = Field(min_length=1, max_length=255)
     service_account_json: dict
+    location: str | None = Field(None, max_length=50)
 
 
 class BigQueryTestResponse(BaseModel):
@@ -53,6 +54,7 @@ class BigQueryConnectorCreate(BaseModel):
     project_id: str = Field(min_length=1, max_length=255)
     service_account_json: dict
     default_dataset: str | None = None
+    location: str | None = Field(None, max_length=50)
 
 
 class BigQueryTableSelection(BaseModel):

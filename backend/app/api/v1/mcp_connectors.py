@@ -400,6 +400,7 @@ async def test_bigquery_connection(
     validation = await validate_connection(
         credentials=request.service_account_json,
         project_id=request.project_id,
+        location=request.location,
     )
 
     if not validation["valid"]:
@@ -409,6 +410,7 @@ async def test_bigquery_connection(
     schema = await discover_schema(
         credentials=request.service_account_json,
         project_id=request.project_id,
+        location=request.location,
     )
     dataset_names = [ds["dataset_id"] for ds in schema.get("datasets", [])]
 
@@ -430,6 +432,7 @@ async def create_bigquery_connector(
     validation = await validate_connection(
         credentials=request.service_account_json,
         project_id=request.project_id,
+        location=request.location,
     )
     if not validation["valid"]:
         raise HTTPException(status_code=400, detail=f"Connection failed: {validation['error']}")
@@ -450,6 +453,7 @@ async def create_bigquery_connector(
     schema = await discover_schema(
         credentials=request.service_account_json,
         project_id=request.project_id,
+        location=request.location,
     )
     dataset_names = [ds["dataset_id"] for ds in schema.get("datasets", [])]
 
@@ -459,6 +463,7 @@ async def create_bigquery_connector(
             "service_account_json": request.service_account_json,
             "project_id": request.project_id,
             "default_dataset": request.default_dataset,
+            "location": request.location,
         }
     )
 
@@ -477,6 +482,7 @@ async def create_bigquery_connector(
         metadata_json={
             "project_id": request.project_id,
             "default_dataset": request.default_dataset,
+            "location": request.location,
             "datasets_discovered": dataset_names,
         },
         # BigQuery tools are registered locally in TOOL_REGISTRY — don't put them
@@ -539,9 +545,10 @@ async def get_bigquery_schema(
     creds = decrypt_credentials(connector.encrypted_credentials)
     sa_json = creds.get("service_account_json", {})
     project_id = creds.get("project_id") or (connector.metadata_json or {}).get("project_id", "")
+    location = creds.get("location") or (connector.metadata_json or {}).get("location")
 
     try:
-        schema = await discover_schema(credentials=sa_json, project_id=project_id)
+        schema = await discover_schema(credentials=sa_json, project_id=project_id, location=location)
     except Exception as e:
         print(f"[BIGQUERY] Schema discovery failed for connector {connector_id}: {e}", flush=True)
         raise HTTPException(
@@ -608,8 +615,9 @@ async def update_bigquery_table_selection(
     creds = decrypt_credentials(connector.encrypted_credentials)
     sa_json = creds.get("service_account_json", {})
     project_id = creds.get("project_id") or metadata.get("project_id", "")
+    location = creds.get("location") or metadata.get("location")
 
-    schema = await discover_schema(credentials=sa_json, project_id=project_id)
+    schema = await discover_schema(credentials=sa_json, project_id=project_id, location=location)
     seeded = await seed_bigquery_schema(
         db=db,
         tenant_id=user.tenant_id,

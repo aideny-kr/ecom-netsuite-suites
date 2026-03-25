@@ -41,12 +41,13 @@ async def _get_bigquery_connector(context: dict) -> McpConnector | None:
     return result.scalars().first()
 
 
-def _extract_credentials(connector: McpConnector) -> tuple[dict, str]:
-    """Decrypt credentials and extract service account JSON + project_id."""
+def _extract_credentials(connector: McpConnector) -> tuple[dict, str, str | None]:
+    """Decrypt credentials and extract service account JSON, project_id, and location."""
     creds = decrypt_credentials(connector.encrypted_credentials)
     sa_json = creds.get("service_account_json", {})
     project_id = creds.get("project_id") or (connector.metadata_json or {}).get("project_id", "")
-    return sa_json, project_id
+    location = creds.get("location") or (connector.metadata_json or {}).get("location")
+    return sa_json, project_id, location
 
 
 async def bigquery_sql_execute(params: dict, context: dict, **kwargs: Any) -> dict:
@@ -58,7 +59,7 @@ async def bigquery_sql_execute(params: dict, context: dict, **kwargs: Any) -> di
     if not connector:
         return {"error": True, "message": "No active BigQuery connector found for this tenant."}
 
-    sa_json, project_id = _extract_credentials(connector)
+    sa_json, project_id, location = _extract_credentials(connector)
     query = params.get("query", "")
     max_rows = params.get("max_rows", 1000)
 
@@ -68,6 +69,7 @@ async def bigquery_sql_execute(params: dict, context: dict, **kwargs: Any) -> di
             project_id=project_id,
             query=query,
             max_rows=max_rows,
+            location=location,
         )
         return result
     except Exception as exc:
@@ -84,7 +86,7 @@ async def bigquery_schema_execute(params: dict, context: dict, **kwargs: Any) ->
     if not connector:
         return {"error": True, "message": "No active BigQuery connector found for this tenant."}
 
-    sa_json, project_id = _extract_credentials(connector)
+    sa_json, project_id, location = _extract_credentials(connector)
     dataset = params.get("dataset")
 
     try:
@@ -92,6 +94,7 @@ async def bigquery_schema_execute(params: dict, context: dict, **kwargs: Any) ->
             credentials=sa_json,
             project_id=project_id,
             dataset=dataset,
+            location=location,
         )
 
         # Filter to only show selected tables if configured
@@ -123,7 +126,7 @@ async def bigquery_cost_estimate_execute(params: dict, context: dict, **kwargs: 
     if not connector:
         return {"error": True, "message": "No active BigQuery connector found for this tenant."}
 
-    sa_json, project_id = _extract_credentials(connector)
+    sa_json, project_id, location = _extract_credentials(connector)
     query = params.get("query", "")
 
     try:
@@ -131,6 +134,7 @@ async def bigquery_cost_estimate_execute(params: dict, context: dict, **kwargs: 
             credentials=sa_json,
             project_id=project_id,
             query=query,
+            location=location,
         )
         return result
     except Exception as exc:
