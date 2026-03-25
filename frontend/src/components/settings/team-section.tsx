@@ -66,7 +66,7 @@ const MAX_SEATS = 20;
 
 const ASSIGNABLE_ROLES: { value: RoleName; label: string }[] = [
   { value: "admin", label: "Admin" },
-  { value: "finance", label: "User" },
+  { value: "finance", label: "Finance" },
   { value: "ops", label: "Operations Only" },
 ];
 
