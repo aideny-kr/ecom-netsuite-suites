@@ -10,6 +10,7 @@ import {
   Database,
   Bookmark,
   Check,
+  Download,
   FileSpreadsheet,
   Loader2,
   X,
@@ -28,6 +29,8 @@ export function SuiteQLToolCard({ step, userQuestion }: SuiteQLToolCardProps) {
   const [name, setName] = useState(userQuestion?.slice(0, 120) ?? "");
 
   const queryText = (step.params?.query as string) ?? (step.params?.sqlQuery as string) ?? "";
+  const savedSearchId = (step.params?.savedSearchId as string) ?? (step.params?.searchId as string) ?? "";
+  const effectiveQueryText = queryText || (savedSearchId ? `Saved Search: ${savedSearchId}` : "");
   const resultPayload = getTablePayload(step);
   const hasStructuredRows = !!resultPayload;
   const isError = !hasStructuredRows && !!step.result_summary;
@@ -40,11 +43,11 @@ export function SuiteQLToolCard({ step, userQuestion }: SuiteQLToolCardProps) {
   const handleMutationSuccess = () => setSaveMode("saved");
 
   const handleSave = () => {
-    if (!name.trim() || !queryText.trim()) return;
+    if (!name.trim() || !effectiveQueryText.trim()) return;
     mutation.mutate(
       {
         name: name.trim(),
-        query_text: queryText.trim(),
+        query_text: effectiveQueryText.trim(),
         result_data: resultPayload
           ? { columns: resultPayload.columns, rows: resultPayload.rows, row_count: resultPayload.row_count }
           : undefined,
@@ -84,7 +87,7 @@ export function SuiteQLToolCard({ step, userQuestion }: SuiteQLToolCardProps) {
         >
           <div className="space-y-2 border-t px-3 py-2">
             <pre className="max-h-[200px] overflow-x-auto whitespace-pre-wrap break-all rounded-md bg-muted/50 px-2.5 py-2 text-[11px] font-mono leading-relaxed text-foreground/90 scrollbar-thin">
-              {queryText}
+              {queryText || (savedSearchId ? `Saved Search ID: ${savedSearchId}` : "No query")}
             </pre>
             {step.result_summary && (
               <div className={cn("text-[11px]", isError && "text-destructive")}>
@@ -166,7 +169,7 @@ export function SuiteQLToolCard({ step, userQuestion }: SuiteQLToolCardProps) {
               ? `Showing ${resultPayload.rows.length} of ${resultPayload.row_count} rows`
               : `${resultPayload.row_count} row${resultPayload.row_count === 1 ? "" : "s"} returned`}
           </div>
-          {queryText && (
+          {effectiveQueryText && (
             <button
               onClick={() => setShowQuery((open) => !open)}
               className="inline-flex items-center gap-1 text-[11px] font-medium text-muted-foreground transition-colors hover:text-foreground"
@@ -182,13 +185,40 @@ export function SuiteQLToolCard({ step, userQuestion }: SuiteQLToolCardProps) {
           )}
         </div>
 
-        {showQuery && queryText && (
+        {showQuery && effectiveQueryText && (
           <pre className="max-h-[200px] overflow-x-auto whitespace-pre-wrap break-all rounded-md bg-muted/50 px-2.5 py-2 text-[11px] font-mono leading-relaxed text-foreground/90 scrollbar-thin">
             {queryText}
           </pre>
         )}
 
         <div className="flex items-center gap-3">
+          <button
+            onClick={() => {
+              if (!resultPayload) return;
+              const escape = (v: unknown) => {
+                const s = String(v ?? "");
+                return s.includes(",") || s.includes('"') || s.includes("\n")
+                  ? `"${s.replace(/"/g, '""')}"`
+                  : s;
+              };
+              const header = resultPayload.columns.map(escape).join(",");
+              const body = resultPayload.rows
+                .map((row: unknown[]) => row.map(escape).join(","))
+                .join("\n");
+              const blob = new Blob([`${header}\n${body}`], { type: "text/csv" });
+              const url = URL.createObjectURL(blob);
+              const a = document.createElement("a");
+              a.href = url;
+              a.download = `${(userQuestion?.slice(0, 80) ?? toolLabel).replace(/[^a-zA-Z0-9\-_ ]/g, "")}-${new Date().toISOString().slice(0, 10)}.csv`;
+              a.click();
+              URL.revokeObjectURL(url);
+            }}
+            disabled={!resultPayload}
+            className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground hover:text-primary transition-colors disabled:opacity-50"
+          >
+            <Download className="h-3 w-3" />
+            Export CSV
+          </button>
           <button
             onClick={() => {
               if (!resultPayload) return;
