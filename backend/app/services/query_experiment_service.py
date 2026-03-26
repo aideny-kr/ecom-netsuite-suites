@@ -65,10 +65,14 @@ BigQuery Standard SQL rules:
 _BIGQUERY_SCHEMA_HINT = """
 Dataset: `frameworkreporting`
 Table: `frameworkreporting.sales-orders_cleaned`
-Columns: order_id, orderdate, email, orderstatus, net_amount, item_name,
-  item_quantity, shipping_country, shipping_state, payment_method,
-  currency, subsidiary, department, classification
+Columns: ordernumber (STRING), orderdate (DATE), orderstatus (STRING),
+  item (STRING), itemdisplayname (STRING), itemclass (STRING),
+  platform (STRING), quantity (INTEGER), netamount (FLOAT),
+  salesprice (FLOAT), actualshipdate (DATE), shipcountry (STRING),
+  shipstate (STRING), email (STRING), ordermonth (STRING),
+  order_type (STRING), customer_type (STRING), customer_category (STRING)
 Note: Use backticks for table names with hyphens: `frameworkreporting.sales-orders_cleaned`
+Note: Column is "netamount" (no underscore), NOT "net_amount"
 """
 
 
