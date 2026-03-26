@@ -1479,9 +1479,7 @@ async def run_chat_turn(
                     # Three-tier routing: try specialized agent first, fall back to UnifiedAgent
                     # Financial reports bypass routing — must use UnifiedAgent with NetSuite tools
                     # Infer previous agent from conversation history for session pinning
-                    _previous_agent_id = (
-                        _infer_previous_agent(session.messages) if session.messages else None
-                    )
+                    _previous_agent_id = _infer_previous_agent(session.messages) if session.messages else None
                     _selected_agent_id = await _select_agent(
                         query=sanitized_input,
                         tenant_id=tenant_id,
