@@ -188,3 +188,81 @@ class TestPinningInSelectAgent:
             assert result == "pricing-agent"
         finally:
             _agent_registry.configs.clear()
+
+
+class TestInferPreviousAgent:
+    """Tests for _infer_previous_agent — extracts agent from tool_calls on messages."""
+
+    def _make_msg(self, role: str, tool_calls=None):
+        msg = MagicMock()
+        msg.role = role
+        msg.tool_calls = tool_calls
+        return msg
+
+    def test_infer_from_explicit_agent_field(self):
+        from app.services.chat.orchestrator import _infer_previous_agent
+
+        messages = [
+            self._make_msg("user"),
+            self._make_msg("assistant", tool_calls=[{"tool": "bigquery_sql", "agent": "bi-agent"}]),
+        ]
+        assert _infer_previous_agent(messages) == "bi-agent"
+
+    def test_infer_from_tool_name_fallback(self):
+        from app.services.chat.orchestrator import _infer_previous_agent
+
+        messages = [
+            self._make_msg("user"),
+            self._make_msg("assistant", tool_calls=[{"tool": "bigquery_schema"}]),
+        ]
+        assert _infer_previous_agent(messages) == "bi-agent"
+
+    def test_no_tool_calls_returns_none(self):
+        from app.services.chat.orchestrator import _infer_previous_agent
+
+        messages = [
+            self._make_msg("user"),
+            self._make_msg("assistant", tool_calls=None),
+        ]
+        assert _infer_previous_agent(messages) is None
+
+    def test_empty_messages_returns_none(self):
+        from app.services.chat.orchestrator import _infer_previous_agent
+
+        assert _infer_previous_agent([]) is None
+
+    def test_unified_agent_ignored(self):
+        from app.services.chat.orchestrator import _infer_previous_agent
+
+        messages = [
+            self._make_msg("assistant", tool_calls=[{"tool": "netsuite_suiteql", "agent": "unified"}]),
+        ]
+        assert _infer_previous_agent(messages) is None
+
+    def test_only_checks_most_recent_assistant(self):
+        from app.services.chat.orchestrator import _infer_previous_agent
+
+        messages = [
+            self._make_msg("assistant", tool_calls=[{"tool": "bigquery_sql", "agent": "bi-agent"}]),
+            self._make_msg("user"),
+            self._make_msg("assistant", tool_calls=[{"tool": "netsuite_suiteql", "agent": "unified"}]),
+        ]
+        # Should check the last assistant (unified), not the first (bi-agent)
+        assert _infer_previous_agent(messages) is None
+
+    def test_skips_user_messages_to_find_assistant(self):
+        from app.services.chat.orchestrator import _infer_previous_agent
+
+        messages = [
+            self._make_msg("assistant", tool_calls=[{"tool": "bigquery_sql", "agent": "bi-agent"}]),
+            self._make_msg("user"),
+        ]
+        assert _infer_previous_agent(messages) == "bi-agent"
+
+    def test_non_dict_tool_calls_handled(self):
+        from app.services.chat.orchestrator import _infer_previous_agent
+
+        messages = [
+            self._make_msg("assistant", tool_calls=["not-a-dict"]),
+        ]
+        assert _infer_previous_agent(messages) is None

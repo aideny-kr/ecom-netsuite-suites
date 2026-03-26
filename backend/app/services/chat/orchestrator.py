@@ -223,6 +223,43 @@ except Exception:
     pass
 
 
+# Tool name → specialized agent mapping for session pinning
+_TOOL_TO_AGENT: dict[str, str] = {
+    "bigquery_sql": "bi-agent",
+    "bigquery_schema": "bi-agent",
+    "bigquery_cost_estimate": "bi-agent",
+}
+
+
+def _infer_previous_agent(messages: list) -> str | None:
+    """Infer last-used agent from the most recent assistant message's tool_calls.
+
+    Checks for an explicit ``agent`` field first (stored by build_tool_call_log_entry),
+    then falls back to tool-name heuristic via ``_TOOL_TO_AGENT``.
+    Only inspects the most recent assistant message — older history is irrelevant.
+    """
+    for msg in reversed(messages):
+        if msg.role != "assistant":
+            continue
+        if not msg.tool_calls:
+            break
+        tc_list = msg.tool_calls if isinstance(msg.tool_calls, list) else []
+        for tc in tc_list:
+            if not isinstance(tc, dict):
+                continue
+            # Prefer explicit agent field (stored since v1.1)
+            stored_agent = tc.get("agent")
+            if stored_agent and stored_agent != "unified":
+                return stored_agent
+            # Fallback: infer from tool name
+            tool_name = tc.get("tool", "")
+            agent = _TOOL_TO_AGENT.get(tool_name)
+            if agent:
+                return agent
+        break  # Only check the most recent assistant message
+    return None
+
+
 async def _select_agent(
     query: str,
     tenant_id: uuid.UUID,
@@ -1441,12 +1478,17 @@ async def run_chat_turn(
 
                     # Three-tier routing: try specialized agent first, fall back to UnifiedAgent
                     # Financial reports bypass routing — must use UnifiedAgent with NetSuite tools
+                    # Infer previous agent from conversation history for session pinning
+                    _previous_agent_id = (
+                        _infer_previous_agent(session.messages) if session.messages else None
+                    )
                     _selected_agent_id = await _select_agent(
                         query=sanitized_input,
                         tenant_id=tenant_id,
                         db=db,
                         adapter=specialist_adapter,
                         is_financial=is_financial,
+                        previous_agent_id=_previous_agent_id,
                     )
 
                     if _selected_agent_id:
