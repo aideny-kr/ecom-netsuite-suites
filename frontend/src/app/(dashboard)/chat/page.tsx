@@ -143,7 +143,11 @@ export default function ChatPage() {
               rafRef.current = requestAnimationFrame(flushBuffer);
             }
           },
-          onToolStatus: (status) => setStreamingStatus(status),
+          onToolStatus: (status) => {
+            // Add newline before tool execution so next text block starts on new line
+            setStreamingContent((prev) => prev && !prev.endsWith("\n") ? prev + "\n\n" : prev);
+            setStreamingStatus(status);
+          },
           onFinancialReport: (data) => setFinancialReport(data),
           onDataTable: (data) => setDataTable(data),
           onChart: (data) => setCharts((prev) => [...prev, data]),
