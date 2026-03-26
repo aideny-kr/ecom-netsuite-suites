@@ -17,7 +17,7 @@ SELECT
   ROUND(SAFE_DIVIDE(SUM(net_amount), COUNT(*)), 2) AS avg_order_value
 FROM `frameworkreporting.sales-orders_cleaned`
 WHERE order_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 12 MONTH)
-  AND order_status NOT IN ('Cancelled', 'Voided')
+  AND orderstatus NOT IN ('Cancelled', 'Voided', 'Closed')
 GROUP BY 1
 ORDER BY 1
 ```
@@ -32,7 +32,7 @@ WITH monthly AS (
     FORMAT_DATE('%b', order_date) AS month_name,
     ROUND(SUM(net_amount), 2) AS revenue
   FROM `frameworkreporting.sales-orders_cleaned`
-  WHERE order_status NOT IN ('Cancelled', 'Voided')
+  WHERE orderstatus NOT IN ('Cancelled', 'Voided', 'Closed')
   GROUP BY 1, 2, 3
 )
 SELECT
@@ -59,7 +59,7 @@ WITH first_purchase AS (
     customer_id,
     DATE_TRUNC(MIN(order_date), MONTH) AS cohort_month
   FROM `frameworkreporting.sales-orders_cleaned`
-  WHERE order_status NOT IN ('Cancelled', 'Voided')
+  WHERE orderstatus NOT IN ('Cancelled', 'Voided', 'Closed')
   GROUP BY 1
 ),
 monthly_activity AS (
@@ -70,7 +70,7 @@ monthly_activity AS (
     DATE_DIFF(DATE_TRUNC(s.order_date, MONTH), fp.cohort_month, MONTH) AS months_since_first
   FROM `frameworkreporting.sales-orders_cleaned` s
   JOIN first_purchase fp ON s.customer_id = fp.customer_id
-  WHERE s.order_status NOT IN ('Cancelled', 'Voided')
+  WHERE s.orderstatus NOT IN ('Cancelled', 'Voided', 'Closed')
 )
 SELECT
   cohort_month,
@@ -99,7 +99,7 @@ SELECT
   DATE_DIFF(MAX(order_date), MIN(order_date), DAY) AS customer_tenure_days,
   ROUND(SAFE_DIVIDE(SUM(net_amount), COUNT(*)), 2) AS avg_order_value
 FROM `frameworkreporting.sales-orders_cleaned`
-WHERE order_status NOT IN ('Cancelled', 'Voided')
+WHERE orderstatus NOT IN ('Cancelled', 'Voided', 'Closed')
 GROUP BY 1
 ORDER BY lifetime_revenue DESC
 LIMIT 100
@@ -114,7 +114,7 @@ SELECT
   ROUND(SUM(net_amount), 2) AS total_revenue,
   ROUND(SAFE_DIVIDE(SUM(net_amount), COUNT(DISTINCT customer_id)), 2) AS arpu
 FROM `frameworkreporting.sales-orders_cleaned`
-WHERE order_status NOT IN ('Cancelled', 'Voided')
+WHERE orderstatus NOT IN ('Cancelled', 'Voided', 'Closed')
   AND order_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 12 MONTH)
 GROUP BY 1
 ORDER BY 1
@@ -130,7 +130,7 @@ WITH monthly AS (
     DATE_TRUNC(order_date, MONTH) AS month,
     ROUND(SUM(net_amount), 2) AS revenue
   FROM `frameworkreporting.sales-orders_cleaned`
-  WHERE order_status NOT IN ('Cancelled', 'Voided')
+  WHERE orderstatus NOT IN ('Cancelled', 'Voided', 'Closed')
   GROUP BY 1
 )
 SELECT
@@ -192,7 +192,7 @@ SELECT
   ROUND(SUM(net_amount), 2) AS bucket_revenue,
   ROUND(SAFE_DIVIDE(COUNT(*), SUM(COUNT(*)) OVER ()) * 100, 1) AS pct_of_orders
 FROM `frameworkreporting.sales-orders_cleaned`
-WHERE order_status NOT IN ('Cancelled', 'Voided')
+WHERE orderstatus NOT IN ('Cancelled', 'Voided', 'Closed')
   AND order_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 12 MONTH)
 GROUP BY 1
 ORDER BY MIN(net_amount)
@@ -208,7 +208,7 @@ SELECT
   APPROX_QUANTILES(net_amount, 100)[OFFSET(90)] AS p90,
   APPROX_QUANTILES(net_amount, 100)[OFFSET(99)] AS p99
 FROM `frameworkreporting.sales-orders_cleaned`
-WHERE order_status NOT IN ('Cancelled', 'Voided')
+WHERE orderstatus NOT IN ('Cancelled', 'Voided', 'Closed')
   AND order_date >= DATE_SUB(CURRENT_DATE(), INTERVAL 12 MONTH)
 ```
 
@@ -223,7 +223,7 @@ SELECT
   SUM(IF(DATE_TRUNC(order_date, MONTH) = '2026-02-01', net_amount, 0)) AS feb_2026,
   SUM(IF(DATE_TRUNC(order_date, MONTH) = '2026-03-01', net_amount, 0)) AS mar_2026
 FROM `frameworkreporting.sales-orders_cleaned`
-WHERE order_status NOT IN ('Cancelled', 'Voided')
+WHERE orderstatus NOT IN ('Cancelled', 'Voided', 'Closed')
   AND order_date >= '2026-01-01'
 GROUP BY 1
 ORDER BY 1
@@ -246,7 +246,7 @@ For dynamic pivots with unknown column values, use `netsuite_pivot_query_result`
 
 ## Common Mistakes in BigQuery BI Queries
 
-1. **Forgetting to exclude cancelled orders** — always filter `order_status NOT IN ('Cancelled', 'Voided')`
+1. **Forgetting to exclude cancelled orders** — always filter `orderstatus NOT IN ('Cancelled', 'Voided', 'Closed')`
 2. **Using COUNT(*) instead of COUNT(DISTINCT)** for customer counts — duplicates inflate metrics
 3. **Not handling NULL in divisions** — always use `SAFE_DIVIDE()`, never bare `/`
 4. **Scanning full table** — always add date filters on partitioned columns

@@ -28,6 +28,7 @@ These rules prevent production failures:
 - **String matching**: Use `LIKE` or `REGEXP_CONTAINS()` for pattern matching.
 - **Arrays**: Use `UNNEST()` to flatten array columns before filtering.
 - **Approximate counts**: Use `APPROX_COUNT_DISTINCT()` for large-cardinality counts.
+- **Order status filter**: Always exclude non-active orders: `WHERE orderstatus NOT IN ('Cancelled', 'Voided', 'Closed')`. This applies to all revenue, order count, and customer analysis queries on `sales-orders_cleaned`.
 
 ## Chart Selection Heuristic
 
