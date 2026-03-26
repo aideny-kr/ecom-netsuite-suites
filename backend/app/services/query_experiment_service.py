@@ -47,10 +47,48 @@ _SUITEQL_DIALECT_RULES = """
 SuiteQL dialect rules:
 - Use FETCH FIRST N ROWS ONLY (not LIMIT)
 - Use TRUNC(SYSDATE) instead of CURRENT_DATE
-- Use BUILTIN.DF() for display values
+- Use BUILTIN.DF() for display values of list/record fields
 - Status codes are single letters like 'B', 'H' (not compound like 'SalesOrd:B')
 - JOIN syntax is standard SQL
 - String concatenation uses ||
+- Primary key column is "id" (NOT "internalid")
+- For latest records, use ORDER BY t.id DESC (more reliable than dates)
+"""
+
+_SUITEQL_SCHEMA_HINT = """
+Core tables and key columns:
+
+transaction (alias: t)
+  id, tranid, trandate, type, status, entity, subsidiary, department,
+  class, location, memo, foreigntotal, exchangerate, createddate
+  Types: SalesOrd, CustInvc, VendBill, PurchOrd, RtnAuth, CashSale, CustPymt, Journal
+  Status: single-letter codes (B=Pending Billing, H=Pending Fulfillment, etc.)
+
+transactionline (alias: tl) — JOIN ON tl.transaction = t.id
+  id, transaction, item, quantity, netamount, rate, amount,
+  department, class, location, subsidiary
+
+customer (alias: c)
+  id, entityid, companyname, email, phone, subsidiary, category,
+  datecreated, lastmodifieddate, isinactive
+
+item (alias: i)
+  id, itemid, displayname, type, class, department, baseprice,
+  averagecost, quantityavailable, quantityonhand, reorderpoint, isinactive
+
+account (alias: a)
+  id, acctnumber, acctname, accttype, balance
+
+transactionaccountingline (alias: tal) — for GL/financial queries
+  transaction, account, amount, debit, credit, subsidiary, posting
+
+Common JOINs:
+  transaction t JOIN transactionline tl ON tl.transaction = t.id
+  transactionline tl JOIN item i ON tl.item = i.id
+  transaction t JOIN customer c ON t.entity = c.id
+
+Note: Use BUILTIN.DF(t.entity) to get customer name, BUILTIN.DF(tl.item) for item name.
+Note: tl.netamount is NEGATIVE for revenue lines — use ABS(tl.netamount) or * -1.
 """
 
 _BIGQUERY_DIALECT_RULES = """
@@ -385,8 +423,11 @@ async def run_single_experiment(
 
     # Step 1: Generate SQL
     effective_schema_hint = schema_hint
-    if not effective_schema_hint and case.dialect == "bigquery":
-        effective_schema_hint = _BIGQUERY_SCHEMA_HINT
+    if not effective_schema_hint:
+        if case.dialect == "bigquery":
+            effective_schema_hint = _BIGQUERY_SCHEMA_HINT
+        elif case.dialect == "suiteql":
+            effective_schema_hint = _SUITEQL_SCHEMA_HINT
     generated_sql = await _generate_sql(
         question=case.question,
         dialect=case.dialect,
