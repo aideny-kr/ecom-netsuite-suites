@@ -5,6 +5,8 @@ source_type: expert_rules
 
 # BigQuery BI Analytics Patterns
 
+> **IMPORTANT**: Column names in the examples below (e.g. `order_date`, `net_amount`, `customer_id`) are **illustrative placeholders**. Actual column names vary per tenant. ALWAYS call `bigquery_schema` first and use the real column names it returns. Never copy column names directly from these examples.
+
 ## Revenue Analysis
 
 ### Monthly Revenue Trend

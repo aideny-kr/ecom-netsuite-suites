@@ -5,6 +5,8 @@ source_type: expert_rules
 
 # BigQuery Data Transformation Patterns
 
+> **IMPORTANT**: Column names in the examples below are **illustrative placeholders**. Actual column names vary per tenant. ALWAYS call `bigquery_schema` first and use the real column names it returns.
+
 ## Data Cleaning
 
 ### Deduplication

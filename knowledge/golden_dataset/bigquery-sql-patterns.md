@@ -5,6 +5,8 @@ source_type: expert_rules
 
 # BigQuery Standard SQL Patterns
 
+> **IMPORTANT**: Column names in the examples below are **illustrative placeholders**. Actual column names vary per tenant. ALWAYS call `bigquery_schema` first and use the real column names it returns.
+
 ## Core Syntax Differences from SuiteQL
 
 BigQuery uses Google Standard SQL — NOT Oracle-based SuiteQL. Critical differences:
