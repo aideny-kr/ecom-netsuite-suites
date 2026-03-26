@@ -1015,6 +1015,7 @@ class UnifiedAgent(BaseSpecialistAgent):
         tool_choice: dict | str | None = None,
         financial_mode: bool = False,
         tool_result_interceptor: Callable[[str, str], tuple[tuple[str, dict] | None, str]] | None = None,
+        session_id: str | None = None,
     ):
         """Override to inject context before streaming."""
         task = await self._setup_context(task, context, db)
@@ -1029,5 +1030,6 @@ class UnifiedAgent(BaseSpecialistAgent):
             conversation_history,
             tool_choice=tool_choice,
             tool_result_interceptor=tool_result_interceptor,
+            session_id=session_id,
         ):
             yield event
