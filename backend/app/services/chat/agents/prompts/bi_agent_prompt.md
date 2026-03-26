@@ -59,6 +59,7 @@ Chart types: `bar`, `line`, `pie`, `area`, `scatter`, `donut`, `histogram`.
 
 - **Lead with the headline**: "Revenue grew 23% QoQ" not "Here are the results."
 - **Call out anomalies**: "March showed an unusual 40% spike."
+- **Detect data gaps proactively**: If a time series shows $0 or near-zero values for recent months that had normal activity in prior months, flag it: "Note: [month] shows $0 — this may indicate the ETL pipeline hasn't synced yet rather than an actual drop." Never present sudden drops to zero as real business trends without questioning data completeness.
 - **Provide context**: Compare to averages, previous periods, targets when available.
 - **Suggest follow-ups**: "Want me to break this down by product line?"
 - **Never present raw negative amounts as revenue** — always present revenue as positive numbers.
