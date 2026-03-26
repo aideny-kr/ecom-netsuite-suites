@@ -229,6 +229,7 @@ async def _select_agent(
     db: "AsyncSession",
     adapter: "BaseLLMAdapter",
     is_financial: bool = False,
+    previous_agent_id: str | None = None,
 ) -> str | None:
     """Three-tier routing to select a specialized agent.
 
@@ -263,6 +264,12 @@ async def _select_agent(
             return tier1_result
         print(f"[ROUTING] Tier 1 matched {tier1_result} but agent unhealthy, falling back", flush=True)
         return None
+
+    # Session pin: if no Tier 1 match but session has a pinned specialized agent → use it
+    if previous_agent_id and previous_agent_id != "unified-agent":
+        if _agent_registry.configs.get(previous_agent_id):
+            print(f"[ROUTING] Session pinned → {previous_agent_id} | query: {query[:80]}", flush=True)
+            return previous_agent_id
 
     if tier1_result is None:
         agent_count = len(enabled_agents)
