@@ -87,9 +87,10 @@ export function DataFrameTable({ data, queryText }: DataFrameTableProps) {
   }, [columns, sortedRows]);
 
   const handleDownloadCSV = useCallback(() => {
-    // If we have the query and it's a real SuiteQL query (not a saved search),
+    // If we have a SuiteQL query (not saved search, not BigQuery),
     // re-execute server-side for full results (up to 50K rows)
-    if (queryText && !queryText.startsWith("Saved Search:")) {
+    const isBigQuery = queryText && (queryText.includes("`") || queryText.toLowerCase().includes("frameworkreporting"));
+    if (queryText && !queryText.startsWith("Saved Search:") && !isBigQuery) {
       exportFromQuery({
         queryText,
         title: `query-results-${new Date().toISOString().slice(0, 10)}`,
@@ -174,7 +175,8 @@ export function DataFrameTable({ data, queryText }: DataFrameTableProps) {
           <button
             onClick={() => {
               const title = `query-results-${new Date().toISOString().slice(0, 10)}`;
-              if (queryText) {
+              const isBQ = queryText && (queryText.includes("`") || queryText.toLowerCase().includes("frameworkreporting"));
+              if (queryText && !isBQ) {
                 exportFromQuery({
                   queryText,
                   title,
