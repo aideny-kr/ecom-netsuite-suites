@@ -275,7 +275,7 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 
 - **Product**: AI-den v1.1 deployed to staging 2026-03-23. Agent framework + BigQuery BI agent + chart rendering all live.
 - **Roadmap**: v1.1 shipped (agent framework + BigQuery BI) → v1.2 Early May (NetSuite read-write, ~2wk) → v1.3 Late May (cross-system intelligence, ~3wk) → v1.4 Mid-Jun (ETL pipelines, ~3wk).
-- **Latest migration**: 053_mcp_financial_flag
+- **Latest migration**: 055_eval_cases
 - **CI status**: Lint + format passing. Backend tests passing (pre-existing SSL test excluded).
 - **Staging**: `api-staging.suitestudio.ai` (backend). Deploy path: `/opt/ecom-netsuite` with `docker-compose.prod.yml`.
 - **Deploy**: Stop beat/worker first, pull, start sequentially. Never `--force-recreate` all at once — kills workers mid-refresh, consuming single-use refresh tokens.
@@ -342,3 +342,11 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 - **Pivot column natural sort** — pivot columns now sorted numerically (M+1, M+2, ..., M+10) instead of lexicographically (M+1, M+10, M+11, M+2). Uses `_natural_sort_key()` with regex digit splitting.
 - **Excel percent formatting** — removed broken `abs(num) > 1` heuristic that treated values ≤1 as decimals (0.49% → 49%). Now always divides by 100 before Excel's `%` format.
 - **Export title leak** — `suiteql-tool-card.tsx` was using raw `userQuestion` chat message as Excel title and filename. Changed to date-based `query-results-YYYY-MM-DD`.
+
+## Resolved (2026-03-26)
+
+- **BigQuery experiments fixed** — wrong credentials key (`service_account` → `service_account_json`), missing `location` param, Haiku preamble in SQL output. Added `_extract_sql()` to parse SQL from markdown/preamble, `_BIGQUERY_SCHEMA_HINT` with actual column names. BigQuery went from 0/15 to 11/15 KEEP.
+- **SuiteQL schema hint** — added `_SUITEQL_SCHEMA_HINT` with common NetSuite tables (transaction, transactionline, customer, item, account, transactionaccountingline), key columns, JOIN patterns, and dialect quirks. SuiteQL went from 1/15 to 7/15 KEEP.
+- **Confidence scoring fix** — financial reports now get floor of 4.0 (was ~2.4). Added `deterministic_success` flag to `CompositeScorer`. Added `netsuite_financial_report` and `bigquery_sql` to `data_tools` set.
+- **Organic eval case mining** — new `eval_cases` table (migration 055), `eval_case_miner.py` mines chat_messages for confidence >= 4 queries, extracts keywords via Haiku ($0.03/case), deduplicates at 80% word overlap. Nightly task: mine → load seed+organic → run experiments. Organic cases prioritized.
+- **Nightly improvement results** — 18/30 KEEP (60%) up from 3/30 (10%) at start of session. $5.25/run, 68 seconds. Runs at 5 AM UTC.
