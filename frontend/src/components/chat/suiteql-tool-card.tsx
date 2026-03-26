@@ -209,7 +209,7 @@ export function SuiteQLToolCard({ step, userQuestion }: SuiteQLToolCardProps) {
               const url = URL.createObjectURL(blob);
               const a = document.createElement("a");
               a.href = url;
-              a.download = `${(userQuestion?.slice(0, 80) ?? toolLabel).replace(/[^a-zA-Z0-9\-_ ]/g, "")}-${new Date().toISOString().slice(0, 10)}.csv`;
+              a.download = `query-results-${new Date().toISOString().slice(0, 10)}.csv`;
               a.click();
               URL.revokeObjectURL(url);
             }}
@@ -225,13 +225,13 @@ export function SuiteQLToolCard({ step, userQuestion }: SuiteQLToolCardProps) {
               if (resultPayload.truncated && queryText) {
                 exportFromQuery({
                   queryText,
-                  title: userQuestion?.slice(0, 80) ?? toolLabel,
+                  title: `query-results-${new Date().toISOString().slice(0, 10)}`,
                 });
               } else {
                 exportToExcel({
                   columns: resultPayload.columns,
                   rows: resultPayload.rows,
-                  title: userQuestion?.slice(0, 80) ?? toolLabel,
+                  title: `query-results-${new Date().toISOString().slice(0, 10)}`,
                 });
               }
             }}

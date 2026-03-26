@@ -6,8 +6,14 @@ No LLM judgment, no hallucinated values, no dropped variants.
 
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from typing import Any
+
+
+def _natural_sort_key(s: str):
+    """Sort key that handles embedded numbers naturally: M+1, M+2, ..., M+10."""
+    return [int(part) if part.isdigit() else part.lower() for part in re.split(r"(\d+)", s)]
 
 
 def pivot_rows(
@@ -60,7 +66,7 @@ def pivot_rows(
     for row in rows:
         val = str(row[col_idx]) if row[col_idx] is not None else ""
         seen_cols.add(val)
-    pivot_cols = sorted(seen_cols)
+    pivot_cols = sorted(seen_cols, key=_natural_sort_key)
 
     # Build pivot: {row_key: {col_value: [values]}}
     pivot: dict[str, dict[str, list[float]]] = defaultdict(lambda: defaultdict(list))

@@ -333,11 +333,9 @@ def _write_typed_cell(cell, value: Any, col_type: str) -> None:
     elif col_type == "percent":
         num = _to_number(value)
         if num is not None:
-            # If value > 1, assume it's already a percentage (e.g. 45.2 = 45.2%)
-            if abs(num) > 1:
-                cell.value = num / 100
-            else:
-                cell.value = num
+            # Values from queries are human-readable percentages (e.g. 2.73 = 2.73%).
+            # Excel "0.0%" format multiplies by 100, so always divide by 100 first.
+            cell.value = num / 100
             cell.number_format = "0.0%"
         else:
             cell.value = str(value)
