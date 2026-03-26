@@ -62,6 +62,40 @@ BigQuery Standard SQL rules:
 - Use SAFE_DIVIDE() to avoid division by zero
 """
 
+_BIGQUERY_SCHEMA_HINT = """
+Dataset: `frameworkreporting`
+Table: `frameworkreporting.sales-orders_cleaned`
+Columns: order_id, orderdate, email, orderstatus, net_amount, item_name,
+  item_quantity, shipping_country, shipping_state, payment_method,
+  currency, subsidiary, department, classification
+Note: Use backticks for table names with hyphens: `frameworkreporting.sales-orders_cleaned`
+"""
+
+
+def _extract_sql(text: str) -> str | None:
+    """Extract SQL from LLM response, handling markdown fences and preamble."""
+    if not text or not text.strip():
+        return None
+
+    # Try extracting from markdown code block first
+    import re
+
+    match = re.search(r"```(?:sql)?\s*\n(.*?)```", text, re.DOTALL)
+    if match:
+        return match.group(1).strip() or None
+
+    # If response starts with SELECT or WITH, it's raw SQL
+    stripped = text.strip()
+    if re.match(r"^(SELECT|WITH)\b", stripped, re.IGNORECASE):
+        return stripped
+
+    # Try finding SELECT/WITH statement after preamble text
+    match = re.search(r"((?:WITH|SELECT)\b.*)", stripped, re.DOTALL | re.IGNORECASE)
+    if match:
+        return match.group(1).strip() or None
+
+    return None
+
 
 # ---------------------------------------------------------------------------
 # Cost estimation
@@ -109,18 +143,17 @@ async def _generate_sql(
 
     system = (
         f"You are a SQL expert. Generate a single read-only {dialect.upper()} query "
-        f"that answers the user's question. Return ONLY the SQL — no explanation, "
-        f"no markdown fences.\n\n{dialect_rules}"
+        f"that answers the user's question.\n\n"
+        f"CRITICAL: Output ONLY the raw SQL query. No explanation, no markdown fences, "
+        f"no preamble, no comments. Just the SELECT statement.\n\n{dialect_rules}"
     )
     if schema_hint:
         system += f"\n\nAvailable schema:\n{schema_hint}"
 
     try:
         sql = await _call_haiku(system, question)
-        # Strip markdown fences if the model wraps them anyway
-        if sql.startswith("```"):
-            lines = sql.split("\n")
-            sql = "\n".join(line for line in lines if not line.startswith("```")).strip()
+        # Extract SQL from response — model may wrap in fences or add preamble
+        sql = _extract_sql(sql)
         return sql or None
     except Exception:
         logger.exception("SQL generation failed for question=%s dialect=%s", question, dialect)
@@ -347,10 +380,13 @@ async def run_single_experiment(
     }
 
     # Step 1: Generate SQL
+    effective_schema_hint = schema_hint
+    if not effective_schema_hint and case.dialect == "bigquery":
+        effective_schema_hint = _BIGQUERY_SCHEMA_HINT
     generated_sql = await _generate_sql(
         question=case.question,
         dialect=case.dialect,
-        schema_hint=schema_hint,
+        schema_hint=effective_schema_hint,
     )
     if not generated_sql:
         result["error_message"] = "SQL generation failed"
