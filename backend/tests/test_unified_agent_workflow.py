@@ -175,8 +175,8 @@ class TestPromptSyncWithSuiteQLAgent:
             correlation_id="test",
         ).system_prompt
 
-        assert "MANDATORY EXECUTION RULE" in unified
-        assert "MANDATORY EXECUTION RULE" in suiteql
+        assert "DATA FRESHNESS RULES" in unified
+        assert "DATA FRESHNESS RULES" in suiteql
 
 
 class TestInvestigationMode:
