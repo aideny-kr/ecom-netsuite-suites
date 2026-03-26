@@ -431,7 +431,12 @@ def _sanitize_assistant_text(text: str) -> str:
 
 
 _FINANCIAL_TOOLS = frozenset({"netsuite.financial_report", "netsuite_financial_report"})
-_SUITEQL_TOOLS = frozenset({"netsuite.suiteql", "netsuite_suiteql"})
+_DATA_TABLE_TOOLS = frozenset({
+    "netsuite.suiteql", "netsuite_suiteql",
+    "bigquery.sql", "bigquery_sql",
+    "pivot.query_result", "pivot_query_result",
+})
+_BIGQUERY_TOOLS = frozenset({"bigquery.sql", "bigquery_sql"})
 
 
 def _is_financial_tool(tool_name: str) -> bool:
@@ -443,9 +448,9 @@ def _is_financial_tool(tool_name: str) -> bool:
     return False
 
 
-def _is_suiteql_tool(tool_name: str) -> bool:
-    """Match local SuiteQL tools and external MCP SuiteQL tools."""
-    if tool_name in _SUITEQL_TOOLS:
+def _is_data_table_tool(tool_name: str) -> bool:
+    """Match tools that return {columns, rows} data tables (SuiteQL, BigQuery, pivot)."""
+    if tool_name in _DATA_TABLE_TOOLS:
         return True
     if tool_name.startswith("ext__") and "suiteql" in tool_name.lower():
         return True
@@ -513,7 +518,7 @@ def _intercept_tool_result(
         return "financial_report", sse_event_data, condensed
 
     # --- SuiteQL query path ---
-    if _is_suiteql_tool(tool_name):
+    if _is_data_table_tool(tool_name):
         try:
             parsed = json.loads(result_str)
         except (json.JSONDecodeError, TypeError):
@@ -654,7 +659,7 @@ def _intercept_tool_result(
     return None, None, result_str
 
 
-def _make_tool_interceptor(context_need: str = ContextNeed.DATA):
+def _make_tool_interceptor(context_need: str = ContextNeed.DATA, cache_callback=None):
     """Create a tool interceptor closure that captures context_need."""
 
     def interceptor(tool_name: str, result_str: str) -> tuple[tuple[str, dict] | None, str]:
@@ -662,6 +667,8 @@ def _make_tool_interceptor(context_need: str = ContextNeed.DATA):
             tool_name, result_str, context_need=context_need
         )
         if event_type is not None and event_data is not None:
+            if cache_callback:
+                cache_callback(tool_name, event_type, event_data)
             return (event_type, event_data), new_result_str
         return None, new_result_str
 
@@ -1510,11 +1517,34 @@ async def run_chat_turn(
                             context_need=context_need,
                         )
 
-                # Augment task for financial report queries
+                # Classify follow-up intent (TRANSFORM vs NEW_DATA)
+                from app.services.chat.follow_up_classifier import FollowUpIntent, classify_follow_up
+                from app.services.chat.result_cache import CachedResult, cache_result, get_latest_result
+
+                _follow_up_intent = FollowUpIntent.NEW_DATA
+                _cached_result = None
+                if not _is_chitchat and not is_financial and session.messages:
+                    _cached_result = await get_latest_result(str(session.id))
+                    _follow_up_intent = classify_follow_up(
+                        message=sanitized_input,
+                        has_previous_result=_cached_result is not None,
+                    )
+                    if _follow_up_intent == FollowUpIntent.TRANSFORM:
+                        print(f"[ORCHESTRATOR] TRANSFORM intent — using cached result", flush=True)
+
+                # Augment task for financial report queries or transform requests
                 unified_task = sanitized_input
                 if not _is_chitchat and is_financial:
                     unified_task = _build_financial_mode_task(sanitized_input)
                     print("[UNIFIED] Financial report mode activated (SuiteQL + CONSOLIDATE)", flush=True)
+                elif _follow_up_intent == FollowUpIntent.TRANSFORM and _cached_result:
+                    unified_task = (
+                        f"{sanitized_input}\n\n"
+                        f"[CACHED DATA AVAILABLE] The previous result ({_cached_result.row_count} rows, "
+                        f"type: {_cached_result.result_type}, columns: {_cached_result.columns[:10]}) "
+                        f"is available via the reference_previous_result tool. "
+                        f"Use it instead of re-querying NetSuite or BigQuery."
+                    )
 
                 streamed_text_parts: list[str] = []
                 agent_result = None
@@ -1539,6 +1569,26 @@ async def run_chat_turn(
                 _in_chart_block = False
                 _chart_buffer = ""
 
+                # Cache callback: collect intercepted results for Redis cache
+                _pending_caches: list[CachedResult] = []
+
+                def _on_tool_intercepted(tool_name: str, event_type_str: str, event_data: dict):
+                    result_type = (
+                        "financial_report" if event_type_str == "financial_report"
+                        else "bigquery" if tool_name in _BIGQUERY_TOOLS
+                        else "suiteql"
+                    )
+                    _pending_caches.append(CachedResult(
+                        message_id="pending",
+                        conversation_id=str(session.id),
+                        result_type=result_type,
+                        columns=event_data.get("columns", []),
+                        rows=event_data.get("rows", []),
+                        row_count=event_data.get("row_count", 0),
+                        summary=event_data.get("summary"),
+                        query_text=event_data.get("query", ""),
+                    ))
+
                 async for event_type, payload in unified_agent.run_streaming(
                     task=unified_task,
                     context=context,
@@ -1547,7 +1597,8 @@ async def run_chat_turn(
                     model=unified_model,
                     conversation_history=history_messages,
                     tool_choice=None,
-                    tool_result_interceptor=_make_tool_interceptor(context_need),
+                    tool_result_interceptor=_make_tool_interceptor(context_need, cache_callback=_on_tool_intercepted),
+                    session_id=str(session.id),
                 ):
                     if event_type == "text":
                         streamed_text_parts.append(payload)
@@ -1694,6 +1745,11 @@ async def run_chat_turn(
                     created_at=datetime.now(timezone.utc),
                 )
                 db.add(assistant_msg)
+
+                # Flush pending result caches (for follow-up intelligence)
+                for _pc in _pending_caches:
+                    _pc.message_id = str(assistant_msg.id)
+                    await cache_result(str(session.id), str(assistant_msg.id), _pc)
 
                 if not session.title:
                     session.title = user_message[:100].strip()
