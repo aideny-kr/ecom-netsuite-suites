@@ -579,7 +579,7 @@ def _intercept_tool_result(
                 default=str,
             )
         else:
-            row_preview = rows[:5]
+            row_preview = rows[:30]
             condensed = json.dumps(
                 {
                     "columns": columns,
@@ -590,7 +590,7 @@ def _intercept_tool_result(
                         "The full data table has been sent to the frontend for rendering. "
                         "Do NOT rebuild or reproduce the table in your response. "
                         "Provide commentary, insights, and analysis only. "
-                        "Use rows_preview to extract values you need for follow-up queries."
+                        "Use rows_preview for charting and follow-up analysis."
                     ),
                 },
                 default=str,
