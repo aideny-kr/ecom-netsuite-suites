@@ -59,7 +59,7 @@ BI_AGENT_RESPONSES = {
             '"y_axes": [{"label": "Retention Rate (%)", "key": "retention"}], '
             '"data": [{"year": "2023", "retention": 62}, {"year": "2024", "retention": 68}]}</chart>'
         ),
-        "tool_calls_log": [{"tool": "bigquery_sql"}, {"tool": "netsuite_pivot_query_result"}],
+        "tool_calls_log": [{"tool": "bigquery_sql"}, {"tool": "pivot_query_result"}],
         "cost": 0.25,
         "latency_ms": 8000,
     },
@@ -91,7 +91,7 @@ BASELINE_RESPONSES = {
             {"tool": "bigquery_schema"},
             {"tool": "bigquery_sql"},
             {"tool": "bigquery_sql"},
-            {"tool": "netsuite_pivot_query_result"},
+            {"tool": "pivot_query_result"},
         ],
         "cost": 0.45,
         "latency_ms": 18000,

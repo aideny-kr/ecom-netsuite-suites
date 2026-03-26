@@ -25,7 +25,7 @@ class TestAllowedChatTools:
         """Only expected tools are in the set."""
         expected = {
             "netsuite.suiteql",
-            "netsuite.pivot_query_result",
+            "pivot.query_result",
             "netsuite.financial_report",
             "netsuite.report",
             "netsuite.connectivity",

@@ -19,7 +19,7 @@ tool_ids:
   - netsuite_suiteql
   - netsuite_get_record
   - rag_search
-  - netsuite_pivot_query_result
+  - pivot_query_result
 rag_partitions:
   - pricing/margin-rules
   - pricing/tariff-schedules

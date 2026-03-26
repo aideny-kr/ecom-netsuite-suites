@@ -1,7 +1,8 @@
 """Pivot query result tool — server-side deterministic pivoting.
 
-Re-executes a SuiteQL query without row limits and pivots the result
+Re-executes a SQL query without row limits and pivots the result
 in Python. Only values that exist in the data become columns.
+Supports both SuiteQL (NetSuite) and BigQuery dialects.
 """
 
 from __future__ import annotations
@@ -17,25 +18,125 @@ logger = logging.getLogger(__name__)
 
 _FETCH_FIRST_RE = re.compile(r"\s*FETCH\s+FIRST\s+\d+\s+ROWS\s+ONLY\s*$", re.IGNORECASE)
 _ROWNUM_RE = re.compile(r"\s+AND\s+ROWNUM\s*<=\s*\d+", re.IGNORECASE)
+_LIMIT_RE = re.compile(r"\s+LIMIT\s+\d+\s*$", re.IGNORECASE)
 
 
-def _strip_row_limit(query: str) -> str:
-    """Remove FETCH FIRST N ROWS ONLY and ROWNUM limits from query."""
-    query = _FETCH_FIRST_RE.sub("", query)
-    query = _ROWNUM_RE.sub("", query)
+def _strip_row_limit(query: str, dialect: str = "suiteql") -> str:
+    """Remove row limits from query based on dialect."""
+    if dialect == "bigquery":
+        query = _LIMIT_RE.sub("", query)
+    else:
+        query = _FETCH_FIRST_RE.sub("", query)
+        query = _ROWNUM_RE.sub("", query)
     return query.strip()
 
 
-async def execute(params: dict, context: dict | None = None, **kwargs: Any) -> dict:
-    """Execute a SuiteQL query and pivot the result.
+def _detect_dialect(query: str, dialect: str) -> str:
+    """Auto-detect dialect from query syntax if not explicitly set."""
+    if dialect != "suiteql":
+        return dialect
+    # Backtick-quoted identifiers or BigQuery-specific patterns
+    if "`" in query or "frameworkreporting" in query.lower():
+        return "bigquery"
+    return dialect
 
-    1. Strip row limits from query
-    2. Re-execute via REST API (up to 10,000 rows)
-    3. Pivot using pivot_rows()
-    4. Return pivoted table
-    """
+
+async def _execute_bigquery_pivot(params: dict, context: dict) -> dict:
+    """Execute a BigQuery query and pivot the result."""
     from sqlalchemy import select
 
+    from app.core.encryption import decrypt_credentials
+    from app.models.mcp_connector import McpConnector
+    from app.services.bigquery_service import execute_query
+
+    ctx = context or {}
+    db = ctx.get("db")
+    tenant_id_str = ctx.get("tenant_id")
+
+    if not db or not tenant_id_str:
+        return {"error": "Database session and tenant_id required"}
+
+    tenant_id = UUID(tenant_id_str) if isinstance(tenant_id_str, str) else tenant_id_str
+
+    # Get active BigQuery connector
+    result = await db.execute(
+        select(McpConnector).where(
+            McpConnector.tenant_id == tenant_id,
+            McpConnector.provider == "bigquery",
+            McpConnector.status == "active",
+        )
+    )
+    connector = result.scalars().first()
+    if not connector:
+        return {"error": "No active BigQuery connector found for this tenant"}
+
+    creds = decrypt_credentials(connector.encrypted_credentials)
+    sa_json = creds.get("service_account_json", {})
+    project_id = creds.get("project_id") or (connector.metadata_json or {}).get("project_id", "")
+    location = creds.get("location") or (connector.metadata_json or {}).get("location")
+
+    query = params.get("query", "")
+    row_field = params.get("row_field", "")
+    column_field = params.get("column_field", "")
+    value_field = params.get("value_field", "")
+    aggregation = params.get("aggregation", "sum")
+    include_total = params.get("include_total", True)
+    if isinstance(include_total, str):
+        include_total = include_total.lower() != "false"
+
+    clean_query = _strip_row_limit(query, dialect="bigquery")
+    logger.info("pivot_tool.executing_bigquery", extra={"query_len": len(clean_query)})
+
+    try:
+        raw_result = await execute_query(
+            credentials=sa_json,
+            project_id=project_id,
+            query=clean_query,
+            max_rows=10000,
+            location=location,
+        )
+    except Exception as e:
+        return {"error": f"BigQuery execution failed: {str(e)[:300]}"}
+
+    columns = raw_result.get("columns", [])
+    rows = raw_result.get("rows", [])
+
+    if not rows:
+        return {"columns": [row_field], "rows": [], "row_count": 0, "pivoted": True}
+
+    try:
+        out_columns, out_rows = pivot_rows(
+            columns=columns,
+            rows=rows,
+            row_field=row_field,
+            column_field=column_field,
+            value_field=value_field,
+            aggregation=aggregation,
+            include_total=include_total,
+        )
+    except ValueError as e:
+        return {"error": str(e)}
+
+    return {
+        "columns": out_columns,
+        "rows": out_rows,
+        "row_count": len(out_rows),
+        "pivoted": True,
+        "dialect": "bigquery",
+        "pivot_config": {
+            "row_field": row_field,
+            "column_field": column_field,
+            "value_field": value_field,
+            "aggregation": aggregation,
+        },
+    }
+
+
+async def _execute_suiteql_pivot(params: dict, context: dict) -> dict:
+    """Execute a SuiteQL query and pivot the result."""
+    from sqlalchemy import select
+
+    from app.core.encryption import decrypt_credentials
     from app.models.connection import Connection
     from app.services.netsuite_client import execute_suiteql_via_rest
     from app.services.netsuite_oauth_service import get_valid_token
@@ -78,14 +179,12 @@ async def execute(params: dict, context: dict | None = None, **kwargs: Any) -> d
     if not access_token:
         return {"error": "OAuth token expired — re-authorize in Settings"}
 
-    from app.core.encryption import decrypt_credentials
-
     creds = decrypt_credentials(connection.encrypted_credentials)
     account_id = creds.get("account_id", "")
 
     # Strip row limit and re-execute
-    clean_query = _strip_row_limit(query)
-    logger.info("pivot_tool.executing", extra={"query_len": len(clean_query)})
+    clean_query = _strip_row_limit(query, dialect="suiteql")
+    logger.info("pivot_tool.executing_suiteql", extra={"query_len": len(clean_query)})
 
     try:
         raw_result = await execute_suiteql_via_rest(
@@ -123,6 +222,7 @@ async def execute(params: dict, context: dict | None = None, **kwargs: Any) -> d
         "rows": out_rows,
         "row_count": len(out_rows),
         "pivoted": True,
+        "dialect": "suiteql",
         "pivot_config": {
             "row_field": row_field,
             "column_field": column_field,
@@ -130,3 +230,22 @@ async def execute(params: dict, context: dict | None = None, **kwargs: Any) -> d
             "aggregation": aggregation,
         },
     }
+
+
+async def execute(params: dict, context: dict | None = None, **kwargs: Any) -> dict:
+    """Execute a SQL query and pivot the result.
+
+    Supports both SuiteQL (NetSuite) and BigQuery dialects.
+    Auto-detects dialect from query syntax if not explicitly specified.
+    """
+    ctx = context or {}
+    dialect = params.get("dialect", "suiteql")
+    query = params.get("query", "")
+
+    # Auto-detect dialect from query if not explicitly set
+    dialect = _detect_dialect(query, dialect)
+
+    if dialect == "bigquery":
+        return await _execute_bigquery_pivot(params, ctx)
+    else:
+        return await _execute_suiteql_pivot(params, ctx)

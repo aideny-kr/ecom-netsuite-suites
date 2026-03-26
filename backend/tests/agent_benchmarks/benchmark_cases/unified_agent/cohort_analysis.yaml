@@ -1,6 +1,6 @@
 query: "Compare year-over-year retention by customer cohort"
 agent_id: unified-agent
-expected_tools: ["bigquery_sql", "netsuite_pivot_query_result"]
+expected_tools: ["bigquery_sql", "pivot_query_result"]
 expected_answer_contains: ["retention", "cohort", "year"]
 expected_accuracy: 0.7
 max_cost: 0.50

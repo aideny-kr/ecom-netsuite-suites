@@ -89,13 +89,13 @@ class TestPricingAgentInstantiation:
         )
         tool_names = {t["name"] for t in agent.tool_definitions}
         # Pricing agent YAML specifies: netsuite_suiteql, netsuite_get_record,
-        # rag_search, netsuite_pivot_query_result
+        # rag_search, pivot_query_result
         # Only tools that exist in ALLOWED_CHAT_TOOLS will appear
         allowed_pricing_tools = {
             "netsuite_suiteql",
             "netsuite_get_record",
             "rag_search",
-            "netsuite_pivot_query_result",
+            "pivot_query_result",
         }
         assert tool_names <= allowed_pricing_tools
         # Should NOT have tools outside the pricing agent's tool_ids

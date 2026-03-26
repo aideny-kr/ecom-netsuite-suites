@@ -177,5 +177,5 @@ When analyzing tariff impact:
 - Check <tenant_schema> for available cost-related fields before querying
 
 When comparing prices:
-- Use `netsuite_pivot_query_result` for cross-product or cross-category comparisons
+- Use `pivot_query_result` for cross-product or cross-category comparisons
 - Do NOT build CASE WHEN pivot SQL manually — the pivot tool handles this deterministically

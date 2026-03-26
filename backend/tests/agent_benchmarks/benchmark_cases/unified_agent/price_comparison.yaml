@@ -1,5 +1,5 @@
 query: "Compare prices across all product lines"
-expected_tools: ["netsuite_suiteql", "netsuite_pivot_query_result"]
+expected_tools: ["netsuite_suiteql", "pivot_query_result"]
 expected_answer_contains: ["price", "product"]
 expected_accuracy: 0.7
 max_cost: 0.40

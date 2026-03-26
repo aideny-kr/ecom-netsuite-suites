@@ -76,19 +76,18 @@ TOOL_REGISTRY = {
             },
         },
     },
-    "netsuite.pivot_query_result": {
+    "pivot.query_result": {
         "description": (
-            "Pivot a SuiteQL query result into a crosstab table. Re-executes the query "
-            "without row limits and pivots server-side. Use this INSTEAD of building "
-            "CASE WHEN pivot SQL manually. The tool determines which values become columns "
-            "from the actual data — no hallucinated or missing values."
+            "Pivot a query result into a crosstab table. Works with both SuiteQL and BigQuery. "
+            "Re-executes the query without row limits and pivots server-side. Use this INSTEAD "
+            "of building CASE WHEN pivot SQL manually."
         ),
         "execute": pivot_tool.execute,
         "params_schema": {
             "query": {
                 "type": "string",
                 "required": True,
-                "description": "The SuiteQL query to re-execute. FETCH FIRST will be stripped automatically.",
+                "description": "SQL query to pivot. Row limits (FETCH FIRST / LIMIT) stripped automatically.",
             },
             "row_field": {
                 "type": "string",
@@ -116,6 +115,12 @@ TOOL_REGISTRY = {
                 "required": False,
                 "default": True,
                 "description": "Add a Total column",
+            },
+            "dialect": {
+                "type": "string",
+                "required": False,
+                "default": "suiteql",
+                "description": "SQL dialect: 'suiteql' or 'bigquery'",
             },
         },
     },

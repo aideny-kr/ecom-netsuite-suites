@@ -180,7 +180,7 @@ class TestEvaluateToolUsage:
         case = BenchmarkCase(
             query="Test",
             expected_answer_contains=["result"],
-            expected_tools=["netsuite_suiteql", "netsuite_pivot_query_result"],
+            expected_tools=["netsuite_suiteql", "pivot_query_result"],
         )
         score = runner.evaluate(result, case, cost=0.05, latency_ms=3000)
         assert score.tool_accuracy == 0.5

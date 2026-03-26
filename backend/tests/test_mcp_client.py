@@ -43,7 +43,7 @@ EXPECTED_TOOLS = {
     "workspace.run_unit_tests",
     "workspace.deploy_sandbox",
     "workspace.run_suiteql_assertions",
-    "netsuite.pivot_query_result",
+    "pivot.query_result",
     "suitescript.sync",
     "tenant.save_learned_rule",
     "bigquery.sql",

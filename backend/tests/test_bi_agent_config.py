@@ -31,7 +31,7 @@ class TestBiAgentConfig:
         assert "bigquery_sql" in tool_ids
         assert "bigquery_schema" in tool_ids
         assert "bigquery_cost_estimate" in tool_ids
-        assert "netsuite_pivot_query_result" in tool_ids
+        assert "pivot_query_result" in tool_ids
         assert "rag_search" in tool_ids
 
     def test_bi_agent_rag_partitions(self):

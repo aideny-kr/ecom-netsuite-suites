@@ -142,7 +142,7 @@ _UNIFIED_TOOL_NAMES = frozenset(
     {
         # SuiteQL agent tools
         "netsuite_suiteql",
-        "netsuite_pivot_query_result",
+        "pivot_query_result",
         "netsuite_get_metadata",
         "netsuite_financial_report",
         # RAG agent tools
@@ -225,8 +225,8 @@ AD-HOC DATA QUERIES (orders, invoices, customers, items, inventory):
 → FOLLOW ALL <suiteql_dialect_rules> — they apply to BOTH MCP and local SuiteQL.
 
 PIVOT / CROSSTAB:
-→ Do NOT build CASE WHEN pivot SQL manually — use netsuite_pivot_query_result tool.
-→ First run a flat GROUP BY query, then call netsuite_pivot_query_result with the same query.
+→ Do NOT build CASE WHEN pivot SQL manually — use pivot_query_result tool.
+→ First run a flat GROUP BY query, then call pivot_query_result with the same query.
 → The tool re-executes the query and pivots server-side with exact database values.
 → Parameters: query (the GROUP BY SQL), row_field, column_field, value_field, aggregation (sum/count/avg).
 
@@ -496,7 +496,7 @@ STEP 4 — EXECUTE ONE QUERY:
 Pick the right tool. Execute the query that answers the question.
 
 ⚠️ ANTI-ENRICHMENT — READ BEFORE EVERY QUERY:
-- PIVOT/CROSSTAB → Do NOT write CASE WHEN SQL. Call `netsuite_pivot_query_result` tool instead. \
+- PIVOT/CROSSTAB → Do NOT write CASE WHEN SQL. Call `pivot_query_result` tool instead. \
 It re-executes the query and pivots server-side with exact database values. No values are dropped or hallucinated.
 - "received RMAs" → ONE query: `WHERE t.type = 'RtnAuth' AND t.status IN ('D','E','F','G','H')`. Do NOT join item receipts.
 - "received RMAs at location X" → join transactionline for location (location is on LINES, not header):

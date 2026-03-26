@@ -39,7 +39,7 @@ tool_ids:
   - bigquery_sql
   - bigquery_schema
   - bigquery_cost_estimate
-  - netsuite_pivot_query_result
+  - pivot_query_result
   - rag_search
 
 rag_partitions:
