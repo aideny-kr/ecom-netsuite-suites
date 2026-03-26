@@ -307,8 +307,15 @@ def _compute_confidence(
     tool_rate = (successful_tools / total_tools) if total_tools > 0 else 0.0
 
     # Any data tool call means the query required tools
-    data_tools = {"netsuite_suiteql", "rag_search", "web_search"}
+    data_tools = {"netsuite_suiteql", "netsuite_financial_report", "bigquery_sql", "rag_search", "web_search"}
     required = any(t.get("tool_name") in data_tools for t in tool_calls_log)
+
+    # Deterministic tools return factual data — success means high confidence by definition
+    _DETERMINISTIC_TOOLS = {"netsuite_financial_report"}
+    deterministic = any(
+        t.get("tool_name") in _DETERMINISTIC_TOOLS and not tool_call_had_error(t)
+        for t in tool_calls_log
+    )
 
     return CompositeScorer(
         llm_score=llm_norm,
@@ -319,6 +326,7 @@ def _compute_confidence(
         tool_success_rate=tool_rate,
         num_tool_calls=total_tools,
         required_tool_calls=required,
+        deterministic_success=deterministic,
     ).compute()
 
 

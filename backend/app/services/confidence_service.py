@@ -36,9 +36,20 @@ class CompositeScorer:
     tool_success_rate: float = 0.0
     num_tool_calls: int = 0
     required_tool_calls: bool = False
+    deterministic_success: bool = False  # financial reports, schema lookups — no LLM judgment needed
 
     def compute(self) -> float:
         """Return composite confidence score 1.0-5.0."""
+        # Deterministic tool results (e.g. financial reports) that succeeded
+        # are inherently high-confidence — the data is correct by definition.
+        if self.deterministic_success and self.tool_success_rate == 1.0:
+            score = max(4.0, (self.llm_score * 4 + 1) if self.llm_score > 0 else 4.5)
+            logger.info(
+                "confidence.deterministic llm=%.2f tool_rate=%.2f final=%.1f",
+                self.llm_score, self.tool_success_rate, score,
+            )
+            return score
+
         weighted_sum = (
             _W_LLM * self.llm_score
             + _W_PATTERN * self.query_pattern_similarity
