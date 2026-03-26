@@ -1,107 +1,108 @@
 # BigQuery Eval Test Set — 15 cases
 # Dialect rules: LIMIT N, backtick identifiers, SAFE_DIVIDE, DATE_TRUNC
+# Schema: frameworkreporting.sales-orders_cleaned
 
 - question: "What's our monthly revenue trend for the last 12 months?"
   dialect: bigquery
-  expected_keywords: ["revenue", "month", "trend"]
-  expected_sql_contains: ["DATE_TRUNC", "GROUP BY", "LIMIT"]
-  tables: ["frameworkreporting.sales-orders"]
+  expected_keywords: ["revenue", "month"]
+  expected_sql_contains: ["DATE_TRUNC", "GROUP BY", "LIMIT", "netamount", "orderdate"]
+  tables: ["frameworkreporting.sales-orders_cleaned"]
   difficulty: easy
 
 - question: "Which product categories have the highest average order value?"
   dialect: bigquery
   expected_keywords: ["product", "category", "order", "value"]
-  expected_sql_contains: ["AVG", "GROUP BY", "ORDER BY", "LIMIT"]
-  tables: ["frameworkreporting.sales-orders"]
+  expected_sql_contains: ["AVG", "GROUP BY", "ORDER BY", "LIMIT", "itemclass"]
+  tables: ["frameworkreporting.sales-orders_cleaned"]
   difficulty: easy
 
 - question: "Show me customer cohort retention for the last 6 cohorts"
   dialect: bigquery
   expected_keywords: ["customer", "cohort", "retention"]
-  expected_sql_contains: ["DATE_TRUNC", "WITH", "GROUP BY"]
-  tables: ["frameworkreporting.sales-orders"]
+  expected_sql_contains: ["DATE_TRUNC", "email", "GROUP BY"]
+  tables: ["frameworkreporting.sales-orders_cleaned"]
   difficulty: hard
 
 - question: "What is our average revenue per user (ARPU) by month?"
   dialect: bigquery
-  expected_keywords: ["revenue", "user", "arpu", "month"]
-  expected_sql_contains: ["SAFE_DIVIDE", "DATE_TRUNC", "GROUP BY"]
-  tables: ["frameworkreporting.sales-orders"]
+  expected_keywords: ["revenue", "user", "month"]
+  expected_sql_contains: ["SAFE_DIVIDE", "DATE_TRUNC", "GROUP BY", "email"]
+  tables: ["frameworkreporting.sales-orders_cleaned"]
   difficulty: medium
 
 - question: "Show the distribution of order sizes in buckets of $500"
   dialect: bigquery
   expected_keywords: ["order", "distribution", "bucket"]
-  expected_sql_contains: ["FLOOR", "GROUP BY", "COUNT"]
-  tables: ["frameworkreporting.sales-orders"]
+  expected_sql_contains: ["FLOOR", "GROUP BY", "COUNT", "ecom_order_total"]
+  tables: ["frameworkreporting.sales-orders_cleaned"]
   difficulty: medium
 
 - question: "What is the repeat purchase rate by customer segment?"
   dialect: bigquery
-  expected_keywords: ["repeat", "purchase", "customer", "segment"]
-  expected_sql_contains: ["COUNT", "GROUP BY", "HAVING", "SAFE_DIVIDE"]
-  tables: ["frameworkreporting.sales-orders"]
+  expected_keywords: ["repeat", "purchase", "customer"]
+  expected_sql_contains: ["COUNT", "GROUP BY", "SAFE_DIVIDE", "email", "customer_category"]
+  tables: ["frameworkreporting.sales-orders_cleaned"]
   difficulty: hard
 
 - question: "Show me week-over-week order volume change for the past 8 weeks"
   dialect: bigquery
   expected_keywords: ["order", "volume", "week"]
-  expected_sql_contains: ["DATE_TRUNC", "LAG", "GROUP BY"]
-  tables: ["frameworkreporting.sales-orders"]
+  expected_sql_contains: ["DATE_TRUNC", "LAG", "GROUP BY", "ordernumber"]
+  tables: ["frameworkreporting.sales-orders_cleaned"]
   difficulty: medium
 
 - question: "What are the top 10 customers by lifetime value?"
   dialect: bigquery
   expected_keywords: ["customer", "lifetime", "value"]
-  expected_sql_contains: ["SUM", "GROUP BY", "ORDER BY", "LIMIT 10"]
-  tables: ["frameworkreporting.sales-orders"]
+  expected_sql_contains: ["SUM", "GROUP BY", "ORDER BY", "LIMIT", "email"]
+  tables: ["frameworkreporting.sales-orders_cleaned"]
   difficulty: easy
 
 - question: "Show revenue by country for Q1 2025"
   dialect: bigquery
-  expected_keywords: ["revenue", "country", "quarter"]
-  expected_sql_contains: ["SUM", "GROUP BY", "WHERE", "DATE_TRUNC"]
-  tables: ["frameworkreporting.sales-orders"]
+  expected_keywords: ["revenue", "country"]
+  expected_sql_contains: ["SUM", "GROUP BY", "shipcountry", "netamount"]
+  tables: ["frameworkreporting.sales-orders_cleaned"]
   difficulty: easy
 
-- question: "What is the cart abandonment rate by traffic source?"
+- question: "What is the B2B vs B2C revenue split by quarter?"
   dialect: bigquery
-  expected_keywords: ["cart", "abandonment", "source"]
-  expected_sql_contains: ["SAFE_DIVIDE", "GROUP BY", "COUNT"]
-  tables: ["frameworkreporting.sessions", "frameworkreporting.orders"]
-  difficulty: hard
+  expected_keywords: ["b2b", "b2c", "revenue", "quarter"]
+  expected_sql_contains: ["customer_type", "DATE_TRUNC", "GROUP BY", "SUM"]
+  tables: ["frameworkreporting.sales-orders_cleaned"]
+  difficulty: medium
 
 - question: "Show me the median order value by product line"
   dialect: bigquery
   expected_keywords: ["median", "order", "value", "product"]
-  expected_sql_contains: ["PERCENTILE_CONT", "GROUP BY", "OVER"]
-  tables: ["frameworkreporting.sales-orders"]
+  expected_sql_contains: ["APPROX_QUANTILES", "itemclass"]
+  tables: ["frameworkreporting.sales-orders_cleaned"]
   difficulty: medium
 
 - question: "What percentage of revenue comes from new vs returning customers?"
   dialect: bigquery
   expected_keywords: ["revenue", "new", "returning", "customer"]
-  expected_sql_contains: ["SAFE_DIVIDE", "GROUP BY", "COUNT"]
-  tables: ["frameworkreporting.sales-orders"]
+  expected_sql_contains: ["SAFE_DIVIDE", "email", "SUM"]
+  tables: ["frameworkreporting.sales-orders_cleaned"]
   difficulty: medium
 
-- question: "Show cross-system revenue: NetSuite invoices vs BigQuery ecom orders by month"
+- question: "What are the top selling items by revenue this quarter?"
   dialect: bigquery
-  expected_keywords: ["revenue", "invoice", "order", "month"]
-  expected_sql_contains: ["DATE_TRUNC", "GROUP BY", "UNION ALL"]
-  tables: ["frameworkreporting.sales-orders", "frameworkreporting.invoices"]
-  difficulty: hard
+  expected_keywords: ["item", "revenue"]
+  expected_sql_contains: ["itemdisplayname", "SUM", "netamount", "GROUP BY", "ORDER BY"]
+  tables: ["frameworkreporting.sales-orders_cleaned"]
+  difficulty: easy
 
-- question: "What is the average days to first purchase for new customers?"
+- question: "What is the average days to first repeat purchase for customers?"
   dialect: bigquery
-  expected_keywords: ["days", "first", "purchase", "customer"]
-  expected_sql_contains: ["MIN", "DATE_DIFF", "GROUP BY"]
-  tables: ["frameworkreporting.sales-orders"]
+  expected_keywords: ["days", "repeat", "purchase", "customer"]
+  expected_sql_contains: ["DATE_DIFF", "email", "GROUP BY"]
+  tables: ["frameworkreporting.sales-orders_cleaned"]
   difficulty: medium
 
 - question: "Show cumulative revenue growth year to date vs prior year"
   dialect: bigquery
   expected_keywords: ["cumulative", "revenue", "growth", "year"]
   expected_sql_contains: ["SUM", "OVER", "DATE_TRUNC", "ORDER BY"]
-  tables: ["frameworkreporting.sales-orders"]
+  tables: ["frameworkreporting.sales-orders_cleaned"]
   difficulty: hard

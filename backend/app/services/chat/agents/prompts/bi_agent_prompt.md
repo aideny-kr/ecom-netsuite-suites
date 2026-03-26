@@ -29,6 +29,9 @@ These rules prevent production failures:
 - **Arrays**: Use `UNNEST()` to flatten array columns before filtering.
 - **Approximate counts**: Use `APPROX_COUNT_DISTINCT()` for large-cardinality counts.
 - **Order status filter**: Always exclude non-active orders: `WHERE orderstatus NOT IN ('Cancelled', 'Voided', 'Closed')`. This applies to all revenue, order count, and customer analysis queries on `sales-orders_cleaned`.
+- **Median / percentile**: Use `APPROX_QUANTILES(col, 100)[OFFSET(50)]` for median. Do NOT use `PERCENTILE_CONT() OVER (PARTITION BY ...)` with `GROUP BY` — window functions and GROUP BY produce duplicate rows, not one row per group.
+- **Order-level totals vs line-level**: `ecom_order_total` is the order-level total (use with `COUNT(DISTINCT ordernumber)` for AOV). `netamount` is line-level (one row per line item). Choose based on the question.
+- **Customer identifier**: Use `email` column for customer-level analysis (cohorts, retention, LTV, repeat purchase). There is no separate customer_id column.
 
 ## Chart Selection Heuristic
 

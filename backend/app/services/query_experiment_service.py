@@ -60,13 +60,20 @@ Core tables and key columns:
 
 transaction (alias: t)
   id, tranid, trandate, type, status, entity, subsidiary, department,
-  class, location, memo, foreigntotal, exchangerate, createddate
-  Types: SalesOrd, CustInvc, VendBill, PurchOrd, RtnAuth, CashSale, CustPymt, Journal
-  Status: single-letter codes (B=Pending Billing, H=Pending Fulfillment, etc.)
+  class, location, memo, foreigntotal, total, currency, exchangerate, createddate, duedate
+  Types: SalesOrd, CustInvc, VendBill, PurchOrd, RtnAuth, CashSale, CustPymt, Journal, TrnfrOrd, ItemShip, ItemRcpt, WorkOrd
+  AMOUNT RULES:
+  - t.foreigntotal = amount in TRANSACTION currency
+  - t.total = amount in SUBSIDIARY BASE currency (usually USD)
+  - For order-level totals WITHOUT transactionline join: use t.foreigntotal or t.total
+  - If query has JOIN transactionline, you MUST use line-level amounts (tl.foreignamount, tl.netamount), NOT t.foreigntotal
 
 transactionline (alias: tl) — JOIN ON tl.transaction = t.id
-  id, transaction, item, quantity, netamount, rate, amount,
+  id, transaction, item, quantity, netamount, foreignamount, rate, amount,
   department, class, location, subsidiary
+  - tl.foreignamount = line amount in TRANSACTION currency
+  - tl.netamount = line net amount
+  - Revenue lines are NEGATIVE — use ABS(tl.netamount) or * -1
 
 customer (alias: c)
   id, entityid, companyname, email, phone, subsidiary, category,
@@ -79,16 +86,56 @@ item (alias: i)
 account (alias: a)
   id, acctnumber, acctname, accttype, balance
 
+employee (alias: emp)
+  id, entityid, firstname, lastname, email, department, subsidiary, isinactive
+
+subsidiary (alias: s)
+  id, name, isinactive
+
+department (alias: d)
+  id, name, isinactive
+
 transactionaccountingline (alias: tal) — for GL/financial queries
   transaction, account, amount, debit, credit, subsidiary, posting
+
+STATUS CODES — CRITICAL (single-letter only, NEVER compound like 'SalesOrd:B'):
+  Sales Order (SalesOrd): A=Pending Approval, B=Pending Fulfillment, C=Cancelled, D=Partially Fulfilled, E=Pending Billing/Partially Fulfilled, F=Pending Billing, G=Billed, H=Closed
+  Purchase Order (PurchOrd): A=Pending Supervisor Approval, B=Pending Receipt, C=Rejected, D=Partially Received, E=Pending Billing/Partially Received, F=Pending Bill, G=Fully Billed, H=Closed
+  Return Authorization (RtnAuth): A=Pending Approval, B=Pending Receipt, C=Cancelled, D=Partially Received, E=Pending Refund/Partially Received, F=Pending Refund, G=Refunded, H=Closed
+  Invoice (CustInvc): A=Open, B=Paid In Full
+  Vendor Bill (VendBill): A=Open, B=Paid In Full
+  Item Fulfillment (ItemShip): A=Shipped, B=Packed, C=Picked
+  Active SOs: status NOT IN ('C', 'H')
+  Open POs: status NOT IN ('G', 'H')
+  RMAs received: status IN ('D', 'E', 'F', 'G', 'H')
+  Overdue invoices: type = 'CustInvc' AND status = 'A' AND duedate < TRUNC(SYSDATE)
+
+DISPLAY VALUES — use BUILTIN.DF() for foreign-key / list fields:
+  BUILTIN.DF(t.entity) → customer/vendor name
+  BUILTIN.DF(tl.item) → item display name
+  BUILTIN.DF(t.subsidiary) → subsidiary name
+  BUILTIN.DF(t.department) → department name
+  BUILTIN.DF(t.status) → status display text
+  BUILTIN.DF(t.currency) → currency name
 
 Common JOINs:
   transaction t JOIN transactionline tl ON tl.transaction = t.id
   transactionline tl JOIN item i ON tl.item = i.id
   transaction t JOIN customer c ON t.entity = c.id
+  transaction t JOIN subsidiary s ON t.subsidiary = s.id
+  transactionline tl JOIN account a ON tl.account = a.id
+  transactionaccountingline tal JOIN account a ON tal.account = a.id
 
-Note: Use BUILTIN.DF(t.entity) to get customer name, BUILTIN.DF(tl.item) for item name.
-Note: tl.netamount is NEGATIVE for revenue lines — use ABS(tl.netamount) or * -1.
+DATE FUNCTIONS:
+  Today: TRUNC(SYSDATE)
+  Last N days: t.trandate >= TRUNC(SYSDATE) - N
+  This month: t.trandate >= TRUNC(SYSDATE, 'MONTH')
+  This quarter: t.trandate >= TRUNC(SYSDATE, 'Q')
+  This year: t.trandate >= TRUNC(SYSDATE, 'YEAR')
+  Specific date: TO_DATE('2026-01-01', 'YYYY-MM-DD')
+  NEVER use CURRENT_DATE — not supported in SuiteQL
+
+PAGINATION: Use FETCH FIRST N ROWS ONLY (never LIMIT)
 """
 
 _BIGQUERY_DIALECT_RULES = """
@@ -102,15 +149,67 @@ BigQuery Standard SQL rules:
 
 _BIGQUERY_SCHEMA_HINT = """
 Dataset: `frameworkreporting`
-Table: `frameworkreporting.sales-orders_cleaned`
-Columns: ordernumber (STRING), orderdate (DATE), orderstatus (STRING),
-  item (STRING), itemdisplayname (STRING), itemclass (STRING),
-  platform (STRING), quantity (INTEGER), netamount (FLOAT),
-  salesprice (FLOAT), actualshipdate (DATE), shipcountry (STRING),
-  shipstate (STRING), email (STRING), ordermonth (STRING),
-  order_type (STRING), customer_type (STRING), customer_category (STRING)
-Note: Use backticks for table names with hyphens: `frameworkreporting.sales-orders_cleaned`
-Note: Column is "netamount" (no underscore), NOT "net_amount"
+Primary table: `frameworkreporting.sales-orders_cleaned` (partitioned by orderdate)
+
+ALL COLUMNS — use ONLY these exact names:
+  ordernumber (STRING) — unique order ID (e.g. "R296292279")
+  orderdate (DATE) — partition key, always filter on this for performance
+  orderstatus (STRING) — "Billed", "Pending Fulfillment", "Cancelled", "Closed", etc.
+  solidusorderstatus (STRING) — ecommerce platform status
+  item (STRING) — item SKU/code
+  itemdisplayname (STRING) — human-readable item name
+  itemclass (STRING) — product category: "Laptop", "Keyboard", "SSD", "RAM", "Expansion Card", etc.
+  itemhierarchy (STRING) — product hierarchy path
+  platform (STRING) — sales platform
+  Refurbished (BOOLEAN) — note: capital R
+  quantity (INTEGER) — line quantity
+  quantityfulfilled_received (INTEGER) — fulfilled/received qty
+  lastpurchaseprice (FLOAT) — cost price
+  netamount (FLOAT) — line-level net revenue (NOT "net_amount")
+  salesprice (FLOAT) — unit sale price
+  actualshipdate (DATE) — ship date
+  shipcountry (STRING) — ship-to country (e.g. "US", "CA", "DE")
+  shipstate (STRING) — ship-to state
+  batchlabel (STRING) — production batch
+  ordermonth (STRING) — pre-computed order month string
+  shipmonth (STRING) — pre-computed ship month string
+  orderweeknumber (INTEGER) — ISO week number of order
+  shipweeknumber (INTEGER) — ISO week number of shipment
+  email (STRING) — customer email (use as customer identifier for cohorts/LTV)
+  preorder (BOOLEAN) — preorder flag
+  lineuniquekey (STRING) — unique line identifier
+  order_type (STRING) — "Standard", "Replacement", etc.
+  line_order_type (STRING) — line-level order type
+  customer_type (STRING) — "B2C", "B2B"
+  customer_category (STRING) — customer segment
+  b2b_customer_name (STRING) — B2B company name (NULL for B2C)
+  shipmethod (STRING) — shipping method
+  shippingcost (FLOAT) — shipping cost
+  billingcountry (STRING) — billing country
+  date_closed (DATE) — order close date
+  ecom_order_total (FLOAT) — ORDER-LEVEL total (use for order value analysis, NOT netamount which is per-line)
+  location (STRING) — fulfillment location
+  fw_sku (STRING) — Framework-specific SKU
+
+CRITICAL RULES:
+- Backticks required: `frameworkreporting.sales-orders_cleaned` (hyphen in name)
+- For order-level totals/AOV: use ecom_order_total with COUNT(DISTINCT ordernumber)
+- For line-level revenue: use netamount (one row per line item)
+- ALWAYS filter non-active: WHERE orderstatus NOT IN ('Cancelled', 'Voided', 'Closed')
+- ALWAYS add date range: WHERE orderdate >= DATE_SUB(CURRENT_DATE(), INTERVAL N DAY)
+- For customer cohorts/retention: use email as customer identifier
+- For median: use APPROX_QUANTILES(col, 100)[OFFSET(50)] (NOT PERCENTILE_CONT with GROUP BY)
+- Use SAFE_DIVIDE() for all divisions
+- Use DATE_TRUNC(orderdate, MONTH) for monthly grouping
+
+OTHER TABLES (same dataset):
+  `frameworkreporting.spree-line-items` — ecommerce line items
+  `frameworkreporting.spree-shipments` — shipment tracking
+  `frameworkreporting.inventory_snapshot` — inventory levels
+  `frameworkreporting.profit-and-loss_load` — P&L data
+  `frameworkreporting.netsuite_items` — item master
+  `frameworkreporting.campaigns` — marketing campaigns
+  `frameworkreporting.campaign_recipients` — campaign recipients
 """
 
 

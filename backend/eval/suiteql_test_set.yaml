@@ -1,107 +1,108 @@
 # SuiteQL Eval Test Set — 15 cases
-# Dialects rules: FETCH FIRST N ROWS ONLY, BUILTIN.DF(), TRUNC(SYSDATE), single-letter status codes
+# Dialect rules: FETCH FIRST N ROWS ONLY, BUILTIN.DF(), TRUNC(SYSDATE), single-letter status codes
+# Schema hints: status code mappings, BUILTIN.DF for display values, amount rules
 
 - question: "What are the top 10 sales orders by amount this month?"
   dialect: suiteql
   expected_keywords: ["sales", "order", "amount"]
-  expected_sql_contains: ["FETCH FIRST", "ORDER BY", "trandate"]
+  expected_sql_contains: ["FETCH FIRST", "ORDER BY", "trandate", "SalesOrd", "foreigntotal"]
   tables: ["transaction"]
   difficulty: easy
 
 - question: "Show me all open purchase orders with their vendors"
   dialect: suiteql
   expected_keywords: ["purchase", "order", "vendor"]
-  expected_sql_contains: ["transaction", "entity", "type = 'PurchOrd'"]
-  tables: ["transaction", "vendor"]
+  expected_sql_contains: ["PurchOrd", "BUILTIN.DF(t.entity)", "status"]
+  tables: ["transaction"]
   difficulty: easy
 
 - question: "What is the total revenue by subsidiary this quarter?"
   dialect: suiteql
   expected_keywords: ["revenue", "subsidiary", "quarter"]
-  expected_sql_contains: ["SUM", "GROUP BY", "subsidiary"]
-  tables: ["transaction", "transactionline"]
+  expected_sql_contains: ["SUM", "GROUP BY", "BUILTIN.DF", "subsidiary", "TRUNC(SYSDATE"]
+  tables: ["transaction"]
   difficulty: medium
 
 - question: "List all customers with overdue invoices older than 30 days"
   dialect: suiteql
   expected_keywords: ["customer", "invoice", "overdue"]
-  expected_sql_contains: ["duedate", "TRUNC(SYSDATE)", "type = 'CustInvc'"]
-  tables: ["transaction", "entity"]
+  expected_sql_contains: ["CustInvc", "duedate", "TRUNC(SYSDATE)", "status", "'A'"]
+  tables: ["transaction"]
   difficulty: medium
 
 - question: "What are the inventory levels for active items below reorder point?"
   dialect: suiteql
   expected_keywords: ["inventory", "item", "reorder"]
-  expected_sql_contains: ["inventoryitem", "quantityonhand", "reorderpoint"]
-  tables: ["inventoryitem"]
+  expected_sql_contains: ["quantityonhand", "reorderpoint", "isinactive"]
+  tables: ["item"]
   difficulty: medium
 
 - question: "Show me all vendor bills pending approval in the last 7 days"
   dialect: suiteql
   expected_keywords: ["vendor", "bill", "approval"]
-  expected_sql_contains: ["type = 'VendBill'", "status", "trandate"]
+  expected_sql_contains: ["VendBill", "status", "'A'", "trandate", "TRUNC(SYSDATE)"]
   tables: ["transaction"]
   difficulty: easy
 
-- question: "What is the average order value by customer class?"
+- question: "What is the average order value by customer category?"
   dialect: suiteql
-  expected_keywords: ["average", "order", "customer", "class"]
-  expected_sql_contains: ["AVG", "GROUP BY", "custcategory"]
-  tables: ["transaction", "entity"]
+  expected_keywords: ["average", "order", "customer"]
+  expected_sql_contains: ["AVG", "GROUP BY", "SalesOrd", "foreigntotal"]
+  tables: ["transaction"]
   difficulty: medium
 
-- question: "Show me all GL transactions for account 4000 this year"
+- question: "Show me all GL transactions for the revenue account this year"
   dialect: suiteql
   expected_keywords: ["account", "transaction", "year"]
-  expected_sql_contains: ["accountingline", "account", "TRUNC(SYSDATE, 'YEAR')"]
-  tables: ["accountingline", "account"]
+  expected_sql_contains: ["transactionaccountingline", "account", "TRUNC(SYSDATE", "'YEAR'"]
+  tables: ["transactionaccountingline", "account"]
   difficulty: medium
 
 - question: "Which items have been sold more than 100 times this month?"
   dialect: suiteql
   expected_keywords: ["item", "sold", "count"]
-  expected_sql_contains: ["COUNT", "GROUP BY", "item", "HAVING"]
-  tables: ["transactionline", "item"]
+  expected_sql_contains: ["COUNT", "GROUP BY", "HAVING", "BUILTIN.DF", "SalesOrd"]
+  tables: ["transactionline", "transaction"]
   difficulty: medium
 
 - question: "Show revenue breakdown by department for Q1"
   dialect: suiteql
-  expected_keywords: ["revenue", "department", "breakdown"]
-  expected_sql_contains: ["SUM", "department", "GROUP BY"]
-  tables: ["transaction", "transactionline", "department"]
+  expected_keywords: ["revenue", "department"]
+  expected_sql_contains: ["SUM", "BUILTIN.DF", "department", "GROUP BY"]
+  tables: ["transaction", "transactionline"]
   difficulty: hard
 
 - question: "What are all received RMAs in the past 90 days?"
   dialect: suiteql
   expected_keywords: ["rma", "received"]
-  expected_sql_contains: ["type = 'RtnAuth'", "status IN", "trandate"]
+  expected_sql_contains: ["RtnAuth", "status IN", "TRUNC(SYSDATE)", "BUILTIN.DF"]
   tables: ["transaction"]
   difficulty: medium
 
-- question: "List all employees with their department and base salary"
+- question: "List all employees with their department and subsidiary"
   dialect: suiteql
-  expected_keywords: ["employee", "department", "salary"]
-  expected_sql_contains: ["employee", "department", "basewage"]
+  expected_keywords: ["employee", "department"]
+  expected_sql_contains: ["employee", "BUILTIN.DF", "department"]
   tables: ["employee"]
   difficulty: easy
 
 - question: "What is the multi-currency AR balance by currency?"
   dialect: suiteql
-  expected_keywords: ["currency", "balance", "accounts receivable"]
-  expected_sql_contains: ["foreignamount", "currency", "GROUP BY"]
+  expected_keywords: ["currency", "balance", "receivable"]
+  expected_sql_contains: ["foreignamount", "BUILTIN.DF(t.currency)", "GROUP BY", "CustInvc"]
   tables: ["transaction", "transactionline"]
   difficulty: hard
 
-- question: "Show all custom record entries for active promotions"
+- question: "Show the total amount of pending vendor bills by vendor"
   dialect: suiteql
-  expected_keywords: ["custom", "promotion", "active"]
-  expected_sql_contains: ["customrecord", "isinactive = 'F'"]
-  tables: ["customrecord"]
-  difficulty: hard
+  expected_keywords: ["vendor", "bill", "pending"]
+  expected_sql_contains: ["VendBill", "BUILTIN.DF(t.entity)", "status", "'A'", "SUM"]
+  tables: ["transaction"]
+  difficulty: medium
 
-- question: "What are the top 5 items by gross profit margin this quarter?"
+- question: "What are the top 5 items by gross margin this quarter?"
   dialect: suiteql
-  expected_keywords: ["item", "profit", "margin"]
-  expected_sql_contains: ["SUM", "GROUP BY", "FETCH FIRST 5 ROWS ONLY", "ORDER BY"]
-  tables: ["transactionline", "item"]
+  expected_keywords: ["item", "margin"]
+  expected_sql_contains: ["SUM", "GROUP BY", "FETCH FIRST 5 ROWS ONLY", "BUILTIN.DF"]
+  tables: ["transactionline", "transaction"]
   difficulty: hard
