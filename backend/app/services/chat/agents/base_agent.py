@@ -377,6 +377,7 @@ class BaseSpecialistAgent(abc.ABC):
         adapter: BaseLLMAdapter,
         model: str,
         tool_choice: dict | str | None = None,
+        session_id: str | None = None,
     ) -> AgentResult:
         """Execute the specialist's mini agentic loop.
 
@@ -527,6 +528,7 @@ class BaseSpecialistAgent(abc.ABC):
                             correlation_id=self.correlation_id,
                             db=db,
                             context_need=getattr(self, "_context_need", None),
+                            session_id=session_id,
                         )
 
                         # Output redaction
@@ -641,6 +643,7 @@ class BaseSpecialistAgent(abc.ABC):
         conversation_history: list[dict] | None = None,
         tool_choice: dict | str | None = None,
         tool_result_interceptor: Callable[[str, str], tuple[tuple[str, dict] | None, str]] | None = None,
+        session_id: str | None = None,
     ):
         """Execute the agentic loop with streaming text output.
 
@@ -816,6 +819,7 @@ class BaseSpecialistAgent(abc.ABC):
                             correlation_id=self.correlation_id,
                             db=db,
                             context_need=getattr(self, "_context_need", None),
+                            session_id=session_id,
                         )
                         if active_policy and active_policy.blocked_fields:
                             try:
