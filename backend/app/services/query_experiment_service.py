@@ -227,8 +227,9 @@ async def _execute_bigquery(
     except Exception as exc:
         return {"success": False, "error": f"Decrypt failed: {exc}", "result_text": "", "rows": 0, "bytes_processed": 0}
 
-    project_id = creds.get("project_id", "")
-    service_creds = creds.get("service_account", creds)
+    project_id = creds.get("project_id") or (connector.metadata_json or {}).get("project_id", "")
+    service_creds = creds.get("service_account_json", {})
+    location = creds.get("location") or (connector.metadata_json or {}).get("location")
 
     # Dry-run cost check
     try:
@@ -236,6 +237,7 @@ async def _execute_bigquery(
             credentials=service_creds,
             project_id=project_id,
             query=sql,
+            location=location,
         )
         if cost_info.get("estimated_cost_usd", 0) > _BIGQUERY_MAX_COST_USD:
             return {
@@ -263,6 +265,7 @@ async def _execute_bigquery(
             project_id=project_id,
             query=sql,
             max_rows=100,
+            location=location,
         )
     except Exception as exc:
         return {"success": False, "error": str(exc), "result_text": "", "rows": 0, "bytes_processed": 0}
