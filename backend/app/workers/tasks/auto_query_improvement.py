@@ -43,32 +43,56 @@ async def _run_experiments(settings) -> dict:
     import uuid
 
     from app.core.database import async_session_factory
-    from app.services.query_eval_harness import load_eval_cases
+    from app.services.eval_case_miner import mine_organic_eval_cases, store_mined_cases
+    from app.services.query_eval_harness import load_db_eval_cases, load_eval_cases
     from app.services.query_experiment_service import estimate_experiment_cost, run_single_experiment
 
     tenant_id = uuid.UUID(settings.QUERY_IMPROVEMENT_TENANT_ID)
     budget = settings.QUERY_IMPROVEMENT_BUDGET_USD
     max_experiments = settings.QUERY_IMPROVEMENT_MAX_EXPERIMENTS
     spent = 0.0
-    stats = {"total": 0, "kept": 0, "reverted": 0, "skipped": 0, "errors": 0, "cost_usd": 0.0}
+    stats = {"total": 0, "kept": 0, "reverted": 0, "skipped": 0, "errors": 0, "cost_usd": 0.0, "mined": 0}
     consecutive_errors = 0
 
-    # Load eval cases
-    suiteql_cases = load_eval_cases("suiteql")
-    bigquery_cases = load_eval_cases("bigquery")
-
-    # Interleave: alternate SuiteQL and BigQuery
-    cases = []
-    for i in range(max(len(suiteql_cases), len(bigquery_cases))):
-        if i < len(suiteql_cases):
-            cases.append(suiteql_cases[i])
-        if i < len(bigquery_cases):
-            cases.append(bigquery_cases[i])
-
-    cases = cases[:max_experiments]
-    print(f"[AUTO_IMPROVE] Starting: {len(cases)} experiments, budget ${budget}", flush=True)
-
     async with async_session_factory() as db:
+        # Phase 1: Mine new organic eval cases from recent successful queries
+        try:
+            new_cases = await mine_organic_eval_cases(db, tenant_id)
+            if new_cases:
+                stored = await store_mined_cases(db, tenant_id, new_cases)
+                await db.commit()
+                stats["mined"] = stored
+                print(f"[AUTO_IMPROVE] Mined {stored} new organic eval cases", flush=True)
+        except Exception as exc:
+            print(f"[AUTO_IMPROVE] Mining failed (non-fatal): {exc}", flush=True)
+
+        # Phase 2: Load all eval cases (YAML seed + DB organic)
+        suiteql_seed = load_eval_cases("suiteql")
+        bigquery_seed = load_eval_cases("bigquery")
+        suiteql_organic = await load_db_eval_cases(db, tenant_id, "suiteql")
+        bigquery_organic = await load_db_eval_cases(db, tenant_id, "bigquery")
+
+        # Combine: organic cases first (higher value — real user patterns), then seed
+        suiteql_cases = suiteql_organic + suiteql_seed
+        bigquery_cases = bigquery_organic + bigquery_seed
+
+        # Interleave: alternate SuiteQL and BigQuery
+        cases = []
+        for i in range(max(len(suiteql_cases), len(bigquery_cases))):
+            if i < len(suiteql_cases):
+                cases.append(suiteql_cases[i])
+            if i < len(bigquery_cases):
+                cases.append(bigquery_cases[i])
+
+        cases = cases[:max_experiments]
+        print(
+            f"[AUTO_IMPROVE] Starting: {len(cases)} experiments "
+            f"({len(suiteql_organic)}+{len(bigquery_organic)} organic, "
+            f"{len(suiteql_seed)}+{len(bigquery_seed)} seed), "
+            f"budget ${budget}",
+            flush=True,
+        )
+
         for case in cases:
             # Budget check
             est_cost = estimate_experiment_cost(case.dialect)

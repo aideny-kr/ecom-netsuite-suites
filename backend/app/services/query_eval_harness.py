@@ -187,3 +187,36 @@ def load_eval_cases(dialect: str) -> list[EvalCase]:
         )
 
     return cases
+
+
+async def load_db_eval_cases(
+    db: "AsyncSession",
+    tenant_id: "uuid.UUID",
+    dialect: str,
+) -> list[EvalCase]:
+    """Load active eval cases from the database for a given tenant + dialect."""
+    from sqlalchemy import select as sa_select
+
+    from app.models.eval_case import EvalCase as EvalCaseModel
+
+    stmt = (
+        sa_select(EvalCaseModel)
+        .where(
+            EvalCaseModel.tenant_id == tenant_id,
+            EvalCaseModel.dialect == dialect,
+            EvalCaseModel.is_active == True,  # noqa: E712
+        )
+        .order_by(EvalCaseModel.created_at.desc())
+        .limit(50)
+    )
+    result = await db.execute(stmt)
+    rows = result.scalars().all()
+
+    return [
+        EvalCase(
+            question=row.question,
+            dialect=row.dialect,
+            expected_keywords=row.expected_keywords or [],
+        )
+        for row in rows
+    ]
