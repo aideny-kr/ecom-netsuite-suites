@@ -19,6 +19,7 @@ from app.api.v1 import (
     netsuite_metadata,
     onboarding,
     policies,
+    pricing_config,
     schedules,
     settings,
     skills,
@@ -61,3 +62,4 @@ api_router.include_router(skills.router)
 api_router.include_router(exports.router)
 api_router.include_router(invites.router)
 api_router.include_router(connection_alerts.router)
+api_router.include_router(pricing_config.router)
