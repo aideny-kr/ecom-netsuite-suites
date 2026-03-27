@@ -25,7 +25,7 @@ async def pricing_convert_execute(params: dict, context: dict, **kwargs) -> dict
         return {"error": True, "message": "Missing context — tenant_id and db are required."}
     db = context["db"]
     tenant_id = context["tenant_id"]
-    user_id = context.get("user_id")
+    user_id = context.get("actor_id") or context.get("user_id")
 
     # 1. Load config
     config_row = await get_config(db, tenant_id)
@@ -131,7 +131,7 @@ async def pricing_export_execute(params: dict, context: dict, **kwargs) -> dict:
         return {"error": True, "message": "Missing context — tenant_id and db are required."}
     db = context["db"]
     tenant_id = context["tenant_id"]
-    user_id = context.get("user_id")
+    user_id = context.get("actor_id") or context.get("user_id")
 
     # 1. Load config
     config_row = await get_config(db, tenant_id)
