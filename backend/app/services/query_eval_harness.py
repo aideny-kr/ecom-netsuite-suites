@@ -1,11 +1,12 @@
 """Query evaluation harness — scoring functions and test case loader.
 
-Scores generated SQL queries on three dimensions:
+Scores generated SQL queries on four dimensions:
   - syntax:     dialect correctness (SuiteQL vs BigQuery rules)
   - accuracy:   keyword hit ratio against expected answer tokens
   - efficiency: query structure quality (avoids SELECT *, uses CTEs/GROUP BY)
+  - sql_match:  fragment hit ratio of expected SQL constructs in generated SQL
 
-Composite weight: accuracy 0.40, syntax 0.35, efficiency 0.25.
+Composite weight: accuracy 0.30, syntax 0.30, efficiency 0.15, sql_match 0.25.
 """
 
 from __future__ import annotations
@@ -148,9 +149,21 @@ def score_efficiency(
     return max(0.0, round(score, 4))
 
 
-def composite_score(accuracy: float, syntax: float, efficiency: float) -> float:
-    """Weighted composite: accuracy 40%, syntax 35%, efficiency 25%."""
-    return round(accuracy * 0.40 + syntax * 0.35 + efficiency * 0.25, 4)
+def score_sql_contains(sql: str, expected_fragments: list[str]) -> float:
+    """Return hit ratio of expected SQL fragments found in generated SQL.
+
+    Case-insensitive. Returns 0.0 when either argument is empty.
+    """
+    if not sql or not expected_fragments:
+        return 0.0
+    sql_upper = sql.upper()
+    hits = sum(1 for frag in expected_fragments if frag.upper() in sql_upper)
+    return round(hits / len(expected_fragments), 4)
+
+
+def composite_score(accuracy: float, syntax: float, efficiency: float, sql_match: float = 0.0) -> float:
+    """Weighted composite: accuracy 30%, syntax 30%, efficiency 15%, sql_match 25%."""
+    return round(accuracy * 0.30 + syntax * 0.30 + efficiency * 0.15 + sql_match * 0.25, 4)
 
 
 # ---------------------------------------------------------------------------

@@ -29,6 +29,7 @@ from app.services.query_eval_harness import (
     composite_score,
     score_accuracy,
     score_efficiency,
+    score_sql_contains,
     score_syntax,
 )
 from app.services.query_pattern_service import extract_and_store_pattern
@@ -512,6 +513,7 @@ async def run_single_experiment(
         "score_accuracy": 0.0,
         "score_syntax": 0.0,
         "score_efficiency": 0.0,
+        "score_sql_match": 0.0,
         "experiment_score": 0.0,
         "baseline_score": baseline_score,
         "delta": 0.0,
@@ -560,11 +562,13 @@ async def run_single_experiment(
         rows_returned=exec_result.get("rows"),
         bytes_processed=exec_result.get("bytes_processed"),
     )
-    exp_score = composite_score(acc, syn, eff)
+    sql_match = score_sql_contains(generated_sql, case.expected_sql_contains)
+    exp_score = composite_score(acc, syn, eff, sql_match)
 
     result["score_accuracy"] = acc
     result["score_syntax"] = syn
     result["score_efficiency"] = eff
+    result["score_sql_match"] = sql_match
     result["experiment_score"] = exp_score
     result["delta"] = round(exp_score - baseline_score, 4)
 
