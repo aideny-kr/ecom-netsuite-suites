@@ -107,8 +107,8 @@ class Settings(BaseSettings):
 
     # Autonomous query improvement loop
     QUERY_IMPROVEMENT_ENABLED: bool = False
-    QUERY_IMPROVEMENT_BUDGET_USD: float = 10.0
-    QUERY_IMPROVEMENT_MAX_EXPERIMENTS: int = 30
+    QUERY_IMPROVEMENT_BUDGET_USD: float = 12.0
+    QUERY_IMPROVEMENT_MAX_EXPERIMENTS: int = 60
     QUERY_IMPROVEMENT_TENANT_ID: str = ""
 
     model_config = {"env_file": str(_env_file), "extra": "ignore"}
