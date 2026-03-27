@@ -48,5 +48,8 @@ class TestAllowedChatToolsFromOld:
             "bigquery.sql",
             "bigquery.schema",
             "bigquery.cost_estimate",
+            "pricing.convert",
+            "pricing.config_read",
+            "pricing.export",
         }
         assert ALLOWED_CHAT_TOOLS == expected

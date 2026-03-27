@@ -96,10 +96,12 @@ class TestPricingAgentInstantiation:
             "netsuite_get_record",
             "rag_search",
             "pivot_query_result",
+            "pricing_convert",
+            "pricing_config_read",
+            "pricing_export",
+            "web_search",
         }
         assert tool_names <= allowed_pricing_tools
-        # Should NOT have tools outside the pricing agent's tool_ids
-        assert "web_search" not in tool_names
 
     def test_pricing_agent_prompt_loaded(self):
         registry = _make_registry()

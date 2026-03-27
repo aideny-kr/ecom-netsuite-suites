@@ -59,8 +59,8 @@ class TestAutoQueryImprovementTask:
         from app.core.config import settings
 
         assert settings.QUERY_IMPROVEMENT_ENABLED is False  # Off by default
-        assert settings.QUERY_IMPROVEMENT_BUDGET_USD == 10.0
-        assert settings.QUERY_IMPROVEMENT_MAX_EXPERIMENTS == 30
+        assert settings.QUERY_IMPROVEMENT_BUDGET_USD == 12.0
+        assert settings.QUERY_IMPROVEMENT_MAX_EXPERIMENTS == 60
 
     def test_task_function_importable(self):
         from app.workers.tasks.auto_query_improvement import auto_query_improvement

@@ -978,9 +978,12 @@ async def run_chat_turn(
         from app.models.tenant import Tenant, TenantConfig
 
         # Single query for all TenantConfig fields used in this function
-        _tc_result = await db.execute(sa_select(TenantConfig).where(TenantConfig.tenant_id == tenant_id))
-        _tenant_config_row = _tc_result.scalar_one_or_none()
-        brand_name = (_tenant_config_row.brand_name if _tenant_config_row else None) or ""
+        try:
+            _tc_result = await db.execute(sa_select(TenantConfig).where(TenantConfig.tenant_id == tenant_id))
+            _tenant_config_row = _tc_result.scalar_one_or_none()
+        except Exception:
+            _tenant_config_row = None
+        brand_name = (getattr(_tenant_config_row, "brand_name", None) if _tenant_config_row else None) or ""
         if not brand_name:
             tenant_result = await db.execute(sa_select(Tenant.name).where(Tenant.id == tenant_id))
             brand_name = tenant_result.scalar_one_or_none() or "Suite Studio AI"

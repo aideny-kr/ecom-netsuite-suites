@@ -75,12 +75,13 @@ class TestScoreEfficiency:
 
 class TestCompositeScore:
     def test_weighted_composite(self):
+        # Weights: accuracy 30%, syntax 30%, efficiency 15%, sql_match 25%
         score = composite_score(accuracy=0.9, syntax=1.0, efficiency=0.8)
-        expected = 0.9 * 0.40 + 1.0 * 0.35 + 0.8 * 0.25  # 0.91
+        expected = 0.9 * 0.30 + 1.0 * 0.30 + 0.8 * 0.15 + 0.0 * 0.25  # 0.69
         assert abs(score - expected) < 0.01
 
     def test_all_perfect(self):
-        assert composite_score(accuracy=1.0, syntax=1.0, efficiency=1.0) == 1.0
+        assert composite_score(accuracy=1.0, syntax=1.0, efficiency=1.0, sql_match=1.0) == 1.0
 
     def test_all_zero(self):
         assert composite_score(accuracy=0.0, syntax=0.0, efficiency=0.0) == 0.0

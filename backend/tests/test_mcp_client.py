@@ -49,6 +49,9 @@ EXPECTED_TOOLS = {
     "bigquery.sql",
     "bigquery.schema",
     "bigquery.cost_estimate",
+    "pricing.convert",
+    "pricing.config_read",
+    "pricing.export",
 }
 
 

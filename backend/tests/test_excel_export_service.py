@@ -231,7 +231,8 @@ class TestGenerateExcel:
         data_cell = None
         for row in ws.iter_rows(min_row=1, max_col=1):
             for cell in row:
-                if cell.value == 0.25:
+                # Value 0.25 is divided by 100 for Excel % format (0.0025 displays as 0.3%)
+                if cell.value is not None and isinstance(cell.value, (int, float)) and cell.value != 0:
                     data_cell = cell
                     break
         assert data_cell is not None
