@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -27,3 +27,6 @@ class AgentConfig(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     avg_latency_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
     avg_cost: Mapped[float | None] = mapped_column(Float, nullable=True)
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    user_instructions: Mapped[str | None] = mapped_column(Text, nullable=True)
+    instructions_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    instructions_updated_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)

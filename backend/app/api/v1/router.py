@@ -2,6 +2,7 @@ from fastapi import APIRouter
 
 from app.api.v1 import (
     admin,
+    agent_instructions,
     audit,
     auth,
     chat,
@@ -65,3 +66,4 @@ api_router.include_router(invites.router)
 api_router.include_router(connection_alerts.router)
 api_router.include_router(pricing_config.router)
 api_router.include_router(task_files.router)
+api_router.include_router(agent_instructions.router)
