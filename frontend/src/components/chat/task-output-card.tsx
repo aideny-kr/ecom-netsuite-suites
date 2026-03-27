@@ -20,7 +20,15 @@ export function TaskOutputCard({ data }: TaskOutputCardProps) {
   const handleDownload = async (format: string, fileId: string) => {
     setDownloading(format);
     try {
-      const response = await apiClient.download(`/api/v1/task-files/${fileId}/download`, {});
+      const baseUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+      const token = typeof window !== "undefined" ? localStorage.getItem("access_token") : null;
+      const headers: Record<string, string> = {};
+      if (token) headers["Authorization"] = `Bearer ${token}`;
+      const response = await fetch(`${baseUrl}/api/v1/task-files/${fileId}/download`, {
+        headers,
+        credentials: "include",
+      });
+      if (!response.ok) throw new Error("Download failed");
       const blob = await response.blob();
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
