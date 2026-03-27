@@ -18,6 +18,14 @@ export interface DataTableData {
   truncated: boolean;
 }
 
+export interface TaskOutputData {
+  sku_count: number;
+  currency_count: number;
+  output_files: Record<string, string>;
+  preview: Record<string, any>[];
+  template_mode: boolean;
+}
+
 export type ChatStreamEvent =
   | { type: "text"; content: string }
   | { type: "tool_status"; content: string }
@@ -25,6 +33,7 @@ export type ChatStreamEvent =
   | { type: "importance"; tier: number; label: string; needs_review: boolean }
   | { type: "financial_report"; data: FinancialReportData }
   | { type: "data_table"; data: DataTableData }
+  | { type: "task_output"; data: TaskOutputData }
   | { type: "chart"; data: ChartData }
   | { type: "error"; error: string }
   | { type: "message"; message: ChatMessage };
@@ -42,6 +51,7 @@ type StreamHandlers = {
   onFinancialReport?: (data: FinancialReportData) => void;
   onDataTable?: (data: DataTableData) => void;
   onChart?: (data: ChartData) => void;
+  onTaskOutput?: (data: TaskOutputData) => void;
   onError?: (error: string) => void;
   onMessage?: (message: ChatMessage) => void;
 };
@@ -139,6 +149,8 @@ export async function consumeChatStream(
         handlers.onDataTable?.(event.data);
       } else if (event.type === "chart") {
         handlers.onChart?.(event.data);
+      } else if (event.type === "task_output") {
+        handlers.onTaskOutput?.(event.data);
       } else if (event.type === "error") {
         handlers.onError?.(event.error);
       } else if (event.type === "message") {

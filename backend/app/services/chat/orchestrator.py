@@ -655,6 +655,33 @@ def _intercept_tool_result(
         )
         return "data_table", sse_event_data, condensed
 
+    # --- Task output path (pricing conversion, etc.) ---
+    if tool_name in ("pricing_convert", "pricing.convert"):
+        try:
+            parsed = json.loads(result_str)
+        except (json.JSONDecodeError, TypeError):
+            return None, None, result_str
+        if not parsed.get("success"):
+            return None, None, result_str
+
+        sse_event_data = {
+            "type": "task_output",
+            "sku_count": parsed.get("sku_count", 0),
+            "currency_count": parsed.get("currency_count", 0),
+            "output_files": parsed.get("output_files", {}),
+            "preview": parsed.get("preview", []),
+            "template_mode": parsed.get("template_mode", False),
+        }
+        condensed = json.dumps({
+            "success": True,
+            "sku_count": parsed.get("sku_count"),
+            "currency_count": parsed.get("currency_count"),
+            "output_files": parsed.get("output_files"),
+            "template_mode": parsed.get("template_mode"),
+            "note": "Conversion complete. Output files ready for download. Present the summary to the user.",
+        }, default=str)
+        return "task_output", sse_event_data, condensed
+
     # --- Not a data tool ---
     return None, None, result_str
 
