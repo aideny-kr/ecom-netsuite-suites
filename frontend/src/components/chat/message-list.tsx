@@ -19,6 +19,7 @@ import { ToolCallStepCard } from "@/components/chat/tool-call-step";
 import { ChangeProposalCard } from "@/components/chat/change-proposal-card";
 import { WorkspaceToolCard } from "@/components/chat/workspace-tool-card";
 import { SuiteQLToolCard } from "@/components/chat/suiteql-tool-card";
+import { TaskOutputCard } from "@/components/chat/task-output-card";
 import { FileCode, Bookmark, Check, Loader2, Copy, ThumbsUp, ThumbsDown, User, Zap } from "lucide-react";
 import { ConfidenceBadge } from "@/components/chat/confidence-badge";
 import { ImportanceBanner } from "@/components/chat/importance-banner";
@@ -477,6 +478,8 @@ interface MessageListProps {
   dataTables?: Map<string, DataTableData>;
   charts?: ChartData[];
   chartsByMessage?: Map<string, ChartData[]>;
+  taskOutput?: import("@/lib/chat-stream").TaskOutputData | null;
+  taskOutputs?: Map<string, import("@/lib/chat-stream").TaskOutputData>;
   onImportanceOverride?: (messageId: string, newTier: number) => void;
   variant?: "default" | "terminal";
 }
@@ -499,6 +502,8 @@ export function MessageList({
   dataTables,
   charts,
   chartsByMessage,
+  taskOutput,
+  taskOutputs,
   onImportanceOverride,
   variant,
 }: MessageListProps) {
@@ -634,6 +639,7 @@ export function MessageList({
             financialReportData={financialReports?.get(message.id) ?? null}
             dataTableData={dataTables?.get(message.id) ?? null}
             chartDataList={chartsByMessage?.get(message.id) ?? null}
+            taskOutputData={taskOutputs?.get(message.id) ?? null}
             isTerminal={isTerminal}
           />
         ) : isTerminal ? (
@@ -809,6 +815,7 @@ function AssistantMessageRow({
   financialReportData = null,
   dataTableData = null,
   chartDataList = null,
+  taskOutputData = null,
   isTerminal = false,
 }: {
   message: ChatMessage;
@@ -821,6 +828,7 @@ function AssistantMessageRow({
   financialReportData?: FinancialReportData | null;
   dataTableData?: DataTableData | null;
   chartDataList?: ChartData[] | null;
+  taskOutputData?: import("@/lib/chat-stream").TaskOutputData | null;
   isTerminal?: boolean;
 }) {
   const { brandName: agentName } = useBranding();
@@ -900,6 +908,10 @@ function AssistantMessageRow({
         {chartDataList && chartDataList.length > 0 && chartDataList.map((chart, idx) => (
           <ChartRenderer key={idx} data={chart} />
         ))}
+
+        {taskOutputData && (
+          <TaskOutputCard data={taskOutputData} />
+        )}
 
         <div className="flex min-w-0 flex-col gap-2">
           {parseThinkingBlocks(message.content).map((part, index) =>

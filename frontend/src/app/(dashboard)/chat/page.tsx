@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiClient } from "@/lib/api-client";
 import { consumeChatStream } from "@/lib/chat-stream";
-import type { FinancialReportData, DataTableData } from "@/lib/chat-stream";
+import type { FinancialReportData, DataTableData, TaskOutputData } from "@/lib/chat-stream";
 import type { ChartData } from "@/lib/types";
 import type { ChatSession, ChatSessionDetail, ChatMessage } from "@/lib/types";
 import { SessionSidebar } from "@/components/chat/session-sidebar";
@@ -29,6 +29,8 @@ export default function ChatPage() {
   const dataTablesRef = useRef<Map<string, DataTableData>>(new Map());
   const [charts, setCharts] = useState<ChartData[]>([]);
   const chartsRef = useRef<Map<string, ChartData[]>>(new Map());
+  const [taskOutput, setTaskOutput] = useState<TaskOutputData | null>(null);
+  const taskOutputsRef = useRef<Map<string, TaskOutputData>>(new Map());
   const queryClient = useQueryClient();
   const router = useRouter();
 
@@ -116,6 +118,7 @@ export default function ChatPage() {
       setFinancialReport(null);
       setDataTable(null);
       setCharts([]);
+      setTaskOutput(null);
 
       let sessionId = activeSessionId;
       if (!sessionId) {
@@ -151,6 +154,7 @@ export default function ChatPage() {
           onFinancialReport: (data) => setFinancialReport(data),
           onDataTable: (data) => setDataTable(data),
           onChart: (data) => setCharts((prev) => [...prev, data]),
+          onTaskOutput: (data) => setTaskOutput(data),
           onError: (streamError) => setError(streamError),
           onMessage: (message) => {
             // Associate any in-flight financial report with this message
@@ -173,6 +177,13 @@ export default function ChatPage() {
                 chartsRef.current.set(message.id, current);
               }
               return [];
+            });
+            // Associate any in-flight task output with this message
+            setTaskOutput((current) => {
+              if (current) {
+                taskOutputsRef.current.set(message.id, current);
+              }
+              return null;
             });
             setStreamingMessage(message);
             setStreamingContent(null);
@@ -207,6 +218,7 @@ export default function ChatPage() {
         setFinancialReport(null);
         setDataTable(null);
         setCharts([]);
+        setTaskOutput(null);
       }
     },
     [activeSessionId, createSession, flushBuffer, isStreaming, queryClient],
@@ -267,6 +279,8 @@ export default function ChatPage() {
             dataTables={dataTablesRef.current}
             charts={charts}
             chartsByMessage={chartsRef.current}
+            taskOutput={taskOutput}
+            taskOutputs={taskOutputsRef.current}
             onMentionClick={handleMentionClick}
             onImportanceOverride={(messageId, newTier) => {
               queryClient.setQueryData<ChatSessionDetail>(
