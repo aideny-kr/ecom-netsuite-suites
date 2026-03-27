@@ -221,6 +221,19 @@ function normalizeStreamEvent(data: Record<string, unknown>): ChatStreamEvent | 
       } as ChartData,
     };
   }
+  if (type === "task_output" && data.data && typeof data.data === "object") {
+    const d = data.data as Record<string, unknown>;
+    return {
+      type,
+      data: {
+        sku_count: typeof d.sku_count === "number" ? d.sku_count : 0,
+        currency_count: typeof d.currency_count === "number" ? d.currency_count : 0,
+        output_files: (d.output_files && typeof d.output_files === "object" ? d.output_files : {}) as Record<string, string>,
+        preview: Array.isArray(d.preview) ? d.preview : [],
+        template_mode: Boolean(d.template_mode),
+      },
+    };
+  }
   if (type === "error" && typeof data.error === "string") {
     return { type, error: data.error };
   }
