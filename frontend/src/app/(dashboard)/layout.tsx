@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, Suspense } from "react";
 import Link from "next/link";
 import { useRouter, usePathname } from "next/navigation";
 import { useAuth } from "@/providers/auth-provider";
@@ -124,7 +124,12 @@ export default function DashboardLayout({
       {showOnboarding && (
         <OnboardingWizard onComplete={handleOnboardingComplete} />
       )}
-      <Sidebar collapsed={sidebarCollapsed} onToggle={() => setSidebarCollapsed(!sidebarCollapsed)} />
+      <Suspense fallback={null}>
+        <Sidebar
+          collapsed={sidebarCollapsed}
+          onToggle={() => setSidebarCollapsed(!sidebarCollapsed)}
+        />
+      </Suspense>
       <main className="flex-1 overflow-auto bg-background scrollbar-thin">
         {sidebarCollapsed && (
           <button

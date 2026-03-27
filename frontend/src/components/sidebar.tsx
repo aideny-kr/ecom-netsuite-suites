@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useState, useEffect } from "react";
 import { useTheme } from "next-themes";
 import {
@@ -21,12 +21,15 @@ import {
   Zap,
   Moon,
   Sun,
+  Tag,
+  BarChart3,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { NAV_ITEMS, CANONICAL_TABLES } from "@/lib/constants";
 import { useAuth } from "@/providers/auth-provider";
 import { useBranding } from "@/providers/branding-provider";
 import { useFeatures } from "@/hooks/use-features";
+import { useAgents } from "@/hooks/use-agents";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -44,8 +47,26 @@ const iconMap = {
   Settings,
 } as const;
 
+const agentIconMap: Record<string, typeof Tag> = {
+  "pricing-agent": Tag,
+  "bi-agent": BarChart3,
+};
+
 export function Sidebar({ collapsed = false, onToggle }: { collapsed?: boolean; onToggle?: () => void }) {
   const pathname = usePathname();
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const pinnedAgentId = searchParams?.get("agent") || null;
+  const { data: agents = [] } = useAgents();
+  const specialistAgents = agents.filter(a => a.agent_id !== "unified-agent");
+
+  const handleSelectAgent = (agentId: string) => {
+    if (pinnedAgentId === agentId) {
+      router.push("/chat");
+    } else {
+      router.push(`/chat?agent=${agentId}`);
+    }
+  };
   const { user, tenants, switchTenant, logout } = useAuth();
   const { brandName, logoUrl } = useBranding();
   const { data: features } = useFeatures();
@@ -150,6 +171,34 @@ export function Sidebar({ collapsed = false, onToggle }: { collapsed?: boolean; 
             </Link>
           );
         })}
+
+        {/* Custom Agents */}
+        {specialistAgents.length > 0 && (
+          <div className="pt-4">
+            <p className="mb-2 px-3 text-[10px] font-semibold uppercase tracking-widest text-[hsl(var(--sidebar-muted))]">
+              Custom Agents
+            </p>
+            {specialistAgents.map((agent) => {
+              const AgentIcon = agentIconMap[agent.agent_id] || Tag;
+              const isActive = pathname === "/chat" && pinnedAgentId === agent.agent_id;
+              return (
+                <button
+                  key={agent.agent_id}
+                  onClick={() => handleSelectAgent(agent.agent_id)}
+                  className={cn(
+                    "group flex w-full items-center gap-3 px-4 py-2.5 text-[13px] font-medium tracking-wide uppercase transition-all duration-150",
+                    isActive
+                      ? "bg-[hsl(var(--sidebar-hover))] text-[hsl(var(--sidebar-active))] border-l-4 border-[hsl(var(--sidebar-active))]"
+                      : "text-[hsl(var(--sidebar-foreground))] hover:bg-[hsl(var(--sidebar-hover))/0.5] hover:text-[hsl(var(--sidebar-active))/0.7]",
+                  )}
+                >
+                  <AgentIcon className={cn("h-4 w-4", isActive ? "text-[hsl(var(--sidebar-active))]" : "text-[hsl(var(--sidebar-muted))] group-hover:text-[hsl(var(--sidebar-active))/0.7]")} />
+                  {agent.display_name}
+                </button>
+              );
+            })}
+          </div>
+        )}
 
         <div className="pt-4">
           <p className="mb-2 px-3 text-[10px] font-semibold uppercase tracking-widest text-[hsl(var(--sidebar-muted))]">

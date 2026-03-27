@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useCallback, useMemo, useEffect, useRef, type KeyboardEvent } from "react";
-import { ArrowUp, ArrowRight, AtSign, X, Slash } from "lucide-react";
+import { ArrowUp, ArrowRight, AtSign, X, Slash, Paperclip, FileSpreadsheet } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useQuery } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
@@ -11,7 +11,7 @@ import { apiClient } from "@/lib/api-client";
 import type { AgentSkillMetadata } from "@/lib/types";
 
 interface ChatInputProps {
-  onSend: (content: string) => void;
+  onSend: (content: string, fileId?: string) => void;
   isLoading: boolean;
   workspaceId?: string | null;
   variant?: "default" | "terminal";
@@ -20,6 +20,8 @@ interface ChatInputProps {
 export function ChatInput({ onSend, isLoading, workspaceId, variant }: ChatInputProps) {
   const isTerminal = variant === "terminal";
   const [value, setValue] = useState("");
+  const [attachedFile, setAttachedFile] = useState<{ id: string; name: string } | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [mentionOpen, setMentionOpen] = useState(false);
   const [commandOpen, setCommandOpen] = useState(false);
   const [analyticsOpen, setAnalyticsOpen] = useState(false);
@@ -81,13 +83,33 @@ export function ChatInput({ onSend, isLoading, workspaceId, variant }: ChatInput
     [value],
   );
 
+  const handleFileUpload = useCallback(async (file: File) => {
+    const formData = new FormData();
+    formData.append("file", file);
+    const baseUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+    try {
+      const res = await fetch(`${baseUrl}/api/v1/task-files/upload`, {
+        method: "POST",
+        body: formData,
+        credentials: "include",
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setAttachedFile({ id: data.id, name: data.filename });
+      }
+    } catch {
+      // Silently fail — user can retry
+    }
+  }, []);
+
   const handleSend = useCallback(() => {
     const trimmed = value.trim();
     if (!trimmed || isLoading) return;
-    onSend(trimmed);
+    onSend(trimmed, attachedFile?.id || undefined);
     setValue("");
+    setAttachedFile(null);
     setCommandOpen(false);
-  }, [value, isLoading, onSend]);
+  }, [value, isLoading, onSend, attachedFile]);
 
   // Track when a command was just selected to prevent popover from reopening
   const commandJustSelected = useRef(false);
@@ -220,6 +242,26 @@ export function ChatInput({ onSend, isLoading, workspaceId, variant }: ChatInput
             ))}
           </div>
         )}
+        {attachedFile && (
+          <div className="flex items-center gap-2 px-3 py-1.5 mb-1 bg-blue-500/10 rounded-md text-[12px]">
+            <FileSpreadsheet className="h-3.5 w-3.5 text-blue-400" />
+            <span className="text-foreground">{attachedFile.name}</span>
+            <button onClick={() => setAttachedFile(null)} className="text-muted-foreground hover:text-foreground">
+              <X className="h-3 w-3" />
+            </button>
+          </div>
+        )}
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".xlsx,.csv,.xls"
+          className="hidden"
+          onChange={(e) => {
+            const file = e.target.files?.[0];
+            if (file) handleFileUpload(file);
+            if (e.target) e.target.value = "";
+          }}
+        />
         <div
           className={cn(
             isTerminal
@@ -266,6 +308,18 @@ export function ChatInput({ onSend, isLoading, workspaceId, variant }: ChatInput
               </Button>
             </FileMentionPicker>
           )}
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            className={cn(
+              "p-1.5 rounded transition-colors",
+              isTerminal
+                ? "text-[var(--chat-accent)]/60 hover:text-[var(--chat-accent)]"
+                : "text-muted-foreground hover:text-foreground",
+            )}
+            title="Attach file"
+          >
+            <Paperclip className="h-4 w-4" />
+          </button>
           {isTerminal ? (
             <button
               onClick={handleSend}

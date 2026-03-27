@@ -16,13 +16,10 @@ import {
   Check,
   X,
   Loader2,
-  Tag,
-  BarChart3,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import type { ChatSession } from "@/lib/types";
-import type { AgentSummary } from "@/hooks/use-agents";
 import {
   useSavedQueries,
   useUpdateSavedQuery,
@@ -39,15 +36,7 @@ interface SessionSidebarProps {
   variant?: "default" | "terminal";
   collapsed?: boolean;
   onToggle?: () => void;
-  agents?: AgentSummary[];
-  pinnedAgentId?: string | null;
-  onSelectAgent?: (agentId: string | null) => void;
 }
-
-const AGENT_ICONS: Record<string, typeof Tag> = {
-  "pricing-agent": Tag,
-  "bi-agent": BarChart3,
-};
 
 export function SessionSidebar({
   sessions,
@@ -57,9 +46,6 @@ export function SessionSidebar({
   variant,
   collapsed = false,
   onToggle,
-  agents = [],
-  pinnedAgentId,
-  onSelectAgent,
 }: SessionSidebarProps) {
   const isTerminal = variant === "terminal";
   const [queriesExpanded, setQueriesExpanded] = useState(true);
@@ -108,43 +94,6 @@ export function SessionSidebar({
           </button>
         )}
       </div>
-
-      {/* Agents */}
-      {agents.length > 0 && onSelectAgent && (
-        <div className="px-3 pb-2">
-          <p className={cn(
-            "px-2 pb-1 text-[10px] font-semibold uppercase tracking-widest",
-            isTerminal ? "text-[var(--chat-accent)]" : "text-muted-foreground",
-          )}>
-            Agents
-          </p>
-          <div className="space-y-0.5">
-            {agents.map((agent) => {
-              const Icon = AGENT_ICONS[agent.agent_id] || Tag;
-              const isActive = pinnedAgentId === agent.agent_id;
-              return (
-                <button
-                  key={agent.agent_id}
-                  onClick={() => onSelectAgent(isActive ? null : agent.agent_id)}
-                  className={cn(
-                    "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-[13px] transition-colors",
-                    isActive
-                      ? isTerminal
-                        ? "bg-[var(--chat-accent)]/10 text-[var(--chat-accent)] border-l-2 border-[var(--chat-accent)]"
-                        : "bg-primary/10 text-primary border-l-2 border-primary"
-                      : isTerminal
-                        ? "text-muted-foreground hover:bg-[var(--chat-surface-mid)] hover:text-foreground"
-                        : "text-muted-foreground hover:bg-accent hover:text-foreground",
-                  )}
-                >
-                  <Icon className="h-3.5 w-3.5 shrink-0" />
-                  <span className="truncate">{agent.display_name}</span>
-                </button>
-              );
-            })}
-          </div>
-        </div>
-      )}
 
       {/* Chat Sessions — scrollable */}
       <div className="flex-1 min-h-0 overflow-auto px-3 space-y-0.5 scrollbar-thin">

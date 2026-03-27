@@ -21,6 +21,10 @@ import { WorkspaceToolCard } from "@/components/chat/workspace-tool-card";
 import { SuiteQLToolCard } from "@/components/chat/suiteql-tool-card";
 import { TaskOutputCard } from "@/components/chat/task-output-card";
 import { AgentChatHeader } from "@/components/chat/agent-chat-header";
+import { PricingConfigSection } from "@/components/settings/pricing-config-section";
+import { InstructionPanel } from "@/components/chat/instruction-panel";
+import { TemplateSlot } from "@/components/chat/template-slot";
+import { useAgentInstructions, useUpdateAgentInstructions } from "@/hooks/use-agent-instructions";
 import { FileCode, Bookmark, Check, Loader2, Copy, ThumbsUp, ThumbsDown, User, Zap } from "lucide-react";
 import { ConfidenceBadge } from "@/components/chat/confidence-badge";
 import { ImportanceBanner } from "@/components/chat/importance-banner";
@@ -483,7 +487,11 @@ interface MessageListProps {
   taskOutputs?: Map<string, import("@/lib/chat-stream").TaskOutputData>;
   pinnedAgentId?: string | null;
   agents?: import("@/hooks/use-agents").AgentSummary[];
-  onSelectAgent?: (agentId: string | null) => void;
+  agentTab?: "chat" | "config";
+  onTabChange?: (tab: "chat" | "config") => void;
+  onTemplateUploaded?: (file: { id: string; filename: string }) => void;
+  onRemoveTemplate?: () => void;
+  templateFile?: { id: string; filename: string } | null;
   onImportanceOverride?: (messageId: string, newTier: number) => void;
   variant?: "default" | "terminal";
 }
@@ -510,13 +518,19 @@ export function MessageList({
   taskOutputs,
   pinnedAgentId,
   agents,
-  onSelectAgent,
+  agentTab,
+  onTabChange,
+  onTemplateUploaded,
+  onRemoveTemplate,
+  templateFile,
   onImportanceOverride,
   variant,
 }: MessageListProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const isTerminal = variant === "terminal";
   const { brandName } = useBranding();
+  const { data: agentInstructions } = useAgentInstructions(pinnedAgentId ?? null);
+  const updateInstructions = useUpdateAgentInstructions(pinnedAgentId ?? "");
 
   // Scroll to bottom: instant for new messages, smooth during streaming.
   const isStreamingNow = !!(streamingContent || isWaitingForReply);
@@ -634,12 +648,34 @@ export function MessageList({
       data-testid="message-list"
     >
       {pinnedAgentId && (
-        <div className="mb-4 -mx-10 -mt-8 border-b border-border/50">
+        <div className="mb-4 -mx-10 -mt-8">
           <AgentChatHeader
             agentId={pinnedAgentId}
             agentName={agents?.find(a => a.agent_id === pinnedAgentId)?.display_name || pinnedAgentId}
-            onExit={() => onSelectAgent?.(null)}
+            activeTab={agentTab || "chat"}
+            onTabChange={(tab) => onTabChange?.(tab)}
           />
+          {(!agentTab || agentTab === "chat") && (
+            <div className="px-6 pb-3 space-y-2 border-b border-border/50">
+              <InstructionPanel
+                agentId={pinnedAgentId}
+                instructions={agentInstructions?.instructions || ""}
+                canEdit={true}
+                onSave={(text) => updateInstructions.mutate(text)}
+                lastUpdated={agentInstructions?.updated_at || undefined}
+              />
+              <TemplateSlot
+                template={templateFile ? { id: templateFile.id, name: templateFile.filename, size: 0 } : null}
+                onUpload={(f) => onTemplateUploaded?.({ id: f.id, filename: f.name })}
+                onRemove={() => onRemoveTemplate?.()}
+              />
+            </div>
+          )}
+          {agentTab === "config" && (
+            <div className="flex-1 overflow-auto px-8 py-6">
+              <PricingConfigSection />
+            </div>
+          )}
         </div>
       )}
       {messages.map((message) => (

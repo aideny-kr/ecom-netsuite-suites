@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useCallback, useEffect, useRef } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiClient } from "@/lib/api-client";
 import { consumeChatStream } from "@/lib/chat-stream";
@@ -18,8 +18,14 @@ import { AlertCircle, X, PanelLeftOpen } from "lucide-react";
 export default function ChatPage() {
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [chatSidebarCollapsed, setChatSidebarCollapsed] = useState(false);
-  const [pinnedAgentId, setPinnedAgentId] = useState<string | null>(null);
+  const searchParams = useSearchParams();
+  const pinnedAgentId = searchParams?.get("agent") || null;
+  const [agentTab, setAgentTab] = useState<"chat" | "config">("chat");
+  const [templateFile, setTemplateFile] = useState<{ id: string; filename: string } | null>(null);
   const { data: agents = [] } = useAgents();
+
+  // Reset tab when agent changes
+  useEffect(() => { setAgentTab("chat"); }, [pinnedAgentId]);
   const [error, setError] = useState<string | null>(null);
   const [pendingMessage, setPendingMessage] = useState<string | null>(null);
   const [streamingContent, setStreamingContent] = useState<string | null>(null);
@@ -110,7 +116,7 @@ export default function ChatPage() {
   }, [sessionDetail]);
 
   const handleSend = useCallback(
-    async (content: string) => {
+    async (content: string, fileId?: string) => {
       if (isStreaming || createSession.isPending) return;
       setError(null);
       setPendingMessage(content);
@@ -139,7 +145,7 @@ export default function ChatPage() {
       try {
         const res = await apiClient.stream(
           `/api/v1/chat/sessions/${sessionId}/messages`,
-          { content, agent_id: pinnedAgentId || undefined },
+          { content, agent_id: pinnedAgentId || undefined, file_id: fileId || undefined },
         );
         await consumeChatStream(res, {
           onText: (chunk) => {
@@ -255,9 +261,6 @@ export default function ChatPage() {
         onNewChat={handleNewChat}
         collapsed={chatSidebarCollapsed}
         onToggle={() => setChatSidebarCollapsed(!chatSidebarCollapsed)}
-        agents={agents}
-        pinnedAgentId={pinnedAgentId}
-        onSelectAgent={setPinnedAgentId}
       />
       <div className="relative flex min-w-0 flex-1 flex-col bg-[var(--chat-surface)]">
         {chatSidebarCollapsed && (
@@ -289,7 +292,11 @@ export default function ChatPage() {
             taskOutputs={taskOutputsRef.current}
             pinnedAgentId={pinnedAgentId}
             agents={agents}
-            onSelectAgent={setPinnedAgentId}
+            agentTab={agentTab}
+            onTabChange={setAgentTab}
+            templateFile={templateFile}
+            onTemplateUploaded={setTemplateFile}
+            onRemoveTemplate={() => setTemplateFile(null)}
             onMentionClick={handleMentionClick}
             onImportanceOverride={(messageId, newTier) => {
               queryClient.setQueryData<ChatSessionDetail>(
