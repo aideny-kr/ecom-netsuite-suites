@@ -10,7 +10,8 @@ import { useCreateSavedQuery } from "@/hooks/use-saved-queries";
 import { cn } from "@/lib/utils";
 import { useBranding } from "@/providers/branding-provider";
 import type { ChatMessage } from "@/lib/types";
-import type { FinancialReportData, DataTableData } from "@/lib/chat-stream";
+import type { FinancialReportData, DataTableData, TaskOutputData } from "@/lib/chat-stream";
+import type { AgentSummary } from "@/hooks/use-agents";
 import type { ChartData } from "@/lib/types";
 import { FinancialReport } from "@/components/chat/financial-report";
 import { DataFrameTable } from "@/components/chat/data-frame-table";
@@ -483,10 +484,10 @@ interface MessageListProps {
   dataTables?: Map<string, DataTableData>;
   charts?: ChartData[];
   chartsByMessage?: Map<string, ChartData[]>;
-  taskOutput?: import("@/lib/chat-stream").TaskOutputData | null;
-  taskOutputs?: Map<string, import("@/lib/chat-stream").TaskOutputData>;
+  taskOutput?: TaskOutputData | null;
+  taskOutputs?: Map<string, TaskOutputData>;
   pinnedAgentId?: string | null;
-  agents?: import("@/hooks/use-agents").AgentSummary[];
+  agents?: AgentSummary[];
   agentTab?: "chat" | "config";
   onTabChange?: (tab: "chat" | "config") => void;
   onTemplateUploaded?: (file: { id: string; filename: string }) => void;
@@ -880,7 +881,7 @@ function AssistantMessageRow({
   financialReportData?: FinancialReportData | null;
   dataTableData?: DataTableData | null;
   chartDataList?: ChartData[] | null;
-  taskOutputData?: import("@/lib/chat-stream").TaskOutputData | null;
+  taskOutputData?: TaskOutputData | null;
   isTerminal?: boolean;
 }) {
   const { brandName: agentName } = useBranding();

@@ -11,7 +11,7 @@ interface InstructionPanelProps {
   lastUpdated?: string | null;
 }
 
-export function InstructionPanel({ agentId, instructions, canEdit, onSave, lastUpdated }: InstructionPanelProps) {
+export function InstructionPanel({ agentId: _agentId, instructions, canEdit, onSave, lastUpdated }: InstructionPanelProps) {
   const [expanded, setExpanded] = useState(true);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(instructions || "");

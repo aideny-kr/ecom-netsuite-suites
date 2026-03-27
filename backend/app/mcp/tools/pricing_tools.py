@@ -7,6 +7,7 @@ from decimal import Decimal
 
 from openpyxl import load_workbook
 
+from app.models.pricing_conversion_log import PricingConversionLog
 from app.schemas.pricing import PricingInput, TenantPricingConfig
 from app.services.pricing_config_service import get_config
 from app.services.pricing_engine import PricingEngine
@@ -20,6 +21,8 @@ _file_svc = TaskFileService()
 
 async def pricing_convert_execute(params: dict, context: dict, **kwargs) -> dict:
     """Convert prices in uploaded Excel using tenant FX rates."""
+    if not context or not context.get("db") or not context.get("tenant_id"):
+        return {"error": True, "message": "Missing context — tenant_id and db are required."}
     db = context["db"]
     tenant_id = context["tenant_id"]
     user_id = context.get("user_id")
@@ -91,7 +94,6 @@ async def pricing_convert_execute(params: dict, context: dict, **kwargs) -> dict
     output_files["netsuite_csv"] = str(csv_file.id)
 
     # 7. Audit log
-    from app.models.pricing_conversion_log import PricingConversionLog
 
     db.add(
         PricingConversionLog(
@@ -125,6 +127,8 @@ async def pricing_convert_execute(params: dict, context: dict, **kwargs) -> dict
 
 async def pricing_export_execute(params: dict, context: dict, **kwargs) -> dict:
     """Export computed prices to downloadable Excel from inline data (no upload required)."""
+    if not context or not context.get("db") or not context.get("tenant_id"):
+        return {"error": True, "message": "Missing context — tenant_id and db are required."}
     db = context["db"]
     tenant_id = context["tenant_id"]
     user_id = context.get("user_id")
@@ -184,7 +188,6 @@ async def pricing_export_execute(params: dict, context: dict, **kwargs) -> dict:
     output_files["netsuite_csv"] = str(csv_file.id)
 
     # 6. Audit log
-    from app.models.pricing_conversion_log import PricingConversionLog
 
     db.add(
         PricingConversionLog(
@@ -218,6 +221,8 @@ async def pricing_export_execute(params: dict, context: dict, **kwargs) -> dict:
 
 async def pricing_config_read_execute(params: dict, context: dict, **kwargs) -> dict:
     """Read current tenant pricing configuration."""
+    if not context or not context.get("db") or not context.get("tenant_id"):
+        return {"error": True, "message": "Missing context — tenant_id and db are required."}
     db = context["db"]
     tenant_id = context["tenant_id"]
     config_row = await get_config(db, tenant_id)
