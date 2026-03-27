@@ -11,6 +11,10 @@ routing_rules:
     priority: 0
   - pattern: "(?i)(cost.?plus|cost.?analysis|profitability)"
     priority: 0
+  - pattern: "(?i)(convert.*(price|currency)|currency.?conversion|fx.?rate|regional.?pric)"
+    priority: 0
+  - pattern: "(?i)(upload.*pric|pricing.*sheet|price.*sheet|netsuite.*csv.*import)"
+    priority: 0
 semantic_examples:
   - "What's the margin on this item?"
   - "How does the tariff affect our landed cost?"
@@ -20,6 +24,8 @@ tool_ids:
   - netsuite_get_record
   - rag_search
   - pivot_query_result
+  - pricing_convert
+  - pricing_config_read
 rag_partitions:
   - pricing/margin-rules
   - pricing/tariff-schedules

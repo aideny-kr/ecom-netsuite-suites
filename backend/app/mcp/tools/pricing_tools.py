@@ -1,0 +1,149 @@
+"""Pricing agent tool executors — currency conversion and config read."""
+from __future__ import annotations
+
+import io
+import uuid
+from decimal import Decimal
+
+from openpyxl import load_workbook
+
+from app.schemas.pricing import PricingInput, TenantPricingConfig
+from app.services.pricing_config_service import get_config
+from app.services.pricing_engine import PricingEngine
+from app.services.task_file_service import TaskFileService
+from app.services.template_filler import TemplateFiller
+
+_engine = PricingEngine()
+_filler = TemplateFiller()
+_file_svc = TaskFileService()
+
+
+async def pricing_convert_execute(params: dict, context: dict, **kwargs) -> dict:
+    """Convert prices in uploaded Excel using tenant FX rates."""
+    db = context["db"]
+    tenant_id = context["tenant_id"]
+    user_id = context.get("user_id")
+
+    # 1. Load config
+    config_row = await get_config(db, tenant_id)
+    if not config_row:
+        return {"error": True, "message": "No pricing configuration found. Set up FX rates in Settings."}
+    pricing_config = TenantPricingConfig(**config_row.config)
+
+    # 2. Load file
+    file_id = params.get("file_id")
+    if not file_id:
+        return {"error": True, "message": "file_id is required"}
+    try:
+        task_file, content = await _file_svc.get_file(db, tenant_id, uuid.UUID(file_id))
+    except ValueError:
+        return {"error": True, "message": f"File not found: {file_id}"}
+
+    # 3. Parse Excel
+    wb = load_workbook(io.BytesIO(content))
+    mapping = _filler.detect_columns(wb)
+    ws = wb.active
+    items = []
+    for row in range(2, ws.max_row + 1):
+        sku_val = ws.cell(row=row, column=mapping.sku_col + 1).value
+        price_val = ws.cell(row=row, column=mapping.price_col + 1).value
+        if not sku_val or not price_val:
+            continue
+        items.append(PricingInput(sku=str(sku_val).strip(), usd_price=Decimal(str(price_val))))
+    if not items:
+        return {"error": True, "message": "No valid rows found. Need SKU and USD Price columns."}
+
+    # 4. Convert
+    results = _engine.convert_batch(items, pricing_config)
+
+    # 5. Generate output
+    output_format = params.get("output_format", "excel")
+    output_files = {}
+    if mapping.currency_cols:
+        _filler.fill(wb, results, mapping)
+        buf = io.BytesIO()
+        wb.save(buf)
+        output_content = buf.getvalue()
+    else:
+        out_wb = _filler.generate_default_output(results)
+        buf = io.BytesIO()
+        out_wb.save(buf)
+        output_content = buf.getvalue()
+
+    excel_file = await _file_svc.save_output(
+        db=db,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        filename=f"pricing-{task_file.filename}",
+        content=output_content,
+    )
+    output_files["excel"] = str(excel_file.id)
+
+    # 6. NetSuite CSV
+    if output_format == "netsuite_csv":
+        csv_str = _filler.generate_netsuite_csv(results)
+        csv_file = await _file_svc.save_output(
+            db=db,
+            tenant_id=tenant_id,
+            user_id=user_id,
+            filename=f"netsuite-import-{task_file.filename.rsplit('.', 1)[0]}.csv",
+            content=csv_str.encode("utf-8"),
+        )
+        output_files["netsuite_csv"] = str(csv_file.id)
+
+    # 7. Audit log
+    from app.models.pricing_conversion_log import PricingConversionLog
+
+    db.add(
+        PricingConversionLog(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            input_file_id=uuid.UUID(file_id),
+            output_file_id=excel_file.id,
+            sku_count=len(items),
+            currency_count=len(pricing_config.currencies),
+            config_snapshot=pricing_config.model_dump(mode="json"),
+        )
+    )
+
+    # 8. Summary
+    preview = []
+    for r in results[:5]:
+        row = {"SKU": r.sku, "USD": float(r.usd_price)}
+        for code, cr in list(r.results.items())[:6]:
+            row[code] = float(cr.final_price)
+        preview.append(row)
+
+    return {
+        "success": True,
+        "sku_count": len(items),
+        "currency_count": len(pricing_config.currencies),
+        "output_files": output_files,
+        "preview": preview,
+        "template_mode": bool(mapping.currency_cols),
+    }
+
+
+async def pricing_config_read_execute(params: dict, context: dict, **kwargs) -> dict:
+    """Read current tenant pricing configuration."""
+    db = context["db"]
+    tenant_id = context["tenant_id"]
+    config_row = await get_config(db, tenant_id)
+    if not config_row:
+        return {"error": True, "message": "No pricing configuration set."}
+    config = TenantPricingConfig(**config_row.config)
+    currencies = {}
+    for code, cc in config.currencies.items():
+        currencies[code] = {
+            "fx_rate": float(cc.fx_rate),
+            "tier": cc.tier,
+            "vat_rate": float(cc.vat_rate) if cc.vat_rate else None,
+            "rounding_rule": cc.rounding_rule,
+        }
+    return {
+        "success": True,
+        "base_currency": config.base_currency,
+        "eur_fx_rate": float(config.eur_fx_rate),
+        "currency_count": len(currencies),
+        "currencies": currencies,
+    }

@@ -50,6 +50,8 @@ ALLOWED_CHAT_TOOLS: frozenset[str] = frozenset(
         "bigquery.sql",
         "bigquery.schema",
         "bigquery.cost_estimate",
+        "pricing.convert",
+        "pricing.config_read",
     }
 )
 

@@ -8,6 +8,7 @@ from app.mcp.tools import (
     netsuite_report,
     netsuite_suiteql,
     pivot_tool,
+    pricing_tools,
     rag_search,
     recon_run,
     report_export,
@@ -476,5 +477,28 @@ TOOL_REGISTRY = {
         "params_schema": {
             "query": {"type": "string", "required": True, "description": "BigQuery SQL query to estimate"},
         },
+    },
+    "pricing.convert": {
+        "description": (
+            "Convert product prices from USD to multiple currencies using tenant FX rates, VAT rules, and rounding. "
+            "Input: file_id of uploaded Excel. Output: file_id of converted Excel."
+        ),
+        "execute": pricing_tools.pricing_convert_execute,
+        "params_schema": {
+            "file_id": {"type": "string", "required": True, "description": "ID of the uploaded Excel file"},
+            "output_format": {
+                "type": "string",
+                "required": False,
+                "default": "excel",
+                "description": "Output format: 'excel' or 'netsuite_csv'",
+            },
+        },
+    },
+    "pricing.config_read": {
+        "description": (
+            "Read the current tenant pricing configuration — FX rates, VAT/GST percentages, and rounding rules."
+        ),
+        "execute": pricing_tools.pricing_config_read_execute,
+        "params_schema": {},
     },
 }
