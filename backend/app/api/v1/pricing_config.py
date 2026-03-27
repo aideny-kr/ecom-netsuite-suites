@@ -17,12 +17,15 @@ async def get_pricing_config(
     user: Annotated[User, Depends(get_current_user)],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
-    config = await pricing_config_service.get_config(db, user.tenant_id)
-    if not config:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="No pricing configuration found. Create one first.",
+    config = await pricing_config_service.get_config(db=db, tenant_id=user.tenant_id)
+    if config is None:
+        from app.services.pricing_config_defaults import get_default_config
+        config = await pricing_config_service.upsert_config(
+            db=db, tenant_id=user.tenant_id,
+            config_data=get_default_config(), updated_by=user.id,
         )
+        await db.commit()
+        await db.refresh(config)
     return PricingConfigResponse(
         id=str(config.id),
         tenant_id=str(config.tenant_id),
