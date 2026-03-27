@@ -582,6 +582,52 @@ export function MessageList({
   }
 
   if (messages.length === 0 && !pendingUserMessage) {
+    // Agent workspace empty state — show header + panels + agent-specific prompt
+    if (pinnedAgentId) {
+      const agentName = agents?.find(a => a.agent_id === pinnedAgentId)?.display_name || pinnedAgentId;
+      return (
+        <div className="flex h-full flex-col">
+          <AgentChatHeader
+            agentId={pinnedAgentId}
+            agentName={agentName}
+            activeTab={agentTab || "chat"}
+            onTabChange={(tab) => onTabChange?.(tab)}
+          />
+          {(!agentTab || agentTab === "chat") ? (
+            <>
+              <div className="px-6 py-3 space-y-2 border-b border-border/50">
+                <InstructionPanel
+                  agentId={pinnedAgentId}
+                  instructions={agentInstructions?.instructions || ""}
+                  canEdit={true}
+                  onSave={(text) => updateInstructions.mutate(text)}
+                  lastUpdated={agentInstructions?.updated_at || undefined}
+                />
+                <TemplateSlot
+                  template={templateFile ? { id: templateFile.id, name: templateFile.filename, size: 0 } : null}
+                  onUpload={(f) => onTemplateUploaded?.({ id: f.id, filename: f.name })}
+                  onRemove={() => onRemoveTemplate?.()}
+                />
+              </div>
+              <div className="flex-1 flex items-center justify-center">
+                <div className="text-center space-y-3">
+                  <p className="text-muted-foreground text-[14px]">
+                    {templateFile
+                      ? `Ready to process "${templateFile.filename}" — type a command or say "convert prices"`
+                      : `Upload a template or ask ${agentName} anything`}
+                  </p>
+                </div>
+              </div>
+            </>
+          ) : (
+            <div className="flex-1 overflow-auto px-8 py-6">
+              <PricingConfigSection />
+            </div>
+          )}
+        </div>
+      );
+    }
+
     if (isTerminal) {
       return (
         <div className="flex h-full items-start px-0 py-4">
