@@ -963,13 +963,16 @@ async def run_chat_turn(
 
     # ── Inject brand identity so the AI knows its name ──
     brand_name = ""
+    _tenant_config_row = None
     if not is_onboarding:
         from sqlalchemy import select as sa_select
 
         from app.models.tenant import Tenant, TenantConfig
 
-        config_result = await db.execute(sa_select(TenantConfig.brand_name).where(TenantConfig.tenant_id == tenant_id))
-        brand_name = config_result.scalar_one_or_none() or ""
+        # Single query for all TenantConfig fields used in this function
+        _tc_result = await db.execute(sa_select(TenantConfig).where(TenantConfig.tenant_id == tenant_id))
+        _tenant_config_row = _tc_result.scalar_one_or_none()
+        brand_name = (_tenant_config_row.brand_name if _tenant_config_row else None) or ""
         if not brand_name:
             tenant_result = await db.execute(sa_select(Tenant.name).where(Tenant.id == tenant_id))
             brand_name = tenant_result.scalar_one_or_none() or "Suite Studio AI"
@@ -1182,15 +1185,8 @@ async def run_chat_turn(
         from app.models.tenant import TenantConfig
 
         use_multi_agent = settings.MULTI_AGENT_ENABLED
-        try:
-            tc_result = await db.execute(
-                sa_select(TenantConfig.multi_agent_enabled).where(TenantConfig.tenant_id == tenant_id)
-            )
-            tenant_ma = tc_result.scalar_one_or_none()
-            if isinstance(tenant_ma, bool):
-                use_multi_agent = tenant_ma
-        except Exception:
-            pass  # Fall through to single-agent
+        if _tenant_config_row and isinstance(getattr(_tenant_config_row, "multi_agent_enabled", None), bool):
+            use_multi_agent = _tenant_config_row.multi_agent_enabled
 
         if use_multi_agent:
             from app.services.chat.llm_adapter import get_adapter as get_specialist_adapter
@@ -1208,15 +1204,8 @@ async def run_chat_turn(
 
             # ── Check for unified agent flag (Phase 2) ──
             use_unified = settings.UNIFIED_AGENT_ENABLED
-            try:
-                tc_result2 = await db.execute(
-                    sa_select(TenantConfig.unified_agent_enabled).where(TenantConfig.tenant_id == tenant_id)
-                )
-                tenant_ua = tc_result2.scalar_one_or_none()
-                if isinstance(tenant_ua, bool):
-                    use_unified = tenant_ua
-            except Exception:
-                logger.warning("unified_agent.flag_check_failed", exc_info=True)
+            if _tenant_config_row and isinstance(getattr(_tenant_config_row, "unified_agent_enabled", None), bool):
+                use_unified = _tenant_config_row.unified_agent_enabled
 
             if use_unified:
                 # ── Unified agent path: context assembly → single agent → stream ──
@@ -1455,12 +1444,7 @@ async def run_chat_turn(
                         print(f"[ORCHESTRATOR] Skipping onboarding profile for {context_need} query", flush=True)
                     else:
                         try:
-                            from app.models.tenant import TenantConfig as _TC
-
-                            _op_result = await db.execute(
-                                sa_select(_TC.onboarding_profile).where(_TC.tenant_id == tenant_id)
-                            )
-                            _onboarding_profile = _op_result.scalar_one_or_none()
+                            _onboarding_profile = getattr(_tenant_config_row, "onboarding_profile", None) if _tenant_config_row else None
                             if _onboarding_profile and isinstance(_onboarding_profile, dict):
                                 profile_parts: list[str] = []
 

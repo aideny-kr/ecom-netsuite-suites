@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, useMemo } from "react";
+import { useEffect, useRef, useState, useMemo, memo } from "react";
 import ReactMarkdown from "react-markdown";
 import type { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -105,6 +105,7 @@ function makeMdComponents(isTerminal: boolean): Components {
 
 /** Static default markdown components (no terminal styling) */
 const mdComponents: Components = makeMdComponents(false);
+const mdComponentsTerminal: Components = makeMdComponents(true);
 
 function renderWithMentions(
   content: string,
@@ -340,7 +341,7 @@ function MarkdownRenderer({
   className?: string;
   isTerminal?: boolean;
 }) {
-  const components = isTerminal ? makeMdComponents(true) : mdComponents;
+  const components = isTerminal ? mdComponentsTerminal : mdComponents;
   return (
     <div className={cn("chat-markdown text-[14px] leading-relaxed", className)}>
       <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
@@ -857,7 +858,7 @@ export function MessageList({
   );
 }
 
-function AssistantMessageRow({
+const AssistantMessageRow = memo(function AssistantMessageRow({
   message,
   messages,
   workspaceId,
@@ -1045,7 +1046,7 @@ function AssistantMessageRow({
       </div>
     </div>
   );
-}
+});
 
 /**
  * Subtle inline save link rendered below assistant messages that contain
