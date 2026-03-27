@@ -231,6 +231,20 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 | BigQuery schema seeder | `backend/app/services/bigquery_schema_seeder.py` |
 | Chart extractor | `backend/app/services/chat/chart_extractor.py` |
 | Chart renderer | `frontend/src/components/chat/chart-renderer.tsx` |
+| Pricing engine | `backend/app/services/pricing_engine.py` |
+| Pricing schemas | `backend/app/schemas/pricing.py` |
+| Pricing config API | `backend/app/api/v1/pricing_config.py` |
+| Pricing config service | `backend/app/services/pricing_config_service.py` |
+| Pricing config defaults | `backend/app/services/pricing_config_defaults.py` |
+| Pricing tools | `backend/app/mcp/tools/pricing_tools.py` |
+| Template filler | `backend/app/services/template_filler.py` |
+| Task file service | `backend/app/services/task_file_service.py` |
+| Task files API | `backend/app/api/v1/task_files.py` |
+| Agent instructions API | `backend/app/api/v1/agent_instructions.py` |
+| Task output card | `frontend/src/components/chat/task-output-card.tsx` |
+| File upload zone | `frontend/src/components/chat/file-upload-zone.tsx` |
+| Instruction panel | `frontend/src/components/chat/instruction-panel.tsx` |
+| Template slot | `frontend/src/components/chat/template-slot.tsx` |
 | Specs / Plans | `docs/superpowers/specs/`, `docs/superpowers/plans/` |
 | Architecture memory | `memory/` |
 
@@ -273,9 +287,9 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 
 ## Current State
 
-- **Product**: AI-den v1.1 deployed to staging 2026-03-23. Agent framework + BigQuery BI agent + chart rendering all live.
-- **Roadmap**: v1.1 shipped (agent framework + BigQuery BI) → v1.2 Early May (NetSuite read-write, ~2wk) → v1.3 Late May (cross-system intelligence, ~3wk) → v1.4 Mid-Jun (ETL pipelines, ~3wk).
-- **Latest migration**: 055_eval_cases
+- **Product**: AI-den v1.2 deployed to staging 2026-03-27. Pricing Agent + Agent Hub UI + file upload infra all live.
+- **Roadmap**: v1.2 shipped (Pricing Agent, Agent Hub, auto-improvement loop) → v1.3 Late Apr (cross-system intelligence) → v1.4 Mid-May (ETL pipelines).
+- **Latest migration**: 061_session_agent_id
 - **CI status**: Lint + format passing. Backend tests passing (pre-existing SSL test excluded).
 - **Staging**: `api-staging.suitestudio.ai` (backend). Deploy path: `/opt/ecom-netsuite` with `docker-compose.prod.yml`.
 - **Deploy**: Stop beat/worker first, pull, start sequentially. Never `--force-recreate` all at once — kills workers mid-refresh, consuming single-use refresh tokens.
@@ -350,3 +364,19 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 - **Confidence scoring fix** — financial reports now get floor of 4.0 (was ~2.4). Added `deterministic_success` flag to `CompositeScorer`. Added `netsuite_financial_report` and `bigquery_sql` to `data_tools` set.
 - **Organic eval case mining** — new `eval_cases` table (migration 055), `eval_case_miner.py` mines chat_messages for confidence >= 4 queries, extracts keywords via Haiku ($0.03/case), deduplicates at 80% word overlap. Nightly task: mine → load seed+organic → run experiments. Organic cases prioritized.
 - **Nightly improvement results** — 18/30 KEEP (60%) up from 3/30 (10%) at start of session. $5.25/run, 68 seconds. Runs at 5 AM UTC.
+- **Pricing Agent v1.2 (Phases 1–3)** — Full currency conversion pipeline: `PricingEngine` (16 currencies, 4 rounding rules, 2-tier USD/EUR conversion, pure Decimal math), `TemplateFiller` (fuzzy header matching, template fill, default 3-sheet output, NetSuite CSV), `TaskFileService` (upload/download with validation), tool executors (`pricing_convert`, `pricing_config_read`), SSE `task_output` event pipeline, 4 frontend components (`TaskOutputCard`, `FileUploadZone`, `InstructionPanel`, `TemplateSlot`), agent instructions API + migration 060. Migrations: 058 (pricing configs), 059 (task files + conversion logs), 060 (agent instructions). 174 new tests, zero regressions.
+- **Specialized Agent UI pattern** — Reusable architecture for task-oriented agents: instruction panel (editable, 5K char limit, per-agent per-tenant), template slot (file upload), task output cards (preview table + download buttons). Spec at `docs/superpowers/specs/2026-03-26-specialized-agent-ui-pattern.md`.
+
+## Resolved (2026-03-27)
+
+- **v1.2 Pricing Agent Phase 4** — Settings UI: currency table with inline edit, add/delete, test calculator, EUR rate. Default config auto-seeds 16 currencies on first GET. Integration tests (11 new). Agent chat header with Chat/Config tab switcher. `useAgentInstructions` + `useAgents` hooks.
+- **Agent Hub v2** — Agents moved from chat sidebar to main left nav. URL param routing (`?agent=pricing-agent`). Agent workspace with Chat/Config tabs — Config tab embeds PricingConfigSection. Removed pricing config from global Settings page (each agent owns its config). Session `agent_id` tracking (migration 061).
+- **`pricing_export` tool** — inline conversion without file upload. Agent can convert prices from conversational data or agent instructions. Always generates both Excel + NetSuite CSV.
+- **File attachment in chat** — paperclip button in chat input, file chip display, `file_id` threaded through message payload.
+- **Follow-up Intelligence** — intent classifier (TRANSFORM vs NEW_DATA), Redis result cache (30-min TTL), `reference_previous_result` tool, DATA FRESHNESS RULES replacing MANDATORY EXECUTION. Data preview 5→30 rows for charting.
+- **Autonomous improvement expanded** — 80 eval cases (40 SuiteQL + 40 BigQuery), 4-dimension scoring (accuracy 30%, syntax 30%, efficiency 15%, sql_match 25%), autonomous test case generator (3/dialect/night via Haiku), score history tracking (migration 057). Nightly: 18/30→expanded pool.
+- **BI agent quality** — schema-first workflow (zero column name errors), proactive data gap detection, orderstatus 'Closed' exclusion, golden dataset disclaimer (no prompt pollution).
+- **RBAC fix** — ops role: added exports.excel, tools.suiteql, recon.run (data parity with finance minus financial reports).
+- **Streaming text fix** — line breaks between tool execution text blocks.
+- **BigQuery export fix** — client-side export for BigQuery results (backend only supports SuiteQL re-execution).
+- **CI Guardian** — scheduled remote agent, daily 6am PT, lints + tests + auto-fixes.
