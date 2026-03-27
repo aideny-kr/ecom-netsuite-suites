@@ -51,6 +51,7 @@ memory/
 
 # Proprietary AI playbooks (not needed to run the app)
 CLAUDE.md
+docs/
 GEMINI.md
 prompts/
 skills/
