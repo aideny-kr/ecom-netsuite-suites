@@ -41,6 +41,7 @@ tool_ids:
   - bigquery_cost_estimate
   - pivot_query_result
   - rag_search
+  - web_search
 
 rag_partitions:
   - bi/schema-docs

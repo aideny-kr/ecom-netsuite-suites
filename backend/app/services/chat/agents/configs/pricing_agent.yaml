@@ -27,6 +27,7 @@ tool_ids:
   - pricing_convert
   - pricing_config_read
   - pricing_export
+  - web_search
 rag_partitions:
   - pricing/margin-rules
   - pricing/tariff-schedules
