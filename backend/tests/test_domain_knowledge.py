@@ -286,6 +286,9 @@ class TestGoldenDataset:
         """SuiteQL examples must use FETCH FIRST, never LIMIT."""
         golden_dir = Path(__file__).resolve().parents[1].parent / "knowledge" / "golden_dataset"
         for md_file in golden_dir.glob("*.md"):
+            # BigQuery files legitimately use LIMIT — only check SuiteQL files
+            if md_file.name.startswith("bigquery"):
+                continue
             content = md_file.read_text()
             # Find all SQL code blocks
             import re
