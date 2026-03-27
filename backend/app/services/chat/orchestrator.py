@@ -656,7 +656,7 @@ def _intercept_tool_result(
         return "data_table", sse_event_data, condensed
 
     # --- Task output path (pricing conversion, etc.) ---
-    if tool_name in ("pricing_convert", "pricing.convert"):
+    if tool_name in ("pricing_convert", "pricing.convert", "pricing_export", "pricing.export"):
         try:
             parsed = json.loads(result_str)
         except (json.JSONDecodeError, TypeError):

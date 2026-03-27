@@ -481,17 +481,11 @@ TOOL_REGISTRY = {
     "pricing.convert": {
         "description": (
             "Convert product prices from USD to multiple currencies using tenant FX rates, VAT rules, and rounding. "
-            "Input: file_id of uploaded Excel. Output: file_id of converted Excel."
+            "Input: file_id of uploaded Excel. Output: Excel + NetSuite CSV file_ids for download."
         ),
         "execute": pricing_tools.pricing_convert_execute,
         "params_schema": {
             "file_id": {"type": "string", "required": True, "description": "ID of the uploaded Excel file"},
-            "output_format": {
-                "type": "string",
-                "required": False,
-                "default": "excel",
-                "description": "Output format: 'excel' or 'netsuite_csv'",
-            },
         },
     },
     "pricing.config_read": {
@@ -500,5 +494,20 @@ TOOL_REGISTRY = {
         ),
         "execute": pricing_tools.pricing_config_read_execute,
         "params_schema": {},
+    },
+    "pricing.export": {
+        "description": (
+            "Generate downloadable Excel + NetSuite CSV from inline pricing data (no file upload needed). "
+            "Pass items as a list of {sku, usd_price, item_name?}. Uses tenant FX rates, VAT rules, and rounding. "
+            "Returns file_ids for download."
+        ),
+        "execute": pricing_tools.pricing_export_execute,
+        "params_schema": {
+            "items": {
+                "type": "array",
+                "required": True,
+                "description": "List of items: [{sku: string, usd_price: number, item_name?: string}]",
+            },
+        },
     },
 }

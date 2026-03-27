@@ -79,17 +79,16 @@ async def pricing_convert_execute(params: dict, context: dict, **kwargs) -> dict
     )
     output_files["excel"] = str(excel_file.id)
 
-    # 6. NetSuite CSV
-    if output_format == "netsuite_csv":
-        csv_str = _filler.generate_netsuite_csv(results)
-        csv_file = await _file_svc.save_output(
-            db=db,
-            tenant_id=tenant_id,
-            user_id=user_id,
-            filename=f"netsuite-import-{task_file.filename.rsplit('.', 1)[0]}.csv",
-            content=csv_str.encode("utf-8"),
-        )
-        output_files["netsuite_csv"] = str(csv_file.id)
+    # 6. NetSuite CSV (always generated)
+    csv_str = _filler.generate_netsuite_csv(results)
+    csv_file = await _file_svc.save_output(
+        db=db,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        filename=f"netsuite-import-{task_file.filename.rsplit('.', 1)[0]}.csv",
+        content=csv_str.encode("utf-8"),
+    )
+    output_files["netsuite_csv"] = str(csv_file.id)
 
     # 7. Audit log
     from app.models.pricing_conversion_log import PricingConversionLog
@@ -121,6 +120,99 @@ async def pricing_convert_execute(params: dict, context: dict, **kwargs) -> dict
         "output_files": output_files,
         "preview": preview,
         "template_mode": bool(mapping.currency_cols),
+    }
+
+
+async def pricing_export_execute(params: dict, context: dict, **kwargs) -> dict:
+    """Export computed prices to downloadable Excel from inline data (no upload required)."""
+    db = context["db"]
+    tenant_id = context["tenant_id"]
+    user_id = context.get("user_id")
+
+    # 1. Load config
+    config_row = await get_config(db, tenant_id)
+    if not config_row:
+        return {"error": True, "message": "No pricing configuration found. Set up FX rates in Settings."}
+    pricing_config = TenantPricingConfig(**config_row.config)
+
+    # 2. Parse inline items
+    raw_items = params.get("items")
+    if not raw_items or not isinstance(raw_items, list):
+        return {"error": True, "message": "items is required (list of {sku, usd_price, item_name?})"}
+    items = []
+    for raw in raw_items:
+        sku = raw.get("sku")
+        price = raw.get("usd_price")
+        if not sku or price is None:
+            continue
+        items.append(PricingInput(
+            sku=str(sku).strip(),
+            item_name=raw.get("item_name"),
+            usd_price=Decimal(str(price)),
+        ))
+    if not items:
+        return {"error": True, "message": "No valid items. Each needs at least sku and usd_price."}
+
+    # 3. Convert
+    results = _engine.convert_batch(items, pricing_config)
+
+    # 4. Generate output Excel (default 3-sheet workbook)
+    out_wb = _filler.generate_default_output(results)
+    buf = io.BytesIO()
+    out_wb.save(buf)
+    output_content = buf.getvalue()
+
+    output_files = {}
+    excel_file = await _file_svc.save_output(
+        db=db,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        filename=f"pricing-export-{len(items)}-skus.xlsx",
+        content=output_content,
+    )
+    output_files["excel"] = str(excel_file.id)
+
+    # 5. NetSuite CSV (always generated)
+    csv_str = _filler.generate_netsuite_csv(results)
+    csv_file = await _file_svc.save_output(
+        db=db,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        filename=f"netsuite-import-{len(items)}-skus.csv",
+        content=csv_str.encode("utf-8"),
+    )
+    output_files["netsuite_csv"] = str(csv_file.id)
+
+    # 6. Audit log
+    from app.models.pricing_conversion_log import PricingConversionLog
+
+    db.add(
+        PricingConversionLog(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            input_file_id=None,
+            output_file_id=excel_file.id,
+            sku_count=len(items),
+            currency_count=len(pricing_config.currencies),
+            config_snapshot=pricing_config.model_dump(mode="json"),
+        )
+    )
+
+    # 7. Summary
+    preview = []
+    for r in results[:5]:
+        row = {"SKU": r.sku, "USD": float(r.usd_price)}
+        for code, cr in list(r.results.items())[:6]:
+            row[code] = float(cr.final_price)
+        preview.append(row)
+
+    return {
+        "success": True,
+        "sku_count": len(items),
+        "currency_count": len(pricing_config.currencies),
+        "output_files": output_files,
+        "preview": preview,
+        "template_mode": False,
     }
 
 

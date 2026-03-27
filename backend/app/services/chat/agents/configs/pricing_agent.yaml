@@ -26,6 +26,7 @@ tool_ids:
   - pivot_query_result
   - pricing_convert
   - pricing_config_read
+  - pricing_export
 rag_partitions:
   - pricing/margin-rules
   - pricing/tariff-schedules
