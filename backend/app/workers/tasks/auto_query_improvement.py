@@ -51,10 +51,23 @@ async def _run_experiments(settings) -> dict:
     budget = settings.QUERY_IMPROVEMENT_BUDGET_USD
     max_experiments = settings.QUERY_IMPROVEMENT_MAX_EXPERIMENTS
     spent = 0.0
-    stats = {"total": 0, "kept": 0, "reverted": 0, "skipped": 0, "errors": 0, "cost_usd": 0.0, "mined": 0}
+    stats = {"total": 0, "kept": 0, "reverted": 0, "skipped": 0, "errors": 0, "cost_usd": 0.0, "generated": 0, "mined": 0}
     consecutive_errors = 0
 
     async with async_session_factory() as db:
+        # Phase 0: Generate new synthetic eval cases from schema hints
+        try:
+            from app.services.eval_case_generator import generate_eval_cases
+
+            for dialect in ["suiteql", "bigquery"]:
+                generated = await generate_eval_cases(db, tenant_id, dialect, max_new=3)
+                stats["generated"] += len(generated)
+                if generated:
+                    print(f"[AUTO_IMPROVE] Generated {len(generated)} new {dialect} eval cases", flush=True)
+            await db.commit()
+        except Exception as exc:
+            print(f"[AUTO_IMPROVE] Generation failed (non-fatal): {exc}", flush=True)
+
         # Phase 1: Mine new organic eval cases from recent successful queries
         try:
             new_cases = await mine_organic_eval_cases(db, tenant_id)
@@ -93,6 +106,12 @@ async def _run_experiments(settings) -> dict:
             flush=True,
         )
 
+        # Per-dialect tracking for score history
+        from collections import defaultdict
+        _dialect_stats: dict[str, dict] = defaultdict(lambda: {
+            "total": 0, "kept": 0, "reverted": 0, "skipped": 0, "errors": 0, "scores": [], "cost": 0.0,
+        })
+
         for case in cases:
             # Budget check
             est_cost = estimate_experiment_cost(case.dialect)
@@ -112,12 +131,22 @@ async def _run_experiments(settings) -> dict:
                 consecutive_errors = 0
 
                 decision = result.get("decision", "SKIP")
+                ds = _dialect_stats[case.dialect]
+                ds["total"] += 1
+                ds["cost"] += result.get("cost_usd", est_cost)
+                exp_score = result.get("experiment_score", 0)
+                if exp_score > 0:
+                    ds["scores"].append(exp_score)
+
                 if decision == "KEEP":
                     stats["kept"] += 1
+                    ds["kept"] += 1
                 elif decision == "REVERT":
                     stats["reverted"] += 1
+                    ds["reverted"] += 1
                 else:
                     stats["skipped"] += 1
+                    ds["skipped"] += 1
 
                 print(
                     f"[AUTO_IMPROVE] #{stats['total']} {case.dialect} "
@@ -128,11 +157,40 @@ async def _run_experiments(settings) -> dict:
 
             except Exception as exc:
                 stats["errors"] += 1
+                _dialect_stats[case.dialect]["errors"] += 1
                 consecutive_errors += 1
                 print(f"[AUTO_IMPROVE] Experiment error: {exc}", flush=True)
                 if consecutive_errors >= 3:
                     print("[AUTO_IMPROVE] 3 consecutive errors, stopping", flush=True)
                     break
+
+        # Write score history per dialect
+        try:
+            from datetime import date, timezone
+            from app.models.eval_score_history import EvalScoreHistory
+
+            for dial, dial_stats in _dialect_stats.items():
+                if dial_stats["total"] == 0:
+                    continue
+                avg_score = (
+                    round(sum(dial_stats["scores"]) / len(dial_stats["scores"]), 4)
+                    if dial_stats["scores"] else None
+                )
+                history = EvalScoreHistory(
+                    tenant_id=tenant_id,
+                    run_date=date.today(),
+                    dialect=dial,
+                    total_cases=dial_stats["total"],
+                    kept=dial_stats["kept"],
+                    reverted=dial_stats["reverted"],
+                    skipped=dial_stats["skipped"],
+                    errors=dial_stats["errors"],
+                    avg_composite_score=avg_score,
+                    cost_usd=dial_stats["cost"],
+                )
+                db.add(history)
+        except Exception as exc:
+            print(f"[AUTO_IMPROVE] Score history write failed (non-fatal): {exc}", flush=True)
 
         await db.commit()
 
