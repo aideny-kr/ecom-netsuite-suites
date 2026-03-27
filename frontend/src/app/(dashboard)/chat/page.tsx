@@ -68,8 +68,11 @@ export default function ChatPage() {
   });
 
   const createSession = useMutation({
-    mutationFn: (title?: string) =>
-      apiClient.post<ChatSession>("/api/v1/chat/sessions", { title }),
+    mutationFn: (params?: { title?: string; agent_id?: string | null }) =>
+      apiClient.post<ChatSession>("/api/v1/chat/sessions", {
+        title: params?.title,
+        agent_id: params?.agent_id || undefined,
+      }),
     onSuccess: (session) => {
       queryClient.invalidateQueries({ queryKey: ["chat-sessions"] });
       setActiveSessionId(session.id);
@@ -104,6 +107,9 @@ export default function ChatPage() {
           chartsRef.current.set(msg.id, [data as unknown as ChartData]);
           hydrated = true;
         }
+      } else if (type === "task_output" && data) {
+        taskOutputsRef.current.set(msg.id, data as any);
+        hydrated = true;
       }
       // Hydrate persisted charts array (from v1.1 chart persistence)
       // Skip if charts already exist for this message (came from streaming)
@@ -132,7 +138,7 @@ export default function ChatPage() {
       let sessionId = activeSessionId;
       if (!sessionId) {
         try {
-          const session = await createSession.mutateAsync(undefined);
+          const session = await createSession.mutateAsync(pinnedAgentId ? { agent_id: pinnedAgentId } : undefined);
           sessionId = session.id;
         } catch {
           setPendingMessage(null);
