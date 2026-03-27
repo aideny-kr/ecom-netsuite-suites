@@ -14,7 +14,7 @@ import uuid
 from typing import Any
 
 import anthropic
-from sqlalchemy import select, func
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -72,7 +72,9 @@ async def generate_eval_cases(
 
     # Check cap
     count_result = await db.execute(
-        select(func.count()).select_from(EvalCaseModel).where(
+        select(func.count())
+        .select_from(EvalCaseModel)
+        .where(
             EvalCaseModel.tenant_id == tenant_id,
             EvalCaseModel.source == "generated",
         )
@@ -149,11 +151,13 @@ async def generate_eval_cases(
         )
         db.add(model)
         existing_questions.append(question)
-        stored.append({
-            "question": question,
-            "dialect": dialect,
-            "expected_keywords": keywords,
-            "expected_sql_contains": sql_contains,
-        })
+        stored.append(
+            {
+                "question": question,
+                "dialect": dialect,
+                "expected_keywords": keywords,
+                "expected_sql_contains": sql_contains,
+            }
+        )
 
     return stored

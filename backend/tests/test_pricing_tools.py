@@ -1,4 +1,5 @@
 """Tests for pricing tool executors."""
+
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -68,8 +69,9 @@ class TestPricingConvert:
     async def test_file_not_found(self, mock_context):
         mock_row = MagicMock()
         mock_row.config = {"base_currency": "USD", "eur_fx_rate": "0.92", "currencies": {}}
-        with patch("app.mcp.tools.pricing_tools.get_config", new_callable=AsyncMock, return_value=mock_row), patch.object(
-            _file_svc, "get_file", new_callable=AsyncMock, side_effect=ValueError("not found")
+        with (
+            patch("app.mcp.tools.pricing_tools.get_config", new_callable=AsyncMock, return_value=mock_row),
+            patch.object(_file_svc, "get_file", new_callable=AsyncMock, side_effect=ValueError("not found")),
         ):
             result = await pricing_convert_execute({"file_id": str(uuid.uuid4())}, mock_context)
         assert result["error"] is True

@@ -1,4 +1,5 @@
 """Pricing agent tool executors — currency conversion and config read."""
+
 from __future__ import annotations
 
 import io
@@ -60,7 +61,6 @@ async def pricing_convert_execute(params: dict, context: dict, **kwargs) -> dict
     results = _engine.convert_batch(items, pricing_config)
 
     # 5. Generate output
-    output_format = params.get("output_format", "excel")
     output_files = {}
     if mapping.currency_cols:
         _filler.fill(wb, results, mapping)
@@ -149,11 +149,13 @@ async def pricing_export_execute(params: dict, context: dict, **kwargs) -> dict:
         price = raw.get("usd_price")
         if not sku or price is None:
             continue
-        items.append(PricingInput(
-            sku=str(sku).strip(),
-            item_name=raw.get("item_name"),
-            usd_price=Decimal(str(price)),
-        ))
+        items.append(
+            PricingInput(
+                sku=str(sku).strip(),
+                item_name=raw.get("item_name"),
+                usd_price=Decimal(str(price)),
+            )
+        )
     if not items:
         return {"error": True, "message": "No valid items. Each needs at least sku and usd_price."}
 

@@ -1,10 +1,8 @@
 """Tool for agents to retrieve cached results from previous queries in the conversation."""
 
 import json
-from typing import Any
 
 from app.services.chat.result_cache import get_latest_result, get_result_by_message
-
 
 TOOL_DEFINITION = {
     "name": "reference_previous_result",
@@ -38,18 +36,26 @@ async def execute_reference_previous_result(
         result = await get_latest_result(conversation_id)
 
     if not result:
-        return json.dumps({
-            "success": False,
-            "error": "No cached result found. The data may have expired (30-min TTL) or no query was run recently. Please re-query to get fresh data.",
-        })
+        return json.dumps(
+            {
+                "success": False,
+                "error": (
+                    "No cached result found. The data may have expired (30-min TTL) "
+                    "or no query was run recently. Please re-query to get fresh data."
+                ),
+            }
+        )
 
-    return json.dumps({
-        "success": True,
-        "result_type": result.result_type,
-        "columns": result.columns,
-        "rows": result.rows,
-        "row_count": result.row_count,
-        "summary": result.summary,
-        "query_text": result.query_text,
-        "note": "This is cached data from a previous query. Use it for charting, pivoting, or transforming — do NOT re-query.",
-    }, default=str)
+    return json.dumps(
+        {
+            "success": True,
+            "result_type": result.result_type,
+            "columns": result.columns,
+            "rows": result.rows,
+            "row_count": result.row_count,
+            "summary": result.summary,
+            "query_text": result.query_text,
+            "note": "This is cached data from a previous query. Use it for charting, pivoting, or transforming — do NOT re-query.",
+        },
+        default=str,
+    )

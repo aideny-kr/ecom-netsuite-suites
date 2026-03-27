@@ -4,9 +4,11 @@ Revision ID: 059_task_files
 Revises: 058_pricing_cfg
 Create Date: 2026-03-26
 """
-from alembic import op
+
 import sqlalchemy as sa
-from sqlalchemy.dialects.postgresql import UUID, JSONB
+from sqlalchemy.dialects.postgresql import JSONB, UUID
+
+from alembic import op
 
 revision = "059_task_files"
 down_revision = "058_pricing_cfg"

@@ -32,6 +32,7 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 class CreateSessionRequest(BaseModel):
     title: str | None = None
     workspace_id: str | None = None
+    agent_id: str | None = None
 
 
 class UpdateSessionRequest(BaseModel):
@@ -68,6 +69,7 @@ class SessionListItem(BaseModel):
     title: str | None = None
     workspace_id: str | None = None
     session_type: str = "chat"
+    agent_id: str | None = None
     is_archived: bool
     created_at: str
     updated_at: str
@@ -93,6 +95,7 @@ def _serialize_session(session: ChatSession) -> dict:
         "title": session.title,
         "workspace_id": str(session.workspace_id) if session.workspace_id else None,
         "session_type": session.session_type or "chat",
+        "agent_id": session.agent_id,
         "is_archived": session.is_archived,
         "created_at": session.created_at.isoformat(),
         "updated_at": session.updated_at.isoformat(),
@@ -145,6 +148,7 @@ async def create_session(
         title=body.title,
         workspace_id=ws_id,
         session_type="workspace" if ws_id else "chat",
+        agent_id=body.agent_id,
     )
     db.add(session)
     await db.commit()
@@ -228,6 +232,10 @@ async def send_message(
     session = result.scalar_one_or_none()
     if not session:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
+
+    # Stamp agent_id on session if this is the first agent-pinned message
+    if body.agent_id and not session.agent_id:
+        session.agent_id = body.agent_id
 
     # Save user message *before* calling the pipeline so it persists on errors.
     # Explicitly set created_at in Python (not server_default) to guarantee the

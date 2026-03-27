@@ -1,19 +1,20 @@
 """TDD RED phase — pricing engine tests. Implementation does not exist yet."""
-import pytest
+
 from decimal import Decimal
+
+import pytest
+
+from app.schemas.pricing import (
+    CurrencyConfig,
+    PricingInput,
+    TenantPricingConfig,
+)
 from app.services.pricing_engine import (
     PricingEngine,
     round_nearest_9,
+    round_nearest_50,
     round_nearest_100,
     round_nearest_990,
-    round_nearest_50,
-)
-from app.schemas.pricing import (
-    CurrencyConfig,
-    TenantPricingConfig,
-    PricingInput,
-    PricingOutput,
-    CurrencyResult,
 )
 
 
@@ -23,22 +24,50 @@ def accounting_config():
         base_currency="USD",
         eur_fx_rate=Decimal("0.92"),
         currencies={
-            "GBP": CurrencyConfig(fx_rate=Decimal("0.79"), tier="usd_based", vat_rate=Decimal("0.20"), rounding_rule="nearest_9"),
+            "GBP": CurrencyConfig(
+                fx_rate=Decimal("0.79"), tier="usd_based", vat_rate=Decimal("0.20"), rounding_rule="nearest_9"
+            ),
             "EUR": CurrencyConfig(fx_rate=Decimal("0.92"), tier="eur_based", vat_rate=None, rounding_rule="nearest_9"),
             "CAD": CurrencyConfig(fx_rate=Decimal("1.36"), tier="usd_based", vat_rate=None, rounding_rule="nearest_9"),
-            "AUD": CurrencyConfig(fx_rate=Decimal("1.53"), tier="usd_based", vat_rate=Decimal("0.10"), rounding_rule="nearest_9"),
-            "JPY": CurrencyConfig(fx_rate=Decimal("149.50"), tier="usd_based", vat_rate=Decimal("0.10"), rounding_rule="nearest_100"),
-            "KRW": CurrencyConfig(fx_rate=Decimal("1380.00"), tier="usd_based", vat_rate=Decimal("0.10"), rounding_rule="nearest_990"),
-            "INR": CurrencyConfig(fx_rate=Decimal("83.50"), tier="usd_based", vat_rate=Decimal("0.18"), rounding_rule="nearest_50"),
-            "AED": CurrencyConfig(fx_rate=Decimal("3.67"), tier="usd_based", vat_rate=Decimal("0.05"), rounding_rule="nearest_9"),
-            "SEK": CurrencyConfig(fx_rate=Decimal("11.20"), tier="eur_based", vat_rate=Decimal("0.25"), rounding_rule="nearest_9"),
-            "NOK": CurrencyConfig(fx_rate=Decimal("11.50"), tier="eur_based", vat_rate=Decimal("0.25"), rounding_rule="nearest_9"),
-            "DKK": CurrencyConfig(fx_rate=Decimal("7.45"), tier="eur_based", vat_rate=Decimal("0.25"), rounding_rule="nearest_9"),
-            "PLN": CurrencyConfig(fx_rate=Decimal("4.32"), tier="eur_based", vat_rate=Decimal("0.23"), rounding_rule="nearest_9"),
-            "CZK": CurrencyConfig(fx_rate=Decimal("25.10"), tier="eur_based", vat_rate=Decimal("0.21"), rounding_rule="nearest_9"),
-            "CHF": CurrencyConfig(fx_rate=Decimal("0.94"), tier="eur_based", vat_rate=Decimal("0.081"), rounding_rule="nearest_9"),
-            "HUF": CurrencyConfig(fx_rate=Decimal("395.00"), tier="eur_based", vat_rate=Decimal("0.27"), rounding_rule="nearest_990"),
-            "RON": CurrencyConfig(fx_rate=Decimal("4.97"), tier="eur_based", vat_rate=Decimal("0.19"), rounding_rule="nearest_9"),
+            "AUD": CurrencyConfig(
+                fx_rate=Decimal("1.53"), tier="usd_based", vat_rate=Decimal("0.10"), rounding_rule="nearest_9"
+            ),
+            "JPY": CurrencyConfig(
+                fx_rate=Decimal("149.50"), tier="usd_based", vat_rate=Decimal("0.10"), rounding_rule="nearest_100"
+            ),
+            "KRW": CurrencyConfig(
+                fx_rate=Decimal("1380.00"), tier="usd_based", vat_rate=Decimal("0.10"), rounding_rule="nearest_990"
+            ),
+            "INR": CurrencyConfig(
+                fx_rate=Decimal("83.50"), tier="usd_based", vat_rate=Decimal("0.18"), rounding_rule="nearest_50"
+            ),
+            "AED": CurrencyConfig(
+                fx_rate=Decimal("3.67"), tier="usd_based", vat_rate=Decimal("0.05"), rounding_rule="nearest_9"
+            ),
+            "SEK": CurrencyConfig(
+                fx_rate=Decimal("11.20"), tier="eur_based", vat_rate=Decimal("0.25"), rounding_rule="nearest_9"
+            ),
+            "NOK": CurrencyConfig(
+                fx_rate=Decimal("11.50"), tier="eur_based", vat_rate=Decimal("0.25"), rounding_rule="nearest_9"
+            ),
+            "DKK": CurrencyConfig(
+                fx_rate=Decimal("7.45"), tier="eur_based", vat_rate=Decimal("0.25"), rounding_rule="nearest_9"
+            ),
+            "PLN": CurrencyConfig(
+                fx_rate=Decimal("4.32"), tier="eur_based", vat_rate=Decimal("0.23"), rounding_rule="nearest_9"
+            ),
+            "CZK": CurrencyConfig(
+                fx_rate=Decimal("25.10"), tier="eur_based", vat_rate=Decimal("0.21"), rounding_rule="nearest_9"
+            ),
+            "CHF": CurrencyConfig(
+                fx_rate=Decimal("0.94"), tier="eur_based", vat_rate=Decimal("0.081"), rounding_rule="nearest_9"
+            ),
+            "HUF": CurrencyConfig(
+                fx_rate=Decimal("395.00"), tier="eur_based", vat_rate=Decimal("0.27"), rounding_rule="nearest_990"
+            ),
+            "RON": CurrencyConfig(
+                fx_rate=Decimal("4.97"), tier="eur_based", vat_rate=Decimal("0.19"), rounding_rule="nearest_9"
+            ),
         },
     )
 
@@ -102,7 +131,8 @@ class TestTier1Conversion:
     def test_gbp_conversion(self, accounting_config):
         engine = PricingEngine()
         result = engine.convert_single(
-            Decimal("1659"), "GBP",
+            Decimal("1659"),
+            "GBP",
             accounting_config.currencies["GBP"],
             accounting_config.eur_fx_rate,
         )
@@ -111,7 +141,8 @@ class TestTier1Conversion:
     def test_cad_conversion(self, accounting_config):
         engine = PricingEngine()
         result = engine.convert_single(
-            Decimal("1659"), "CAD",
+            Decimal("1659"),
+            "CAD",
             accounting_config.currencies["CAD"],
             accounting_config.eur_fx_rate,
         )
@@ -120,7 +151,8 @@ class TestTier1Conversion:
     def test_aud_conversion(self, accounting_config):
         engine = PricingEngine()
         result = engine.convert_single(
-            Decimal("1659"), "AUD",
+            Decimal("1659"),
+            "AUD",
             accounting_config.currencies["AUD"],
             accounting_config.eur_fx_rate,
         )
@@ -129,7 +161,8 @@ class TestTier1Conversion:
     def test_jpy_conversion(self, accounting_config):
         engine = PricingEngine()
         result = engine.convert_single(
-            Decimal("1659"), "JPY",
+            Decimal("1659"),
+            "JPY",
             accounting_config.currencies["JPY"],
             accounting_config.eur_fx_rate,
         )
@@ -138,7 +171,8 @@ class TestTier1Conversion:
     def test_krw_conversion(self, accounting_config):
         engine = PricingEngine()
         result = engine.convert_single(
-            Decimal("1659"), "KRW",
+            Decimal("1659"),
+            "KRW",
             accounting_config.currencies["KRW"],
             accounting_config.eur_fx_rate,
         )
@@ -147,7 +181,8 @@ class TestTier1Conversion:
     def test_inr_conversion(self, accounting_config):
         engine = PricingEngine()
         result = engine.convert_single(
-            Decimal("1659"), "INR",
+            Decimal("1659"),
+            "INR",
             accounting_config.currencies["INR"],
             accounting_config.eur_fx_rate,
         )
@@ -156,7 +191,8 @@ class TestTier1Conversion:
     def test_aed_conversion(self, accounting_config):
         engine = PricingEngine()
         result = engine.convert_single(
-            Decimal("1659"), "AED",
+            Decimal("1659"),
+            "AED",
             accounting_config.currencies["AED"],
             accounting_config.eur_fx_rate,
         )
@@ -169,7 +205,8 @@ class TestTier2Conversion:
     def test_sek_conversion(self, accounting_config):
         engine = PricingEngine()
         result = engine.convert_single(
-            Decimal("1659"), "SEK",
+            Decimal("1659"),
+            "SEK",
             accounting_config.currencies["SEK"],
             accounting_config.eur_fx_rate,
         )
@@ -178,7 +215,8 @@ class TestTier2Conversion:
     def test_nok_conversion(self, accounting_config):
         engine = PricingEngine()
         result = engine.convert_single(
-            Decimal("1659"), "NOK",
+            Decimal("1659"),
+            "NOK",
             accounting_config.currencies["NOK"],
             accounting_config.eur_fx_rate,
         )
@@ -187,7 +225,8 @@ class TestTier2Conversion:
     def test_dkk_conversion(self, accounting_config):
         engine = PricingEngine()
         result = engine.convert_single(
-            Decimal("1659"), "DKK",
+            Decimal("1659"),
+            "DKK",
             accounting_config.currencies["DKK"],
             accounting_config.eur_fx_rate,
         )
@@ -196,7 +235,8 @@ class TestTier2Conversion:
     def test_pln_conversion(self, accounting_config):
         engine = PricingEngine()
         result = engine.convert_single(
-            Decimal("1659"), "PLN",
+            Decimal("1659"),
+            "PLN",
             accounting_config.currencies["PLN"],
             accounting_config.eur_fx_rate,
         )
@@ -205,7 +245,8 @@ class TestTier2Conversion:
     def test_czk_conversion(self, accounting_config):
         engine = PricingEngine()
         result = engine.convert_single(
-            Decimal("1659"), "CZK",
+            Decimal("1659"),
+            "CZK",
             accounting_config.currencies["CZK"],
             accounting_config.eur_fx_rate,
         )
@@ -214,7 +255,8 @@ class TestTier2Conversion:
     def test_chf_conversion(self, accounting_config):
         engine = PricingEngine()
         result = engine.convert_single(
-            Decimal("1659"), "CHF",
+            Decimal("1659"),
+            "CHF",
             accounting_config.currencies["CHF"],
             accounting_config.eur_fx_rate,
         )
@@ -223,7 +265,8 @@ class TestTier2Conversion:
     def test_huf_conversion(self, accounting_config):
         engine = PricingEngine()
         result = engine.convert_single(
-            Decimal("1659"), "HUF",
+            Decimal("1659"),
+            "HUF",
             accounting_config.currencies["HUF"],
             accounting_config.eur_fx_rate,
         )
@@ -232,7 +275,8 @@ class TestTier2Conversion:
     def test_ron_conversion(self, accounting_config):
         engine = PricingEngine()
         result = engine.convert_single(
-            Decimal("1659"), "RON",
+            Decimal("1659"),
+            "RON",
             accounting_config.currencies["RON"],
             accounting_config.eur_fx_rate,
         )
@@ -245,7 +289,8 @@ class TestSecondSKU:
     def test_gbp_199(self, accounting_config):
         engine = PricingEngine()
         result = engine.convert_single(
-            Decimal("199"), "GBP",
+            Decimal("199"),
+            "GBP",
             accounting_config.currencies["GBP"],
             accounting_config.eur_fx_rate,
         )
@@ -254,7 +299,8 @@ class TestSecondSKU:
     def test_jpy_199(self, accounting_config):
         engine = PricingEngine()
         result = engine.convert_single(
-            Decimal("199"), "JPY",
+            Decimal("199"),
+            "JPY",
             accounting_config.currencies["JPY"],
             accounting_config.eur_fx_rate,
         )
@@ -263,7 +309,8 @@ class TestSecondSKU:
     def test_krw_199(self, accounting_config):
         engine = PricingEngine()
         result = engine.convert_single(
-            Decimal("199"), "KRW",
+            Decimal("199"),
+            "KRW",
             accounting_config.currencies["KRW"],
             accounting_config.eur_fx_rate,
         )
@@ -272,7 +319,8 @@ class TestSecondSKU:
     def test_sek_199(self, accounting_config):
         engine = PricingEngine()
         result = engine.convert_single(
-            Decimal("199"), "SEK",
+            Decimal("199"),
+            "SEK",
             accounting_config.currencies["SEK"],
             accounting_config.eur_fx_rate,
         )
@@ -310,7 +358,8 @@ class TestEdgeCases:
     def test_zero_price(self, accounting_config):
         engine = PricingEngine()
         result = engine.convert_single(
-            Decimal("0"), "GBP",
+            Decimal("0"),
+            "GBP",
             accounting_config.currencies["GBP"],
             accounting_config.eur_fx_rate,
         )
@@ -319,7 +368,8 @@ class TestEdgeCases:
     def test_one_cent(self, accounting_config):
         engine = PricingEngine()
         result = engine.convert_single(
-            Decimal("0.01"), "GBP",
+            Decimal("0.01"),
+            "GBP",
             accounting_config.currencies["GBP"],
             accounting_config.eur_fx_rate,
         )
@@ -328,7 +378,8 @@ class TestEdgeCases:
     def test_large_price(self, accounting_config):
         engine = PricingEngine()
         result = engine.convert_single(
-            Decimal("99999"), "JPY",
+            Decimal("99999"),
+            "JPY",
             accounting_config.currencies["JPY"],
             accounting_config.eur_fx_rate,
         )
@@ -354,7 +405,8 @@ class TestEdgeCases:
     def test_no_vat_currency(self, accounting_config):
         engine = PricingEngine()
         result = engine.convert_single(
-            Decimal("1659"), "CAD",
+            Decimal("1659"),
+            "CAD",
             accounting_config.currencies["CAD"],
             accounting_config.eur_fx_rate,
         )
@@ -364,7 +416,8 @@ class TestEdgeCases:
     def test_decimal_precision(self, accounting_config):
         engine = PricingEngine()
         result = engine.convert_single(
-            Decimal("1659"), "GBP",
+            Decimal("1659"),
+            "GBP",
             accounting_config.currencies["GBP"],
             accounting_config.eur_fx_rate,
         )
@@ -376,7 +429,8 @@ class TestConvertSingle:
     def test_single_usd_to_gbp(self, accounting_config):
         engine = PricingEngine()
         result = engine.convert_single(
-            Decimal("1659"), "GBP",
+            Decimal("1659"),
+            "GBP",
             accounting_config.currencies["GBP"],
             accounting_config.eur_fx_rate,
         )
@@ -388,7 +442,8 @@ class TestConvertSingle:
     def test_single_audit_trail(self, accounting_config):
         engine = PricingEngine()
         result = engine.convert_single(
-            Decimal("1659"), "GBP",
+            Decimal("1659"),
+            "GBP",
             accounting_config.currencies["GBP"],
             accounting_config.eur_fx_rate,
         )

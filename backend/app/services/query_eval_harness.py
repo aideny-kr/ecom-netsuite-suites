@@ -203,8 +203,8 @@ def load_eval_cases(dialect: str) -> list[EvalCase]:
 
 
 async def load_db_eval_cases(
-    db: "AsyncSession",
-    tenant_id: "uuid.UUID",
+    db: "AsyncSession",  # noqa: F821
+    tenant_id: "uuid.UUID",  # noqa: F821
     dialect: str,
 ) -> list[EvalCase]:
     """Load active eval cases from the database for a given tenant + dialect."""

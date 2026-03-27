@@ -1,12 +1,14 @@
 """Tests for pricing config service — get/upsert operations."""
-import pytest
+
 import uuid
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
 from app.services import pricing_config_service
 
 
 class TestPricingConfigService:
-
     @pytest.mark.asyncio
     async def test_get_config_returns_none_when_empty(self):
         """get_config returns None when no row exists for the tenant."""
@@ -15,9 +17,7 @@ class TestPricingConfigService:
         mock_result.scalar_one_or_none.return_value = None
         mock_db.execute.return_value = mock_result
 
-        result = await pricing_config_service.get_config(
-            mock_db, uuid.UUID("00000000-0000-0000-0000-000000000001")
-        )
+        result = await pricing_config_service.get_config(mock_db, uuid.UUID("00000000-0000-0000-0000-000000000001"))
         assert result is None
         mock_db.execute.assert_awaited_once()
 
@@ -31,9 +31,7 @@ class TestPricingConfigService:
         mock_result.scalar_one_or_none.return_value = fake_config
         mock_db.execute.return_value = mock_result
 
-        result = await pricing_config_service.get_config(
-            mock_db, uuid.uuid4()
-        )
+        result = await pricing_config_service.get_config(mock_db, uuid.uuid4())
         assert result is fake_config
         assert result.config["base_currency"] == "USD"
 
@@ -47,9 +45,7 @@ class TestPricingConfigService:
         mock_db.execute.return_value = mock_result
 
         config_data = {"base_currency": "USD", "currencies": {}}
-        result = await pricing_config_service.upsert_config(
-            mock_db, uuid.uuid4(), config_data, uuid.uuid4()
-        )
+        await pricing_config_service.upsert_config(mock_db, uuid.uuid4(), config_data, uuid.uuid4())
 
         # A new model should have been added to the session
         mock_db.add.assert_called_once()
@@ -68,9 +64,7 @@ class TestPricingConfigService:
 
         new_config_data = {"base_currency": "USD", "currencies": {"GBP": {}}}
         updated_by = uuid.uuid4()
-        result = await pricing_config_service.upsert_config(
-            mock_db, uuid.uuid4(), new_config_data, updated_by
-        )
+        result = await pricing_config_service.upsert_config(mock_db, uuid.uuid4(), new_config_data, updated_by)
 
         # Should update in-place, not call db.add
         assert existing.config == new_config_data
@@ -89,9 +83,7 @@ class TestPricingConfigService:
 
         tenant_id = uuid.uuid4()
         config_data = {"base_currency": "EUR", "currencies": {}}
-        await pricing_config_service.upsert_config(
-            mock_db, tenant_id, config_data, uuid.uuid4()
-        )
+        await pricing_config_service.upsert_config(mock_db, tenant_id, config_data, uuid.uuid4())
 
         added_model = mock_db.add.call_args[0][0]
         assert added_model.tenant_id == tenant_id

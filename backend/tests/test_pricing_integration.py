@@ -1,21 +1,25 @@
 """Integration test — full pricing pipeline: config → engine → template fill → output."""
-import pytest
+
 from decimal import Decimal
+
+from app.schemas.pricing import CurrencyConfig, PricingInput, TenantPricingConfig
 from app.services.pricing_engine import PricingEngine
 from app.services.template_filler import TemplateFiller
-from app.schemas.pricing import TenantPricingConfig, CurrencyConfig, PricingInput
 
 
 class TestPricingIntegration:
-
     def test_full_pipeline_default_output(self):
         """Config → PricingEngine.convert_batch → TemplateFiller.generate_default_output → verify Excel."""
         config = TenantPricingConfig(
             base_currency="USD",
             eur_fx_rate=Decimal("0.92"),
             currencies={
-                "GBP": CurrencyConfig(fx_rate=Decimal("0.79"), tier="usd_based", vat_rate=Decimal("0.20"), rounding_rule="nearest_9"),
-                "JPY": CurrencyConfig(fx_rate=Decimal("149.50"), tier="usd_based", vat_rate=Decimal("0.10"), rounding_rule="nearest_100"),
+                "GBP": CurrencyConfig(
+                    fx_rate=Decimal("0.79"), tier="usd_based", vat_rate=Decimal("0.20"), rounding_rule="nearest_9"
+                ),
+                "JPY": CurrencyConfig(
+                    fx_rate=Decimal("149.50"), tier="usd_based", vat_rate=Decimal("0.10"), rounding_rule="nearest_100"
+                ),
             },
         )
         items = [
@@ -48,6 +52,7 @@ class TestPricingIntegration:
     def test_full_pipeline_template_fill(self):
         """Config → Engine → TemplateFiller.fill with template → verify filled values."""
         import openpyxl
+
         template_wb = openpyxl.Workbook()
         ws = template_wb.active
         ws["A1"] = "SKU"
@@ -60,7 +65,9 @@ class TestPricingIntegration:
             base_currency="USD",
             eur_fx_rate=Decimal("0.92"),
             currencies={
-                "GBP": CurrencyConfig(fx_rate=Decimal("0.79"), tier="usd_based", vat_rate=Decimal("0.20"), rounding_rule="nearest_9"),
+                "GBP": CurrencyConfig(
+                    fx_rate=Decimal("0.79"), tier="usd_based", vat_rate=Decimal("0.20"), rounding_rule="nearest_9"
+                ),
             },
         )
         items = [PricingInput(sku="SKU-001", usd_price=Decimal("99.00"))]
@@ -85,7 +92,9 @@ class TestPricingIntegration:
             base_currency="USD",
             eur_fx_rate=Decimal("0.92"),
             currencies={
-                "GBP": CurrencyConfig(fx_rate=Decimal("0.79"), tier="usd_based", vat_rate=Decimal("0.20"), rounding_rule="nearest_9"),
+                "GBP": CurrencyConfig(
+                    fx_rate=Decimal("0.79"), tier="usd_based", vat_rate=Decimal("0.20"), rounding_rule="nearest_9"
+                ),
             },
         )
         items = [PricingInput(sku="SKU-001", usd_price=Decimal("99.00"))]
@@ -133,8 +142,12 @@ class TestPricingIntegration:
             base_currency="USD",
             eur_fx_rate=Decimal("0.92"),
             currencies={
-                "GBP": CurrencyConfig(fx_rate=Decimal("0.79"), tier="usd_based", vat_rate=Decimal("0.20"), rounding_rule="nearest_9"),
-                "JPY": CurrencyConfig(fx_rate=Decimal("149.50"), tier="usd_based", vat_rate=Decimal("0.10"), rounding_rule="nearest_100"),
+                "GBP": CurrencyConfig(
+                    fx_rate=Decimal("0.79"), tier="usd_based", vat_rate=Decimal("0.20"), rounding_rule="nearest_9"
+                ),
+                "JPY": CurrencyConfig(
+                    fx_rate=Decimal("149.50"), tier="usd_based", vat_rate=Decimal("0.10"), rounding_rule="nearest_100"
+                ),
             },
         )
         items = [

@@ -2,16 +2,16 @@
 
 from __future__ import annotations
 
-import pytest
 from unittest.mock import AsyncMock, patch
+
+import pytest
 
 from app.services.eval_case_miner import (
     _detect_dialect,
+    _extract_keywords_via_haiku,
     _fallback_keywords,
     _is_duplicate,
-    _extract_keywords_via_haiku,
 )
-
 
 # ---------------------------------------------------------------------------
 # _detect_dialect

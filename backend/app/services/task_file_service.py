@@ -1,9 +1,12 @@
 """Task file storage — upload/download for agent task files."""
+
 import os
 import uuid
 from pathlib import Path
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.models.task_file import TaskFile
 
 TASK_FILE_ROOT = Path(os.getenv("TASK_FILE_ROOT", "/data/task_files"))
@@ -12,7 +15,9 @@ ALLOWED_EXTENSIONS = {".xlsx", ".csv", ".xls"}
 
 
 class TaskFileService:
-    async def save_upload(self, db: AsyncSession, tenant_id: uuid.UUID, user_id: uuid.UUID, filename: str, content: bytes) -> TaskFile:
+    async def save_upload(
+        self, db: AsyncSession, tenant_id: uuid.UUID, user_id: uuid.UUID, filename: str, content: bytes
+    ) -> TaskFile:
         """Validate, store on disk, create DB record. direction='input'."""
         self._validate_upload(filename, content)
         ext = Path(filename).suffix.lower()
@@ -66,9 +71,7 @@ class TaskFileService:
 
     async def get_file(self, db: AsyncSession, tenant_id: uuid.UUID, file_id: uuid.UUID) -> tuple[TaskFile, bytes]:
         """Get file record + contents. Raises ValueError if not found."""
-        result = await db.execute(
-            select(TaskFile).where(TaskFile.id == file_id, TaskFile.tenant_id == tenant_id)
-        )
+        result = await db.execute(select(TaskFile).where(TaskFile.id == file_id, TaskFile.tenant_id == tenant_id))
         task_file = result.scalar_one_or_none()
         if not task_file:
             raise ValueError("File not found")

@@ -35,22 +35,136 @@ _MAX_KEYWORDS = 8
 
 _STOPWORDS: frozenset[str] = frozenset(
     {
-        "a", "an", "the", "and", "or", "but", "in", "on", "at", "to", "for",
-        "of", "with", "by", "from", "is", "are", "was", "were", "be", "been",
-        "being", "have", "has", "had", "do", "does", "did", "will", "would",
-        "could", "should", "may", "might", "can", "shall", "not", "no", "nor",
-        "so", "yet", "both", "either", "neither", "each", "every", "all",
-        "any", "few", "more", "most", "other", "some", "such", "what", "which",
-        "who", "whom", "how", "when", "where", "why", "me", "my", "our",
-        "your", "his", "her", "its", "their", "we", "you", "he", "she", "it",
-        "they", "i", "this", "that", "these", "those", "as", "if", "then",
-        "than", "because", "while", "although", "though", "since", "until",
-        "unless", "after", "before", "during", "about", "above", "across",
-        "against", "along", "among", "around", "between", "beyond", "despite",
-        "except", "into", "like", "near", "off", "out", "over", "past",
-        "regarding", "through", "throughout", "under", "upon", "within",
-        "without", "up", "down", "get", "show", "give", "list", "tell",
-        "find", "me", "us",
+        "a",
+        "an",
+        "the",
+        "and",
+        "or",
+        "but",
+        "in",
+        "on",
+        "at",
+        "to",
+        "for",
+        "of",
+        "with",
+        "by",
+        "from",
+        "is",
+        "are",
+        "was",
+        "were",
+        "be",
+        "been",
+        "being",
+        "have",
+        "has",
+        "had",
+        "do",
+        "does",
+        "did",
+        "will",
+        "would",
+        "could",
+        "should",
+        "may",
+        "might",
+        "can",
+        "shall",
+        "not",
+        "no",
+        "nor",
+        "so",
+        "yet",
+        "both",
+        "either",
+        "neither",
+        "each",
+        "every",
+        "all",
+        "any",
+        "few",
+        "more",
+        "most",
+        "other",
+        "some",
+        "such",
+        "what",
+        "which",
+        "who",
+        "whom",
+        "how",
+        "when",
+        "where",
+        "why",
+        "me",
+        "my",
+        "our",
+        "your",
+        "his",
+        "her",
+        "its",
+        "their",
+        "we",
+        "you",
+        "he",
+        "she",
+        "it",
+        "they",
+        "i",
+        "this",
+        "that",
+        "these",
+        "those",
+        "as",
+        "if",
+        "then",
+        "than",
+        "because",
+        "while",
+        "although",
+        "though",
+        "since",
+        "until",
+        "unless",
+        "after",
+        "before",
+        "during",
+        "about",
+        "above",
+        "across",
+        "against",
+        "along",
+        "among",
+        "around",
+        "between",
+        "beyond",
+        "despite",
+        "except",
+        "into",
+        "like",
+        "near",
+        "off",
+        "out",
+        "over",
+        "past",
+        "regarding",
+        "through",
+        "throughout",
+        "under",
+        "upon",
+        "within",
+        "without",
+        "up",
+        "down",
+        "get",
+        "show",
+        "give",
+        "list",
+        "tell",
+        "find",
+        "me",
+        "us",
     }
 )
 
@@ -106,7 +220,8 @@ def _fallback_keywords(question: str) -> list[str]:
     """Extract keywords from question by removing stopwords, returning words > 2 chars, max 8."""
     words = question.lower().split()
     keywords = [
-        w.strip(".,!?;:\"'()[]{}") for w in words
+        w.strip(".,!?;:\"'()[]{}")
+        for w in words
         if len(w.strip(".,!?;:\"'()[]{}")) > 2 and w.strip(".,!?;:\"'()[]{}") not in _STOPWORDS
     ]
     # Deduplicate while preserving order
@@ -193,15 +308,19 @@ async def mine_organic_eval_cases(
     cutoff = datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
 
     # 1. Fetch qualifying assistant messages (high confidence, has tool calls, recent)
-    stmt = select(ChatMessage).where(
-        and_(
-            ChatMessage.tenant_id == tenant_id,
-            ChatMessage.role == "assistant",
-            ChatMessage.confidence_score >= _MIN_CONFIDENCE,
-            ChatMessage.created_at >= cutoff,
-            ChatMessage.tool_calls.is_not(None),
+    stmt = (
+        select(ChatMessage)
+        .where(
+            and_(
+                ChatMessage.tenant_id == tenant_id,
+                ChatMessage.role == "assistant",
+                ChatMessage.confidence_score >= _MIN_CONFIDENCE,
+                ChatMessage.created_at >= cutoff,
+                ChatMessage.tool_calls.is_not(None),
+            )
         )
-    ).order_by(ChatMessage.created_at.desc())
+        .order_by(ChatMessage.created_at.desc())
+    )
 
     result = await db.execute(stmt)
     assistant_messages: list[ChatMessage] = list(result.scalars().all())
@@ -246,13 +365,18 @@ async def mine_organic_eval_cases(
             continue
 
         # 4. Find the preceding user message in the same session
-        user_stmt = select(ChatMessage).where(
-            and_(
-                ChatMessage.session_id == msg.session_id,
-                ChatMessage.role == "user",
-                ChatMessage.created_at < msg.created_at,
+        user_stmt = (
+            select(ChatMessage)
+            .where(
+                and_(
+                    ChatMessage.session_id == msg.session_id,
+                    ChatMessage.role == "user",
+                    ChatMessage.created_at < msg.created_at,
+                )
             )
-        ).order_by(ChatMessage.created_at.desc()).limit(1)
+            .order_by(ChatMessage.created_at.desc())
+            .limit(1)
+        )
         user_result = await db.execute(user_stmt)
         user_msg = user_result.scalar_one_or_none()
 

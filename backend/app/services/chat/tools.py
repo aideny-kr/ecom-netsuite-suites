@@ -171,6 +171,7 @@ async def build_all_tool_definitions(db: "AsyncSession", tenant_id: uuid.UUID) -
         logger.warning("Failed to fetch external MCP connectors for tools", exc_info=True)
 
     from app.mcp.tools.result_reference_tool import TOOL_DEFINITION as _REF_RESULT_TOOL
+
     tools.append(_REF_RESULT_TOOL)
 
     return tools
@@ -194,6 +195,7 @@ async def execute_tool_call(
 
     if tool_name == "reference_previous_result":
         from app.mcp.tools.result_reference_tool import execute_reference_previous_result
+
         return await execute_reference_previous_result(
             conversation_id=session_id or "",
             message_id=tool_input.get("message_id"),

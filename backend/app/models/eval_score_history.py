@@ -15,7 +15,9 @@ from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
 class EvalScoreHistory(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "eval_score_history"
 
-    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False, index=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False, index=True
+    )
     run_date: Mapped[date] = mapped_column(Date, nullable=False)
     dialect: Mapped[str] = mapped_column(String(20), nullable=False)
     total_cases: Mapped[int] = mapped_column(Integer, nullable=False)

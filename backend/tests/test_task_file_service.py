@@ -1,6 +1,8 @@
 """Unit tests for TaskFileService._validate_upload()."""
+
 import pytest
-from app.services.task_file_service import TaskFileService, MAX_FILE_SIZE
+
+from app.services.task_file_service import MAX_FILE_SIZE, TaskFileService
 
 
 @pytest.fixture

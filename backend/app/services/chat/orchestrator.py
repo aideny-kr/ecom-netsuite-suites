@@ -431,11 +431,16 @@ def _sanitize_assistant_text(text: str) -> str:
 
 
 _FINANCIAL_TOOLS = frozenset({"netsuite.financial_report", "netsuite_financial_report"})
-_DATA_TABLE_TOOLS = frozenset({
-    "netsuite.suiteql", "netsuite_suiteql",
-    "bigquery.sql", "bigquery_sql",
-    "pivot.query_result", "pivot_query_result",
-})
+_DATA_TABLE_TOOLS = frozenset(
+    {
+        "netsuite.suiteql",
+        "netsuite_suiteql",
+        "bigquery.sql",
+        "bigquery_sql",
+        "pivot.query_result",
+        "pivot_query_result",
+    }
+)
 _BIGQUERY_TOOLS = frozenset({"bigquery.sql", "bigquery_sql"})
 
 
@@ -672,14 +677,17 @@ def _intercept_tool_result(
             "preview": parsed.get("preview", []),
             "template_mode": parsed.get("template_mode", False),
         }
-        condensed = json.dumps({
-            "success": True,
-            "sku_count": parsed.get("sku_count"),
-            "currency_count": parsed.get("currency_count"),
-            "output_files": parsed.get("output_files"),
-            "template_mode": parsed.get("template_mode"),
-            "note": "Conversion complete. Output files ready for download. Present the summary to the user.",
-        }, default=str)
+        condensed = json.dumps(
+            {
+                "success": True,
+                "sku_count": parsed.get("sku_count"),
+                "currency_count": parsed.get("currency_count"),
+                "output_files": parsed.get("output_files"),
+                "template_mode": parsed.get("template_mode"),
+                "note": "Conversion complete. Output files ready for download. Present the summary to the user.",
+            },
+            default=str,
+        )
         return "task_output", sse_event_data, condensed
 
     # --- Not a data tool ---
@@ -1444,7 +1452,9 @@ async def run_chat_turn(
                         print(f"[ORCHESTRATOR] Skipping onboarding profile for {context_need} query", flush=True)
                     else:
                         try:
-                            _onboarding_profile = getattr(_tenant_config_row, "onboarding_profile", None) if _tenant_config_row else None
+                            _onboarding_profile = (
+                                getattr(_tenant_config_row, "onboarding_profile", None) if _tenant_config_row else None
+                            )
                             if _onboarding_profile and isinstance(_onboarding_profile, dict):
                                 profile_parts: list[str] = []
 
@@ -1547,7 +1557,7 @@ async def run_chat_turn(
                         has_previous_result=_cached_result is not None,
                     )
                     if _follow_up_intent == FollowUpIntent.TRANSFORM:
-                        print(f"[ORCHESTRATOR] TRANSFORM intent — using cached result", flush=True)
+                        print("[ORCHESTRATOR] TRANSFORM intent — using cached result", flush=True)
 
                 # Augment task for financial report queries or transform requests
                 unified_task = sanitized_input
@@ -1591,20 +1601,24 @@ async def run_chat_turn(
 
                 def _on_tool_intercepted(tool_name: str, event_type_str: str, event_data: dict):
                     result_type = (
-                        "financial_report" if event_type_str == "financial_report"
-                        else "bigquery" if tool_name in _BIGQUERY_TOOLS
+                        "financial_report"
+                        if event_type_str == "financial_report"
+                        else "bigquery"
+                        if tool_name in _BIGQUERY_TOOLS
                         else "suiteql"
                     )
-                    _pending_caches.append(CachedResult(
-                        message_id="pending",
-                        conversation_id=str(session.id),
-                        result_type=result_type,
-                        columns=event_data.get("columns", []),
-                        rows=event_data.get("rows", []),
-                        row_count=event_data.get("row_count", 0),
-                        summary=event_data.get("summary"),
-                        query_text=event_data.get("query", ""),
-                    ))
+                    _pending_caches.append(
+                        CachedResult(
+                            message_id="pending",
+                            conversation_id=str(session.id),
+                            result_type=result_type,
+                            columns=event_data.get("columns", []),
+                            rows=event_data.get("rows", []),
+                            row_count=event_data.get("row_count", 0),
+                            summary=event_data.get("summary"),
+                            query_text=event_data.get("query", ""),
+                        )
+                    )
 
                 async for event_type, payload in unified_agent.run_streaming(
                     task=unified_task,

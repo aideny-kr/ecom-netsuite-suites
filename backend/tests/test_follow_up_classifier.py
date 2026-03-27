@@ -1,6 +1,6 @@
 """Tests for follow-up intent classification."""
-import pytest
-from app.services.chat.follow_up_classifier import classify_follow_up, FollowUpIntent
+
+from app.services.chat.follow_up_classifier import FollowUpIntent, classify_follow_up
 
 
 class TestFollowUpClassifier:
@@ -47,4 +47,7 @@ class TestFollowUpClassifier:
         assert classify_follow_up("how many orders this month?", has_previous_result=True) == FollowUpIntent.NEW_DATA
 
     def test_line_chart_instead_is_transform(self):
-        assert classify_follow_up("make it a line chart instead of bar", has_previous_result=True) == FollowUpIntent.TRANSFORM
+        assert (
+            classify_follow_up("make it a line chart instead of bar", has_previous_result=True)
+            == FollowUpIntent.TRANSFORM
+        )

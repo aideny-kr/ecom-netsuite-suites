@@ -313,8 +313,7 @@ def _compute_confidence(
     # Deterministic tools return factual data — success means high confidence by definition
     _DETERMINISTIC_TOOLS = {"netsuite_financial_report"}
     deterministic = any(
-        t.get("tool_name") in _DETERMINISTIC_TOOLS and not tool_call_had_error(t)
-        for t in tool_calls_log
+        t.get("tool_name") in _DETERMINISTIC_TOOLS and not tool_call_had_error(t) for t in tool_calls_log
     )
 
     return CompositeScorer(

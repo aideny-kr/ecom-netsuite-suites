@@ -2,8 +2,8 @@
 
 import uuid
 
-from sqlalchemy import ForeignKey, String
-from sqlalchemy.dialects.postgresql import UUID, JSONB
+from sqlalchemy import ForeignKey
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
@@ -16,6 +16,4 @@ class TenantPricingConfig(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False, unique=True, index=True
     )
     config: Mapped[dict] = mapped_column(JSONB, nullable=False)
-    updated_by: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.id"), nullable=True
-    )
+    updated_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)

@@ -29,17 +29,20 @@ class CachedResult:
     created_at: float = field(default_factory=time.time)
 
     def to_json(self) -> str:
-        return json.dumps({
-            "message_id": self.message_id,
-            "conversation_id": self.conversation_id,
-            "result_type": self.result_type,
-            "columns": self.columns,
-            "rows": self.rows[:MAX_PREVIEW_ROWS],
-            "row_count": self.row_count,
-            "summary": self.summary,
-            "query_text": self.query_text,
-            "created_at": self.created_at,
-        }, default=str)
+        return json.dumps(
+            {
+                "message_id": self.message_id,
+                "conversation_id": self.conversation_id,
+                "result_type": self.result_type,
+                "columns": self.columns,
+                "rows": self.rows[:MAX_PREVIEW_ROWS],
+                "row_count": self.row_count,
+                "summary": self.summary,
+                "query_text": self.query_text,
+                "created_at": self.created_at,
+            },
+            default=str,
+        )
 
     @classmethod
     def from_json(cls, data: str) -> "CachedResult":
@@ -51,6 +54,7 @@ def _get_redis():
     """Get Redis client. Returns None if Redis unavailable (dev fallback)."""
     try:
         import redis
+
         return redis.from_url(settings.REDIS_URL, decode_responses=True)
     except Exception:
         return None

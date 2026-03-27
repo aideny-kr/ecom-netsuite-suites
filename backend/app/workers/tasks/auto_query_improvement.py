@@ -51,7 +51,16 @@ async def _run_experiments(settings) -> dict:
     budget = settings.QUERY_IMPROVEMENT_BUDGET_USD
     max_experiments = settings.QUERY_IMPROVEMENT_MAX_EXPERIMENTS
     spent = 0.0
-    stats = {"total": 0, "kept": 0, "reverted": 0, "skipped": 0, "errors": 0, "cost_usd": 0.0, "generated": 0, "mined": 0}
+    stats = {
+        "total": 0,
+        "kept": 0,
+        "reverted": 0,
+        "skipped": 0,
+        "errors": 0,
+        "cost_usd": 0.0,
+        "generated": 0,
+        "mined": 0,
+    }
     consecutive_errors = 0
 
     async with async_session_factory() as db:
@@ -108,9 +117,18 @@ async def _run_experiments(settings) -> dict:
 
         # Per-dialect tracking for score history
         from collections import defaultdict
-        _dialect_stats: dict[str, dict] = defaultdict(lambda: {
-            "total": 0, "kept": 0, "reverted": 0, "skipped": 0, "errors": 0, "scores": [], "cost": 0.0,
-        })
+
+        _dialect_stats: dict[str, dict] = defaultdict(
+            lambda: {
+                "total": 0,
+                "kept": 0,
+                "reverted": 0,
+                "skipped": 0,
+                "errors": 0,
+                "scores": [],
+                "cost": 0.0,
+            }
+        )
 
         for case in cases:
             # Budget check
@@ -166,15 +184,15 @@ async def _run_experiments(settings) -> dict:
 
         # Write score history per dialect
         try:
-            from datetime import date, timezone
+            from datetime import date
+
             from app.models.eval_score_history import EvalScoreHistory
 
             for dial, dial_stats in _dialect_stats.items():
                 if dial_stats["total"] == 0:
                     continue
                 avg_score = (
-                    round(sum(dial_stats["scores"]) / len(dial_stats["scores"]), 4)
-                    if dial_stats["scores"] else None
+                    round(sum(dial_stats["scores"]) / len(dial_stats["scores"]), 4) if dial_stats["scores"] else None
                 )
                 history = EvalScoreHistory(
                     tenant_id=tenant_id,

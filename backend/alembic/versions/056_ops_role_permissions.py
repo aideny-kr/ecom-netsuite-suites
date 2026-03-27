@@ -1,7 +1,8 @@
 """Add missing permissions to ops role (data parity with finance minus financial reports)."""
 
-from alembic import op
 import sqlalchemy as sa
+
+from alembic import op
 
 revision = "056_ops_perms"
 down_revision = "055_eval_cases"
@@ -30,18 +31,14 @@ def upgrade() -> None:
 
         # Skip if already assigned
         existing = conn.execute(
-            sa.text(
-                "SELECT 1 FROM role_permissions WHERE role_id = :rid AND permission_id = :pid"
-            ),
+            sa.text("SELECT 1 FROM role_permissions WHERE role_id = :rid AND permission_id = :pid"),
             {"rid": ops_id, "pid": perm[0]},
         ).fetchone()
         if existing:
             continue
 
         conn.execute(
-            sa.text(
-                "INSERT INTO role_permissions (role_id, permission_id) VALUES (:rid, :pid)"
-            ),
+            sa.text("INSERT INTO role_permissions (role_id, permission_id) VALUES (:rid, :pid)"),
             {"rid": ops_id, "pid": perm[0]},
         )
 
@@ -64,8 +61,6 @@ def downgrade() -> None:
             continue
 
         conn.execute(
-            sa.text(
-                "DELETE FROM role_permissions WHERE role_id = :rid AND permission_id = :pid"
-            ),
+            sa.text("DELETE FROM role_permissions WHERE role_id = :rid AND permission_id = :pid"),
             {"rid": ops_id, "pid": perm[0]},
         )

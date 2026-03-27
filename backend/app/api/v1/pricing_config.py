@@ -1,13 +1,15 @@
 """Pricing configuration API — GET/PUT tenant pricing config."""
+
 from typing import Annotated
-from fastapi import APIRouter, Depends, HTTPException, status
+
+from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.core.database import get_db
 from app.core.dependencies import get_current_user
 from app.models.user import User
-from app.services import audit_service
-from app.services import pricing_config_service
 from app.schemas.pricing import PricingConfigResponse, PricingConfigUpdate
+from app.services import audit_service, pricing_config_service
 
 router = APIRouter(prefix="/pricing-config", tags=["pricing-config"])
 
@@ -20,9 +22,12 @@ async def get_pricing_config(
     config = await pricing_config_service.get_config(db=db, tenant_id=user.tenant_id)
     if config is None:
         from app.services.pricing_config_defaults import get_default_config
+
         config = await pricing_config_service.upsert_config(
-            db=db, tenant_id=user.tenant_id,
-            config_data=get_default_config(), updated_by=user.id,
+            db=db,
+            tenant_id=user.tenant_id,
+            config_data=get_default_config(),
+            updated_by=user.id,
         )
         await db.commit()
         await db.refresh(config)

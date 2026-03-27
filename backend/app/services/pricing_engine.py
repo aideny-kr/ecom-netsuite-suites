@@ -21,6 +21,7 @@ from app.schemas.pricing import (
 # Rounding helpers (standalone pure functions)
 # ---------------------------------------------------------------------------
 
+
 def round_nearest_9(value: Decimal) -> Decimal:
     """Round UP to nearest integer ending in 9."""
     n = int(math.ceil(value))
@@ -69,6 +70,7 @@ _ROUNDING_FNS: dict[str, callable] = {
 # ---------------------------------------------------------------------------
 # Engine
 # ---------------------------------------------------------------------------
+
 
 class PricingEngine:
     """Stateless pricing engine.  Instantiate and call methods."""

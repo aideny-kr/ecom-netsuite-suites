@@ -46,7 +46,9 @@ class CompositeScorer:
             score = max(4.0, (self.llm_score * 4 + 1) if self.llm_score > 0 else 4.5)
             logger.info(
                 "confidence.deterministic llm=%.2f tool_rate=%.2f final=%.1f",
-                self.llm_score, self.tool_success_rate, score,
+                self.llm_score,
+                self.tool_success_rate,
+                score,
             )
             return score
 

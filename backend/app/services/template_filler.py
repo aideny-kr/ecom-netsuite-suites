@@ -6,7 +6,6 @@ import csv
 import io
 import re
 from dataclasses import dataclass, field
-from decimal import Decimal
 
 from openpyxl import Workbook
 
@@ -16,32 +15,59 @@ from app.schemas.pricing import PricingOutput
 # Currency alias mapping
 # ---------------------------------------------------------------------------
 _DEFAULT_CURRENCY_ALIASES: dict[str, str] = {
-    "USD": "USD", "US DOLLAR": "USD",
-    "GBP": "GBP", "EUR": "EUR", "CAD": "CAD", "AUD": "AUD", "JPY": "JPY",
-    "KRW": "KRW", "INR": "INR", "AED": "AED", "SEK": "SEK", "NOK": "NOK",
-    "DKK": "DKK", "PLN": "PLN", "CZK": "CZK", "CHF": "CHF", "HUF": "HUF", "RON": "RON",
-    "BRITISH POUND": "GBP", "POUND STERLING": "GBP", "STERLING": "GBP",
-    "EURO": "EUR", "CANADIAN DOLLAR": "CAD", "AUSTRALIAN DOLLAR": "AUD",
-    "JAPANESE YEN": "JPY", "YEN": "JPY", "KOREAN WON": "KRW", "WON": "KRW",
-    "INDIAN RUPEE": "INR", "RUPEE": "INR", "UAE DIRHAM": "AED", "DIRHAM": "AED",
-    "SWEDISH KRONA": "SEK", "NORWEGIAN KRONE": "NOK", "DANISH KRONE": "DKK",
-    "POLISH ZLOTY": "PLN", "ZLOTY": "PLN", "CZECH KORUNA": "CZK", "KORUNA": "CZK",
-    "SWISS FRANC": "CHF", "FRANC": "CHF", "HUNGARIAN FORINT": "HUF", "FORINT": "HUF",
-    "ROMANIAN LEU": "RON", "LEU": "RON",
+    "USD": "USD",
+    "US DOLLAR": "USD",
+    "GBP": "GBP",
+    "EUR": "EUR",
+    "CAD": "CAD",
+    "AUD": "AUD",
+    "JPY": "JPY",
+    "KRW": "KRW",
+    "INR": "INR",
+    "AED": "AED",
+    "SEK": "SEK",
+    "NOK": "NOK",
+    "DKK": "DKK",
+    "PLN": "PLN",
+    "CZK": "CZK",
+    "CHF": "CHF",
+    "HUF": "HUF",
+    "RON": "RON",
+    "BRITISH POUND": "GBP",
+    "POUND STERLING": "GBP",
+    "STERLING": "GBP",
+    "EURO": "EUR",
+    "CANADIAN DOLLAR": "CAD",
+    "AUSTRALIAN DOLLAR": "AUD",
+    "JAPANESE YEN": "JPY",
+    "YEN": "JPY",
+    "KOREAN WON": "KRW",
+    "WON": "KRW",
+    "INDIAN RUPEE": "INR",
+    "RUPEE": "INR",
+    "UAE DIRHAM": "AED",
+    "DIRHAM": "AED",
+    "SWEDISH KRONA": "SEK",
+    "NORWEGIAN KRONE": "NOK",
+    "DANISH KRONE": "DKK",
+    "POLISH ZLOTY": "PLN",
+    "ZLOTY": "PLN",
+    "CZECH KORUNA": "CZK",
+    "KORUNA": "CZK",
+    "SWISS FRANC": "CHF",
+    "FRANC": "CHF",
+    "HUNGARIAN FORINT": "HUF",
+    "FORINT": "HUF",
+    "ROMANIAN LEU": "RON",
+    "LEU": "RON",
 }
 
 # ---------------------------------------------------------------------------
 # Regex patterns
 # ---------------------------------------------------------------------------
-_SKU_PATTERNS = re.compile(
-    r"(?i)^(sku|item(\s*id)?|external\s*id|product\s*(code|id)|part\s*(number|no))$"
-)
-_PRICE_PATTERNS = re.compile(
-    r"(?i)(^usd$|usd\s*price|price\s*usd|base\s*price|unit\s*price)"
-)
-_USD_PATTERN = re.compile(
-    r"(?i)(^usd$|^us\s*dollar$|usd\s*price|price\s*usd|base.*price|unit.*price)"
-)
+_SKU_PATTERNS = re.compile(r"(?i)^(sku|item(\s*id)?|external\s*id|product\s*(code|id)|part\s*(number|no))$")
+_PRICE_PATTERNS = re.compile(r"(?i)(^usd$|usd\s*price|price\s*usd|base\s*price|unit\s*price)")
+_USD_PATTERN = re.compile(r"(?i)(^usd$|^us\s*dollar$|usd\s*price|price\s*usd|base.*price|unit.*price)")
 
 
 # ---------------------------------------------------------------------------
@@ -59,6 +85,7 @@ class ColumnMapping:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _normalize_header(h: str) -> str:
     """Strip 'Price', 'Local', 'Base', parentheses, extra whitespace → uppercase."""
@@ -88,6 +115,7 @@ def _match_currency(token: str, aliases: dict[str, str]) -> str | None:
 # ---------------------------------------------------------------------------
 # Main class
 # ---------------------------------------------------------------------------
+
 
 class TemplateFiller:
     """Reads Excel templates, detects currency columns, fills with pricing data."""
@@ -220,8 +248,16 @@ class TemplateFiller:
         # --- Sheet 2: Conversion Details ---
         ws_audit = wb.create_sheet("Conversion Details")
         audit_headers = [
-            "SKU", "Currency", "FX Rate", "Tier", "Converted Amount",
-            "VAT Rate", "VAT Amount", "Pre-Round Amount", "Final Price", "Rounding Rule",
+            "SKU",
+            "Currency",
+            "FX Rate",
+            "Tier",
+            "Converted Amount",
+            "VAT Rate",
+            "VAT Amount",
+            "Pre-Round Amount",
+            "Final Price",
+            "Rounding Rule",
         ]
         for ci, h in enumerate(audit_headers, 1):
             ws_audit.cell(row=1, column=ci, value=h)
@@ -264,12 +300,14 @@ class TemplateFiller:
         for pricing_output in results:
             for code in sorted(pricing_output.results.keys()):
                 cr = pricing_output.results[code]
-                writer.writerow([
-                    pricing_output.sku,
-                    pricing_output.sku,
-                    "Base Price",
-                    cr.currency,
-                    str(cr.final_price),
-                ])
+                writer.writerow(
+                    [
+                        pricing_output.sku,
+                        pricing_output.sku,
+                        "Base Price",
+                        cr.currency,
+                        str(cr.final_price),
+                    ]
+                )
 
         return output.getvalue()

@@ -8,10 +8,10 @@ from openpyxl import Workbook
 from app.schemas.pricing import CurrencyResult, PricingOutput
 from app.services.template_filler import TemplateFiller
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_workbook(headers, rows=None):
     wb = Workbook()
@@ -38,14 +38,13 @@ def _make_output(sku, usd, currencies):
             final_price=Decimal(str(price)),
             rounding_rule="nearest_9",
         )
-    return PricingOutput(
-        sku=sku, item_name=sku, usd_price=Decimal(str(usd)), results=results
-    )
+    return PricingOutput(sku=sku, item_name=sku, usd_price=Decimal(str(usd)), results=results)
 
 
 # ---------------------------------------------------------------------------
 # Class 1: TestColumnDetection
 # ---------------------------------------------------------------------------
+
 
 class TestColumnDetection:
     """Test TemplateFiller().detect_columns() on various header patterns."""
@@ -105,6 +104,7 @@ class TestColumnDetection:
 # Class 2: TestSKUColumnDetection
 # ---------------------------------------------------------------------------
 
+
 class TestSKUColumnDetection:
     """Test detect_sku_column() for various header patterns."""
 
@@ -151,6 +151,7 @@ class TestSKUColumnDetection:
 # Class 3: TestPriceColumnDetection
 # ---------------------------------------------------------------------------
 
+
 class TestPriceColumnDetection:
     """Test detect_price_column() for USD/base price detection."""
 
@@ -191,6 +192,7 @@ class TestPriceColumnDetection:
 # ---------------------------------------------------------------------------
 # Class 4: TestTemplateFill
 # ---------------------------------------------------------------------------
+
 
 class TestTemplateFill:
     """Test fill() with actual Workbook objects."""
@@ -274,6 +276,7 @@ class TestTemplateFill:
 # Class 5: TestDefaultOutput
 # ---------------------------------------------------------------------------
 
+
 class TestDefaultOutput:
     """Test generate_default_output() creates proper multi-sheet workbook."""
 
@@ -324,6 +327,7 @@ class TestDefaultOutput:
 # ---------------------------------------------------------------------------
 # Class 6: TestNetSuiteCSV
 # ---------------------------------------------------------------------------
+
 
 class TestNetSuiteCSV:
     """Test generate_netsuite_csv() output format."""

@@ -10,10 +10,10 @@ import pytest
 
 from app.services.eval_case_generator import generate_eval_cases
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_db(count: int = 0, existing_questions: list[str] | None = None) -> MagicMock:
     """Build a mock AsyncSession whose execute() returns appropriate results."""
@@ -35,23 +35,25 @@ def _make_db(count: int = 0, existing_questions: list[str] | None = None) -> Mag
     return db
 
 
-_VALID_HAIKU_RESPONSE = json.dumps([
-    {
-        "question": "What is the total revenue from sales orders in Q1 2025?",
-        "expected_keywords": ["revenue", "sales_order", "q1"],
-        "expected_sql_contains": ["SELECT", "SUM", "transaction"],
-    },
-    {
-        "question": "Show me open vendor bills pending approval by subsidiary",
-        "expected_keywords": ["vendor_bill", "pending", "subsidiary"],
-        "expected_sql_contains": ["SELECT", "vendorbill", "subsidiary"],
-    },
-    {
-        "question": "What are the top 10 customers by order count in the last 90 days?",
-        "expected_keywords": ["customer", "order_count", "90 days"],
-        "expected_sql_contains": ["SELECT", "COUNT", "entity"],
-    },
-])
+_VALID_HAIKU_RESPONSE = json.dumps(
+    [
+        {
+            "question": "What is the total revenue from sales orders in Q1 2025?",
+            "expected_keywords": ["revenue", "sales_order", "q1"],
+            "expected_sql_contains": ["SELECT", "SUM", "transaction"],
+        },
+        {
+            "question": "Show me open vendor bills pending approval by subsidiary",
+            "expected_keywords": ["vendor_bill", "pending", "subsidiary"],
+            "expected_sql_contains": ["SELECT", "vendorbill", "subsidiary"],
+        },
+        {
+            "question": "What are the top 10 customers by order count in the last 90 days?",
+            "expected_keywords": ["customer", "order_count", "90 days"],
+            "expected_sql_contains": ["SELECT", "COUNT", "entity"],
+        },
+    ]
+)
 
 _TENANT_ID = uuid.UUID("ce3dfaad-626f-4992-84e9-500c8291ca0a")
 
@@ -67,6 +69,7 @@ async def test_generate_returns_list():
     db = _make_db(count=0)
 
     import app.services.query_experiment_service as qes
+
     original_suiteql = getattr(qes, "_SUITEQL_SCHEMA_HINT", None)
     original_bq = getattr(qes, "_BIGQUERY_SCHEMA_HINT", None)
     try:
@@ -105,6 +108,7 @@ async def test_dedup_skips_existing():
     db = _make_db(count=0, existing_questions=existing)
 
     import app.services.query_experiment_service as qes
+
     original_suiteql = getattr(qes, "_SUITEQL_SCHEMA_HINT", None)
     original_bq = getattr(qes, "_BIGQUERY_SCHEMA_HINT", None)
     try:
@@ -139,6 +143,7 @@ async def test_haiku_failure_returns_empty():
     db = _make_db(count=0)
 
     import app.services.query_experiment_service as qes
+
     original_suiteql = getattr(qes, "_SUITEQL_SCHEMA_HINT", None)
     original_bq = getattr(qes, "_BIGQUERY_SCHEMA_HINT", None)
     try:
@@ -169,6 +174,7 @@ async def test_max_cap_respected():
     db = _make_db(count=200)
 
     import app.services.query_experiment_service as qes
+
     original_suiteql = getattr(qes, "_SUITEQL_SCHEMA_HINT", None)
     original_bq = getattr(qes, "_BIGQUERY_SCHEMA_HINT", None)
     try:
@@ -201,6 +207,7 @@ async def test_invalid_json_returns_empty():
     db = _make_db(count=0)
 
     import app.services.query_experiment_service as qes
+
     original_suiteql = getattr(qes, "_SUITEQL_SCHEMA_HINT", None)
     original_bq = getattr(qes, "_BIGQUERY_SCHEMA_HINT", None)
     try:
