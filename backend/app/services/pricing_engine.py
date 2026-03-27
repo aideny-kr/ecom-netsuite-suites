@@ -7,7 +7,7 @@ no database, no async, no side effects.
 from __future__ import annotations
 
 import math
-from decimal import ROUND_CEILING, ROUND_HALF_UP, Decimal
+from decimal import ROUND_HALF_UP, Decimal
 
 from app.schemas.pricing import (
     CurrencyConfig,
@@ -38,30 +38,21 @@ def round_nearest_100(value: Decimal) -> Decimal:
 def round_nearest_990(value: Decimal) -> Decimal:
     """Round to nearest X490 or X990 charm-price point.
 
-    Values close to a 1000 boundary (offset < 100) snap to the previous
-    block's X990 point, otherwise snap up to X490 or X990 within the block.
+    Simple rule: offset <= 490 → X490, else → X990.
     """
     n = int(math.ceil(value))
     base_1000 = (n // 1000) * 1000
     offset = n - base_1000
-    if offset < 100 and base_1000 >= 10:
-        return Decimal(base_1000 - 10)
-    elif offset <= 490:
+    if offset <= 490:
         return Decimal(base_1000 + 490)
     else:
         return Decimal(base_1000 + 990)
 
 
 def round_nearest_50(value: Decimal) -> Decimal:
-    """Round to nearest 50.
-
-    Fractional values (non-integer) round UP (ceiling) to the next 50
-    boundary; integer values use standard ROUND_HALF_UP.
-    """
+    """Round to nearest 50 (ROUND_HALF_UP consistently)."""
     if value % 50 == 0:
         return value
-    if value != value.to_integral_value():
-        return (value / 50).quantize(Decimal("1"), rounding=ROUND_CEILING) * 50
     return (value / 50).quantize(Decimal("1"), rounding=ROUND_HALF_UP) * 50
 
 

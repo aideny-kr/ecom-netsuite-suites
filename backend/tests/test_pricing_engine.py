@@ -151,7 +151,7 @@ class TestTier1Conversion:
             accounting_config.currencies["INR"],
             accounting_config.eur_fx_rate,
         )
-        assert result.final_price == Decimal("163500")
+        assert result.final_price == Decimal("163450")
 
     def test_aed_conversion(self, accounting_config):
         engine = PricingEngine()
@@ -267,7 +267,7 @@ class TestSecondSKU:
             accounting_config.currencies["KRW"],
             accounting_config.eur_fx_rate,
         )
-        assert result.final_price == Decimal("301990")
+        assert result.final_price == Decimal("302490")
 
     def test_sek_199(self, accounting_config):
         engine = PricingEngine()
