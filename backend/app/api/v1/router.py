@@ -26,6 +26,7 @@ from app.api.v1 import (
     suitescript_sync,
     sync,
     tables,
+    task_files,
     tenants,
     users,
     workspaces,
@@ -63,3 +64,4 @@ api_router.include_router(exports.router)
 api_router.include_router(invites.router)
 api_router.include_router(connection_alerts.router)
 api_router.include_router(pricing_config.router)
+api_router.include_router(task_files.router)
