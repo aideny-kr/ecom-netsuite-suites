@@ -12,11 +12,14 @@ import { SessionSidebar } from "@/components/chat/session-sidebar";
 import { MessageList } from "@/components/chat/message-list";
 import { ChatInput } from "@/components/chat/chat-input";
 import { useWorkspaces } from "@/hooks/use-workspace";
+import { useAgents } from "@/hooks/use-agents";
 import { AlertCircle, X, PanelLeftOpen } from "lucide-react";
 
 export default function ChatPage() {
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [chatSidebarCollapsed, setChatSidebarCollapsed] = useState(false);
+  const [pinnedAgentId, setPinnedAgentId] = useState<string | null>(null);
+  const { data: agents = [] } = useAgents();
   const [error, setError] = useState<string | null>(null);
   const [pendingMessage, setPendingMessage] = useState<string | null>(null);
   const [streamingContent, setStreamingContent] = useState<string | null>(null);
@@ -136,7 +139,7 @@ export default function ChatPage() {
       try {
         const res = await apiClient.stream(
           `/api/v1/chat/sessions/${sessionId}/messages`,
-          { content },
+          { content, agent_id: pinnedAgentId || undefined },
         );
         await consumeChatStream(res, {
           onText: (chunk) => {
@@ -252,6 +255,9 @@ export default function ChatPage() {
         onNewChat={handleNewChat}
         collapsed={chatSidebarCollapsed}
         onToggle={() => setChatSidebarCollapsed(!chatSidebarCollapsed)}
+        agents={agents}
+        pinnedAgentId={pinnedAgentId}
+        onSelectAgent={setPinnedAgentId}
       />
       <div className="relative flex min-w-0 flex-1 flex-col bg-[var(--chat-surface)]">
         {chatSidebarCollapsed && (
@@ -281,6 +287,9 @@ export default function ChatPage() {
             chartsByMessage={chartsRef.current}
             taskOutput={taskOutput}
             taskOutputs={taskOutputsRef.current}
+            pinnedAgentId={pinnedAgentId}
+            agents={agents}
+            onSelectAgent={setPinnedAgentId}
             onMentionClick={handleMentionClick}
             onImportanceOverride={(messageId, newTier) => {
               queryClient.setQueryData<ChatSessionDetail>(

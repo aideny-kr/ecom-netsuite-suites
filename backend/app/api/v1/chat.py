@@ -40,6 +40,7 @@ class UpdateSessionRequest(BaseModel):
 
 class SendMessageRequest(BaseModel):
     content: str = Field(..., max_length=4000)
+    agent_id: str | None = Field(default=None, description="Pin to a specific agent (skip routing)")
 
 
 class MessageResponse(BaseModel):
@@ -262,6 +263,7 @@ async def send_message(
                     user_msg=user_msg,
                     wizard_step=wizard_step,
                     user_timezone=x_timezone,
+                    agent_id=body.agent_id,
                 ):
                     await queue.put(chunk)
             except ValueError as exc:

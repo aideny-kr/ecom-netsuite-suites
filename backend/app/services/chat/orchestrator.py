@@ -842,6 +842,7 @@ async def run_chat_turn(
     user_msg: ChatMessage | None = None,
     wizard_step: str | None = None,
     user_timezone: str | None = None,
+    agent_id: str | None = None,
 ) -> AsyncGenerator[dict, None]:
     """Execute an agentic chat turn with Claude's native tool use.
 
@@ -1512,16 +1513,21 @@ async def run_chat_turn(
 
                     # Three-tier routing: try specialized agent first, fall back to UnifiedAgent
                     # Financial reports bypass routing — must use UnifiedAgent with NetSuite tools
-                    # Infer previous agent from conversation history for session pinning
-                    _previous_agent_id = _infer_previous_agent(session.messages) if session.messages else None
-                    _selected_agent_id = await _select_agent(
-                        query=sanitized_input,
-                        tenant_id=tenant_id,
-                        db=db,
-                        adapter=specialist_adapter,
-                        is_financial=is_financial,
-                        previous_agent_id=_previous_agent_id,
-                    )
+                    if agent_id and not is_financial:
+                        # Client-side agent pin — skip routing entirely
+                        _selected_agent_id = agent_id
+                        print(f"[ROUTING] Client pinned → {agent_id}", flush=True)
+                    else:
+                        # Infer previous agent from conversation history for session pinning
+                        _previous_agent_id = _infer_previous_agent(session.messages) if session.messages else None
+                        _selected_agent_id = await _select_agent(
+                            query=sanitized_input,
+                            tenant_id=tenant_id,
+                            db=db,
+                            adapter=specialist_adapter,
+                            is_financial=is_financial,
+                            previous_agent_id=_previous_agent_id,
+                        )
 
                     if _selected_agent_id:
                         # Route to specialized agent

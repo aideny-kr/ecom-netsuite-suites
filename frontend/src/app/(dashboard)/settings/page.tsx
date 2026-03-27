@@ -61,7 +61,7 @@ import { TeamSection } from "@/components/settings/team-section";
 import { JobsSection } from "@/components/settings/jobs-section";
 import { NetSuiteConnectionsSection } from "@/components/settings/netsuite-connections-section";
 import { BigQueryConnectionSection } from "@/components/settings/bigquery-connection-section";
-import { PricingConfigSection } from "@/components/settings/pricing-config-section";
+
 import { usePermissions } from "@/hooks/use-permissions";
 import { useAuth } from "@/providers/auth-provider";
 import { ROLE_DISPLAY_NAMES } from "@/lib/types";
@@ -2833,9 +2833,6 @@ export default function SettingsPage() {
 
           {/* Chat Settings (MCP Financial toggle) */}
           <ChatSettingsSection />
-
-          {/* Pricing Configuration */}
-          <PricingConfigSection />
 
           {/* Tenant Profile Section */}
           <TenantProfileSection />

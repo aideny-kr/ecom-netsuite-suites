@@ -20,6 +20,7 @@ import { ChangeProposalCard } from "@/components/chat/change-proposal-card";
 import { WorkspaceToolCard } from "@/components/chat/workspace-tool-card";
 import { SuiteQLToolCard } from "@/components/chat/suiteql-tool-card";
 import { TaskOutputCard } from "@/components/chat/task-output-card";
+import { AgentChatHeader } from "@/components/chat/agent-chat-header";
 import { FileCode, Bookmark, Check, Loader2, Copy, ThumbsUp, ThumbsDown, User, Zap } from "lucide-react";
 import { ConfidenceBadge } from "@/components/chat/confidence-badge";
 import { ImportanceBanner } from "@/components/chat/importance-banner";
@@ -480,6 +481,9 @@ interface MessageListProps {
   chartsByMessage?: Map<string, ChartData[]>;
   taskOutput?: import("@/lib/chat-stream").TaskOutputData | null;
   taskOutputs?: Map<string, import("@/lib/chat-stream").TaskOutputData>;
+  pinnedAgentId?: string | null;
+  agents?: import("@/hooks/use-agents").AgentSummary[];
+  onSelectAgent?: (agentId: string | null) => void;
   onImportanceOverride?: (messageId: string, newTier: number) => void;
   variant?: "default" | "terminal";
 }
@@ -504,6 +508,9 @@ export function MessageList({
   chartsByMessage,
   taskOutput,
   taskOutputs,
+  pinnedAgentId,
+  agents,
+  onSelectAgent,
   onImportanceOverride,
   variant,
 }: MessageListProps) {
@@ -626,6 +633,15 @@ export function MessageList({
       )}
       data-testid="message-list"
     >
+      {pinnedAgentId && (
+        <div className="mb-4 -mx-10 -mt-8 border-b border-border/50">
+          <AgentChatHeader
+            agentId={pinnedAgentId}
+            agentName={agents?.find(a => a.agent_id === pinnedAgentId)?.display_name || pinnedAgentId}
+            onExit={() => onSelectAgent?.(null)}
+          />
+        </div>
+      )}
       {messages.map((message) => (
         message.role === "assistant" ? (
           <AssistantMessageRow
