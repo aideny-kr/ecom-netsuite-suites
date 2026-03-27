@@ -1,4 +1,4 @@
-# BigQuery Eval Test Set — 15 cases
+# BigQuery Eval Test Set — 40 cases
 # Dialect rules: LIMIT N, backtick identifiers, SAFE_DIVIDE, DATE_TRUNC
 # Schema: frameworkreporting.sales-orders_cleaned
 
@@ -104,5 +104,188 @@
   dialect: bigquery
   expected_keywords: ["cumulative", "revenue", "growth", "year"]
   expected_sql_contains: ["SUM", "OVER", "DATE_TRUNC", "ORDER BY"]
+  tables: ["frameworkreporting.sales-orders_cleaned"]
+  difficulty: hard
+
+# --- Column Coverage ---
+
+- question: "B2B vs B2C order count"
+  dialect: bigquery
+  expected_keywords: ["b2b", "b2c", "order", "count"]
+  expected_sql_contains: ["customer_type", "COUNT", "ordernumber", "GROUP BY", "orderstatus NOT IN"]
+  tables: ["frameworkreporting.sales-orders_cleaned"]
+  difficulty: easy
+
+- question: "revenue by customer segment"
+  dialect: bigquery
+  expected_keywords: ["revenue", "customer", "segment"]
+  expected_sql_contains: ["customer_category", "SUM", "netamount", "GROUP BY", "orderstatus NOT IN"]
+  tables: ["frameworkreporting.sales-orders_cleaned"]
+  difficulty: easy
+
+- question: "top B2B customers by revenue"
+  dialect: bigquery
+  expected_keywords: ["b2b", "customer", "revenue"]
+  expected_sql_contains: ["b2b_customer_name", "SUM", "netamount", "GROUP BY", "ORDER BY"]
+  tables: ["frameworkreporting.sales-orders_cleaned"]
+  difficulty: easy
+
+- question: "average order value trend by month"
+  dialect: bigquery
+  expected_keywords: ["average", "order", "value", "trend"]
+  expected_sql_contains: ["ecom_order_total", "DATE_TRUNC", "SAFE_DIVIDE", "ordernumber", "orderstatus NOT IN"]
+  tables: ["frameworkreporting.sales-orders_cleaned"]
+  difficulty: medium
+
+- question: "refurbished vs new product revenue"
+  dialect: bigquery
+  expected_keywords: ["refurbished", "new", "revenue"]
+  expected_sql_contains: ["Refurbished", "SUM", "netamount", "GROUP BY", "orderstatus NOT IN"]
+  tables: ["frameworkreporting.sales-orders_cleaned"]
+  difficulty: medium
+
+- question: "preorder vs standard order mix"
+  dialect: bigquery
+  expected_keywords: ["preorder", "standard", "order"]
+  expected_sql_contains: ["preorder", "COUNT", "ordernumber", "GROUP BY", "orderstatus NOT IN"]
+  tables: ["frameworkreporting.sales-orders_cleaned"]
+  difficulty: medium
+
+- question: "revenue by shipping method"
+  dialect: bigquery
+  expected_keywords: ["revenue", "shipping", "method"]
+  expected_sql_contains: ["shipmethod", "SUM", "netamount", "GROUP BY", "orderstatus NOT IN"]
+  tables: ["frameworkreporting.sales-orders_cleaned"]
+  difficulty: easy
+
+- question: "average shipping cost by country"
+  dialect: bigquery
+  expected_keywords: ["shipping", "cost", "country"]
+  expected_sql_contains: ["shippingcost", "shipcountry", "AVG", "GROUP BY"]
+  tables: ["frameworkreporting.sales-orders_cleaned"]
+  difficulty: easy
+
+- question: "billing vs shipping country mismatch count"
+  dialect: bigquery
+  expected_keywords: ["billing", "shipping", "country", "mismatch"]
+  expected_sql_contains: ["billingcountry", "shipcountry", "COUNT", "WHERE"]
+  tables: ["frameworkreporting.sales-orders_cleaned"]
+  difficulty: medium
+
+- question: "average days to close by product"
+  dialect: bigquery
+  expected_keywords: ["days", "close", "product"]
+  expected_sql_contains: ["date_closed", "DATE_DIFF", "itemdisplayname", "AVG", "GROUP BY"]
+  tables: ["frameworkreporting.sales-orders_cleaned"]
+  difficulty: medium
+
+- question: "top SKUs by quantity sold"
+  dialect: bigquery
+  expected_keywords: ["sku", "quantity"]
+  expected_sql_contains: ["fw_sku", "SUM", "quantity", "GROUP BY", "ORDER BY"]
+  tables: ["frameworkreporting.sales-orders_cleaned"]
+  difficulty: easy
+
+- question: "revenue by fulfillment location"
+  dialect: bigquery
+  expected_keywords: ["revenue", "location"]
+  expected_sql_contains: ["location", "SUM", "netamount", "GROUP BY", "orderstatus NOT IN"]
+  tables: ["frameworkreporting.sales-orders_cleaned"]
+  difficulty: easy
+
+- question: "replacement orders this quarter"
+  dialect: bigquery
+  expected_keywords: ["replacement", "order", "quarter"]
+  expected_sql_contains: ["order_type", "DATE_TRUNC", "COUNT", "ordernumber", "GROUP BY"]
+  tables: ["frameworkreporting.sales-orders_cleaned"]
+  difficulty: medium
+
+- question: "line-level order type distribution"
+  dialect: bigquery
+  expected_keywords: ["line", "order", "type"]
+  expected_sql_contains: ["line_order_type", "COUNT", "GROUP BY", "ORDER BY"]
+  tables: ["frameworkreporting.sales-orders_cleaned"]
+  difficulty: medium
+
+- question: "units by production batch"
+  dialect: bigquery
+  expected_keywords: ["units", "batch"]
+  expected_sql_contains: ["batchlabel", "SUM", "quantity", "GROUP BY", "ORDER BY"]
+  tables: ["frameworkreporting.sales-orders_cleaned"]
+  difficulty: medium
+
+# --- Aggregation Pattern Cases ---
+
+- question: "order count by month"
+  dialect: bigquery
+  expected_keywords: ["order", "count", "month"]
+  expected_sql_contains: ["COUNT(DISTINCT ordernumber)", "DATE_TRUNC", "GROUP BY", "orderstatus NOT IN"]
+  tables: ["frameworkreporting.sales-orders_cleaned"]
+  difficulty: easy
+
+- question: "AOV trend by month"
+  dialect: bigquery
+  expected_keywords: ["aov", "trend", "month"]
+  expected_sql_contains: ["SAFE_DIVIDE(SUM(ecom_order_total)", "COUNT(DISTINCT ordernumber)", "DATE_TRUNC", "GROUP BY"]
+  tables: ["frameworkreporting.sales-orders_cleaned"]
+  difficulty: medium
+
+- question: "revenue per line vs per order comparison"
+  dialect: bigquery
+  expected_keywords: ["revenue", "line", "order"]
+  expected_sql_contains: ["ecom_order_total", "netamount", "COUNT(DISTINCT ordernumber)", "SAFE_DIVIDE"]
+  tables: ["frameworkreporting.sales-orders_cleaned"]
+  difficulty: hard
+
+# --- Window Function Cases ---
+
+- question: "running total of revenue by month"
+  dialect: bigquery
+  expected_keywords: ["running", "total", "revenue", "month"]
+  expected_sql_contains: ["SUM", "OVER", "ORDER BY", "DATE_TRUNC", "netamount"]
+  tables: ["frameworkreporting.sales-orders_cleaned"]
+  difficulty: medium
+
+- question: "month-over-month revenue growth rate"
+  dialect: bigquery
+  expected_keywords: ["month", "growth", "revenue"]
+  expected_sql_contains: ["LAG", "SAFE_DIVIDE", "DATE_TRUNC", "GROUP BY", "netamount"]
+  tables: ["frameworkreporting.sales-orders_cleaned"]
+  difficulty: hard
+
+- question: "rank customers by lifetime value"
+  dialect: bigquery
+  expected_keywords: ["rank", "customer", "lifetime", "value"]
+  expected_sql_contains: ["RANK", "SUM", "email", "GROUP BY", "ORDER BY"]
+  tables: ["frameworkreporting.sales-orders_cleaned"]
+  difficulty: medium
+
+- question: "3-month moving average of revenue"
+  dialect: bigquery
+  expected_keywords: ["moving", "average", "revenue"]
+  expected_sql_contains: ["AVG", "OVER", "ROWS BETWEEN", "DATE_TRUNC", "netamount"]
+  tables: ["frameworkreporting.sales-orders_cleaned"]
+  difficulty: hard
+
+# --- Cross-Dimension Cases ---
+
+- question: "revenue by country and product category"
+  dialect: bigquery
+  expected_keywords: ["revenue", "country", "category"]
+  expected_sql_contains: ["shipcountry", "itemclass", "SUM", "netamount", "GROUP BY"]
+  tables: ["frameworkreporting.sales-orders_cleaned"]
+  difficulty: medium
+
+- question: "B2B AOV by quarter and product line"
+  dialect: bigquery
+  expected_keywords: ["b2b", "aov", "quarter", "product"]
+  expected_sql_contains: ["customer_type", "DATE_TRUNC", "itemclass", "SAFE_DIVIDE", "GROUP BY"]
+  tables: ["frameworkreporting.sales-orders_cleaned"]
+  difficulty: hard
+
+- question: "customer retention by first-purchase product category"
+  dialect: bigquery
+  expected_keywords: ["customer", "retention", "product"]
+  expected_sql_contains: ["email", "itemclass", "DATE_TRUNC", "GROUP BY", "COUNT(DISTINCT"]
   tables: ["frameworkreporting.sales-orders_cleaned"]
   difficulty: hard

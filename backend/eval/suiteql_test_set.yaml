@@ -1,4 +1,4 @@
-# SuiteQL Eval Test Set — 15 cases
+# SuiteQL Eval Test Set — 40 cases
 # Dialect rules: FETCH FIRST N ROWS ONLY, BUILTIN.DF(), TRUNC(SYSDATE), single-letter status codes
 # Schema hints: status code mappings, BUILTIN.DF for display values, amount rules
 
@@ -106,3 +106,190 @@
   expected_sql_contains: ["SUM", "GROUP BY", "FETCH FIRST 5 ROWS ONLY", "BUILTIN.DF"]
   tables: ["transactionline", "transaction"]
   difficulty: hard
+
+# --- Transaction Type Coverage ---
+
+- question: "total cash sales this week"
+  dialect: suiteql
+  expected_keywords: ["cash", "sales", "total"]
+  expected_sql_contains: ["CashSale", "SUM", "foreigntotal", "TRUNC(SYSDATE)"]
+  tables: ["transaction"]
+  difficulty: easy
+
+- question: "payments received this month"
+  dialect: suiteql
+  expected_keywords: ["payment", "received", "month"]
+  expected_sql_contains: ["CustPymt", "SUM", "foreigntotal", "TRUNC(SYSDATE"]
+  tables: ["transaction"]
+  difficulty: easy
+
+- question: "journal entries posted today"
+  dialect: suiteql
+  expected_keywords: ["journal", "entry", "today"]
+  expected_sql_contains: ["Journal", "trandate", "TRUNC(SYSDATE)"]
+  tables: ["transaction"]
+  difficulty: easy
+
+- question: "open transfer orders between warehouses"
+  dialect: suiteql
+  expected_keywords: ["transfer", "order", "open"]
+  expected_sql_contains: ["TrnfrOrd", "status", "BUILTIN.DF"]
+  tables: ["transaction"]
+  difficulty: medium
+
+- question: "fulfillments shipped this week"
+  dialect: suiteql
+  expected_keywords: ["fulfillment", "shipped", "week"]
+  expected_sql_contains: ["ItemShip", "trandate", "TRUNC(SYSDATE)"]
+  tables: ["transaction"]
+  difficulty: easy
+
+- question: "items received this month"
+  dialect: suiteql
+  expected_keywords: ["item", "received", "month"]
+  expected_sql_contains: ["ItemRcpt", "trandate", "TRUNC(SYSDATE"]
+  tables: ["transaction"]
+  difficulty: easy
+
+- question: "open work orders"
+  dialect: suiteql
+  expected_keywords: ["work", "order", "open"]
+  expected_sql_contains: ["WorkOrd", "status", "BUILTIN.DF(t.entity)"]
+  tables: ["transaction"]
+  difficulty: easy
+
+# --- Status Code Edge Cases ---
+
+- question: "show me all billed sales orders"
+  dialect: suiteql
+  expected_keywords: ["billed", "sales", "order"]
+  expected_sql_contains: ["SalesOrd", "status", "'G'", "BUILTIN.DF(t.entity)"]
+  tables: ["transaction"]
+  difficulty: medium
+
+- question: "POs pending supervisor approval"
+  dialect: suiteql
+  expected_keywords: ["purchase", "order", "approval"]
+  expected_sql_contains: ["PurchOrd", "status", "'A'", "BUILTIN.DF(t.entity)"]
+  tables: ["transaction"]
+  difficulty: medium
+
+- question: "cancelled RMAs this quarter"
+  dialect: suiteql
+  expected_keywords: ["rma", "cancelled", "quarter"]
+  expected_sql_contains: ["RtnAuth", "status", "'C'", "TRUNC(SYSDATE"]
+  tables: ["transaction"]
+  difficulty: medium
+
+- question: "partially received POs"
+  dialect: suiteql
+  expected_keywords: ["purchase", "order", "partially received"]
+  expected_sql_contains: ["PurchOrd", "status", "'D'", "BUILTIN.DF(t.entity)"]
+  tables: ["transaction"]
+  difficulty: medium
+
+# --- BUILTIN.DF() Required Cases ---
+
+- question: "revenue by customer name"
+  dialect: suiteql
+  expected_keywords: ["revenue", "customer"]
+  expected_sql_contains: ["BUILTIN.DF(t.entity)", "SUM", "foreigntotal", "GROUP BY", "SalesOrd"]
+  tables: ["transaction"]
+  difficulty: easy
+
+- question: "top items by department"
+  dialect: suiteql
+  expected_keywords: ["item", "department"]
+  expected_sql_contains: ["BUILTIN.DF(tl.department)", "SUM", "GROUP BY", "FETCH FIRST"]
+  tables: ["transaction", "transactionline"]
+  difficulty: medium
+
+- question: "orders by currency"
+  dialect: suiteql
+  expected_keywords: ["order", "currency"]
+  expected_sql_contains: ["BUILTIN.DF(t.currency)", "COUNT", "GROUP BY", "SalesOrd"]
+  tables: ["transaction"]
+  difficulty: easy
+
+- question: "invoices by subsidiary and status"
+  dialect: suiteql
+  expected_keywords: ["invoice", "subsidiary", "status"]
+  expected_sql_contains: ["BUILTIN.DF(t.subsidiary)", "BUILTIN.DF(t.status)", "CustInvc", "GROUP BY"]
+  tables: ["transaction"]
+  difficulty: medium
+
+# --- Amount Rule Cases ---
+
+- question: "total PO amount by vendor"
+  dialect: suiteql
+  expected_keywords: ["purchase", "order", "amount", "vendor"]
+  expected_sql_contains: ["PurchOrd", "foreigntotal", "BUILTIN.DF(t.entity)", "SUM", "GROUP BY"]
+  tables: ["transaction"]
+  difficulty: medium
+
+- question: "revenue by item"
+  dialect: suiteql
+  expected_keywords: ["revenue", "item"]
+  expected_sql_contains: ["foreignamount", "transactionline", "JOIN", "SalesOrd", "GROUP BY"]
+  tables: ["transaction", "transactionline"]
+  difficulty: medium
+
+- question: "compare order total vs line totals for sales orders"
+  dialect: suiteql
+  expected_keywords: ["order", "total", "line"]
+  expected_sql_contains: ["foreigntotal", "foreignamount", "transactionline", "JOIN", "SalesOrd"]
+  tables: ["transaction", "transactionline"]
+  difficulty: hard
+
+# --- Date Function Cases ---
+
+- question: "orders placed today"
+  dialect: suiteql
+  expected_keywords: ["order", "today"]
+  expected_sql_contains: ["TRUNC(SYSDATE)", "trandate", "SalesOrd"]
+  tables: ["transaction"]
+  difficulty: easy
+
+- question: "invoices this quarter"
+  dialect: suiteql
+  expected_keywords: ["invoice", "quarter"]
+  expected_sql_contains: ["TRUNC(SYSDATE", "'Q'", "CustInvc", "trandate"]
+  tables: ["transaction"]
+  difficulty: easy
+
+- question: "transactions since start of year"
+  dialect: suiteql
+  expected_keywords: ["transaction", "year"]
+  expected_sql_contains: ["TRUNC(SYSDATE", "'YEAR'", "trandate"]
+  tables: ["transaction"]
+  difficulty: easy
+
+- question: "bills due before March 15"
+  dialect: suiteql
+  expected_keywords: ["bill", "due", "date"]
+  expected_sql_contains: ["TO_DATE('2026-03-15', 'YYYY-MM-DD')", "duedate", "VendBill"]
+  tables: ["transaction"]
+  difficulty: medium
+
+# --- Multi-Table Join Cases ---
+
+- question: "sales by customer and item"
+  dialect: suiteql
+  expected_keywords: ["sales", "customer", "item"]
+  expected_sql_contains: ["BUILTIN.DF(t.entity)", "BUILTIN.DF(tl.item)", "JOIN", "SalesOrd", "SUM"]
+  tables: ["transaction", "transactionline"]
+  difficulty: hard
+
+- question: "GL entries for income accounts"
+  dialect: suiteql
+  expected_keywords: ["gl", "income", "account"]
+  expected_sql_contains: ["transactionaccountingline", "account", "JOIN", "SUM", "GROUP BY"]
+  tables: ["transactionaccountingline", "account"]
+  difficulty: hard
+
+- question: "employee count by department and subsidiary"
+  dialect: suiteql
+  expected_keywords: ["employee", "department", "subsidiary"]
+  expected_sql_contains: ["employee", "BUILTIN.DF", "department", "subsidiary", "COUNT", "GROUP BY"]
+  tables: ["employee"]
+  difficulty: medium
