@@ -425,7 +425,18 @@ class BaseSpecialistAgent(abc.ABC):
         ]
 
         tools = self.tool_definitions if self.tool_definitions else None
-        prompt_parts = split_system_prompt(self.system_prompt)
+
+        # Inject learned rules into system prompt for all agents
+        _system_prompt = self.system_prompt
+        _learned_rules = context.get("learned_rules", [])
+        if _learned_rules:
+            lr_block = "\n<learned_rules>\nTenant-specific business rules — FOLLOW THESE STRICTLY:\n"
+            for rule in _learned_rules:
+                lr_block += f"- {rule}\n"
+            lr_block += "</learned_rules>"
+            _system_prompt += lr_block
+
+        prompt_parts = split_system_prompt(_system_prompt)
 
         try:
             for step in range(self.max_steps):
@@ -681,7 +692,18 @@ class BaseSpecialistAgent(abc.ABC):
         messages.append({"role": "user", "content": f"Task: {task}{context_block}"})
 
         tools = self.tool_definitions if self.tool_definitions else None
-        prompt_parts = split_system_prompt(self.system_prompt)
+
+        # Inject learned rules into system prompt for all agents
+        _system_prompt = self.system_prompt
+        _learned_rules = context.get("learned_rules", [])
+        if _learned_rules:
+            lr_block = "\n<learned_rules>\nTenant-specific business rules — FOLLOW THESE STRICTLY:\n"
+            for rule in _learned_rules:
+                lr_block += f"- {rule}\n"
+            lr_block += "</learned_rules>"
+            _system_prompt += lr_block
+
+        prompt_parts = split_system_prompt(_system_prompt)
 
         try:
             patched_files: set[str] = set()  # Dedup workspace_propose_patch per file
