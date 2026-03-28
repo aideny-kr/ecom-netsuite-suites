@@ -107,6 +107,33 @@ function makeMdComponents(isTerminal: boolean): Components {
 const mdComponents: Components = makeMdComponents(false);
 const mdComponentsTerminal: Components = makeMdComponents(true);
 
+/**
+ * Memoized markdown renderer for streaming text.
+ * Re-renders only when content grows by 30+ chars or gains a new line.
+ * This replaces the old <pre> tag that showed raw markdown during streaming.
+ */
+const StreamingMarkdownBlock = memo(
+  function StreamingMarkdownBlock({ content, isTerminal }: { content: string; isTerminal: boolean }) {
+    return (
+      <div className="text-[15px] leading-relaxed prose prose-sm dark:prose-invert max-w-none">
+        <ReactMarkdown
+          remarkPlugins={[remarkGfm]}
+          components={isTerminal ? mdComponentsTerminal : mdComponents}
+        >
+          {content}
+        </ReactMarkdown>
+      </div>
+    );
+  },
+  (prev, next) => {
+    if (prev.content === next.content) return true;
+    const diff = next.content.length - prev.content.length;
+    const newLines = next.content.slice(prev.content.length).includes("\n");
+    // Re-render on: 30+ char growth OR new line added
+    return diff < 30 && !newLines;
+  }
+);
+
 function renderWithMentions(
   content: string,
   onMentionClick?: (filePath: string) => void,
@@ -478,6 +505,7 @@ interface MessageListProps {
   onChangesetAction?: () => void;
   streamingContent?: string | null;
   streamingStatus?: string | null;
+  streamingSteps?: { label: string; status: "complete" | "running" }[];
   streamingMessage?: ChatMessage | null;
   financialReport?: FinancialReportData | null;
   financialReports?: Map<string, FinancialReportData>;
@@ -509,6 +537,7 @@ export function MessageList({
   onChangesetAction,
   streamingContent,
   streamingStatus,
+  streamingSteps = [],
   streamingMessage,
   financialReport,
   financialReports,
@@ -835,30 +864,36 @@ export function MessageList({
                     />
                   )}
                   {parsed.text && (
-                    <pre className="whitespace-pre-wrap font-sans text-[15px] leading-relaxed m-0">
-                      {parsed.text}
-                    </pre>
+                    <StreamingMarkdownBlock content={parsed.text} isTerminal={isTerminal} />
                   )}
                 </>
               );
             })()}
 
-            {/* 2. Tool status BELOW text */}
-            {streamingStatus ? (
-              isTerminal ? (
-                <div className="mt-2 flex items-center gap-4">
-                  <div className="h-2 w-2 bg-[var(--chat-accent)] animate-pulse" />
-                  <span className="text-[10px] tracking-widest text-[var(--chat-accent)] uppercase">
-                    {streamingStatus}
-                  </span>
-                </div>
-              ) : (
-                <div className="mt-2 text-[12px] font-medium text-muted-foreground flex items-center gap-2">
-                  <span className="h-1.5 w-1.5 rounded-full bg-primary animate-pulse" />
-                  {streamingStatus}
-                </div>
-              )
-            ) : !streamingContent ? (
+            {/* 2. Tool steps timeline BELOW text */}
+            {streamingSteps.length > 0 && (
+              <div className="mt-2 space-y-1">
+                {streamingSteps.map((step, i) => (
+                  <div key={i} className={cn(
+                    "flex items-center gap-2 text-[11px]",
+                    step.status === "running" ? "text-foreground" : "text-muted-foreground",
+                  )}>
+                    {step.status === "running" ? (
+                      <span className={cn(
+                        "h-1.5 w-1.5 rounded-full animate-pulse",
+                        isTerminal ? "bg-[var(--chat-accent)]" : "bg-primary",
+                      )} />
+                    ) : (
+                      <Check className="h-3 w-3 text-emerald-500" />
+                    )}
+                    <span className={isTerminal ? "tracking-wider uppercase text-[10px]" : ""}>
+                      {step.label}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+            {!streamingContent && streamingSteps.length === 0 && (
               isTerminal ? (
                 <div className="flex items-center gap-4">
                   <div className="h-2 w-2 bg-[var(--chat-accent)] animate-pulse" />
@@ -873,7 +908,7 @@ export function MessageList({
                   <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/60 animate-bounce [animation-delay:300ms]" />
                 </span>
               )
-            ) : null}
+            )}
 
             {/* 3. Data tables with fade-in animation */}
             {financialReport && (

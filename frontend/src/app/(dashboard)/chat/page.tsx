@@ -30,6 +30,7 @@ export default function ChatPage() {
   const [pendingMessage, setPendingMessage] = useState<string | null>(null);
   const [streamingContent, setStreamingContent] = useState<string | null>(null);
   const [streamingStatus, setStreamingStatus] = useState<string | null>(null);
+  const [streamingSteps, setStreamingSteps] = useState<{ label: string; status: "complete" | "running" }[]>([]);
   const [streamingMessage, setStreamingMessage] = useState<ChatMessage | null>(null);
   const [isStreaming, setIsStreaming] = useState(false);
   const [financialReport, setFinancialReport] = useState<FinancialReportData | null>(null);
@@ -157,6 +158,7 @@ export default function ChatPage() {
           onText: (chunk) => {
             bufferRef.current.push(chunk);
             setStreamingStatus(null);
+        setStreamingSteps([]);
             if (rafRef.current === null) {
               rafRef.current = requestAnimationFrame(flushBuffer);
             }
@@ -165,6 +167,11 @@ export default function ChatPage() {
             // Add newline before tool execution so next text block starts on new line
             setStreamingContent((prev) => prev && !prev.endsWith("\n") ? prev + "\n\n" : prev);
             setStreamingStatus(status);
+            // Accumulate tool steps — mark previous as complete, add new as running
+            setStreamingSteps((prev) => [
+              ...prev.map((s) => ({ ...s, status: "complete" as const })),
+              { label: status, status: "running" as const },
+            ]);
           },
           onFinancialReport: (data) => setFinancialReport(data),
           onDataTable: (data) => setDataTable(data),
@@ -203,6 +210,7 @@ export default function ChatPage() {
             setStreamingMessage(message);
             setStreamingContent(null);
             setStreamingStatus(null);
+        setStreamingSteps([]);
           },
         });
       } catch (err: unknown) {
@@ -229,6 +237,7 @@ export default function ChatPage() {
         setPendingMessage(null);
         setStreamingContent(null);
         setStreamingStatus(null);
+        setStreamingSteps([]);
         setStreamingMessage(null);
         setFinancialReport(null);
         setDataTable(null);
@@ -287,6 +296,7 @@ export default function ChatPage() {
             isWaitingForReply={isStreaming}
             streamingContent={streamingContent}
             streamingStatus={streamingStatus}
+            streamingSteps={streamingSteps}
             streamingMessage={streamingMessage}
             financialReport={financialReport}
             financialReports={financialReportsRef.current}
