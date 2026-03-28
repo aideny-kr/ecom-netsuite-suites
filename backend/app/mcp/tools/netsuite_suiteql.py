@@ -97,6 +97,40 @@ def enforce_limit(query: str, max_rows: int) -> str:
     return f"{stripped} FETCH FIRST {max_rows} ROWS ONLY"
 
 
+def enforce_limit_with_metadata(query: str, max_rows: int) -> dict:
+    """Like enforce_limit, but returns metadata about whether the limit was capped.
+
+    Returns: {"query": str, "was_capped": bool, "requested_rows": int|None, "actual_limit": int}
+    """
+    stripped = query.rstrip().rstrip(";")
+    requested_rows = None
+    was_capped = False
+
+    # Check for existing FETCH FIRST
+    fetch_match = re.search(r"FETCH\s+FIRST\s+(\d+)\s+ROWS\s+ONLY", stripped, re.IGNORECASE)
+    if fetch_match:
+        requested_rows = int(fetch_match.group(1))
+        if requested_rows > max_rows:
+            was_capped = True
+
+    # Check for existing LIMIT
+    if not fetch_match:
+        limit_match = re.search(r"LIMIT\s+(\d+)", stripped, re.IGNORECASE)
+        if limit_match:
+            requested_rows = int(limit_match.group(1))
+            if requested_rows > max_rows:
+                was_capped = True
+
+    final_query = enforce_limit(query, max_rows)
+
+    return {
+        "query": final_query,
+        "was_capped": was_capped,
+        "requested_rows": requested_rows,
+        "actual_limit": max_rows,
+    }
+
+
 _SELECT_RE = re.compile(r"SELECT\s+(.*?)\s+FROM\s+", re.IGNORECASE)
 _AS_RE = re.compile(r"\bAS\s+(\w+)\s*$", re.IGNORECASE)
 _IDENT_RE = re.compile(r"^[a-zA-Z_]\w*$")

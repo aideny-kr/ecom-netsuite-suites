@@ -126,6 +126,72 @@ _BROKEN_STATUSES = frozenset({"needs_reauth", "error", "expired"})
 _REST_TOOLS = frozenset({"netsuite_suiteql", "netsuite_financial_report"})
 
 
+# ---------------------------------------------------------------------------
+# R1: Explicit web search override
+# ---------------------------------------------------------------------------
+_WEB_SEARCH_RE = re.compile(
+    r"""(?ix)
+    (?:search\s+(?:the\s+)?web)
+    | (?:web\s+search)
+    | (?:look\s+(?:this\s+)?up\s+online)
+    | (?:search\s+online)
+    | (?:google\s+this)
+    | (?:use\s+web\s*search)
+    """,
+)
+
+
+def _detect_web_search_intent(user_message: str) -> bool:
+    """Detect explicit web search requests (R1)."""
+    return bool(_WEB_SEARCH_RE.search(user_message))
+
+
+# ---------------------------------------------------------------------------
+# R5: Data reference detection (reduce re-query bias)
+# ---------------------------------------------------------------------------
+_DATA_REFERENCE_RE = re.compile(
+    r"""(?ix)
+    (?:(?:the|that|those|same)\s+(?:list|data|result|customers|orders|items|records))
+    | (?:(?:from|use|with|based\s+on)\s+(?:the\s+)?(?:previous|earlier|above|before|last))
+    | (?:we\s+(?:just\s+)?(?:pulled|looked\s+up|queried|got|fetched))
+    | (?:(?:use|take)\s+(?:the\s+)?(?:same|those|that)\s+(?:data|result|list))
+    """,
+)
+
+
+def _detect_data_reference(user_message: str) -> bool:
+    """Detect when user references previously-returned data (R5)."""
+    return bool(_DATA_REFERENCE_RE.search(user_message))
+
+
+# ---------------------------------------------------------------------------
+# R6: NetSuite entity routing
+# ---------------------------------------------------------------------------
+_NETSUITE_ENTITY_RE = re.compile(
+    r"""(?ix)
+    (?:customer\s+balance)
+    | (?:outstanding\s+balance)
+    | (?:accounts?\s+receivable)
+    | (?:AR\s+aging)
+    | (?:open\s+(?:invoices?|sales\s+orders?|purchase\s+orders?|vendor\s+bills?))
+    | (?:(?:purchase|sales)\s+order)
+    | (?:journal\s+entr)
+    | (?:credit\s+memo)
+    | (?:vendor\s+bill)
+    | (?:GL\s+balance)
+    | (?:general\s+ledger)
+    | (?:inventory\s+(?:count|adjustment|transfer))
+    | (?:item\s+fulfillment)
+    | (?:item\s+receipt)
+    """,
+)
+
+
+def _detect_netsuite_entity(user_message: str) -> bool:
+    """Detect queries about NetSuite-native entities (R6)."""
+    return bool(_NETSUITE_ENTITY_RE.search(user_message))
+
+
 async def _check_connection_health(db: AsyncSession, tenant_id: uuid.UUID) -> list[str]:
     """Check REST API and MCP connection health for a tenant.
 
@@ -266,6 +332,7 @@ async def _select_agent(
     db: "AsyncSession",
     adapter: "BaseLLMAdapter",
     is_financial: bool = False,
+    is_netsuite_entity: bool = False,
     previous_agent_id: str | None = None,
 ) -> str | None:
     """Three-tier routing to select a specialized agent.
@@ -276,6 +343,11 @@ async def _select_agent(
     # Financial reports MUST use UnifiedAgent (NetSuite financial tools)
     if is_financial:
         print(f"[ROUTING] Financial report detected, forcing unified-agent | query: {query[:80]}", flush=True)
+        return None
+
+    # NetSuite-native entities (balance, AR, invoices, POs) → UnifiedAgent (R6)
+    if is_netsuite_entity:
+        print(f"[ROUTING] NetSuite entity detected, forcing unified-agent | query: {query[:80]}", flush=True)
         return None
 
     if not _agent_registry.configs:
@@ -1247,6 +1319,9 @@ async def run_chat_turn(
 
                     detected_intent = classify_intent(sanitized_input)
                     is_financial = detected_intent == IntentType.FINANCIAL_REPORT
+                    is_web_search = _detect_web_search_intent(sanitized_input)
+                    is_netsuite_entity = _detect_netsuite_entity(sanitized_input)
+                    _has_data_reference = _detect_data_reference(sanitized_input)
 
                     # Gate financial reports by permission
                     if is_financial:
@@ -1523,6 +1598,7 @@ async def run_chat_turn(
                             db=db,
                             adapter=specialist_adapter,
                             is_financial=is_financial,
+                            is_netsuite_entity=is_netsuite_entity,
                             previous_agent_id=_previous_agent_id,
                         )
 
@@ -1567,6 +1643,23 @@ async def run_chat_turn(
                 if not _is_chitchat and is_financial:
                     unified_task = _build_financial_mode_task(sanitized_input)
                     print("[UNIFIED] Financial report mode activated (SuiteQL + CONSOLIDATE)", flush=True)
+                elif is_web_search:
+                    unified_task = (
+                        f"{sanitized_input}\n\n"
+                        "OVERRIDE: The user explicitly asked for a web search. You MUST call the web_search "
+                        "tool FIRST before any database queries. Extract the search topic from their message "
+                        "and search the web."
+                    )
+                    print(f"[ORCHESTRATOR] Web search override activated", flush=True)
+                elif _has_data_reference and _cached_result:
+                    unified_task = (
+                        f"{sanitized_input}\n\n"
+                        f"[CACHED DATA AVAILABLE] The user is referencing data from earlier in this conversation. "
+                        f"Previous result ({_cached_result.row_count} rows, type: {_cached_result.result_type}) "
+                        f"is available via the reference_previous_result tool. "
+                        f"Use it instead of re-querying. Do NOT run a new database query."
+                    )
+                    print(f"[ORCHESTRATOR] Data reference detected — using cached result", flush=True)
                 elif _follow_up_intent == FollowUpIntent.TRANSFORM and _cached_result:
                     unified_task = (
                         f"{sanitized_input}\n\n"
