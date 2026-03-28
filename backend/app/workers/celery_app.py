@@ -63,7 +63,7 @@ celery_app.conf.beat_schedule = {
     },
     "auto-query-improvement": {
         "task": "tasks.auto_query_improvement",
-        "schedule": crontab(hour=5, minute=0),
+        "schedule": crontab(hour=10, minute=0),
     },
     "proactive-token-refresh": {
         "task": "tasks.proactive_token_refresh",
