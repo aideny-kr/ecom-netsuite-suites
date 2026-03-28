@@ -1650,7 +1650,7 @@ async def run_chat_turn(
                         "tool FIRST before any database queries. Extract the search topic from their message "
                         "and search the web."
                     )
-                    print(f"[ORCHESTRATOR] Web search override activated", flush=True)
+                    print("[ORCHESTRATOR] Web search override activated", flush=True)
                 elif _has_data_reference and _cached_result:
                     unified_task = (
                         f"{sanitized_input}\n\n"
@@ -1659,7 +1659,7 @@ async def run_chat_turn(
                         f"is available via the reference_previous_result tool. "
                         f"Use it instead of re-querying. Do NOT run a new database query."
                     )
-                    print(f"[ORCHESTRATOR] Data reference detected — using cached result", flush=True)
+                    print("[ORCHESTRATOR] Data reference detected — using cached result", flush=True)
                 elif _follow_up_intent == FollowUpIntent.TRANSFORM and _cached_result:
                     unified_task = (
                         f"{sanitized_input}\n\n"
