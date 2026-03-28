@@ -1757,6 +1757,10 @@ async def run_chat_turn(
                                 _chart_buffer = _chart_buffer[end_idx + 8 :]
                                 _in_chart_block = False
                     elif event_type == "tool_status":
+                        # Flush chart buffer before tool execution — text is paused
+                        if _chart_buffer and not _in_chart_block:
+                            yield {"type": "text", "content": _chart_buffer}
+                            _chart_buffer = ""
                         yield {"type": "tool_status", "content": payload}
                     elif event_type == "tool_intercept":
                         # payload is (event_type_str, event_data_dict)
