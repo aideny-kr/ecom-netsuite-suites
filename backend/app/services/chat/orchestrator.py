@@ -326,6 +326,49 @@ def _infer_previous_agent(messages: list) -> str | None:
     return None
 
 
+# Financial phrase veto — if any of these appear in the query and a specialist
+# agent was selected, override to UnifiedAgent.  Substring matching handles
+# plurals naturally ("income statement" matches "income statements").
+# False positives are safe: UnifiedAgent can handle any query.
+_FINANCIAL_VETO_PHRASES = frozenset(
+    [
+        "income statement",
+        "balance sheet",
+        "cash flow statement",
+        "profit and loss",
+        "profit & loss",
+        "p&l",
+        "p/l",
+        "trial balance",
+        "financial statement",
+        "financial report",
+        "general ledger",
+        "gl report",
+        "gl balance",
+        "gl summary",
+        "chart of accounts",
+        "ebitda",
+        "consolidated financials",
+        "consolidated revenue",
+        "consolidated income",
+        "fiscal year report",
+        "accounting period",
+        "net income",
+        "gross profit",
+        "operating income",
+        "operating expenses",
+        "cost of goods sold",
+        "cogs",
+    ]
+)
+
+
+def _is_financial_query(query: str) -> bool:
+    """Broad check for financial report intent via substring matching."""
+    q = query.lower()
+    return any(phrase in q for phrase in _FINANCIAL_VETO_PHRASES)
+
+
 async def _select_agent(
     query: str,
     tenant_id: uuid.UUID,
@@ -367,6 +410,10 @@ async def _select_agent(
     tier1_result = rule_router.route(query)
 
     if tier1_result and tier1_result != "unified-agent":
+        # Financial veto: override specialist if query is financial
+        if _is_financial_query(query):
+            print(f"[ROUTING] Financial veto overrides Tier 1 ({tier1_result}) → unified-agent | query: {query[:80]}", flush=True)
+            return None
         # Check health before using
         if _agent_registry.is_healthy(error_count=0, success_count=0):
             print(f"[ROUTING] Tier 1 (regex) → {tier1_result} | matched patterns for query: {query[:80]}", flush=True)
@@ -377,6 +424,10 @@ async def _select_agent(
     # Session pin: if no Tier 1 match but session has a pinned specialized agent → use it
     if previous_agent_id and previous_agent_id != "unified-agent":
         if _agent_registry.configs.get(previous_agent_id):
+            # Financial veto applies to session pins too
+            if _is_financial_query(query):
+                print(f"[ROUTING] Financial veto overrides session pin ({previous_agent_id}) → unified-agent | query: {query[:80]}", flush=True)
+                return None
             print(f"[ROUTING] Session pinned → {previous_agent_id} | query: {query[:80]}", flush=True)
             return previous_agent_id
 
@@ -392,6 +443,10 @@ async def _select_agent(
     tier2_result = await semantic_router.route(query, enabled_agents, adapter)
 
     if tier2_result and tier2_result != "unified-agent":
+        # Financial veto: last line of defense
+        if _is_financial_query(query):
+            print(f"[ROUTING] Financial veto overrides Tier 2 ({tier2_result}) → unified-agent | query: {query[:80]}", flush=True)
+            return None
         print(f"[ROUTING] Tier 2 (semantic) → {tier2_result} | query: {query[:80]}", flush=True)
         return tier2_result
 

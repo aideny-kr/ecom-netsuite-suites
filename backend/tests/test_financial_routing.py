@@ -143,6 +143,71 @@ class TestSelectAgentFinancialPreFilter:
             _agent_registry.configs.clear()
 
 
+class TestFinancialVeto:
+    """_is_financial_query veto catches financial queries that the regex classifier missed."""
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "income statements from oct 2025 to feb 2026",
+            "show me the balance sheets",
+            "P&L for last quarter",
+            "profit and loss by subsidiary",
+            "cash flow statements by month",
+            "consolidated financials for 2025",
+            "what's the net income trend",
+            "ebitda by quarter",
+            "general ledger summary",
+            "trial balance as of today",
+        ],
+    )
+    def test_veto_detects_financial_queries(self, query):
+        from app.services.chat.orchestrator import _is_financial_query
+
+        assert _is_financial_query(query), f"Veto should catch: {query}"
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "top 10 customers by revenue",
+            "show me order trends over time",
+            "average order value last quarter",
+            "how many orders per day",
+            "what's our conversion rate",
+            "customer lifetime value analysis",
+        ],
+    )
+    def test_veto_does_not_block_bi_queries(self, query):
+        from app.services.chat.orchestrator import _is_financial_query
+
+        assert not _is_financial_query(query), f"Veto should NOT catch: {query}"
+
+    @pytest.mark.asyncio
+    async def test_veto_overrides_tier2_for_financial_query(self):
+        """Even when is_financial=False (regex missed), veto catches it after Tier 2."""
+        from app.services.chat.orchestrator import _agent_registry, _select_agent
+
+        _agent_registry.load_configs(CONFIGS_DIR)
+        try:
+            mock_db = AsyncMock()
+            mock_result = MagicMock()
+            mock_result.all.return_value = []
+            mock_db.execute = AsyncMock(return_value=mock_result)
+
+            # is_financial=False simulates the regex missing "income statements" (plural)
+            result = await _select_agent(
+                query="income statements from oct 2025 to feb 2026",
+                tenant_id=uuid.uuid4(),
+                db=mock_db,
+                adapter=AsyncMock(),
+                is_financial=False,  # regex missed it!
+            )
+            # Veto should override to None (unified-agent)
+            assert result is None, "Financial veto should override to unified-agent"
+        finally:
+            _agent_registry.configs.clear()
+
+
 class TestBiAgentDescriptionExcludesFinancials:
     """BI agent description should clarify it doesn't handle financial statements."""
 

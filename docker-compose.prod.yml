@@ -29,6 +29,8 @@ services:
     env_file: .env.production
     ports:
       - "8000:8000"
+    volumes:
+      - workspace-data:/tmp/workspace_storage
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "python", "-c", "import httpx; httpx.get('http://localhost:8000/api/v1/health')"]
@@ -68,3 +70,4 @@ services:
 
 volumes:
   celerybeat-data:
+  workspace-data:

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, Component, type ReactNode, type ErrorInfo } from "react";
 import {
   useMcpConnectors,
 } from "@/hooks/use-mcp-connectors";
@@ -2773,6 +2773,37 @@ function ConnectionStatusSection() {
 }
 
 // ---------------------------------------------------------------------------
+// Error boundary — isolates crashing sections so they don't take down the page
+// ---------------------------------------------------------------------------
+class SectionErrorBoundary extends Component<
+  { name: string; children: ReactNode },
+  { error: Error | null }
+> {
+  state: { error: Error | null } = { error: null };
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    console.error(`[Settings] ${this.props.name} crashed:`, error, info);
+  }
+  render() {
+    if (this.state.error) {
+      return (
+        <div className="rounded-xl border border-destructive/30 bg-destructive/5 p-5">
+          <p className="text-[13px] text-destructive font-medium">
+            {this.props.name} failed to load
+          </p>
+          <p className="mt-1 text-[12px] text-muted-foreground">
+            {this.state.error.message}
+          </p>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Main Settings Page
 // ---------------------------------------------------------------------------
 
@@ -2841,17 +2872,31 @@ export default function SettingsPage() {
           <SoulSection />
 
           {/* Team Section */}
-          <TeamSection />
+          <SectionErrorBoundary name="Team">
+            <TeamSection />
+          </SectionErrorBoundary>
 
           {/* Scheduled Jobs */}
-          <JobsSection />
+          <SectionErrorBoundary name="Scheduled Jobs">
+            <JobsSection />
+          </SectionErrorBoundary>
 
           {/* Connection & integration sections */}
-          <NetSuiteConnectionsSection />
-          <BigQueryConnectionSection />
-          <NetSuiteMetadataSection />
-          <SuiteScriptFilesSection />
-          <GovernancePolicySection />
+          <SectionErrorBoundary name="NetSuite Connections">
+            <NetSuiteConnectionsSection />
+          </SectionErrorBoundary>
+          <SectionErrorBoundary name="BigQuery">
+            <BigQueryConnectionSection />
+          </SectionErrorBoundary>
+          <SectionErrorBoundary name="NetSuite Metadata">
+            <NetSuiteMetadataSection />
+          </SectionErrorBoundary>
+          <SectionErrorBoundary name="SuiteScript Files">
+            <SuiteScriptFilesSection />
+          </SectionErrorBoundary>
+          <SectionErrorBoundary name="Governance Policy">
+            <GovernancePolicySection />
+          </SectionErrorBoundary>
         </>
       )}
 

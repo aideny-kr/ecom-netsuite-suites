@@ -52,6 +52,7 @@ const iconMap = {
 const agentIconMap: Record<string, typeof Tag> = {
   "pricing-agent": Tag,
   "bi-agent": BarChart3,
+  "recon-agent": Scale,
 };
 
 export function Sidebar({ collapsed = false, onToggle }: { collapsed?: boolean; onToggle?: () => void }) {
@@ -194,8 +195,8 @@ export function Sidebar({ collapsed = false, onToggle }: { collapsed?: boolean; 
                       : "text-[hsl(var(--sidebar-foreground))] hover:bg-[hsl(var(--sidebar-hover))/0.5] hover:text-[hsl(var(--sidebar-active))/0.7]",
                   )}
                 >
-                  <AgentIcon className={cn("h-4 w-4", isActive ? "text-[hsl(var(--sidebar-active))]" : "text-[hsl(var(--sidebar-muted))] group-hover:text-[hsl(var(--sidebar-active))/0.7]")} />
-                  {agent.display_name}
+                  <AgentIcon className={cn("h-4 w-4 shrink-0", isActive ? "text-[hsl(var(--sidebar-active))]" : "text-[hsl(var(--sidebar-muted))] group-hover:text-[hsl(var(--sidebar-active))/0.7]")} />
+                  <span className="truncate">{agent.display_name}</span>
                 </button>
               );
             })}
