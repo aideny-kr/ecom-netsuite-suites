@@ -1,0 +1,208 @@
+"""Generate evidence packs from reconciliation results.
+
+Produces Excel workbooks with:
+- Summary sheet: run metadata + match/exception/unmatched counts
+- All Results sheet: full detail table
+- Exceptions sheet: only unmatched/low-confidence items
+"""
+
+from __future__ import annotations
+
+import io
+from datetime import date, datetime, timezone
+from decimal import Decimal
+from typing import Any
+
+import structlog
+from openpyxl import Workbook
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+from openpyxl.utils import get_column_letter
+
+logger = structlog.get_logger()
+
+_HEADER_FILL = PatternFill(start_color="1a73e8", end_color="1a73e8", fill_type="solid")
+_HEADER_FONT = Font(name="Arial", size=10, bold=True, color="FFFFFF")
+_MATCHED_FILL = PatternFill(start_color="d4edda", end_color="d4edda", fill_type="solid")
+_EXCEPTION_FILL = PatternFill(start_color="fff3cd", end_color="fff3cd", fill_type="solid")
+_UNMATCHED_FILL = PatternFill(start_color="f8d7da", end_color="f8d7da", fill_type="solid")
+_THIN_BORDER = Border(
+    left=Side(style="thin"),
+    right=Side(style="thin"),
+    top=Side(style="thin"),
+    bottom=Side(style="thin"),
+)
+
+
+class EvidencePackGenerator:
+    """Generate evidence pack Excel files from reconciliation results."""
+
+    def generate_excel(
+        self,
+        results: list[dict],
+        run_id: str,
+        date_from: date,
+        date_to: date,
+        tenant_name: str | None = None,
+    ) -> io.BytesIO:
+        """Generate the full evidence pack workbook."""
+        wb = Workbook()
+
+        # --- Summary sheet ---
+        self._write_summary(wb, results, run_id, date_from, date_to, tenant_name)
+
+        # --- All Results sheet ---
+        self._write_results(wb, results, "All Results")
+
+        # --- Exceptions sheet ---
+        exceptions = [
+            r
+            for r in results
+            if r.get("match_type") == "unmatched"
+            or (
+                r.get("confidence") is not None
+                and Decimal(str(r["confidence"])) < Decimal("0.95")
+            )
+        ]
+        self._write_results(wb, exceptions, "Exceptions")
+
+        buf = io.BytesIO()
+        wb.save(buf)
+        buf.seek(0)
+        return buf
+
+    def _write_summary(
+        self,
+        wb: Workbook,
+        results: list[dict],
+        run_id: str,
+        date_from: date,
+        date_to: date,
+        tenant_name: str | None,
+    ) -> None:
+        """Write the summary sheet with run metadata and counts."""
+        ws = wb.active
+        ws.title = "Summary"
+
+        matched = len(
+            [
+                r
+                for r in results
+                if r.get("match_type") in ("deterministic", "fuzzy")
+                and Decimal(str(r.get("confidence", 0))) >= Decimal("0.95")
+            ]
+        )
+        suggested = len(
+            [
+                r
+                for r in results
+                if r.get("match_type") in ("deterministic", "fuzzy")
+                and Decimal("0.75")
+                <= Decimal(str(r.get("confidence", 0)))
+                < Decimal("0.95")
+            ]
+        )
+        unmatched = len([r for r in results if r.get("match_type") == "unmatched"])
+        total_variance = sum(Decimal(str(r.get("variance_amount", 0))) for r in results)
+
+        title_font = Font(name="Arial", size=14, bold=True)
+        label_font = Font(name="Arial", size=11, bold=True)
+        value_font = Font(name="Arial", size=11)
+
+        row = 1
+        ws.cell(row=row, column=1, value="Reconciliation Evidence Pack").font = title_font
+        row += 1
+        if tenant_name:
+            ws.cell(row=row, column=1, value=f"Tenant: {tenant_name}").font = value_font
+            row += 1
+
+        row += 1
+        summary_data = [
+            ("Run ID", run_id),
+            ("Period", f"{date_from.isoformat()} to {date_to.isoformat()}"),
+            ("Generated", datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")),
+            ("", ""),
+            ("Auto-Matched", matched),
+            ("Suggested (Review Required)", suggested),
+            ("Unmatched", unmatched),
+            ("Total Results", len(results)),
+            ("Total Variance", f"${total_variance:,.2f}"),
+        ]
+
+        for label, value in summary_data:
+            ws.cell(row=row, column=1, value=label).font = label_font
+            ws.cell(row=row, column=2, value=str(value) if value else "").font = value_font
+            row += 1
+
+        ws.column_dimensions["A"].width = 30
+        ws.column_dimensions["B"].width = 45
+
+    def _write_results(self, wb: Workbook, results: list[dict], sheet_name: str) -> None:
+        """Write a results table sheet."""
+        ws = wb.create_sheet(title=sheet_name)
+
+        headers = [
+            "Match Type",
+            "Confidence",
+            "Status",
+            "Stripe Amount",
+            "NetSuite Amount",
+            "Variance",
+            "Variance Type",
+            "Explanation",
+            "Currency",
+            "Match Rule",
+            "Payout ID",
+            "Deposit ID(s)",
+        ]
+
+        # Header row
+        for col_idx, header in enumerate(headers, 1):
+            cell = ws.cell(row=1, column=col_idx, value=header)
+            cell.fill = _HEADER_FILL
+            cell.font = _HEADER_FONT
+            cell.border = _THIN_BORDER
+            cell.alignment = Alignment(horizontal="center")
+
+        # Data rows
+        for row_idx, result in enumerate(results, 2):
+            evidence = result.get("evidence", {}) or {}
+            row_data: list[Any] = [
+                result.get("match_type", ""),
+                float(result.get("confidence", 0)),
+                result.get("status", ""),
+                float(result["stripe_amount"]) if result.get("stripe_amount") is not None else "",
+                float(result["netsuite_amount"])
+                if result.get("netsuite_amount") is not None
+                else "",
+                float(result.get("variance_amount", 0)),
+                result.get("variance_type", ""),
+                result.get("variance_explanation", ""),
+                result.get("currency", ""),
+                result.get("match_rule", ""),
+                evidence.get("payout_source_id", ""),
+                ", ".join(evidence.get("deposit_ids", [])),
+            ]
+
+            # Row fill based on match type
+            match_type = result.get("match_type", "")
+            if match_type == "unmatched":
+                fill = _UNMATCHED_FILL
+            elif match_type in ("deterministic", "fuzzy") and Decimal(
+                str(result.get("confidence", 0))
+            ) >= Decimal("0.95"):
+                fill = _MATCHED_FILL
+            else:
+                fill = _EXCEPTION_FILL
+
+            for col_idx, value in enumerate(row_data, 1):
+                cell = ws.cell(row=row_idx, column=col_idx, value=value)
+                cell.fill = fill
+                cell.border = _THIN_BORDER
+
+        # Auto-width columns
+        for col_idx in range(1, len(headers) + 1):
+            letter = get_column_letter(col_idx)
+            ws.column_dimensions[letter].width = max(15, len(headers[col_idx - 1]) + 4)
+
+        # Wider column for explanations
+        ws.column_dimensions[get_column_letter(8)].width = 50

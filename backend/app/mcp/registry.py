@@ -10,6 +10,9 @@ from app.mcp.tools import (
     pivot_tool,
     pricing_tools,
     rag_search,
+    recon_approve,
+    recon_evidence,
+    recon_exceptions,
     recon_run,
     report_export,
     save_learned_rule,
@@ -183,6 +186,30 @@ TOOL_REGISTRY = {
             "date_from": {"type": "string", "required": True, "description": "Start date (YYYY-MM-DD)"},
             "date_to": {"type": "string", "required": True, "description": "End date (YYYY-MM-DD)"},
             "payout_ids": {"type": "array", "required": False, "description": "Specific payout IDs to reconcile"},
+        },
+    },
+    "recon.get_exceptions": {
+        "description": "Fetch unmatched and low-confidence reconciliation results (exceptions) for investigation",
+        "execute": recon_exceptions.execute,
+        "params_schema": {
+            "run_id": {"type": "string", "required": True, "description": "Reconciliation run ID"},
+        },
+    },
+    "recon.get_evidence": {
+        "description": "Get evidence pack download link for a reconciliation run",
+        "execute": recon_evidence.execute,
+        "params_schema": {
+            "run_id": {"type": "string", "required": True, "description": "Reconciliation run ID"},
+        },
+    },
+    "recon.approve_match": {
+        "description": (
+            "Approve a suggested reconciliation match. REQUIRES user confirmation before execution. "
+            "Show match details (Stripe amount, NetSuite amount, variance) and ask for approval."
+        ),
+        "execute": recon_approve.execute,
+        "params_schema": {
+            "result_id": {"type": "string", "required": True, "description": "ReconciliationResult ID to approve"},
         },
     },
     "report.export": {

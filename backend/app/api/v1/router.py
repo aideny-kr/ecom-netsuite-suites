@@ -22,6 +22,7 @@ from app.api.v1 import (
     onboarding,
     policies,
     pricing_config,
+    reconciliation,
     schedules,
     settings,
     skills,
@@ -69,3 +70,4 @@ api_router.include_router(pricing_config.router)
 api_router.include_router(task_files.router)
 api_router.include_router(agents.router)
 api_router.include_router(agent_instructions.router)
+api_router.include_router(reconciliation.router)

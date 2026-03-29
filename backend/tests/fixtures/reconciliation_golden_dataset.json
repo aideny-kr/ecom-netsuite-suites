@@ -1,0 +1,559 @@
+{
+  "description": "Golden dataset for reconciliation matching tests. Each pair has a Stripe payout and NetSuite deposit with expected match result.",
+  "pairs": [
+    {
+      "id": "exact_match_01",
+      "label": "exact_match",
+      "stripe_payout": {
+        "source_id": "po_3Qtest001",
+        "amount": "1500.00",
+        "net_amount": "1455.00",
+        "fee_amount": "45.00",
+        "currency": "USD",
+        "arrival_date": "2026-03-10",
+        "status": "paid"
+      },
+      "netsuite_deposit": {
+        "netsuite_internal_id": "12001",
+        "record_type": "deposit",
+        "amount": "1455.00",
+        "currency": "USD",
+        "transaction_date": "2026-03-10",
+        "memo": "Stripe payout po_3Qtest001",
+        "related_payout_id": "po_3Qtest001"
+      },
+      "expected": {
+        "match_type": "deterministic",
+        "confidence": 1.0,
+        "variance_amount": "0.00",
+        "variance_type": null
+      }
+    },
+    {
+      "id": "exact_match_02",
+      "label": "exact_match",
+      "stripe_payout": {
+        "source_id": "po_3Qtest002",
+        "amount": "2340.50",
+        "net_amount": "2272.29",
+        "fee_amount": "68.21",
+        "currency": "USD",
+        "arrival_date": "2026-03-11",
+        "status": "paid"
+      },
+      "netsuite_deposit": {
+        "netsuite_internal_id": "12002",
+        "record_type": "deposit",
+        "amount": "2272.29",
+        "currency": "USD",
+        "transaction_date": "2026-03-11",
+        "memo": "Stripe po_3Qtest002",
+        "related_payout_id": "po_3Qtest002"
+      },
+      "expected": {
+        "match_type": "deterministic",
+        "confidence": 1.0,
+        "variance_amount": "0.00",
+        "variance_type": null
+      }
+    },
+    {
+      "id": "fee_variance_01",
+      "label": "fee_variance",
+      "stripe_payout": {
+        "source_id": "po_3Qtest003",
+        "amount": "5000.00",
+        "net_amount": "4855.00",
+        "fee_amount": "145.00",
+        "currency": "USD",
+        "arrival_date": "2026-03-12",
+        "status": "paid"
+      },
+      "netsuite_deposit": {
+        "netsuite_internal_id": "12003",
+        "record_type": "deposit",
+        "amount": "5000.00",
+        "currency": "USD",
+        "transaction_date": "2026-03-12",
+        "memo": "Stripe deposit",
+        "related_payout_id": null
+      },
+      "expected": {
+        "match_type": "fuzzy",
+        "confidence": 0.85,
+        "variance_amount": "145.00",
+        "variance_type": "fees"
+      }
+    },
+    {
+      "id": "fx_rounding_01",
+      "label": "fx_rounding",
+      "stripe_payout": {
+        "source_id": "po_3Qtest004",
+        "amount": "1000.00",
+        "net_amount": "970.50",
+        "fee_amount": "29.50",
+        "currency": "USD",
+        "arrival_date": "2026-03-13",
+        "status": "paid"
+      },
+      "netsuite_deposit": {
+        "netsuite_internal_id": "12004",
+        "record_type": "deposit",
+        "amount": "970.47",
+        "currency": "USD",
+        "transaction_date": "2026-03-13",
+        "memo": "Stripe payout",
+        "related_payout_id": null
+      },
+      "expected": {
+        "match_type": "fuzzy",
+        "confidence": 0.92,
+        "variance_amount": "0.03",
+        "variance_type": "fx_rounding"
+      }
+    },
+    {
+      "id": "timing_01",
+      "label": "timing",
+      "stripe_payout": {
+        "source_id": "po_3Qtest005",
+        "amount": "3200.00",
+        "net_amount": "3104.00",
+        "fee_amount": "96.00",
+        "currency": "USD",
+        "arrival_date": "2026-03-10",
+        "status": "paid"
+      },
+      "netsuite_deposit": {
+        "netsuite_internal_id": "12005",
+        "record_type": "deposit",
+        "amount": "3104.00",
+        "currency": "USD",
+        "transaction_date": "2026-03-12",
+        "memo": "Bank deposit - Stripe",
+        "related_payout_id": null
+      },
+      "expected": {
+        "match_type": "fuzzy",
+        "confidence": 0.88,
+        "variance_amount": "0.00",
+        "variance_type": "timing"
+      }
+    },
+    {
+      "id": "timing_02",
+      "label": "timing",
+      "stripe_payout": {
+        "source_id": "po_3Qtest006",
+        "amount": "750.00",
+        "net_amount": "727.50",
+        "fee_amount": "22.50",
+        "currency": "USD",
+        "arrival_date": "2026-03-14",
+        "status": "paid"
+      },
+      "netsuite_deposit": {
+        "netsuite_internal_id": "12006",
+        "record_type": "deposit",
+        "amount": "727.50",
+        "currency": "USD",
+        "transaction_date": "2026-03-17",
+        "memo": "Stripe payout",
+        "related_payout_id": null
+      },
+      "expected": {
+        "match_type": "fuzzy",
+        "confidence": 0.85,
+        "variance_amount": "0.00",
+        "variance_type": "timing"
+      }
+    },
+    {
+      "id": "missing_stripe_01",
+      "label": "missing",
+      "stripe_payout": {
+        "source_id": "po_3Qtest007",
+        "amount": "890.00",
+        "net_amount": "863.30",
+        "fee_amount": "26.70",
+        "currency": "USD",
+        "arrival_date": "2026-03-15",
+        "status": "paid"
+      },
+      "netsuite_deposit": null,
+      "expected": {
+        "match_type": "unmatched",
+        "confidence": 0.0,
+        "variance_amount": "863.30",
+        "variance_type": "missing"
+      }
+    },
+    {
+      "id": "missing_netsuite_01",
+      "label": "missing",
+      "stripe_payout": null,
+      "netsuite_deposit": {
+        "netsuite_internal_id": "12008",
+        "record_type": "deposit",
+        "amount": "1200.00",
+        "currency": "USD",
+        "transaction_date": "2026-03-16",
+        "memo": "Unknown deposit",
+        "related_payout_id": null
+      },
+      "expected": {
+        "match_type": "unmatched",
+        "confidence": 0.0,
+        "variance_amount": "1200.00",
+        "variance_type": "missing"
+      }
+    },
+    {
+      "id": "duplicate_01",
+      "label": "duplicate",
+      "stripe_payout": {
+        "source_id": "po_3Qtest009",
+        "amount": "500.00",
+        "net_amount": "485.00",
+        "fee_amount": "15.00",
+        "currency": "USD",
+        "arrival_date": "2026-03-10",
+        "status": "paid"
+      },
+      "netsuite_deposit": {
+        "netsuite_internal_id": "12009",
+        "record_type": "deposit",
+        "amount": "485.00",
+        "currency": "USD",
+        "transaction_date": "2026-03-10",
+        "memo": "Stripe payout po_3Qtest009",
+        "related_payout_id": "po_3Qtest009"
+      },
+      "extra_netsuite_deposit": {
+        "netsuite_internal_id": "12009b",
+        "record_type": "deposit",
+        "amount": "485.00",
+        "currency": "USD",
+        "transaction_date": "2026-03-10",
+        "memo": "Stripe payout po_3Qtest009 (dup)",
+        "related_payout_id": "po_3Qtest009"
+      },
+      "expected": {
+        "match_type": "exception",
+        "confidence": 0.60,
+        "variance_amount": "485.00",
+        "variance_type": "duplicate"
+      }
+    },
+    {
+      "id": "chargeback_01",
+      "label": "chargeback",
+      "stripe_payout": {
+        "source_id": "po_3Qtest010",
+        "amount": "2000.00",
+        "net_amount": "1790.00",
+        "fee_amount": "60.00",
+        "currency": "USD",
+        "arrival_date": "2026-03-11",
+        "status": "paid"
+      },
+      "netsuite_deposit": {
+        "netsuite_internal_id": "12010",
+        "record_type": "deposit",
+        "amount": "1940.00",
+        "currency": "USD",
+        "transaction_date": "2026-03-11",
+        "memo": "Stripe net payout",
+        "related_payout_id": null
+      },
+      "expected": {
+        "match_type": "fuzzy",
+        "confidence": 0.78,
+        "variance_amount": "150.00",
+        "variance_type": "chargeback"
+      }
+    },
+    {
+      "id": "exact_match_03",
+      "label": "exact_match",
+      "stripe_payout": {
+        "source_id": "po_3Qtest011",
+        "amount": "8500.00",
+        "net_amount": "8245.00",
+        "fee_amount": "255.00",
+        "currency": "USD",
+        "arrival_date": "2026-03-18",
+        "status": "paid"
+      },
+      "netsuite_deposit": {
+        "netsuite_internal_id": "12011",
+        "record_type": "deposit",
+        "amount": "8245.00",
+        "currency": "USD",
+        "transaction_date": "2026-03-18",
+        "memo": "Stripe po_3Qtest011",
+        "related_payout_id": "po_3Qtest011"
+      },
+      "expected": {
+        "match_type": "deterministic",
+        "confidence": 1.0,
+        "variance_amount": "0.00",
+        "variance_type": null
+      }
+    },
+    {
+      "id": "exact_match_04",
+      "label": "exact_match",
+      "stripe_payout": {
+        "source_id": "po_3Qtest012",
+        "amount": "420.00",
+        "net_amount": "407.40",
+        "fee_amount": "12.60",
+        "currency": "USD",
+        "arrival_date": "2026-03-19",
+        "status": "paid"
+      },
+      "netsuite_deposit": {
+        "netsuite_internal_id": "12012",
+        "record_type": "deposit",
+        "amount": "407.40",
+        "currency": "USD",
+        "transaction_date": "2026-03-19",
+        "memo": "po_3Qtest012 stripe",
+        "related_payout_id": "po_3Qtest012"
+      },
+      "expected": {
+        "match_type": "deterministic",
+        "confidence": 1.0,
+        "variance_amount": "0.00",
+        "variance_type": null
+      }
+    },
+    {
+      "id": "fee_variance_02",
+      "label": "fee_variance",
+      "stripe_payout": {
+        "source_id": "po_3Qtest013",
+        "amount": "10000.00",
+        "net_amount": "9710.00",
+        "fee_amount": "290.00",
+        "currency": "USD",
+        "arrival_date": "2026-03-20",
+        "status": "paid"
+      },
+      "netsuite_deposit": {
+        "netsuite_internal_id": "12013",
+        "record_type": "deposit",
+        "amount": "10000.00",
+        "currency": "USD",
+        "transaction_date": "2026-03-20",
+        "memo": "Stripe batch deposit",
+        "related_payout_id": null
+      },
+      "expected": {
+        "match_type": "fuzzy",
+        "confidence": 0.82,
+        "variance_amount": "290.00",
+        "variance_type": "fees"
+      }
+    },
+    {
+      "id": "split_payout_01",
+      "label": "split_payout",
+      "stripe_payout": {
+        "source_id": "po_3Qtest014",
+        "amount": "6000.00",
+        "net_amount": "5820.00",
+        "fee_amount": "180.00",
+        "currency": "USD",
+        "arrival_date": "2026-03-21",
+        "status": "paid"
+      },
+      "netsuite_deposit": {
+        "netsuite_internal_id": "12014a",
+        "record_type": "deposit",
+        "amount": "3000.00",
+        "currency": "USD",
+        "transaction_date": "2026-03-21",
+        "memo": "Stripe partial 1",
+        "related_payout_id": null
+      },
+      "extra_netsuite_deposit": {
+        "netsuite_internal_id": "12014b",
+        "record_type": "deposit",
+        "amount": "2820.00",
+        "currency": "USD",
+        "transaction_date": "2026-03-21",
+        "memo": "Stripe partial 2",
+        "related_payout_id": null
+      },
+      "expected": {
+        "match_type": "fuzzy",
+        "confidence": 0.80,
+        "variance_amount": "0.00",
+        "variance_type": null
+      }
+    },
+    {
+      "id": "fx_rounding_02",
+      "label": "fx_rounding",
+      "stripe_payout": {
+        "source_id": "po_3Qtest015",
+        "amount": "2500.00",
+        "net_amount": "2425.00",
+        "fee_amount": "75.00",
+        "currency": "USD",
+        "arrival_date": "2026-03-22",
+        "status": "paid"
+      },
+      "netsuite_deposit": {
+        "netsuite_internal_id": "12015",
+        "record_type": "deposit",
+        "amount": "2424.98",
+        "currency": "USD",
+        "transaction_date": "2026-03-22",
+        "memo": "Stripe payout",
+        "related_payout_id": null
+      },
+      "expected": {
+        "match_type": "fuzzy",
+        "confidence": 0.93,
+        "variance_amount": "0.02",
+        "variance_type": "fx_rounding"
+      }
+    },
+    {
+      "id": "manual_adjustment_01",
+      "label": "manual_adjustment",
+      "stripe_payout": {
+        "source_id": "po_3Qtest016",
+        "amount": "4000.00",
+        "net_amount": "3880.00",
+        "fee_amount": "120.00",
+        "currency": "USD",
+        "arrival_date": "2026-03-23",
+        "status": "paid"
+      },
+      "netsuite_deposit": {
+        "netsuite_internal_id": "12016",
+        "record_type": "deposit",
+        "amount": "3930.00",
+        "currency": "USD",
+        "transaction_date": "2026-03-23",
+        "memo": "Stripe + manual adj",
+        "related_payout_id": null
+      },
+      "expected": {
+        "match_type": "fuzzy",
+        "confidence": 0.75,
+        "variance_amount": "50.00",
+        "variance_type": "manual_adjustment"
+      }
+    },
+    {
+      "id": "exact_match_05",
+      "label": "exact_match",
+      "stripe_payout": {
+        "source_id": "po_3Qtest017",
+        "amount": "12000.00",
+        "net_amount": "11640.00",
+        "fee_amount": "360.00",
+        "currency": "USD",
+        "arrival_date": "2026-03-24",
+        "status": "paid"
+      },
+      "netsuite_deposit": {
+        "netsuite_internal_id": "12017",
+        "record_type": "deposit",
+        "amount": "11640.00",
+        "currency": "USD",
+        "transaction_date": "2026-03-24",
+        "memo": "Stripe po_3Qtest017",
+        "related_payout_id": "po_3Qtest017"
+      },
+      "expected": {
+        "match_type": "deterministic",
+        "confidence": 1.0,
+        "variance_amount": "0.00",
+        "variance_type": null
+      }
+    },
+    {
+      "id": "timing_03",
+      "label": "timing",
+      "stripe_payout": {
+        "source_id": "po_3Qtest018",
+        "amount": "1800.00",
+        "net_amount": "1746.00",
+        "fee_amount": "54.00",
+        "currency": "USD",
+        "arrival_date": "2026-03-25",
+        "status": "paid"
+      },
+      "netsuite_deposit": {
+        "netsuite_internal_id": "12018",
+        "record_type": "deposit",
+        "amount": "1746.00",
+        "currency": "USD",
+        "transaction_date": "2026-03-28",
+        "memo": "Stripe deposit late",
+        "related_payout_id": null
+      },
+      "expected": {
+        "match_type": "fuzzy",
+        "confidence": 0.85,
+        "variance_amount": "0.00",
+        "variance_type": "timing"
+      }
+    },
+    {
+      "id": "exact_match_06",
+      "label": "exact_match",
+      "stripe_payout": {
+        "source_id": "po_3Qtest019",
+        "amount": "350.00",
+        "net_amount": "339.50",
+        "fee_amount": "10.50",
+        "currency": "USD",
+        "arrival_date": "2026-03-26",
+        "status": "paid"
+      },
+      "netsuite_deposit": {
+        "netsuite_internal_id": "12019",
+        "record_type": "deposit",
+        "amount": "339.50",
+        "currency": "USD",
+        "transaction_date": "2026-03-26",
+        "memo": "po_3Qtest019",
+        "related_payout_id": "po_3Qtest019"
+      },
+      "expected": {
+        "match_type": "deterministic",
+        "confidence": 1.0,
+        "variance_amount": "0.00",
+        "variance_type": null
+      }
+    },
+    {
+      "id": "missing_stripe_02",
+      "label": "missing",
+      "stripe_payout": {
+        "source_id": "po_3Qtest020",
+        "amount": "675.00",
+        "net_amount": "654.75",
+        "fee_amount": "20.25",
+        "currency": "USD",
+        "arrival_date": "2026-03-27",
+        "status": "paid"
+      },
+      "netsuite_deposit": null,
+      "expected": {
+        "match_type": "unmatched",
+        "confidence": 0.0,
+        "variance_amount": "654.75",
+        "variance_type": "missing"
+      }
+    }
+  ]
+}
