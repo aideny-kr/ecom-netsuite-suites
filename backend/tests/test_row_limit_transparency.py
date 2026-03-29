@@ -1,6 +1,5 @@
 """Tests for R4: Transparent row limits."""
 
-
 from app.mcp.tools.netsuite_suiteql import enforce_limit_with_metadata
 
 
