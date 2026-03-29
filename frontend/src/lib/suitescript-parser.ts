@@ -33,7 +33,7 @@ export interface ScriptMetadata {
   governanceHint: string | null;
 }
 
-const SCRIPT_TYPE_MAP: Record<ScriptType, { short: string; color: string; icon: string; governance: string | null }> = {
+export const SCRIPT_TYPE_MAP: Record<ScriptType, { short: string; color: string; icon: string; governance: string | null }> = {
   UserEventScript:          { short: "UE",    color: "bg-blue-500/15 text-blue-700 border-blue-500/30",     icon: "zap",       governance: "1,000 units" },
   ClientScript:             { short: "CS",    color: "bg-purple-500/15 text-purple-700 border-purple-500/30", icon: "monitor",   governance: null },
   ScheduledScript:          { short: "SS",    color: "bg-amber-500/15 text-amber-700 border-amber-500/30",   icon: "clock",     governance: "10,000 units" },

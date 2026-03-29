@@ -340,8 +340,9 @@ async def send_message(
         stream_generator(),
         media_type="text/event-stream",
         headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",  # Disable nginx/proxy buffering
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
         },
     )
 

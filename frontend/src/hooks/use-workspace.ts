@@ -83,6 +83,20 @@ export function useSearchFiles(workspaceId: string | null, query: string) {
   });
 }
 
+export function useReorganizeWorkspace() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (workspaceId: string) =>
+      apiClient.post<{ moved: number; skipped: number; errors: number }>(
+        `/api/v1/workspaces/${workspaceId}/reorganize`,
+        {},
+      ),
+    onSuccess: (_, workspaceId) => {
+      queryClient.invalidateQueries({ queryKey: ["workspace-files", workspaceId] });
+    },
+  });
+}
+
 export function useImportWorkspace() {
   const queryClient = useQueryClient();
   return useMutation({

@@ -24,9 +24,14 @@ export function TemplateSlot({ template, onUpload, onRemove }: TemplateSlotProps
     try {
       const formData = new FormData();
       formData.append("file", file);
-      const response = await fetch("/api/v1/task-files/upload", {
+      const baseUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+      const headers: Record<string, string> = {};
+      const token = typeof window !== "undefined" ? localStorage.getItem("access_token") : null;
+      if (token) headers["Authorization"] = `Bearer ${token}`;
+      const response = await fetch(`${baseUrl}/api/v1/task-files/upload`, {
         method: "POST",
         body: formData,
+        headers,
         credentials: "include",
       });
       if (!response.ok) throw new Error("Upload failed");

@@ -1,12 +1,29 @@
 # Production Docker Compose for GCP Compute Engine
-# Postgres → Supabase (external), Redis → Upstash (external), Frontend → Vercel (external)
-# This only runs: backend (FastAPI) + worker (Celery)
+# Postgres → Supabase (external), Redis → Upstash (external)
+# Runs: frontend (Next.js) + backend (FastAPI) + worker (Celery) + beat (Celery Beat)
 #
 # Usage:
-#   docker compose -f docker-compose.prod.yml pull
+#   docker compose -f docker-compose.prod.yml pull   # backend only (GHCR)
 #   docker compose -f docker-compose.prod.yml up -d
 
 services:
+  frontend:
+    image: ghcr.io/aideny-kr/ecom-netsuite-suites/frontend:latest
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   backend:
     image: ghcr.io/aideny-kr/ecom-netsuite-suites/backend:latest
     env_file: .env.production
@@ -35,3 +52,19 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+  beat:
+    image: ghcr.io/aideny-kr/ecom-netsuite-suites/backend:latest
+    env_file: .env.production
+    command: celery -A app.workers.celery_app beat --loglevel=info
+    volumes:
+      - celerybeat-data:/data
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  celerybeat-data:

@@ -190,7 +190,10 @@
   50% { box-shadow: 0 0 8px 2px rgba(0, 240, 255, 0.3); }
 }
 
-*:focus-visible {
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible,
+[role="combobox"]:focus-visible {
   animation: ring-breathe 2.5s ease-in-out infinite;
 }
 

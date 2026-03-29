@@ -4,7 +4,7 @@ import { cn } from "@/lib/utils";
 import { useAuth } from "@/providers/auth-provider";
 import { apiClient } from "@/lib/api-client";
 import { Shield, ShieldAlert, ShieldCheck, Info, ChevronDown } from "lucide-react";
-import { useState } from "react";
+import { useState, memo } from "react";
 import {
     DropdownMenu,
     DropdownMenuContent,
@@ -21,39 +21,32 @@ interface ImportanceBannerProps {
 
 const TIER_CONFIG: Record<number, {
     label: string;
-    color: string;
-    borderColor: string;
-    bgColor: string;
     icon: typeof Shield;
     description: string;
 }> = {
+    1: {
+        label: "Casual",
+        icon: Shield,
+        description: "Quick lookup — standard validation, no additional verification needed.",
+    },
     2: {
         label: "Operational",
-        color: "text-sky-600 dark:text-sky-400",
-        borderColor: "border-sky-200 dark:border-sky-800/50",
-        bgColor: "bg-sky-50/50 dark:bg-sky-950/20",
         icon: ShieldCheck,
-        description: "This query was classified as operational — results were verified by an AI judge with moderate confidence requirements.",
+        description: "Day-to-day business queries — results verified by AI judge with moderate confidence requirements (60%+).",
     },
     3: {
         label: "Reporting",
-        color: "text-amber-600 dark:text-amber-400",
-        borderColor: "border-amber-200 dark:border-amber-800/50",
-        bgColor: "bg-amber-50/50 dark:bg-amber-950/20",
         icon: ShieldAlert,
-        description: "This query was classified as reporting-grade — results were verified by an AI judge with high confidence requirements. Review before including in reports.",
+        description: "Financial/management reporting — AI judge requires high confidence (80%+). Review data before including in reports.",
     },
     4: {
         label: "Audit Critical",
-        color: "text-rose-600 dark:text-rose-400",
-        borderColor: "border-rose-200 dark:border-rose-800/50",
-        bgColor: "bg-rose-50/50 dark:bg-rose-950/20",
         icon: ShieldAlert,
-        description: "This query was classified as audit-critical — results were verified by an AI judge with the strictest confidence threshold. Human verification is strongly recommended before use in audits or compliance.",
+        description: "Audit and compliance queries — strictest verification (90%+ confidence). Human review strongly recommended.",
     },
 };
 
-export function ImportanceBanner({ tier, messageId, onOverride }: ImportanceBannerProps) {
+export const ImportanceBanner = memo(function ImportanceBanner({ tier, messageId, onOverride }: ImportanceBannerProps) {
     const { user } = useAuth();
     const [updating, setUpdating] = useState(false);
     const [expanded, setExpanded] = useState(false);
@@ -83,15 +76,14 @@ export function ImportanceBanner({ tier, messageId, onOverride }: ImportanceBann
     return (
         <div className={cn(
             "mt-2 rounded-lg border text-[13px]",
-            config.borderColor,
-            config.bgColor,
+            "border-[#00F0FF]/20 bg-[#00F0FF]/5",
             updating && "opacity-50",
         )}>
             <div className="flex items-center gap-2 px-3 py-2">
-                <Icon className={cn("h-4 w-4 shrink-0", config.color)} />
+                <Icon className="h-4 w-4 shrink-0 text-[#00F0FF]" />
                 <span className="text-muted-foreground">
                     This is {tier === 2 || tier === 4 ? "an" : "a"}{" "}
-                    <span className={cn("font-medium", config.color)}>{config.label}</span>
+                    <span className="font-medium text-[#00F0FF]">{config.label}</span>
                     {" "}tier answer
                 </span>
 
@@ -105,7 +97,7 @@ export function ImportanceBanner({ tier, messageId, onOverride }: ImportanceBann
                 {isAdmin && messageId && (
                 <DropdownMenu>
                     <DropdownMenuTrigger asChild>
-                        <button className="ml-auto flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] text-muted-foreground/60 hover:text-muted-foreground hover:bg-accent transition-colors">
+                        <button className="ml-auto flex items-center gap-1 rounded-md px-2 py-0.5 text-[11px] text-muted-foreground/60 hover:text-muted-foreground hover:bg-muted transition-colors">
                             Change
                             <ChevronDown className="h-3 w-3" />
                         </button>
@@ -116,9 +108,8 @@ export function ImportanceBanner({ tier, messageId, onOverride }: ImportanceBann
                         </DropdownMenuLabel>
                         {[1, 2, 3, 4].map((t) => {
                             const tc = TIER_CONFIG[t];
-                            const label = tc?.label ?? "Casual";
-                            const TIcon = tc?.icon ?? Shield;
-                            const tColor = tc?.color ?? "text-muted-foreground";
+                            if (!tc) return null;
+                            const TIcon = tc.icon;
                             return (
                                 <DropdownMenuItem
                                     key={t}
@@ -126,11 +117,11 @@ export function ImportanceBanner({ tier, messageId, onOverride }: ImportanceBann
                                     disabled={updating}
                                     className={cn(
                                         "gap-2 text-[12px]",
-                                        t === tier && "bg-accent font-medium"
+                                        t === tier && "bg-[#00F0FF]/10 font-medium"
                                     )}
                                 >
-                                    <TIcon className={cn("h-3 w-3", tColor)} />
-                                    {label}
+                                    <TIcon className="h-3 w-3 text-[#00F0FF]" />
+                                    {tc.label}
                                 </DropdownMenuItem>
                             );
                         })}
@@ -140,13 +131,13 @@ export function ImportanceBanner({ tier, messageId, onOverride }: ImportanceBann
             </div>
 
             {expanded && (
-                <div className="border-t px-3 py-2 text-[12px] text-muted-foreground/80 space-y-1.5" style={{ borderColor: "inherit" }}>
+                <div className="border-t border-[#00F0FF]/10 px-3 py-2 text-[12px] text-muted-foreground/80 space-y-1.5">
                     <div><span className="font-medium text-muted-foreground">Casual (Tier 1):</span> Quick lookup — standard validation, no additional verification needed.</div>
-                    <div><span className="font-medium text-sky-600 dark:text-sky-400">Operational (Tier 2):</span> Day-to-day business queries — results verified by AI judge with moderate confidence requirements (60%+).</div>
-                    <div><span className="font-medium text-amber-600 dark:text-amber-400">Reporting (Tier 3):</span> Financial/management reporting — AI judge requires high confidence (80%+). Review data before including in reports.</div>
-                    <div><span className="font-medium text-rose-600 dark:text-rose-400">Audit Critical (Tier 4):</span> Audit and compliance queries — strictest verification (90%+ confidence). Human review strongly recommended.</div>
+                    <div><span className="font-medium text-[#00F0FF]">Operational (Tier 2):</span> Day-to-day business queries — results verified by AI judge with moderate confidence (60%+).</div>
+                    <div><span className="font-medium text-[#00F0FF]/80">Reporting (Tier 3):</span> Financial/management reporting — AI judge requires high confidence (80%+). Review before reports.</div>
+                    <div><span className="font-medium text-[#00F0FF]/60">Audit Critical (Tier 4):</span> Audit and compliance — strictest verification (90%+). Human review strongly recommended.</div>
                 </div>
             )}
         </div>
     );
-}
+});

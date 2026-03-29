@@ -308,6 +308,7 @@ export interface ChatSession {
   title: string | null;
   workspace_id?: string | null;
   session_type?: string;
+  agent_id?: string | null;
   is_archived: boolean;
   created_at: string;
   updated_at: string;

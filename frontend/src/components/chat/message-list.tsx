@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, useMemo, memo } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, useMemo, memo, useCallback } from "react";
 import ReactMarkdown from "react-markdown";
 import type { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -126,11 +126,8 @@ const StreamingMarkdownBlock = memo(
     );
   },
   (prev, next) => {
-    if (prev.content === next.content) return true;
-    const diff = next.content.length - prev.content.length;
-    const newLines = next.content.slice(prev.content.length).includes("\n");
-    // Re-render on: 30+ char growth OR new line added
-    return diff < 30 && !newLines;
+    // Re-render on every content change for fluid streaming
+    return prev.content === next.content;
   }
 );
 
@@ -558,43 +555,50 @@ export function MessageList({
   variant,
 }: MessageListProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
   const isTerminal = variant === "terminal";
   const { brandName } = useBranding();
   const { data: agentInstructions } = useAgentInstructions(pinnedAgentId ?? null);
   const updateInstructions = useUpdateAgentInstructions(pinnedAgentId ?? "");
 
-  // Scroll to bottom: instant for new messages, smooth during streaming.
-  const isStreamingNow = !!(streamingContent || isWaitingForReply);
-  const scrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const rafRef = useRef<number | null>(null);
-  const prevStreamingRef = useRef(false);
-  useEffect(() => {
-    // Use instant scroll for new messages to avoid the "push down then hoist" visual.
-    // Only use smooth scroll during active streaming (content growing).
-    const wasStreaming = prevStreamingRef.current;
-    prevStreamingRef.current = isStreamingNow;
+  // Track if user has scrolled up (should NOT auto-scroll)
+  const shouldAutoScrollRef = useRef(true);
+  const handleScroll = useCallback(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    shouldAutoScrollRef.current = distanceFromBottom < 80;
+  }, []);
 
-    const behavior: ScrollBehavior = isStreamingNow && wasStreaming ? "smooth" : "instant";
-    const scrollToBottom = () => {
-      bottomRef.current?.scrollIntoView({ behavior });
-    };
-
-    if (isStreamingNow && wasStreaming) {
-      // During active streaming — debounce to avoid janky rapid scrolls
-      if (scrollTimerRef.current) clearTimeout(scrollTimerRef.current);
-      scrollTimerRef.current = setTimeout(() => {
-        rafRef.current = requestAnimationFrame(scrollToBottom);
-      }, 16);
-    } else {
-      // New message or stream start — instant scroll, no animation
-      rafRef.current = requestAnimationFrame(scrollToBottom);
+  // Synchronous scroll — fires BEFORE browser paint, prevents visible jump
+  useLayoutEffect(() => {
+    const el = containerRef.current;
+    if (el && shouldAutoScrollRef.current) {
+      el.scrollTop = el.scrollHeight;
     }
-    return () => {
-      if (scrollTimerRef.current) clearTimeout(scrollTimerRef.current);
-      if (rafRef.current) cancelAnimationFrame(rafRef.current);
-    };
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- isStreamingNow is derived from streamingContent + isWaitingForReply
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [messages, pendingUserMessage, isWaitingForReply, streamingContent]);
+
+  // ResizeObserver to catch streaming content growth between React renders
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => {
+      if (shouldAutoScrollRef.current) {
+        el.scrollTop = el.scrollHeight;
+      }
+    });
+    // Observe all direct children for size changes
+    Array.from(el.children).forEach((child) => ro.observe(child));
+    const mo = new MutationObserver(() => {
+      Array.from(el.children).forEach((child) => ro.observe(child));
+      if (shouldAutoScrollRef.current) {
+        el.scrollTop = el.scrollHeight;
+      }
+    });
+    mo.observe(el, { childList: true });
+    return () => { ro.disconnect(); mo.disconnect(); };
+  }, []);
 
   // Skip loading indicator if we have a pending message (just created session)
   if (isLoading && !pendingUserMessage && !isWaitingForReply) {
@@ -716,6 +720,8 @@ export function MessageList({
 
   return (
     <div
+      ref={containerRef}
+      onScroll={handleScroll}
       className={cn(
         "h-full min-h-0 min-w-0 overflow-auto",
         isTerminal
@@ -850,7 +856,7 @@ export function MessageList({
                 ? "rounded-sm border border-[var(--chat-surface-mid)] bg-[var(--chat-surface)]"
                 : "rounded-2xl border border-border/50 bg-muted/40",
             )}>
-              <div className="flex max-h-[60vh] min-w-0 flex-col gap-2 overflow-auto px-4 py-3 scrollbar-thin">
+              <div className="flex min-w-0 flex-col gap-2 px-4 py-3">
             {/* 1. Always show streaming text first */}
             {streamingContent && (() => {
               const parsed = parseStreamingThinking(streamingContent);
