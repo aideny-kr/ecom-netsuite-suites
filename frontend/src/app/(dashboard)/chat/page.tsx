@@ -20,6 +20,8 @@ export default function ChatPage() {
   const [chatSidebarCollapsed, setChatSidebarCollapsed] = useState(false);
   const searchParams = useSearchParams();
   const pinnedAgentId = searchParams?.get("agent") || null;
+  const prefillMessage = searchParams?.get("prefill") || null;
+  const prefillSentRef = useRef(false);
   const [agentTab, setAgentTab] = useState<"chat" | "config">("chat");
   const [templateFile, setTemplateFile] = useState<{ id: string; filename: string } | null>(null);
   const { data: agents = [] } = useAgents();
@@ -253,6 +255,18 @@ export default function ChatPage() {
     setError(null);
     setPendingMessage(null);
   }, []);
+
+  // Auto-send prefill message from URL (e.g., from Recon "Investigate in Chat")
+  useEffect(() => {
+    if (prefillMessage && !prefillSentRef.current && !isStreaming) {
+      prefillSentRef.current = true;
+      // Clear URL params to prevent re-send on navigation
+      router.replace(`/chat${pinnedAgentId ? `?agent=${pinnedAgentId}` : ""}`);
+      // Small delay to ensure session creation is ready
+      const timer = setTimeout(() => handleSend(prefillMessage), 300);
+      return () => clearTimeout(timer);
+    }
+  }, [prefillMessage, isStreaming, handleSend, pinnedAgentId, router]);
 
   const handleMentionClick = useCallback(
     (filePath: string) => {

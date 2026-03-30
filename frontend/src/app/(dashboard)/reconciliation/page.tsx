@@ -50,7 +50,10 @@ export default function ReconciliationPage() {
   }, [pipeline.runId]);
 
   const handleInvestigate = (result: ReconResult) => {
-    const query = `Investigate reconciliation exception: variance of $${Number(result.variance_amount).toFixed(2)} (${result.variance_type || "unknown type"})`;
+    const payoutId = result.evidence?.payout_source_id || "unknown";
+    const amount = Number(result.stripe_amount || result.variance_amount).toLocaleString("en-US", { style: "currency", currency: "USD" });
+    const varType = result.variance_type || "unmatched";
+    const query = `Investigate this reconciliation exception: Stripe payout ${payoutId} for ${amount} is ${varType}. No matching NetSuite deposit was found. Can you check NetSuite for deposits around this amount and date range?`;
     router.push(`/chat?agent=recon-agent&prefill=${encodeURIComponent(query)}`);
   };
 

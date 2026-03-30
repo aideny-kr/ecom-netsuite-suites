@@ -791,6 +791,7 @@ export interface ReconResult {
   variance_explanation: string | null;
   currency: string;
   match_rule: string | null;
+  evidence: { payout_source_id?: string; deposit_ids?: string[]; signals?: string } | null;
   approved_by: string | null;
   approved_at: string | null;
   created_at: string;
