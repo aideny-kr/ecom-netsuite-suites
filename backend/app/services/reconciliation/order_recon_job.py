@@ -1,0 +1,281 @@
+"""Order-level reconciliation job: charge → deposit matching."""
+
+from __future__ import annotations
+
+import uuid
+from datetime import date, timedelta
+from decimal import Decimal
+
+import structlog
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
+
+from app.models.canonical import NetsuitePosting, Payout, PayoutLine
+from app.models.reconciliation import ReconciliationResult, ReconciliationRun
+from app.schemas.order_reconciliation import (
+    ChargeRecord,
+    NSPaymentRecord,
+    OrderMatchCandidate,
+)
+from app.schemas.reconciliation import ReconRunSummary
+from app.services.reconciliation.order_matching_engine import (
+    OrderMatchingEngine,
+    extract_order_ref,
+)
+
+logger = structlog.get_logger()
+
+_DATE_BUFFER = timedelta(days=5)
+
+
+class OrderReconJob:
+    """Orchestrates order-level reconciliation: charge → deposit matching."""
+
+    def __init__(self, db: AsyncSession, tenant_id: str) -> None:
+        self.db = db
+        self.tenant_id = tenant_id
+        self.engine = OrderMatchingEngine()
+
+    async def run(
+        self,
+        date_from: date,
+        date_to: date,
+        subsidiary_id: str | None = None,
+        job_id: str | None = None,
+    ) -> ReconRunSummary:
+        """Execute a full order-level reconciliation run.
+
+        1. Create run record
+        2. Fetch charges from payout_lines (type='charge', date via payouts.arrival_date JOIN)
+        3. Extract order_reference from description using extract_order_ref()
+        4. Fetch deposits from netsuite_postings (custdep + deposit, ±5 day buffer)
+        5. Set order_reference from related_payout_id
+        6. Run engine.match(charges, deposits)
+        7. Store results: payout_id=NULL, deposit_id set when matched, evidence={...}
+        8. Return summary
+        """
+        # 1. Create run record
+        run_id = uuid.uuid4()
+        run = ReconciliationRun(
+            id=run_id,
+            tenant_id=self.tenant_id,
+            job_id=uuid.UUID(job_id) if job_id else None,
+            date_from=date_from,
+            date_to=date_to,
+            subsidiary_id=subsidiary_id,
+            status="running",
+            parameters={
+                "match_level": "order",
+                "subsidiary_id": subsidiary_id,
+            },
+        )
+        self.db.add(run)
+        await self.db.commit()
+
+        try:
+            # 2-3. Fetch charges and extract order references
+            charges = await self._fetch_charges(
+                date_from=date_from,
+                date_to=date_to,
+                subsidiary_id=subsidiary_id,
+            )
+
+            # 4-5. Fetch deposits with order references
+            deposits = await self._fetch_deposits(
+                date_from=date_from,
+                date_to=date_to,
+                subsidiary_id=subsidiary_id,
+            )
+
+            logger.info(
+                "order_recon_job.data_fetched",
+                run_id=str(run_id),
+                charges=len(charges),
+                deposits=len(deposits),
+            )
+
+            # 6. Run matching
+            candidates = self.engine.match(charges, deposits)
+
+            # 7. Store results
+            await self._store_results(run_id, candidates)
+
+            # Compute summary
+            matched = [c for c in candidates if c.match_type in ("deterministic", "fuzzy")]
+            exceptions = [c for c in candidates if c.match_type == "exception"]
+            unmatched = [c for c in candidates if c.match_type == "unmatched"]
+            total_variance = sum(c.variance_amount for c in candidates)
+
+            # Update run record
+            run.status = "completed"
+            run.total_payouts = len(charges)
+            run.total_deposits = len(deposits)
+            run.matched_count = len(matched)
+            run.exception_count = len(exceptions)
+            run.unmatched_count = len(unmatched)
+            run.total_variance = total_variance
+            await self.db.commit()
+
+            match_rate = Decimal(len(matched)) / Decimal(len(charges)) * 100 if charges else Decimal("0")
+
+            summary = ReconRunSummary(
+                run_id=str(run_id),
+                status="completed",
+                total_payouts=len(charges),
+                total_deposits=len(deposits),
+                matched_count=len(matched),
+                exception_count=len(exceptions),
+                unmatched_count=len(unmatched),
+                total_variance=total_variance,
+                match_rate=match_rate.quantize(Decimal("0.01")),
+            )
+
+            logger.info(
+                "order_recon_job.completed",
+                run_id=str(run_id),
+                match_rate=float(match_rate),
+            )
+            return summary
+
+        except Exception as e:
+            run.status = "failed"
+            await self.db.commit()
+            logger.error("order_recon_job.failed", run_id=str(run_id), error=str(e))
+            raise
+
+    async def _fetch_charges(
+        self,
+        date_from: date,
+        date_to: date,
+        subsidiary_id: str | None = None,
+    ) -> list[ChargeRecord]:
+        """Fetch charges from payout_lines with line_type='charge'.
+
+        Joins payouts to get arrival_date for date filtering and charge_date.
+        Extracts order_reference from description using extract_order_ref().
+        """
+        p = aliased(Payout)
+        stmt = (
+            select(PayoutLine, p.arrival_date)
+            .join(p, PayoutLine.payout_id == p.id)
+            .where(
+                PayoutLine.tenant_id == self.tenant_id,
+                PayoutLine.line_type == "charge",
+                p.arrival_date >= date_from - _DATE_BUFFER,
+                p.arrival_date <= date_to + _DATE_BUFFER,
+            )
+        )
+
+        if subsidiary_id:
+            stmt = stmt.where(PayoutLine.subsidiary_id == subsidiary_id)
+
+        result = await self.db.execute(stmt)
+        rows = result.all()
+
+        return [
+            ChargeRecord(
+                id=str(pl.id),
+                source_id=pl.source_id,
+                payout_line_id=str(pl.id),
+                amount=pl.amount,
+                fee=pl.fee,
+                net=pl.net,
+                currency=pl.currency,
+                charge_date=arrival_date,
+                description=pl.description,
+                order_reference=extract_order_ref(pl.description),
+            )
+            for pl, arrival_date in rows
+        ]
+
+    async def _fetch_deposits(
+        self,
+        date_from: date,
+        date_to: date,
+        subsidiary_id: str | None = None,
+    ) -> list[NSPaymentRecord]:
+        """Fetch deposits from netsuite_postings (custdep + deposit).
+
+        Uses ±5 day buffer. Sets order_reference from related_payout_id.
+        """
+        stmt = select(NetsuitePosting).where(
+            NetsuitePosting.tenant_id == self.tenant_id,
+            NetsuitePosting.record_type.in_(["deposit", "custdep"]),
+            NetsuitePosting.transaction_date >= date_from - _DATE_BUFFER,
+            NetsuitePosting.transaction_date <= date_to + _DATE_BUFFER,
+        )
+
+        if subsidiary_id:
+            stmt = stmt.where(NetsuitePosting.subsidiary_id == subsidiary_id)
+
+        result = await self.db.execute(stmt)
+        rows = result.scalars().all()
+
+        return [
+            NSPaymentRecord(
+                id=str(r.id),
+                netsuite_internal_id=r.netsuite_internal_id,
+                amount=r.amount,
+                currency=r.currency,
+                transaction_date=r.transaction_date,
+                record_type=r.record_type,
+                memo=r.memo,
+                order_reference=r.related_payout_id,
+            )
+            for r in rows
+        ]
+
+    async def _store_results(
+        self,
+        run_id: uuid.UUID,
+        candidates: list[OrderMatchCandidate],
+    ) -> None:
+        """Persist match candidates as ReconciliationResult rows.
+
+        Key differences from payout-level:
+        - payout_id is always NULL (order-level, not payout-level)
+        - deposit_id set when matched
+        - evidence contains charge_source_id, order_reference, charge_payout_line_id
+        """
+        for candidate in candidates:
+            # Determine status based on confidence
+            if candidate.match_type == "unmatched":
+                status = "pending"
+            elif candidate.confidence >= Decimal("0.95"):
+                status = "auto_matched"
+            elif candidate.confidence >= Decimal("0.75"):
+                status = "suggested"
+            else:
+                status = "pending"
+
+            # deposit_id from matched deposit
+            deposit_id = None
+            if candidate.deposit:
+                deposit_id = uuid.UUID(candidate.deposit.id)
+
+            result = ReconciliationResult(
+                id=uuid.uuid4(),
+                tenant_id=self.tenant_id,
+                run_id=run_id,
+                payout_id=None,  # Always NULL for order-level
+                deposit_id=deposit_id,
+                match_type=candidate.match_type,
+                confidence=candidate.confidence,
+                status=status,
+                stripe_amount=candidate.charge.amount,
+                netsuite_amount=candidate.deposit.amount if candidate.deposit else None,
+                variance_amount=candidate.variance_amount,
+                variance_type=candidate.variance_type,
+                variance_explanation=candidate.variance_explanation,
+                currency=candidate.charge.currency,
+                match_rule=candidate.match_rule,
+                evidence={
+                    "charge_source_id": candidate.charge.source_id,
+                    "order_reference": candidate.charge.order_reference,
+                    "charge_payout_line_id": candidate.charge.payout_line_id,
+                },
+            )
+            self.db.add(result)
+
+        await self.db.commit()

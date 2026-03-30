@@ -1,0 +1,45 @@
+"""Schemas for order-level reconciliation."""
+
+from __future__ import annotations
+
+from datetime import date
+from decimal import Decimal
+
+from pydantic import BaseModel
+
+
+class ChargeRecord(BaseModel):
+    id: str
+    source_id: str  # Stripe charge ID (ch_xxx)
+    payout_line_id: str
+    amount: Decimal  # Gross charge amount
+    fee: Decimal
+    net: Decimal
+    currency: str
+    charge_date: date
+    description: str | None = None
+    order_reference: str | None = None  # Extracted R\d{9}
+    customer_email: str | None = None
+
+
+class NSPaymentRecord(BaseModel):
+    id: str
+    netsuite_internal_id: str
+    amount: Decimal
+    currency: str
+    transaction_date: date
+    record_type: str
+    memo: str | None = None
+    customer_name: str | None = None
+    order_reference: str | None = None  # From createdfrom sales order
+
+
+class OrderMatchCandidate(BaseModel):
+    charge: ChargeRecord
+    deposit: NSPaymentRecord | None
+    match_type: str  # deterministic, fuzzy, unmatched
+    confidence: Decimal
+    variance_amount: Decimal = Decimal("0")
+    variance_type: str | None = None
+    variance_explanation: str | None = None
+    match_rule: str | None = None

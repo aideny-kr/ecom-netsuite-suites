@@ -9,6 +9,7 @@ from __future__ import annotations
 from app.services.ingestion.netsuite_deposit_sync import (
     _normalize_currency,
     _parse_date,
+    extract_order_ref,
     extract_payout_id,
 )
 
@@ -89,3 +90,33 @@ class TestParseDate:
 
     def test_invalid_format(self):
         assert _parse_date("not-a-date") is None
+
+
+class TestExtractOrderRef:
+    """Order reference extraction from sales order display name."""
+
+    def test_extract_from_sales_order_display(self):
+        """Sales Order #R577684612 → R577684612"""
+        assert extract_order_ref("Sales Order #R577684612") == "R577684612"
+
+    def test_extract_plain_order_ref(self):
+        assert extract_order_ref("R628489275") == "R628489275"
+
+    def test_extract_from_longer_string(self):
+        assert extract_order_ref("SO created from R123456789 via import") == "R123456789"
+
+    def test_none_returns_none(self):
+        assert extract_order_ref(None) is None
+
+    def test_empty_string_returns_none(self):
+        assert extract_order_ref("") is None
+
+    def test_no_match_returns_none(self):
+        assert extract_order_ref("Sales Order #12345") is None
+
+    def test_short_r_number_no_match(self):
+        """R followed by fewer than 9 digits should not match."""
+        assert extract_order_ref("R12345678") is None
+
+    def test_multiple_refs_returns_first(self):
+        assert extract_order_ref("R111111111 and R222222222") == "R111111111"

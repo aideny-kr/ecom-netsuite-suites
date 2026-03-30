@@ -310,15 +310,22 @@ async def create_run(
     user: Annotated[User, Depends(require_permission("recon.run"))],
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
-    runner = ReconJobRunner(db=db, tenant_id=str(user.tenant_id))
+    if request.match_level == "order":
+        from app.services.reconciliation.order_recon_job import OrderReconJob
+
+        runner = OrderReconJob(db=db, tenant_id=str(user.tenant_id))
+    else:
+        runner = ReconJobRunner(db=db, tenant_id=str(user.tenant_id))
 
     try:
-        summary = await runner.run(
-            date_from=request.date_from,
-            date_to=request.date_to,
-            subsidiary_id=request.subsidiary_id,
-            payout_ids=request.payout_ids,
-        )
+        run_kwargs: dict = {
+            "date_from": request.date_from,
+            "date_to": request.date_to,
+            "subsidiary_id": request.subsidiary_id,
+        }
+        if request.match_level == "payout":
+            run_kwargs["payout_ids"] = request.payout_ids
+        summary = await runner.run(**run_kwargs)
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -372,6 +379,7 @@ async def create_run_stream(
                     date_to=request.date_to,
                     subsidiary_id=request.subsidiary_id,
                     payout_ids=request.payout_ids,
+                    match_level=request.match_level,
                 )
 
                 # Audit log on success

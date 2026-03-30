@@ -14,7 +14,7 @@ import structlog
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.canonical import NetsuitePosting, Payout
+from app.models.canonical import NetsuitePosting, Payout, PayoutLine
 from app.models.connection import Connection
 from app.services.ingestion.netsuite_deposit_sync import sync_netsuite_deposits
 from app.services.reconciliation.recon_job import ReconJobRunner
@@ -83,6 +83,7 @@ class ReconPipeline:
         date_to: date,
         subsidiary_id: str | None = None,
         payout_ids: list[str] | None = None,
+        match_level: str = "order",
     ) -> dict[str, Any]:
         """Execute full reconciliation pipeline with progress events.
 
@@ -197,15 +198,22 @@ class ReconPipeline:
                 )
 
             # Check we have data to reconcile
-            payout_count = await self._count_payouts(date_from, date_to, subsidiary_id, payout_ids)
             deposit_count = await self._count_deposits(date_from, date_to, subsidiary_id)
 
-            if payout_count == 0 and deposit_count == 0:
+            if match_level == "order":
+                source_count = await self._count_charges(date_from, date_to, subsidiary_id)
+                source_label = "charges"
+            else:
+                source_count = await self._count_payouts(date_from, date_to, subsidiary_id, payout_ids)
+                source_label = "payouts"
+
+            if source_count == 0 and deposit_count == 0:
                 await self._emit(
                     {
                         "type": "recon_error",
                         "error": (
-                            f"No payouts or deposits found for {date_from} – {date_to}. Sync your data sources first."
+                            f"No {source_label} or deposits found for {date_from} – {date_to}. "
+                            "Sync your data sources first."
                         ),
                     }
                 )
@@ -215,22 +223,32 @@ class ReconPipeline:
             await self._emit_stage(
                 "matching",
                 "running",
-                f"Matching {payout_count} payouts with {deposit_count} deposits...",
+                f"Matching {source_count} {source_label} vs {deposit_count} deposits...",
             )
 
-            runner = ReconJobRunner(db=self.db, tenant_id=self.tenant_id)
-            summary = await runner.run(
-                date_from=date_from,
-                date_to=date_to,
-                subsidiary_id=subsidiary_id,
-                payout_ids=payout_ids,
-            )
+            if match_level == "order":
+                from app.services.reconciliation.order_recon_job import OrderReconJob
+
+                runner = OrderReconJob(db=self.db, tenant_id=self.tenant_id)
+                summary = await runner.run(
+                    date_from=date_from,
+                    date_to=date_to,
+                    subsidiary_id=subsidiary_id,
+                )
+            else:
+                runner = ReconJobRunner(db=self.db, tenant_id=self.tenant_id)
+                summary = await runner.run(
+                    date_from=date_from,
+                    date_to=date_to,
+                    subsidiary_id=subsidiary_id,
+                    payout_ids=payout_ids,
+                )
             run_id = summary.run_id
 
             await self._emit_stage(
                 "matching",
                 "completed",
-                f"Matched {summary.matched_count} of {summary.total_payouts} payouts",
+                f"Matched {summary.matched_count} of {summary.total_payouts} {source_label}",
             )
 
             # ── Stage 5: Classify results ───────────────────────────────
@@ -364,6 +382,32 @@ class ReconPipeline:
             stmt = stmt.where(Payout.arrival_date >= date_from, Payout.arrival_date <= date_to)
         if subsidiary_id:
             stmt = stmt.where(Payout.subsidiary_id == subsidiary_id)
+        result = await self.db.execute(stmt)
+        return result.scalar() or 0
+
+    async def _count_charges(
+        self,
+        date_from: date,
+        date_to: date,
+        subsidiary_id: str | None,
+    ) -> int:
+        """Count payout_lines (charges) available for order-level matching."""
+        from datetime import timedelta
+
+        buffer = timedelta(days=5)
+        stmt = (
+            select(func.count())
+            .select_from(PayoutLine)
+            .join(Payout, PayoutLine.payout_id == Payout.id)
+            .where(
+                PayoutLine.tenant_id == self.tenant_id,
+                PayoutLine.line_type == "charge",
+                Payout.arrival_date >= date_from - buffer,
+                Payout.arrival_date <= date_to + buffer,
+            )
+        )
+        if subsidiary_id:
+            stmt = stmt.where(PayoutLine.subsidiary_id == subsidiary_id)
         result = await self.db.execute(stmt)
         return result.scalar() or 0
 

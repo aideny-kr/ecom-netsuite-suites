@@ -50,10 +50,17 @@ export default function ReconciliationPage() {
   }, [pipeline.runId]);
 
   const handleInvestigate = (result: ReconResult) => {
-    const payoutId = result.evidence?.payout_source_id || "unknown";
+    const orderRef = result.evidence?.order_reference;
+    const chargeId = result.evidence?.charge_source_id || result.evidence?.payout_source_id;
     const amount = Number(result.stripe_amount || result.variance_amount).toLocaleString("en-US", { style: "currency", currency: "USD" });
     const varType = result.variance_type || "unmatched";
-    const query = `Investigate this reconciliation exception: Stripe payout ${payoutId} for ${amount} is ${varType}. No matching NetSuite deposit was found. Can you check NetSuite for deposits around this amount and date range?`;
+
+    let query: string;
+    if (orderRef) {
+      query = `Investigate order ${orderRef}: Stripe charge ${chargeId || "unknown"} for ${amount} is ${varType}. Check if NetSuite has a matching customer deposit or sales order for this order number and amount.`;
+    } else {
+      query = `Investigate this reconciliation exception: Stripe charge for ${amount} is ${varType}. No order reference found. Can you search NetSuite for customer deposits around this amount?`;
+    }
     router.push(`/chat?agent=recon-agent&prefill=${encodeURIComponent(query)}`);
   };
 

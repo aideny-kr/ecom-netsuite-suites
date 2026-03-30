@@ -30,6 +30,9 @@ _PAYOUT_ID_PATTERNS = [
     re.compile(r"stripe\.com/payouts/(\w+)", re.IGNORECASE),
 ]
 
+# Regex for extracting order references (R followed by 9 digits) from sales order display names
+_ORDER_REF_PATTERN = re.compile(r"(R\d{9})")
+
 # SuiteQL query template — pagination handled by execute_suiteql_via_rest(paginate=True)
 _DEPOSIT_QUERY = """\
 SELECT
@@ -39,22 +42,21 @@ SELECT
     t.type AS record_type,
     t.memo,
     t.total AS amount,
-    t.currency AS currency_id,
     BUILTIN.DF(t.currency) AS currency_name,
     t.subsidiary AS subsidiary_id,
     BUILTIN.DF(t.subsidiary) AS subsidiary_name,
     t.account AS account_id,
     BUILTIN.DF(t.account) AS account_name,
-    t.status
-FROM
-    transaction t
+    t.status,
+    BUILTIN.DF(tl.createdfrom) AS sales_order_ref
+FROM transaction t
+JOIN transactionline tl ON tl.transaction = t.id AND tl.mainline = 'T'
 WHERE
     t.type IN ('Deposit', 'CustDep')
     AND t.trandate >= TO_DATE('{date_from}', 'YYYY-MM-DD')
     AND t.trandate <= TO_DATE('{date_to}', 'YYYY-MM-DD')
     AND t.posting = 'T'
-ORDER BY
-    t.trandate DESC\
+ORDER BY t.trandate DESC\
 """
 
 
@@ -66,6 +68,18 @@ class DepositSyncResult:
     records_updated: int = 0
     records_new: int = 0
     errors: list[str] = field(default_factory=list)
+
+
+def extract_order_ref(sales_order_ref: str | None) -> str | None:
+    """Extract an order reference (R followed by 9 digits) from a sales order display name.
+
+    E.g. "Sales Order #R577684612" → "R577684612"
+    Returns the first match, or None.
+    """
+    if not sales_order_ref:
+        return None
+    m = _ORDER_REF_PATTERN.search(sales_order_ref)
+    return m.group(1) if m else None
 
 
 def extract_payout_id(memo: str | None) -> str | None:
@@ -180,8 +194,12 @@ async def sync_netsuite_deposits(
         if account_filter and row_account_id not in account_filter:
             continue
 
-        # Extract payout ID from memo
-        payout_id = extract_payout_id(memo)
+        # Extract order reference from linked sales order (primary)
+        sales_order_ref = row_dict.get("sales_order_ref", "")
+        order_ref = extract_order_ref(sales_order_ref) if sales_order_ref else None
+
+        # Fallback: extract payout ID from memo (legacy path)
+        payout_id = extract_payout_id(memo) if not order_ref else None
 
         # Parse amount
         try:
@@ -229,7 +247,7 @@ async def sync_netsuite_deposits(
             "account_name": row_dict.get("account_name"),
             "subsidiary_id": str(row_dict.get("subsidiary_id", "")) or None,
             "memo": memo or None,
-            "related_payout_id": payout_id,
+            "related_payout_id": order_ref or payout_id,
             "raw_data": row_dict,
             "created_at": now,
             "updated_at": now,

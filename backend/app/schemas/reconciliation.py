@@ -29,6 +29,9 @@ class ReconRunCreate(BaseModel):
     date_to: date
     subsidiary_id: str | None = None
     payout_ids: list[str] | None = Field(default=None, description="Specific payout source_ids to reconcile")
+    match_level: Literal["order", "payout"] = Field(
+        default="order", description="Matching granularity: 'order' (charge-level) or 'payout' (aggregate)"
+    )
 
 
 class ReconResultApprove(BaseModel):
