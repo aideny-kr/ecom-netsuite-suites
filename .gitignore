@@ -41,6 +41,9 @@ docs/
 # MCP config (contains API keys)
 .mcp.json
 
+# Task queue (local workflow, not code)
+tasks/
+
 # Personal/internal files
 aiden-*.docx
 aiden-*.jsx
