@@ -1,6 +1,6 @@
 # AI-den — NetSuite AI Operations Platform
 
-A multi-tenant AI platform that connects NetSuite ERP and BigQuery data warehouses to an intelligent chat assistant. Features specialized agent routing, natural language querying, financial reporting with auto-charts, and a SuiteScript development workspace.
+An AI platform that connects NetSuite ERP and BigQuery data warehouses to an intelligent chat assistant. Features specialized agent routing, natural language querying, financial reporting with auto-charts, bank reconciliation, and a SuiteScript development workspace.
 
 ## Key Features
 
@@ -11,7 +11,7 @@ A multi-tenant AI platform that connects NetSuite ERP and BigQuery data warehous
 - **BigQuery BI agent** — natural language → BigQuery Standard SQL → premium recharts visualization (bar, line, pie, area, scatter)
 - **Financial report auto-charts** — deterministic post-processing generates grouped bar charts from income statement and balance sheet trends
 - **Chart pipeline** — `<chart>` XML extraction from agent text, SSE chart events, recharts frontend renderer with smart $M formatting and gradients
-- **Multi-provider LLM support**: Anthropic (Claude), OpenAI, Google Gemini — BYOK (bring your own key) per tenant
+- **Multi-provider LLM support**: Anthropic (Claude), OpenAI, Google Gemini — BYOK (bring your own key)
 - **Entity resolution**: fast NER (Haiku) + pg_trgm fuzzy matching maps entity names to NetSuite script IDs in sub-100ms
 - **MCP tool governance**: read-only SQL enforcement, table allowlist, row limits, cost guardrails
 - **SSE streaming** with markdown rendering, collapsible `<thinking>` tags, and progressive scroll
@@ -27,7 +27,7 @@ A multi-tenant AI platform that connects NetSuite ERP and BigQuery data warehous
 ### BigQuery Integration (v1.1)
 - **Service account auth** — encrypted credentials, no OAuth token refresh needed
 - **3 local tools**: `bigquery_sql` (read-only, cost-guardrailed), `bigquery_schema` (discover tables/columns), `bigquery_cost_estimate` (dry-run)
-- **Connector-gated tools** — BigQuery tools only appear when tenant has active connector
+- **Connector-gated tools** — BigQuery tools only appear when an active connector exists
 - **Table selector UI** — hierarchical dataset/table browser with search, select/deselect per dataset
 - **Schema RAG seeder** — auto-seeds table schemas into RAG partitions on connector creation
 - **Regional support** — `location` parameter for us-central1, EU, etc.
@@ -46,18 +46,26 @@ A multi-tenant AI platform that connects NetSuite ERP and BigQuery data warehous
 - **Financial reports** — income statement, balance sheet, trial balance via dedicated tool with pre-computed summaries
 - **Metadata discovery**: custom fields, record types, subsidiaries, departments, classes, locations
 
+### Reconciliation (v1.3/v1.5)
+- **Three-tier matching engine** — deterministic (payout ID) → fuzzy (amount/date/memo Jaccard) → split-payout subset-sum
+- **Data pipeline connectors** — Stripe payout sync (cursor-based, incremental), NetSuite deposit sync via SuiteQL
+- **Self-service for finance users** — data freshness banner, sync trigger from Recon page (`recon.run` permission, no admin needed)
+- **SSE progress stepper** — 6-stage pipeline with real-time progress (preflight → sync → match → classify → complete)
+- **Evidence packs** — Excel export with matched/unmatched/exception breakdowns
+- **Month-end close workflow** — approve matches, lock periods, audit trail
+
 ### Platform
-- **Multi-tenant** with row-level security (RLS), RBAC, and plan-based entitlements
+- **Role-based access control** (RBAC) with row-level security (RLS) and plan-based entitlements
 - **Audit trail** recording every mutation with correlation IDs
-- **White-label branding** — per-tenant brand name, color, logo, favicon
-- **Feature flags** — TTL-cached, per-tenant feature gating
+- **White-label branding** — brand name, color, logo, favicon
+- **Feature flags** — TTL-cached feature gating
 - **Email invitations** via Resend with role-based access
 
 ## Tech Stack
 
 | Layer | Technology |
 |---|---|
-| Backend API | Python 3.11, FastAPI, Pydantic v2, SQLAlchemy 2.0 (async), Gunicorn (4 workers) |
+| Backend API | Python 3.11, FastAPI, Pydantic v2, SQLAlchemy 2.0 (async), Uvicorn (4 workers) |
 | Database | PostgreSQL 16 with pgvector, pg_trgm, btree_gin; 53 Alembic migrations |
 | Cache / Broker | Redis 7 |
 | Task Queue | Celery 5 |
@@ -67,9 +75,9 @@ A multi-tenant AI platform that connects NetSuite ERP and BigQuery data warehous
 | AI/LLM | Anthropic Claude, OpenAI, Google Gemini adapters; MCP tool protocol |
 | BigQuery | google-cloud-bigquery SDK, service account auth, asyncio.to_thread() |
 | SuiteApp | SuiteScript 2.1, SDF (ACCOUNTCUSTOMIZATION) |
-| Testing | pytest (async, 2300+ tests), Playwright E2E, Jest (SuiteScript) |
-| Infrastructure | Docker Compose, Gunicorn + Uvicorn workers, Cloudflare Tunnel |
-| Staging | GCP e2-small, api-staging.suitestudio.ai + staging.suitestudio.ai (Vercel) |
+| Testing | pytest (async, 2669+ tests), Playwright E2E, Jest (SuiteScript) |
+| Infrastructure | Docker Compose, Uvicorn workers, nginx + Let's Encrypt |
+| Staging | GCP e2-small, api-staging.suitestudio.ai + staging.suitestudio.ai |
 
 ## Quick Start
 
@@ -106,21 +114,22 @@ ecom-netsuite-suites/
             prompts/       # Agent system prompts (markdown)
           routing/         # Three-tier routing (RuleRouter, SemanticRouter)
           adapters/        # LLM provider adapters (Anthropic, OpenAI, Gemini)
-        ingestion/         # Stripe and Shopify sync services
+        ingestion/         # Stripe sync, NetSuite deposit sync, Shopify sync
+        reconciliation/    # Matching engine, pipeline, evidence packs, variance classifier
       workers/             # Celery app and background tasks
       mcp/                 # MCP tool server, governance, registry
         tools/             # Tool executors (SuiteQL, BigQuery, RAG, workspace)
-    alembic/               # Database migrations (53 versions)
-    tests/                 # pytest async test suite (2300+ tests)
+    alembic/               # Database migrations (62 versions)
+    tests/                 # pytest async test suite (2669+ tests)
       agent_benchmarks/    # BI agent vs baseline benchmark framework
       stress/              # Concurrency stress tests
   frontend/
     src/
-      app/(dashboard)/     # Dashboard pages (chat, workspace, settings, analytics)
+      app/(dashboard)/     # Dashboard pages (chat, workspace, settings, analytics, reconciliation)
       components/          # React components
         chat/              # Message list, chart renderer, tool cards, financial reports
         workspace/         # File tree, constellation view, changeset panel
-        settings/          # Connection sections (NetSuite, BigQuery), team management
+        settings/          # Connection sections (NetSuite, BigQuery, Stripe), team management
         analytics/         # Saved queries, preview modal
         ui/                # shadcn/ui primitives
       hooks/               # React Query hooks

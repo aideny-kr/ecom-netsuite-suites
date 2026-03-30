@@ -253,6 +253,17 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 | Recon agent config | `backend/app/services/chat/agents/configs/recon_agent.yaml` |
 | Recon dashboard | `frontend/src/app/(dashboard)/reconciliation/` |
 | Financial veto | `backend/app/services/chat/orchestrator.py` (_FINANCIAL_VETO_PHRASES) |
+| Connector status API | `backend/app/api/v1/connector_status.py` |
+| Stripe sync service | `backend/app/services/ingestion/stripe_sync.py` |
+| NetSuite deposit sync | `backend/app/services/ingestion/netsuite_deposit_sync.py` |
+| Recon pipeline | `backend/app/services/reconciliation/pipeline.py` |
+| Stripe health check | `backend/app/workers/tasks/stripe_health_check.py` |
+| Stripe sync all (Beat) | `backend/app/workers/tasks/stripe_sync_all.py` |
+| Recon progress stepper | `frontend/src/components/reconciliation/recon-progress-stepper.tsx` |
+| Data freshness banner | `frontend/src/components/reconciliation/data-freshness-banner.tsx` |
+| Stripe connector card | `frontend/src/components/settings/stripe-connector-card.tsx` |
+| Data source connectors | `frontend/src/components/settings/data-source-connectors-section.tsx` |
+| Permission helpers | `backend/app/core/dependencies.py` (require_any_permission) |
 | nginx config | `/etc/nginx/sites-available/suitestudio` (on GCP VM) |
 
 ## Common Mistakes to Avoid
@@ -294,13 +305,16 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 35. **Soul config is file-based** — stored at `/tmp/workspace_storage/{tenant_id}/soul.md`. Must have persistent Docker volume. NEVER overwrite or seed without explicit user confirmation.
 36. **Financial routing needs veto, not just regex** — `_FINANCIAL_VETO_PHRASES` catches plurals/variants that the coordinator regex misses. Applied after Tier 1, session pin, and Tier 2 in `_select_agent()`.
 37. **nginx ssl_buffer_size for SSE** — default 16KB causes bursty streaming over TLS. Set to 4k for real-time SSE.
+38. **Stripe SDK v15 breaking changes** — `dict(payout)` fails (use `payout.to_dict()`). `account.get("field")` fails (use `getattr(account, "field", None)`). StripeObject no longer behaves like a dict.
+39. **Stripe connector key in `connections` table** — encrypted per-tenant, NOT in env vars. `STRIPE_API_KEY` in config.py is for billing only. Per-connection key via `decrypt_credentials(connection.encrypted_credentials)["api_key"]`.
+40. **Recon pipeline Stripe sync timeout** — initial sync pulls all historical payouts (800+) with payout lines — can take 30+ min. Pipeline has 90s timeout with fallback to existing data. Pre-sync via Settings "Sync Now" or hourly Beat schedule.
 
 ## Current State
 
-- **Product**: AI-den v1.2 deployed to staging 2026-03-27. Pricing Agent + Agent Hub UI + file upload infra all live.
-- **Roadmap**: v1.2 shipped (Pricing Agent, Agent Hub, auto-improvement loop) → v1.3 Late Apr (cross-system intelligence) → v1.4 Mid-May (ETL pipelines).
+- **Product**: AI-den v1.5 deployed to staging 2026-03-30. Data pipeline connectors + recon self-service live.
+- **Roadmap**: v1.2 shipped → v1.3 shipped (recon engine + data pipeline) → v1.5 shipped (self-service sync) → v1.6 next (order-level reconciliation).
 - **Latest migration**: 062_recon_results
-- **CI status**: Lint + format passing. Backend tests passing (pre-existing SSL test excluded).
+- **CI status**: Python lint + frontend lint + TS check + frontend build all passing. 3 pre-existing test_mcp_client failures (tool count mismatch).
 - **Staging**: `api-staging.suitestudio.ai` (backend). Frontend on GCP Docker (nginx + Let's Encrypt). No Vercel, no Cloudflare Tunnel. Deploy path: `/opt/ecom-netsuite` with `docker-compose.prod.yml`.
 - **Deploy**: Stop beat/worker first, pull, start sequentially. Never `--force-recreate` all at once — kills workers mid-refresh, consuming single-use refresh tokens.
 
@@ -402,3 +416,12 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 - **Importance banner** — uses brand cyan (#00F0FF), memoized. Dropdown flicker fixed (focus-visible scoped to inputs).
 - **Skills consolidated** — all skills in `.claude/skills/` (10 total). Old `skills/` directory removed. 3 new skills: pricing-agent, bigquery-bi, autonomous-improvement. Oracle guardrails merged.
 - **Workspace volume** — Soul config persists across deploys via Docker volume `workspace-data` mounted at `/tmp/workspace_storage`.
+
+## Resolved (2026-03-30)
+
+- **v1.3 Data Pipeline Connectors** — Stripe connector: Settings UI (card, dialog, hooks), API (status/test/connect/disconnect), Celery health check (15min). NetSuite deposit sync: SuiteQL query for Deposit/CustDep, upsert to netsuite_postings, payout ID regex extraction from memo. Settings page "Data Source Connectors" section. 16 new tests.
+- **Stripe SDK v15 compatibility** — `dict(payout)` → `payout.to_dict()` (StripeObject no longer supports `dict()` conversion). `account.get()` → `getattr(account, ...)` (Account objects don't have `.get()` method). All three serialization points fixed (payouts, balance transactions, disputes).
+- **Reconciliation Pipeline + Progress Stepper** — 6-stage SSE pipeline (preflight → sync stripe → sync netsuite → matching → classifying → complete). Graceful degradation: skips missing connectors, 90s timeout on Stripe sync with fallback to existing data. Frontend horizontal stepper component with progress bar and summary stats.
+- **Pydantic UUID→str serialization** — `StrFromUUID = Annotated[str, BeforeValidator(...)]` in `ReconRunResponse`/`ReconResultResponse`. Fixes 500 on `GET /reconciliation/runs` when SQLAlchemy returns UUID objects.
+- **v1.5 Reconciliation Self-Service** — `require_any_permission()` dependency helper for OR-based permission checks. `GET /reconciliation/data-status` endpoint (recon.run gated). `POST /reconciliation/sync` with Redis rate limiting (5min cooldown). Data freshness banner (5 states: no connectors, error, never synced, stale >24h, fresh). Stripe sync progress callback (sub-progress every ~20 payouts via `loop.call_soon_threadsafe`). Hourly Stripe sync via Celery Beat (`stripe_sync_all`). Connector status GETs now accept `recon.run` OR `connections.manage`. 14 new TDD tests.
+- **CI fixes** — 15 ruff lint errors fixed (unused imports in recon test files, unused variable). ESLint apostrophe escape. Missing `types.ts` staging. All frontend checks green (lint, TS, build).
