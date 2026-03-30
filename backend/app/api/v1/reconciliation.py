@@ -183,10 +183,13 @@ async def trigger_recon_sync(
             )
             jobs_dispatched.append({"provider": "stripe", "job_id": result.id})
 
-        # NetSuite deposit sync (async, runs inline)
+        # NetSuite deposit sync (async, runs inline with job tracking)
         from datetime import date as date_type
+        from datetime import datetime as dt
         from datetime import timedelta
+        from datetime import timezone as tz
 
+        from app.models.job import Job
         from app.services.ingestion.netsuite_deposit_sync import (
             get_netsuite_rest_connection,
             sync_netsuite_deposits,
@@ -195,12 +198,37 @@ async def trigger_recon_sync(
         ns_conn = await get_netsuite_rest_connection(db, str(user.tenant_id))
         if ns_conn:
             today = date_type.today()
+            now = dt.now(tz.utc)
+
+            # Create job record
+            ns_job = Job(
+                tenant_id=user.tenant_id,
+                job_type="tasks.netsuite_deposit_sync",
+                status="running",
+                connection_id=ns_conn.id,
+                started_at=now,
+                parameters={"date_from": (today - timedelta(days=90)).isoformat(), "date_to": today.isoformat()},
+            )
+            db.add(ns_job)
+            await db.commit()
+
             ns_result = await sync_netsuite_deposits(
                 db=db,
                 tenant_id=str(user.tenant_id),
                 date_from=today - timedelta(days=90),
                 date_to=today,
             )
+
+            ns_job.status = "completed" if not ns_result.errors else "failed"
+            ns_job.completed_at = dt.now(tz.utc)
+            ns_job.result_summary = {
+                "records_synced": ns_result.records_synced,
+                "records_new": ns_result.records_new,
+            }
+            if ns_result.errors:
+                ns_job.error_message = ns_result.errors[0]
+            await db.commit()
+
             jobs_dispatched.append(
                 {
                     "provider": "netsuite_deposits",
