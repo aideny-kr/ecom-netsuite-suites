@@ -3,7 +3,7 @@
 import uuid
 from datetime import date
 from decimal import Decimal
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -107,7 +107,7 @@ class TestReconJobRunner:
 
         with (
             patch.object(runner, "_fetch_payouts", return_value=[]) as mock_fetch_p,
-            patch.object(runner, "_fetch_deposits", return_value=[]) as mock_fetch_d,
+            patch.object(runner, "_fetch_deposits", return_value=[]),
             patch.object(runner, "_store_results", return_value=None),
         ):
             await runner.run(

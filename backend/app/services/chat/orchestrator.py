@@ -412,7 +412,10 @@ async def _select_agent(
     if tier1_result and tier1_result != "unified-agent":
         # Financial veto: override specialist if query is financial
         if _is_financial_query(query):
-            print(f"[ROUTING] Financial veto overrides Tier 1 ({tier1_result}) → unified-agent | query: {query[:80]}", flush=True)
+            print(
+                f"[ROUTING] Financial veto overrides Tier 1 ({tier1_result}) → unified-agent | query: {query[:80]}",
+                flush=True,
+            )
             return None
         # Check health before using
         if _agent_registry.is_healthy(error_count=0, success_count=0):
@@ -426,7 +429,10 @@ async def _select_agent(
         if _agent_registry.configs.get(previous_agent_id):
             # Financial veto applies to session pins too
             if _is_financial_query(query):
-                print(f"[ROUTING] Financial veto overrides session pin ({previous_agent_id}) → unified-agent | query: {query[:80]}", flush=True)
+                print(
+                    f"[ROUTING] Financial veto overrides session pin ({previous_agent_id}) → unified-agent | query: {query[:80]}",
+                    flush=True,
+                )
                 return None
             print(f"[ROUTING] Session pinned → {previous_agent_id} | query: {query[:80]}", flush=True)
             return previous_agent_id
@@ -445,7 +451,10 @@ async def _select_agent(
     if tier2_result and tier2_result != "unified-agent":
         # Financial veto: last line of defense
         if _is_financial_query(query):
-            print(f"[ROUTING] Financial veto overrides Tier 2 ({tier2_result}) → unified-agent | query: {query[:80]}", flush=True)
+            print(
+                f"[ROUTING] Financial veto overrides Tier 2 ({tier2_result}) → unified-agent | query: {query[:80]}",
+                flush=True,
+            )
             return None
         print(f"[ROUTING] Tier 2 (semantic) → {tier2_result} | query: {query[:80]}", flush=True)
         return tier2_result

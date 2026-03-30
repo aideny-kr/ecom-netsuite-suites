@@ -302,9 +302,7 @@ class MatchingEngine:
 
         # Duplicate detection: multiple deposits claim the same payout
         payout_refs = [
-            d for d in available
-            if d.related_payout_id == payout.source_id
-            or (d.memo and payout.source_id in d.memo)
+            d for d in available if d.related_payout_id == payout.source_id or (d.memo and payout.source_id in d.memo)
         ]
         if len(payout_refs) >= 2:
             return MatchCandidate(
@@ -314,9 +312,7 @@ class MatchingEngine:
                 confidence=Decimal("0.60"),
                 variance_amount=sum(d.amount for d in payout_refs[1:]),
                 variance_type="duplicate",
-                variance_explanation=(
-                    f"Duplicate: {len(payout_refs)} deposits reference payout {payout.source_id}"
-                ),
+                variance_explanation=(f"Duplicate: {len(payout_refs)} deposits reference payout {payout.source_id}"),
                 match_rule="duplicate_detection",
             )
 

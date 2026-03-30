@@ -11,6 +11,7 @@ from app.api.v1 import (
     chat_integration,
     connection_alerts,
     connections,
+    connector_status,
     exports,
     health,
     invites,
@@ -70,4 +71,5 @@ api_router.include_router(pricing_config.router)
 api_router.include_router(task_files.router)
 api_router.include_router(agents.router)
 api_router.include_router(agent_instructions.router)
+api_router.include_router(connector_status.router)
 api_router.include_router(reconciliation.router)

@@ -17,8 +17,5 @@ async def execute(params: dict, **kwargs) -> dict:
         "success": True,
         "run_id": run_id,
         "download_url": f"/api/v1/reconciliation/evidence/{run_id}",
-        "message": (
-            "Evidence pack ready for download. "
-            "Use the link or click the download button in the dashboard."
-        ),
+        "message": ("Evidence pack ready for download. Use the link or click the download button in the dashboard."),
     }

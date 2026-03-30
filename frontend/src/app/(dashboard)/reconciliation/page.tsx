@@ -1,17 +1,19 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { Scale, Play, Download, Calendar } from "lucide-react";
 import { ReconSummaryBar } from "@/components/reconciliation/recon-summary-bar";
 import { ReconResultsTable } from "@/components/reconciliation/recon-results-table";
 import { ReconExceptionCard } from "@/components/reconciliation/recon-exception-card";
+import { ReconProgressStepper } from "@/components/reconciliation/recon-progress-stepper";
+import { DataFreshnessBanner } from "@/components/reconciliation/data-freshness-banner";
 import { CloseChecklist } from "@/components/reconciliation/close-checklist";
 import {
   useReconRuns,
   useReconResults,
-  useCreateReconRun,
 } from "@/hooks/use-reconciliation";
+import { useReconPipeline } from "@/hooks/use-recon-pipeline";
 import type { ReconResult } from "@/lib/types";
 
 type TabId = "all" | "exceptions" | "unmatched";
@@ -25,7 +27,7 @@ export default function ReconciliationPage() {
 
   const { data: runs } = useReconRuns();
   const { data: results } = useReconResults(selectedRunId);
-  const createRun = useCreateReconRun();
+  const pipeline = useReconPipeline();
 
   const selectedRun = runs?.find((r) => r.id === selectedRunId) || null;
 
@@ -37,15 +39,15 @@ export default function ReconciliationPage() {
 
   const handleRunRecon = () => {
     if (!dateFrom || !dateTo) return;
-    createRun.mutate(
-      { date_from: dateFrom, date_to: dateTo },
-      {
-        onSuccess: (data) => {
-          setSelectedRunId(data.run_id);
-        },
-      }
-    );
+    pipeline.runPipeline({ date_from: dateFrom, date_to: dateTo });
   };
+
+  // Auto-select the run when pipeline completes
+  useEffect(() => {
+    if (pipeline.runId && pipeline.runId !== selectedRunId) {
+      setSelectedRunId(pipeline.runId);
+    }
+  }, [pipeline.runId]);
 
   const handleInvestigate = (result: ReconResult) => {
     const query = `Investigate reconciliation exception: variance of $${Number(result.variance_amount).toFixed(2)} (${result.variance_type || "unknown type"})`;
@@ -82,17 +84,30 @@ export default function ReconciliationPage() {
           />
           <button
             onClick={handleRunRecon}
-            disabled={!dateFrom || !dateTo || createRun.isPending}
+            disabled={!dateFrom || !dateTo || pipeline.isRunning}
             className="flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-1.5 text-[13px] font-medium text-white hover:bg-blue-700 disabled:opacity-50 transition-colors"
           >
             <Play className="h-3.5 w-3.5" />
-            {createRun.isPending ? "Running..." : "Run Reconciliation"}
+            {pipeline.isRunning ? "Running..." : "Run Reconciliation"}
           </button>
         </div>
       </div>
 
+      {/* Data freshness banner — always visible */}
+      {!pipeline.isRunning && <DataFreshnessBanner />}
+
+      {/* Pipeline progress stepper — visible during/after a run */}
+      {(pipeline.isRunning || pipeline.summary || pipeline.error) && (
+        <ReconProgressStepper
+          stages={pipeline.stages}
+          progress={pipeline.progress}
+          error={pipeline.error}
+          summary={pipeline.summary}
+        />
+      )}
+
       {/* Previous runs selector */}
-      {runs && runs.length > 0 && (
+      {runs && runs.length > 0 && !pipeline.isRunning && (
         <div className="flex items-center gap-2">
           <Calendar className="h-4 w-4 text-muted-foreground" />
           <select
@@ -120,10 +135,10 @@ export default function ReconciliationPage() {
       )}
 
       {/* Summary bar */}
-      <ReconSummaryBar run={selectedRun} />
+      {!pipeline.isRunning && selectedRunId && <ReconSummaryBar run={selectedRun} />}
 
       {/* Tabs + results */}
-      {selectedRunId && (
+      {!pipeline.isRunning && selectedRunId && (
         <>
           <div className="flex gap-1 border-b">
             {tabs.map((tab) => (

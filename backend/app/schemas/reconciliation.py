@@ -4,9 +4,13 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Literal
+from typing import Annotated, Literal
+from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, BeforeValidator, Field
+
+# Coerce UUID objects to str for response schemas
+StrFromUUID = Annotated[str, BeforeValidator(lambda v: str(v) if isinstance(v, UUID) else v)]
 
 # ---------------------------------------------------------------------------
 # Enums / Literals
@@ -87,10 +91,10 @@ class MatchCandidate(BaseModel):
 # Response schemas
 # ---------------------------------------------------------------------------
 class ReconResultResponse(BaseModel):
-    id: str
-    run_id: str
-    payout_id: str | None
-    deposit_id: str | None
+    id: StrFromUUID
+    run_id: StrFromUUID
+    payout_id: StrFromUUID | None
+    deposit_id: StrFromUUID | None
     match_type: str
     confidence: Decimal
     status: str
@@ -101,7 +105,7 @@ class ReconResultResponse(BaseModel):
     variance_explanation: str | None
     currency: str
     match_rule: str | None
-    approved_by: str | None = None
+    approved_by: StrFromUUID | None = None
     approved_at: datetime | None = None
     created_at: datetime
 
@@ -109,8 +113,8 @@ class ReconResultResponse(BaseModel):
 
 
 class ReconRunResponse(BaseModel):
-    id: str
-    tenant_id: str
+    id: StrFromUUID
+    tenant_id: StrFromUUID
     date_from: date
     date_to: date
     subsidiary_id: str | None

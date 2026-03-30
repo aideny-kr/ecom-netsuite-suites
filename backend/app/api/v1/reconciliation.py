@@ -6,7 +6,9 @@ Mutation endpoints gated by require_permission("recon.run").
 
 from __future__ import annotations
 
+import asyncio
 import calendar
+import json
 import uuid
 from datetime import date as date_type
 from datetime import datetime, timezone
@@ -19,6 +21,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.dependencies import require_feature, require_permission
+from app.core.redis_lock import acquire_lock, release_lock
+from app.models.canonical import NetsuitePosting, Payout, PayoutLine
+from app.models.connection import Connection
+from app.models.pipeline import CursorState
 from app.models.reconciliation import ReconciliationResult, ReconciliationRun
 from app.models.user import User
 from app.schemas.reconciliation import (
@@ -30,9 +36,199 @@ from app.schemas.reconciliation import (
 )
 from app.services import audit_service
 from app.services.reconciliation.evidence_service import EvidencePackGenerator
+from app.services.reconciliation.pipeline import ReconPipeline
 from app.services.reconciliation.recon_job import ReconJobRunner
 
 router = APIRouter(prefix="/reconciliation", tags=["reconciliation"])
+
+
+# ---------------------------------------------------------------------------
+# Data freshness status (finance user accessible)
+# ---------------------------------------------------------------------------
+@router.get("/data-status")
+async def get_data_status(
+    user: Annotated[User, Depends(require_permission("recon.run"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Return connector status and data freshness for reconciliation.
+
+    Accessible by finance users (recon.run) — no admin permission required.
+    """
+    from sqlalchemy import func
+
+    # Stripe status
+    stripe_conn = (
+        await db.execute(
+            select(Connection).where(
+                Connection.tenant_id == user.tenant_id,
+                Connection.provider == "stripe",
+            )
+        )
+    ).scalar_one_or_none()
+
+    stripe_info: dict = {"connected": False, "status": "not_configured"}
+    if stripe_conn:
+        # Last sync time
+        cursor = (
+            await db.execute(
+                select(CursorState.last_synced_at).where(
+                    CursorState.connection_id == stripe_conn.id,
+                    CursorState.object_type == "stripe_payouts",
+                )
+            )
+        ).scalar_one_or_none()
+
+        payout_count = (
+            await db.execute(select(func.count(Payout.id)).where(Payout.tenant_id == user.tenant_id))
+        ).scalar_one()
+
+        payout_line_count = (
+            await db.execute(select(func.count(PayoutLine.id)).where(PayoutLine.tenant_id == user.tenant_id))
+        ).scalar_one()
+
+        stripe_status = "healthy" if stripe_conn.status in ("active", "healthy") else stripe_conn.status
+        stripe_info = {
+            "connected": True,
+            "status": stripe_status,
+            "last_sync": cursor.isoformat() if cursor else None,
+            "payout_count": payout_count,
+            "payout_line_count": payout_line_count,
+            "error": stripe_conn.error_reason,
+        }
+
+    # NetSuite deposit status
+    ns_conn = (
+        await db.execute(
+            select(Connection).where(
+                Connection.tenant_id == user.tenant_id,
+                Connection.provider == "netsuite",
+                Connection.status.in_(["active", "healthy"]),
+            )
+        )
+    ).scalar_one_or_none()
+
+    netsuite_info: dict = {"connected": False, "status": "not_configured"}
+    if ns_conn:
+        ns_cursor = (
+            await db.execute(
+                select(CursorState.last_synced_at).where(
+                    CursorState.connection_id == ns_conn.id,
+                    CursorState.object_type == "netsuite_deposits",
+                )
+            )
+        ).scalar_one_or_none()
+
+        from sqlalchemy import func as sqla_func
+
+        deposit_count = (
+            await db.execute(
+                select(sqla_func.count(NetsuitePosting.id)).where(NetsuitePosting.tenant_id == user.tenant_id)
+            )
+        ).scalar_one()
+
+        netsuite_info = {
+            "connected": True,
+            "status": "active",
+            "last_sync": ns_cursor.isoformat() if ns_cursor else None,
+            "deposit_count": deposit_count,
+        }
+
+    return {"stripe": stripe_info, "netsuite": netsuite_info}
+
+
+# ---------------------------------------------------------------------------
+# Sync trigger from Reconciliation page (finance user accessible)
+# ---------------------------------------------------------------------------
+@router.post("/sync")
+async def trigger_recon_sync(
+    user: Annotated[User, Depends(require_permission("recon.run"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Trigger Stripe + NetSuite sync for reconciliation data.
+
+    Rate limited: max 1 sync per tenant per 5 minutes.
+    Accessible by finance users (recon.run).
+    """
+    lock_key = f"recon_sync:{user.tenant_id}"
+    if not acquire_lock(lock_key, timeout=300):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="A sync is already running or was triggered recently. Please wait 5 minutes.",
+        )
+
+    jobs_dispatched = []
+
+    try:
+        # Stripe sync
+        stripe_conn = (
+            await db.execute(
+                select(Connection).where(
+                    Connection.tenant_id == user.tenant_id,
+                    Connection.provider == "stripe",
+                    Connection.status.in_(["active", "healthy"]),
+                )
+            )
+        ).scalar_one_or_none()
+
+        if stripe_conn:
+            from app.workers.celery_app import celery_app
+
+            result = celery_app.send_task(
+                "tasks.stripe_sync",
+                kwargs={
+                    "tenant_id": str(user.tenant_id),
+                    "connection_id": str(stripe_conn.id),
+                },
+                queue="sync",
+            )
+            jobs_dispatched.append({"provider": "stripe", "job_id": result.id})
+
+        # NetSuite deposit sync (async, runs inline)
+        from datetime import date as date_type
+        from datetime import timedelta
+
+        from app.services.ingestion.netsuite_deposit_sync import (
+            get_netsuite_rest_connection,
+            sync_netsuite_deposits,
+        )
+
+        ns_conn = await get_netsuite_rest_connection(db, str(user.tenant_id))
+        if ns_conn:
+            today = date_type.today()
+            ns_result = await sync_netsuite_deposits(
+                db=db,
+                tenant_id=str(user.tenant_id),
+                date_from=today - timedelta(days=90),
+                date_to=today,
+            )
+            jobs_dispatched.append(
+                {
+                    "provider": "netsuite_deposits",
+                    "records_synced": ns_result.records_synced,
+                }
+            )
+
+        await audit_service.log_event(
+            db=db,
+            tenant_id=user.tenant_id,
+            category="reconciliation",
+            action="recon.sync_trigger",
+            actor_id=user.id,
+            resource_type="sync",
+            resource_id="manual",
+            payload={"jobs": jobs_dispatched},
+        )
+        await db.commit()
+
+    except Exception:
+        release_lock(lock_key)
+        raise
+
+    return {
+        "status": "syncing",
+        "jobs": jobs_dispatched,
+        "message": "Data sync triggered. Stripe syncs in background, NetSuite deposits synced inline.",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -113,6 +309,96 @@ async def create_run(
     await db.commit()
 
     return summary
+
+
+# ---------------------------------------------------------------------------
+# Run reconciliation with SSE progress (pipeline)
+# ---------------------------------------------------------------------------
+@router.post("/runs/stream", status_code=status.HTTP_200_OK)
+async def create_run_stream(
+    request: ReconRunCreate,
+    user: Annotated[User, Depends(require_permission("recon.run"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Run reconciliation pipeline with real-time SSE progress events.
+
+    Emits events:
+      - recon_progress: stage updates with progress percentage
+      - recon_complete: final summary
+      - recon_error: if pipeline fails
+    """
+    _SENTINEL = object()
+
+    async def stream_generator():
+        queue: asyncio.Queue = asyncio.Queue()
+
+        async def _producer():
+            try:
+                pipeline = ReconPipeline(
+                    db=db,
+                    tenant_id=str(user.tenant_id),
+                    queue=queue,
+                )
+                result = await pipeline.run(
+                    date_from=request.date_from,
+                    date_to=request.date_to,
+                    subsidiary_id=request.subsidiary_id,
+                    payout_ids=request.payout_ids,
+                )
+
+                # Audit log on success
+                run_id = result.get("run_id")
+                if run_id:
+                    await audit_service.log_event(
+                        db=db,
+                        tenant_id=user.tenant_id,
+                        category="reconciliation",
+                        action="recon.pipeline_run",
+                        actor_id=user.id,
+                        resource_type="reconciliation_run",
+                        resource_id=run_id,
+                    )
+                    await db.commit()
+
+            except Exception as e:
+                await queue.put(
+                    {
+                        "type": "recon_error",
+                        "error": f"Pipeline failed: {str(e)}",
+                    }
+                )
+            finally:
+                await queue.put(_SENTINEL)
+
+        producer_task = asyncio.create_task(_producer())
+
+        # Padding for Cloudflare / nginx buffering
+        yield f": {' ' * 2048}\n\n"
+
+        try:
+            while True:
+                try:
+                    chunk = await asyncio.wait_for(queue.get(), timeout=30.0)
+                except asyncio.TimeoutError:
+                    yield ": heartbeat\n\n"
+                    continue
+
+                if chunk is _SENTINEL:
+                    break
+
+                yield f"data: {json.dumps(chunk, default=str)}\n\n"
+        finally:
+            producer_task.cancel()
+
+    return StreamingResponse(
+        stream_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
 
 
 # ---------------------------------------------------------------------------

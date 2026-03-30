@@ -58,10 +58,7 @@ class EvidencePackGenerator:
             r
             for r in results
             if r.get("match_type") == "unmatched"
-            or (
-                r.get("confidence") is not None
-                and Decimal(str(r["confidence"])) < Decimal("0.95")
-            )
+            or (r.get("confidence") is not None and Decimal(str(r["confidence"])) < Decimal("0.95"))
         ]
         self._write_results(wb, exceptions, "Exceptions")
 
@@ -96,9 +93,7 @@ class EvidencePackGenerator:
                 r
                 for r in results
                 if r.get("match_type") in ("deterministic", "fuzzy")
-                and Decimal("0.75")
-                <= Decimal(str(r.get("confidence", 0)))
-                < Decimal("0.95")
+                and Decimal("0.75") <= Decimal(str(r.get("confidence", 0))) < Decimal("0.95")
             ]
         )
         unmatched = len([r for r in results if r.get("match_type") == "unmatched"])
@@ -171,9 +166,7 @@ class EvidencePackGenerator:
                 float(result.get("confidence", 0)),
                 result.get("status", ""),
                 float(result["stripe_amount"]) if result.get("stripe_amount") is not None else "",
-                float(result["netsuite_amount"])
-                if result.get("netsuite_amount") is not None
-                else "",
+                float(result["netsuite_amount"]) if result.get("netsuite_amount") is not None else "",
                 float(result.get("variance_amount", 0)),
                 result.get("variance_type", ""),
                 result.get("variance_explanation", ""),
@@ -187,9 +180,9 @@ class EvidencePackGenerator:
             match_type = result.get("match_type", "")
             if match_type == "unmatched":
                 fill = _UNMATCHED_FILL
-            elif match_type in ("deterministic", "fuzzy") and Decimal(
-                str(result.get("confidence", 0))
-            ) >= Decimal("0.95"):
+            elif match_type in ("deterministic", "fuzzy") and Decimal(str(result.get("confidence", 0))) >= Decimal(
+                "0.95"
+            ):
                 fill = _MATCHED_FILL
             else:
                 fill = _EXCEPTION_FILL

@@ -127,6 +127,34 @@ async def get_current_superadmin(
     return user
 
 
+def require_any_permission(*codenames: str):
+    """Allow access if user has ANY of the listed permissions."""
+
+    async def permission_checker(
+        user: Annotated[User, Depends(get_current_user)],
+        db: Annotated[AsyncSession, Depends(get_db)],
+    ) -> User:
+        role_ids = [ur.role_id for ur in user.user_roles]
+        if not role_ids:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No roles assigned")
+
+        result = await db.execute(
+            select(Permission.codename)
+            .join(RolePermission, RolePermission.permission_id == Permission.id)
+            .where(RolePermission.role_id.in_(role_ids))
+        )
+        user_permissions = {row[0] for row in result.all()}
+
+        if not user_permissions.intersection(codenames):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Missing permission: one of {', '.join(codenames)}",
+            )
+        return user
+
+    return permission_checker
+
+
 def require_feature(flag_key: str):
     """Dependency that checks if a tenant feature flag is enabled."""
 

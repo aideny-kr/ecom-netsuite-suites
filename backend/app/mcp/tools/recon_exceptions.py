@@ -43,18 +43,20 @@ async def execute(params: dict, **kwargs) -> dict:
 
     exceptions = []
     for r in rows:
-        exceptions.append({
-            "result_id": str(r.id),
-            "match_type": r.match_type,
-            "confidence": str(r.confidence),
-            "stripe_amount": str(r.stripe_amount) if r.stripe_amount else None,
-            "netsuite_amount": str(r.netsuite_amount) if r.netsuite_amount else None,
-            "variance_amount": str(r.variance_amount),
-            "variance_type": r.variance_type,
-            "variance_explanation": r.variance_explanation,
-            "currency": r.currency,
-            "evidence": r.evidence,
-        })
+        exceptions.append(
+            {
+                "result_id": str(r.id),
+                "match_type": r.match_type,
+                "confidence": str(r.confidence),
+                "stripe_amount": str(r.stripe_amount) if r.stripe_amount else None,
+                "netsuite_amount": str(r.netsuite_amount) if r.netsuite_amount else None,
+                "variance_amount": str(r.variance_amount),
+                "variance_type": r.variance_type,
+                "variance_explanation": r.variance_explanation,
+                "currency": r.currency,
+                "evidence": r.evidence,
+            }
+        )
 
     return {
         "success": True,

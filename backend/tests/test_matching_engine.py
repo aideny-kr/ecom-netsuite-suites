@@ -4,9 +4,7 @@ import uuid
 from datetime import date
 from decimal import Decimal
 
-import pytest
-
-from app.schemas.reconciliation import DepositRecord, MatchCandidate, PayoutRecord
+from app.schemas.reconciliation import DepositRecord, PayoutRecord
 from app.services.reconciliation.matching_engine import MatchingEngine
 
 

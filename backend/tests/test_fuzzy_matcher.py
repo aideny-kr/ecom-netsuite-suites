@@ -3,8 +3,6 @@
 from datetime import date
 from decimal import Decimal
 
-import pytest
-
 from app.services.reconciliation.fuzzy_matcher import (
     amount_within_tolerance,
     date_within_window,
@@ -20,9 +18,7 @@ class TestAmountTolerance:
         assert amount_within_tolerance(Decimal("100.00"), Decimal("100.03")) is True
 
     def test_outside_rounding_within_fx(self):
-        result = amount_within_tolerance(
-            Decimal("100.00"), Decimal("100.50"), fx_tolerance_pct=Decimal("0.01")
-        )
+        result = amount_within_tolerance(Decimal("100.00"), Decimal("100.50"), fx_tolerance_pct=Decimal("0.01"))
         assert result is True
 
     def test_outside_all_tolerance(self):

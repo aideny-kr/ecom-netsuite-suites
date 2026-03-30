@@ -38,7 +38,10 @@ celery_app.conf.include = [
     "app.workers.tasks.onboarding_discovery",
     "app.workers.tasks.proactive_token_refresh",
     "app.workers.tasks.shopify_sync",
+    "app.workers.tasks.stripe_health_check",
     "app.workers.tasks.stripe_sync",
+    "app.workers.tasks.stripe_sync_all",
+    "app.workers.tasks.netsuite_deposit_sync",
     "app.workers.tasks.suitescript_sync",
     "app.workers.tasks.suiteql_export",
     "app.workers.tasks.workspace_run",
@@ -68,5 +71,13 @@ celery_app.conf.beat_schedule = {
     "proactive-token-refresh": {
         "task": "tasks.proactive_token_refresh",
         "schedule": 300.0,  # every 5 minutes
+    },
+    "stripe-health-check": {
+        "task": "tasks.stripe_health_check",
+        "schedule": 900.0,  # every 15 minutes
+    },
+    "stripe-sync-hourly": {
+        "task": "tasks.stripe_sync_all",
+        "schedule": 3600.0,  # every hour — incremental, cursor-based
     },
 }

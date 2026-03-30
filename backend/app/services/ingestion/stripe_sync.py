@@ -17,8 +17,17 @@ from app.services.ingestion.base import load_cursor, save_cursor, upsert_canonic
 logger = structlog.get_logger()
 
 
-def sync_stripe(db: Session, connection_id: str, tenant_id: str) -> dict:
+def sync_stripe(
+    db: Session,
+    connection_id: str,
+    tenant_id: str,
+    progress_callback=None,
+) -> dict:
     """Run a full incremental sync for a Stripe connection.
+
+    Args:
+        progress_callback: Optional callable(payouts_synced, stage) for progress reporting.
+                          Called every ~20 payouts during sync.
 
     Returns a summary dict with counts of records synced.
     """
@@ -61,12 +70,19 @@ def sync_stripe(db: Session, connection_id: str, tenant_id: str) -> dict:
                 "currency": payout.currency.upper(),
                 "status": payout.status,
                 "arrival_date": (date.fromtimestamp(payout.arrival_date) if payout.arrival_date else None),
-                "raw_data": dict(payout),
+                "raw_data": payout.to_dict(),
             },
         )
         synced_payout_stripe_ids.append(payout.id)
         last_created = payout.created
         payouts_synced += 1
+
+        if progress_callback and payouts_synced % 20 == 0:
+            progress_callback(payouts_synced, "payouts")
+
+    # Final progress callback for remaining payouts
+    if progress_callback and payouts_synced > 0:
+        progress_callback(payouts_synced, "payouts_done")
 
     if last_created is not None:
         save_cursor(db, connection_id, "stripe_payouts", str(last_created))
@@ -107,7 +123,7 @@ def sync_stripe(db: Session, connection_id: str, tenant_id: str) -> dict:
                     "currency": txn.currency.upper(),
                     "description": txn.description,
                     "related_order_id": getattr(txn, "source", None),
-                    "raw_data": dict(txn),
+                    "raw_data": txn.to_dict(),
                 },
             )
             payout_lines_synced += 1
@@ -142,7 +158,7 @@ def sync_stripe(db: Session, connection_id: str, tenant_id: str) -> dict:
                 "reason": dispute.reason,
                 "related_order_id": None,
                 "related_payment_id": dispute.charge,
-                "raw_data": dict(dispute),
+                "raw_data": dispute.to_dict(),
             },
         )
         last_created = dispute.created

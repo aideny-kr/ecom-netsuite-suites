@@ -109,11 +109,7 @@ class ReconJobRunner:
             run.total_variance = total_variance
             await self.db.commit()
 
-            match_rate = (
-                Decimal(len(matched)) / Decimal(len(payouts)) * 100
-                if payouts
-                else Decimal("0")
-            )
+            match_rate = Decimal(len(matched)) / Decimal(len(payouts)) * 100 if payouts else Decimal("0")
 
             summary = ReconRunSummary(
                 run_id=str(run_id),
