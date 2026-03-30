@@ -756,3 +756,54 @@ export interface ChartData {
     orientation?: "vertical" | "horizontal";
   };
 }
+
+// ---------------------------------------------------------------------------
+// Reconciliation
+// ---------------------------------------------------------------------------
+export interface ReconRun {
+  id: string;
+  tenant_id: string;
+  date_from: string;
+  date_to: string;
+  subsidiary_id: string | null;
+  status: string;
+  total_payouts: number;
+  total_deposits: number;
+  matched_count: number;
+  exception_count: number;
+  unmatched_count: number;
+  total_variance: number;
+  created_at: string;
+}
+
+export interface ReconResult {
+  id: string;
+  run_id: string;
+  payout_id: string | null;
+  deposit_id: string | null;
+  match_type: string;
+  confidence: number;
+  status: string;
+  stripe_amount: number | null;
+  netsuite_amount: number | null;
+  variance_amount: number;
+  variance_type: string | null;
+  variance_explanation: string | null;
+  currency: string;
+  match_rule: string | null;
+  approved_by: string | null;
+  approved_at: string | null;
+  created_at: string;
+}
+
+export interface ReconRunSummary {
+  run_id: string;
+  status: string;
+  total_payouts: number;
+  total_deposits: number;
+  matched_count: number;
+  exception_count: number;
+  unmatched_count: number;
+  total_variance: number;
+  match_rate: number;
+}

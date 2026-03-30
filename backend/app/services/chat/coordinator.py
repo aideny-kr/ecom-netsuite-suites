@@ -209,11 +209,11 @@ _HEURISTIC_RULES: list[tuple[IntentType, re.Pattern[str]]] = [
         re.compile(
             r"""(?xi)
             \b(?:
-                income\s+statement |
+                income\s+statements? |
                 profit\s*(?:&|and)\s*loss |
                 p\s*[&/]\s*l\b |
-                balance\s+sheet |
-                cash\s+flow\s+statement |
+                balance\s+sheets? |
+                cash\s+flow\s+statements? |
                 trial\s+balance |
                 (?:net|gross)\s+(?:income|profit|margin|revenue) |
                 operating\s+(?:income|expenses?|profit|loss) |

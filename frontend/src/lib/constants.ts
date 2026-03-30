@@ -93,6 +93,7 @@ export const NAV_ITEMS = [
   { label: "Chat", href: "/chat", icon: "MessageSquare" as const, featureFlag: "chat" },
   { label: "Saved Queries", href: "/queries", icon: "Database" as const, featureFlag: "analytics_export" },
   { label: "Dev Workspace", href: "/workspace", icon: "Code" as const, featureFlag: "workspace" },
+  { label: "Reconciliation", href: "/reconciliation", icon: "Scale" as const, featureFlag: "reconciliation" },
   { label: "Settings", href: "/settings", icon: "Settings" as const, featureFlag: null },
 ] as const;
 

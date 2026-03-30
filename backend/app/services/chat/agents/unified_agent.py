@@ -626,6 +626,7 @@ class UnifiedAgent(BaseSpecialistAgent):
         self._soul_quirks: str = ""
         self._soul_tone: str = ""
         self._brand_name: str = ""
+        self._netsuite_account_slug: str = ""  # e.g. "1234567" for URL construction
         self._user_timezone: str | None = None
         self._current_task: str = ""
         self._domain_knowledge: list[str] = []
@@ -797,6 +798,29 @@ class UnifiedAgent(BaseSpecialistAgent):
                 pp_block += f'{i}. "{pattern["question"]}" → {pattern["sql"]}\n'
             pp_block += "</proven_patterns>"
             parts.append(pp_block)
+
+        # NetSuite record deep links
+        if self._netsuite_account_slug:
+            parts.append(
+                f"\n<record_links>\n"
+                f"When referencing NetSuite records, include a clickable link using this pattern:\n"
+                f"Base URL: https://{self._netsuite_account_slug}.app.netsuite.com\n\n"
+                f"| Record Type | Path |\n"
+                f"|---|---|\n"
+                f"| Invoice | /app/accounting/transactions/custinvc.nl?id={{id}} |\n"
+                f"| Sales Order | /app/accounting/transactions/salesord.nl?id={{id}} |\n"
+                f"| Purchase Order | /app/accounting/transactions/purchord.nl?id={{id}} |\n"
+                f"| Vendor Bill | /app/accounting/transactions/vendbill.nl?id={{id}} |\n"
+                f"| Customer Payment | /app/accounting/transactions/custpymt.nl?id={{id}} |\n"
+                f"| Journal Entry | /app/accounting/transactions/journal.nl?id={{id}} |\n"
+                f"| Credit Memo | /app/accounting/transactions/credmemo.nl?id={{id}} |\n"
+                f"| Customer | /app/common/entity/custjob.nl?id={{id}} |\n"
+                f"| Vendor | /app/common/entity/vendor.nl?id={{id}} |\n"
+                f"| Employee | /app/common/entity/employee.nl?id={{id}} |\n\n"
+                f"Always include t.id in SELECT when querying transactions so you can construct links.\n"
+                f"Format: [Invoice #{{tranid}}](full_url) or [{{customer_name}}](full_url)\n"
+                f"</record_links>"
+            )
 
         # Learned rules — tenant-specific business logic (always injected)
         _learned_rules = self._context.get("learned_rules", [])
@@ -985,6 +1009,20 @@ class UnifiedAgent(BaseSpecialistAgent):
                             self._tool_defs.append(et)
         except Exception:
             _logger.warning("unified_agent.ext_tool_discovery_failed", exc_info=True)
+
+        # Extract NetSuite account slug for record deep links
+        try:
+            from app.core.encryption import decrypt_credentials
+
+            for conn in self._connectors:
+                if conn.provider in ("netsuite_mcp", "netsuite") and conn.encrypted_credentials:
+                    creds = decrypt_credentials(conn.encrypted_credentials)
+                    raw_id = creds.get("account_id", "")
+                    if raw_id:
+                        self._netsuite_account_slug = raw_id.replace("_", "-").lower()
+                        break
+        except Exception:
+            _logger.warning("unified_agent.account_slug_failed", exc_info=True)
 
         return task
 
