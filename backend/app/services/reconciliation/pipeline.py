@@ -116,59 +116,79 @@ class ReconPipeline:
             # ── Stage 2: Sync Stripe payouts ────────────────────────────
             stripe_count = 0
             if preflight["stripe_ok"]:
-                await self._emit_stage("sync_stripe", "running", "Pulling latest Stripe payouts...")
-                try:
-                    stripe_count = await asyncio.wait_for(
-                        self._sync_stripe(preflight["stripe_connection_id"]),
-                        timeout=90.0,
-                    )
+                # Smart skip: if data was synced within the last hour, skip re-sync
+                stripe_fresh = await self._is_stripe_fresh(preflight["stripe_connection_id"])
+                existing_payouts = await self._count_payouts(date_from, date_to, subsidiary_id, payout_ids)
+
+                if stripe_fresh and existing_payouts > 0:
                     await self._emit_stage(
                         "sync_stripe",
                         "completed",
-                        f"Synced {stripe_count} payouts from Stripe",
+                        f"Data is fresh — using {existing_payouts} existing payouts",
                     )
-                except asyncio.TimeoutError:
-                    # Initial sync can take 10+ min for large accounts.
-                    # Use existing data and suggest pre-syncing via Settings.
-                    existing = await self._count_payouts(date_from, date_to, subsidiary_id, payout_ids)
-                    if existing > 0:
+                else:
+                    await self._emit_stage("sync_stripe", "running", "Pulling latest Stripe payouts...")
+                    try:
+                        stripe_count = await asyncio.wait_for(
+                            self._sync_stripe(preflight["stripe_connection_id"]),
+                            timeout=90.0,
+                        )
                         await self._emit_stage(
                             "sync_stripe",
                             "completed",
-                            f"Sync timed out — using {existing} existing payouts",
+                            f"Synced {stripe_count} payouts from Stripe",
                         )
-                    else:
-                        await self._emit_stage(
-                            "sync_stripe",
-                            "error",
-                            "Sync timed out. Click 'Sync Now' in Settings → Stripe Connector first.",
-                        )
+                    except asyncio.TimeoutError:
+                        if existing_payouts > 0:
+                            await self._emit_stage(
+                                "sync_stripe",
+                                "completed",
+                                f"Sync timed out — using {existing_payouts} existing payouts",
+                            )
+                        else:
+                            await self._emit_stage(
+                                "sync_stripe",
+                                "error",
+                                "Sync timed out. Click Sync Now in Settings first.",
+                            )
             else:
                 await self._emit_stage("sync_stripe", "skipped", "Stripe not configured — using existing payout data")
 
             # ── Stage 3: Sync NetSuite deposits ─────────────────────────
             ns_count = 0
             if preflight["netsuite_ok"]:
-                await self._emit_stage("sync_netsuite", "running", "Pulling NetSuite bank deposits via SuiteQL...")
-                ns_result = await sync_netsuite_deposits(
-                    db=self.db,
-                    tenant_id=self.tenant_id,
-                    date_from=date_from,
-                    date_to=date_to,
-                )
-                ns_count = ns_result.records_synced
-                if ns_result.errors:
+                # Smart skip: if deposits exist for this date range, skip re-sync
+                existing_deposits = await self._count_deposits(date_from, date_to, subsidiary_id)
+                ns_fresh = await self._is_netsuite_fresh(preflight["netsuite_connection_id"])
+
+                if ns_fresh and existing_deposits > 0:
                     await self._emit_stage(
                         "sync_netsuite",
                         "completed",
-                        f"Synced {ns_count} deposits (warnings: {'; '.join(ns_result.errors[:2])})",
+                        f"Data is fresh — using {existing_deposits} existing deposits",
                     )
+                    ns_count = existing_deposits
                 else:
-                    await self._emit_stage(
-                        "sync_netsuite",
-                        "completed",
-                        f"Synced {ns_count} deposits from NetSuite",
+                    await self._emit_stage("sync_netsuite", "running", "Pulling NetSuite bank deposits via SuiteQL...")
+                    ns_result = await sync_netsuite_deposits(
+                        db=self.db,
+                        tenant_id=self.tenant_id,
+                        date_from=date_from,
+                        date_to=date_to,
                     )
+                    ns_count = ns_result.records_synced
+                    if ns_result.errors:
+                        await self._emit_stage(
+                            "sync_netsuite",
+                            "completed",
+                            f"Synced {ns_count} deposits (warnings: {'; '.join(ns_result.errors[:2])})",
+                        )
+                    else:
+                        await self._emit_stage(
+                            "sync_netsuite",
+                            "completed",
+                            f"Synced {ns_count} deposits from NetSuite",
+                        )
             else:
                 await self._emit_stage(
                     "sync_netsuite",
@@ -368,3 +388,39 @@ class ReconPipeline:
             stmt = stmt.where(NetsuitePosting.subsidiary_id == subsidiary_id)
         result = await self.db.execute(stmt)
         return result.scalar() or 0
+
+    async def _is_stripe_fresh(self, connection_id: str) -> bool:
+        """Check if Stripe data was synced within the last hour."""
+        from datetime import datetime, timezone
+
+        from app.models.pipeline import CursorState
+
+        result = await self.db.execute(
+            select(CursorState.last_synced_at).where(
+                CursorState.connection_id == connection_id,
+                CursorState.object_type == "stripe_payouts",
+            )
+        )
+        last_sync = result.scalar_one_or_none()
+        if not last_sync:
+            return False
+        elapsed = (datetime.now(timezone.utc) - last_sync).total_seconds()
+        return elapsed < 3600  # 1 hour
+
+    async def _is_netsuite_fresh(self, connection_id: str) -> bool:
+        """Check if NetSuite deposit data was synced within the last hour."""
+        from datetime import datetime, timezone
+
+        from app.models.pipeline import CursorState
+
+        result = await self.db.execute(
+            select(CursorState.last_synced_at).where(
+                CursorState.connection_id == connection_id,
+                CursorState.object_type == "netsuite_deposits",
+            )
+        )
+        last_sync = result.scalar_one_or_none()
+        if not last_sync:
+            return False
+        elapsed = (datetime.now(timezone.utc) - last_sync).total_seconds()
+        return elapsed < 3600  # 1 hour
