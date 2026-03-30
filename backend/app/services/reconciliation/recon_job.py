@@ -148,9 +148,13 @@ class ReconJobRunner:
         if payout_ids:
             stmt = stmt.where(Payout.source_id.in_(payout_ids))
         else:
+            # Expand by 5 days to catch payouts whose deposits fall in range
+            from datetime import timedelta
+
+            buffer = timedelta(days=5)
             stmt = stmt.where(
-                Payout.arrival_date >= date_from,
-                Payout.arrival_date <= date_to,
+                Payout.arrival_date >= date_from - buffer,
+                Payout.arrival_date <= date_to + buffer,
             )
 
         if subsidiary_id:
@@ -179,12 +183,20 @@ class ReconJobRunner:
         date_to: date,
         subsidiary_id: str | None = None,
     ) -> list[DepositRecord]:
-        """Fetch bank deposits from netsuite_postings for the given period."""
+        """Fetch bank deposits from netsuite_postings for the given period.
+
+        Expands the date range by 5 days on each side to catch deposits
+        posted slightly before/after the payout arrival date (common with
+        Stripe → bank → NetSuite recording delays).
+        """
+        from datetime import timedelta
+
+        buffer = timedelta(days=5)
         stmt = select(NetsuitePosting).where(
             NetsuitePosting.tenant_id == self.tenant_id,
             NetsuitePosting.record_type.in_(["deposit", "bankdeposit", "journalentry"]),
-            NetsuitePosting.transaction_date >= date_from,
-            NetsuitePosting.transaction_date <= date_to,
+            NetsuitePosting.transaction_date >= date_from - buffer,
+            NetsuitePosting.transaction_date <= date_to + buffer,
         )
 
         if subsidiary_id:
