@@ -405,7 +405,7 @@ class ReconPipeline:
         if not last_sync:
             return False
         elapsed = (datetime.now(timezone.utc) - last_sync).total_seconds()
-        return elapsed < 3600  # 1 hour
+        return elapsed < 86400  # 24 hours — data syncs hourly via Beat
 
     async def _is_netsuite_fresh(self, connection_id: str) -> bool:
         """Check if NetSuite deposit data was synced within the last hour."""
@@ -423,4 +423,4 @@ class ReconPipeline:
         if not last_sync:
             return False
         elapsed = (datetime.now(timezone.utc) - last_sync).total_seconds()
-        return elapsed < 3600  # 1 hour
+        return elapsed < 86400  # 24 hours — data syncs hourly via Beat
