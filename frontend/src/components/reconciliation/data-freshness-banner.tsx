@@ -82,7 +82,7 @@ export function DataFreshnessBanner() {
         <div className="flex items-start gap-2.5">
           <Info className="h-4 w-4 text-blue-500 mt-0.5 shrink-0" />
           <div className="text-[13px] text-foreground">
-            Stripe is connected but hasn't synced yet. Pull latest data to get started.
+            Stripe is connected but has not synced yet. Pull latest data to get started.
           </div>
         </div>
         <Button
