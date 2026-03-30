@@ -194,7 +194,7 @@ class ReconJobRunner:
         buffer = timedelta(days=5)
         stmt = select(NetsuitePosting).where(
             NetsuitePosting.tenant_id == self.tenant_id,
-            NetsuitePosting.record_type.in_(["deposit", "bankdeposit", "journalentry"]),
+            NetsuitePosting.record_type.in_(["deposit", "custdep", "bankdeposit", "journalentry"]),
             NetsuitePosting.transaction_date >= date_from - buffer,
             NetsuitePosting.transaction_date <= date_to + buffer,
         )

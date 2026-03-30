@@ -379,7 +379,7 @@ class ReconPipeline:
             .select_from(NetsuitePosting)
             .where(
                 NetsuitePosting.tenant_id == self.tenant_id,
-                NetsuitePosting.record_type.in_(["deposit", "bankdeposit", "journalentry"]),
+                NetsuitePosting.record_type.in_(["deposit", "custdep", "bankdeposit", "journalentry"]),
                 NetsuitePosting.transaction_date >= date_from,
                 NetsuitePosting.transaction_date <= date_to,
             )
