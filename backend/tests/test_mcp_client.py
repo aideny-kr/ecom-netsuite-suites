@@ -52,6 +52,9 @@ EXPECTED_TOOLS = {
     "pricing.convert",
     "pricing.config_read",
     "pricing.export",
+    "recon.approve_match",
+    "recon.get_exceptions",
+    "recon.get_evidence",
 }
 
 
@@ -158,14 +161,12 @@ class TestRateLimitEnforced:
         tool = "recon.run"
         limit = TOOL_CONFIGS[tool]["rate_limit_per_minute"]
 
-        # Exhaust rate limit
+        # Exhaust rate limit — tool may return context errors (no DB session)
+        # but each call still counts toward the rate limit.
         for _ in range(limit):
-            result = await server.call_tool(
-                tool, {"date_from": "2024-01-01", "date_to": "2024-01-31"}, TENANT_ID, ACTOR_ID
-            )
-            assert "error" not in result
+            await server.call_tool(tool, {"date_from": "2024-01-01", "date_to": "2024-01-31"}, TENANT_ID, ACTOR_ID)
 
-        # Next call should be denied
+        # Next call should be denied by rate limiter (before reaching the tool)
         result = await server.call_tool(tool, {"date_from": "2024-01-01", "date_to": "2024-01-31"}, TENANT_ID, ACTOR_ID)
         assert "error" in result
         assert "rate limit" in result["error"].lower()
