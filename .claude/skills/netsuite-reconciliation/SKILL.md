@@ -1,15 +1,69 @@
 ---
 name: netsuite-reconciliation
 description: >
-  NetSuite Reconciliation Engine (v1.3) — Stripe-to-NetSuite payout matching,
-  variance classification, evidence packs, and month-end close. Use for reconciliation,
-  recon, payout matching, Stripe variance, discrepancy, exception, month-end close,
-  or settlement reconciliation.
+  NetSuite Reconciliation Engine — order-level Stripe charge → NetSuite customer deposit
+  matching, data pipeline connectors, self-service sync, SSE progress stepper, evidence packs,
+  and month-end close. Use for reconciliation, recon, charge matching, order matching,
+  Stripe sync, deposit sync, variance, exception, month-end close, or settlement reconciliation.
 ---
 
-# NetSuite Reconciliation Engine (v1.3 — Shipped)
+# NetSuite Reconciliation Engine (v1.5 — Order-Level)
 
-Deterministic Stripe-to-NetSuite payout matching engine. No LLM in the matching pipeline — all matching uses Decimal math with configurable tolerances.
+Order-level Stripe charge → NetSuite customer deposit matching. No LLM in the matching pipeline — all matching uses Decimal math with deterministic order reference linking.
+
+## Order-Level Matching (Current — v1.5)
+
+Matches individual Stripe charges against individual NetSuite customer deposits using shared order number (`R\d{9}`) as the deterministic linking key.
+
+**Data validation (2026-03-30):**
+- Stripe charges: 334K records, 99.99% have order ID in `payout_lines.description` ("Framework Marketplace Order ID: R628489275-XU9EPZPD")
+- NetSuite custdep: 26K records, 99.7% have linked sales order via `transactionline.createdfrom` ("Sales Order #R577684612")
+- Linking key: `R\d{9}` extracted from both sides
+
+**Files:**
+- `backend/app/services/reconciliation/order_matching_engine.py` — OrderMatchingEngine + extract_order_ref()
+- `backend/app/services/reconciliation/order_fuzzy_matcher.py` — fuzzy_match() for amount+date+currency fallback
+- `backend/app/services/reconciliation/order_recon_job.py` — OrderReconJob (fetches charges + deposits, runs matcher)
+- `backend/app/schemas/order_reconciliation.py` — ChargeRecord, NSPaymentRecord, OrderMatchCandidate
+
+**Matching tiers:**
+1. **Deterministic**: `charge.order_reference == deposit.order_reference` — confidence 0.95+
+2. **Fuzzy**: Amount ±2%/±$50, date ±5 days, same currency — confidence 0.60-0.89
+3. **Unmatched**: No match found — variance_type="missing"
+
+## Data Pipeline Connectors
+
+**Stripe connector** (`backend/app/api/v1/connector_status.py`):
+- Settings UI card with connect/test/sync/disconnect
+- Celery health check every 15 min (`stripe_health_check`)
+- Hourly incremental sync via Beat (`stripe_sync_all`)
+- Batch commits (every 50 payouts, 200 payout lines) to avoid Supabase statement timeout
+- Stripe SDK v15: use `payout.to_dict()` not `dict(payout)`, `getattr()` not `.get()`
+
+**NetSuite deposit sync** (`backend/app/services/ingestion/netsuite_deposit_sync.py`):
+- SuiteQL query JOINs transactionline for `createdfrom` (sales order reference)
+- Upserts to `netsuite_postings`, stores order ref in `related_payout_id`
+- Record types: Deposit, CustDep
+
+## Self-Service (v1.5)
+
+- `require_any_permission("connections.manage", "recon.run")` — finance users can read connector status
+- `GET /reconciliation/data-status` — freshness banner (recon.run gated)
+- `POST /reconciliation/sync` — sync trigger with Redis rate limiting (5min cooldown)
+- Data freshness banner: 5 states (no connectors, error, never synced, stale >24h, fresh)
+- Smart pipeline skip: if data synced within 24h, skip re-sync
+
+## Pipeline + Progress Stepper
+
+6-stage SSE pipeline: preflight → sync stripe → sync netsuite → matching → classifying → complete.
+- `match_level` param: "order" (default) routes to OrderReconJob, "payout" to legacy ReconJobRunner
+- Stripe sub-progress via `loop.call_soon_threadsafe()` from sync thread
+- 90s timeout on inline Stripe sync with fallback to existing data
+- Frontend: `ReconProgressStepper` horizontal stepper + `DataFreshnessBanner`
+
+---
+
+## Legacy Payout-Level Matching (v1.3)
 
 ---
 

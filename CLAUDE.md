@@ -311,117 +311,38 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 
 ## Current State
 
-- **Product**: AI-den v1.5 deployed to staging 2026-03-30. Data pipeline connectors + recon self-service live.
-- **Roadmap**: v1.2 shipped → v1.3 shipped (recon engine + data pipeline) → v1.5 shipped (self-service sync) → v1.6 next (order-level reconciliation).
+- **Product**: AI-den v1.5 + order-level recon deployed to staging 2026-03-30. 2757 tests, CI fully green.
 - **Latest migration**: 062_recon_results
-- **CI status**: Python lint + frontend lint + TS check + frontend build all passing. 3 pre-existing test_mcp_client failures (tool count mismatch).
-- **Staging**: `api-staging.suitestudio.ai` (backend). Frontend on GCP Docker (nginx + Let's Encrypt). No Vercel, no Cloudflare Tunnel. Deploy path: `/opt/ecom-netsuite` with `docker-compose.prod.yml`.
-- **Deploy**: Stop beat/worker first, pull, start sequentially. Never `--force-recreate` all at once — kills workers mid-refresh, consuming single-use refresh tokens.
+- **Staging**: `api-staging.suitestudio.ai` + `staging.suitestudio.ai`. GCP Docker + nginx + Let's Encrypt. Deploy: `saas-deployment` skill.
 
 ## Known Issues
 
-1. **CI failures** — `test_security_hardening.py` SSL tests fail. Not blocking deploy (manual `workflow_dispatch` bypasses CI gate).
-2. **Workspace RAG chunking** — preamble code (constants before first entry point) now captured as `#preamble` chunk. Force re-seed after changing chunking logic: `seed_workspace_scripts(db, tenant_id, force=True)`.
-3. **CSV/Excel export** — strips `FETCH FIRST N ROWS ONLY` before re-executing server-side (up to 50K rows). Filenames are `query-results-YYYY-MM-DD`.
-4. **LLM pivot limitation** — the LLM cannot reliably build CASE WHEN pivot SQL (drops variants, adds non-existent values). Always use `pivot_query_result` tool instead. Prompt says this but LLM occasionally ignores it.
-5. **Proven patterns can poison** — bad query patterns auto-saved from failed attempts get injected into follow-up queries. If the agent produces consistently wrong queries, check `tenant_query_patterns` table and delete bad patterns.
+1. **LLM pivot limitation** — always use `pivot_query_result` tool, not CASE WHEN SQL.
+2. **Proven patterns can poison** — bad patterns in `tenant_query_patterns` table. Delete if agent produces consistently wrong queries.
+3. **Stripe initial sync is slow** — 400K+ payout lines, takes 30+ min first time. Batch commits every 200 lines. Hourly incremental via Beat after that.
 
-## Resolved (2026-03-18)
+## Skills Reference
 
-- **Token refresh** — per-connection client_id, immediate commit per-connection, Redis lock, proactive 5-min task. `expires_in` cast to int (NetSuite returns string). Confirmed self-sustaining on both staging and local.
-- **OAuth re-auth** — upsert matches any non-revoked connection (was only matching `active`, creating duplicates). Resets status + error_reason.
-- **Entity seeder** — now seeds locations, subsidiaries, departments, classes from metadata (was missing, causing "Panurgy" to match custom fields).
-- **RMA status codes** — added to static prompt + golden dataset. Received = `D,E,F,G,H`. Status codes discovered from live NetSuite REST API.
-- **History summaries** — backfilled 204 messages. New messages auto-summarize at write-time (Haiku).
-- **10x agent quality** (PRs #16-20) — connection-aware orchestrator, entity resolver 0.70 threshold, 7-step workflow with anti-enrichment, programmatic stop-when-done, early exit preserves knowledge tools, RAG keyword boosting + H2 titles, preamble chunking, workspace ID routing, change request dedup. Cost per query: $2.29 → $0.29 (87% reduction).
+Domain knowledge lives in `.claude/skills/`. Use the Skill tool to load when needed:
 
-## Resolved (2026-03-19)
+| Skill | Use For |
+|-------|---------|
+| `netsuite-mcp-chat` | Chat orchestration, agent routing, tool interception, SSE streaming, entity resolution |
+| `ai-agent-design` | Agent framework v1.1, composition + hooks, three-tier routing, YAML configs, benchmarks |
+| `netsuite-mastery` | SuiteQL dialect, SuiteScript 2.x, REST API, OAuth, NetSuite tribal knowledge |
+| `netsuite-reconciliation` | Reconciliation engine, order-level matching, data pipeline, Stripe sync, evidence packs |
+| `bigquery-bi` | BigQuery BI agent, schema seeder, chart pipeline, connector lifecycle |
+| `pricing-agent` | Currency conversion, PricingEngine, TemplateFiller, TaskFileService |
+| `saas-deployment` | Docker, GCP, nginx, CI/CD, Alembic migrations, staging deploy procedures |
+| `suitescript-engineer` | SuiteScript development, workspace, SDF, deploy pipeline |
+| `autonomous-improvement` | Nightly eval/experiment loop, scoring, pattern promotion |
+| `shopify-ops` | Shopify sync pipeline, order ingestion |
 
-- **Pivot queries** — new `pivot_query_result` tool for deterministic server-side pivoting. No more LLM-built CASE WHEN SQL.
-- **Token condensation** — `build_condensed_history()` reduces follow-up tokens from ~100K to ~40K.
-- **Haiku routing** — simple lookups route to Haiku for 10x speed (non-BYOK only).
-- **Saved query CSV export** — was downloading stale files from disk (wiped by Docker restarts). Now re-executes query on demand.
+## Resolved History
 
-## Resolved (2026-03-21)
-
-- **Investigation mode** — conditional on `context_need == FULL`: expanded `_INVESTIGATION_RE` regex (history/timeline/audit trail/what happened/how long/when was), 12-step budget, disabled early exit + data nudge, progressive output instructions (replaces one-sentence constraint), systemnote expertise block (`recordtypeid = -30`, raw field names, context codes). 3 files changed (~30 lines), 12 new tests. Beats Claude + native MCP on R850152063 benchmark.
-
-## Resolved (2026-03-22)
-
-- **Streaming markdown jump** — replaced `<pre>` with memoized `StreamingMarkdown` component during streaming. Uses `React.memo` with 50-char threshold to batch visual updates. No more reformatting jump when stream completes.
-- **Confidence miscalibration** — `strip_confidence_tag()` was removing the agent's `<confidence>N</confidence>` BEFORE `extract_structured_confidence()` could read it, forcing Haiku fallback with a generic rubric every time. Fix: extract → strip → display. Agent self-scores now respected; Haiku only fires when tag missing.
-- **Duration precision** — added exact timestamp calculation hint to `_SYSTEMNOTE_EXPERTISE`. Agent now computes "22 hours 14 minutes" instead of "~1 day".
-- **Cloudflare SSE buffering** — removed `no-chunked-encoding: true` from `/etc/cloudflared/config.yml` on staging VM. SSE now streams progressively instead of snapshotting.
-- **Chat scroll jump** — wrapped `scrollIntoView` in `requestAnimationFrame` to wait for DOM layout to settle before scrolling. Fixes "message appears at bottom then shoots up".
-
-## Resolved (2026-03-23)
-
-- **v1.1 Agent Framework** — Full Week 1 shipped: AgentProtocol, SpecializedAgent (composition-based), HookManager, AgentYAMLConfig, AgentRegistry, three-tier routing (RuleRouter + SemanticRouter + UnifiedAgent fallback), tool filtering, RAG partitions. 131 new tests.
-- **v1.1 BigQuery BI Agent** — Full Week 2 shipped: BigQuery service (read-only, cost-guardrailed), 3 tools (sql/schema/cost_estimate), connector API + frontend settings UI, BI agent YAML config + prompt, schema RAG seeder, table selector with search. 70+ BigQuery tests.
-- **Chart pipeline** — `<chart>` XML extraction from agent text, SSE chart events, recharts frontend renderer (bar/line/pie/area/scatter), premium UX (smart $M formatting, gradients, glassmorphism). Chart suppression during streaming.
-- **Financial report auto-charts** — Deterministic post-processing (no LLM): income statement trend → grouped bar (revenue/COGS/opex/net income), balance sheet trend → grouped bar (assets/liabilities/equity). Only for 2+ period reports.
-- **Financial routing fix** — `_select_agent(is_financial=True)` bypasses agent routing for financial statements, forcing UnifiedAgent with NetSuite tools. Prevents income statement going to BigQuery BI agent.
-- **Scalability Sprint 0** — DB pool 5→20 + overflow 30, gunicorn 4 workers, `/health/detailed` endpoint with pool stats + SSE counter. Stress tested to 25 concurrent chats at 100% success.
-- **BigQuery connector encryption fix** — Staging connector created with wrong Fernet key. Re-encrypted with staging `ENCRYPTION_KEY`.
-- **BigQuery `asyncio.to_thread()`** — All 4 service functions wrapped to prevent event loop blocking. Schema endpoint returns 502 with message on failure instead of 503 timeout.
-- **BigQuery location parameter** — `location` field threaded through entire stack (schema, service, API, tools, frontend). Defaults to "US" for backward compat. Framework uses `us-central1`.
-- **Saved search interception** — `ns_runSavedSearch` results now intercepted as `data_table` SSE events (was falling through to raw LLM response). Client-side CSV export for saved searches.
-- **CSV export on all data tables** — Export CSV button added to `suiteql-tool-card.tsx`. Save to Analytics fixed for saved searches (uses `Saved Search: {id}` as query_text).
-- **Saved query export fix** — Excel/CSV export on `/queries` page for saved search results uses stored snapshot instead of trying to re-execute non-SQL query text.
-- **Chart persistence** — Charts stored in `structured_output.charts` array, survive page refresh. Deduplication prevents double rendering.
-- **Streaming smoothness** — StreamingMarkdown memo threshold 50→15 chars, scroll debounce 50→16ms.
-- **CI cleanup** — All 229 ruff lint errors resolved. 15 pre-existing test failures fixed. Migration 053 added for missing `use_mcp_financial_reports` column.
-- **Invite role label** — "User" → "Finance" in team invite dropdown.
-- **Email config** — Staging configured with Resend provider for invite emails.
-
-## Resolved (2026-03-25)
-
-- **Pivot tool renamed** — `netsuite.pivot_query_result` → `pivot.query_result`. Now supports both SuiteQL and BigQuery dialects with auto-detection (backtick identifiers → BigQuery). Updated across ~20 files.
-- **Pivot column natural sort** — pivot columns now sorted numerically (M+1, M+2, ..., M+10) instead of lexicographically (M+1, M+10, M+11, M+2). Uses `_natural_sort_key()` with regex digit splitting.
-- **Excel percent formatting** — removed broken `abs(num) > 1` heuristic that treated values ≤1 as decimals (0.49% → 49%). Now always divides by 100 before Excel's `%` format.
-- **Export title leak** — `suiteql-tool-card.tsx` was using raw `userQuestion` chat message as Excel title and filename. Changed to date-based `query-results-YYYY-MM-DD`.
-
-## Resolved (2026-03-26)
-
-- **BigQuery experiments fixed** — wrong credentials key (`service_account` → `service_account_json`), missing `location` param, Haiku preamble in SQL output. Added `_extract_sql()` to parse SQL from markdown/preamble, `_BIGQUERY_SCHEMA_HINT` with actual column names. BigQuery went from 0/15 to 11/15 KEEP.
-- **SuiteQL schema hint** — added `_SUITEQL_SCHEMA_HINT` with common NetSuite tables (transaction, transactionline, customer, item, account, transactionaccountingline), key columns, JOIN patterns, and dialect quirks. SuiteQL went from 1/15 to 7/15 KEEP.
-- **Confidence scoring fix** — financial reports now get floor of 4.0 (was ~2.4). Added `deterministic_success` flag to `CompositeScorer`. Added `netsuite_financial_report` and `bigquery_sql` to `data_tools` set.
-- **Organic eval case mining** — new `eval_cases` table (migration 055), `eval_case_miner.py` mines chat_messages for confidence >= 4 queries, extracts keywords via Haiku ($0.03/case), deduplicates at 80% word overlap. Nightly task: mine → load seed+organic → run experiments. Organic cases prioritized.
-- **Nightly improvement results** — 18/30 KEEP (60%) up from 3/30 (10%) at start of session. $5.25/run, 68 seconds. Runs at 5 AM UTC.
-- **Pricing Agent v1.2 (Phases 1–3)** — Full currency conversion pipeline: `PricingEngine` (16 currencies, 4 rounding rules, 2-tier USD/EUR conversion, pure Decimal math), `TemplateFiller` (fuzzy header matching, template fill, default 3-sheet output, NetSuite CSV), `TaskFileService` (upload/download with validation), tool executors (`pricing_convert`, `pricing_config_read`), SSE `task_output` event pipeline, 4 frontend components (`TaskOutputCard`, `FileUploadZone`, `InstructionPanel`, `TemplateSlot`), agent instructions API + migration 060. Migrations: 058 (pricing configs), 059 (task files + conversion logs), 060 (agent instructions). 174 new tests, zero regressions.
-- **Specialized Agent UI pattern** — Reusable architecture for task-oriented agents: instruction panel (editable, 5K char limit, per-agent per-tenant), template slot (file upload), task output cards (preview table + download buttons). Spec at `docs/superpowers/specs/2026-03-26-specialized-agent-ui-pattern.md`.
-
-## Resolved (2026-03-27)
-
-- **v1.2 Pricing Agent Phase 4** — Settings UI: currency table with inline edit, add/delete, test calculator, EUR rate. Default config auto-seeds 16 currencies on first GET. Integration tests (11 new). Agent chat header with Chat/Config tab switcher. `useAgentInstructions` + `useAgents` hooks.
-- **Agent Hub v2** — Agents moved from chat sidebar to main left nav. URL param routing (`?agent=pricing-agent`). Agent workspace with Chat/Config tabs — Config tab embeds PricingConfigSection. Removed pricing config from global Settings page (each agent owns its config). Session `agent_id` tracking (migration 061).
-- **`pricing_export` tool** — inline conversion without file upload. Agent can convert prices from conversational data or agent instructions. Always generates both Excel + NetSuite CSV.
-- **File attachment in chat** — paperclip button in chat input, file chip display, `file_id` threaded through message payload.
-- **Follow-up Intelligence** — intent classifier (TRANSFORM vs NEW_DATA), Redis result cache (30-min TTL), `reference_previous_result` tool, DATA FRESHNESS RULES replacing MANDATORY EXECUTION. Data preview 5→30 rows for charting.
-- **Autonomous improvement expanded** — 80 eval cases (40 SuiteQL + 40 BigQuery), 4-dimension scoring (accuracy 30%, syntax 30%, efficiency 15%, sql_match 25%), autonomous test case generator (3/dialect/night via Haiku), score history tracking (migration 057). Nightly: 18/30→expanded pool.
-- **BI agent quality** — schema-first workflow (zero column name errors), proactive data gap detection, orderstatus 'Closed' exclusion, golden dataset disclaimer (no prompt pollution).
-- **RBAC fix** — ops role: added exports.excel, tools.suiteql, recon.run (data parity with finance minus financial reports).
-- **Streaming text fix** — line breaks between tool execution text blocks.
-- **BigQuery export fix** — client-side export for BigQuery results (backend only supports SuiteQL re-execution).
-- **CI Guardian** — scheduled remote agent, daily 6am PT, lints + tests + auto-fixes.
-
-## Resolved (2026-03-29)
-
-- **Frontend on GCP** — moved from Vercel to Docker container on GCP VM. nginx + Let's Encrypt SSL. No Cloudflare Tunnel.
-- **SSE streaming fixes** — `ssl_buffer_size 4k` (was 16KB default, caused TLS record batching), uvicorn direct (not gunicorn), `proxy_buffering off`, `gzip off`, `tcp_nodelay on`
-- **Scroll anchoring** — replaced `useEffect` + `scrollIntoView` with `useLayoutEffect` + direct `scrollTop` + `ResizeObserver`. Eliminates push-down on staging.
-- **Financial routing veto** — `_FINANCIAL_VETO_PHRASES` in `_select_agent()` overrides Tier 1/2 routing for financial queries. Catches plurals and variations that regex classifier misses.
-- **v1.3 Reconciliation Engine** — 6 slices shipped: matching engine (deterministic + fuzzy + split-payout), job runner, evidence packs, 7 API endpoints, recon chat agent, dashboard + close workflow. Migration 062. 45 new tests.
-- **Record deep links** — unified agent injects `<record_links>` with tenant's NetSuite account URL pattern. Agent hyperlinks records in responses.
-- **Importance banner** — uses brand cyan (#00F0FF), memoized. Dropdown flicker fixed (focus-visible scoped to inputs).
-- **Skills consolidated** — all skills in `.claude/skills/` (10 total). Old `skills/` directory removed. 3 new skills: pricing-agent, bigquery-bi, autonomous-improvement. Oracle guardrails merged.
-- **Workspace volume** — Soul config persists across deploys via Docker volume `workspace-data` mounted at `/tmp/workspace_storage`.
-
-## Resolved (2026-03-30)
-
-- **v1.3 Data Pipeline Connectors** — Stripe connector: Settings UI (card, dialog, hooks), API (status/test/connect/disconnect), Celery health check (15min). NetSuite deposit sync: SuiteQL query for Deposit/CustDep, upsert to netsuite_postings, payout ID regex extraction from memo. Settings page "Data Source Connectors" section. 16 new tests.
-- **Stripe SDK v15 compatibility** — `dict(payout)` → `payout.to_dict()` (StripeObject no longer supports `dict()` conversion). `account.get()` → `getattr(account, ...)` (Account objects don't have `.get()` method). All three serialization points fixed (payouts, balance transactions, disputes).
-- **Reconciliation Pipeline + Progress Stepper** — 6-stage SSE pipeline (preflight → sync stripe → sync netsuite → matching → classifying → complete). Graceful degradation: skips missing connectors, 90s timeout on Stripe sync with fallback to existing data. Frontend horizontal stepper component with progress bar and summary stats.
-- **Pydantic UUID→str serialization** — `StrFromUUID = Annotated[str, BeforeValidator(...)]` in `ReconRunResponse`/`ReconResultResponse`. Fixes 500 on `GET /reconciliation/runs` when SQLAlchemy returns UUID objects.
-- **v1.5 Reconciliation Self-Service** — `require_any_permission()` dependency helper for OR-based permission checks. `GET /reconciliation/data-status` endpoint (recon.run gated). `POST /reconciliation/sync` with Redis rate limiting (5min cooldown). Data freshness banner (5 states: no connectors, error, never synced, stale >24h, fresh). Stripe sync progress callback (sub-progress every ~20 payouts via `loop.call_soon_threadsafe`). Hourly Stripe sync via Celery Beat (`stripe_sync_all`). Connector status GETs now accept `recon.run` OR `connections.manage`. 14 new TDD tests.
-- **CI fixes** — 15 ruff lint errors fixed (unused imports in recon test files, unused variable). ESLint apostrophe escape. Missing `types.ts` staging. All frontend checks green (lint, TS, build).
+Full changelog moved to skills. Key milestones:
+- **v1.0** (2026-03-18): Token refresh, entity seeder, 10x agent quality
+- **v1.1** (2026-03-23): Agent framework, BigQuery BI, chart pipeline, scalability
+- **v1.2** (2026-03-27): Pricing Agent, Agent Hub, follow-up intelligence, autonomous improvement
+- **v1.3** (2026-03-29): Reconciliation engine, data pipeline connectors, GCP frontend
+- **v1.5** (2026-03-30): Self-service sync, order-level matching, progress stepper, CI green
