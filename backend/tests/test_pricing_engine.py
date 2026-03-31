@@ -27,7 +27,9 @@ def accounting_config():
             "GBP": CurrencyConfig(
                 fx_rate=Decimal("0.79"), tier="usd_based", vat_rate=Decimal("0.20"), rounding_rule="nearest_9"
             ),
-            "EUR": CurrencyConfig(fx_rate=Decimal("0.92"), tier="eur_based", vat_rate=None, rounding_rule="nearest_9"),
+            "EUR": CurrencyConfig(
+                fx_rate=Decimal("0.92"), tier="eur_based", vat_rate=Decimal("0.23"), rounding_rule="nearest_9"
+            ),
             "CAD": CurrencyConfig(fx_rate=Decimal("1.36"), tier="usd_based", vat_rate=None, rounding_rule="nearest_9"),
             "AUD": CurrencyConfig(
                 fx_rate=Decimal("1.53"), tier="usd_based", vat_rate=Decimal("0.10"), rounding_rule="nearest_9"
@@ -209,8 +211,9 @@ class TestTier2Conversion:
             "SEK",
             accounting_config.currencies["SEK"],
             accounting_config.eur_fx_rate,
+            eur_config=accounting_config.currencies["EUR"],
         )
-        assert result.final_price == Decimal("21369")
+        assert result.final_price == Decimal("21049")
 
     def test_nok_conversion(self, accounting_config):
         engine = PricingEngine()
@@ -219,8 +222,9 @@ class TestTier2Conversion:
             "NOK",
             accounting_config.currencies["NOK"],
             accounting_config.eur_fx_rate,
+            eur_config=accounting_config.currencies["EUR"],
         )
-        assert result.final_price == Decimal("21949")
+        assert result.final_price == Decimal("21609")
 
     def test_dkk_conversion(self, accounting_config):
         engine = PricingEngine()
@@ -229,8 +233,9 @@ class TestTier2Conversion:
             "DKK",
             accounting_config.currencies["DKK"],
             accounting_config.eur_fx_rate,
+            eur_config=accounting_config.currencies["EUR"],
         )
-        assert result.final_price == Decimal("14219")
+        assert result.final_price == Decimal("13999")
 
     def test_pln_conversion(self, accounting_config):
         engine = PricingEngine()
@@ -239,6 +244,7 @@ class TestTier2Conversion:
             "PLN",
             accounting_config.currencies["PLN"],
             accounting_config.eur_fx_rate,
+            eur_config=accounting_config.currencies["EUR"],
         )
         assert result.final_price == Decimal("8119")
 
@@ -249,8 +255,9 @@ class TestTier2Conversion:
             "CZK",
             accounting_config.currencies["CZK"],
             accounting_config.eur_fx_rate,
+            eur_config=accounting_config.currencies["EUR"],
         )
-        assert result.final_price == Decimal("46359")
+        assert result.final_price == Decimal("47169")
 
     def test_chf_conversion(self, accounting_config):
         engine = PricingEngine()
@@ -259,8 +266,9 @@ class TestTier2Conversion:
             "CHF",
             accounting_config.currencies["CHF"],
             accounting_config.eur_fx_rate,
+            eur_config=accounting_config.currencies["EUR"],
         )
-        assert result.final_price == Decimal("1559")
+        assert result.final_price == Decimal("1769")
 
     def test_huf_conversion(self, accounting_config):
         engine = PricingEngine()
@@ -269,8 +277,9 @@ class TestTier2Conversion:
             "HUF",
             accounting_config.currencies["HUF"],
             accounting_config.eur_fx_rate,
+            eur_config=accounting_config.currencies["EUR"],
         )
-        assert result.final_price == Decimal("765990")
+        assert result.final_price == Decimal("742490")
 
     def test_ron_conversion(self, accounting_config):
         engine = PricingEngine()
@@ -279,8 +288,9 @@ class TestTier2Conversion:
             "RON",
             accounting_config.currencies["RON"],
             accounting_config.eur_fx_rate,
+            eur_config=accounting_config.currencies["EUR"],
         )
-        assert result.final_price == Decimal("9029")
+        assert result.final_price == Decimal("9339")
 
 
 class TestSecondSKU:
@@ -323,6 +333,7 @@ class TestSecondSKU:
             "SEK",
             accounting_config.currencies["SEK"],
             accounting_config.eur_fx_rate,
+            eur_config=accounting_config.currencies["EUR"],
         )
         assert result.final_price == Decimal("2569")
 

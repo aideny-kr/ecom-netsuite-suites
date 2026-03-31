@@ -81,34 +81,55 @@ class PricingEngine:
         currency: str,
         config: CurrencyConfig,
         eur_fx_rate: Decimal,
+        eur_config: CurrencyConfig | None = None,
     ) -> CurrencyResult:
-        """Convert a single USD price to the target currency."""
-        # Step 1: FX conversion
+        """Convert a single USD price to the target currency.
+
+        For eur_based currencies: VAT is applied at the EUR intermediate step
+        (using EUR's VAT rate), rounded, then multiplied by local FX rate with
+        NO local VAT. This matches the 2-tier conversion model:
+          Step 1: USD → EUR with EUR VAT → round EUR
+          Step 2: Rounded EUR × local FX → round local (no local VAT)
+        """
         if config.tier == "usd_based":
+            # USD-based: direct FX + local VAT
             converted = usd_price * config.fx_rate
+            if config.vat_rate is not None:
+                vat_amount = converted * config.vat_rate
+                pre_round = converted + vat_amount
+            else:
+                vat_amount = None
+                pre_round = converted
+            rounding_fn = _ROUNDING_FNS[config.rounding_rule]
+            final_price = rounding_fn(pre_round)
         else:
-            # Tier 2: USD → EUR → local
+            # EUR-based: USD → EUR with EUR VAT → round → local FX → round
             eur_amount = usd_price * eur_fx_rate
-            converted = eur_amount * config.fx_rate
 
-        # Step 2: VAT (applied after FX, before rounding)
-        if config.vat_rate is not None:
-            vat_amount = converted * config.vat_rate
-            pre_round = converted + vat_amount
-        else:
-            vat_amount = None
+            # Apply EUR's VAT at intermediate step
+            eur_vat_rate = eur_config.vat_rate if eur_config and eur_config.vat_rate else None
+            if eur_vat_rate is not None:
+                eur_with_vat = eur_amount + (eur_amount * eur_vat_rate)
+            else:
+                eur_with_vat = eur_amount
+
+            # Round EUR intermediate price
+            eur_rounding = eur_config.rounding_rule if eur_config else config.rounding_rule
+            eur_rounded = _ROUNDING_FNS[eur_rounding](eur_with_vat)
+
+            # Convert rounded EUR to local currency (no local VAT)
+            converted = eur_rounded * config.fx_rate
+            vat_amount = eur_amount * eur_vat_rate if eur_vat_rate else None
             pre_round = converted
-
-        # Step 3: Rounding (only at the final step)
-        rounding_fn = _ROUNDING_FNS[config.rounding_rule]
-        final_price = rounding_fn(pre_round)
+            rounding_fn = _ROUNDING_FNS[config.rounding_rule]
+            final_price = rounding_fn(pre_round)
 
         return CurrencyResult(
             currency=currency,
             fx_rate=config.fx_rate,
             tier=config.tier,
             converted_amount=converted,
-            vat_rate=config.vat_rate,
+            vat_rate=config.vat_rate if config.tier == "usd_based" else (eur_config.vat_rate if eur_config else None),
             vat_amount=vat_amount,
             pre_round_amount=pre_round,
             final_price=final_price,
@@ -121,6 +142,9 @@ class PricingEngine:
         config: TenantPricingConfig,
     ) -> list[PricingOutput]:
         """Convert a list of items across all configured currencies."""
+        # Get EUR config for 2-tier VAT application
+        eur_config = config.currencies.get("EUR")
+
         outputs: list[PricingOutput] = []
         for item in items:
             results: dict[str, CurrencyResult] = {}
@@ -130,6 +154,7 @@ class PricingEngine:
                     currency=currency_code,
                     config=currency_config,
                     eur_fx_rate=config.eur_fx_rate,
+                    eur_config=eur_config,
                 )
             outputs.append(
                 PricingOutput(
