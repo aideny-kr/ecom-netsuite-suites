@@ -50,7 +50,8 @@ class OrderMatchingEngine:
         # Tier 2: Fuzzy — amount + date + currency (stub for Task 4)
         results.extend(self._fuzzy_match(unmatched_charges, unmatched_deposits))
 
-        # Remaining unmatched charges
+        # Remaining unmatched charges — these are the real exceptions
+        # (Stripe charged the customer but NetSuite has no matching deposit)
         for c in unmatched_charges:
             results.append(
                 OrderMatchCandidate(
@@ -59,33 +60,17 @@ class OrderMatchingEngine:
                     match_type="unmatched",
                     confidence=Decimal("0"),
                     variance_amount=c.amount,
-                    variance_type="missing",
-                    variance_explanation=f"No matching deposit for charge {c.source_id}",
+                    variance_type="missing_in_netsuite",
+                    variance_explanation=(
+                        f"Stripe charge {c.order_reference or c.source_id} has no matching NetSuite deposit"
+                    ),
                 )
             )
 
-        # Remaining unmatched deposits
-        for d in unmatched_deposits:
-            results.append(
-                OrderMatchCandidate(
-                    charge=ChargeRecord(
-                        id="",
-                        source_id="",
-                        payout_line_id="",
-                        amount=Decimal("0"),
-                        fee=Decimal("0"),
-                        net=Decimal("0"),
-                        currency=d.currency,
-                        charge_date=d.transaction_date,
-                    ),
-                    deposit=d,
-                    match_type="unmatched",
-                    confidence=Decimal("0"),
-                    variance_amount=d.amount,
-                    variance_type="missing",
-                    variance_explanation=(f"No matching charge for deposit {d.netsuite_internal_id}"),
-                )
-            )
+        # NOTE: Unmatched deposits are NOT reported as exceptions.
+        # Deposits without matching charges are expected (non-Stripe payments,
+        # deposits from outside the date range, manual adjustments).
+        # The goal is one-directional: every Stripe charge should be in NetSuite.
 
         return results
 
