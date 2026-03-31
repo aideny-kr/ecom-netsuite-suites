@@ -74,7 +74,9 @@ def sync_stripe(
             },
         )
         synced_payout_stripe_ids.append(payout.id)
-        last_created = payout.created
+        # Track the NEWEST payout timestamp for cursor (Stripe returns newest first)
+        if last_created is None or payout.created > last_created:
+            last_created = payout.created
         payouts_synced += 1
 
         # Batch commit every 10 payouts — Supabase has 2min statement timeout
