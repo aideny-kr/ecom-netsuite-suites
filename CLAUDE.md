@@ -2,6 +2,15 @@
 
 > Read by Claude Code at session start. Encodes patterns, conventions, and decisions.
 
+## Development Workflow — FOLLOW ALWAYS
+
+- **TDD strictly**: Write failing tests FIRST, then implement. No production code without a failing test.
+- **Max 10 iterations per task**: Use the loop protocol. If blocked after 3 self-heal attempts, stop and report.
+- **Multi-agent execution**: Spawn agent teams or subagents for parallel-safe tasks (no file overlap). Use `subagent-driven-development` skill for plan execution.
+- **Zero regressions**: Run full test suite before committing. Fix CI as a follow-up after every deploy.
+- **Discuss before fixing**: Always discuss approach AND research existing code before making changes.
+- **Commit frequently**: One commit per logical change. Never amend. Push to BOTH repos (`origin` + `framework`).
+
 ## Tech Stack
 
 - **Frontend**: Next.js 14 (App Router), TypeScript strict, TanStack React Query, Tailwind CSS, shadcn/ui, react-resizable-panels v4
