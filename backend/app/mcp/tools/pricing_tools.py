@@ -109,9 +109,9 @@ async def pricing_convert_execute(params: dict, context: dict, **kwargs) -> dict
 
     # 8. Summary
     preview = []
-    for r in results[:5]:
+    for r in results[:10]:
         row = {"SKU": r.sku, "USD": float(r.usd_price)}
-        for code, cr in list(r.results.items())[:6]:
+        for code, cr in sorted(r.results.items()):
             row[code] = float(cr.final_price)
         preview.append(row)
 
@@ -203,11 +203,11 @@ async def pricing_export_execute(params: dict, context: dict, **kwargs) -> dict:
         )
     )
 
-    # 7. Summary
+    # 7. Summary — include ALL currencies so the agent can present accurate prices
     preview = []
-    for r in results[:5]:
+    for r in results[:10]:
         row = {"SKU": r.sku, "USD": float(r.usd_price)}
-        for code, cr in list(r.results.items())[:6]:
+        for code, cr in sorted(r.results.items()):
             row[code] = float(cr.final_price)
         preview.append(row)
 
