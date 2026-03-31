@@ -151,7 +151,7 @@ class ReconJobRunner:
             # Expand by 5 days to catch payouts whose deposits fall in range
             from datetime import timedelta
 
-            buffer = timedelta(days=5)
+            buffer = timedelta(days=14)
             stmt = stmt.where(
                 Payout.arrival_date >= date_from - buffer,
                 Payout.arrival_date <= date_to + buffer,
@@ -191,7 +191,7 @@ class ReconJobRunner:
         """
         from datetime import timedelta
 
-        buffer = timedelta(days=5)
+        buffer = timedelta(days=14)
         stmt = select(NetsuitePosting).where(
             NetsuitePosting.tenant_id == self.tenant_id,
             NetsuitePosting.record_type.in_(["deposit", "custdep", "bankdeposit", "journalentry"]),

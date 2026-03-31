@@ -26,7 +26,7 @@ from app.services.reconciliation.order_matching_engine import (
 
 logger = structlog.get_logger()
 
-_DATE_BUFFER = timedelta(days=5)
+_DATE_BUFFER = timedelta(days=14)
 
 
 class OrderReconJob:

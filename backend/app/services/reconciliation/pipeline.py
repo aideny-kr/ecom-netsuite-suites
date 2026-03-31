@@ -394,7 +394,7 @@ class ReconPipeline:
         """Count payout_lines (charges) available for order-level matching."""
         from datetime import timedelta
 
-        buffer = timedelta(days=5)
+        buffer = timedelta(days=14)
         stmt = (
             select(func.count())
             .select_from(PayoutLine)
