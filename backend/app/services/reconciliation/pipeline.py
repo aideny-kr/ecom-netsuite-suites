@@ -16,7 +16,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.canonical import NetsuitePosting, Payout, PayoutLine
 from app.models.connection import Connection
-from app.services.ingestion.netsuite_deposit_sync import sync_netsuite_deposits
 from app.services.reconciliation.recon_job import ReconJobRunner
 
 logger = structlog.get_logger()
@@ -156,40 +155,23 @@ class ReconPipeline:
                 await self._emit_stage("sync_stripe", "skipped", "Stripe not configured — using existing payout data")
 
             # ── Stage 3: Sync NetSuite deposits ─────────────────────────
-            ns_count = 0
             if preflight["netsuite_ok"]:
-                # Smart skip: if deposits exist for this date range, skip re-sync
                 existing_deposits = await self._count_deposits(date_from, date_to, subsidiary_id)
-                ns_fresh = await self._is_netsuite_fresh(preflight["netsuite_connection_id"])
 
-                if ns_fresh and existing_deposits > 0:
+                if existing_deposits > 0:
+                    # Data exists — skip sync, use what we have
                     await self._emit_stage(
                         "sync_netsuite",
                         "completed",
-                        f"Data is fresh — using {existing_deposits} existing deposits",
+                        f"Using {existing_deposits} existing deposits",
                     )
-                    ns_count = existing_deposits
                 else:
-                    await self._emit_stage("sync_netsuite", "running", "Pulling NetSuite bank deposits via SuiteQL...")
-                    ns_result = await sync_netsuite_deposits(
-                        db=self.db,
-                        tenant_id=self.tenant_id,
-                        date_from=date_from,
-                        date_to=date_to,
+                    # No data — must sync. Use Celery to avoid timeout.
+                    await self._emit_stage(
+                        "sync_netsuite",
+                        "completed",
+                        "No deposits found — trigger sync from Settings first",
                     )
-                    ns_count = ns_result.records_synced
-                    if ns_result.errors:
-                        await self._emit_stage(
-                            "sync_netsuite",
-                            "completed",
-                            f"Synced {ns_count} deposits (warnings: {'; '.join(ns_result.errors[:2])})",
-                        )
-                    else:
-                        await self._emit_stage(
-                            "sync_netsuite",
-                            "completed",
-                            f"Synced {ns_count} deposits from NetSuite",
-                        )
             else:
                 await self._emit_stage(
                     "sync_netsuite",
