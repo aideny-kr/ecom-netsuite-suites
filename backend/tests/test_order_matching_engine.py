@@ -159,17 +159,17 @@ class TestDeterministicMatching:
         charges = [_make_charge(order_reference="R999999999")]
         results = engine.match(charges, [])
         assert results[0].match_type == "unmatched"
-        assert results[0].variance_type == "missing"
+        assert results[0].variance_type == "missing_in_netsuite"
 
-    def test_unmatched_deposit(self):
+    def test_unmatched_deposit_not_reported(self):
+        """Unmatched deposits should NOT be reported as exceptions."""
         from app.services.reconciliation.order_matching_engine import OrderMatchingEngine
 
         engine = OrderMatchingEngine()
         deposits = [_make_deposit(order_reference="R999999999")]
         results = engine.match([], deposits)
-        unmatched = [r for r in results if r.deposit and r.deposit.order_reference == "R999999999"]
-        assert len(unmatched) == 1
-        assert unmatched[0].match_type == "unmatched"
+        # One-directional: only charges missing from NetSuite are flagged
+        assert len(results) == 0
 
     def test_multiple_charges_multiple_deposits(self):
         from app.services.reconciliation.order_matching_engine import OrderMatchingEngine
