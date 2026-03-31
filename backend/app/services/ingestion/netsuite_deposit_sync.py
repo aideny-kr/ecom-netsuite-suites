@@ -273,6 +273,10 @@ async def sync_netsuite_deposits(
         else:
             result.records_updated += 1
 
+        # Batch commit every 200 records to avoid Supabase statement timeout
+        if result.records_synced % 200 == 0:
+            await db.commit()
+
     await db.commit()
 
     logger.info(
