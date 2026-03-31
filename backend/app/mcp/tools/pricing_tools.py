@@ -20,6 +20,20 @@ _filler = TemplateFiller()
 _file_svc = TaskFileService()
 
 
+def _build_markdown_table(results) -> str:
+    """Build a markdown table from pricing results for the agent to present verbatim."""
+    if not results:
+        return ""
+    currencies = sorted(results[0].results.keys())
+    header = "| SKU | USD | " + " | ".join(currencies) + " |"
+    separator = "|---|---|" + "|".join(["---"] * len(currencies)) + "|"
+    rows = []
+    for r in results:
+        vals = [str(r.results[c].final_price) for c in currencies]
+        rows.append(f"| {r.sku} | {r.usd_price} | " + " | ".join(vals) + " |")
+    return "\n".join([header, separator] + rows)
+
+
 async def pricing_convert_execute(params: dict, context: dict, **kwargs) -> dict:
     """Convert prices in uploaded Excel using tenant FX rates."""
     if not context or not context.get("db") or not context.get("tenant_id"):
@@ -115,20 +129,18 @@ async def pricing_convert_execute(params: dict, context: dict, **kwargs) -> dict
             row[code] = float(cr.final_price)
         preview.append(row)
 
-    lines = ["FINAL PRICES (present these EXACT numbers — do NOT round or modify):"]
-    for r in results[:10]:
-        lines.append(f"\nSKU: {r.sku} (USD ${r.usd_price})")
-        for code, cr in sorted(r.results.items()):
-            lines.append(f"  {code}: {cr.final_price}")
-
     return {
         "success": True,
         "sku_count": len(items),
         "currency_count": len(pricing_config.currencies),
         "output_files": output_files,
         "preview": preview,
-        "price_table": "\n".join(lines),
-        "IMPORTANT": "Present the prices from price_table EXACTLY as shown. Do NOT recalculate or round differently.",
+        "response_instruction": (
+            "The Excel file has been generated with exact prices. "
+            "Tell the user: 'Your pricing file is ready for download below.' "
+            "Then show this EXACT table (copy it verbatim, do not modify any numbers):\n\n"
+            + _build_markdown_table(results[:10])
+        ),
         "template_mode": bool(mapping.currency_cols),
     }
 
@@ -219,21 +231,18 @@ async def pricing_export_execute(params: dict, context: dict, **kwargs) -> dict:
             row[code] = float(cr.final_price)
         preview.append(row)
 
-    # Build a copy-paste-ready text table so the agent presents EXACT numbers
-    lines = ["FINAL PRICES (present these EXACT numbers — do NOT round or modify):"]
-    for r in results[:10]:
-        lines.append(f"\nSKU: {r.sku} (USD ${r.usd_price})")
-        for code, cr in sorted(r.results.items()):
-            lines.append(f"  {code}: {cr.final_price}")
-
     return {
         "success": True,
         "sku_count": len(items),
         "currency_count": len(pricing_config.currencies),
         "output_files": output_files,
         "preview": preview,
-        "price_table": "\n".join(lines),
-        "IMPORTANT": "Present the prices from price_table EXACTLY as shown. Do NOT recalculate or round differently.",
+        "response_instruction": (
+            "The Excel file has been generated with exact prices. "
+            "Tell the user: 'Your pricing file is ready for download below.' "
+            "Then show this EXACT table (copy it verbatim, do not modify any numbers):\n\n"
+            + _build_markdown_table(results[:10])
+        ),
         "template_mode": False,
     }
 
