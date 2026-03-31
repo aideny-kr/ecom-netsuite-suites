@@ -42,6 +42,7 @@ celery_app.conf.include = [
     "app.workers.tasks.stripe_sync",
     "app.workers.tasks.stripe_sync_all",
     "app.workers.tasks.netsuite_deposit_sync",
+    "app.workers.tasks.netsuite_deposit_sync_all",
     "app.workers.tasks.suitescript_sync",
     "app.workers.tasks.suiteql_export",
     "app.workers.tasks.workspace_run",
@@ -79,5 +80,9 @@ celery_app.conf.beat_schedule = {
     "stripe-sync-hourly": {
         "task": "tasks.stripe_sync_all",
         "schedule": 3600.0,  # every hour — incremental, cursor-based
+    },
+    "netsuite-deposit-sync-nightly": {
+        "task": "tasks.netsuite_deposit_sync_all",
+        "schedule": crontab(hour=2, minute=0),  # 2 AM UTC nightly, 7-day delta
     },
 }
