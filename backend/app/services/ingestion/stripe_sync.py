@@ -77,6 +77,10 @@ def sync_stripe(
         last_created = payout.created
         payouts_synced += 1
 
+        # Batch commit every 50 payouts to avoid statement timeout
+        if payouts_synced % 50 == 0:
+            db.commit()
+
         if progress_callback and payouts_synced % 20 == 0:
             progress_callback(payouts_synced, "payouts")
 
@@ -86,6 +90,7 @@ def sync_stripe(
 
     if last_created is not None:
         save_cursor(db, connection_id, "stripe_payouts", str(last_created))
+    db.commit()
 
     logger.info("stripe_sync.payouts.done", count=payouts_synced)
 
@@ -127,6 +132,13 @@ def sync_stripe(
                 },
             )
             payout_lines_synced += 1
+
+            # Batch commit every 200 payout lines to avoid statement timeout
+            if payout_lines_synced % 200 == 0:
+                db.commit()
+
+        # Commit after each payout's lines
+        db.commit()
 
     logger.info("stripe_sync.payout_lines.done", count=payout_lines_synced)
 
