@@ -77,9 +77,9 @@ celery_app.conf.beat_schedule = {
         "task": "tasks.stripe_health_check",
         "schedule": 900.0,  # every 15 minutes
     },
-    "stripe-sync-hourly": {
+    "stripe-sync-nightly": {
         "task": "tasks.stripe_sync_all",
-        "schedule": 3600.0,  # hourly — batch commits every 10 rows for Supabase 2min timeout
+        "schedule": crontab(hour=1, minute=0),  # 1 AM UTC nightly
     },
     "netsuite-deposit-sync-nightly": {
         "task": "tasks.netsuite_deposit_sync_all",
