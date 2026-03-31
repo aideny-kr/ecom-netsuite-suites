@@ -35,11 +35,11 @@ export function ReconResultsTable({ results, onInvestigate }: ReconResultsTableP
         <thead>
           <tr className="border-b bg-muted/50">
             <th className="px-4 py-3 text-left font-medium text-muted-foreground">Status</th>
-            <th className="px-4 py-3 text-left font-medium text-muted-foreground">Match Type</th>
+            <th className="px-4 py-3 text-left font-medium text-muted-foreground">Order</th>
+            <th className="px-4 py-3 text-left font-medium text-muted-foreground">Match</th>
             <th className="px-4 py-3 text-right font-medium text-muted-foreground">Stripe</th>
             <th className="px-4 py-3 text-right font-medium text-muted-foreground">NetSuite</th>
             <th className="px-4 py-3 text-right font-medium text-muted-foreground">Variance</th>
-            <th className="px-4 py-3 text-left font-medium text-muted-foreground">Type</th>
             <th className="px-4 py-3 text-center font-medium text-muted-foreground">Confidence</th>
             <th className="px-4 py-3 text-center font-medium text-muted-foreground">Actions</th>
           </tr>
@@ -51,6 +51,15 @@ export function ReconResultsTable({ results, onInvestigate }: ReconResultsTableP
                 <span className={cn("rounded-full px-2 py-0.5 text-xs font-medium", statusColors[result.status] || "bg-gray-100")}>
                   {result.status}
                 </span>
+              </td>
+              <td className="px-4 py-3">
+                {result.evidence?.order_reference ? (
+                  <span className="font-mono text-[11px] text-foreground">{result.evidence.order_reference}</span>
+                ) : result.evidence?.charge_source_id ? (
+                  <span className="font-mono text-[11px] text-muted-foreground">{result.evidence.charge_source_id.slice(0, 14)}...</span>
+                ) : (
+                  <span className="text-muted-foreground">-</span>
+                )}
               </td>
               <td className="px-4 py-3 text-foreground">{result.match_type}</td>
               <td className="px-4 py-3 text-right font-mono text-foreground">
@@ -66,7 +75,6 @@ export function ReconResultsTable({ results, onInvestigate }: ReconResultsTableP
                   "$0.00"
                 )}
               </td>
-              <td className="px-4 py-3 text-muted-foreground">{result.variance_type || "-"}</td>
               <td className="px-4 py-3 text-center">
                 <span className={cn(
                   "font-mono text-xs",
