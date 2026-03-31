@@ -77,10 +77,13 @@ celery_app.conf.beat_schedule = {
         "task": "tasks.stripe_health_check",
         "schedule": 900.0,  # every 15 minutes
     },
-    "stripe-sync-hourly": {
-        "task": "tasks.stripe_sync_all",
-        "schedule": 3600.0,  # every hour — incremental, cursor-based
-    },
+    # Stripe sync disabled — initial sync of 400K+ payout lines exceeds Supabase
+    # statement timeout. Re-enable once cursor is established (after first successful sync).
+    # Manual sync via Settings "Sync Now" button.
+    # "stripe-sync-hourly": {
+    #     "task": "tasks.stripe_sync_all",
+    #     "schedule": 3600.0,
+    # },
     "netsuite-deposit-sync-nightly": {
         "task": "tasks.netsuite_deposit_sync_all",
         "schedule": crontab(hour=2, minute=0),  # 2 AM UTC nightly, 7-day delta
