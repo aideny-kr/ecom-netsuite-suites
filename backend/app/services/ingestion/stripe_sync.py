@@ -77,8 +77,8 @@ def sync_stripe(
         last_created = payout.created
         payouts_synced += 1
 
-        # Batch commit every 50 payouts to avoid statement timeout
-        if payouts_synced % 50 == 0:
+        # Batch commit every 10 payouts — Supabase has 2min statement timeout
+        if payouts_synced % 10 == 0:
             db.commit()
 
         if progress_callback and payouts_synced % 20 == 0:
@@ -133,8 +133,8 @@ def sync_stripe(
             )
             payout_lines_synced += 1
 
-            # Batch commit every 200 payout lines to avoid statement timeout
-            if payout_lines_synced % 200 == 0:
+            # Batch commit every 10 payout lines — Supabase 2min timeout
+            if payout_lines_synced % 10 == 0:
                 db.commit()
 
         # Commit after each payout's lines
