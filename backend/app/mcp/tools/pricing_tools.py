@@ -115,12 +115,20 @@ async def pricing_convert_execute(params: dict, context: dict, **kwargs) -> dict
             row[code] = float(cr.final_price)
         preview.append(row)
 
+    lines = ["FINAL PRICES (present these EXACT numbers — do NOT round or modify):"]
+    for r in results[:10]:
+        lines.append(f"\nSKU: {r.sku} (USD ${r.usd_price})")
+        for code, cr in sorted(r.results.items()):
+            lines.append(f"  {code}: {cr.final_price}")
+
     return {
         "success": True,
         "sku_count": len(items),
         "currency_count": len(pricing_config.currencies),
         "output_files": output_files,
         "preview": preview,
+        "price_table": "\n".join(lines),
+        "IMPORTANT": "Present the prices from price_table EXACTLY as shown. Do NOT recalculate or round differently.",
         "template_mode": bool(mapping.currency_cols),
     }
 
@@ -203,7 +211,7 @@ async def pricing_export_execute(params: dict, context: dict, **kwargs) -> dict:
         )
     )
 
-    # 7. Summary — include ALL currencies so the agent can present accurate prices
+    # 7. Summary — pre-formatted table for the agent to present verbatim
     preview = []
     for r in results[:10]:
         row = {"SKU": r.sku, "USD": float(r.usd_price)}
@@ -211,12 +219,21 @@ async def pricing_export_execute(params: dict, context: dict, **kwargs) -> dict:
             row[code] = float(cr.final_price)
         preview.append(row)
 
+    # Build a copy-paste-ready text table so the agent presents EXACT numbers
+    lines = ["FINAL PRICES (present these EXACT numbers — do NOT round or modify):"]
+    for r in results[:10]:
+        lines.append(f"\nSKU: {r.sku} (USD ${r.usd_price})")
+        for code, cr in sorted(r.results.items()):
+            lines.append(f"  {code}: {cr.final_price}")
+
     return {
         "success": True,
         "sku_count": len(items),
         "currency_count": len(pricing_config.currencies),
         "output_files": output_files,
         "preview": preview,
+        "price_table": "\n".join(lines),
+        "IMPORTANT": "Present the prices from price_table EXACTLY as shown. Do NOT recalculate or round differently.",
         "template_mode": False,
     }
 
