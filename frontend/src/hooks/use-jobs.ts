@@ -31,11 +31,14 @@ interface ScheduleItem {
 
 export type { JobHistoryItem, ScheduleItem };
 
-export function useJobHistory(pageSize = 10) {
+export function useJobHistory(pageSize = 10, status?: string) {
   return useQuery<PaginatedJobs>({
-    queryKey: ["jobs", "history", pageSize],
-    queryFn: () =>
-      apiClient.get(`/api/v1/jobs?page=1&page_size=${pageSize}`),
+    queryKey: ["jobs", pageSize, status],
+    queryFn: () => {
+      const params = new URLSearchParams({ page: "1", page_size: String(pageSize) });
+      if (status) params.set("status", status);
+      return apiClient.get<PaginatedJobs>(`/api/v1/jobs?${params}`);
+    },
     refetchInterval: 15_000,
   });
 }

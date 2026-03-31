@@ -52,6 +52,134 @@ def override_deps(mock_admin, mock_db):
     app.dependency_overrides.clear()
 
 
+def _make_job(tenant_id, status="completed", job_type="knowledge_crawler"):
+    """Create a mock Job-like object."""
+    job = MagicMock()
+    job.id = uuid.uuid4()
+    job.tenant_id = tenant_id
+    job.job_type = job_type
+    job.status = status
+    job.correlation_id = None
+    job.connection_id = None
+    job.started_at = None
+    job.completed_at = None
+    job.parameters = None
+    job.result_summary = None
+    job.error_message = None
+    job.celery_task_id = None
+    job.created_at = MagicMock()
+    return job
+
+
+class TestJobsListFiltering:
+    """Tests for GET /jobs — status filter and pagination."""
+
+    @pytest.mark.asyncio
+    async def test_status_filter_param_accepted(self, mock_admin, mock_db):
+        """GET /jobs?status=completed should only return completed jobs."""
+        jobs = [_make_job(mock_admin.tenant_id, "completed")]
+
+        # First call: permission check, second: count, third: query
+        count_result = MagicMock()
+        count_result.scalar.return_value = 1
+        query_result = MagicMock()
+        query_result.scalars.return_value.all.return_value = jobs
+
+        perm_result = MagicMock()
+        perm_result.all.return_value = [("tables.view",)]
+
+        mock_db.execute = AsyncMock(side_effect=[perm_result, count_result, query_result])
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.get(
+                "/api/v1/jobs?status=completed",
+                headers={"Authorization": "Bearer test"},
+            )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["total"] == 1
+        assert all(item["status"] == "completed" for item in data["items"])
+
+    @pytest.mark.asyncio
+    async def test_status_filter_excludes_other_statuses(self, mock_admin, mock_db):
+        """When status=completed, failed jobs should not appear."""
+        # Return 0 jobs for a status that doesn't exist
+        count_result = MagicMock()
+        count_result.scalar.return_value = 0
+        query_result = MagicMock()
+        query_result.scalars.return_value.all.return_value = []
+
+        perm_result = MagicMock()
+        perm_result.all.return_value = [("tables.view",)]
+
+        mock_db.execute = AsyncMock(side_effect=[perm_result, count_result, query_result])
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.get(
+                "/api/v1/jobs?status=completed",
+                headers={"Authorization": "Bearer test"},
+            )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["total"] == 0
+        assert data["items"] == []
+
+    @pytest.mark.asyncio
+    async def test_no_filter_returns_all(self, mock_admin, mock_db):
+        """Without status param, all jobs are returned."""
+        jobs = [
+            _make_job(mock_admin.tenant_id, "completed"),
+            _make_job(mock_admin.tenant_id, "failed"),
+        ]
+
+        count_result = MagicMock()
+        count_result.scalar.return_value = 2
+        query_result = MagicMock()
+        query_result.scalars.return_value.all.return_value = jobs
+
+        perm_result = MagicMock()
+        perm_result.all.return_value = [("tables.view",)]
+
+        mock_db.execute = AsyncMock(side_effect=[perm_result, count_result, query_result])
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.get(
+                "/api/v1/jobs",
+                headers={"Authorization": "Bearer test"},
+            )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["total"] == 2
+        assert len(data["items"]) == 2
+
+    @pytest.mark.asyncio
+    async def test_pagination_params(self, mock_admin, mock_db):
+        """page and page_size params work correctly."""
+        jobs = [_make_job(mock_admin.tenant_id, "completed")]
+
+        count_result = MagicMock()
+        count_result.scalar.return_value = 15
+        query_result = MagicMock()
+        query_result.scalars.return_value.all.return_value = jobs
+
+        perm_result = MagicMock()
+        perm_result.all.return_value = [("tables.view",)]
+
+        mock_db.execute = AsyncMock(side_effect=[perm_result, count_result, query_result])
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.get(
+                "/api/v1/jobs?page=2&page_size=5",
+                headers={"Authorization": "Bearer test"},
+            )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["total"] == 15
+        assert data["page"] == 2
+        assert data["page_size"] == 5
+        assert data["pages"] == 3
+
+
 class TestTriggerJob:
     @pytest.mark.asyncio
     async def test_trigger_knowledge_crawler(self):

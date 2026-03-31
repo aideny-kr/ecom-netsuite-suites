@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import { usePermissions } from "@/hooks/use-permissions";
 import { useJobHistory, useTriggerJob } from "@/hooks/use-jobs";
 import type { JobHistoryItem } from "@/hooks/use-jobs";
@@ -173,7 +174,9 @@ function JobCard({
 
 export function JobsSection() {
   const { isAdmin } = usePermissions();
-  const { data: jobsData } = useJobHistory(10);
+  const [statusFilter, setStatusFilter] = useState<string | undefined>(undefined);
+  const [pageSize, setPageSize] = useState(10);
+  const { data: jobsData } = useJobHistory(pageSize, statusFilter);
 
   if (!isAdmin) return null;
 
@@ -213,6 +216,21 @@ export function JobsSection() {
           <h4 className="text-[14px] font-medium text-foreground">
             Recent Job History
           </h4>
+          <div className="flex items-center gap-2 mb-3">
+            {["all", "completed", "running", "failed"].map((s) => (
+              <button
+                key={s}
+                onClick={() => setStatusFilter(s === "all" ? undefined : s)}
+                className={`px-3 py-1 rounded-full text-[12px] font-medium transition-colors ${
+                  (s === "all" && !statusFilter) || statusFilter === s
+                    ? "bg-foreground text-background"
+                    : "bg-muted text-muted-foreground hover:bg-muted/80"
+                }`}
+              >
+                {s.charAt(0).toUpperCase() + s.slice(1)}
+              </button>
+            ))}
+          </div>
           <div className="rounded-lg border overflow-hidden">
             <table className="w-full text-[13px]">
               <thead>
@@ -258,6 +276,14 @@ export function JobsSection() {
               </tbody>
             </table>
           </div>
+          {jobsData && jobsData.items.length >= pageSize && (
+            <button
+              onClick={() => setPageSize((prev) => prev + 20)}
+              className="mt-3 w-full rounded-lg border py-2 text-[13px] text-muted-foreground hover:bg-muted/50 transition-colors"
+            >
+              Show More
+            </button>
+          )}
         </div>
       )}
     </section>
