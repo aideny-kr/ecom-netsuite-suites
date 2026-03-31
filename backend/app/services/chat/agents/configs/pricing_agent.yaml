@@ -26,6 +26,7 @@ tool_ids:
   - pivot_query_result
   - pricing_convert
   - pricing_config_read
+  - pricing_config_update
   - pricing_export
   - web_search
 rag_partitions:

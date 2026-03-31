@@ -522,6 +522,22 @@ TOOL_REGISTRY = {
         "execute": pricing_tools.pricing_config_read_execute,
         "params_schema": {},
     },
+    "pricing.config_update": {
+        "description": (
+            "Update the tenant pricing configuration — change FX rates, VAT/GST percentages, or rounding rules. "
+            "Pass updates as a dict with 'eur_fx_rate' and/or 'currencies' containing per-currency changes."
+        ),
+        "execute": pricing_tools.pricing_config_update_execute,
+        "params_schema": {
+            "updates": {
+                "type": "object",
+                "required": True,
+                "description": (
+                    "Fields to update. Example: {eur_fx_rate: 1.08, currencies: {GBP: {fx_rate: 0.79, vat_rate: 20}}}"
+                ),
+            },
+        },
+    },
     "pricing.export": {
         "description": (
             "Generate downloadable Excel + NetSuite CSV from inline pricing data (no file upload needed). "

@@ -10,7 +10,7 @@ from openpyxl import load_workbook
 
 from app.models.pricing_conversion_log import PricingConversionLog
 from app.schemas.pricing import PricingInput, TenantPricingConfig
-from app.services.pricing_config_service import get_config
+from app.services.pricing_config_service import get_config, upsert_config
 from app.services.pricing_engine import PricingEngine
 from app.services.task_file_service import TaskFileService
 from app.services.template_filler import TemplateFiller
@@ -245,4 +245,55 @@ async def pricing_config_read_execute(params: dict, context: dict, **kwargs) -> 
         "eur_fx_rate": float(config.eur_fx_rate),
         "currency_count": len(currencies),
         "currencies": currencies,
+    }
+
+
+async def pricing_config_update_execute(params: dict, context: dict, **kwargs) -> dict:
+    """Update tenant pricing configuration — FX rates, VAT, rounding rules.
+
+    Accepts partial updates: only the fields provided will be changed.
+    """
+    if not context or not context.get("db") or not context.get("tenant_id"):
+        return {"error": True, "message": "Missing context — tenant_id and db are required."}
+
+    db = context["db"]
+    tenant_id = context["tenant_id"]
+    user_id = context.get("user_id")
+
+    # Read current config
+    config_row = await get_config(db, tenant_id)
+    if not config_row:
+        return {"error": True, "message": "No pricing configuration exists. Create one in Settings first."}
+
+    current_config = dict(config_row.config)
+
+    # Apply updates
+    updates = params.get("updates", {})
+    if not updates:
+        return {"error": True, "message": "No updates provided. Pass 'updates' with fields to change."}
+
+    # Update EUR FX rate
+    if "eur_fx_rate" in updates:
+        current_config["eur_fx_rate"] = float(updates["eur_fx_rate"])
+
+    # Update individual currency configs
+    if "currencies" in updates:
+        existing_currencies = current_config.get("currencies", {})
+        for code, changes in updates["currencies"].items():
+            code_upper = code.upper()
+            if code_upper not in existing_currencies:
+                existing_currencies[code_upper] = {}
+            for field in ("fx_rate", "vat_rate", "rounding_rule", "tier"):
+                if field in changes:
+                    existing_currencies[code_upper][field] = changes[field]
+        current_config["currencies"] = existing_currencies
+
+    # Save
+    await upsert_config(db, tenant_id, current_config, user_id)
+    await db.commit()
+
+    return {
+        "success": True,
+        "message": f"Pricing config updated: {list(updates.keys())}",
+        "updated_fields": list(updates.keys()),
     }
