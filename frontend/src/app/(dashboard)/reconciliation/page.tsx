@@ -53,15 +53,16 @@ export default function ReconciliationPage() {
     const orderRef = result.evidence?.order_reference;
     const chargeId = result.evidence?.charge_source_id || result.evidence?.payout_source_id;
     const amount = Number(result.stripe_amount || result.variance_amount).toLocaleString("en-US", { style: "currency", currency: "USD" });
-    const varType = result.variance_type || "unmatched";
+    const dateRange = selectedRun ? `between ${selectedRun.date_from} and ${selectedRun.date_to}` : "";
 
     let query: string;
     if (orderRef) {
-      query = `Investigate order ${orderRef}: Stripe charge ${chargeId || "unknown"} for ${amount} is ${varType}. Check if NetSuite has a matching customer deposit or sales order for this order number and amount.`;
+      query = `Use SuiteQL to investigate order ${orderRef} in NetSuite. A Stripe charge of ${amount} ${dateRange} has no matching customer deposit. Run: SELECT t.id, t.tranid, t.trandate, t.total, BUILTIN.DF(t.entity) AS customer FROM transaction t WHERE t.type = 'CustDep' AND t.tranid LIKE '%${orderRef}%' OR t.total = ${Number(result.stripe_amount || 0).toFixed(2)} FETCH FIRST 10 ROWS ONLY`;
     } else {
-      query = `Investigate this reconciliation exception: Stripe charge for ${amount} is ${varType}. No order reference found. Can you search NetSuite for customer deposits around this amount?`;
+      query = `Use SuiteQL to find customer deposits in NetSuite around ${amount} ${dateRange}. Run: SELECT t.id, t.tranid, t.trandate, t.total, BUILTIN.DF(t.entity) AS customer FROM transaction t WHERE t.type = 'CustDep' AND t.total BETWEEN ${(Number(result.stripe_amount || 0) * 0.95).toFixed(2)} AND ${(Number(result.stripe_amount || 0) * 1.05).toFixed(2)} ${dateFrom ? `AND t.trandate >= TO_DATE('${dateFrom}', 'YYYY-MM-DD') AND t.trandate <= TO_DATE('${dateTo}', 'YYYY-MM-DD')` : ""} FETCH FIRST 10 ROWS ONLY`;
     }
-    router.push(`/chat?agent=recon-agent&prefill=${encodeURIComponent(query)}`);
+    // Use unified agent (not recon-agent) — it has SuiteQL tools
+    router.push(`/chat?prefill=${encodeURIComponent(query)}`);
   };
 
   const tabs: { id: TabId; label: string; count: number }[] = [
