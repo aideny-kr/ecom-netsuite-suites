@@ -83,6 +83,7 @@ class AgentRegistry:
         correlation_id: str,
         overrides: dict[str, Any] | None = None,
         knowledge: list[str] | None = None,
+        user_instructions: str | None = None,
     ) -> SpecializedAgent:
         """Create a SpecializedAgent instance from a registered config.
 
@@ -99,6 +100,17 @@ class AgentRegistry:
             prompt_path = Path(__file__).parent / "prompts" / config.prompt_file
             if prompt_path.is_file():
                 prompt_text = prompt_path.read_text()
+
+        # Prepend user instructions (from Agent Hub) — takes priority over defaults
+        if user_instructions:
+            prompt_text = (
+                "<user_instructions>\n"
+                "The user has configured the following instructions for this agent. "
+                "ALWAYS follow these instructions. They take priority over default behavior.\n\n"
+                f"{user_instructions}\n"
+                "</user_instructions>\n\n"
+                f"{prompt_text}"
+            )
 
         return SpecializedAgent(
             config=config,

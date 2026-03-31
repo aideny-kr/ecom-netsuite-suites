@@ -1669,12 +1669,31 @@ async def run_chat_turn(
                     if _selected_agent_id:
                         # Route to specialized agent
                         _dk_chunks = context.get("domain_knowledge", [])
+
+                        # Fetch per-tenant agent instructions
+                        _user_instructions = None
+                        try:
+                            from sqlalchemy import select as _sel
+
+                            from app.models.agent_config import AgentConfig
+
+                            _instr_result = await db.execute(
+                                _sel(AgentConfig.user_instructions).where(
+                                    AgentConfig.tenant_id == tenant_id,
+                                    AgentConfig.agent_id == _selected_agent_id,
+                                )
+                            )
+                            _user_instructions = _instr_result.scalar_one_or_none()
+                        except Exception:
+                            pass
+
                         unified_agent = _agent_registry.instantiate(
                             agent_id=_selected_agent_id,
                             tenant_id=tenant_id,
                             user_id=user_id,
                             correlation_id=correlation_id,
                             knowledge=_dk_chunks,
+                            user_instructions=_user_instructions,
                         )
                     else:
                         # Fallback: create UnifiedAgent (existing behavior)
