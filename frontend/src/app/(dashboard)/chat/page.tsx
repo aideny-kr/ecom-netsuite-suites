@@ -258,15 +258,20 @@ export default function ChatPage() {
 
   // Auto-send prefill message from URL (e.g., from Recon "Investigate in Chat")
   useEffect(() => {
-    if (prefillMessage && !prefillSentRef.current && !isStreaming) {
-      prefillSentRef.current = true;
-      // Clear URL params to prevent re-send on navigation
+    if (!prefillMessage || prefillSentRef.current) return;
+    // Capture the message before clearing URL
+    const message = prefillMessage;
+    prefillSentRef.current = true;
+
+    // Delay to let the page fully mount and session hooks initialize
+    const timer = setTimeout(() => {
+      handleSend(message);
+      // Clear URL params after send to prevent re-send on back navigation
       router.replace(`/chat${pinnedAgentId ? `?agent=${pinnedAgentId}` : ""}`);
-      // Small delay to ensure session creation is ready
-      const timer = setTimeout(() => handleSend(prefillMessage), 300);
-      return () => clearTimeout(timer);
-    }
-  }, [prefillMessage, isStreaming, handleSend, pinnedAgentId, router]);
+    }, 500);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [prefillMessage]);
 
   const handleMentionClick = useCallback(
     (filePath: string) => {
