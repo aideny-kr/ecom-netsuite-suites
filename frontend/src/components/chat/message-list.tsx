@@ -199,7 +199,7 @@ function parseThinkingBlocks(content: string): Array<{
  * Parse streaming content to separate thinking/reasoning blocks from text.
  * Handles incomplete (still-open) tags during streaming.
  */
-function parseStreamingThinking(content: string): {
+export function parseStreamingThinking(content: string): {
   thinking: string | null;
   isThinking: boolean;
   text: string;
@@ -231,6 +231,18 @@ function parseStreamingThinking(content: string): {
       isThinking: true,
       text: textParts.join("\n\n"),
     };
+  }
+
+  // Detect partial opening tags at end of stream (e.g. "<thi", "<thinking")
+  // Strip them from visible text so they don't flash to user
+  const partialTagMatch = remainder.match(/<(?:t(?:h(?:i(?:n(?:k(?:i(?:n(?:g)?)?)?)?)?)?)?|r(?:e(?:a(?:s(?:o(?:n(?:i(?:n(?:g)?)?)?)?)?)?)?)?)?$/);
+  if (partialTagMatch && partialTagMatch.index !== undefined) {
+    const beforePartial = remainder.slice(0, partialTagMatch.index).trim();
+    if (lastIndex > 0) {
+      if (beforePartial) textParts.push(beforePartial);
+      return { thinking: lastThinking, isThinking: false, text: textParts.join("\n\n") };
+    }
+    return { thinking: null, isThinking: false, text: beforePartial || "" };
   }
 
   if (lastIndex > 0) {

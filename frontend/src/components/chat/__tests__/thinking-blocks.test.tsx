@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
-import { ThinkingBlock, StreamingThinkingBlock, StatusHeadline } from "../message-list";
+import { ThinkingBlock, StreamingThinkingBlock, StatusHeadline, parseStreamingThinking } from "../message-list";
 
 vi.mock("react-markdown", () => ({ default: ({ children }: any) => <div>{children}</div> }));
 vi.mock("react-syntax-highlighter", () => ({ Prism: () => null }));
@@ -114,5 +114,42 @@ describe("Streaming section layout", () => {
   it("StatusHeadline renders nothing when no steps", () => {
     const { container } = render(<StatusHeadline steps={[]} />);
     expect(container.firstChild).toBeNull();
+  });
+});
+
+describe("parseStreamingThinking — partial tag stripping", () => {
+  it("strips partial <thi from visible text", () => {
+    const result = parseStreamingThinking("Hello <thi");
+    expect(result.text).toBe("Hello");
+    expect(result.isThinking).toBe(false);
+  });
+
+  it("strips partial <thinking from visible text", () => {
+    const result = parseStreamingThinking("Hello <thinking");
+    expect(result.text).toBe("Hello");
+    expect(result.isThinking).toBe(false);
+  });
+
+  it("strips partial <reas from visible text", () => {
+    const result = parseStreamingThinking("Hello <reas");
+    expect(result.text).toBe("Hello");
+    expect(result.isThinking).toBe(false);
+  });
+
+  it("strips lone < at end", () => {
+    const result = parseStreamingThinking("Hello <");
+    expect(result.text).toBe("Hello");
+  });
+
+  it("does not strip < in middle of text", () => {
+    const result = parseStreamingThinking("a < b is true");
+    expect(result.text).toBe("a < b is true");
+  });
+
+  it("handles complete <thinking> tag correctly", () => {
+    const result = parseStreamingThinking("<thinking>analyzing data");
+    expect(result.thinking).toBe("analyzing data");
+    expect(result.isThinking).toBe(true);
+    expect(result.text).toBe("");
   });
 });
