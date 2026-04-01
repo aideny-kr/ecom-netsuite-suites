@@ -176,6 +176,11 @@
   animation: thinking-fade 2s ease-in-out infinite;
 }
 
+/* Gradient fade for truncated thinking blocks */
+.thinking-fade-overlay {
+  background: linear-gradient(to bottom, transparent 0%, var(--card) 100%);
+}
+
 @keyframes table-appear {
   from { opacity: 0; transform: translateY(4px); }
   to { opacity: 1; transform: translateY(0); }

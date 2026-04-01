@@ -426,7 +426,9 @@ function AssistantTextBlocks({ content, isTerminal = false }: { content: string;
 }
 
 /** Collapsed thinking block for completed messages */
-function ThinkingBlock({ content, isTerminal = false }: { content: string; isTerminal?: boolean }) {
+export function ThinkingBlock({ content, isTerminal = false }: { content: string; isTerminal?: boolean }) {
+  const [expanded, setExpanded] = useState(false);
+
   return (
     <details className={cn(
       "mb-2 text-[12px] group",
@@ -438,15 +440,35 @@ function ThinkingBlock({ content, isTerminal = false }: { content: string; isTer
         <FrameworkIcon className="h-3 w-3" />
         Thought process
       </summary>
-      <div className="px-3 pb-2.5 text-muted-foreground/70 text-[12px] leading-relaxed">
-        <MarkdownRenderer content={content} className="text-[12px] text-muted-foreground/70" isTerminal={isTerminal} />
+      <div className="relative">
+        <div
+          data-testid="thinking-content"
+          className={cn(
+            "px-3 pb-2.5 text-muted-foreground/70 text-[12px] leading-relaxed overflow-hidden transition-all duration-200",
+            !expanded && "max-h-[3.5rem]",
+          )}
+        >
+          <MarkdownRenderer content={content} className="text-[12px] text-muted-foreground/70" isTerminal={isTerminal} />
+        </div>
+        {!expanded && (
+          <div data-testid="thinking-fade" className="thinking-fade-overlay absolute bottom-6 left-0 right-0 h-6 pointer-events-none" />
+        )}
+        <button
+          onClick={() => setExpanded((v) => !v)}
+          aria-label={expanded ? "Collapse" : "Show more"}
+          className="w-full px-3 pb-2 pt-0.5 text-[11px] font-medium text-muted-foreground/50 hover:text-muted-foreground transition-colors text-left"
+        >
+          {expanded ? "Show less" : "Show more"}
+        </button>
       </div>
     </details>
   );
 }
 
 /** Live thinking block shown during streaming — Gemini-style animation */
-function StreamingThinkingBlock({ content, isActive, isTerminal = false }: { content: string | null; isActive: boolean; isTerminal?: boolean }) {
+export function StreamingThinkingBlock({ content, isActive, isTerminal = false }: { content: string | null; isActive: boolean; isTerminal?: boolean }) {
+  const [expanded, setExpanded] = useState(false);
+
   return (
     <div className={cn(
       "mb-2 overflow-hidden",
@@ -475,16 +497,32 @@ function StreamingThinkingBlock({ content, isActive, isTerminal = false }: { con
         </span>
       </div>
       {content && (
-        <div className={cn(
-          "px-3 pb-2.5 text-[12px] leading-relaxed text-muted-foreground/60",
-          isActive && "animate-thinking-fade"
-        )}>
-          {/* Use plain text while actively streaming to avoid expensive ReactMarkdown re-renders per chunk */}
-          {isActive ? (
-            <p className="whitespace-pre-wrap">{content}</p>
-          ) : (
-            <MarkdownRenderer content={content} className="text-[12px] text-muted-foreground/60" isTerminal={isTerminal} />
+        <div className="relative">
+          <div
+            data-testid="thinking-content"
+            className={cn(
+              "px-3 text-[12px] leading-relaxed text-muted-foreground/60 overflow-hidden transition-all duration-200",
+              isActive && "animate-thinking-fade",
+              !expanded && "max-h-[3.5rem]",
+            )}
+          >
+            {/* Use plain text while actively streaming to avoid expensive ReactMarkdown re-renders per chunk */}
+            {isActive ? (
+              <p className="whitespace-pre-wrap">{content}</p>
+            ) : (
+              <MarkdownRenderer content={content} className="text-[12px] text-muted-foreground/60" isTerminal={isTerminal} />
+            )}
+          </div>
+          {!expanded && (
+            <div data-testid="thinking-fade" className="thinking-fade-overlay absolute bottom-6 left-0 right-0 h-6 pointer-events-none" />
           )}
+          <button
+            onClick={() => setExpanded((v) => !v)}
+            aria-label={expanded ? "Collapse" : "Expand"}
+            className="w-full px-3 pb-2 pt-0.5 text-[11px] font-medium text-muted-foreground/40 hover:text-muted-foreground/70 transition-colors text-left"
+          >
+            {expanded ? "Show less" : "Show more"}
+          </button>
         </div>
       )}
     </div>
