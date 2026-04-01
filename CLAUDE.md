@@ -316,7 +316,9 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 37. **nginx ssl_buffer_size for SSE** — default 16KB causes bursty streaming over TLS. Set to 4k for real-time SSE.
 38. **Stripe SDK v15 breaking changes** — `dict(payout)` fails (use `payout.to_dict()`). `account.get("field")` fails (use `getattr(account, "field", None)`). StripeObject no longer behaves like a dict.
 39. **Stripe connector key in `connections` table** — encrypted per-tenant, NOT in env vars. `STRIPE_API_KEY` in config.py is for billing only. Per-connection key via `decrypt_credentials(connection.encrypted_credentials)["api_key"]`.
-40. **Recon pipeline Stripe sync timeout** — initial sync pulls all historical payouts (800+) with payout lines — can take 30+ min. Pipeline has 90s timeout with fallback to existing data. Pre-sync via Settings "Sync Now" or hourly Beat schedule.
+40. **Recon pipeline Stripe sync timeout** — initial sync pulls all historical payouts (800+) with payout lines — can take 30+ min. Pipeline has 90s timeout with fallback to existing data. Pre-sync via Settings "Sync Now" or nightly Beat schedule.
+41. **Never let LLM present tool-computed numbers** — LLMs hallucinate/round numbers. Use tool result interception (`_intercept_tool_result`) to send data directly to frontend via SSE events (`data_table`, `task_output`). Condensed result to LLM should say "table shown automatically, do NOT list numbers." Pricing agent, SuiteQL, BigQuery all follow this pattern.
+42. **Supabase 2min statement timeout** — batch commits every 10 rows for upserts. Stripe/NetSuite sync both hit this. Cursor must save `max(created)` not `last` (Stripe returns newest first).
 
 ## Current State
 
