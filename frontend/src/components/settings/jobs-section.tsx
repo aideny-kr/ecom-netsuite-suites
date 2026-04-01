@@ -211,46 +211,52 @@ export function JobsSection() {
         ))}
       </div>
 
-      {jobs.length > 0 && (
-        <div className="space-y-2">
-          <h4 className="text-[14px] font-medium text-foreground">
-            Recent Job History
-          </h4>
-          <div className="flex items-center gap-2 mb-3">
-            {["all", "completed", "running", "failed"].map((s) => (
-              <button
-                key={s}
-                onClick={() => setStatusFilter(s === "all" ? undefined : s)}
-                className={`px-3 py-1 rounded-full text-[12px] font-medium transition-colors ${
-                  (s === "all" && !statusFilter) || statusFilter === s
-                    ? "bg-foreground text-background"
-                    : "bg-muted text-muted-foreground hover:bg-muted/80"
-                }`}
-              >
-                {s.charAt(0).toUpperCase() + s.slice(1)}
-              </button>
-            ))}
-          </div>
-          <div className="rounded-lg border overflow-hidden">
-            <table className="w-full text-[13px]">
-              <thead>
-                <tr className="border-b bg-muted/50">
-                  <th className="text-left py-2 px-3 font-medium text-muted-foreground">
-                    Job
-                  </th>
-                  <th className="text-left py-2 px-3 font-medium text-muted-foreground">
-                    Started
-                  </th>
-                  <th className="text-left py-2 px-3 font-medium text-muted-foreground">
-                    Duration
-                  </th>
-                  <th className="text-left py-2 px-3 font-medium text-muted-foreground">
-                    Status
-                  </th>
+      <div className="space-y-2">
+        <h4 className="text-[14px] font-medium text-foreground">
+          Job History
+        </h4>
+        <div className="flex items-center gap-2 mb-3">
+          {["all", "completed", "running", "failed"].map((s) => (
+            <button
+              key={s}
+              onClick={() => setStatusFilter(s === "all" ? undefined : s)}
+              className={`px-3 py-1 rounded-full text-[12px] font-medium transition-colors ${
+                (s === "all" && !statusFilter) || statusFilter === s
+                  ? "bg-foreground text-background"
+                  : "bg-muted text-muted-foreground hover:bg-muted/80"
+              }`}
+            >
+              {s.charAt(0).toUpperCase() + s.slice(1)}
+            </button>
+          ))}
+        </div>
+        <div className="rounded-lg border overflow-hidden">
+          <table className="w-full text-[13px]">
+            <thead>
+              <tr className="border-b bg-muted/50">
+                <th className="text-left py-2 px-3 font-medium text-muted-foreground">
+                  Job
+                </th>
+                <th className="text-left py-2 px-3 font-medium text-muted-foreground">
+                  Started
+                </th>
+                <th className="text-left py-2 px-3 font-medium text-muted-foreground">
+                  Duration
+                </th>
+                <th className="text-left py-2 px-3 font-medium text-muted-foreground">
+                  Status
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              {jobs.length === 0 ? (
+                <tr>
+                  <td colSpan={4} className="py-6 text-center text-muted-foreground text-[13px]">
+                    No {statusFilter || ""} jobs found
+                  </td>
                 </tr>
-              </thead>
-              <tbody>
-                {jobs.map((job) => (
+              ) : (
+                jobs.map((job) => (
                   <tr key={job.id} className="border-b last:border-b-0">
                     <td className="py-2 px-3 font-mono text-[12px]">
                       {job.job_type}
@@ -272,20 +278,20 @@ export function JobsSection() {
                       <StatusBadge status={job.status} />
                     </td>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          {jobsData && jobsData.items.length >= pageSize && (
-            <button
-              onClick={() => setPageSize((prev) => prev + 20)}
-              className="mt-3 w-full rounded-lg border py-2 text-[13px] text-muted-foreground hover:bg-muted/50 transition-colors"
-            >
-              Show More
-            </button>
-          )}
+                ))
+              )}
+            </tbody>
+          </table>
         </div>
-      )}
+        {jobsData && jobsData.items.length >= pageSize && (
+          <button
+            onClick={() => setPageSize((prev) => prev + 20)}
+            className="mt-3 w-full rounded-lg border py-2 text-[13px] text-muted-foreground hover:bg-muted/50 transition-colors"
+          >
+            Show More
+          </button>
+        )}
+      </div>
     </section>
   );
 }
