@@ -570,11 +570,24 @@ export function MessageList({
     shouldAutoScrollRef.current = distanceFromBottom < 80;
   }, []);
 
+  // Wheel up immediately breaks auto-scroll lock (don't wait for threshold)
+  const handleWheel = useCallback((e: React.WheelEvent) => {
+    if (e.deltaY < 0) {
+      shouldAutoScrollRef.current = false;
+    }
+  }, []);
+
   // Synchronous scroll — fires BEFORE browser paint, prevents visible jump
   useLayoutEffect(() => {
     const el = containerRef.current;
     if (el && shouldAutoScrollRef.current) {
-      el.scrollTop = el.scrollHeight;
+      // Use instant scroll for new messages, smooth for streaming updates
+      const isNewMessage = !streamingContent;
+      if (isNewMessage) {
+        el.scrollTop = el.scrollHeight;
+      } else {
+        el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+      }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [messages, pendingUserMessage, isWaitingForReply, streamingContent]);
@@ -591,7 +604,7 @@ export function MessageList({
       rafId = requestAnimationFrame(() => {
         rafId = null;
         if (shouldAutoScrollRef.current && el) {
-          el.scrollTop = el.scrollHeight;
+          el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
         }
       });
     };
@@ -732,12 +745,14 @@ export function MessageList({
     <div
       ref={containerRef}
       onScroll={handleScroll}
+      onWheel={handleWheel}
       className={cn(
         "h-full min-h-0 min-w-0 overflow-auto",
         isTerminal
           ? "px-10 py-8 space-y-8"
           : "px-6 py-6 space-y-5 scrollbar-thin",
       )}
+      style={{ overflowAnchor: "none", scrollbarGutter: "stable" }}
       data-testid="message-list"
     >
       {pinnedAgentId && (
