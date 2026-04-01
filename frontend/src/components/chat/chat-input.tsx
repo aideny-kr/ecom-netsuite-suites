@@ -290,7 +290,13 @@ export function ChatInput({ onSend, isLoading, workspaceId, variant }: ChatInput
             onInput={(e) => {
               const target = e.target as HTMLTextAreaElement;
               target.style.height = "auto";
-              target.style.height = `${Math.min(target.scrollHeight, 128)}px`;
+              const newHeight = Math.min(target.scrollHeight, 128);
+              target.style.height = `${newHeight}px`;
+              // Notify parent to re-anchor scroll after layout shift
+              requestAnimationFrame(() => {
+                const msgList = document.querySelector("[data-testid='message-list']");
+                if (msgList) msgList.scrollTop = msgList.scrollHeight;
+              });
             }}
           />
           {workspaceId && (

@@ -580,24 +580,34 @@ export function MessageList({
   }, [messages, pendingUserMessage, isWaitingForReply, streamingContent]);
 
   // ResizeObserver to catch streaming content growth between React renders
+  // Uses rAF to batch scroll updates and prevent jank
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
-    const ro = new ResizeObserver(() => {
-      if (shouldAutoScrollRef.current) {
-        el.scrollTop = el.scrollHeight;
-      }
-    });
-    // Observe all direct children for size changes
+    let rafId: number | null = null;
+
+    const scrollToBottom = () => {
+      if (rafId) return; // Already scheduled
+      rafId = requestAnimationFrame(() => {
+        rafId = null;
+        if (shouldAutoScrollRef.current && el) {
+          el.scrollTop = el.scrollHeight;
+        }
+      });
+    };
+
+    const ro = new ResizeObserver(scrollToBottom);
     Array.from(el.children).forEach((child) => ro.observe(child));
     const mo = new MutationObserver(() => {
       Array.from(el.children).forEach((child) => ro.observe(child));
-      if (shouldAutoScrollRef.current) {
-        el.scrollTop = el.scrollHeight;
-      }
+      scrollToBottom();
     });
     mo.observe(el, { childList: true });
-    return () => { ro.disconnect(); mo.disconnect(); };
+    return () => {
+      ro.disconnect();
+      mo.disconnect();
+      if (rafId) cancelAnimationFrame(rafId);
+    };
   }, []);
 
   // Skip loading indicator if we have a pending message (just created session)
