@@ -121,6 +121,7 @@ async def _execute_bigquery_pivot(params: dict, context: dict) -> dict:
         "columns": out_columns,
         "rows": out_rows,
         "row_count": len(out_rows),
+        "query": clean_query,
         "pivoted": True,
         "dialect": "bigquery",
         "pivot_config": {
@@ -221,6 +222,7 @@ async def _execute_suiteql_pivot(params: dict, context: dict) -> dict:
         "columns": out_columns,
         "rows": out_rows,
         "row_count": len(out_rows),
+        "query": clean_query,
         "pivoted": True,
         "dialect": "suiteql",
         "pivot_config": {

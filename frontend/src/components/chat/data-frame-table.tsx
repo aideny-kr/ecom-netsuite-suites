@@ -212,7 +212,7 @@ export function DataFrameTable({ data, queryText }: DataFrameTableProps) {
             className="flex w-full items-center gap-1.5 px-4 py-2 text-[11px] font-medium text-muted-foreground transition-colors hover:text-foreground"
           >
             <Code2 className="h-3 w-3" />
-            SuiteQL Query
+            {queryText && (queryText.includes("`") || queryText.toLowerCase().includes("frameworkreporting")) ? "BigQuery SQL" : "SuiteQL Query"}
             {showQuery ? (
               <ChevronUp className="ml-auto h-3 w-3" />
             ) : (
