@@ -820,7 +820,11 @@ def _intercept_tool_result(
                 "currency_count": parsed.get("currency_count"),
                 "output_files": parsed.get("output_files"),
                 "template_mode": parsed.get("template_mode"),
-                "note": "Conversion complete. Output files ready for download. Present the summary to the user.",
+                "note": (
+                    "Conversion complete. The pricing table is displayed to the user automatically. "
+                    "Do NOT list individual prices — the user can see them in the table and download below. "
+                    "Just confirm: how many SKUs were converted and how many currencies."
+                ),
             },
             default=str,
         )
