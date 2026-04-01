@@ -9,6 +9,7 @@ from datetime import date, timedelta
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.workers.base_task import InstrumentedTask
 from app.workers.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
@@ -27,7 +28,7 @@ def _find_active_netsuite_connections(db: Session) -> list[dict]:
     return [{"connection_id": str(row[0]), "tenant_id": str(row[1])} for row in result.all()]
 
 
-@celery_app.task(name="tasks.netsuite_deposit_sync_all", queue="sync")
+@celery_app.task(base=InstrumentedTask, name="tasks.netsuite_deposit_sync_all", queue="sync")
 def netsuite_deposit_sync_all():
     """Iterate all active NetSuite connections and dispatch per-tenant deposit sync tasks.
 

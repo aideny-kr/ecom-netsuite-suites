@@ -8,6 +8,7 @@ import logging
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.workers.base_task import InstrumentedTask
 from app.workers.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
@@ -26,7 +27,7 @@ def _find_active_stripe_connections(db: Session) -> list[dict]:
     return [{"connection_id": str(row[0]), "tenant_id": str(row[1])} for row in result.all()]
 
 
-@celery_app.task(name="tasks.stripe_sync_all", queue="sync")
+@celery_app.task(base=InstrumentedTask, name="tasks.stripe_sync_all", queue="sync")
 def stripe_sync_all():
     """Iterate all active Stripe connections and dispatch per-tenant sync tasks."""
     from app.workers.base_task import sync_engine

@@ -8,12 +8,13 @@ import asyncio
 import logging
 from datetime import date, timedelta
 
+from app.workers.base_task import InstrumentedTask
 from app.workers.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
 
 
-@celery_app.task(name="tasks.netsuite_deposit_sync", queue="sync")
+@celery_app.task(base=InstrumentedTask, name="tasks.netsuite_deposit_sync", queue="sync")
 def netsuite_deposit_sync(
     tenant_id: str,
     date_from: str | None = None,

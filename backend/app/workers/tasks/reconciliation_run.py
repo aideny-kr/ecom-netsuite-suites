@@ -6,12 +6,13 @@ from datetime import date
 
 import structlog
 
+from app.workers.base_task import InstrumentedTask
 from app.workers.celery_app import celery_app
 
 logger = structlog.get_logger()
 
 
-@celery_app.task(name="tasks.reconciliation_run", bind=True, max_retries=1)
+@celery_app.task(base=InstrumentedTask, name="tasks.reconciliation_run", bind=True, max_retries=1)
 def reconciliation_run_task(
     self,
     tenant_id: str,
