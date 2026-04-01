@@ -119,7 +119,7 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
 
       - name: Install frontend dependencies
-        run: cd frontend && npm ci
+        run: cd frontend && npm install
 
       - name: Run lint
         run: cd frontend && npm run lint
@@ -138,7 +138,7 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
 
       - name: Install frontend dependencies
-        run: cd frontend && npm ci
+        run: cd frontend && npm install
 
       - name: Run TypeScript type check
         run: cd frontend && npx tsc --noEmit
@@ -158,7 +158,7 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
 
       - name: Install frontend dependencies
-        run: cd frontend && npm ci
+        run: cd frontend && npm install
 
       - name: Build Next.js app
         run: cd frontend && npm run build
@@ -194,7 +194,7 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
 
       - name: Install frontend dependencies
-        run: cd frontend && npm ci
+        run: cd frontend && npm install
 
       - name: Install Playwright Chromium
         run: cd frontend && npx playwright install --with-deps chromium
