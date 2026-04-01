@@ -369,6 +369,50 @@ def _is_financial_query(query: str) -> bool:
     return any(phrase in q for phrase in _FINANCIAL_VETO_PHRASES)
 
 
+# Queries about NetSuite operational data — should NEVER go to BigQuery BI agent
+_NETSUITE_VETO_PHRASES = frozenset(
+    [
+        "vendor",
+        "purchase order",
+        "purchase orders",
+        "vendor bill",
+        "vendor bills",
+        "supplier",
+        "procurement",
+        "supply chain",
+        "item receipt",
+        "item fulfillment",
+        "transfer order",
+        "work order",
+        "assembly",
+        "inventory",
+        "stock",
+        "warehouse",
+        "location",
+        "bin",
+        "lot number",
+        "serial number",
+        "rma",
+        "return authorization",
+        "credit memo",
+        "customer deposit",
+        "customer payment",
+        "journal entry",
+        "deposit",
+        "subsidiary",
+        "department",
+        "class",
+        "netsuite",
+    ]
+)
+
+
+def _is_netsuite_operational_query(query: str) -> bool:
+    """Check if query is about NetSuite operational data (not BI/analytics)."""
+    q = query.lower()
+    return any(phrase in q for phrase in _NETSUITE_VETO_PHRASES)
+
+
 async def _select_agent(
     query: str,
     tenant_id: uuid.UUID,
@@ -391,6 +435,11 @@ async def _select_agent(
     # NetSuite-native entities (balance, AR, invoices, POs) → UnifiedAgent (R6)
     if is_netsuite_entity:
         print(f"[ROUTING] NetSuite entity detected, forcing unified-agent | query: {query[:80]}", flush=True)
+        return None
+
+    # Supply chain / operational queries → UnifiedAgent (NetSuite SuiteQL, not BigQuery)
+    if _is_netsuite_operational_query(query):
+        print(f"[ROUTING] NetSuite operational query, forcing unified-agent | query: {query[:80]}", flush=True)
         return None
 
     if not _agent_registry.configs:
