@@ -425,6 +425,37 @@ function AssistantTextBlocks({ content, isTerminal = false }: { content: string;
   );
 }
 
+/** Status headline above thinking — shows what the agent is doing right now */
+export function StatusHeadline({ steps, isTerminal = false }: { steps: { label: string; status: "complete" | "running" }[]; isTerminal?: boolean }) {
+  if (steps.length === 0) return null;
+
+  const runningStep = steps.findLast((s) => s.status === "running");
+  const lastComplete = steps.findLast((s) => s.status === "complete");
+  const display = runningStep || lastComplete;
+  if (!display) return null;
+
+  const isRunning = display.status === "running";
+
+  return (
+    <div className={cn(
+      "flex items-center gap-2 text-[13px] font-medium",
+      isRunning ? "text-foreground" : "text-muted-foreground",
+    )}>
+      {isRunning ? (
+        <span className={cn(
+          "h-1.5 w-1.5 rounded-full animate-pulse",
+          isTerminal ? "bg-[var(--chat-accent)]" : "bg-primary",
+        )} />
+      ) : (
+        <Check className="h-3.5 w-3.5 text-emerald-500" />
+      )}
+      <span className={isTerminal ? "tracking-wider uppercase text-[11px]" : ""}>
+        {display.label}
+      </span>
+    </div>
+  );
+}
+
 /** Collapsed thinking block for completed messages */
 export function ThinkingBlock({ content, isTerminal = false }: { content: string; isTerminal?: boolean }) {
   const [expanded, setExpanded] = useState(false);
@@ -920,7 +951,10 @@ export function MessageList({
                 : "rounded-2xl border border-border/50 bg-muted/40",
             )}>
               <div className="flex min-w-0 flex-col gap-2 px-4 py-3">
-            {/* 1. Always show streaming text first */}
+            {/* 1. Status headline — what the agent is doing NOW */}
+            <StatusHeadline steps={streamingSteps} isTerminal={isTerminal} />
+
+            {/* 2. Thinking block (contained) */}
             {streamingContent && (() => {
               const parsed = parseStreamingThinking(streamingContent);
               return (
@@ -939,22 +973,12 @@ export function MessageList({
               );
             })()}
 
-            {/* 2. Tool steps timeline BELOW text */}
-            {streamingSteps.length > 0 && (
-              <div className="mt-2 space-y-1">
-                {streamingSteps.map((step, i) => (
-                  <div key={i} className={cn(
-                    "flex items-center gap-2 text-[11px]",
-                    step.status === "running" ? "text-foreground" : "text-muted-foreground",
-                  )}>
-                    {step.status === "running" ? (
-                      <span className={cn(
-                        "h-1.5 w-1.5 rounded-full animate-pulse",
-                        isTerminal ? "bg-[var(--chat-accent)]" : "bg-primary",
-                      )} />
-                    ) : (
-                      <Check className="h-3 w-3 text-emerald-500" />
-                    )}
+            {/* 3. Completed tool steps (compact, below thinking) */}
+            {streamingSteps.length > 1 && (
+              <div className="space-y-0.5">
+                {streamingSteps.slice(0, -1).filter((s) => s.status === "complete").map((step, i) => (
+                  <div key={i} className="flex items-center gap-2 text-[11px] text-muted-foreground">
+                    <Check className="h-3 w-3 text-emerald-500" />
                     <span className={isTerminal ? "tracking-wider uppercase text-[10px]" : ""}>
                       {step.label}
                     </span>
@@ -962,6 +986,8 @@ export function MessageList({
                 ))}
               </div>
             )}
+
+            {/* 4. Idle spinner when nothing streaming yet */}
             {!streamingContent && streamingSteps.length === 0 && (
               isTerminal ? (
                 <div className="flex items-center gap-4">
@@ -979,19 +1005,17 @@ export function MessageList({
               )
             )}
 
-            {/* 3. Data tables with fade-in animation */}
+            {/* 5. Data tables / charts with fade-in */}
             {financialReport && (
               <div className="animate-table-appear">
                 <FinancialReport data={financialReport} />
               </div>
             )}
-
             {dataTable && (
               <div className="animate-table-appear">
                 <DataFrameTable data={dataTable} queryText={dataTable.query} />
               </div>
             )}
-
             {charts && charts.length > 0 && charts.map((chart, idx) => (
               <div key={idx} className="animate-table-appear">
                 <ChartRenderer data={chart} />

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
-import { ThinkingBlock, StreamingThinkingBlock } from "../message-list";
+import { ThinkingBlock, StreamingThinkingBlock, StatusHeadline } from "../message-list";
 
 vi.mock("react-markdown", () => ({ default: ({ children }: any) => <div>{children}</div> }));
 vi.mock("react-syntax-highlighter", () => ({ Prism: () => null }));
@@ -89,5 +89,30 @@ describe("ThinkingBlock (completed)", () => {
     fireEvent.click(showMore);
     const contentArea = container.querySelector("[data-testid='thinking-content']");
     expect(contentArea).not.toHaveClass("max-h-[3.5rem]");
+  });
+});
+
+describe("Streaming section layout", () => {
+  it("StatusHeadline shows the latest running step label", () => {
+    const steps = [
+      { label: "Querying NetSuite...", status: "complete" as const },
+      { label: "Analyzing results...", status: "running" as const },
+    ];
+    render(<StatusHeadline steps={steps} />);
+    expect(screen.getByText("Analyzing results...")).toBeInTheDocument();
+  });
+
+  it("StatusHeadline shows last completed step with checkmark when nothing running", () => {
+    const steps = [
+      { label: "Querying NetSuite...", status: "complete" as const },
+      { label: "Found 24 rows", status: "complete" as const },
+    ];
+    render(<StatusHeadline steps={steps} />);
+    expect(screen.getByText("Found 24 rows")).toBeInTheDocument();
+  });
+
+  it("StatusHeadline renders nothing when no steps", () => {
+    const { container } = render(<StatusHeadline steps={[]} />);
+    expect(container.firstChild).toBeNull();
   });
 });
