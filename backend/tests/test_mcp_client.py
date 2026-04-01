@@ -51,6 +51,7 @@ EXPECTED_TOOLS = {
     "bigquery.cost_estimate",
     "pricing.convert",
     "pricing.config_read",
+    "pricing.config_update",
     "pricing.export",
     "recon.approve_match",
     "recon.get_exceptions",
