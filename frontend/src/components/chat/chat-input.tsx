@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useCallback, useMemo, useEffect, useRef, type KeyboardEvent } from "react";
-import { ArrowUp, ArrowRight, AtSign, X, Slash, Paperclip, FileSpreadsheet } from "lucide-react";
+import { ArrowUp, ArrowRight, AtSign, X, Slash, Paperclip, FileSpreadsheet, Square } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useQuery } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
@@ -12,12 +12,14 @@ import type { AgentSkillMetadata } from "@/lib/types";
 
 interface ChatInputProps {
   onSend: (content: string, fileId?: string) => void;
+  onStop?: () => void;
   isLoading: boolean;
+  isRunning?: boolean;
   workspaceId?: string | null;
   variant?: "default" | "terminal";
 }
 
-export function ChatInput({ onSend, isLoading, workspaceId, variant }: ChatInputProps) {
+export function ChatInput({ onSend, onStop, isLoading, isRunning, workspaceId, variant }: ChatInputProps) {
   const isTerminal = variant === "terminal";
   const [value, setValue] = useState("");
   const [attachedFile, setAttachedFile] = useState<{ id: string; name: string } | null>(null);
@@ -330,7 +332,17 @@ export function ChatInput({ onSend, isLoading, workspaceId, variant }: ChatInput
           >
             <Paperclip className="h-4 w-4" />
           </button>
-          {isTerminal ? (
+          {isRunning ? (
+            <Button
+              size="icon"
+              variant="destructive"
+              className="h-8 w-8 rounded-lg shrink-0"
+              onClick={onStop}
+              title="Stop response"
+            >
+              <Square className="h-4 w-4" />
+            </Button>
+          ) : isTerminal ? (
             <button
               onClick={handleSend}
               disabled={!value.trim() || isLoading}
