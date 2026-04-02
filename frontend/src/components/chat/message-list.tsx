@@ -219,10 +219,21 @@ export function parseStreamingThinking(content: string): {
     lastIndex = closedRegex.lastIndex;
   }
 
-  // Check remainder after all closed tags for an unclosed open tag
+  // Check remainder after all closed tags
   const remainder = content.slice(lastIndex);
-  const openTagMatch = remainder.match(/<(thinking|reasoning)>([\s\S]*)$/);
 
+  // Fast bailout: no < means no tags to parse
+  if (!remainder.includes("<")) {
+    if (lastIndex > 0) {
+      const remainingText = remainder.trim();
+      if (remainingText) textParts.push(remainingText);
+      return { thinking: lastThinking, isThinking: false, text: textParts.join("\n\n") };
+    }
+    return { thinking: null, isThinking: false, text: content };
+  }
+
+  // Check for unclosed open tag
+  const openTagMatch = remainder.match(/<(thinking|reasoning)>([\s\S]*)$/);
   if (openTagMatch) {
     const beforeOpenTag = remainder.slice(0, openTagMatch.index).trim();
     if (beforeOpenTag) textParts.push(beforeOpenTag);
@@ -235,14 +246,22 @@ export function parseStreamingThinking(content: string): {
 
   // Detect partial opening tags at end of stream (e.g. "<thi", "<thinking")
   // Strip them from visible text so they don't flash to user
-  const partialTagMatch = remainder.match(/<(?:t(?:h(?:i(?:n(?:k(?:i(?:n(?:g)?)?)?)?)?)?)?|r(?:e(?:a(?:s(?:o(?:n(?:i(?:n(?:g)?)?)?)?)?)?)?)?)?$/);
-  if (partialTagMatch && partialTagMatch.index !== undefined) {
-    const beforePartial = remainder.slice(0, partialTagMatch.index).trim();
-    if (lastIndex > 0) {
-      if (beforePartial) textParts.push(beforePartial);
-      return { thinking: lastThinking, isThinking: false, text: textParts.join("\n\n") };
+  const _PARTIAL_TAGS = ["thinking", "reasoning"];
+  const trailingLt = remainder.lastIndexOf("<");
+  if (trailingLt >= 0) {
+    const tail = remainder.slice(trailingLt);
+    const isPartial = _PARTIAL_TAGS.some((tag) => {
+      const full = `<${tag}>`;
+      return full.startsWith(tail) && tail.length < full.length;
+    });
+    if (isPartial) {
+      const beforePartial = remainder.slice(0, trailingLt).trim();
+      if (lastIndex > 0) {
+        if (beforePartial) textParts.push(beforePartial);
+        return { thinking: lastThinking, isThinking: false, text: textParts.join("\n\n") };
+      }
+      return { thinking: null, isThinking: false, text: beforePartial || "" };
     }
-    return { thinking: null, isThinking: false, text: beforePartial || "" };
   }
 
   if (lastIndex > 0) {
@@ -446,11 +465,11 @@ const AGENT_TAGS: Record<string, { label: string; color: string }> = {
 
 /** Status headline above thinking — shows what the agent is doing right now */
 export function StatusHeadline({ steps, isTerminal = false }: { steps: { label: string; status: "complete" | "running" }[]; isTerminal?: boolean }) {
-  if (steps.length === 0) return null;
+  const display = useMemo(() => {
+    if (steps.length === 0) return null;
+    return steps.findLast((s) => s.status === "running") || steps.findLast((s) => s.status === "complete") || null;
+  }, [steps]);
 
-  const runningStep = steps.findLast((s) => s.status === "running");
-  const lastComplete = steps.findLast((s) => s.status === "complete");
-  const display = runningStep || lastComplete;
   if (!display) return null;
 
   const isRunning = display.status === "running";

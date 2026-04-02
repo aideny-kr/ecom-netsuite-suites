@@ -43,6 +43,10 @@ export function DataFrameTable({ data, queryText }: DataFrameTableProps) {
   const [sortDir, setSortDir] = useState<SortDirection>(null);
   const [copied, setCopied] = useState(false);
   const [showQuery, setShowQuery] = useState(false);
+  const isBigQuery = useMemo(
+    () => !!queryText && (queryText.includes("`") || queryText.toLowerCase().includes("frameworkreporting")),
+    [queryText],
+  );
 
   const handleSort = useCallback(
     (colIndex: number) => {
@@ -89,7 +93,6 @@ export function DataFrameTable({ data, queryText }: DataFrameTableProps) {
   const handleDownloadCSV = useCallback(() => {
     // If we have a SuiteQL query (not saved search, not BigQuery),
     // re-execute server-side for full results (up to 50K rows)
-    const isBigQuery = queryText && (queryText.includes("`") || queryText.toLowerCase().includes("frameworkreporting"));
     if (queryText && !queryText.startsWith("Saved Search:") && !isBigQuery) {
       exportFromQuery({
         queryText,
@@ -175,8 +178,7 @@ export function DataFrameTable({ data, queryText }: DataFrameTableProps) {
           <button
             onClick={() => {
               const title = `query-results-${new Date().toISOString().slice(0, 10)}`;
-              const isBQ = queryText && (queryText.includes("`") || queryText.toLowerCase().includes("frameworkreporting"));
-              if (queryText && !isBQ) {
+              if (queryText && !isBigQuery) {
                 exportFromQuery({
                   queryText,
                   title,
@@ -212,7 +214,7 @@ export function DataFrameTable({ data, queryText }: DataFrameTableProps) {
             className="flex w-full items-center gap-1.5 px-4 py-2 text-[11px] font-medium text-muted-foreground transition-colors hover:text-foreground"
           >
             <Code2 className="h-3 w-3" />
-            {queryText && (queryText.includes("`") || queryText.toLowerCase().includes("frameworkreporting")) ? "BigQuery SQL" : "SuiteQL Query"}
+            {isBigQuery ? "BigQuery SQL" : "SuiteQL Query"}
             {showQuery ? (
               <ChevronUp className="ml-auto h-3 w-3" />
             ) : (
