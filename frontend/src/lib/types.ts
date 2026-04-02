@@ -310,6 +310,8 @@ export interface ChatSession {
   session_type?: string;
   agent_id?: string | null;
   is_archived: boolean;
+  active_run_id?: string | null;
+  status?: "idle" | "running" | "cancelling";
   created_at: string;
   updated_at: string;
 }
