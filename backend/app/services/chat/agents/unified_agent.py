@@ -510,7 +510,7 @@ class UnifiedAgent(BaseSpecialistAgent):
     @property
     def max_steps(self) -> int:
         # Investigation queries get more budget to follow evidence chains
-        return 12 if self._context_need == "full" else 6
+        return 15 if self._context_need == "full" else 12
 
     @property
     def system_prompt(self) -> str:
