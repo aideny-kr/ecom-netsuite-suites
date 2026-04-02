@@ -868,7 +868,7 @@ export function MessageList({
           ? "px-10 py-8 space-y-8"
           : "px-6 py-6 space-y-5 scrollbar-thin",
       )}
-      style={{ overflowAnchor: "none", scrollbarGutter: "stable" }}
+      style={{ scrollbarGutter: "stable" }}
       data-testid="message-list"
     >
       {pinnedAgentId && (
@@ -1074,7 +1074,7 @@ export function MessageList({
         </div>
       )}
 
-      <div ref={bottomRef} />
+      <div ref={bottomRef} style={{ overflowAnchor: "auto" }} />
     </div>
   );
 }

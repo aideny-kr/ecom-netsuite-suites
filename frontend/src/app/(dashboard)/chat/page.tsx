@@ -205,6 +205,8 @@ export default function ChatPage() {
             }]);
           },
           onToolEnd: (tool_name, step, duration_ms, success, result_summary) => {
+            // Ensure next text starts on a new line after tool completes
+            setStreamingContent((prev) => prev && !prev.endsWith("\n") ? prev + "\n\n" : prev);
             setStreamingTools(prev => prev.map(t =>
               t.step === step
                 ? { ...t, status: success ? "complete" : "error", duration_ms, success, result_summary }
