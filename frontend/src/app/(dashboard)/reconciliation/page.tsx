@@ -62,7 +62,7 @@ export default function ReconciliationPage() {
       query = `Use SuiteQL to find customer deposits in NetSuite around ${amount} ${dateRange}. Run: SELECT t.id, t.tranid, t.trandate, t.total, BUILTIN.DF(t.entity) AS customer FROM transaction t WHERE t.type = 'CustDep' AND t.total BETWEEN ${(Number(result.stripe_amount || 0) * 0.95).toFixed(2)} AND ${(Number(result.stripe_amount || 0) * 1.05).toFixed(2)} ${dateFrom ? `AND t.trandate >= TO_DATE('${dateFrom}', 'YYYY-MM-DD') AND t.trandate <= TO_DATE('${dateTo}', 'YYYY-MM-DD')` : ""} FETCH FIRST 10 ROWS ONLY`;
     }
     // Use unified agent (not recon-agent) — it has SuiteQL tools
-    router.push(`/chat?prefill=${encodeURIComponent(query)}`);
+    router.push(`/chat?prefill=${encodeURIComponent(query)}&new_session=true`);
   };
 
   const tabs: { id: TabId; label: string; count: number }[] = [
