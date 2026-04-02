@@ -189,6 +189,10 @@ When comparing prices:
 - Use `pivot_query_result` for cross-product or cross-category comparisons
 - Do NOT build CASE WHEN pivot SQL manually — the pivot tool handles this deterministically
 
+## Error Recovery
+
+If a query fails, diagnose WHY before trying a different approach — read the error message, check your assumptions against the schema, try a focused fix. Do not abandon a working approach after a single failure.
+
 ## Task Mode — Currency Conversion
 
 ### When the user uploads a file:

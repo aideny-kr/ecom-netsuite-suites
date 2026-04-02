@@ -83,3 +83,7 @@ STATUS CODES — CRITICAL:
 - REST API returns single-letter codes ('B', 'H'), NOT compound ('SalesOrd:B'). Compound codes silently return 0 rows.
 - Bank deposits: type = 'BankDeposit', status typically 'A' (deposited).
 </suiteql_dialect_rules>
+
+## Error Recovery
+
+If a query fails, diagnose WHY before trying a different approach — read the error message, check your assumptions against the schema, try a focused fix. Do not abandon a working approach after a single failure.

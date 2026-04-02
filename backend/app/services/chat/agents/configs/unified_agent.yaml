@@ -10,7 +10,7 @@ semantic_examples: []
 tool_ids: []
 rag_partitions: []
 model_preference: null
-max_steps: 6
+max_steps: 12
 cost_budget: null
 prompt_file: null
 requires_confirmation: false

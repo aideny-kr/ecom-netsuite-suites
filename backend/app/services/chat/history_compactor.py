@@ -36,6 +36,11 @@ DROP: Pleasantries, raw data dumps, repeated questions, tool call JSON, markdown
 Output a concise summary (max 300 words).
 """
 
+COMPACTION_CONTINUATION = (
+    "Resume the conversation directly. Do not acknowledge this summary, "
+    "do not recap what was happening, and do not preface with continuation text."
+)
+
 
 def condense_tool_results(content: str, max_result_chars: int = 500) -> str:
     """Replace large JSON blocks in message content with short summaries.
@@ -165,7 +170,7 @@ async def compact_history(
             },
             {
                 "role": "assistant",
-                "content": "Understood. I have the conversation context.",
+                "content": f"Understood. {COMPACTION_CONTINUATION}",
             },
         ]
         compacted.extend(recent_turns)
