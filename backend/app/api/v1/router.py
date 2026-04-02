@@ -8,6 +8,7 @@ from app.api.v1 import (
     auth,
     chat,
     chat_api_keys,
+    chat_runs,
     chat_integration,
     connection_alerts,
     connections,
@@ -48,6 +49,7 @@ api_router.include_router(tables.router)
 api_router.include_router(audit.router)
 api_router.include_router(jobs.router)
 api_router.include_router(chat.router)
+api_router.include_router(chat_runs.router)
 api_router.include_router(mcp_connectors.router)
 api_router.include_router(sync.router)
 api_router.include_router(schedules.router)
