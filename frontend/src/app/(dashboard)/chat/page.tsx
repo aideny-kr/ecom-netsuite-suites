@@ -191,9 +191,14 @@ export default function ChatPage() {
           onChart: (data) => setCharts((prev) => [...prev, data]),
           onTaskOutput: (data) => setTaskOutput(data),
           onToolStart: (tool_name, tool_input, step) => {
-            // Clear inter-tool narration text — only show final response after last tool
-            bufferRef.current = [];
-            setStreamingContent(null);
+            // Flush any buffered text before tool starts
+            if (bufferRef.current.length > 0) {
+              const text = bufferRef.current.join("");
+              bufferRef.current = [];
+              if (text.trim()) {
+                setStreamingContent((prev) => (prev || "") + text);
+              }
+            }
             setStreamingTools(prev => [...prev, {
               tool_name, tool_input, step,
               status: "running",
