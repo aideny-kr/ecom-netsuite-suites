@@ -36,7 +36,9 @@ export type ChatStreamEvent =
   | { type: "task_output"; data: TaskOutputData }
   | { type: "chart"; data: ChartData }
   | { type: "error"; error: string }
-  | { type: "message"; message: ChatMessage };
+  | { type: "message"; message: ChatMessage }
+  | { type: "tool_start"; tool_name: string; tool_input: Record<string, unknown>; step: number }
+  | { type: "tool_end"; tool_name: string; step: number; duration_ms: number; success: boolean; result_summary: string };
 
 interface ParsedSseBuffer {
   events: ChatStreamEvent[];
@@ -54,6 +56,8 @@ type StreamHandlers = {
   onTaskOutput?: (data: TaskOutputData) => void;
   onError?: (error: string) => void;
   onMessage?: (message: ChatMessage) => void;
+  onToolStart?: (tool_name: string, tool_input: Record<string, unknown>, step: number) => void;
+  onToolEnd?: (tool_name: string, step: number, duration_ms: number, success: boolean, result_summary: string) => void;
 };
 
 export function normalizeStreamMessage(raw: Record<string, unknown>): ChatMessage | null {
@@ -155,6 +159,10 @@ export async function consumeChatStream(
         handlers.onError?.(event.error);
       } else if (event.type === "message") {
         handlers.onMessage?.(event.message);
+      } else if (event.type === "tool_start") {
+        handlers.onToolStart?.(event.tool_name, event.tool_input, event.step);
+      } else if (event.type === "tool_end") {
+        handlers.onToolEnd?.(event.tool_name, event.step, event.duration_ms, event.success, event.result_summary);
       }
     }
   }
@@ -242,6 +250,12 @@ function normalizeStreamEvent(data: Record<string, unknown>): ChatStreamEvent | 
     if (message) {
       return { type, message };
     }
+  }
+  if (type === "tool_start" && data.tool_name) {
+    return { type, tool_name: String(data.tool_name), tool_input: (data.tool_input && typeof data.tool_input === "object" ? data.tool_input : {}) as Record<string, unknown>, step: typeof data.step === "number" ? data.step : 0 };
+  }
+  if (type === "tool_end" && data.tool_name) {
+    return { type, tool_name: String(data.tool_name), step: typeof data.step === "number" ? data.step : 0, duration_ms: typeof data.duration_ms === "number" ? data.duration_ms : 0, success: data.success !== false, result_summary: String(data.result_summary || "") };
   }
 
   return null;
