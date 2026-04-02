@@ -4,6 +4,7 @@ import { useState, useCallback, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiClient } from "@/lib/api-client";
 import { consumeChatStream } from "@/lib/chat-stream";
+import type { StreamBlock } from "@/lib/chat-stream";
 import type { ChatMessage, ChatSession, ChatSessionDetail } from "@/lib/types";
 
 export function useWorkspaceChat(workspaceId: string | null) {
@@ -11,8 +12,7 @@ export function useWorkspaceChat(workspaceId: string | null) {
   const [pendingMessage, setPendingMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isStreaming, setIsStreaming] = useState(false);
-  const [streamingContent, setStreamingContent] = useState<string | null>(null);
-  const [streamingStatus, setStreamingStatus] = useState<string | null>(null);
+  const [streamBlocks, setStreamBlocks] = useState<StreamBlock[]>([]);
   const [streamingMessage, setStreamingMessage] = useState<ChatMessage | null>(null);
   const queryClient = useQueryClient();
 
@@ -23,7 +23,13 @@ export function useWorkspaceChat(workspaceId: string | null) {
     if (bufferRef.current.length === 0) return;
     const text = bufferRef.current.join("");
     bufferRef.current = [];
-    setStreamingContent((prev) => (prev || "") + text);
+    setStreamBlocks(prev => {
+      const last = prev[prev.length - 1];
+      if (last && last.type === "text") {
+        return [...prev.slice(0, -1), { ...last, content: last.content + text }];
+      }
+      return [...prev, { type: "text" as const, content: text, id: `text-${Date.now()}` }];
+    });
     rafRef.current = null;
   }, []);
 
@@ -63,8 +69,7 @@ export function useWorkspaceChat(workspaceId: string | null) {
       setError(null);
       setPendingMessage(content);
       setIsStreaming(true);
-      setStreamingContent("");
-      setStreamingStatus(null);
+      setStreamBlocks([]);
       setStreamingMessage(null);
 
       let sessionId = activeSessionId;
@@ -88,17 +93,15 @@ export function useWorkspaceChat(workspaceId: string | null) {
         await consumeChatStream(res, {
           onText: (chunk) => {
             bufferRef.current.push(chunk);
-            setStreamingStatus(null);
             if (rafRef.current === null) {
               rafRef.current = requestAnimationFrame(flushBuffer);
             }
           },
-          onToolStatus: (status) => setStreamingStatus(status),
+          onToolStatus: () => {},
           onError: (streamError) => setError(streamError),
           onMessage: (message) => {
             setStreamingMessage(message);
-            setStreamingContent(null);
-            setStreamingStatus(null);
+            setStreamBlocks([]);
           },
         });
       } catch (err: unknown) {
@@ -116,7 +119,15 @@ export function useWorkspaceChat(workspaceId: string | null) {
         if (bufferRef.current.length > 0) {
           const remaining = bufferRef.current.join("");
           bufferRef.current = [];
-          setStreamingContent((prev) => (prev || "") + remaining);
+          if (remaining.trim()) {
+            setStreamBlocks(prev => {
+              const last = prev[prev.length - 1];
+              if (last && last.type === "text") {
+                return [...prev.slice(0, -1), { ...last, content: last.content + remaining }];
+              }
+              return [...prev, { type: "text" as const, content: remaining, id: `text-final` }];
+            });
+          }
         }
         await queryClient.invalidateQueries({
           queryKey: ["chat-session", sessionId],
@@ -126,8 +137,7 @@ export function useWorkspaceChat(workspaceId: string | null) {
         });
         setIsStreaming(false);
         setPendingMessage(null);
-        setStreamingContent(null);
-        setStreamingStatus(null);
+        setStreamBlocks([]);
         setStreamingMessage(null);
       }
     },
@@ -151,8 +161,7 @@ export function useWorkspaceChat(workspaceId: string | null) {
     handleSend,
     handleNewChat,
     isSending: isStreaming || createSession.isPending,
-    streamingContent,
-    streamingStatus,
+    streamBlocks,
     streamingMessage,
   };
 }

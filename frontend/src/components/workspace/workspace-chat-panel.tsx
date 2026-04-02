@@ -41,8 +41,7 @@ export function WorkspaceChatPanel({
     handleSend,
     handleNewChat,
     isSending,
-    streamingContent,
-    streamingStatus,
+    streamBlocks,
     streamingMessage,
   } = useWorkspaceChat(workspaceId);
 
@@ -147,8 +146,7 @@ export function WorkspaceChatPanel({
           isLoading={isLoadingDetail && !!activeSessionId}
           pendingUserMessage={pendingMessage}
           isWaitingForReply={isSending}
-          streamingContent={streamingContent}
-          streamingStatus={streamingStatus}
+          streamBlocks={streamBlocks}
           streamingMessage={streamingMessage}
           onMentionClick={onMentionClick}
           workspaceId={workspaceId}

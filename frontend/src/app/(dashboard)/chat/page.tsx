@@ -5,7 +5,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiClient } from "@/lib/api-client";
 import { consumeChatStream } from "@/lib/chat-stream";
-import type { FinancialReportData, DataTableData, TaskOutputData } from "@/lib/chat-stream";
+import type { FinancialReportData, DataTableData, TaskOutputData, StreamBlock } from "@/lib/chat-stream";
 import type { ChartData } from "@/lib/types";
 import type { ChatSession, ChatSessionDetail, ChatMessage, StreamingToolCall } from "@/lib/types";
 import { SessionSidebar } from "@/components/chat/session-sidebar";
@@ -30,9 +30,7 @@ export default function ChatPage() {
   useEffect(() => { setAgentTab("chat"); }, [pinnedAgentId]);
   const [error, setError] = useState<string | null>(null);
   const [pendingMessage, setPendingMessage] = useState<string | null>(null);
-  const [streamingContent, setStreamingContent] = useState<string | null>(null);
-  const [streamingStatus, setStreamingStatus] = useState<string | null>(null);
-  const [streamingSteps, setStreamingSteps] = useState<{ label: string; status: "complete" | "running" }[]>([]);
+  const [streamBlocks, setStreamBlocks] = useState<StreamBlock[]>([]);
   const [streamingMessage, setStreamingMessage] = useState<ChatMessage | null>(null);
   const [isStreaming, setIsStreaming] = useState(false);
   const [financialReport, setFinancialReport] = useState<FinancialReportData | null>(null);
@@ -43,7 +41,6 @@ export default function ChatPage() {
   const chartsRef = useRef<Map<string, ChartData[]>>(new Map());
   const [taskOutput, setTaskOutput] = useState<TaskOutputData | null>(null);
   const taskOutputsRef = useRef<Map<string, TaskOutputData>>(new Map());
-  const [streamingTools, setStreamingTools] = useState<StreamingToolCall[]>([]);
   const queryClient = useQueryClient();
   const router = useRouter();
 
@@ -54,17 +51,22 @@ export default function ChatPage() {
     if (bufferRef.current.length === 0) return;
     const text = bufferRef.current.join("");
     // Flush at word/sentence boundaries to prevent mid-word rendering
-    // Find the last whitespace or punctuation boundary
     const boundaryMatch = text.match(/^([\s\S]*[\s.!?:;\n,\-—])([^\s.!?:;\n,\-—]*)$/);
+    let toFlush: string;
     if (boundaryMatch && boundaryMatch[2].length > 0 && boundaryMatch[2].length < 40) {
-      // Flush up to boundary, keep remainder in buffer
+      toFlush = boundaryMatch[1];
       bufferRef.current = [boundaryMatch[2]];
-      setStreamingContent((prev) => (prev || "") + boundaryMatch[1]);
     } else {
-      // No boundary found or remainder too long — flush everything
+      toFlush = text;
       bufferRef.current = [];
-      setStreamingContent((prev) => (prev || "") + text);
     }
+    setStreamBlocks(prev => {
+      const last = prev[prev.length - 1];
+      if (last && last.type === "text") {
+        return [...prev.slice(0, -1), { ...last, content: last.content + toFlush }];
+      }
+      return [...prev, { type: "text" as const, content: toFlush, id: `text-${Date.now()}` }];
+    });
     rafRef.current = null;
   }, []);
 
@@ -141,8 +143,7 @@ export default function ChatPage() {
       setError(null);
       setPendingMessage(content);
       setIsStreaming(true);
-      setStreamingContent("");
-      setStreamingStatus(null);
+      setStreamBlocks([]);
       setStreamingMessage(null);
       setFinancialReport(null);
       setDataTable(null);
@@ -170,47 +171,55 @@ export default function ChatPage() {
         await consumeChatStream(res, {
           onText: (chunk) => {
             bufferRef.current.push(chunk);
-            setStreamingStatus(null);
-        setStreamingSteps([]);
             if (rafRef.current === null) {
               rafRef.current = requestAnimationFrame(flushBuffer);
             }
           },
-          onToolStatus: (status) => {
-            // Add newline before tool execution so next text block starts on new line
-            setStreamingContent((prev) => prev && !prev.endsWith("\n") ? prev + "\n\n" : prev);
-            setStreamingStatus(status);
-            // Accumulate tool steps — mark previous as complete, add new as running
-            setStreamingSteps((prev) => [
-              ...prev.map((s) => ({ ...s, status: "complete" as const })),
-              { label: status, status: "running" as const },
-            ]);
+          onToolStatus: () => {
+            // Legacy handler — tool_start/tool_end now drive the UI via streamBlocks
           },
-          onFinancialReport: (data) => setFinancialReport(data),
-          onDataTable: (data) => setDataTable(data),
-          onChart: (data) => setCharts((prev) => [...prev, data]),
-          onTaskOutput: (data) => setTaskOutput(data),
+          onFinancialReport: (data) => {
+            setFinancialReport(data);
+            setStreamBlocks(prev => [...prev, { type: "financial_report" as const, data, id: `fr-${Date.now()}` }]);
+          },
+          onDataTable: (data) => {
+            setDataTable(data);
+            setStreamBlocks(prev => [...prev, { type: "data_table" as const, data, id: `dt-${Date.now()}` }]);
+          },
+          onChart: (data) => {
+            setCharts((prev) => [...prev, data]);
+            setStreamBlocks(prev => [...prev, { type: "chart" as const, data, id: `chart-${Date.now()}` }]);
+          },
+          onTaskOutput: (data) => {
+            setTaskOutput(data);
+            setStreamBlocks(prev => [...prev, { type: "task_output" as const, data, id: `to-${Date.now()}` }]);
+          },
           onToolStart: (tool_name, tool_input, step) => {
             // Flush any buffered text before tool starts
             if (bufferRef.current.length > 0) {
               const text = bufferRef.current.join("");
               bufferRef.current = [];
               if (text.trim()) {
-                setStreamingContent((prev) => (prev || "") + text);
+                setStreamBlocks(prev => {
+                  const last = prev[prev.length - 1];
+                  if (last && last.type === "text") {
+                    return [...prev.slice(0, -1), { ...last, content: last.content + text }];
+                  }
+                  return [...prev, { type: "text" as const, content: text, id: `text-${Date.now()}` }];
+                });
               }
             }
-            setStreamingTools(prev => [...prev, {
-              tool_name, tool_input, step,
-              status: "running",
+            setStreamBlocks(prev => [...prev, {
+              type: "tool" as const,
+              tool: { tool_name, tool_input, step, status: "running" as const },
+              id: `tool-${step}`,
             }]);
           },
           onToolEnd: (tool_name, step, duration_ms, success, result_summary) => {
-            // Ensure next text starts on a new line after tool completes
-            setStreamingContent((prev) => prev && !prev.endsWith("\n") ? prev + "\n\n" : prev);
-            setStreamingTools(prev => prev.map(t =>
-              t.step === step
-                ? { ...t, status: success ? "complete" : "error", duration_ms, success, result_summary }
-                : t
+            setStreamBlocks(prev => prev.map(block =>
+              block.type === "tool" && block.tool.step === step
+                ? { ...block, tool: { ...block.tool, status: (success ? "complete" : "error") as StreamingToolCall["status"], duration_ms, success, result_summary } }
+                : block
             ));
           },
           onError: (streamError) => setError(streamError),
@@ -244,10 +253,7 @@ export default function ChatPage() {
               return null;
             });
             setStreamingMessage(message);
-            setStreamingContent(null);
-            setStreamingStatus(null);
-            setStreamingSteps([]);
-            setStreamingTools([]);
+            setStreamBlocks([]);
           },
         });
       } catch (err: unknown) {
@@ -262,7 +268,15 @@ export default function ChatPage() {
         if (bufferRef.current.length > 0) {
           const remaining = bufferRef.current.join("");
           bufferRef.current = [];
-          setStreamingContent((prev) => (prev || "") + remaining);
+          if (remaining.trim()) {
+            setStreamBlocks(prev => {
+              const last = prev[prev.length - 1];
+              if (last && last.type === "text") {
+                return [...prev.slice(0, -1), { ...last, content: last.content + remaining }];
+              }
+              return [...prev, { type: "text" as const, content: remaining, id: `text-final` }];
+            });
+          }
         }
         // Refetch persisted messages BEFORE clearing streaming state
         // so there's no blank gap between streaming text disappearing
@@ -272,15 +286,12 @@ export default function ChatPage() {
         await queryClient.invalidateQueries({ queryKey: ["chat-sessions"] });
         setIsStreaming(false);
         setPendingMessage(null);
-        setStreamingContent(null);
-        setStreamingStatus(null);
-        setStreamingSteps([]);
+        setStreamBlocks([]);
         setStreamingMessage(null);
         setFinancialReport(null);
         setDataTable(null);
         setCharts([]);
         setTaskOutput(null);
-        setStreamingTools([]);
       }
     },
     [activeSessionId, createSession, flushBuffer, isStreaming, queryClient],
@@ -349,19 +360,12 @@ export default function ChatPage() {
             isLoading={isLoadingDetail && !!activeSessionId}
             pendingUserMessage={pendingMessage}
             isWaitingForReply={isStreaming}
-            streamingContent={streamingContent}
-            streamingStatus={streamingStatus}
-            streamingSteps={streamingSteps}
+            streamBlocks={streamBlocks}
             streamingMessage={streamingMessage}
-            financialReport={financialReport}
             financialReports={financialReportsRef.current}
-            dataTable={dataTable}
             dataTables={dataTablesRef.current}
-            charts={charts}
             chartsByMessage={chartsRef.current}
-            taskOutput={taskOutput}
             taskOutputs={taskOutputsRef.current}
-            streamingTools={streamingTools}
             pinnedAgentId={pinnedAgentId}
             agents={agents}
             agentTab={agentTab}

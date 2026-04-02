@@ -1,6 +1,6 @@
 "use client";
 
-import type { ChatMessage, ChartData } from "@/lib/types";
+import type { ChatMessage, ChartData, StreamingToolCall } from "@/lib/types";
 
 export interface FinancialReportData {
   report_type: string;
@@ -25,6 +25,15 @@ export interface TaskOutputData {
   preview: Record<string, any>[];
   template_mode: boolean;
 }
+
+export type StreamBlock =
+  | { type: "text"; content: string; id: string }
+  | { type: "tool"; tool: StreamingToolCall; id: string }
+  | { type: "data_table"; data: DataTableData; id: string }
+  | { type: "chart"; data: ChartData; id: string }
+  | { type: "financial_report"; data: FinancialReportData; id: string }
+  | { type: "task_output"; data: TaskOutputData; id: string }
+  | { type: "thinking"; content: string; isActive: boolean; id: string };
 
 export type ChatStreamEvent =
   | { type: "text"; content: string }

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useLayoutEffect, useRef, useState, useMemo, memo, useCallback } from "react";
+import React, { useEffect, useLayoutEffect, useRef, useState, useMemo, memo, useCallback } from "react";
 import ReactMarkdown from "react-markdown";
 import type { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -10,7 +10,7 @@ import { useCreateSavedQuery } from "@/hooks/use-saved-queries";
 import { cn } from "@/lib/utils";
 import { useBranding } from "@/providers/branding-provider";
 import type { ChatMessage } from "@/lib/types";
-import type { FinancialReportData, DataTableData, TaskOutputData } from "@/lib/chat-stream";
+import type { FinancialReportData, DataTableData, TaskOutputData, StreamBlock } from "@/lib/chat-stream";
 import type { AgentSummary } from "@/hooks/use-agents";
 import type { ChartData } from "@/lib/types";
 import { FinancialReport } from "@/components/chat/financial-report";
@@ -31,7 +31,6 @@ import { ConfidenceBadge } from "@/components/chat/confidence-badge";
 import { ImportanceBanner } from "@/components/chat/importance-banner";
 import { useChatFeedback } from "@/hooks/use-chat-feedback";
 import { StreamingToolCard } from "@/components/chat/streaming-tool-card";
-import type { StreamingToolCall } from "@/lib/types";
 
 /** Framework-inspired gear/module icon used as AI assistant avatar.
  *  A square with notches on each side — resembles the Framework Computer logo. */
@@ -609,17 +608,11 @@ interface MessageListProps {
   workspaceId?: string | null;
   onViewDiff?: (changesetId: string) => void;
   onChangesetAction?: () => void;
-  streamingContent?: string | null;
-  streamingStatus?: string | null;
-  streamingSteps?: { label: string; status: "complete" | "running" }[];
+  streamBlocks?: StreamBlock[];
   streamingMessage?: ChatMessage | null;
-  financialReport?: FinancialReportData | null;
   financialReports?: Map<string, FinancialReportData>;
-  dataTable?: DataTableData | null;
   dataTables?: Map<string, DataTableData>;
-  charts?: ChartData[];
   chartsByMessage?: Map<string, ChartData[]>;
-  taskOutput?: TaskOutputData | null;
   taskOutputs?: Map<string, TaskOutputData>;
   pinnedAgentId?: string | null;
   agents?: AgentSummary[];
@@ -629,7 +622,6 @@ interface MessageListProps {
   onRemoveTemplate?: () => void;
   templateFile?: { id: string; filename: string } | null;
   onImportanceOverride?: (messageId: string, newTier: number) => void;
-  streamingTools?: StreamingToolCall[];
   variant?: "default" | "terminal";
 }
 
@@ -642,17 +634,11 @@ export function MessageList({
   workspaceId,
   onViewDiff,
   onChangesetAction,
-  streamingContent,
-  streamingStatus,
-  streamingSteps = [],
+  streamBlocks = [],
   streamingMessage,
-  financialReport,
   financialReports,
-  dataTable,
   dataTables,
-  charts,
   chartsByMessage,
-  taskOutput,
   taskOutputs,
   pinnedAgentId,
   agents,
@@ -662,7 +648,6 @@ export function MessageList({
   onRemoveTemplate,
   templateFile,
   onImportanceOverride,
-  streamingTools = [],
   variant,
 }: MessageListProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -972,7 +957,7 @@ export function MessageList({
         />
       )}
 
-      {!shouldRenderStreamingMessage && (isWaitingForReply || streamingContent || streamingStatus) && (
+      {!shouldRenderStreamingMessage && (isWaitingForReply || streamBlocks.length > 0) && (
         <div className="flex min-w-0 justify-start gap-3">
           {isTerminal ? (
             <div className="w-10 h-10 bg-[var(--card)] flex-shrink-0 flex items-center justify-center border border-[var(--chat-surface-mid)]">
@@ -991,76 +976,85 @@ export function MessageList({
                 : "rounded-2xl border border-border/50 bg-muted/40",
             )}>
               <div className="flex min-w-0 flex-col gap-2 px-4 py-3">
-            {/* 1. Status headline */}
-            <StatusHeadline steps={streamingSteps} isTerminal={isTerminal} />
-
-            {/* 2. Thinking block (contained) */}
-            {streamingContent && (() => {
-              const parsed = parseStreamingThinking(streamingContent);
-              return (
-                <>
-                  {(parsed.thinking !== null || parsed.isThinking) && (
-                    <StreamingThinkingBlock
-                      content={parsed.thinking}
-                      isActive={parsed.isThinking}
-                      isTerminal={isTerminal}
-                    />
-                  )}
-                </>
-              );
-            })()}
-
-            {/* 3. Tool cards — distinct visual blocks for each tool execution */}
-            {streamingTools.length > 0 && (
-              <div className="flex flex-col gap-1.5">
-                {streamingTools.map((tool) => (
-                  <StreamingToolCard key={tool.step} tool={tool} isTerminal={isTerminal} />
-                ))}
-              </div>
-            )}
-
-            {/* 4. Streaming text response (after tools) */}
-            {streamingContent && (() => {
-              const parsed = parseStreamingThinking(streamingContent);
-              return parsed.text ? (
-                <StreamingMarkdownBlock content={parsed.text} isTerminal={isTerminal} />
-              ) : null;
-            })()}
-
-            {/* 5. Idle spinner when nothing streaming yet */}
-            {!streamingContent && streamingSteps.length === 0 && streamingTools.length === 0 && (
-              isTerminal ? (
-                <div className="flex items-center gap-4">
-                  <div className="h-2 w-2 bg-[var(--chat-accent)] animate-pulse" />
-                  <span className="text-[10px] tracking-widest text-[var(--chat-accent)] uppercase">
-                    PROCESSING...
+            {/* Render blocks in chronological order */}
+            {streamBlocks.length > 0 ? (
+              streamBlocks.map((block) => {
+                switch (block.type) {
+                  case "thinking":
+                    return (
+                      <StreamingThinkingBlock
+                        key={block.id}
+                        content={block.content}
+                        isActive={block.isActive}
+                        isTerminal={isTerminal}
+                      />
+                    );
+                  case "text": {
+                    const parsed = parseStreamingThinking(block.content);
+                    return (
+                      <React.Fragment key={block.id}>
+                        {(parsed.thinking !== null || parsed.isThinking) && (
+                          <StreamingThinkingBlock
+                            content={parsed.thinking}
+                            isActive={parsed.isThinking}
+                            isTerminal={isTerminal}
+                          />
+                        )}
+                        {parsed.text && (
+                          <StreamingMarkdownBlock content={parsed.text} isTerminal={isTerminal} />
+                        )}
+                      </React.Fragment>
+                    );
+                  }
+                  case "tool":
+                    return <StreamingToolCard key={block.id} tool={block.tool} isTerminal={isTerminal} />;
+                  case "data_table":
+                    return (
+                      <div key={block.id} className="animate-table-appear">
+                        <DataFrameTable data={block.data} queryText={block.data.query} />
+                      </div>
+                    );
+                  case "financial_report":
+                    return (
+                      <div key={block.id} className="animate-table-appear">
+                        <FinancialReport data={block.data} />
+                      </div>
+                    );
+                  case "chart":
+                    return (
+                      <div key={block.id} className="animate-table-appear">
+                        <ChartRenderer data={block.data} />
+                      </div>
+                    );
+                  case "task_output":
+                    return (
+                      <div key={block.id} className="animate-table-appear">
+                        <TaskOutputCard data={block.data} />
+                      </div>
+                    );
+                  default:
+                    return null;
+                }
+              })
+            ) : (
+              /* Idle spinner when nothing streaming yet */
+              isWaitingForReply && (
+                isTerminal ? (
+                  <div className="flex items-center gap-4">
+                    <div className="h-2 w-2 bg-[var(--chat-accent)] animate-pulse" />
+                    <span className="text-[10px] tracking-widest text-[var(--chat-accent)] uppercase">
+                      PROCESSING...
+                    </span>
+                  </div>
+                ) : (
+                  <span className="inline-flex gap-1 h-[20px] items-center">
+                    <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/60 animate-bounce [animation-delay:0ms]" />
+                    <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/60 animate-bounce [animation-delay:150ms]" />
+                    <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/60 animate-bounce [animation-delay:300ms]" />
                   </span>
-                </div>
-              ) : (
-                <span className="inline-flex gap-1 h-[20px] items-center">
-                  <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/60 animate-bounce [animation-delay:0ms]" />
-                  <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/60 animate-bounce [animation-delay:150ms]" />
-                  <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/60 animate-bounce [animation-delay:300ms]" />
-                </span>
+                )
               )
             )}
-
-            {/* 6. Data tables / charts with fade-in */}
-            {financialReport && (
-              <div className="animate-table-appear">
-                <FinancialReport data={financialReport} />
-              </div>
-            )}
-            {dataTable && (
-              <div className="animate-table-appear">
-                <DataFrameTable data={dataTable} queryText={dataTable.query} />
-              </div>
-            )}
-            {charts && charts.length > 0 && charts.map((chart, idx) => (
-              <div key={idx} className="animate-table-appear">
-                <ChartRenderer data={chart} />
-              </div>
-            ))}
               </div>
             </div>
           </div>
