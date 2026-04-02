@@ -20,6 +20,7 @@ from app.models.chat import ChatMessage, ChatSession
 from app.models.user import User
 from app.services import audit_service
 from app.services.chat.orchestrator import run_chat_turn
+from app.services.chat.run_manager import get_run_manager
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +73,8 @@ class SessionListItem(BaseModel):
     session_type: str = "chat"
     agent_id: str | None = None
     is_archived: bool
+    active_run_id: str | None = None
+    status: str = "idle"  # idle, running, cancelling
     created_at: str
     updated_at: str
 
@@ -91,6 +94,15 @@ class SessionDetailResponse(BaseModel):
 
 
 def _serialize_session(session: ChatSession) -> dict:
+    rm = get_run_manager()
+    active_run_id = rm.get_active_run(str(session.id))
+    run_status = "idle"
+    if active_run_id:
+        rs = rm.get_status(active_run_id)
+        run_status = rs if rs in ("running", "cancelling") else "idle"
+        if run_status == "idle":
+            active_run_id = None
+
     return {
         "id": str(session.id),
         "title": session.title,
@@ -98,6 +110,8 @@ def _serialize_session(session: ChatSession) -> dict:
         "session_type": session.session_type or "chat",
         "agent_id": session.agent_id,
         "is_archived": session.is_archived,
+        "active_run_id": active_run_id,
+        "status": run_status,
         "created_at": session.created_at.isoformat(),
         "updated_at": session.updated_at.isoformat(),
     }
@@ -215,7 +229,7 @@ async def get_session(
 
 @router.post(
     "/sessions/{session_id}/messages",
-    status_code=status.HTTP_201_CREATED,
+    status_code=status.HTTP_202_ACCEPTED,
 )
 async def send_message(
     session_id: uuid.UUID,
@@ -253,6 +267,108 @@ async def send_message(
     )
     db.add(user_msg)
     await db.flush()
+
+    # Commit user message BEFORE spawning background task (it uses its own DB session)
+    await db.commit()
+
+    rm = get_run_manager()
+
+    if not rm.available:
+        # Redis unavailable — fall back to inline SSE streaming
+        return await _send_message_inline_sse(
+            db=db,
+            session=session,
+            body=body,
+            user=user,
+            user_msg=user_msg,
+            wizard_step=wizard_step,
+            x_timezone=x_timezone,
+        )
+
+    # Check for concurrent run
+    existing_run = rm.get_active_run(str(session_id))
+    if existing_run:
+        existing_status = rm.get_status(existing_run)
+        if existing_status == "running":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="A run is already active for this session.",
+            )
+
+    # Create run and spawn background task
+    import asyncio
+
+    run_id = str(uuid.uuid4())
+    rm.create_run(run_id, str(session_id))
+
+    asyncio.create_task(
+        _run_chat_background(
+            run_id=run_id,
+            session_id=str(session_id),
+            session=session,
+            user_message=body.content,
+            user_id=user.id,
+            tenant_id=user.tenant_id,
+            user_msg=user_msg,
+            wizard_step=wizard_step,
+            user_timezone=x_timezone,
+            agent_id=body.agent_id,
+        )
+    )
+
+    return {"run_id": run_id, "session_id": str(session_id)}
+
+
+async def _run_chat_background(
+    run_id: str,
+    session_id: str,
+    session: ChatSession,
+    user_message: str,
+    user_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+    user_msg: ChatMessage,
+    wizard_step: str | None,
+    user_timezone: str | None,
+    agent_id: str | None,
+) -> None:
+    """Run the chat pipeline in background, writing events to Redis."""
+    from app.core.database import async_session_factory
+
+    rm = get_run_manager()
+    try:
+        async with async_session_factory() as db:
+            async for chunk in run_chat_turn(
+                db=db,
+                session=session,
+                user_message=user_message,
+                user_id=user_id,
+                tenant_id=tenant_id,
+                user_msg=user_msg,
+                wizard_step=wizard_step,
+                user_timezone=user_timezone,
+                agent_id=agent_id,
+                run_id=run_id,
+            ):
+                rm.write_event(run_id, chunk)
+        rm.set_status(run_id, "complete")
+    except Exception as exc:
+        logger.exception("Background chat run failed: %s", exc)
+        rm.write_event(run_id, {"type": "error", "error": "Chat service temporarily unavailable."})
+        rm.set_status(run_id, "failed")
+    finally:
+        rm.clear_active_run(session_id)
+
+
+async def _send_message_inline_sse(
+    db: AsyncSession,
+    session: ChatSession,
+    body: SendMessageRequest,
+    user: User,
+    user_msg: ChatMessage,
+    wizard_step: str | None,
+    x_timezone: str | None,
+) -> StreamingResponse:
+    """Fallback: inline SSE streaming when Redis is unavailable."""
 
     async def stream_generator():
         import asyncio

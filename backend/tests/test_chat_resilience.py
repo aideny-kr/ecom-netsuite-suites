@@ -132,7 +132,13 @@ class TestSendMessageErrorHandling:
         create_resp = await client.post("/api/v1/chat/sessions", json={"title": "Error Test"}, headers=headers)
         session_id = create_resp.json()["id"]
 
-        with patch("app.api.v1.chat.run_chat_turn", side_effect=ValueError("ANTHROPIC_API_KEY is not configured")):
+        mock_rm = MagicMock()
+        mock_rm.available = False
+
+        with (
+            patch("app.api.v1.chat.run_chat_turn", side_effect=ValueError("ANTHROPIC_API_KEY is not configured")),
+            patch("app.api.v1.chat.get_run_manager", return_value=mock_rm),
+        ):
             resp = await client.post(
                 f"/api/v1/chat/sessions/{session_id}/messages",
                 json={"content": "Hello"},
@@ -159,7 +165,13 @@ class TestSendMessageErrorHandling:
             body={"error": {"message": "Invalid API key"}},
         )
 
-        with patch("app.api.v1.chat.run_chat_turn", side_effect=auth_error):
+        mock_rm = MagicMock()
+        mock_rm.available = False
+
+        with (
+            patch("app.api.v1.chat.run_chat_turn", side_effect=auth_error),
+            patch("app.api.v1.chat.get_run_manager", return_value=mock_rm),
+        ):
             resp = await client.post(
                 f"/api/v1/chat/sessions/{session_id}/messages",
                 json={"content": "Hello"},
@@ -179,7 +191,13 @@ class TestSendMessageErrorHandling:
         create_resp = await client.post("/api/v1/chat/sessions", json={"title": "Generic Error"}, headers=headers)
         session_id = create_resp.json()["id"]
 
-        with patch("app.api.v1.chat.run_chat_turn", side_effect=RuntimeError("Unexpected")):
+        mock_rm = MagicMock()
+        mock_rm.available = False
+
+        with (
+            patch("app.api.v1.chat.run_chat_turn", side_effect=RuntimeError("Unexpected")),
+            patch("app.api.v1.chat.get_run_manager", return_value=mock_rm),
+        ):
             resp = await client.post(
                 f"/api/v1/chat/sessions/{session_id}/messages",
                 json={"content": "Hello"},
