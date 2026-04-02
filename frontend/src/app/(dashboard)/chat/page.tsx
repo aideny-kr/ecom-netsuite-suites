@@ -53,8 +53,18 @@ export default function ChatPage() {
   const flushBuffer = useCallback(() => {
     if (bufferRef.current.length === 0) return;
     const text = bufferRef.current.join("");
-    bufferRef.current = [];
-    setStreamingContent((prev) => (prev || "") + text);
+    // Flush at word/sentence boundaries to prevent mid-word rendering
+    // Find the last whitespace or punctuation boundary
+    const boundaryMatch = text.match(/^([\s\S]*[\s.!?:;\n,\-—])([^\s.!?:;\n,\-—]*)$/);
+    if (boundaryMatch && boundaryMatch[2].length > 0 && boundaryMatch[2].length < 40) {
+      // Flush up to boundary, keep remainder in buffer
+      bufferRef.current = [boundaryMatch[2]];
+      setStreamingContent((prev) => (prev || "") + boundaryMatch[1]);
+    } else {
+      // No boundary found or remainder too long — flush everything
+      bufferRef.current = [];
+      setStreamingContent((prev) => (prev || "") + text);
+    }
     rafRef.current = null;
   }, []);
 
@@ -181,6 +191,9 @@ export default function ChatPage() {
           onChart: (data) => setCharts((prev) => [...prev, data]),
           onTaskOutput: (data) => setTaskOutput(data),
           onToolStart: (tool_name, tool_input, step) => {
+            // Clear inter-tool narration text — only show final response after last tool
+            bufferRef.current = [];
+            setStreamingContent(null);
             setStreamingTools(prev => [...prev, {
               tool_name, tool_input, step,
               status: "running",
