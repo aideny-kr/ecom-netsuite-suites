@@ -690,18 +690,11 @@ export function MessageList({
 
   // Synchronous scroll — fires BEFORE browser paint, prevents visible jump
   useLayoutEffect(() => {
-    const el = containerRef.current;
-    if (el && shouldAutoScrollRef.current) {
-      // Use instant scroll for new messages, smooth for streaming updates
-      const isNewMessage = !streamingContent;
-      if (isNewMessage) {
-        el.scrollTop = el.scrollHeight;
-      } else {
-        el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
-      }
+    if (shouldAutoScrollRef.current && bottomRef.current) {
+      bottomRef.current.scrollIntoView({ block: "end" });
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [messages, pendingUserMessage, isWaitingForReply, streamingContent]);
+  }, [messages, pendingUserMessage, isWaitingForReply]);
 
   // ResizeObserver to catch streaming content growth between React renders
   // Uses 50ms debounce to smooth scroll updates and prevent bounce
