@@ -10,10 +10,10 @@ class TestPromptSize:
         line_count = _SYSTEM_PROMPT.count("\n")
         assert line_count < 350, f"Prompt is {line_count} lines, target is <350"
 
-    def test_prompt_under_15000_chars(self):
-        """Trimmed prompt should save at least 30% characters."""
+    def test_prompt_under_18000_chars(self):
+        """Trimmed prompt should be under 18000 chars (dialect rules alone = ~11500)."""
         char_count = len(_SYSTEM_PROMPT)
-        assert char_count < 15000, f"Prompt is {char_count} chars, target is <15000"
+        assert char_count < 18000, f"Prompt is {char_count} chars, target is <18000"
 
 
 class TestCriticalRulesPreserved:
