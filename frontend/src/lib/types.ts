@@ -378,6 +378,16 @@ export interface ChatSessionDetail {
   updated_at: string;
 }
 
+export interface StreamingToolCall {
+  tool_name: string;
+  tool_input: Record<string, unknown>;
+  step: number;
+  status: "running" | "complete" | "error";
+  duration_ms?: number;
+  success?: boolean;
+  result_summary?: string;
+}
+
 // --- Workspace Types ---
 
 export interface Workspace {

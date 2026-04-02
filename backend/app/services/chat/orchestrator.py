@@ -925,7 +925,7 @@ from app.services.chat.onboarding_tools import (
     execute_onboarding_tool,
 )
 from app.services.chat.prompts import INPUT_SANITIZATION_PREFIX, ONBOARDING_SYSTEM_PROMPT
-from app.services.chat.tool_call_results import build_tool_call_log_entry
+from app.services.chat.tool_call_results import build_tool_call_log_entry, tool_call_had_error, tool_call_row_count
 from app.services.chat.tools import build_all_tool_definitions, execute_tool_call
 from app.services.prompt_template_service import get_active_template
 
@@ -1898,6 +1898,10 @@ async def run_chat_turn(
                             yield {"type": "text", "content": _chart_buffer}
                             _chart_buffer = ""
                         yield {"type": "tool_status", "content": payload}
+                    elif event_type == "tool_start":
+                        yield {"type": "tool_start", **payload}
+                    elif event_type == "tool_end":
+                        yield {"type": "tool_end", **payload}
                     elif event_type == "tool_intercept":
                         # payload is (event_type_str, event_data_dict)
                         last_structured_output = {"type": payload[0], "data": payload[1]}
@@ -2293,6 +2297,12 @@ async def run_chat_turn(
                                 workspace_context = {"workspace_id": resolved_ws_id, "name": "auto-resolved"}
 
             yield {"type": "tool_status", "content": f"Executing {block.name}..."}
+            yield {
+                "type": "tool_start",
+                "tool_name": block.name,
+                "tool_input": block.input,
+                "step": step,
+            }
 
             # Route tool execution: onboarding tools vs standard tools
             t0 = time.monotonic()
@@ -2351,6 +2361,24 @@ async def run_chat_turn(
 
             # Log for audit
             elapsed_ms = int((time.monotonic() - t0) * 1000)
+
+            _result_dict = {"result_summary": result_str}
+            _row_count = tool_call_row_count(_result_dict)
+            _had_error = tool_call_had_error(_result_dict)
+            _summary = (
+                f"{_row_count} rows returned"
+                if _row_count and not _had_error
+                else ("Error" if _had_error else "Done")
+            )
+            yield {
+                "type": "tool_end",
+                "tool_name": block.name,
+                "step": step,
+                "duration_ms": elapsed_ms,
+                "success": not _had_error,
+                "result_summary": _summary,
+            }
+
             tool_calls_log.append(
                 build_tool_call_log_entry(
                     step=step,

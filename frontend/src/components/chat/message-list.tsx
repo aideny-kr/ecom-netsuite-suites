@@ -30,6 +30,8 @@ import { FileCode, Bookmark, Check, Loader2, Copy, ThumbsUp, ThumbsDown, User, Z
 import { ConfidenceBadge } from "@/components/chat/confidence-badge";
 import { ImportanceBanner } from "@/components/chat/importance-banner";
 import { useChatFeedback } from "@/hooks/use-chat-feedback";
+import { StreamingToolCard } from "@/components/chat/streaming-tool-card";
+import type { StreamingToolCall } from "@/lib/types";
 
 /** Framework-inspired gear/module icon used as AI assistant avatar.
  *  A square with notches on each side — resembles the Framework Computer logo. */
@@ -627,6 +629,7 @@ interface MessageListProps {
   onRemoveTemplate?: () => void;
   templateFile?: { id: string; filename: string } | null;
   onImportanceOverride?: (messageId: string, newTier: number) => void;
+  streamingTools?: StreamingToolCall[];
   variant?: "default" | "terminal";
 }
 
@@ -659,6 +662,7 @@ export function MessageList({
   onRemoveTemplate,
   templateFile,
   onImportanceOverride,
+  streamingTools = [],
   variant,
 }: MessageListProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -700,33 +704,38 @@ export function MessageList({
   }, [messages, pendingUserMessage, isWaitingForReply, streamingContent]);
 
   // ResizeObserver to catch streaming content growth between React renders
-  // Uses rAF to batch scroll updates and prevent jank
+  // Uses 50ms debounce to smooth scroll updates and prevent bounce
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
-    let rafId: number | null = null;
+    let scrollTimerId: ReturnType<typeof setTimeout> | null = null;
 
-    const scrollToBottom = () => {
-      if (rafId) return; // Already scheduled
-      rafId = requestAnimationFrame(() => {
-        rafId = null;
-        if (shouldAutoScrollRef.current && el) {
+    const observer = new ResizeObserver(() => {
+      if (scrollTimerId) clearTimeout(scrollTimerId);
+      scrollTimerId = setTimeout(() => {
+        if (shouldAutoScrollRef.current) {
           el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
         }
-      });
-    };
+        scrollTimerId = null;
+      }, 50);
+    });
 
-    const ro = new ResizeObserver(scrollToBottom);
-    Array.from(el.children).forEach((child) => ro.observe(child));
+    Array.from(el.children).forEach((child) => observer.observe(child));
     const mo = new MutationObserver(() => {
-      Array.from(el.children).forEach((child) => ro.observe(child));
-      scrollToBottom();
+      Array.from(el.children).forEach((child) => observer.observe(child));
+      if (scrollTimerId) clearTimeout(scrollTimerId);
+      scrollTimerId = setTimeout(() => {
+        if (shouldAutoScrollRef.current) {
+          el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+        }
+        scrollTimerId = null;
+      }, 50);
     });
     mo.observe(el, { childList: true });
     return () => {
-      ro.disconnect();
+      observer.disconnect();
       mo.disconnect();
-      if (rafId) cancelAnimationFrame(rafId);
+      if (scrollTimerId) clearTimeout(scrollTimerId);
     };
   }, []);
 
@@ -989,7 +998,7 @@ export function MessageList({
                 : "rounded-2xl border border-border/50 bg-muted/40",
             )}>
               <div className="flex min-w-0 flex-col gap-2 px-4 py-3">
-            {/* 1. Status headline — what the agent is doing NOW */}
+            {/* 1. Status headline */}
             <StatusHeadline steps={streamingSteps} isTerminal={isTerminal} />
 
             {/* 2. Thinking block (contained) */}
@@ -1004,29 +1013,29 @@ export function MessageList({
                       isTerminal={isTerminal}
                     />
                   )}
-                  {parsed.text && (
-                    <StreamingMarkdownBlock content={parsed.text} isTerminal={isTerminal} />
-                  )}
                 </>
               );
             })()}
 
-            {/* 3. Completed tool steps (compact, below thinking) */}
-            {streamingSteps.length > 1 && (
-              <div className="space-y-0.5">
-                {streamingSteps.slice(0, -1).filter((s) => s.status === "complete").map((step, i) => (
-                  <div key={i} className="flex items-center gap-2 text-[11px] text-muted-foreground">
-                    <Check className="h-3 w-3 text-emerald-500" />
-                    <span className={isTerminal ? "tracking-wider uppercase text-[10px]" : ""}>
-                      {step.label}
-                    </span>
-                  </div>
+            {/* 3. Tool cards — distinct visual blocks for each tool execution */}
+            {streamingTools.length > 0 && (
+              <div className="flex flex-col gap-1.5">
+                {streamingTools.map((tool) => (
+                  <StreamingToolCard key={tool.step} tool={tool} isTerminal={isTerminal} />
                 ))}
               </div>
             )}
 
-            {/* 4. Idle spinner when nothing streaming yet */}
-            {!streamingContent && streamingSteps.length === 0 && (
+            {/* 4. Streaming text response (after tools) */}
+            {streamingContent && (() => {
+              const parsed = parseStreamingThinking(streamingContent);
+              return parsed.text ? (
+                <StreamingMarkdownBlock content={parsed.text} isTerminal={isTerminal} />
+              ) : null;
+            })()}
+
+            {/* 5. Idle spinner when nothing streaming yet */}
+            {!streamingContent && streamingSteps.length === 0 && streamingTools.length === 0 && (
               isTerminal ? (
                 <div className="flex items-center gap-4">
                   <div className="h-2 w-2 bg-[var(--chat-accent)] animate-pulse" />
@@ -1043,7 +1052,7 @@ export function MessageList({
               )
             )}
 
-            {/* 5. Data tables / charts with fade-in */}
+            {/* 6. Data tables / charts with fade-in */}
             {financialReport && (
               <div className="animate-table-appear">
                 <FinancialReport data={financialReport} />

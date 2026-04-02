@@ -7,7 +7,7 @@ import { apiClient } from "@/lib/api-client";
 import { consumeChatStream } from "@/lib/chat-stream";
 import type { FinancialReportData, DataTableData, TaskOutputData } from "@/lib/chat-stream";
 import type { ChartData } from "@/lib/types";
-import type { ChatSession, ChatSessionDetail, ChatMessage } from "@/lib/types";
+import type { ChatSession, ChatSessionDetail, ChatMessage, StreamingToolCall } from "@/lib/types";
 import { SessionSidebar } from "@/components/chat/session-sidebar";
 import { MessageList } from "@/components/chat/message-list";
 import { ChatInput } from "@/components/chat/chat-input";
@@ -43,6 +43,7 @@ export default function ChatPage() {
   const chartsRef = useRef<Map<string, ChartData[]>>(new Map());
   const [taskOutput, setTaskOutput] = useState<TaskOutputData | null>(null);
   const taskOutputsRef = useRef<Map<string, TaskOutputData>>(new Map());
+  const [streamingTools, setStreamingTools] = useState<StreamingToolCall[]>([]);
   const queryClient = useQueryClient();
   const router = useRouter();
 
@@ -179,6 +180,19 @@ export default function ChatPage() {
           onDataTable: (data) => setDataTable(data),
           onChart: (data) => setCharts((prev) => [...prev, data]),
           onTaskOutput: (data) => setTaskOutput(data),
+          onToolStart: (tool_name, tool_input, step) => {
+            setStreamingTools(prev => [...prev, {
+              tool_name, tool_input, step,
+              status: "running",
+            }]);
+          },
+          onToolEnd: (tool_name, step, duration_ms, success, result_summary) => {
+            setStreamingTools(prev => prev.map(t =>
+              t.step === step
+                ? { ...t, status: success ? "complete" : "error", duration_ms, success, result_summary }
+                : t
+            ));
+          },
           onError: (streamError) => setError(streamError),
           onMessage: (message) => {
             // Associate any in-flight financial report with this message
@@ -212,7 +226,8 @@ export default function ChatPage() {
             setStreamingMessage(message);
             setStreamingContent(null);
             setStreamingStatus(null);
-        setStreamingSteps([]);
+            setStreamingSteps([]);
+            setStreamingTools([]);
           },
         });
       } catch (err: unknown) {
@@ -245,6 +260,7 @@ export default function ChatPage() {
         setDataTable(null);
         setCharts([]);
         setTaskOutput(null);
+        setStreamingTools([]);
       }
     },
     [activeSessionId, createSession, flushBuffer, isStreaming, queryClient],
@@ -325,6 +341,7 @@ export default function ChatPage() {
             chartsByMessage={chartsRef.current}
             taskOutput={taskOutput}
             taskOutputs={taskOutputsRef.current}
+            streamingTools={streamingTools}
             pinnedAgentId={pinnedAgentId}
             agents={agents}
             agentTab={agentTab}

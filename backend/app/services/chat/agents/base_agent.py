@@ -824,6 +824,11 @@ class BaseSpecialistAgent(abc.ABC):
                         patched_files.add(file_path)
 
                     yield "tool_status", f"Executing {block.name}..."
+                    yield "tool_start", {
+                        "tool_name": block.name,
+                        "tool_input": block.input,
+                        "step": step,
+                    }
 
                     t0 = time.monotonic()
                     policy_result = policy_evaluate(active_policy, block.name, block.input)
@@ -854,6 +859,22 @@ class BaseSpecialistAgent(abc.ABC):
 
                     raw_result_strings.append(result_str)
                     elapsed_ms = int((time.monotonic() - t0) * 1000)
+
+                    _result_dict = {"result_summary": result_str}
+                    _row_count = tool_call_row_count(_result_dict)
+                    _had_error = tool_call_had_error(_result_dict)
+                    _summary = (
+                        f"{_row_count} rows returned"
+                        if _row_count and not _had_error
+                        else ("Error" if _had_error else "Done")
+                    )
+                    yield "tool_end", {
+                        "tool_name": block.name,
+                        "step": step,
+                        "duration_ms": elapsed_ms,
+                        "success": not _had_error,
+                        "result_summary": _summary,
+                    }
 
                     # Allow orchestrator to intercept specific tool results
                     # (e.g. financial reports → SSE event + condensed LLM context)
