@@ -36,12 +36,19 @@ const TOOL_DISPLAY: Record<string, { label: string; Icon: typeof Database }> = {
 };
 
 function getToolDisplay(toolName: string) {
-  // Check exact match first, then prefix match for ext__ tools
+  // Check exact match first
   if (TOOL_DISPLAY[toolName]) return TOOL_DISPLAY[toolName];
-  // Strip ext__ prefix and try
-  const stripped = toolName.replace(/^ext__[^_]+__/, "");
+  // Strip ext__<uuid>__ prefix for MCP tools (UUID contains hex + underscores)
+  const stripped = toolName.replace(/^ext__[a-f0-9]+__/, "");
   if (TOOL_DISPLAY[stripped]) return TOOL_DISPLAY[stripped];
-  return { label: toolName.replace(/_/g, " "), Icon: Wrench };
+  // Match by suffix — e.g. "ns_runCustomSuiteQL" contains "SuiteQL"
+  const lower = stripped.toLowerCase();
+  if (lower.includes("suiteql")) return { label: "SuiteQL Query", Icon: Database };
+  if (lower.includes("report")) return { label: "Report", Icon: FileText };
+  if (lower.includes("search")) return { label: "Saved Search", Icon: Search };
+  if (lower.includes("record")) return { label: "Record Operation", Icon: FileText };
+  if (lower.includes("metadata")) return { label: "Schema Lookup", Icon: Search };
+  return { label: stripped.replace(/^ns_/, "").replace(/_/g, " "), Icon: Wrench };
 }
 
 function formatInput(toolInput: Record<string, unknown>): string {
