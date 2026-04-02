@@ -59,6 +59,7 @@ class MessageResponse(BaseModel):
     query_importance: int | None = None
     user_feedback: str | None = None
     structured_output: dict | None = None
+    agent_id: str | None = None
     created_at: str
 
     model_config = {"from_attributes": True}
@@ -129,6 +130,8 @@ def _serialize_message(msg: ChatMessage) -> dict:
         result["user_feedback"] = msg.user_feedback
     if msg.structured_output is not None:
         result["structured_output"] = msg.structured_output
+    if msg.agent_id:
+        result["agent_id"] = msg.agent_id
     return result
 
 

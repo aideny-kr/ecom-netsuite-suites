@@ -45,6 +45,9 @@ class ChatMessage(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     provider_used: Mapped[str | None] = mapped_column(String(20), nullable=True)
     is_byok: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=False)
 
+    # Which specialized agent handled this message (None = unified agent)
+    agent_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+
     # Factual summary for history compaction (generated async after each turn)
     content_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
 

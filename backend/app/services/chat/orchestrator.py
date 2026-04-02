@@ -2009,6 +2009,7 @@ async def run_chat_turn(
                     confidence_score=confidence_val,
                     query_importance=importance_tier.value,
                     structured_output=_persisted_output,
+                    agent_id=_selected_agent_id if _selected_agent_id else None,
                     created_at=datetime.now(timezone.utc),
                 )
                 db.add(assistant_msg)
@@ -2084,6 +2085,8 @@ async def run_chat_turn(
                 if confidence_val is not None:
                     result_msg["confidence_score"] = confidence_val
                 result_msg["query_importance"] = importance_tier.value
+                if _selected_agent_id:
+                    result_msg["agent_id"] = _selected_agent_id
                 yield {"type": "message", "message": result_msg}
                 return
 
@@ -2157,6 +2160,7 @@ async def run_chat_turn(
                 is_byok=is_byok,
                 query_importance=importance_tier.value,
                 structured_output=coord_structured_output,
+                agent_id=None,
                 created_at=datetime.now(timezone.utc),
             )
             db.add(assistant_msg)

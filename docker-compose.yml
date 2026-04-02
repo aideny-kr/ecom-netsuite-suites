@@ -41,6 +41,9 @@ services:
       CELERY_RESULT_BACKEND: redis://redis:6379/2
       GOOGLE_CLIENT_ID: "840124956248-2e21n3ilk0a93osaiffihuei6pof7jfm.apps.googleusercontent.com"
       FRONTEND_URL: "http://localhost:3002"
+      EMAIL_PROVIDER: "console"
+      EMAIL_API_KEY: ""
+      EMAIL_FROM_ADDRESS: "AI-den <noreply@suitestudio.ai>"
     ports:
       - "8000:8000"
     depends_on:

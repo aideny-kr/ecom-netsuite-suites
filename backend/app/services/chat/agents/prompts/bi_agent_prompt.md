@@ -59,6 +59,16 @@ When a chart is appropriate, emit it using XML tags with JSON inside:
 
 Chart types: `bar`, `line`, `pie`, `area`, `scatter`, `donut`, `histogram`.
 
+For **multi-series charts** (e.g., pivoted data with multiple columns), each `y_axes` entry MUST have a **unique label** matching the series name — NOT the metric name. Example for sales by platform:
+
+```
+<chart>
+{"chart_type": "bar", "title": "Weekly Sales by Platform", "x_axis": {"label": "Week", "key": "week_start"}, "y_axes": [{"label": "Alder Lake", "key": "Alder Lake"}, {"label": "Azalea", "key": "Azalea"}, {"label": "Lotus", "key": "Lotus"}], "data": [{"week_start": "2026-03-02", "Alder Lake": 25, "Azalea": 105, "Lotus": 1002}]}
+</chart>
+```
+
+The label is shown in the legend — if all labels say "Units Sold", the legend is useless.
+
 ## Narration Guidelines
 
 - **Lead with the headline**: "Revenue grew 23% QoQ" not "Here are the results."

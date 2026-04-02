@@ -437,6 +437,13 @@ function AssistantTextBlocks({ content, isTerminal = false }: { content: string;
   );
 }
 
+/** Agent display config for indicator badges */
+const AGENT_TAGS: Record<string, { label: string; color: string }> = {
+  "bi-agent": { label: "BI Analyst", color: "text-violet-500 bg-violet-500/10" },
+  "recon-agent": { label: "Reconciliation", color: "text-emerald-500 bg-emerald-500/10" },
+  "pricing-agent": { label: "Pricing", color: "text-amber-500 bg-amber-500/10" },
+};
+
 /** Status headline above thinking — shows what the agent is doing right now */
 export function StatusHeadline({ steps, isTerminal = false }: { steps: { label: string; status: "complete" | "running" }[]; isTerminal?: boolean }) {
   if (steps.length === 0) return null;
@@ -1203,6 +1210,11 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
 
         {!isStreamingPreview && message.model_used && (
           <div className="mt-1.5 flex items-center gap-1.5 text-[11px] text-muted-foreground/60">
+            {message.agent_id && AGENT_TAGS[message.agent_id] && (
+              <span className={cn("rounded px-1.5 py-0.5 font-medium", AGENT_TAGS[message.agent_id].color)}>
+                {AGENT_TAGS[message.agent_id].label}
+              </span>
+            )}
             {message.is_byok ? (
               <span className="rounded bg-blue-500/10 px-1.5 py-0.5 font-medium text-blue-600 dark:text-blue-400">
                 BYOK
