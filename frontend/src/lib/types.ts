@@ -364,6 +364,7 @@ export interface ChatMessage {
   query_importance?: number; // 1=Casual, 2=Operational, 3=Reporting, 4=Audit Critical
   user_feedback?: "helpful" | "not_helpful" | null;
   structured_output?: { type: string; data: Record<string, unknown> } | null;
+  agent_id?: string | null;
   created_at: string;
 }
 
