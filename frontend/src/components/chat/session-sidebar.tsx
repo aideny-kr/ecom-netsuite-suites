@@ -18,6 +18,7 @@ import {
   Loader2,
   Tag,
   BarChart3,
+  Scale,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -338,8 +339,11 @@ function SessionItem({
           {session.agent_id === "pricing-agent" && (
             <Tag className="h-3 w-3 flex-shrink-0 text-orange-400" />
           )}
-          {session.agent_id === "bigquery-bi" && (
-            <BarChart3 className="h-3 w-3 flex-shrink-0 text-blue-400" />
+          {session.agent_id === "bi-agent" && (
+            <BarChart3 className="h-3 w-3 flex-shrink-0 text-violet-400" />
+          )}
+          {session.agent_id === "recon-agent" && (
+            <Scale className="h-3 w-3 flex-shrink-0 text-emerald-400" />
           )}
         </div>
         <p
