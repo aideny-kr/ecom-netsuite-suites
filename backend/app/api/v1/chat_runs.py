@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Annotated
@@ -42,20 +43,21 @@ async def stream_run(
             detail=f"Run {run_id} not found",
         )
 
-    def _generate():
+    async def _generate():
         cursor = last_id
 
         # 8KB padding for Cloudflare
         yield f": {' ' * 8192}\n\n"
 
         while True:
-            events = rm.read_events(
-                run_id, last_id=cursor, count=100, block_ms=5000
+            # Run blocking Redis XREAD in threadpool to avoid blocking event loop
+            events = await asyncio.to_thread(
+                rm.read_events, run_id, cursor, 100, 1000
             )
 
             if not events:
                 # Check if run is terminal
-                current = rm.get_status(run_id)
+                current = await asyncio.to_thread(rm.get_status, run_id)
                 if current in _TERMINAL_STATUSES:
                     yield f"data: {json.dumps({'type': 'run_status', 'status': current})}\n\n"
                     return
@@ -68,10 +70,12 @@ async def stream_run(
                 yield f"data: {json.dumps(event['data'])}\n\n"
 
             # After flushing events, check terminal
-            current = rm.get_status(run_id)
+            current = await asyncio.to_thread(rm.get_status, run_id)
             if current in _TERMINAL_STATUSES:
                 # Drain any remaining events
-                remaining = rm.read_events(run_id, last_id=cursor, count=100)
+                remaining = await asyncio.to_thread(
+                    rm.read_events, run_id, cursor, 100, 0
+                )
                 for event in remaining:
                     cursor = event["id"]
                     yield f"data: {json.dumps(event['data'])}\n\n"
