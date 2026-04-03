@@ -45,42 +45,69 @@ async def stream_run(
 
     async def _generate():
         cursor = last_id
+        queue: asyncio.Queue = asyncio.Queue()
+        _SENTINEL = object()
+
+        async def _reader():
+            """Read Redis stream in a loop, put events into queue one-by-one."""
+            nonlocal cursor
+            try:
+                while True:
+                    events = await asyncio.to_thread(
+                        rm.read_events, run_id, cursor, 50, 1000
+                    )
+                    if events:
+                        for event in events:
+                            cursor = event["id"]
+                            await queue.put(event["data"])
+                    else:
+                        # No events — check if run is done
+                        current = await asyncio.to_thread(rm.get_status, run_id)
+                        if current in _TERMINAL_STATUSES:
+                            # Drain any remaining events
+                            remaining = await asyncio.to_thread(
+                                rm.read_events, run_id, cursor, 100, 0
+                            )
+                            for event in remaining:
+                                cursor = event["id"]
+                                await queue.put(event["data"])
+                            await queue.put({"type": "run_status", "status": current})
+                            await queue.put(_SENTINEL)
+                            return
+                    # Check terminal after reading events too
+                    current = await asyncio.to_thread(rm.get_status, run_id)
+                    if current in _TERMINAL_STATUSES:
+                        remaining = await asyncio.to_thread(
+                            rm.read_events, run_id, cursor, 100, 0
+                        )
+                        for event in remaining:
+                            cursor = event["id"]
+                            await queue.put(event["data"])
+                        await queue.put({"type": "run_status", "status": current})
+                        await queue.put(_SENTINEL)
+                        return
+            except Exception:
+                await queue.put(_SENTINEL)
+
+        reader_task = asyncio.create_task(_reader())
 
         # 8KB padding for Cloudflare
         yield f": {' ' * 8192}\n\n"
 
-        while True:
-            # Run blocking Redis XREAD in threadpool to avoid blocking event loop
-            events = await asyncio.to_thread(
-                rm.read_events, run_id, cursor, 100, 1000
-            )
+        try:
+            while True:
+                try:
+                    item = await asyncio.wait_for(queue.get(), timeout=15.0)
+                except asyncio.TimeoutError:
+                    yield ": heartbeat\n\n"
+                    continue
 
-            if not events:
-                # Check if run is terminal
-                current = await asyncio.to_thread(rm.get_status, run_id)
-                if current in _TERMINAL_STATUSES:
-                    yield f"data: {json.dumps({'type': 'run_status', 'status': current})}\n\n"
+                if item is _SENTINEL:
                     return
-                # Heartbeat
-                yield ": heartbeat\n\n"
-                continue
 
-            for event in events:
-                cursor = event["id"]
-                yield f"data: {json.dumps(event['data'])}\n\n"
-
-            # After flushing events, check terminal
-            current = await asyncio.to_thread(rm.get_status, run_id)
-            if current in _TERMINAL_STATUSES:
-                # Drain any remaining events
-                remaining = await asyncio.to_thread(
-                    rm.read_events, run_id, cursor, 100, 0
-                )
-                for event in remaining:
-                    cursor = event["id"]
-                    yield f"data: {json.dumps(event['data'])}\n\n"
-                yield f"data: {json.dumps({'type': 'run_status', 'status': current})}\n\n"
-                return
+                yield f"data: {json.dumps(item)}\n\n"
+        finally:
+            reader_task.cancel()
 
     return StreamingResponse(
         _generate(),
