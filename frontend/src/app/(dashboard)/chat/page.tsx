@@ -21,6 +21,7 @@ export default function ChatPage() {
   const searchParams = useSearchParams();
   const pinnedAgentId = searchParams?.get("agent") || null;
   const prefillMessage = searchParams?.get("prefill") || null;
+  const newSessionParam = searchParams?.get("new_session") || null;
   const prefillSentRef = useRef(false);
   const [agentTab, setAgentTab] = useState<"chat" | "config">("chat");
   const [templateFile, setTemplateFile] = useState<{ id: string; filename: string } | null>(null);
@@ -47,6 +48,17 @@ export default function ChatPage() {
   const bufferRef = useRef<string[]>([]);
   const rafRef = useRef<number | null>(null);
   const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const activeRunRef = useRef<string | null>(null);
+
+  const handleStop = useCallback(async () => {
+    const runId = activeRunRef.current;
+    if (!runId) return;
+    try {
+      await apiClient.post(`/api/v1/chat/runs/${runId}/cancel`, {});
+    } catch {
+      // Ignore cancel errors
+    }
+  }, []);
 
   const appendTextBlock = useCallback((toFlush: string) => {
     setStreamBlocks(prev => {
@@ -151,6 +163,109 @@ export default function ChatPage() {
     if (hydrated) forceRender((n) => n + 1);
   }, [sessionDetail]);
 
+  // Reconnect to a running session's SSE stream when switching to it
+  useEffect(() => {
+    if (!activeSessionId) return;
+    const session = sessions?.find((s: ChatSession) => s.id === activeSessionId);
+    if (!session?.active_run_id || session.status !== "running") return;
+    if (isStreaming) return;
+
+    const runId = session.active_run_id;
+    activeRunRef.current = runId;
+    setIsStreaming(true);
+    setStreamBlocks([]);
+
+    (async () => {
+      try {
+        const res = await apiClient.streamGet(`/api/v1/chat/runs/${runId}/stream?last_id=0`);
+        await consumeChatStream(res, {
+          onText: (chunk) => {
+            bufferRef.current.push(chunk);
+            if (rafRef.current === null) {
+              rafRef.current = requestAnimationFrame(flushBuffer);
+            }
+          },
+          onToolStatus: () => {
+            // Legacy handler — tool_start/tool_end now drive the UI via streamBlocks
+          },
+          onFinancialReport: (data) => {
+            setFinancialReport(data);
+            setStreamBlocks(prev => [...prev, { type: "financial_report" as const, data, id: `fr-${Date.now()}` }]);
+          },
+          onDataTable: (data) => {
+            setDataTable(data);
+            setStreamBlocks(prev => [...prev, { type: "data_table" as const, data, id: `dt-${Date.now()}` }]);
+          },
+          onChart: (data) => {
+            setCharts((prev) => [...prev, data]);
+            setStreamBlocks(prev => [...prev, { type: "chart" as const, data, id: `chart-${Date.now()}` }]);
+          },
+          onTaskOutput: (data) => {
+            setTaskOutput(data);
+            setStreamBlocks(prev => [...prev, { type: "task_output" as const, data, id: `to-${Date.now()}` }]);
+          },
+          onToolStart: (tool_name, tool_input, step) => {
+            if (bufferRef.current.length > 0) {
+              const text = bufferRef.current.join("");
+              bufferRef.current = [];
+              if (text.trim()) {
+                setStreamBlocks(prev => {
+                  const last = prev[prev.length - 1];
+                  if (last && last.type === "text") {
+                    return [...prev.slice(0, -1), { ...last, content: last.content + text }];
+                  }
+                  return [...prev, { type: "text" as const, content: text, id: `text-${Date.now()}` }];
+                });
+              }
+            }
+            setStreamBlocks(prev => [...prev, {
+              type: "tool" as const,
+              tool: { tool_name, tool_input, step, status: "running" as const },
+              id: `tool-${step}`,
+            }]);
+          },
+          onToolEnd: (tool_name, step, duration_ms, success, result_summary) => {
+            setStreamBlocks(prev => prev.map(block =>
+              block.type === "tool" && block.tool.step === step
+                ? { ...block, tool: { ...block.tool, status: (success ? "complete" : "error") as StreamingToolCall["status"], duration_ms, success, result_summary } }
+                : block
+            ));
+          },
+          onError: (err) => setError(err),
+          onMessage: (message) => {
+            setFinancialReport((current) => {
+              if (current) financialReportsRef.current.set(message.id, current);
+              return null;
+            });
+            setDataTable((current) => {
+              if (current) dataTablesRef.current.set(message.id, current);
+              return null;
+            });
+            setCharts((current) => {
+              if (current.length > 0) chartsRef.current.set(message.id, current);
+              return [];
+            });
+            setTaskOutput((current) => {
+              if (current) taskOutputsRef.current.set(message.id, current);
+              return null;
+            });
+            setStreamingMessage(message);
+            setStreamBlocks([]);
+          },
+        });
+      } catch {
+        // Run may have completed while we were away
+      } finally {
+        activeRunRef.current = null;
+        if (rafRef.current !== null) { cancelAnimationFrame(rafRef.current); rafRef.current = null; }
+        setIsStreaming(false);
+        await queryClient.invalidateQueries({ queryKey: ["chat-session", activeSessionId] });
+        await queryClient.invalidateQueries({ queryKey: ["chat-sessions"] });
+      }
+    })();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeSessionId, sessions]);
+
   const handleSend = useCallback(
     async (content: string, fileId?: string) => {
       if (isStreaming || createSession.isPending) return;
@@ -178,9 +293,16 @@ export default function ChatPage() {
       }
 
       try {
-        const res = await apiClient.stream(
+        // Step 1: Submit message → get run_id
+        const { run_id } = await apiClient.post<{ run_id: string }>(
           `/api/v1/chat/sessions/${sessionId}/messages`,
           { content, agent_id: pinnedAgentId || undefined, file_id: fileId || undefined },
+        );
+        activeRunRef.current = run_id;
+
+        // Step 2: Connect to SSE stream for this run
+        const res = await apiClient.streamGet(
+          `/api/v1/chat/runs/${run_id}/stream?last_id=0`,
         );
         await consumeChatStream(res, {
           onText: (chunk) => {
@@ -275,8 +397,13 @@ export default function ChatPage() {
         });
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : "Failed to send message. Please try again.";
-        setError(message);
+        if (message.includes("already in progress")) {
+          setError("A response is already in progress for this session. Please wait or stop it first.");
+        } else {
+          setError(message);
+        }
       } finally {
+        activeRunRef.current = null;
         // Flush any remaining buffered text and cancel pending RAF/timers
         if (rafRef.current !== null) {
           cancelAnimationFrame(rafRef.current);
@@ -327,14 +454,22 @@ export default function ChatPage() {
   // Auto-send prefill message from URL (e.g., from Recon "Investigate in Chat")
   useEffect(() => {
     if (!prefillMessage || prefillSentRef.current) return;
-    // Capture the message before clearing URL
     const message = prefillMessage;
     prefillSentRef.current = true;
 
-    // Delay to let the page fully mount and session hooks initialize
-    const timer = setTimeout(() => {
+    const timer = setTimeout(async () => {
+      if (newSessionParam === "true") {
+        try {
+          const session = await createSession.mutateAsync(
+            pinnedAgentId ? { agent_id: pinnedAgentId } : undefined
+          );
+          setActiveSessionId(session.id);
+        } catch {
+          setError("Failed to create chat session.");
+          return;
+        }
+      }
       handleSend(message);
-      // Clear URL params after send to prevent re-send on back navigation
       router.replace(`/chat${pinnedAgentId ? `?agent=${pinnedAgentId}` : ""}`);
     }, 500);
     return () => clearTimeout(timer);
@@ -424,6 +559,7 @@ export default function ChatPage() {
         <ChatInput
           variant="terminal"
           onSend={handleSend}
+          onStop={handleStop}
           isLoading={isStreaming || createSession.isPending}
           workspaceId={workspaces[0]?.id || null}
         />

@@ -2,7 +2,7 @@
 
 import uuid
 from datetime import datetime, timezone
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 from sqlalchemy import text
@@ -126,13 +126,20 @@ async def test_send_message(client, db, admin_user):
         yield {"type": "text", "content": "Hello! Here is your answer."}
         yield {"type": "message", "message": msg_dict}
 
-    with patch("app.api.v1.chat.run_chat_turn", side_effect=mock_generator):
+    # Mock RunManager as unavailable so the inline SSE fallback is used
+    mock_rm = MagicMock()
+    mock_rm.available = False
+
+    with (
+        patch("app.api.v1.chat.run_chat_turn", side_effect=mock_generator),
+        patch("app.api.v1.chat.get_run_manager", return_value=mock_rm),
+    ):
         resp = await client.post(
             f"/api/v1/chat/sessions/{session_id}/messages",
             json={"content": "What are my recent orders?"},
             headers=headers,
         )
-    # SSE streaming returns 200, not 201
+    # SSE streaming fallback returns 200
     assert resp.status_code == 200
     assert resp.headers["content-type"].startswith("text/event-stream")
 

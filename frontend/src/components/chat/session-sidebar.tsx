@@ -345,6 +345,12 @@ function SessionItem({
           {session.agent_id === "recon-agent" && (
             <Scale className="h-3 w-3 flex-shrink-0 text-emerald-400" />
           )}
+          {session.status === "running" || session.status === "cancelling" ? (
+            <span
+              className="ml-1.5 inline-block h-1.5 w-1.5 rounded-full bg-primary animate-pulse shrink-0"
+              title={session.status === "cancelling" ? "Stopping..." : "Running"}
+            />
+          ) : null}
         </div>
         <p
           className={cn(

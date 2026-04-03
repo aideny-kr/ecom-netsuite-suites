@@ -243,5 +243,39 @@ export const apiClient = {
   patch: <T>(path: string, body?: unknown) => request<T>("PATCH", path, body),
   delete: <T>(path: string) => request<T>("DELETE", path),
   stream: (path: string, body?: unknown) => streamRequest(path, body),
+  streamGet: async (path: string): Promise<Response> => {
+    const headers: Record<string, string> = {};
+    if (typeof window !== "undefined") {
+      const token = localStorage.getItem("access_token");
+      if (token) {
+        headers["Authorization"] = `Bearer ${token}`;
+      }
+    }
+    const res = await fetch(`${BASE_URL}${path}`, {
+      method: "GET",
+      headers,
+      credentials: "include",
+    });
+    if (res.status === 401 && typeof window !== "undefined") {
+      const refreshed = await tryRefreshToken();
+      if (refreshed) {
+        headers["Authorization"] = `Bearer ${localStorage.getItem("access_token")}`;
+        const retry = await fetch(`${BASE_URL}${path}`, {
+          method: "GET",
+          headers,
+          credentials: "include",
+        });
+        if (retry.ok) return retry;
+      }
+      localStorage.removeItem("access_token");
+      localStorage.removeItem("refresh_token");
+      window.location.href = "/login";
+      throw new Error("Unauthorized");
+    }
+    if (!res.ok) {
+      throw new Error(`Stream request failed: ${res.status}`);
+    }
+    return res;
+  },
   download: (path: string, body?: unknown) => downloadRequest(path, body),
 };

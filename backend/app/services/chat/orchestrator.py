@@ -1040,6 +1040,7 @@ async def run_chat_turn(
     wizard_step: str | None = None,
     user_timezone: str | None = None,
     agent_id: str | None = None,
+    run_id: str | None = None,
 ) -> AsyncGenerator[dict, None]:
     """Execute an agentic chat turn with Claude's native tool use.
 
@@ -1862,6 +1863,7 @@ async def run_chat_turn(
                     tool_choice=None,
                     tool_result_interceptor=_make_tool_interceptor(context_need, cache_callback=_on_tool_intercepted),
                     session_id=str(session.id),
+                    run_id=run_id,
                 ):
                     if event_type == "text":
                         streamed_text_parts.append(payload)

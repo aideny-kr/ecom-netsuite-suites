@@ -654,6 +654,7 @@ class BaseSpecialistAgent(abc.ABC):
         tool_choice: dict | str | None = None,
         tool_result_interceptor: Callable[[str, str], tuple[tuple[str, dict] | None, str]] | None = None,
         session_id: str | None = None,
+        run_id: str | None = None,
     ):
         """Execute the agentic loop with streaming text output.
 
@@ -708,6 +709,15 @@ class BaseSpecialistAgent(abc.ABC):
         try:
             patched_files: set[str] = set()  # Dedup workspace_propose_patch per file
             for step in range(self.max_steps):
+                # Check cancel flag between steps (background run graceful stop)
+                if run_id and step > 0:
+                    from app.services.chat.run_manager import get_run_manager
+                    rm = get_run_manager()
+                    if rm.is_cancelled(run_id):
+                        logger.info("Agent cancelled at step %d for run %s", step, run_id)
+                        yield "text", "\n\n*(Response cancelled)*"
+                        return
+
                 # Stream the LLM response
                 step_tool_choice = tool_choice if step == 0 else None
                 response = None
