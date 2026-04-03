@@ -170,14 +170,18 @@ export default function ChatPage() {
   }, [sessionDetail]);
 
   // Reconnect to a running session's SSE stream when switching to it
+  const reconnectingRef = useRef(false);
   useEffect(() => {
     if (!activeSessionId) return;
     const session = sessions?.find((s: ChatSession) => s.id === activeSessionId);
     if (!session?.active_run_id || session.status !== "running") return;
-    if (isStreaming) return;
+    if (isStreaming || reconnectingRef.current) return;
+    // Don't reconnect to a run we just started ourselves
+    if (activeRunRef.current === session.active_run_id) return;
 
     const runId = session.active_run_id;
     activeRunRef.current = runId;
+    reconnectingRef.current = true;
     setIsStreaming(true);
     setStreamBlocks([]);
 
@@ -263,6 +267,7 @@ export default function ChatPage() {
         // Run may have completed while we were away
       } finally {
         activeRunRef.current = null;
+        reconnectingRef.current = false;
         if (rafRef.current !== null) { cancelAnimationFrame(rafRef.current); rafRef.current = null; }
         setIsStreaming(false);
         await queryClient.invalidateQueries({ queryKey: ["chat-session", activeSessionId] });
@@ -270,7 +275,7 @@ export default function ChatPage() {
       }
     })();
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeSessionId, sessions]);
+  }, [activeSessionId]);
 
   const handleSend = useCallback(
     async (content: string, fileId?: string) => {
@@ -305,6 +310,11 @@ export default function ChatPage() {
           { content, agent_id: pinnedAgentId || undefined, file_id: fileId || undefined },
         );
         activeRunRef.current = run_id;
+
+        // Message is now saved in DB — clear local pending copy to avoid duplicate
+        // and refetch so the persisted message appears in the list
+        setPendingMessage(null);
+        await queryClient.invalidateQueries({ queryKey: ["chat-session", sessionId] });
 
         // Step 2: Connect to SSE stream for this run
         const res = await apiClient.streamGet(
