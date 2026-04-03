@@ -243,7 +243,7 @@ export const apiClient = {
   patch: <T>(path: string, body?: unknown) => request<T>("PATCH", path, body),
   delete: <T>(path: string) => request<T>("DELETE", path),
   stream: (path: string, body?: unknown) => streamRequest(path, body),
-  streamGet: async (path: string): Promise<Response> => {
+  streamGet: async (path: string, signal?: AbortSignal): Promise<Response> => {
     const headers: Record<string, string> = {};
     if (typeof window !== "undefined") {
       const token = localStorage.getItem("access_token");
@@ -255,6 +255,7 @@ export const apiClient = {
       method: "GET",
       headers,
       credentials: "include",
+      signal,
     });
     if (res.status === 401 && typeof window !== "undefined") {
       const refreshed = await tryRefreshToken();
@@ -264,6 +265,7 @@ export const apiClient = {
           method: "GET",
           headers,
           credentials: "include",
+          signal,
         });
         if (retry.ok) return retry;
       }

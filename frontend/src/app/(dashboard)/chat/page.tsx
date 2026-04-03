@@ -49,6 +49,7 @@ export default function ChatPage() {
   const rafRef = useRef<number | null>(null);
   const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const activeRunRef = useRef<string | null>(null);
+  const abortRef = useRef<AbortController | null>(null);
 
   const handleStop = useCallback(async () => {
     const runId = activeRunRef.current;
@@ -187,7 +188,9 @@ export default function ChatPage() {
 
     (async () => {
       try {
-        const res = await apiClient.streamGet(`/api/v1/chat/runs/${runId}/stream?last_id=0`);
+        const controller = new AbortController();
+        abortRef.current = controller;
+        const res = await apiClient.streamGet(`/api/v1/chat/runs/${runId}/stream?last_id=0`, controller.signal);
         await consumeChatStream(res, {
           onText: (chunk) => {
             bufferRef.current.push(chunk);
@@ -317,8 +320,11 @@ export default function ChatPage() {
         await queryClient.invalidateQueries({ queryKey: ["chat-session", sessionId] });
 
         // Step 2: Connect to SSE stream for this run
+        const controller = new AbortController();
+        abortRef.current = controller;
         const res = await apiClient.streamGet(
           `/api/v1/chat/runs/${run_id}/stream?last_id=0`,
+          controller.signal,
         );
         await consumeChatStream(res, {
           onText: (chunk) => {
@@ -462,6 +468,11 @@ export default function ChatPage() {
   );
 
   const clearStreamingState = useCallback(() => {
+    // Abort any in-flight SSE connection so old handlers stop firing
+    if (abortRef.current) {
+      abortRef.current.abort();
+      abortRef.current = null;
+    }
     // Clear local streaming state — the old run continues server-side
     setIsStreaming(false);
     setStreamBlocks([]);
