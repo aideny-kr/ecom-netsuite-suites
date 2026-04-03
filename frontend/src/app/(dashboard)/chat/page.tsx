@@ -101,6 +101,12 @@ export default function ChatPage() {
   const { data: sessions = [] } = useQuery<ChatSession[]>({
     queryKey: ["chat-sessions", "main"],
     queryFn: () => apiClient.get<ChatSession[]>("/api/v1/chat/sessions"),
+    // Poll every 5s when any session is running, so sidebar indicator updates
+    refetchInterval: (query) => {
+      const data = query.state.data;
+      const hasRunning = data?.some((s) => s.status === "running" || s.status === "cancelling");
+      return hasRunning ? 5000 : false;
+    },
   });
 
   const { data: sessionDetail, isLoading: isLoadingDetail } = useQuery<ChatSessionDetail>({
@@ -445,11 +451,29 @@ export default function ChatPage() {
     [activeSessionId, createSession, flushBuffer, isStreaming, queryClient],
   );
 
+  const clearStreamingState = useCallback(() => {
+    // Clear local streaming state — the old run continues server-side
+    setIsStreaming(false);
+    setStreamBlocks([]);
+    setStreamingMessage(null);
+    setFinancialReport(null);
+    setDataTable(null);
+    setCharts([]);
+    setTaskOutput(null);
+    setPendingMessage(null);
+    setError(null);
+  }, []);
+
   const handleNewChat = useCallback(() => {
     setActiveSessionId(null);
-    setError(null);
-    setPendingMessage(null);
-  }, []);
+    clearStreamingState();
+  }, [clearStreamingState]);
+
+  const handleSelectSession = useCallback((sessionId: string) => {
+    if (sessionId === activeSessionId) return;
+    clearStreamingState();
+    setActiveSessionId(sessionId);
+  }, [activeSessionId, clearStreamingState]);
 
   // Auto-send prefill message from URL (e.g., from Recon "Investigate in Chat")
   useEffect(() => {
@@ -494,7 +518,7 @@ export default function ChatPage() {
         variant="terminal"
         sessions={sessions}
         activeSessionId={activeSessionId}
-        onSelectSession={setActiveSessionId}
+        onSelectSession={handleSelectSession}
         onNewChat={handleNewChat}
         collapsed={chatSidebarCollapsed}
         onToggle={() => setChatSidebarCollapsed(!chatSidebarCollapsed)}
@@ -561,6 +585,7 @@ export default function ChatPage() {
           onSend={handleSend}
           onStop={handleStop}
           isLoading={isStreaming || createSession.isPending}
+          isRunning={isStreaming}
           workspaceId={workspaces[0]?.id || null}
         />
       </div>
