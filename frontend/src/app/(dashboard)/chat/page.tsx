@@ -170,115 +170,19 @@ export default function ChatPage() {
     if (hydrated) forceRender((n) => n + 1);
   }, [sessionDetail]);
 
-  // Reconnect to a running session's SSE stream when switching to it
-  const reconnectingRef = useRef(false);
+  // When switching to a session that finished a background run, refetch to show the result.
+  // We intentionally do NOT reconnect to mid-stream runs — the completed response
+  // will appear when the session detail is refetched after the run finishes.
   useEffect(() => {
     if (!activeSessionId) return;
-    const session = sessions?.find((s: ChatSession) => s.id === activeSessionId);
-    if (!session?.active_run_id || session.status !== "running") return;
-    if (isStreaming || reconnectingRef.current) return;
-    // Don't reconnect to a run we just started ourselves
-    if (activeRunRef.current === session.active_run_id) return;
-
-    const runId = session.active_run_id;
-    activeRunRef.current = runId;
-    reconnectingRef.current = true;
-    setIsStreaming(true);
-    setStreamBlocks([]);
-
-    (async () => {
-      try {
-        const controller = new AbortController();
-        abortRef.current = controller;
-        const res = await apiClient.streamGet(`/api/v1/chat/runs/${runId}/stream?last_id=0`, controller.signal);
-        await consumeChatStream(res, {
-          onText: (chunk) => {
-            bufferRef.current.push(chunk);
-            if (rafRef.current === null) {
-              rafRef.current = requestAnimationFrame(flushBuffer);
-            }
-          },
-          onToolStatus: () => {
-            // Legacy handler — tool_start/tool_end now drive the UI via streamBlocks
-          },
-          onFinancialReport: (data) => {
-            setFinancialReport(data);
-            setStreamBlocks(prev => [...prev, { type: "financial_report" as const, data, id: `fr-${Date.now()}` }]);
-          },
-          onDataTable: (data) => {
-            setDataTable(data);
-            setStreamBlocks(prev => [...prev, { type: "data_table" as const, data, id: `dt-${Date.now()}` }]);
-          },
-          onChart: (data) => {
-            setCharts((prev) => [...prev, data]);
-            setStreamBlocks(prev => [...prev, { type: "chart" as const, data, id: `chart-${Date.now()}` }]);
-          },
-          onTaskOutput: (data) => {
-            setTaskOutput(data);
-            setStreamBlocks(prev => [...prev, { type: "task_output" as const, data, id: `to-${Date.now()}` }]);
-          },
-          onToolStart: (tool_name, tool_input, step) => {
-            if (bufferRef.current.length > 0) {
-              const text = bufferRef.current.join("");
-              bufferRef.current = [];
-              if (text.trim()) {
-                setStreamBlocks(prev => {
-                  const last = prev[prev.length - 1];
-                  if (last && last.type === "text") {
-                    return [...prev.slice(0, -1), { ...last, content: last.content + text }];
-                  }
-                  return [...prev, { type: "text" as const, content: text, id: `text-${Date.now()}` }];
-                });
-              }
-            }
-            setStreamBlocks(prev => [...prev, {
-              type: "tool" as const,
-              tool: { tool_name, tool_input, step, status: "running" as const },
-              id: `tool-${step}`,
-            }]);
-          },
-          onToolEnd: (tool_name, step, duration_ms, success, result_summary) => {
-            setStreamBlocks(prev => prev.map(block =>
-              block.type === "tool" && block.tool.step === step
-                ? { ...block, tool: { ...block.tool, status: (success ? "complete" : "error") as StreamingToolCall["status"], duration_ms, success, result_summary } }
-                : block
-            ));
-          },
-          onError: (err) => setError(err),
-          onMessage: (message) => {
-            setFinancialReport((current) => {
-              if (current) financialReportsRef.current.set(message.id, current);
-              return null;
-            });
-            setDataTable((current) => {
-              if (current) dataTablesRef.current.set(message.id, current);
-              return null;
-            });
-            setCharts((current) => {
-              if (current.length > 0) chartsRef.current.set(message.id, current);
-              return [];
-            });
-            setTaskOutput((current) => {
-              if (current) taskOutputsRef.current.set(message.id, current);
-              return null;
-            });
-            setStreamingMessage(message);
-            setStreamBlocks([]);
-          },
-        });
-      } catch {
-        // Run may have completed while we were away
-      } finally {
-        activeRunRef.current = null;
-        reconnectingRef.current = false;
-        if (rafRef.current !== null) { cancelAnimationFrame(rafRef.current); rafRef.current = null; }
-        setIsStreaming(false);
-        await queryClient.invalidateQueries({ queryKey: ["chat-session", activeSessionId] });
-        await queryClient.invalidateQueries({ queryKey: ["chat-sessions"] });
-      }
-    })();
+    queryClient.invalidateQueries({ queryKey: ["chat-session", activeSessionId] });
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeSessionId]);
+
+  // Placeholder — reconnect logic removed to fix cross-session bleed.
+  // When a background run completes, the 5s session poll detects status → "idle".
+  // The session detail refetch above loads the completed messages from DB.
+  // Future: add mid-stream reconnect with proper stream isolation.
 
   const handleSend = useCallback(
     async (content: string, fileId?: string) => {
