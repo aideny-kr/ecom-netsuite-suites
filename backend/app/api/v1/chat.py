@@ -337,6 +337,12 @@ async def _run_chat_background(
     rm = get_run_manager()
     try:
         async with async_session_factory() as db:
+            # Re-load session in this DB context so title/updated_at changes persist
+            result = await db.execute(
+                select(ChatSession).where(ChatSession.id == uuid.UUID(session_id))
+            )
+            session = result.scalar_one()
+
             async for chunk in run_chat_turn(
                 db=db,
                 session=session,
