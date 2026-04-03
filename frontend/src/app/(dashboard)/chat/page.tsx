@@ -46,20 +46,9 @@ export default function ChatPage() {
 
   const bufferRef = useRef<string[]>([]);
   const rafRef = useRef<number | null>(null);
+  const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const flushBuffer = useCallback(() => {
-    if (bufferRef.current.length === 0) return;
-    const text = bufferRef.current.join("");
-    // Flush at word/sentence boundaries to prevent mid-word rendering
-    const boundaryMatch = text.match(/^([\s\S]*[\s.!?:;\n,\-—])([^\s.!?:;\n,\-—]*)$/);
-    let toFlush: string;
-    if (boundaryMatch && boundaryMatch[2].length > 0 && boundaryMatch[2].length < 40) {
-      toFlush = boundaryMatch[1];
-      bufferRef.current = [boundaryMatch[2]];
-    } else {
-      toFlush = text;
-      bufferRef.current = [];
-    }
+  const appendTextBlock = useCallback((toFlush: string) => {
     setStreamBlocks(prev => {
       const last = prev[prev.length - 1];
       if (last && last.type === "text") {
@@ -67,8 +56,33 @@ export default function ChatPage() {
       }
       return [...prev, { type: "text" as const, content: toFlush, id: `text-${Date.now()}` }];
     });
-    rafRef.current = null;
   }, []);
+
+  const flushBuffer = useCallback(() => {
+    rafRef.current = null;
+    if (flushTimerRef.current) { clearTimeout(flushTimerRef.current); flushTimerRef.current = null; }
+    if (bufferRef.current.length === 0) return;
+    const text = bufferRef.current.join("");
+    // Prefer word/sentence boundaries to prevent mid-word rendering
+    const boundaryMatch = text.match(/^([\s\S]*[\s.!?:;\n,\-—])([^\s.!?:;\n,\-—]*)$/);
+    if (boundaryMatch && boundaryMatch[2].length > 0 && boundaryMatch[2].length < 40) {
+      bufferRef.current = [boundaryMatch[2]];
+      appendTextBlock(boundaryMatch[1]);
+      // Start safety timer for remainder — force flush if no new chunks arrive
+      flushTimerRef.current = setTimeout(forceFlush, 100);
+    } else {
+      bufferRef.current = [];
+      appendTextBlock(text);
+    }
+  }, [appendTextBlock]);
+
+  const forceFlush = useCallback(() => {
+    flushTimerRef.current = null;
+    if (bufferRef.current.length === 0) return;
+    const text = bufferRef.current.join("");
+    bufferRef.current = [];
+    appendTextBlock(text);
+  }, [appendTextBlock]);
 
   const { data: workspaces = [] } = useWorkspaces();
 
@@ -174,6 +188,9 @@ export default function ChatPage() {
             if (rafRef.current === null) {
               rafRef.current = requestAnimationFrame(flushBuffer);
             }
+            // Safety timer: force flush after 100ms even without word boundary
+            if (flushTimerRef.current) clearTimeout(flushTimerRef.current);
+            flushTimerRef.current = setTimeout(forceFlush, 100);
           },
           onToolStatus: () => {
             // Legacy handler — tool_start/tool_end now drive the UI via streamBlocks
@@ -260,10 +277,14 @@ export default function ChatPage() {
         const message = err instanceof Error ? err.message : "Failed to send message. Please try again.";
         setError(message);
       } finally {
-        // Flush any remaining buffered text and cancel pending RAF
+        // Flush any remaining buffered text and cancel pending RAF/timers
         if (rafRef.current !== null) {
           cancelAnimationFrame(rafRef.current);
           rafRef.current = null;
+        }
+        if (flushTimerRef.current) {
+          clearTimeout(flushTimerRef.current);
+          flushTimerRef.current = null;
         }
         if (bufferRef.current.length > 0) {
           const remaining = bufferRef.current.join("");
