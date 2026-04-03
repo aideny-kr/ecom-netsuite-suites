@@ -322,6 +322,9 @@ export default function ChatPage() {
           },
         });
       } catch (err: unknown) {
+        // AbortController.abort() throws — this is expected on session switch, not an error
+        if (err instanceof DOMException && err.name === "AbortError") return;
+        if (err instanceof Error && err.message.includes("aborted")) return;
         const message = err instanceof Error ? err.message : "Failed to send message. Please try again.";
         if (message.includes("already in progress")) {
           setError("A response is already in progress for this session. Please wait or stop it first.");
