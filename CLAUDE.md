@@ -273,6 +273,11 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 | Stripe connector card | `frontend/src/components/settings/stripe-connector-card.tsx` |
 | Data source connectors | `frontend/src/components/settings/data-source-connectors-section.tsx` |
 | Permission helpers | `backend/app/core/dependencies.py` (require_any_permission) |
+| Streaming tool card | `frontend/src/components/chat/streaming-tool-card.tsx` |
+| Chat run manager | `backend/app/services/chat/run_manager.py` |
+| Chat runs API | `backend/app/api/v1/chat_runs.py` |
+| Frontend tests | `frontend/src/components/chat/__tests__/` |
+| Vitest config | `frontend/vitest.config.ts` |
 | nginx config | `/etc/nginx/sites-available/suitestudio` (on GCP VM) |
 
 ## Common Mistakes to Avoid
@@ -322,8 +327,9 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 
 ## Current State
 
-- **Product**: AI-den v1.5 + order-level recon deployed to staging 2026-03-30. 2757 tests, CI fully green.
-- **Latest migration**: 062_recon_results
+- **Product**: AI-den v1.6 deployed to staging 2026-04-03. Background chat, streaming tool cards, ordered content blocks, trimmed prompt. CI green.
+- **Latest migration**: 063_message_agent_id
+- **Frontend tests**: Vitest + @testing-library/react (30 tests). Run: `cd frontend && npx vitest run`
 - **Staging**: `api-staging.suitestudio.ai` + `staging.suitestudio.ai`. GCP Docker + nginx + Let's Encrypt. Deploy: `saas-deployment` skill.
 
 ## Known Issues
