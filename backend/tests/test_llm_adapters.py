@@ -355,6 +355,7 @@ class TestAnthropicStreamRetry:
             def text_stream(self):
                 async def _gen():
                     yield "hello"
+
                 return _gen()
 
             async def get_final_message(self):
@@ -420,6 +421,7 @@ class TestAnthropicStreamRetry:
                 async def _gen():
                     yield "partial "
                     raise _make_overloaded_error()
+
                 return _gen()
 
             async def get_final_message(self):  # pragma: no cover - not reached
