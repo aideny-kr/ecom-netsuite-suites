@@ -53,9 +53,7 @@ async def stream_run(
             nonlocal cursor
             try:
                 while True:
-                    events = await asyncio.to_thread(
-                        rm.read_events, run_id, cursor, 50, 1000
-                    )
+                    events = await asyncio.to_thread(rm.read_events, run_id, cursor, 50, 1000)
                     if events:
                         for event in events:
                             cursor = event["id"]
@@ -65,9 +63,7 @@ async def stream_run(
                         current = await asyncio.to_thread(rm.get_status, run_id)
                         if current in _TERMINAL_STATUSES:
                             # Drain any remaining events
-                            remaining = await asyncio.to_thread(
-                                rm.read_events, run_id, cursor, 100, 0
-                            )
+                            remaining = await asyncio.to_thread(rm.read_events, run_id, cursor, 100, 0)
                             for event in remaining:
                                 cursor = event["id"]
                                 await queue.put(event["data"])
@@ -77,9 +73,7 @@ async def stream_run(
                     # Check terminal after reading events too
                     current = await asyncio.to_thread(rm.get_status, run_id)
                     if current in _TERMINAL_STATUSES:
-                        remaining = await asyncio.to_thread(
-                            rm.read_events, run_id, cursor, 100, 0
-                        )
+                        remaining = await asyncio.to_thread(rm.read_events, run_id, cursor, 100, 0)
                         for event in remaining:
                             cursor = event["id"]
                             await queue.put(event["data"])

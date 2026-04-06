@@ -1,6 +1,5 @@
 """Tests for chat RunManager — Redis-backed run state and event streams."""
 
-
 import pytest
 import redis
 
@@ -22,9 +21,7 @@ def _redis_available() -> bool:
         return False
 
 
-skip_no_redis = pytest.mark.skipif(
-    not _redis_available(), reason="Redis not available"
-)
+skip_no_redis = pytest.mark.skipif(not _redis_available(), reason="Redis not available")
 
 
 @pytest.fixture
