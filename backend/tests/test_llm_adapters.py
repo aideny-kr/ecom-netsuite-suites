@@ -309,3 +309,140 @@ class TestDataclasses:
         assert block.id == "1"
         assert block.name == "test"
         assert block.input == {"a": 1}
+
+
+# ---------------------------------------------------------------------------
+# Anthropic stream retry on transient errors
+# ---------------------------------------------------------------------------
+
+
+class TestAnthropicStreamRetry:
+    """Regression for staging bug where overloaded_error surfaced after zero retries,
+    leaving the user with a fallback message and a stuck 'Processing...' spinner."""
+
+    @pytest.mark.asyncio
+    async def test_retries_overloaded_error_then_succeeds(self, monkeypatch):
+        import anthropic
+
+        from app.services.chat.adapters import anthropic_adapter as mod
+        from app.services.chat.adapters.anthropic_adapter import AnthropicAdapter
+
+        # Zero out sleeps so the test is fast
+        monkeypatch.setattr(mod, "_RETRY_DELAYS_SECONDS", (0, 0, 0))
+
+        call_count = {"n": 0}
+
+        def _make_overloaded_error():
+            exc = anthropic.APIStatusError.__new__(anthropic.APIStatusError)
+            exc.status_code = 529
+            exc.body = {"error": {"type": "overloaded_error", "message": "Overloaded"}}
+            exc.message = "Overloaded"
+            return exc
+
+        class _FakeStream:
+            def __init__(self, raise_once: bool):
+                self._raise = raise_once
+
+            async def __aenter__(self):
+                if self._raise:
+                    raise _make_overloaded_error()
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            @property
+            def text_stream(self):
+                async def _gen():
+                    yield "hello"
+
+                return _gen()
+
+            async def get_final_message(self):
+                final = MagicMock()
+                final.content = []
+                final.usage = MagicMock(
+                    input_tokens=1,
+                    output_tokens=1,
+                    cache_creation_input_tokens=0,
+                    cache_read_input_tokens=0,
+                )
+                return final
+
+        def _stream(**kwargs):
+            call_count["n"] += 1
+            return _FakeStream(raise_once=call_count["n"] == 1)
+
+        adapter = AnthropicAdapter(api_key="sk-test")
+        adapter._client = MagicMock()
+        adapter._client.messages.stream = _stream
+
+        events = []
+        async for event_type, payload in adapter.stream_message(
+            model="claude-sonnet-4-6",
+            max_tokens=100,
+            system="sys",
+            messages=[{"role": "user", "content": "hi"}],
+        ):
+            events.append((event_type, payload))
+
+        # First attempt raised, second attempt succeeded
+        assert call_count["n"] == 2
+        assert any(e[0] == "text" for e in events)
+        assert any(e[0] == "response" for e in events)
+
+    @pytest.mark.asyncio
+    async def test_does_not_retry_after_partial_output(self, monkeypatch):
+        import anthropic
+
+        from app.services.chat.adapters import anthropic_adapter as mod
+        from app.services.chat.adapters.anthropic_adapter import AnthropicAdapter
+
+        monkeypatch.setattr(mod, "_RETRY_DELAYS_SECONDS", (0, 0, 0))
+
+        call_count = {"n": 0}
+
+        def _make_overloaded_error():
+            exc = anthropic.APIStatusError.__new__(anthropic.APIStatusError)
+            exc.status_code = 529
+            exc.body = {"error": {"type": "overloaded_error", "message": "Overloaded"}}
+            exc.message = "Overloaded"
+            return exc
+
+        class _FakeStream:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            @property
+            def text_stream(self):
+                async def _gen():
+                    yield "partial "
+                    raise _make_overloaded_error()
+
+                return _gen()
+
+            async def get_final_message(self):  # pragma: no cover - not reached
+                return MagicMock()
+
+        def _stream(**kwargs):
+            call_count["n"] += 1
+            return _FakeStream()
+
+        adapter = AnthropicAdapter(api_key="sk-test")
+        adapter._client = MagicMock()
+        adapter._client.messages.stream = _stream
+
+        with pytest.raises(anthropic.APIStatusError):
+            async for _ in adapter.stream_message(
+                model="claude-sonnet-4-6",
+                max_tokens=100,
+                system="sys",
+                messages=[{"role": "user", "content": "hi"}],
+            ):
+                pass
+
+        # Only the original attempt — no retry after partial output streamed
+        assert call_count["n"] == 1

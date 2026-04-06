@@ -105,16 +105,12 @@ class TestStreamEndpoint:
         mock_rm.get_status.return_value = "complete"
         mock_rm.read_events.return_value = []
 
-        resp = client.get(
-            f"/api/v1/chat/runs/{run_id}/stream", params={"last_id": "5-0"}
-        )
+        resp = client.get(f"/api/v1/chat/runs/{run_id}/stream", params={"last_id": "5-0"})
         assert resp.status_code == 200
         # Verify read_events was called with the last_id
         mock_rm.read_events.assert_called()
         call_kwargs = mock_rm.read_events.call_args
-        assert call_kwargs[1].get("last_id") == "5-0" or (
-            len(call_kwargs[0]) >= 2 and call_kwargs[0][1] == "5-0"
-        )
+        assert call_kwargs[1].get("last_id") == "5-0" or (len(call_kwargs[0]) >= 2 and call_kwargs[0][1] == "5-0")
 
 
 # ---------------------------------------------------------------------------

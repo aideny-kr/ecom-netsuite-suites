@@ -1,8 +1,28 @@
 """Anthropic (Claude) adapter — identity mapping since tools are already in Anthropic format."""
 
+import asyncio
+import logging
+
 import anthropic
 
 from app.services.chat.llm_adapter import BaseLLMAdapter, LLMResponse, TokenUsage, ToolUseBlock
+
+logger = logging.getLogger(__name__)
+
+# Transient errors worth retrying with exponential backoff before any tokens stream.
+_RETRYABLE_ERROR_TYPES = {"overloaded_error", "rate_limit_error", "api_error"}
+_RETRY_DELAYS_SECONDS = (1.0, 2.0, 4.0)  # 3 retries = 4 total attempts
+
+
+def _is_retryable(exc: anthropic.APIStatusError) -> bool:
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        err = body.get("error") or {}
+        if isinstance(err, dict) and err.get("type") in _RETRYABLE_ERROR_TYPES:
+            return True
+    # Also retry on 529/503 even if body shape is unexpected
+    status_code = getattr(exc, "status_code", None)
+    return status_code in {503, 529}
 
 
 class AnthropicAdapter(BaseLLMAdapter):
@@ -104,34 +124,56 @@ class AnthropicAdapter(BaseLLMAdapter):
         if tool_choice is not None:
             kwargs["tool_choice"] = tool_choice
 
-        async with self._client.messages.stream(**kwargs) as stream:
-            async for text in stream.text_stream:
-                yield "text", text
+        # Retry the stream open (and the first chunk) on transient overloads.
+        # Once any text has been yielded we do NOT retry — partial output
+        # cannot be rewound without confusing the caller.
+        attempt = 0
+        first_chunk_received = False
+        while True:
+            try:
+                async with self._client.messages.stream(**kwargs) as stream:
+                    async for text in stream.text_stream:
+                        first_chunk_received = True
+                        yield "text", text
 
-            final_message = await stream.get_final_message()
+                    final_message = await stream.get_final_message()
+                break
+            except anthropic.APIStatusError as exc:
+                if first_chunk_received or not _is_retryable(exc) or attempt >= len(_RETRY_DELAYS_SECONDS):
+                    raise
+                delay = _RETRY_DELAYS_SECONDS[attempt]
+                attempt += 1
+                logger.warning(
+                    "anthropic stream transient error (%s), retry %d/%d after %.1fs",
+                    getattr(exc, "status_code", "?"),
+                    attempt,
+                    len(_RETRY_DELAYS_SECONDS),
+                    delay,
+                )
+                await asyncio.sleep(delay)
 
-            text_blocks: list[str] = []
-            tool_use_blocks: list[ToolUseBlock] = []
+        text_blocks: list[str] = []
+        tool_use_blocks: list[ToolUseBlock] = []
 
-            for block in final_message.content:
-                if block.type == "text":
-                    text_blocks.append(block.text)
-                elif block.type == "tool_use":
-                    tool_use_blocks.append(ToolUseBlock(id=block.id, name=block.name, input=block.input))
+        for block in final_message.content:
+            if block.type == "text":
+                text_blocks.append(block.text)
+            elif block.type == "tool_use":
+                tool_use_blocks.append(ToolUseBlock(id=block.id, name=block.name, input=block.input))
 
-            usage = TokenUsage(
-                input_tokens=final_message.usage.input_tokens,
-                output_tokens=final_message.usage.output_tokens,
-                cache_creation_input_tokens=getattr(final_message.usage, "cache_creation_input_tokens", 0) or 0,
-                cache_read_input_tokens=getattr(final_message.usage, "cache_read_input_tokens", 0) or 0,
-            )
+        usage = TokenUsage(
+            input_tokens=final_message.usage.input_tokens,
+            output_tokens=final_message.usage.output_tokens,
+            cache_creation_input_tokens=getattr(final_message.usage, "cache_creation_input_tokens", 0) or 0,
+            cache_read_input_tokens=getattr(final_message.usage, "cache_read_input_tokens", 0) or 0,
+        )
 
-            response = LLMResponse(
-                text_blocks=text_blocks,
-                tool_use_blocks=tool_use_blocks,
-                usage=usage,
-            )
-            yield "response", response
+        response = LLMResponse(
+            text_blocks=text_blocks,
+            tool_use_blocks=tool_use_blocks,
+            usage=usage,
+        )
+        yield "response", response
 
     def build_tool_result_message(self, tool_results: list[dict]) -> dict:
         return {"role": "user", "content": tool_results}

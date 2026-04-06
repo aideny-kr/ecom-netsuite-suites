@@ -109,4 +109,5 @@ class TestDiagnoseBeforeSwitching:
 class TestCompactionContinuation:
     def test_continuation_constant_exists(self):
         from app.services.chat.history_compactor import COMPACTION_CONTINUATION
+
         assert "resume" in COMPACTION_CONTINUATION.lower() or "do not recap" in COMPACTION_CONTINUATION.lower()

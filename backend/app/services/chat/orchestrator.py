@@ -2368,9 +2368,7 @@ async def run_chat_turn(
             _row_count = tool_call_row_count(_result_dict)
             _had_error = tool_call_had_error(_result_dict)
             _summary = (
-                f"{_row_count} rows returned"
-                if _row_count and not _had_error
-                else ("Error" if _had_error else "Done")
+                f"{_row_count} rows returned" if _row_count and not _had_error else ("Error" if _had_error else "Done")
             )
             yield {
                 "type": "tool_end",
