@@ -138,41 +138,57 @@ export async function consumeChatStream(
 
   const decoder = new TextDecoder();
   let buffer = "";
+  // Terminal events — once dispatched, we stop reading the stream so the UI
+  // never hangs waiting for a sentinel that may be dropped by the proxy.
+  //   `message` fires at the end of every successful turn
+  //   `error`   fires when the backend gives up on this turn
+  let terminalSeen = false;
 
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
+  try {
+    while (!terminalSeen) {
+      const { value, done } = await reader.read();
+      if (done) break;
 
-    buffer += decoder.decode(value, { stream: true });
-    const parsed = parseSseBuffer(buffer);
-    buffer = parsed.remainder;
+      buffer += decoder.decode(value, { stream: true });
+      const parsed = parseSseBuffer(buffer);
+      buffer = parsed.remainder;
 
-    for (const event of parsed.events) {
-      if (event.type === "text") {
-        handlers.onText?.(event.content);
-      } else if (event.type === "tool_status") {
-        handlers.onToolStatus?.(event.content);
-      } else if (event.type === "confidence") {
-        handlers.onConfidence?.(event.score, event.explanation);
-      } else if (event.type === "importance") {
-        handlers.onImportance?.(event.tier, event.label, event.needs_review);
-      } else if (event.type === "financial_report") {
-        handlers.onFinancialReport?.(event.data);
-      } else if (event.type === "data_table") {
-        handlers.onDataTable?.(event.data);
-      } else if (event.type === "chart") {
-        handlers.onChart?.(event.data);
-      } else if (event.type === "task_output") {
-        handlers.onTaskOutput?.(event.data);
-      } else if (event.type === "error") {
-        handlers.onError?.(event.error);
-      } else if (event.type === "message") {
-        handlers.onMessage?.(event.message);
-      } else if (event.type === "tool_start") {
-        handlers.onToolStart?.(event.tool_name, event.tool_input, event.step);
-      } else if (event.type === "tool_end") {
-        handlers.onToolEnd?.(event.tool_name, event.step, event.duration_ms, event.success, event.result_summary);
+      for (const event of parsed.events) {
+        if (event.type === "text") {
+          handlers.onText?.(event.content);
+        } else if (event.type === "tool_status") {
+          handlers.onToolStatus?.(event.content);
+        } else if (event.type === "confidence") {
+          handlers.onConfidence?.(event.score, event.explanation);
+        } else if (event.type === "importance") {
+          handlers.onImportance?.(event.tier, event.label, event.needs_review);
+        } else if (event.type === "financial_report") {
+          handlers.onFinancialReport?.(event.data);
+        } else if (event.type === "data_table") {
+          handlers.onDataTable?.(event.data);
+        } else if (event.type === "chart") {
+          handlers.onChart?.(event.data);
+        } else if (event.type === "task_output") {
+          handlers.onTaskOutput?.(event.data);
+        } else if (event.type === "error") {
+          handlers.onError?.(event.error);
+          terminalSeen = true;
+        } else if (event.type === "message") {
+          handlers.onMessage?.(event.message);
+          terminalSeen = true;
+        } else if (event.type === "tool_start") {
+          handlers.onToolStart?.(event.tool_name, event.tool_input, event.step);
+        } else if (event.type === "tool_end") {
+          handlers.onToolEnd?.(event.tool_name, event.step, event.duration_ms, event.success, event.result_summary);
+        }
       }
+    }
+  } finally {
+    // Release the HTTP connection so the browser's pending fetch resolves.
+    try {
+      await reader.cancel();
+    } catch {
+      // Cancel errors are non-fatal
     }
   }
 }
