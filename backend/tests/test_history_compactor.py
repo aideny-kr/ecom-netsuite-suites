@@ -64,7 +64,7 @@ class TestCompactHistory:
         assert "<compacted_history>" in result[0]["content"]
         assert "Q1 sales" in result[0]["content"]
         assert result[1]["role"] == "assistant"
-        assert "context" in result[1]["content"].lower()
+        assert "resume" in result[1]["content"].lower()
 
     @pytest.mark.asyncio
     async def test_preserves_recent_turns(self):

@@ -1,7 +1,8 @@
 """Add agent_id to chat_messages for per-message agent tracking."""
 
-from alembic import op
 import sqlalchemy as sa
+
+from alembic import op
 
 revision = "063"
 down_revision = "062_recon_results"

@@ -40,10 +40,10 @@ class TestPromptChangeRequestRules:
         prompt = _make_agent().system_prompt
         assert "3 tool calls" in prompt or "search → read → patch" in prompt
 
-    def test_no_line_by_line_analysis(self):
-        """Prompt should say not to analyze file line-by-line in reasoning."""
+    def test_workspace_read_before_patch(self):
+        """Prompt should say to always read before patching."""
         prompt = _make_agent().system_prompt
-        assert "line-by-line" in prompt
+        assert "read before patching" in prompt.lower() or "Always read before patching" in prompt
 
 
 class TestDuplicatePatchPrevention:

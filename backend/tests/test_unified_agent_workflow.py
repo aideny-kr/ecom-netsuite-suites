@@ -1,7 +1,7 @@
-"""Tests for unified agent 7-step workflow (Fix 4 — 10x Agent Quality).
+"""Tests for unified agent workflow (restructured prompt — XML sections).
 
-Validates that the unified agent prompt has the battle-tested workflow from
-the SuiteQL agent, anti-enrichment rules, and correct RMA status codes.
+Validates that the unified agent prompt has the battle-tested workflow,
+anti-enrichment rules, correct RMA status codes, and investigation mode.
 """
 
 import uuid
@@ -18,53 +18,62 @@ def _make_agent() -> UnifiedAgent:
 
 
 class TestWorkflowStructure:
-    """The unified agent should have the 7-step workflow, not the old 5-step DECISION ORDER."""
+    """The unified agent should have the XML-section workflow with tool selection,
+    dialect rules, agentic workflow, and output instructions."""
 
-    def test_has_step_0_custom_records(self):
+    def test_has_tool_selection_section(self):
         agent = _make_agent()
         prompt = agent.system_prompt
-        assert "STEP 0" in prompt
-        assert "CUSTOM RECORDS FIRST" in prompt
+        assert "<tool_selection>" in prompt
+        assert "</tool_selection>" in prompt
 
-    def test_has_step_1_check_context(self):
+    def test_has_suiteql_dialect_rules(self):
         agent = _make_agent()
         prompt = agent.system_prompt
-        assert "STEP 1" in prompt
+        assert "<suiteql_dialect_rules>" in prompt
+        assert "</suiteql_dialect_rules>" in prompt
 
-    def test_has_step_2_domain_knowledge(self):
+    def test_has_agentic_workflow(self):
         agent = _make_agent()
         prompt = agent.system_prompt
-        assert "STEP 2" in prompt
-        assert "domain_knowledge" in prompt.lower()
+        assert "<agentic_workflow>" in prompt
+        assert "</agentic_workflow>" in prompt
 
-    def test_has_step_3_preflight_schema(self):
+    def test_has_output_instructions(self):
         agent = _make_agent()
         prompt = agent.system_prompt
-        assert "STEP 3" in prompt
-        assert "PREFLIGHT" in prompt
+        assert "<output_instructions>" in prompt
+        assert "</output_instructions>" in prompt
 
-    def test_has_step_4_execute_one_query(self):
+    def test_has_custom_records_guidance(self):
         agent = _make_agent()
         prompt = agent.system_prompt
-        assert "STEP 4" in prompt
-        assert "EXECUTE" in prompt
+        assert "CUSTOM RECORD" in prompt or "customrecord_" in prompt
 
-    def test_has_step_5_error_recovery(self):
+    def test_has_check_context_first(self):
         agent = _make_agent()
         prompt = agent.system_prompt
-        assert "STEP 5" in prompt
-        assert "ERROR RECOVERY" in prompt or "Error" in prompt
+        assert "CHECK CONTEXT FIRST" in prompt or "tenant_vernacular" in prompt
 
-    def test_has_step_6_stop_when_done(self):
+    def test_has_preflight_schema_check(self):
         agent = _make_agent()
         prompt = agent.system_prompt
-        assert "STEP 6" in prompt
-        assert "STOP" in prompt
+        assert "PREFLIGHT SCHEMA CHECK" in prompt
 
-    def test_has_step_7_documentation(self):
+    def test_has_execute_one_query(self):
         agent = _make_agent()
         prompt = agent.system_prompt
-        assert "STEP 7" in prompt
+        assert "EXECUTE ONE QUERY" in prompt
+
+    def test_has_error_recovery(self):
+        agent = _make_agent()
+        prompt = agent.system_prompt
+        assert "ERROR RECOVERY" in prompt
+
+    def test_has_stop_when_done(self):
+        agent = _make_agent()
+        prompt = agent.system_prompt
+        assert "STOP WHEN YOU HAVE DATA" in prompt
 
     def test_old_decision_order_removed(self):
         """The old 5-step DECISION ORDER should no longer exist."""
@@ -76,21 +85,21 @@ class TestWorkflowStructure:
         agent = _make_agent()
         prompt = agent.system_prompt
         assert "BUDGET" in prompt
-        assert "tool calls" in prompt or "tool call" in prompt
+        assert "tool call" in prompt
 
 
 class TestAntiEnrichmentRules:
-    """The unified agent should have explicit anti-enrichment rules in STEP 4."""
+    """The unified agent should have explicit anti-enrichment rules in the agentic workflow."""
 
-    def test_anti_enrichment_in_step_4(self):
-        """Anti-enrichment rules must be inside STEP 4, not at the bottom."""
+    def test_anti_enrichment_in_agentic_workflow(self):
+        """Anti-enrichment rules must be inside <agentic_workflow>, not at the bottom."""
         agent = _make_agent()
         prompt = agent.system_prompt
-        step_4_pos = prompt.index("STEP 4")
-        step_5_pos = prompt.index("STEP 5")
+        workflow_start = prompt.index("<agentic_workflow>")
+        workflow_end = prompt.index("</agentic_workflow>")
         anti_enrichment_pos = prompt.index("ANTI-ENRICHMENT")
-        # Anti-enrichment must be between STEP 4 and STEP 5
-        assert step_4_pos < anti_enrichment_pos < step_5_pos
+        # Anti-enrichment must be between agentic_workflow tags
+        assert workflow_start < anti_enrichment_pos < workflow_end
 
     def test_rma_anti_enrichment(self):
         """Should NOT join item receipts to 'prove' receipt status."""
@@ -102,7 +111,7 @@ class TestAntiEnrichmentRules:
         """General rule: if status filter answers the question, stop."""
         agent = _make_agent()
         prompt = agent.system_prompt
-        assert "No cross-reference joins" in prompt or "No cross-reference" in prompt
+        assert "No cross-reference joins" in prompt or "No cross-reference" in prompt or "status codes answer" in prompt
 
 
 class TestRMAStatusCodes:
@@ -185,16 +194,16 @@ class TestInvestigationMode:
     def test_max_steps_investigation(self):
         agent = _make_agent()
         agent._context_need = "full"
-        assert agent.max_steps == 12
+        assert agent.max_steps == 15
 
     def test_max_steps_data(self):
         agent = _make_agent()
         agent._context_need = "data"
-        assert agent.max_steps == 6
+        assert agent.max_steps == 12
 
     def test_max_steps_default(self):
         agent = _make_agent()
-        assert agent.max_steps == 6
+        assert agent.max_steps == 12
 
     def test_investigation_prompt_has_progressive_output(self):
         agent = _make_agent()
@@ -213,7 +222,7 @@ class TestInvestigationMode:
         agent = _make_agent()
         agent._context_need = "data"
         prompt = agent.system_prompt
-        assert "ONLY ONE sentence" in prompt
+        assert "ONE sentence summary" in prompt
 
     def test_investigation_has_systemnote_expertise(self):
         agent = _make_agent()

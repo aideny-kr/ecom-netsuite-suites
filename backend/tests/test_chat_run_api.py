@@ -1,16 +1,14 @@
 """Tests for chat run API endpoints (SSE relay + cancel)."""
 
-import json
 import uuid
 from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
 
-from app.main import app
 from app.core.dependencies import get_current_user
+from app.main import app
 from app.models.user import User
-
 
 # ---------------------------------------------------------------------------
 # Fixtures

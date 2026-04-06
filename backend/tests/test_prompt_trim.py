@@ -1,5 +1,4 @@
 """Test prompt trim — verify critical rules preserved and size reduced."""
-import pytest
 
 from app.services.chat.agents.unified_agent import _SYSTEM_PROMPT, UnifiedAgent
 

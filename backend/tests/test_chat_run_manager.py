@@ -1,7 +1,5 @@
 """Tests for chat RunManager — Redis-backed run state and event streams."""
 
-import json
-import time
 
 import pytest
 import redis
