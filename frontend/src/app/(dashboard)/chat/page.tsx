@@ -34,6 +34,7 @@ export default function ChatPage() {
   const [streamBlocks, setStreamBlocks] = useState<StreamBlock[]>([]);
   const [streamingMessage, setStreamingMessage] = useState<ChatMessage | null>(null);
   const [isStreaming, setIsStreaming] = useState(false);
+  const isStreamingRef = useRef(false);
   const [financialReport, setFinancialReport] = useState<FinancialReportData | null>(null);
   const financialReportsRef = useRef<Map<string, FinancialReportData>>(new Map());
   const [dataTable, setDataTable] = useState<DataTableData | null>(null);
@@ -186,9 +187,10 @@ export default function ChatPage() {
 
   const handleSend = useCallback(
     async (content: string, fileId?: string) => {
-      if (isStreaming || createSession.isPending) return;
+      if (isStreamingRef.current || createSession.isPending) return;
       setError(null);
       setPendingMessage(content);
+      isStreamingRef.current = true;
       setIsStreaming(true);
       setStreamBlocks([]);
       setStreamingMessage(null);
@@ -204,6 +206,7 @@ export default function ChatPage() {
           sessionId = session.id;
         } catch {
           setPendingMessage(null);
+          isStreamingRef.current = false;
           setIsStreaming(false);
           setError("Failed to create chat session.");
           return;
@@ -359,8 +362,13 @@ export default function ChatPage() {
         // so there's no blank gap between streaming text disappearing
         // and the saved message appearing.
         // Use local sessionId (not activeSessionId) to avoid stale closure.
-        await queryClient.invalidateQueries({ queryKey: ["chat-session", sessionId] });
-        await queryClient.invalidateQueries({ queryKey: ["chat-sessions"] });
+        try {
+          await queryClient.invalidateQueries({ queryKey: ["chat-session", sessionId] });
+          await queryClient.invalidateQueries({ queryKey: ["chat-sessions"] });
+        } catch {
+          // Refetch failure is non-critical — session data may be stale until next poll
+        }
+        isStreamingRef.current = false;
         setIsStreaming(false);
         setPendingMessage(null);
         setStreamBlocks([]);
@@ -371,7 +379,7 @@ export default function ChatPage() {
         setTaskOutput(null);
       }
     },
-    [activeSessionId, createSession, flushBuffer, isStreaming, queryClient],
+    [activeSessionId, createSession, flushBuffer, queryClient],
   );
 
   const clearStreamingState = useCallback(() => {
@@ -381,6 +389,7 @@ export default function ChatPage() {
       abortRef.current = null;
     }
     // Clear local streaming state — the old run continues server-side
+    isStreamingRef.current = false;
     setIsStreaming(false);
     setStreamBlocks([]);
     setStreamingMessage(null);

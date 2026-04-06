@@ -12,6 +12,7 @@ export function useWorkspaceChat(workspaceId: string | null) {
   const [pendingMessage, setPendingMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isStreaming, setIsStreaming] = useState(false);
+  const isStreamingRef = useRef(false);
   const [streamBlocks, setStreamBlocks] = useState<StreamBlock[]>([]);
   const [streamingMessage, setStreamingMessage] = useState<ChatMessage | null>(null);
   const queryClient = useQueryClient();
@@ -65,9 +66,10 @@ export function useWorkspaceChat(workspaceId: string | null) {
 
   const handleSend = useCallback(
     async (content: string) => {
-      if (isStreaming || createSession.isPending) return;
+      if (isStreamingRef.current || createSession.isPending) return;
       setError(null);
       setPendingMessage(content);
+      isStreamingRef.current = true;
       setIsStreaming(true);
       setStreamBlocks([]);
       setStreamingMessage(null);
@@ -79,6 +81,7 @@ export function useWorkspaceChat(workspaceId: string | null) {
           sessionId = session.id;
         } catch {
           setPendingMessage(null);
+          isStreamingRef.current = false;
           setIsStreaming(false);
           setError("Failed to create chat session.");
           return;
@@ -129,19 +132,24 @@ export function useWorkspaceChat(workspaceId: string | null) {
             });
           }
         }
-        await queryClient.invalidateQueries({
-          queryKey: ["chat-session", sessionId],
-        });
-        await queryClient.invalidateQueries({
-          queryKey: ["chat-sessions"],
-        });
+        try {
+          await queryClient.invalidateQueries({
+            queryKey: ["chat-session", sessionId],
+          });
+          await queryClient.invalidateQueries({
+            queryKey: ["chat-sessions"],
+          });
+        } catch {
+          // Refetch failure is non-critical
+        }
+        isStreamingRef.current = false;
         setIsStreaming(false);
         setPendingMessage(null);
         setStreamBlocks([]);
         setStreamingMessage(null);
       }
     },
-    [activeSessionId, createSession, flushBuffer, isStreaming, queryClient],
+    [activeSessionId, createSession, flushBuffer, queryClient],
   );
 
   const handleNewChat = useCallback(() => {
