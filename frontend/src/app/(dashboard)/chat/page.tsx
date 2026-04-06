@@ -290,7 +290,16 @@ export default function ChatPage() {
                 : block
             ));
           },
-          onError: (streamError) => setError(streamError),
+          onError: (streamError) => {
+            setError(streamError);
+            // Treat error as terminal on the frontend — abort the SSE reader
+            // so the "Processing..." spinner clears immediately instead of
+            // hanging until the backend sentinel arrives.
+            if (abortRef.current) {
+              abortRef.current.abort();
+              abortRef.current = null;
+            }
+          },
           onMessage: (message) => {
             // Associate any in-flight financial report with this message
             setFinancialReport((current) => {
