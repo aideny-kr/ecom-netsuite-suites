@@ -111,7 +111,7 @@ async def build_connector_state(db: AsyncSession, tenant_id: UUID) -> _LiveConne
     bq_healthy = (
         bq_connector is not None
         and getattr(bq_connector, "status", None) == "active"
-        and (bq_connector.id not in mcp_alert_connection_ids if bq_connector else True)
+        and bq_connector.id not in mcp_alert_connection_ids
     )
 
     # ── BigQuery sync age ──

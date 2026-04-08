@@ -1041,6 +1041,7 @@ async def run_chat_turn(
     user_timezone: str | None = None,
     agent_id: str | None = None,
     run_id: str | None = None,
+    *,
     is_rerun: bool = False,
 ) -> AsyncGenerator[dict, None]:
     """Execute an agentic chat turn with Claude's native tool use.
@@ -2254,6 +2255,12 @@ async def run_chat_turn(
                 )
             )
 
+            # KNOWN LIMITATION (v0): the legacy multi-agent path streamed
+            # `message` above via `yield event` from the coordinator loop,
+            # so the frontend reader has already exited by the time this
+            # disclosure block runs. Dogfood tenants (Framework, Rails) use
+            # the unified-agent path where ordering is correct. Fix in v1
+            # if non-dogfood tenants need disclosure on the legacy path.
             # ── Disclosure footer (Task 9 / v0 disclosure-footer feature) ──
             # Wrapped in try/except — disclosure must NEVER break the chat turn.
             # Gated on env var DISCLOSURE_ENABLED until Task 14 wires the proper
