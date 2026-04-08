@@ -35,6 +35,10 @@ frontend/e2e/screenshots/
 # Docker
 pgdata/
 
+# Git worktrees (local isolated workspaces)
+.worktrees/
+worktrees/
+
 # Docs (generated/internal)
 docs/
 
