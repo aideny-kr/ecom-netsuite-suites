@@ -6,7 +6,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiClient } from "@/lib/api-client";
 import { consumeChatStream } from "@/lib/chat-stream";
 import type { FinancialReportData, DataTableData, TaskOutputData, StreamBlock } from "@/lib/chat-stream";
-import type { ChartData } from "@/lib/types";
+import type { ChartData, DisclosureBlock } from "@/lib/types";
 import type { ChatSession, ChatSessionDetail, ChatMessage, StreamingToolCall } from "@/lib/types";
 import { SessionSidebar } from "@/components/chat/session-sidebar";
 import { MessageList } from "@/components/chat/message-list";
@@ -43,6 +43,9 @@ export default function ChatPage() {
   const chartsRef = useRef<Map<string, ChartData[]>>(new Map());
   const [taskOutput, setTaskOutput] = useState<TaskOutputData | null>(null);
   const taskOutputsRef = useRef<Map<string, TaskOutputData>>(new Map());
+  const [streamingDisclosure, setStreamingDisclosure] = useState<DisclosureBlock | null>(null);
+  const disclosuresRef = useRef<Map<string, DisclosureBlock>>(new Map());
+  const switchHintShownRef = useRef<boolean>(false);
   const queryClient = useQueryClient();
   const router = useRouter();
 
@@ -144,6 +147,10 @@ export default function ChatPage() {
     if (!sessionDetail?.messages) return;
     let hydrated = false;
     for (const msg of sessionDetail.messages) {
+      if (msg.disclosure_json) {
+        disclosuresRef.current.set(msg.id, msg.disclosure_json);
+        hydrated = true;
+      }
       if (!msg.structured_output) continue;
       const { type, data, charts: persistedCharts } = msg.structured_output as any;
       if (type === "financial_report" && data) {
@@ -262,6 +269,17 @@ export default function ChatPage() {
             setTaskOutput(data);
             setStreamBlocks(prev => [...prev, { type: "task_output" as const, data, id: `to-${Date.now()}` }]);
           },
+          onDisclosure: (disclosure) => {
+            // Per-session throttle: show switch hint only on the first dual-source query
+            const forRender = {
+              ...disclosure,
+              can_switch_source: disclosure.can_switch_source && !switchHintShownRef.current,
+            };
+            if (forRender.can_switch_source) {
+              switchHintShownRef.current = true;
+            }
+            setStreamingDisclosure(forRender);
+          },
           onToolStart: (tool_name, tool_input, step) => {
             // Flush any buffered text before tool starts
             if (bufferRef.current.length > 0) {
@@ -329,6 +347,13 @@ export default function ChatPage() {
               }
               return null;
             });
+            // Associate any in-flight disclosure with this message
+            setStreamingDisclosure((current) => {
+              if (current) {
+                disclosuresRef.current.set(message.id, current);
+              }
+              return null;
+            });
             setStreamingMessage(message);
             setStreamBlocks([]);
           },
@@ -386,6 +411,7 @@ export default function ChatPage() {
         setDataTable(null);
         setCharts([]);
         setTaskOutput(null);
+        setStreamingDisclosure(null);
       }
     },
     [activeSessionId, createSession, flushBuffer, queryClient],
@@ -411,12 +437,14 @@ export default function ChatPage() {
   }, []);
 
   const handleNewChat = useCallback(() => {
+    switchHintShownRef.current = false;
     setActiveSessionId(null);
     clearStreamingState();
   }, [clearStreamingState]);
 
   const handleSelectSession = useCallback((sessionId: string) => {
     if (sessionId === activeSessionId) return;
+    switchHintShownRef.current = false;
     clearStreamingState();
     setActiveSessionId(sessionId);
   }, [activeSessionId, clearStreamingState]);
@@ -492,6 +520,8 @@ export default function ChatPage() {
             dataTables={dataTablesRef.current}
             chartsByMessage={chartsRef.current}
             taskOutputs={taskOutputsRef.current}
+            disclosures={disclosuresRef.current}
+            streamingDisclosure={streamingDisclosure}
             pinnedAgentId={pinnedAgentId}
             agents={agents}
             agentTab={agentTab}
