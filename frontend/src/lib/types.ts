@@ -351,6 +351,15 @@ export interface Citation {
   snippet: string;
 }
 
+export interface DisclosureBlock {
+  source: "netsuite" | "bigquery";
+  interpretation: string;
+  implicit_filters: string[];
+  can_switch_source: boolean;
+  is_rerun: boolean;
+  failure_mode: boolean;
+}
+
 export interface ChatMessage {
   id: string;
   role: "user" | "assistant" | "system";
@@ -367,6 +376,7 @@ export interface ChatMessage {
   user_feedback?: "helpful" | "not_helpful" | null;
   structured_output?: { type: string; data: Record<string, unknown> } | null;
   agent_id?: string | null;
+  disclosure_json?: DisclosureBlock | null;
   created_at: string;
 }
 
