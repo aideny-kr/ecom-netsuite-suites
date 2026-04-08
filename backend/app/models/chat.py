@@ -3,7 +3,7 @@ from decimal import Decimal
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import Boolean, ForeignKey, Index, Integer, Numeric, String, Text
-from sqlalchemy.dialects.postgresql import JSON, UUID
+from sqlalchemy.dialects.postgresql import JSON, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
@@ -67,7 +67,7 @@ class ChatMessage(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     structured_output: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     # Post-turn disclosure footer: source, interpretation, implicit filters, switch hint
-    disclosure_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    disclosure_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
     session: Mapped["ChatSession"] = relationship(back_populates="messages")
 
