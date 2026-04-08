@@ -12,7 +12,7 @@ import { useBranding } from "@/providers/branding-provider";
 import type { ChatMessage } from "@/lib/types";
 import type { FinancialReportData, DataTableData, TaskOutputData, StreamBlock } from "@/lib/chat-stream";
 import type { AgentSummary } from "@/hooks/use-agents";
-import type { ChartData } from "@/lib/types";
+import type { ChartData, DisclosureBlock } from "@/lib/types";
 import { FinancialReport } from "@/components/chat/financial-report";
 import { DataFrameTable } from "@/components/chat/data-frame-table";
 import { ChartRenderer } from "@/components/chat/chart-renderer";
@@ -21,6 +21,7 @@ import { ChangeProposalCard } from "@/components/chat/change-proposal-card";
 import { WorkspaceToolCard } from "@/components/chat/workspace-tool-card";
 import { SuiteQLToolCard } from "@/components/chat/suiteql-tool-card";
 import { TaskOutputCard } from "@/components/chat/task-output-card";
+import { DisclosureFooter } from "@/components/chat/disclosure-footer";
 import { AgentChatHeader } from "@/components/chat/agent-chat-header";
 import { PricingConfigSection } from "@/components/settings/pricing-config-section";
 import { InstructionPanel } from "@/components/chat/instruction-panel";
@@ -614,6 +615,8 @@ interface MessageListProps {
   dataTables?: Map<string, DataTableData>;
   chartsByMessage?: Map<string, ChartData[]>;
   taskOutputs?: Map<string, TaskOutputData>;
+  disclosures?: Map<string, DisclosureBlock>;
+  streamingDisclosure?: DisclosureBlock | null;
   pinnedAgentId?: string | null;
   agents?: AgentSummary[];
   agentTab?: "chat" | "config";
@@ -640,6 +643,8 @@ export function MessageList({
   dataTables,
   chartsByMessage,
   taskOutputs,
+  disclosures,
+  streamingDisclosure,
   pinnedAgentId,
   agents,
   agentTab,
@@ -894,6 +899,7 @@ export function MessageList({
             dataTableData={dataTables?.get(message.id) ?? null}
             chartDataList={chartsByMessage?.get(message.id) ?? null}
             taskOutputData={taskOutputs?.get(message.id) ?? null}
+            disclosureData={disclosures?.get(message.id) ?? null}
             isTerminal={isTerminal}
           />
         ) : isTerminal ? (
@@ -954,6 +960,7 @@ export function MessageList({
           onChangesetAction={onChangesetAction}
           isStreamingPreview
           isTerminal={isTerminal}
+          disclosureData={streamingDisclosure ?? null}
         />
       )}
 
@@ -1078,6 +1085,7 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
   dataTableData = null,
   chartDataList = null,
   taskOutputData = null,
+  disclosureData = null,
   isTerminal = false,
 }: {
   message: ChatMessage;
@@ -1091,6 +1099,7 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
   dataTableData?: DataTableData | null;
   chartDataList?: ChartData[] | null;
   taskOutputData?: TaskOutputData | null;
+  disclosureData?: DisclosureBlock | null;
   isTerminal?: boolean;
 }) {
   const { brandName: agentName } = useBranding();
@@ -1174,6 +1183,8 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
         {taskOutputData && (
           <TaskOutputCard data={taskOutputData} />
         )}
+
+        {disclosureData && <DisclosureFooter disclosure={disclosureData} />}
 
         <div className="flex min-w-0 flex-col gap-2">
           {parseThinkingBlocks(message.content).map((part, index) =>
