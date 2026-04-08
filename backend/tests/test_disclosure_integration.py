@@ -33,7 +33,6 @@ from sqlalchemy import text
 from app.services.chat.disclosure import disclosure_enabled_for_tenant
 from app.services.feature_flag_service import clear_cache as clear_flag_cache
 
-
 # ---------------------------------------------------------------------------
 # Test 1: SSE event ordering — disclosure BEFORE message
 # ---------------------------------------------------------------------------
