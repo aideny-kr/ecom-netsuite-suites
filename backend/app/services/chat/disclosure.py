@@ -329,3 +329,76 @@ def parse_where_clause(sql: str) -> ParsedFilters:
         filters.append(f"Entity ID {entity_match.group(1)}")
 
     return ParsedFilters(interpretation=interpretation, implicit_filters=filters)
+
+
+# ── Entry point ──────────────────────────────────────────────────────────
+
+_DATA_TOOL_NAMES = {
+    "netsuite_suiteql",
+    "bigquery_sql",
+    "netsuite_financial_report",
+    "pivot_query_result",
+    "ns_runCustomSuiteQL",
+    "ns_getRecord",
+    "netsuite_saved_search",
+}
+
+_STALE_PATTERN_THRESHOLD_DAYS = 7
+
+
+def assemble_disclosure(
+    *,
+    tool_calls: list[dict],
+    user_query: str,
+    current_source: Literal["netsuite", "bigquery"],
+    connector_state: ConnectorState,
+    matched_pattern: dict | None,
+    is_rerun: bool,
+) -> DisclosureBlock | None:
+    """Assemble a DisclosureBlock for the current turn, or None if not applicable.
+
+    Rules:
+    1. No data-returning tool called → None
+    2. Proven pattern matched AND age < 7 days → None
+    3. All tool calls failed → failure-mode footer (only if can_switch_source)
+    4. Otherwise → parse the LAST successful data tool's SQL
+    """
+    data_tool_calls = [t for t in tool_calls if t.get("tool") in _DATA_TOOL_NAMES]
+    if not data_tool_calls:
+        return None
+
+    # Rule 2: fresh pattern suppresses the footer
+    if matched_pattern and matched_pattern.get("age_days", 0) < _STALE_PATTERN_THRESHOLD_DAYS:
+        return None
+
+    successful = [t for t in data_tool_calls if t.get("success", True)]
+    failed = [t for t in data_tool_calls if not t.get("success", True)]
+
+    can_switch = compute_can_switch_source(current_source, user_query, connector_state)
+
+    # Rule 3: failure mode
+    if not successful and failed:
+        if not can_switch:
+            return None
+        return DisclosureBlock(
+            source=current_source,
+            interpretation=f"Tried {current_source.capitalize()}.",
+            implicit_filters=[],
+            can_switch_source=True,
+            is_rerun=is_rerun,
+            failure_mode=True,
+        )
+
+    # Rule 4: parse the last successful call
+    primary = successful[-1]
+    sql = primary.get("params", {}).get("query", "")
+    parsed = parse_where_clause(sql)
+
+    return DisclosureBlock(
+        source=current_source,
+        interpretation=parsed.interpretation,
+        implicit_filters=parsed.implicit_filters,
+        can_switch_source=can_switch,
+        is_rerun=is_rerun,
+        failure_mode=False,
+    )
