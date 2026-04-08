@@ -1,6 +1,6 @@
 "use client";
 
-import type { ChatMessage, ChartData, StreamingToolCall } from "@/lib/types";
+import type { ChatMessage, ChartData, StreamingToolCall, DisclosureBlock } from "@/lib/types";
 
 export interface FinancialReportData {
   report_type: string;
@@ -46,6 +46,7 @@ export type ChatStreamEvent =
   | { type: "chart"; data: ChartData }
   | { type: "error"; error: string }
   | { type: "message"; message: ChatMessage }
+  | { type: "disclosure"; disclosure: DisclosureBlock }
   | { type: "tool_start"; tool_name: string; tool_input: Record<string, unknown>; step: number }
   | { type: "tool_end"; tool_name: string; step: number; duration_ms: number; success: boolean; result_summary: string };
 
@@ -65,6 +66,7 @@ type StreamHandlers = {
   onTaskOutput?: (data: TaskOutputData) => void;
   onError?: (error: string) => void;
   onMessage?: (message: ChatMessage) => void;
+  onDisclosure?: (disclosure: DisclosureBlock) => void;
   onToolStart?: (tool_name: string, tool_input: Record<string, unknown>, step: number) => void;
   onToolEnd?: (tool_name: string, step: number, duration_ms: number, success: boolean, result_summary: string) => void;
 };
@@ -170,6 +172,8 @@ export async function consumeChatStream(
           handlers.onChart?.(event.data);
         } else if (event.type === "task_output") {
           handlers.onTaskOutput?.(event.data);
+        } else if (event.type === "disclosure") {
+          handlers.onDisclosure?.(event.disclosure);
         } else if (event.type === "error") {
           handlers.onError?.(event.error);
           terminalSeen = true;
@@ -264,6 +268,21 @@ function normalizeStreamEvent(data: Record<string, unknown>): ChatStreamEvent | 
         output_files: (d.output_files && typeof d.output_files === "object" ? d.output_files : {}) as Record<string, string>,
         preview: Array.isArray(d.preview) ? d.preview : [],
         template_mode: Boolean(d.template_mode),
+      },
+    };
+  }
+  if (type === "disclosure" && typeof data.source === "string") {
+    return {
+      type,
+      disclosure: {
+        source: data.source as "netsuite" | "bigquery",
+        interpretation: String(data.interpretation || ""),
+        implicit_filters: Array.isArray(data.implicit_filters)
+          ? data.implicit_filters.map(String)
+          : [],
+        can_switch_source: Boolean(data.can_switch_source),
+        is_rerun: Boolean(data.is_rerun),
+        failure_mode: Boolean(data.failure_mode),
       },
     };
   }
