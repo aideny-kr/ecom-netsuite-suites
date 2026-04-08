@@ -93,6 +93,44 @@ class SessionDetailResponse(BaseModel):
 # --- Helpers ---
 
 
+async def _find_previous_assistant_message(
+    db: AsyncSession,
+    session_id: uuid.UUID,
+    exclude_message_id: uuid.UUID,
+) -> ChatMessage | None:
+    """Return the most recent assistant message in the session, excluding a given id."""
+    result = await db.execute(
+        select(ChatMessage)
+        .where(
+            ChatMessage.session_id == session_id,
+            ChatMessage.role == "assistant",
+            ChatMessage.id != exclude_message_id,
+        )
+        .order_by(ChatMessage.created_at.desc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
+async def _find_previous_user_message(
+    db: AsyncSession,
+    session_id: uuid.UUID,
+    exclude_message_id: uuid.UUID,
+) -> ChatMessage | None:
+    """Return the most recent user message in the session, excluding a given id."""
+    result = await db.execute(
+        select(ChatMessage)
+        .where(
+            ChatMessage.session_id == session_id,
+            ChatMessage.role == "user",
+            ChatMessage.id != exclude_message_id,
+        )
+        .order_by(ChatMessage.created_at.desc())
+        .limit(1)
+    )
+    return result.scalar_one_or_none()
+
+
 def _serialize_session(session: ChatSession) -> dict:
     rm = get_run_manager()
     active_run_id = rm.get_active_run(str(session.id))
@@ -271,6 +309,75 @@ async def send_message(
     # Commit user message BEFORE spawning background task (it uses its own DB session)
     await db.commit()
 
+    # ── Source-switch command detection (Task 12 / v0 disclosure-footer) ──
+    from app.services.chat.disclosure import _SOURCE_LABELS, parse_source_switch
+
+    _switch_target = parse_source_switch(body.content)
+    _is_rerun = False
+    _rerun_source_message: str | None = None
+
+    if _switch_target:
+        # Update the session pin
+        session.source_pin = _switch_target
+        await db.commit()
+
+        # Look up the previous assistant + user messages (excluding the just-persisted user msg)
+        prev_assistant = await _find_previous_assistant_message(
+            db, session.id, exclude_message_id=user_msg.id
+        )
+        prev_user = await _find_previous_user_message(
+            db, session.id, exclude_message_id=user_msg.id
+        )
+
+        if (
+            prev_assistant is not None
+            and prev_user is not None
+            and prev_assistant.disclosure_json is not None
+            and prev_assistant.disclosure_json.get("can_switch_source") is True
+            and prev_assistant.tool_calls  # Guard B: previous turn used a data tool
+        ):
+            # Smart re-run: replay the previous user query against the new source
+            _is_rerun = True
+            _rerun_source_message = prev_user.content
+        else:
+            # Guards failed → minimal acknowledgment, no re-run
+            ack_msg = f"Got it — I'll use {_SOURCE_LABELS[_switch_target]} for your next question."
+            ack_assistant = ChatMessage(
+                tenant_id=user.tenant_id,
+                session_id=session.id,
+                role="assistant",
+                content=ack_msg,
+                tool_calls=None,
+                citations=None,
+                created_at=datetime.now(timezone.utc),
+            )
+            db.add(ack_assistant)
+            await db.commit()
+            await db.refresh(ack_assistant)
+
+            # Write directly to the run stream as a single message event + terminal status
+            ack_rm = get_run_manager()
+            ack_run_id = str(uuid.uuid4())
+            ack_rm.create_run(ack_run_id, str(session.id))
+            ack_rm.write_event(
+                ack_run_id,
+                {
+                    "type": "message",
+                    "message": {
+                        "id": str(ack_assistant.id),
+                        "role": "assistant",
+                        "content": ack_msg,
+                        "tool_calls": None,
+                        "citations": None,
+                        "created_at": ack_assistant.created_at.isoformat()
+                        if ack_assistant.created_at
+                        else None,
+                    },
+                },
+            )
+            ack_rm.set_status(ack_run_id, "complete")
+            return {"run_id": ack_run_id, "session_id": str(session.id)}
+
     rm = get_run_manager()
 
     if not rm.available:
@@ -301,18 +408,22 @@ async def send_message(
     run_id = str(uuid.uuid4())
     rm.create_run(run_id, str(session_id))
 
+    # When re-running after a source switch, replay the previous user message text
+    effective_user_message = _rerun_source_message if _is_rerun else body.content
+
     asyncio.create_task(
         _run_chat_background(
             run_id=run_id,
             session_id=str(session_id),
             session=session,
-            user_message=body.content,
+            user_message=effective_user_message,
             user_id=user.id,
             tenant_id=user.tenant_id,
             user_msg=user_msg,
             wizard_step=wizard_step,
             user_timezone=x_timezone,
             agent_id=body.agent_id,
+            is_rerun=_is_rerun,
         )
     )
 
@@ -330,6 +441,8 @@ async def _run_chat_background(
     wizard_step: str | None,
     user_timezone: str | None,
     agent_id: str | None,
+    *,
+    is_rerun: bool = False,
 ) -> None:
     """Run the chat pipeline in background, writing events to Redis."""
     from app.core.database import async_session_factory
@@ -352,6 +465,7 @@ async def _run_chat_background(
                 user_timezone=user_timezone,
                 agent_id=agent_id,
                 run_id=run_id,
+                is_rerun=is_rerun,
             ):
                 rm.write_event(run_id, chunk)
         rm.set_status(run_id, "complete")
