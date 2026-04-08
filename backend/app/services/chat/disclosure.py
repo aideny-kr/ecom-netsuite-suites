@@ -153,7 +153,7 @@ _BIGQUERY_STALE_THRESHOLD = timedelta(hours=24)
 
 
 def compute_can_switch_source(
-    current_source: str,
+    current_source: Literal["netsuite", "bigquery"],
     query: str,
     state: ConnectorState,
 ) -> bool:
@@ -167,7 +167,12 @@ def compute_can_switch_source(
     if query_class == QueryClass.UNMATCHED:
         return False
 
-    other_source = "bigquery" if current_source == "netsuite" else "netsuite"
+    if current_source == "netsuite":
+        other_source = "bigquery"
+    elif current_source == "bigquery":
+        other_source = "netsuite"
+    else:
+        return False  # unknown source — conservative default
 
     if other_source == "bigquery":
         if query_class == QueryClass.NETSUITE_ONLY:

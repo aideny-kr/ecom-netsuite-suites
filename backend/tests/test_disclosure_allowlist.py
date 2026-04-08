@@ -70,7 +70,7 @@ def test_can_switch_returns_false_when_bigquery_not_connected():
 
 
 def test_can_switch_returns_false_when_bigquery_stale():
-    state = _FakeConnectorState(bq_sync_age_hours=30)
+    state = _FakeConnectorState(bq_sync_age_hours=9999)
     assert compute_can_switch_source("netsuite", "orders this week", state) is False
 
 
@@ -82,3 +82,18 @@ def test_can_switch_returns_false_when_bigquery_unhealthy():
 def test_can_switch_returns_false_for_unmatched_query():
     state = _FakeConnectorState()
     assert compute_can_switch_source("netsuite", "hello", state) is False
+
+
+def test_can_switch_bigquery_to_netsuite_healthy_dual_source():
+    state = _FakeConnectorState()
+    assert compute_can_switch_source("bigquery", "orders this week", state) is True
+
+
+def test_can_switch_bigquery_returns_false_for_bigquery_only_query():
+    state = _FakeConnectorState()
+    assert compute_can_switch_source("bigquery", "ad spend last month", state) is False
+
+
+def test_can_switch_bigquery_returns_false_when_netsuite_unhealthy():
+    state = _FakeConnectorState(ns_healthy=False)
+    assert compute_can_switch_source("bigquery", "orders this week", state) is False
