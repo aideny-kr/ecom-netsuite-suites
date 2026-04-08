@@ -719,25 +719,43 @@ class UnifiedAgent(BaseSpecialistAgent):
             parts.append("\n## TENANT DISCOVERY PROFILE")
             parts.append(self._onboarding_profile)
 
-        # User timezone
-        if self._user_timezone:
-            from datetime import datetime, timedelta
-            from zoneinfo import ZoneInfo
+        # Current date — ALWAYS injected so the LLM never guesses from training cutoff.
+        # Uses the user's timezone when available; falls back to UTC otherwise. This
+        # block is unconditional because any client that doesn't send X-Timezone
+        # (API consumers, background jobs, MCP partners) would otherwise leave the
+        # LLM with no current-date reference, and it will silently anchor on its
+        # training cutoff for "last N months", "this quarter", etc.
+        from datetime import datetime, timedelta
+        from datetime import timezone as _tz
 
-            try:
-                tz = ZoneInfo(self._user_timezone)
-                local_now = datetime.now(tz)
-                local_today = local_now.strftime("%Y-%m-%d")
-                local_yesterday = (local_now - timedelta(days=1)).strftime("%Y-%m-%d")
-                parts.append("\n## USER LOCAL TIME")
-                parts.append(
-                    f"Timezone: {self._user_timezone}. "
-                    f"Local date: {local_today}, time: {local_now.strftime('%H:%M')}. "
-                    f"'today' = TO_DATE('{local_today}', 'YYYY-MM-DD'). "
-                    f"'yesterday' = TO_DATE('{local_yesterday}', 'YYYY-MM-DD')."
-                )
-            except Exception:
-                pass
+        try:
+            tz_label = "UTC"
+            local_now = datetime.now(_tz.utc)
+            if self._user_timezone:
+                try:
+                    from zoneinfo import ZoneInfo
+
+                    local_now = datetime.now(ZoneInfo(self._user_timezone))
+                    tz_label = self._user_timezone
+                except Exception:
+                    # Unknown timezone name — fall through to UTC
+                    pass
+
+            local_today = local_now.strftime("%Y-%m-%d")
+            local_yesterday = (local_now - timedelta(days=1)).strftime("%Y-%m-%d")
+            parts.append("\n## CURRENT DATE & TIME")
+            parts.append(
+                f"Timezone: {tz_label}. "
+                f"Today: {local_today} ({local_now.strftime('%A, %B %d, %Y')}), "
+                f"local time: {local_now.strftime('%H:%M')}. "
+                f"'today' = TO_DATE('{local_today}', 'YYYY-MM-DD'). "
+                f"'yesterday' = TO_DATE('{local_yesterday}', 'YYYY-MM-DD'). "
+                f"When the user says 'last N months', anchor on the month BEFORE "
+                f"today's month as the most recent complete month."
+            )
+        except Exception:
+            # Date injection must NEVER break the turn
+            pass
 
         # Active skill instructions (progressive disclosure)
         if self._active_skill:

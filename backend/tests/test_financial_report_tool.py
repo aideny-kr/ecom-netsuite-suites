@@ -544,3 +544,60 @@ def test_parse_last_quarter():
     assert result["report_type"] == "income_statement_trend"
     # Should have 3 months
     assert len(result["period"].split(", ")) == 3
+
+
+def test_parse_last_n_months():
+    """Regression: 'last 4 months' must resolve to the 4 months ending with last month.
+
+    Before this fix, the relative-period regex only matched 'last month' / 'last quarter'
+    / 'last year' — not 'last N months' with a number between 'last' and 'months'.
+    The parser returned None and the LLM was left to compute the range from its
+    (stale) training-cutoff date, producing periods a year off.
+    """
+    from datetime import datetime, timedelta
+
+    from app.mcp.tools.netsuite_financial_report import parse_report_intent
+
+    result = parse_report_intent("can you pull income statement for the last 4 months?")
+    assert result is not None
+    assert result["report_type"] == "income_statement_trend"
+
+    periods = result["period"].split(", ")
+    assert len(periods) == 4, f"Expected 4 periods, got {len(periods)}: {periods}"
+
+    # Compute expected: the 4 months ending with the month BEFORE the current month.
+    # E.g. if today is 2026-04-08, last 4 months = Dec 2025, Jan 2026, Feb 2026, Mar 2026.
+    now = datetime.utcnow()
+    first_of_current_month = now.replace(day=1)
+    month_names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+    expected = []
+    cursor = first_of_current_month - timedelta(days=1)  # last day of previous month
+    for _ in range(4):
+        expected.append(f"{month_names[cursor.month - 1]} {cursor.year}")
+        cursor = cursor.replace(day=1) - timedelta(days=1)
+    expected.reverse()  # oldest → newest
+    assert periods == expected, f"Expected {expected}, got {periods}"
+
+
+def test_parse_last_n_weeks():
+    """'last 2 weeks' should NOT resolve to anything parser-wise (weeks aren't months).
+
+    Falls through to return None so the agent handles it (SuiteQL query, not report).
+    """
+    from app.mcp.tools.netsuite_financial_report import parse_report_intent
+
+    result = parse_report_intent("Show me revenue for the last 2 weeks")
+    # weeks are not a supported unit for financial reports — agent handles via SuiteQL
+    assert result is None or "week" not in result.get("period", "").lower()
+
+
+def test_parse_last_n_quarters():
+    """'last 2 quarters' should resolve to the 6 months covering the 2 most recent
+    full quarters."""
+    from app.mcp.tools.netsuite_financial_report import parse_report_intent
+
+    result = parse_report_intent("Income statement for the last 2 quarters")
+    assert result is not None
+    assert result["report_type"] == "income_statement_trend"
+    periods = result["period"].split(", ")
+    assert len(periods) == 6, f"Expected 6 months (2 quarters), got {len(periods)}: {periods}"
