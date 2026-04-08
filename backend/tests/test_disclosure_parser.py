@@ -12,7 +12,8 @@ from app.services.chat.disclosure import ParsedFilters, parse_where_clause
 def test_date_range_literal():
     sql = "SELECT * FROM transaction WHERE trandate >= '2026-01-01' AND trandate <= '2026-01-31'"
     filters = parse_where_clause(sql)
-    assert "Jan 1 – 31" in filters.interpretation or "2026-01" in filters.interpretation
+    assert "2026-01-01" in filters.interpretation
+    assert "2026-01-31" in filters.interpretation
 
 
 def test_relative_week():
@@ -45,8 +46,7 @@ def test_relative_year():
 def test_transaction_type_single():
     sql = "SELECT * FROM transaction WHERE type = 'SalesOrd'"
     filters = parse_where_clause(sql)
-    assert any("sales order" in f.lower() for f in filters.implicit_filters) \
-        or any("SalesOrd" in f for f in filters.implicit_filters)
+    assert any("sales order" in f.lower() for f in filters.implicit_filters)
 
 
 def test_status_in():
@@ -69,6 +69,22 @@ def test_boolean_flag_false():
     filters = parse_where_clause(sql)
     assert any("test" in f.lower() for f in filters.implicit_filters)
     assert any("cancelled" in f.lower() for f in filters.implicit_filters)
+
+
+def test_combined_predicates_in_one_where():
+    """Verify the parser extracts ALL applicable predicates from a single WHERE clause."""
+    sql = (
+        "SELECT * FROM transaction "
+        "WHERE trandate >= TRUNC(SYSDATE, 'MM') "
+        "AND type = 'SalesOrd' "
+        "AND status IN ('B','H') "
+        "AND subsidiary = 5"
+    )
+    filters = parse_where_clause(sql)
+    assert "month" in filters.interpretation.lower()
+    assert any("Sales Order" in f for f in filters.implicit_filters)
+    assert any("Status" in f and "B" in f and "H" in f for f in filters.implicit_filters)
+    assert any("Subsidiary ID 5" in f for f in filters.implicit_filters)
 
 
 # ── BigQuery dialect ─────────────────────────────────────────────────────

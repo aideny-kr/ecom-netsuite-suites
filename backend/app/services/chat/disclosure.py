@@ -227,14 +227,16 @@ def parse_where_clause(sql: str) -> ParsedFilters:
     7. `cancelled_at IS NULL`
     8. `currency = N`
     9. `entity = N`
-    10. BigQuery `LIMIT N` / SuiteQL `FETCH FIRST N ROWS ONLY`
 
     Anything not matched is silently skipped.
     """
     if not sql:
         return ParsedFilters()
 
-    # Extract the WHERE clause (strip comments, collapse whitespace)
+    # Strip block comments first (multi-line safe), then single-line comments.
+    # NOTE: this naively strips `--` even inside SQL string literals like
+    # `WHERE name = '-- not a comment'`. Acceptable for v0 since the failure
+    # mode is an empty footer, not a wrong one.
     normalized = re.sub(r"/\*.*?\*/", " ", sql, flags=re.DOTALL)
     normalized = re.sub(r"--[^\n]*", " ", normalized)
     normalized = re.sub(r"\s+", " ", normalized).strip()
@@ -309,7 +311,7 @@ def parse_where_clause(sql: str) -> ParsedFilters:
         filters.append(f"Subsidiary ID {sub_match.group(1)}")
 
     # 6. is_test flag
-    if re.search(r"\bis_test\s*=\s*false\b|\btest\s*=\s*false\b", where_text, re.IGNORECASE):
+    if re.search(r"\bis_test\s*=\s*false\b", where_text, re.IGNORECASE):
         filters.append("Excludes test orders")
 
     # 7. cancelled_at IS NULL
