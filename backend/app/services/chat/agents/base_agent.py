@@ -47,6 +47,51 @@ def _is_valid_uuid(val: str) -> bool:
 _MAX_ERROR_CHARS = 1000
 _MAX_RESULT_ROWS = 500  # Cap rows sent back to LLM (50 was too low for grouped queries like 14 platforms x 10 weeks)
 
+
+def build_current_date_block(user_timezone: str | None) -> str:
+    """Build a "## CURRENT DATE & TIME" system-prompt block.
+
+    Uses the user's timezone when available; falls back to UTC. Unconditional —
+    every agent (unified or specialized) should call this so the LLM never has
+    to guess from its training cutoff for queries like "last 4 months",
+    "this quarter", "yesterday", etc.
+
+    Returns a multi-line string with a header and date context, or an empty
+    string on unexpected failure (so callers can safely concat the result).
+    """
+    from datetime import datetime, timedelta
+    from datetime import timezone as _tz
+
+    try:
+        tz_label = "UTC"
+        local_now = datetime.now(_tz.utc)
+        if user_timezone:
+            try:
+                from zoneinfo import ZoneInfo
+
+                local_now = datetime.now(ZoneInfo(user_timezone))
+                tz_label = user_timezone
+            except Exception:
+                # Unknown timezone name — fall through to UTC
+                pass
+
+        local_today = local_now.strftime("%Y-%m-%d")
+        local_yesterday = (local_now - timedelta(days=1)).strftime("%Y-%m-%d")
+        return (
+            "\n## CURRENT DATE & TIME\n"
+            f"Timezone: {tz_label}. "
+            f"Today: {local_today} ({local_now.strftime('%A, %B %d, %Y')}), "
+            f"local time: {local_now.strftime('%H:%M')}. "
+            f"'today' = TO_DATE('{local_today}', 'YYYY-MM-DD'). "
+            f"'yesterday' = TO_DATE('{local_yesterday}', 'YYYY-MM-DD'). "
+            f"When the user says 'last N months', anchor on the month BEFORE "
+            f"today's month as the most recent complete month."
+        )
+    except Exception:
+        # Date injection must NEVER break a turn
+        return ""
+
+
 # Pattern to detect data queries that MUST be executed, not answered from memory
 _QUERY_PATTERN = re.compile(r"\bSELECT\b", re.IGNORECASE)
 _DATA_QUESTION_KEYWORDS = {
@@ -348,6 +393,10 @@ class BaseSpecialistAgent(abc.ABC):
         self.tenant_id = tenant_id
         self.user_id = user_id
         self.correlation_id = correlation_id
+        # Set by run() / run_streaming() from the turn context. Consumed by
+        # `build_current_date_block` in every agent's system_prompt so the LLM
+        # always knows today's date regardless of which agent handles the turn.
+        self._user_timezone: str | None = None
 
     @property
     @abc.abstractmethod
@@ -401,6 +450,9 @@ class BaseSpecialistAgent(abc.ABC):
         from app.services.chat.tools import execute_tool_call
         from app.services.policy_service import evaluate_tool_call as policy_evaluate
         from app.services.policy_service import get_active_policy, redact_output
+
+        # Capture timezone from context so system_prompt can inject today's date
+        self._user_timezone = context.get("user_timezone")
 
         tool_calls_log: list[dict] = []
         total_input_tokens = 0
@@ -672,6 +724,9 @@ class BaseSpecialistAgent(abc.ABC):
         from app.services.chat.tools import execute_tool_call
         from app.services.policy_service import evaluate_tool_call as policy_evaluate
         from app.services.policy_service import get_active_policy, redact_output
+
+        # Capture timezone from context so system_prompt can inject today's date
+        self._user_timezone = context.get("user_timezone")
 
         tool_calls_log: list[dict] = []
         total_input_tokens = 0

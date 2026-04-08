@@ -257,3 +257,63 @@ class TestInvestigationMode:
         # Count occurrences — should appear twice (early exit + nudge)
         count = source.count("_context_need")
         assert count >= 2, f"Expected at least 2 context_need references, found {count}"
+
+
+class TestCurrentDateInjection:
+    """The unified agent must ALWAYS inject today's date into the system prompt,
+    even when the client does not provide a timezone header. Before this fix,
+    date injection was gated on `self._user_timezone` — clients that didn't send
+    X-Timezone (e.g. background MCP consumers, pre-fix frontend) left the LLM
+    with no current-date anchor and it would guess from training cutoff,
+    producing year-stale results like 'March 2025' for 'last 4 months' queries.
+    """
+
+    def _agent_with_timezone(self, tz: str | None) -> UnifiedAgent:
+        agent = UnifiedAgent(
+            tenant_id=uuid.uuid4(),
+            user_id=uuid.uuid4(),
+            correlation_id="test",
+        )
+        # _user_timezone is normally populated by _setup_context from the turn
+        # context; set it directly so we can test system_prompt in isolation.
+        agent._user_timezone = tz
+        return agent
+
+    def test_injects_current_date_without_timezone(self):
+        agent = self._agent_with_timezone(None)
+        prompt = agent.system_prompt
+        assert "## CURRENT DATE & TIME" in prompt
+        assert "Timezone: UTC" in prompt
+        assert "Today:" in prompt
+
+    def test_injects_local_date_with_timezone(self):
+        agent = self._agent_with_timezone("America/Los_Angeles")
+        prompt = agent.system_prompt
+        assert "## CURRENT DATE & TIME" in prompt
+        assert "Timezone: America/Los_Angeles" in prompt
+
+    def test_date_block_contains_iso_today(self):
+        """Prompt must contain today's literal YYYY-MM-DD so the LLM can't misread it."""
+        from datetime import datetime, timezone
+
+        agent = self._agent_with_timezone(None)
+        prompt = agent.system_prompt
+        today_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        assert today_iso in prompt, f"Expected {today_iso} in prompt"
+
+    def test_date_block_includes_last_n_months_anchoring_hint(self):
+        """The date block should tell the LLM how to anchor 'last N months' queries
+        so it doesn't use the current partial month as the endpoint."""
+        agent = self._agent_with_timezone(None)
+        prompt = agent.system_prompt
+        assert "last N months" in prompt
+        assert "anchor" in prompt.lower()
+
+    def test_date_injection_survives_invalid_timezone(self):
+        """Invalid timezone strings should NOT crash the prompt build —
+        falls back to UTC."""
+        agent = self._agent_with_timezone("Not/A/Real/Timezone")
+        prompt = agent.system_prompt
+        # Should still have the current date block, with UTC fallback
+        assert "## CURRENT DATE & TIME" in prompt
+        assert "Timezone: UTC" in prompt

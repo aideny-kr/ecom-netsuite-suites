@@ -106,3 +106,54 @@ class TestSpecializedAgentProtocol:
         assert isinstance(agent.system_prompt, str)
         assert isinstance(agent.max_steps, int)
         assert agent.requires_confirmation is False
+
+
+class TestSpecializedAgentDateInjection:
+    """SpecializedAgent (BI agent, pricing agent, recon agent, etc.) must also
+    inject today's date into its system_prompt — not just UnifiedAgent.
+
+    Before this fix, specialized agents read their prompt from a static .md
+    file and had no dynamic date context. The BI agent would generate
+    BigQuery SQL like WHERE created_at >= DATE '2025-03-01' when asked for
+    "last 4 months", anchoring on its training cutoff.
+    """
+
+    def test_system_prompt_includes_current_date_block_without_timezone(self):
+        agent = _make_agent(prompt_text="You are a test agent.")
+        # _user_timezone is None by default
+        prompt = agent.system_prompt
+        assert "## CURRENT DATE & TIME" in prompt
+        assert "Timezone: UTC" in prompt
+        assert "Today:" in prompt
+
+    def test_system_prompt_includes_iso_today_literal(self):
+        from datetime import datetime, timezone
+
+        agent = _make_agent(prompt_text="You are a test agent.")
+        prompt = agent.system_prompt
+        today_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        assert today_iso in prompt
+
+    def test_system_prompt_respects_user_timezone(self):
+        agent = _make_agent(prompt_text="You are a test agent.")
+        agent._user_timezone = "America/Los_Angeles"
+        prompt = agent.system_prompt
+        assert "Timezone: America/Los_Angeles" in prompt
+
+    def test_system_prompt_falls_back_to_utc_on_invalid_timezone(self):
+        agent = _make_agent(prompt_text="You are a test agent.")
+        agent._user_timezone = "Not/A/Real/Timezone"
+        prompt = agent.system_prompt
+        assert "Timezone: UTC" in prompt
+
+    def test_system_prompt_preserves_static_prompt_text(self):
+        """The date block is appended, not substituted — static prompt text stays."""
+        agent = _make_agent(prompt_text="You are a pricing expert. Do X, Y, Z.")
+        prompt = agent.system_prompt
+        assert "You are a pricing expert. Do X, Y, Z." in prompt
+
+    def test_system_prompt_includes_last_n_months_anchoring_hint(self):
+        agent = _make_agent(prompt_text="You are a test agent.")
+        prompt = agent.system_prompt
+        assert "last N months" in prompt
+        assert "anchor" in prompt.lower()

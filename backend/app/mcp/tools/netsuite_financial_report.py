@@ -480,6 +480,12 @@ _MONTH_RE = re.compile(
     re.IGNORECASE,
 )
 _RELATIVE_PERIOD_RE = re.compile(r"\b(last|previous|prior|this|current)\s+(month|quarter|year)\b", re.IGNORECASE)
+# Handles "last 4 months", "previous 2 quarters", "past 3 years" — the numeric
+# variants of _RELATIVE_PERIOD_RE. Matches the (count, unit) pair.
+_RELATIVE_COUNT_RE = re.compile(
+    r"\b(?:last|previous|prior|past)\s+(\d+)\s+(months?|quarters?|years?)\b",
+    re.IGNORECASE,
+)
 _Q_RE = re.compile(r"\bQ([1-4])\s+(\d{4})\b", re.IGNORECASE)
 
 
@@ -534,6 +540,41 @@ def _resolve_quarter(q_num: str, year: str) -> str:
     first_month = (q - 1) * 3 + 1
     months = [first_month, first_month + 1, first_month + 2]
     return ", ".join(f"{_MONTH_NAMES[m - 1]} {year}" for m in months)
+
+
+def _resolve_relative_count(count: int, unit: str) -> str:
+    """Resolve 'last N months/quarters/years' to a comma-separated period list.
+
+    Anchored on the month BEFORE the current calendar month (the most recent
+    *completed* month). This matches the semantic of "last 4 months" — the 4
+    complete months ending with the prior month, not the current partial one.
+
+    - 'last 4 months' → Dec 2025, Jan 2026, Feb 2026, Mar 2026  (if today is April)
+    - 'last 2 quarters' → 6 months covering the 2 most recent complete quarters
+    - 'last 2 years' → 24 months covering the 2 most recent complete years
+    """
+    now = datetime.now(tz=None)
+    unit = unit.lower().rstrip("s")  # "months" → "month"
+
+    if unit == "month":
+        total_months = count
+    elif unit == "quarter":
+        total_months = count * 3
+    elif unit == "year":
+        total_months = count * 12
+    else:  # pragma: no cover — regex already filters
+        return f"{_MONTH_NAMES[now.month - 1]} {now.year}"
+
+    # Start at the month before the current one — most recent *completed* month.
+    first_of_current = now.replace(day=1)
+    cursor = first_of_current - timedelta(days=1)  # last day of previous month
+
+    periods: list[str] = []
+    for _ in range(total_months):
+        periods.append(f"{_MONTH_NAMES[cursor.month - 1]} {cursor.year}")
+        cursor = cursor.replace(day=1) - timedelta(days=1)
+    periods.reverse()  # oldest → newest
+    return ", ".join(periods)
 
 
 def parse_report_intent(user_message: str) -> dict | None:
@@ -592,6 +633,18 @@ def parse_report_intent(user_message: str) -> dict | None:
         q_match = _Q_RE.search(user_message)
         if q_match:
             period = _resolve_quarter(q_match.group(1), q_match.group(2))
+            if "_trend" not in report_type:
+                report_type += "_trend"
+
+    # Try relative count: "last 4 months", "previous 2 quarters", "past 3 years"
+    # Checked BEFORE single-unit relative so "last 4 months" doesn't half-match "last".
+    if not period:
+        count_match = _RELATIVE_COUNT_RE.search(user_message)
+        if count_match:
+            count = int(count_match.group(1))
+            unit = count_match.group(2).rstrip("s")  # "months" → "month"
+            period = _resolve_relative_count(count, unit)
+            # Multi-period result is always a trend
             if "_trend" not in report_type:
                 report_type += "_trend"
 

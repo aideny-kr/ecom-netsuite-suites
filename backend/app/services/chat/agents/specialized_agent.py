@@ -86,6 +86,8 @@ class SpecializedAgent(BaseSpecialistAgent):
 
     @property
     def system_prompt(self) -> str:
+        from app.services.chat.agents.base_agent import build_current_date_block
+
         base = self._prompt_text
         if self._knowledge:
             parts = ["\n<knowledge>"]
@@ -93,6 +95,12 @@ class SpecializedAgent(BaseSpecialistAgent):
                 parts.append(chunk)
             parts.append("</knowledge>")
             base += "\n".join(parts)
+        # Always append the current-date block so the LLM never has to guess
+        # from its training cutoff. Benefits BI agent, pricing agent, recon
+        # agent, and any future YAML-driven specialized agent.
+        date_block = build_current_date_block(self._user_timezone)
+        if date_block:
+            base += date_block
         return base
 
     @property

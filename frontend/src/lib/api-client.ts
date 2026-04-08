@@ -43,6 +43,15 @@ async function request<T>(
     if (token) {
       headers["Authorization"] = `Bearer ${token}`;
     }
+    // Send browser timezone for date-aware queries (income statement periods,
+    // "last N months", etc.). Previously only sent on streamRequest(); after
+    // PR #23 moved chat to background tasks, non-streaming POSTs silently
+    // dropped the header and the backend had no current-date reference.
+    try {
+      headers["X-Timezone"] = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    } catch {
+      // Fallback silently if Intl API unavailable
+    }
   }
 
   const res = await fetch(`${BASE_URL}${path}`, {

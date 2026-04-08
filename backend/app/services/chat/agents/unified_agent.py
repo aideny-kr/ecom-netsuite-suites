@@ -719,25 +719,14 @@ class UnifiedAgent(BaseSpecialistAgent):
             parts.append("\n## TENANT DISCOVERY PROFILE")
             parts.append(self._onboarding_profile)
 
-        # User timezone
-        if self._user_timezone:
-            from datetime import datetime, timedelta
-            from zoneinfo import ZoneInfo
+        # Current date — ALWAYS injected via the shared helper so the LLM
+        # never has to guess from its training cutoff. SpecializedAgent uses
+        # the same helper; keep them in sync via that single source.
+        from app.services.chat.agents.base_agent import build_current_date_block
 
-            try:
-                tz = ZoneInfo(self._user_timezone)
-                local_now = datetime.now(tz)
-                local_today = local_now.strftime("%Y-%m-%d")
-                local_yesterday = (local_now - timedelta(days=1)).strftime("%Y-%m-%d")
-                parts.append("\n## USER LOCAL TIME")
-                parts.append(
-                    f"Timezone: {self._user_timezone}. "
-                    f"Local date: {local_today}, time: {local_now.strftime('%H:%M')}. "
-                    f"'today' = TO_DATE('{local_today}', 'YYYY-MM-DD'). "
-                    f"'yesterday' = TO_DATE('{local_yesterday}', 'YYYY-MM-DD')."
-                )
-            except Exception:
-                pass
+        date_block = build_current_date_block(self._user_timezone)
+        if date_block:
+            parts.append(date_block)
 
         # Active skill instructions (progressive disclosure)
         if self._active_skill:
