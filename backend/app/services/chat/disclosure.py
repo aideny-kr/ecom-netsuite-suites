@@ -71,3 +71,59 @@ PUSHBACK_RE = re.compile(
     r")",
     re.IGNORECASE,
 )
+
+
+# ── Query source-class classification ────────────────────────────────────
+
+from enum import Enum
+
+
+class QueryClass(str, Enum):
+    DUAL_SOURCE = "dual_source"
+    NETSUITE_ONLY = "netsuite_only"
+    BIGQUERY_ONLY = "bigquery_only"
+    UNMATCHED = "unmatched"
+
+
+# Order matters: NetSuite/BigQuery-only are checked before dual-source so
+# "GL revenue by channel" routes to NetSuite-only, not dual-source.
+_NETSUITE_ONLY_KEYWORDS = [
+    "balance sheet", "income statement", "p&l", "pl statement",
+    "gl ", " gl", "journal", "ledger", "period close", "close the period",
+    "saved search", "suitescript", "script", "custom record", "custom field",
+    "ar aging", "ap aging", "trial balance", "general ledger",
+]
+
+_BIGQUERY_ONLY_KEYWORDS = [
+    "ad spend", "attribution", "campaign", "funnel", "conversion rate",
+    "session", "cohort", "retention", "ctr", "cpc", "cpm", "roas",
+]
+
+_DUAL_SOURCE_KEYWORDS = [
+    "order", "sale", "transaction", "customer", "item", "product",
+    "revenue", "refund", "return", "invoice", "channel",
+]
+
+
+def classify_query_source_class(query: str) -> QueryClass:
+    """Classify a user query into a source-availability class.
+
+    Used to decide if the other data source (`can_switch_source`) is viable
+    for this query. Conservative: unmatched queries return UNMATCHED, which
+    disables the switch hint.
+    """
+    q = query.lower().strip()
+    if not q:
+        return QueryClass.UNMATCHED
+
+    # Check single-source keywords FIRST so they beat dual-source overlaps
+    for kw in _NETSUITE_ONLY_KEYWORDS:
+        if kw in q:
+            return QueryClass.NETSUITE_ONLY
+    for kw in _BIGQUERY_ONLY_KEYWORDS:
+        if kw in q:
+            return QueryClass.BIGQUERY_ONLY
+    for kw in _DUAL_SOURCE_KEYWORDS:
+        if kw in q:
+            return QueryClass.DUAL_SOURCE
+    return QueryClass.UNMATCHED
