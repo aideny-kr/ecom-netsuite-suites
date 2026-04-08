@@ -14,6 +14,7 @@ This module exposes:
 
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, dataclass, field
 from typing import Literal
 
@@ -31,3 +32,42 @@ class DisclosureBlock:
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+# ── Source-switch detection ───────────────────────────────────────────────
+
+
+SOURCE_SWITCH_RE = re.compile(
+    r"^\s*(?:use|switch\s+to|run\s+on|try)\s+(netsuite|bigquery|bq|ns)\s*[.!?]?\s*$",
+    re.IGNORECASE,
+)
+
+_SOURCE_ALIASES = {
+    "bq": "bigquery",
+    "ns": "netsuite",
+    "bigquery": "bigquery",
+    "netsuite": "netsuite",
+}
+
+
+def parse_source_switch(message: str) -> str | None:
+    """Return the target source ('netsuite' | 'bigquery') or None if not a switch command."""
+    match = SOURCE_SWITCH_RE.match(message)
+    if not match:
+        return None
+    return _SOURCE_ALIASES.get(match.group(1).lower())
+
+
+# ── Pushback detection ────────────────────────────────────────────────────
+
+
+PUSHBACK_RE = re.compile(
+    r"^\s*(?:"
+    r"that(?:'s|s|\s+is)?\s+(?:wrong|not\s+right)|"
+    r"no[,\s]+i\s+meant|"
+    r"actually\b|"
+    r"why\s+is\b|"
+    r"i\s+need\b"
+    r")",
+    re.IGNORECASE,
+)
