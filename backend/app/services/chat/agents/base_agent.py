@@ -91,6 +91,7 @@ def build_current_date_block(user_timezone: str | None) -> str:
         # Date injection must NEVER break a turn
         return ""
 
+
 # Pattern to detect data queries that MUST be executed, not answered from memory
 _QUERY_PATTERN = re.compile(r"\bSELECT\b", re.IGNORECASE)
 _DATA_QUESTION_KEYWORDS = {
