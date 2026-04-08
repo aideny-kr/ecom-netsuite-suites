@@ -16,7 +16,8 @@ from __future__ import annotations
 
 import re
 from dataclasses import asdict, dataclass, field
-from typing import Literal
+from datetime import timedelta
+from typing import Literal, Protocol
 
 
 @dataclass
@@ -128,3 +129,57 @@ def classify_query_source_class(query: str) -> QueryClass:
         if kw in q:
             return QueryClass.DUAL_SOURCE
     return QueryClass.UNMATCHED
+
+
+# ── can_switch_source logic ──────────────────────────────────────────────
+
+
+class ConnectorState(Protocol):
+    """Protocol for the connector state the hook receives.
+
+    Kept as a Protocol so tests can pass a lightweight fake and production
+    can pass a real object assembled by the orchestrator from
+    `connection_alerts` and the Stripe/BigQuery sync tables.
+    """
+
+    has_bigquery: bool
+    has_netsuite: bool
+    bq_healthy: bool
+    ns_healthy: bool
+    bq_sync_age: timedelta
+
+
+_BIGQUERY_STALE_THRESHOLD = timedelta(hours=24)
+
+
+def compute_can_switch_source(
+    current_source: str,
+    query: str,
+    state: ConnectorState,
+) -> bool:
+    """Decide if the user should see a 'switch to X' hint in the disclosure footer.
+
+    Returns True only if the other source has a healthy connector AND the
+    query class is compatible with that source. Conservative: any ambiguity
+    returns False.
+    """
+    query_class = classify_query_source_class(query)
+    if query_class == QueryClass.UNMATCHED:
+        return False
+
+    other_source = "bigquery" if current_source == "netsuite" else "netsuite"
+
+    if other_source == "bigquery":
+        if query_class == QueryClass.NETSUITE_ONLY:
+            return False
+        if not state.has_bigquery or not state.bq_healthy:
+            return False
+        if state.bq_sync_age > _BIGQUERY_STALE_THRESHOLD:
+            return False
+        return True
+    else:
+        if query_class == QueryClass.BIGQUERY_ONLY:
+            return False
+        if not state.has_netsuite or not state.ns_healthy:
+            return False
+        return True

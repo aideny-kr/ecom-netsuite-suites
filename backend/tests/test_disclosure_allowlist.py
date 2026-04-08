@@ -1,8 +1,14 @@
 """Unit tests for classify_query_source_class()."""
 
+from datetime import timedelta
+
 import pytest
 
-from app.services.chat.disclosure import QueryClass, classify_query_source_class
+from app.services.chat.disclosure import (
+    QueryClass,
+    classify_query_source_class,
+    compute_can_switch_source,
+)
 
 
 @pytest.mark.parametrize("query,expected", [
@@ -35,3 +41,44 @@ from app.services.chat.disclosure import QueryClass, classify_query_source_class
 ])
 def test_classify_query_source_class(query, expected):
     assert classify_query_source_class(query) == expected
+
+
+class _FakeConnectorState:
+    """Minimal stand-in for the connector registry / connection_alerts lookups."""
+
+    def __init__(self, has_bigquery=True, has_netsuite=True, bq_healthy=True, ns_healthy=True, bq_sync_age_hours=1):
+        self.has_bigquery = has_bigquery
+        self.has_netsuite = has_netsuite
+        self.bq_healthy = bq_healthy
+        self.ns_healthy = ns_healthy
+        self.bq_sync_age = timedelta(hours=bq_sync_age_hours)
+
+
+def test_can_switch_netsuite_to_bigquery_healthy_dual_source():
+    state = _FakeConnectorState()
+    assert compute_can_switch_source("netsuite", "orders query", state) is True
+
+
+def test_can_switch_returns_false_for_netsuite_only_query():
+    state = _FakeConnectorState()
+    assert compute_can_switch_source("netsuite", "balance sheet last quarter", state) is False
+
+
+def test_can_switch_returns_false_when_bigquery_not_connected():
+    state = _FakeConnectorState(has_bigquery=False)
+    assert compute_can_switch_source("netsuite", "orders this week", state) is False
+
+
+def test_can_switch_returns_false_when_bigquery_stale():
+    state = _FakeConnectorState(bq_sync_age_hours=30)
+    assert compute_can_switch_source("netsuite", "orders this week", state) is False
+
+
+def test_can_switch_returns_false_when_bigquery_unhealthy():
+    state = _FakeConnectorState(bq_healthy=False)
+    assert compute_can_switch_source("netsuite", "orders this week", state) is False
+
+
+def test_can_switch_returns_false_for_unmatched_query():
+    state = _FakeConnectorState()
+    assert compute_can_switch_source("netsuite", "hello", state) is False
