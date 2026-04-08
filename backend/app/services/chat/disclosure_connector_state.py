@@ -104,9 +104,7 @@ async def build_connector_state(db: AsyncSession, tenant_id: UUID) -> _LiveConne
 
     # ── Health: status=="active" AND no active alerts ──
     ns_healthy = (
-        ns_connection is not None
-        and getattr(ns_connection, "status", None) == "active"
-        and not has_rest_api_alert
+        ns_connection is not None and getattr(ns_connection, "status", None) == "active" and not has_rest_api_alert
     )
     bq_healthy = (
         bq_connector is not None

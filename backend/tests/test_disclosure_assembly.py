@@ -43,7 +43,9 @@ def test_assemble_returns_none_for_fresh_proven_pattern():
 
 def test_assemble_emits_for_stale_proven_pattern():
     result = assemble_disclosure(
-        tool_calls=[_tool_call("netsuite_suiteql", "SELECT COUNT(*) FROM transaction WHERE trandate >= TRUNC(SYSDATE, 'WW')")],
+        tool_calls=[
+            _tool_call("netsuite_suiteql", "SELECT COUNT(*) FROM transaction WHERE trandate >= TRUNC(SYSDATE, 'WW')")
+        ],
         user_query="how many orders this week",
         current_source="netsuite",
         connector_state=_State(),
@@ -91,7 +93,14 @@ def test_assemble_rerun_flag_propagates():
 
 def test_assemble_failure_mode_with_switch_hint():
     result = assemble_disclosure(
-        tool_calls=[{"tool": "netsuite_suiteql", "params": {"query": "SELECT ..."}, "success": False, "error": "OAuth token expired"}],
+        tool_calls=[
+            {
+                "tool": "netsuite_suiteql",
+                "params": {"query": "SELECT ..."},
+                "success": False,
+                "error": "OAuth token expired",
+            }
+        ],
         user_query="top customers last month",
         current_source="netsuite",
         connector_state=_State(),
@@ -124,7 +133,10 @@ def test_assemble_picks_last_successful_tool_call():
     result = assemble_disclosure(
         tool_calls=[
             _tool_call("netsuite_suiteql", "SELECT 1 FROM dual"),  # exploratory
-            _tool_call("netsuite_suiteql", "SELECT COUNT(*) FROM transaction WHERE type = 'SalesOrd' AND trandate >= TRUNC(SYSDATE, 'MM')"),
+            _tool_call(
+                "netsuite_suiteql",
+                "SELECT COUNT(*) FROM transaction WHERE type = 'SalesOrd' AND trandate >= TRUNC(SYSDATE, 'MM')",
+            ),
         ],
         user_query="how many sales orders this month",
         current_source="netsuite",

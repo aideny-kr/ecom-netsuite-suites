@@ -2140,11 +2140,7 @@ async def run_chat_turn(
                         _matched_pattern_dict: dict | None = None
                         try:
                             _pr = patterns_result
-                            if (
-                                isinstance(_pr, list)
-                                and _pr
-                                and float(_pr[0].get("similarity", 0.0)) >= 0.75
-                            ):
+                            if isinstance(_pr, list) and _pr and float(_pr[0].get("similarity", 0.0)) >= 0.75:
                                 _top = _pr[0]
                                 _ts = _top.get("last_used_at") or _top.get("created_at")
                                 if _ts is not None:
@@ -2174,6 +2170,7 @@ async def run_chat_turn(
                             assistant_msg.disclosure_json = disclosure_payload
                             await db.commit()
                             from app.services.chat.disclosure import log_disclosure_event
+
                             await log_disclosure_event(
                                 db,
                                 tenant_id=tenant_id,
@@ -2359,6 +2356,7 @@ async def run_chat_turn(
                         assistant_msg.disclosure_json = disclosure_payload
                         await db.commit()
                         from app.services.chat.disclosure import log_disclosure_event
+
                         await log_disclosure_event(
                             db,
                             tenant_id=tenant_id,
@@ -2690,6 +2688,7 @@ async def run_chat_turn(
                 assistant_msg.disclosure_json = disclosure_payload
                 await db.commit()
                 from app.services.chat.disclosure import log_disclosure_event
+
                 await log_disclosure_event(
                     db,
                     tenant_id=tenant_id,

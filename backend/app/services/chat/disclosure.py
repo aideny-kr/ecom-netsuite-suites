@@ -89,21 +89,55 @@ class QueryClass(str, Enum):
 # Order matters: NetSuite/BigQuery-only are checked before dual-source so
 # "GL revenue by channel" routes to NetSuite-only, not dual-source.
 _NETSUITE_ONLY_KEYWORDS = [
-    "balance sheet", "income statement", "p&l", "pl statement",
-    "gl ", " gl", "journal", "ledger", "period close", "close the period",
-    "purchase order", "vendor bill",
-    "saved search", "suitescript", "custom record", "custom field",
-    "ar aging", "ap aging", "trial balance", "general ledger",
+    "balance sheet",
+    "income statement",
+    "p&l",
+    "pl statement",
+    "gl ",
+    " gl",
+    "journal",
+    "ledger",
+    "period close",
+    "close the period",
+    "purchase order",
+    "vendor bill",
+    "saved search",
+    "suitescript",
+    "custom record",
+    "custom field",
+    "ar aging",
+    "ap aging",
+    "trial balance",
+    "general ledger",
 ]
 
 _BIGQUERY_ONLY_KEYWORDS = [
-    "ad spend", "attribution", "campaign", "funnel", "conversion rate",
-    "session", "cohort", "retention", "ctr", "cpc", "cpm", "roas",
+    "ad spend",
+    "attribution",
+    "campaign",
+    "funnel",
+    "conversion rate",
+    "session",
+    "cohort",
+    "retention",
+    "ctr",
+    "cpc",
+    "cpm",
+    "roas",
 ]
 
 _DUAL_SOURCE_KEYWORDS = [
-    "order", "sale", "transaction", "customer", "item", "product",
-    "revenue", "refund", "return", "invoice", "channel",
+    "order",
+    "sale",
+    "transaction",
+    "customer",
+    "item",
+    "product",
+    "revenue",
+    "refund",
+    "return",
+    "invoice",
+    "channel",
 ]
 
 
@@ -429,6 +463,7 @@ async def disclosure_enabled_for_tenant(db, tenant_id) -> bool:
     Default OFF if the flag isn't set, the lookup fails, or the helper raises.
     """
     from app.services.feature_flag_service import is_enabled
+
     try:
         return await is_enabled(db, tenant_id, "disclosure_footer_enabled")
     except Exception:

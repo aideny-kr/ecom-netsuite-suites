@@ -329,14 +329,11 @@ async def send_message(
         # pushback event against the previous assistant message (if it had a
         # disclosure). Runs AFTER the user msg commit so the helper can exclude it.
         from app.services.chat.disclosure import PUSHBACK_RE, log_disclosure_event
+
         if PUSHBACK_RE.match(body.content):
-            prev = await _find_previous_assistant_message(
-                db, session.id, exclude_message_id=user_msg.id
-            )
+            prev = await _find_previous_assistant_message(db, session.id, exclude_message_id=user_msg.id)
             if prev and prev.disclosure_json:
-                await log_disclosure_event(
-                    db, user.tenant_id, session.id, prev.id, "pushback"
-                )
+                await log_disclosure_event(db, user.tenant_id, session.id, prev.id, "pushback")
 
         # ── Source-switch command detection (Task 12 / v0 disclosure-footer) ──
         from app.services.chat.disclosure import SOURCE_LABELS, parse_source_switch
@@ -344,20 +341,14 @@ async def send_message(
         _switch_target = parse_source_switch(body.content)
 
         if _switch_target:
-            await log_disclosure_event(
-                db, user.tenant_id, session.id, None, "switch_command", source=_switch_target
-            )
+            await log_disclosure_event(db, user.tenant_id, session.id, None, "switch_command", source=_switch_target)
             # Update the session pin
             session.source_pin = _switch_target
             await db.commit()
 
             # Look up the previous assistant + user messages (excluding the just-persisted user msg)
-            prev_assistant = await _find_previous_assistant_message(
-                db, session.id, exclude_message_id=user_msg.id
-            )
-            prev_user = await _find_previous_user_message(
-                db, session.id, exclude_message_id=user_msg.id
-            )
+            prev_assistant = await _find_previous_assistant_message(db, session.id, exclude_message_id=user_msg.id)
+            prev_user = await _find_previous_user_message(db, session.id, exclude_message_id=user_msg.id)
 
             if (
                 prev_assistant is not None
@@ -369,9 +360,7 @@ async def send_message(
                 # Smart re-run: replay the previous user query against the new source
                 _is_rerun = True
                 _rerun_source_message = prev_user.content
-                await log_disclosure_event(
-                    db, user.tenant_id, session.id, None, "switch_rerun", source=_switch_target
-                )
+                await log_disclosure_event(db, user.tenant_id, session.id, None, "switch_rerun", source=_switch_target)
             else:
                 await log_disclosure_event(
                     db, user.tenant_id, session.id, None, "switch_ack_only", source=_switch_target
@@ -412,9 +401,7 @@ async def send_message(
                             "content": ack_msg,
                             "tool_calls": None,
                             "citations": None,
-                            "created_at": ack_assistant.created_at.isoformat()
-                            if ack_assistant.created_at
-                            else None,
+                            "created_at": ack_assistant.created_at.isoformat() if ack_assistant.created_at else None,
                         },
                     },
                 )

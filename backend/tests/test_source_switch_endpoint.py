@@ -426,9 +426,7 @@ async def test_source_switch_is_noop_when_flag_off(client, db, admin_user):
     assert refreshed.source_pin is None
 
     # No telemetry rows for this session
-    result = await db.execute(
-        select(ChatDisclosureEvent).where(ChatDisclosureEvent.session_id == session.id)
-    )
+    result = await db.execute(select(ChatDisclosureEvent).where(ChatDisclosureEvent.session_id == session.id))
     rows = result.scalars().all()
     assert len(rows) == 0, f"Expected no telemetry rows, got {[r.event_type for r in rows]}"
 
