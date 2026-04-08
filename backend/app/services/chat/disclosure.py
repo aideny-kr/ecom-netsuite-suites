@@ -90,7 +90,8 @@ class QueryClass(str, Enum):
 _NETSUITE_ONLY_KEYWORDS = [
     "balance sheet", "income statement", "p&l", "pl statement",
     "gl ", " gl", "journal", "ledger", "period close", "close the period",
-    "saved search", "suitescript", "script", "custom record", "custom field",
+    "purchase order", "vendor bill",
+    "saved search", "suitescript", "custom record", "custom field",
     "ar aging", "ap aging", "trial balance", "general ledger",
 ]
 
