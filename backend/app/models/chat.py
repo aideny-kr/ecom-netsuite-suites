@@ -20,6 +20,9 @@ class ChatSession(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     is_archived: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     agent_id: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
 
+    # Session-scoped source pin set by user via "use BigQuery" / "use NetSuite"
+    source_pin: Mapped[str | None] = mapped_column(String(16), nullable=True)
+
     messages: Mapped[list["ChatMessage"]] = relationship(
         back_populates="session",
         order_by="ChatMessage.created_at, ChatMessage.id",
@@ -62,6 +65,9 @@ class ChatMessage(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
     # Persisted structured output (financial_report or data_table SSE payload)
     structured_output: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+    # Post-turn disclosure footer: source, interpretation, implicit filters, switch hint
+    disclosure_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     session: Mapped["ChatSession"] = relationship(back_populates="messages")
 
