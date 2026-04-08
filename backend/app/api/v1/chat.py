@@ -60,6 +60,7 @@ class MessageResponse(BaseModel):
     query_importance: int | None = None
     user_feedback: str | None = None
     structured_output: dict | None = None
+    disclosure_json: dict | None = None
     agent_id: str | None = None
     created_at: str
 
@@ -182,6 +183,8 @@ def _serialize_message(msg: ChatMessage) -> dict:
         result["user_feedback"] = msg.user_feedback
     if msg.structured_output is not None:
         result["structured_output"] = msg.structured_output
+    if msg.disclosure_json is not None:
+        result["disclosure_json"] = msg.disclosure_json
     if msg.agent_id:
         result["agent_id"] = msg.agent_id
     return result
