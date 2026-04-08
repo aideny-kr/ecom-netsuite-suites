@@ -305,14 +305,18 @@ async def test_switch_with_passing_guards_triggers_rerun(client, db, admin_user)
 
     mock_rm = _make_mock_rm(available=True)
 
-    captured = {"user_message": None, "is_rerun": None}
+    # Use a MagicMock so we can read call_args.kwargs synchronously after the
+    # request returns. The side_effect coroutine is a no-op — MagicMock records
+    # the call kwargs at invocation time, before the coroutine runs.
+    mock_bg = MagicMock()
 
-    async def fake_background(**kwargs):
-        captured["user_message"] = kwargs.get("user_message")
-        captured["is_rerun"] = kwargs.get("is_rerun")
+    async def fake_background(*args, **kwargs):
+        return None  # no-op coroutine
+
+    mock_bg.side_effect = fake_background
 
     with (
-        patch("app.api.v1.chat._run_chat_background", side_effect=fake_background),
+        patch("app.api.v1.chat._run_chat_background", mock_bg),
         patch("app.api.v1.chat.get_run_manager", return_value=mock_rm),
     ):
         resp = await client.post(
@@ -328,8 +332,9 @@ async def test_switch_with_passing_guards_triggers_rerun(client, db, admin_user)
     refreshed = result.scalar_one()
     assert refreshed.source_pin == "bigquery"
 
-    # Background task got the previous user message text + is_rerun=True
-    # Note: asyncio.create_task schedules the task but our patched coroutine
-    # records the kwargs synchronously when invoked.
-    assert captured["user_message"] == prev_user_content
-    assert captured["is_rerun"] is True
+    # Background task got the previous user message text + is_rerun=True.
+    # Read kwargs synchronously from the mock — MagicMock records call_args
+    # at invocation time, independent of event-loop scheduling.
+    assert mock_bg.call_args is not None, "_run_chat_background was not invoked"
+    assert mock_bg.call_args.kwargs["user_message"] == prev_user_content
+    assert mock_bg.call_args.kwargs["is_rerun"] is True

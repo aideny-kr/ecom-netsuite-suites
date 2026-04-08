@@ -333,7 +333,7 @@ def parse_where_clause(sql: str) -> ParsedFilters:
 
 # ── Entry point ──────────────────────────────────────────────────────────
 
-_SOURCE_LABELS = {"netsuite": "NetSuite", "bigquery": "BigQuery"}
+SOURCE_LABELS = {"netsuite": "NetSuite", "bigquery": "BigQuery"}
 
 _DATA_TOOL_NAMES = {
     "netsuite_suiteql",
@@ -401,7 +401,7 @@ def assemble_disclosure(
             return None
         return DisclosureBlock(
             source=current_source,
-            interpretation=f"Tried {_SOURCE_LABELS[current_source]}.",
+            interpretation=f"Tried {SOURCE_LABELS[current_source]}.",
             implicit_filters=[],
             can_switch_source=True,
             is_rerun=is_rerun,

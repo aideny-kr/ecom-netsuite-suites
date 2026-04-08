@@ -310,7 +310,7 @@ async def send_message(
     await db.commit()
 
     # ── Source-switch command detection (Task 12 / v0 disclosure-footer) ──
-    from app.services.chat.disclosure import _SOURCE_LABELS, parse_source_switch
+    from app.services.chat.disclosure import SOURCE_LABELS, parse_source_switch
 
     _switch_target = parse_source_switch(body.content)
     _is_rerun = False
@@ -341,7 +341,7 @@ async def send_message(
             _rerun_source_message = prev_user.content
         else:
             # Guards failed → minimal acknowledgment, no re-run
-            ack_msg = f"Got it — I'll use {_SOURCE_LABELS[_switch_target]} for your next question."
+            ack_msg = f"Got it — I'll use {SOURCE_LABELS[_switch_target]} for your next question."
             ack_assistant = ChatMessage(
                 tenant_id=user.tenant_id,
                 session_id=session.id,
@@ -355,8 +355,15 @@ async def send_message(
             await db.commit()
             await db.refresh(ack_assistant)
 
-            # Write directly to the run stream as a single message event + terminal status
+            # Write directly to the run stream as a single message event + terminal status.
+            # If Redis is down, the create_run/write_event/set_status calls would silently
+            # no-op and we'd return a fake run_id pointing at nothing — fail loud instead.
             ack_rm = get_run_manager()
+            if not ack_rm.available:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Chat service temporarily unavailable. Please try again.",
+                )
             ack_run_id = str(uuid.uuid4())
             ack_rm.create_run(ack_run_id, str(session.id))
             ack_rm.write_event(
@@ -381,7 +388,10 @@ async def send_message(
     rm = get_run_manager()
 
     if not rm.available:
-        # Redis unavailable — fall back to inline SSE streaming
+        # Redis unavailable — fall back to inline SSE streaming.
+        # If a source-switch rerun was requested upstream, thread the previous
+        # user message + is_rerun flag through so the orchestrator replays the
+        # right query and stamps the disclosure footer correctly.
         return await _send_message_inline_sse(
             db=db,
             session=session,
@@ -390,6 +400,8 @@ async def send_message(
             user_msg=user_msg,
             wizard_step=wizard_step,
             x_timezone=x_timezone,
+            is_rerun=_is_rerun,
+            effective_user_message=(_rerun_source_message if _is_rerun else None),
         )
 
     # Check for concurrent run
@@ -485,8 +497,18 @@ async def _send_message_inline_sse(
     user_msg: ChatMessage,
     wizard_step: str | None,
     x_timezone: str | None,
+    *,
+    is_rerun: bool = False,
+    effective_user_message: str | None = None,
 ) -> StreamingResponse:
-    """Fallback: inline SSE streaming when Redis is unavailable."""
+    """Fallback: inline SSE streaming when Redis is unavailable.
+
+    When the source-switch smart-rerun path is taken, callers can pass
+    `effective_user_message` to replay the previous user query and
+    `is_rerun=True` so the orchestrator marks the disclosure footer accordingly.
+    """
+    # When re-running after a source switch, replay the previous user message text
+    pipeline_user_message = effective_user_message if effective_user_message is not None else body.content
 
     async def stream_generator():
         import asyncio
@@ -502,13 +524,14 @@ async def _send_message_inline_sse(
                 async for chunk in run_chat_turn(
                     db=db,
                     session=session,
-                    user_message=body.content,
+                    user_message=pipeline_user_message,
                     user_id=user.id,
                     tenant_id=user.tenant_id,
                     user_msg=user_msg,
                     wizard_step=wizard_step,
                     user_timezone=x_timezone,
                     agent_id=body.agent_id,
+                    is_rerun=is_rerun,
                 ):
                     await queue.put(chunk)
             except ValueError as exc:
