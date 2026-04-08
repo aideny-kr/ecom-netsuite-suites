@@ -79,6 +79,7 @@ __all__ = [
     "PolicyProfile",
     "SystemPromptTemplate",
     "ChatApiKey",
+    "ChatDisclosureEvent",
     "OnboardingChecklistItem",
     "ScriptSyncState",
     "NetSuiteApiLog",

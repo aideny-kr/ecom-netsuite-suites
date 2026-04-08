@@ -19,9 +19,24 @@ def upgrade() -> None:
     op.create_table(
         "chat_disclosure_events",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True, server_default=sa.text("gen_random_uuid()")),
-        sa.Column("tenant_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("tenants.id"), nullable=False),
-        sa.Column("session_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("chat_sessions.id"), nullable=False),
-        sa.Column("message_id", postgresql.UUID(as_uuid=True), sa.ForeignKey("chat_messages.id"), nullable=True),
+        sa.Column(
+            "tenant_id",
+            postgresql.UUID(as_uuid=True),
+            sa.ForeignKey("tenants.id", ondelete="CASCADE"),
+            nullable=False,
+        ),
+        sa.Column(
+            "session_id",
+            postgresql.UUID(as_uuid=True),
+            sa.ForeignKey("chat_sessions.id", ondelete="CASCADE"),
+            nullable=False,
+        ),
+        sa.Column(
+            "message_id",
+            postgresql.UUID(as_uuid=True),
+            sa.ForeignKey("chat_messages.id", ondelete="CASCADE"),
+            nullable=True,
+        ),
         sa.Column("event_type", sa.String(32), nullable=False),
         sa.Column("source", sa.String(16), nullable=True),
         sa.Column("event_metadata", postgresql.JSONB, nullable=True),
