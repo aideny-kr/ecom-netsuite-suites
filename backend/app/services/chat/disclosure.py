@@ -188,3 +188,142 @@ def compute_can_switch_source(
         if not state.has_netsuite or not state.ns_healthy:
             return False
         return True
+
+
+# ── WHERE-clause parser (best-effort, ~10 common shapes) ────────────────
+
+
+@dataclass
+class ParsedFilters:
+    """Output of parse_where_clause: interpretation sentence + filter bullets."""
+
+    interpretation: str = ""
+    implicit_filters: list[str] = field(default_factory=list)
+
+
+_TRANSACTION_TYPE_LABELS = {
+    "SalesOrd": "Sales Order",
+    "CustInvc": "Customer Invoice",
+    "CustCred": "Credit Memo",
+    "PurchOrd": "Purchase Order",
+    "ItemShip": "Item Fulfillment",
+    "CustPymt": "Customer Payment",
+    "Journal": "Journal Entry",
+    "Deposit": "Deposit",
+    "RtnAuth": "Return Authorization",
+}
+
+
+def parse_where_clause(sql: str) -> ParsedFilters:
+    """Parse a WHERE clause for common predicate shapes. Graceful degrade.
+
+    Supported shapes:
+    1. `trandate >= TRUNC(SYSDATE, 'WW' | 'MM' | 'Q' | 'YYYY')`
+    2. `trandate >= 'YYYY-MM-DD' AND trandate <= 'YYYY-MM-DD'`
+    3. `type = 'X'` / `type IN ('X', 'Y')`
+    4. `status = 'X'` / `status IN ('X', 'Y')`
+    5. `subsidiary = N`
+    6. `is_test = false` / `is_test IS false`
+    7. `cancelled_at IS NULL`
+    8. `currency = N`
+    9. `entity = N`
+    10. BigQuery `LIMIT N` / SuiteQL `FETCH FIRST N ROWS ONLY`
+
+    Anything not matched is silently skipped.
+    """
+    if not sql:
+        return ParsedFilters()
+
+    # Extract the WHERE clause (strip comments, collapse whitespace)
+    normalized = re.sub(r"/\*.*?\*/", " ", sql, flags=re.DOTALL)
+    normalized = re.sub(r"--[^\n]*", " ", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+
+    where_match = re.search(
+        r"\bWHERE\b(.*?)(?:\bGROUP\s+BY\b|\bORDER\s+BY\b|\bLIMIT\b|\bFETCH\b|$)",
+        normalized,
+        re.IGNORECASE,
+    )
+    if not where_match:
+        return ParsedFilters()
+
+    where_text = where_match.group(1).strip()
+    if not where_text:
+        return ParsedFilters()
+
+    interpretation = ""
+    filters: list[str] = []
+
+    # 1. Relative date windows (check before literal ranges)
+    rel_match = re.search(
+        r"trandate\s*>=\s*TRUNC\s*\(\s*SYSDATE\s*,\s*'(WW|MM|Q|YYYY)'\s*\)",
+        where_text,
+        re.IGNORECASE,
+    )
+    if rel_match:
+        grain = rel_match.group(1).upper()
+        interpretation = {
+            "WW": "This week (Monday–today)",
+            "MM": "This month",
+            "Q": "This quarter",
+            "YYYY": "This year",
+        }[grain]
+
+    # 2. Literal date range
+    if not interpretation:
+        range_match = re.search(
+            r"trandate\s*>=\s*'?(\d{4}-\d{2}-\d{2})'?\s+AND\s+trandate\s*<=\s*'?(\d{4}-\d{2}-\d{2})'?",
+            where_text,
+            re.IGNORECASE,
+        )
+        if range_match:
+            interpretation = f"{range_match.group(1)} – {range_match.group(2)}"
+
+    # 3. Transaction type
+    type_in_match = re.search(r"\btype\s+IN\s*\(([^)]+)\)", where_text, re.IGNORECASE)
+    if type_in_match:
+        codes = [c.strip().strip("'\"") for c in type_in_match.group(1).split(",")]
+        labels = [_TRANSACTION_TYPE_LABELS.get(c, c) for c in codes]
+        filters.append(f"Transaction type: {', '.join(labels)}")
+    else:
+        type_eq_match = re.search(r"\btype\s*=\s*'([^']+)'", where_text, re.IGNORECASE)
+        if type_eq_match:
+            code = type_eq_match.group(1)
+            label = _TRANSACTION_TYPE_LABELS.get(code, code)
+            filters.append(f"Transaction type: {label}")
+
+    # 4. Status predicates
+    status_match = re.search(
+        r"\bstatus\s+IN\s*\(([^)]+)\)|\bstatus\s*=\s*'([^']+)'",
+        where_text,
+        re.IGNORECASE,
+    )
+    if status_match:
+        codes_raw = status_match.group(1) or status_match.group(2)
+        codes = [c.strip().strip("'\"") for c in codes_raw.split(",")]
+        filters.append(f"Status: {', '.join(codes)}")
+
+    # 5. Subsidiary
+    sub_match = re.search(r"\bsubsidiary\s*=\s*(\d+)", where_text, re.IGNORECASE)
+    if sub_match:
+        filters.append(f"Subsidiary ID {sub_match.group(1)}")
+
+    # 6. is_test flag
+    if re.search(r"\bis_test\s*=\s*false\b|\btest\s*=\s*false\b", where_text, re.IGNORECASE):
+        filters.append("Excludes test orders")
+
+    # 7. cancelled_at IS NULL
+    if re.search(r"\bcancelled_at\s+IS\s+NULL\b", where_text, re.IGNORECASE):
+        filters.append("Excludes cancelled orders")
+
+    # 8. Currency
+    curr_match = re.search(r"\bcurrency\s*=\s*(\d+)", where_text, re.IGNORECASE)
+    if curr_match:
+        filters.append(f"Currency ID {curr_match.group(1)}")
+
+    # 9. Entity
+    entity_match = re.search(r"\bentity\s*=\s*(\d+)", where_text, re.IGNORECASE)
+    if entity_match:
+        filters.append(f"Entity ID {entity_match.group(1)}")
+
+    return ParsedFilters(interpretation=interpretation, implicit_filters=filters)
