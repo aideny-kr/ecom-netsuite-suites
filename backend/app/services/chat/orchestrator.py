@@ -413,6 +413,19 @@ def _is_netsuite_operational_query(query: str) -> bool:
     return any(phrase in q for phrase in _NETSUITE_VETO_PHRASES)
 
 
+def _select_agent_for_pin(source_pin: str | None) -> str | None:
+    """Return the agent ID to force-route to, or None if no pin is set.
+
+    source_pin values come from the chat_sessions.source_pin column, set by
+    the source-switch command detector in chat.py (Task 12).
+    """
+    if source_pin == "bigquery":
+        return "bi-agent"
+    if source_pin == "netsuite":
+        return "unified-agent"
+    return None
+
+
 async def _select_agent(
     query: str,
     tenant_id: uuid.UUID,
@@ -1703,9 +1716,14 @@ async def run_chat_turn(
                         except Exception:
                             logger.warning("orchestrator.onboarding_profile_injection_failed", exc_info=True)
 
+                    # ── Source pin overrides all other routing ──
+                    _pinned_agent = _select_agent_for_pin(getattr(session, "source_pin", None))
+                    if _pinned_agent:
+                        print(f"[ROUTING] Source pin: forcing {_pinned_agent}", flush=True)
+                        _selected_agent_id = _pinned_agent
                     # Three-tier routing: try specialized agent first, fall back to UnifiedAgent
                     # Financial reports bypass routing — must use UnifiedAgent with NetSuite tools
-                    if agent_id and not is_financial:
+                    elif agent_id and not is_financial:
                         # Client-side agent pin — skip routing entirely
                         _selected_agent_id = agent_id
                         print(f"[ROUTING] Client pinned → {agent_id}", flush=True)
