@@ -522,6 +522,7 @@ export default function ChatPage() {
             taskOutputs={taskOutputsRef.current}
             disclosures={disclosuresRef.current}
             streamingDisclosure={streamingDisclosure}
+            sessionId={activeSessionId}
             pinnedAgentId={pinnedAgentId}
             agents={agents}
             agentTab={agentTab}

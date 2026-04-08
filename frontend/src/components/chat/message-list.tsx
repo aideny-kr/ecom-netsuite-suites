@@ -617,6 +617,7 @@ interface MessageListProps {
   taskOutputs?: Map<string, TaskOutputData>;
   disclosures?: Map<string, DisclosureBlock>;
   streamingDisclosure?: DisclosureBlock | null;
+  sessionId?: string | null;
   pinnedAgentId?: string | null;
   agents?: AgentSummary[];
   agentTab?: "chat" | "config";
@@ -645,6 +646,7 @@ export function MessageList({
   taskOutputs,
   disclosures,
   streamingDisclosure,
+  sessionId,
   pinnedAgentId,
   agents,
   agentTab,
@@ -900,6 +902,7 @@ export function MessageList({
             chartDataList={chartsByMessage?.get(message.id) ?? null}
             taskOutputData={taskOutputs?.get(message.id) ?? null}
             disclosureData={disclosures?.get(message.id) ?? null}
+            sessionId={sessionId ?? null}
             isTerminal={isTerminal}
           />
         ) : isTerminal ? (
@@ -961,6 +964,7 @@ export function MessageList({
           isStreamingPreview
           isTerminal={isTerminal}
           disclosureData={streamingDisclosure ?? null}
+          sessionId={sessionId ?? null}
         />
       )}
 
@@ -1086,6 +1090,7 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
   chartDataList = null,
   taskOutputData = null,
   disclosureData = null,
+  sessionId = null,
   isTerminal = false,
 }: {
   message: ChatMessage;
@@ -1100,6 +1105,7 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
   chartDataList?: ChartData[] | null;
   taskOutputData?: TaskOutputData | null;
   disclosureData?: DisclosureBlock | null;
+  sessionId?: string | null;
   isTerminal?: boolean;
 }) {
   const { brandName: agentName } = useBranding();
@@ -1184,7 +1190,13 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
           <TaskOutputCard data={taskOutputData} />
         )}
 
-        {disclosureData && <DisclosureFooter disclosure={disclosureData} />}
+        {disclosureData && (
+          <DisclosureFooter
+            disclosure={disclosureData}
+            sessionId={sessionId ?? undefined}
+            messageId={message.id}
+          />
+        )}
 
         <div className="flex min-w-0 flex-col gap-2">
           {parseThinkingBlocks(message.content).map((part, index) =>

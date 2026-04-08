@@ -3,8 +3,15 @@
 import { useState } from "react";
 import { ChevronDown } from "lucide-react";
 import type { DisclosureBlock } from "@/lib/types";
+import { apiClient } from "@/lib/api-client";
 
-export function DisclosureFooter({ disclosure }: { disclosure: DisclosureBlock }) {
+interface DisclosureFooterProps {
+  disclosure: DisclosureBlock;
+  sessionId?: string;
+  messageId?: string;
+}
+
+export function DisclosureFooter({ disclosure, sessionId, messageId }: DisclosureFooterProps) {
   const [expanded, setExpanded] = useState(false);
   const hasDetails =
     disclosure.implicit_filters.length > 0 || disclosure.can_switch_source;
@@ -14,13 +21,29 @@ export function DisclosureFooter({ disclosure }: { disclosure: DisclosureBlock }
     ? "border-amber-500/20"
     : "border-border/30";
 
+  const handleClick = () => {
+    if (!hasDetails) return;
+    const next = !expanded;
+    setExpanded(next);
+    if (next && sessionId && messageId) {
+      apiClient
+        .post("/api/v1/disclosure-events/expanded", {
+          session_id: sessionId,
+          message_id: messageId,
+        })
+        .catch(() => {
+          /* fire-and-forget — telemetry failures must not affect UX */
+        });
+    }
+  };
+
   return (
     <div
       className={`mt-3 pt-2 border-t ${borderClass} text-[11px] sm:text-[12px] italic text-muted-foreground/70`}
     >
       <button
         type="button"
-        onClick={() => hasDetails && setExpanded(!expanded)}
+        onClick={handleClick}
         className="flex items-start gap-1.5 text-left hover:text-muted-foreground transition-colors disabled:cursor-default"
         disabled={!hasDetails}
       >

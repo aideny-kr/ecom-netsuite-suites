@@ -13,6 +13,7 @@ from app.api.v1 import (
     connection_alerts,
     connections,
     connector_status,
+    disclosure_telemetry,
     exports,
     health,
     invites,
@@ -75,3 +76,4 @@ api_router.include_router(agents.router)
 api_router.include_router(agent_instructions.router)
 api_router.include_router(connector_status.router)
 api_router.include_router(reconciliation.router)
+api_router.include_router(disclosure_telemetry.router)

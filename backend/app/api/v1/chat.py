@@ -312,6 +312,20 @@ async def send_message(
     # Commit user message BEFORE spawning background task (it uses its own DB session)
     await db.commit()
 
+    # ── Pushback telemetry (Task 21 / v0 disclosure-footer) ──
+    # Detect "that's wrong / actually / why is / I need" patterns and log a
+    # pushback event against the previous assistant message (if it had a
+    # disclosure). Runs AFTER the user msg commit so the helper can exclude it.
+    from app.services.chat.disclosure import PUSHBACK_RE, log_disclosure_event
+    if PUSHBACK_RE.match(body.content):
+        prev = await _find_previous_assistant_message(
+            db, session.id, exclude_message_id=user_msg.id
+        )
+        if prev and prev.disclosure_json:
+            await log_disclosure_event(
+                db, user.tenant_id, session.id, prev.id, "pushback"
+            )
+
     # ── Source-switch command detection (Task 12 / v0 disclosure-footer) ──
     from app.services.chat.disclosure import SOURCE_LABELS, parse_source_switch
 
@@ -320,6 +334,9 @@ async def send_message(
     _rerun_source_message: str | None = None
 
     if _switch_target:
+        await log_disclosure_event(
+            db, user.tenant_id, session.id, None, "switch_command", source=_switch_target
+        )
         # Update the session pin
         session.source_pin = _switch_target
         await db.commit()
@@ -342,7 +359,13 @@ async def send_message(
             # Smart re-run: replay the previous user query against the new source
             _is_rerun = True
             _rerun_source_message = prev_user.content
+            await log_disclosure_event(
+                db, user.tenant_id, session.id, None, "switch_rerun", source=_switch_target
+            )
         else:
+            await log_disclosure_event(
+                db, user.tenant_id, session.id, None, "switch_ack_only", source=_switch_target
+            )
             # Guards failed → minimal acknowledgment, no re-run
             ack_msg = f"Got it — I'll use {SOURCE_LABELS[_switch_target]} for your next question."
             ack_assistant = ChatMessage(

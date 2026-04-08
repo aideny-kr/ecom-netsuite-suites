@@ -433,3 +433,34 @@ async def disclosure_enabled_for_tenant(db, tenant_id) -> bool:
         return await is_enabled(db, tenant_id, "disclosure_footer_enabled")
     except Exception:
         return False  # belt-and-suspenders default OFF
+
+
+async def log_disclosure_event(
+    db,
+    tenant_id,
+    session_id,
+    message_id,
+    event_type: str,
+    source: str | None = None,
+    metadata: dict | None = None,
+) -> None:
+    """Write a row to chat_disclosure_events. Never raises.
+
+    Telemetry failures must NEVER affect chat UX — wrap in try/except and log
+    via print(flush=True) per the docker-logging convention.
+    """
+    from app.models.chat_disclosure_event import ChatDisclosureEvent
+
+    try:
+        row = ChatDisclosureEvent(
+            tenant_id=tenant_id,
+            session_id=session_id,
+            message_id=message_id,
+            event_type=event_type,
+            source=source,
+            event_metadata=metadata or {},
+        )
+        db.add(row)
+        await db.commit()
+    except Exception as exc:
+        print(f"[DISCLOSURE] telemetry write failed: {exc}", flush=True)

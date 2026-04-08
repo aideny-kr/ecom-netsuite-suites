@@ -2169,6 +2169,20 @@ async def run_chat_turn(
                             # Persist onto the message row so it hydrates on session reload
                             assistant_msg.disclosure_json = disclosure_payload
                             await db.commit()
+                            from app.services.chat.disclosure import log_disclosure_event
+                            await log_disclosure_event(
+                                db,
+                                tenant_id=tenant_id,
+                                session_id=session.id,
+                                message_id=assistant_msg.id,
+                                event_type="emitted",
+                                source=_disclosure.source,
+                                metadata={
+                                    "can_switch_source": _disclosure.can_switch_source,
+                                    "is_rerun": _disclosure.is_rerun,
+                                    "failure_mode": _disclosure.failure_mode,
+                                },
+                            )
                 except Exception as _disclosure_exc:
                     # Disclosure must never break the turn — log and continue
                     print(f"[DISCLOSURE] assembly failed: {_disclosure_exc}", flush=True)
@@ -2340,6 +2354,20 @@ async def run_chat_turn(
                         # Persist onto the message row so it hydrates on session reload
                         assistant_msg.disclosure_json = disclosure_payload
                         await db.commit()
+                        from app.services.chat.disclosure import log_disclosure_event
+                        await log_disclosure_event(
+                            db,
+                            tenant_id=tenant_id,
+                            session_id=session.id,
+                            message_id=assistant_msg.id,
+                            event_type="emitted",
+                            source=_disclosure.source,
+                            metadata={
+                                "can_switch_source": _disclosure.can_switch_source,
+                                "is_rerun": _disclosure.is_rerun,
+                                "failure_mode": _disclosure.failure_mode,
+                            },
+                        )
             except Exception as _disclosure_exc:
                 # Disclosure must never break the turn — log and continue
                 print(f"[DISCLOSURE] assembly failed: {_disclosure_exc}", flush=True)
@@ -2657,6 +2685,20 @@ async def run_chat_turn(
                 # Persist onto the message row so it hydrates on session reload
                 assistant_msg.disclosure_json = disclosure_payload
                 await db.commit()
+                from app.services.chat.disclosure import log_disclosure_event
+                await log_disclosure_event(
+                    db,
+                    tenant_id=tenant_id,
+                    session_id=session.id,
+                    message_id=assistant_msg.id,
+                    event_type="emitted",
+                    source=_disclosure.source,
+                    metadata={
+                        "can_switch_source": _disclosure.can_switch_source,
+                        "is_rerun": _disclosure.is_rerun,
+                        "failure_mode": _disclosure.failure_mode,
+                    },
+                )
     except Exception as _disclosure_exc:
         # Disclosure must never break the turn — log and continue
         print(f"[DISCLOSURE] assembly failed: {_disclosure_exc}", flush=True)
