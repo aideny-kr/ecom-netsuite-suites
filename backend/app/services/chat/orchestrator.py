@@ -1041,6 +1041,7 @@ async def run_chat_turn(
     user_timezone: str | None = None,
     agent_id: str | None = None,
     run_id: str | None = None,
+    is_rerun: bool = False,
 ) -> AsyncGenerator[dict, None]:
     """Execute an agentic chat turn with Claude's native tool use.
 
@@ -2093,6 +2094,35 @@ async def run_chat_turn(
                 result_msg["query_importance"] = importance_tier.value
                 if _selected_agent_id:
                     result_msg["agent_id"] = _selected_agent_id
+
+                # ── Disclosure footer (Task 9 / v0 disclosure-footer feature) ──
+                # Wrapped in try/except — disclosure must NEVER break the chat turn.
+                # Gated on env var DISCLOSURE_ENABLED until Task 14 wires the proper
+                # tenant_feature_flag.
+                import os as _disclosure_os
+                if _disclosure_os.getenv("DISCLOSURE_ENABLED", "false").lower() == "true":
+                    try:
+                        from app.services.chat.disclosure import assemble_disclosure
+                        from app.services.chat.disclosure_connector_state import build_connector_state
+
+                        _disclosure = assemble_disclosure(
+                            tool_calls=(assistant_msg.tool_calls or []),
+                            user_query=sanitized_input,
+                            current_source=(session.source_pin or "netsuite"),
+                            connector_state=await build_connector_state(db, tenant_id),
+                            matched_pattern=None,  # TODO(task-10): pattern-match detection
+                            is_rerun=is_rerun,
+                        )
+                        if _disclosure is not None:
+                            disclosure_payload = _disclosure.to_dict()
+                            yield {"type": "disclosure", **disclosure_payload}
+                            # Persist onto the message row so it hydrates on session reload
+                            assistant_msg.disclosure_json = disclosure_payload
+                            await db.commit()
+                    except Exception as _disclosure_exc:
+                        # Disclosure must never break the turn — log and continue
+                        print(f"[DISCLOSURE] assembly failed: {_disclosure_exc}", flush=True)
+
                 yield {"type": "message", "message": result_msg}
                 return
 
@@ -2223,6 +2253,34 @@ async def run_chat_turn(
                     assistant_message=final_text,
                 )
             )
+
+            # ── Disclosure footer (Task 9 / v0 disclosure-footer feature) ──
+            # Wrapped in try/except — disclosure must NEVER break the chat turn.
+            # Gated on env var DISCLOSURE_ENABLED until Task 14 wires the proper
+            # tenant_feature_flag.
+            import os as _disclosure_os
+            if _disclosure_os.getenv("DISCLOSURE_ENABLED", "false").lower() == "true":
+                try:
+                    from app.services.chat.disclosure import assemble_disclosure
+                    from app.services.chat.disclosure_connector_state import build_connector_state
+
+                    _disclosure = assemble_disclosure(
+                        tool_calls=(assistant_msg.tool_calls or []),
+                        user_query=sanitized_input,
+                        current_source=(session.source_pin or "netsuite"),
+                        connector_state=await build_connector_state(db, tenant_id),
+                        matched_pattern=None,  # TODO(task-10): pattern-match detection
+                        is_rerun=is_rerun,
+                    )
+                    if _disclosure is not None:
+                        disclosure_payload = _disclosure.to_dict()
+                        yield {"type": "disclosure", **disclosure_payload}
+                        # Persist onto the message row so it hydrates on session reload
+                        assistant_msg.disclosure_json = disclosure_payload
+                        await db.commit()
+                except Exception as _disclosure_exc:
+                    # Disclosure must never break the turn — log and continue
+                    print(f"[DISCLOSURE] assembly failed: {_disclosure_exc}", flush=True)
 
             # If we already yielded the final message via streaming, just return
             # Otherwise yield a final message now
@@ -2386,6 +2444,7 @@ async def run_chat_turn(
                     params=block.input,
                     result_str=result_str,
                     duration_ms=elapsed_ms,
+                    success=not _had_error,
                 )
             )
 
@@ -2505,5 +2564,33 @@ async def run_chat_turn(
     if hasattr(assistant_msg, "created_at") and assistant_msg.created_at:
         result_msg["created_at"] = assistant_msg.created_at.isoformat()
     result_msg["query_importance"] = importance_tier.value
+
+    # ── Disclosure footer (Task 9 / v0 disclosure-footer feature) ──
+    # Wrapped in try/except — disclosure must NEVER break the chat turn.
+    # Gated on env var DISCLOSURE_ENABLED until Task 14 wires the proper
+    # tenant_feature_flag.
+    import os as _disclosure_os
+    if _disclosure_os.getenv("DISCLOSURE_ENABLED", "false").lower() == "true":
+        try:
+            from app.services.chat.disclosure import assemble_disclosure
+            from app.services.chat.disclosure_connector_state import build_connector_state
+
+            _disclosure = assemble_disclosure(
+                tool_calls=(assistant_msg.tool_calls or []),
+                user_query=sanitized_input,
+                current_source=(session.source_pin or "netsuite"),
+                connector_state=await build_connector_state(db, tenant_id),
+                matched_pattern=None,  # TODO(task-10): pattern-match detection
+                is_rerun=is_rerun,
+            )
+            if _disclosure is not None:
+                disclosure_payload = _disclosure.to_dict()
+                yield {"type": "disclosure", **disclosure_payload}
+                # Persist onto the message row so it hydrates on session reload
+                assistant_msg.disclosure_json = disclosure_payload
+                await db.commit()
+        except Exception as _disclosure_exc:
+            # Disclosure must never break the turn — log and continue
+            print(f"[DISCLOSURE] assembly failed: {_disclosure_exc}", flush=True)
 
     yield {"type": "message", "message": result_msg}

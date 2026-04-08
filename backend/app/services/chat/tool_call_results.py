@@ -243,7 +243,15 @@ def build_tool_call_log_entry(
     result_str: str,
     duration_ms: int,
     agent_name: str | None = None,
+    success: bool | None = None,
 ) -> dict[str, Any]:
+    """Build a tool-call log entry dict.
+
+    The ``success`` field is required by the disclosure hook (Task 9) so the
+    failure-mode footer can detect failed data tool calls. When callers do not
+    pass ``success`` explicitly, we derive it from the parsed ``result_str``
+    via :func:`tool_call_had_error` so existing call sites keep working.
+    """
     entry: dict[str, Any] = {
         "step": step,
         "tool": tool_name,
@@ -257,6 +265,15 @@ def build_tool_call_log_entry(
     result_payload = extract_result_payload(tool_name, params, result_str)
     if result_payload is not None:
         entry["result_payload"] = result_payload
+
+    # Populate the success field so downstream consumers (disclosure footer
+    # in particular) can distinguish successful tool calls from failures.
+    # We parse the raw result_str (not the summarised form) so JSON error
+    # envelopes like {"error": true, "message": "..."} are detected reliably.
+    if success is None:
+        parsed_raw = parse_tool_result_value(result_str)
+        success = not (parsed_raw and _extract_error_message(parsed_raw) is not None)
+    entry["success"] = success
 
     return entry
 

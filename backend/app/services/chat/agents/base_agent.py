@@ -964,6 +964,7 @@ class BaseSpecialistAgent(abc.ABC):
                             params=block.input,
                             result_str=result_str,
                             duration_ms=elapsed_ms,
+                            success=not _had_error,
                         )
                     )
 
