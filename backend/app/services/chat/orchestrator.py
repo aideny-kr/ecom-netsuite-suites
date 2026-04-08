@@ -1434,6 +1434,7 @@ async def run_chat_turn(
                 from app.services.importance_classifier import ImportanceTier, classify_importance
 
                 importance_tier = ImportanceTier.CASUAL  # default for chitchat/MCP
+                patterns_result: list | None = None  # Default for chitchat path; overwritten in else branch below
 
                 if _is_chitchat:
                     print("[UNIFIED] Chitchat detected — skipping context assembly", flush=True)
@@ -1716,9 +1717,12 @@ async def run_chat_turn(
                         except Exception:
                             logger.warning("orchestrator.onboarding_profile_injection_failed", exc_info=True)
 
-                    # ── Source pin overrides all other routing ──
+                    # ── Source pin overrides non-financial routing ──
+                    # Financial queries bypass the pin so the financial-report path
+                    # (UnifiedAgent + NetSuite tools) still wins — the pin only
+                    # controls the SuiteQL vs BigQuery agent choice.
                     _pinned_agent = _select_agent_for_pin(getattr(session, "source_pin", None))
-                    if _pinned_agent:
+                    if _pinned_agent and not is_financial:
                         print(f"[ROUTING] Source pin: forcing {_pinned_agent}", flush=True)
                         _selected_agent_id = _pinned_agent
                     # Three-tier routing: try specialized agent first, fall back to UnifiedAgent
@@ -2135,7 +2139,7 @@ async def run_chat_turn(
                         # age (missing timestamp), default to age_days=0 to suppress.
                         _matched_pattern_dict: dict | None = None
                         try:
-                            _pr = patterns_result  # noqa: F821 — defined upstream in same `else:` branch
+                            _pr = patterns_result
                             if (
                                 isinstance(_pr, list)
                                 and _pr

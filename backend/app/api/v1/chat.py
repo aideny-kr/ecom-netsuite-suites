@@ -312,104 +312,114 @@ async def send_message(
     # Commit user message BEFORE spawning background task (it uses its own DB session)
     await db.commit()
 
-    # ── Pushback telemetry (Task 21 / v0 disclosure-footer) ──
-    # Detect "that's wrong / actually / why is / I need" patterns and log a
-    # pushback event against the previous assistant message (if it had a
-    # disclosure). Runs AFTER the user msg commit so the helper can exclude it.
-    from app.services.chat.disclosure import PUSHBACK_RE, log_disclosure_event
-    if PUSHBACK_RE.match(body.content):
-        prev = await _find_previous_assistant_message(
-            db, session.id, exclude_message_id=user_msg.id
-        )
-        if prev and prev.disclosure_json:
-            await log_disclosure_event(
-                db, user.tenant_id, session.id, prev.id, "pushback"
-            )
-
-    # ── Source-switch command detection (Task 12 / v0 disclosure-footer) ──
-    from app.services.chat.disclosure import SOURCE_LABELS, parse_source_switch
-
-    _switch_target = parse_source_switch(body.content)
+    # ── Feature-flag-gated disclosure footer logic (Task 14) ──
+    # Pushback telemetry, source-switch command detection, and the ack path all
+    # belong to the v0 disclosure-footer feature and are no-ops when
+    # `disclosure_footer_enabled` is OFF. Keep defaults in scope so the normal
+    # background task spawn below still works.
     _is_rerun = False
     _rerun_source_message: str | None = None
 
-    if _switch_target:
-        await log_disclosure_event(
-            db, user.tenant_id, session.id, None, "switch_command", source=_switch_target
-        )
-        # Update the session pin
-        session.source_pin = _switch_target
-        await db.commit()
+    from app.services.chat.disclosure import disclosure_enabled_for_tenant
 
-        # Look up the previous assistant + user messages (excluding the just-persisted user msg)
-        prev_assistant = await _find_previous_assistant_message(
-            db, session.id, exclude_message_id=user_msg.id
-        )
-        prev_user = await _find_previous_user_message(
-            db, session.id, exclude_message_id=user_msg.id
-        )
-
-        if (
-            prev_assistant is not None
-            and prev_user is not None
-            and prev_assistant.disclosure_json is not None
-            and prev_assistant.disclosure_json.get("can_switch_source") is True
-            and prev_assistant.tool_calls  # Guard B: previous turn used a data tool
-        ):
-            # Smart re-run: replay the previous user query against the new source
-            _is_rerun = True
-            _rerun_source_message = prev_user.content
-            await log_disclosure_event(
-                db, user.tenant_id, session.id, None, "switch_rerun", source=_switch_target
+    _disclosure_flag_on = await disclosure_enabled_for_tenant(db, user.tenant_id)
+    if _disclosure_flag_on:
+        # ── Pushback telemetry (Task 21 / v0 disclosure-footer) ──
+        # Detect "that's wrong / actually / why is / I need" patterns and log a
+        # pushback event against the previous assistant message (if it had a
+        # disclosure). Runs AFTER the user msg commit so the helper can exclude it.
+        from app.services.chat.disclosure import PUSHBACK_RE, log_disclosure_event
+        if PUSHBACK_RE.match(body.content):
+            prev = await _find_previous_assistant_message(
+                db, session.id, exclude_message_id=user_msg.id
             )
-        else:
-            await log_disclosure_event(
-                db, user.tenant_id, session.id, None, "switch_ack_only", source=_switch_target
-            )
-            # Guards failed → minimal acknowledgment, no re-run
-            ack_msg = f"Got it — I'll use {SOURCE_LABELS[_switch_target]} for your next question."
-            ack_assistant = ChatMessage(
-                tenant_id=user.tenant_id,
-                session_id=session.id,
-                role="assistant",
-                content=ack_msg,
-                tool_calls=None,
-                citations=None,
-                created_at=datetime.now(timezone.utc),
-            )
-            db.add(ack_assistant)
-            await db.commit()
-            await db.refresh(ack_assistant)
-
-            # Write directly to the run stream as a single message event + terminal status.
-            # If Redis is down, the create_run/write_event/set_status calls would silently
-            # no-op and we'd return a fake run_id pointing at nothing — fail loud instead.
-            ack_rm = get_run_manager()
-            if not ack_rm.available:
-                raise HTTPException(
-                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                    detail="Chat service temporarily unavailable. Please try again.",
+            if prev and prev.disclosure_json:
+                await log_disclosure_event(
+                    db, user.tenant_id, session.id, prev.id, "pushback"
                 )
-            ack_run_id = str(uuid.uuid4())
-            ack_rm.create_run(ack_run_id, str(session.id))
-            ack_rm.write_event(
-                ack_run_id,
-                {
-                    "type": "message",
-                    "message": {
-                        "id": str(ack_assistant.id),
-                        "role": "assistant",
-                        "content": ack_msg,
-                        "tool_calls": None,
-                        "citations": None,
-                        "created_at": ack_assistant.created_at.isoformat()
-                        if ack_assistant.created_at
-                        else None,
-                    },
-                },
+
+        # ── Source-switch command detection (Task 12 / v0 disclosure-footer) ──
+        from app.services.chat.disclosure import SOURCE_LABELS, parse_source_switch
+
+        _switch_target = parse_source_switch(body.content)
+
+        if _switch_target:
+            await log_disclosure_event(
+                db, user.tenant_id, session.id, None, "switch_command", source=_switch_target
             )
-            ack_rm.set_status(ack_run_id, "complete")
-            return {"run_id": ack_run_id, "session_id": str(session.id)}
+            # Update the session pin
+            session.source_pin = _switch_target
+            await db.commit()
+
+            # Look up the previous assistant + user messages (excluding the just-persisted user msg)
+            prev_assistant = await _find_previous_assistant_message(
+                db, session.id, exclude_message_id=user_msg.id
+            )
+            prev_user = await _find_previous_user_message(
+                db, session.id, exclude_message_id=user_msg.id
+            )
+
+            if (
+                prev_assistant is not None
+                and prev_user is not None
+                and prev_assistant.disclosure_json is not None
+                and prev_assistant.disclosure_json.get("can_switch_source") is True
+                and prev_assistant.tool_calls  # Guard B: previous turn used a data tool
+            ):
+                # Smart re-run: replay the previous user query against the new source
+                _is_rerun = True
+                _rerun_source_message = prev_user.content
+                await log_disclosure_event(
+                    db, user.tenant_id, session.id, None, "switch_rerun", source=_switch_target
+                )
+            else:
+                await log_disclosure_event(
+                    db, user.tenant_id, session.id, None, "switch_ack_only", source=_switch_target
+                )
+                # Guards failed → minimal acknowledgment, no re-run
+                ack_msg = f"Got it — I'll use {SOURCE_LABELS[_switch_target]} for your next question."
+                ack_assistant = ChatMessage(
+                    tenant_id=user.tenant_id,
+                    session_id=session.id,
+                    role="assistant",
+                    content=ack_msg,
+                    tool_calls=None,
+                    citations=None,
+                    created_at=datetime.now(timezone.utc),
+                )
+                db.add(ack_assistant)
+                await db.commit()
+                await db.refresh(ack_assistant)
+
+                # Write directly to the run stream as a single message event + terminal status.
+                # If Redis is down, the create_run/write_event/set_status calls would silently
+                # no-op and we'd return a fake run_id pointing at nothing — fail loud instead.
+                ack_rm = get_run_manager()
+                if not ack_rm.available:
+                    raise HTTPException(
+                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                        detail="Chat service temporarily unavailable. Please try again.",
+                    )
+                ack_run_id = str(uuid.uuid4())
+                ack_rm.create_run(ack_run_id, str(session.id))
+                ack_rm.write_event(
+                    ack_run_id,
+                    {
+                        "type": "message",
+                        "message": {
+                            "id": str(ack_assistant.id),
+                            "role": "assistant",
+                            "content": ack_msg,
+                            "tool_calls": None,
+                            "citations": None,
+                            "created_at": ack_assistant.created_at.isoformat()
+                            if ack_assistant.created_at
+                            else None,
+                        },
+                    },
+                )
+                ack_rm.set_status(ack_run_id, "complete")
+                return {"run_id": ack_run_id, "session_id": str(session.id)}
 
     rm = get_run_manager()
 

@@ -16,6 +16,33 @@ import pytest
 from sqlalchemy import select, text
 
 from app.models.chat import ChatMessage, ChatSession
+from app.models.chat_disclosure_event import ChatDisclosureEvent
+
+# ---------------------------------------------------------------------------
+# Helper: enable the disclosure_footer_enabled feature flag for a tenant
+# ---------------------------------------------------------------------------
+
+
+async def _enable_disclosure_flag(db, tenant_id) -> None:
+    """Enable the disclosure_footer_enabled flag for a tenant and clear the TTL cache.
+
+    The endpoint-side logic is gated on this flag; tests that exercise the
+    source-switch / pushback / ack paths must flip it on before issuing the
+    request.
+    """
+    from app.services.feature_flag_service import clear_cache
+
+    await db.execute(
+        text(
+            "INSERT INTO tenant_feature_flags (tenant_id, flag_key, enabled, created_at, updated_at) "
+            "VALUES (:tid, 'disclosure_footer_enabled', true, NOW(), NOW()) "
+            "ON CONFLICT ON CONSTRAINT uq_tenant_feature_flag DO UPDATE SET enabled = true"
+        ),
+        {"tid": str(tenant_id)},
+    )
+    await db.commit()
+    clear_cache()
+
 
 # ---------------------------------------------------------------------------
 # Helper: build a session with prior history that satisfies the rerun guards
@@ -119,6 +146,7 @@ def _make_mock_rm(*, available: bool = True):
 async def test_use_bigquery_updates_source_pin(client, db, admin_user):
     """Sending 'use BigQuery' should set chat_sessions.source_pin to 'bigquery'."""
     user, headers = admin_user
+    await _enable_disclosure_flag(db, user.tenant_id)
     await db.execute(text(f"SET LOCAL app.current_tenant_id = '{user.tenant_id}'"))
 
     session, _, _ = await _seed_session_with_history(
@@ -158,6 +186,7 @@ async def test_use_bigquery_updates_source_pin(client, db, admin_user):
 async def test_use_netsuite_after_bigquery_updates_pin(client, db, admin_user):
     """Switching back to NetSuite should update the pin to 'netsuite'."""
     user, headers = admin_user
+    await _enable_disclosure_flag(db, user.tenant_id)
     await db.execute(text(f"SET LOCAL app.current_tenant_id = '{user.tenant_id}'"))
 
     session, _, _ = await _seed_session_with_history(
@@ -198,6 +227,7 @@ async def test_use_netsuite_after_bigquery_updates_pin(client, db, admin_user):
 async def test_partial_match_does_not_fire(client, db, admin_user):
     """'let me use BigQuery to find X' should NOT trigger a source switch."""
     user, headers = admin_user
+    await _enable_disclosure_flag(db, user.tenant_id)
     await db.execute(text(f"SET LOCAL app.current_tenant_id = '{user.tenant_id}'"))
 
     session, _, _ = await _seed_session_with_history(
@@ -236,6 +266,7 @@ async def test_partial_match_does_not_fire(client, db, admin_user):
 async def test_switch_with_failed_guards_emits_ack_only(client, db, admin_user):
     """When the previous turn lacks tool_calls or disclosure, emit an ack."""
     user, headers = admin_user
+    await _enable_disclosure_flag(db, user.tenant_id)
     await db.execute(text(f"SET LOCAL app.current_tenant_id = '{user.tenant_id}'"))
 
     # Prior turn has NO tool_calls and NO disclosure → guards fail
@@ -295,6 +326,7 @@ async def test_switch_with_failed_guards_emits_ack_only(client, db, admin_user):
 async def test_switch_with_passing_guards_triggers_rerun(client, db, admin_user):
     """When all 5 guards pass, the background task is spawned with the previous user message."""
     user, headers = admin_user
+    await _enable_disclosure_flag(db, user.tenant_id)
     await db.execute(text(f"SET LOCAL app.current_tenant_id = '{user.tenant_id}'"))
 
     session, prev_user, _ = await _seed_session_with_history(
@@ -338,3 +370,69 @@ async def test_switch_with_passing_guards_triggers_rerun(client, db, admin_user)
     assert mock_bg.call_args is not None, "_run_chat_background was not invoked"
     assert mock_bg.call_args.kwargs["user_message"] == prev_user_content
     assert mock_bg.call_args.kwargs["is_rerun"] is True
+
+
+# ---------------------------------------------------------------------------
+# Test: flag-OFF invariant — "use BigQuery" is a pass-through, no mutation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_source_switch_is_noop_when_flag_off(client, db, admin_user):
+    """When disclosure_footer_enabled is OFF, `use BigQuery` must NOT mutate source_pin,
+    must NOT write telemetry, and MUST pass through to the background task with the
+    literal user message.
+    """
+    user, headers = admin_user
+    # Do NOT enable the flag — clear cache just in case a prior test leaked state.
+    from app.services.feature_flag_service import clear_cache
+
+    clear_cache()
+
+    await db.execute(text(f"SET LOCAL app.current_tenant_id = '{user.tenant_id}'"))
+
+    # Seed a session with a full prior turn — if the gate leaked, the rerun
+    # path would fire and mutate state, so this gives the test teeth.
+    session, _, _ = await _seed_session_with_history(
+        db, user, can_switch=True, has_tool_calls=True, has_disclosure=True
+    )
+    session_id = str(session.id)
+
+    mock_rm = _make_mock_rm(available=True)
+
+    # MagicMock captures call_args synchronously at invocation time.
+    mock_bg = MagicMock()
+
+    async def fake_background(*args, **kwargs):
+        return None
+
+    mock_bg.side_effect = fake_background
+
+    with (
+        patch("app.api.v1.chat._run_chat_background", mock_bg),
+        patch("app.api.v1.chat.get_run_manager", return_value=mock_rm),
+    ):
+        resp = await client.post(
+            f"/api/v1/chat/sessions/{session_id}/messages",
+            json={"content": "use BigQuery"},
+            headers=headers,
+        )
+
+    assert resp.status_code == 202
+
+    # source_pin must remain None — pin NOT mutated when flag is off
+    result = await db.execute(select(ChatSession).where(ChatSession.id == session.id))
+    refreshed = result.scalar_one()
+    assert refreshed.source_pin is None
+
+    # No telemetry rows for this session
+    result = await db.execute(
+        select(ChatDisclosureEvent).where(ChatDisclosureEvent.session_id == session.id)
+    )
+    rows = result.scalars().all()
+    assert len(rows) == 0, f"Expected no telemetry rows, got {[r.event_type for r in rows]}"
+
+    # Background task invoked with the literal "use BigQuery" text and is_rerun=False
+    assert mock_bg.call_args is not None, "_run_chat_background was not invoked"
+    assert mock_bg.call_args.kwargs["user_message"] == "use BigQuery"
+    assert mock_bg.call_args.kwargs["is_rerun"] is False
