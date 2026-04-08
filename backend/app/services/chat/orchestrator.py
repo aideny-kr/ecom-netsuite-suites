@@ -2106,12 +2106,40 @@ async def run_chat_turn(
                         from app.services.chat.disclosure import assemble_disclosure
                         from app.services.chat.disclosure_connector_state import build_connector_state
 
+                        # Task 10: Build matched_pattern dict from the unified-agent
+                        # proven-pattern lookup. Only treat a pattern as "fired" when
+                        # the top retrieval is reasonably similar (>= 0.75) — random
+                        # top-K results without a similarity gate would over-suppress.
+                        # Conservative default: if a pattern fired but we can't compute
+                        # age (missing timestamp), default to age_days=0 to suppress.
+                        _matched_pattern_dict: dict | None = None
+                        try:
+                            _pr = patterns_result  # noqa: F821 — defined upstream in same `else:` branch
+                            if (
+                                isinstance(_pr, list)
+                                and _pr
+                                and float(_pr[0].get("similarity", 0.0)) >= 0.75
+                            ):
+                                _top = _pr[0]
+                                _ts = _top.get("last_used_at") or _top.get("created_at")
+                                if _ts is not None:
+                                    if _ts.tzinfo is None:
+                                        _ts = _ts.replace(tzinfo=timezone.utc)
+                                    _age_days = (datetime.now(timezone.utc) - _ts).days
+                                    _matched_pattern_dict = {"age_days": _age_days}
+                                else:
+                                    # Conservative: pattern matched but no timestamp →
+                                    # treat as fresh and suppress.
+                                    _matched_pattern_dict = {"age_days": 0}
+                        except Exception:
+                            _matched_pattern_dict = None
+
                         _disclosure = assemble_disclosure(
                             tool_calls=(assistant_msg.tool_calls or []),
                             user_query=sanitized_input,
                             current_source=(session.source_pin or "netsuite"),
                             connector_state=await build_connector_state(db, tenant_id),
-                            matched_pattern=None,  # TODO(task-10): pattern-match detection
+                            matched_pattern=_matched_pattern_dict,
                             is_rerun=is_rerun,
                         )
                         if _disclosure is not None:
@@ -2276,7 +2304,10 @@ async def run_chat_turn(
                         user_query=sanitized_input,
                         current_source=(session.source_pin or "netsuite"),
                         connector_state=await build_connector_state(db, tenant_id),
-                        matched_pattern=None,  # TODO(task-10): pattern-match detection
+                        # Legacy multi-agent path does NOT consult tenant_query_patterns —
+                        # `retrieve_similar_patterns` is only invoked in the unified-agent
+                        # path above. Disclosure footer never gets pattern-suppressed here.
+                        matched_pattern=None,
                         is_rerun=is_rerun,
                     )
                     if _disclosure is not None:
@@ -2587,7 +2618,10 @@ async def run_chat_turn(
                 user_query=sanitized_input,
                 current_source=(session.source_pin or "netsuite"),
                 connector_state=await build_connector_state(db, tenant_id),
-                matched_pattern=None,  # TODO(task-10): pattern-match detection
+                # Single-agent agentic loop does NOT consult tenant_query_patterns —
+                # `retrieve_similar_patterns` is only invoked in the unified-agent path.
+                # Disclosure footer never gets pattern-suppressed here.
+                matched_pattern=None,
                 is_rerun=is_rerun,
             )
             if _disclosure is not None:
