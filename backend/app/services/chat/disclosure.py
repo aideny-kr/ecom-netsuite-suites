@@ -333,6 +333,8 @@ def parse_where_clause(sql: str) -> ParsedFilters:
 
 # ── Entry point ──────────────────────────────────────────────────────────
 
+_SOURCE_LABELS = {"netsuite": "NetSuite", "bigquery": "BigQuery"}
+
 _DATA_TOOL_NAMES = {
     "netsuite_suiteql",
     "bigquery_sql",
@@ -341,9 +343,26 @@ _DATA_TOOL_NAMES = {
     "ns_runCustomSuiteQL",
     "ns_getRecord",
     "netsuite_saved_search",
+    "ns_runReport",
+    "ns_runSavedSearch",
 }
 
 _STALE_PATTERN_THRESHOLD_DAYS = 7
+
+
+def _data_tool_key(name: str) -> str:
+    """Strip the `ext__{32-hex}__` prefix used by external MCP tool names.
+
+    External MCP tools are exposed to the LLM with a uniqueness prefix
+    (see `app/services/chat/tools.py`); the disclosure footer needs to
+    match against the underlying raw tool name.
+    """
+    if name.startswith("ext__"):
+        # ext__{32 hex chars}__{raw_name}
+        parts = name.split("__", 2)
+        if len(parts) == 3:
+            return parts[2]
+    return name
 
 
 def assemble_disclosure(
@@ -363,7 +382,7 @@ def assemble_disclosure(
     3. All tool calls failed → failure-mode footer (only if can_switch_source)
     4. Otherwise → parse the LAST successful data tool's SQL
     """
-    data_tool_calls = [t for t in tool_calls if t.get("tool") in _DATA_TOOL_NAMES]
+    data_tool_calls = [t for t in tool_calls if _data_tool_key(t.get("tool", "")) in _DATA_TOOL_NAMES]
     if not data_tool_calls:
         return None
 
@@ -382,7 +401,7 @@ def assemble_disclosure(
             return None
         return DisclosureBlock(
             source=current_source,
-            interpretation=f"Tried {current_source.capitalize()}.",
+            interpretation=f"Tried {_SOURCE_LABELS[current_source]}.",
             implicit_filters=[],
             can_switch_source=True,
             is_rerun=is_rerun,
