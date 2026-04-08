@@ -421,3 +421,15 @@ def assemble_disclosure(
         is_rerun=is_rerun,
         failure_mode=False,
     )
+
+
+async def disclosure_enabled_for_tenant(db, tenant_id) -> bool:
+    """Check the tenant_feature_flags table for 'disclosure_footer_enabled'.
+
+    Default OFF if the flag isn't set, the lookup fails, or the helper raises.
+    """
+    from app.services.feature_flag_service import is_enabled
+    try:
+        return await is_enabled(db, tenant_id, "disclosure_footer_enabled")
+    except Exception:
+        return False  # belt-and-suspenders default OFF

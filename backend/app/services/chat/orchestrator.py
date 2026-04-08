@@ -2114,16 +2114,19 @@ async def run_chat_turn(
                 if _selected_agent_id:
                     result_msg["agent_id"] = _selected_agent_id
 
-                # ── Disclosure footer (Task 9 / v0 disclosure-footer feature) ──
+                # ── Disclosure footer (Task 14: tenant feature flag) ──
                 # Wrapped in try/except — disclosure must NEVER break the chat turn.
-                # Gated on env var DISCLOSURE_ENABLED until Task 14 wires the proper
-                # tenant_feature_flag.
-                import os as _disclosure_os
-                if _disclosure_os.getenv("DISCLOSURE_ENABLED", "false").lower() == "true":
-                    try:
-                        from app.services.chat.disclosure import assemble_disclosure
-                        from app.services.chat.disclosure_connector_state import build_connector_state
+                # Gated on `disclosure_footer_enabled` tenant feature flag (default OFF).
+                # To enable for dogfood tenants after merge:
+                #   INSERT INTO tenant_feature_flags (tenant_id, flag_key, enabled)
+                #   VALUES
+                #     ('ce3dfaad-626f-4992-84e9-500c8291ca0a', 'disclosure_footer_enabled', true),
+                #     ('bf92d059-4f45-492d-b920-d0390f6fb77a', 'disclosure_footer_enabled', true);
+                try:
+                    from app.services.chat.disclosure import assemble_disclosure, disclosure_enabled_for_tenant
+                    from app.services.chat.disclosure_connector_state import build_connector_state
 
+                    if await disclosure_enabled_for_tenant(db, tenant_id):
                         # Task 10: Build matched_pattern dict from the unified-agent
                         # proven-pattern lookup. Only treat a pattern as "fired" when
                         # the top retrieval is reasonably similar (>= 0.75) — random
@@ -2166,9 +2169,9 @@ async def run_chat_turn(
                             # Persist onto the message row so it hydrates on session reload
                             assistant_msg.disclosure_json = disclosure_payload
                             await db.commit()
-                    except Exception as _disclosure_exc:
-                        # Disclosure must never break the turn — log and continue
-                        print(f"[DISCLOSURE] assembly failed: {_disclosure_exc}", flush=True)
+                except Exception as _disclosure_exc:
+                    # Disclosure must never break the turn — log and continue
+                    print(f"[DISCLOSURE] assembly failed: {_disclosure_exc}", flush=True)
 
                 yield {"type": "message", "message": result_msg}
                 return
@@ -2307,16 +2310,19 @@ async def run_chat_turn(
             # disclosure block runs. Dogfood tenants (Framework, Rails) use
             # the unified-agent path where ordering is correct. Fix in v1
             # if non-dogfood tenants need disclosure on the legacy path.
-            # ── Disclosure footer (Task 9 / v0 disclosure-footer feature) ──
+            # ── Disclosure footer (Task 14: tenant feature flag) ──
             # Wrapped in try/except — disclosure must NEVER break the chat turn.
-            # Gated on env var DISCLOSURE_ENABLED until Task 14 wires the proper
-            # tenant_feature_flag.
-            import os as _disclosure_os
-            if _disclosure_os.getenv("DISCLOSURE_ENABLED", "false").lower() == "true":
-                try:
-                    from app.services.chat.disclosure import assemble_disclosure
-                    from app.services.chat.disclosure_connector_state import build_connector_state
+            # Gated on `disclosure_footer_enabled` tenant feature flag (default OFF).
+            # To enable for dogfood tenants after merge:
+            #   INSERT INTO tenant_feature_flags (tenant_id, flag_key, enabled)
+            #   VALUES
+            #     ('ce3dfaad-626f-4992-84e9-500c8291ca0a', 'disclosure_footer_enabled', true),
+            #     ('bf92d059-4f45-492d-b920-d0390f6fb77a', 'disclosure_footer_enabled', true);
+            try:
+                from app.services.chat.disclosure import assemble_disclosure, disclosure_enabled_for_tenant
+                from app.services.chat.disclosure_connector_state import build_connector_state
 
+                if await disclosure_enabled_for_tenant(db, tenant_id):
                     _disclosure = assemble_disclosure(
                         tool_calls=(assistant_msg.tool_calls or []),
                         user_query=sanitized_input,
@@ -2334,9 +2340,9 @@ async def run_chat_turn(
                         # Persist onto the message row so it hydrates on session reload
                         assistant_msg.disclosure_json = disclosure_payload
                         await db.commit()
-                except Exception as _disclosure_exc:
-                    # Disclosure must never break the turn — log and continue
-                    print(f"[DISCLOSURE] assembly failed: {_disclosure_exc}", flush=True)
+            except Exception as _disclosure_exc:
+                # Disclosure must never break the turn — log and continue
+                print(f"[DISCLOSURE] assembly failed: {_disclosure_exc}", flush=True)
 
             # If we already yielded the final message via streaming, just return
             # Otherwise yield a final message now
@@ -2621,16 +2627,19 @@ async def run_chat_turn(
         result_msg["created_at"] = assistant_msg.created_at.isoformat()
     result_msg["query_importance"] = importance_tier.value
 
-    # ── Disclosure footer (Task 9 / v0 disclosure-footer feature) ──
+    # ── Disclosure footer (Task 14: tenant feature flag) ──
     # Wrapped in try/except — disclosure must NEVER break the chat turn.
-    # Gated on env var DISCLOSURE_ENABLED until Task 14 wires the proper
-    # tenant_feature_flag.
-    import os as _disclosure_os
-    if _disclosure_os.getenv("DISCLOSURE_ENABLED", "false").lower() == "true":
-        try:
-            from app.services.chat.disclosure import assemble_disclosure
-            from app.services.chat.disclosure_connector_state import build_connector_state
+    # Gated on `disclosure_footer_enabled` tenant feature flag (default OFF).
+    # To enable for dogfood tenants after merge:
+    #   INSERT INTO tenant_feature_flags (tenant_id, flag_key, enabled)
+    #   VALUES
+    #     ('ce3dfaad-626f-4992-84e9-500c8291ca0a', 'disclosure_footer_enabled', true),
+    #     ('bf92d059-4f45-492d-b920-d0390f6fb77a', 'disclosure_footer_enabled', true);
+    try:
+        from app.services.chat.disclosure import assemble_disclosure, disclosure_enabled_for_tenant
+        from app.services.chat.disclosure_connector_state import build_connector_state
 
+        if await disclosure_enabled_for_tenant(db, tenant_id):
             _disclosure = assemble_disclosure(
                 tool_calls=(assistant_msg.tool_calls or []),
                 user_query=sanitized_input,
@@ -2648,8 +2657,8 @@ async def run_chat_turn(
                 # Persist onto the message row so it hydrates on session reload
                 assistant_msg.disclosure_json = disclosure_payload
                 await db.commit()
-        except Exception as _disclosure_exc:
-            # Disclosure must never break the turn — log and continue
-            print(f"[DISCLOSURE] assembly failed: {_disclosure_exc}", flush=True)
+    except Exception as _disclosure_exc:
+        # Disclosure must never break the turn — log and continue
+        print(f"[DISCLOSURE] assembly failed: {_disclosure_exc}", flush=True)
 
     yield {"type": "message", "message": result_msg}
