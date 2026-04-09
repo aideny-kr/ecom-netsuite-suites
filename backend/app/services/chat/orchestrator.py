@@ -1999,6 +1999,36 @@ async def run_chat_turn(
                     else:
                         _persisted_output = {"charts": _charts_output}
 
+                # ── Post-tool disclosure (v0 intent clarification) ──
+                disclosure_block = None
+                try:
+                    from app.services.chat import disclosure as _disclosure_mod
+                    from app.services.feature_flag_service import is_enabled
+
+                    if await is_enabled(db, tenant_id, "disclosure_footer_enabled"):
+                        _checks = await _disclosure_mod._build_connector_checks(db, tenant_id)
+                        _pattern_age = None
+                        if context.get("matched_pattern_similarity"):
+                            # Fresh pattern = matched with high similarity this session.
+                            # For v0 we treat any matched_pattern_similarity >= 0.85 as
+                            # fresh (<7d) since tenant_query_patterns are re-used, not aged.
+                            if context["matched_pattern_similarity"] >= 0.85:
+                                _pattern_age = 0.0
+                        disclosure_block = _disclosure_mod.assemble_disclosure(
+                            user_question=sanitized_input,
+                            tool_calls_log=coord_result_tool_calls,
+                            current_source=(session.source_pin or "netsuite"),  # type: ignore[arg-type]
+                            tenant_id=tenant_id,
+                            matched_pattern_age_days=_pattern_age,
+                            connector_checks=_checks,
+                            is_rerun=False,  # Task 7 will wire source-switch re-run flag
+                        )
+                    if disclosure_block is not None:
+                        yield {"type": "disclosure", **disclosure_block.to_dict()}
+                except Exception as _disclosure_err:
+                    print(f"[DISCLOSURE] hook failed: {_disclosure_err}", flush=True)
+                    disclosure_block = None
+
                 assistant_msg = ChatMessage(
                     tenant_id=tenant_id,
                     session_id=session.id,
@@ -2015,10 +2045,30 @@ async def run_chat_turn(
                     confidence_score=confidence_val,
                     query_importance=importance_tier.value,
                     structured_output=_persisted_output,
+                    disclosure_json=disclosure_block.to_dict() if disclosure_block else None,
                     agent_id=_selected_agent_id if _selected_agent_id else None,
                     created_at=datetime.now(timezone.utc),
                 )
                 db.add(assistant_msg)
+
+                if disclosure_block is not None:
+                    from app.models.chat_disclosure_event import ChatDisclosureEvent
+
+                    db.add(
+                        ChatDisclosureEvent(
+                            tenant_id=tenant_id,
+                            session_id=session.id,
+                            message_id=assistant_msg.id,
+                            event_type="emitted",
+                            source=disclosure_block.source,
+                            metadata_={
+                                "can_switch_source": disclosure_block.can_switch_source,
+                                "failure_mode": disclosure_block.failure_mode,
+                                "is_rerun": disclosure_block.is_rerun,
+                                "filter_count": len(disclosure_block.implicit_filters),
+                            },
+                        )
+                    )
 
                 # Flush pending result caches (for follow-up intelligence)
                 for _pc in _pending_caches:
