@@ -1,5 +1,5 @@
 # Variation 1: same intent, different wording (implicit country subset)
-case_id: country_sales_variation_1
+case_id: sales_country_abbreviated_iso
 query: "how much did we sell today in Norway, Switzerland, NZ and SG?"
 tags: ["country", "shipping", "variation"]
 notes: |

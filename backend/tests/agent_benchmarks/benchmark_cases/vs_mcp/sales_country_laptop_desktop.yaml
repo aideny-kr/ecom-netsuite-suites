@@ -1,5 +1,5 @@
 # Variation 5: breakdown by laptop vs desktop (Olivia's Turn 3 follow-up)
-case_id: country_sales_variation_5
+case_id: sales_country_laptop_desktop
 query: "for today's sales to Norway, Switzerland, New Zealand and Singapore, break down the quantities into laptop and desktop"
 tags: ["country", "shipping", "variation", "breakdown", "olivia-turn-3"]
 notes: |

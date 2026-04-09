@@ -1,0 +1,34 @@
+# Wrench: 3-dimension filter — "top 3 platforms in Europe by USD this month"
+#
+# Combines:
+#  - Top-N (ORDER BY revenue DESC, FETCH FIRST 3 ROWS ONLY)
+#  - Platform custom field (custitem_fw_platform on item)
+#  - Geographic filter "Europe" (multiple countries, via shipping address)
+#  - USD currency filter (t.currency = 1) or base currency (t.total)
+#  - Date filter (this month)
+#
+# This is a "real user question" that combines 4 dimensions. The agent
+# needs to handle all 4 without losing one.
+
+case_id: sales_wrench_europe_top_platforms
+query: "top 3 platforms by USD revenue in Europe this month"
+tags: ["sales", "wrench", "top-n", "platform", "country", "currency", "multi-dimension"]
+notes: |
+  Multi-filter wrench. Requires:
+    - JOIN transactionShippingAddress for country filter
+    - JOIN item for custitem_fw_platform
+    - Europe countries list (agent may expand "Europe" to a hard-coded list
+      or use a geographic lookup — either is acceptable)
+    - SUM(t.total) or SUM(tl.amount * -1) for USD base currency
+    - GROUP BY platform, ORDER BY total DESC, FETCH FIRST 3 ROWS ONLY
+expected_answer_contains:
+  - "platform"
+  - "Europe"
+expected_tools:
+  - "netsuite_suiteql"
+expected_accuracy: 0.6
+max_cost: 0.75
+max_latency_ms: 180000
+baseline_expected_accuracy: 0.6
+baseline_expected_tools:
+  - "ns_runCustomSuiteQL"

@@ -1,5 +1,5 @@
 # Variation 3: different time window ("this week")
-case_id: country_sales_variation_3
+case_id: sales_country_this_week
 query: "show me this week's sales for the 4 European countries: Norway, Switzerland, Singapore and New Zealand"
 tags: ["country", "shipping", "variation", "time-window"]
 notes: |

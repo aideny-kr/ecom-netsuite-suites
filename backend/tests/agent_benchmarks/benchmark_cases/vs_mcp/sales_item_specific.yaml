@@ -1,0 +1,33 @@
+# Specific item lookup — "sales of FRANKK00A1 this month"
+#
+# Tests:
+#  - Item lookup by itemid (case-sensitive SKU pattern)
+#  - item.itemid (NOT displayname) is the right search column
+#  - Joining transactionline on specific item
+
+case_id: sales_item_specific
+query: "how many units of FRANKK00A1 did we sell this month and for how much?"
+tags: ["sales", "item", "specific-sku", "lookup"]
+notes: |
+  Tests specific item lookup. FRANKK00A1 is a Framework SKU. Correct:
+    SELECT COUNT(DISTINCT t.id) AS orders,
+           SUM(ABS(tl.quantity)) AS units,
+           SUM(tl.amount * -1) AS revenue_usd
+    FROM transaction t
+    JOIN transactionline tl ON tl.transaction = t.id
+    JOIN item i ON i.id = tl.item
+    WHERE t.type = 'SalesOrd'
+      AND t.trandate >= TRUNC(SYSDATE, 'MM')
+      AND i.itemid = 'FRANKK00A1'
+      AND tl.mainline = 'F' AND tl.taxline = 'F'
+      AND (tl.iscogs = 'F' OR tl.iscogs IS NULL)
+expected_answer_contains:
+  - "FRANKK00A1"
+expected_tools:
+  - "netsuite_suiteql"
+expected_accuracy: 0.7
+max_cost: 0.50
+max_latency_ms: 120000
+baseline_expected_accuracy: 0.7
+baseline_expected_tools:
+  - "ns_runCustomSuiteQL"

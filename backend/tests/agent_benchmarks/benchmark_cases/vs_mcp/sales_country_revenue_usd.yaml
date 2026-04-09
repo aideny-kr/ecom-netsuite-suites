@@ -1,5 +1,5 @@
 # Variation 4: different metric (revenue USD instead of qty)
-case_id: country_sales_variation_4
+case_id: sales_country_revenue_usd
 query: "revenue in USD for Norway, Switzerland, NZ, Singapore today"
 tags: ["country", "shipping", "variation", "metric"]
 notes: |

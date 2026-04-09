@@ -1,0 +1,32 @@
+# Top customers — "top 10 customers by revenue this quarter"
+#
+# Tests:
+#  - JOIN customer c ON c.id = t.entity (customer as buyer)
+#  - c.companyname for display
+#  - Quarter boundary interpretation
+#  - Top-N with ORDER BY + FETCH FIRST
+
+case_id: sales_top_customers
+query: "who are our top 10 customers by revenue this quarter?"
+tags: ["sales", "customer", "top-n", "fiscal-period"]
+notes: |
+  Tests customer dimension + top-N. Correct approach:
+    SELECT c.companyname, SUM(t.total) AS revenue
+    FROM transaction t
+    JOIN customer c ON c.id = t.entity
+    WHERE t.type = 'SalesOrd'
+      AND t.trandate >= TRUNC(SYSDATE, 'Q')
+    GROUP BY c.companyname
+    ORDER BY revenue DESC
+    FETCH FIRST 10 ROWS ONLY
+expected_answer_contains:
+  - "customer"
+  - "revenue"
+expected_tools:
+  - "netsuite_suiteql"
+expected_accuracy: 0.7
+max_cost: 0.50
+max_latency_ms: 120000
+baseline_expected_accuracy: 0.7
+baseline_expected_tools:
+  - "ns_runCustomSuiteQL"

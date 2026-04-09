@@ -1,0 +1,30 @@
+# Wrench: average order value — "AOV by class this month"
+#
+# Tests:
+#  - Average order value requires header-level total (t.total), not line aggregation
+#  - Cannot use SUM(t.total)/COUNT(tl.id) — inflates denominator
+#  - Correct: SUM(t.total)/COUNT(DISTINCT t.id) or AVG(t.total) at header level
+#  - Dialect rule: "If you JOIN transactionline, NEVER use SUM(t.foreigntotal)"
+#  - Which means for AOV you probably need a subquery or separate header query
+
+case_id: sales_wrench_aov_by_class
+query: "what is the average order value by product class this month?"
+tags: ["sales", "wrench", "aov", "aggregation", "class"]
+notes: |
+  Wrench — AOV is a header-level metric, class is a line-level dimension.
+  Naive approach (SUM(t.total)/COUNT(*) after joining lines) inflates the
+  denominator. Correct approach: subquery that groups by class at the
+  line level but uses DISTINCT transaction IDs, OR a 2-step query
+  (orders per class, then divide). Strict revenue filter on tl.mainline='F'
+  etc. still applies.
+expected_answer_contains:
+  - "class"
+  - "average"
+expected_tools:
+  - "netsuite_suiteql"
+expected_accuracy: 0.6
+max_cost: 0.75
+max_latency_ms: 180000
+baseline_expected_accuracy: 0.6
+baseline_expected_tools:
+  - "ns_runCustomSuiteQL"

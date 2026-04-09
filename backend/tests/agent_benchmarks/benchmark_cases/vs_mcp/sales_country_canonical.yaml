@@ -14,7 +14,7 @@
 # For exact-number regression, re-seed the YAML with today's ground truth
 # before each benchmark run.
 
-case_id: country_sales_canonical
+case_id: sales_country_canonical
 query: "give me the sales data of Norway, Switzerland, New Zealand and Singapore as of today, sales data includes total sales order amount and system sales qty"
 tags: ["country", "shipping", "regression", "olivia-2026-04-09"]
 notes: |

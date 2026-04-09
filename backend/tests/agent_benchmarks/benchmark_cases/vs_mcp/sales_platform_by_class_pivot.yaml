@@ -1,0 +1,30 @@
+# Combo pivot: platform × class — "pivot sales by platform and class this month"
+#
+# Tests:
+#  - pivot_query_result tool (NOT manual CASE WHEN SQL)
+#  - Two custom dimensions: custitem_fw_platform + i.class
+#  - Correct dialect rule: "PIVOT/CROSSTAB → Call pivot_query_result tool"
+#
+# This is a particularly good regression check — the dialect rules in
+# <suiteql_dialect_rules> explicitly forbid hand-rolled pivot SQL.
+
+case_id: sales_platform_by_class_pivot
+query: "pivot this month's sales by platform (rows) and product class (columns), with quantity as the value"
+tags: ["sales", "platform", "class", "pivot", "combo", "multi-dimension"]
+notes: |
+  Tests the pivot_query_result tool. Expected sequence:
+  1. Agent runs flat GROUP BY query first: SELECT platform, class, SUM(qty) FROM ... GROUP BY platform, class
+  2. Agent calls pivot_query_result with the same query + row_field=platform, column_field=class, value_field=qty
+  3. Agent does NOT write CASE WHEN pivot SQL manually
+expected_answer_contains:
+  - "platform"
+  - "class"
+expected_tools:
+  - "netsuite_suiteql"
+  - "pivot_query_result"
+expected_accuracy: 0.6
+max_cost: 0.75
+max_latency_ms: 180000
+baseline_expected_accuracy: 0.5
+baseline_expected_tools:
+  - "ns_runCustomSuiteQL"

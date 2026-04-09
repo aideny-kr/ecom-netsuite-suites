@@ -1,5 +1,5 @@
 # Variation 2: single country instead of list
-case_id: country_sales_variation_2
+case_id: sales_country_single
 query: "what are today's sales for Norway?"
 tags: ["country", "shipping", "variation", "single-country"]
 notes: |
