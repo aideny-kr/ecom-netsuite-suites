@@ -1041,6 +1041,7 @@ async def run_chat_turn(
     user_timezone: str | None = None,
     agent_id: str | None = None,
     run_id: str | None = None,
+    source_pick: str | None = None,
 ) -> AsyncGenerator[dict, None]:
     """Execute an agentic chat turn with Claude's native tool use.
 
@@ -1095,6 +1096,81 @@ async def run_chat_turn(
     sanitized_input = sanitize_user_input(user_message)
     rag_context = ""
     citations: list[dict] = []
+
+    # ── Source picker short-circuit (v0.1 intent clarification) ─────────────
+    # Skip picker if:
+    #   - the current request already supplied a source_pick (user clicked a card)
+    #   - the session already has a pin (user previously chose this session)
+    # Otherwise, score the query; if ambiguous, persist a picker placeholder
+    # assistant message, yield a terminal `message` event, and return without
+    # running the agent.
+    if source_pick and source_pick in ("netsuite", "bigquery"):
+        session.source_pin = source_pick
+        # Mark the most recent picker placeholder as selected so the card
+        # shows a persistent "Selected" state in the conversation scroll.
+        from sqlalchemy import select as _select
+        from sqlalchemy.orm.attributes import flag_modified
+
+        _recent_msgs = await db.execute(
+            _select(ChatMessage)
+            .where(
+                ChatMessage.session_id == session.id,
+                ChatMessage.role == "assistant",
+            )
+            .order_by(ChatMessage.created_at.desc())
+            .limit(5)
+        )
+        for _msg in _recent_msgs.scalars().all():
+            _so = _msg.structured_output
+            if isinstance(_so, dict) and _so.get("type") == "source_picker" and not _so.get("selected"):
+                _updated_so = dict(_so)
+                _updated_so["selected"] = source_pick
+                _msg.structured_output = _updated_so
+                flag_modified(_msg, "structured_output")
+                break
+        await db.commit()
+        print(f"[SOURCE-PICKER] user selected {source_pick}", flush=True)
+    elif not session.source_pin and not is_onboarding and not getattr(session, "workspace_id", None):
+        from app.services.chat.source_picker import (
+            build_picker_payload,
+            has_data_intent,
+            score_source,
+            should_prompt_user,
+        )
+
+        _score = score_source(sanitized_input)
+        if has_data_intent(sanitized_input) and should_prompt_user(_score):
+            _payload = build_picker_payload(_score, user_question=sanitized_input)
+            _placeholder_msg = ChatMessage(
+                tenant_id=tenant_id,
+                session_id=session.id,
+                role="assistant",
+                content="",
+                structured_output=dict(_payload),
+                created_at=datetime.now(timezone.utc),
+            )
+            db.add(_placeholder_msg)
+            await db.commit()
+            await db.refresh(_placeholder_msg)
+
+            yield {
+                "type": "message",
+                "message": {
+                    "id": str(_placeholder_msg.id),
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": None,
+                    "citations": None,
+                    "created_at": _placeholder_msg.created_at.isoformat(),
+                    "structured_output": dict(_payload),
+                },
+            }
+            print(
+                f"[SOURCE-PICKER] shown | confidence={_score[1]:.2f} "
+                f"recommended={_score[0]} query={sanitized_input[:60]}",
+                flush=True,
+            )
+            return
 
     if not is_onboarding:
         state = OrchestratorState(
@@ -1607,6 +1683,14 @@ async def run_chat_turn(
                     context["user_timezone"] = user_timezone
                     context["importance_tier"] = importance_tier.value
 
+                    # Fiscal calendar — inject into context so agents interpret
+                    # Q1/Q2/Q3/Q4 and "fiscal year" queries using the tenant's
+                    # actual FY start month instead of defaulting to calendar.
+                    _fy_start = 1
+                    if _tenant_config_row:
+                        _fy_start = getattr(_tenant_config_row, "fiscal_year_start_month", 1) or 1
+                    context["fiscal_year_start_month"] = _fy_start
+
                     # table_schemas (FULL, DATA — skip for DOCS, WORKSPACE, FINANCIAL)
                     if not _need_schemas:
                         print(f"[ORCHESTRATOR] Skipping schema injection for {context_need} query", flush=True)
@@ -1707,6 +1791,14 @@ async def run_chat_turn(
                         # Client-side agent pin — skip routing entirely
                         _selected_agent_id = agent_id
                         print(f"[ROUTING] Client pinned → {agent_id}", flush=True)
+                    elif session.source_pin == "bigquery":
+                        # User chose BigQuery via source picker → force bi-agent
+                        _selected_agent_id = "bi-agent"
+                        print("[ROUTING] Source pin → bi-agent (bigquery)", flush=True)
+                    elif session.source_pin == "netsuite":
+                        # User chose NetSuite via source picker → force unified-agent
+                        _selected_agent_id = None
+                        print("[ROUTING] Source pin → unified-agent (netsuite)", flush=True)
                     else:
                         # Infer previous agent from conversation history for session pinning
                         _previous_agent_id = _infer_previous_agent(session.messages) if session.messages else None

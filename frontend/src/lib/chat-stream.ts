@@ -92,6 +92,10 @@ export function normalizeStreamMessage(raw: Record<string, unknown>): ChatMessag
     is_byok: typeof raw.is_byok === "boolean" ? raw.is_byok : undefined,
     confidence_score: typeof raw.confidence_score === "number" ? raw.confidence_score : undefined,
     query_importance: typeof raw.query_importance === "number" ? raw.query_importance : undefined,
+    structured_output:
+      raw.structured_output && typeof raw.structured_output === "object"
+        ? (raw.structured_output as ChatMessage["structured_output"])
+        : undefined,
   };
 }
 

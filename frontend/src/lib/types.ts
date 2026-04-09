@@ -750,6 +750,28 @@ export interface FeatureFlagsResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Source Picker (v0.1 intent clarification)
+// ---------------------------------------------------------------------------
+
+export interface SourcePickerOption {
+  source: "netsuite" | "bigquery";
+  label: string;
+  description: string;
+  recommended: boolean;
+}
+
+export interface SourcePickerData {
+  type: "source_picker";
+  recommended: "netsuite" | "bigquery";
+  confidence: number;
+  reason: string;
+  user_question: string;
+  options: SourcePickerOption[];
+  /** Set after the user picks a card. Persists on the picker message. */
+  selected?: "netsuite" | "bigquery";
+}
+
+// ---------------------------------------------------------------------------
 // Chart Data (BigQuery BI Agent)
 // ---------------------------------------------------------------------------
 

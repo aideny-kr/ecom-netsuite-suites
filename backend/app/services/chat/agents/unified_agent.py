@@ -728,6 +728,50 @@ class UnifiedAgent(BaseSpecialistAgent):
         if date_block:
             parts.append(date_block)
 
+        # Fiscal calendar — tell the LLM how to interpret Q1/Q2/Q3/Q4 and
+        # "fiscal year" references. Without this it defaults to calendar year.
+        fy_start = self._context.get("fiscal_year_start_month", 1) if self._context else 1
+        if fy_start and fy_start != 1:
+            _month_names = [
+                "January",
+                "February",
+                "March",
+                "April",
+                "May",
+                "June",
+                "July",
+                "August",
+                "September",
+                "October",
+                "November",
+                "December",
+            ]
+            _start_name = _month_names[fy_start - 1]
+            _q1_end = _month_names[(fy_start + 2) % 12]
+            _q2_start = _month_names[(fy_start + 3) % 12]
+            _q2_end = _month_names[(fy_start + 5) % 12]
+            _q3_start = _month_names[(fy_start + 6) % 12]
+            _q3_end = _month_names[(fy_start + 8) % 12]
+            _q4_start = _month_names[(fy_start + 9) % 12]
+            _q4_end = _month_names[(fy_start + 11) % 12]
+            parts.append(
+                f"\n## FISCAL CALENDAR\n"
+                f"This tenant's fiscal year starts in **{_start_name}** (month {fy_start}).\n"
+                f"- Fiscal Q1 = {_start_name} – {_q1_end}\n"
+                f"- Fiscal Q2 = {_q2_start} – {_q2_end}\n"
+                f"- Fiscal Q3 = {_q3_start} – {_q3_end}\n"
+                f"- Fiscal Q4 = {_q4_start} – {_q4_end}\n"
+                f"**Default behavior**: when the user says 'Q1', 'Q2', 'this quarter', 'fiscal year', "
+                f"or 'YTD' without specifying 'calendar', use the FISCAL calendar above. "
+                f"Only use calendar quarters if the user explicitly says 'calendar Q1', 'Jan-Mar', etc."
+            )
+        else:
+            parts.append(
+                "\n## FISCAL CALENDAR\n"
+                "This tenant uses the **calendar year** (Jan 1 – Dec 31) as its fiscal year. "
+                "Q1 = Jan-Mar, Q2 = Apr-Jun, Q3 = Jul-Sep, Q4 = Oct-Dec."
+            )
+
         # Active skill instructions (progressive disclosure)
         if self._active_skill:
             from app.services.chat.skills import get_skill_instructions

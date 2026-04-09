@@ -9,10 +9,11 @@ import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { useCreateSavedQuery } from "@/hooks/use-saved-queries";
 import { cn } from "@/lib/utils";
 import { useBranding } from "@/providers/branding-provider";
-import type { ChatMessage } from "@/lib/types";
+import type { ChatMessage, SourcePickerData } from "@/lib/types";
 import type { FinancialReportData, DataTableData, TaskOutputData, StreamBlock } from "@/lib/chat-stream";
 import type { AgentSummary } from "@/hooks/use-agents";
 import type { ChartData } from "@/lib/types";
+import { SourcePickerCard } from "@/components/chat/source-picker-card";
 import { FinancialReport } from "@/components/chat/financial-report";
 import { DataFrameTable } from "@/components/chat/data-frame-table";
 import { ChartRenderer } from "@/components/chat/chart-renderer";
@@ -622,6 +623,7 @@ interface MessageListProps {
   onRemoveTemplate?: () => void;
   templateFile?: { id: string; filename: string } | null;
   onImportanceOverride?: (messageId: string, newTier: number) => void;
+  onSourcePick?: (messageId: string, source: "netsuite" | "bigquery") => void;
   variant?: "default" | "terminal";
 }
 
@@ -648,6 +650,7 @@ export function MessageList({
   onRemoveTemplate,
   templateFile,
   onImportanceOverride,
+  onSourcePick,
   variant,
 }: MessageListProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -890,6 +893,7 @@ export function MessageList({
             onViewDiff={onViewDiff}
             onChangesetAction={onChangesetAction}
             onImportanceOverride={onImportanceOverride}
+            onSourcePick={onSourcePick}
             financialReportData={financialReports?.get(message.id) ?? null}
             dataTableData={dataTables?.get(message.id) ?? null}
             chartDataList={chartsByMessage?.get(message.id) ?? null}
@@ -952,6 +956,7 @@ export function MessageList({
           workspaceId={workspaceId}
           onViewDiff={onViewDiff}
           onChangesetAction={onChangesetAction}
+          onSourcePick={onSourcePick}
           isStreamingPreview
           isTerminal={isTerminal}
         />
@@ -1074,6 +1079,7 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
   onChangesetAction,
   isStreamingPreview = false,
   onImportanceOverride,
+  onSourcePick,
   financialReportData = null,
   dataTableData = null,
   chartDataList = null,
@@ -1087,6 +1093,7 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
   onChangesetAction?: () => void;
   isStreamingPreview?: boolean;
   onImportanceOverride?: (messageId: string, newTier: number) => void;
+  onSourcePick?: (messageId: string, source: "netsuite" | "bigquery") => void;
   financialReportData?: FinancialReportData | null;
   dataTableData?: DataTableData | null;
   chartDataList?: ChartData[] | null;
@@ -1094,6 +1101,35 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
   isTerminal?: boolean;
 }) {
   const { brandName: agentName } = useBranding();
+
+  // Early return for source_picker placeholder messages
+  const structuredOutput = message.structured_output as
+    | { type?: string; [key: string]: unknown }
+    | null
+    | undefined;
+
+  if (structuredOutput?.type === "source_picker") {
+    return (
+      <div className="flex min-w-0 justify-start gap-3">
+        {isTerminal ? (
+          <div className="w-10 h-10 bg-[var(--card)] flex-shrink-0 flex items-center justify-center border border-[var(--chat-surface-mid)]">
+            <Zap className="h-4 w-4 text-[var(--chat-accent)]" />
+          </div>
+        ) : (
+          <div className="mt-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-primary/10">
+            <FrameworkIcon className="h-3.5 w-3.5 text-primary" />
+          </div>
+        )}
+        <div className="flex min-w-0 flex-1 flex-col">
+          <SourcePickerCard
+            data={structuredOutput as unknown as SourcePickerData}
+            onPick={(source) => onSourcePick?.(message.id, source)}
+          />
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="flex min-w-0 justify-start gap-3">
       {isTerminal ? (
