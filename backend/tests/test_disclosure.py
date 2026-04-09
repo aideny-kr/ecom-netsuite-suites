@@ -396,3 +396,163 @@ class TestPushbackRegex:
         from app.services.chat.disclosure import _PUSHBACK_RE
 
         assert _PUSHBACK_RE.match(msg) is None
+
+
+class TestAssembleDisclosure:
+    def _call(self, **overrides):
+        from app.services.chat.disclosure import assemble_disclosure
+
+        defaults = dict(
+            user_question="how many orders this week",
+            tool_calls_log=[],
+            current_source="netsuite",
+            tenant_id=None,
+            matched_pattern_age_days=None,
+            connector_checks={
+                "tenant_has_connector": lambda src: True,
+                "connector_is_healthy": lambda src: True,
+                "bigquery_sync_age_hours": lambda: 2,
+            },
+            is_rerun=False,
+        )
+        defaults.update(overrides)
+        return assemble_disclosure(**defaults)
+
+    def test_no_data_tool_returns_none(self):
+        # Text-only turn — no data tool called
+        result = self._call(tool_calls_log=[])
+        assert result is None
+
+    def test_metadata_tool_only_returns_none(self):
+        calls = [
+            {
+                "tool": "bigquery_schema",
+                "result": {"success": True, "columns": []},
+            }
+        ]
+        result = self._call(tool_calls_log=calls)
+        assert result is None
+
+    def test_fresh_pattern_suppresses(self):
+        calls = [
+            {
+                "tool": "netsuite_suiteql",
+                "input": {"query": "SELECT COUNT(*) FROM transaction WHERE trandate >= TRUNC(SYSDATE, 'WW')"},
+                "result": {"success": True, "columns": ["count"], "rows": [[1247]]},
+            }
+        ]
+        result = self._call(tool_calls_log=calls, matched_pattern_age_days=2)
+        assert result is None
+
+    def test_stale_pattern_still_emits(self):
+        calls = [
+            {
+                "tool": "netsuite_suiteql",
+                "input": {"query": "SELECT COUNT(*) FROM transaction WHERE trandate >= TRUNC(SYSDATE, 'WW')"},
+                "result": {"success": True, "columns": ["count"], "rows": [[1247]]},
+            }
+        ]
+        result = self._call(tool_calls_log=calls, matched_pattern_age_days=30)
+        assert result is not None
+        assert result.source == "netsuite"
+        assert "week" in result.interpretation.lower()
+
+    def test_happy_path_suiteql(self):
+        calls = [
+            {
+                "tool": "netsuite_suiteql",
+                "input": {
+                    "query": (
+                        "SELECT COUNT(*) FROM transaction "
+                        "WHERE type = 'SalesOrd' "
+                        "AND trandate >= TRUNC(SYSDATE, 'WW') "
+                        "AND cancelled_at IS NULL"
+                    )
+                },
+                "result": {"success": True, "columns": ["count"], "rows": [[1247]]},
+            }
+        ]
+        block = self._call(tool_calls_log=calls)
+        assert block is not None
+        assert block.source == "netsuite"
+        assert block.failure_mode is False
+        assert "week" in block.interpretation.lower()
+        assert any("cancel" in f.lower() for f in block.implicit_filters)
+        assert block.can_switch_source is True
+
+    def test_uses_last_successful_data_call(self):
+        calls = [
+            {
+                "tool": "netsuite_suiteql",
+                "input": {"query": "SELECT 1 FROM dual"},
+                "result": {"success": True, "columns": ["one"], "rows": [[1]]},
+            },
+            {
+                "tool": "netsuite_suiteql",
+                "input": {
+                    "query": "SELECT COUNT(*) FROM transaction WHERE trandate >= TRUNC(SYSDATE, 'MM')"
+                },
+                "result": {"success": True, "columns": ["count"], "rows": [[5000]]},
+            },
+        ]
+        block = self._call(tool_calls_log=calls)
+        assert block is not None
+        assert "month" in block.interpretation.lower()
+
+    def test_all_failed_emits_failure_mode_when_can_switch(self):
+        calls = [
+            {
+                "tool": "netsuite_suiteql",
+                "input": {"query": "SELECT * FROM transaction WHERE type = 'SalesOrd'"},
+                "result": {"success": False, "error": "OAuth token expired"},
+            }
+        ]
+        block = self._call(tool_calls_log=calls)
+        assert block is not None
+        assert block.failure_mode is True
+        assert block.can_switch_source is True
+
+    def test_all_failed_returns_none_when_cannot_switch(self):
+        calls = [
+            {
+                "tool": "netsuite_suiteql",
+                "input": {"query": "SELECT * FROM transaction"},
+                "result": {"success": False, "error": "OAuth token expired"},
+            }
+        ]
+        # GL-ish question → cannot switch
+        block = self._call(
+            user_question="journal entries this month",
+            tool_calls_log=calls,
+        )
+        assert block is None
+
+    def test_bigquery_tool_path(self):
+        calls = [
+            {
+                "tool": "bigquery_sql",
+                "input": {
+                    "query": (
+                        "SELECT COUNT(*) FROM `proj.ds.events_*` "
+                        "WHERE _TABLE_SUFFIX BETWEEN '20260401' AND '20260407' LIMIT 100"
+                    )
+                },
+                "result": {"success": True, "data": [{"count": 1312}]},
+            }
+        ]
+        block = self._call(current_source="bigquery", tool_calls_log=calls)
+        assert block is not None
+        assert block.source == "bigquery"
+        assert "2026-04" in block.interpretation
+
+    def test_is_rerun_propagates(self):
+        calls = [
+            {
+                "tool": "netsuite_suiteql",
+                "input": {"query": "SELECT COUNT(*) FROM transaction WHERE trandate >= TRUNC(SYSDATE, 'WW')"},
+                "result": {"success": True, "columns": ["count"], "rows": [[1247]]},
+            }
+        ]
+        block = self._call(tool_calls_log=calls, is_rerun=True)
+        assert block is not None
+        assert block.is_rerun is True

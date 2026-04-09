@@ -353,3 +353,243 @@ _PUSHBACK_RE = re.compile(
     r"^\s*(?:that'?s?\s+(?:wrong|not\s+right)|no,?\s+i\s+meant|actually|why\s+is|i\s+need)",
     re.IGNORECASE,
 )
+
+
+# Tools that fire a disclosure when they succeed
+_DATA_TOOLS: frozenset[str] = frozenset(
+    {
+        "netsuite_suiteql",
+        "bigquery_sql",
+        "netsuite_financial_report",
+        "pivot.query_result",
+        "pivot_query_result",
+        "ns_runCustomSuiteQL",
+        "ns_getRecord",
+        "ns_runSavedSearch",
+        "saved_search",
+    }
+)
+
+# Tools that are explicitly NON-data (metadata / writes / workspace)
+_NON_DATA_TOOLS: frozenset[str] = frozenset(
+    {
+        "bigquery_schema",
+        "bigquery_cost_estimate",
+        "tenant_save_learned_rule",
+        "ns_createRecord",
+        "ns_updateRecord",
+        "ns_deleteRecord",
+    }
+)
+
+
+_NETSUITE_DATA_TOOLS: frozenset[str] = frozenset(
+    {
+        "netsuite_suiteql",
+        "netsuite_financial_report",
+        "ns_runCustomSuiteQL",
+        "ns_getRecord",
+        "ns_runSavedSearch",
+        "saved_search",
+        "pivot.query_result",
+        "pivot_query_result",
+    }
+)
+
+
+def _tool_source(tool_name: str) -> Literal["netsuite", "bigquery"] | None:
+    if tool_name.startswith("bigquery"):
+        return "bigquery"
+    if tool_name in _NETSUITE_DATA_TOOLS:
+        return "netsuite"
+    return None
+
+
+def _call_succeeded(call: dict) -> bool:
+    result = call.get("result")
+    if not isinstance(result, dict):
+        return False
+    if result.get("success") is False:
+        return False
+    if "error" in result and result.get("success") is not True:
+        return False
+    return True
+
+
+def assemble_disclosure(
+    *,
+    user_question: str,
+    tool_calls_log: list[dict],
+    current_source: Literal["netsuite", "bigquery"],
+    tenant_id: UUID | None,
+    matched_pattern_age_days: float | None = None,
+    connector_checks: dict | None = None,
+    is_rerun: bool = False,
+) -> DisclosureBlock | None:
+    """Assemble a DisclosureBlock for the current turn, or return None.
+
+    Logic (per spec):
+    1. No data-returning tool → None
+    2. Fresh pattern (<7 days) → None
+    3. All tool calls failed → failure-mode footer if can_switch_source, else None
+    4. Otherwise → parse last successful data tool's WHERE clause → block
+
+    Args:
+        user_question: The raw user message for the current turn.
+        tool_calls_log: Ordered list of {tool, input, result} dicts from the agent.
+        current_source: Which source the agent routed to for this turn.
+        tenant_id: Tenant UUID for connector health checks.
+        matched_pattern_age_days: Age of the matched tenant_query_pattern in days,
+            or None if no pattern matched.
+        connector_checks: Dict of lambdas for connector health lookups. Keys:
+            - tenant_has_connector(src) -> bool
+            - connector_is_healthy(src) -> bool
+            - bigquery_sync_age_hours() -> float
+        is_rerun: True when this turn was spawned by a source-switch re-run.
+    """
+    # global must be declared before any use of the names in this scope
+    global _tenant_has_connector, _connector_is_healthy, _bigquery_sync_age_hours
+
+    # Filter out non-data tool calls
+    data_calls = [c for c in tool_calls_log if c.get("tool") in _DATA_TOOLS and c.get("tool") not in _NON_DATA_TOOLS]
+
+    if not data_calls:
+        return None
+
+    # Proven pattern suppression
+    if matched_pattern_age_days is not None and matched_pattern_age_days < 7:
+        return None
+
+    # Wire connector checks into module-level stubs for compute_can_switch_source
+    checks = connector_checks or {}
+    has_fn = checks.get("tenant_has_connector", _tenant_has_connector)
+    healthy_fn = checks.get("connector_is_healthy", _connector_is_healthy)
+    sync_fn = checks.get("bigquery_sync_age_hours", _bigquery_sync_age_hours)
+
+    # Temporarily bind module-level stubs so compute_can_switch_source picks them up.
+    # Safe since this function is sync and single-threaded per turn.
+    _prev = (_tenant_has_connector, _connector_is_healthy, _bigquery_sync_age_hours)
+    _tenant_has_connector = lambda tid, src: has_fn(src)  # noqa: E731
+    _connector_is_healthy = lambda tid, src: healthy_fn(src)  # noqa: E731
+    _bigquery_sync_age_hours = lambda tid: sync_fn()  # noqa: E731
+    try:
+        query_class = classify_query_class(user_question)
+        # When connector_checks are injected the patched stubs ignore tenant_id,
+        # so use a sentinel UUID when tenant_id is None. When no checks are injected
+        # and tenant_id is absent, skip the switch computation.
+        if tenant_id is not None:
+            can_switch = compute_can_switch_source(current_source, tenant_id, query_class)
+        elif checks:
+            _sentinel = UUID("00000000-0000-0000-0000-000000000000")
+            can_switch = compute_can_switch_source(current_source, _sentinel, query_class)
+        else:
+            can_switch = False
+    finally:
+        _tenant_has_connector, _connector_is_healthy, _bigquery_sync_age_hours = _prev
+
+    # All failed → failure-mode footer (only if can_switch)
+    if not any(_call_succeeded(c) for c in data_calls):
+        if not can_switch:
+            return None
+        return DisclosureBlock(
+            source=current_source,
+            interpretation=f"Tried {'NetSuite' if current_source == 'netsuite' else 'BigQuery'}.",
+            implicit_filters=[],
+            can_switch_source=True,
+            is_rerun=is_rerun,
+            failure_mode=True,
+        )
+
+    # Last successful data call is the "primary" call
+    primary = next(c for c in reversed(data_calls) if _call_succeeded(c))
+    sql = ""
+    tool_input = primary.get("input") or {}
+    if isinstance(tool_input, dict):
+        sql = tool_input.get("query") or tool_input.get("sql") or ""
+
+    parsed = parse_where_clause(sql)
+    block_source: Literal["netsuite", "bigquery"] = _tool_source(primary.get("tool", "")) or current_source
+
+    interpretation = parsed.interpretation or ""
+    return DisclosureBlock(
+        source=block_source,
+        interpretation=interpretation,
+        implicit_filters=parsed.filters,
+        can_switch_source=can_switch,
+        is_rerun=is_rerun,
+        failure_mode=False,
+    )
+
+
+# ── Real connector lookups (async) ──────────────────────────────────────────
+
+
+async def _build_connector_checks(db, tenant_id: UUID) -> dict:
+    """Build a dict of lambdas that resolve real connector health for a tenant.
+
+    Uses snapshots at call time so the sync assemble_disclosure function can
+    consume them without needing an async context.
+    """
+    from sqlalchemy import select
+
+    from app.models.connection import Connection
+    from app.models.connection_alert import ConnectionAlert
+    from app.models.mcp_connector import McpConnector
+
+    # NetSuite connection (REST API)
+    ns_result = await db.execute(
+        select(Connection).where(
+            Connection.tenant_id == tenant_id,
+            Connection.provider == "netsuite",
+        )
+    )
+    has_netsuite = ns_result.scalar_one_or_none() is not None
+
+    # BigQuery connector
+    bq_result = await db.execute(
+        select(McpConnector).where(
+            McpConnector.tenant_id == tenant_id,
+            McpConnector.provider == "bigquery",
+            McpConnector.is_enabled.is_(True),
+        )
+    )
+    bq_connector = bq_result.scalar_one_or_none()
+    has_bigquery = bq_connector is not None
+
+    # Critical alerts (unhealthy connectors)
+    alerts_result = await db.execute(
+        select(ConnectionAlert).where(
+            ConnectionAlert.tenant_id == tenant_id,
+            ConnectionAlert.dismissed_at.is_(None),
+        )
+    )
+    alerts = alerts_result.scalars().all()
+    netsuite_unhealthy = any(a.connection_type in ("rest_api", "mcp") for a in alerts)
+
+    # BigQuery sync age — from mcp_connectors.metadata_json["last_sync_at"] if present
+    bq_sync_age_hours = 999.0
+    if bq_connector and isinstance(bq_connector.metadata_json, dict):
+        last_sync = bq_connector.metadata_json.get("last_sync_at")
+        if last_sync:
+            try:
+                ts = datetime.fromisoformat(last_sync.replace("Z", "+00:00"))
+                bq_sync_age_hours = (datetime.now(timezone.utc) - ts).total_seconds() / 3600
+            except (ValueError, AttributeError):
+                pass
+
+    def _has(src: str) -> bool:
+        return has_netsuite if src == "netsuite" else has_bigquery
+
+    def _healthy(src: str) -> bool:
+        if src == "netsuite":
+            return not netsuite_unhealthy
+        return True  # BigQuery has no alert pipeline yet — trust sync-age guard below
+
+    def _bq_age() -> float:
+        return bq_sync_age_hours
+
+    return {
+        "tenant_has_connector": _has,
+        "connector_is_healthy": _healthy,
+        "bigquery_sync_age_hours": _bq_age,
+    }
