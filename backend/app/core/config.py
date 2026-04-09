@@ -61,6 +61,7 @@ class Settings(BaseSettings):
         "customtransactionbodyfield,customtransactioncolumnfield,"
         "entitycustomfield,itemcustomfield,crmcustomfield,othercustomfield,"
         "customrecordtype,customlist,"
+        "transactionshippingaddress,transactionbillingaddress,"
         "systemnote"
     )
 
