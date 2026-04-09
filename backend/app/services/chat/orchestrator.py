@@ -1786,6 +1786,14 @@ async def run_chat_turn(
                         # Client-side agent pin — skip routing entirely
                         _selected_agent_id = agent_id
                         print(f"[ROUTING] Client pinned → {agent_id}", flush=True)
+                    elif session.source_pin == "bigquery":
+                        # User chose BigQuery via source picker → force bi-agent
+                        _selected_agent_id = "bi-agent"
+                        print("[ROUTING] Source pin → bi-agent (bigquery)", flush=True)
+                    elif session.source_pin == "netsuite":
+                        # User chose NetSuite via source picker → force unified-agent
+                        _selected_agent_id = None
+                        print("[ROUTING] Source pin → unified-agent (netsuite)", flush=True)
                     else:
                         # Infer previous agent from conversation history for session pinning
                         _previous_agent_id = _infer_previous_agent(session.messages) if session.messages else None

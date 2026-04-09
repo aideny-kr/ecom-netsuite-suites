@@ -259,15 +259,38 @@ async def send_message(
     # Explicitly set created_at in Python (not server_default) to guarantee the
     # user message timestamp is strictly before the assistant message, preventing
     # ordering issues when both land in the same DB transaction.
-    user_msg = ChatMessage(
-        tenant_id=user.tenant_id,
-        session_id=session.id,
-        role="user",
-        content=body.content,
-        created_at=datetime.now(timezone.utc),
-    )
-    db.add(user_msg)
-    await db.flush()
+    #
+    # Exception: when source_pick is set, the user clicked a card on an existing
+    # picker placeholder. The original user question is already in the conversation;
+    # we do NOT create a duplicate user message. We still need a valid ChatMessage
+    # object for downstream code, so we reuse the last user message in the session.
+    if body.source_pick:
+        _last_user_result = await db.execute(
+            select(ChatMessage)
+            .where(
+                ChatMessage.session_id == session.id,
+                ChatMessage.role == "user",
+            )
+            .order_by(ChatMessage.created_at.desc())
+            .limit(1)
+        )
+        _last_user_msg = _last_user_result.scalar_one_or_none()
+        if _last_user_msg is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="source_pick requires an existing user message in the session",
+            )
+        user_msg = _last_user_msg
+    else:
+        user_msg = ChatMessage(
+            tenant_id=user.tenant_id,
+            session_id=session.id,
+            role="user",
+            content=body.content,
+            created_at=datetime.now(timezone.utc),
+        )
+        db.add(user_msg)
+        await db.flush()
 
     # Commit user message BEFORE spawning background task (it uses its own DB session)
     await db.commit()
