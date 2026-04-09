@@ -1,6 +1,6 @@
 "use client";
 
-import type { ChatMessage, ChartData, StreamingToolCall } from "@/lib/types";
+import type { ChatMessage, ChartData, StreamingToolCall, DisclosureBlock } from "@/lib/types";
 
 export interface FinancialReportData {
   report_type: string;
@@ -47,7 +47,8 @@ export type ChatStreamEvent =
   | { type: "error"; error: string }
   | { type: "message"; message: ChatMessage }
   | { type: "tool_start"; tool_name: string; tool_input: Record<string, unknown>; step: number }
-  | { type: "tool_end"; tool_name: string; step: number; duration_ms: number; success: boolean; result_summary: string };
+  | { type: "tool_end"; tool_name: string; step: number; duration_ms: number; success: boolean; result_summary: string }
+  | { type: "disclosure"; disclosure: DisclosureBlock };
 
 interface ParsedSseBuffer {
   events: ChatStreamEvent[];
@@ -67,6 +68,7 @@ type StreamHandlers = {
   onMessage?: (message: ChatMessage) => void;
   onToolStart?: (tool_name: string, tool_input: Record<string, unknown>, step: number) => void;
   onToolEnd?: (tool_name: string, step: number, duration_ms: number, success: boolean, result_summary: string) => void;
+  onDisclosure?: (disclosure: DisclosureBlock) => void;
 };
 
 export function normalizeStreamMessage(raw: Record<string, unknown>): ChatMessage | null {
@@ -92,6 +94,10 @@ export function normalizeStreamMessage(raw: Record<string, unknown>): ChatMessag
     is_byok: typeof raw.is_byok === "boolean" ? raw.is_byok : undefined,
     confidence_score: typeof raw.confidence_score === "number" ? raw.confidence_score : undefined,
     query_importance: typeof raw.query_importance === "number" ? raw.query_importance : undefined,
+    disclosure_json:
+      raw.disclosure_json && typeof raw.disclosure_json === "object"
+        ? (raw.disclosure_json as unknown as DisclosureBlock)
+        : null,
   };
 }
 
@@ -180,6 +186,8 @@ export async function consumeChatStream(
           handlers.onToolStart?.(event.tool_name, event.tool_input, event.step);
         } else if (event.type === "tool_end") {
           handlers.onToolEnd?.(event.tool_name, event.step, event.duration_ms, event.success, event.result_summary);
+        } else if (event.type === "disclosure") {
+          handlers.onDisclosure?.(event.disclosure);
         }
       }
     }
@@ -281,6 +289,21 @@ function normalizeStreamEvent(data: Record<string, unknown>): ChatStreamEvent | 
   }
   if (type === "tool_end" && data.tool_name) {
     return { type, tool_name: String(data.tool_name), step: typeof data.step === "number" ? data.step : 0, duration_ms: typeof data.duration_ms === "number" ? data.duration_ms : 0, success: data.success !== false, result_summary: String(data.result_summary || "") };
+  }
+  if (type === "disclosure" && typeof data.source === "string") {
+    return {
+      type,
+      disclosure: {
+        source: (data.source === "bigquery" ? "bigquery" : "netsuite") as "netsuite" | "bigquery",
+        interpretation: String(data.interpretation || ""),
+        implicit_filters: Array.isArray(data.implicit_filters)
+          ? data.implicit_filters.map(String)
+          : [],
+        can_switch_source: Boolean(data.can_switch_source),
+        is_rerun: Boolean(data.is_rerun),
+        failure_mode: Boolean(data.failure_mode),
+      },
+    };
   }
 
   return null;
