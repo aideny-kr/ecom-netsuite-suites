@@ -256,21 +256,28 @@ async def _maybe_store_query_pattern(
     user_question: str,
     tool_calls_log: list[dict],
 ) -> None:
-    """Auto-extract and store successful SuiteQL query patterns (fire-and-forget)."""
-    # Only store if there were successful SuiteQL calls
-    has_suiteql = any(
-        c.get("tool") == "netsuite_suiteql" and not tool_call_had_error(c) and tool_call_row_count(c) > 0
-        for c in tool_calls_log
-    )
-    if not has_suiteql:
-        return
+    """DEPRECATED — auto-pattern-learning disabled 2026-04-09.
 
-    try:
-        from app.services.query_pattern_service import extract_and_store_pattern
+    This was the source of the pattern-pollution feedback loop:
+    live chat runs extracted any SuiteQL query that had GROUP BY and
+    returned rows, with no verification of correctness. Combined with
+    `query_pattern_similarity` in the confidence scorer, this created a
+    self-reinforcing cycle where bad patterns boosted their own confidence
+    on retrieval and spawned more bad patterns.
 
-        await extract_and_store_pattern(db, tenant_id, user_question, tool_calls_log)
-    except Exception:
-        logger.warning("query_pattern.auto_extract_failed", exc_info=True)
+    Patterns now come exclusively from vetted sources:
+      1. The nightly benchmark runner (`autonomous-improvement` skill)
+         only promotes patterns that pass the golden eval suite.
+      2. Manual admin seeds via `extract_and_store_pattern` with a
+         known-good `tool_calls_log` (see `query_experiment_service`).
+      3. Explicit user feedback → manual review → promotion.
+
+    This function is kept as a no-op so existing call sites compile but
+    do nothing. Do NOT re-enable auto-learning from live chat runs
+    without eval-gated promotion in place. See
+    docs/postmortem/2026-04-09-pattern-poisoning.md.
+    """
+    return
 
 
 async def _resolve_default_workspace(

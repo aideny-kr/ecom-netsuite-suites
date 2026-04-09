@@ -8,18 +8,25 @@ from dataclasses import dataclass
 logger = logging.getLogger(__name__)
 
 # Weights for each signal component
+#
+# Pattern-related signals are zero-weighted as of 2026-04-09 to break the
+# self-reinforcing feedback loop where bad cached patterns boosted their own
+# confidence on retrieval. The 0.25 weight previously assigned to them is
+# redistributed to more trustworthy signals: LLM self-score stays at 0.40,
+# domain-knowledge +0.05, entity-resolution +0.05, tool-success +0.15.
+# See docs/postmortem/2026-04-09-pattern-poisoning.md for full context.
 _W_LLM = 0.40
-_W_PATTERN = 0.15
-_W_PATTERN_BOOST = 0.10
-_W_DOMAIN = 0.10
-_W_ENTITY = 0.15
-_W_TOOL = 0.10
+_W_PATTERN = 0.0  # DEPRECATED — zero-weighted, kept for API compat
+_W_PATTERN_BOOST = 0.0  # DEPRECATED — zero-weighted, kept for API compat
+_W_DOMAIN = 0.15
+_W_ENTITY = 0.20
+_W_TOOL = 0.25
 
 # Penalties
 _PENALTY_MISSING_TOOLS = -0.2
 _PENALTY_TOOL_FAILURE = -0.3
 
-# Pattern success boost cap
+# Pattern success boost cap (unused — pattern weights are zero)
 _PATTERN_BOOST_DENOM = 50
 
 
