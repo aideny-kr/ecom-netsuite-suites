@@ -186,7 +186,7 @@ export default function ChatPage() {
   // Future: add mid-stream reconnect with proper stream isolation.
 
   const handleSend = useCallback(
-    async (content: string, fileId?: string) => {
+    async (content: string, fileId?: string, opts: { source_pick?: "netsuite" | "bigquery" } = {}) => {
       if (isStreamingRef.current || createSession.isPending) return;
       setError(null);
       setPendingMessage(content);
@@ -215,9 +215,15 @@ export default function ChatPage() {
 
       try {
         // Step 1: Submit message → get run_id
+        const msgBody: Record<string, unknown> = {
+          content,
+          agent_id: pinnedAgentId || undefined,
+          file_id: fileId || undefined,
+        };
+        if (opts.source_pick) msgBody.source_pick = opts.source_pick;
         const { run_id } = await apiClient.post<{ run_id: string }>(
           `/api/v1/chat/sessions/${sessionId}/messages`,
-          { content, agent_id: pinnedAgentId || undefined, file_id: fileId || undefined },
+          msgBody,
         );
         activeRunRef.current = run_id;
 
@@ -388,7 +394,21 @@ export default function ChatPage() {
         setTaskOutput(null);
       }
     },
-    [activeSessionId, createSession, flushBuffer, queryClient],
+    [activeSessionId, createSession, flushBuffer, queryClient, pinnedAgentId],
+  );
+
+  const handleSourcePick = useCallback(
+    async (messageId: string, source: "netsuite" | "bigquery") => {
+      const pickerMsg = sessionDetail?.messages.find((m) => m.id === messageId);
+      const so = pickerMsg?.structured_output as { user_question?: string } | null | undefined;
+      const originalQuestion = so?.user_question;
+      if (!originalQuestion) {
+        console.warn("[source-picker] no user_question in placeholder message");
+        return;
+      }
+      await handleSend(originalQuestion, undefined, { source_pick: source });
+    },
+    [sessionDetail, handleSend],
   );
 
   const clearStreamingState = useCallback(() => {
@@ -500,6 +520,7 @@ export default function ChatPage() {
             onTemplateUploaded={setTemplateFile}
             onRemoveTemplate={() => setTemplateFile(null)}
             onMentionClick={handleMentionClick}
+            onSourcePick={handleSourcePick}
             onImportanceOverride={(messageId, newTier) => {
               queryClient.setQueryData<ChatSessionDetail>(
                 ["chat-session", activeSessionId],
