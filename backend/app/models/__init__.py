@@ -1,3 +1,4 @@
+from app.models.agent_benchmark_run import AgentBenchmarkRun
 from app.models.agent_config import AgentConfig
 from app.models.audit import AuditEvent
 from app.models.base import Base
@@ -42,6 +43,7 @@ from app.models.workspace import (
 )
 
 __all__ = [
+    "AgentBenchmarkRun",
     "Base",
     "Tenant",
     "TenantConfig",

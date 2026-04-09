@@ -27,6 +27,7 @@ celery_app.conf.update(
 )
 
 celery_app.conf.include = [
+    "app.workers.tasks.agent_benchmark_vs_mcp",
     "app.workers.tasks.audit_retention",
     "app.workers.tasks.auto_learning",
     "app.workers.tasks.auto_query_improvement",
@@ -68,6 +69,14 @@ celery_app.conf.beat_schedule = {
     "auto-query-improvement": {
         "task": "tasks.auto_query_improvement",
         "schedule": crontab(hour=10, minute=0),
+    },
+    # vs-MCP agent benchmark — runs nightly and alerts on regression.
+    # Gated by AGENT_BENCHMARK_VS_MCP_ENABLED env var (default false).
+    # Runs at 11:00 UTC, AFTER auto-query-improvement (10:00) so the
+    # benchmark measures the state AFTER the nightly pattern promotion.
+    "agent-benchmark-vs-mcp": {
+        "task": "tasks.agent_benchmark_vs_mcp",
+        "schedule": crontab(hour=11, minute=0),
     },
     "proactive-token-refresh": {
         "task": "tasks.proactive_token_refresh",

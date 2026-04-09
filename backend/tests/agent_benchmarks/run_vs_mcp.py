@@ -70,8 +70,10 @@ import sys
 import time
 import uuid
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from statistics import mean
+from typing import Any
 
 import yaml
 
@@ -210,6 +212,10 @@ class CaseResult:
     ours: SideScore
     mcp: SideScore | None  # None when --skip-baseline
     verdict: str  # "OURS WINS" | "MCP WINS" | "TIE" | "BOTH FAILED" | "OURS ONLY"
+    # Raw result objects — kept so persistence can access token counts,
+    # context_chars, tool_calls, confidence_score, etc. without re-running.
+    ours_raw: Any = None  # AgentRunResult | None
+    mcp_raw: Any = None  # BaselineResult | None
 
     def delta_accuracy(self) -> float:
         if self.mcp is None:
@@ -249,6 +255,7 @@ async def _run_single_case(
     from tests.agent_benchmarks.baseline_runner import run_baseline
 
     # Run ours
+    agent_result = None
     t0 = time.monotonic()
     try:
         agent_result = await run_agent(
@@ -293,8 +300,11 @@ async def _run_single_case(
             ours=ours_side,
             mcp=None,
             verdict=_compute_verdict(ours_side, None),
+            ours_raw=agent_result,
+            mcp_raw=None,
         )
 
+    baseline_result = None
     t0 = time.monotonic()
     try:
         baseline_result = await run_baseline(
@@ -337,6 +347,8 @@ async def _run_single_case(
         ours=ours_side,
         mcp=mcp_side,
         verdict=_compute_verdict(ours_side, mcp_side),
+        ours_raw=agent_result,
+        mcp_raw=baseline_result,
     )
 
 
@@ -478,6 +490,12 @@ async def _main_async(args: argparse.Namespace) -> int:
     from app.core.database import async_session_factory
 
     tenant_uuid = uuid.UUID(args.tenant_id)
+    run_id = uuid.uuid4()
+    run_date = date.today()
+
+    if args.persist:
+        print(f"Persistence:    ENABLED (run_id={run_id})")
+    print()
 
     results: list[CaseResult] = []
     async with async_session_factory() as db:
@@ -501,8 +519,47 @@ async def _main_async(args: argparse.Namespace) -> int:
             if result.mcp and result.mcp.error:
                 print(f"    mcp error:  {result.mcp.error}")
 
+            # Persist both sides if --persist
+            if args.persist and result.ours_raw is not None:
+                from tests.agent_benchmarks.persistence import persist_case_result
+
+                try:
+                    await persist_case_result(
+                        db=db,
+                        tenant_id=tenant_uuid,
+                        run_id=run_id,
+                        run_date=run_date,
+                        case_id=case.case_id,
+                        side="ours",
+                        model=args.agent_model,
+                        result=result.ours_raw,
+                        answer_accuracy=result.ours.answer_acc,
+                        tool_accuracy=result.ours.tool_acc,
+                    )
+                    if result.mcp_raw is not None:
+                        await persist_case_result(
+                            db=db,
+                            tenant_id=tenant_uuid,
+                            run_id=run_id,
+                            run_date=run_date,
+                            case_id=case.case_id,
+                            side="mcp",
+                            model=args.baseline_model,
+                            result=result.mcp_raw,
+                            answer_accuracy=result.mcp.answer_acc if result.mcp else 0.0,
+                            tool_accuracy=result.mcp.tool_acc if result.mcp else 0.0,
+                        )
+                    await db.commit()
+                except Exception as exc:
+                    print(f"    ⚠ persistence failed: {exc}", file=sys.stderr)
+                    await db.rollback()
+
     _print_results_table(results, args.skip_baseline)
     _print_summary(results, args.skip_baseline)
+
+    if args.persist:
+        print(f"Persisted to agent_benchmark_runs (run_id={run_id})")
+        print()
 
     # Exit code: 1 if any case was lost (or "OURS FAILED")
     has_loss = any(r.verdict in ("MCP WINS", "OURS FAILED", "BOTH FAILED") for r in results)
@@ -546,6 +603,13 @@ def main() -> int:
         "--skip-baseline",
         action="store_true",
         help="Skip the Claude+MCP baseline and just time-and-score our agent.",
+    )
+    parser.add_argument(
+        "--persist",
+        action="store_true",
+        help="Write each case result to the agent_benchmark_runs table. "
+             "Enabled by default for the nightly cron; use it manually if "
+             "you want the run to become the new historical baseline.",
     )
 
     args = parser.parse_args()
