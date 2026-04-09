@@ -196,3 +196,203 @@ class TestParseWhereClauseGracefulDegrade:
         sql = "SELECT * FROM transaction WHERE TRANDATE >= trunc(sysdate, 'ww')"
         result = self._parse(sql)
         assert "week" in result.interpretation.lower()
+
+
+import pytest  # noqa: E402
+
+
+class TestClassifyQueryClass:
+    def _classify(self, q: str) -> str:
+        from app.services.chat.disclosure import classify_query_class
+
+        return classify_query_class(q)
+
+    @pytest.mark.parametrize(
+        "query,expected",
+        [
+            ("how many orders this week", "orders"),
+            ("top 10 customers by sales", "orders"),
+            ("total transactions last month", "orders"),
+            ("show item 12345", "orders"),
+            ("journal entries for March", "gl"),
+            ("gl balance for period", "gl"),
+            ("close the month", "gl"),
+            ("period end accruals", "gl"),
+            ("ad spend by channel", "marketing"),
+            ("attribution for last quarter", "marketing"),
+            ("marketing sessions this week", "marketing"),
+            ("cohort retention by month", "marketing"),
+            ("saved search named open_invoices", "saved_search"),
+            ("run the custom record query", "saved_search"),
+            ("how does the suitescript work", "saved_search"),
+            ("what's the weather", "unmatched"),
+            ("tell me a joke", "unmatched"),
+            ("hi", "unmatched"),
+            ("explain revenue recognition", "unmatched"),
+            ("account summary", "unmatched"),
+        ],
+    )
+    def test_classify(self, query, expected):
+        assert self._classify(query) == expected
+
+
+class TestCanSwitchSource:
+    def test_allowed_orders_bigquery_healthy(self, monkeypatch):
+        from app.services.chat import disclosure
+
+        monkeypatch.setattr(disclosure, "_tenant_has_connector", lambda tid, src: True)
+        monkeypatch.setattr(disclosure, "_connector_is_healthy", lambda tid, src: True)
+        monkeypatch.setattr(disclosure, "_bigquery_sync_age_hours", lambda tid: 2)
+
+        from uuid import uuid4
+
+        assert disclosure.compute_can_switch_source("netsuite", uuid4(), "orders") is True
+
+    def test_blocked_gl_netsuite_only(self, monkeypatch):
+        from app.services.chat import disclosure
+
+        monkeypatch.setattr(disclosure, "_tenant_has_connector", lambda tid, src: True)
+        monkeypatch.setattr(disclosure, "_connector_is_healthy", lambda tid, src: True)
+        monkeypatch.setattr(disclosure, "_bigquery_sync_age_hours", lambda tid: 2)
+
+        from uuid import uuid4
+
+        assert disclosure.compute_can_switch_source("netsuite", uuid4(), "gl") is False
+
+    def test_blocked_marketing_bigquery_only(self, monkeypatch):
+        from app.services.chat import disclosure
+
+        monkeypatch.setattr(disclosure, "_tenant_has_connector", lambda tid, src: True)
+        monkeypatch.setattr(disclosure, "_connector_is_healthy", lambda tid, src: True)
+        monkeypatch.setattr(disclosure, "_bigquery_sync_age_hours", lambda tid: 2)
+
+        from uuid import uuid4
+
+        assert disclosure.compute_can_switch_source("bigquery", uuid4(), "marketing") is False
+
+    def test_blocked_missing_connector(self, monkeypatch):
+        from app.services.chat import disclosure
+
+        monkeypatch.setattr(disclosure, "_tenant_has_connector", lambda tid, src: False)
+        monkeypatch.setattr(disclosure, "_connector_is_healthy", lambda tid, src: True)
+        monkeypatch.setattr(disclosure, "_bigquery_sync_age_hours", lambda tid: 2)
+
+        from uuid import uuid4
+
+        assert disclosure.compute_can_switch_source("netsuite", uuid4(), "orders") is False
+
+    def test_blocked_unhealthy_connector(self, monkeypatch):
+        from app.services.chat import disclosure
+
+        monkeypatch.setattr(disclosure, "_tenant_has_connector", lambda tid, src: True)
+        monkeypatch.setattr(disclosure, "_connector_is_healthy", lambda tid, src: False)
+        monkeypatch.setattr(disclosure, "_bigquery_sync_age_hours", lambda tid: 2)
+
+        from uuid import uuid4
+
+        assert disclosure.compute_can_switch_source("netsuite", uuid4(), "orders") is False
+
+    def test_blocked_bigquery_stale(self, monkeypatch):
+        from app.services.chat import disclosure
+
+        monkeypatch.setattr(disclosure, "_tenant_has_connector", lambda tid, src: True)
+        monkeypatch.setattr(disclosure, "_connector_is_healthy", lambda tid, src: True)
+        monkeypatch.setattr(disclosure, "_bigquery_sync_age_hours", lambda tid: 48)
+
+        from uuid import uuid4
+
+        assert disclosure.compute_can_switch_source("netsuite", uuid4(), "orders") is False
+
+    def test_unmatched_query_class_returns_false(self, monkeypatch):
+        from app.services.chat import disclosure
+
+        monkeypatch.setattr(disclosure, "_tenant_has_connector", lambda tid, src: True)
+        monkeypatch.setattr(disclosure, "_connector_is_healthy", lambda tid, src: True)
+        monkeypatch.setattr(disclosure, "_bigquery_sync_age_hours", lambda tid: 2)
+
+        from uuid import uuid4
+
+        assert disclosure.compute_can_switch_source("netsuite", uuid4(), "unmatched") is False
+
+
+class TestSourceSwitchRegex:
+    @pytest.mark.parametrize(
+        "msg,target",
+        [
+            ("use BigQuery", "bigquery"),
+            ("Use NetSuite", "netsuite"),
+            ("switch to bigquery", "bigquery"),
+            ("switch to NS", "netsuite"),
+            ("run on bq", "bigquery"),
+            ("try netsuite", "netsuite"),
+            ("use BigQuery.", "bigquery"),
+            ("  use  bigquery  ", "bigquery"),
+            ("use bq!", "bigquery"),
+        ],
+    )
+    def test_positive(self, msg, target):
+        from app.services.chat.disclosure import _SOURCE_ALIASES, _SOURCE_SWITCH_RE
+
+        m = _SOURCE_SWITCH_RE.match(msg)
+        assert m is not None
+        raw = m.group(1).lower()
+        resolved = _SOURCE_ALIASES.get(raw, raw)
+        assert resolved == target
+
+    @pytest.mark.parametrize(
+        "msg",
+        [
+            "can I use BigQuery for this?",
+            "what about netsuite",
+            "use BigQuery for orders and then netsuite for gl",
+            "I already use BigQuery daily",
+            "try comparing netsuite and bigquery",
+            "",
+        ],
+    )
+    def test_negative(self, msg):
+        from app.services.chat.disclosure import _SOURCE_SWITCH_RE
+
+        assert _SOURCE_SWITCH_RE.match(msg) is None
+
+
+class TestPushbackRegex:
+    @pytest.mark.parametrize(
+        "msg",
+        [
+            "that's wrong",
+            "thats wrong",
+            "That's not right",
+            "no, I meant last week",
+            "actually it should be this week",
+            "why is that filter there",
+            "I need only sales orders",
+            "actually, include cancelled",
+            "no i meant customers",
+            "why is subsidiary 5 included",
+        ],
+    )
+    def test_positive(self, msg):
+        from app.services.chat.disclosure import _PUSHBACK_RE
+
+        assert _PUSHBACK_RE.match(msg) is not None
+
+    @pytest.mark.parametrize(
+        "msg",
+        [
+            "thanks, that works",
+            "great, can you add a chart",
+            "perfect",
+            "ok now show me customers",
+            "how about last month",
+            "run the same query for q1",
+            "export to csv",
+            "compare with last year",
+            "show top 10",
+            "add a filter for subsidiary",
+        ],
+    )
+    def test_negative(self, msg):
+        from app.services.chat.disclosure import _PUSHBACK_RE
+
+        assert _PUSHBACK_RE.match(msg) is None

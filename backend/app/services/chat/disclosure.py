@@ -40,6 +40,8 @@ class DisclosureBlock:
 
 import re
 from dataclasses import dataclass as _dataclass
+from datetime import datetime, timedelta, timezone  # noqa: F401
+from uuid import UUID
 
 
 @_dataclass
@@ -216,3 +218,138 @@ def parse_where_clause(sql: str) -> ParsedWhere:
         interpretation=". ".join(interpretation_parts).strip(),
         filters=filters,
     )
+
+
+# ── Query classification ────────────────────────────────────────────────────
+
+# Keyword buckets — deliberately simple, order matters: saved_search before orders
+# so "saved search for orders" matches saved_search.
+_CLASS_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "gl": (
+        "journal",
+        "journal entries",
+        "gl balance",
+        "gl account",
+        "trial balance",
+        "close the month",
+        "close the period",
+        "period end",
+        "period-end",
+        "accounting period",
+        "month-end close",
+        "chart of accounts",
+        "accruals",
+    ),
+    "marketing": (
+        "ad spend",
+        "attribution",
+        "marketing",
+        "sessions",
+        "cohort",
+        "campaign",
+        "utm",
+        "ctr",
+        "roas",
+        "cac",
+        "funnel",
+    ),
+    "saved_search": (
+        "saved search",
+        "custom record",
+        "customrecord",
+        "suitescript",
+        "script id",
+        "scriptid",
+    ),
+    "orders": (
+        "order",
+        "sales",
+        "transaction",
+        "customer",
+        "item",
+        "invoice",
+        "payment",
+        "refund",
+        "return",
+        "deposit",
+        "sku",
+        "shipment",
+        "fulfillment",
+    ),
+}
+
+# Classes where a source switch is viable.
+DUAL_SOURCE_ALLOWLIST: dict[str, tuple[str, ...]] = {
+    "orders": ("netsuite", "bigquery"),
+    "gl": ("netsuite",),
+    "marketing": ("bigquery",),
+    "saved_search": ("netsuite",),
+    "unmatched": (),
+}
+
+
+def classify_query_class(question: str) -> str:
+    """Classify a user question into one of: orders, gl, marketing, saved_search, unmatched."""
+    if not question:
+        return "unmatched"
+    q = question.lower()
+    # Check more specific classes first (gl, marketing, saved_search) before orders,
+    # since a "journal" query mentioning "transactions" is still GL.
+    for klass in ("gl", "marketing", "saved_search", "orders"):
+        for kw in _CLASS_KEYWORDS[klass]:
+            if kw in q:
+                return klass
+    return "unmatched"
+
+
+# ── Connector health (stubs patched by tests; real lookups added in later tasks) ──
+
+
+def _tenant_has_connector(tenant_id: UUID, source: str) -> bool:
+    """Default stub: returns False. Overridden by the async wrapper in assemble_disclosure."""
+    return False
+
+
+def _connector_is_healthy(tenant_id: UUID, source: str) -> bool:
+    return False
+
+
+def _bigquery_sync_age_hours(tenant_id: UUID) -> float:
+    return 999.0
+
+
+def compute_can_switch_source(
+    current_source: str,
+    tenant_id: UUID,
+    query_class: str,
+) -> bool:
+    """Return True iff the user can switch to the *other* data source for this query."""
+    other = "bigquery" if current_source == "netsuite" else "netsuite"
+
+    allowed_sources = DUAL_SOURCE_ALLOWLIST.get(query_class, ())
+    if other not in allowed_sources:
+        return False
+    if not _tenant_has_connector(tenant_id, other):
+        return False
+    if not _connector_is_healthy(tenant_id, other):
+        return False
+    if other == "bigquery" and _bigquery_sync_age_hours(tenant_id) > 24:
+        return False
+    return True
+
+
+# ── Source-switch command regex ─────────────────────────────────────────────
+
+_SOURCE_SWITCH_RE = re.compile(
+    r"^\s*(?:use|switch\s+to|run\s+on|try)\s+(netsuite|bigquery|bq|ns)\s*[.!?]?\s*$",
+    re.IGNORECASE,
+)
+_SOURCE_ALIASES = {"bq": "bigquery", "ns": "netsuite"}
+
+
+# ── Pushback detection ──────────────────────────────────────────────────────
+
+_PUSHBACK_RE = re.compile(
+    r"^\s*(?:that'?s?\s+(?:wrong|not\s+right)|no,?\s+i\s+meant|actually|why\s+is|i\s+need)",
+    re.IGNORECASE,
+)
