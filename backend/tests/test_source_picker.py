@@ -8,6 +8,7 @@ from app.services.chat.source_picker import (
     AMBIGUITY_THRESHOLD,
     SourceScore,
     build_picker_payload,
+    has_data_intent,
     score_source,
     should_prompt_user,
 )
@@ -140,6 +141,47 @@ class TestShouldPromptUser:
     def test_low_confidence_prompts(self):
         score: SourceScore = ("netsuite", 0.5, "unclear")
         assert should_prompt_user(score) is True
+
+
+class TestHasDataIntent:
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "how many orders this week",
+            "top customers",
+            "show me recent transactions",
+            "sales last month",
+            "revenue this quarter",
+            "total invoices",
+            "count of refunds",
+            "trend of payouts YTD",
+            "Q1 revenue report",
+            "ad spend last week",
+            "income statement",
+            "open invoices for customer X",
+            "run this in bigquery",
+        ],
+    )
+    def test_data_queries_have_intent(self, query):
+        assert has_data_intent(query) is True
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "hello",
+            "hi there",
+            "thanks",
+            "how are you",
+            "what can you do",
+            "help me",
+            "show me workspace files",
+            "upload a file",
+            "",
+            "   ",
+        ],
+    )
+    def test_non_data_queries_lack_intent(self, query):
+        assert has_data_intent(query) is False
 
 
 class TestBuildPickerPayload:

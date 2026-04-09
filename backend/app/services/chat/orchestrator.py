@@ -1130,15 +1130,16 @@ async def run_chat_turn(
                 break
         await db.commit()
         print(f"[SOURCE-PICKER] user selected {source_pick}", flush=True)
-    elif not session.source_pin:
+    elif not session.source_pin and not is_onboarding and not getattr(session, "workspace_id", None):
         from app.services.chat.source_picker import (
             build_picker_payload,
+            has_data_intent,
             score_source,
             should_prompt_user,
         )
 
         _score = score_source(sanitized_input)
-        if should_prompt_user(_score):
+        if has_data_intent(sanitized_input) and should_prompt_user(_score):
             _payload = build_picker_payload(_score, user_question=sanitized_input)
             _placeholder_msg = ChatMessage(
                 tenant_id=tenant_id,

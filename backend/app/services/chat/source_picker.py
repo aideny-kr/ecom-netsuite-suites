@@ -95,6 +95,56 @@ _MARKETING_RE = re.compile(
 _EXPLICIT_BIGQUERY_RE = re.compile(r"(?i)\b(?:bigquery|bq|data\s+warehouse)\b")
 _EXPLICIT_NETSUITE_RE = re.compile(r"(?i)\b(?:netsuite|net\s*suite|suiteql|ns\s+(?:records?|data))\b")
 
+# Data-intent heuristic — picker only fires when the query looks like a data
+# question. Chitchat ("hello"), workspace questions ("show me workspace files"),
+# and meta questions ("how do I use this") must skip the picker.
+_DATA_INTENT_RE = re.compile(
+    r"""(?xi)
+    \b(?:
+        # Core data entity nouns
+        orders? | invoices? | customers? | vendors? | suppliers? |
+        transactions? | payments? | refunds? | charges? | deposits? |
+        payouts? | sales? | revenue | revenues? | sku | skus |
+        products? | items? | shipments? | fulfillments? | returns? |
+        bills? | receipts? | quotes? | estimates? | opportunities? |
+        subscriptions? | discounts? | coupons? | taxes? | margins? |
+        # Aggregation verbs
+        total | totals? | sum | average | mean | median | count |
+        top\s+\d* | bottom\s+\d* | best\s+selling | worst |
+        # Time-window data questions
+        this\s+(?:week|month|quarter|year|day) |
+        last\s+(?:week|month|quarter|year|day|\d+\s+(?:days?|weeks?|months?|quarters?|years?)) |
+        ytd | mtd | qtd | wtd |
+        q[1-4] | fy\d{2,4} |
+        year[-\s]?over[-\s]?year | yoy | month[-\s]?over[-\s]?month | mom |
+        # Report / trend nouns
+        trend | trends | growth | decline | variance | forecast |
+        dashboards? | reports? | metrics? | kpis?
+    )\b
+    """
+)
+
+
+def has_data_intent(query: str) -> bool:
+    """Return True iff the query looks like a data question.
+
+    Chitchat, greetings, workspace file questions, and meta questions about
+    the app itself should not trigger the source picker. This is a coarse
+    heuristic — false positives are acceptable (picker appears), false
+    negatives are not (picker should not hijack a workspace or chitchat turn).
+    """
+    if not query or not query.strip():
+        return False
+    if _EXPLICIT_BIGQUERY_RE.search(query) or _EXPLICIT_NETSUITE_RE.search(query):
+        return True
+    if _FINANCIAL_RE.search(query):
+        return True
+    if _NETSUITE_ENTITY_RE.search(query) or _NETSUITE_OPERATIONAL_RE.search(query):
+        return True
+    if _MARKETING_RE.search(query):
+        return True
+    return bool(_DATA_INTENT_RE.search(query))
+
 
 class PickerOption(TypedDict):
     source: Source
