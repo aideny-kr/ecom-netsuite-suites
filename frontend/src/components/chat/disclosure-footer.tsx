@@ -1,0 +1,61 @@
+"use client";
+
+import { useState } from "react";
+import { ChevronDown } from "lucide-react";
+import type { DisclosureBlock } from "@/lib/types";
+
+interface DisclosureFooterProps {
+  disclosure: DisclosureBlock;
+}
+
+export function DisclosureFooter({ disclosure }: DisclosureFooterProps) {
+  const [expanded, setExpanded] = useState(false);
+  const hasDetails =
+    disclosure.implicit_filters.length > 0 || disclosure.can_switch_source;
+  const otherSource = disclosure.source === "netsuite" ? "BigQuery" : "NetSuite";
+  const sourceLabel = disclosure.source === "netsuite" ? "NetSuite" : "BigQuery";
+  const borderClass = disclosure.failure_mode
+    ? "border-amber-500/20"
+    : "border-border/30";
+
+  return (
+    <div
+      className={`mt-3 pt-2 border-t ${borderClass} text-[11px] sm:text-[12px] italic text-muted-foreground/70`}
+    >
+      <button
+        type="button"
+        onClick={() => hasDetails && setExpanded((prev) => !prev)}
+        disabled={!hasDetails}
+        className="flex items-start gap-1.5 text-left hover:text-muted-foreground transition-colors disabled:cursor-default"
+        aria-expanded={hasDetails ? expanded : undefined}
+      >
+        <span>
+          Read from{" "}
+          <span className="not-italic font-medium">{sourceLabel}</span>
+          {disclosure.is_rerun && " (re-ran after source switch)"}
+          {disclosure.interpretation ? `. ${disclosure.interpretation}` : "."}
+        </span>
+        {hasDetails && (
+          <ChevronDown
+            data-testid="chevron-icon"
+            className={`h-3 w-3 mt-0.5 transition-transform ${
+              expanded ? "rotate-180" : ""
+            }`}
+          />
+        )}
+      </button>
+      {expanded && hasDetails && (
+        <ul className="mt-1.5 ml-1 space-y-0.5">
+          {disclosure.implicit_filters.map((f, i) => (
+            <li key={i}>• {f}</li>
+          ))}
+          {disclosure.can_switch_source && !disclosure.is_rerun && (
+            <li className="mt-1 text-muted-foreground/60">
+              Say &ldquo;use {otherSource}&rdquo; to switch source.
+            </li>
+          )}
+        </ul>
+      )}
+    </div>
+  );
+}
