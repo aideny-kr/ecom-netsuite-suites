@@ -108,19 +108,19 @@ def parse_external_tool_name(name: str) -> tuple[uuid.UUID, str] | None:
     return connector_id, raw_name
 
 
-# Max chars for an external MCP tool description. Raised from 1024 → 8192
-# on 2026-04-09 because Oracle's `ns_runCustomSuiteQL` tool ships ~4,800
-# chars of SuiteQL dialect rules baked into the description (string
-# concatenation, date literals, ANSI joins, no CTE support, etc.). The old
-# 1024 cap was throwing away ~80% of that expert knowledge before the
-# agent ever saw it — a major root cause for the agent fumbling on queries
-# the same MCP + Claude baseline answers in one shot. The 8192 cap still
-# bounds a misbehaving MCP server while preserving real-world descriptions.
-_MAX_EXT_TOOL_DESCRIPTION_CHARS = 8192
-
-
 def build_external_tool_definitions(connectors: list) -> list[dict]:
-    """Convert discovered MCP connector tools to Anthropic tool format."""
+    """Convert discovered MCP connector tools to Anthropic tool format.
+
+    Tool descriptions are passed through unchanged — no truncation. Oracle's
+    NetSuite MCP Standard Tools SuiteApp ships expert SuiteQL dialect rules
+    (string concatenation, date literals, ANSI joins, no CTE support, etc.)
+    baked directly into tool descriptions. Any local truncation here is a
+    direct handicap relative to the Claude-direct + MCP baseline — our
+    agent's north star is to match or beat that baseline, so we pass
+    descriptions through as-is. The Anthropic API enforces its own limits
+    and will reject requests that exceed them; we let that be the
+    authoritative bound rather than imposing our own arbitrary cap.
+    """
     tools = []
     for connector in connectors:
         if not connector.discovered_tools:
@@ -141,7 +141,7 @@ def build_external_tool_definitions(connectors: list) -> list[dict]:
             tools.append(
                 {
                     "name": anthropic_name,
-                    "description": f"[{connector.provider}] {desc}"[:_MAX_EXT_TOOL_DESCRIPTION_CHARS],
+                    "description": f"[{connector.provider}] {desc}",
                     "input_schema": input_schema,
                 }
             )

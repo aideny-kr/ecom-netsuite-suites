@@ -5,10 +5,13 @@ descriptions at 1024 chars in `build_external_tool_definitions`. Oracle's
 `ns_runCustomSuiteQL` tool ships with ~4,800 chars of SuiteQL dialect rules
 (string concatenation, date literals, ANSI joins, no CTE support, etc.)
 baked into the description — ~80% of that expert knowledge was being thrown
-away before the agent ever saw it. This directly degraded the agent's ability
-to construct working queries. The new cap is 8,192 chars, enough to preserve
-Oracle's full description while still bounding against misbehaving MCP
-servers.
+away before the agent ever saw it. This directly handicapped the agent
+relative to the Claude-direct + MCP baseline (our north star).
+
+Policy: DO NOT impose a local cap on MCP tool descriptions. Any cap is a
+direct restriction on the agent's capability relative to the baseline.
+The Anthropic API enforces its own limits and should be the authoritative
+bound, not our code.
 """
 
 import uuid
@@ -37,7 +40,8 @@ def test_short_description_passes_through():
 
 def test_oracle_full_suiteql_description_preserved():
     """Oracle's ns_runCustomSuiteQL ships ~4,800 chars of dialect rules.
-    This test simulates that length and asserts nothing is lost above 1024."""
+    This test simulates that length and asserts the description passes
+    through unchanged."""
     oracle_desc = (
         "Runs a custom SuiteQL query. "
         "Bold: String concatenation uses the || operator. "
@@ -47,7 +51,6 @@ def test_oracle_full_suiteql_description_preserved():
         "Bold: Mixed join syntax disallowed. "
     ) * 20  # roughly 5,000 chars
     assert len(oracle_desc) > 1024, "test setup: description must be > old 1024 cap"
-    assert len(oracle_desc) < 8192, "test setup: description must fit under new 8192 cap"
 
     conn = _FakeConnector(
         [{"name": "ns_runCustomSuiteQL", "description": oracle_desc, "input_schema": {"type": "object", "properties": {}}}]
@@ -56,10 +59,11 @@ def test_oracle_full_suiteql_description_preserved():
     assert len(tools) == 1
 
     out_desc = tools[0]["description"]
-    # Full description should survive (plus the `[netsuite] ` prefix)
-    assert len(out_desc) > 1024, (
-        f"Description was truncated to {len(out_desc)} chars — "
-        f"Oracle's SuiteQL dialect rules are being thrown away"
+    # Full description must pass through — any truncation is a handicap
+    # versus the Claude-direct + MCP baseline.
+    prefix = "[netsuite] "
+    assert out_desc == prefix + oracle_desc, (
+        f"Description was altered: expected {len(prefix) + len(oracle_desc)} chars, got {len(out_desc)}"
     )
     # Key dialect rules must appear in the output
     assert "|| operator" in out_desc
@@ -67,16 +71,23 @@ def test_oracle_full_suiteql_description_preserved():
     assert "ANSI JOIN" in out_desc
 
 
-def test_description_capped_at_8192_for_misbehaving_server():
-    """Protects against a misbehaving MCP server sending a massive description."""
-    bloated = "X" * 20_000
+def test_no_local_cap_on_descriptions():
+    """Regression guard: we must NEVER impose a local cap on MCP tool
+    descriptions. Any cap is a direct restriction on agent capability
+    relative to the Claude-direct + MCP baseline. Only Anthropic's API
+    should bound the size.
+    """
+    huge_desc = "X" * 20_000
     conn = _FakeConnector(
-        [{"name": "bloated_tool", "description": bloated, "input_schema": {"type": "object", "properties": {}}}]
+        [{"name": "huge_tool", "description": huge_desc, "input_schema": {"type": "object", "properties": {}}}]
     )
     tools = build_external_tool_definitions([conn])
-    assert len(tools[0]["description"]) <= 8192
-    # The safety cap should kick in
-    assert len(tools[0]["description"]) == 8192
+    # The description should pass through in full (plus the [provider] prefix).
+    expected = "[netsuite] " + huge_desc
+    assert tools[0]["description"] == expected, (
+        f"Description was truncated from {len(expected)} to {len(tools[0]['description'])} chars — "
+        f"we must not impose any local cap on MCP descriptions."
+    )
 
 
 def test_tool_name_format_unchanged():
