@@ -2,7 +2,7 @@ import json
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Annotated
+from typing import Annotated, Literal
 
 import anthropic
 import openai
@@ -43,6 +43,7 @@ class UpdateSessionRequest(BaseModel):
 class SendMessageRequest(BaseModel):
     content: str = Field(..., max_length=4000)
     agent_id: str | None = Field(default=None, description="Pin to a specific agent (skip routing)")
+    source_pick: Literal["netsuite", "bigquery"] | None = None
 
 
 class MessageResponse(BaseModel):
@@ -313,6 +314,7 @@ async def send_message(
             wizard_step=wizard_step,
             user_timezone=x_timezone,
             agent_id=body.agent_id,
+            source_pick=body.source_pick,
         )
     )
 
@@ -330,6 +332,7 @@ async def _run_chat_background(
     wizard_step: str | None,
     user_timezone: str | None,
     agent_id: str | None,
+    source_pick: str | None = None,
 ) -> None:
     """Run the chat pipeline in background, writing events to Redis."""
     from app.core.database import async_session_factory
@@ -352,6 +355,7 @@ async def _run_chat_background(
                 user_timezone=user_timezone,
                 agent_id=agent_id,
                 run_id=run_id,
+                source_pick=source_pick,
             ):
                 rm.write_event(run_id, chunk)
         rm.set_status(run_id, "complete")
