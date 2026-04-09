@@ -46,6 +46,8 @@
 - **Feature Flags**: `tenant_feature_flags` table, TTL-cached. `require_feature(flag_key)` dependency returns 403 when disabled.
 - **Write-Back Confirmation**: All mutation-path agents use shared confirmation flow: agent builds payload → SSE `confirmation_required` event → frontend `ConfirmationDialog` component → user approves → agent executes → audit log with before/after snapshots. Never auto-execute writes.
 - **Reconciliation Engine**: Three-tier deterministic matching (exact payout ID → fuzzy amount/date/narration → AI investigation for 5% exceptions). No LLM in matching pipeline. Chat agent as primary interface, dashboard as secondary.
+- **Source Picker (v0.1)**: Confidence-gated pre-execution card picker between NetSuite and BigQuery. `score_source()` in `backend/app/services/chat/source_picker.py` returns `(source, confidence, reason)`. Threshold 0.85 — above = auto-run, below = picker. Financial keywords → NetSuite 0.99, marketing → BigQuery 0.95, NS entities → 0.95, ambiguous (orders/customers/revenue) → 0.55. Orchestrator short-circuits BEFORE agent execution, persists picker placeholder `ChatMessage` with `structured_output.type == "source_picker"`, yields terminal message, returns. User click posts `source_pick` field, backend sets `session.source_pin`, marks picker as `selected`, runs agent honoring pin. Routing block explicitly checks `source_pin` before 3-tier routing.
+- **Fiscal Calendar**: `tenant_configs.fiscal_year_start_month` (1-12, default 1) injected into unified agent prompt as `## FISCAL CALENDAR` block. Agent interprets Q1/Q2/Q3/Q4/"fiscal year" using tenant's fiscal calendar instead of defaulting to calendar year. Calendar-year tenants (Framework) get the default behavior.
 
 ## Backend Patterns — FOLLOW EXACTLY
 
@@ -262,6 +264,8 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 | Recon agent config | `backend/app/services/chat/agents/configs/recon_agent.yaml` |
 | Recon dashboard | `frontend/src/app/(dashboard)/reconciliation/` |
 | Financial veto | `backend/app/services/chat/orchestrator.py` (_FINANCIAL_VETO_PHRASES) |
+| Source picker scorer | `backend/app/services/chat/source_picker.py` |
+| Source picker card | `frontend/src/components/chat/source-picker-card.tsx` |
 | Connector status API | `backend/app/api/v1/connector_status.py` |
 | Stripe sync service | `backend/app/services/ingestion/stripe_sync.py` |
 | NetSuite deposit sync | `backend/app/services/ingestion/netsuite_deposit_sync.py` |
@@ -319,6 +323,10 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 35. **Soul config is file-based** — stored at `/tmp/workspace_storage/{tenant_id}/soul.md`. Must have persistent Docker volume. NEVER overwrite or seed without explicit user confirmation.
 36. **Financial routing needs veto, not just regex** — `_FINANCIAL_VETO_PHRASES` catches plurals/variants that the coordinator regex misses. Applied after Tier 1, session pin, and Tier 2 in `_select_agent()`.
 37. **nginx ssl_buffer_size for SSE** — default 16KB causes bursty streaming over TLS. Set to 4k for real-time SSE.
+43. **`normalizeStreamMessage` must preserve `structured_output`** — when adding new structured types (like source_picker), the SSE terminal `message` event's `structured_output` field MUST be copied in `frontend/src/lib/chat-stream.ts::normalizeStreamMessage()`. Otherwise the frontend drops it. This bit us twice.
+44. **`session.source_pin` must be honored by routing** — setting `source_pin` alone doesn't change behavior. The orchestrator's routing block explicitly checks `session.source_pin` BEFORE calling `_select_agent()`. Bypass Tier 1/2 when pin is set.
+45. **Source picker placeholders do NOT re-persist user messages** — when `source_pick` is present in the POST body, reuse the last existing user message via `SELECT ... ORDER BY created_at DESC LIMIT 1`. Creating a new user row duplicates the question in the conversation.
+46. **One Next.js dev server per project, from the main checkout** — if you have worktrees, make sure you're not running `npm run dev` from a stale worktree. Check with `ps aux | grep next-dev` if hot reload isn't working.
 38. **Stripe SDK v15 breaking changes** — `dict(payout)` fails (use `payout.to_dict()`). `account.get("field")` fails (use `getattr(account, "field", None)`). StripeObject no longer behaves like a dict.
 39. **Stripe connector key in `connections` table** — encrypted per-tenant, NOT in env vars. `STRIPE_API_KEY` in config.py is for billing only. Per-connection key via `decrypt_credentials(connection.encrypted_credentials)["api_key"]`.
 40. **Recon pipeline Stripe sync timeout** — initial sync pulls all historical payouts (800+) with payout lines — can take 30+ min. Pipeline has 90s timeout with fallback to existing data. Pre-sync via Settings "Sync Now" or nightly Beat schedule.
@@ -328,7 +336,7 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 ## Current State
 
 - **Product**: AI-den v1.6 deployed to staging 2026-04-03. Background chat, streaming tool cards, ordered content blocks, trimmed prompt. CI green.
-- **Latest migration**: 063_message_agent_id
+- **Latest migration**: 065_fiscal_year_start (064_source_pin + 065_fiscal_year_start shipped in v0.1 source picker PR)
 - **Frontend tests**: Vitest + @testing-library/react (30 tests). Run: `cd frontend && npx vitest run`
 - **Staging**: `api-staging.suitestudio.ai` + `staging.suitestudio.ai`. GCP Docker + nginx + Let's Encrypt. Deploy: `saas-deployment` skill.
 
@@ -363,3 +371,5 @@ Full changelog moved to skills. Key milestones:
 - **v1.2** (2026-03-27): Pricing Agent, Agent Hub, follow-up intelligence, autonomous improvement
 - **v1.3** (2026-03-29): Reconciliation engine, data pipeline connectors, GCP frontend
 - **v1.5** (2026-03-30): Self-service sync, order-level matching, progress stepper, CI green
+- **v1.6** (2026-04-03): Background chat, streaming tool cards, ordered content blocks, trimmed prompt
+- **v0.1 Intent Clarification** (2026-04-09): Source picker cards (confidence-gated, ambiguous → two cards, < 0.85 threshold), fiscal calendar injection into agent prompts, abandoned v0 disclosure footer design after design mismatch
