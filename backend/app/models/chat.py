@@ -3,7 +3,7 @@ from decimal import Decimal
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import Boolean, ForeignKey, Index, Integer, Numeric, String, Text
-from sqlalchemy.dialects.postgresql import JSON, UUID
+from sqlalchemy.dialects.postgresql import JSON, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
@@ -19,6 +19,7 @@ class ChatSession(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     workspace_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
     is_archived: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     agent_id: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
+    source_pin: Mapped[str | None] = mapped_column(String(16), nullable=True)
 
     messages: Mapped[list["ChatMessage"]] = relationship(
         back_populates="session",
@@ -62,6 +63,9 @@ class ChatMessage(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
     # Persisted structured output (financial_report or data_table SSE payload)
     structured_output: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+    # Post-stream disclosure footer (source, interpretation, filters, can_switch_source)
+    disclosure_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
     session: Mapped["ChatSession"] = relationship(back_populates="messages")
 

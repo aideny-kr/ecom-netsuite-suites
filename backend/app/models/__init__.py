@@ -11,6 +11,7 @@ from app.models.canonical import (
     Refund,
 )
 from app.models.chat import ChatMessage, ChatSession, DocChunk
+from app.models.chat_disclosure_event import ChatDisclosureEvent
 from app.models.chat_api_key import ChatApiKey
 from app.models.connection import Connection
 from app.models.connection_alert import ConnectionAlert
@@ -65,6 +66,7 @@ __all__ = [
     "Schedule",
     "ChatSession",
     "ChatMessage",
+    "ChatDisclosureEvent",
     "DocChunk",
     "McpConnector",
     "NetSuiteMetadata",
