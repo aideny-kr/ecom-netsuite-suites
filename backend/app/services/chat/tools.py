@@ -108,6 +108,17 @@ def parse_external_tool_name(name: str) -> tuple[uuid.UUID, str] | None:
     return connector_id, raw_name
 
 
+# Max chars for an external MCP tool description. Raised from 1024 → 8192
+# on 2026-04-09 because Oracle's `ns_runCustomSuiteQL` tool ships ~4,800
+# chars of SuiteQL dialect rules baked into the description (string
+# concatenation, date literals, ANSI joins, no CTE support, etc.). The old
+# 1024 cap was throwing away ~80% of that expert knowledge before the
+# agent ever saw it — a major root cause for the agent fumbling on queries
+# the same MCP + Claude baseline answers in one shot. The 8192 cap still
+# bounds a misbehaving MCP server while preserving real-world descriptions.
+_MAX_EXT_TOOL_DESCRIPTION_CHARS = 8192
+
+
 def build_external_tool_definitions(connectors: list) -> list[dict]:
     """Convert discovered MCP connector tools to Anthropic tool format."""
     tools = []
@@ -130,7 +141,7 @@ def build_external_tool_definitions(connectors: list) -> list[dict]:
             tools.append(
                 {
                     "name": anthropic_name,
-                    "description": f"[{connector.provider}] {desc}"[:1024],
+                    "description": f"[{connector.provider}] {desc}"[:_MAX_EXT_TOOL_DESCRIPTION_CHARS],
                     "input_schema": input_schema,
                 }
             )
