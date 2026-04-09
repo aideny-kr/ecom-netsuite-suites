@@ -223,6 +223,91 @@ class TestPatternStorage:
         assert stored is False
 
     @pytest.mark.asyncio
+    async def test_stores_external_mcp_suiteql_pattern(self, db: AsyncSession):
+        """External MCP ns_runCustomSuiteQL calls must also persist patterns.
+
+        Regression for Olivia's 2026-04-09 session: the successful
+        transactionShippingAddress join ran via ext__<hex>__ns_runCustomSuiteQL
+        but never got stored because the extractor only matched the local
+        `netsuite_suiteql` tool name. The follow-up turn had no cached
+        pattern to fall back to and hallucinated the wrong answer.
+        """
+        tenant = await create_test_tenant(db, name="Ext MCP Corp")
+
+        tool_calls_log = [
+            {
+                "tool": "ext__fc1cba33e9924f62a5b7df0d5f235214__ns_runCustomSuiteQL",
+                "params": {
+                    "sqlQuery": (
+                        "SELECT BUILTIN.DF(sa.country) AS ship_country, "
+                        "COUNT(DISTINCT t.id) AS total_orders, "
+                        "SUM(ABS(tl.quantity)) AS total_qty "
+                        "FROM transaction t "
+                        "JOIN transactionShippingAddress sa ON sa.nKey = t.shippingAddress "
+                        "JOIN transactionline tl ON tl.transaction = t.id "
+                        "WHERE t.type = 'SalesOrd' "
+                        "GROUP BY BUILTIN.DF(sa.country)"
+                    ),
+                    "description": "Sales by ship country",
+                },
+                "result_summary": "Returned 4 rows",
+                "result_payload": {
+                    "kind": "table",
+                    "columns": ["ship_country", "total_orders", "total_qty"],
+                    "rows": [
+                        ["Switzerland", 16, 146],
+                        ["Norway", 3, 25],
+                        ["Singapore", 3, 6],
+                        ["New Zealand", 1, 3],
+                    ],
+                    "row_count": 4,
+                    "truncated": False,
+                    "query": "...",
+                    "limit": 4,
+                },
+            }
+        ]
+
+        with patch("app.services.query_pattern_service._embed_text", new_callable=AsyncMock, return_value=None):
+            stored = await extract_and_store_pattern(
+                db,
+                tenant.id,
+                "give me sales data by shipping country for Norway, Switzerland, NZ, Singapore",
+                tool_calls_log,
+            )
+            await db.flush()
+
+        assert stored is True
+
+        result = await db.execute(select(TenantQueryPattern).where(TenantQueryPattern.tenant_id == tenant.id))
+        patterns = result.scalars().all()
+        assert len(patterns) == 1
+        assert "transactionshippingaddress" in patterns[0].tables_used
+        assert "transaction" in patterns[0].tables_used
+        # The whole point: the working SQL with the nKey join survives
+        assert "sa.nKey = t.shippingAddress" in patterns[0].working_sql
+
+    @pytest.mark.asyncio
+    async def test_external_mcp_failed_query_not_stored(self, db: AsyncSession):
+        """Failed external MCP queries should not get stored as patterns."""
+        tenant = await create_test_tenant(db, name="Ext MCP Error Corp")
+
+        tool_calls_log = [
+            {
+                "tool": "ext__abc__ns_runCustomSuiteQL",
+                "params": {
+                    "sqlQuery": "SELECT GROUP BY junk FROM transaction GROUP BY type",
+                },
+                "result_summary": '{"error": true, "message": "Invalid SQL syntax"}',
+            }
+        ]
+
+        with patch("app.services.query_pattern_service._embed_text", new_callable=AsyncMock, return_value=None):
+            stored = await extract_and_store_pattern(db, tenant.id, "bad query", tool_calls_log)
+
+        assert stored is False
+
+    @pytest.mark.asyncio
     async def test_tenant_isolation(self, db: AsyncSession):
         """Patterns from different tenants should not leak."""
         tenant_a = await create_test_tenant(db, name="Corp A")

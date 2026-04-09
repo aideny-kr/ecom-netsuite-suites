@@ -32,6 +32,38 @@ _TABLE_RE = re.compile(r"\b(?:FROM|JOIN)\s+(\w+)", re.IGNORECASE)
 _COLUMN_RE = re.compile(r"\b(\w+\.\w+)\b")
 
 
+def _is_suiteql_tool_call(tool_name: str | None) -> bool:
+    """Return True if a tool call name corresponds to a raw SuiteQL executor.
+
+    Matches:
+    - ``netsuite_suiteql`` — the local REST tool.
+    - ``ext__<hex>__ns_runCustomSuiteQL`` — external MCP SuiteQL executor
+      (Oracle's NetSuite MCP Standard Tools SuiteApp).
+
+    Deliberately excludes ``ns_getSuiteQLMetadata`` (schema discovery, not
+    a query) and saved-search / report tools (they have different
+    semantics and are stored separately if at all).
+    """
+    if not tool_name:
+        return False
+    if tool_name == "netsuite_suiteql":
+        return True
+    # External MCP tools have the form ext__<hex>__<tool_name>; match by
+    # the final segment so we don't care which connector executed it.
+    return tool_name.endswith("__ns_runCustomSuiteQL")
+
+
+def _extract_sql_from_params(params: dict | None) -> str:
+    """Pull the SQL query from a tool-call params dict.
+
+    Local ``netsuite_suiteql`` uses the ``query`` key; external MCP
+    ``ns_runCustomSuiteQL`` uses ``sqlQuery``. Accept either.
+    """
+    if not isinstance(params, dict):
+        return ""
+    return params.get("query") or params.get("sqlQuery") or ""
+
+
 def _extract_tables(sql: str) -> list[str]:
     """Extract table names from FROM/JOIN clauses."""
     return list({m.lower() for m in _TABLE_RE.findall(sql)})
@@ -92,11 +124,10 @@ async def extract_and_store_pattern(
     stored = False
 
     for call in tool_calls_log:
-        if call.get("tool") != "netsuite_suiteql":
+        if not _is_suiteql_tool_call(call.get("tool")):
             continue
 
-        params = call.get("params", {})
-        query = params.get("query", "")
+        query = _extract_sql_from_params(call.get("params"))
         if not query:
             continue
 
@@ -159,10 +190,10 @@ async def process_feedback(
         return
 
     for call in message.tool_calls:
-        if call.get("tool") != "netsuite_suiteql":
+        if not _is_suiteql_tool_call(call.get("tool")):
             continue
 
-        sql = call.get("params", {}).get("query", "")
+        sql = _extract_sql_from_params(call.get("params"))
         if not sql:
             continue
 
