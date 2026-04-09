@@ -247,6 +247,19 @@ _TRANSACTION_TYPE_LABELS = {
     "RtnAuth": "Return Authorization",
 }
 
+# Date column families: NetSuite uses `trandate`, BigQuery/warehouse tables use
+# `orderdate`, `posting_date`, `created_at`, `invoicedate`, etc. The parser
+# matches any column ending in `date` with one of these common prefixes plus
+# bare `created_at` / `posted_at`. Anchored to `\b` so we don't match middle-of-word.
+_DATE_COL_RE = (
+    r"(?:tran|order|posting|posted|created|invoice|sale|fulfillment|ship|"
+    r"close|cancel|due)?date|created_at|posted_at|order_date|posting_date"
+)
+# Status column families: bare `status` plus common qualifiers.
+_STATUS_COL_RE = r"(?:order|payment|fulfillment|invoice|item|line)?status"
+# Type column families: bare `type` plus common qualifiers.
+_TYPE_COL_RE = r"(?:order|transaction|record)?type"
+
 
 def parse_where_clause(sql: str) -> ParsedFilters:
     """Parse a WHERE clause for common predicate shapes. Graceful degrade.
@@ -290,9 +303,9 @@ def parse_where_clause(sql: str) -> ParsedFilters:
     interpretation = ""
     filters: list[str] = []
 
-    # 1. Relative date windows (check before literal ranges)
+    # 1. Relative date windows (check before literal ranges) — SuiteQL only
     rel_match = re.search(
-        r"trandate\s*>=\s*TRUNC\s*\(\s*SYSDATE\s*,\s*'(WW|MM|Q|YYYY)'\s*\)",
+        rf"\b(?:{_DATE_COL_RE})\s*>=\s*TRUNC\s*\(\s*SYSDATE\s*,\s*'(WW|MM|Q|YYYY)'\s*\)",
         where_text,
         re.IGNORECASE,
     )
@@ -305,39 +318,77 @@ def parse_where_clause(sql: str) -> ParsedFilters:
             "YYYY": "This year",
         }[grain]
 
-    # 2. Literal date range
+    # 2. Literal date range — works for both SuiteQL `trandate` and BigQuery
+    # `orderdate`/`posting_date`/etc. Both >=/<= predicates must use the same
+    # column family for the range to be detected.
     if not interpretation:
         range_match = re.search(
-            r"trandate\s*>=\s*'?(\d{4}-\d{2}-\d{2})'?\s+AND\s+trandate\s*<=\s*'?(\d{4}-\d{2}-\d{2})'?",
+            rf"\b(?:{_DATE_COL_RE})\s*>=\s*'?(\d{{4}}-\d{{2}}-\d{{2}})'?"
+            rf"\s+AND\s+(?:{_DATE_COL_RE})\s*<=\s*'?(\d{{4}}-\d{{2}}-\d{{2}})'?",
             where_text,
             re.IGNORECASE,
         )
         if range_match:
             interpretation = f"{range_match.group(1)} – {range_match.group(2)}"
 
-    # 3. Transaction type
-    type_in_match = re.search(r"\btype\s+IN\s*\(([^)]+)\)", where_text, re.IGNORECASE)
+    # 2b. Half-open range: `>= literal AND <= CURRENT_DATE()/NOW()/SYSDATE`.
+    # Common BigQuery pattern when the agent wants "from X through today".
+    if not interpretation:
+        since_match = re.search(
+            rf"\b(?:{_DATE_COL_RE})\s*>=\s*'?(\d{{4}}-\d{{2}}-\d{{2}})'?"
+            rf"\s+AND\s+(?:{_DATE_COL_RE})\s*<=\s*(?:CURRENT_DATE\s*\(\s*\)|NOW\s*\(\s*\)|SYSDATE)",
+            where_text,
+            re.IGNORECASE,
+        )
+        if since_match:
+            interpretation = f"{since_match.group(1)} – today"
+
+    # 2c. Single lower-bound predicate: `>= literal` with no upper bound.
+    if not interpretation:
+        lower_match = re.search(
+            rf"\b(?:{_DATE_COL_RE})\s*>=\s*'?(\d{{4}}-\d{{2}}-\d{{2}})'?",
+            where_text,
+            re.IGNORECASE,
+        )
+        if lower_match:
+            interpretation = f"Since {lower_match.group(1)}"
+
+    # 3. Transaction type — match `type`, `ordertype`, `transactiontype`, etc.
+    type_in_match = re.search(
+        rf"\b(?:{_TYPE_COL_RE})\s+IN\s*\(([^)]+)\)",
+        where_text,
+        re.IGNORECASE,
+    )
     if type_in_match:
         codes = [c.strip().strip("'\"") for c in type_in_match.group(1).split(",")]
         labels = [_TRANSACTION_TYPE_LABELS.get(c, c) for c in codes]
         filters.append(f"Transaction type: {', '.join(labels)}")
     else:
-        type_eq_match = re.search(r"\btype\s*=\s*'([^']+)'", where_text, re.IGNORECASE)
+        type_eq_match = re.search(
+            rf"\b(?:{_TYPE_COL_RE})\s*=\s*'([^']+)'",
+            where_text,
+            re.IGNORECASE,
+        )
         if type_eq_match:
             code = type_eq_match.group(1)
             label = _TRANSACTION_TYPE_LABELS.get(code, code)
             filters.append(f"Transaction type: {label}")
 
-    # 4. Status predicates
+    # 4. Status predicates — match bare `status` and `orderstatus`/etc.,
+    # including `NOT IN` exclusions which BigQuery agents commonly use.
     status_match = re.search(
-        r"\bstatus\s+IN\s*\(([^)]+)\)|\bstatus\s*=\s*'([^']+)'",
+        rf"\b(?:{_STATUS_COL_RE})\s+(?:NOT\s+)?IN\s*\(([^)]+)\)|"
+        rf"\b(?:{_STATUS_COL_RE})\s*=\s*'([^']+)'",
         where_text,
         re.IGNORECASE,
     )
     if status_match:
         codes_raw = status_match.group(1) or status_match.group(2)
         codes = [c.strip().strip("'\"") for c in codes_raw.split(",")]
-        filters.append(f"Status: {', '.join(codes)}")
+        # Detect whether this was an exclusion (NOT IN) so the label reads correctly.
+        is_exclusion = bool(re.search(rf"\b(?:{_STATUS_COL_RE})\s+NOT\s+IN\b", where_text, re.IGNORECASE))
+        prefix = "Excludes status" if is_exclusion else "Status"
+        filters.append(f"{prefix}: {', '.join(codes)}")
 
     # 5. Subsidiary
     sub_match = re.search(r"\bsubsidiary\s*=\s*(\d+)", where_text, re.IGNORECASE)
@@ -399,6 +450,36 @@ def _data_tool_key(name: str) -> str:
     return name
 
 
+def _detect_source_from_tools(tool_calls: list[dict]) -> Literal["netsuite", "bigquery"] | None:
+    """Inspect actual tool names to determine which source the answer came from.
+
+    Returns "bigquery" if any data tool was a BigQuery tool.
+    Returns "netsuite" if any data tool was a NetSuite/SuiteQL tool.
+    Returns None if ambiguous or no recognizable data tool fired.
+
+    BigQuery wins on conflict: a multi-source agent that ran both should
+    label the footer with the source that produced the FINAL data — but
+    we approximate by preferring bigquery if present, since the existing
+    disclosure layer uses the LAST successful tool's SQL anyway.
+    """
+    has_bq = False
+    has_ns = False
+    for t in tool_calls:
+        key = _data_tool_key(t.get("tool", ""))
+        if key.startswith("bigquery_"):
+            has_bq = True
+        elif key.startswith("netsuite_") or key.startswith("ns_"):
+            has_ns = True
+        elif key == "pivot_query_result":
+            # Pivot is dialect-agnostic — don't use it for source detection
+            continue
+    if has_bq and not has_ns:
+        return "bigquery"
+    if has_ns and not has_bq:
+        return "netsuite"
+    return None
+
+
 def assemble_disclosure(
     *,
     tool_calls: list[dict],
@@ -424,18 +505,27 @@ def assemble_disclosure(
     if matched_pattern and matched_pattern.get("age_days", 0) < _STALE_PATTERN_THRESHOLD_DAYS:
         return None
 
+    # The agent can override the user's session pin (current_source) by
+    # actually running a tool against a different source — e.g. the bi-agent
+    # runs BigQuery even when the session has no pin and current_source
+    # defaults to 'netsuite'. The footer must report the source the answer
+    # ACTUALLY came from, not the user's preference, otherwise the label is
+    # misleading. Fall back to current_source only when detection is ambiguous.
+    detected_source = _detect_source_from_tools(data_tool_calls)
+    effective_source: Literal["netsuite", "bigquery"] = detected_source or current_source
+
     successful = [t for t in data_tool_calls if t.get("success", True)]
     failed = [t for t in data_tool_calls if not t.get("success", True)]
 
-    can_switch = compute_can_switch_source(current_source, user_query, connector_state)
+    can_switch = compute_can_switch_source(effective_source, user_query, connector_state)
 
     # Rule 3: failure mode
     if not successful and failed:
         if not can_switch:
             return None
         return DisclosureBlock(
-            source=current_source,
-            interpretation=f"Tried {SOURCE_LABELS[current_source]}.",
+            source=effective_source,
+            interpretation=f"Tried {SOURCE_LABELS[effective_source]}.",
             implicit_filters=[],
             can_switch_source=True,
             is_rerun=is_rerun,
@@ -448,7 +538,7 @@ def assemble_disclosure(
     parsed = parse_where_clause(sql)
 
     return DisclosureBlock(
-        source=current_source,
+        source=effective_source,
         interpretation=parsed.interpretation,
         implicit_filters=parsed.implicit_filters,
         can_switch_source=can_switch,

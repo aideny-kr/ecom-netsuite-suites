@@ -149,6 +149,42 @@ def test_assemble_picks_last_successful_tool_call():
     assert any("sales" in f.lower() or "salesord" in f.lower() for f in result.implicit_filters)
 
 
+def test_assemble_overrides_current_source_when_bigquery_tool_actually_ran():
+    """The agent (e.g., bi-agent) can override the user's session pin by running
+    BigQuery tools even when current_source defaults to 'netsuite'. The footer
+    MUST report the source the answer actually came from, not the user's pin.
+    Otherwise the footer is misleading — exactly the CFO-screenshot risk the
+    feature was designed to prevent.
+    """
+    sql = "SELECT customer, SUM(total) FROM `proj.ds.orders` WHERE orderdate >= '2026-01-01' AND orderdate <= '2026-12-31' GROUP BY 1"
+    result = assemble_disclosure(
+        tool_calls=[_tool_call("bigquery_sql", sql)],
+        user_query="top customers by revenue this year",
+        current_source="netsuite",  # session pin default
+        connector_state=_State(),
+        matched_pattern=None,
+        is_rerun=False,
+    )
+    assert result is not None
+    assert result.source == "bigquery", "source must be detected from tool calls, not session pin"
+
+
+def test_assemble_overrides_current_source_when_netsuite_tool_actually_ran():
+    """Symmetric: if current_source='bigquery' but the agent ran a NetSuite
+    SuiteQL tool, the footer should report 'netsuite'."""
+    sql = "SELECT COUNT(*) FROM transaction WHERE trandate >= TRUNC(SYSDATE, 'WW')"
+    result = assemble_disclosure(
+        tool_calls=[_tool_call("netsuite_suiteql", sql)],
+        user_query="how many orders this week",
+        current_source="bigquery",
+        connector_state=_State(),
+        matched_pattern=None,
+        is_rerun=False,
+    )
+    assert result is not None
+    assert result.source == "netsuite"
+
+
 def test_assemble_recognizes_prefixed_ext_mcp_tool_names():
     """External MCP tools are exposed to the LLM with an ext__{hex}__ prefix.
     The disclosure assembler must strip the prefix before matching against

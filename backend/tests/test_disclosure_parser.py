@@ -97,6 +97,59 @@ def test_bigquery_limit():
     assert isinstance(filters, ParsedFilters)
 
 
+def test_bigquery_orderdate_range():
+    """BigQuery date columns aren't named `trandate` — they're `orderdate`,
+    `posting_date`, `created_at`, etc. The parser must recognize the family."""
+    sql = (
+        "SELECT customer, SUM(total) FROM `proj.ds.orders` "
+        "WHERE orderdate >= '2026-01-01' AND orderdate <= '2026-12-31' "
+        "GROUP BY 1"
+    )
+    filters = parse_where_clause(sql)
+    assert "2026-01-01" in filters.interpretation
+    assert "2026-12-31" in filters.interpretation
+
+
+def test_bigquery_orderstatus_in():
+    """BigQuery uses `orderstatus`, not bare `status`. The parser should match."""
+    sql = "SELECT * FROM `proj.ds.orders` WHERE orderstatus NOT IN ('Cancelled', 'Voided', 'Closed')"
+    filters = parse_where_clause(sql)
+    assert any("status" in f.lower() for f in filters.implicit_filters)
+    assert any("Cancelled" in f for f in filters.implicit_filters)
+
+
+def test_bigquery_half_open_range_to_current_date():
+    """Common BigQuery pattern: `>= literal AND <= CURRENT_DATE()`. Should
+    render as 'YYYY-MM-DD – today'."""
+    sql = "SELECT * FROM `proj.ds.orders` WHERE orderdate >= '2026-01-01' AND orderdate <= CURRENT_DATE()"
+    filters = parse_where_clause(sql)
+    assert "2026-01-01" in filters.interpretation
+    assert "today" in filters.interpretation.lower()
+
+
+def test_bigquery_lower_bound_only_falls_back_to_since():
+    """If only the lower bound is literal and no upper bound is present at all."""
+    sql = "SELECT * FROM `proj.ds.orders` WHERE orderdate >= '2025-01-01'"
+    filters = parse_where_clause(sql)
+    assert "Since 2025-01-01" in filters.interpretation
+
+
+def test_bigquery_combined_predicates():
+    """End-to-end check: a real BigQuery query like the bi-agent produced
+    locally — orderdate range + orderstatus exclusion. Both should appear."""
+    sql = (
+        "SELECT customer, SUM(total) FROM `proj.ds.orders` "
+        "WHERE orderstatus NOT IN ('Cancelled', 'Voided', 'Closed') "
+        "AND orderdate >= '2026-01-01' "
+        "AND orderdate <= '2026-12-31' "
+        "GROUP BY 1 ORDER BY 2 DESC LIMIT 5"
+    )
+    filters = parse_where_clause(sql)
+    assert "2026-01-01" in filters.interpretation
+    assert "2026-12-31" in filters.interpretation
+    assert any("status" in f.lower() for f in filters.implicit_filters)
+
+
 # ── Graceful degrade ─────────────────────────────────────────────────────
 
 
