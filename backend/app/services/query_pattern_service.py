@@ -262,4 +262,22 @@ async def retrieve_similar_patterns(
             }
         )
 
+    # Instrumentation: log similarity scores so we can see whether retrieved
+    # patterns are actually relevant or just "least irrelevant top K".
+    # This is read by the benchmark harness and by the regression analysis.
+    if patterns:
+        sims = [round(p["similarity"], 3) for p in patterns]
+        print(
+            f"[PATTERN_RETRIEVAL] tenant={str(tenant_id)[:8]} "
+            f'q="{user_question[:80]}" '
+            f"returned={len(patterns)} similarities={sims}",
+            flush=True,
+        )
+    else:
+        print(
+            f"[PATTERN_RETRIEVAL] tenant={str(tenant_id)[:8]} "
+            f'q="{user_question[:80]}" returned=0',
+            flush=True,
+        )
+
     return patterns

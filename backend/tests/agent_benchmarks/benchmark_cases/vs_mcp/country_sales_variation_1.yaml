@@ -1,0 +1,19 @@
+# Variation 1: same intent, different wording (implicit country subset)
+case_id: country_sales_variation_1
+query: "how much did we sell today in Norway, Switzerland, NZ and SG?"
+tags: ["country", "shipping", "variation"]
+notes: |
+  Tests that the agent handles ISO code abbreviations ("NZ", "SG") in the
+  question text. Should still use the transactionShippingAddress join with
+  ISO code filtering.
+expected_answer_contains:
+  - "Norway"
+  - "Switzerland"
+expected_tools:
+  - "netsuite_suiteql"
+expected_accuracy: 0.7
+max_cost: 0.50
+max_latency_ms: 120000
+baseline_expected_accuracy: 0.7
+baseline_expected_tools:
+  - "ns_runCustomSuiteQL"

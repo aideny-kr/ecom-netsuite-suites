@@ -34,6 +34,22 @@ async def retrieve_learned_rules(
         .order_by(TenantLearnedRule.created_at)
     )
     rules = result.scalars().all()
+
+    # Instrumentation: log rule count + categories so we can see how many
+    # rules are being dumped into every prompt. This function is NOT
+    # currently query-aware — it returns ALL active rules for the tenant,
+    # every request, regardless of topic. Known handicap vs Claude + MCP.
+    if rules:
+        categories: dict[str, int] = {}
+        for r in rules:
+            cat = r.rule_category or "general"
+            categories[cat] = categories.get(cat, 0) + 1
+        print(
+            f"[LEARNED_RULES_RETRIEVAL] tenant={str(tenant_id)[:8]} "
+            f"count={len(rules)} categories={categories}",
+            flush=True,
+        )
+
     return [
         {
             "category": rule.rule_category or "general",

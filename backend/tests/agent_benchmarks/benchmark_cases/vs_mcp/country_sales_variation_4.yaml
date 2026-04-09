@@ -1,0 +1,20 @@
+# Variation 4: different metric (revenue USD instead of qty)
+case_id: country_sales_variation_4
+query: "revenue in USD for Norway, Switzerland, NZ, Singapore today"
+tags: ["country", "shipping", "variation", "metric"]
+notes: |
+  Same countries + time window as canonical but asks for revenue in USD
+  specifically. The agent should use `SUM(tl.amount * -1)` (base currency)
+  per the dialect rules.
+expected_answer_contains:
+  - "Norway"
+  - "Switzerland"
+  - "USD"
+expected_tools:
+  - "netsuite_suiteql"
+expected_accuracy: 0.7
+max_cost: 0.50
+max_latency_ms: 120000
+baseline_expected_accuracy: 0.7
+baseline_expected_tools:
+  - "ns_runCustomSuiteQL"
