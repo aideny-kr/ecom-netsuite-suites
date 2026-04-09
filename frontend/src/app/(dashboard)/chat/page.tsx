@@ -6,7 +6,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiClient } from "@/lib/api-client";
 import { consumeChatStream } from "@/lib/chat-stream";
 import type { FinancialReportData, DataTableData, TaskOutputData, StreamBlock } from "@/lib/chat-stream";
-import type { ChartData } from "@/lib/types";
+import type { ChartData, DisclosureBlock } from "@/lib/types";
 import type { ChatSession, ChatSessionDetail, ChatMessage, StreamingToolCall } from "@/lib/types";
 import { SessionSidebar } from "@/components/chat/session-sidebar";
 import { MessageList } from "@/components/chat/message-list";
@@ -43,6 +43,9 @@ export default function ChatPage() {
   const chartsRef = useRef<Map<string, ChartData[]>>(new Map());
   const [taskOutput, setTaskOutput] = useState<TaskOutputData | null>(null);
   const taskOutputsRef = useRef<Map<string, TaskOutputData>>(new Map());
+  const [streamingDisclosure, setStreamingDisclosure] = useState<DisclosureBlock | null>(null);
+  const disclosuresRef = useRef<Map<string, DisclosureBlock>>(new Map());
+  const switchHintShownRef = useRef<boolean>(false);
   const queryClient = useQueryClient();
   const router = useRouter();
 
@@ -165,6 +168,11 @@ export default function ChatPage() {
       // Skip if charts already exist for this message (came from streaming)
       if (Array.isArray(persistedCharts) && persistedCharts.length > 0 && !chartsRef.current.has(msg.id)) {
         chartsRef.current.set(msg.id, persistedCharts as unknown as ChartData[]);
+        hydrated = true;
+      }
+      // Hydrate persisted disclosure_json onto disclosuresRef
+      if (msg.disclosure_json) {
+        disclosuresRef.current.set(msg.id, msg.disclosure_json as DisclosureBlock);
         hydrated = true;
       }
     }
@@ -290,6 +298,18 @@ export default function ChatPage() {
                 : block
             ));
           },
+          onDisclosure: (disclosure) => {
+            // Throttle switch hint: once shown in a session, suppress subsequent ones.
+            const displayDisclosure: DisclosureBlock = {
+              ...disclosure,
+              can_switch_source:
+                disclosure.can_switch_source && !switchHintShownRef.current,
+            };
+            if (displayDisclosure.can_switch_source) {
+              switchHintShownRef.current = true;
+            }
+            setStreamingDisclosure(displayDisclosure);
+          },
           onError: (streamError) => {
             setError(streamError);
             // Treat error as terminal on the frontend — abort the SSE reader
@@ -326,6 +346,12 @@ export default function ChatPage() {
             setTaskOutput((current) => {
               if (current) {
                 taskOutputsRef.current.set(message.id, current);
+              }
+              return null;
+            });
+            setStreamingDisclosure((current) => {
+              if (current) {
+                disclosuresRef.current.set(message.id, current);
               }
               return null;
             });
@@ -406,17 +432,20 @@ export default function ChatPage() {
     setDataTable(null);
     setCharts([]);
     setTaskOutput(null);
+    setStreamingDisclosure(null);
     setPendingMessage(null);
     setError(null);
   }, []);
 
   const handleNewChat = useCallback(() => {
     setActiveSessionId(null);
+    switchHintShownRef.current = false;
     clearStreamingState();
   }, [clearStreamingState]);
 
   const handleSelectSession = useCallback((sessionId: string) => {
     if (sessionId === activeSessionId) return;
+    switchHintShownRef.current = false;
     clearStreamingState();
     setActiveSessionId(sessionId);
   }, [activeSessionId, clearStreamingState]);
@@ -492,6 +521,8 @@ export default function ChatPage() {
             dataTables={dataTablesRef.current}
             chartsByMessage={chartsRef.current}
             taskOutputs={taskOutputsRef.current}
+            disclosures={disclosuresRef.current}
+            streamingDisclosure={streamingDisclosure}
             pinnedAgentId={pinnedAgentId}
             agents={agents}
             agentTab={agentTab}

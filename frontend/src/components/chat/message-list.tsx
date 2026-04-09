@@ -31,6 +31,8 @@ import { ConfidenceBadge } from "@/components/chat/confidence-badge";
 import { ImportanceBanner } from "@/components/chat/importance-banner";
 import { useChatFeedback } from "@/hooks/use-chat-feedback";
 import { StreamingToolCard } from "@/components/chat/streaming-tool-card";
+import { DisclosureFooter } from "@/components/chat/disclosure-footer";
+import type { DisclosureBlock } from "@/lib/types";
 
 /** Framework-inspired gear/module icon used as AI assistant avatar.
  *  A square with notches on each side — resembles the Framework Computer logo. */
@@ -614,6 +616,8 @@ interface MessageListProps {
   dataTables?: Map<string, DataTableData>;
   chartsByMessage?: Map<string, ChartData[]>;
   taskOutputs?: Map<string, TaskOutputData>;
+  disclosures?: Map<string, DisclosureBlock>;
+  streamingDisclosure?: DisclosureBlock | null;
   pinnedAgentId?: string | null;
   agents?: AgentSummary[];
   agentTab?: "chat" | "config";
@@ -640,6 +644,8 @@ export function MessageList({
   dataTables,
   chartsByMessage,
   taskOutputs,
+  disclosures,
+  streamingDisclosure = null,
   pinnedAgentId,
   agents,
   agentTab,
@@ -894,6 +900,7 @@ export function MessageList({
             dataTableData={dataTables?.get(message.id) ?? null}
             chartDataList={chartsByMessage?.get(message.id) ?? null}
             taskOutputData={taskOutputs?.get(message.id) ?? null}
+            disclosureData={disclosures?.get(message.id) ?? null}
             isTerminal={isTerminal}
           />
         ) : isTerminal ? (
@@ -954,6 +961,7 @@ export function MessageList({
           onChangesetAction={onChangesetAction}
           isStreamingPreview
           isTerminal={isTerminal}
+          disclosureData={streamingDisclosure}
         />
       )}
 
@@ -1078,6 +1086,7 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
   dataTableData = null,
   chartDataList = null,
   taskOutputData = null,
+  disclosureData = null,
   isTerminal = false,
 }: {
   message: ChatMessage;
@@ -1091,6 +1100,7 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
   dataTableData?: DataTableData | null;
   chartDataList?: ChartData[] | null;
   taskOutputData?: TaskOutputData | null;
+  disclosureData?: DisclosureBlock | null;
   isTerminal?: boolean;
 }) {
   const { brandName: agentName } = useBranding();
@@ -1174,6 +1184,8 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
         {taskOutputData && (
           <TaskOutputCard data={taskOutputData} />
         )}
+
+        {disclosureData && <DisclosureFooter disclosure={disclosureData} />}
 
         <div className="flex min-w-0 flex-col gap-2">
           {parseThinkingBlocks(message.content).map((part, index) =>
