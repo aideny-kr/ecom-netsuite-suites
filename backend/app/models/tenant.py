@@ -72,6 +72,13 @@ class TenantConfig(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         Boolean, nullable=False, default=True, server_default="true"
     )
 
+    # Fiscal calendar — month (1-12) when the tenant's fiscal year starts.
+    # Used by agents to interpret Q1/Q2/Q3/Q4/fiscal year queries without
+    # defaulting to calendar year. 1 = January (calendar year).
+    fiscal_year_start_month: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1, server_default="1"
+    )
+
     # Onboarding deep discovery profile
     onboarding_profile: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 

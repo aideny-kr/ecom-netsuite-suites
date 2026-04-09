@@ -1686,6 +1686,14 @@ async def run_chat_turn(
                     context["user_timezone"] = user_timezone
                     context["importance_tier"] = importance_tier.value
 
+                    # Fiscal calendar — inject into context so agents interpret
+                    # Q1/Q2/Q3/Q4 and "fiscal year" queries using the tenant's
+                    # actual FY start month instead of defaulting to calendar.
+                    _fy_start = 1
+                    if _tenant_config_row:
+                        _fy_start = getattr(_tenant_config_row, "fiscal_year_start_month", 1) or 1
+                    context["fiscal_year_start_month"] = _fy_start
+
                     # table_schemas (FULL, DATA — skip for DOCS, WORKSPACE, FINANCIAL)
                     if not _need_schemas:
                         print(f"[ORCHESTRATOR] Skipping schema injection for {context_need} query", flush=True)
