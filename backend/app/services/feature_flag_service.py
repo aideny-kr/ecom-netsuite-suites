@@ -20,6 +20,9 @@ DEFAULT_FLAGS: dict[str, bool] = {
     "custom_branding": False,
     "custom_domain": False,
     "analytics_export": True,
+    # v0 intent clarification — post-stream disclosure footer + source switch.
+    # OFF by default. Enable per-tenant after manual staging verification.
+    "disclosure_footer_enabled": False,
 }
 
 # In-memory cache: (tenant_id, flag_key) → (enabled, timestamp)
