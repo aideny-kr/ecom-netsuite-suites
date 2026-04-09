@@ -1041,6 +1041,7 @@ async def run_chat_turn(
     user_timezone: str | None = None,
     agent_id: str | None = None,
     run_id: str | None = None,
+    is_rerun: bool = False,
 ) -> AsyncGenerator[dict, None]:
     """Execute an agentic chat turn with Claude's native tool use.
 
@@ -2021,7 +2022,7 @@ async def run_chat_turn(
                             tenant_id=tenant_id,
                             matched_pattern_age_days=_pattern_age,
                             connector_checks=_checks,
-                            is_rerun=False,  # Task 7 will wire source-switch re-run flag
+                            is_rerun=is_rerun,
                         )
                     if disclosure_block is not None:
                         yield {"type": "disclosure", **disclosure_block.to_dict()}

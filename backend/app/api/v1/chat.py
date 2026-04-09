@@ -17,8 +17,10 @@ from app.core.config import settings
 from app.core.database import get_db
 from app.core.dependencies import get_current_user, require_feature, require_permission
 from app.models.chat import ChatMessage, ChatSession
+from app.models.chat_disclosure_event import ChatDisclosureEvent
 from app.models.user import User
 from app.services import audit_service
+from app.services.chat.disclosure import _PUSHBACK_RE, _SOURCE_ALIASES, _SOURCE_SWITCH_RE
 from app.services.chat.orchestrator import run_chat_turn
 from app.services.chat.run_manager import get_run_manager
 
@@ -149,6 +151,70 @@ def _serialize_message(msg: ChatMessage) -> dict:
     return result
 
 
+# --- Source-switch helpers (v0 intent clarification) ---
+
+_DATA_TOOL_NAMES: frozenset[str] = frozenset(
+    {
+        "netsuite_suiteql",
+        "bigquery_sql",
+        "netsuite_financial_report",
+        "pivot.query_result",
+        "pivot_query_result",
+        "ns_runCustomSuiteQL",
+        "ns_getRecord",
+        "ns_runSavedSearch",
+        "saved_search",
+    }
+)
+
+
+async def _detect_source_switch(
+    content: str,
+) -> tuple[str, str] | None:
+    """Return (target_source, matched_alias) or None if the message is not a switch command."""
+    match = _SOURCE_SWITCH_RE.match(content)
+    if not match:
+        return None
+    raw = match.group(1).lower()
+    target = _SOURCE_ALIASES.get(raw, raw)
+    return (target, raw)
+
+
+def _prev_turn_has_data_tool(prev_msg: ChatMessage | None) -> bool:
+    if not prev_msg or not prev_msg.tool_calls:
+        return False
+    tool_calls = prev_msg.tool_calls if isinstance(prev_msg.tool_calls, list) else []
+    return any(isinstance(tc, dict) and tc.get("tool") in _DATA_TOOL_NAMES for tc in tool_calls)
+
+
+def _prev_turn_can_switch(prev_msg: ChatMessage | None) -> bool:
+    if not prev_msg or not prev_msg.disclosure_json:
+        return False
+    return bool(prev_msg.disclosure_json.get("can_switch_source"))
+
+
+async def _log_disclosure_event(
+    db: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    session_id: uuid.UUID,
+    message_id: uuid.UUID | None,
+    event_type: str,
+    source: str | None = None,
+    metadata: dict | None = None,
+) -> None:
+    db.add(
+        ChatDisclosureEvent(
+            tenant_id=tenant_id,
+            session_id=session_id,
+            message_id=message_id,
+            event_type=event_type,
+            source=source,
+            metadata_=metadata or {},
+        )
+    )
+
+
 # --- Endpoints ---
 
 
@@ -250,6 +316,72 @@ async def send_message(
     if not session:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
 
+    # ── v0 intent clarification: source-switch detection ──
+    switch_info = await _detect_source_switch(body.content)
+    pushback_fires = bool(_PUSHBACK_RE.match(body.content))
+    is_source_switch_rerun = False
+    prev_user_text: str | None = None
+    if switch_info:
+        target_source, _alias = switch_info
+        # Persist the pin regardless of guards — next query will use this source
+        session.source_pin = target_source
+
+        # Load previous assistant message to check guards
+        prev_result = await db.execute(
+            select(ChatMessage)
+            .where(ChatMessage.session_id == session.id, ChatMessage.role == "assistant")
+            .order_by(ChatMessage.created_at.desc())
+            .limit(1)
+        )
+        prev_assistant = prev_result.scalar_one_or_none()
+        guards_pass = _prev_turn_can_switch(prev_assistant) and _prev_turn_has_data_tool(prev_assistant)
+
+        if guards_pass:
+            # Find the user message that preceded that assistant turn
+            prev_user_result = await db.execute(
+                select(ChatMessage)
+                .where(
+                    ChatMessage.session_id == session.id,
+                    ChatMessage.role == "user",
+                    ChatMessage.created_at < prev_assistant.created_at,  # type: ignore[union-attr]
+                )
+                .order_by(ChatMessage.created_at.desc())
+                .limit(1)
+            )
+            prev_user_msg = prev_user_result.scalar_one_or_none()
+            if prev_user_msg:
+                prev_user_text = prev_user_msg.content
+                is_source_switch_rerun = True
+
+        await _log_disclosure_event(
+            db,
+            tenant_id=user.tenant_id,
+            session_id=session.id,
+            message_id=None,
+            event_type="switch_rerun" if is_source_switch_rerun else "switch_ack_only",
+            source=target_source,
+            metadata={"alias": _alias, "guards_passed": is_source_switch_rerun},
+        )
+
+    if pushback_fires:
+        # Log pushback against the most recent assistant message
+        prev_assistant_result = await db.execute(
+            select(ChatMessage)
+            .where(ChatMessage.session_id == session.id, ChatMessage.role == "assistant")
+            .order_by(ChatMessage.created_at.desc())
+            .limit(1)
+        )
+        _prev_for_pushback = prev_assistant_result.scalar_one_or_none()
+        await _log_disclosure_event(
+            db,
+            tenant_id=user.tenant_id,
+            session_id=session.id,
+            message_id=_prev_for_pushback.id if _prev_for_pushback else None,
+            event_type="pushback",
+            source=None,
+            metadata={"user_text": body.content[:200]},
+        )
+
     # Stamp agent_id on session if this is the first agent-pinned message
     if body.agent_id and not session.agent_id:
         session.agent_id = body.agent_id
@@ -306,13 +438,15 @@ async def send_message(
             run_id=run_id,
             session_id=str(session_id),
             session=session,
-            user_message=body.content,
+            user_message=prev_user_text if is_source_switch_rerun and prev_user_text else body.content,
             user_id=user.id,
             tenant_id=user.tenant_id,
             user_msg=user_msg,
             wizard_step=wizard_step,
             user_timezone=x_timezone,
             agent_id=body.agent_id,
+            is_rerun=is_source_switch_rerun,
+            ack_only_source=switch_info[0] if switch_info and not is_source_switch_rerun else None,
         )
     )
 
@@ -330,12 +464,47 @@ async def _run_chat_background(
     wizard_step: str | None,
     user_timezone: str | None,
     agent_id: str | None,
+    is_rerun: bool = False,
+    ack_only_source: str | None = None,
 ) -> None:
     """Run the chat pipeline in background, writing events to Redis."""
     from app.core.database import async_session_factory
 
     rm = get_run_manager()
     try:
+        # ── Source-switch acknowledgment fast path ──
+        if ack_only_source:
+            display = "BigQuery" if ack_only_source == "bigquery" else "NetSuite"
+            ack_text = f"Got it — I'll use {display} for your next question."
+            async with async_session_factory() as db:
+                ack_msg = ChatMessage(
+                    tenant_id=tenant_id,
+                    session_id=uuid.UUID(session_id),
+                    role="assistant",
+                    content=ack_text,
+                    created_at=datetime.now(timezone.utc),
+                )
+                db.add(ack_msg)
+                await db.commit()
+                await db.refresh(ack_msg)
+            rm.write_event(
+                run_id,
+                {
+                    "type": "message",
+                    "message": {
+                        "id": str(ack_msg.id),
+                        "role": "assistant",
+                        "content": ack_text,
+                        "tool_calls": None,
+                        "citations": None,
+                        "created_at": ack_msg.created_at.isoformat(),
+                    },
+                },
+            )
+            rm.set_status(run_id, "complete")
+            rm.clear_active_run(session_id)
+            return
+
         async with async_session_factory() as db:
             # Re-load session in this DB context so title/updated_at changes persist
             result = await db.execute(select(ChatSession).where(ChatSession.id == uuid.UUID(session_id)))
@@ -352,6 +521,7 @@ async def _run_chat_background(
                 user_timezone=user_timezone,
                 agent_id=agent_id,
                 run_id=run_id,
+                is_rerun=is_rerun,
             ):
                 rm.write_event(run_id, chunk)
         rm.set_status(run_id, "complete")
