@@ -406,9 +406,34 @@ export default function ChatPage() {
         console.warn("[source-picker] no user_question in placeholder message");
         return;
       }
+      // Optimistic update: mark the picker card as selected immediately so
+      // the UI reflects the click without waiting for the backend round-trip.
+      // The backend will persist the same `selected` value via orchestrator.
+      if (activeSessionId && pickerMsg) {
+        queryClient.setQueryData(
+          ["chat-session", activeSessionId],
+          (prev: ChatSessionDetail | undefined) => {
+            if (!prev) return prev;
+            return {
+              ...prev,
+              messages: prev.messages.map((m) => {
+                if (m.id !== messageId) return m;
+                const mSo = (m.structured_output as Record<string, unknown> | null) ?? {};
+                return {
+                  ...m,
+                  structured_output: {
+                    ...mSo,
+                    selected: source,
+                  } as unknown as ChatMessage["structured_output"],
+                };
+              }),
+            };
+          },
+        );
+      }
       await handleSend(originalQuestion, undefined, { source_pick: source });
     },
-    [sessionDetail, handleSend],
+    [sessionDetail, handleSend, activeSessionId, queryClient],
   );
 
   const clearStreamingState = useCallback(() => {

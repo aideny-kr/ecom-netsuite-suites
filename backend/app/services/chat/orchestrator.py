@@ -1106,6 +1106,32 @@ async def run_chat_turn(
     # running the agent.
     if source_pick and source_pick in ("netsuite", "bigquery"):
         session.source_pin = source_pick
+        # Mark the most recent picker placeholder as selected so the card
+        # shows a persistent "Selected" state in the conversation scroll.
+        from sqlalchemy import select as _select
+        from sqlalchemy.orm.attributes import flag_modified
+
+        _recent_msgs = await db.execute(
+            _select(ChatMessage)
+            .where(
+                ChatMessage.session_id == session.id,
+                ChatMessage.role == "assistant",
+            )
+            .order_by(ChatMessage.created_at.desc())
+            .limit(5)
+        )
+        for _msg in _recent_msgs.scalars().all():
+            _so = _msg.structured_output
+            if (
+                isinstance(_so, dict)
+                and _so.get("type") == "source_picker"
+                and not _so.get("selected")
+            ):
+                _updated_so = dict(_so)
+                _updated_so["selected"] = source_pick
+                _msg.structured_output = _updated_so
+                flag_modified(_msg, "structured_output")
+                break
         await db.commit()
         print(f"[SOURCE-PICKER] user selected {source_pick}", flush=True)
     elif not session.source_pin:

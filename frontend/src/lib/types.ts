@@ -767,6 +767,8 @@ export interface SourcePickerData {
   reason: string;
   user_question: string;
   options: SourcePickerOption[];
+  /** Set after the user picks a card. Persists on the picker message. */
+  selected?: "netsuite" | "bigquery";
 }
 
 // ---------------------------------------------------------------------------
