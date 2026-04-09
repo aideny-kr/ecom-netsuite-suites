@@ -247,9 +247,17 @@ async def run_baseline(
             break
 
         try:
+            # max_tokens bumped 8192 → 16384 on 2026-04-09. The first real
+            # benchmark run showed the baseline hitting exactly 8192 on a
+            # metadata-discovery step (Oracle's transaction table has 209
+            # columns and the metadata response was ~7500 tokens, leaving
+            # no budget for the model to write even a single sentence of
+            # reasoning before being cut off). 16384 gives Claude room to
+            # think between tool calls without letting a runaway answer
+            # blow the budget.
             create_kwargs: dict[str, Any] = {
                 "model": model,
-                "max_tokens": 8192,
+                "max_tokens": 16384,
                 "system": system_prompt,
                 "messages": messages,
             }

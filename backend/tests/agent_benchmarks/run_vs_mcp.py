@@ -157,17 +157,36 @@ def load_cases(
     return cases
 
 
-def _score_answer(
+async def _score_answer(
     *,
+    question: str,
     answer_text: str,
     expected_contains: list[str],
-) -> float:
-    """Substring-match score: fraction of expected terms present (case-insensitive)."""
-    if not expected_contains:
-        return 1.0
-    lower = (answer_text or "").lower()
-    hits = sum(1 for kw in expected_contains if kw.lower() in lower)
-    return hits / len(expected_contains)
+    use_llm_judge: bool,
+) -> tuple[float, str]:
+    """Score an agent answer. Returns (score, rationale).
+
+    When `use_llm_judge` is True, uses Claude Haiku as evaluator — catches
+    "I couldn't find" / hallucinated zero results that substring matching
+    falsely credits.
+
+    When False (or on judge error), falls back to substring scoring with
+    failure-phrase penalty.
+    """
+    from tests.agent_benchmarks.scorer import llm_judge_score, substring_score
+
+    if use_llm_judge:
+        result = await llm_judge_score(
+            question=question,
+            answer_text=answer_text,
+            expected_contains=expected_contains,
+        )
+    else:
+        result = substring_score(
+            answer_text=answer_text,
+            expected_contains=expected_contains,
+        )
+    return result.score, f"[{result.source}] {result.rationale}"
 
 
 def _score_tools(
@@ -249,6 +268,7 @@ async def _run_single_case(
     agent_model: str,
     baseline_model: str,
     skip_baseline: bool,
+    use_llm_judge: bool,
     db,
 ) -> CaseResult:
     from tests.agent_benchmarks.agent_runner import run_agent
@@ -277,11 +297,14 @@ async def _run_single_case(
             answer_preview="",
         )
     else:
+        ours_acc, ours_rationale = await _score_answer(
+            question=case.query,
+            answer_text=agent_result.answer_text,
+            expected_contains=case.expected_answer_contains,
+            use_llm_judge=use_llm_judge,
+        )
         ours_side = SideScore(
-            answer_acc=_score_answer(
-                answer_text=agent_result.answer_text,
-                expected_contains=case.expected_answer_contains,
-            ),
+            answer_acc=ours_acc,
             tool_acc=_score_tools(
                 tool_calls=agent_result.tool_calls,
                 expected_tools=case.expected_tools,
@@ -292,6 +315,7 @@ async def _run_single_case(
             error=agent_result.error,
             answer_preview=(agent_result.answer_text or "")[:240],
         )
+        print(f"    ours score rationale: {ours_rationale}")
 
     # Run baseline
     if skip_baseline:
@@ -326,11 +350,14 @@ async def _run_single_case(
             answer_preview="",
         )
     else:
+        mcp_acc, mcp_rationale = await _score_answer(
+            question=case.query,
+            answer_text=baseline_result.answer_text,
+            expected_contains=case.expected_answer_contains,
+            use_llm_judge=use_llm_judge,
+        )
         mcp_side = SideScore(
-            answer_acc=_score_answer(
-                answer_text=baseline_result.answer_text,
-                expected_contains=case.expected_answer_contains,
-            ),
+            answer_acc=mcp_acc,
             tool_acc=_score_tools(
                 tool_calls=baseline_result.tool_calls,
                 expected_tools=case.baseline_expected_tools or case.expected_tools,
@@ -341,6 +368,7 @@ async def _run_single_case(
             error=baseline_result.error,
             answer_preview=(baseline_result.answer_text or "")[:240],
         )
+        print(f"    mcp  score rationale: {mcp_rationale}")
 
     return CaseResult(
         case=case,
@@ -510,6 +538,7 @@ async def _main_async(args: argparse.Namespace) -> int:
                 agent_model=args.agent_model,
                 baseline_model=args.baseline_model,
                 skip_baseline=args.skip_baseline,
+                use_llm_judge=not args.no_llm_judge,
                 db=db,
             )
             results.append(result)
@@ -610,6 +639,14 @@ def main() -> int:
         help="Write each case result to the agent_benchmark_runs table. "
              "Enabled by default for the nightly cron; use it manually if "
              "you want the run to become the new historical baseline.",
+    )
+    parser.add_argument(
+        "--no-llm-judge",
+        action="store_true",
+        help="Skip the LLM-judge (Claude Haiku) and fall back to substring "
+             "scoring with failure-phrase penalty. Faster and free but "
+             "scores a 'I couldn't find Norway' answer as correct when "
+             "Norway was expected. Default: judge enabled.",
     )
 
     args = parser.parse_args()

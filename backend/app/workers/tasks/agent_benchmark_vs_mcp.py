@@ -155,6 +155,7 @@ async def _run_nightly_benchmark(
                     agent_model=agent_model,
                     baseline_model=baseline_model,
                     skip_baseline=False,
+                    use_llm_judge=True,
                     db=db,
                 )
             except Exception as exc:

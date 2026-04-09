@@ -9,16 +9,18 @@ by `run_id` reconstruct the full run result.
 from __future__ import annotations
 
 import uuid
-from datetime import date
+from datetime import date, datetime
 
-from sqlalchemy import Boolean, Date, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, Date, DateTime, Float, ForeignKey, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.models.base import Base, TimestampMixin, UUIDPrimaryKeyMixin
+from app.models.base import Base, UUIDPrimaryKeyMixin
 
 
-class AgentBenchmarkRun(Base, UUIDPrimaryKeyMixin, TimestampMixin):
+class AgentBenchmarkRun(Base, UUIDPrimaryKeyMixin):
+    """Benchmark runs are immutable — no updated_at, just created_at."""
+
     __tablename__ = "agent_benchmark_runs"
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(
@@ -49,3 +51,8 @@ class AgentBenchmarkRun(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     confidence_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     # Full tool call log (audit + debugging)
     tool_calls: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    # Explicit created_at — we don't use TimestampMixin because benchmark
+    # rows are immutable (no updated_at needed).
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
