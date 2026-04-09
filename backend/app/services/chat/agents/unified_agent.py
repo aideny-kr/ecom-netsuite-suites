@@ -733,8 +733,18 @@ class UnifiedAgent(BaseSpecialistAgent):
         fy_start = self._context.get("fiscal_year_start_month", 1) if self._context else 1
         if fy_start and fy_start != 1:
             _month_names = [
-                "January", "February", "March", "April", "May", "June",
-                "July", "August", "September", "October", "November", "December",
+                "January",
+                "February",
+                "March",
+                "April",
+                "May",
+                "June",
+                "July",
+                "August",
+                "September",
+                "October",
+                "November",
+                "December",
             ]
             _start_name = _month_names[fy_start - 1]
             _q1_end = _month_names[(fy_start + 2) % 12]

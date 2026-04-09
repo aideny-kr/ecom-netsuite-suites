@@ -1122,11 +1122,7 @@ async def run_chat_turn(
         )
         for _msg in _recent_msgs.scalars().all():
             _so = _msg.structured_output
-            if (
-                isinstance(_so, dict)
-                and _so.get("type") == "source_picker"
-                and not _so.get("selected")
-            ):
+            if isinstance(_so, dict) and _so.get("type") == "source_picker" and not _so.get("selected"):
                 _updated_so = dict(_so)
                 _updated_so["selected"] = source_pick
                 _msg.structured_output = _updated_so
