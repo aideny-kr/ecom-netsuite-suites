@@ -421,12 +421,24 @@ async def _select_agent(
     is_financial: bool = False,
     is_netsuite_entity: bool = False,
     previous_agent_id: str | None = None,
+    source_pin: str | None = None,
 ) -> str | None:
     """Three-tier routing to select a specialized agent.
 
     Returns agent_id if a specialized agent should handle the query,
     or None if UnifiedAgent should handle it (default path).
     """
+    # Source pin — if the user chose a source via the picker, honor it
+    # regardless of what the semantic classifier thinks. This is a
+    # belt-and-suspenders check: the caller at 1807 also checks, but
+    # the coordinator path may call _select_agent directly.
+    if source_pin == "netsuite":
+        print(f"[ROUTING] Source pin forces unified-agent (netsuite) | query: {query[:80]}", flush=True)
+        return None
+    if source_pin == "bigquery":
+        print(f"[ROUTING] Source pin forces bi-agent (bigquery) | query: {query[:80]}", flush=True)
+        return "bi-agent"
+
     # Financial reports MUST use UnifiedAgent (NetSuite financial tools)
     if is_financial:
         print(f"[ROUTING] Financial report detected, forcing unified-agent | query: {query[:80]}", flush=True)
@@ -1819,6 +1831,7 @@ async def run_chat_turn(
                             is_financial=is_financial,
                             is_netsuite_entity=is_netsuite_entity,
                             previous_agent_id=_previous_agent_id,
+                            source_pin=getattr(session, "source_pin", None),
                         )
 
                     if _selected_agent_id:
