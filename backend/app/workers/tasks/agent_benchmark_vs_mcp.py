@@ -252,6 +252,18 @@ async def _run_nightly_benchmark(
         round(yesterday_delta, 4) if yesterday_delta is not None else None
     )
 
+    # Send email digest (daily summary + regression alert)
+    try:
+        from app.services.benchmark_email_service import send_benchmark_digest
+
+        send_benchmark_digest(
+            run_date=run_date,
+            stats=stats,
+            regression_detected=stats.get("regression_detected", False),
+        )
+    except Exception as exc:
+        print(f"[AGENT_BENCHMARK] email digest failed (non-fatal): {exc}", flush=True)
+
     return stats
 
 
