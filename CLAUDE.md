@@ -4,9 +4,20 @@
 
 ## Development Workflow — FOLLOW ALWAYS
 
-- **TDD strictly**: Write failing tests FIRST, then implement. No production code without a failing test.
-- **Max 10 iterations per task**: Use the loop protocol. If blocked after 3 self-heal attempts, stop and report.
-- **Multi-agent execution**: Spawn agent teams or subagents for parallel-safe tasks (no file overlap). Use `subagent-driven-development` skill for plan execution.
+- **TDD strictly**: Write failing tests FIRST, then implement. No production code without a failing test. This applies to EVERY task, regardless of whether the plan document explicitly says "TDD" — assume TDD unless the task is purely non-code (docs, config, infra).
+- **Max 15 iterations per task**: Use the loop protocol. If blocked after 3 self-heal attempts within a task, stop and report. An "iteration" = one test-implement-verify cycle, OR one review-fix cycle. Review loops (spec + quality) count toward the 15.
+- **Multi-agent execution**:
+  - *Sequential implementers* — fresh subagent per task via `subagent-driven-development`. Never dispatch multiple implementation subagents in parallel against the same working tree (file conflicts).
+  - *Parallel reviewers* — spec-reviewer + code-quality-reviewer run after each task (sequential within a task but fast).
+  - *Parallel research* — use Explore / general-purpose agents in parallel when investigating independent questions.
+  - *True parallel implementation* — only when tasks touch disjoint file sets (e.g., backend-only vs frontend-only) AND file ownership is pre-declared in the plan AND each runs in its own worktree.
+- **Subagent dispatch checklist** — every implementer prompt I send must include:
+  1. TDD required (write failing test first)
+  2. Max 15 iterations per task; stop and report if blocked after 3 self-heal attempts
+  3. Research existing code before writing
+  4. Commit when green; one commit per logical change
+  5. Files owned by this task (to prevent conflicts with other subagents)
+  Subagents do NOT inherit `CLAUDE.md` — these rules must be in the dispatch prompt every time.
 - **Zero regressions**: Run full test suite before committing. Fix CI as a follow-up after every deploy.
 - **Discuss before fixing**: Always discuss approach AND research existing code before making changes.
 - **Commit frequently**: One commit per logical change. Never amend. Push to BOTH repos (`origin` + `framework`).
@@ -283,6 +294,17 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 | Frontend tests | `frontend/src/components/chat/__tests__/` |
 | Vitest config | `frontend/vitest.config.ts` |
 | nginx config | `/etc/nginx/sites-available/suitestudio` (on GCP VM) |
+| Benchmark CLI | `backend/tests/agent_benchmarks/run_vs_mcp.py` |
+| Benchmark cases | `backend/tests/agent_benchmarks/benchmark_cases/vs_mcp/` |
+| Baseline runner | `backend/tests/agent_benchmarks/baseline_runner.py` |
+| Agent runner | `backend/tests/agent_benchmarks/agent_runner.py` |
+| Benchmark scorer | `backend/tests/agent_benchmarks/scorer.py` |
+| Benchmark persistence | `backend/tests/agent_benchmarks/persistence.py` |
+| Benchmark API | `backend/app/api/v1/agent_benchmarks.py` |
+| Benchmark nightly task | `backend/app/workers/tasks/agent_benchmark_vs_mcp.py` |
+| Benchmark email | `backend/app/services/benchmark_email_service.py` |
+| History tool trace | `backend/app/services/chat/history_tool_trace.py` |
+| CI benchmark gate | `.github/workflows/agent-benchmark.yml` |
 
 ## Common Mistakes to Avoid
 
@@ -335,16 +357,25 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 
 ## Current State
 
-- **Product**: AI-den v1.6 deployed to staging 2026-04-03. Background chat, streaming tool cards, ordered content blocks, trimmed prompt. CI green.
-- **Latest migration**: 065_fiscal_year_start (064_source_pin + 065_fiscal_year_start shipped in v0.1 source picker PR)
+- **Product**: AI-den v1.7 deployed to staging 2026-04-10. Agent quality overhaul (PR #33), vs-MCP benchmark harness, pattern cleanup, retrieval thresholds.
+- **Latest migration**: 066_bench_vs_mcp (agent_benchmark_runs table)
 - **Frontend tests**: Vitest + @testing-library/react (30 tests). Run: `cd frontend && npx vitest run`
+- **Backend tests**: 140+ tests. Run: `cd backend && .venv/bin/python -m pytest`
+- **Agent benchmark**: 18 sales cases vs Claude+MCP. Run: `cd backend && .venv/bin/python -m tests.agent_benchmarks.run_vs_mcp --suite sales --tenant-id ce3dfaad-626f-4992-84e9-500c8291ca0a`
 - **Staging**: `api-staging.suitestudio.ai` + `staging.suitestudio.ai`. GCP Docker + nginx + Let's Encrypt. Deploy: `saas-deployment` skill.
+- **Nightly benchmark**: 11:00 UTC, enabled on staging. Results in `agent_benchmark_runs` table. Regression alerts via Sentry + structured log.
+- **Nightly auto-improvement**: 10:00 UTC. KEEP/REVERT/SKIP decisions now based on vs-MCP comparison (not broken composite scorer).
+- **Auto-learning from live chat**: DISABLED (pattern pollution source). Patterns only via admin seed or eval-gated nightly promotion.
+- **Pattern retrieval threshold**: ≥ 0.45 similarity. Domain knowledge threshold: ≥ 0.50. Learned rules: query-aware (max 10 relevant).
+- **MCP tool descriptions**: NO local caps. Oracle's full descriptions flow through to the agent.
 
 ## Known Issues
 
 1. **LLM pivot limitation** — always use `pivot_query_result` tool, not CASE WHEN SQL.
-2. **Proven patterns can poison** — bad patterns in `tenant_query_patterns` table. Delete if agent produces consistently wrong queries.
+2. **Proven patterns** — auto-learning from live sessions DISABLED (2026-04-09). Only admin-seeded or nightly-promoted patterns are retrievable. 6 verified shipping-country patterns + 1 RAG chunk seeded for Framework.
 3. **Stripe initial sync is slow** — 400K+ payout lines, takes 30+ min first time. Batch commits every 200 lines. Hourly incremental via Beat after that.
+4. **Confidence scorer partially broken** — `query_pattern_similarity` zeroed out (was part of feedback loop). LLM self-score and tool_success_rate are the remaining signals. `final_text[:500]` truncation in confidence extractor still open.
+5. **Agent benchmark vs MCP baseline** — our north star. Every change to chat/agent code must match or beat Claude+MCP. CI gate enforces this on PRs. Nightly cron tracks trends. See `memory/feedback_benchmark_vs_claude_mcp.md`.
 
 ## Skills Reference
 
