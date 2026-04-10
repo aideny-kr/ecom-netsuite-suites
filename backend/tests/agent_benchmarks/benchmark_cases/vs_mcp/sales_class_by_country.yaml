@@ -1,0 +1,36 @@
+# Combo: class × country — "laptop sales by country this week"
+#
+# Combines TWO dimensions (item class + shipping country). Tests:
+#  - transactionShippingAddress join for country
+#  - item join for class filter
+#  - ONE combined query, not separate by-country and by-class queries
+
+case_id: sales_class_by_country
+query: "show me laptop sales by country this week"
+tags: ["sales", "class", "country", "combo", "multi-dimension"]
+notes: |
+  Combo query. Correct approach:
+    SELECT BUILTIN.DF(sa.country) AS country,
+           COUNT(DISTINCT t.id) AS orders,
+           SUM(ABS(tl.quantity)) AS qty
+    FROM transaction t
+    JOIN transactionShippingAddress sa ON sa.nKey = t.shippingAddress
+    JOIN transactionline tl ON tl.transaction = t.id
+    JOIN item i ON i.id = tl.item
+    WHERE t.type = 'SalesOrd'
+      AND t.trandate >= TRUNC(SYSDATE, 'IW')
+      AND i.class = 2  -- laptop
+      AND tl.mainline = 'F' AND tl.taxline = 'F'
+      ...
+    GROUP BY BUILTIN.DF(sa.country)
+expected_answer_contains:
+  - "laptop"
+  - "country"
+expected_tools:
+  - "netsuite_suiteql"
+expected_accuracy: 0.7
+max_cost: 0.50
+max_latency_ms: 120000
+baseline_expected_accuracy: 0.7
+baseline_expected_tools:
+  - "ns_runCustomSuiteQL"

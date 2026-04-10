@@ -1,0 +1,23 @@
+# Variation 5: breakdown by laptop vs desktop (Olivia's Turn 3 follow-up)
+case_id: sales_country_laptop_desktop
+query: "for today's sales to Norway, Switzerland, New Zealand and Singapore, break down the quantities into laptop and desktop"
+tags: ["country", "shipping", "variation", "breakdown", "olivia-turn-3"]
+notes: |
+  This is Olivia's Turn 3 question rephrased as a standalone query
+  (not a follow-up). Exercises the same transactionShippingAddress join
+  PLUS a class-based CASE WHEN for laptop (class=2) and desktop (class=17).
+  Previous pattern-polluted agent hallucinated zero results. Ground truth
+  verified via MCP on 2026-04-09: Switzerland 9 laptops / 0 desktops,
+  Norway 3/0, NZ 1/0, Singapore 0/0.
+expected_answer_contains:
+  - "Norway"
+  - "Switzerland"
+  - "laptop"
+expected_tools:
+  - "netsuite_suiteql"
+expected_accuracy: 0.7
+max_cost: 0.50
+max_latency_ms: 120000
+baseline_expected_accuracy: 0.7
+baseline_expected_tools:
+  - "ns_runCustomSuiteQL"

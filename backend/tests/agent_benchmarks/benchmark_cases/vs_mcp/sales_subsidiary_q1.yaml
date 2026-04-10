@@ -1,0 +1,29 @@
+# Subsidiary Q1 rollup — "sales by subsidiary Q1 2026"
+#
+# Tests:
+#  - Subsidiary dimension via BUILTIN.DF(t.subsidiary)
+#  - Fiscal quarter interpretation (Framework uses calendar Q1 = Jan-Mar)
+#  - Accounting period vs date range — SHOULD use accounting periods
+#    via netsuite_financial_report, but SuiteQL with date range is also
+#    acceptable
+
+case_id: sales_subsidiary_q1
+query: "give me Q1 2026 sales broken down by subsidiary"
+tags: ["sales", "subsidiary", "fiscal-period", "rollup"]
+notes: |
+  Tests subsidiary dimension and fiscal period handling. Framework is
+  calendar-year, so Q1 2026 = Jan 1 - Mar 31 2026. Acceptable approaches:
+  1. netsuite_financial_report with period="Q1 2026"
+  2. SuiteQL with t.trandate BETWEEN TO_DATE('2026-01-01', ...) AND TO_DATE('2026-03-31', ...)
+     + GROUP BY BUILTIN.DF(t.subsidiary)
+expected_answer_contains:
+  - "subsidiary"
+  - "Q1"
+expected_tools:
+  - "netsuite_suiteql"
+expected_accuracy: 0.7
+max_cost: 0.50
+max_latency_ms: 120000
+baseline_expected_accuracy: 0.7
+baseline_expected_tools:
+  - "ns_runCustomSuiteQL"

@@ -1,0 +1,87 @@
+name: Agent Benchmark Gate
+
+on:
+  pull_request:
+    paths:
+      - 'backend/app/services/chat/**'
+      - 'backend/app/services/query_pattern_service.py'
+      - 'backend/app/services/confidence_service.py'
+      - 'backend/app/mcp/**'
+      - 'backend/tests/agent_benchmarks/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  agent-benchmark:
+    name: vs-MCP Agent Benchmark
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: ecom_netsuite_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+    env:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/ecom_netsuite_test
+      DATABASE_URL_SYNC: postgresql://postgres:postgres@localhost:5432/ecom_netsuite_test
+      REDIS_URL: redis://localhost:6379/0
+      JWT_SECRET_KEY: test-secret-key-for-ci
+      ENCRYPTION_KEY: dGVzdC1lbmNyeXB0aW9uLWtleS0zMmJ5dGVzISEh
+      APP_ENV: test
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-bench-${{ hashFiles('backend/pyproject.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-bench-
+            ${{ runner.os }}-pip-
+
+      - name: Install backend dependencies
+        run: cd backend && pip install -e ".[dev]"
+
+      - name: Generate valid Fernet encryption key
+        run: |
+          FERNET_KEY=$(python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")
+          echo "ENCRYPTION_KEY=$FERNET_KEY" >> "$GITHUB_ENV"
+
+      - name: Run Alembic migrations
+        run: cd backend && alembic upgrade head
+
+      - name: Run vs-MCP agent benchmark
+        run: |
+          cd backend && python -m tests.agent_benchmarks.run_vs_mcp \
+            --suite sales \
+            --tenant-id ce3dfaad-626f-4992-84e9-500c8291ca0a \
+            --skip-baseline \
+            --no-llm-judge

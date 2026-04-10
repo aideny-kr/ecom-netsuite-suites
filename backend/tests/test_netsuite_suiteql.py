@@ -139,3 +139,62 @@ class TestMalformedQueries:
         """Multi-statement with forbidden keyword is caught."""
         with pytest.raises(ValueError, match="read-only"):
             validate_query("SELECT id FROM transaction; DROP TABLE transaction", ALLOWED)
+
+
+# ---------------------------------------------------------------------------
+# Address tables — shipping/billing joins must be allowed
+#
+# Regression test for Olivia's country-filter session (2026-04-09): the agent
+# found the correct pattern using `transactionShippingAddress` via external
+# MCP, but follow-up turns fell back to the local tool which was blocking
+# the table. See docs/debugging/olivia-country-tangent.md for context.
+# ---------------------------------------------------------------------------
+
+
+class TestAddressTables:
+    def test_default_allowlist_includes_transaction_shipping_address(self):
+        """The shipped NETSUITE_SUITEQL_ALLOWED_TABLES must include shipping address."""
+        from app.core.config import settings
+
+        allowed = {t.strip().lower() for t in settings.NETSUITE_SUITEQL_ALLOWED_TABLES.split(",")}
+        assert "transactionshippingaddress" in allowed
+        assert "transactionbillingaddress" in allowed
+
+    def test_transaction_shipping_address_join_validates(self):
+        """The canonical ship-country query must pass allowlist validation."""
+        from app.core.config import settings
+
+        allowed = {t.strip().lower() for t in settings.NETSUITE_SUITEQL_ALLOWED_TABLES.split(",")}
+        query = (
+            "SELECT BUILTIN.DF(sa.country) AS ship_country, COUNT(DISTINCT t.id) AS orders "
+            "FROM transaction t "
+            "JOIN transactionShippingAddress sa ON sa.nKey = t.shippingAddress "
+            "JOIN transactionline tl ON tl.transaction = t.id "
+            "WHERE t.type = 'SalesOrd' "
+            "GROUP BY BUILTIN.DF(sa.country)"
+        )
+        # Should not raise
+        validate_query(query, allowed)
+
+    def test_transaction_billing_address_join_validates(self):
+        """Billing address joins must also pass (used for tax/invoice country)."""
+        from app.core.config import settings
+
+        allowed = {t.strip().lower() for t in settings.NETSUITE_SUITEQL_ALLOWED_TABLES.split(",")}
+        query = (
+            "SELECT BUILTIN.DF(ba.country) AS bill_country, COUNT(DISTINCT t.id) AS invoices "
+            "FROM transaction t "
+            "JOIN transactionBillingAddress ba ON ba.nKey = t.billingAddress "
+            "WHERE t.type = 'CustInvc' "
+            "GROUP BY BUILTIN.DF(ba.country)"
+        )
+        validate_query(query, allowed)
+
+    def test_entityaddress_still_blocked(self):
+        """entityaddress (global address book) remains blocked — PII blast radius."""
+        from app.core.config import settings
+
+        allowed = {t.strip().lower() for t in settings.NETSUITE_SUITEQL_ALLOWED_TABLES.split(",")}
+        query = "SELECT country FROM entityaddress WHERE id = 1"
+        with pytest.raises(ValueError, match="disallowed tables.*entityaddress"):
+            validate_query(query, allowed)

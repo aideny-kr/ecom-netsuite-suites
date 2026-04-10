@@ -101,6 +101,34 @@ async def retrieve_domain_knowledge(
         # Sort by adjusted score descending, take top_k
         scored.sort(key=lambda x: x[1], reverse=True)
 
+        # Filter by minimum similarity threshold — chunks below this are
+        # noise that dilutes attention. Set from instrumentation data:
+        # domain knowledge chunks at 0.36-0.44 similarity on a country-
+        # sales query were pure noise. Only inject genuinely relevant chunks.
+        min_sim = settings.DOMAIN_KNOWLEDGE_MIN_SIMILARITY
+        scored = [s for s in scored if s[2] >= min_sim]
+
+        returned = scored[:top_k]
+
+        # Instrumentation: log similarity scores so we can see whether
+        # retrieved chunks are actually relevant or just "least irrelevant
+        # top K". This is read by the benchmark harness.
+        if returned:
+            sims = [round(item[2], 3) for item in returned]
+            kw_hits = [item[3] for item in returned]
+            print(
+                f"[DOMAIN_KNOWLEDGE_RETRIEVAL] "
+                f'q="{query_text[:80]}" '
+                f"returned={len(returned)} similarities={sims} keyword_hits={kw_hits}",
+                flush=True,
+            )
+        else:
+            print(
+                f"[DOMAIN_KNOWLEDGE_RETRIEVAL] "
+                f'q="{query_text[:80]}" returned=0',
+                flush=True,
+            )
+
         return [
             {
                 "raw_text": item[0].raw_text,
@@ -110,7 +138,7 @@ async def retrieve_domain_knowledge(
                 "adjusted_score": round(item[1], 4),
                 "topic_tags": item[0].topic_tags,
             }
-            for item in scored[:top_k]
+            for item in returned
         ]
 
     except Exception:

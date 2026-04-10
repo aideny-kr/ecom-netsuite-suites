@@ -1,0 +1,40 @@
+# YoY wrench — "Q1 2026 vs Q1 2025 sales by class"
+#
+# Tests:
+#  - Two date ranges in ONE query (not two separate queries)
+#  - CASE WHEN to assign rows to "this year" vs "last year" buckets
+#  - GROUP BY class + year
+#  - Dialect rule: "YoY comparisons: ideal ~5-15 rows (dimension × year)"
+#
+# Wrench: the agent often runs this as TWO separate queries and the LLM
+# tries to manually compute the delta in text. Correct behavior is ONE
+# query with CASE buckets returning 2× (num classes) rows.
+
+case_id: sales_yoy_by_class
+query: "compare Q1 2026 sales to Q1 2025, broken down by item class"
+tags: ["sales", "yoy", "class", "wrench", "multi-period"]
+notes: |
+  Wrench case. Correct approach is ONE query with period buckets:
+    SELECT BUILTIN.DF(i.class) AS class,
+           SUM(CASE WHEN trandate >= TO_DATE('2026-01-01','YYYY-MM-DD') AND trandate < TO_DATE('2026-04-01','YYYY-MM-DD')
+                    THEN t.total ELSE 0 END) AS q1_2026,
+           SUM(CASE WHEN trandate >= TO_DATE('2025-01-01','YYYY-MM-DD') AND trandate < TO_DATE('2025-04-01','YYYY-MM-DD')
+                    THEN t.total ELSE 0 END) AS q1_2025
+    FROM transaction t JOIN transactionline tl ON tl.transaction = t.id JOIN item i ON i.id = tl.item
+    WHERE t.type = 'SalesOrd'
+    GROUP BY BUILTIN.DF(i.class)
+  Agents that run TWO separate queries should still get marked as correct
+  if the final text answer contains both periods — but it's slower and
+  the delta computation becomes a hallucination risk.
+expected_answer_contains:
+  - "2026"
+  - "2025"
+  - "class"
+expected_tools:
+  - "netsuite_suiteql"
+expected_accuracy: 0.6
+max_cost: 0.75
+max_latency_ms: 180000
+baseline_expected_accuracy: 0.6
+baseline_expected_tools:
+  - "ns_runCustomSuiteQL"

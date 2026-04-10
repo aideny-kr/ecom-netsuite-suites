@@ -1,0 +1,17 @@
+# Variation 2: single country instead of list
+case_id: sales_country_single
+query: "what are today's sales for Norway?"
+tags: ["country", "shipping", "variation", "single-country"]
+notes: |
+  Simpler version — just one country. If the agent handles this worse
+  than the multi-country canonical, that's a pattern-overfitting signal.
+expected_answer_contains:
+  - "Norway"
+expected_tools:
+  - "netsuite_suiteql"
+expected_accuracy: 0.7
+max_cost: 0.50
+max_latency_ms: 120000
+baseline_expected_accuracy: 0.7
+baseline_expected_tools:
+  - "ns_runCustomSuiteQL"

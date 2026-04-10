@@ -1,0 +1,28 @@
+# Class breakdown — "sales by class this week"
+#
+# Tests that the agent knows:
+#  - item.class needs JOIN item i ON i.id = tl.item
+#  - BUILTIN.DF(i.class) resolves class ID to display name
+#  - Week boundary via TRUNC(SYSDATE, 'IW') or BUILTIN.RELATIVE_RANGES
+#  - Tenant vernacular: "laptop" = class 2, "desktop" = class 17 (Framework)
+#
+# Expected behavior: group by class with counts + revenue, 5-15 rows.
+
+case_id: sales_class_breakdown
+query: "show me this week's sales broken down by item class"
+tags: ["sales", "class", "dimension", "time-week"]
+notes: |
+  Tests class dimension. Should use BUILTIN.DF(i.class) for the display
+  name and GROUP BY on class. Expect 5-20 rows (total distinct classes
+  with sales this week).
+expected_answer_contains:
+  - "class"
+  - "sales"
+expected_tools:
+  - "netsuite_suiteql"
+expected_accuracy: 0.7
+max_cost: 0.50
+max_latency_ms: 120000
+baseline_expected_accuracy: 0.7
+baseline_expected_tools:
+  - "ns_runCustomSuiteQL"

@@ -2,6 +2,7 @@ from fastapi import APIRouter
 
 from app.api.v1 import (
     admin,
+    agent_benchmarks,
     agent_instructions,
     agents,
     audit,
@@ -48,6 +49,7 @@ api_router.include_router(netsuite_auth.router)
 api_router.include_router(tables.router)
 api_router.include_router(audit.router)
 api_router.include_router(jobs.router)
+api_router.include_router(agent_benchmarks.router)
 api_router.include_router(chat.router)
 api_router.include_router(chat_runs.router)
 api_router.include_router(mcp_connectors.router)

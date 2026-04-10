@@ -421,12 +421,24 @@ async def _select_agent(
     is_financial: bool = False,
     is_netsuite_entity: bool = False,
     previous_agent_id: str | None = None,
+    source_pin: str | None = None,
 ) -> str | None:
     """Three-tier routing to select a specialized agent.
 
     Returns agent_id if a specialized agent should handle the query,
     or None if UnifiedAgent should handle it (default path).
     """
+    # Source pin — if the user chose a source via the picker, honor it
+    # regardless of what the semantic classifier thinks. This is a
+    # belt-and-suspenders check: the caller at 1807 also checks, but
+    # the coordinator path may call _select_agent directly.
+    if source_pin == "netsuite":
+        print(f"[ROUTING] Source pin forces unified-agent (netsuite) | query: {query[:80]}", flush=True)
+        return None
+    if source_pin == "bigquery":
+        print(f"[ROUTING] Source pin forces bi-agent (bigquery) | query: {query[:80]}", flush=True)
+        return "bi-agent"
+
     # Financial reports MUST use UnifiedAgent (NetSuite financial tools)
     if is_financial:
         print(f"[ROUTING] Financial report detected, forcing unified-agent | query: {query[:80]}", flush=True)
@@ -1052,19 +1064,28 @@ async def run_chat_turn(
 
     # ── Load conversation history (summary-based windowing) ──
     from app.services.chat.history_compactor import KEEP_RECENT
+    from app.services.chat.history_tool_trace import build_history_dicts
 
     max_turns = settings.CHAT_MAX_HISTORY_TURNS
     all_messages: list[dict] = []
     summarised = 0
     if session.messages:
-        msg_list = [m for m in session.messages if m.role in ("user", "assistant")]
-        for i, msg in enumerate(msg_list):
-            is_recent = i >= len(msg_list) - KEEP_RECENT
-            if is_recent or not msg.content_summary:
-                all_messages.append({"role": msg.role, "content": msg.content})
-            else:
-                all_messages.append({"role": msg.role, "content": msg.content_summary})
-                summarised += 1
+        # Convert ORM → dicts so the history builder can be unit-tested.
+        # We include `tool_calls` so build_history_dicts can replay a compact
+        # tool-call trace for the next turn — without this, the agent loses
+        # the SQL/tool pattern that worked in the previous turn and
+        # rediscovers it from scratch (see Olivia 2026-04-09 tangent).
+        msg_dicts = [
+            {
+                "role": m.role,
+                "content": m.content,
+                "content_summary": m.content_summary,
+                "tool_calls": m.tool_calls,
+            }
+            for m in session.messages
+            if m.role in ("user", "assistant")
+        ]
+        all_messages, summarised = build_history_dicts(msg_dicts, keep_recent=KEEP_RECENT)
 
     # Hard cap at max_turns * 2 messages
     history_messages = all_messages[-(max_turns * 2) :]
@@ -1614,8 +1635,8 @@ async def run_chat_turn(
                         _gather_tasks.append(retrieve_similar_patterns(db, tenant_id, sanitized_input))
                         _gather_keys.append("patterns")
 
-                    # Learned rules — ALWAYS injected regardless of context_need
-                    _gather_tasks.append(retrieve_learned_rules(db=db, tenant_id=tenant_id))
+                    # Learned rules — query-aware: only inject rules relevant to this query
+                    _gather_tasks.append(retrieve_learned_rules(db=db, tenant_id=tenant_id, query_text=sanitized_input))
                     _gather_keys.append("learned_rules")
 
                     _gather_results = await asyncio.gather(*_gather_tasks, return_exceptions=True)
@@ -1810,6 +1831,7 @@ async def run_chat_turn(
                             is_financial=is_financial,
                             is_netsuite_entity=is_netsuite_entity,
                             previous_agent_id=_previous_agent_id,
+                            source_pin=getattr(session, "source_pin", None),
                         )
 
                     if _selected_agent_id:

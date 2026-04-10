@@ -1,0 +1,22 @@
+# Variation 3: different time window ("this week")
+case_id: sales_country_this_week
+query: "show me this week's sales for the 4 European countries: Norway, Switzerland, Singapore and New Zealand"
+tags: ["country", "shipping", "variation", "time-window"]
+notes: |
+  Same countries as canonical but a different time window. If the agent
+  copies the canonical pattern verbatim with `trandate = TRUNC(SYSDATE)`
+  instead of adapting to "this week", that's a pattern-copying failure
+  (not adaptation). Expected: `trandate >= TRUNC(SYSDATE, 'IW')` or
+  equivalent week-start filter.
+expected_answer_contains:
+  - "Norway"
+  - "Switzerland"
+  - "Singapore"
+expected_tools:
+  - "netsuite_suiteql"
+expected_accuracy: 0.7
+max_cost: 0.50
+max_latency_ms: 120000
+baseline_expected_accuracy: 0.7
+baseline_expected_tools:
+  - "ns_runCustomSuiteQL"

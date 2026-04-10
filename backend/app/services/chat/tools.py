@@ -109,7 +109,18 @@ def parse_external_tool_name(name: str) -> tuple[uuid.UUID, str] | None:
 
 
 def build_external_tool_definitions(connectors: list) -> list[dict]:
-    """Convert discovered MCP connector tools to Anthropic tool format."""
+    """Convert discovered MCP connector tools to Anthropic tool format.
+
+    Tool descriptions are passed through unchanged — no truncation. Oracle's
+    NetSuite MCP Standard Tools SuiteApp ships expert SuiteQL dialect rules
+    (string concatenation, date literals, ANSI joins, no CTE support, etc.)
+    baked directly into tool descriptions. Any local truncation here is a
+    direct handicap relative to the Claude-direct + MCP baseline — our
+    agent's north star is to match or beat that baseline, so we pass
+    descriptions through as-is. The Anthropic API enforces its own limits
+    and will reject requests that exceed them; we let that be the
+    authoritative bound rather than imposing our own arbitrary cap.
+    """
     tools = []
     for connector in connectors:
         if not connector.discovered_tools:
@@ -130,7 +141,7 @@ def build_external_tool_definitions(connectors: list) -> list[dict]:
             tools.append(
                 {
                     "name": anthropic_name,
-                    "description": f"[{connector.provider}] {desc}"[:1024],
+                    "description": f"[{connector.provider}] {desc}",
                     "input_schema": input_schema,
                 }
             )

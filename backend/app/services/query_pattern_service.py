@@ -32,6 +32,38 @@ _TABLE_RE = re.compile(r"\b(?:FROM|JOIN)\s+(\w+)", re.IGNORECASE)
 _COLUMN_RE = re.compile(r"\b(\w+\.\w+)\b")
 
 
+def _is_suiteql_tool_call(tool_name: str | None) -> bool:
+    """Return True if a tool call name corresponds to a raw SuiteQL executor.
+
+    Matches:
+    - ``netsuite_suiteql`` — the local REST tool.
+    - ``ext__<hex>__ns_runCustomSuiteQL`` — external MCP SuiteQL executor
+      (Oracle's NetSuite MCP Standard Tools SuiteApp).
+
+    Deliberately excludes ``ns_getSuiteQLMetadata`` (schema discovery, not
+    a query) and saved-search / report tools (they have different
+    semantics and are stored separately if at all).
+    """
+    if not tool_name:
+        return False
+    if tool_name == "netsuite_suiteql":
+        return True
+    # External MCP tools have the form ext__<hex>__<tool_name>; match by
+    # the final segment so we don't care which connector executed it.
+    return tool_name.endswith("__ns_runCustomSuiteQL")
+
+
+def _extract_sql_from_params(params: dict | None) -> str:
+    """Pull the SQL query from a tool-call params dict.
+
+    Local ``netsuite_suiteql`` uses the ``query`` key; external MCP
+    ``ns_runCustomSuiteQL`` uses ``sqlQuery``. Accept either.
+    """
+    if not isinstance(params, dict):
+        return ""
+    return params.get("query") or params.get("sqlQuery") or ""
+
+
 def _extract_tables(sql: str) -> list[str]:
     """Extract table names from FROM/JOIN clauses."""
     return list({m.lower() for m in _TABLE_RE.findall(sql)})
@@ -92,11 +124,10 @@ async def extract_and_store_pattern(
     stored = False
 
     for call in tool_calls_log:
-        if call.get("tool") != "netsuite_suiteql":
+        if not _is_suiteql_tool_call(call.get("tool")):
             continue
 
-        params = call.get("params", {})
-        query = params.get("query", "")
+        query = _extract_sql_from_params(call.get("params"))
         if not query:
             continue
 
@@ -159,10 +190,10 @@ async def process_feedback(
         return
 
     for call in message.tool_calls:
-        if call.get("tool") != "netsuite_suiteql":
+        if not _is_suiteql_tool_call(call.get("tool")):
             continue
 
-        sql = call.get("params", {}).get("query", "")
+        sql = _extract_sql_from_params(call.get("params"))
         if not sql:
             continue
 
@@ -201,6 +232,10 @@ async def retrieve_similar_patterns(
     # Lower distance = more similar
     embedding_str = "[" + ",".join(str(v) for v in embedding) + "]"
 
+    from app.core.config import settings
+
+    min_similarity = settings.PATTERN_MIN_SIMILARITY
+
     result = await db.execute(
         text("""
             SELECT user_question, working_sql, tables_used, success_count,
@@ -209,6 +244,7 @@ async def retrieve_similar_patterns(
             WHERE tenant_id = CAST(:tenant_id AS uuid)
               AND intent_embedding IS NOT NULL
               AND success_count > 0
+              AND (1 - (intent_embedding <=> CAST(:embedding AS vector))) >= :min_sim
             ORDER BY intent_embedding <=> CAST(:embedding AS vector)
             LIMIT :top_k
         """),
@@ -216,6 +252,7 @@ async def retrieve_similar_patterns(
             "tenant_id": str(tenant_id),
             "embedding": embedding_str,
             "top_k": top_k,
+            "min_sim": min_similarity,
         },
     )
 
@@ -229,6 +266,24 @@ async def retrieve_similar_patterns(
                 "success_count": row[3],
                 "similarity": float(row[4]),
             }
+        )
+
+    # Instrumentation: log similarity scores so we can see whether retrieved
+    # patterns are actually relevant or just "least irrelevant top K".
+    # This is read by the benchmark harness and by the regression analysis.
+    if patterns:
+        sims = [round(p["similarity"], 3) for p in patterns]
+        print(
+            f"[PATTERN_RETRIEVAL] tenant={str(tenant_id)[:8]} "
+            f'q="{user_question[:80]}" '
+            f"returned={len(patterns)} similarities={sims}",
+            flush=True,
+        )
+    else:
+        print(
+            f"[PATTERN_RETRIEVAL] tenant={str(tenant_id)[:8]} "
+            f'q="{user_question[:80]}" returned=0',
+            flush=True,
         )
 
     return patterns

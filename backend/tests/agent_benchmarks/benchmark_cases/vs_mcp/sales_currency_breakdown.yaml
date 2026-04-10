@@ -1,0 +1,30 @@
+# Currency breakdown — "sales by currency this month"
+#
+# Tests:
+#  - Transaction currency field t.currency (FK to currency table)
+#  - BUILTIN.DF(t.currency) for display name (e.g., "USD", "EUR", "GBP")
+#  - foreigntotal (transaction currency) vs total (base currency)
+#  - The dialect rules say to use SUM(t.foreigntotal) for per-currency
+#    breakdown — testing whether the agent knows this
+
+case_id: sales_currency_breakdown
+query: "this month's sales broken down by transaction currency"
+tags: ["sales", "currency", "multi-currency", "dimension"]
+notes: |
+  Tests multi-currency awareness. Correct approach per dialect rules:
+    SELECT BUILTIN.DF(t.currency) AS currency,
+           SUM(t.foreigntotal) AS total_in_currency
+    FROM transaction t
+    WHERE t.type = 'SalesOrd' AND t.trandate >= TRUNC(SYSDATE, 'MM')
+    GROUP BY BUILTIN.DF(t.currency)
+expected_answer_contains:
+  - "currency"
+  - "USD"
+expected_tools:
+  - "netsuite_suiteql"
+expected_accuracy: 0.7
+max_cost: 0.50
+max_latency_ms: 120000
+baseline_expected_accuracy: 0.7
+baseline_expected_tools:
+  - "ns_runCustomSuiteQL"

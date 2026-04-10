@@ -1,0 +1,29 @@
+# Wrench: negation — "sales this week EXCLUDING laptops"
+#
+# Tests:
+#  - Negation (NOT IN / != / <>)
+#  - Tenant vernacular resolution of "laptop" to class 2
+#  - Agent must IGNORE the resolved class in the filter (NOT equal, not equal)
+#
+# Wrench: a naive agent might inject laptop INTO the filter because the
+# vernacular resolver flagged it. The correct semantic is EXCLUSION.
+
+case_id: sales_wrench_exclude_laptop
+query: "show me this week's sales excluding laptops"
+tags: ["sales", "wrench", "negation", "class"]
+notes: |
+  Wrench case — negation. The tenant vernacular resolver will see "laptop"
+  and emit a <tenant_vernacular> entry mapping it to class 2. The agent
+  must use this mapping in a NEGATION clause, not an equality clause.
+  Correct: WHERE i.class != 2 (or i.class NOT IN (2)).
+  Wrong: WHERE i.class = 2 (inverts the intent).
+expected_answer_contains:
+  - "sales"
+expected_tools:
+  - "netsuite_suiteql"
+expected_accuracy: 0.7
+max_cost: 0.50
+max_latency_ms: 120000
+baseline_expected_accuracy: 0.7
+baseline_expected_tools:
+  - "ns_runCustomSuiteQL"

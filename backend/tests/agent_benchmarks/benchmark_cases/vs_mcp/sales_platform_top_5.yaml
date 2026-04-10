@@ -1,0 +1,28 @@
+# Platform top 5 — "top 5 platforms by revenue this month"
+#
+# Tests that the agent uses the tenant-specific custom field
+# custitem_fw_platform (on item, not transaction). This is classic
+# "tenant vernacular" territory — a word like "platform" maps to a
+# custitem_* field, not a standard column.
+#
+# Expected behavior: JOIN item, GROUP BY BUILTIN.DF(i.custitem_fw_platform),
+# ORDER BY revenue DESC, FETCH FIRST 5 ROWS ONLY.
+
+case_id: sales_platform_top_5
+query: "what are the top 5 platforms by revenue this month?"
+tags: ["sales", "platform", "top-n", "custom-field", "vernacular"]
+notes: |
+  Tests tenant vernacular resolution. "platform" must map to
+  custitem_fw_platform on the item table. Tests top-N with ORDER BY +
+  FETCH FIRST. 5 rows expected.
+expected_answer_contains:
+  - "platform"
+  - "revenue"
+expected_tools:
+  - "netsuite_suiteql"
+expected_accuracy: 0.7
+max_cost: 0.50
+max_latency_ms: 120000
+baseline_expected_accuracy: 0.6
+baseline_expected_tools:
+  - "ns_runCustomSuiteQL"
