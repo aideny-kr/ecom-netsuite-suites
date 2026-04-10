@@ -513,9 +513,7 @@ async def _main_async(args: argparse.Namespace) -> int:
     print()
 
     # Lazy DB import
-    from sqlalchemy import text as sa_text
-
-    from app.core.database import async_session_factory
+    from app.core.database import async_session_factory, set_tenant_context
 
     tenant_uuid = uuid.UUID(args.tenant_id)
     run_id = uuid.uuid4()
@@ -527,8 +525,7 @@ async def _main_async(args: argparse.Namespace) -> int:
 
     results: list[CaseResult] = []
     async with async_session_factory() as db:
-        # Set tenant context for RLS
-        await db.execute(sa_text(f"SET LOCAL app.current_tenant_id = '{tenant_uuid}'"))
+        await set_tenant_context(db, str(tenant_uuid))
 
         for i, case in enumerate(cases, 1):
             print(f"[{i}/{len(cases)}] {case.case_id}: {case.query[:80]}")

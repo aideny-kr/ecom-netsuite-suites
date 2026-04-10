@@ -36,6 +36,7 @@ savings vs. the hallucination-repair cost on a follow-up turn.
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 
@@ -161,8 +162,6 @@ def _render_call(call: dict[str, Any]) -> list[str]:
     row_match = re.search(r"Returned (\d+) rows?", result_summary)
     if row_match:
         header_parts.append(f"→ OK ({row_match.group(1)} rows)")
-    elif "success" in result_summary.lower() and not sql:
-        header_parts.append("→ OK")
     else:
         header_parts.append("→ OK")
 
@@ -192,8 +191,6 @@ def _compact_params(params: dict[str, Any]) -> str:
         if k in ("query", "sqlQuery", "description", "user_question"):
             continue
         if isinstance(v, (dict, list)):
-            import json
-
             value_str = json.dumps(v, default=str, separators=(",", ":"))
         else:
             value_str = str(v)

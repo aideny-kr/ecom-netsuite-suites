@@ -93,9 +93,7 @@ async def _run_nightly_benchmark(
     baseline_model: str,
 ) -> dict:
     """Run the benchmark and compare to yesterday's run."""
-    from sqlalchemy import text as sa_text
-
-    from app.core.database import async_session_factory
+    from app.core.database import async_session_factory, set_tenant_context
     from tests.agent_benchmarks.agent_runner import run_agent
     from tests.agent_benchmarks.baseline_runner import run_baseline
     from tests.agent_benchmarks.persistence import persist_case_result
@@ -140,8 +138,7 @@ async def _run_nightly_benchmark(
     deltas: list[float] = []
 
     async with async_session_factory() as db:
-        # RLS context
-        await db.execute(sa_text(f"SET LOCAL app.current_tenant_id = '{tenant_id}'"))
+        await set_tenant_context(db, str(tenant_id))
 
         for i, case in enumerate(cases, 1):
             print(
@@ -246,7 +243,6 @@ async def _run_nightly_benchmark(
             stats["regression_detected"] = False
     else:
         stats["regression_detected"] = False
-        stats["yesterday_delta"] = None
 
     stats["yesterday_delta"] = (
         round(yesterday_delta, 4) if yesterday_delta is not None else None
