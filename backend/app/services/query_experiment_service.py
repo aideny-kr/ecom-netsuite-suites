@@ -1,10 +1,14 @@
 """Query experiment service — generate SQL, execute, score, decide KEEP/REVERT.
 
 Runs a single experiment for the autonomous query improvement loop:
-  1. Generate SQL via Haiku (~$0.03/call)
+  1. Generate candidate SQL via Haiku (~$0.03/call)
   2. Execute against live NetSuite (SuiteQL) or BigQuery
-  3. Score with the eval harness (accuracy, syntax, efficiency)
-  4. Decide: KEEP if experiment_score > baseline + 0.05, else REVERT
+  3. Run both our agent AND Claude+MCP baseline on the same question
+  4. Score both answers with substring_score (fast, deterministic)
+  5. Decide:
+       KEEP   — agent_score >= baseline_score AND agent_score > 0.5
+       REVERT — agent_score < baseline_score - 0.1 (we got worse)
+       SKIP   — neither better nor worse
 
 Budget: ~$0.15/experiment for SuiteQL, ~$0.20 for BigQuery.
 """
@@ -26,13 +30,14 @@ from app.models.experiment_log import ExperimentLog
 from app.models.mcp_connector import McpConnector
 from app.services.query_eval_harness import (
     EvalCase,
-    composite_score,
-    score_accuracy,
-    score_efficiency,
-    score_sql_contains,
-    score_syntax,
 )
 from app.services.query_pattern_service import extract_and_store_pattern
+
+# vs-MCP benchmark scoring — replaces the internal composite scorer.
+# Imported here so callers (and tests) can patch them in this module's namespace.
+from tests.agent_benchmarks.agent_runner import run_agent  # noqa: F401
+from tests.agent_benchmarks.baseline_runner import run_baseline  # noqa: F401
+from tests.agent_benchmarks.scorer import substring_score  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -515,7 +520,7 @@ async def run_single_experiment(
         "score_efficiency": 0.0,
         "score_sql_match": 0.0,
         "experiment_score": 0.0,
-        "baseline_score": baseline_score,
+        "baseline_score": 0.0,
         "delta": 0.0,
         "decision": "SKIP",
         "error_message": None,
@@ -554,29 +559,64 @@ async def run_single_experiment(
 
     result["executed_successfully"] = True
 
-    # Step 3: Score
-    acc = score_accuracy(exec_result["result_text"], case.expected_keywords)
-    syn = score_syntax(generated_sql, case.dialect)
-    eff = score_efficiency(
-        generated_sql,
-        rows_returned=exec_result.get("rows"),
-        bytes_processed=exec_result.get("bytes_processed"),
-    )
-    sql_match = score_sql_contains(generated_sql, case.expected_sql_contains)
-    exp_score = composite_score(acc, syn, eff, sql_match)
+    # Step 3: Run vs-MCP benchmark comparison
+    # Run our agent (which will use the candidate pattern if it's in the DB)
+    # and the Claude+MCP baseline on the same question, then score both
+    # with substring_score (fast, deterministic — no LLM judge needed).
+    agent_score = 0.0
+    bl_score = 0.0
 
-    result["score_accuracy"] = acc
-    result["score_syntax"] = syn
-    result["score_efficiency"] = eff
-    result["score_sql_match"] = sql_match
-    result["experiment_score"] = exp_score
-    result["delta"] = round(exp_score - baseline_score, 4)
+    try:
+        agent_result = await run_agent(
+            tenant_id=tenant_id,
+            question=case.question,
+            db=db,
+            model="claude-haiku-4-5-20251001",  # cheap model for experiment loop
+        )
+        if agent_result.success and agent_result.answer_text:
+            agent_sr = substring_score(
+                answer_text=agent_result.answer_text,
+                expected_contains=case.expected_keywords,
+            )
+            agent_score = agent_sr.score
+    except Exception:
+        logger.warning(
+            "Benchmark agent run failed for question=%s",
+            case.question[:60],
+            exc_info=True,
+        )
 
-    # Step 4: Decide
-    if exp_score > baseline_score + _KEEP_THRESHOLD:
+    try:
+        baseline_result = await run_baseline(
+            tenant_id=tenant_id,
+            question=case.question,
+            db=db,
+            model="claude-haiku-4-5-20251001",  # same cheap model for fair comparison
+        )
+        if baseline_result.success and baseline_result.answer_text:
+            baseline_sr = substring_score(
+                answer_text=baseline_result.answer_text,
+                expected_contains=case.expected_keywords,
+            )
+            bl_score = baseline_sr.score
+    except Exception:
+        logger.warning(
+            "Benchmark baseline run failed for question=%s",
+            case.question[:60],
+            exc_info=True,
+        )
+
+    result["experiment_score"] = agent_score
+    result["baseline_score"] = bl_score
+    result["delta"] = round(agent_score - bl_score, 4)
+
+    # Step 4: Decide based on vs-MCP comparison
+    if agent_score >= bl_score and agent_score > 0.5:
         result["decision"] = "KEEP"
-    else:
+    elif agent_score < bl_score - 0.1:
         result["decision"] = "REVERT"
+    else:
+        result["decision"] = "SKIP"
 
     # Step 5: Promote KEEP results to proven patterns + log all experiments
     # Use test_query key expected by promote_experiment_result
