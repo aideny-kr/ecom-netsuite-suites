@@ -232,6 +232,10 @@ async def retrieve_similar_patterns(
     # Lower distance = more similar
     embedding_str = "[" + ",".join(str(v) for v in embedding) + "]"
 
+    from app.core.config import settings
+
+    min_similarity = settings.PATTERN_MIN_SIMILARITY
+
     result = await db.execute(
         text("""
             SELECT user_question, working_sql, tables_used, success_count,
@@ -240,6 +244,7 @@ async def retrieve_similar_patterns(
             WHERE tenant_id = CAST(:tenant_id AS uuid)
               AND intent_embedding IS NOT NULL
               AND success_count > 0
+              AND (1 - (intent_embedding <=> CAST(:embedding AS vector))) >= :min_sim
             ORDER BY intent_embedding <=> CAST(:embedding AS vector)
             LIMIT :top_k
         """),
@@ -247,6 +252,7 @@ async def retrieve_similar_patterns(
             "tenant_id": str(tenant_id),
             "embedding": embedding_str,
             "top_k": top_k,
+            "min_sim": min_similarity,
         },
     )
 

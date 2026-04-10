@@ -1623,8 +1623,8 @@ async def run_chat_turn(
                         _gather_tasks.append(retrieve_similar_patterns(db, tenant_id, sanitized_input))
                         _gather_keys.append("patterns")
 
-                    # Learned rules — ALWAYS injected regardless of context_need
-                    _gather_tasks.append(retrieve_learned_rules(db=db, tenant_id=tenant_id))
+                    # Learned rules — query-aware: only inject rules relevant to this query
+                    _gather_tasks.append(retrieve_learned_rules(db=db, tenant_id=tenant_id, query_text=sanitized_input))
                     _gather_keys.append("learned_rules")
 
                     _gather_results = await asyncio.gather(*_gather_tasks, return_exceptions=True)

@@ -101,6 +101,13 @@ async def retrieve_domain_knowledge(
         # Sort by adjusted score descending, take top_k
         scored.sort(key=lambda x: x[1], reverse=True)
 
+        # Filter by minimum similarity threshold — chunks below this are
+        # noise that dilutes attention. Set from instrumentation data:
+        # domain knowledge chunks at 0.36-0.44 similarity on a country-
+        # sales query were pure noise. Only inject genuinely relevant chunks.
+        min_sim = settings.DOMAIN_KNOWLEDGE_MIN_SIMILARITY
+        scored = [s for s in scored if s[2] >= min_sim]
+
         returned = scored[:top_k]
 
         # Instrumentation: log similarity scores so we can see whether
