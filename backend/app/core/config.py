@@ -52,7 +52,7 @@ class Settings(BaseSettings):
     # domain knowledge chunks were 0.36-0.44 on a country-sales query
     # (pure noise), patterns should be high-confidence matches only.
     DOMAIN_KNOWLEDGE_MIN_SIMILARITY: float = 0.50
-    PATTERN_MIN_SIMILARITY: float = 0.75
+    PATTERN_MIN_SIMILARITY: float = 0.45
     CHAT_MAX_HISTORY_TURNS: int = 20
     CHAT_MAX_TOOL_CALLS_PER_TURN: int = 5
     CHAT_RAG_TOP_K: int = 5
