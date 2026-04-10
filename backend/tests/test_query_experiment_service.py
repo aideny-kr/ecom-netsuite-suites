@@ -1,11 +1,41 @@
 """Tests for query experiment service."""
 
 import uuid
-from unittest.mock import AsyncMock, patch
+from dataclasses import dataclass, field
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from app.services.query_eval_harness import EvalCase
+
+_SVC = "app.services.query_experiment_service"
+
+
+@dataclass
+class _FakeAgentResult:
+    answer_text: str = ""
+    tool_calls: list[dict] = field(default_factory=list)
+    input_tokens: int = 100
+    output_tokens: int = 200
+    cost_usd: float = 0.01
+    latency_ms: int = 500
+    success: bool = True
+    error: str | None = None
+    confidence_score: float | None = None
+    num_steps: int = 1
+    context_chars: int = 500
+
+
+@dataclass
+class _FakeBaselineResult:
+    answer_text: str = ""
+    tool_calls: list[dict] = field(default_factory=list)
+    input_tokens: int = 100
+    output_tokens: int = 200
+    cost_usd: float = 0.01
+    latency_ms: int = 500
+    success: bool = True
+    error: str | None = None
 
 
 class TestRunExperiment:
@@ -22,9 +52,15 @@ class TestRunExperiment:
             difficulty="easy",
         )
 
+        agent_result = _FakeAgentResult(answer_text="Here are top sales order results.", success=True)
+        baseline_result = _FakeBaselineResult(answer_text="Sales order list.", success=True)
+
         with (
-            patch("app.services.query_experiment_service._generate_sql", new_callable=AsyncMock) as mock_gen,
-            patch("app.services.query_experiment_service._execute_sql", new_callable=AsyncMock) as mock_exec,
+            patch(f"{_SVC}._generate_sql", new_callable=AsyncMock) as mock_gen,
+            patch(f"{_SVC}._execute_sql", new_callable=AsyncMock) as mock_exec,
+            patch(f"{_SVC}.run_agent", new_callable=AsyncMock, return_value=agent_result),
+            patch(f"{_SVC}.run_baseline", new_callable=AsyncMock, return_value=baseline_result),
+            patch(f"{_SVC}.promote_experiment_result", new_callable=AsyncMock),
         ):
             mock_gen.return_value = "SELECT tranid, total FROM transaction WHERE type = 'SalesOrd' ORDER BY total DESC FETCH FIRST 10 ROWS ONLY"
             mock_exec.return_value = {
@@ -59,8 +95,8 @@ class TestRunExperiment:
         )
 
         with (
-            patch("app.services.query_experiment_service._generate_sql", new_callable=AsyncMock) as mock_gen,
-            patch("app.services.query_experiment_service._execute_sql", new_callable=AsyncMock) as mock_exec,
+            patch(f"{_SVC}._generate_sql", new_callable=AsyncMock) as mock_gen,
+            patch(f"{_SVC}._execute_sql", new_callable=AsyncMock) as mock_exec,
         ):
             mock_gen.return_value = "INVALID SQL QUERY"
             mock_exec.return_value = {
@@ -117,9 +153,22 @@ class TestRunExperiment:
             difficulty="easy",
         )
 
+        # Agent gives a great answer, baseline fails
+        agent_result = _FakeAgentResult(
+            answer_text="Revenue by region: US $4.2M, EU $2.8M",
+            success=True,
+        )
+        baseline_result = _FakeBaselineResult(
+            answer_text="I couldn't find the revenue data.",
+            success=True,
+        )
+
         with (
-            patch("app.services.query_experiment_service._generate_sql", new_callable=AsyncMock) as mock_gen,
-            patch("app.services.query_experiment_service._execute_sql", new_callable=AsyncMock) as mock_exec,
+            patch(f"{_SVC}._generate_sql", new_callable=AsyncMock) as mock_gen,
+            patch(f"{_SVC}._execute_sql", new_callable=AsyncMock) as mock_exec,
+            patch(f"{_SVC}.run_agent", new_callable=AsyncMock, return_value=agent_result),
+            patch(f"{_SVC}.run_baseline", new_callable=AsyncMock, return_value=baseline_result),
+            patch(f"{_SVC}.promote_experiment_result", new_callable=AsyncMock),
         ):
             mock_gen.return_value = "SELECT region, SUM(revenue) FROM `proj.ds.sales` GROUP BY region LIMIT 20"
             mock_exec.return_value = {
@@ -133,10 +182,10 @@ class TestRunExperiment:
                 case=case,
                 tenant_id=uuid.uuid4(),
                 db=AsyncMock(),
-                baseline_score=0.5,  # Low baseline
             )
 
-        # Good query with matching keywords should score well above 0.5
+        # Agent has all keywords + no failure phrase => 1.0
+        # Baseline has failure phrase => capped at 0.5
         assert result["decision"] == "KEEP"
 
     @pytest.mark.asyncio
@@ -152,14 +201,27 @@ class TestRunExperiment:
             difficulty="medium",
         )
 
+        # Agent fails, baseline has all keywords
+        agent_result = _FakeAgentResult(
+            answer_text="I couldn't find the transactions. Error occurred.",
+            success=True,
+        )
+        baseline_result = _FakeBaselineResult(
+            answer_text="Here are customer transactions with amount, date, and status details.",
+            success=True,
+        )
+
         with (
-            patch("app.services.query_experiment_service._generate_sql", new_callable=AsyncMock) as mock_gen,
-            patch("app.services.query_experiment_service._execute_sql", new_callable=AsyncMock) as mock_exec,
+            patch(f"{_SVC}._generate_sql", new_callable=AsyncMock) as mock_gen,
+            patch(f"{_SVC}._execute_sql", new_callable=AsyncMock) as mock_exec,
+            patch(f"{_SVC}.run_agent", new_callable=AsyncMock, return_value=agent_result),
+            patch(f"{_SVC}.run_baseline", new_callable=AsyncMock, return_value=baseline_result),
+            patch(f"{_SVC}.promote_experiment_result", new_callable=AsyncMock),
         ):
             mock_gen.return_value = "SELECT id FROM transaction FETCH FIRST 5 ROWS ONLY"
             mock_exec.return_value = {
                 "success": True,
-                "result_text": "id: 123, id: 456",  # Missing expected keywords
+                "result_text": "id: 123, id: 456",
                 "rows": 2,
                 "bytes_processed": 0,
             }
@@ -168,7 +230,6 @@ class TestRunExperiment:
                 case=case,
                 tenant_id=uuid.uuid4(),
                 db=AsyncMock(),
-                baseline_score=0.9,  # High baseline
             )
 
         assert result["decision"] == "REVERT"
@@ -186,9 +247,15 @@ class TestRunExperiment:
             difficulty="easy",
         )
 
+        agent_result = _FakeAgentResult(answer_text="The count of items is 42.", success=True)
+        baseline_result = _FakeBaselineResult(answer_text="Item count: 42.", success=True)
+
         with (
-            patch("app.services.query_experiment_service._generate_sql", new_callable=AsyncMock) as mock_gen,
-            patch("app.services.query_experiment_service._execute_sql", new_callable=AsyncMock) as mock_exec,
+            patch(f"{_SVC}._generate_sql", new_callable=AsyncMock) as mock_gen,
+            patch(f"{_SVC}._execute_sql", new_callable=AsyncMock) as mock_exec,
+            patch(f"{_SVC}.run_agent", new_callable=AsyncMock, return_value=agent_result),
+            patch(f"{_SVC}.run_baseline", new_callable=AsyncMock, return_value=baseline_result),
+            patch(f"{_SVC}.promote_experiment_result", new_callable=AsyncMock),
         ):
             mock_gen.return_value = "SELECT COUNT(*) AS cnt FROM item FETCH FIRST 1 ROWS ONLY"
             mock_exec.return_value = {
@@ -204,6 +271,7 @@ class TestRunExperiment:
                 db=AsyncMock(),
             )
 
+        # Core scoring fields still present (may be 0.0 for legacy fields)
         assert "score_accuracy" in result
         assert "score_syntax" in result
         assert "score_efficiency" in result
