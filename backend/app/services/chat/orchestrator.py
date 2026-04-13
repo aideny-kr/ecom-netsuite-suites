@@ -421,24 +421,16 @@ async def _select_agent(
     is_financial: bool = False,
     is_netsuite_entity: bool = False,
     previous_agent_id: str | None = None,
-    source_pin: str | None = None,
 ) -> str | None:
     """Three-tier routing to select a specialized agent.
 
     Returns agent_id if a specialized agent should handle the query,
     or None if UnifiedAgent should handle it (default path).
-    """
-    # Source pin — if the user chose a source via the picker, honor it
-    # regardless of what the semantic classifier thinks. This is a
-    # belt-and-suspenders check: the caller at 1807 also checks, but
-    # the coordinator path may call _select_agent directly.
-    if source_pin == "netsuite":
-        print(f"[ROUTING] Source pin forces unified-agent (netsuite) | query: {query[:80]}", flush=True)
-        return None
-    if source_pin == "bigquery":
-        print(f"[ROUTING] Source pin forces bi-agent (bigquery) | query: {query[:80]}", flush=True)
-        return "bi-agent"
 
+    Note: source_pin logic is handled in the routing block before this
+    function is called. The pin is now a soft preference — high-confidence
+    queries for a different source override it via _should_override_pin().
+    """
     # Financial reports MUST use UnifiedAgent (NetSuite financial tools)
     if is_financial:
         print(f"[ROUTING] Financial report detected, forcing unified-agent | query: {query[:80]}", flush=True)
@@ -1813,13 +1805,43 @@ async def run_chat_turn(
                         _selected_agent_id = agent_id
                         print(f"[ROUTING] Client pinned → {agent_id}", flush=True)
                     elif session.source_pin == "bigquery":
-                        # User chose BigQuery via source picker → force bi-agent
-                        _selected_agent_id = "bi-agent"
-                        print("[ROUTING] Source pin → bi-agent (bigquery)", flush=True)
+                        # Soft pin: honor unless query clearly belongs to NetSuite
+                        from app.services.chat.source_picker import _should_override_pin
+
+                        if _should_override_pin(sanitized_input, "bigquery"):
+                            print("[ROUTING] Source pin override — high-confidence for other source", flush=True)
+                            _previous_agent_id = _infer_previous_agent(session.messages) if session.messages else None
+                            _selected_agent_id = await _select_agent(
+                                query=sanitized_input,
+                                tenant_id=tenant_id,
+                                db=db,
+                                adapter=specialist_adapter,
+                                is_financial=is_financial,
+                                is_netsuite_entity=is_netsuite_entity,
+                                previous_agent_id=_previous_agent_id,
+                            )
+                        else:
+                            _selected_agent_id = "bi-agent"
+                            print("[ROUTING] Source pin → bi-agent (bigquery)", flush=True)
                     elif session.source_pin == "netsuite":
-                        # User chose NetSuite via source picker → force unified-agent
-                        _selected_agent_id = None
-                        print("[ROUTING] Source pin → unified-agent (netsuite)", flush=True)
+                        # Soft pin: honor unless query clearly belongs to BigQuery
+                        from app.services.chat.source_picker import _should_override_pin
+
+                        if _should_override_pin(sanitized_input, "netsuite"):
+                            print("[ROUTING] Source pin override — high-confidence for other source", flush=True)
+                            _previous_agent_id = _infer_previous_agent(session.messages) if session.messages else None
+                            _selected_agent_id = await _select_agent(
+                                query=sanitized_input,
+                                tenant_id=tenant_id,
+                                db=db,
+                                adapter=specialist_adapter,
+                                is_financial=is_financial,
+                                is_netsuite_entity=is_netsuite_entity,
+                                previous_agent_id=_previous_agent_id,
+                            )
+                        else:
+                            _selected_agent_id = None
+                            print("[ROUTING] Source pin → unified-agent (netsuite)", flush=True)
                     else:
                         # Infer previous agent from conversation history for session pinning
                         _previous_agent_id = _infer_previous_agent(session.messages) if session.messages else None
@@ -1831,7 +1853,6 @@ async def run_chat_turn(
                             is_financial=is_financial,
                             is_netsuite_entity=is_netsuite_entity,
                             previous_agent_id=_previous_agent_id,
-                            source_pin=getattr(session, "source_pin", None),
                         )
 
                     if _selected_agent_id:

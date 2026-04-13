@@ -61,3 +61,43 @@ class TestOrchestratorSourcePickerShortCircuit:
         # Guard logic lives in orchestrator — documented here:
         assert bool(session_with_pin.source_pin) is True, "pinned session skips picker"
         assert bool(session_no_pin.source_pin) is False, "unpinned session runs picker check"
+
+
+class TestShouldOverridePin:
+    """Test _should_override_pin(): high-confidence queries override soft pin."""
+
+    def test_override_pin_balance_sheet_overrides_bigquery_pin(self):
+        """Financial query should override bigquery pin."""
+        from app.services.chat.source_picker import _should_override_pin
+
+        assert _should_override_pin("show me the balance sheet", "bigquery") is True
+
+    def test_override_pin_ambiguous_honors_bigquery_pin(self):
+        """Ambiguous follow-up should NOT override bigquery pin."""
+        from app.services.chat.source_picker import _should_override_pin
+
+        assert _should_override_pin("break it down by month", "bigquery") is False
+
+    def test_override_pin_explicit_netsuite_overrides_bigquery_pin(self):
+        """Explicit NetSuite mention should override bigquery pin."""
+        from app.services.chat.source_picker import _should_override_pin
+
+        assert _should_override_pin("ask NetSuite about invoices", "bigquery") is True
+
+    def test_override_pin_explicit_bigquery_overrides_netsuite_pin(self):
+        """Explicit BigQuery mention should override netsuite pin."""
+        from app.services.chat.source_picker import _should_override_pin
+
+        assert _should_override_pin("show BigQuery dashboard metrics", "netsuite") is True
+
+    def test_override_pin_ambiguous_honors_netsuite_pin(self):
+        """Ambiguous follow-up should NOT override netsuite pin."""
+        from app.services.chat.source_picker import _should_override_pin
+
+        assert _should_override_pin("how many orders this week", "netsuite") is False
+
+    def test_override_pin_same_source_high_confidence(self):
+        """High-confidence for same source should NOT override."""
+        from app.services.chat.source_picker import _should_override_pin
+
+        assert _should_override_pin("show me the balance sheet", "netsuite") is False

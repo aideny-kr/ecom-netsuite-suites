@@ -207,6 +207,16 @@ def should_prompt_user(score: SourceScore, threshold: float = AMBIGUITY_THRESHOL
     return score[1] < threshold
 
 
+def _should_override_pin(query: str, current_pin: str) -> bool:
+    """Return True if query clearly belongs to a DIFFERENT source than the pin.
+
+    Used to make source_pin a soft preference: ambiguous follow-ups honor the pin,
+    but high-confidence queries for the other source override it.
+    """
+    source, confidence, _reason = score_source(query)
+    return confidence >= 0.95 and source != current_pin
+
+
 def build_picker_payload(score: SourceScore, *, user_question: str) -> PickerPayload:
     """Build the SSE + structured_output payload for the frontend picker card."""
     recommended, confidence, reason = score
