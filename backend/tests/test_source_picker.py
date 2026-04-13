@@ -184,6 +184,26 @@ class TestHasDataIntent:
         assert has_data_intent(query) is False
 
 
+class TestHasDataIntentDiscussionGuard:
+    def test_discussion_questions_return_false(self):
+        """Discussion/advisory questions should return False even with data nouns."""
+        assert has_data_intent("how to proceed knowing that the product is stored differently") is False
+        assert has_data_intent("can you explain the difference between these fields") is False
+        assert has_data_intent("what should I do about missing orders") is False
+        assert has_data_intent("how do I approach this problem with items") is False
+
+    def test_data_queries_still_return_true(self):
+        """Actual data queries should still return True."""
+        assert has_data_intent("how many orders this week") is True
+        assert has_data_intent("show me the top customers") is True
+        assert has_data_intent("total revenue last quarter") is True
+
+    def test_discussion_with_explicit_source_returns_true(self):
+        """Discussion mentioning explicit source should still return True."""
+        assert has_data_intent("can you explain how to query BigQuery for orders") is True
+        assert has_data_intent("how should I use NetSuite to find invoices") is True
+
+
 class TestBuildPickerPayload:
     def test_payload_contains_both_options(self):
         score: SourceScore = ("netsuite", 0.55, "operational data")
