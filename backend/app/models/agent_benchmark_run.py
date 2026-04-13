@@ -1,6 +1,6 @@
 """Agent benchmark run — one row per case × side per vs-MCP benchmark run.
 
-Each CLI invocation of `tests.agent_benchmarks.run_vs_mcp` writes N rows:
+Each CLI invocation of `app.services.benchmarks.run_vs_mcp` writes N rows:
 one for "ours" and (if baseline enabled) one for "mcp", per case. Rows
 sharing a `run_id` came from the same invocation, so joins / groupings
 by `run_id` reconstruct the full run result.

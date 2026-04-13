@@ -25,7 +25,7 @@ Implementation notes
   thin indirection layers so the unit tests can patch them without
   reaching into the real Anthropic SDK or DB.
 * :func:`execute_tool_call` is imported at module level so the tests can
-  patch ``tests.agent_benchmarks.baseline_runner.execute_tool_call``.
+  patch ``app.services.benchmarks.baseline_runner.execute_tool_call``.
 * The system prompt template is exposed as a module constant
   (``BASELINE_SYSTEM_PROMPT_TEMPLATE``) so a unit test can assert it
   stays small and free of internal-agent concepts.

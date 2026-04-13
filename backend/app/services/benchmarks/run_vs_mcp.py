@@ -11,26 +11,26 @@ Usage
 Quick smoke test — single canonical case:
 
     cd backend
-    .venv/bin/python -m tests.agent_benchmarks.run_vs_mcp \\
+    .venv/bin/python -m app.services.benchmarks.run_vs_mcp \\
         --case country_sales_canonical \\
         --tenant-id ce3dfaad-626f-4992-84e9-500c8291ca0a
 
 All country-sales variations (6 cases total — canonical + 5 variations):
 
-    .venv/bin/python -m tests.agent_benchmarks.run_vs_mcp \\
+    .venv/bin/python -m app.services.benchmarks.run_vs_mcp \\
         --suite country_sales \\
         --tenant-id ce3dfaad-626f-4992-84e9-500c8291ca0a
 
 Compare against Opus-class baseline ("can we beat our best ceiling?"):
 
-    .venv/bin/python -m tests.agent_benchmarks.run_vs_mcp \\
+    .venv/bin/python -m app.services.benchmarks.run_vs_mcp \\
         --suite country_sales \\
         --tenant-id ce3dfaad-626f-4992-84e9-500c8291ca0a \\
         --baseline-model claude-opus-4-6
 
 Skip the baseline (just time-and-score our agent):
 
-    .venv/bin/python -m tests.agent_benchmarks.run_vs_mcp \\
+    .venv/bin/python -m app.services.benchmarks.run_vs_mcp \\
         --suite country_sales \\
         --tenant-id ce3dfaad-626f-4992-84e9-500c8291ca0a \\
         --skip-baseline
@@ -173,7 +173,7 @@ async def _score_answer(
     When False (or on judge error), falls back to substring scoring with
     failure-phrase penalty.
     """
-    from tests.agent_benchmarks.scorer import llm_judge_score, substring_score
+    from app.services.benchmarks.scorer import llm_judge_score, substring_score
 
     if use_llm_judge:
         result = await llm_judge_score(
@@ -271,8 +271,8 @@ async def _run_single_case(
     use_llm_judge: bool,
     db,
 ) -> CaseResult:
-    from tests.agent_benchmarks.agent_runner import run_agent
-    from tests.agent_benchmarks.baseline_runner import run_baseline
+    from app.services.benchmarks.agent_runner import run_agent
+    from app.services.benchmarks.baseline_runner import run_baseline
 
     # Run ours
     agent_result = None
@@ -547,7 +547,7 @@ async def _main_async(args: argparse.Namespace) -> int:
 
             # Persist both sides if --persist
             if args.persist and result.ours_raw is not None:
-                from tests.agent_benchmarks.persistence import persist_case_result
+                from app.services.benchmarks.persistence import persist_case_result
 
                 try:
                     await persist_case_result(

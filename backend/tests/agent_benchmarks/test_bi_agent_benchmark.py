@@ -2,9 +2,9 @@
 
 from pathlib import Path
 
-from tests.agent_benchmarks.benchmark_runner import BenchmarkRunner
+from app.services.benchmarks.benchmark_runner import BenchmarkRunner
 
-CASES_DIR = Path(__file__).resolve().parent / "benchmark_cases"
+CASES_DIR = Path(__file__).resolve().parent.parent.parent / "app" / "services" / "benchmarks" / "benchmark_cases"
 
 
 class TestBiAgentBenchmark:
@@ -75,7 +75,7 @@ class TestBiAgentBenchmark:
 
     def test_bi_pass_at_5(self):
         runner = BenchmarkRunner()
-        from tests.agent_benchmarks.benchmark_runner import BenchmarkScore
+        from app.services.benchmarks.benchmark_runner import BenchmarkScore
 
         scores = [
             BenchmarkScore(accuracy=0.9, tool_accuracy=1.0, cost=0.10, latency_ms=5000, cost_ok=True, latency_ok=True),
@@ -96,7 +96,7 @@ class TestBiAgentBenchmark:
 
     def test_bi_vs_unified_report(self):
         runner = BenchmarkRunner()
-        from tests.agent_benchmarks.benchmark_runner import BenchmarkScore
+        from app.services.benchmarks.benchmark_runner import BenchmarkScore
 
         agent_scores = [
             BenchmarkScore(accuracy=0.9, tool_accuracy=1.0, cost=0.15, latency_ms=5000, cost_ok=True, latency_ok=True),

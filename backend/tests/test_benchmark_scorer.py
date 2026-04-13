@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from tests.agent_benchmarks.scorer import (
+from app.services.benchmarks.scorer import (
     ScoreResult,
     _parse_judge_json,
     llm_judge_score,
@@ -122,7 +122,7 @@ class TestLLMJudgeScore:
     async def test_judge_returns_high_score_for_correct_answer(self):
         """Judge should score a correct answer close to 1.0."""
         judge_response = '{"score": 0.95, "rationale": "answered with specific numbers", "correct": true}'
-        with patch("tests.agent_benchmarks.scorer.AsyncAnthropic") as mock_anthropic:
+        with patch("app.services.benchmarks.scorer.AsyncAnthropic") as mock_anthropic:
             mock_anthropic.return_value = _make_fake_client(judge_response)
             result = await llm_judge_score(
                 question="sales by country today",
@@ -139,7 +139,7 @@ class TestLLMJudgeScore:
         judge_response = (
             '{"score": 0.15, "rationale": "agent hallucinated zero results", "correct": false}'
         )
-        with patch("tests.agent_benchmarks.scorer.AsyncAnthropic") as mock_anthropic:
+        with patch("app.services.benchmarks.scorer.AsyncAnthropic") as mock_anthropic:
             mock_anthropic.return_value = _make_fake_client(judge_response)
             result = await llm_judge_score(
                 question="sales for Norway, Switzerland, NZ, Singapore today",
@@ -156,7 +156,7 @@ class TestLLMJudgeScore:
         client = AsyncMock()
         client.messages = AsyncMock()
         client.messages.create = AsyncMock(side_effect=Exception("rate limited"))
-        with patch("tests.agent_benchmarks.scorer.AsyncAnthropic") as mock_anthropic:
+        with patch("app.services.benchmarks.scorer.AsyncAnthropic") as mock_anthropic:
             mock_anthropic.return_value = client
             result = await llm_judge_score(
                 question="q",
@@ -170,7 +170,7 @@ class TestLLMJudgeScore:
     async def test_judge_parses_markdown_fenced_json(self):
         """Judge sometimes wraps JSON in ``` fences — must still parse."""
         judge_response = '```json\n{"score": 0.7, "rationale": "mostly correct", "correct": true}\n```'
-        with patch("tests.agent_benchmarks.scorer.AsyncAnthropic") as mock_anthropic:
+        with patch("app.services.benchmarks.scorer.AsyncAnthropic") as mock_anthropic:
             mock_anthropic.return_value = _make_fake_client(judge_response)
             result = await llm_judge_score(
                 question="q",

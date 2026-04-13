@@ -5,7 +5,7 @@ external dependency so the tests never touch the real DB, Anthropic API,
 filesystem, or tenant config.
 
 The contract under test is the public surface exposed by
-``tests.agent_benchmarks.agent_runner``:
+``app.services.benchmarks.agent_runner``:
 
 * :class:`AgentRunResult` dataclass (field-compatible with ``BaselineResult``
   plus three extras used by the benchmark harness).
@@ -134,43 +134,43 @@ def patched_deps(stub_agent_cls):
     touches the DB or the real UnifiedAgent."""
     with (
         patch(
-            "tests.agent_benchmarks.agent_runner.UnifiedAgent",
+            "app.services.benchmarks.agent_runner.UnifiedAgent",
             stub_agent_cls,
         ),
         patch(
-            "tests.agent_benchmarks.agent_runner.get_active_metadata",
+            "app.services.benchmarks.agent_runner.get_active_metadata",
             new=AsyncMock(return_value=None),
         ),
         patch(
-            "tests.agent_benchmarks.agent_runner.get_active_connectors_for_tenant",
+            "app.services.benchmarks.agent_runner.get_active_connectors_for_tenant",
             new=AsyncMock(return_value=[]),
         ),
         patch(
-            "tests.agent_benchmarks.agent_runner.retrieve_domain_knowledge",
+            "app.services.benchmarks.agent_runner.retrieve_domain_knowledge",
             new=AsyncMock(return_value=[]),
         ),
         patch(
-            "tests.agent_benchmarks.agent_runner.retrieve_similar_patterns",
+            "app.services.benchmarks.agent_runner.retrieve_similar_patterns",
             new=AsyncMock(return_value=[]),
         ),
         patch(
-            "tests.agent_benchmarks.agent_runner.retrieve_learned_rules",
+            "app.services.benchmarks.agent_runner.retrieve_learned_rules",
             new=AsyncMock(return_value=[]),
         ),
         patch(
-            "tests.agent_benchmarks.agent_runner.TenantEntityResolver.resolve_entities",
+            "app.services.benchmarks.agent_runner.TenantEntityResolver.resolve_entities",
             new=AsyncMock(return_value=""),
         ),
         patch(
-            "tests.agent_benchmarks.agent_runner.build_all_tool_definitions",
+            "app.services.benchmarks.agent_runner.build_all_tool_definitions",
             new=AsyncMock(return_value=[]),
         ),
         patch(
-            "tests.agent_benchmarks.agent_runner._build_adapter",
+            "app.services.benchmarks.agent_runner._build_adapter",
             return_value=MagicMock(),
         ),
         patch(
-            "tests.agent_benchmarks.agent_runner._load_tenant_config",
+            "app.services.benchmarks.agent_runner._load_tenant_config",
             new=AsyncMock(
                 return_value=SimpleNamespace(
                     brand_name="TestCo",
@@ -189,7 +189,7 @@ def patched_deps(stub_agent_cls):
 
 class TestAgentRunResult:
     def test_has_baseline_compatible_fields(self):
-        from tests.agent_benchmarks.agent_runner import AgentRunResult
+        from app.services.benchmarks.agent_runner import AgentRunResult
 
         result = AgentRunResult(
             answer_text="hi",
@@ -225,7 +225,7 @@ class TestAgentRunResult:
 class TestCostCalculation:
     def test_sonnet_pricing_table(self):
         # 10K input + 5K output on sonnet: 0.010 * 3 + 0.005 * 15 = $0.105
-        from tests.agent_benchmarks.agent_runner import _calculate_cost
+        from app.services.benchmarks.agent_runner import _calculate_cost
 
         cost = _calculate_cost(
             model="claude-sonnet-4-6",
@@ -236,7 +236,7 @@ class TestCostCalculation:
 
     def test_opus_pricing_table(self):
         # 1K input + 1K output on opus: 0.001 * 15 + 0.001 * 75 = $0.090
-        from tests.agent_benchmarks.agent_runner import _calculate_cost
+        from app.services.benchmarks.agent_runner import _calculate_cost
 
         cost = _calculate_cost(
             model="claude-opus-4-6",
@@ -246,7 +246,7 @@ class TestCostCalculation:
         assert cost == pytest.approx(0.090)
 
     def test_unknown_model_falls_back_to_sonnet(self):
-        from tests.agent_benchmarks.agent_runner import _calculate_cost
+        from app.services.benchmarks.agent_runner import _calculate_cost
 
         cost = _calculate_cost(
             model="not-a-real-model",
@@ -269,7 +269,7 @@ class TestRunAgentHappyPath:
         patched_deps,
         db_mock,
     ):
-        from tests.agent_benchmarks import agent_runner
+        from app.services.benchmarks import agent_runner
 
         canned = _make_agent_result(
             data="There were 42 orders last week.",
@@ -311,7 +311,7 @@ class TestRunAgentHappyPath:
 @pytest.mark.asyncio
 class TestRunAgentToolUsePath:
     async def test_single_tool_call_logged(self, patched_deps, db_mock):
-        from tests.agent_benchmarks import agent_runner
+        from app.services.benchmarks import agent_runner
 
         tool_log_entry = {
             "step": 0,
@@ -364,7 +364,7 @@ class TestRunAgentExceptionPath:
         patched_deps,
         db_mock,
     ):
-        from tests.agent_benchmarks import agent_runner
+        from app.services.benchmarks import agent_runner
 
         original_init = agent_runner.UnifiedAgent.__init__
 
@@ -399,7 +399,7 @@ class TestRunAgentExceptionPath:
 class TestContextAssembly:
     async def test_context_chars_nonzero_after_setup(self, patched_deps, db_mock):
         """system_prompt should have some content after the runner wires things up."""
-        from tests.agent_benchmarks import agent_runner
+        from app.services.benchmarks import agent_runner
 
         result = await agent_runner.run_agent(
             tenant_id=_TENANT_ID,
@@ -414,7 +414,7 @@ class TestContextAssembly:
         db_mock,
     ):
         """run_agent must not fail when there are zero connectors."""
-        from tests.agent_benchmarks import agent_runner
+        from app.services.benchmarks import agent_runner
 
         # patched_deps already returns [] for connectors
         result = await agent_runner.run_agent(

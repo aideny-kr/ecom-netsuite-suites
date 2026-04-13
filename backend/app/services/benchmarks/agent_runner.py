@@ -23,7 +23,7 @@ Public surface
   agent, streams a response, and returns a populated :class:`AgentRunResult`.
 
 Every helper the unit tests need to patch is imported at module level so
-tests can swap them out via ``tests.agent_benchmarks.agent_runner.XXX``.
+tests can swap them out via ``app.services.benchmarks.agent_runner.XXX``.
 """
 
 from __future__ import annotations

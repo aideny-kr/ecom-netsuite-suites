@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from tests.agent_benchmarks.baseline_runner import (
+from app.services.benchmarks.baseline_runner import (
     BASELINE_SYSTEM_PROMPT_TEMPLATE,
     BaselineResult,
     _calculate_cost,
@@ -136,11 +136,11 @@ class TestRunBaselineHappyPath:
 
         with (
             patch(
-                "tests.agent_benchmarks.baseline_runner._build_baseline_tools",
+                "app.services.benchmarks.baseline_runner._build_baseline_tools",
                 new=AsyncMock(return_value=[]),
             ),
             patch(
-                "tests.agent_benchmarks.baseline_runner._get_anthropic_client"
+                "app.services.benchmarks.baseline_runner._get_anthropic_client"
             ) as mock_get_client,
         ):
             mock_client = MagicMock()
@@ -193,14 +193,14 @@ class TestRunBaselineToolUse:
 
         with (
             patch(
-                "tests.agent_benchmarks.baseline_runner._build_baseline_tools",
+                "app.services.benchmarks.baseline_runner._build_baseline_tools",
                 new=AsyncMock(return_value=[{"name": "ext__abc__ns_runCustomSuiteQL", "description": "x", "input_schema": {"type": "object", "properties": {}}}]),
             ),
             patch(
-                "tests.agent_benchmarks.baseline_runner._get_anthropic_client"
+                "app.services.benchmarks.baseline_runner._get_anthropic_client"
             ) as mock_get_client,
             patch(
-                "tests.agent_benchmarks.baseline_runner.execute_tool_call",
+                "app.services.benchmarks.baseline_runner.execute_tool_call",
                 new=mock_execute,
             ),
         ):
@@ -247,14 +247,14 @@ class TestRunBaselineToolUse:
 
         with (
             patch(
-                "tests.agent_benchmarks.baseline_runner._build_baseline_tools",
+                "app.services.benchmarks.baseline_runner._build_baseline_tools",
                 new=AsyncMock(return_value=[{"name": "ext__abc__ns_runCustomSuiteQL", "description": "x", "input_schema": {"type": "object", "properties": {}}}]),
             ),
             patch(
-                "tests.agent_benchmarks.baseline_runner._get_anthropic_client"
+                "app.services.benchmarks.baseline_runner._get_anthropic_client"
             ) as mock_get_client,
             patch(
-                "tests.agent_benchmarks.baseline_runner.execute_tool_call",
+                "app.services.benchmarks.baseline_runner.execute_tool_call",
                 new=mock_execute,
             ),
         ):
@@ -293,14 +293,14 @@ class TestRunBaselineMaxSteps:
 
         with (
             patch(
-                "tests.agent_benchmarks.baseline_runner._build_baseline_tools",
+                "app.services.benchmarks.baseline_runner._build_baseline_tools",
                 new=AsyncMock(return_value=[{"name": "ext__abc__ns_runCustomSuiteQL", "description": "x", "input_schema": {"type": "object", "properties": {}}}]),
             ),
             patch(
-                "tests.agent_benchmarks.baseline_runner._get_anthropic_client"
+                "app.services.benchmarks.baseline_runner._get_anthropic_client"
             ) as mock_get_client,
             patch(
-                "tests.agent_benchmarks.baseline_runner.execute_tool_call",
+                "app.services.benchmarks.baseline_runner.execute_tool_call",
                 new=mock_execute,
             ),
         ):
@@ -338,11 +338,11 @@ class TestRunBaselineApiError:
 
         with (
             patch(
-                "tests.agent_benchmarks.baseline_runner._build_baseline_tools",
+                "app.services.benchmarks.baseline_runner._build_baseline_tools",
                 new=AsyncMock(return_value=[]),
             ),
             patch(
-                "tests.agent_benchmarks.baseline_runner._get_anthropic_client"
+                "app.services.benchmarks.baseline_runner._get_anthropic_client"
             ) as mock_get_client,
         ):
             mock_client = MagicMock()

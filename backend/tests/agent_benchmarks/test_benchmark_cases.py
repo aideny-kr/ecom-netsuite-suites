@@ -10,9 +10,9 @@ from pathlib import Path
 
 import yaml
 
-from tests.agent_benchmarks.benchmark_runner import BenchmarkCase
+from app.services.benchmarks.benchmark_runner import BenchmarkCase
 
-BENCHMARK_CASES_DIR = Path(__file__).parent / "benchmark_cases"
+BENCHMARK_CASES_DIR = Path(__file__).parent.parent.parent / "app" / "services" / "benchmarks" / "benchmark_cases"
 
 
 def _load_all_cases() -> dict[str, list[tuple[str, BenchmarkCase]]]:

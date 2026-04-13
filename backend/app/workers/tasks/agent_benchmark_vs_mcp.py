@@ -94,10 +94,10 @@ async def _run_nightly_benchmark(
 ) -> dict:
     """Run the benchmark and compare to yesterday's run."""
     from app.core.database import async_session_factory, set_tenant_context
-    from tests.agent_benchmarks.agent_runner import run_agent
-    from tests.agent_benchmarks.baseline_runner import run_baseline
-    from tests.agent_benchmarks.persistence import persist_case_result
-    from tests.agent_benchmarks.run_vs_mcp import (
+    from app.services.benchmarks.agent_runner import run_agent
+    from app.services.benchmarks.baseline_runner import run_baseline
+    from app.services.benchmarks.persistence import persist_case_result
+    from app.services.benchmarks.run_vs_mcp import (
         _run_single_case,
         load_cases,
     )

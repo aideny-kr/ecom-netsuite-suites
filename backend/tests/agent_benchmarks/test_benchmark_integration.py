@@ -2,9 +2,9 @@
 
 from pathlib import Path
 
-from tests.agent_benchmarks.benchmark_runner import BenchmarkRunner
+from app.services.benchmarks.benchmark_runner import BenchmarkRunner
 
-CASES_DIR = Path(__file__).resolve().parent / "benchmark_cases"
+CASES_DIR = Path(__file__).resolve().parent.parent.parent / "app" / "services" / "benchmarks" / "benchmark_cases"
 
 
 class TestBenchmarkIntegration:
@@ -68,7 +68,7 @@ class TestBenchmarkIntegration:
 
     def test_pass_at_k_computation(self):
         runner = BenchmarkRunner()
-        from tests.agent_benchmarks.benchmark_runner import BenchmarkScore
+        from app.services.benchmarks.benchmark_runner import BenchmarkScore
 
         scores = [
             BenchmarkScore(
@@ -86,7 +86,7 @@ class TestBenchmarkIntegration:
 
     def test_pass_at_k_partial(self):
         runner = BenchmarkRunner()
-        from tests.agent_benchmarks.benchmark_runner import BenchmarkScore
+        from app.services.benchmarks.benchmark_runner import BenchmarkScore
 
         scores = [
             BenchmarkScore(

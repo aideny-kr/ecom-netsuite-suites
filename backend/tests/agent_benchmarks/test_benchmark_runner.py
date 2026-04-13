@@ -12,7 +12,7 @@ import pytest
 import yaml
 
 from app.services.chat.agents.base_agent import AgentResult
-from tests.agent_benchmarks.benchmark_runner import (
+from app.services.benchmarks.benchmark_runner import (
     BenchmarkCase,
     BenchmarkReport,
     BenchmarkRunner,

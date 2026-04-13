@@ -35,9 +35,9 @@ from app.services.query_pattern_service import extract_and_store_pattern
 
 # vs-MCP benchmark scoring — replaces the internal composite scorer.
 # Imported here so callers (and tests) can patch them in this module's namespace.
-from tests.agent_benchmarks.agent_runner import run_agent  # noqa: F401
-from tests.agent_benchmarks.baseline_runner import run_baseline  # noqa: F401
-from tests.agent_benchmarks.scorer import substring_score  # noqa: F401
+from app.services.benchmarks.agent_runner import run_agent  # noqa: F401
+from app.services.benchmarks.baseline_runner import run_baseline  # noqa: F401
+from app.services.benchmarks.scorer import substring_score  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
