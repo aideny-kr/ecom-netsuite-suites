@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import uuid
@@ -320,8 +321,6 @@ async def send_message(
             )
 
     # Create run and spawn background task
-    import asyncio
-
     run_id = str(uuid.uuid4())
     rm.create_run(run_id, str(session_id))
 
@@ -344,6 +343,46 @@ async def send_message(
     return {"run_id": run_id, "session_id": str(session_id)}
 
 
+_BACKGROUND_TASK_TIMEOUT = 300  # 5 minutes total for any chat turn
+
+
+async def _run_chat_pipeline(
+    rm,
+    run_id: str,
+    session_id: str,
+    user_message: str,
+    user_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+    user_msg: ChatMessage,
+    wizard_step: str | None,
+    user_timezone: str | None,
+    agent_id: str | None,
+    source_pick: str | None,
+) -> None:
+    """Inner pipeline coroutine — wrapped by asyncio.wait_for in _run_chat_background."""
+    from app.core.database import async_session_factory
+
+    async with async_session_factory() as db:
+        # Re-load session in this DB context so title/updated_at changes persist
+        result = await db.execute(select(ChatSession).where(ChatSession.id == uuid.UUID(session_id)))
+        session = result.scalar_one()
+
+        async for chunk in run_chat_turn(
+            db=db,
+            session=session,
+            user_message=user_message,
+            user_id=user_id,
+            tenant_id=tenant_id,
+            user_msg=user_msg,
+            wizard_step=wizard_step,
+            user_timezone=user_timezone,
+            agent_id=agent_id,
+            run_id=run_id,
+            source_pick=source_pick,
+        ):
+            rm.write_event(run_id, chunk)
+
+
 async def _run_chat_background(
     run_id: str,
     session_id: str,
@@ -358,18 +397,13 @@ async def _run_chat_background(
     source_pick: str | None = None,
 ) -> None:
     """Run the chat pipeline in background, writing events to Redis."""
-    from app.core.database import async_session_factory
-
     rm = get_run_manager()
     try:
-        async with async_session_factory() as db:
-            # Re-load session in this DB context so title/updated_at changes persist
-            result = await db.execute(select(ChatSession).where(ChatSession.id == uuid.UUID(session_id)))
-            session = result.scalar_one()
-
-            async for chunk in run_chat_turn(
-                db=db,
-                session=session,
+        await asyncio.wait_for(
+            _run_chat_pipeline(
+                rm=rm,
+                run_id=run_id,
+                session_id=session_id,
                 user_message=user_message,
                 user_id=user_id,
                 tenant_id=tenant_id,
@@ -377,11 +411,25 @@ async def _run_chat_background(
                 wizard_step=wizard_step,
                 user_timezone=user_timezone,
                 agent_id=agent_id,
-                run_id=run_id,
                 source_pick=source_pick,
-            ):
-                rm.write_event(run_id, chunk)
+            ),
+            timeout=_BACKGROUND_TASK_TIMEOUT,
+        )
         rm.set_status(run_id, "complete")
+    except asyncio.TimeoutError:
+        logger.error(
+            "Background chat run timed out after %ds: %s",
+            _BACKGROUND_TASK_TIMEOUT,
+            run_id,
+        )
+        rm.write_event(
+            run_id,
+            {
+                "type": "error",
+                "error": "The response took too long. Please try again with a simpler question.",
+            },
+        )
+        rm.set_status(run_id, "failed")
     except Exception as exc:
         logger.exception("Background chat run failed: %s", exc)
         rm.write_event(run_id, {"type": "error", "error": "Chat service temporarily unavailable."})
@@ -402,8 +450,6 @@ async def _send_message_inline_sse(
     """Fallback: inline SSE streaming when Redis is unavailable."""
 
     async def stream_generator():
-        import asyncio
-
         _SENTINEL = object()
         partial_text_parts: list[str] = []
         stream_completed = False
