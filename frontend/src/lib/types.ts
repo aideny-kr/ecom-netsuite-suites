@@ -376,6 +376,9 @@ export interface ChatSessionDetail {
   title: string | null;
   workspace_id?: string | null;
   is_archived: boolean;
+  active_run_id?: string | null;
+  status?: "idle" | "running" | "cancelling";
+  run_started_at?: number | null;
   messages: ChatMessage[];
   created_at: string;
   updated_at: string;
