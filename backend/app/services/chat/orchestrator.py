@@ -1144,46 +1144,55 @@ async def run_chat_turn(
         await db.commit()
         print(f"[SOURCE-PICKER] user selected {source_pick}", flush=True)
     elif not session.source_pin and not is_onboarding and not getattr(session, "workspace_id", None):
-        from app.services.chat.source_picker import (
-            build_picker_payload,
-            has_data_intent,
-            score_source,
-            should_prompt_user,
+        # Skip picker if session already has substantive agent results — the user's
+        # data-source intent is established; use normal 3-tier routing for follow-ups.
+        _has_prior_agent_result = any(
+            m.get("role") == "assistant" and len(m.get("content", "")) > 100
+            for m in history_messages
         )
-
-        _score = score_source(sanitized_input)
-        if has_data_intent(sanitized_input) and should_prompt_user(_score):
-            _payload = build_picker_payload(_score, user_question=sanitized_input)
-            _placeholder_msg = ChatMessage(
-                tenant_id=tenant_id,
-                session_id=session.id,
-                role="assistant",
-                content="",
-                structured_output=dict(_payload),
-                created_at=datetime.now(timezone.utc),
+        if _has_prior_agent_result:
+            pass  # Fall through to normal routing below
+        else:
+            from app.services.chat.source_picker import (
+                build_picker_payload,
+                has_data_intent,
+                score_source,
+                should_prompt_user,
             )
-            db.add(_placeholder_msg)
-            await db.commit()
-            await db.refresh(_placeholder_msg)
 
-            yield {
-                "type": "message",
-                "message": {
-                    "id": str(_placeholder_msg.id),
-                    "role": "assistant",
-                    "content": "",
-                    "tool_calls": None,
-                    "citations": None,
-                    "created_at": _placeholder_msg.created_at.isoformat(),
-                    "structured_output": dict(_payload),
-                },
-            }
-            print(
-                f"[SOURCE-PICKER] shown | confidence={_score[1]:.2f} "
-                f"recommended={_score[0]} query={sanitized_input[:60]}",
-                flush=True,
-            )
-            return
+            _score = score_source(sanitized_input)
+            if has_data_intent(sanitized_input) and should_prompt_user(_score):
+                _payload = build_picker_payload(_score, user_question=sanitized_input)
+                _placeholder_msg = ChatMessage(
+                    tenant_id=tenant_id,
+                    session_id=session.id,
+                    role="assistant",
+                    content="",
+                    structured_output=dict(_payload),
+                    created_at=datetime.now(timezone.utc),
+                )
+                db.add(_placeholder_msg)
+                await db.commit()
+                await db.refresh(_placeholder_msg)
+
+                yield {
+                    "type": "message",
+                    "message": {
+                        "id": str(_placeholder_msg.id),
+                        "role": "assistant",
+                        "content": "",
+                        "tool_calls": None,
+                        "citations": None,
+                        "created_at": _placeholder_msg.created_at.isoformat(),
+                        "structured_output": dict(_payload),
+                    },
+                }
+                print(
+                    f"[SOURCE-PICKER] shown | confidence={_score[1]:.2f} "
+                    f"recommended={_score[0]} query={sanitized_input[:60]}",
+                    flush=True,
+                )
+                return
 
     if not is_onboarding:
         state = OrchestratorState(

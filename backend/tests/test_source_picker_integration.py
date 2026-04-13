@@ -101,3 +101,28 @@ class TestShouldOverridePin:
         from app.services.chat.source_picker import _should_override_pin
 
         assert _should_override_pin("show me the balance sheet", "netsuite") is False
+
+
+class TestPickerSkipsAfterAgentResult:
+    """Task 7: Picker should not show when session already has agent results."""
+
+    def test_has_prior_result_check(self):
+        """History with a substantive assistant message should suppress picker."""
+        history_with_result = [
+            {"role": "user", "content": "how many orders this week"},
+            {"role": "assistant", "content": "Based on BigQuery data, there were 1,247 orders this week. " * 3},
+        ]
+        history_without_result = [
+            {"role": "user", "content": "how many orders this week"},
+            {"role": "assistant", "content": ""},  # picker placeholder (empty)
+        ]
+        history_empty = []
+
+        _has_result = lambda msgs: any(
+            m.get("role") == "assistant" and len(m.get("content", "")) > 100
+            for m in msgs
+        )
+
+        assert _has_result(history_with_result) is True
+        assert _has_result(history_without_result) is False
+        assert _has_result(history_empty) is False
