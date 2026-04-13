@@ -35,6 +35,7 @@ export default function ChatPage() {
   const [streamingMessage, setStreamingMessage] = useState<ChatMessage | null>(null);
   const [isStreaming, setIsStreaming] = useState(false);
   const isStreamingRef = useRef(false);
+  const [activeSourcePick, setActiveSourcePick] = useState<"netsuite" | "bigquery" | null>(null);
   const [financialReport, setFinancialReport] = useState<FinancialReportData | null>(null);
   const financialReportsRef = useRef<Map<string, FinancialReportData>>(new Map());
   const [dataTable, setDataTable] = useState<DataTableData | null>(null);
@@ -431,6 +432,7 @@ export default function ChatPage() {
           },
         );
       }
+      setActiveSourcePick(source);
       await handleSend(originalQuestion, undefined, { source_pick: source });
     },
     [sessionDetail, handleSend, activeSessionId, queryClient],
@@ -453,6 +455,7 @@ export default function ChatPage() {
     setTaskOutput(null);
     setPendingMessage(null);
     setError(null);
+    setActiveSourcePick(null);
   }, []);
 
   const handleNewChat = useCallback(() => {
@@ -531,6 +534,7 @@ export default function ChatPage() {
             isLoading={isLoadingDetail && !!activeSessionId}
             pendingUserMessage={pendingMessage}
             isWaitingForReply={isStreaming}
+            activeSourcePick={activeSourcePick}
             streamBlocks={streamBlocks}
             streamingMessage={streamingMessage}
             financialReports={financialReportsRef.current}

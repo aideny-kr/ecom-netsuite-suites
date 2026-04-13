@@ -605,6 +605,7 @@ interface MessageListProps {
   isLoading: boolean;
   pendingUserMessage?: string | null;
   isWaitingForReply?: boolean;
+  activeSourcePick?: "netsuite" | "bigquery" | null;
   onMentionClick?: (filePath: string) => void;
   workspaceId?: string | null;
   onViewDiff?: (changesetId: string) => void;
@@ -632,6 +633,7 @@ export function MessageList({
   isLoading,
   pendingUserMessage,
   isWaitingForReply,
+  activeSourcePick,
   onMentionClick,
   workspaceId,
   onViewDiff,
@@ -1048,14 +1050,23 @@ export function MessageList({
                   <div className="flex items-center gap-4">
                     <div className="h-2 w-2 bg-[var(--chat-accent)] animate-pulse" />
                     <span className="text-[10px] tracking-widest text-[var(--chat-accent)] uppercase">
-                      PROCESSING...
+                      {activeSourcePick
+                        ? `Using ${activeSourcePick === "bigquery" ? "BigQuery" : "NetSuite"}...`
+                        : "PROCESSING..."}
                     </span>
                   </div>
                 ) : (
-                  <span className="inline-flex gap-1 h-[20px] items-center">
-                    <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/60 animate-bounce [animation-delay:0ms]" />
-                    <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/60 animate-bounce [animation-delay:150ms]" />
-                    <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/60 animate-bounce [animation-delay:300ms]" />
+                  <span className="inline-flex gap-1.5 h-[20px] items-center">
+                    <span className="inline-flex gap-1 items-center">
+                      <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/60 animate-bounce [animation-delay:0ms]" />
+                      <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/60 animate-bounce [animation-delay:150ms]" />
+                      <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/60 animate-bounce [animation-delay:300ms]" />
+                    </span>
+                    {activeSourcePick && (
+                      <span className="text-[11px] text-muted-foreground ml-1">
+                        Using {activeSourcePick === "bigquery" ? "BigQuery" : "NetSuite"}
+                      </span>
+                    )}
                   </span>
                 )
               )
