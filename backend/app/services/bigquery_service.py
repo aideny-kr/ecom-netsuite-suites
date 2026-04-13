@@ -8,6 +8,7 @@ Tests mock _get_client so the sync calls are instant.
 from __future__ import annotations
 
 import asyncio
+import re
 from typing import Any
 
 from google.cloud import bigquery
@@ -23,11 +24,26 @@ def _get_client(credentials: dict, project_id: str, location: str | None = None)
         raise ValueError(f"Failed to initialize BigQuery client: {e}")
 
 
+def _strip_sql_comments(query: str) -> str:
+    """Remove SQL comments from a query string.
+
+    Strips:
+    - Block comments: /* ... */ (non-greedy, handles multi-line)
+    - Single-line comments: -- ... to end of line
+    - Leading/trailing whitespace after stripping
+    """
+    # Remove block comments first (non-greedy, DOTALL for multi-line)
+    cleaned = re.sub(r"/\*.*?\*/", "", query, flags=re.DOTALL)
+    # Remove single-line comments
+    cleaned = re.sub(r"--[^\n]*", "", cleaned)
+    return cleaned.strip()
+
+
 def _validate_read_only(query: str) -> None:
     """Reject DML/DDL. Raises ValueError for non-SELECT queries."""
-    normalized = query.strip().upper()
+    cleaned = _strip_sql_comments(query).strip().upper()
     # Allow SELECT and WITH (CTEs)
-    if normalized.startswith("SELECT") or normalized.startswith("WITH"):
+    if cleaned.startswith("SELECT") or cleaned.startswith("WITH"):
         return
     raise ValueError("Read-only queries only — SELECT and WITH/CTE are allowed")
 
