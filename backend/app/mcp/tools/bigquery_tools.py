@@ -63,6 +63,7 @@ async def bigquery_sql_execute(params: dict, context: dict, **kwargs: Any) -> di
     query = params.get("query", "")
     max_rows = params.get("max_rows", 1000)
 
+    logger.debug("BigQuery SQL query: %.500s", query)  # Truncate at 500 chars
     try:
         result = await execute_query(
             credentials=sa_json,
@@ -73,7 +74,7 @@ async def bigquery_sql_execute(params: dict, context: dict, **kwargs: Any) -> di
         )
         return result
     except Exception as exc:
-        logger.warning("BigQuery SQL execution failed", exc_info=True)
+        logger.warning("BigQuery SQL execution failed | query=%.500s", query, exc_info=True)
         return {"error": True, "message": f"BigQuery query failed: {exc}"}
 
 
