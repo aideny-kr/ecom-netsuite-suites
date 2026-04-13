@@ -31,6 +31,10 @@ def _strip_sql_comments(query: str) -> str:
     - Block comments: /* ... */ (non-greedy, handles multi-line)
     - Single-line comments: -- ... to end of line
     - Leading/trailing whitespace after stripping
+
+    NOTE: Does not handle comment-like syntax inside string literals.
+    Safe for _validate_read_only (only checks first keyword), but do NOT
+    use this to transform queries before execution.
     """
     # Remove block comments first (non-greedy, DOTALL for multi-line)
     cleaned = re.sub(r"/\*.*?\*/", "", query, flags=re.DOTALL)

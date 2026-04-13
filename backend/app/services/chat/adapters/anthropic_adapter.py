@@ -2,12 +2,16 @@
 
 import asyncio
 import logging
+import time
 
 import anthropic
 
 from app.services.chat.llm_adapter import BaseLLMAdapter, LLMResponse, TokenUsage, ToolUseBlock
 
 logger = logging.getLogger(__name__)
+
+# Wall-clock deadline for a single stream_message call (seconds).
+_STREAM_TIMEOUT_SECONDS = 120  # 2 minutes
 
 # Transient errors worth retrying with exponential backoff before any tokens stream.
 _RETRYABLE_ERROR_TYPES = {"overloaded_error", "rate_limit_error", "api_error"}
@@ -127,14 +131,29 @@ class AnthropicAdapter(BaseLLMAdapter):
         # Retry the stream open (and the first chunk) on transient overloads.
         # Once any text has been yielded we do NOT retry — partial output
         # cannot be rewound without confusing the caller.
+        deadline = time.monotonic() + _STREAM_TIMEOUT_SECONDS
         attempt = 0
         first_chunk_received = False
         while True:
             try:
                 async with self._client.messages.stream(**kwargs) as stream:
                     async for text in stream.text_stream:
+                        if time.monotonic() > deadline:
+                            logger.warning(
+                                "stream_message deadline exceeded (%ds)",
+                                _STREAM_TIMEOUT_SECONDS,
+                            )
+                            return  # No "response" event — caller sees timeout
                         first_chunk_received = True
                         yield "text", text
+
+                    # Check deadline before awaiting final_message
+                    if time.monotonic() > deadline:
+                        logger.warning(
+                            "stream_message deadline exceeded before final_message (%ds)",
+                            _STREAM_TIMEOUT_SECONDS,
+                        )
+                        return
 
                     final_message = await stream.get_final_message()
                 break
