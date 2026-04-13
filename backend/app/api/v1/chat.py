@@ -77,6 +77,7 @@ class SessionListItem(BaseModel):
     is_archived: bool
     active_run_id: str | None = None
     status: str = "idle"  # idle, running, cancelling
+    run_started_at: float | None = None
     created_at: str
     updated_at: str
 
@@ -99,11 +100,14 @@ def _serialize_session(session: ChatSession) -> dict:
     rm = get_run_manager()
     active_run_id = rm.get_active_run(str(session.id))
     run_status = "idle"
+    run_started_at = None
     if active_run_id:
         rs = rm.get_status(active_run_id)
         run_status = rs if rs in ("running", "cancelling") else "idle"
         if run_status == "idle":
             active_run_id = None
+        else:
+            run_started_at = rm.get_started_at(active_run_id)
 
     return {
         "id": str(session.id),
@@ -114,6 +118,7 @@ def _serialize_session(session: ChatSession) -> dict:
         "is_archived": session.is_archived,
         "active_run_id": active_run_id,
         "status": run_status,
+        "run_started_at": run_started_at,
         "created_at": session.created_at.isoformat(),
         "updated_at": session.updated_at.isoformat(),
     }

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiClient } from "@/lib/api-client";
 import {
@@ -346,9 +346,9 @@ function SessionItem({
             <Scale className="h-3 w-3 flex-shrink-0 text-emerald-400" />
           )}
           {session.status === "running" || session.status === "cancelling" ? (
-            <span
-              className="ml-1.5 inline-block h-1.5 w-1.5 rounded-full bg-primary animate-pulse shrink-0"
-              title={session.status === "cancelling" ? "Stopping..." : "Running"}
+            <RunningIndicator
+              status={session.status}
+              startedAt={session.run_started_at}
             />
           ) : null}
         </div>
@@ -386,6 +386,45 @@ function SessionItem({
         </button>
       </div>
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Running indicator with elapsed time
+// ---------------------------------------------------------------------------
+
+function RunningIndicator({ status, startedAt }: { status: string; startedAt?: number | null }) {
+  const [, setTick] = useState(0);
+
+  useEffect(() => {
+    if (!startedAt) return;
+    const interval = setInterval(() => setTick((t) => t + 1), 1000);
+    return () => clearInterval(interval);
+  }, [startedAt]);
+
+  if (status === "cancelling") {
+    return (
+      <span className="ml-1.5 text-[10px] text-muted-foreground animate-pulse" title="Stopping...">
+        stopping
+      </span>
+    );
+  }
+
+  if (!startedAt) {
+    return (
+      <span className="ml-1.5 inline-block h-1.5 w-1.5 rounded-full bg-primary animate-pulse shrink-0" />
+    );
+  }
+
+  const elapsed = Math.floor(Date.now() / 1000 - startedAt);
+  const label = elapsed < 60 ? `${elapsed}s` : `${Math.floor(elapsed / 60)}m ${elapsed % 60}s`;
+  const color = elapsed >= 120 ? "text-destructive" : elapsed >= 60 ? "text-amber-500" : "text-muted-foreground";
+
+  return (
+    <span className={cn("ml-1.5 text-[10px] shrink-0 tabular-nums", color)} title={`Running for ${label}`}>
+      <span className="inline-block h-1.5 w-1.5 rounded-full bg-primary animate-pulse mr-0.5 align-middle" />
+      {label}
+    </span>
   );
 }
 

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from typing import Any
 
 import redis
@@ -49,8 +50,17 @@ class RunManager:
             return
         pipe = r.pipeline()
         pipe.set(f"chat:run:{run_id}:status", "running", ex=_RUN_TTL)
+        pipe.set(f"chat:run:{run_id}:started_at", str(time.time()), ex=_RUN_TTL)
         pipe.set(f"chat:session:{session_id}:run", run_id, ex=_RUN_TTL)
         pipe.execute()
+
+    def get_started_at(self, run_id: str) -> float | None:
+        """Get the start timestamp of a run (Unix epoch)."""
+        r = self._redis
+        if r is None:
+            return None
+        val = r.get(f"chat:run:{run_id}:started_at")
+        return float(val) if val else None
 
     def get_status(self, run_id: str) -> str | None:
         """Get the current status of a run."""
