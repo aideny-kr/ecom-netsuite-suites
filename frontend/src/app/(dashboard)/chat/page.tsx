@@ -445,6 +445,15 @@ export default function ChatPage() {
           },
         );
       }
+      // The picker's SSE stream may still be open (connectToRunStream hasn't
+      // finished its finally block). Clear streaming state so handleSend's
+      // isStreamingRef guard doesn't silently block the new request.
+      if (abortRef.current) {
+        abortRef.current.abort();
+        abortRef.current = null;
+      }
+      isStreamingRef.current = false;
+      setIsStreaming(false);
       setActiveSourcePick(source);
       await handleSend(originalQuestion, undefined, { source_pick: source });
     },
