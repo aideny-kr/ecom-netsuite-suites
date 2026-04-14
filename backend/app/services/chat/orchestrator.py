@@ -1513,6 +1513,9 @@ async def run_chat_turn(
                 # ── Chitchat short-circuit: skip expensive context for conversational messages ──
                 _is_chitchat = bool(_CHITCHAT_RE.match(sanitized_input))
                 is_financial = False
+                is_web_search = False
+                is_netsuite_entity = False
+                _has_data_reference = False
 
                 from app.services.importance_classifier import ImportanceTier, classify_importance
 
