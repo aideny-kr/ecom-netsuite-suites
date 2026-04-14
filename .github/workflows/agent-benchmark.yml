@@ -7,6 +7,7 @@ on:
       - 'backend/app/services/query_pattern_service.py'
       - 'backend/app/services/confidence_service.py'
       - 'backend/app/mcp/**'
+      - 'backend/app/services/benchmarks/**'
       - 'backend/tests/agent_benchmarks/**'
 
 concurrency:
@@ -78,9 +79,20 @@ jobs:
       - name: Run Alembic migrations
         run: cd backend && alembic upgrade head
 
-      - name: Run vs-MCP agent benchmark
+      - name: Skip benchmark when ANTHROPIC_API_KEY secret is missing
+        id: check_secret
         run: |
-          cd backend && python -m tests.agent_benchmarks.run_vs_mcp \
+          if [ -z "${ANTHROPIC_API_KEY}" ]; then
+            echo "ANTHROPIC_API_KEY is not set; skipping agent benchmark." >&2
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run vs-MCP agent benchmark
+        if: steps.check_secret.outputs.skip != 'true'
+        run: |
+          cd backend && python -m app.services.benchmarks.run_vs_mcp \
             --suite sales \
             --tenant-id ce3dfaad-626f-4992-84e9-500c8291ca0a \
             --skip-baseline \

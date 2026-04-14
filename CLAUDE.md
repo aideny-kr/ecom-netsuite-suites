@@ -295,7 +295,7 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 | Frontend tests | `frontend/src/components/chat/__tests__/` |
 | Vitest config | `frontend/vitest.config.ts` |
 | nginx config | `/etc/nginx/sites-available/suitestudio` (on GCP VM) |
-| Benchmark CLI | `backend/tests/agent_benchmarks/run_vs_mcp.py` |
+| Benchmark CLI | `backend/app/services/benchmarks/run_vs_mcp.py` |
 | Benchmark cases | `backend/tests/agent_benchmarks/benchmark_cases/vs_mcp/` |
 | Baseline runner | `backend/tests/agent_benchmarks/baseline_runner.py` |
 | Agent runner | `backend/tests/agent_benchmarks/agent_runner.py` |
@@ -365,7 +365,7 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 - **Latest migration**: 068_revoke_recon_ops
 - **Frontend tests**: Vitest + @testing-library/react (31 tests). Run: `cd frontend && npx vitest run`
 - **Backend tests**: 150+ tests. Run: `cd backend && .venv/bin/python -m pytest`
-- **Agent benchmark**: 18 sales cases vs Claude+MCP. Run: `cd backend && .venv/bin/python -m tests.agent_benchmarks.run_vs_mcp --suite sales --tenant-id ce3dfaad-626f-4992-84e9-500c8291ca0a`
+- **Agent benchmark**: 18 sales cases vs Claude+MCP. Run: `cd backend && .venv/bin/python -m app.services.benchmarks.run_vs_mcp --suite sales --tenant-id ce3dfaad-626f-4992-84e9-500c8291ca0a`
 - **Staging**: `api-staging.suitestudio.ai` + `staging.suitestudio.ai`. GCP Docker + nginx + Let's Encrypt. Deploy: `saas-deployment` skill.
 - **Nightly benchmark**: 11:00 UTC, enabled on staging. Results in `agent_benchmark_runs` table. Regression alerts via Sentry + structured log.
 - **Nightly auto-improvement**: 10:00 UTC. KEEP/REVERT/SKIP decisions now based on vs-MCP comparison (not broken composite scorer).

@@ -140,7 +140,7 @@ def _truncate_preview(value: Any) -> str:
     s = value if isinstance(value, str) else str(value)
     if len(s) <= _TOOL_RESULT_PREVIEW_CHARS:
         return s
-    return s[: _TOOL_RESULT_PREVIEW_CHARS] + f"... [+{len(s) - _TOOL_RESULT_PREVIEW_CHARS} chars truncated]"
+    return s[:_TOOL_RESULT_PREVIEW_CHARS] + f"... [+{len(s) - _TOOL_RESULT_PREVIEW_CHARS} chars truncated]"
 
 
 def _tool_log_to_baseline_shape(tool_calls_log: list[dict]) -> list[dict]:

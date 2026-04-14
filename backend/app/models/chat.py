@@ -1,5 +1,6 @@
 import uuid
 from decimal import Decimal
+
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import Boolean, ForeignKey, Index, Integer, Numeric, String, Text
 from sqlalchemy.dialects.postgresql import JSON, UUID

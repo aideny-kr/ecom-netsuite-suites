@@ -132,7 +132,10 @@ def db_mock():
 def patched_deps(stub_agent_cls):
     """Patch all the orchestrator context-loading helpers so run_agent never
     touches the DB or the real UnifiedAgent."""
+    # CI doesn't set ANTHROPIC_API_KEY; patch it so run_agent's early-exit
+    # guard (missing_anthropic_api_key) doesn't short-circuit the test.
     with (
+        patch("app.core.config.settings.ANTHROPIC_API_KEY", "sk-test-not-real"),
         patch(
             "app.services.benchmarks.agent_runner.UnifiedAgent",
             stub_agent_cls,

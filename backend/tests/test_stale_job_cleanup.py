@@ -3,7 +3,6 @@
 import uuid
 from datetime import datetime, timedelta, timezone
 
-import pytest
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -14,9 +13,7 @@ from tests.conftest import create_test_tenant
 class TestStaleJobCleanup:
     """Verify _cleanup_stale_jobs marks stale running jobs as failed."""
 
-    async def _insert_job(
-        self, db: AsyncSession, tenant_id: uuid.UUID, status: str, started_at: datetime
-    ) -> uuid.UUID:
+    async def _insert_job(self, db: AsyncSession, tenant_id: uuid.UUID, status: str, started_at: datetime) -> uuid.UUID:
         job = Job(
             tenant_id=tenant_id,
             job_type="tasks.test_task",

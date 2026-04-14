@@ -1,4 +1,5 @@
 import json
+import time
 import uuid
 
 import structlog
@@ -43,11 +44,17 @@ class TenantEntityResolver:
         model: str,
     ) -> str:
         prompt = f"User prompt: {user_message}"
+        print(f"[TENANT_RESOLVER] start | msg_len={len(user_message)}", flush=True)
+        _t0 = time.time()
         response = await adapter.create_message(
             model=model,
             max_tokens=256,
             system=EXTRACTOR_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": prompt}],
+        )
+        print(
+            f"[TENANT_RESOLVER] llm_call_complete in {time.time() - _t0:.2f}s",
+            flush=True,
         )
 
         try:

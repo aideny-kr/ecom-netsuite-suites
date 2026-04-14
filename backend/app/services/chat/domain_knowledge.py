@@ -125,8 +125,7 @@ async def retrieve_domain_knowledge(
             )
         else:
             print(
-                f"[DOMAIN_KNOWLEDGE_RETRIEVAL] "
-                f'q="{query_text[:80]}" returned=0',
+                f'[DOMAIN_KNOWLEDGE_RETRIEVAL] q="{query_text[:80]}" returned=0',
                 flush=True,
             )
 

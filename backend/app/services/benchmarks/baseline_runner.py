@@ -333,9 +333,7 @@ async def run_baseline(
                 {
                     "type": "tool_result",
                     "tool_use_id": tu.id,
-                    "content": tool_result_str
-                    if isinstance(tool_result_str, str)
-                    else str(tool_result_str),
+                    "content": tool_result_str if isinstance(tool_result_str, str) else str(tool_result_str),
                 }
             )
 

@@ -136,7 +136,7 @@ def _build_html_body(*, run_date: date, stats: dict, regression_detected: bool) 
                 </tr>
                 <tr>
                     <td style="padding: 8px; border-bottom: 1px solid #e5e7eb;">MCP Wins</td>
-                    <td style="padding: 8px; border-bottom: 1px solid #e5e7eb; {'color: #dc2626; font-weight: 600;' if mcp_wins > 0 else ''}">{mcp_wins}</td>
+                    <td style="padding: 8px; border-bottom: 1px solid #e5e7eb; {"color: #dc2626; font-weight: 600;" if mcp_wins > 0 else ""}">{mcp_wins}</td>
                 </tr>
                 <tr>
                     <td style="padding: 8px; border-bottom: 1px solid #e5e7eb;">Ties</td>
@@ -155,7 +155,7 @@ def _build_html_body(*, run_date: date, stats: dict, regression_detected: bool) 
         </div>
 
         <p style="color: #6b7280; font-size: 13px;">
-            Run ID: {stats.get('run_id', 'n/a')}<br>
+            Run ID: {stats.get("run_id", "n/a")}<br>
             View full results: <a href="https://staging.suitestudio.ai/settings/benchmarks">Dashboard</a><br>
             API: <code>GET /api/v1/benchmarks/latest</code>
         </p>

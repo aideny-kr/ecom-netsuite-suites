@@ -7,10 +7,18 @@ from google.genai import types as genai_types
 
 from app.services.chat.llm_adapter import BaseLLMAdapter, LLMResponse, TokenUsage, ToolUseBlock
 
+# See anthropic_adapter._CLIENT_TIMEOUT for rationale. google-genai uses
+# milliseconds for http_options.timeout; 60000ms keeps stalled calls from
+# burning the 300s chat budget.
+_CLIENT_TIMEOUT_MS = 60_000
+
 
 class GeminiAdapter(BaseLLMAdapter):
     def __init__(self, api_key: str):
-        self._client = genai.Client(api_key=api_key)
+        self._client = genai.Client(
+            api_key=api_key,
+            http_options=genai_types.HttpOptions(timeout=_CLIENT_TIMEOUT_MS),
+        )
 
     def _convert_tools(self, tools: list[dict]) -> list[genai_types.Tool]:
         """Convert Anthropic tool format to Gemini FunctionDeclarations."""
