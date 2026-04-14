@@ -95,9 +95,7 @@ async def test_stream_deadline_exceeded_during_text():
 
     # First text chunk should be yielded (check happens after yield)
     # but crucially, no "response" event should exist
-    assert not any(et == "response" for et, _ in events), (
-        "Expected no 'response' event when deadline exceeded"
-    )
+    assert not any(et == "response" for et, _ in events), "Expected no 'response' event when deadline exceeded"
 
 
 @pytest.mark.asyncio

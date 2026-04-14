@@ -1153,8 +1153,7 @@ async def run_chat_turn(
         # Skip picker if session already has substantive agent results — the user's
         # data-source intent is established; use normal 3-tier routing for follow-ups.
         _has_prior_agent_result = any(
-            m.get("role") == "assistant" and len(m.get("content", "")) > 100
-            for m in history_messages
+            m.get("role") == "assistant" and len(m.get("content", "")) > 100 for m in history_messages
         )
         if _has_prior_agent_result:
             pass  # Fall through to normal routing below
@@ -1653,9 +1652,7 @@ async def run_chat_turn(
                     _gather_keys.append("learned_rules")
 
                     _gather_t0 = time.time()
-                    print(
-                        f"[ORCHESTRATOR] context_gather start | tasks={_gather_keys}", flush=True
-                    )
+                    print(f"[ORCHESTRATOR] context_gather start | tasks={_gather_keys}", flush=True)
                     _gather_results = await asyncio.gather(*_gather_tasks, return_exceptions=True)
                     print(
                         f"[ORCHESTRATOR] context_gather complete in {time.time() - _gather_t0:.2f}s",

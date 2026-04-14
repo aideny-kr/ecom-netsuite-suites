@@ -62,11 +62,16 @@ class TestAllCaseFilesParse:
             assert not dupes, f"{agent_id}: duplicate queries found: {set(dupes)}"
 
     def test_baseline_mirrors_exist(self):
-        """Every specialized agent case has a matching case in unified_agent/."""
+        """Every specialized-agent case has a matching case in unified_agent/.
+
+        vs_mcp/ is excluded: those cases compare our unified agent against
+        Claude+MCP (the external baseline), so they don't need a mirror in
+        unified_agent/.
+        """
         all_cases = _load_all_cases()
         unified_queries = {c.query for _, c in all_cases.get("unified_agent", [])}
         for agent_id, cases in all_cases.items():
-            if agent_id == "unified_agent":
+            if agent_id in ("unified_agent", "vs_mcp"):
                 continue
             for filename, case in cases:
                 assert case.query in unified_queries, (

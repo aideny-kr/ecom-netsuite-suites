@@ -53,6 +53,4 @@ class AgentBenchmarkRun(Base, UUIDPrimaryKeyMixin):
     tool_calls: Mapped[list | None] = mapped_column(JSONB, nullable=True)
     # Explicit created_at — we don't use TimestampMixin because benchmark
     # rows are immutable (no updated_at needed).
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), nullable=False
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)

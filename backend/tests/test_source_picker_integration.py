@@ -119,10 +119,7 @@ class TestPickerSkipsAfterAgentResult:
         history_empty = []
 
         def _has_result(msgs):
-            return any(
-                m.get("role") == "assistant" and len(m.get("content", "")) > 100
-                for m in msgs
-            )
+            return any(m.get("role") == "assistant" and len(m.get("content", "")) > 100 for m in msgs)
 
         assert _has_result(history_with_result) is True
         assert _has_result(history_without_result) is False

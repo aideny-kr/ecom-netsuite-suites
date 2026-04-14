@@ -136,9 +136,7 @@ class TestLLMJudgeScore:
     async def test_judge_returns_low_score_for_failure_answer(self):
         """Judge should penalize 'I couldn't find' answers even if they
         mention the keywords."""
-        judge_response = (
-            '{"score": 0.15, "rationale": "agent hallucinated zero results", "correct": false}'
-        )
+        judge_response = '{"score": 0.15, "rationale": "agent hallucinated zero results", "correct": false}'
         with patch("app.services.benchmarks.scorer.AsyncAnthropic") as mock_anthropic:
             mock_anthropic.return_value = _make_fake_client(judge_response)
             result = await llm_judge_score(

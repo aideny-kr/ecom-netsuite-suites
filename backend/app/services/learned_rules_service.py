@@ -57,10 +57,7 @@ async def retrieve_learned_rules(
             f"count={len(all_rules)} (no query filter, returning all)",
             flush=True,
         )
-        return [
-            {"category": r.rule_category or "general", "description": r.rule_description}
-            for r in all_rules
-        ]
+        return [{"category": r.rule_category or "general", "description": r.rule_description} for r in all_rules]
 
     # Query-aware filtering: extract keywords, rank rules by overlap
     query_words = set(re.findall(r"\b\w{3,}\b", query_text.lower()))
@@ -101,7 +98,4 @@ async def retrieve_learned_rules(
         flush=True,
     )
 
-    return [
-        {"category": r.rule_category or "general", "description": r.rule_description}
-        for r in selected
-    ]
+    return [{"category": r.rule_category or "general", "description": r.rule_description} for r in selected]

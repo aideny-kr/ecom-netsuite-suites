@@ -139,9 +139,7 @@ class TestRunBaselineHappyPath:
                 "app.services.benchmarks.baseline_runner._build_baseline_tools",
                 new=AsyncMock(return_value=[]),
             ),
-            patch(
-                "app.services.benchmarks.baseline_runner._get_anthropic_client"
-            ) as mock_get_client,
+            patch("app.services.benchmarks.baseline_runner._get_anthropic_client") as mock_get_client,
         ):
             mock_client = MagicMock()
             mock_client.messages.create = mock_create
@@ -194,11 +192,17 @@ class TestRunBaselineToolUse:
         with (
             patch(
                 "app.services.benchmarks.baseline_runner._build_baseline_tools",
-                new=AsyncMock(return_value=[{"name": "ext__abc__ns_runCustomSuiteQL", "description": "x", "input_schema": {"type": "object", "properties": {}}}]),
+                new=AsyncMock(
+                    return_value=[
+                        {
+                            "name": "ext__abc__ns_runCustomSuiteQL",
+                            "description": "x",
+                            "input_schema": {"type": "object", "properties": {}},
+                        }
+                    ]
+                ),
             ),
-            patch(
-                "app.services.benchmarks.baseline_runner._get_anthropic_client"
-            ) as mock_get_client,
+            patch("app.services.benchmarks.baseline_runner._get_anthropic_client") as mock_get_client,
             patch(
                 "app.services.benchmarks.baseline_runner.execute_tool_call",
                 new=mock_execute,
@@ -248,11 +252,17 @@ class TestRunBaselineToolUse:
         with (
             patch(
                 "app.services.benchmarks.baseline_runner._build_baseline_tools",
-                new=AsyncMock(return_value=[{"name": "ext__abc__ns_runCustomSuiteQL", "description": "x", "input_schema": {"type": "object", "properties": {}}}]),
+                new=AsyncMock(
+                    return_value=[
+                        {
+                            "name": "ext__abc__ns_runCustomSuiteQL",
+                            "description": "x",
+                            "input_schema": {"type": "object", "properties": {}},
+                        }
+                    ]
+                ),
             ),
-            patch(
-                "app.services.benchmarks.baseline_runner._get_anthropic_client"
-            ) as mock_get_client,
+            patch("app.services.benchmarks.baseline_runner._get_anthropic_client") as mock_get_client,
             patch(
                 "app.services.benchmarks.baseline_runner.execute_tool_call",
                 new=mock_execute,
@@ -294,11 +304,17 @@ class TestRunBaselineMaxSteps:
         with (
             patch(
                 "app.services.benchmarks.baseline_runner._build_baseline_tools",
-                new=AsyncMock(return_value=[{"name": "ext__abc__ns_runCustomSuiteQL", "description": "x", "input_schema": {"type": "object", "properties": {}}}]),
+                new=AsyncMock(
+                    return_value=[
+                        {
+                            "name": "ext__abc__ns_runCustomSuiteQL",
+                            "description": "x",
+                            "input_schema": {"type": "object", "properties": {}},
+                        }
+                    ]
+                ),
             ),
-            patch(
-                "app.services.benchmarks.baseline_runner._get_anthropic_client"
-            ) as mock_get_client,
+            patch("app.services.benchmarks.baseline_runner._get_anthropic_client") as mock_get_client,
             patch(
                 "app.services.benchmarks.baseline_runner.execute_tool_call",
                 new=mock_execute,
@@ -341,9 +357,7 @@ class TestRunBaselineApiError:
                 "app.services.benchmarks.baseline_runner._build_baseline_tools",
                 new=AsyncMock(return_value=[]),
             ),
-            patch(
-                "app.services.benchmarks.baseline_runner._get_anthropic_client"
-            ) as mock_get_client,
+            patch("app.services.benchmarks.baseline_runner._get_anthropic_client") as mock_get_client,
         ):
             mock_client = MagicMock()
             mock_client.messages.create = mock_create

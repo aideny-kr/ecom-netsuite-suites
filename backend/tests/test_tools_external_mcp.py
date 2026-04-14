@@ -30,7 +30,13 @@ class _FakeConnector:
 
 def test_short_description_passes_through():
     conn = _FakeConnector(
-        [{"name": "short_tool", "description": "A short description", "input_schema": {"type": "object", "properties": {}}}]
+        [
+            {
+                "name": "short_tool",
+                "description": "A short description",
+                "input_schema": {"type": "object", "properties": {}},
+            }
+        ]
     )
     tools = build_external_tool_definitions([conn])
     assert len(tools) == 1
@@ -53,7 +59,13 @@ def test_oracle_full_suiteql_description_preserved():
     assert len(oracle_desc) > 1024, "test setup: description must be > old 1024 cap"
 
     conn = _FakeConnector(
-        [{"name": "ns_runCustomSuiteQL", "description": oracle_desc, "input_schema": {"type": "object", "properties": {}}}]
+        [
+            {
+                "name": "ns_runCustomSuiteQL",
+                "description": oracle_desc,
+                "input_schema": {"type": "object", "properties": {}},
+            }
+        ]
     )
     tools = build_external_tool_definitions([conn])
     assert len(tools) == 1

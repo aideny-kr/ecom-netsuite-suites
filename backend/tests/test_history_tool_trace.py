@@ -49,7 +49,7 @@ class TestRenderToolTrace:
                 "params": {"query": "SELECT t.shipcountry FROM transaction t"},
                 "result_summary": (
                     "NetSuite query failed: NetSuite API error 400: "
-                    '{"detail":"Field \'shipcountry\' for record \'transaction\' '
+                    "{\"detail\":\"Field 'shipcountry' for record 'transaction' "
                     "was not found. Reason: NOT_EXPOSED"
                 ),
                 "duration_ms": 1000,
@@ -197,11 +197,11 @@ class TestBuildHistoryDicts:
     def _make_olivia_session(self) -> list[dict]:
         """Reproduce the first 5 messages of Olivia's 2026-04-09 session:
 
-            0 user: give me sales data for NO/CH/NZ/SG
-            1 assistant: source picker (empty content)
-            2 assistant: Turn 1 — failed, gave up (with big tool_calls log)
-            3 user: using shipping country
-            4 assistant: Turn 2 — SUCCESS via transactionShippingAddress join
+        0 user: give me sales data for NO/CH/NZ/SG
+        1 assistant: source picker (empty content)
+        2 assistant: Turn 1 — failed, gave up (with big tool_calls log)
+        3 user: using shipping country
+        4 assistant: Turn 2 — SUCCESS via transactionShippingAddress join
         """
         return [
             {

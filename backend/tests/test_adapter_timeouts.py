@@ -23,10 +23,7 @@ class TestAdapterTimeouts:
             f"Anthropic read timeout {timeout.read}s would allow a single "
             "stalled request to exceed our 300s chat budget. Expected ≤120s."
         )
-        assert timeout.connect <= 10, (
-            f"Anthropic connect timeout {timeout.connect}s is too loose. "
-            "Expected ≤10s."
-        )
+        assert timeout.connect <= 10, f"Anthropic connect timeout {timeout.connect}s is too loose. Expected ≤10s."
 
     def test_openai_adapter_has_non_default_timeout(self):
         adapter = OpenAIAdapter(api_key="sk-test")
@@ -36,20 +33,12 @@ class TestAdapterTimeouts:
             f"OpenAI read timeout {timeout.read}s would allow a single "
             "stalled request to exceed our 300s chat budget. Expected ≤120s."
         )
-        assert timeout.connect <= 10, (
-            f"OpenAI connect timeout {timeout.connect}s is too loose. "
-            "Expected ≤10s."
-        )
+        assert timeout.connect <= 10, f"OpenAI connect timeout {timeout.connect}s is too loose. Expected ≤10s."
 
     def test_gemini_adapter_has_non_default_timeout(self):
         adapter = GeminiAdapter(api_key="test-key")
         http_options = adapter._client._api_client._http_options
 
         timeout_ms = getattr(http_options, "timeout", None)
-        assert timeout_ms is not None, (
-            "GeminiAdapter must configure http_options.timeout to bound stalled reads."
-        )
-        assert timeout_ms <= 120_000, (
-            f"Gemini timeout {timeout_ms}ms exceeds our 300s chat budget. "
-            "Expected ≤120000ms."
-        )
+        assert timeout_ms is not None, "GeminiAdapter must configure http_options.timeout to bound stalled reads."
+        assert timeout_ms <= 120_000, f"Gemini timeout {timeout_ms}ms exceeds our 300s chat budget. Expected ≤120000ms."

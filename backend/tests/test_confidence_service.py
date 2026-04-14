@@ -94,19 +94,28 @@ def test_pattern_signals_both_zero_weight():
     """Both pattern_similarity AND pattern_success_count must be zero-weight.
     Varying them independently with everything else fixed should be a no-op."""
     baseline = CompositeScorer(
-        llm_score=0.7, domain_knowledge_similarity=0.5,
-        entity_resolution_confidence=0.8, tool_success_rate=1.0, num_tool_calls=2,
+        llm_score=0.7,
+        domain_knowledge_similarity=0.5,
+        entity_resolution_confidence=0.8,
+        tool_success_rate=1.0,
+        num_tool_calls=2,
     ).compute()
 
     with_sim_only = CompositeScorer(
-        llm_score=0.7, domain_knowledge_similarity=0.5,
-        entity_resolution_confidence=0.8, tool_success_rate=1.0, num_tool_calls=2,
+        llm_score=0.7,
+        domain_knowledge_similarity=0.5,
+        entity_resolution_confidence=0.8,
+        tool_success_rate=1.0,
+        num_tool_calls=2,
         query_pattern_similarity=1.0,
     ).compute()
 
     with_count_only = CompositeScorer(
-        llm_score=0.7, domain_knowledge_similarity=0.5,
-        entity_resolution_confidence=0.8, tool_success_rate=1.0, num_tool_calls=2,
+        llm_score=0.7,
+        domain_knowledge_similarity=0.5,
+        entity_resolution_confidence=0.8,
+        tool_success_rate=1.0,
+        num_tool_calls=2,
         query_pattern_success_count=100,
     ).compute()
 

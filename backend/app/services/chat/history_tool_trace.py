@@ -232,11 +232,7 @@ def render_tool_trace(tool_calls: list[dict[str, Any]] | None) -> str:
         return ""
 
     body = "\n".join(lines)
-    return (
-        "<tool_trace from previous turn>\n"
-        f"{body}\n"
-        "</tool_trace>"
-    )
+    return f"<tool_trace from previous turn>\n{body}\n</tool_trace>"
 
 
 # ---------------------------------------------------------------------------

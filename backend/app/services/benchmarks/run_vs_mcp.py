@@ -405,25 +405,29 @@ def _print_results_table(results: list[CaseResult], skip_baseline: bool) -> None
     rows: list[list[str]] = []
     for r in results:
         if skip_baseline:
-            rows.append([
-                r.case.case_id,
-                f"{r.ours.answer_acc:.2f}",
-                f"{r.ours.tool_acc:.2f}",
-                _format_cost(r.ours.cost_usd),
-                _format_ms(r.ours.latency_ms),
-                r.verdict,
-            ])
+            rows.append(
+                [
+                    r.case.case_id,
+                    f"{r.ours.answer_acc:.2f}",
+                    f"{r.ours.tool_acc:.2f}",
+                    _format_cost(r.ours.cost_usd),
+                    _format_ms(r.ours.latency_ms),
+                    r.verdict,
+                ]
+            )
         else:
             assert r.mcp is not None
-            rows.append([
-                r.case.case_id,
-                f"{r.ours.answer_acc:.2f}",
-                f"{r.mcp.answer_acc:.2f}",
-                f"{r.delta_accuracy():+.2f}",
-                f"{_format_cost(r.ours.cost_usd)}/{_format_cost(r.mcp.cost_usd)}",
-                f"{_format_ms(r.ours.latency_ms)}/{_format_ms(r.mcp.latency_ms)}",
-                r.verdict,
-            ])
+            rows.append(
+                [
+                    r.case.case_id,
+                    f"{r.ours.answer_acc:.2f}",
+                    f"{r.mcp.answer_acc:.2f}",
+                    f"{r.delta_accuracy():+.2f}",
+                    f"{_format_cost(r.ours.cost_usd)}/{_format_cost(r.mcp.cost_usd)}",
+                    f"{_format_ms(r.ours.latency_ms)}/{_format_ms(r.mcp.latency_ms)}",
+                    r.verdict,
+                ]
+            )
 
     # Column widths
     widths = [max(len(str(row[i])) for row in ([cols] + rows)) for i in range(len(cols))]
@@ -451,8 +455,10 @@ def _print_summary(results: list[CaseResult], skip_baseline: bool) -> None:
     ours_latency = mean(r.ours.latency_ms for r in results)
 
     print("SUMMARY")
-    print(f"  Ours avg accuracy: {ours_acc:.2f}  |  avg cost: {_format_cost(ours_cost)}"
-          f"  |  avg latency: {_format_ms(int(ours_latency))}")
+    print(
+        f"  Ours avg accuracy: {ours_acc:.2f}  |  avg cost: {_format_cost(ours_cost)}"
+        f"  |  avg latency: {_format_ms(int(ours_latency))}"
+    )
 
     if skip_baseline:
         errors = [r for r in results if not r.ours.success]
@@ -466,8 +472,10 @@ def _print_summary(results: list[CaseResult], skip_baseline: bool) -> None:
     mcp_cost = mean(r.mcp.cost_usd for r in results if r.mcp is not None)
     mcp_latency = mean(r.mcp.latency_ms for r in results if r.mcp is not None)
 
-    print(f"  MCP  avg accuracy: {mcp_acc:.2f}  |  avg cost: {_format_cost(mcp_cost)}"
-          f"  |  avg latency: {_format_ms(int(mcp_latency))}")
+    print(
+        f"  MCP  avg accuracy: {mcp_acc:.2f}  |  avg cost: {_format_cost(mcp_cost)}"
+        f"  |  avg latency: {_format_ms(int(mcp_latency))}"
+    )
 
     wins = sum(1 for r in results if r.verdict == "OURS WINS")
     losses = sum(1 for r in results if r.verdict == "MCP WINS")
@@ -480,9 +488,11 @@ def _print_summary(results: list[CaseResult], skip_baseline: bool) -> None:
         print("  Regression cases:")
         for r in results:
             if r.verdict == "MCP WINS":
-                print(f"    - {r.case.case_id}: Δacc={r.delta_accuracy():+.2f}"
-                      f" | ours='{r.ours.answer_preview[:80]}...'"
-                      f" | mcp='{(r.mcp.answer_preview if r.mcp else '')[:80]}...'")
+                print(
+                    f"    - {r.case.case_id}: Δacc={r.delta_accuracy():+.2f}"
+                    f" | ours='{r.ours.answer_preview[:80]}...'"
+                    f" | mcp='{(r.mcp.answer_preview if r.mcp else '')[:80]}...'"
+                )
     elif ours_acc >= mcp_acc:
         print(f"  NORTH STAR STATUS: OURS matches or beats MCP on all {total} cases.")
     print()
@@ -595,13 +605,12 @@ async def _main_async(args: argparse.Namespace) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Run benchmark cases through our agent AND the Claude+MCP baseline, "
-                    "and print a side-by-side comparison.",
+        "and print a side-by-side comparison.",
     )
     parser.add_argument(
         "--tenant-id",
         required=True,
-        help="Tenant UUID to run the benchmark against (e.g. Framework: "
-             "ce3dfaad-626f-4992-84e9-500c8291ca0a)",
+        help="Tenant UUID to run the benchmark against (e.g. Framework: ce3dfaad-626f-4992-84e9-500c8291ca0a)",
     )
     parser.add_argument(
         "--case",
@@ -622,8 +631,7 @@ def main() -> int:
     parser.add_argument(
         "--baseline-model",
         default="claude-sonnet-4-6",
-        help="Model for the Claude+MCP baseline. Default: claude-sonnet-4-6 "
-             "(apples-to-apples with the agent).",
+        help="Model for the Claude+MCP baseline. Default: claude-sonnet-4-6 (apples-to-apples with the agent).",
     )
     parser.add_argument(
         "--skip-baseline",
@@ -634,16 +642,16 @@ def main() -> int:
         "--persist",
         action="store_true",
         help="Write each case result to the agent_benchmark_runs table. "
-             "Enabled by default for the nightly cron; use it manually if "
-             "you want the run to become the new historical baseline.",
+        "Enabled by default for the nightly cron; use it manually if "
+        "you want the run to become the new historical baseline.",
     )
     parser.add_argument(
         "--no-llm-judge",
         action="store_true",
         help="Skip the LLM-judge (Claude Haiku) and fall back to substring "
-             "scoring with failure-phrase penalty. Faster and free but "
-             "scores a 'I couldn't find Norway' answer as correct when "
-             "Norway was expected. Default: judge enabled.",
+        "scoring with failure-phrase penalty. Faster and free but "
+        "scores a 'I couldn't find Norway' answer as correct when "
+        "Norway was expected. Default: judge enabled.",
     )
 
     args = parser.parse_args()

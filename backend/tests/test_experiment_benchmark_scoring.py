@@ -92,8 +92,16 @@ async def test_keep_when_agent_beats_baseline():
     db = _mock_db()
 
     with (
-        patch(f"{_SVC}._generate_sql", new_callable=AsyncMock, return_value="SELECT COUNT(*) FROM transaction WHERE type = 'SalesOrd'"),
-        patch(f"{_SVC}._execute_sql", new_callable=AsyncMock, return_value={"success": True, "result_text": "42", "rows": 1, "bytes_processed": 0}),
+        patch(
+            f"{_SVC}._generate_sql",
+            new_callable=AsyncMock,
+            return_value="SELECT COUNT(*) FROM transaction WHERE type = 'SalesOrd'",
+        ),
+        patch(
+            f"{_SVC}._execute_sql",
+            new_callable=AsyncMock,
+            return_value={"success": True, "result_text": "42", "rows": 1, "bytes_processed": 0},
+        ),
         patch(f"{_SVC}.run_agent", new_callable=AsyncMock, return_value=agent_result),
         patch(f"{_SVC}.run_baseline", new_callable=AsyncMock, return_value=baseline_result),
         patch(f"{_SVC}.promote_experiment_result", new_callable=AsyncMock),
@@ -133,7 +141,11 @@ async def test_revert_when_agent_worse_than_baseline():
 
     with (
         patch(f"{_SVC}._generate_sql", new_callable=AsyncMock, return_value="SELECT COUNT(*) FROM transaction"),
-        patch(f"{_SVC}._execute_sql", new_callable=AsyncMock, return_value={"success": True, "result_text": "42", "rows": 1, "bytes_processed": 0}),
+        patch(
+            f"{_SVC}._execute_sql",
+            new_callable=AsyncMock,
+            return_value={"success": True, "result_text": "42", "rows": 1, "bytes_processed": 0},
+        ),
         patch(f"{_SVC}.run_agent", new_callable=AsyncMock, return_value=agent_result),
         patch(f"{_SVC}.run_baseline", new_callable=AsyncMock, return_value=baseline_result),
         patch(f"{_SVC}.promote_experiment_result", new_callable=AsyncMock),
@@ -177,7 +189,11 @@ async def test_skip_when_scores_are_close_and_low():
 
     with (
         patch(f"{_SVC}._generate_sql", new_callable=AsyncMock, return_value="SELECT COUNT(*) FROM transaction"),
-        patch(f"{_SVC}._execute_sql", new_callable=AsyncMock, return_value={"success": True, "result_text": "42", "rows": 1, "bytes_processed": 0}),
+        patch(
+            f"{_SVC}._execute_sql",
+            new_callable=AsyncMock,
+            return_value={"success": True, "result_text": "42", "rows": 1, "bytes_processed": 0},
+        ),
         patch(f"{_SVC}.run_agent", new_callable=AsyncMock, return_value=agent_result),
         patch(f"{_SVC}.run_baseline", new_callable=AsyncMock, return_value=baseline_result),
         patch(f"{_SVC}.promote_experiment_result", new_callable=AsyncMock),
@@ -216,7 +232,11 @@ async def test_skip_when_agent_above_baseline_but_below_threshold():
 
     with (
         patch(f"{_SVC}._generate_sql", new_callable=AsyncMock, return_value="SELECT COUNT(*) FROM transaction"),
-        patch(f"{_SVC}._execute_sql", new_callable=AsyncMock, return_value={"success": True, "result_text": "42", "rows": 1, "bytes_processed": 0}),
+        patch(
+            f"{_SVC}._execute_sql",
+            new_callable=AsyncMock,
+            return_value={"success": True, "result_text": "42", "rows": 1, "bytes_processed": 0},
+        ),
         patch(f"{_SVC}.run_agent", new_callable=AsyncMock, return_value=agent_result),
         patch(f"{_SVC}.run_baseline", new_callable=AsyncMock, return_value=baseline_result),
         patch(f"{_SVC}.promote_experiment_result", new_callable=AsyncMock),
@@ -246,7 +266,11 @@ async def test_skip_when_benchmark_runners_fail():
 
     with (
         patch(f"{_SVC}._generate_sql", new_callable=AsyncMock, return_value="SELECT COUNT(*) FROM transaction"),
-        patch(f"{_SVC}._execute_sql", new_callable=AsyncMock, return_value={"success": True, "result_text": "42", "rows": 1, "bytes_processed": 0}),
+        patch(
+            f"{_SVC}._execute_sql",
+            new_callable=AsyncMock,
+            return_value={"success": True, "result_text": "42", "rows": 1, "bytes_processed": 0},
+        ),
         patch(f"{_SVC}.run_agent", new_callable=AsyncMock, return_value=agent_result),
         patch(f"{_SVC}.run_baseline", new_callable=AsyncMock, return_value=baseline_result),
         patch(f"{_SVC}.promote_experiment_result", new_callable=AsyncMock),
@@ -280,7 +304,11 @@ async def test_return_keys_match_caller_expectations():
 
     with (
         patch(f"{_SVC}._generate_sql", new_callable=AsyncMock, return_value="SELECT COUNT(*) FROM transaction"),
-        patch(f"{_SVC}._execute_sql", new_callable=AsyncMock, return_value={"success": True, "result_text": "42", "rows": 1, "bytes_processed": 0}),
+        patch(
+            f"{_SVC}._execute_sql",
+            new_callable=AsyncMock,
+            return_value={"success": True, "result_text": "42", "rows": 1, "bytes_processed": 0},
+        ),
         patch(f"{_SVC}.run_agent", new_callable=AsyncMock, return_value=agent_result),
         patch(f"{_SVC}.run_baseline", new_callable=AsyncMock, return_value=baseline_result),
         patch(f"{_SVC}.promote_experiment_result", new_callable=AsyncMock),

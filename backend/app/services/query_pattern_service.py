@@ -281,8 +281,7 @@ async def retrieve_similar_patterns(
         )
     else:
         print(
-            f"[PATTERN_RETRIEVAL] tenant={str(tenant_id)[:8]} "
-            f'q="{user_question[:80]}" returned=0',
+            f'[PATTERN_RETRIEVAL] tenant={str(tenant_id)[:8]} q="{user_question[:80]}" returned=0',
             flush=True,
         )
 

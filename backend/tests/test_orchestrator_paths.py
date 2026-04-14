@@ -93,9 +93,7 @@ class TestOrchestratorVariableInit:
 
         # These initializations must be between chitchat detection and the if branch
         init_region = source[chitchat_idx:if_chitchat_idx]
-        assert "is_web_search = False" in init_region, (
-            "is_web_search must be initialized before chitchat branch"
-        )
+        assert "is_web_search = False" in init_region, "is_web_search must be initialized before chitchat branch"
         assert "is_netsuite_entity = False" in init_region, (
             "is_netsuite_entity must be initialized before chitchat branch"
         )
@@ -131,28 +129,41 @@ class TestOrchestratorChitchatPath:
         """'good job' (chitchat) must not raise UnboundLocalError."""
         from app.services.chat.orchestrator import run_chat_turn
 
-        session = _make_session(messages=[
-            _make_user_msg_dict("how many orders"),
-            _make_assistant_msg_dict("There were 500 orders this week."),
-        ])
+        session = _make_session(
+            messages=[
+                _make_user_msg_dict("how many orders"),
+                _make_assistant_msg_dict("There were 500 orders this week."),
+            ]
+        )
         # Patch so we convert messages list to the expected dict format
         session.messages = [
             MagicMock(
-                id=uuid.uuid4(), role="user", content="how many orders",
-                tool_calls=None, citations=None,
+                id=uuid.uuid4(),
+                role="user",
+                content="how many orders",
+                tool_calls=None,
+                citations=None,
                 created_at=datetime.now(timezone.utc),
-                structured_output=None, token_count=None,
-                content_summary=None, agent_id=None,
-                query_importance=None, confidence_score=None,
+                structured_output=None,
+                token_count=None,
+                content_summary=None,
+                agent_id=None,
+                query_importance=None,
+                confidence_score=None,
             ),
             MagicMock(
-                id=uuid.uuid4(), role="assistant",
+                id=uuid.uuid4(),
+                role="assistant",
                 content="There were 500 orders this week. " * 3,
-                tool_calls=None, citations=None,
+                tool_calls=None,
+                citations=None,
                 created_at=datetime.now(timezone.utc),
-                structured_output=None, token_count=None,
-                content_summary=None, agent_id=None,
-                query_importance=None, confidence_score=None,
+                structured_output=None,
+                token_count=None,
+                content_summary=None,
+                agent_id=None,
+                query_importance=None,
+                confidence_score=None,
             ),
         ]
 
@@ -191,25 +202,39 @@ class TestOrchestratorPickerSkipPath:
         """Ambiguous query in session with prior results must not raise UnboundLocalError."""
         from app.services.chat.orchestrator import run_chat_turn
 
-        session = _make_session(source_pin=None, messages=[
-            MagicMock(
-                id=uuid.uuid4(), role="user", content="how many orders",
-                tool_calls=None, citations=None,
-                created_at=datetime.now(timezone.utc),
-                structured_output=None, token_count=None,
-                content_summary=None, agent_id=None,
-                query_importance=None, confidence_score=None,
-            ),
-            MagicMock(
-                id=uuid.uuid4(), role="assistant",
-                content="Based on the analysis, there were 1,247 orders. " * 3,
-                tool_calls=None, citations=None,
-                created_at=datetime.now(timezone.utc),
-                structured_output=None, token_count=None,
-                content_summary=None, agent_id=None,
-                query_importance=None, confidence_score=None,
-            ),
-        ])
+        session = _make_session(
+            source_pin=None,
+            messages=[
+                MagicMock(
+                    id=uuid.uuid4(),
+                    role="user",
+                    content="how many orders",
+                    tool_calls=None,
+                    citations=None,
+                    created_at=datetime.now(timezone.utc),
+                    structured_output=None,
+                    token_count=None,
+                    content_summary=None,
+                    agent_id=None,
+                    query_importance=None,
+                    confidence_score=None,
+                ),
+                MagicMock(
+                    id=uuid.uuid4(),
+                    role="assistant",
+                    content="Based on the analysis, there were 1,247 orders. " * 3,
+                    tool_calls=None,
+                    citations=None,
+                    created_at=datetime.now(timezone.utc),
+                    structured_output=None,
+                    token_count=None,
+                    content_summary=None,
+                    agent_id=None,
+                    query_importance=None,
+                    confidence_score=None,
+                ),
+            ],
+        )
 
         db = AsyncMock()
         user_msg = _make_user_msg("what about last month")
