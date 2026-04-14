@@ -203,6 +203,12 @@ async def finance_user(db: AsyncSession, tenant_a: Tenant) -> tuple[User, dict]:
 
 
 @pytest_asyncio.fixture
+async def ops_user(db: AsyncSession, tenant_a: Tenant) -> tuple[User, dict]:
+    user, _ = await create_test_user(db, tenant_a, role_name="ops")
+    return user, make_auth_headers(user)
+
+
+@pytest_asyncio.fixture
 async def admin_user_b(db: AsyncSession, tenant_b: Tenant) -> tuple[User, dict]:
     user, _ = await create_test_user(db, tenant_b, role_name="admin")
     return user, make_auth_headers(user)

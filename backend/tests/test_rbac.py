@@ -181,6 +181,31 @@ class TestFinanceAccess:
         assert resp.status_code == 403
 
 
+class TestOpsAccess:
+    """Ops users can manage connections and schedules but cannot run reconciliation."""
+
+    async def test_ops_can_view_connections(self, client: AsyncClient, ops_user):
+        _, headers = ops_user
+        resp = await client.get("/api/v1/connections", headers=headers)
+        assert resp.status_code == 200
+
+    async def test_ops_can_view_tables(self, client: AsyncClient, ops_user):
+        _, headers = ops_user
+        resp = await client.get("/api/v1/tables/orders", headers=headers)
+        assert resp.status_code == 200
+
+    async def test_ops_cannot_access_recon(self, client: AsyncClient, ops_user):
+        """Ops should NOT have recon.run — only admin and finance."""
+        _, headers = ops_user
+        resp = await client.get("/api/v1/reconciliation/data-status", headers=headers)
+        assert resp.status_code == 403
+
+    async def test_ops_cannot_manage_users(self, client: AsyncClient, ops_user):
+        _, headers = ops_user
+        resp = await client.get("/api/v1/users", headers=headers)
+        assert resp.status_code == 403
+
+
 class TestUnauthenticatedAccess:
     """Unauthenticated requests should be rejected on protected endpoints."""
 
