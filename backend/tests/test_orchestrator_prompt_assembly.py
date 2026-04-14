@@ -37,3 +37,14 @@ class TestAssembleSystemPrompt:
         # Safety: if a template doesn't use the placeholder, assembly is a no-op.
         template = "No placeholder here."
         assert _assemble_system_prompt(template=template, tool_definitions=[]) == template
+
+    def test_mcp_tool_produces_execution_priority_in_assembled_prompt(self):
+        template = "{{TOOL_INVENTORY}}"
+        result = _assemble_system_prompt(
+            template=template,
+            tool_definitions=[
+                _tool("ext__c__ns_runReport", "[ns] run report", "financial"),
+            ],
+        )
+        assert "EXECUTION PRIORITY" in result
+        assert "FINANCIAL REPORTS" in result

@@ -106,3 +106,14 @@ class TestBuildMcpExecutionGuidance:
         assert "SUITEQL (MCP)" in guidance
         assert "DISCOVER REPORTS" in guidance
         assert "EXECUTION PRIORITY" in guidance
+
+    def test_other_tools_render_each_on_own_line(self):
+        from app.services.chat.tool_inventory import build_mcp_execution_guidance
+
+        guidance = build_mcp_execution_guidance([
+            {"name": "ext__a__list_orders", "description": "[shopify] orders", "category": "other"},
+            {"name": "ext__a__get_product", "description": "[shopify] product", "category": "other"},
+        ])
+        # Bullets must be separated by newlines, not run together.
+        assert "\n- ext__a__list_orders" in guidance
+        assert "\n- ext__a__get_product" in guidance

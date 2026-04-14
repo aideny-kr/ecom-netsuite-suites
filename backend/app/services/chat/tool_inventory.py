@@ -173,7 +173,7 @@ def build_mcp_execution_guidance(tool_definitions: list[dict]) -> str:
     if other_ext_tools:
         sections.append("\n\nOTHER CONNECTED SYSTEM TOOLS:")
         for td in other_ext_tools:
-            sections.append(f"- {td.get('name', '')}: {td.get('description', '')}")
+            sections.append(f"\n- {td.get('name', '')}: {td.get('description', '')}")
         sections.append(
             "\nUse these tools when the user's question relates to the system they belong to. "
             "Check the tool description prefix (e.g., [shopify_mcp]) to identify which system."
