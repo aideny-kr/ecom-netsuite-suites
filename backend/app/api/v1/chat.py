@@ -88,6 +88,9 @@ class SessionDetailResponse(BaseModel):
     id: str
     title: str | None = None
     is_archived: bool
+    active_run_id: str | None = None
+    status: str = "idle"
+    run_started_at: float | None = None
     messages: list[MessageResponse]
     created_at: str
     updated_at: str
