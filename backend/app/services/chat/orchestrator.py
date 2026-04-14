@@ -275,6 +275,23 @@ def _build_connection_warning_block(connection_warnings: list[str]) -> str:
     )
 
 
+from app.services.chat.tool_inventory import build_tool_inventory_block
+
+
+def _assemble_system_prompt(*, template: str, tool_definitions: list[dict]) -> str:
+    """Resolve the {{TOOL_INVENTORY}} placeholder with the real tool schema.
+
+    Agents that opt in by including the placeholder in their template get
+    their prompt's enumerated capabilities auto-synced with what the LLM
+    will actually receive in its tool schema. Templates without the
+    placeholder are returned unchanged.
+    """
+    if "{{TOOL_INVENTORY}}" not in template:
+        return template
+    inventory = build_tool_inventory_block(tool_definitions)
+    return template.replace("{{TOOL_INVENTORY}}", inventory)
+
+
 # ---------------------------------------------------------------------------
 # Agent registry + three-tier routing
 # ---------------------------------------------------------------------------
@@ -1300,130 +1317,13 @@ async def run_chat_turn(
                 soul_parts.append(f"NETSUITE QUIRKS & LOGIC:\n{soul_config.netsuite_quirks}\n")
             system_prompt += "\n".join(soul_parts)
 
-    # ── Inject dynamic tool inventory into system prompt ──
-    # This ensures the model always knows the exact tool names it can call,
-    # regardless of whether the base prompt matches.
-    # Detect ALL NetSuite MCP tools by pattern matching the tool name
-    _MCP_TOOL_PATTERNS = {
-        "runreport": "REPORTS",
-        "runsavedsearch": "SAVED_SEARCHES",
-        "listallreports": "REPORT_DISCOVERY",
-        "listsavedsearches": "SEARCH_DISCOVERY",
-        "suiteql": "SUITEQL",
-        "getsuiteqlmetadata": "METADATA",
-        "getsubsidiaries": "SUBSIDIARIES",
-    }
-
-    if not is_onboarding and tool_definitions:
-        tool_inventory_lines = ["\nAVAILABLE TOOLS (use these exact names when calling tools):"]
-        ext_mcp_tools: dict[str, str] = {}  # category → tool_name
-        for td in tool_definitions:
-            tool_inventory_lines.append(f"- {td['name']}: {td.get('description', '')}")
-            if td["name"].startswith("ext__"):
-                lower_name = td["name"].lower()
-                for pattern, category in _MCP_TOOL_PATTERNS.items():
-                    if pattern in lower_name:
-                        ext_mcp_tools[category] = td["name"]
-
-        if ext_mcp_tools:
-            guidance = [
-                "\n\nNETSUITE MCP TOOLS (connect directly to NetSuite — prefer these for execution):",
-            ]
-
-            if "REPORTS" in ext_mcp_tools:
-                guidance.append(
-                    f"\n• FINANCIAL REPORTS: `{ext_mcp_tools['REPORTS']}`"
-                    "\n  For Income Statement, Balance Sheet, Trial Balance, Aging, GL, etc."
-                    '\n  Parameters: {"reportId": <number>, "dateTo": "YYYY-MM-DD", "dateFrom": "YYYY-MM-DD", "subsidiaryId": <number>}'
-                    "\n  → reportId must be a NUMBER (e.g. -200), not a string."
-                    "\n  → dateTo is always required. dateFrom is required for P&L, optional for Balance Sheet."
-                    "\n  → Call ns_listAllReports FIRST to get reportId and check has_subsidiary_filter / as_of_date_format."
-                    "\n  → If has_subsidiary_filter=true, call ns_getSubsidiaries and pass subsidiaryId."
-                    "\n  → NetSuite handles sign conventions, consolidation, currency natively."
-                )
-
-            if "REPORT_DISCOVERY" in ext_mcp_tools:
-                guidance.append(
-                    f"\n• DISCOVER REPORTS: `{ext_mcp_tools['REPORT_DISCOVERY']}`"
-                    "\n  Lists all available reports with IDs. Call FIRST before ns_runReport."
-                )
-
-            if "SAVED_SEARCHES" in ext_mcp_tools:
-                guidance.append(
-                    f"\n• SAVED SEARCHES: `{ext_mcp_tools['SAVED_SEARCHES']}`"
-                    "\n  Run pre-built searches with custom columns, formulas, and filters."
-                    '\n  Parameters: {"savedSearchId": "<id>", "filters": [...]}'
-                )
-
-            if "SEARCH_DISCOVERY" in ext_mcp_tools:
-                guidance.append(
-                    f"\n• DISCOVER SEARCHES: `{ext_mcp_tools['SEARCH_DISCOVERY']}`"
-                    "\n  Lists saved searches. Use when user asks 'do we have a report for X?'"
-                )
-
-            if "SUITEQL" in ext_mcp_tools:
-                guidance.append(
-                    f"\n• SUITEQL (MCP): `{ext_mcp_tools['SUITEQL']}`"
-                    "\n  Ad-hoc SuiteQL queries inside NetSuite. Prefer over local netsuite_suiteql."
-                    '\n  Parameters: {"sqlQuery": "SELECT ...", "description": "..."}'
-                    "\n  STILL FOLLOW all <suiteql_dialect_rules> — they apply to MCP SuiteQL too."
-                )
-
-            if "METADATA" in ext_mcp_tools:
-                guidance.append(
-                    f"\n• SCHEMA (MCP): `{ext_mcp_tools['METADATA']}`"
-                    "\n  Ground-truth column metadata from NetSuite. Use alongside netsuite_get_metadata."
-                )
-
-            if "SUBSIDIARIES" in ext_mcp_tools:
-                guidance.append(
-                    f"\n• SUBSIDIARIES: `{ext_mcp_tools['SUBSIDIARIES']}`\n  Subsidiary hierarchy with base currencies."
-                )
-
-            guidance.append(
-                "\n\nEXECUTION PRIORITY (pick the first that fits):"
-                "\n  Financial statements → ns_runReport"
-                "\n  Pre-built business reports → ns_runSavedSearch"
-                "\n  Ad-hoc data queries → ns_runCustomSuiteQL (MCP) → netsuite_suiteql (local fallback)"
-                "\n  Schema verification → ns_getSuiteQLMetadata + netsuite_get_metadata (use both)"
-                "\n  Documentation/how-to → rag_search → web_search"
-                "\n"
-                "\nIMPORTANT: MCP tools handle EXECUTION. But you still have rich tenant context"
-                "\n(entity vernacular, custom field schema, learned rules, proven patterns) injected"
-                "\ninto your system prompt. USE THIS CONTEXT when constructing parameters for MCP tools."
-                "\nFor example, if <tenant_vernacular> resolves 'FW' to subsidiary ID 5, pass"
-                "\nsubsidiaryId: 5 to ns_runReport."
-            )
-
-            tool_inventory_lines.append("\n".join(guidance))
-
-        # Non-NetSuite tools guidance
-        non_ns_tools = [
-            td
-            for td in tool_definitions
-            if td["name"].startswith("ext__") and not any(p in td["name"].lower() for p in _MCP_TOOL_PATTERNS)
-        ]
-        if non_ns_tools:
-            tool_inventory_lines.append("\n\nOTHER CONNECTED SYSTEM TOOLS:")
-            for td in non_ns_tools:
-                tool_inventory_lines.append(f"- {td['name']}: {td.get('description', '')}")
-            tool_inventory_lines.append(
-                "\nUse these tools when the user's question relates to the system they belong to. "
-                "Check the tool description prefix (e.g., [shopify_mcp]) to identify which system."
-            )
-
-        # BigQuery tools hint (if available for this tenant)
-        _has_bq = any(td["name"].startswith("bigquery_") for td in tool_definitions)
-        if _has_bq:
-            tool_inventory_lines.append(
-                "\n\nBIGQUERY DATA WAREHOUSE:"
-                "\nThis tenant has BigQuery connected. Use `bigquery_sql` for ad-hoc queries, "
-                "`bigquery_schema` to discover datasets/tables, `bigquery_cost_estimate` for dry-run cost checks."
-                "\nBigQuery uses Standard SQL — use backtick identifiers (`dataset.table`) and LIMIT (not FETCH FIRST)."
-                "\nDo NOT confuse BigQuery SQL with SuiteQL — they are different dialects."
-            )
-
-        system_prompt += "\n".join(tool_inventory_lines)
+    # ── Resolve {{TOOL_INVENTORY}} placeholder in the system prompt ──
+    # using the real tool schema (single source of truth).
+    if not is_onboarding:
+        system_prompt = _assemble_system_prompt(
+            template=system_prompt,
+            tool_definitions=tool_definitions,
+        )
 
     # ── Connection health warning (appended after tool inventory) ──
     if connection_warnings:
