@@ -388,10 +388,11 @@ export default function ChatPage() {
           msgBody,
         );
 
-        // Message is now saved in DB — clear local pending copy to avoid duplicate
-        // and refetch so the persisted message appears in the list
-        setPendingMessage(null);
+        // Message is now saved in DB — refetch so the persisted message appears,
+        // then clear the optimistic pending copy. Clearing AFTER refetch prevents
+        // the brief gap where neither the pending nor persisted message renders.
         await queryClient.invalidateQueries({ queryKey: ["chat-session", sessionId] });
+        setPendingMessage(null);
 
         // Step 2: Connect to SSE stream for this run (shared with reconnection)
         await connectToRunStream(run_id, sessionId);
