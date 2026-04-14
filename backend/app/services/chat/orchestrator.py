@@ -1812,6 +1812,7 @@ async def run_chat_turn(
 
                     # Three-tier routing: try specialized agent first, fall back to UnifiedAgent
                     # Financial reports bypass routing — must use UnifiedAgent with NetSuite tools
+                    _selected_agent_id = None
                     if agent_id and not is_financial:
                         # Client-side agent pin — skip routing entirely
                         _selected_agent_id = agent_id
