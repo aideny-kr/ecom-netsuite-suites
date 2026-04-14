@@ -2,14 +2,24 @@
 
 import json
 
+import httpx
 import openai
 
 from app.services.chat.llm_adapter import BaseLLMAdapter, LLMResponse, TokenUsage, ToolUseBlock
 
+# See anthropic_adapter._CLIENT_TIMEOUT for rationale. OpenAI's SDK default
+# is also read=600s, which is catastrophic for interactive chat.
+_CLIENT_TIMEOUT = httpx.Timeout(connect=5.0, read=60.0, write=60.0, pool=60.0)
+_CLIENT_MAX_RETRIES = 2
+
 
 class OpenAIAdapter(BaseLLMAdapter):
     def __init__(self, api_key: str):
-        self._client = openai.AsyncOpenAI(api_key=api_key)
+        self._client = openai.AsyncOpenAI(
+            api_key=api_key,
+            timeout=_CLIENT_TIMEOUT,
+            max_retries=_CLIENT_MAX_RETRIES,
+        )
 
     @staticmethod
     def _convert_tool_choice(tool_choice: dict | str | None) -> dict | str | None:

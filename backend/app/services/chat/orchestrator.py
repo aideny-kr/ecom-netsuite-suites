@@ -29,6 +29,12 @@ _REASONING_RE = re.compile(r"<reasoning>.*?</reasoning>\s*", re.DOTALL)
 # Short-circuits expensive context assembly (entity resolution, domain knowledge, etc.)
 _FINANCIAL_MODE_TAG = "FINANCIAL REPORT MODE"
 
+# Hard cap on optional pre-flight LLM calls (e.g. entity resolution). These
+# feed *optional* context — vernacular enrichment — and must never block the
+# main chat turn. A single stalled Haiku socket used to burn the full 300s
+# chat budget; this cap lets us proceed without vernacular if the call stalls.
+_RESOLVE_ENTITIES_TIMEOUT_SECONDS = 15
+
 
 def _build_financial_mode_task(user_message: str) -> str:
     """Build task for financial report queries.
@@ -1621,12 +1627,15 @@ async def run_chat_turn(
 
                     if _need_vernacular:
                         _gather_tasks.append(
-                            TenantEntityResolver.resolve_entities(
-                                user_message=sanitized_input,
-                                tenant_id=tenant_id,
-                                db=db,
-                                adapter=specialist_adapter,
-                                model=settings.MULTI_AGENT_SPECIALIST_MODEL,
+                            asyncio.wait_for(
+                                TenantEntityResolver.resolve_entities(
+                                    user_message=sanitized_input,
+                                    tenant_id=tenant_id,
+                                    db=db,
+                                    adapter=specialist_adapter,
+                                    model=settings.MULTI_AGENT_SPECIALIST_MODEL,
+                                ),
+                                timeout=_RESOLVE_ENTITIES_TIMEOUT_SECONDS,
                             )
                         )
                         _gather_keys.append("vernacular")
@@ -1643,7 +1652,15 @@ async def run_chat_turn(
                     _gather_tasks.append(retrieve_learned_rules(db=db, tenant_id=tenant_id, query_text=sanitized_input))
                     _gather_keys.append("learned_rules")
 
+                    _gather_t0 = time.time()
+                    print(
+                        f"[ORCHESTRATOR] context_gather start | tasks={_gather_keys}", flush=True
+                    )
                     _gather_results = await asyncio.gather(*_gather_tasks, return_exceptions=True)
+                    print(
+                        f"[ORCHESTRATOR] context_gather complete in {time.time() - _gather_t0:.2f}s",
+                        flush=True,
+                    )
                     _results = dict(zip(_gather_keys, _gather_results))
 
                     vernacular_result = _results.get("vernacular")
@@ -1655,7 +1672,17 @@ async def run_chat_turn(
 
                     # tenant_vernacular (FULL, DATA, FINANCIAL)
                     if vernacular_result is not None:
-                        if isinstance(vernacular_result, Exception):
+                        if isinstance(vernacular_result, asyncio.TimeoutError):
+                            print(
+                                f"[ORCHESTRATOR] entity_resolution timed out after "
+                                f"{_RESOLVE_ENTITIES_TIMEOUT_SECONDS}s — proceeding without vernacular",
+                                flush=True,
+                            )
+                            logger.warning(
+                                "unified_agent.entity_resolution_timeout",
+                                extra={"timeout_seconds": _RESOLVE_ENTITIES_TIMEOUT_SECONDS},
+                            )
+                        elif isinstance(vernacular_result, Exception):
                             logger.warning("unified_agent.entity_resolution_failed", exc_info=vernacular_result)
                         elif vernacular_result:
                             context["tenant_vernacular"] = vernacular_result

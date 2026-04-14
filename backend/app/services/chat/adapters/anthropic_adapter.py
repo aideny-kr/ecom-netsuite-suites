@@ -5,6 +5,7 @@ import logging
 import time
 
 import anthropic
+import httpx
 
 from app.services.chat.llm_adapter import BaseLLMAdapter, LLMResponse, TokenUsage, ToolUseBlock
 
@@ -12,6 +13,15 @@ logger = logging.getLogger(__name__)
 
 # Wall-clock deadline for a single stream_message call (seconds).
 _STREAM_TIMEOUT_SECONDS = 120  # 2 minutes
+
+# Per-request socket timeouts. The SDK default is read=600s, which means a
+# single stalled request (TCP open, no bytes flowing) can eat the entire
+# 300s chat budget before the outer asyncio.wait_for kills it — producing a
+# blank-screen timeout with no user-facing progress. read=60s is 6–100× the
+# typical Haiku/Sonnet response, so it only trips on actual hangs, and
+# max_retries=2 turns a transient stall into a ~1s retry instead of a dead turn.
+_CLIENT_TIMEOUT = httpx.Timeout(connect=5.0, read=60.0, write=60.0, pool=60.0)
+_CLIENT_MAX_RETRIES = 2
 
 # Transient errors worth retrying with exponential backoff before any tokens stream.
 _RETRYABLE_ERROR_TYPES = {"overloaded_error", "rate_limit_error", "api_error"}
@@ -31,7 +41,11 @@ def _is_retryable(exc: anthropic.APIStatusError) -> bool:
 
 class AnthropicAdapter(BaseLLMAdapter):
     def __init__(self, api_key: str):
-        self._client = anthropic.AsyncAnthropic(api_key=api_key)
+        self._client = anthropic.AsyncAnthropic(
+            api_key=api_key,
+            timeout=_CLIENT_TIMEOUT,
+            max_retries=_CLIENT_MAX_RETRIES,
+        )
 
     async def create_message(
         self,
