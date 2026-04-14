@@ -361,8 +361,8 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 
 ## Current State
 
-- **Product**: AI-den v1.8 deployed to staging 2026-04-13. Source picker resilience (PR #34): BQ validation fix, agent timeouts (120s stream / 300s task), soft source pin, discussion guard, SSE reconnection on navigate-away, elapsed time indicator.
-- **Latest migration**: 066_bench_vs_mcp (agent_benchmark_runs table)
+- **Product**: AI-den v1.9 deployed to staging 2026-04-14. PR #35: RBAC ops recon revoke, chat render fixes (double bubble, logo flash, auto-scroll, source picker stuck), stale job auto-cleanup, disputes cursor fix, pre-deploy schema validation.
+- **Latest migration**: 068_revoke_recon_ops
 - **Frontend tests**: Vitest + @testing-library/react (31 tests). Run: `cd frontend && npx vitest run`
 - **Backend tests**: 150+ tests. Run: `cd backend && .venv/bin/python -m pytest`
 - **Agent benchmark**: 18 sales cases vs Claude+MCP. Run: `cd backend && .venv/bin/python -m tests.agent_benchmarks.run_vs_mcp --suite sales --tenant-id ce3dfaad-626f-4992-84e9-500c8291ca0a`
