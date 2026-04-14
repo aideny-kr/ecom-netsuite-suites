@@ -1,6 +1,5 @@
 import uuid
 from decimal import Decimal
-
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import Boolean, ForeignKey, Index, Integer, Numeric, String, Text
 from sqlalchemy.dialects.postgresql import JSON, UUID
@@ -19,7 +18,8 @@ class ChatSession(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     workspace_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
     is_archived: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     agent_id: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
-    source_pin: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # source_pin column dropped in migration 067 — now a transient per-turn
+    # attribute set dynamically by the orchestrator (session.source_pin = ...)
 
     messages: Mapped[list["ChatMessage"]] = relationship(
         back_populates="session",

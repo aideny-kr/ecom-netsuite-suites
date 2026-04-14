@@ -1143,7 +1143,7 @@ async def run_chat_turn(
                 break
         await db.commit()
         print(f"[SOURCE-PICKER] user selected {source_pick}", flush=True)
-    elif not session.source_pin and not is_onboarding and not getattr(session, "workspace_id", None):
+    elif not getattr(session, "source_pin", None) and not is_onboarding and not getattr(session, "workspace_id", None):
         # Skip picker if session already has substantive agent results — the user's
         # data-source intent is established; use normal 3-tier routing for follow-ups.
         _has_prior_agent_result = any(
@@ -1817,7 +1817,7 @@ async def run_chat_turn(
                         # Client-side agent pin — skip routing entirely
                         _selected_agent_id = agent_id
                         print(f"[ROUTING] Client pinned → {agent_id}", flush=True)
-                    elif session.source_pin == "bigquery":
+                    elif getattr(session, "source_pin", None) == "bigquery":
                         # Soft pin: honor unless query clearly belongs to NetSuite
                         from app.services.chat.source_picker import _should_override_pin
 
@@ -1836,7 +1836,7 @@ async def run_chat_turn(
                         else:
                             _selected_agent_id = "bi-agent"
                             print("[ROUTING] Source pin → bi-agent (bigquery)", flush=True)
-                    elif session.source_pin == "netsuite":
+                    elif getattr(session, "source_pin", None) == "netsuite":
                         # Soft pin: honor unless query clearly belongs to BigQuery
                         from app.services.chat.source_picker import _should_override_pin
 
