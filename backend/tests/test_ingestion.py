@@ -139,6 +139,42 @@ class TestStripeSync:
         assert result["disputes_synced"] == 1
         mock_save.assert_called()
 
+    @patch("app.services.ingestion.stripe_sync.decrypt_credentials")
+    @patch("app.services.ingestion.stripe_sync.stripe")
+    def test_dispute_cursor_saves_max_timestamp(self, mock_stripe, mock_decrypt):
+        """Cursor should save the NEWEST dispute timestamp, not the last iterated."""
+        mock_decrypt.return_value = {"api_key": "sk_test_123"}
+
+        # Stripe returns newest first — d1 is newer, d2 is older
+        d1 = _make_stripe_dispute("dp_new", amount=5000)
+        d1.created = 1700000099  # Newest
+        d2 = _make_stripe_dispute("dp_old", amount=3000)
+        d2.created = 1700000001  # Oldest
+
+        mock_stripe.Payout.list.return_value = _FakeListResult([])
+        mock_stripe.BalanceTransaction.list.return_value = _FakeListResult([])
+        mock_stripe.Dispute.list.return_value = _FakeListResult([d1, d2])
+
+        db = MagicMock()
+        conn = _make_connection("stripe")
+        db.execute.return_value.scalar_one.return_value = conn
+
+        with (
+            patch("app.services.ingestion.stripe_sync.load_cursor", return_value=None),
+            patch("app.services.ingestion.stripe_sync.save_cursor") as mock_save,
+            patch("app.services.ingestion.stripe_sync.upsert_canonical"),
+        ):
+            from app.services.ingestion.stripe_sync import sync_stripe
+
+            result = sync_stripe(db, str(conn.id), str(conn.tenant_id))
+
+        assert result["disputes_synced"] == 2
+        # Cursor should save the NEWEST (highest) timestamp
+        dispute_save_call = [c for c in mock_save.call_args_list if "stripe_disputes" in str(c)]
+        assert len(dispute_save_call) == 1
+        saved_value = dispute_save_call[0].args[3] if dispute_save_call[0].args else dispute_save_call[0][0][3]
+        assert saved_value == "1700000099"  # The newest, not 1700000001
+
 
 # ---------------------------------------------------------------------------
 # Shopify sync tests
