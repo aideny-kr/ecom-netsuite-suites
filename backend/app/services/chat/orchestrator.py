@@ -275,21 +275,26 @@ def _build_connection_warning_block(connection_warnings: list[str]) -> str:
     )
 
 
-from app.services.chat.tool_inventory import build_tool_inventory_block
+from app.services.chat.tool_inventory import build_mcp_execution_guidance, build_tool_inventory_block
 
 
 def _assemble_system_prompt(*, template: str, tool_definitions: list[dict]) -> str:
     """Resolve the {{TOOL_INVENTORY}} placeholder with the real tool schema.
 
-    Agents that opt in by including the placeholder in their template get
-    their prompt's enumerated capabilities auto-synced with what the LLM
-    will actually receive in its tool schema. Templates without the
-    placeholder are returned unchanged.
+    The replacement bundles:
+    - the <available_tools> block (build_tool_inventory_block)
+    - per-tool MCP guidance + EXECUTION PRIORITY (build_mcp_execution_guidance)
+      when external MCP tools are present.
+
+    Both are derived from the same tool_definitions, so the LLM's view of
+    what it can call AND how to choose between them stays in sync with the
+    real schema.
     """
     if "{{TOOL_INVENTORY}}" not in template:
         return template
     inventory = build_tool_inventory_block(tool_definitions)
-    return template.replace("{{TOOL_INVENTORY}}", inventory)
+    guidance = build_mcp_execution_guidance(tool_definitions)
+    return template.replace("{{TOOL_INVENTORY}}", inventory + guidance)
 
 
 # ---------------------------------------------------------------------------

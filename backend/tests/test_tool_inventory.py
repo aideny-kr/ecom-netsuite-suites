@@ -56,3 +56,53 @@ class TestBuildToolInventoryBlock:
             _tool("rag_search", "Search docs.", "rag"),
         ]
         assert build_tool_inventory_block(tools) == build_tool_inventory_block(tools)
+
+
+class TestBuildMcpExecutionGuidance:
+    def test_no_mcp_tools_returns_empty(self):
+        from app.services.chat.tool_inventory import build_mcp_execution_guidance
+
+        assert build_mcp_execution_guidance([
+            {"name": "netsuite_suiteql", "description": "...", "category": "data_table"},
+        ]) == ""
+
+    def test_ns_runreport_triggers_reports_guidance(self):
+        from app.services.chat.tool_inventory import build_mcp_execution_guidance
+
+        guidance = build_mcp_execution_guidance([
+            {"name": "ext__connector1__ns_runReport", "description": "[ns] Run report", "category": "financial"},
+        ])
+        assert "FINANCIAL REPORTS" in guidance
+        assert "ext__connector1__ns_runReport" in guidance
+        assert "EXECUTION PRIORITY" in guidance
+
+    def test_ns_runsavedsearch_triggers_savedsearch_guidance(self):
+        from app.services.chat.tool_inventory import build_mcp_execution_guidance
+
+        guidance = build_mcp_execution_guidance([
+            {"name": "ext__c1__ns_runSavedSearch", "description": "[ns] saved search", "category": "data_table"},
+        ])
+        assert "SAVED SEARCHES" in guidance
+        assert "ext__c1__ns_runSavedSearch" in guidance
+
+    def test_other_ext_tool_listed_under_other_systems(self):
+        from app.services.chat.tool_inventory import build_mcp_execution_guidance
+
+        guidance = build_mcp_execution_guidance([
+            {"name": "ext__shopify_xyz__list_orders", "description": "[shopify] orders", "category": "other"},
+        ])
+        assert "OTHER CONNECTED SYSTEM TOOLS" in guidance
+        assert "ext__shopify_xyz__list_orders" in guidance
+
+    def test_multiple_mcp_tools_combined_guidance(self):
+        from app.services.chat.tool_inventory import build_mcp_execution_guidance
+
+        guidance = build_mcp_execution_guidance([
+            {"name": "ext__c__ns_runReport", "description": "", "category": "financial"},
+            {"name": "ext__c__ns_runCustomSuiteQL", "description": "", "category": "data_table"},
+            {"name": "ext__c__ns_listAllReports", "description": "", "category": "other"},
+        ])
+        assert "FINANCIAL REPORTS" in guidance
+        assert "SUITEQL (MCP)" in guidance
+        assert "DISCOVER REPORTS" in guidance
+        assert "EXECUTION PRIORITY" in guidance
