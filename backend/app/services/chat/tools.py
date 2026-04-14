@@ -187,7 +187,10 @@ async def build_all_tool_definitions(db: "AsyncSession", tenant_id: uuid.UUID) -
 
     from app.mcp.tools.result_reference_tool import TOOL_DEFINITION as _REF_RESULT_TOOL
 
-    tools.append(_REF_RESULT_TOOL)
+    # Defensive copy: the stamping loop below mutates each dict in-place, so
+    # appending the module-level constant directly would permanently add
+    # "category" to it, polluting shared state across requests.
+    tools.append(dict(_REF_RESULT_TOOL))
 
     for t in tools:
         if "category" not in t:

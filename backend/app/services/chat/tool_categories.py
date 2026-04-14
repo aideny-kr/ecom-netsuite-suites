@@ -9,7 +9,9 @@ exactly one edit — declaring its category in tools.py."""
 
 from __future__ import annotations
 
-Category = str  # "financial" | "data_table" | "bigquery" | "rag" | "workspace" | "other"
+from typing import Literal
+
+Category = Literal["financial", "data_table", "bigquery", "rag", "workspace", "other"]
 
 _EXACT: dict[str, Category] = {
     "netsuite_suiteql": "data_table",
