@@ -14,15 +14,22 @@ Usage:
 import asyncio
 import sys
 
-from sqlalchemy import inspect, text
+import importlib
+import pkgutil
+
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from app.core.config import settings
 from app.core.database import _build_connect_args
 from app.models.base import Base
 
-# Import all models so they register with Base.metadata
-import app.models  # noqa: F401
+# Auto-discover and import ALL model modules so they register with Base.metadata.
+# Using pkgutil ensures we don't miss models that aren't in __init__.py.
+import app.models as _models_pkg
+
+for _, modname, _ in pkgutil.iter_modules(_models_pkg.__path__):
+    importlib.import_module(f"app.models.{modname}")
 
 
 async def validate() -> list[str]:
