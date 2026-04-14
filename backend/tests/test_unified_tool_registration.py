@@ -3,12 +3,6 @@
 import uuid
 
 
-def test_financial_report_in_unified_tool_names():
-    """netsuite_financial_report must be in the unified agent's tool set."""
-    from app.services.chat.agents.unified_agent import _UNIFIED_TOOL_NAMES
-
-    assert "netsuite_financial_report" in _UNIFIED_TOOL_NAMES
-
 
 def test_unified_agent_tool_definitions_include_financial_report():
     """Unified agent should build tool definitions that include netsuite_financial_report."""
