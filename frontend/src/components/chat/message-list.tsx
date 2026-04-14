@@ -662,16 +662,21 @@ export function MessageList({
   const { data: agentInstructions } = useAgentInstructions(pinnedAgentId ?? null);
   const updateInstructions = useUpdateAgentInstructions(pinnedAgentId ?? "");
 
-  // Track if user has scrolled up (should NOT auto-scroll)
+  // Track if user has scrolled up (should NOT auto-scroll).
+  // Only wheel-up BREAKS auto-scroll. Scroll events only RE-ENABLE it
+  // (when user scrolls back to bottom). This prevents content growth
+  // during streaming from falsely disabling auto-scroll.
   const shouldAutoScrollRef = useRef(true);
   const handleScroll = useCallback(() => {
     const el = containerRef.current;
     if (!el) return;
     const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-    shouldAutoScrollRef.current = distanceFromBottom < 80;
+    if (distanceFromBottom < 80) {
+      shouldAutoScrollRef.current = true;
+    }
   }, []);
 
-  // Wheel up immediately breaks auto-scroll lock (don't wait for threshold)
+  // Wheel up immediately breaks auto-scroll lock
   const handleWheel = useCallback((e: React.WheelEvent) => {
     if (e.deltaY < 0) {
       shouldAutoScrollRef.current = false;
