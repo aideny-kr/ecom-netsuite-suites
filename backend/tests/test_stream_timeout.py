@@ -1,8 +1,8 @@
 """Tests for stream_message deadline timeout in AnthropicAdapter."""
 
-import asyncio
-import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 from app.services.chat.adapters.anthropic_adapter import AnthropicAdapter
 
