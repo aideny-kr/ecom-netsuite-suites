@@ -799,6 +799,8 @@ class BaseSpecialistAgent(abc.ABC):
                         response = payload
 
                 if not response:
+                    yield "text", "\n\nI'm sorry, the response timed out. Please try again with a simpler question."
+                    print(f"[AGENT] {self.agent_name} stream returned no response (possible timeout)", flush=True)
                     break
 
                 total_input_tokens += response.usage.input_tokens

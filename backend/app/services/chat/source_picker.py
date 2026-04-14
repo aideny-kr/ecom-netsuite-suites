@@ -95,6 +95,16 @@ _MARKETING_RE = re.compile(
 _EXPLICIT_BIGQUERY_RE = re.compile(r"(?i)\b(?:bigquery|bq|data\s+warehouse)\b")
 _EXPLICIT_NETSUITE_RE = re.compile(r"(?i)\b(?:netsuite|net\s*suite|suiteql|ns\s+(?:records?|data))\b")
 
+# Discussion / advisory patterns — these are NOT data queries even when they
+# contain data nouns like "product" or "orders".  Applied as a negative gate
+# before the broad _DATA_INTENT_RE check.
+_DISCUSSION_RE = re.compile(
+    r"(?i)\b(how\s+to|how\s+do|how\s+should|what\s+should|can\s+you|could\s+you|"
+    r"is\s+it\s+possible|best\s+way|recommend|suggest|advice|explain|"
+    r"help\s+me\s+understand|what\s+happens|why\s+does|difference\s+between|"
+    r"proceed|approach)\b"
+)
+
 # Data-intent heuristic — picker only fires when the query looks like a data
 # question. Chitchat ("hello"), workspace questions ("show me workspace files"),
 # and meta questions ("how do I use this") must skip the picker.
@@ -135,15 +145,23 @@ def has_data_intent(query: str) -> bool:
     """
     if not query or not query.strip():
         return False
-    if _EXPLICIT_BIGQUERY_RE.search(query) or _EXPLICIT_NETSUITE_RE.search(query):
+    q = query.strip()
+    # High-confidence patterns always have data intent — check before the
+    # discussion guard so "how to query BigQuery" still returns True.
+    if _EXPLICIT_BIGQUERY_RE.search(q) or _EXPLICIT_NETSUITE_RE.search(q):
         return True
-    if _FINANCIAL_RE.search(query):
+    if _FINANCIAL_RE.search(q):
         return True
-    if _NETSUITE_ENTITY_RE.search(query) or _NETSUITE_OPERATIONAL_RE.search(query):
+    if _NETSUITE_ENTITY_RE.search(q) or _NETSUITE_OPERATIONAL_RE.search(q):
         return True
-    if _MARKETING_RE.search(query):
+    if _MARKETING_RE.search(q):
         return True
-    return bool(_DATA_INTENT_RE.search(query))
+    # Discussion/advisory questions are NOT data queries, even when they
+    # mention data nouns like "product", "orders", or "items".
+    if _DISCUSSION_RE.search(q):
+        return False
+    # Fall through to broad data noun check.
+    return bool(_DATA_INTENT_RE.search(q))
 
 
 class PickerOption(TypedDict):
@@ -205,6 +223,16 @@ def score_source(query: str) -> SourceScore:
 def should_prompt_user(score: SourceScore, threshold: float = AMBIGUITY_THRESHOLD) -> bool:
     """True iff confidence is strictly below the threshold."""
     return score[1] < threshold
+
+
+def _should_override_pin(query: str, current_pin: str) -> bool:
+    """Return True if query clearly belongs to a DIFFERENT source than the pin.
+
+    Used to make source_pin a soft preference: ambiguous follow-ups honor the pin,
+    but high-confidence queries for the other source override it.
+    """
+    source, confidence, _reason = score_source(query)
+    return confidence >= 0.95 and source != current_pin
 
 
 def build_picker_payload(score: SourceScore, *, user_question: str) -> PickerPayload:

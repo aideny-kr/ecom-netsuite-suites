@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import uuid
@@ -76,6 +77,7 @@ class SessionListItem(BaseModel):
     is_archived: bool
     active_run_id: str | None = None
     status: str = "idle"  # idle, running, cancelling
+    run_started_at: float | None = None
     created_at: str
     updated_at: str
 
@@ -86,6 +88,9 @@ class SessionDetailResponse(BaseModel):
     id: str
     title: str | None = None
     is_archived: bool
+    active_run_id: str | None = None
+    status: str = "idle"
+    run_started_at: float | None = None
     messages: list[MessageResponse]
     created_at: str
     updated_at: str
@@ -98,11 +103,14 @@ def _serialize_session(session: ChatSession) -> dict:
     rm = get_run_manager()
     active_run_id = rm.get_active_run(str(session.id))
     run_status = "idle"
+    run_started_at = None
     if active_run_id:
         rs = rm.get_status(active_run_id)
         run_status = rs if rs in ("running", "cancelling") else "idle"
         if run_status == "idle":
             active_run_id = None
+        else:
+            run_started_at = rm.get_started_at(active_run_id)
 
     return {
         "id": str(session.id),
@@ -113,6 +121,7 @@ def _serialize_session(session: ChatSession) -> dict:
         "is_archived": session.is_archived,
         "active_run_id": active_run_id,
         "status": run_status,
+        "run_started_at": run_started_at,
         "created_at": session.created_at.isoformat(),
         "updated_at": session.updated_at.isoformat(),
     }
@@ -320,8 +329,6 @@ async def send_message(
             )
 
     # Create run and spawn background task
-    import asyncio
-
     run_id = str(uuid.uuid4())
     rm.create_run(run_id, str(session_id))
 
@@ -344,6 +351,46 @@ async def send_message(
     return {"run_id": run_id, "session_id": str(session_id)}
 
 
+_BACKGROUND_TASK_TIMEOUT = 300  # 5 minutes total for any chat turn
+
+
+async def _run_chat_pipeline(
+    rm,
+    run_id: str,
+    session_id: str,
+    user_message: str,
+    user_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+    user_msg: ChatMessage,
+    wizard_step: str | None,
+    user_timezone: str | None,
+    agent_id: str | None,
+    source_pick: str | None,
+) -> None:
+    """Inner pipeline coroutine — wrapped by asyncio.wait_for in _run_chat_background."""
+    from app.core.database import async_session_factory
+
+    async with async_session_factory() as db:
+        # Re-load session in this DB context so title/updated_at changes persist
+        result = await db.execute(select(ChatSession).where(ChatSession.id == uuid.UUID(session_id)))
+        session = result.scalar_one()
+
+        async for chunk in run_chat_turn(
+            db=db,
+            session=session,
+            user_message=user_message,
+            user_id=user_id,
+            tenant_id=tenant_id,
+            user_msg=user_msg,
+            wizard_step=wizard_step,
+            user_timezone=user_timezone,
+            agent_id=agent_id,
+            run_id=run_id,
+            source_pick=source_pick,
+        ):
+            rm.write_event(run_id, chunk)
+
+
 async def _run_chat_background(
     run_id: str,
     session_id: str,
@@ -358,18 +405,13 @@ async def _run_chat_background(
     source_pick: str | None = None,
 ) -> None:
     """Run the chat pipeline in background, writing events to Redis."""
-    from app.core.database import async_session_factory
-
     rm = get_run_manager()
     try:
-        async with async_session_factory() as db:
-            # Re-load session in this DB context so title/updated_at changes persist
-            result = await db.execute(select(ChatSession).where(ChatSession.id == uuid.UUID(session_id)))
-            session = result.scalar_one()
-
-            async for chunk in run_chat_turn(
-                db=db,
-                session=session,
+        await asyncio.wait_for(
+            _run_chat_pipeline(
+                rm=rm,
+                run_id=run_id,
+                session_id=session_id,
                 user_message=user_message,
                 user_id=user_id,
                 tenant_id=tenant_id,
@@ -377,11 +419,25 @@ async def _run_chat_background(
                 wizard_step=wizard_step,
                 user_timezone=user_timezone,
                 agent_id=agent_id,
-                run_id=run_id,
                 source_pick=source_pick,
-            ):
-                rm.write_event(run_id, chunk)
+            ),
+            timeout=_BACKGROUND_TASK_TIMEOUT,
+        )
         rm.set_status(run_id, "complete")
+    except asyncio.TimeoutError:
+        logger.error(
+            "Background chat run timed out after %ds: %s",
+            _BACKGROUND_TASK_TIMEOUT,
+            run_id,
+        )
+        rm.write_event(
+            run_id,
+            {
+                "type": "error",
+                "error": "The response took too long. Please try again with a simpler question.",
+            },
+        )
+        rm.set_status(run_id, "failed")
     except Exception as exc:
         logger.exception("Background chat run failed: %s", exc)
         rm.write_event(run_id, {"type": "error", "error": "Chat service temporarily unavailable."})
@@ -402,8 +458,6 @@ async def _send_message_inline_sse(
     """Fallback: inline SSE streaming when Redis is unavailable."""
 
     async def stream_generator():
-        import asyncio
-
         _SENTINEL = object()
         partial_text_parts: list[str] = []
         stream_completed = False

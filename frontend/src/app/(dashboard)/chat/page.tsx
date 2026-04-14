@@ -35,6 +35,7 @@ export default function ChatPage() {
   const [streamingMessage, setStreamingMessage] = useState<ChatMessage | null>(null);
   const [isStreaming, setIsStreaming] = useState(false);
   const isStreamingRef = useRef(false);
+  const [activeSourcePick, setActiveSourcePick] = useState<"netsuite" | "bigquery" | null>(null);
   const [financialReport, setFinancialReport] = useState<FinancialReportData | null>(null);
   const financialReportsRef = useRef<Map<string, FinancialReportData>>(new Map());
   const [dataTable, setDataTable] = useState<DataTableData | null>(null);
@@ -180,10 +181,171 @@ export default function ChatPage() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeSessionId]);
 
-  // Placeholder — reconnect logic removed to fix cross-session bleed.
-  // When a background run completes, the 5s session poll detects status → "idle".
-  // The session detail refetch above loads the completed messages from DB.
-  // Future: add mid-stream reconnect with proper stream isolation.
+  // ── Shared stream consumption ───────────────────────────────────────────
+  // Used by both handleSend (new message) and reconnection (navigated back
+  // to a session with an active run). Extracted to avoid duplicating handlers.
+  const connectToRunStream = useCallback(
+    async (runId: string, sessionId: string) => {
+      const controller = new AbortController();
+      abortRef.current = controller;
+      activeRunRef.current = runId;
+      isStreamingRef.current = true;
+      setIsStreaming(true);
+      setStreamBlocks([]);
+      setStreamingMessage(null);
+
+      try {
+        const res = await apiClient.streamGet(
+          `/api/v1/chat/runs/${runId}/stream?last_id=0`,
+          controller.signal,
+        );
+        await consumeChatStream(res, {
+          onText: (chunk) => {
+            bufferRef.current.push(chunk);
+            if (rafRef.current === null) {
+              rafRef.current = requestAnimationFrame(flushBuffer);
+            }
+            if (flushTimerRef.current) clearTimeout(flushTimerRef.current);
+            flushTimerRef.current = setTimeout(forceFlush, 100);
+          },
+          onToolStatus: () => {},
+          onFinancialReport: (data) => {
+            setFinancialReport(data);
+            setStreamBlocks(prev => [...prev, { type: "financial_report" as const, data, id: `fr-${Date.now()}` }]);
+          },
+          onDataTable: (data) => {
+            setDataTable(data);
+            setStreamBlocks(prev => [...prev, { type: "data_table" as const, data, id: `dt-${Date.now()}` }]);
+          },
+          onChart: (data) => {
+            setCharts((prev) => [...prev, data]);
+            setStreamBlocks(prev => [...prev, { type: "chart" as const, data, id: `chart-${Date.now()}` }]);
+          },
+          onTaskOutput: (data) => {
+            setTaskOutput(data);
+            setStreamBlocks(prev => [...prev, { type: "task_output" as const, data, id: `to-${Date.now()}` }]);
+          },
+          onToolStart: (tool_name, tool_input, step) => {
+            if (bufferRef.current.length > 0) {
+              const text = bufferRef.current.join("");
+              bufferRef.current = [];
+              if (text.trim()) {
+                setStreamBlocks(prev => {
+                  const last = prev[prev.length - 1];
+                  if (last && last.type === "text") {
+                    return [...prev.slice(0, -1), { ...last, content: last.content + text }];
+                  }
+                  return [...prev, { type: "text" as const, content: text, id: `text-${Date.now()}` }];
+                });
+              }
+            }
+            setStreamBlocks(prev => [...prev, {
+              type: "tool" as const,
+              tool: { tool_name, tool_input, step, status: "running" as const },
+              id: `tool-${step}`,
+            }]);
+          },
+          onToolEnd: (tool_name, step, duration_ms, success, result_summary) => {
+            setStreamBlocks(prev => prev.map(block =>
+              block.type === "tool" && block.tool.step === step
+                ? { ...block, tool: { ...block.tool, status: (success ? "complete" : "error") as StreamingToolCall["status"], duration_ms, success, result_summary } }
+                : block
+            ));
+          },
+          onError: (streamError) => {
+            setError(streamError);
+            if (abortRef.current) {
+              abortRef.current.abort();
+              abortRef.current = null;
+            }
+          },
+          onMessage: (message) => {
+            setFinancialReport((current) => {
+              if (current) financialReportsRef.current.set(message.id, current);
+              return null;
+            });
+            setDataTable((current) => {
+              if (current) dataTablesRef.current.set(message.id, current);
+              return null;
+            });
+            setCharts((current) => {
+              if (current.length > 0) chartsRef.current.set(message.id, current);
+              return [];
+            });
+            setTaskOutput((current) => {
+              if (current) taskOutputsRef.current.set(message.id, current);
+              return null;
+            });
+            setStreamingMessage(message);
+            setStreamBlocks([]);
+          },
+        });
+      } catch (err: unknown) {
+        if (err instanceof DOMException && err.name === "AbortError") return;
+        if (err instanceof Error && err.message.includes("aborted")) return;
+        const message = err instanceof Error ? err.message : "Failed to stream response.";
+        if (!message.includes("already in progress")) {
+          setError(message);
+        }
+      } finally {
+        activeRunRef.current = null;
+        if (rafRef.current !== null) { cancelAnimationFrame(rafRef.current); rafRef.current = null; }
+        if (flushTimerRef.current) { clearTimeout(flushTimerRef.current); flushTimerRef.current = null; }
+        if (bufferRef.current.length > 0) {
+          const remaining = bufferRef.current.join("");
+          bufferRef.current = [];
+          if (remaining.trim()) {
+            setStreamBlocks(prev => {
+              const last = prev[prev.length - 1];
+              if (last && last.type === "text") {
+                return [...prev.slice(0, -1), { ...last, content: last.content + remaining }];
+              }
+              return [...prev, { type: "text" as const, content: remaining, id: `text-final` }];
+            });
+          }
+        }
+        try {
+          await queryClient.invalidateQueries({ queryKey: ["chat-session", sessionId] });
+          await queryClient.invalidateQueries({ queryKey: ["chat-sessions"] });
+        } catch { /* non-critical */ }
+        isStreamingRef.current = false;
+        setIsStreaming(false);
+        setPendingMessage(null);
+        setStreamBlocks([]);
+        setStreamingMessage(null);
+        setFinancialReport(null);
+        setDataTable(null);
+        setCharts([]);
+        setTaskOutput(null);
+        setActiveSourcePick(null);
+      }
+    },
+    [flushBuffer, forceFlush, queryClient],
+  );
+
+  // ── Reconnect to active run on session switch ─────────────────────────
+  // When navigating to a session with a running agent, reconnect to the SSE
+  // stream so the user sees live progress (text, tool cards, data tables).
+  // Prevents "looks dead" when navigating away and back mid-run.
+  useEffect(() => {
+    if (!sessionDetail?.active_run_id) return;
+    if (sessionDetail.status !== "running") return;
+    if (isStreamingRef.current) return; // Already consuming (we started this run)
+
+    const runId = sessionDetail.active_run_id;
+    const sessionId = activeSessionId!;
+
+    connectToRunStream(runId, sessionId);
+
+    // Cleanup: abort on unmount or session change
+    return () => {
+      if (abortRef.current) {
+        abortRef.current.abort();
+        abortRef.current = null;
+      }
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionDetail?.active_run_id, sessionDetail?.status, activeSessionId]);
 
   const handleSend = useCallback(
     async (content: string, fileId?: string, opts: { source_pick?: "netsuite" | "bigquery" } = {}) => {
@@ -225,120 +387,14 @@ export default function ChatPage() {
           `/api/v1/chat/sessions/${sessionId}/messages`,
           msgBody,
         );
-        activeRunRef.current = run_id;
 
         // Message is now saved in DB — clear local pending copy to avoid duplicate
         // and refetch so the persisted message appears in the list
         setPendingMessage(null);
         await queryClient.invalidateQueries({ queryKey: ["chat-session", sessionId] });
 
-        // Step 2: Connect to SSE stream for this run
-        const controller = new AbortController();
-        abortRef.current = controller;
-        const res = await apiClient.streamGet(
-          `/api/v1/chat/runs/${run_id}/stream?last_id=0`,
-          controller.signal,
-        );
-        await consumeChatStream(res, {
-          onText: (chunk) => {
-            bufferRef.current.push(chunk);
-            if (rafRef.current === null) {
-              rafRef.current = requestAnimationFrame(flushBuffer);
-            }
-            // Safety timer: force flush after 100ms even without word boundary
-            if (flushTimerRef.current) clearTimeout(flushTimerRef.current);
-            flushTimerRef.current = setTimeout(forceFlush, 100);
-          },
-          onToolStatus: () => {
-            // Legacy handler — tool_start/tool_end now drive the UI via streamBlocks
-          },
-          onFinancialReport: (data) => {
-            setFinancialReport(data);
-            setStreamBlocks(prev => [...prev, { type: "financial_report" as const, data, id: `fr-${Date.now()}` }]);
-          },
-          onDataTable: (data) => {
-            setDataTable(data);
-            setStreamBlocks(prev => [...prev, { type: "data_table" as const, data, id: `dt-${Date.now()}` }]);
-          },
-          onChart: (data) => {
-            setCharts((prev) => [...prev, data]);
-            setStreamBlocks(prev => [...prev, { type: "chart" as const, data, id: `chart-${Date.now()}` }]);
-          },
-          onTaskOutput: (data) => {
-            setTaskOutput(data);
-            setStreamBlocks(prev => [...prev, { type: "task_output" as const, data, id: `to-${Date.now()}` }]);
-          },
-          onToolStart: (tool_name, tool_input, step) => {
-            // Flush any buffered text before tool starts
-            if (bufferRef.current.length > 0) {
-              const text = bufferRef.current.join("");
-              bufferRef.current = [];
-              if (text.trim()) {
-                setStreamBlocks(prev => {
-                  const last = prev[prev.length - 1];
-                  if (last && last.type === "text") {
-                    return [...prev.slice(0, -1), { ...last, content: last.content + text }];
-                  }
-                  return [...prev, { type: "text" as const, content: text, id: `text-${Date.now()}` }];
-                });
-              }
-            }
-            setStreamBlocks(prev => [...prev, {
-              type: "tool" as const,
-              tool: { tool_name, tool_input, step, status: "running" as const },
-              id: `tool-${step}`,
-            }]);
-          },
-          onToolEnd: (tool_name, step, duration_ms, success, result_summary) => {
-            setStreamBlocks(prev => prev.map(block =>
-              block.type === "tool" && block.tool.step === step
-                ? { ...block, tool: { ...block.tool, status: (success ? "complete" : "error") as StreamingToolCall["status"], duration_ms, success, result_summary } }
-                : block
-            ));
-          },
-          onError: (streamError) => {
-            setError(streamError);
-            // Treat error as terminal on the frontend — abort the SSE reader
-            // so the "Processing..." spinner clears immediately instead of
-            // hanging until the backend sentinel arrives.
-            if (abortRef.current) {
-              abortRef.current.abort();
-              abortRef.current = null;
-            }
-          },
-          onMessage: (message) => {
-            // Associate any in-flight financial report with this message
-            setFinancialReport((current) => {
-              if (current) {
-                financialReportsRef.current.set(message.id, current);
-              }
-              return null;
-            });
-            // Associate any in-flight data table with this message
-            setDataTable((current) => {
-              if (current) {
-                dataTablesRef.current.set(message.id, current);
-              }
-              return null;
-            });
-            // Associate any in-flight charts with this message
-            setCharts((current) => {
-              if (current.length > 0) {
-                chartsRef.current.set(message.id, current);
-              }
-              return [];
-            });
-            // Associate any in-flight task output with this message
-            setTaskOutput((current) => {
-              if (current) {
-                taskOutputsRef.current.set(message.id, current);
-              }
-              return null;
-            });
-            setStreamingMessage(message);
-            setStreamBlocks([]);
-          },
-        });
+        // Step 2: Connect to SSE stream for this run (shared with reconnection)
+        await connectToRunStream(run_id, sessionId);
       } catch (err: unknown) {
         // AbortController.abort() throws — this is expected on session switch, not an error
         if (err instanceof DOMException && err.name === "AbortError") return;
@@ -349,49 +405,6 @@ export default function ChatPage() {
         } else {
           setError(message);
         }
-      } finally {
-        activeRunRef.current = null;
-        // Flush any remaining buffered text and cancel pending RAF/timers
-        if (rafRef.current !== null) {
-          cancelAnimationFrame(rafRef.current);
-          rafRef.current = null;
-        }
-        if (flushTimerRef.current) {
-          clearTimeout(flushTimerRef.current);
-          flushTimerRef.current = null;
-        }
-        if (bufferRef.current.length > 0) {
-          const remaining = bufferRef.current.join("");
-          bufferRef.current = [];
-          if (remaining.trim()) {
-            setStreamBlocks(prev => {
-              const last = prev[prev.length - 1];
-              if (last && last.type === "text") {
-                return [...prev.slice(0, -1), { ...last, content: last.content + remaining }];
-              }
-              return [...prev, { type: "text" as const, content: remaining, id: `text-final` }];
-            });
-          }
-        }
-        // Refetch persisted messages BEFORE clearing streaming state
-        // so there's no blank gap between streaming text disappearing
-        // and the saved message appearing.
-        // Use local sessionId (not activeSessionId) to avoid stale closure.
-        try {
-          await queryClient.invalidateQueries({ queryKey: ["chat-session", sessionId] });
-          await queryClient.invalidateQueries({ queryKey: ["chat-sessions"] });
-        } catch {
-          // Refetch failure is non-critical — session data may be stale until next poll
-        }
-        isStreamingRef.current = false;
-        setIsStreaming(false);
-        setPendingMessage(null);
-        setStreamBlocks([]);
-        setStreamingMessage(null);
-        setFinancialReport(null);
-        setDataTable(null);
-        setCharts([]);
-        setTaskOutput(null);
       }
     },
     [activeSessionId, createSession, flushBuffer, queryClient, pinnedAgentId],
@@ -431,6 +444,7 @@ export default function ChatPage() {
           },
         );
       }
+      setActiveSourcePick(source);
       await handleSend(originalQuestion, undefined, { source_pick: source });
     },
     [sessionDetail, handleSend, activeSessionId, queryClient],
@@ -453,6 +467,7 @@ export default function ChatPage() {
     setTaskOutput(null);
     setPendingMessage(null);
     setError(null);
+    setActiveSourcePick(null);
   }, []);
 
   const handleNewChat = useCallback(() => {
@@ -531,6 +546,7 @@ export default function ChatPage() {
             isLoading={isLoadingDetail && !!activeSessionId}
             pendingUserMessage={pendingMessage}
             isWaitingForReply={isStreaming}
+            activeSourcePick={activeSourcePick}
             streamBlocks={streamBlocks}
             streamingMessage={streamingMessage}
             financialReports={financialReportsRef.current}

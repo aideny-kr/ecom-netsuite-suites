@@ -28,16 +28,16 @@ from app.core.encryption import decrypt_credentials
 from app.models.connection import Connection
 from app.models.experiment_log import ExperimentLog
 from app.models.mcp_connector import McpConnector
-from app.services.query_eval_harness import (
-    EvalCase,
-)
-from app.services.query_pattern_service import extract_and_store_pattern
 
 # vs-MCP benchmark scoring — replaces the internal composite scorer.
 # Imported here so callers (and tests) can patch them in this module's namespace.
 from app.services.benchmarks.agent_runner import run_agent  # noqa: F401
 from app.services.benchmarks.baseline_runner import run_baseline  # noqa: F401
 from app.services.benchmarks.scorer import substring_score  # noqa: F401
+from app.services.query_eval_harness import (
+    EvalCase,
+)
+from app.services.query_pattern_service import extract_and_store_pattern
 
 logger = logging.getLogger(__name__)
 
