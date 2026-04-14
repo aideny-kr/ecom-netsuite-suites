@@ -12,21 +12,19 @@ Usage:
 """
 
 import asyncio
-import sys
-
 import importlib
 import pkgutil
+import sys
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 
-from app.core.config import settings
-from app.core.database import _build_connect_args
-from app.models.base import Base
-
 # Auto-discover and import ALL model modules so they register with Base.metadata.
 # Using pkgutil ensures we don't miss models that aren't in __init__.py.
 import app.models as _models_pkg
+from app.core.config import settings
+from app.core.database import _build_connect_args
+from app.models.base import Base
 
 for _, modname, _ in pkgutil.iter_modules(_models_pkg.__path__):
     importlib.import_module(f"app.models.{modname}")

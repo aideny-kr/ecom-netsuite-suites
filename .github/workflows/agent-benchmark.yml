@@ -80,7 +80,7 @@ jobs:
 
       - name: Run vs-MCP agent benchmark
         run: |
-          cd backend && python -m tests.agent_benchmarks.run_vs_mcp \
+          cd backend && python -m app.services.benchmarks.run_vs_mcp \
             --suite sales \
             --tenant-id ce3dfaad-626f-4992-84e9-500c8291ca0a \
             --skip-baseline \
