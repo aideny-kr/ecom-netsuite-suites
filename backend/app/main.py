@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from sqlalchemy import text as sa_text
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.requests import Request
@@ -60,11 +61,42 @@ def _init_sentry() -> None:
         pass  # Sentry is optional — don't crash the app if it fails
 
 
+async def _cleanup_stale_jobs() -> None:
+    """Mark jobs stuck in 'running' as failed on startup.
+
+    After a container restart, any job that was mid-execution is dead.
+    We mark them failed (preserving audit trail) so the UI doesn't show
+    perpetually-running jobs.  Uses a 10-minute threshold to avoid
+    racing with legitimately-running tasks during a rolling restart.
+    """
+    import structlog
+
+    from app.core.database import engine
+
+    logger = structlog.get_logger("startup")
+    try:
+        async with engine.begin() as conn:
+            result = await conn.execute(
+                sa_text(
+                    "UPDATE jobs SET status = 'failed', "
+                    "completed_at = NOW(), "
+                    "error_message = 'Auto-cleaned: marked stale on startup' "
+                    "WHERE status = 'running' "
+                    "AND started_at < NOW() - INTERVAL '10 minutes'"
+                )
+            )
+            if result.rowcount:
+                logger.info("stale_jobs_cleaned", count=result.rowcount)
+    except Exception as exc:
+        logger.warning("stale_job_cleanup_failed", error=str(exc))
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _validate_production_secrets()
     _init_sentry()
     setup_logging()
+    await _cleanup_stale_jobs()
     yield
 
 

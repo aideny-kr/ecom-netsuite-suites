@@ -678,13 +678,14 @@ export function MessageList({
     }
   }, []);
 
-  // Synchronous scroll — fires BEFORE browser paint, prevents visible jump
+  // Synchronous scroll — fires BEFORE browser paint, prevents visible jump.
+  // streamBlocks.length ensures scroll follows streaming content as it arrives.
   useLayoutEffect(() => {
     if (shouldAutoScrollRef.current && bottomRef.current) {
       bottomRef.current.scrollIntoView({ block: "end" });
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [messages, pendingUserMessage, isWaitingForReply]);
+  }, [messages, pendingUserMessage, isWaitingForReply, streamBlocks.length]);
 
   // ResizeObserver to catch streaming content growth between React renders
   // Uses 50ms debounce to smooth scroll updates and prevent bounce
@@ -736,7 +737,7 @@ export function MessageList({
     );
   }
 
-  if (messages.length === 0 && !pendingUserMessage) {
+  if (messages.length === 0 && !pendingUserMessage && !isWaitingForReply) {
     // Agent workspace empty state — show header + panels + agent-specific prompt
     if (pinnedAgentId) {
       const agentName = agents?.find(a => a.agent_id === pinnedAgentId)?.display_name || pinnedAgentId;

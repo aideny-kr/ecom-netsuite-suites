@@ -57,7 +57,8 @@
 - **Feature Flags**: `tenant_feature_flags` table, TTL-cached. `require_feature(flag_key)` dependency returns 403 when disabled.
 - **Write-Back Confirmation**: All mutation-path agents use shared confirmation flow: agent builds payload → SSE `confirmation_required` event → frontend `ConfirmationDialog` component → user approves → agent executes → audit log with before/after snapshots. Never auto-execute writes.
 - **Reconciliation Engine**: Three-tier deterministic matching (exact payout ID → fuzzy amount/date/narration → AI investigation for 5% exceptions). No LLM in matching pipeline. Chat agent as primary interface, dashboard as secondary.
-- **Source Picker (v0.1)**: Confidence-gated pre-execution card picker between NetSuite and BigQuery. `score_source()` in `backend/app/services/chat/source_picker.py` returns `(source, confidence, reason)`. Threshold 0.85 — above = auto-run, below = picker. Financial keywords → NetSuite 0.99, marketing → BigQuery 0.95, NS entities → 0.95, ambiguous (orders/customers/revenue) → 0.55. Orchestrator short-circuits BEFORE agent execution, persists picker placeholder `ChatMessage` with `structured_output.type == "source_picker"`, yields terminal message, returns. User click posts `source_pick` field, backend sets `session.source_pin`, marks picker as `selected`, runs agent honoring pin. Routing block explicitly checks `source_pin` before 3-tier routing.
+- **Source Picker (v0.2)**: Confidence-gated pre-execution card picker between NetSuite and BigQuery. `score_source()` returns `(source, confidence, reason)`. Threshold 0.85 — above = auto-run, below = picker. Financial keywords → NetSuite 0.99, marketing → BigQuery 0.95, ambiguous → 0.55. **Soft pin**: `session.source_pin` persists per-session but `_should_override_pin()` lets queries scoring ≥0.95 for the OTHER source override it (e.g., "balance sheet" overrides a BigQuery pin). Discussion questions caught by `_DISCUSSION_RE` → `has_data_intent()` returns False → no picker. Sessions with prior agent results skip picker entirely (`_has_prior_agent_result` guard). **SSE reconnection**: navigating away and back auto-reconnects to the Redis stream via `connectToRunStream()` + `last_id=0`. Elapsed time indicator in sidebar.
+- **Agent Timeouts**: 120s wall-clock deadline on `anthropic_adapter.py::stream_message()` (per LLM call). 300s `asyncio.wait_for()` on `_run_chat_background()` (per chat turn). On timeout: user-facing error message, run status set to "failed", active run cleared.
 - **Fiscal Calendar**: `tenant_configs.fiscal_year_start_month` (1-12, default 1) injected into unified agent prompt as `## FISCAL CALENDAR` block. Agent interprets Q1/Q2/Q3/Q4/"fiscal year" using tenant's fiscal calendar instead of defaulting to calendar year. Calendar-year tenants (Framework) get the default behavior.
 
 ## Backend Patterns — FOLLOW EXACTLY
@@ -346,7 +347,7 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 36. **Financial routing needs veto, not just regex** — `_FINANCIAL_VETO_PHRASES` catches plurals/variants that the coordinator regex misses. Applied after Tier 1, session pin, and Tier 2 in `_select_agent()`.
 37. **nginx ssl_buffer_size for SSE** — default 16KB causes bursty streaming over TLS. Set to 4k for real-time SSE.
 43. **`normalizeStreamMessage` must preserve `structured_output`** — when adding new structured types (like source_picker), the SSE terminal `message` event's `structured_output` field MUST be copied in `frontend/src/lib/chat-stream.ts::normalizeStreamMessage()`. Otherwise the frontend drops it. This bit us twice.
-44. **`session.source_pin` must be honored by routing** — setting `source_pin` alone doesn't change behavior. The orchestrator's routing block explicitly checks `session.source_pin` BEFORE calling `_select_agent()`. Bypass Tier 1/2 when pin is set.
+44. **`session.source_pin` is a soft preference** — pin is honored for ambiguous queries (confidence < 0.95) but overridden when `_should_override_pin()` detects high-confidence routing for a different source. Don't hardcode pin as an absolute override.
 45. **Source picker placeholders do NOT re-persist user messages** — when `source_pick` is present in the POST body, reuse the last existing user message via `SELECT ... ORDER BY created_at DESC LIMIT 1`. Creating a new user row duplicates the question in the conversation.
 46. **One Next.js dev server per project, from the main checkout** — if you have worktrees, make sure you're not running `npm run dev` from a stale worktree. Check with `ps aux | grep next-dev` if hot reload isn't working.
 38. **Stripe SDK v15 breaking changes** — `dict(payout)` fails (use `payout.to_dict()`). `account.get("field")` fails (use `getattr(account, "field", None)`). StripeObject no longer behaves like a dict.
@@ -354,13 +355,16 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 40. **Recon pipeline Stripe sync timeout** — initial sync pulls all historical payouts (800+) with payout lines — can take 30+ min. Pipeline has 90s timeout with fallback to existing data. Pre-sync via Settings "Sync Now" or nightly Beat schedule.
 41. **Never let LLM present tool-computed numbers** — LLMs hallucinate/round numbers. Use tool result interception (`_intercept_tool_result`) to send data directly to frontend via SSE events (`data_table`, `task_output`). Condensed result to LLM should say "table shown automatically, do NOT list numbers." Pricing agent, SuiteQL, BigQuery all follow this pattern.
 42. **Supabase 2min statement timeout** — batch commits every 10 rows for upserts. Stripe/NetSuite sync both hit this. Cursor must save `max(created)` not `last` (Stripe returns newest first).
+47. **Initialize orchestrator variables before branch points** — variables used after if/elif chains in `run_chat_turn()` MUST be initialized before the chain. Chitchat path, picker-skip path, and other branches skip assignment blocks. `test_orchestrator_paths.py` catches this statically.
+48. **`_validate_read_only` must strip SQL comments** — LLMs generate `-- comment\nSELECT...`. The `_strip_sql_comments()` helper removes `--` and `/* */` before the `startswith` check. Do NOT use `_strip_sql_comments` to transform queries before execution (doesn't handle string literals).
+49. **`SessionDetailResponse` must include run fields** — `active_run_id`, `status`, `run_started_at` must be in BOTH `SessionListItem` and `SessionDetailResponse`. Missing them from detail broke SSE reconnection.
 
 ## Current State
 
-- **Product**: AI-den v1.7 deployed to staging 2026-04-10. Agent quality overhaul (PR #33), vs-MCP benchmark harness, pattern cleanup, retrieval thresholds.
+- **Product**: AI-den v1.8 deployed to staging 2026-04-13. Source picker resilience (PR #34): BQ validation fix, agent timeouts (120s stream / 300s task), soft source pin, discussion guard, SSE reconnection on navigate-away, elapsed time indicator.
 - **Latest migration**: 066_bench_vs_mcp (agent_benchmark_runs table)
-- **Frontend tests**: Vitest + @testing-library/react (30 tests). Run: `cd frontend && npx vitest run`
-- **Backend tests**: 140+ tests. Run: `cd backend && .venv/bin/python -m pytest`
+- **Frontend tests**: Vitest + @testing-library/react (31 tests). Run: `cd frontend && npx vitest run`
+- **Backend tests**: 150+ tests. Run: `cd backend && .venv/bin/python -m pytest`
 - **Agent benchmark**: 18 sales cases vs Claude+MCP. Run: `cd backend && .venv/bin/python -m tests.agent_benchmarks.run_vs_mcp --suite sales --tenant-id ce3dfaad-626f-4992-84e9-500c8291ca0a`
 - **Staging**: `api-staging.suitestudio.ai` + `staging.suitestudio.ai`. GCP Docker + nginx + Let's Encrypt. Deploy: `saas-deployment` skill.
 - **Nightly benchmark**: 11:00 UTC, enabled on staging. Results in `agent_benchmark_runs` table. Regression alerts via Sentry + structured log.
@@ -404,3 +408,4 @@ Full changelog moved to skills. Key milestones:
 - **v1.5** (2026-03-30): Self-service sync, order-level matching, progress stepper, CI green
 - **v1.6** (2026-04-03): Background chat, streaming tool cards, ordered content blocks, trimmed prompt
 - **v0.1 Intent Clarification** (2026-04-09): Source picker cards (confidence-gated, ambiguous → two cards, < 0.85 threshold), fiscal calendar injection into agent prompts, abandoned v0 disclosure footer design after design mismatch
+- **v0.2 Source Picker Resilience** (2026-04-13): BQ comment stripping, stream/task timeouts, soft source pin with override, discussion guard, picker skip after first result, SSE reconnection on navigate-away, elapsed time indicator, orchestrator path regression tests

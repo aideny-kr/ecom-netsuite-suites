@@ -175,7 +175,9 @@ def sync_stripe(
                 "raw_data": dispute.to_dict(),
             },
         )
-        last_created = dispute.created
+        # Track NEWEST dispute timestamp for cursor (Stripe returns newest first)
+        if last_created is None or dispute.created > last_created:
+            last_created = dispute.created
         disputes_synced += 1
 
     if last_created is not None:
