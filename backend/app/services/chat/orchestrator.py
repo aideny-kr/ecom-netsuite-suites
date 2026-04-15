@@ -299,268 +299,12 @@ def _assemble_system_prompt(*, template: str, tool_definitions: list[dict]) -> s
 
 
 # ---------------------------------------------------------------------------
-# Agent registry (kept for backward compat — tests import these symbols)
-# ---------------------------------------------------------------------------
-
-from app.services.chat.agents.agent_registry import AgentRegistry
-from app.services.chat.routing.rule_router import RuleRouter
-from app.services.chat.routing.semantic_router import SemanticRouter
-
-_agent_registry = AgentRegistry()
-# Load configs at module init — directory may not exist yet, that's fine
-try:
-    from pathlib import Path as _Path
-
-    _configs_dir = _Path(__file__).parent / "agents" / "configs"
-    if _configs_dir.is_dir():
-        _agent_registry.load_configs(_configs_dir)
-except Exception:
-    pass
-
-# ---------------------------------------------------------------------------
 # Knowledge profiles — replace routing with context injection
 # ---------------------------------------------------------------------------
 
 from app.services.chat.knowledge_profiles import load_all_profiles
 
 _knowledge_profiles = load_all_profiles()
-
-
-# Tool name → specialized agent mapping for session pinning
-_TOOL_TO_AGENT: dict[str, str] = {
-    "bigquery_sql": "bi-agent",
-    "bigquery_schema": "bi-agent",
-    "bigquery_cost_estimate": "bi-agent",
-}
-
-
-def _infer_previous_agent(messages: list) -> str | None:
-    """Infer last-used agent from the most recent assistant message's tool_calls.
-
-    Checks for an explicit ``agent`` field first (stored by build_tool_call_log_entry),
-    then falls back to tool-name heuristic via ``_TOOL_TO_AGENT``.
-    Only inspects the most recent assistant message — older history is irrelevant.
-    """
-    for msg in reversed(messages):
-        if msg.role != "assistant":
-            continue
-        if not msg.tool_calls:
-            break
-        tc_list = msg.tool_calls if isinstance(msg.tool_calls, list) else []
-        for tc in tc_list:
-            if not isinstance(tc, dict):
-                continue
-            # Prefer explicit agent field (stored since v1.1)
-            stored_agent = tc.get("agent")
-            if stored_agent and stored_agent != "unified":
-                return stored_agent
-            # Fallback: infer from tool name
-            tool_name = tc.get("tool", "")
-            agent = _TOOL_TO_AGENT.get(tool_name)
-            if agent:
-                return agent
-        break  # Only check the most recent assistant message
-    return None
-
-
-# Financial phrase veto — if any of these appear in the query and a specialist
-# agent was selected, override to UnifiedAgent.  Substring matching handles
-# plurals naturally ("income statement" matches "income statements").
-# False positives are safe: UnifiedAgent can handle any query.
-_FINANCIAL_VETO_PHRASES = frozenset(
-    [
-        "income statement",
-        "balance sheet",
-        "cash flow statement",
-        "profit and loss",
-        "profit & loss",
-        "p&l",
-        "p/l",
-        "trial balance",
-        "financial statement",
-        "financial report",
-        "general ledger",
-        "gl report",
-        "gl balance",
-        "gl summary",
-        "chart of accounts",
-        "ebitda",
-        "consolidated financials",
-        "consolidated revenue",
-        "consolidated income",
-        "fiscal year report",
-        "accounting period",
-        "net income",
-        "gross profit",
-        "operating income",
-        "operating expenses",
-        "cost of goods sold",
-        "cogs",
-    ]
-)
-
-
-def _is_financial_query(query: str) -> bool:
-    """Broad check for financial report intent via substring matching."""
-    q = query.lower()
-    return any(phrase in q for phrase in _FINANCIAL_VETO_PHRASES)
-
-
-# Queries about NetSuite operational data — should NEVER go to BigQuery BI agent
-_NETSUITE_VETO_PHRASES = frozenset(
-    [
-        "vendor",
-        "purchase order",
-        "purchase orders",
-        "vendor bill",
-        "vendor bills",
-        "supplier",
-        "procurement",
-        "supply chain",
-        "item receipt",
-        "item fulfillment",
-        "transfer order",
-        "work order",
-        "assembly",
-        "inventory",
-        "stock",
-        "warehouse",
-        "location",
-        "bin",
-        "lot number",
-        "serial number",
-        "rma",
-        "return authorization",
-        "credit memo",
-        "customer deposit",
-        "customer payment",
-        "journal entry",
-        "deposit",
-        "subsidiary",
-        "department",
-        "class",
-        "netsuite",
-    ]
-)
-
-
-def _is_netsuite_operational_query(query: str) -> bool:
-    """Check if query is about NetSuite operational data (not BI/analytics)."""
-    q = query.lower()
-    return any(phrase in q for phrase in _NETSUITE_VETO_PHRASES)
-
-
-async def _select_agent(
-    query: str,
-    tenant_id: uuid.UUID,
-    db: "AsyncSession",
-    adapter: "BaseLLMAdapter",
-    is_financial: bool = False,
-    is_netsuite_entity: bool = False,
-    previous_agent_id: str | None = None,
-    history: list[dict] | None = None,
-) -> str | None:
-    """Three-tier routing to select a specialized agent.
-
-    Returns agent_id if a specialized agent should handle the query,
-    or None if UnifiedAgent should handle it (default path).
-
-    Note: source_pin logic is handled in the routing block before this
-    function is called. The pin is now a soft preference — high-confidence
-    queries for a different source override it via _should_override_pin().
-    """
-    # Financial reports MUST use UnifiedAgent (NetSuite financial tools)
-    if is_financial:
-        print(f"[ROUTING] Financial report detected, forcing unified-agent | query: {query[:80]}", flush=True)
-        return None
-
-    # NetSuite-native entities (balance, AR, invoices, POs) → UnifiedAgent (R6)
-    if is_netsuite_entity:
-        print(f"[ROUTING] NetSuite entity detected, forcing unified-agent | query: {query[:80]}", flush=True)
-        return None
-
-    # Supply chain / operational queries → UnifiedAgent (NetSuite SuiteQL, not BigQuery)
-    if _is_netsuite_operational_query(query):
-        print(f"[ROUTING] NetSuite operational query, forcing unified-agent | query: {query[:80]}", flush=True)
-        return None
-
-    if not _agent_registry.configs:
-        return None
-
-    try:
-        enabled_agents = await _agent_registry.get_enabled_agents(db, tenant_id)
-    except Exception:
-        print("[ROUTING] Failed to load enabled agents, falling back to unified-agent", flush=True)
-        return None
-
-    if not enabled_agents:
-        return None
-
-    # Tier 1: Rule-based routing (<1ms)
-    rule_router = RuleRouter([(a, True) for a in enabled_agents])
-    tier1_result = rule_router.route(query)
-
-    if tier1_result and tier1_result != "unified-agent":
-        # Financial veto: override specialist if query is financial
-        if _is_financial_query(query):
-            print(
-                f"[ROUTING] Financial veto overrides Tier 1 ({tier1_result}) → unified-agent | query: {query[:80]}",
-                flush=True,
-            )
-            return None
-        # Check health before using
-        if _agent_registry.is_healthy(error_count=0, success_count=0):
-            print(f"[ROUTING] Tier 1 (regex) → {tier1_result} | matched patterns for query: {query[:80]}", flush=True)
-            return tier1_result
-        print(f"[ROUTING] Tier 1 matched {tier1_result} but agent unhealthy, falling back", flush=True)
-        return None
-
-    # Session pin: if no Tier 1 match but session has a pinned specialized agent
-    # that is currently enabled for this tenant → use it. Filtered-out agents
-    # (e.g. bi-agent when BigQuery is not connected) are ignored.
-    if previous_agent_id and previous_agent_id != "unified-agent":
-        enabled_ids = {a.agent_id for a in enabled_agents}
-        if previous_agent_id in enabled_ids:
-            # Financial veto applies to session pins too
-            if _is_financial_query(query):
-                print(
-                    f"[ROUTING] Financial veto overrides session pin ({previous_agent_id}) → unified-agent | query: {query[:80]}",
-                    flush=True,
-                )
-                return None
-            print(f"[ROUTING] Session pinned → {previous_agent_id} | query: {query[:80]}", flush=True)
-            return previous_agent_id
-
-    if tier1_result is None:
-        agent_count = len(enabled_agents)
-        print(
-            f"[ROUTING] Tier 1 no match, escalating to Tier 2 (semantic) | {agent_count} agents | query: {query[:80]}",
-            flush=True,
-        )
-
-    # Tier 2: Semantic routing via Haiku (~50ms)
-    semantic_router = SemanticRouter()
-    tier2_result = await semantic_router.route(
-        query,
-        enabled_agents,
-        adapter,
-        history=history if history else None,
-    )
-
-    if tier2_result and tier2_result != "unified-agent":
-        # Financial veto: last line of defense
-        if _is_financial_query(query):
-            print(
-                f"[ROUTING] Financial veto overrides Tier 2 ({tier2_result}) → unified-agent | query: {query[:80]}",
-                flush=True,
-            )
-            return None
-        print(f"[ROUTING] Tier 2 (semantic) → {tier2_result} | query: {query[:80]}", flush=True)
-        return tier2_result
-
-    # Tier 3: UnifiedAgent fallback
-    print(f"[ROUTING] Tier 3 (fallback) → unified-agent | query: {query[:80]}", flush=True)
-    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1559,10 +1303,7 @@ async def run_chat_turn(
                     )
                 else:
                     # Detect financial intent for task augmentation + domain knowledge boost
-                    from app.services.chat.coordinator import IntentType, classify_intent
-
-                    detected_intent = classify_intent(sanitized_input)
-                    is_financial = detected_intent == IntentType.FINANCIAL_REPORT
+                    is_financial = bool(_FINANCIAL_RE.search(sanitized_input))
                     is_web_search = _detect_web_search_intent(sanitized_input)
                     is_netsuite_entity = _detect_netsuite_entity(sanitized_input)
                     _has_data_reference = _detect_data_reference(sanitized_input)
@@ -1586,7 +1327,7 @@ async def run_chat_turn(
 
                     importance_tier = classify_importance(
                         sanitized_input,
-                        intent_hint=detected_intent.value if is_financial else None,
+                        intent_hint="financial_report" if is_financial else None,
                     )
                     print(
                         f"[ORCHESTRATOR] Importance tier: {importance_tier.label} ({importance_tier.value})",
