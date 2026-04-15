@@ -450,6 +450,7 @@ async def _select_agent(
     is_financial: bool = False,
     is_netsuite_entity: bool = False,
     previous_agent_id: str | None = None,
+    history: list[dict] | None = None,
 ) -> str | None:
     """Three-tier routing to select a specialized agent.
 
@@ -528,7 +529,12 @@ async def _select_agent(
 
     # Tier 2: Semantic routing via Haiku (~50ms)
     semantic_router = SemanticRouter()
-    tier2_result = await semantic_router.route(query, enabled_agents, adapter)
+    tier2_result = await semantic_router.route(
+        query,
+        enabled_agents,
+        adapter,
+        history=history if history else None,
+    )
 
     if tier2_result and tier2_result != "unified-agent":
         # Financial veto: last line of defense
@@ -1745,6 +1751,7 @@ async def run_chat_turn(
                                 is_financial=is_financial,
                                 is_netsuite_entity=is_netsuite_entity,
                                 previous_agent_id=_previous_agent_id,
+                                history=history_messages if history_messages else None,
                             )
                         else:
                             _selected_agent_id = "bi-agent"
@@ -1764,6 +1771,7 @@ async def run_chat_turn(
                                 is_financial=is_financial,
                                 is_netsuite_entity=is_netsuite_entity,
                                 previous_agent_id=_previous_agent_id,
+                                history=history_messages if history_messages else None,
                             )
                         else:
                             _selected_agent_id = None
@@ -1779,6 +1787,7 @@ async def run_chat_turn(
                             is_financial=is_financial,
                             is_netsuite_entity=is_netsuite_entity,
                             previous_agent_id=_previous_agent_id,
+                            history=history_messages if history_messages else None,
                         )
 
                     if _selected_agent_id:
