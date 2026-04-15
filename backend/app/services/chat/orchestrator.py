@@ -1188,10 +1188,6 @@ async def run_chat_turn(
             tool_definitions=tool_definitions,
         )
 
-    # Strip internal-only "category" field — Anthropic API rejects extra keys
-    for _td in tool_definitions:
-        _td.pop("category", None)
-
     # ── Connection health warning (appended after tool inventory) ──
     if connection_warnings:
         system_prompt += _build_connection_warning_block(connection_warnings)

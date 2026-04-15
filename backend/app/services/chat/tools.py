@@ -16,7 +16,6 @@ from typing import TYPE_CHECKING
 from app.mcp.registry import TOOL_REGISTRY
 from app.mcp.server import mcp_server
 from app.services.chat.nodes import ALLOWED_CHAT_TOOLS
-from app.services.chat.tool_categories import categorize
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -71,9 +70,6 @@ def build_local_tool_definitions() -> list[dict]:
                 },
             }
         )
-    for t in tools:
-        if "category" not in t:
-            t["category"] = categorize(t["name"])
     return tools
 
 
@@ -187,14 +183,7 @@ async def build_all_tool_definitions(db: "AsyncSession", tenant_id: uuid.UUID) -
 
     from app.mcp.tools.result_reference_tool import TOOL_DEFINITION as _REF_RESULT_TOOL
 
-    # Defensive copy: the stamping loop below mutates each dict in-place, so
-    # appending the module-level constant directly would permanently add
-    # "category" to it, polluting shared state across requests.
     tools.append(dict(_REF_RESULT_TOOL))
-
-    for t in tools:
-        if "category" not in t:
-            t["category"] = categorize(t["name"])
     return tools
 
 
