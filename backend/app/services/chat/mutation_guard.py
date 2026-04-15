@@ -78,7 +78,7 @@ _BLOCKED_RECORD_TYPES: frozenset[str] = frozenset(
 
 
 # ---------------------------------------------------------------------------
-# Public API
+# Helpers
 # ---------------------------------------------------------------------------
 
 
@@ -123,7 +123,7 @@ def is_record_type_allowed(record_type: str) -> bool:
 def generate_confirmation_token(session_id: str, payload_json: str) -> str:
     """Generate an HMAC-SHA256 token binding *payload_json* to *session_id*.
 
-    The token is a 64-character hex digest.  Uses ``settings.SECRET_KEY``
+    The token is a 64-character hex digest.  Uses ``settings.JWT_SECRET_KEY``
     as the HMAC key so tokens are server-side secrets the browser cannot
     forge.
     """
