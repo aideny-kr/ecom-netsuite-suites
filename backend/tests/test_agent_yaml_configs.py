@@ -153,3 +153,13 @@ class TestRequiresConnectorField:
         )
         config = AgentYAMLConfig.from_yaml(yaml_file)
         assert config.requires_connector == ["bigquery", "snowflake"]
+
+
+class TestBiAgentRequiresBigQuery:
+    def test_bi_agent_declares_bigquery_connector_requirement(self):
+        """bi-agent is BigQuery-dependent — the YAML must declare this."""
+        config = AgentYAMLConfig.from_yaml(CONFIGS_DIR / "bi_agent.yaml")
+        assert "bigquery" in config.requires_connector, (
+            f"bi_agent.yaml must list bigquery in requires_connector; "
+            f"got {config.requires_connector}"
+        )
