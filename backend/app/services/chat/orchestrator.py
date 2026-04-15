@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.services.chat.prompt_cache import split_system_prompt
+from app.services.chat.tool_categories import categorize
 
 # Regex to strip leaked Anthropic tool-call XML from assistant text
 _TOOL_XML_RE = re.compile(r"</?(?:invoke|parameter|tool_use)[^>]*>", re.DOTALL)
@@ -647,36 +648,19 @@ def _sanitize_assistant_text(text: str) -> str:
     return text.strip()
 
 
-_FINANCIAL_TOOLS = frozenset({"netsuite.financial_report", "netsuite_financial_report"})
-_DATA_TABLE_TOOLS = frozenset(
-    {
-        "netsuite.suiteql",
-        "netsuite_suiteql",
-        "bigquery.sql",
-        "bigquery_sql",
-        "pivot.query_result",
-        "pivot_query_result",
-    }
-)
-_BIGQUERY_TOOLS = frozenset({"bigquery.sql", "bigquery_sql"})
-
-
 def _is_financial_tool(tool_name: str) -> bool:
-    """Match local financial tools and external MCP runReport tools."""
-    if tool_name in _FINANCIAL_TOOLS:
-        return True
-    if tool_name.startswith("ext__") and "runreport" in tool_name.lower():
-        return True
-    return False
+    """True for local financial-report tools and external MCP ns_runReport."""
+    return categorize(tool_name) == "financial"
 
 
 def _is_data_table_tool(tool_name: str) -> bool:
-    """Match tools that return {columns, rows} data tables (SuiteQL, BigQuery, pivot)."""
-    if tool_name in _DATA_TABLE_TOOLS:
-        return True
-    if tool_name.startswith("ext__") and "suiteql" in tool_name.lower():
-        return True
-    return False
+    """True for tools returning tabular data (SuiteQL, BigQuery, pivot)."""
+    return categorize(tool_name) in ("data_table", "bigquery")
+
+
+def _is_bigquery_tool(tool_name: str) -> bool:
+    """True for BigQuery query tools."""
+    return categorize(tool_name) == "bigquery"
 
 
 _SAVED_SEARCH_TOOLS = frozenset({"netsuite.saved_search", "netsuite_saved_search"})
@@ -1914,7 +1898,7 @@ async def run_chat_turn(
                         "financial_report"
                         if event_type_str == "financial_report"
                         else "bigquery"
-                        if tool_name in _BIGQUERY_TOOLS
+                        if _is_bigquery_tool(tool_name)
                         else "suiteql"
                     )
                     _pending_caches.append(

@@ -42,3 +42,35 @@ class TestCategorize:
         # Tool registry uses dotted names; LLM sees underscores. Both map equally.
         assert categorize("netsuite.suiteql") == "data_table"
         assert categorize("bigquery.sql") == "bigquery"
+
+
+class TestOrchestratorCategoryCheckers:
+    """Prove the orchestrator's legacy helpers are now category-driven."""
+
+    def test_is_financial_tool_uses_categorize(self):
+        from app.services.chat.orchestrator import _is_financial_tool
+
+        assert _is_financial_tool("netsuite_financial_report") is True
+        assert _is_financial_tool("netsuite_suiteql") is False
+        assert _is_financial_tool("ext__connector1__ns_runReport") is True
+
+    def test_is_data_table_tool_uses_categorize(self):
+        from app.services.chat.orchestrator import _is_data_table_tool
+
+        assert _is_data_table_tool("netsuite_suiteql") is True
+        assert _is_data_table_tool("bigquery_sql") is True
+        assert _is_data_table_tool("pivot_query_result") is True
+        assert _is_data_table_tool("rag_search") is False
+
+    def test_no_hardcoded_financial_tools_frozenset(self):
+        from app.services.chat import orchestrator
+
+        assert not hasattr(orchestrator, "_FINANCIAL_TOOLS"), (
+            "Delete _FINANCIAL_TOOLS frozenset; use categorize() instead."
+        )
+        assert not hasattr(orchestrator, "_DATA_TABLE_TOOLS"), (
+            "Delete _DATA_TABLE_TOOLS frozenset; use categorize() instead."
+        )
+        assert not hasattr(orchestrator, "_BIGQUERY_TOOLS"), (
+            "Delete _BIGQUERY_TOOLS frozenset; use categorize() instead."
+        )
