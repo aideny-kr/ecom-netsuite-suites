@@ -586,6 +586,31 @@ class BaseSpecialistAgent(abc.ABC):
 
                     t0 = time.monotonic()
 
+                    # Mutation intercept: block writes in non-streaming path too
+                    from app.services.chat.mutation_guard import classify_mutation as _classify_mut
+
+                    _mut_type = _classify_mut(block.name)
+                    if _mut_type is not None:
+                        result_str = json.dumps({
+                            "error": "Write operations require the streaming chat path for HITL confirmation. "
+                            "This tool cannot be executed in the non-streaming path.",
+                            "blocked": True,
+                        })
+                        elapsed_ms = int((time.monotonic() - t0) * 1000)
+                        tool_calls_log.append(
+                            build_tool_call_log_entry(
+                                step=step, agent_name=self.agent_name,
+                                tool_name=block.name, params=block.input,
+                                result_str=result_str, duration_ms=elapsed_ms,
+                            )
+                        )
+                        tool_results_content.append({
+                            "type": "tool_result",
+                            "tool_use_id": block.id,
+                            "content": result_str,
+                        })
+                        continue
+
                     # Policy check
                     policy_result = policy_evaluate(active_policy, block.name, block.input)
                     if not policy_result["allowed"]:
@@ -944,7 +969,7 @@ class BaseSpecialistAgent(abc.ABC):
                                     get_result_str = await _aio.wait_for(
                                         execute_tool_call(
                                             tool_name=get_tool_name,
-                                            tool_input={"type": record_type, "id": str(record_id)},
+                                            tool_input={"recordType": record_type, "id": str(record_id)},
                                             tenant_id=self.tenant_id,
                                             actor_id=self.user_id,
                                             correlation_id=self.correlation_id,
@@ -966,7 +991,7 @@ class BaseSpecialistAgent(abc.ABC):
                             record_type=record_type,
                             tool_name=block.name,
                             tool_input=block.input,
-                            session_id=session_id or "",
+                            session_id=session_id if session_id else str(self.tenant_id),
                             current_record=current_record,
                         )
 

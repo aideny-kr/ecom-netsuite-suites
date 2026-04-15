@@ -1162,32 +1162,36 @@ async def run_chat_turn(
                     session_id=str(session.id),
                 )
 
-                _updated_so = dict(_so)
-                _updated_so["status"] = "approved"
-                _confirm_msg.structured_output = _updated_so
-                _wc_flag_modified(_confirm_msg, "structured_output")
-
                 _mutation_type = _so.get("mutation_type", "write")
-                await log_event(
-                    db=db,
-                    tenant_id=tenant_id,
-                    category="chat",
-                    action=f"record.{_mutation_type}.approved",
-                    actor_id=user_id,
-                    resource_type="chat_session",
-                    resource_id=str(session.id),
-                    payload={"tool_name": tool_name, "tool_input": tool_input, "result": _exec_result_str[:1000]},
-                )
+                _record_type = _so.get("record_type", "record")
 
+                _exec_succeeded = False
                 try:
                     _exec_result = json.loads(_exec_result_str)
                     if isinstance(_exec_result, dict) and _exec_result.get("error"):
                         _confirm_content = f"The operation failed: {_exec_result['error']}"
                     else:
-                        _record_type = _so.get("record_type", "record")
+                        _exec_succeeded = True
                         _confirm_content = f"Done — the {_record_type} {_mutation_type} has been executed successfully."
                 except (json.JSONDecodeError, TypeError):
+                    _exec_succeeded = True
                     _confirm_content = f"The {_mutation_type} operation has been executed."
+
+                _updated_so = dict(_so)
+                _updated_so["status"] = "approved" if _exec_succeeded else "pending"
+                _confirm_msg.structured_output = _updated_so
+                _wc_flag_modified(_confirm_msg, "structured_output")
+
+                await log_event(
+                    db=db,
+                    tenant_id=tenant_id,
+                    category="chat",
+                    action=f"record.{_mutation_type}.{'approved' if _exec_succeeded else 'failed'}",
+                    actor_id=user_id,
+                    resource_type="chat_session",
+                    resource_id=str(session.id),
+                    payload={"tool_name": tool_name, "tool_input": tool_input, "result": _exec_result_str[:1000]},
+                )
 
                 _assistant_msg = ChatMessage(
                     tenant_id=tenant_id,
