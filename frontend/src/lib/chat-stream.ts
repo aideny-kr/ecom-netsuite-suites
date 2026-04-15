@@ -1,6 +1,6 @@
 "use client";
 
-import type { ChatMessage, ChartData, StreamingToolCall } from "@/lib/types";
+import type { ChatMessage, ChartData, StreamingToolCall, WriteConfirmationData } from "@/lib/types";
 
 export interface FinancialReportData {
   report_type: string;
@@ -33,7 +33,8 @@ export type StreamBlock =
   | { type: "chart"; data: ChartData; id: string }
   | { type: "financial_report"; data: FinancialReportData; id: string }
   | { type: "task_output"; data: TaskOutputData; id: string }
-  | { type: "thinking"; content: string; isActive: boolean; id: string };
+  | { type: "thinking"; content: string; isActive: boolean; id: string }
+  | { type: "write_confirmation"; data: WriteConfirmationData; id: string };
 
 export type ChatStreamEvent =
   | { type: "text"; content: string }
