@@ -234,9 +234,7 @@ class TestGetEnabledAgentsConnectorFilter:
     @pytest.mark.asyncio
     async def test_any_of_semantics_one_match_enables(self, tmp_path):
         """Agent requires [bigquery, snowflake], tenant has only snowflake → included."""
-        _write_yaml_config(
-            tmp_path, "warehouse-agent", requires_connector=["bigquery", "snowflake"]
-        )
+        _write_yaml_config(tmp_path, "warehouse-agent", requires_connector=["bigquery", "snowflake"])
         registry = AgentRegistry()
         registry.load_configs(tmp_path)
 
@@ -264,9 +262,7 @@ class TestGetEnabledAgentsConnectorFilter:
         overrides_result = MagicMock()
         overrides_result.all.return_value = []
 
-        mock_db.execute = AsyncMock(
-            side_effect=[overrides_result, RuntimeError("connection lost")]
-        )
+        mock_db.execute = AsyncMock(side_effect=[overrides_result, RuntimeError("connection lost")])
 
         with caplog.at_level(logging.WARNING):
             enabled = await registry.get_enabled_agents(mock_db, uuid.uuid4())
