@@ -173,6 +173,34 @@ def _tool_log_to_baseline_shape(tool_calls_log: list[dict]) -> list[dict]:
     return normalized
 
 
+def _extract_tool_data_for_judge(tool_calls_log: list[dict]) -> str:
+    """Extract actual data from tool results for LLM judge scoring.
+
+    The agent's text response is intentionally brief ("table shown automatically")
+    because tool result interception sends data via SSE. The judge needs to see
+    the actual data to score accuracy, so we append tool result summaries.
+    """
+    data_parts: list[str] = []
+    for entry in tool_calls_log:
+        summary = entry.get("result_summary")
+        if not summary or not isinstance(summary, dict):
+            continue
+        tool = entry.get("tool", "")
+        if summary.get("error"):
+            continue
+        row_count = summary.get("row_count") or summary.get("count")
+        if row_count is not None:
+            data_parts.append(f"[Tool {tool} returned {row_count} rows]")
+        payload = entry.get("result_payload")
+        if isinstance(payload, dict):
+            preview = json.dumps(payload, default=str)[:2000]
+            data_parts.append(f"[Data from {tool}]: {preview}")
+        elif isinstance(summary, dict) and not summary.get("error"):
+            preview = json.dumps(summary, default=str)[:2000]
+            data_parts.append(f"[Result from {tool}]: {preview}")
+    return "\n".join(data_parts)
+
+
 def _count_steps(tool_calls_log: list[dict]) -> int:
     """Count distinct agent steps — one step per unique ``step`` index.
 
@@ -470,7 +498,9 @@ async def run_agent(
         input_tokens=result.input_tokens,
         output_tokens=result.output_tokens,
     )
-    result.answer_text = str(agent_result.data or "")
+    agent_text = str(agent_result.data or "")
+    tool_data = _extract_tool_data_for_judge(agent_result.tool_calls_log)
+    result.answer_text = f"{agent_text}\n\n{tool_data}".strip() if tool_data else agent_text
     result.tool_calls = _tool_log_to_baseline_shape(agent_result.tool_calls_log)
     result.num_steps = _count_steps(agent_result.tool_calls_log)
     result.confidence_score = agent_result.confidence_score
