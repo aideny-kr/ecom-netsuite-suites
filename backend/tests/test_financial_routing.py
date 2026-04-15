@@ -7,7 +7,7 @@ The BI agent handles BigQuery analytics only.
 
 import uuid
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -96,6 +96,14 @@ class TestFinancialReportsRouteToUnified:
 
 class TestSelectAgentFinancialPreFilter:
     """_select_agent should bypass routing for financial queries."""
+
+    @pytest.fixture(autouse=True)
+    def _mock_active_connectors(self):
+        with patch(
+            "app.services.chat.agents.agent_registry._get_active_connectors",
+            AsyncMock(return_value={"bigquery"}),
+        ):
+            yield
 
     @pytest.mark.asyncio
     async def test_financial_query_bypasses_routing(self):

@@ -1273,8 +1273,6 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
           )}
         </div>
 
-        {disclosureData && <DisclosureFooter disclosure={disclosureData} />}
-
         {message.citations && message.citations.length > 0 && (
           <div className="mt-0.5 flex flex-wrap gap-1.5">
             {message.citations.map((citation, idx) => (

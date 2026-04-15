@@ -59,9 +59,7 @@ async def validate() -> list[str]:
                 # Columns in model but not in DB
                 extra_in_model = model_cols - db_cols
                 if extra_in_model:
-                    errors.append(
-                        f"  {table_name}: model has columns not in DB: {extra_in_model}"
-                    )
+                    errors.append(f"  {table_name}: model has columns not in DB: {extra_in_model}")
 
                 # Columns in DB but not in model (warning only — could be intentional)
                 extra_in_db = db_cols - model_cols
@@ -83,10 +81,7 @@ def main() -> int:
         print("\nFAILED — model/DB mismatch detected:")
         for err in errors:
             print(err)
-        print(
-            "\nFix: update the SQLAlchemy model to match the migration, "
-            "or write a new migration to match the model."
-        )
+        print("\nFix: update the SQLAlchemy model to match the migration, or write a new migration to match the model.")
         return 1
 
     print("OK — all model columns match the database.")

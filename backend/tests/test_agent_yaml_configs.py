@@ -134,22 +134,14 @@ class TestRequiresConnectorField:
 
     def test_yaml_string_form_parses(self, tmp_path):
         yaml_file = tmp_path / "x.yaml"
-        yaml_file.write_text(
-            "agent_id: x-agent\n"
-            "display_name: X\n"
-            "description: X\n"
-            "requires_connector: bigquery\n"
-        )
+        yaml_file.write_text("agent_id: x-agent\ndisplay_name: X\ndescription: X\nrequires_connector: bigquery\n")
         config = AgentYAMLConfig.from_yaml(yaml_file)
         assert config.requires_connector == ["bigquery"]
 
     def test_yaml_list_form_parses(self, tmp_path):
         yaml_file = tmp_path / "x.yaml"
         yaml_file.write_text(
-            "agent_id: x-agent\n"
-            "display_name: X\n"
-            "description: X\n"
-            "requires_connector: [bigquery, snowflake]\n"
+            "agent_id: x-agent\ndisplay_name: X\ndescription: X\nrequires_connector: [bigquery, snowflake]\n"
         )
         config = AgentYAMLConfig.from_yaml(yaml_file)
         assert config.requires_connector == ["bigquery", "snowflake"]
@@ -160,6 +152,5 @@ class TestBiAgentRequiresBigQuery:
         """bi-agent is BigQuery-dependent — the YAML must declare this."""
         config = AgentYAMLConfig.from_yaml(CONFIGS_DIR / "bi_agent.yaml")
         assert "bigquery" in config.requires_connector, (
-            f"bi_agent.yaml must list bigquery in requires_connector; "
-            f"got {config.requires_connector}"
+            f"bi_agent.yaml must list bigquery in requires_connector; got {config.requires_connector}"
         )

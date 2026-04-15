@@ -12,15 +12,11 @@ from __future__ import annotations
 
 import json
 
-import pytest
-
 from app.services.chat.mutation_guard import (
     get_mutation_type,
     is_mutation_tool,
-    is_record_type_allowed,
 )
 from app.services.chat.write_confirmation_service import (
-    WriteConfirmationPayload,
     build_confirmation_payload,
 )
 
@@ -65,8 +61,7 @@ def _build_intercept_result_str(
         # Blocked or unknown record type
         return json.dumps(
             {
-                "error": f"Record type '{record_type}' is not allowed for "
-                f"AI-initiated {mutation_type} operations.",
+                "error": f"Record type '{record_type}' is not allowed for AI-initiated {mutation_type} operations.",
                 "blocked": True,
             }
         )
@@ -89,8 +84,7 @@ def _build_blocked_result_str(mutation_type: str, record_type: str) -> str:
     """Replicate the result_str for a BLOCKED record type."""
     return json.dumps(
         {
-            "error": f"Record type '{record_type}' is not allowed for "
-            f"AI-initiated {mutation_type} operations.",
+            "error": f"Record type '{record_type}' is not allowed for AI-initiated {mutation_type} operations.",
             "blocked": True,
         }
     )
