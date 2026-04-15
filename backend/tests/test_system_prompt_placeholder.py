@@ -7,8 +7,7 @@ from app.services.chat import prompts
 class TestSystemPromptPlaceholder:
     def test_prompt_contains_tool_inventory_placeholder(self):
         assert "{{TOOL_INVENTORY}}" in prompts.SYSTEM_PROMPT, (
-            "Base system prompt must inject tools dynamically via "
-            "{{TOOL_INVENTORY}}, not hardcode a numbered list."
+            "Base system prompt must inject tools dynamically via {{TOOL_INVENTORY}}, not hardcode a numbered list."
         )
 
     def test_prompt_does_not_hardcode_netsuite_suiteql_description(self):

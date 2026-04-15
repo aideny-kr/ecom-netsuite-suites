@@ -23,9 +23,7 @@ def _agent(agent_id: str, description: str):
 async def test_route_accepts_history_kwarg():
     """Signature check: route() must take an optional `history` kwarg."""
     router = SemanticRouter()
-    adapter = SimpleNamespace(
-        create_message=AsyncMock(return_value=LLMResponse(text_blocks=["unified-agent"]))
-    )
+    adapter = SimpleNamespace(create_message=AsyncMock(return_value=LLMResponse(text_blocks=["unified-agent"])))
     agents = [_agent("bi-agent", "BigQuery analytics")]
     result = await router.route(
         query="go ahead",
@@ -40,9 +38,7 @@ async def test_route_accepts_history_kwarg():
 async def test_history_included_in_haiku_prompt():
     """The last N messages must show up in the classifier prompt."""
     router = SemanticRouter()
-    adapter = SimpleNamespace(
-        create_message=AsyncMock(return_value=LLMResponse(text_blocks=["bi-agent"]))
-    )
+    adapter = SimpleNamespace(create_message=AsyncMock(return_value=LLMResponse(text_blocks=["bi-agent"])))
     agents = [_agent("bi-agent", "BigQuery analytics")]
     await router.route(
         query="go ahead with step 1",
@@ -62,9 +58,7 @@ async def test_history_included_in_haiku_prompt():
 async def test_route_without_history_still_works():
     """Backwards compatibility: existing callers pass no history."""
     router = SemanticRouter()
-    adapter = SimpleNamespace(
-        create_message=AsyncMock(return_value=LLMResponse(text_blocks=["unified-agent"]))
-    )
+    adapter = SimpleNamespace(create_message=AsyncMock(return_value=LLMResponse(text_blocks=["unified-agent"])))
     agents = [_agent("bi-agent", "BigQuery analytics")]
     result = await router.route(
         query="hello",

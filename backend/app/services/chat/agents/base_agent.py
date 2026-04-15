@@ -363,10 +363,7 @@ def _compute_confidence(
     # Data sources: data_table (SuiteQL/pivot), financial (reports),
     # bigquery (BQ SQL), rag (knowledge/web search).
     _DATA_CATEGORIES = {"data_table", "financial", "bigquery", "rag"}
-    required = any(
-        categorize(t.get("tool_name", "")) in _DATA_CATEGORIES
-        for t in tool_calls_log
-    )
+    required = any(categorize(t.get("tool_name", "")) in _DATA_CATEGORIES for t in tool_calls_log)
 
     # Deterministic tools return factual data — success means high confidence by definition
     _DETERMINISTIC_TOOLS = {"netsuite_financial_report"}

@@ -8,7 +8,9 @@ from pathlib import Path
 
 import yaml
 
-CONFIG_PATH = Path(__file__).resolve().parent.parent / "app" / "services" / "chat" / "agents" / "configs" / "bi_agent.yaml"
+CONFIG_PATH = (
+    Path(__file__).resolve().parent.parent / "app" / "services" / "chat" / "agents" / "configs" / "bi_agent.yaml"
+)
 
 
 def _load_patterns() -> list[str]:
@@ -20,9 +22,7 @@ class TestBiAgentRouting:
     def test_heap_pageview_query_matches(self):
         patterns = _load_patterns()
         query = "analyze Heap pageview funnel for AMD Ryzen SKUs"
-        assert any(re.search(p, query) for p in patterns), (
-            "bi-agent's Tier 1 regex must match Heap/analytics queries."
-        )
+        assert any(re.search(p, query) for p in patterns), "bi-agent's Tier 1 regex must match Heap/analytics queries."
 
     def test_funnel_conversion_matches(self):
         patterns = _load_patterns()

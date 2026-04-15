@@ -87,9 +87,6 @@ class TestBaseAgentConfidenceCategoryCheck:
             "base_agent must use categorize() instead of hardcoded data tool set."
         )
         # Specifically: the old set used to be on one line. Catch its return.
-        assert (
-            'data_tools = {"netsuite_suiteql"' not in source
-            and "data_tools = {'netsuite_suiteql'" not in source
-        ), (
+        assert 'data_tools = {"netsuite_suiteql"' not in source and "data_tools = {'netsuite_suiteql'" not in source, (
             "data_tools hardcoded set must be removed; use categorize() instead."
         )

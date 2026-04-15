@@ -109,10 +109,13 @@ def build_mcp_execution_guidance(tool_definitions: list[dict]) -> str:
             sections.append(
                 f"\n• FINANCIAL REPORTS: `{matched['REPORTS']}`"
                 "\n  For Income Statement, Balance Sheet, Trial Balance, Aging, GL, etc."
-                '\n  Parameters: {"reportId": <number>, "dateTo": "YYYY-MM-DD", "dateFrom": "YYYY-MM-DD", "subsidiaryId": <number>}'
+                "\n  Parameters: "
+                '{"reportId": <number>, "dateTo": "YYYY-MM-DD", '
+                '"dateFrom": "YYYY-MM-DD", "subsidiaryId": <number>}'
                 "\n  → reportId must be a NUMBER (e.g. -200), not a string."
                 "\n  → dateTo is always required. dateFrom is required for P&L, optional for Balance Sheet."
-                "\n  → Call ns_listAllReports FIRST to get reportId and check has_subsidiary_filter / as_of_date_format."
+                "\n  → Call ns_listAllReports FIRST to get reportId and check"
+                " has_subsidiary_filter / as_of_date_format."
                 "\n  → If has_subsidiary_filter=true, call ns_getSubsidiaries and pass subsidiaryId."
                 "\n  → NetSuite handles sign conventions, consolidation, currency natively."
             )

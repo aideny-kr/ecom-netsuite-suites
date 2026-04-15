@@ -3,7 +3,6 @@
 import uuid
 
 
-
 def test_unified_agent_tool_definitions_include_financial_report():
     """Unified agent should build tool definitions that include netsuite_financial_report."""
     from app.services.chat.agents.unified_agent import UnifiedAgent

@@ -49,10 +49,7 @@ class SemanticRouter:
 
         if history:
             recent = history[-_HISTORY_MESSAGES_TO_INCLUDE:]
-            formatted = "\n".join(
-                f"{m.get('role', 'user').upper()}: {str(m.get('content', ''))[:500]}"
-                for m in recent
-            )
+            formatted = "\n".join(f"{m.get('role', 'user').upper()}: {str(m.get('content', ''))[:500]}" for m in recent)
             system_sections.append(f"\nRecent conversation:\n{formatted}")
 
         system_sections.append("\nRespond with only the agent_id, nothing else.")
