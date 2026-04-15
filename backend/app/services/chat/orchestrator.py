@@ -681,6 +681,40 @@ def _is_saved_search_tool(tool_name: str) -> bool:
     return False
 
 
+def _compute_source_pin_update(tool_calls_log: list[dict]) -> str | None:
+    """Decide whether a turn's tool calls should update session.source_pin.
+
+    Accepts log entries with either "tool_name" or "tool" key (build_tool_call_log_entry
+    uses "tool"; test fixtures may use "tool_name" — both are supported).
+
+    Returns:
+        "bigquery"  — pin to BigQuery (only BigQuery data tools fired)
+        "netsuite"  — pin to NetSuite (only NetSuite data tools fired)
+        None        — clear the pin (mixed data sources in this turn)
+        "leave_pin" — leave pin unchanged (no data tools fired)
+    """
+    used_bq = False
+    used_ns = False
+    for call in tool_calls_log:
+        # Support both "tool_name" (test fixtures) and "tool" (build_tool_call_log_entry)
+        name = call.get("tool_name") or call.get("tool", "")
+        cat = categorize(name)
+        if cat == "bigquery":
+            used_bq = True
+        elif cat in {"data_table", "financial"}:
+            # data_table covers netsuite_suiteql + pivot; financial covers report.
+            # bigquery is its own category so we only land here for NetSuite.
+            used_ns = True
+
+    if used_bq and used_ns:
+        return None  # mixed — clear
+    if used_bq:
+        return "bigquery"
+    if used_ns:
+        return "netsuite"
+    return "leave_pin"
+
+
 def _intercept_tool_result(
     tool_name: str, result_str: str, context_need: str = ContextNeed.DATA
 ) -> tuple[str | None, dict | None, str]:
@@ -2131,6 +2165,22 @@ async def run_chat_turn(
 
                 await db.commit()
 
+                # Auto-pin after a successful turn so follow-ups stick with the
+                # data source the user was actually working with.
+                try:
+                    _pin_update = _compute_source_pin_update(coord_result_tool_calls)
+                    if _pin_update == "leave_pin":
+                        pass
+                    elif _pin_update is None:
+                        if getattr(session, "source_pin", None) is not None:
+                            session.source_pin = None
+                            await db.commit()
+                    elif getattr(session, "source_pin", None) != _pin_update:
+                        session.source_pin = _pin_update
+                        await db.commit()
+                except Exception:
+                    logger.warning("auto_source_pin_update_failed", exc_info=True)
+
                 asyncio.create_task(
                     _dispatch_memory_update(
                         tenant_id=tenant_id,
@@ -2274,6 +2324,22 @@ async def run_chat_turn(
                 await deduct_chat_credits(db, tenant_id, model)
 
             await db.commit()
+
+            # Auto-pin after a successful turn so follow-ups stick with the
+            # data source the user was actually working with.
+            try:
+                _pin_update = _compute_source_pin_update(coord_result_tool_calls)
+                if _pin_update == "leave_pin":
+                    pass
+                elif _pin_update is None:
+                    if getattr(session, "source_pin", None) is not None:
+                        session.source_pin = None
+                        await db.commit()
+                elif getattr(session, "source_pin", None) != _pin_update:
+                    session.source_pin = _pin_update
+                    await db.commit()
+            except Exception:
+                logger.warning("auto_source_pin_update_failed", exc_info=True)
 
             # Fire-and-forget background tasks
             asyncio.create_task(
@@ -2545,6 +2611,22 @@ async def run_chat_turn(
         await deduct_chat_credits(db, tenant_id, model)
 
     await db.commit()
+
+    # Auto-pin after a successful turn so follow-ups stick with the
+    # data source the user was actually working with.
+    try:
+        _pin_update = _compute_source_pin_update(tool_calls_log)
+        if _pin_update == "leave_pin":
+            pass
+        elif _pin_update is None:
+            if getattr(session, "source_pin", None) is not None:
+                session.source_pin = None
+                await db.commit()
+        elif getattr(session, "source_pin", None) != _pin_update:
+            session.source_pin = _pin_update
+            await db.commit()
+    except Exception:
+        logger.warning("auto_source_pin_update_failed", exc_info=True)
 
     # Fire-and-forget background tasks
     asyncio.create_task(
