@@ -9,11 +9,12 @@ import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { useCreateSavedQuery } from "@/hooks/use-saved-queries";
 import { cn } from "@/lib/utils";
 import { useBranding } from "@/providers/branding-provider";
-import type { ChatMessage, SourcePickerData } from "@/lib/types";
+import type { ChatMessage, SourcePickerData, WriteConfirmationData } from "@/lib/types";
 import type { FinancialReportData, DataTableData, TaskOutputData, StreamBlock } from "@/lib/chat-stream";
 import type { AgentSummary } from "@/hooks/use-agents";
 import type { ChartData } from "@/lib/types";
 import { SourcePickerCard } from "@/components/chat/source-picker-card";
+import { WriteConfirmationCard } from "@/components/chat/write-confirmation-card";
 import { FinancialReport } from "@/components/chat/financial-report";
 import { DataFrameTable } from "@/components/chat/data-frame-table";
 import { ChartRenderer } from "@/components/chat/chart-renderer";
@@ -625,6 +626,7 @@ interface MessageListProps {
   templateFile?: { id: string; filename: string } | null;
   onImportanceOverride?: (messageId: string, newTier: number) => void;
   onSourcePick?: (messageId: string, source: "netsuite" | "bigquery") => void;
+  onWriteConfirm?: (messageId: string, action: "approve" | "reject") => void;
   variant?: "default" | "terminal";
 }
 
@@ -653,6 +655,7 @@ export function MessageList({
   templateFile,
   onImportanceOverride,
   onSourcePick,
+  onWriteConfirm,
   variant,
 }: MessageListProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -902,6 +905,7 @@ export function MessageList({
             onChangesetAction={onChangesetAction}
             onImportanceOverride={onImportanceOverride}
             onSourcePick={onSourcePick}
+            onWriteConfirm={onWriteConfirm}
             financialReportData={financialReports?.get(message.id) ?? null}
             dataTableData={dataTables?.get(message.id) ?? null}
             chartDataList={chartsByMessage?.get(message.id) ?? null}
@@ -965,6 +969,7 @@ export function MessageList({
           onViewDiff={onViewDiff}
           onChangesetAction={onChangesetAction}
           onSourcePick={onSourcePick}
+          onWriteConfirm={onWriteConfirm}
           isStreamingPreview
           isTerminal={isTerminal}
         />
@@ -1097,6 +1102,7 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
   isStreamingPreview = false,
   onImportanceOverride,
   onSourcePick,
+  onWriteConfirm,
   financialReportData = null,
   dataTableData = null,
   chartDataList = null,
@@ -1111,6 +1117,7 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
   isStreamingPreview?: boolean;
   onImportanceOverride?: (messageId: string, newTier: number) => void;
   onSourcePick?: (messageId: string, source: "netsuite" | "bigquery") => void;
+  onWriteConfirm?: (messageId: string, action: "approve" | "reject") => void;
   financialReportData?: FinancialReportData | null;
   dataTableData?: DataTableData | null;
   chartDataList?: ChartData[] | null;
@@ -1141,6 +1148,34 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
           <SourcePickerCard
             data={structuredOutput as unknown as SourcePickerData}
             onPick={(source) => onSourcePick?.(message.id, source)}
+          />
+        </div>
+      </div>
+    );
+  }
+
+  if (structuredOutput?.type === "write_confirmation") {
+    return (
+      <div className="flex min-w-0 justify-start gap-3">
+        {isTerminal ? (
+          <div className="w-10 h-10 bg-[var(--card)] flex-shrink-0 flex items-center justify-center border border-[var(--chat-surface-mid)]">
+            <Zap className="h-4 w-4 text-[var(--chat-accent)]" />
+          </div>
+        ) : (
+          <div className="mt-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-primary/10">
+            <FrameworkIcon className="h-3.5 w-3.5 text-primary" />
+          </div>
+        )}
+        <div className="flex min-w-0 flex-1 flex-col">
+          {message.content && (
+            <div className="mb-2 text-[13px] text-foreground">
+              {message.content}
+            </div>
+          )}
+          <WriteConfirmationCard
+            data={structuredOutput as unknown as WriteConfirmationData}
+            onConfirm={() => onWriteConfirm?.(message.id, "approve")}
+            onReject={() => onWriteConfirm?.(message.id, "reject")}
           />
         </div>
       </div>
