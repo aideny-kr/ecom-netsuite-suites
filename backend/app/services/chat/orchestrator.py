@@ -299,7 +299,7 @@ def _assemble_system_prompt(*, template: str, tool_definitions: list[dict]) -> s
 
 
 # ---------------------------------------------------------------------------
-# Agent registry + three-tier routing
+# Agent registry (kept for backward compat — tests import these symbols)
 # ---------------------------------------------------------------------------
 
 from app.services.chat.agents.agent_registry import AgentRegistry
@@ -316,6 +316,14 @@ try:
         _agent_registry.load_configs(_configs_dir)
 except Exception:
     pass
+
+# ---------------------------------------------------------------------------
+# Knowledge profiles — replace routing with context injection
+# ---------------------------------------------------------------------------
+
+from app.services.chat.knowledge_profiles import load_all_profiles
+
+_knowledge_profiles = load_all_profiles()
 
 
 # Tool name → specialized agent mapping for session pinning
@@ -1299,13 +1307,7 @@ async def run_chat_turn(
     rag_context = ""
     citations: list[dict] = []
 
-    # ── Source picker short-circuit (v0.1 intent clarification) ─────────────
-    # Skip picker if:
-    #   - the current request already supplied a source_pick (user clicked a card)
-    #   - the session already has a pin (user previously chose this session)
-    # Otherwise, score the query; if ambiguous, persist a picker placeholder
-    # assistant message, yield a terminal `message` event, and return without
-    # running the agent.
+    # ── Source pin handling (knowledge-driven: no picker UI, pin from prior tool use) ──
     if source_pick and source_pick in ("netsuite", "bigquery"):
         session.source_pin = source_pick
         # Mark the most recent picker placeholder as selected so the card
@@ -1331,56 +1333,7 @@ async def run_chat_turn(
                 flag_modified(_msg, "structured_output")
                 break
         await db.commit()
-        print(f"[SOURCE-PICKER] user selected {source_pick}", flush=True)
-    elif not getattr(session, "source_pin", None) and not is_onboarding and not getattr(session, "workspace_id", None):
-        # Skip picker if session already has substantive agent results — the user's
-        # data-source intent is established; use normal 3-tier routing for follow-ups.
-        _has_prior_agent_result = any(
-            m.get("role") == "assistant" and len(m.get("content", "")) > 100 for m in history_messages
-        )
-        if _has_prior_agent_result:
-            pass  # Fall through to normal routing below
-        else:
-            from app.services.chat.source_picker import (
-                build_picker_payload,
-                has_data_intent,
-                score_source,
-                should_prompt_user,
-            )
-
-            _score = score_source(sanitized_input)
-            if has_data_intent(sanitized_input) and should_prompt_user(_score):
-                _payload = build_picker_payload(_score, user_question=sanitized_input)
-                _placeholder_msg = ChatMessage(
-                    tenant_id=tenant_id,
-                    session_id=session.id,
-                    role="assistant",
-                    content="",
-                    structured_output=dict(_payload),
-                    created_at=datetime.now(timezone.utc),
-                )
-                db.add(_placeholder_msg)
-                await db.commit()
-                await db.refresh(_placeholder_msg)
-
-                yield {
-                    "type": "message",
-                    "message": {
-                        "id": str(_placeholder_msg.id),
-                        "role": "assistant",
-                        "content": "",
-                        "tool_calls": None,
-                        "citations": None,
-                        "created_at": _placeholder_msg.created_at.isoformat(),
-                        "structured_output": dict(_payload),
-                    },
-                }
-                print(
-                    f"[SOURCE-PICKER] shown | confidence={_score[1]:.2f} "
-                    f"recommended={_score[0]} query={sanitized_input[:60]}",
-                    flush=True,
-                )
-                return
+        print(f"[SOURCE-PIN] user selected {source_pick}", flush=True)
 
     if not is_onboarding:
         state = OrchestratorState(
@@ -1583,6 +1536,7 @@ async def run_chat_turn(
 
                 # ── Chitchat short-circuit: skip expensive context for conversational messages ──
                 _is_chitchat = bool(_CHITCHAT_RE.match(sanitized_input))
+                _selected_agent_id = None  # no routing fork; kept for audit trail
                 is_financial = False
                 is_web_search = False
                 is_netsuite_entity = False
@@ -1900,106 +1854,53 @@ async def run_chat_turn(
                         except Exception:
                             logger.warning("orchestrator.onboarding_profile_injection_failed", exc_info=True)
 
-                    # Three-tier routing: try specialized agent first, fall back to UnifiedAgent
-                    # Financial reports bypass routing — must use UnifiedAgent with NetSuite tools
+                    # Three-tier routing replaced by knowledge profiles — inject
+                    # domain context based on available tools instead of routing
+                    # to specialized agents.  UnifiedAgent handles all queries.
                     _selected_agent_id = None
                     if agent_id and not is_financial:
-                        # Client-side agent pin — skip routing entirely
+                        # Client-side agent pin — noted for audit, but UnifiedAgent handles
                         _selected_agent_id = agent_id
-                        print(f"[ROUTING] Client pinned → {agent_id}", flush=True)
-                    elif getattr(session, "source_pin", None) == "bigquery":
-                        # Soft pin: honor unless query clearly belongs to NetSuite
-                        from app.services.chat.source_picker import _should_override_pin
+                        print(f"[KNOWLEDGE] Client pinned agent_id={agent_id} (audit only)", flush=True)
 
-                        if _should_override_pin(sanitized_input, "bigquery"):
-                            print("[ROUTING] Source pin override — high-confidence for other source", flush=True)
-                            _previous_agent_id = _infer_previous_agent(session.messages) if session.messages else None
-                            _selected_agent_id = await _select_agent(
-                                query=sanitized_input,
-                                tenant_id=tenant_id,
-                                db=db,
-                                adapter=specialist_adapter,
-                                is_financial=is_financial,
-                                is_netsuite_entity=is_netsuite_entity,
-                                previous_agent_id=_previous_agent_id,
-                                history=history_messages if history_messages else None,
-                            )
-                        else:
-                            _selected_agent_id = "bi-agent"
-                            print("[ROUTING] Source pin → bi-agent (bigquery)", flush=True)
-                    elif getattr(session, "source_pin", None) == "netsuite":
-                        # Soft pin: honor unless query clearly belongs to BigQuery
-                        from app.services.chat.source_picker import _should_override_pin
+                    # Knowledge profile matching — inject domain context
+                    from app.services.chat.prompt_assembler import (
+                        assemble_knowledge_context,
+                        build_disambiguation_instruction,
+                        build_source_pin_hint,
+                        collect_rag_partitions,
+                        get_active_profiles,
+                    )
 
-                        if _should_override_pin(sanitized_input, "netsuite"):
-                            print("[ROUTING] Source pin override — high-confidence for other source", flush=True)
-                            _previous_agent_id = _infer_previous_agent(session.messages) if session.messages else None
-                            _selected_agent_id = await _select_agent(
-                                query=sanitized_input,
-                                tenant_id=tenant_id,
-                                db=db,
-                                adapter=specialist_adapter,
-                                is_financial=is_financial,
-                                is_netsuite_entity=is_netsuite_entity,
-                                previous_agent_id=_previous_agent_id,
-                                history=history_messages if history_messages else None,
-                            )
-                        else:
-                            _selected_agent_id = None
-                            print("[ROUTING] Source pin → unified-agent (netsuite)", flush=True)
-                    else:
-                        # Infer previous agent from conversation history for session pinning
-                        _previous_agent_id = _infer_previous_agent(session.messages) if session.messages else None
-                        _selected_agent_id = await _select_agent(
-                            query=sanitized_input,
-                            tenant_id=tenant_id,
-                            db=db,
-                            adapter=specialist_adapter,
-                            is_financial=is_financial,
-                            is_netsuite_entity=is_netsuite_entity,
-                            previous_agent_id=_previous_agent_id,
-                            history=history_messages if history_messages else None,
+                    tool_names = {t["name"] for t in tool_definitions}
+                    active_profiles = get_active_profiles(_knowledge_profiles, tool_names)
+                    if active_profiles:
+                        print(
+                            f"[KNOWLEDGE] Active profiles: {[p.profile_id for p in active_profiles]}",
+                            flush=True,
                         )
 
-                    if _selected_agent_id:
-                        # Route to specialized agent
-                        _dk_chunks = context.get("domain_knowledge", [])
+                    knowledge_context = assemble_knowledge_context(active_profiles)
+                    if knowledge_context:
+                        system_prompt += f"\n\n{knowledge_context}"
+                    disambiguation = build_disambiguation_instruction(active_profiles)
+                    if disambiguation:
+                        system_prompt += disambiguation
+                    pin_hint = build_source_pin_hint(getattr(session, "source_pin", None))
+                    if pin_hint:
+                        system_prompt += pin_hint
 
-                        # Fetch per-tenant agent instructions
-                        _user_instructions = None
-                        try:
-                            from sqlalchemy import select as _sel
+                    profile_partitions = collect_rag_partitions(active_profiles)
 
-                            from app.models.agent_config import AgentConfig
-
-                            _instr_result = await db.execute(
-                                _sel(AgentConfig.user_instructions).where(
-                                    AgentConfig.tenant_id == tenant_id,
-                                    AgentConfig.agent_id == _selected_agent_id,
-                                )
-                            )
-                            _user_instructions = _instr_result.scalar_one_or_none()
-                        except Exception:
-                            pass
-
-                        unified_agent = _agent_registry.instantiate(
-                            agent_id=_selected_agent_id,
-                            tenant_id=tenant_id,
-                            user_id=user_id,
-                            correlation_id=correlation_id,
-                            knowledge=_dk_chunks,
-                            user_instructions=_user_instructions,
-                        )
-                    else:
-                        # Fallback: create UnifiedAgent (existing behavior)
-                        unified_agent = UnifiedAgent(
-                            tenant_id=tenant_id,
-                            user_id=user_id,
-                            correlation_id=correlation_id,
-                            metadata=metadata if _need_schemas else None,
-                            policy=active_policy,
-                            context_need=context_need,
-                        )
+                    # Always use UnifiedAgent — no routing fork
+                    unified_agent = UnifiedAgent(
+                        tenant_id=tenant_id,
+                        user_id=user_id,
+                        correlation_id=correlation_id,
+                        metadata=metadata if _need_schemas else None,
+                        policy=active_policy,
+                        context_need=context_need,
+                    )
 
                 # Classify follow-up intent (TRANSFORM vs NEW_DATA)
                 from app.services.chat.follow_up_classifier import FollowUpIntent, classify_follow_up
@@ -2355,165 +2256,7 @@ async def run_chat_turn(
                 yield {"type": "message", "message": result_msg}
                 return
 
-            # ── Legacy multi-agent path ──
-            from app.services.chat.coordinator import MultiAgentCoordinator
-            from app.services.importance_classifier import ImportanceTier, classify_importance
-
-            importance_tier = classify_importance(sanitized_input)
-
-            coordinator = MultiAgentCoordinator(
-                db=db,
-                tenant_id=tenant_id,
-                user_id=user_id,
-                correlation_id=correlation_id,
-                main_adapter=adapter,
-                main_model=model,
-                specialist_adapter=specialist_adapter,
-                specialist_model=settings.MULTI_AGENT_SPECIALIST_MODEL,
-                metadata=metadata,
-                policy=active_policy,
-                system_prompt=system_prompt,
-                user_timezone=user_timezone,
-            )
-            coordinator.soul_tone = soul_bot_tone
-            coordinator.brand_name = brand_name
-
-            # Stream multi-agent: dispatch agents first, then stream synthesis
-            streamed_text_parts: list[str] = []
-            coord_structured_output: dict | None = None
-            async for event in coordinator.run_streaming(
-                user_message=sanitized_input,
-                conversation_history=history_messages,
-                rag_context=rag_context,
-            ):
-                if event["type"] == "text":
-                    streamed_text_parts.append(event["content"])
-                if event["type"] in ("data_table", "financial_report"):
-                    coord_structured_output = {"type": event["type"], "data": event["data"]}
-                yield event
-                if event["type"] == "message":
-                    # Final message already yielded — save and return
-                    break
-
-            coord_result = coordinator.last_result
-            if coord_result is None:
-                # Fallback: synthesis didn't produce a result
-                final_text = (
-                    _sanitize_assistant_text("".join(streamed_text_parts))
-                    or "I wasn't able to find relevant information for that question. Could you rephrase or provide more details?"
-                )
-                coord_result_tokens = (0, 0)
-                coord_result_tool_calls: list[dict] = []
-            else:
-                final_text = _sanitize_assistant_text(coord_result.final_text)
-                coord_result_tokens = (coord_result.total_input_tokens, coord_result.total_output_tokens)
-                coord_result_tool_calls = coord_result.tool_calls_log
-
-            assistant_msg = ChatMessage(
-                tenant_id=tenant_id,
-                session_id=session.id,
-                role="assistant",
-                content=final_text
-                or "I wasn't able to find relevant information for that question. Could you rephrase or provide more details?",
-                tool_calls=coord_result_tool_calls if coord_result_tool_calls else None,
-                citations=citations if citations else None,
-                token_count=coord_result_tokens[0] + coord_result_tokens[1],
-                input_tokens=coord_result_tokens[0],
-                output_tokens=coord_result_tokens[1],
-                model_used=model,
-                provider_used=provider,
-                is_byok=is_byok,
-                query_importance=importance_tier.value,
-                structured_output=coord_structured_output,
-                agent_id=None,
-                created_at=datetime.now(timezone.utc),
-            )
-            db.add(assistant_msg)
-
-            if not session.title:
-                session.title = user_message[:100].strip()
-            # Always bump updated_at so session re-sorts to top of list
-            session.updated_at = func.now()
-
-            audit_payload: dict[str, Any] = {
-                "mode": "multi_agent",
-                "provider": provider,
-                "model": model,
-                "specialist_model": settings.MULTI_AGENT_SPECIALIST_MODEL,
-                "steps": len(coord_result_tool_calls),
-                "input_tokens": coord_result_tokens[0],
-                "output_tokens": coord_result_tokens[1],
-                "doc_chunks_count": len(state.doc_chunks) if state.doc_chunks else 0,
-                "tools_called": [t["tool"] for t in coord_result_tool_calls],
-            }
-            await log_event(
-                db=db,
-                tenant_id=tenant_id,
-                category="chat",
-                action="chat.turn",
-                actor_id=user_id,
-                resource_type="chat_session",
-                resource_id=str(session.id),
-                correlation_id=correlation_id,
-                payload=audit_payload,
-            )
-
-            # Tollbooth: deduct credits before commit (skip for BYOK users)
-            if not is_byok:
-                await deduct_chat_credits(db, tenant_id, model)
-
-            await db.commit()
-
-            # Auto-pin after a successful turn so follow-ups stick with the
-            # data source the user was actually working with.
-            try:
-                _pin_update = _compute_source_pin_update(coord_result_tool_calls)
-                if _pin_update == "leave_pin":
-                    pass
-                elif _pin_update is None:
-                    if getattr(session, "source_pin", None) is not None:
-                        session.source_pin = None
-                        await db.commit()
-                elif getattr(session, "source_pin", None) != _pin_update:
-                    session.source_pin = _pin_update
-                    await db.commit()
-            except Exception:
-                logger.warning("auto_source_pin_update_failed", exc_info=True)
-
-            # Fire-and-forget background tasks
-            asyncio.create_task(
-                _dispatch_memory_update(
-                    tenant_id=tenant_id,
-                    user_id=user_id,
-                    db=db,
-                    user_message=sanitized_input,
-                    assistant_message=final_text,
-                )
-            )
-            asyncio.create_task(
-                _dispatch_content_summary(
-                    db=db,
-                    message_id=assistant_msg.id,
-                    user_message=sanitized_input,
-                    assistant_message=final_text,
-                )
-            )
-
-            # If we already yielded the final message via streaming, just return
-            # Otherwise yield a final message now
-            if not streamed_text_parts:
-                result_msg = {
-                    "id": str(assistant_msg.id),
-                    "role": assistant_msg.role,
-                    "content": assistant_msg.content,
-                    "tool_calls": assistant_msg.tool_calls,
-                    "citations": assistant_msg.citations,
-                }
-                if hasattr(assistant_msg, "created_at") and assistant_msg.created_at:
-                    result_msg["created_at"] = assistant_msg.created_at.isoformat()
-                result_msg["query_importance"] = importance_tier.value
-                yield {"type": "message", "message": result_msg}
-            return
+            # Legacy multi-agent path removed — unified agent handles all queries
 
     # ── Split system prompt for Anthropic prompt caching ──
     prompt_parts = split_system_prompt(system_prompt)
