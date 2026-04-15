@@ -22,6 +22,7 @@ from app.services.chat.tool_call_results import (
     tool_call_had_error,
     tool_call_row_count,
 )
+from app.services.chat.tool_categories import categorize
 from app.services.confidence_extractor import extract_structured_confidence
 from app.services.confidence_service import CompositeScorer
 
@@ -358,9 +359,11 @@ def _compute_confidence(
     successful_tools = sum(1 for t in tool_calls_log if not tool_call_had_error(t))
     tool_rate = (successful_tools / total_tools) if total_tools > 0 else 0.0
 
-    # Any data tool call means the query required tools
-    data_tools = {"netsuite_suiteql", "netsuite_financial_report", "bigquery_sql", "rag_search", "web_search"}
-    required = any(t.get("tool_name") in data_tools for t in tool_calls_log)
+    # Any data tool call means the query required tools.
+    # Data sources: data_table (SuiteQL/pivot), financial (reports),
+    # bigquery (BQ SQL), rag (knowledge/web search).
+    _DATA_CATEGORIES = {"data_table", "financial", "bigquery", "rag"}
+    required = any(categorize(t.get("tool_name", "")) in _DATA_CATEGORIES for t in tool_calls_log)
 
     # Deterministic tools return factual data — success means high confidence by definition
     _DETERMINISTIC_TOOLS = {"netsuite_financial_report"}

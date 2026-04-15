@@ -1,8 +1,4 @@
-"""Tier 2: Semantic routing via Haiku classification (~50ms).
-
-Builds a classification prompt listing all available agents and their
-descriptions, sends it to Haiku, and parses the agent_id from the response.
-"""
+"""Tier 2: Semantic routing via Haiku classification (~50ms)."""
 
 from __future__ import annotations
 
@@ -16,6 +12,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _FALLBACK = "unified-agent"
+_HISTORY_MESSAGES_TO_INCLUDE = 3  # last 3 = enough for continuity without cost
 
 
 class SemanticRouter:
@@ -29,27 +26,34 @@ class SemanticRouter:
         query: str,
         available_agents: list[AgentYAMLConfig],
         adapter: BaseLLMAdapter,
+        history: list[dict] | None = None,
     ) -> str:
         """Classify query to an agent_id using Haiku.
 
-        Returns:
-            An agent_id string, or "unified-agent" as fallback.
+        When `history` is provided, the last few messages are included in
+        the classifier's context so follow-up turns like "go ahead with
+        step 1" inherit the intent of the previous turn.
         """
         valid_ids = {a.agent_id for a in available_agents}
         valid_ids.add(_FALLBACK)
 
-        # Build classification prompt
-        agent_lines = []
-        for agent in available_agents:
-            agent_lines.append(f"- {agent.agent_id}: {agent.description}")
+        agent_lines = [f"- {a.agent_id}: {a.description}" for a in available_agents]
         agent_lines.append(f"- {_FALLBACK}: General-purpose catch-all agent")
 
-        system_prompt = (
-            "You are a query classifier. Given a user query, respond with ONLY the "
-            "agent_id that best handles it. Choose from:\n"
-            + "\n".join(agent_lines)
-            + "\n\nRespond with only the agent_id, nothing else."
-        )
+        system_sections = [
+            "You are a query classifier. Pick the agent_id that best handles "
+            "the user's CURRENT query, considering the conversation so far. "
+            "Choose from:",
+            "\n".join(agent_lines),
+        ]
+
+        if history:
+            recent = history[-_HISTORY_MESSAGES_TO_INCLUDE:]
+            formatted = "\n".join(f"{m.get('role', 'user').upper()}: {str(m.get('content', ''))[:500]}" for m in recent)
+            system_sections.append(f"\nRecent conversation:\n{formatted}")
+
+        system_sections.append("\nRespond with only the agent_id, nothing else.")
+        system_prompt = "\n\n".join(system_sections)
 
         try:
             response = await adapter.create_message(
@@ -63,6 +67,6 @@ class SemanticRouter:
                 return raw
             logger.warning("Semantic router got invalid agent_id: %s", raw)
             return _FALLBACK
-        except (TimeoutError, Exception):
+        except Exception:
             logger.warning("Semantic router failed, falling back to unified-agent")
             return _FALLBACK

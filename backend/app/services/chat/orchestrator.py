@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.services.chat.prompt_cache import split_system_prompt
+from app.services.chat.tool_categories import categorize
 
 # Regex to strip leaked Anthropic tool-call XML from assistant text
 _TOOL_XML_RE = re.compile(r"</?(?:invoke|parameter|tool_use)[^>]*>", re.DOTALL)
@@ -275,6 +276,28 @@ def _build_connection_warning_block(connection_warnings: list[str]) -> str:
     )
 
 
+from app.services.chat.tool_inventory import build_mcp_execution_guidance, build_tool_inventory_block
+
+
+def _assemble_system_prompt(*, template: str, tool_definitions: list[dict]) -> str:
+    """Resolve the {{TOOL_INVENTORY}} placeholder with the real tool schema.
+
+    The replacement bundles:
+    - the <available_tools> block (build_tool_inventory_block)
+    - per-tool MCP guidance + EXECUTION PRIORITY (build_mcp_execution_guidance)
+      when external MCP tools are present.
+
+    Both are derived from the same tool_definitions, so the LLM's view of
+    what it can call AND how to choose between them stays in sync with the
+    real schema.
+    """
+    if "{{TOOL_INVENTORY}}" not in template:
+        return template
+    inventory = build_tool_inventory_block(tool_definitions)
+    guidance = build_mcp_execution_guidance(tool_definitions)
+    return template.replace("{{TOOL_INVENTORY}}", inventory + guidance)
+
+
 # ---------------------------------------------------------------------------
 # Agent registry + three-tier routing
 # ---------------------------------------------------------------------------
@@ -427,6 +450,7 @@ async def _select_agent(
     is_financial: bool = False,
     is_netsuite_entity: bool = False,
     previous_agent_id: str | None = None,
+    history: list[dict] | None = None,
 ) -> str | None:
     """Three-tier routing to select a specialized agent.
 
@@ -505,7 +529,12 @@ async def _select_agent(
 
     # Tier 2: Semantic routing via Haiku (~50ms)
     semantic_router = SemanticRouter()
-    tier2_result = await semantic_router.route(query, enabled_agents, adapter)
+    tier2_result = await semantic_router.route(
+        query,
+        enabled_agents,
+        adapter,
+        history=history if history else None,
+    )
 
     if tier2_result and tier2_result != "unified-agent":
         # Financial veto: last line of defense
@@ -625,36 +654,19 @@ def _sanitize_assistant_text(text: str) -> str:
     return text.strip()
 
 
-_FINANCIAL_TOOLS = frozenset({"netsuite.financial_report", "netsuite_financial_report"})
-_DATA_TABLE_TOOLS = frozenset(
-    {
-        "netsuite.suiteql",
-        "netsuite_suiteql",
-        "bigquery.sql",
-        "bigquery_sql",
-        "pivot.query_result",
-        "pivot_query_result",
-    }
-)
-_BIGQUERY_TOOLS = frozenset({"bigquery.sql", "bigquery_sql"})
-
-
 def _is_financial_tool(tool_name: str) -> bool:
-    """Match local financial tools and external MCP runReport tools."""
-    if tool_name in _FINANCIAL_TOOLS:
-        return True
-    if tool_name.startswith("ext__") and "runreport" in tool_name.lower():
-        return True
-    return False
+    """True for local financial-report tools and external MCP ns_runReport."""
+    return categorize(tool_name) == "financial"
 
 
 def _is_data_table_tool(tool_name: str) -> bool:
-    """Match tools that return {columns, rows} data tables (SuiteQL, BigQuery, pivot)."""
-    if tool_name in _DATA_TABLE_TOOLS:
-        return True
-    if tool_name.startswith("ext__") and "suiteql" in tool_name.lower():
-        return True
-    return False
+    """True for tools returning tabular data (SuiteQL, BigQuery, pivot)."""
+    return categorize(tool_name) in ("data_table", "bigquery")
+
+
+def _is_bigquery_tool(tool_name: str) -> bool:
+    """True for BigQuery query tools."""
+    return categorize(tool_name) == "bigquery"
 
 
 _SAVED_SEARCH_TOOLS = frozenset({"netsuite.saved_search", "netsuite_saved_search"})
@@ -667,6 +679,40 @@ def _is_saved_search_tool(tool_name: str) -> bool:
     if "savedsearch" in tool_name.lower() or "runsavedsearch" in tool_name.lower():
         return True
     return False
+
+
+def _compute_source_pin_update(tool_calls_log: list[dict]) -> str | None:
+    """Decide whether a turn's tool calls should update session.source_pin.
+
+    Accepts log entries with either "tool_name" or "tool" key (build_tool_call_log_entry
+    uses "tool"; test fixtures may use "tool_name" — both are supported).
+
+    Returns:
+        "bigquery"  — pin to BigQuery (only BigQuery data tools fired)
+        "netsuite"  — pin to NetSuite (only NetSuite data tools fired)
+        None        — clear the pin (mixed data sources in this turn)
+        "leave_pin" — leave pin unchanged (no data tools fired)
+    """
+    used_bq = False
+    used_ns = False
+    for call in tool_calls_log:
+        # Support both "tool_name" (test fixtures) and "tool" (build_tool_call_log_entry)
+        name = call.get("tool_name") or call.get("tool", "")
+        cat = categorize(name)
+        if cat == "bigquery":
+            used_bq = True
+        elif cat in {"data_table", "financial"}:
+            # data_table covers netsuite_suiteql + pivot; financial covers report.
+            # bigquery is its own category so we only land here for NetSuite.
+            used_ns = True
+
+    if used_bq and used_ns:
+        return None  # mixed — clear
+    if used_bq:
+        return "bigquery"
+    if used_ns:
+        return "netsuite"
+    return "leave_pin"
 
 
 def _intercept_tool_result(
@@ -1300,130 +1346,13 @@ async def run_chat_turn(
                 soul_parts.append(f"NETSUITE QUIRKS & LOGIC:\n{soul_config.netsuite_quirks}\n")
             system_prompt += "\n".join(soul_parts)
 
-    # ── Inject dynamic tool inventory into system prompt ──
-    # This ensures the model always knows the exact tool names it can call,
-    # regardless of whether the base prompt matches.
-    # Detect ALL NetSuite MCP tools by pattern matching the tool name
-    _MCP_TOOL_PATTERNS = {
-        "runreport": "REPORTS",
-        "runsavedsearch": "SAVED_SEARCHES",
-        "listallreports": "REPORT_DISCOVERY",
-        "listsavedsearches": "SEARCH_DISCOVERY",
-        "suiteql": "SUITEQL",
-        "getsuiteqlmetadata": "METADATA",
-        "getsubsidiaries": "SUBSIDIARIES",
-    }
-
-    if not is_onboarding and tool_definitions:
-        tool_inventory_lines = ["\nAVAILABLE TOOLS (use these exact names when calling tools):"]
-        ext_mcp_tools: dict[str, str] = {}  # category → tool_name
-        for td in tool_definitions:
-            tool_inventory_lines.append(f"- {td['name']}: {td.get('description', '')}")
-            if td["name"].startswith("ext__"):
-                lower_name = td["name"].lower()
-                for pattern, category in _MCP_TOOL_PATTERNS.items():
-                    if pattern in lower_name:
-                        ext_mcp_tools[category] = td["name"]
-
-        if ext_mcp_tools:
-            guidance = [
-                "\n\nNETSUITE MCP TOOLS (connect directly to NetSuite — prefer these for execution):",
-            ]
-
-            if "REPORTS" in ext_mcp_tools:
-                guidance.append(
-                    f"\n• FINANCIAL REPORTS: `{ext_mcp_tools['REPORTS']}`"
-                    "\n  For Income Statement, Balance Sheet, Trial Balance, Aging, GL, etc."
-                    '\n  Parameters: {"reportId": <number>, "dateTo": "YYYY-MM-DD", "dateFrom": "YYYY-MM-DD", "subsidiaryId": <number>}'
-                    "\n  → reportId must be a NUMBER (e.g. -200), not a string."
-                    "\n  → dateTo is always required. dateFrom is required for P&L, optional for Balance Sheet."
-                    "\n  → Call ns_listAllReports FIRST to get reportId and check has_subsidiary_filter / as_of_date_format."
-                    "\n  → If has_subsidiary_filter=true, call ns_getSubsidiaries and pass subsidiaryId."
-                    "\n  → NetSuite handles sign conventions, consolidation, currency natively."
-                )
-
-            if "REPORT_DISCOVERY" in ext_mcp_tools:
-                guidance.append(
-                    f"\n• DISCOVER REPORTS: `{ext_mcp_tools['REPORT_DISCOVERY']}`"
-                    "\n  Lists all available reports with IDs. Call FIRST before ns_runReport."
-                )
-
-            if "SAVED_SEARCHES" in ext_mcp_tools:
-                guidance.append(
-                    f"\n• SAVED SEARCHES: `{ext_mcp_tools['SAVED_SEARCHES']}`"
-                    "\n  Run pre-built searches with custom columns, formulas, and filters."
-                    '\n  Parameters: {"savedSearchId": "<id>", "filters": [...]}'
-                )
-
-            if "SEARCH_DISCOVERY" in ext_mcp_tools:
-                guidance.append(
-                    f"\n• DISCOVER SEARCHES: `{ext_mcp_tools['SEARCH_DISCOVERY']}`"
-                    "\n  Lists saved searches. Use when user asks 'do we have a report for X?'"
-                )
-
-            if "SUITEQL" in ext_mcp_tools:
-                guidance.append(
-                    f"\n• SUITEQL (MCP): `{ext_mcp_tools['SUITEQL']}`"
-                    "\n  Ad-hoc SuiteQL queries inside NetSuite. Prefer over local netsuite_suiteql."
-                    '\n  Parameters: {"sqlQuery": "SELECT ...", "description": "..."}'
-                    "\n  STILL FOLLOW all <suiteql_dialect_rules> — they apply to MCP SuiteQL too."
-                )
-
-            if "METADATA" in ext_mcp_tools:
-                guidance.append(
-                    f"\n• SCHEMA (MCP): `{ext_mcp_tools['METADATA']}`"
-                    "\n  Ground-truth column metadata from NetSuite. Use alongside netsuite_get_metadata."
-                )
-
-            if "SUBSIDIARIES" in ext_mcp_tools:
-                guidance.append(
-                    f"\n• SUBSIDIARIES: `{ext_mcp_tools['SUBSIDIARIES']}`\n  Subsidiary hierarchy with base currencies."
-                )
-
-            guidance.append(
-                "\n\nEXECUTION PRIORITY (pick the first that fits):"
-                "\n  Financial statements → ns_runReport"
-                "\n  Pre-built business reports → ns_runSavedSearch"
-                "\n  Ad-hoc data queries → ns_runCustomSuiteQL (MCP) → netsuite_suiteql (local fallback)"
-                "\n  Schema verification → ns_getSuiteQLMetadata + netsuite_get_metadata (use both)"
-                "\n  Documentation/how-to → rag_search → web_search"
-                "\n"
-                "\nIMPORTANT: MCP tools handle EXECUTION. But you still have rich tenant context"
-                "\n(entity vernacular, custom field schema, learned rules, proven patterns) injected"
-                "\ninto your system prompt. USE THIS CONTEXT when constructing parameters for MCP tools."
-                "\nFor example, if <tenant_vernacular> resolves 'FW' to subsidiary ID 5, pass"
-                "\nsubsidiaryId: 5 to ns_runReport."
-            )
-
-            tool_inventory_lines.append("\n".join(guidance))
-
-        # Non-NetSuite tools guidance
-        non_ns_tools = [
-            td
-            for td in tool_definitions
-            if td["name"].startswith("ext__") and not any(p in td["name"].lower() for p in _MCP_TOOL_PATTERNS)
-        ]
-        if non_ns_tools:
-            tool_inventory_lines.append("\n\nOTHER CONNECTED SYSTEM TOOLS:")
-            for td in non_ns_tools:
-                tool_inventory_lines.append(f"- {td['name']}: {td.get('description', '')}")
-            tool_inventory_lines.append(
-                "\nUse these tools when the user's question relates to the system they belong to. "
-                "Check the tool description prefix (e.g., [shopify_mcp]) to identify which system."
-            )
-
-        # BigQuery tools hint (if available for this tenant)
-        _has_bq = any(td["name"].startswith("bigquery_") for td in tool_definitions)
-        if _has_bq:
-            tool_inventory_lines.append(
-                "\n\nBIGQUERY DATA WAREHOUSE:"
-                "\nThis tenant has BigQuery connected. Use `bigquery_sql` for ad-hoc queries, "
-                "`bigquery_schema` to discover datasets/tables, `bigquery_cost_estimate` for dry-run cost checks."
-                "\nBigQuery uses Standard SQL — use backtick identifiers (`dataset.table`) and LIMIT (not FETCH FIRST)."
-                "\nDo NOT confuse BigQuery SQL with SuiteQL — they are different dialects."
-            )
-
-        system_prompt += "\n".join(tool_inventory_lines)
+    # ── Resolve {{TOOL_INVENTORY}} placeholder in the system prompt ──
+    # using the real tool schema (single source of truth).
+    if not is_onboarding:
+        system_prompt = _assemble_system_prompt(
+            template=system_prompt,
+            tool_definitions=tool_definitions,
+        )
 
     # ── Connection health warning (appended after tool inventory) ──
     if connection_warnings:
@@ -1856,6 +1785,7 @@ async def run_chat_turn(
                                 is_financial=is_financial,
                                 is_netsuite_entity=is_netsuite_entity,
                                 previous_agent_id=_previous_agent_id,
+                                history=history_messages if history_messages else None,
                             )
                         else:
                             _selected_agent_id = "bi-agent"
@@ -1875,6 +1805,7 @@ async def run_chat_turn(
                                 is_financial=is_financial,
                                 is_netsuite_entity=is_netsuite_entity,
                                 previous_agent_id=_previous_agent_id,
+                                history=history_messages if history_messages else None,
                             )
                         else:
                             _selected_agent_id = None
@@ -1890,6 +1821,7 @@ async def run_chat_turn(
                             is_financial=is_financial,
                             is_netsuite_entity=is_netsuite_entity,
                             previous_agent_id=_previous_agent_id,
+                            history=history_messages if history_messages else None,
                         )
 
                     if _selected_agent_id:
@@ -2009,7 +1941,7 @@ async def run_chat_turn(
                         "financial_report"
                         if event_type_str == "financial_report"
                         else "bigquery"
-                        if tool_name in _BIGQUERY_TOOLS
+                        if _is_bigquery_tool(tool_name)
                         else "suiteql"
                     )
                     _pending_caches.append(
@@ -2233,6 +2165,22 @@ async def run_chat_turn(
 
                 await db.commit()
 
+                # Auto-pin after a successful turn so follow-ups stick with the
+                # data source the user was actually working with.
+                try:
+                    _pin_update = _compute_source_pin_update(coord_result_tool_calls)
+                    if _pin_update == "leave_pin":
+                        pass
+                    elif _pin_update is None:
+                        if getattr(session, "source_pin", None) is not None:
+                            session.source_pin = None
+                            await db.commit()
+                    elif getattr(session, "source_pin", None) != _pin_update:
+                        session.source_pin = _pin_update
+                        await db.commit()
+                except Exception:
+                    logger.warning("auto_source_pin_update_failed", exc_info=True)
+
                 asyncio.create_task(
                     _dispatch_memory_update(
                         tenant_id=tenant_id,
@@ -2376,6 +2324,22 @@ async def run_chat_turn(
                 await deduct_chat_credits(db, tenant_id, model)
 
             await db.commit()
+
+            # Auto-pin after a successful turn so follow-ups stick with the
+            # data source the user was actually working with.
+            try:
+                _pin_update = _compute_source_pin_update(coord_result_tool_calls)
+                if _pin_update == "leave_pin":
+                    pass
+                elif _pin_update is None:
+                    if getattr(session, "source_pin", None) is not None:
+                        session.source_pin = None
+                        await db.commit()
+                elif getattr(session, "source_pin", None) != _pin_update:
+                    session.source_pin = _pin_update
+                    await db.commit()
+            except Exception:
+                logger.warning("auto_source_pin_update_failed", exc_info=True)
 
             # Fire-and-forget background tasks
             asyncio.create_task(
@@ -2647,6 +2611,22 @@ async def run_chat_turn(
         await deduct_chat_credits(db, tenant_id, model)
 
     await db.commit()
+
+    # Auto-pin after a successful turn so follow-ups stick with the
+    # data source the user was actually working with.
+    try:
+        _pin_update = _compute_source_pin_update(tool_calls_log)
+        if _pin_update == "leave_pin":
+            pass
+        elif _pin_update is None:
+            if getattr(session, "source_pin", None) is not None:
+                session.source_pin = None
+                await db.commit()
+        elif getattr(session, "source_pin", None) != _pin_update:
+            session.source_pin = _pin_update
+            await db.commit()
+    except Exception:
+        logger.warning("auto_source_pin_update_failed", exc_info=True)
 
     # Fire-and-forget background tasks
     asyncio.create_task(

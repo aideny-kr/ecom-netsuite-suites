@@ -137,28 +137,6 @@ _FINANCIAL_TOOL_NAMES = frozenset(
     }
 )
 
-# Superset of all specialist tools
-_UNIFIED_TOOL_NAMES = frozenset(
-    {
-        # SuiteQL agent tools
-        "netsuite_suiteql",
-        "pivot_query_result",
-        "netsuite_get_metadata",
-        "netsuite_financial_report",
-        # RAG agent tools
-        "rag_search",
-        "web_search",
-        # Workspace agent tools
-        "workspace_list_files",
-        "workspace_read_file",
-        "workspace_search",
-        "workspace_propose_patch",
-        # Shared
-        "tenant_save_learned_rule",
-    }
-)
-
-
 _SYSTEM_PROMPT = """\
 <role>
 {{INJECT_ROLE_PROMPT}}
@@ -176,6 +154,8 @@ needs and use the right tools to get the answer efficiently.
 </tenant_context>
 
 {{INJECT_TABLE_SCHEMAS}}
+
+{{TOOL_INVENTORY}}
 
 <tool_selection>
 FINANCIAL STATEMENTS → netsuite_financial_report (local) or ns_runReport (MCP, call ns_listAllReports first).
@@ -807,13 +787,18 @@ class UnifiedAgent(BaseSpecialistAgent):
             if self._policy.blocked_fields and isinstance(self._policy.blocked_fields, list):
                 parts.append(f"BLOCKED fields (never query these): {', '.join(self._policy.blocked_fields)}")
 
-        return "\n".join(parts)
+        prompt = "\n".join(parts)
+
+        # Resolve {{TOOL_INVENTORY}} with the real tool schema.
+        # Lazy import to avoid circular: orchestrator imports unified_agent.
+        from app.services.chat.orchestrator import _assemble_system_prompt
+
+        return _assemble_system_prompt(template=prompt, tool_definitions=self._tool_defs or [])
 
     @property
     def tool_definitions(self) -> list[dict]:
         if self._tool_defs is None:
-            all_tools = build_local_tool_definitions()
-            self._tool_defs = [t for t in all_tools if t["name"] in _UNIFIED_TOOL_NAMES]
+            self._tool_defs = build_local_tool_definitions()
         return self._tool_defs
 
     @property
@@ -872,23 +857,20 @@ class UnifiedAgent(BaseSpecialistAgent):
         except Exception:
             _logger.warning("unified_agent.brand_fetch_failed", exc_info=True)
 
-        # Discover external MCP tools — load ALL tools from ALL active connectors
+        # Build the full tool schema: connector-gated local tools + external MCP tools.
+        # Use build_all_tool_definitions (not build_local_tool_definitions) so the agent's
+        # prompt inventory matches the schema actually sent to the LLM — no drift.
         try:
-            from app.services.chat.tools import build_external_tool_definitions
+            from app.services.chat.tools import build_all_tool_definitions
             from app.services.mcp_connector_service import get_active_connectors_for_tenant
 
-            connectors = await get_active_connectors_for_tenant(db, self.tenant_id)
-            self._connectors = connectors or []
-            if connectors:
-                ext_tools = build_external_tool_definitions(connectors)
-                if ext_tools:
-                    _ = self.tool_definitions  # ensure local tools built
-                    existing_names = {t["name"] for t in self._tool_defs}
-                    for et in ext_tools:
-                        if et["name"] not in existing_names:
-                            self._tool_defs.append(et)
+            self._connectors = await get_active_connectors_for_tenant(db, self.tenant_id) or []
+            self._tool_defs = await build_all_tool_definitions(db, self.tenant_id)
         except Exception:
-            _logger.warning("unified_agent.ext_tool_discovery_failed", exc_info=True)
+            _logger.warning("unified_agent.tool_discovery_failed", exc_info=True)
+            # Fallback: at least populate local tools so basic queries still work.
+            if self._tool_defs is None:
+                self._tool_defs = build_local_tool_definitions()
 
         # Extract NetSuite account slug for record deep links
         try:

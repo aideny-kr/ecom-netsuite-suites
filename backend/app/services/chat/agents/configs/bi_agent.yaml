@@ -27,6 +27,8 @@ routing_rules:
     priority: 0
   - pattern: "(?i)(forecast|predict|projection|run.?rate)"
     priority: 0
+  - pattern: "(?i)(heap|pageview|funnel|attribution|segment(?!\\W+order)|mixpanel|amplitude|firebase|google.?analytics|\\bga\\b|third.?party)"
+    priority: 10
 
 semantic_examples:
   - "What's our revenue by region this quarter?"

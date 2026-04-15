@@ -252,3 +252,25 @@ class TestLocalNameMap:
         """Map should not contain disallowed tools."""
         assert "schedule_create" not in _LOCAL_NAME_MAP
         assert "recon_run" not in _LOCAL_NAME_MAP
+
+
+# ---------------------------------------------------------------------------
+# Category stamping integration
+# ---------------------------------------------------------------------------
+
+
+class TestCategoryStamping:
+    def test_build_local_stamps_category_on_every_tool(self):
+        """Every tool returned by build_local_tool_definitions must have a category key."""
+        tools = build_local_tool_definitions()
+        assert tools, "build_local_tool_definitions returned no tools"
+        for t in tools:
+            assert "category" in t, f"{t.get('name')} missing category key"
+            assert t["category"] in {
+                "financial",
+                "data_table",
+                "bigquery",
+                "rag",
+                "workspace",
+                "other",
+            }, f"{t.get('name')} has unexpected category {t['category']!r}"

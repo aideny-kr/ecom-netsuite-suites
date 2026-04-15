@@ -204,7 +204,9 @@ class TestXMLStructure:
 
         assert "<system_directives>" in AGENTIC_SYSTEM_PROMPT
         assert "<persona>" in AGENTIC_SYSTEM_PROMPT
-        assert "<tool_inventory>" in AGENTIC_SYSTEM_PROMPT
+        # Tool inventory is now resolved at runtime from the real tool schema;
+        # the prompt template carries a placeholder instead of a hardcoded list.
+        assert "{{TOOL_INVENTORY}}" in AGENTIC_SYSTEM_PROMPT
         assert "<domain_rules>" in AGENTIC_SYSTEM_PROMPT
         assert "<suiteql_syntax>" in AGENTIC_SYSTEM_PROMPT
 
