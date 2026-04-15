@@ -507,9 +507,12 @@ async def _select_agent(
         print(f"[ROUTING] Tier 1 matched {tier1_result} but agent unhealthy, falling back", flush=True)
         return None
 
-    # Session pin: if no Tier 1 match but session has a pinned specialized agent → use it
+    # Session pin: if no Tier 1 match but session has a pinned specialized agent
+    # that is currently enabled for this tenant → use it. Filtered-out agents
+    # (e.g. bi-agent when BigQuery is not connected) are ignored.
     if previous_agent_id and previous_agent_id != "unified-agent":
-        if _agent_registry.configs.get(previous_agent_id):
+        enabled_ids = {a.agent_id for a in enabled_agents}
+        if previous_agent_id in enabled_ids:
             # Financial veto applies to session pins too
             if _is_financial_query(query):
                 print(

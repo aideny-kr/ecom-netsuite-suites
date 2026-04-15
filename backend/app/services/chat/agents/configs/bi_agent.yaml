@@ -56,3 +56,4 @@ cost_budget: 0.50
 prompt_file: bi_agent_prompt.md
 requires_confirmation: false
 enabled_by_default: true
+requires_connector: [bigquery]

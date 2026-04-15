@@ -41,7 +41,8 @@ class AgentRegistry:
         """Return configs for agents enabled for this tenant.
 
         Merges YAML defaults with DB overrides from agent_configs table.
-        Agents disabled in DB (is_enabled=False) are excluded.
+        Agents disabled in DB (is_enabled=False) are excluded. Agents whose
+        requires_connector isn't satisfied by any active connector are excluded.
         """
         # Query DB for tenant-specific overrides
         try:
@@ -64,13 +65,37 @@ class AgentRegistry:
             if row.override_config:
                 overrides[agent_id] = row.override_config
 
-        # Merge and filter
+        # Resolve the set of active connectors for this tenant. Fail-open on error
+        # so a transient DB hiccup doesn't silently hide agents.
+        try:
+            active_connectors = await _get_active_connectors(db, tenant_id)
+            connector_filter_active = True
+        except Exception:
+            logger.warning(
+                "Failed to fetch active connectors for tenant %s; skipping connector filter",
+                tenant_id,
+            )
+            active_connectors = set()
+            connector_filter_active = False
+
+        # Merge overrides first, then filter on the merged config so a tenant
+        # override of requires_connector (e.g. disabling the requirement) takes
+        # effect. DB wins over YAML — same mental model as elsewhere in this method.
         enabled: list[AgentYAMLConfig] = []
         for agent_id, config in self.configs.items():
             if agent_id in disabled:
                 continue
             if agent_id in overrides:
                 config = config.merge(overrides[agent_id])
+            if connector_filter_active and config.requires_connector:
+                if not any(c in active_connectors for c in config.requires_connector):
+                    logger.info(
+                        "Filtering out agent %s for tenant %s — no active connector matches %s",
+                        agent_id,
+                        tenant_id,
+                        config.requires_connector,
+                    )
+                    continue
             enabled.append(config)
 
         return enabled
@@ -132,3 +157,23 @@ class AgentRegistry:
         if error_count / total > 0.05:
             return False
         return True
+
+
+async def _get_active_connectors(db: AsyncSession, tenant_id: uuid.UUID) -> set[str]:
+    """Return the set of connector providers the tenant has usable today.
+
+    Usable = is_enabled=True AND status='active' in mcp_connectors.
+    Revoked / needs_reauth / error / expired connectors are excluded.
+    """
+    from sqlalchemy import select
+
+    from app.models.mcp_connector import McpConnector
+
+    result = await db.execute(
+        select(McpConnector.provider).where(
+            McpConnector.tenant_id == tenant_id,
+            McpConnector.is_enabled == True,  # noqa: E712
+            McpConnector.status == "active",
+        )
+    )
+    return {row[0] for row in result.all()}
