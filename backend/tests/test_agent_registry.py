@@ -186,3 +186,90 @@ class TestGetActiveConnectors:
         assert "tenant_id" in compiled
         assert "is_enabled" in compiled
         assert "status" in compiled
+
+
+class TestGetEnabledAgentsConnectorFilter:
+    @pytest.mark.asyncio
+    async def test_agent_included_when_required_connector_active(self, tmp_path):
+        """Tenant has active BigQuery → bi-agent included."""
+        _write_yaml_config(tmp_path, "bi-agent", requires_connector=["bigquery"])
+        _write_yaml_config(tmp_path, "other-agent")
+        registry = AgentRegistry()
+        registry.load_configs(tmp_path)
+
+        mock_db = AsyncMock()
+        overrides_result = MagicMock()
+        overrides_result.all.return_value = []
+        connectors_result = MagicMock()
+        connectors_result.all.return_value = [("bigquery",)]
+
+        mock_db.execute = AsyncMock(side_effect=[overrides_result, connectors_result])
+
+        enabled = await registry.get_enabled_agents(mock_db, uuid.uuid4())
+        agent_ids = {a.agent_id for a in enabled}
+        assert "bi-agent" in agent_ids
+        assert "other-agent" in agent_ids
+
+    @pytest.mark.asyncio
+    async def test_agent_filtered_when_required_connector_missing(self, tmp_path):
+        """Tenant has NO BigQuery → bi-agent excluded."""
+        _write_yaml_config(tmp_path, "bi-agent", requires_connector=["bigquery"])
+        _write_yaml_config(tmp_path, "other-agent")
+        registry = AgentRegistry()
+        registry.load_configs(tmp_path)
+
+        mock_db = AsyncMock()
+        overrides_result = MagicMock()
+        overrides_result.all.return_value = []
+        connectors_result = MagicMock()
+        connectors_result.all.return_value = []
+
+        mock_db.execute = AsyncMock(side_effect=[overrides_result, connectors_result])
+
+        enabled = await registry.get_enabled_agents(mock_db, uuid.uuid4())
+        agent_ids = {a.agent_id for a in enabled}
+        assert "bi-agent" not in agent_ids
+        assert "other-agent" in agent_ids
+
+    @pytest.mark.asyncio
+    async def test_any_of_semantics_one_match_enables(self, tmp_path):
+        """Agent requires [bigquery, snowflake], tenant has only snowflake → included."""
+        _write_yaml_config(
+            tmp_path, "warehouse-agent", requires_connector=["bigquery", "snowflake"]
+        )
+        registry = AgentRegistry()
+        registry.load_configs(tmp_path)
+
+        mock_db = AsyncMock()
+        overrides_result = MagicMock()
+        overrides_result.all.return_value = []
+        connectors_result = MagicMock()
+        connectors_result.all.return_value = [("snowflake",)]
+
+        mock_db.execute = AsyncMock(side_effect=[overrides_result, connectors_result])
+
+        enabled = await registry.get_enabled_agents(mock_db, uuid.uuid4())
+        assert "warehouse-agent" in {a.agent_id for a in enabled}
+
+    @pytest.mark.asyncio
+    async def test_resolver_failure_fails_open(self, tmp_path, caplog):
+        """Resolver raises → filter skipped → agents included (fail-open)."""
+        import logging
+
+        _write_yaml_config(tmp_path, "bi-agent", requires_connector=["bigquery"])
+        registry = AgentRegistry()
+        registry.load_configs(tmp_path)
+
+        mock_db = AsyncMock()
+        overrides_result = MagicMock()
+        overrides_result.all.return_value = []
+
+        mock_db.execute = AsyncMock(
+            side_effect=[overrides_result, RuntimeError("connection lost")]
+        )
+
+        with caplog.at_level(logging.WARNING):
+            enabled = await registry.get_enabled_agents(mock_db, uuid.uuid4())
+
+        assert "bi-agent" in {a.agent_id for a in enabled}
+        assert any("skipping connector filter" in rec.message.lower() for rec in caplog.records)

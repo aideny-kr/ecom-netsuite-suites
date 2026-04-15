@@ -41,7 +41,8 @@ class AgentRegistry:
         """Return configs for agents enabled for this tenant.
 
         Merges YAML defaults with DB overrides from agent_configs table.
-        Agents disabled in DB (is_enabled=False) are excluded.
+        Agents disabled in DB (is_enabled=False) are excluded. Agents whose
+        requires_connector isn't satisfied by any active connector are excluded.
         """
         # Query DB for tenant-specific overrides
         try:
@@ -64,11 +65,33 @@ class AgentRegistry:
             if row.override_config:
                 overrides[agent_id] = row.override_config
 
+        # Resolve the set of active connectors for this tenant. Fail-open on error
+        # so a transient DB hiccup doesn't silently hide agents.
+        try:
+            active_connectors = await _get_active_connectors(db, tenant_id)
+            connector_filter_active = True
+        except Exception:
+            logger.warning(
+                "Failed to fetch active connectors for tenant %s; skipping connector filter",
+                tenant_id,
+            )
+            active_connectors = set()
+            connector_filter_active = False
+
         # Merge and filter
         enabled: list[AgentYAMLConfig] = []
         for agent_id, config in self.configs.items():
             if agent_id in disabled:
                 continue
+            if connector_filter_active and config.requires_connector:
+                if not any(c in active_connectors for c in config.requires_connector):
+                    logger.info(
+                        "Filtering out agent %s for tenant %s — no active connector matches %s",
+                        agent_id,
+                        tenant_id,
+                        config.requires_connector,
+                    )
+                    continue
             if agent_id in overrides:
                 config = config.merge(overrides[agent_id])
             enabled.append(config)
