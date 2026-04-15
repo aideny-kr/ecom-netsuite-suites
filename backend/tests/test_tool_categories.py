@@ -74,3 +74,22 @@ class TestOrchestratorCategoryCheckers:
         assert not hasattr(orchestrator, "_BIGQUERY_TOOLS"), (
             "Delete _BIGQUERY_TOOLS frozenset; use categorize() instead."
         )
+
+
+class TestBaseAgentConfidenceCategoryCheck:
+    def test_data_tool_set_not_hardcoded(self):
+        import inspect
+
+        from app.services.chat.agents import base_agent
+
+        source = inspect.getsource(base_agent)
+        assert '"netsuite_suiteql"' not in source or "categorize" in source, (
+            "base_agent must use categorize() instead of hardcoded data tool set."
+        )
+        # Specifically: the old set used to be on one line. Catch its return.
+        assert (
+            'data_tools = {"netsuite_suiteql"' not in source
+            and "data_tools = {'netsuite_suiteql'" not in source
+        ), (
+            "data_tools hardcoded set must be removed; use categorize() instead."
+        )
