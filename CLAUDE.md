@@ -250,6 +250,9 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 | Agent registry | `backend/app/services/chat/agents/agent_registry.py` |
 | Agent routing | `backend/app/services/chat/routing/` |
 | Agent benchmarks | `backend/tests/agent_benchmarks/` |
+| Tool inventory helper (PR #37) | `backend/app/services/chat/tool_inventory.py` |
+| Tool category registry (PR #37) | `backend/app/services/chat/tool_categories.py` |
+| Capability-sync CI invariant | `backend/tests/test_prompt_tool_sync.py` |
 | BigQuery service | `backend/app/services/bigquery_service.py` |
 | BigQuery tools | `backend/app/mcp/tools/bigquery_tools.py` |
 | BigQuery schema seeder | `backend/app/services/bigquery_schema_seeder.py` |
@@ -358,11 +361,16 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 47. **Initialize orchestrator variables before branch points** — variables used after if/elif chains in `run_chat_turn()` MUST be initialized before the chain. Chitchat path, picker-skip path, and other branches skip assignment blocks. `test_orchestrator_paths.py` catches this statically.
 48. **`_validate_read_only` must strip SQL comments** — LLMs generate `-- comment\nSELECT...`. The `_strip_sql_comments()` helper removes `--` and `/* */` before the `startswith` check. Do NOT use `_strip_sql_comments` to transform queries before execution (doesn't handle string literals).
 49. **`SessionDetailResponse` must include run fields** — `active_run_id`, `status`, `run_started_at` must be in BOTH `SessionListItem` and `SessionDetailResponse`. Missing them from detail broke SSE reconnection.
+50. **Never hardcode tool names in agent prompts** (PR #37) — use the `{{TOOL_INVENTORY}}` placeholder, resolved at runtime by `_assemble_system_prompt` in `orchestrator.py` via `tool_inventory.build_tool_inventory_block`. The CI invariant `tests/test_prompt_tool_sync.py` fails if anyone reintroduces a tool name in a prompt that isn't in the schema. To add a tool's category, edit ONE place: `tool_categories.py::_EXACT`.
+51. **LLM adapter SDK defaults will hang for 10 min** (PR #36) — `anthropic.AsyncAnthropic(api_key=...)` defaults to `read=600s`. Always pass `timeout=httpx.Timeout(connect=5, read=60, write=60, pool=60)` and `max_retries=2`. Same for `openai.AsyncOpenAI` and `genai.Client(http_options=...)`. Resolver-style optional pre-flight calls should also wrap in `asyncio.wait_for(timeout=15)` for graceful degradation.
+52. **Tier 2 semantic router needs conversation history** (PR #37) — short follow-up turns ("go ahead with step 1", "yes") have no topical signal on their own. `SemanticRouter.route(query, agents, adapter, history=last_3_messages)` lets Haiku see prior context and keep the right specialist selected. Always pass history when calling.
+53. **Auto source_pin from tool use** (PR #37) — when a turn calls `bigquery_*` (or `netsuite_*`), `_compute_source_pin_update(tool_calls_log)` updates `session.source_pin` post-turn so the next ambiguous query inherits the source. Mixed turns clear the pin. Don't manually set the pin from non-routing code unless overriding intentionally.
+54. **Capability-sync open follow-ups** (URGENT, see `tasks/todo.md` 🚨 P0 URGENT section) — (a) bi-agent's widened Tier 1 regex (heap/funnel/attribution/etc.) routes analytics queries to bi-agent for ALL tenants, but bi-agent has no usable data tool when BigQuery isn't connected. Need `requires_connector` in agent YAML + filter in `AgentRegistry.list_enabled_configs`. (b) Tenants with custom DB-stored prompt templates (`system_prompt_templates`) won't have `{{TOOL_INVENTORY}}` placeholder and will get an empty inventory — audit and backfill or add defensive fallback.
 
 ## Current State
 
-- **Product**: AI-den v1.9 deployed to staging 2026-04-14. PR #35: RBAC ops recon revoke, chat render fixes (double bubble, logo flash, auto-scroll, source picker stuck), stale job auto-cleanup, disputes cursor fix, pre-deploy schema validation.
-- **Latest migration**: 068_revoke_recon_ops
+- **Product**: AI-den v1.10 deployed to staging 2026-04-14. PRs landed today: #35 (v1.9 — RBAC ops recon revoke, chat render fixes, stale job cleanup, disputes cursor, schema validation), #36 (LLM adapter timeout caps + entity-resolver graceful degrade), #37 (chat agent capability sync — single source of truth for tool inventory + conversation-aware routing).
+- **Latest migration**: 068_revoke_recon_ops (no new migrations in #36 or #37)
 - **Frontend tests**: Vitest + @testing-library/react (31 tests). Run: `cd frontend && npx vitest run`
 - **Backend tests**: 150+ tests. Run: `cd backend && .venv/bin/python -m pytest`
 - **Agent benchmark**: 18 sales cases vs Claude+MCP. Run: `cd backend && .venv/bin/python -m app.services.benchmarks.run_vs_mcp --suite sales --tenant-id ce3dfaad-626f-4992-84e9-500c8291ca0a`
@@ -409,3 +417,4 @@ Full changelog moved to skills. Key milestones:
 - **v1.6** (2026-04-03): Background chat, streaming tool cards, ordered content blocks, trimmed prompt
 - **v0.1 Intent Clarification** (2026-04-09): Source picker cards (confidence-gated, ambiguous → two cards, < 0.85 threshold), fiscal calendar injection into agent prompts, abandoned v0 disclosure footer design after design mismatch
 - **v0.2 Source Picker Resilience** (2026-04-13): BQ comment stripping, stream/task timeouts, soft source pin with override, discussion guard, picker skip after first result, SSE reconnection on navigate-away, elapsed time indicator, orchestrator path regression tests
+- **v1.10 Adapter Timeout + Capability Sync** (2026-04-14, PR #36 + #37): Anthropic/OpenAI/Gemini SDK `read=60s` timeout caps + entity-resolver wrapped in `asyncio.wait_for(15s)`. Single source of truth for tool inventory: `{{TOOL_INVENTORY}}` placeholder in prompts resolved at runtime by `_assemble_system_prompt` from real tool schema. Killed five hardcoded tool lists (`prompts.py`, `unified_agent._UNIFIED_TOOL_NAMES`, three orchestrator frozensets, `base_agent.data_tools`) — replaced with `tool_categories.categorize()` registry. Tier 2 semantic router accepts conversation history. `session.source_pin` auto-updates from used tools. bi-agent regex widened (heap/funnel/attribution/segment/mixpanel/amplitude/firebase/GA/third-party). CI invariant `test_prompt_tool_sync.py` blocks future drift. **Two URGENT follow-ups in `tasks/todo.md`**: (A) connector-aware agent enabledness — bi-agent now routes analytics queries for tenants without BigQuery; (B) audit DB-stored custom prompt templates for the placeholder.
