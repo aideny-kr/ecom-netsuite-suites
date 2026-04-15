@@ -273,3 +273,30 @@ class TestGetEnabledAgentsConnectorFilter:
 
         assert "bi-agent" in {a.agent_id for a in enabled}
         assert any("skipping connector filter" in rec.message.lower() for rec in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_override_of_requires_connector_is_honored(self, tmp_path):
+        """DB override that clears requires_connector re-enables a filtered agent."""
+        _write_yaml_config(tmp_path, "bi-agent", requires_connector=["bigquery"])
+        registry = AgentRegistry()
+        registry.load_configs(tmp_path)
+
+        mock_db = AsyncMock()
+        # Overrides row: is_enabled=True, override clears requires_connector to []
+        override_row = MagicMock()
+        override_row.agent_id = "bi-agent"
+        override_row.is_enabled = True
+        override_row.override_config = {"requires_connector": []}
+        overrides_result = MagicMock()
+        overrides_result.all.return_value = [override_row]
+
+        # No active connectors — bi-agent would be filtered WITHOUT the override
+        connectors_result = MagicMock()
+        connectors_result.all.return_value = []
+
+        mock_db.execute = AsyncMock(side_effect=[overrides_result, connectors_result])
+
+        enabled = await registry.get_enabled_agents(mock_db, uuid.uuid4())
+        # With the override clearing requires_connector, bi-agent is enabled
+        # even though no active connectors exist. Locks in merge-before-filter order.
+        assert "bi-agent" in {a.agent_id for a in enabled}

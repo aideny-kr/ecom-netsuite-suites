@@ -78,11 +78,15 @@ class AgentRegistry:
             active_connectors = set()
             connector_filter_active = False
 
-        # Merge and filter
+        # Merge overrides first, then filter on the merged config so a tenant
+        # override of requires_connector (e.g. disabling the requirement) takes
+        # effect. DB wins over YAML — same mental model as elsewhere in this method.
         enabled: list[AgentYAMLConfig] = []
         for agent_id, config in self.configs.items():
             if agent_id in disabled:
                 continue
+            if agent_id in overrides:
+                config = config.merge(overrides[agent_id])
             if connector_filter_active and config.requires_connector:
                 if not any(c in active_connectors for c in config.requires_connector):
                     logger.info(
@@ -92,8 +96,6 @@ class AgentRegistry:
                         config.requires_connector,
                     )
                     continue
-            if agent_id in overrides:
-                config = config.merge(overrides[agent_id])
             enabled.append(config)
 
         return enabled
