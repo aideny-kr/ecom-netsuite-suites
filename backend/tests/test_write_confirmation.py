@@ -3,8 +3,6 @@ confirmation payloads for the NetSuite AI agent."""
 
 from __future__ import annotations
 
-import json
-
 import pytest
 
 from app.services.chat.write_confirmation_service import (
@@ -410,16 +408,12 @@ class TestValidateAndExtractConfirmation:
 
     def test_round_trip_returns_valid(self):
         structured_output = self._make_structured_output()
-        is_valid, tool_name, tool_input = validate_and_extract_confirmation(
-            structured_output, _SESSION_ID
-        )
+        is_valid, tool_name, tool_input = validate_and_extract_confirmation(structured_output, _SESSION_ID)
         assert is_valid is True
 
     def test_round_trip_returns_correct_tool_name(self):
         structured_output = self._make_structured_output()
-        _, tool_name, _ = validate_and_extract_confirmation(
-            structured_output, _SESSION_ID
-        )
+        _, tool_name, _ = validate_and_extract_confirmation(structured_output, _SESSION_ID)
         assert tool_name == _ext("ns_createRecord")
 
     def test_round_trip_returns_correct_tool_input(self):
@@ -441,25 +435,19 @@ class TestValidateAndExtractConfirmation:
             "tool_name": payload.tool_name,
             "tool_input": payload.tool_input,
         }
-        _, _, extracted_input = validate_and_extract_confirmation(
-            structured_output, _SESSION_ID
-        )
+        _, _, extracted_input = validate_and_extract_confirmation(structured_output, _SESSION_ID)
         assert extracted_input == tool_input
 
     def test_tampered_token_fails(self):
         structured_output = self._make_structured_output()
         # Replace token with a tampered version
         structured_output["confirmation_token"] = "a" * 64
-        is_valid, _, _ = validate_and_extract_confirmation(
-            structured_output, _SESSION_ID
-        )
+        is_valid, _, _ = validate_and_extract_confirmation(structured_output, _SESSION_ID)
         assert is_valid is False
 
     def test_wrong_session_id_fails(self):
         structured_output = self._make_structured_output()
-        is_valid, _, _ = validate_and_extract_confirmation(
-            structured_output, "wrong-session-id"
-        )
+        is_valid, _, _ = validate_and_extract_confirmation(structured_output, "wrong-session-id")
         assert is_valid is False
 
     def test_tampered_tool_input_fails(self):
@@ -470,9 +458,7 @@ class TestValidateAndExtractConfirmation:
             "recordType": "salesOrder",
             "body": {"memo": "TAMPERED"},
         }
-        is_valid, _, _ = validate_and_extract_confirmation(
-            structured_output, _SESSION_ID
-        )
+        is_valid, _, _ = validate_and_extract_confirmation(structured_output, _SESSION_ID)
         assert is_valid is False
 
     def test_different_sessions_give_different_tokens(self):
@@ -493,9 +479,7 @@ class TestValidateAndExtractConfirmation:
             "tool_input": payload_a.tool_input,
         }
         # Validate against a different session
-        is_valid, _, _ = validate_and_extract_confirmation(
-            structured_output, "session-B"
-        )
+        is_valid, _, _ = validate_and_extract_confirmation(structured_output, "session-B")
         assert is_valid is False
 
     def test_update_round_trip(self):

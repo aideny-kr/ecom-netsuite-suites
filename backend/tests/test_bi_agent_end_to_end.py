@@ -2,7 +2,7 @@
 
 import uuid
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -213,6 +213,14 @@ class TestBigQueryToolGuardrails:
 
 
 class TestSelectAgentIntegration:
+    @pytest.fixture(autouse=True)
+    def _mock_active_connectors(self):
+        with patch(
+            "app.services.chat.agents.agent_registry._get_active_connectors",
+            AsyncMock(return_value={"bigquery"}),
+        ):
+            yield
+
     @pytest.mark.asyncio
     async def test_select_agent_bi_query(self):
         from app.services.chat.orchestrator import _agent_registry, _select_agent

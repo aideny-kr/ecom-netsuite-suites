@@ -3,16 +3,13 @@ HMAC confirmation tokens."""
 
 from __future__ import annotations
 
-import hmac
-import hashlib
-
 import pytest
 
 from app.services.chat.mutation_guard import (
-    is_mutation_tool,
-    get_mutation_type,
-    is_record_type_allowed,
     generate_confirmation_token,
+    get_mutation_type,
+    is_mutation_tool,
+    is_record_type_allowed,
     verify_confirmation_token,
 )
 

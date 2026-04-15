@@ -10,6 +10,14 @@ CONFIGS_DIR = Path(__file__).resolve().parent.parent / "app" / "services" / "cha
 
 
 class TestPinningInSelectAgent:
+    @pytest.fixture(autouse=True)
+    def _mock_active_connectors(self):
+        with patch(
+            "app.services.chat.agents.agent_registry._get_active_connectors",
+            AsyncMock(return_value={"bigquery"}),
+        ):
+            yield
+
     @pytest.mark.asyncio
     async def test_follow_up_uses_pinned_agent(self):
         from app.services.chat.orchestrator import _agent_registry, _select_agent

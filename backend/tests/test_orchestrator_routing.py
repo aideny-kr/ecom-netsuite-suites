@@ -137,9 +137,7 @@ class TestSelectAgent:
 
         with patch("app.services.chat.orchestrator._agent_registry") as mock_registry:
             mock_registry.configs = {"pricing-agent": MagicMock()}
-            mock_registry.get_enabled_agents = AsyncMock(
-                return_value=[MagicMock(agent_id="pricing-agent")]
-            )
+            mock_registry.get_enabled_agents = AsyncMock(return_value=[MagicMock(agent_id="pricing-agent")])
             mock_registry.is_healthy = MagicMock(return_value=True)
 
             with patch("app.services.chat.orchestrator.RuleRouter") as MockRuleRouter:

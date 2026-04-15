@@ -591,24 +591,31 @@ class BaseSpecialistAgent(abc.ABC):
 
                     _mut_type = _classify_mut(block.name)
                     if _mut_type is not None:
-                        result_str = json.dumps({
-                            "error": "Write operations require the streaming chat path for HITL confirmation. "
-                            "This tool cannot be executed in the non-streaming path.",
-                            "blocked": True,
-                        })
+                        result_str = json.dumps(
+                            {
+                                "error": "Write operations require the streaming chat path for HITL confirmation. "
+                                "This tool cannot be executed in the non-streaming path.",
+                                "blocked": True,
+                            }
+                        )
                         elapsed_ms = int((time.monotonic() - t0) * 1000)
                         tool_calls_log.append(
                             build_tool_call_log_entry(
-                                step=step, agent_name=self.agent_name,
-                                tool_name=block.name, params=block.input,
-                                result_str=result_str, duration_ms=elapsed_ms,
+                                step=step,
+                                agent_name=self.agent_name,
+                                tool_name=block.name,
+                                params=block.input,
+                                result_str=result_str,
+                                duration_ms=elapsed_ms,
                             )
                         )
-                        tool_results_content.append({
-                            "type": "tool_result",
-                            "tool_use_id": block.id,
-                            "content": result_str,
-                        })
+                        tool_results_content.append(
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": block.id,
+                                "content": result_str,
+                            }
+                        )
                         continue
 
                     # Policy check
@@ -951,17 +958,13 @@ class BaseSpecialistAgent(abc.ABC):
                         # blocking the SSE stream on slow MCP calls)
                         current_record: dict[str, Any] | None = None
                         if mutation_type in ("update", "upsert"):
-                            record_id = (
-                                block.input.get("id")
-                                or (block.input.get("body") or {}).get("id")
-                            )
+                            record_id = block.input.get("id") or (block.input.get("body") or {}).get("id")
                             if record_id:
-                                from app.services.chat.tools import parse_external_tool_name, _make_ext_tool_name
+                                from app.services.chat.tools import _make_ext_tool_name, parse_external_tool_name
 
                                 _parsed = parse_external_tool_name(block.name)
                                 get_tool_name = (
-                                    _make_ext_tool_name(_parsed[0], "ns_getRecord")
-                                    if _parsed else block.name
+                                    _make_ext_tool_name(_parsed[0], "ns_getRecord") if _parsed else block.name
                                 )
                                 try:
                                     import asyncio as _aio
@@ -1028,9 +1031,7 @@ class BaseSpecialistAgent(abc.ABC):
                                 "duration_ms": elapsed_ms,
                                 "success": payload is not None,
                                 "result_summary": (
-                                    "Confirmation required"
-                                    if payload is not None
-                                    else "Blocked record type"
+                                    "Confirmation required" if payload is not None else "Blocked record type"
                                 ),
                             },
                         )

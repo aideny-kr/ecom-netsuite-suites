@@ -1136,18 +1136,12 @@ async def run_chat_turn(
                 return
 
             _so = _confirm_msg.structured_output
-            if (
-                not isinstance(_so, dict)
-                or _so.get("type") != "write_confirmation"
-                or _so.get("status") != "pending"
-            ):
+            if not isinstance(_so, dict) or _so.get("type") != "write_confirmation" or _so.get("status") != "pending":
                 yield {"type": "error", "error": "Confirmation is not in a pending state."}
                 return
 
             if _wc_action == "approve":
-                is_valid, tool_name, tool_input = validate_and_extract_confirmation(
-                    _so, str(session.id)
-                )
+                is_valid, tool_name, tool_input = validate_and_extract_confirmation(_so, str(session.id))
                 if not is_valid:
                     yield {"type": "error", "error": "Confirmation token is invalid or tampered."}
                     return

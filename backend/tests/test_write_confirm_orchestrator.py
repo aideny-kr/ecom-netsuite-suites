@@ -7,15 +7,11 @@ the start of run_chat_turn.
 
 from __future__ import annotations
 
-import json
 import uuid
 from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock, patch
-
-import pytest
+from unittest.mock import MagicMock
 
 from app.models.chat import ChatMessage, ChatSession
-
 
 # ---------------------------------------------------------------------------
 # Helpers
