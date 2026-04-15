@@ -6,14 +6,14 @@ Consumers:
   tool is executed, then emits the payload as an SSE ``confirmation_required``
   event so the frontend can show a confirmation dialog.
 - Chat runs API: calls ``validate_and_extract_confirmation`` on the user's
-  ``source_pick`` (approve/reject) POST to verify the token before executing
+  ``write_confirm`` (approve/reject) POST to verify the token before executing
   the deferred tool call.
 """
 
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel
 
@@ -36,8 +36,8 @@ class WriteConfirmationPayload(BaseModel):
     ``confirmation_required`` event.
     """
 
-    type: str = "write_confirmation"
-    mutation_type: str  # "create" | "update" | "delete" | "upsert"
+    type: Literal["write_confirmation"] = "write_confirmation"
+    mutation_type: Literal["create", "update", "delete", "upsert"]
     record_type: str
     record_id: str | None = None
     proposed_fields: dict[str, Any]
@@ -45,7 +45,7 @@ class WriteConfirmationPayload(BaseModel):
     tool_name: str
     tool_input: dict[str, Any]
     confirmation_token: str
-    status: str = "pending"  # "pending" | "approved" | "rejected"
+    status: Literal["pending", "approved", "rejected"] = "pending"
 
 
 # ---------------------------------------------------------------------------

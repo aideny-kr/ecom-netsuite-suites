@@ -10,9 +10,8 @@ is one of the four write verbs understood by the Oracle NetSuite MCP server.
 
 from __future__ import annotations
 
-import hmac
 import hashlib
-import re
+import hmac
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -25,9 +24,6 @@ _MUTATION_TOOL_NAMES: dict[str, str] = {
     "ns_deleteRecord": "delete",
     "ns_upsertRecord": "upsert",
 }
-
-# External-MCP prefix pattern: ext__ followed by exactly 32 hex chars and __.
-_EXT_PREFIX_RE = re.compile(r"^ext__[0-9a-fA-F]{32}__(.+)$")
 
 # Record types that are safe to create/update/delete via AI-initiated flows.
 _ALLOWED_RECORD_TYPES: frozenset[str] = frozenset(
@@ -84,29 +80,39 @@ _BLOCKED_RECORD_TYPES: frozenset[str] = frozenset(
 
 def _raw_tool_name(tool_name: str) -> str | None:
     """Return the unqualified tool name if tool_name is a valid ext__ tool,
-    otherwise return None."""
-    m = _EXT_PREFIX_RE.match(tool_name)
-    return m.group(1) if m else None
-
-
-def is_mutation_tool(tool_name: str) -> bool:
-    """Return True if *tool_name* represents an external MCP write operation.
-
-    Only tools with a valid ``ext__<32 hex>__`` prefix whose raw name is
-    one of the four mutation verbs are considered mutations.
+    otherwise return None.  Delegates to the canonical parser in tools.py.
     """
-    raw = _raw_tool_name(tool_name)
-    return raw in _MUTATION_TOOL_NAMES
+    from app.services.chat.tools import parse_external_tool_name
+
+    parsed = parse_external_tool_name(tool_name)
+    return parsed[1] if parsed else None
 
 
-def get_mutation_type(tool_name: str) -> str | None:
+def classify_mutation(tool_name: str) -> str | None:
     """Return the mutation verb ("create", "update", "delete", "upsert")
     for a mutation tool, or None if the tool is not a mutation.
+
+    Single-pass: parses the tool name once and looks up the verb.
+    Prefer this over calling ``is_mutation_tool`` + ``get_mutation_type``
+    separately to avoid a redundant parse.
     """
     raw = _raw_tool_name(tool_name)
     if raw is None:
         return None
     return _MUTATION_TOOL_NAMES.get(raw)
+
+
+def is_mutation_tool(tool_name: str) -> bool:
+    """Return True if *tool_name* represents an external MCP write operation."""
+    return classify_mutation(tool_name) is not None
+
+
+def get_mutation_type(tool_name: str) -> str | None:
+    """Return the mutation verb for a mutation tool, or None.
+
+    Alias for ``classify_mutation`` — kept for backward compatibility.
+    """
+    return classify_mutation(tool_name)
 
 
 def is_record_type_allowed(record_type: str) -> bool:

@@ -22,7 +22,6 @@ from app.services.chat.tool_call_results import (
     tool_call_had_error,
     tool_call_row_count,
 )
-from app.services.chat.mutation_guard import get_mutation_type, is_mutation_tool
 from app.services.chat.tool_categories import categorize
 from app.services.chat.write_confirmation_service import build_confirmation_payload
 from app.services.confidence_extractor import extract_structured_confidence
@@ -916,12 +915,15 @@ class BaseSpecialistAgent(abc.ABC):
                     t0 = time.monotonic()
 
                     # ── Mutation intercept: HITL write confirmation ──
-                    if is_mutation_tool(block.name):
-                        mutation_type = get_mutation_type(block.name)
+                    from app.services.chat.mutation_guard import classify_mutation
+
+                    mutation_type = classify_mutation(block.name)
+                    if mutation_type is not None:
                         record_type = block.input.get("recordType", "unknown")
 
                         # For updates/upserts: pre-fetch current record for
-                        # before/after diff display in the confirmation dialog
+                        # before/after diff display (capped at 5s to avoid
+                        # blocking the SSE stream on slow MCP calls)
                         current_record: dict[str, Any] | None = None
                         if mutation_type in ("update", "upsert"):
                             record_id = (
@@ -929,18 +931,27 @@ class BaseSpecialistAgent(abc.ABC):
                                 or (block.input.get("body") or {}).get("id")
                             )
                             if record_id:
-                                get_tool_name = block.name.replace(
-                                    f"ns_{mutation_type}Record", "ns_getRecord"
+                                from app.services.chat.tools import parse_external_tool_name, _make_ext_tool_name
+
+                                _parsed = parse_external_tool_name(block.name)
+                                get_tool_name = (
+                                    _make_ext_tool_name(_parsed[0], "ns_getRecord")
+                                    if _parsed else block.name
                                 )
                                 try:
-                                    get_result_str = await execute_tool_call(
-                                        tool_name=get_tool_name,
-                                        tool_input={"type": record_type, "id": str(record_id)},
-                                        tenant_id=self.tenant_id,
-                                        actor_id=self.user_id,
-                                        correlation_id=self.correlation_id,
-                                        db=db,
-                                        session_id=session_id,
+                                    import asyncio as _aio
+
+                                    get_result_str = await _aio.wait_for(
+                                        execute_tool_call(
+                                            tool_name=get_tool_name,
+                                            tool_input={"type": record_type, "id": str(record_id)},
+                                            tenant_id=self.tenant_id,
+                                            actor_id=self.user_id,
+                                            correlation_id=self.correlation_id,
+                                            db=db,
+                                            session_id=session_id,
+                                        ),
+                                        timeout=5.0,
                                     )
                                     current_record = json.loads(get_result_str)
                                 except Exception:
