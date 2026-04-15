@@ -22,7 +22,9 @@ from app.services.chat.tool_call_results import (
     tool_call_had_error,
     tool_call_row_count,
 )
+from app.services.chat.mutation_guard import get_mutation_type, is_mutation_tool
 from app.services.chat.tool_categories import categorize
+from app.services.chat.write_confirmation_service import build_confirmation_payload
 from app.services.confidence_extractor import extract_structured_confidence
 from app.services.confidence_service import CompositeScorer
 
@@ -912,6 +914,110 @@ class BaseSpecialistAgent(abc.ABC):
                     )
 
                     t0 = time.monotonic()
+
+                    # ── Mutation intercept: HITL write confirmation ──
+                    if is_mutation_tool(block.name):
+                        mutation_type = get_mutation_type(block.name)
+                        record_type = block.input.get("recordType", "unknown")
+
+                        # For updates/upserts: pre-fetch current record for
+                        # before/after diff display in the confirmation dialog
+                        current_record: dict[str, Any] | None = None
+                        if mutation_type in ("update", "upsert"):
+                            record_id = (
+                                block.input.get("id")
+                                or (block.input.get("body") or {}).get("id")
+                            )
+                            if record_id:
+                                get_tool_name = block.name.replace(
+                                    f"ns_{mutation_type}Record", "ns_getRecord"
+                                )
+                                try:
+                                    get_result_str = await execute_tool_call(
+                                        tool_name=get_tool_name,
+                                        tool_input={"type": record_type, "id": str(record_id)},
+                                        tenant_id=self.tenant_id,
+                                        actor_id=self.user_id,
+                                        correlation_id=self.correlation_id,
+                                        db=db,
+                                        session_id=session_id,
+                                    )
+                                    current_record = json.loads(get_result_str)
+                                except Exception:
+                                    logger.warning(
+                                        "mutation_intercept: failed to pre-fetch %s/%s",
+                                        record_type,
+                                        record_id,
+                                    )
+
+                        payload = build_confirmation_payload(
+                            mutation_type=mutation_type,
+                            record_type=record_type,
+                            tool_name=block.name,
+                            tool_input=block.input,
+                            session_id=session_id or "",
+                            current_record=current_record,
+                        )
+
+                        if payload is None:
+                            # Blocked or unknown record type
+                            result_str = json.dumps(
+                                {
+                                    "error": f"Record type '{record_type}' is not allowed for "
+                                    f"AI-initiated {mutation_type} operations.",
+                                    "blocked": True,
+                                }
+                            )
+                        else:
+                            yield ("confirmation_required", payload.model_dump())
+                            result_str = json.dumps(
+                                {
+                                    "confirmation_required": True,
+                                    "mutation_type": mutation_type,
+                                    "record_type": record_type,
+                                    "message": (
+                                        f"This {mutation_type} operation on {record_type} requires human "
+                                        f"confirmation. The confirmation dialog has been shown to the user. "
+                                        f"Do NOT proceed until the user explicitly approves."
+                                    ),
+                                }
+                            )
+
+                        elapsed_ms = int((time.monotonic() - t0) * 1000)
+                        yield (
+                            "tool_end",
+                            {
+                                "tool_name": block.name,
+                                "step": step,
+                                "duration_ms": elapsed_ms,
+                                "success": payload is not None,
+                                "result_summary": (
+                                    "Confirmation required"
+                                    if payload is not None
+                                    else "Blocked record type"
+                                ),
+                            },
+                        )
+                        tool_calls_log.append(
+                            build_tool_call_log_entry(
+                                step=step,
+                                agent_name=self.agent_name,
+                                tool_name=block.name,
+                                params=block.input,
+                                result_str=result_str,
+                                duration_ms=elapsed_ms,
+                            )
+                        )
+                        tool_results_content.append(
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": block.id,
+                                "content": result_str,
+                            }
+                        )
+                        continue
+                    # ── End mutation intercept ──
+
                     policy_result = policy_evaluate(active_policy, block.name, block.input)
                     if not policy_result["allowed"]:
                         result_str = json.dumps(
