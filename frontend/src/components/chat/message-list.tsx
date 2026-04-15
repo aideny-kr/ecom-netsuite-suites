@@ -9,11 +9,10 @@ import { oneDark } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { useCreateSavedQuery } from "@/hooks/use-saved-queries";
 import { cn } from "@/lib/utils";
 import { useBranding } from "@/providers/branding-provider";
-import type { ChatMessage, SourcePickerData, WriteConfirmationData } from "@/lib/types";
+import type { ChatMessage, WriteConfirmationData } from "@/lib/types";
 import type { FinancialReportData, DataTableData, TaskOutputData, StreamBlock } from "@/lib/chat-stream";
 import type { AgentSummary } from "@/hooks/use-agents";
 import type { ChartData } from "@/lib/types";
-import { SourcePickerCard } from "@/components/chat/source-picker-card";
 import { WriteConfirmationCard } from "@/components/chat/write-confirmation-card";
 import { FinancialReport } from "@/components/chat/financial-report";
 import { DataFrameTable } from "@/components/chat/data-frame-table";
@@ -606,7 +605,6 @@ interface MessageListProps {
   isLoading: boolean;
   pendingUserMessage?: string | null;
   isWaitingForReply?: boolean;
-  activeSourcePick?: "netsuite" | "bigquery" | null;
   onMentionClick?: (filePath: string) => void;
   workspaceId?: string | null;
   onViewDiff?: (changesetId: string) => void;
@@ -625,7 +623,6 @@ interface MessageListProps {
   onRemoveTemplate?: () => void;
   templateFile?: { id: string; filename: string } | null;
   onImportanceOverride?: (messageId: string, newTier: number) => void;
-  onSourcePick?: (messageId: string, source: "netsuite" | "bigquery") => void;
   onWriteConfirm?: (messageId: string, action: "approve" | "reject") => void;
   variant?: "default" | "terminal";
 }
@@ -635,7 +632,6 @@ export function MessageList({
   isLoading,
   pendingUserMessage,
   isWaitingForReply,
-  activeSourcePick,
   onMentionClick,
   workspaceId,
   onViewDiff,
@@ -654,7 +650,6 @@ export function MessageList({
   onRemoveTemplate,
   templateFile,
   onImportanceOverride,
-  onSourcePick,
   onWriteConfirm,
   variant,
 }: MessageListProps) {
@@ -904,7 +899,6 @@ export function MessageList({
             onViewDiff={onViewDiff}
             onChangesetAction={onChangesetAction}
             onImportanceOverride={onImportanceOverride}
-            onSourcePick={onSourcePick}
             onWriteConfirm={onWriteConfirm}
             financialReportData={financialReports?.get(message.id) ?? null}
             dataTableData={dataTables?.get(message.id) ?? null}
@@ -968,7 +962,6 @@ export function MessageList({
           workspaceId={workspaceId}
           onViewDiff={onViewDiff}
           onChangesetAction={onChangesetAction}
-          onSourcePick={onSourcePick}
           onWriteConfirm={onWriteConfirm}
           isStreamingPreview
           isTerminal={isTerminal}
@@ -1061,9 +1054,7 @@ export function MessageList({
                   <div className="flex items-center gap-4">
                     <div className="h-2 w-2 bg-[var(--chat-accent)] animate-pulse" />
                     <span className="text-[10px] tracking-widest text-[var(--chat-accent)] uppercase">
-                      {activeSourcePick
-                        ? `Using ${activeSourcePick === "bigquery" ? "BigQuery" : "NetSuite"}...`
-                        : "PROCESSING..."}
+                      PROCESSING...
                     </span>
                   </div>
                 ) : (
@@ -1073,11 +1064,6 @@ export function MessageList({
                       <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/60 animate-bounce [animation-delay:150ms]" />
                       <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/60 animate-bounce [animation-delay:300ms]" />
                     </span>
-                    {activeSourcePick && (
-                      <span className="text-[11px] text-muted-foreground ml-1">
-                        Using {activeSourcePick === "bigquery" ? "BigQuery" : "NetSuite"}
-                      </span>
-                    )}
                   </span>
                 )
               )
@@ -1101,7 +1087,6 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
   onChangesetAction,
   isStreamingPreview = false,
   onImportanceOverride,
-  onSourcePick,
   onWriteConfirm,
   financialReportData = null,
   dataTableData = null,
@@ -1116,7 +1101,6 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
   onChangesetAction?: () => void;
   isStreamingPreview?: boolean;
   onImportanceOverride?: (messageId: string, newTier: number) => void;
-  onSourcePick?: (messageId: string, source: "netsuite" | "bigquery") => void;
   onWriteConfirm?: (messageId: string, action: "approve" | "reject") => void;
   financialReportData?: FinancialReportData | null;
   dataTableData?: DataTableData | null;
@@ -1131,28 +1115,6 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
     | { type?: string; [key: string]: unknown }
     | null
     | undefined;
-
-  if (structuredOutput?.type === "source_picker") {
-    return (
-      <div className="flex min-w-0 justify-start gap-3">
-        {isTerminal ? (
-          <div className="w-10 h-10 bg-[var(--card)] flex-shrink-0 flex items-center justify-center border border-[var(--chat-surface-mid)]">
-            <Zap className="h-4 w-4 text-[var(--chat-accent)]" />
-          </div>
-        ) : (
-          <div className="mt-1 flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-primary/10">
-            <FrameworkIcon className="h-3.5 w-3.5 text-primary" />
-          </div>
-        )}
-        <div className="flex min-w-0 flex-1 flex-col">
-          <SourcePickerCard
-            data={structuredOutput as unknown as SourcePickerData}
-            onPick={(source) => onSourcePick?.(message.id, source)}
-          />
-        </div>
-      </div>
-    );
-  }
 
   if (structuredOutput?.type === "write_confirmation") {
     return (
