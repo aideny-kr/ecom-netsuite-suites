@@ -27,6 +27,16 @@ _CLIENT_MAX_RETRIES = 2
 _RETRYABLE_ERROR_TYPES = {"overloaded_error", "rate_limit_error", "api_error"}
 _RETRY_DELAYS_SECONDS = (1.0, 2.0, 4.0)  # 3 retries = 4 total attempts
 
+# Tool dicts in this codebase carry internal-only fields like `category` (stamped
+# by `tool_categories.categorize()`). Anthropic rejects unknown keys with
+# `tools.0.custom.<field>: Extra inputs are not permitted`, so the adapter
+# allowlists API-recognised keys before sending.
+_ANTHROPIC_TOOL_API_KEYS = {"name", "description", "input_schema", "cache_control", "type"}
+
+
+def _to_api_tool(tool: dict) -> dict:
+    return {k: v for k, v in tool.items() if k in _ANTHROPIC_TOOL_API_KEYS}
+
 
 def _is_retryable(exc: anthropic.APIStatusError) -> bool:
     body = getattr(exc, "body", None)
@@ -76,7 +86,7 @@ class AnthropicAdapter(BaseLLMAdapter):
         }
         if tools:
             # Cache tool definitions — they're large and identical every step
-            cached_tools = list(tools)
+            cached_tools = [_to_api_tool(t) for t in tools]
             if cached_tools:
                 cached_tools[-1] = {**cached_tools[-1], "cache_control": {"type": "ephemeral"}}
             kwargs["tools"] = cached_tools
@@ -135,7 +145,7 @@ class AnthropicAdapter(BaseLLMAdapter):
             "messages": messages,
         }
         if tools:
-            cached_tools = list(tools)
+            cached_tools = [_to_api_tool(t) for t in tools]
             if cached_tools:
                 cached_tools[-1] = {**cached_tools[-1], "cache_control": {"type": "ephemeral"}}
             kwargs["tools"] = cached_tools
