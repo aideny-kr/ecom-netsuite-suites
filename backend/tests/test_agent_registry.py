@@ -136,3 +136,53 @@ class TestAgentRegistryHealth:
     def test_agent_healthy_zero_calls(self):
         registry = AgentRegistry()
         assert registry.is_healthy(error_count=0, success_count=0) is True
+
+
+class TestGetActiveConnectors:
+    @pytest.mark.asyncio
+    async def test_returns_active_enabled_connectors(self):
+        from app.services.chat.agents.agent_registry import _get_active_connectors
+
+        mock_db = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.all.return_value = [("bigquery",), ("netsuite_mcp",)]
+        mock_db.execute = AsyncMock(return_value=mock_result)
+
+        connectors = await _get_active_connectors(mock_db, uuid.uuid4())
+        assert connectors == {"bigquery", "netsuite_mcp"}
+
+    @pytest.mark.asyncio
+    async def test_returns_empty_set_when_no_connectors(self):
+        from app.services.chat.agents.agent_registry import _get_active_connectors
+
+        mock_db = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.all.return_value = []
+        mock_db.execute = AsyncMock(return_value=mock_result)
+
+        connectors = await _get_active_connectors(mock_db, uuid.uuid4())
+        assert connectors == set()
+
+    @pytest.mark.asyncio
+    async def test_query_filters_by_tenant_enabled_and_active(self):
+        """The SQL query must filter by tenant_id, is_enabled=True, status='active'."""
+        from app.services.chat.agents.agent_registry import _get_active_connectors
+
+        mock_db = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.all.return_value = []
+        mock_db.execute = AsyncMock(return_value=mock_result)
+
+        tenant_id = uuid.uuid4()
+        await _get_active_connectors(mock_db, tenant_id)
+
+        assert mock_db.execute.call_count == 1
+        from sqlalchemy.dialects import postgresql
+
+        stmt = mock_db.execute.call_args[0][0]
+        compiled = str(stmt.compile(dialect=postgresql.dialect()))
+        assert "mcp_connectors" in compiled
+        assert "provider" in compiled
+        assert "tenant_id" in compiled
+        assert "is_enabled" in compiled
+        assert "status" in compiled

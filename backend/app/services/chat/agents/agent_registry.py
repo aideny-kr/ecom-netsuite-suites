@@ -132,3 +132,23 @@ class AgentRegistry:
         if error_count / total > 0.05:
             return False
         return True
+
+
+async def _get_active_connectors(db: AsyncSession, tenant_id: uuid.UUID) -> set[str]:
+    """Return the set of connector providers the tenant has usable today.
+
+    Usable = is_enabled=True AND status='active' in mcp_connectors.
+    Revoked / needs_reauth / error / expired connectors are excluded.
+    """
+    from sqlalchemy import select
+
+    from app.models.mcp_connector import McpConnector
+
+    result = await db.execute(
+        select(McpConnector.provider).where(
+            McpConnector.tenant_id == tenant_id,
+            McpConnector.is_enabled == True,  # noqa: E712
+            McpConnector.status == "active",
+        )
+    )
+    return {row[0] for row in result.all()}
