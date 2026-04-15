@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-Category = Literal["financial", "data_table", "bigquery", "rag", "workspace", "other"]
+Category = Literal["financial", "data_table", "bigquery", "rag", "workspace", "mutation", "other"]
 
 _EXACT: dict[str, Category] = {
     "netsuite_suiteql": "data_table",
@@ -45,6 +45,12 @@ def categorize(tool_name: str) -> Category:
         return _EXACT[tool_name]
 
     if tool_name.startswith("ext__"):
+        # Lazy import to avoid circular dependency.
+        from app.services.chat.mutation_guard import is_mutation_tool
+
+        if is_mutation_tool(tool_name):
+            return "mutation"
+
         lowered = tool_name.lower()
         if "runreport" in lowered:
             return "financial"

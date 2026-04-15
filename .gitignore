@@ -39,6 +39,9 @@ pgdata/
 .worktrees/
 worktrees/
 
+# Brainstorming session artifacts
+.superpowers/
+
 # Docs (generated/internal)
 docs/
 

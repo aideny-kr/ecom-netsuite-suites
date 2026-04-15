@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class RoutingRule(BaseModel):
@@ -47,6 +47,16 @@ class AgentYAMLConfig(BaseModel):
     # Behavior
     requires_confirmation: bool = False
     enabled_by_default: bool = True
+    requires_connector: list[str] = Field(default_factory=list)
+
+    @field_validator("requires_connector", mode="before")
+    @classmethod
+    def _normalize_requires_connector(cls, v):
+        if v is None:
+            return []
+        if isinstance(v, str):
+            return [v]
+        return v
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> AgentYAMLConfig:

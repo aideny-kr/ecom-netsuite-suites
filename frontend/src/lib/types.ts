@@ -775,6 +775,19 @@ export interface SourcePickerData {
   selected?: "netsuite" | "bigquery";
 }
 
+export interface WriteConfirmationData {
+  type: "write_confirmation";
+  mutation_type: "create" | "update" | "delete" | "upsert";
+  record_type: string;
+  record_id: string | null;
+  proposed_fields: Record<string, unknown>;
+  current_record: Record<string, unknown> | null;
+  tool_name: string;
+  tool_input: Record<string, unknown>;
+  confirmation_token: string;
+  status: "pending" | "approved" | "rejected";
+}
+
 // ---------------------------------------------------------------------------
 // Chart Data (BigQuery BI Agent)
 // ---------------------------------------------------------------------------

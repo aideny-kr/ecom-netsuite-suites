@@ -507,9 +507,12 @@ async def _select_agent(
         print(f"[ROUTING] Tier 1 matched {tier1_result} but agent unhealthy, falling back", flush=True)
         return None
 
-    # Session pin: if no Tier 1 match but session has a pinned specialized agent → use it
+    # Session pin: if no Tier 1 match but session has a pinned specialized agent
+    # that is currently enabled for this tenant → use it. Filtered-out agents
+    # (e.g. bi-agent when BigQuery is not connected) are ignored.
     if previous_agent_id and previous_agent_id != "unified-agent":
-        if _agent_registry.configs.get(previous_agent_id):
+        enabled_ids = {a.agent_id for a in enabled_agents}
+        if previous_agent_id in enabled_ids:
             # Financial veto applies to session pins too
             if _is_financial_query(query):
                 print(
@@ -1098,6 +1101,7 @@ async def run_chat_turn(
     agent_id: str | None = None,
     run_id: str | None = None,
     source_pick: str | None = None,
+    write_confirm: dict | None = None,
 ) -> AsyncGenerator[dict, None]:
     """Execute an agentic chat turn with Claude's native tool use.
 
@@ -1105,6 +1109,145 @@ async def run_chat_turn(
     chat.py needs zero changes.
     """
     correlation_id = str(uuid.uuid4())
+
+    # ── Write confirmation short-circuit (HITL) — runs before any expensive
+    # context assembly (history, RAG, entity resolution). The approve/reject
+    # path only needs a single DB lookup by message ID.
+    if write_confirm and isinstance(write_confirm, dict):
+        _wc_action = write_confirm.get("action")
+        _wc_confirmation_id = write_confirm.get("confirmation_id")
+
+        if _wc_action in ("approve", "reject") and _wc_confirmation_id:
+            from sqlalchemy import select as _wc_select
+            from sqlalchemy.orm.attributes import flag_modified as _wc_flag_modified
+
+            from app.services.chat.write_confirmation_service import validate_and_extract_confirmation
+
+            _confirm_result = await db.execute(
+                _wc_select(ChatMessage).where(
+                    ChatMessage.id == uuid.UUID(_wc_confirmation_id),
+                    ChatMessage.session_id == session.id,
+                )
+            )
+            _confirm_msg = _confirm_result.scalar_one_or_none()
+
+            if _confirm_msg is None:
+                yield {"type": "error", "error": "Confirmation message not found."}
+                return
+
+            _so = _confirm_msg.structured_output
+            if (
+                not isinstance(_so, dict)
+                or _so.get("type") != "write_confirmation"
+                or _so.get("status") != "pending"
+            ):
+                yield {"type": "error", "error": "Confirmation is not in a pending state."}
+                return
+
+            if _wc_action == "approve":
+                is_valid, tool_name, tool_input = validate_and_extract_confirmation(
+                    _so, str(session.id)
+                )
+                if not is_valid:
+                    yield {"type": "error", "error": "Confirmation token is invalid or tampered."}
+                    return
+
+                _exec_result_str = await execute_tool_call(
+                    tool_name=tool_name,
+                    tool_input=tool_input,
+                    tenant_id=tenant_id,
+                    actor_id=user_id,
+                    correlation_id=correlation_id,
+                    db=db,
+                    session_id=str(session.id),
+                )
+
+                _mutation_type = _so.get("mutation_type", "write")
+                _record_type = _so.get("record_type", "record")
+
+                _exec_succeeded = False
+                try:
+                    _exec_result = json.loads(_exec_result_str)
+                    if isinstance(_exec_result, dict) and _exec_result.get("error"):
+                        _confirm_content = f"The operation failed: {_exec_result['error']}"
+                    else:
+                        _exec_succeeded = True
+                        _confirm_content = f"Done — the {_record_type} {_mutation_type} has been executed successfully."
+                except (json.JSONDecodeError, TypeError):
+                    _exec_succeeded = True
+                    _confirm_content = f"The {_mutation_type} operation has been executed."
+
+                _updated_so = dict(_so)
+                _updated_so["status"] = "approved" if _exec_succeeded else "pending"
+                _confirm_msg.structured_output = _updated_so
+                _wc_flag_modified(_confirm_msg, "structured_output")
+
+                await log_event(
+                    db=db,
+                    tenant_id=tenant_id,
+                    category="chat",
+                    action=f"record.{_mutation_type}.{'approved' if _exec_succeeded else 'failed'}",
+                    actor_id=user_id,
+                    resource_type="chat_session",
+                    resource_id=str(session.id),
+                    payload={"tool_name": tool_name, "tool_input": tool_input, "result": _exec_result_str[:1000]},
+                )
+
+                _assistant_msg = ChatMessage(
+                    tenant_id=tenant_id,
+                    session_id=session.id,
+                    role="assistant",
+                    content=_confirm_content,
+                    created_at=datetime.now(timezone.utc),
+                )
+                db.add(_assistant_msg)
+                await db.commit()
+                await db.refresh(_assistant_msg)
+
+                yield {
+                    "type": "message",
+                    "message": {
+                        "id": str(_assistant_msg.id),
+                        "role": "assistant",
+                        "content": _confirm_content,
+                        "tool_calls": None,
+                        "citations": None,
+                        "created_at": _assistant_msg.created_at.isoformat(),
+                    },
+                }
+                print(f"[WRITE-CONFIRM] approved {_mutation_type} on {_so.get('record_type')}", flush=True)
+                return
+
+            elif _wc_action == "reject":
+                _updated_so = dict(_so)
+                _updated_so["status"] = "rejected"
+                _confirm_msg.structured_output = _updated_so
+                _wc_flag_modified(_confirm_msg, "structured_output")
+
+                _reject_content = "No changes were made. The proposed write operation was cancelled."
+                _assistant_msg = ChatMessage(
+                    tenant_id=tenant_id,
+                    session_id=session.id,
+                    role="assistant",
+                    content=_reject_content,
+                    created_at=datetime.now(timezone.utc),
+                )
+                db.add(_assistant_msg)
+                await db.commit()
+
+                yield {
+                    "type": "message",
+                    "message": {
+                        "id": str(_assistant_msg.id),
+                        "role": "assistant",
+                        "content": _reject_content,
+                        "tool_calls": None,
+                        "citations": None,
+                        "created_at": _assistant_msg.created_at.isoformat(),
+                    },
+                }
+                print(f"[WRITE-CONFIRM] rejected {_so.get('mutation_type')} on {_so.get('record_type')}", flush=True)
+                return
 
     # ── Load conversation history (summary-based windowing) ──
     from app.services.chat.history_compactor import KEEP_RECENT
@@ -2029,6 +2172,8 @@ async def run_chat_turn(
                                 print(
                                     f"[ORCHESTRATOR] Auto-generated chart for {_fr_data.get('report_type')}", flush=True
                                 )
+                    elif event_type == "confirmation_required":
+                        last_structured_output = {"type": "write_confirmation", **payload}
                     elif event_type == "response":
                         agent_result = payload
 
