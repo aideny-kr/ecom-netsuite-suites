@@ -45,6 +45,10 @@ class SendMessageRequest(BaseModel):
     content: str = Field(..., max_length=4000)
     agent_id: str | None = Field(default=None, description="Pin to a specific agent (skip routing)")
     source_pick: Literal["netsuite", "bigquery"] | None = None
+    write_confirm: dict | None = Field(
+        default=None,
+        description="Confirm or reject a pending write. Keys: action ('approve'|'reject'), confirmation_id (message ID)",
+    )
 
 
 class MessageResponse(BaseModel):
@@ -273,7 +277,7 @@ async def send_message(
     # picker placeholder. The original user question is already in the conversation;
     # we do NOT create a duplicate user message. We still need a valid ChatMessage
     # object for downstream code, so we reuse the last user message in the session.
-    if body.source_pick:
+    if body.source_pick or body.write_confirm:
         _last_user_result = await db.execute(
             select(ChatMessage)
             .where(
@@ -285,9 +289,14 @@ async def send_message(
         )
         _last_user_msg = _last_user_result.scalar_one_or_none()
         if _last_user_msg is None:
+            _detail = (
+                "source_pick requires an existing user message in the session"
+                if body.source_pick
+                else "write_confirm requires an existing user message in the session"
+            )
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="source_pick requires an existing user message in the session",
+                detail=_detail,
             )
         user_msg = _last_user_msg
     else:
@@ -345,6 +354,7 @@ async def send_message(
             user_timezone=x_timezone,
             agent_id=body.agent_id,
             source_pick=body.source_pick,
+            write_confirm=body.write_confirm,
         )
     )
 
@@ -366,6 +376,7 @@ async def _run_chat_pipeline(
     user_timezone: str | None,
     agent_id: str | None,
     source_pick: str | None,
+    write_confirm: dict | None = None,
 ) -> None:
     """Inner pipeline coroutine — wrapped by asyncio.wait_for in _run_chat_background."""
     from app.core.database import async_session_factory
@@ -387,6 +398,7 @@ async def _run_chat_pipeline(
             agent_id=agent_id,
             run_id=run_id,
             source_pick=source_pick,
+            write_confirm=write_confirm,
         ):
             rm.write_event(run_id, chunk)
 
@@ -403,6 +415,7 @@ async def _run_chat_background(
     user_timezone: str | None,
     agent_id: str | None,
     source_pick: str | None = None,
+    write_confirm: dict | None = None,
 ) -> None:
     """Run the chat pipeline in background, writing events to Redis."""
     rm = get_run_manager()
@@ -420,6 +433,7 @@ async def _run_chat_background(
                 user_timezone=user_timezone,
                 agent_id=agent_id,
                 source_pick=source_pick,
+                write_confirm=write_confirm,
             ),
             timeout=_BACKGROUND_TASK_TIMEOUT,
         )
