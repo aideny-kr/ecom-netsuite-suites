@@ -94,3 +94,62 @@ class TestAllYAMLConfigs:
         """All configs have 1 <= max_steps <= 20."""
         for filename, config in _load_all_configs():
             assert 1 <= config.max_steps <= 20, f"{filename}: max_steps={config.max_steps} out of bounds [1,20]"
+
+
+class TestRequiresConnectorField:
+    def test_default_is_empty_list(self):
+        config = AgentYAMLConfig(
+            agent_id="x-agent",
+            display_name="X",
+            description="X",
+        )
+        assert config.requires_connector == []
+
+    def test_string_coerced_to_single_element_list(self):
+        config = AgentYAMLConfig(
+            agent_id="x-agent",
+            display_name="X",
+            description="X",
+            requires_connector="bigquery",
+        )
+        assert config.requires_connector == ["bigquery"]
+
+    def test_list_passthrough(self):
+        config = AgentYAMLConfig(
+            agent_id="x-agent",
+            display_name="X",
+            description="X",
+            requires_connector=["bigquery", "snowflake"],
+        )
+        assert config.requires_connector == ["bigquery", "snowflake"]
+
+    def test_none_becomes_empty_list(self):
+        config = AgentYAMLConfig(
+            agent_id="x-agent",
+            display_name="X",
+            description="X",
+            requires_connector=None,
+        )
+        assert config.requires_connector == []
+
+    def test_yaml_string_form_parses(self, tmp_path):
+        yaml_file = tmp_path / "x.yaml"
+        yaml_file.write_text(
+            "agent_id: x-agent\n"
+            "display_name: X\n"
+            "description: X\n"
+            "requires_connector: bigquery\n"
+        )
+        config = AgentYAMLConfig.from_yaml(yaml_file)
+        assert config.requires_connector == ["bigquery"]
+
+    def test_yaml_list_form_parses(self, tmp_path):
+        yaml_file = tmp_path / "x.yaml"
+        yaml_file.write_text(
+            "agent_id: x-agent\n"
+            "display_name: X\n"
+            "description: X\n"
+            "requires_connector: [bigquery, snowflake]\n"
+        )
+        config = AgentYAMLConfig.from_yaml(yaml_file)
+        assert config.requires_connector == ["bigquery", "snowflake"]
