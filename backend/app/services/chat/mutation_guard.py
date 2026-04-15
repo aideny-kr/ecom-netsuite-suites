@@ -26,35 +26,8 @@ _MUTATION_TOOL_NAMES: dict[str, str] = {
 }
 
 # Record types that are safe to create/update/delete via AI-initiated flows.
-_ALLOWED_RECORD_TYPES: frozenset[str] = frozenset(
-    {
-        "salesOrder",
-        "purchaseOrder",
-        "invoice",
-        "customerDeposit",
-        "customerPayment",
-        "customer",
-        "vendor",
-        "vendorBill",
-        "journalEntry",
-        "creditMemo",
-        "returnAuthorization",
-        "itemFulfillment",
-        "itemReceipt",
-        "transferOrder",
-        "intercompanyJournalEntry",
-        "estimate",
-        "opportunity",
-        "cashSale",
-        "check",
-        "vendorCredit",
-        "depositApplication",
-        "inventoryAdjustment",
-        "workOrder",
-    }
-)
-
-# Record types that must NEVER be mutated by the agent regardless of allowlist.
+# Record types that must NEVER be mutated by the agent — system/security records.
+# Everything else is allowed (HITL confirmation is the safety layer).
 _BLOCKED_RECORD_TYPES: frozenset[str] = frozenset(
     {
         "employee",
@@ -116,14 +89,12 @@ def get_mutation_type(tool_name: str) -> str | None:
 
 
 def is_record_type_allowed(record_type: str) -> bool:
-    """Return True if *record_type* is on the mutation allowlist.
+    """Return True unless *record_type* is on the blocklist.
 
-    Blocked types always return False.  Unknown types (neither explicitly
-    allowed nor blocked) also return False — deny by default.
+    Only system/security records are blocked. Everything else is allowed —
+    HITL confirmation is the primary safety layer.
     """
-    if record_type in _BLOCKED_RECORD_TYPES:
-        return False
-    return record_type in _ALLOWED_RECORD_TYPES
+    return record_type not in _BLOCKED_RECORD_TYPES
 
 
 def generate_confirmation_token(session_id: str, payload_json: str) -> str:
