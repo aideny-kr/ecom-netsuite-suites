@@ -90,6 +90,8 @@ _PROMPT_NOISE_WHITELIST: set[str] = {
     "field_name",
     "source_id",
     "pending_qty",
+    # HITL write confirmation flow identifiers (JSON response field names, not tools)
+    "confirmation_required",
     # NetSuite custom field prefixes referenced as schema patterns (not tools)
     "custbody_platform",
     "custbody_shopify_order",
