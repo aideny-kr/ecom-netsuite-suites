@@ -348,7 +348,7 @@ export default function ChatPage() {
   }, [sessionDetail?.active_run_id, sessionDetail?.status, activeSessionId]);
 
   const handleSend = useCallback(
-    async (content: string, fileId?: string, opts: { source_pick?: "netsuite" | "bigquery" } = {}) => {
+    async (content: string, fileId?: string, opts: { source_pick?: "netsuite" | "bigquery"; write_confirm?: { action: "approve" | "reject"; confirmation_id: string } } = {}) => {
       if (isStreamingRef.current || createSession.isPending) return;
       setError(null);
       setPendingMessage(content);
@@ -383,6 +383,7 @@ export default function ChatPage() {
           file_id: fileId || undefined,
         };
         if (opts.source_pick) msgBody.source_pick = opts.source_pick;
+        if (opts.write_confirm) msgBody.write_confirm = opts.write_confirm;
         const { run_id } = await apiClient.post<{ run_id: string }>(
           `/api/v1/chat/sessions/${sessionId}/messages`,
           msgBody,
@@ -458,6 +459,21 @@ export default function ChatPage() {
       await handleSend(originalQuestion, undefined, { source_pick: source });
     },
     [sessionDetail, handleSend, activeSessionId, queryClient],
+  );
+
+  const handleWriteConfirm = useCallback(
+    async (messageId: string, action: "approve" | "reject") => {
+      if (abortRef.current) {
+        abortRef.current.abort();
+        abortRef.current = null;
+      }
+      isStreamingRef.current = false;
+      setIsStreaming(false);
+      await handleSend("", undefined, {
+        write_confirm: { action, confirmation_id: messageId },
+      });
+    },
+    [handleSend],
   );
 
   const clearStreamingState = useCallback(() => {
@@ -572,6 +588,7 @@ export default function ChatPage() {
             onRemoveTemplate={() => setTemplateFile(null)}
             onMentionClick={handleMentionClick}
             onSourcePick={handleSourcePick}
+            onWriteConfirm={handleWriteConfirm}
             onImportanceOverride={(messageId, newTier) => {
               queryClient.setQueryData<ChatSessionDetail>(
                 ["chat-session", activeSessionId],
