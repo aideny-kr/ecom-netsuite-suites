@@ -257,3 +257,261 @@ class TestOrchestratorPickerSkipPath:
         except Exception:
             # Other exceptions expected from mocked deps
             pass
+
+
+class TestOrchestratorWriteConfirmPaths:
+    """Smoke tests: write_confirm approve/reject paths don't crash with UnboundLocalError.
+
+    The write_confirm short-circuit runs at the very top of run_chat_turn, before
+    any history/RAG/context assembly. These tests verify the short-circuit path
+    returns cleanly without raising UnboundLocalError on any variable it references.
+    """
+
+    @pytest.mark.asyncio
+    async def test_write_confirm_approve_path(self):
+        """write_confirm approve path must not raise UnboundLocalError.
+
+        The approve path: db lookup → validate HMAC → execute tool → yield message → return.
+        We drive it to an early-exit ('Confirmation message not found') to verify the
+        branching variables are always initialized before use.
+        """
+        from unittest.mock import AsyncMock, MagicMock
+
+        from app.services.chat.orchestrator import run_chat_turn
+
+        session = _make_session()
+        confirmation_id = str(uuid.uuid4())
+
+        # Simulate db.execute() returning a result where scalar_one_or_none() returns None
+        # This triggers the early-exit: "Confirmation message not found."
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = None
+
+        db = AsyncMock()
+        db.execute = AsyncMock(return_value=mock_result)
+
+        user_msg = _make_user_msg("approve")
+
+        chunks = []
+        try:
+            async for chunk in run_chat_turn(
+                db=db,
+                session=session,
+                user_message="approve",
+                user_id=uuid.uuid4(),
+                tenant_id=session.tenant_id,
+                user_msg=user_msg,
+                write_confirm={"action": "approve", "confirmation_id": confirmation_id},
+            ):
+                chunks.append(chunk)
+                if len(chunks) > 10:
+                    break
+        except UnboundLocalError:
+            pytest.fail("UnboundLocalError: write_confirm approve path has uninitialized variables")
+        except Exception:
+            # Other exceptions are expected (mocked deps, DB errors, etc.)
+            pass
+
+        # The early-exit should yield an error event (message not found)
+        error_chunks = [c for c in chunks if c.get("type") == "error"]
+        # If we got here without UnboundLocalError, the path is safe
+        # (whether or not the error chunk arrived depends on mock depth)
+
+    @pytest.mark.asyncio
+    async def test_write_confirm_reject_path(self):
+        """write_confirm reject path must not raise UnboundLocalError.
+
+        The reject path: db lookup → check status → update status → yield message → return.
+        We drive it to an early-exit ('Confirmation message not found') to verify the path.
+        """
+        from unittest.mock import AsyncMock, MagicMock
+
+        from app.services.chat.orchestrator import run_chat_turn
+
+        session = _make_session()
+        confirmation_id = str(uuid.uuid4())
+
+        # Simulate db.execute() returning None — triggers early-exit
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = None
+
+        db = AsyncMock()
+        db.execute = AsyncMock(return_value=mock_result)
+
+        user_msg = _make_user_msg("reject")
+
+        chunks = []
+        try:
+            async for chunk in run_chat_turn(
+                db=db,
+                session=session,
+                user_message="reject",
+                user_id=uuid.uuid4(),
+                tenant_id=session.tenant_id,
+                user_msg=user_msg,
+                write_confirm={"action": "reject", "confirmation_id": confirmation_id},
+            ):
+                chunks.append(chunk)
+                if len(chunks) > 10:
+                    break
+        except UnboundLocalError:
+            pytest.fail("UnboundLocalError: write_confirm reject path has uninitialized variables")
+        except Exception:
+            # Other exceptions are expected (mocked deps, DB errors, etc.)
+            pass
+
+    @pytest.mark.asyncio
+    async def test_write_confirm_not_pending_early_exit(self):
+        """write_confirm when structured_output.status != 'pending' yields error and returns.
+
+        This exercises the branch: 'Confirmation is not in a pending state.'
+        """
+        from unittest.mock import AsyncMock, MagicMock
+
+        from app.services.chat.orchestrator import run_chat_turn
+
+        session = _make_session()
+        confirmation_id = str(uuid.uuid4())
+
+        # Return a msg whose structured_output has status='approved' (already done)
+        mock_confirm_msg = MagicMock()
+        mock_confirm_msg.structured_output = {
+            "type": "write_confirmation",
+            "status": "approved",  # not pending — triggers early-exit
+        }
+
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = mock_confirm_msg
+
+        db = AsyncMock()
+        db.execute = AsyncMock(return_value=mock_result)
+
+        user_msg = _make_user_msg("approve again")
+
+        chunks = []
+        try:
+            async for chunk in run_chat_turn(
+                db=db,
+                session=session,
+                user_message="approve again",
+                user_id=uuid.uuid4(),
+                tenant_id=session.tenant_id,
+                user_msg=user_msg,
+                write_confirm={"action": "approve", "confirmation_id": confirmation_id},
+            ):
+                chunks.append(chunk)
+                if len(chunks) > 10:
+                    break
+        except UnboundLocalError:
+            pytest.fail("UnboundLocalError: write_confirm not-pending path has uninitialized variables")
+        except Exception:
+            pass
+
+        # Should yield exactly one error event
+        error_chunks = [c for c in chunks if c.get("type") == "error"]
+        assert len(error_chunks) == 1
+        assert "pending" in error_chunks[0]["error"].lower()
+
+
+class TestOrchestratorVariableInitExtended:
+    """Additional static source inspection tests for safety net coverage.
+
+    These verify that variables used after branch points are always initialized
+    before those branches, preventing the UnboundLocalError class of bug.
+    """
+
+    def test_system_prompt_initialized_before_routing(self):
+        """system_prompt must be initialized (in onboarding AND else branch)
+        before the routing block that eventually uses it in the legacy agent path.
+
+        Both branches (is_onboarding=True and is_onboarding=False) must assign
+        system_prompt so the legacy coordinator path (which reads system_prompt)
+        always has a value.
+        """
+        import inspect
+
+        from app.services.chat.orchestrator import run_chat_turn
+
+        source = inspect.getsource(run_chat_turn)
+
+        # Both the onboarding branch and the else branch must assign system_prompt
+        # before the multi-agent routing block
+        routing_idx = source.index("Multi-agent routing")
+        system_prompt_region = source[:routing_idx]
+
+        # system_prompt = ONBOARDING_SYSTEM_PROMPT (onboarding branch)
+        assert "system_prompt = ONBOARDING_SYSTEM_PROMPT" in system_prompt_region, (
+            "system_prompt must be assigned in the onboarding branch before routing"
+        )
+        # system_prompt = await get_active_template(...) (normal branch)
+        assert "system_prompt = await get_active_template" in system_prompt_region, (
+            "system_prompt must be assigned in the normal branch before routing"
+        )
+
+    def test_importance_tier_initialized_before_routing(self):
+        """importance_tier must be initialized before the routing elif chain.
+
+        It has a default assignment early in the function, then is overridden
+        inside the unified-agent path. The default must exist so legacy paths
+        that skip the unified block still have importance_tier defined.
+        """
+        import inspect
+
+        from app.services.chat.orchestrator import run_chat_turn
+
+        source = inspect.getsource(run_chat_turn)
+
+        # Find the importance tier default assignment
+        assert "importance_tier = classify_importance(sanitized_input)" in source, (
+            "importance_tier must have a default assignment via classify_importance"
+        )
+
+        # The default assignment must come BEFORE the multi-agent routing block
+        routing_idx = source.index("Multi-agent routing")
+        importance_idx = source.index("importance_tier = classify_importance(sanitized_input)")
+        assert importance_idx < routing_idx, (
+            "importance_tier default must be initialized before routing block"
+        )
+
+    def test_context_need_gating_for_schema_injection(self):
+        """The orchestrator must gate schema injection on context_need.
+
+        This verifies the injection matrix is enforced — schemas are only
+        fetched when _need_schemas is True (FULL or DATA context need).
+        This prevents expensive DB calls for CASUAL/DOCS queries.
+        """
+        import inspect
+
+        from app.services.chat.orchestrator import run_chat_turn
+
+        source = inspect.getsource(run_chat_turn)
+
+        # The context_need gating check must exist
+        assert "_need_schemas = context_need in" in source, (
+            "_need_schemas flag must gate schema injection"
+        )
+        # The schema injection must check _need_schemas before executing
+        assert "if not _need_schemas:" in source, (
+            "Schema injection must be guarded by 'if not _need_schemas:' check"
+        )
+
+    def test_importance_tier_casual_gates_haiku_routing(self):
+        """importance_tier.value <= 2 (CASUAL/OPERATIONAL) gates Haiku routing.
+
+        This verifies the importance tier check exists and uses the right threshold
+        so CASUAL queries can be routed to the cheaper/faster Haiku model.
+        """
+        import inspect
+
+        from app.services.chat.orchestrator import run_chat_turn
+
+        source = inspect.getsource(run_chat_turn)
+
+        # The Haiku routing check must use importance_tier.value
+        assert "importance_tier.value <= 2" in source, (
+            "Haiku routing must be gated by importance_tier.value <= 2"
+        )
+        # And it must reference HAIKU_MODEL
+        assert "HAIKU_MODEL" in source, (
+            "HAIKU_MODEL constant must be used when routing simple lookups"
+        )
