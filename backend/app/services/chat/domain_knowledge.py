@@ -49,11 +49,20 @@ async def retrieve_domain_knowledge(
     db: AsyncSession,
     query_text: str,
     top_k: int | None = None,
+    partition_ids: list[str] | None = None,
 ) -> list[dict]:
     """Retrieve top-K domain knowledge chunks for a query.
 
     Tries vector similarity first, falls back to keyword search
     if embeddings are unavailable.
+
+    Args:
+        db: Async DB session.
+        query_text: Natural language query to match against.
+        top_k: Maximum number of chunks to return.
+        partition_ids: When provided and non-empty, restrict results to chunks
+            whose ``partition_id`` is in this list. Enables per-agent RAG
+            isolation without multiple round-trips (single SQL IN clause).
     """
     if top_k is None:
         top_k = settings.DOMAIN_KNOWLEDGE_TOP_K
@@ -61,7 +70,7 @@ async def retrieve_domain_knowledge(
     try:
         query_embedding = await embed_domain_query(query_text)
         if query_embedding is None:
-            return await _keyword_domain_search(db, query_text, top_k)
+            return await _keyword_domain_search(db, query_text, top_k, partition_ids=partition_ids)
 
         # Push similarity threshold into the SQL WHERE clause so Postgres
         # skips irrelevant rows at the index level (cheaper than fetching
@@ -69,16 +78,20 @@ async def retrieve_domain_knowledge(
         min_sim = settings.DOMAIN_KNOWLEDGE_MIN_SIMILARITY
         max_distance = 1.0 - min_sim  # cosine_distance = 1 - similarity
 
+        where_clauses = [
+            DomainKnowledgeChunk.is_deprecated.is_(False),
+            DomainKnowledgeChunk.embedding.isnot(None),
+            DomainKnowledgeChunk.embedding.cosine_distance(query_embedding) <= max_distance,
+        ]
+        if partition_ids:
+            where_clauses.append(DomainKnowledgeChunk.partition_id.in_(partition_ids))
+
         stmt = (
             select(
                 DomainKnowledgeChunk,
                 DomainKnowledgeChunk.embedding.cosine_distance(query_embedding).label("distance"),
             )
-            .where(
-                DomainKnowledgeChunk.is_deprecated.is_(False),
-                DomainKnowledgeChunk.embedding.isnot(None),
-                DomainKnowledgeChunk.embedding.cosine_distance(query_embedding) <= max_distance,
-            )
+            .where(*where_clauses)
             .order_by("distance")
         )
 
@@ -90,7 +103,7 @@ async def retrieve_domain_knowledge(
         rows = result.all()
 
         if not rows:
-            return await _keyword_domain_search(db, query_text, top_k)
+            return await _keyword_domain_search(db, query_text, top_k, partition_ids=partition_ids)
 
         # Keyword boosting: re-rank by combining vector similarity with keyword overlap
         query_keywords = set(re.findall(r"\b\w{3,}\b", query_text.lower()))
@@ -144,7 +157,7 @@ async def retrieve_domain_knowledge(
     except Exception:
         logger.warning("Domain knowledge retrieval failed, trying keyword fallback", exc_info=True)
         try:
-            return await _keyword_domain_search(db, query_text, top_k)
+            return await _keyword_domain_search(db, query_text, top_k, partition_ids=partition_ids)
         except Exception:
             logger.warning("Keyword fallback also failed", exc_info=True)
             return []
@@ -154,6 +167,7 @@ async def _keyword_domain_search(
     db: AsyncSession,
     query_text: str,
     top_k: int,
+    partition_ids: list[str] | None = None,
 ) -> list[dict]:
     """OR-based keyword fallback when embeddings are unavailable."""
     words = [w.strip().lower() for w in query_text.split() if len(w.strip()) >= 3]
@@ -165,12 +179,16 @@ async def _keyword_domain_search(
 
     hit_score = sum(case((DomainKnowledgeChunk.raw_text.ilike(f"%{w[:50]}%"), 1), else_=0) for w in words[:10])
 
+    where_clauses = [
+        DomainKnowledgeChunk.is_deprecated.is_(False),
+        or_(*conditions),
+    ]
+    if partition_ids:
+        where_clauses.append(DomainKnowledgeChunk.partition_id.in_(partition_ids))
+
     stmt = (
         select(DomainKnowledgeChunk, hit_score.label("score"))
-        .where(
-            DomainKnowledgeChunk.is_deprecated.is_(False),
-            or_(*conditions),
-        )
+        .where(*where_clauses)
         .order_by(hit_score.desc())
         .limit(top_k)
     )
