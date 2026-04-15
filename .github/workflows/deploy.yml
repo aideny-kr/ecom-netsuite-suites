@@ -176,13 +176,27 @@ jobs:
           host: ${{ secrets.STAGING_HOST }}
           username: ${{ secrets.STAGING_SSH_USER }}
           key: ${{ secrets.STAGING_SSH_KEY }}
+          script_stop: true
           script: |
+            set -euo pipefail
             cd /opt/ecom-netsuite
             echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
-            docker compose -f docker-compose.prod.yml pull
+            # Pull only the image this workflow built. Frontend is deployed via deploy-frontend.sh,
+            # and a frontend pull failure (e.g. 403) used to silently abort the whole pull and leave
+            # backend on the old image while the deploy reported green.
+            docker compose -f docker-compose.prod.yml pull backend
+            PULLED_DIGEST=$(docker inspect --format '{{.Id}}' ghcr.io/aideny-kr/ecom-netsuite-suites/backend:latest)
             docker compose -f docker-compose.prod.yml up -d --no-deps backend worker beat
             sleep 30
-            curl -f http://localhost:8000/api/v1/health || exit 1
+            # Belt-and-suspenders: verify the running container is on the freshly-pulled image.
+            # `up -d` is a no-op when the image digest hasn't changed, so this catches any case
+            # where the pull silently succeeded but didn't actually advance the digest.
+            RUNNING_DIGEST=$(docker inspect --format '{{.Image}}' ecom-netsuite-backend-1)
+            if [ "$PULLED_DIGEST" != "$RUNNING_DIGEST" ]; then
+              echo "::error::Backend container is on stale image. Pulled $PULLED_DIGEST but container has $RUNNING_DIGEST"
+              exit 1
+            fi
+            curl -f http://localhost:8000/api/v1/health
 
   # ── Deploy to Production (manual approval required) ─────────
   deploy-production:
@@ -216,13 +230,21 @@ jobs:
           host: ${{ secrets.PROD_HOST }}
           username: ${{ secrets.PROD_SSH_USER }}
           key: ${{ secrets.PROD_SSH_KEY }}
+          script_stop: true
           script: |
+            set -euo pipefail
             cd /opt/ecom-netsuite
             echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
-            docker compose -f docker-compose.prod.yml pull
+            docker compose -f docker-compose.prod.yml pull backend
+            PULLED_DIGEST=$(docker inspect --format '{{.Id}}' ghcr.io/aideny-kr/ecom-netsuite-suites/backend:latest)
             docker compose -f docker-compose.prod.yml up -d --no-deps backend
             sleep 15
-            curl -f http://localhost:8000/api/v1/health || exit 1
+            RUNNING_DIGEST=$(docker inspect --format '{{.Image}}' ecom-netsuite-backend-1)
+            if [ "$PULLED_DIGEST" != "$RUNNING_DIGEST" ]; then
+              echo "::error::Backend container is on stale image. Pulled $PULLED_DIGEST but container has $RUNNING_DIGEST"
+              exit 1
+            fi
+            curl -f http://localhost:8000/api/v1/health
             docker compose -f docker-compose.prod.yml up -d --no-deps worker
 
       - name: Production health verification
