@@ -1,5 +1,4 @@
-import pytest
-from app.services.chat.knowledge_profiles.loader import KnowledgeProfile
+from app.services.chat.knowledge_profiles.loader import KnowledgeProfile, load_all_profiles
 from app.services.chat.prompt_assembler import build_disambiguation_instruction
 
 
@@ -31,3 +30,18 @@ class TestCrossSourceDisambiguation:
     def test_still_suggests_asking_when_genuinely_ambiguous(self):
         result = build_disambiguation_instruction([_BQ_PROFILE, _NS_PROFILE])
         assert "ask" in result.lower()
+
+    def test_single_profile_returns_empty(self):
+        result = build_disambiguation_instruction([_BQ_PROFILE])
+        assert result == ""
+
+    def test_empty_profiles_returns_empty(self):
+        result = build_disambiguation_instruction([])
+        assert result == ""
+
+    def test_cross_source_profile_loads(self):
+        profiles = load_all_profiles()
+        cross = next((p for p in profiles if p.profile_id == "cross_source"), None)
+        assert cross is not None, "cross_source profile not found in loaded profiles"
+        assert "bigquery_sql" in cross.trigger_tools
+        assert "netsuite_suiteql" in cross.trigger_tools
