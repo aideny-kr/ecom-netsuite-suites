@@ -312,6 +312,124 @@ class TestDataclasses:
 
 
 # ---------------------------------------------------------------------------
+# Anthropic adapter: strip non-API fields from tool dicts (regression)
+# ---------------------------------------------------------------------------
+
+
+class TestAnthropicToolFieldStripping:
+    """Tools dicts may carry internal-only fields (e.g. `category` from
+    `tool_categories.categorize()`). Anthropic's API rejects unknown fields with
+    400 `tools.0.custom.category: Extra inputs are not permitted`, so the
+    adapter MUST strip any non-API keys before sending."""
+
+    _ALLOWED_TOOL_KEYS = {"name", "description", "input_schema", "cache_control", "type"}
+
+    def _tools_with_category(self) -> list[dict]:
+        return [
+            {
+                "name": "search",
+                "description": "Search data",
+                "input_schema": {"type": "object", "properties": {}},
+                "category": "data",  # internal-only — must be stripped
+            },
+            {
+                "name": "create_record",
+                "description": "Write tool",
+                "input_schema": {"type": "object", "properties": {}},
+                "category": "mutation",  # internal-only — must be stripped
+            },
+        ]
+
+    @pytest.mark.asyncio
+    async def test_create_message_strips_non_api_fields(self):
+        from app.services.chat.adapters.anthropic_adapter import AnthropicAdapter
+
+        captured: dict = {}
+
+        async def _create(**kwargs):
+            captured.update(kwargs)
+            mock_response = MagicMock()
+            mock_response.content = []
+            mock_response.usage = MagicMock(
+                input_tokens=1,
+                output_tokens=1,
+                cache_creation_input_tokens=0,
+                cache_read_input_tokens=0,
+            )
+            return mock_response
+
+        adapter = AnthropicAdapter(api_key="sk-test")
+        adapter._client = MagicMock()
+        adapter._client.messages.create = _create
+
+        await adapter.create_message(
+            model="claude-sonnet-4-6",
+            max_tokens=100,
+            system="sys",
+            messages=[{"role": "user", "content": "hi"}],
+            tools=self._tools_with_category(),
+        )
+
+        sent_tools = captured["tools"]
+        for t in sent_tools:
+            extra = set(t.keys()) - self._ALLOWED_TOOL_KEYS
+            assert not extra, f"tool {t.get('name')!r} has unknown keys: {extra}"
+
+    @pytest.mark.asyncio
+    async def test_stream_message_strips_non_api_fields(self):
+        from app.services.chat.adapters.anthropic_adapter import AnthropicAdapter
+
+        captured: dict = {}
+
+        class _FakeStream:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            @property
+            def text_stream(self):
+                async def _gen():
+                    yield "ok"
+
+                return _gen()
+
+            async def get_final_message(self):
+                final = MagicMock()
+                final.content = []
+                final.usage = MagicMock(
+                    input_tokens=1,
+                    output_tokens=1,
+                    cache_creation_input_tokens=0,
+                    cache_read_input_tokens=0,
+                )
+                return final
+
+        def _stream(**kwargs):
+            captured.update(kwargs)
+            return _FakeStream()
+
+        adapter = AnthropicAdapter(api_key="sk-test")
+        adapter._client = MagicMock()
+        adapter._client.messages.stream = _stream
+
+        async for _ in adapter.stream_message(
+            model="claude-sonnet-4-6",
+            max_tokens=100,
+            system="sys",
+            messages=[{"role": "user", "content": "hi"}],
+            tools=self._tools_with_category(),
+        ):
+            pass
+
+        sent_tools = captured["tools"]
+        for t in sent_tools:
+            extra = set(t.keys()) - self._ALLOWED_TOOL_KEYS
+            assert not extra, f"tool {t.get('name')!r} has unknown keys: {extra}"
+
+
+# ---------------------------------------------------------------------------
 # Anthropic stream retry on transient errors
 # ---------------------------------------------------------------------------
 
