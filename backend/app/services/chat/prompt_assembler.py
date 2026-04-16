@@ -13,8 +13,10 @@ You have access to multiple data sources. Choose the best source based on the qu
 - NetSuite: transactional data (orders, invoices, customers, inventory, financial reports)
 - BigQuery: analytics, marketing, aggregated metrics, third-party data
 
-If the query could be answered by multiple sources, use the most authoritative one.
-If genuinely unsure, ask the user: "I can check this in [source A] or [source B]. Which would you prefer, or should I check both?"
+If the question clearly requires data from both sources, call both tools and synthesize the results.
+Identify the join key (SKU, customer email, order ID, date range) to correlate cross-source data.
+If the query can be fully answered by one source, use the most authoritative one.
+Only ask the user if you genuinely cannot determine which source(s) to use.
 """
 
 
