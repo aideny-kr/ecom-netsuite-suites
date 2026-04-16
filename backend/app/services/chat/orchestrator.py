@@ -692,6 +692,26 @@ def _intercept_tool_result(
         )
         return "task_output", sse_event_data, condensed
 
+    # --- Sheets link path ---
+    if tool_name in ("sheets_create", "sheets.create"):
+        try:
+            parsed = json.loads(result_str)
+        except (json.JSONDecodeError, TypeError):
+            return None, None, result_str
+        if not isinstance(parsed, dict) or parsed.get("error") is True:
+            return None, None, result_str
+        url = parsed.get("url")
+        if not url:
+            return None, None, result_str
+        sse_event_data = {
+            "url": url,
+            "spreadsheet_id": parsed.get("spreadsheet_id", ""),
+            "title": parsed.get("title", "Spreadsheet"),
+            "shared_with": parsed.get("shared_with"),
+        }
+        # Pass result_str through unchanged — the LLM needs to see the URL so it can reference it
+        return "sheets_link", sse_event_data, result_str
+
     # --- Not a data tool ---
     return None, None, result_str
 

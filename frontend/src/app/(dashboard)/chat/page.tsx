@@ -5,7 +5,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiClient } from "@/lib/api-client";
 import { consumeChatStream } from "@/lib/chat-stream";
-import type { FinancialReportData, DataTableData, TaskOutputData, StreamBlock } from "@/lib/chat-stream";
+import type { FinancialReportData, DataTableData, TaskOutputData, SheetsLinkData, StreamBlock } from "@/lib/chat-stream";
 import type { ChartData } from "@/lib/types";
 import type { ChatSession, ChatSessionDetail, ChatMessage, StreamingToolCall } from "@/lib/types";
 import { SessionSidebar } from "@/components/chat/session-sidebar";
@@ -43,6 +43,8 @@ export default function ChatPage() {
   const chartsRef = useRef<Map<string, ChartData[]>>(new Map());
   const [taskOutput, setTaskOutput] = useState<TaskOutputData | null>(null);
   const taskOutputsRef = useRef<Map<string, TaskOutputData>>(new Map());
+  const [sheetsLink, setSheetsLink] = useState<SheetsLinkData | null>(null);
+  const sheetsLinksRef = useRef<Map<string, SheetsLinkData>>(new Map());
   const queryClient = useQueryClient();
   const router = useRouter();
 
@@ -160,6 +162,9 @@ export default function ChatPage() {
       } else if (type === "task_output" && data) {
         taskOutputsRef.current.set(msg.id, data as any);
         hydrated = true;
+      } else if (type === "sheets_link" && data) {
+        sheetsLinksRef.current.set(msg.id, data as unknown as SheetsLinkData);
+        hydrated = true;
       }
       // Hydrate persisted charts array (from v1.1 chart persistence)
       // Skip if charts already exist for this message (came from streaming)
@@ -224,6 +229,10 @@ export default function ChatPage() {
             setTaskOutput(data);
             setStreamBlocks(prev => [...prev, { type: "task_output" as const, data, id: `to-${Date.now()}` }]);
           },
+          onSheetsLink: (data) => {
+            setSheetsLink(data);
+            setStreamBlocks(prev => [...prev, { type: "sheets_link" as const, data, id: `sl-${Date.now()}` }]);
+          },
           onToolStart: (tool_name, tool_input, step) => {
             if (bufferRef.current.length > 0) {
               const text = bufferRef.current.join("");
@@ -273,6 +282,10 @@ export default function ChatPage() {
             });
             setTaskOutput((current) => {
               if (current) taskOutputsRef.current.set(message.id, current);
+              return null;
+            });
+            setSheetsLink((current) => {
+              if (current) sheetsLinksRef.current.set(message.id, current);
               return null;
             });
             setStreamingMessage(message);
@@ -525,6 +538,7 @@ export default function ChatPage() {
             dataTables={dataTablesRef.current}
             chartsByMessage={chartsRef.current}
             taskOutputs={taskOutputsRef.current}
+            sheetsLinks={sheetsLinksRef.current}
             pinnedAgentId={pinnedAgentId}
             agents={agents}
             agentTab={agentTab}
