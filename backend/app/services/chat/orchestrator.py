@@ -852,7 +852,6 @@ async def run_chat_turn(
     user_timezone: str | None = None,
     agent_id: str | None = None,
     run_id: str | None = None,
-    source_pick: str | None = None,
     write_confirm: dict | None = None,
 ) -> AsyncGenerator[dict, None]:
     """Execute an agentic chat turn with Claude's native tool use.
@@ -1051,34 +1050,6 @@ async def run_chat_turn(
     rag_context = ""
     citations: list[dict] = []
 
-    # ── Source pin handling (knowledge-driven: no picker UI, pin from prior tool use) ──
-    if source_pick and source_pick in ("netsuite", "bigquery"):
-        session.source_pin = source_pick
-        # Mark the most recent picker placeholder as selected so the card
-        # shows a persistent "Selected" state in the conversation scroll.
-        from sqlalchemy import select as _select
-        from sqlalchemy.orm.attributes import flag_modified
-
-        _recent_msgs = await db.execute(
-            _select(ChatMessage)
-            .where(
-                ChatMessage.session_id == session.id,
-                ChatMessage.role == "assistant",
-            )
-            .order_by(ChatMessage.created_at.desc())
-            .limit(5)
-        )
-        for _msg in _recent_msgs.scalars().all():
-            _so = _msg.structured_output
-            if isinstance(_so, dict) and _so.get("type") == "source_picker" and not _so.get("selected"):
-                _updated_so = dict(_so)
-                _updated_so["selected"] = source_pick
-                _msg.structured_output = _updated_so
-                flag_modified(_msg, "structured_output")
-                break
-        await db.commit()
-        print(f"[SOURCE-PIN] user selected {source_pick}", flush=True)
-
     if not is_onboarding:
         state = OrchestratorState(
             user_message=sanitized_input,
@@ -1129,6 +1100,15 @@ async def run_chat_turn(
         connection_warnings = await _check_connection_health(db, tenant_id)
         if connection_warnings:
             tool_definitions = _filter_tools_for_dead_connections(tool_definitions, connection_warnings)
+
+    # ── Compute active knowledge profile partitions for RAG scoping ──
+    _profile_partitions: list[str] = []
+    if not is_onboarding:
+        from app.services.chat.prompt_assembler import collect_rag_partitions, get_active_profiles
+
+        _tool_names = {t["name"] for t in tool_definitions}
+        _active_profiles = get_active_profiles(_knowledge_profiles, _tool_names)
+        _profile_partitions = collect_rag_partitions(_active_profiles)
 
     # ── Resolve tenant-specific system prompt ──
     if is_onboarding:
@@ -1401,7 +1381,12 @@ async def run_chat_turn(
                         _gather_keys.append("vernacular")
                     if _need_domain_knowledge:
                         _gather_tasks.append(
-                            retrieve_domain_knowledge(db=db, query_text=sanitized_input, top_k=dk_top_k)
+                            retrieve_domain_knowledge(
+                                db=db,
+                                query_text=sanitized_input,
+                                top_k=dk_top_k,
+                                partition_ids=_profile_partitions or None,
+                            )
                         )
                         _gather_keys.append("dk")
                     if _need_patterns:
@@ -1609,29 +1594,23 @@ async def run_chat_turn(
                         assemble_knowledge_context,
                         build_disambiguation_instruction,
                         build_source_pin_hint,
-                        collect_rag_partitions,
-                        get_active_profiles,
                     )
 
-                    tool_names = {t["name"] for t in tool_definitions}
-                    active_profiles = get_active_profiles(_knowledge_profiles, tool_names)
-                    if active_profiles:
+                    if _active_profiles:
                         print(
-                            f"[KNOWLEDGE] Active profiles: {[p.profile_id for p in active_profiles]}",
+                            f"[KNOWLEDGE] Active profiles: {[p.profile_id for p in _active_profiles]}",
                             flush=True,
                         )
 
-                    knowledge_context = assemble_knowledge_context(active_profiles)
+                    knowledge_context = assemble_knowledge_context(_active_profiles)
                     if knowledge_context:
                         system_prompt += f"\n\n{knowledge_context}"
-                    disambiguation = build_disambiguation_instruction(active_profiles)
+                    disambiguation = build_disambiguation_instruction(_active_profiles)
                     if disambiguation:
                         system_prompt += disambiguation
                     pin_hint = build_source_pin_hint(getattr(session, "source_pin", None))
                     if pin_hint:
                         system_prompt += pin_hint
-
-                    profile_partitions = collect_rag_partitions(active_profiles)
 
                     # Always use UnifiedAgent — no routing fork
                     unified_agent = UnifiedAgent(

@@ -1110,7 +1110,6 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
 }) {
   const { brandName: agentName } = useBranding();
 
-  // Early return for source_picker placeholder messages
   const structuredOutput = message.structured_output as
     | { type?: string; [key: string]: unknown }
     | null
