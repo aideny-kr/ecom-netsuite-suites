@@ -24,8 +24,12 @@ logger = logging.getLogger(__name__)
 
 
 async def _get_sheets_connector(context: dict) -> McpConnector | None:
-    db: AsyncSession = context["db"]
-    tenant_id = uuid.UUID(context["tenant_id"]) if isinstance(context["tenant_id"], str) else context["tenant_id"]
+    db: AsyncSession = context.get("db")
+    tenant_id = context.get("tenant_id")
+    if not db or not tenant_id:
+        return None
+    if isinstance(tenant_id, str):
+        tenant_id = uuid.UUID(tenant_id)
     result = await db.execute(
         select(McpConnector).where(
             McpConnector.tenant_id == tenant_id,
@@ -38,15 +42,24 @@ async def _get_sheets_connector(context: dict) -> McpConnector | None:
 
 
 async def _get_user_email(context: dict) -> str | None:
-    db: AsyncSession = context["db"]
-    actor_id = uuid.UUID(context["actor_id"]) if isinstance(context["actor_id"], str) else context["actor_id"]
+    db: AsyncSession = context.get("db")
+    actor_id = context.get("actor_id")
+    if not db or not actor_id:
+        return None
+    try:
+        actor_uuid = uuid.UUID(actor_id) if isinstance(actor_id, str) else actor_id
+    except (ValueError, TypeError):
+        return None
     from app.models.user import User
 
-    result = await db.execute(select(User.email).where(User.id == actor_id))
+    result = await db.execute(select(User.email).where(User.id == actor_uuid))
     return result.scalar_one_or_none()
 
 
 async def sheets_create_execute(params: dict, context: dict, **kwargs: Any) -> dict:
+    if not context or not context.get("tenant_id") or not context.get("db"):
+        return {"error": True, "message": "Missing context — tenant_id and db are required."}
+
     connector = await _get_sheets_connector(context)
     if not connector:
         return {"error": True, "message": "Google Sheets connector not configured. Set up in Settings."}
@@ -80,6 +93,9 @@ async def sheets_create_execute(params: dict, context: dict, **kwargs: Any) -> d
 
 
 async def sheets_write_range_execute(params: dict, context: dict, **kwargs: Any) -> dict:
+    if not context or not context.get("tenant_id") or not context.get("db"):
+        return {"error": True, "message": "Missing context — tenant_id and db are required."}
+
     connector = await _get_sheets_connector(context)
     if not connector:
         return {"error": True, "message": "Google Sheets connector not configured."}

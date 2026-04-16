@@ -41,6 +41,46 @@ class TestSheetsCreateExecute:
             result = await sheets_create_execute({"title": "Test"}, _CONTEXT)
         assert result["error"] is True
 
+    @pytest.mark.asyncio
+    async def test_create_succeeds_when_share_fails(self):
+        """Sheet is returned successfully even if auto-share step fails (share is best-effort)."""
+        with patch("app.mcp.tools.sheets_tools._get_sheets_connector") as mock_conn, \
+             patch("app.mcp.tools.sheets_tools.create_spreadsheet") as mock_create, \
+             patch("app.mcp.tools.sheets_tools.share_spreadsheet") as mock_share, \
+             patch("app.mcp.tools.sheets_tools.decrypt_credentials") as mock_decrypt, \
+             patch("app.mcp.tools.sheets_tools._get_user_email") as mock_email:
+            mock_conn.return_value = MagicMock(encrypted_credentials="encrypted")
+            mock_decrypt.return_value = {"type": "service_account"}
+            mock_email.return_value = "user@example.com"
+            mock_create.return_value = {"spreadsheet_id": "abc123", "url": "https://docs.google.com/spreadsheets/d/abc123"}
+            mock_share.side_effect = Exception("share failed")
+            result = await sheets_create_execute({"title": "Test"}, _CONTEXT)
+        assert result["error"] is False
+        assert result["spreadsheet_id"] == "abc123"
+
+    @pytest.mark.asyncio
+    async def test_create_succeeds_when_no_user_email(self):
+        """Sheet created even if actor's email cannot be resolved."""
+        with patch("app.mcp.tools.sheets_tools._get_sheets_connector") as mock_conn, \
+             patch("app.mcp.tools.sheets_tools.create_spreadsheet") as mock_create, \
+             patch("app.mcp.tools.sheets_tools.share_spreadsheet") as mock_share, \
+             patch("app.mcp.tools.sheets_tools.decrypt_credentials") as mock_decrypt, \
+             patch("app.mcp.tools.sheets_tools._get_user_email") as mock_email:
+            mock_conn.return_value = MagicMock(encrypted_credentials="encrypted")
+            mock_decrypt.return_value = {"type": "service_account"}
+            mock_email.return_value = None
+            mock_create.return_value = {"spreadsheet_id": "abc123", "url": "https://docs.google.com/spreadsheets/d/abc123"}
+            result = await sheets_create_execute({"title": "Test"}, _CONTEXT)
+        assert result["error"] is False
+        assert result["shared_with"] is None
+        mock_share.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_create_returns_error_on_missing_context(self):
+        result = await sheets_create_execute({"title": "Test"}, {})
+        assert result["error"] is True
+        assert "context" in result["message"].lower() or "missing" in result["message"].lower()
+
 
 class TestSheetsWriteRangeExecute:
     @pytest.mark.asyncio
