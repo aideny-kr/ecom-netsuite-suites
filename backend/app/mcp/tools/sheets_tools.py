@@ -89,6 +89,7 @@ async def sheets_create_execute(params: dict, context: dict, **kwargs: Any) -> d
         "spreadsheet_id": result["spreadsheet_id"],
         "url": result["url"],
         "shared_with": user_email,
+        "title": title,
     }
 
 

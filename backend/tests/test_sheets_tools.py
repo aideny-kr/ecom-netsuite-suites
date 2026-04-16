@@ -81,6 +81,21 @@ class TestSheetsCreateExecute:
         assert result["error"] is True
         assert "context" in result["message"].lower() or "missing" in result["message"].lower()
 
+    @pytest.mark.asyncio
+    async def test_create_echoes_title_in_result(self):
+        """Title passed in params must appear in the result so the orchestrator can display it on the card."""
+        with patch("app.mcp.tools.sheets_tools._get_sheets_connector") as mock_conn, \
+             patch("app.mcp.tools.sheets_tools.create_spreadsheet") as mock_create, \
+             patch("app.mcp.tools.sheets_tools.share_spreadsheet"), \
+             patch("app.mcp.tools.sheets_tools.decrypt_credentials") as mock_decrypt, \
+             patch("app.mcp.tools.sheets_tools._get_user_email") as mock_email:
+            mock_conn.return_value = MagicMock(encrypted_credentials="encrypted")
+            mock_decrypt.return_value = {"type": "service_account"}
+            mock_email.return_value = None
+            mock_create.return_value = {"spreadsheet_id": "abc", "url": "https://docs.google.com/spreadsheets/d/abc"}
+            result = await sheets_create_execute({"title": "Q4 Sales Export"}, _CONTEXT)
+        assert result["title"] == "Q4 Sales Export"
+
 
 class TestSheetsWriteRangeExecute:
     @pytest.mark.asyncio

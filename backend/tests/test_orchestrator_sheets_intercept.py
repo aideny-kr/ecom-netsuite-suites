@@ -21,8 +21,9 @@ class TestSheetsIntercept:
         assert event_data["spreadsheet_id"] == "abc123"
         assert event_data["title"] == "Sales Export"
         assert event_data["shared_with"] == "user@example.com"
-        # LLM still sees the URL so it can reference it
+        # LLM sees the spreadsheet_id but not the full URL (condensed to prevent URL duplication)
         assert "abc123" in new_result
+        assert "clickable card" in new_result
 
     def test_ignores_failed_sheets_create(self):
         result_str = json.dumps({"error": True, "message": "failed"})
@@ -59,8 +60,8 @@ class TestSheetsIntercept:
         assert event_type == "sheets_link"
         assert event_data["title"] == "Spreadsheet"
 
-    def test_passes_result_through_unchanged(self):
-        """The LLM must see the full result — we do NOT condense for sheets_link."""
+    def test_condenses_result_for_llm(self):
+        """The LLM receives a condensed result with a 'do not paste URL' note instead of the raw result."""
         payload = {
             "error": False,
             "spreadsheet_id": "abc",
@@ -69,4 +70,9 @@ class TestSheetsIntercept:
         }
         result_str = json.dumps(payload)
         _, _, new_result = _intercept_tool_result("sheets_create", result_str)
-        assert new_result == result_str
+        parsed = json.loads(new_result)
+        assert parsed["success"] is True
+        assert parsed["spreadsheet_id"] == "abc"
+        assert parsed["title"] == "My Sheet"
+        assert "clickable card" in parsed["note"]
+        assert "do NOT paste the URL" in parsed["note"]

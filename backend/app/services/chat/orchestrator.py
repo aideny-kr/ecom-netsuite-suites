@@ -709,8 +709,19 @@ def _intercept_tool_result(
             "title": parsed.get("title", "Spreadsheet"),
             "shared_with": parsed.get("shared_with"),
         }
-        # Pass result_str through unchanged — the LLM needs to see the URL so it can reference it
-        return "sheets_link", sse_event_data, result_str
+        condensed = json.dumps(
+            {
+                "success": True,
+                "spreadsheet_id": parsed.get("spreadsheet_id", ""),
+                "title": parsed.get("title", ""),
+                "note": (
+                    "The Sheet link is shown to the user as a clickable card. "
+                    "Confirm what was exported and any follow-ups — do NOT paste the URL in your reply."
+                ),
+            },
+            default=str,
+        )
+        return "sheets_link", sse_event_data, condensed
 
     # --- Not a data tool ---
     return None, None, result_str
