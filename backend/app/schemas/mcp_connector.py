@@ -59,3 +59,17 @@ class BigQueryConnectorCreate(BaseModel):
 
 class BigQueryTableSelection(BaseModel):
     selected_tables: dict[str, list[str]]  # dataset_id -> [table_ids]
+
+
+class SheetsTestRequest(BaseModel):
+    service_account_json: dict
+
+
+class SheetsTestResponse(BaseModel):
+    valid: bool
+    error: str | None = None
+
+
+class SheetsConnectorCreate(BaseModel):
+    service_account_json: dict
+    label: str = Field(default="Google Sheets", min_length=1, max_length=255)

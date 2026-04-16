@@ -21,10 +21,14 @@ from app.schemas.mcp_connector import (
     McpConnectorCreate,
     McpConnectorResponse,
     McpConnectorTestResponse,
+    SheetsConnectorCreate,
+    SheetsTestRequest,
+    SheetsTestResponse,
 )
 from app.services import audit_service, mcp_connector_service
 from app.services.bigquery_schema_seeder import seed_bigquery_schema
 from app.services.bigquery_service import discover_schema, validate_connection
+from app.services.sheets_service import validate_connection as validate_sheets_connection
 from app.services.netsuite_oauth_service import (
     build_mcp_authorize_url,
     exchange_code_with_client,
@@ -642,6 +646,90 @@ async def update_bigquery_table_selection(
         "selected_tables": request.selected_tables,
         "seeded_chunks": seeded,
     }
+
+
+# ---------------------------------------------------------------------------
+# Google Sheets connector endpoints
+# ---------------------------------------------------------------------------
+
+
+@router.post("/google-sheets/test")
+async def test_sheets_connection(
+    request: SheetsTestRequest,
+    user: Annotated[User, Depends(require_permission("connections.manage"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> SheetsTestResponse:
+    """Test Google Sheets connection with service account credentials."""
+    validation = await validate_sheets_connection(credentials=request.service_account_json)
+    if not validation["valid"]:
+        return SheetsTestResponse(valid=False, error=validation.get("error"))
+    return SheetsTestResponse(valid=True)
+
+
+@router.post("/google-sheets", status_code=status.HTTP_201_CREATED)
+async def create_sheets_connector(
+    request: SheetsConnectorCreate,
+    user: Annotated[User, Depends(require_permission("connections.manage"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Create a Google Sheets MCP connector."""
+    from sqlalchemy import select
+
+    from app.models.mcp_connector import McpConnector
+
+    # 1. Validate connection
+    validation = await validate_sheets_connection(credentials=request.service_account_json)
+    if not validation["valid"]:
+        raise HTTPException(status_code=400, detail=f"Connection failed: {validation.get('error')}")
+
+    # 2. Revoke existing active sheets connector
+    existing_result = await db.execute(
+        select(McpConnector).where(
+            McpConnector.tenant_id == user.tenant_id,
+            McpConnector.provider == "google_sheets",
+            McpConnector.status == "active",
+        )
+    )
+    existing = existing_result.scalars().first()
+    if existing:
+        existing.status = "revoked"
+
+    # 3. Encrypt credentials
+    encrypted = encrypt_credentials({"service_account_json": request.service_account_json})
+
+    # 4. Create connector (tools are registered locally — don't populate discovered_tools)
+    connector = McpConnector(
+        tenant_id=user.tenant_id,
+        provider="google_sheets",
+        label=request.label,
+        server_url="https://sheets.googleapis.com",
+        auth_type="service_account",
+        encrypted_credentials=encrypted,
+        encryption_key_version=1,
+        status="active",
+        is_enabled=True,
+        created_by=user.id,
+        metadata_json={"client_email": request.service_account_json.get("client_email", "")},
+        discovered_tools=None,
+    )
+    db.add(connector)
+
+    # 5. Audit log
+    await audit_service.log_event(
+        db=db,
+        tenant_id=user.tenant_id,
+        category="mcp_connector",
+        action="mcp_connector.create",
+        actor_id=user.id,
+        resource_type="mcp_connector",
+        resource_id=str(connector.id),
+        payload={"provider": "google_sheets"},
+    )
+
+    await db.commit()
+    await db.refresh(connector)
+
+    return connector
 
 
 # ---------------------------------------------------------------------------
