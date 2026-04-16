@@ -13,8 +13,6 @@ countries we recently launched?' classified as FULL, and the gate
 skipped patterns under FULL by design.
 """
 
-import pytest
-
 from app.services.chat.orchestrator import ContextNeed, _compute_need_patterns
 
 

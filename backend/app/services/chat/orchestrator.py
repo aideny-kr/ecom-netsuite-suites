@@ -332,6 +332,19 @@ def _compute_need_patterns(context_need: str, tool_names: set[str]) -> bool:
     patterns whenever a query classified as FULL (investigation), which is
     exactly when worked examples are most useful. New rule: patterns retrieve
     whenever a SQL query tool is connected, regardless of context_need.
+
+    The `context_need` parameter is intentionally unused today — kept in the
+    signature so call sites read self-documentingly and so future context-aware
+    tuning (e.g., suppressing patterns for WORKSPACE queries even when SuiteQL
+    tools are present) does not require touching call sites.
+
+    The ext__ match is intentionally broader than `_is_suiteql_tool_call` in
+    `query_pattern_service.py` — fetching patterns when a metadata tool
+    (`ns_getSuiteQLMetadata`) is present is harmless, while not fetching them
+    when a query tool is present is the bug we fixed. Similarly, `bigquery_sql`
+    triggers the gate even though `tenant_query_patterns` doesn't yet store
+    BigQuery patterns; `retrieve_similar_patterns` returns `[]` cheaply for
+    BQ-only sessions, and the gate is ready when Phase 2 adds BigQuery storage.
     """
     if {"netsuite_suiteql", "bigquery_sql"} & tool_names:
         return True
