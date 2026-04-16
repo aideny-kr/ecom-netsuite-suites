@@ -324,6 +324,20 @@ class ContextNeed:
     FINANCIAL = "financial"  # Financial report — inject only vernacular + onboarding
 
 
+def _compute_need_patterns(context_need: str, tool_names: set[str]) -> bool:
+    """Decide whether to retrieve seeded SuiteQL/BigQuery patterns this turn.
+
+    Pre-2026-04-16 this was `context_need in (ContextNeed.DATA,)` — patterns
+    only fired when the classifier said DATA. That stranded admin-seeded
+    patterns whenever a query classified as FULL (investigation), which is
+    exactly when worked examples are most useful. New rule: patterns retrieve
+    whenever a SQL query tool is connected, regardless of context_need.
+    """
+    if {"netsuite_suiteql", "bigquery_sql"} & tool_names:
+        return True
+    return any(name.startswith("ext__") and "suiteql" in name.lower() for name in tool_names)
+
+
 _WORKSPACE_RE = re.compile(
     r"\b(?:scripts?|deploy(?:ment)?s?|triggers?|automation|scheduled|user\s*events?|"
     r"suitelets?|restlets?|map\s*reduce|client\s*scripts?|mass\s*updates?|portlets?|"
@@ -1378,13 +1392,16 @@ async def run_chat_turn(
                     #   tenant_vernacular   ❌    ✅    ❌      ❌        ✅
                     #   domain_knowledge    ❌    ✅    ✅      ❌        ❌
                     #   onboarding_profile  ❌    ❌    ❌      ❌        ✅
-                    #   proven_patterns     ❌    ✅    ❌      ❌        ❌
+                    #   proven_patterns    (gate by tool presence — see _compute_need_patterns)
                     #   learned_rules       ✅    ✅    ✅      ✅        ✅    (always)
-                    # FULL = investigation ("why") — minimal context so agent reasons freely
+                    # FULL = investigation ("why") — minimal context so agent reasons freely.
+                    # proven_patterns: gated by tool presence (any SuiteQL/BQ tool in the toolset),
+                    # NOT by context_need. Admin-seeded patterns are high-quality and shouldn't be
+                    # stranded by the FULL classification. See _compute_need_patterns docstring.
 
                     _need_vernacular = context_need in (ContextNeed.DATA, ContextNeed.FINANCIAL)
                     _need_domain_knowledge = context_need in (ContextNeed.DATA, ContextNeed.DOCS)
-                    _need_patterns = context_need in (ContextNeed.DATA,)
+                    _need_patterns = _compute_need_patterns(context_need, _tool_names)
                     _need_schemas = context_need in (ContextNeed.FULL, ContextNeed.DATA)
                     _need_onboarding = context_need in (ContextNeed.FINANCIAL,)
 
