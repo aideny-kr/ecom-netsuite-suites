@@ -1518,7 +1518,7 @@ async def run_chat_turn(
                             if sims:
                                 context["domain_knowledge_similarity"] = sum(sims) / len(sims)
 
-                    # proven_patterns (FULL, DATA — skip for DOCS, WORKSPACE, FINANCIAL)
+                    # proven_patterns (gate by tool presence — injects when _need_patterns is True)
                     if patterns_result is not None:
                         if isinstance(patterns_result, Exception):
                             logger.warning("unified_agent.proven_patterns_failed", exc_info=patterns_result)
