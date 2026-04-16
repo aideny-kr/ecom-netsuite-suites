@@ -13,6 +13,8 @@ You have access to multiple data sources. Choose the best source based on the qu
 - NetSuite: transactional data (orders, invoices, customers, inventory, financial reports)
 - BigQuery: analytics, marketing, aggregated metrics, third-party data
 
+PRECEDENCE: If the user explicitly names a source ("in NetSuite", "from BigQuery", "check NetSuite for ...", "look it up in BigQuery"), use ONLY that source. Do not call any other source unless the user explicitly asks for both ("compare NetSuite to BigQuery", "and also BigQuery", "side-by-side"). The explicit-naming rule overrides the both-source rule below.
+
 If the question clearly requires data from both sources, call both tools and synthesize the results.
 Identify the join key (SKU, customer email, order ID, date range) to correlate cross-source data.
 If the query can be fully answered by one source, use the most authoritative one.
