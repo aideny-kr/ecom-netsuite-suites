@@ -421,7 +421,7 @@ async def test_bigquery_connection(
     return BigQueryTestResponse(valid=True, datasets=dataset_names)
 
 
-@router.post("/bigquery", status_code=status.HTTP_201_CREATED)
+@router.post("/bigquery", status_code=status.HTTP_201_CREATED, response_model=McpConnectorResponse)
 async def create_bigquery_connector(
     request: BigQueryConnectorCreate,
     user: Annotated[User, Depends(require_permission("connections.manage"))],
@@ -666,7 +666,7 @@ async def test_sheets_connection(
     return SheetsTestResponse(valid=True)
 
 
-@router.post("/google-sheets", status_code=status.HTTP_201_CREATED)
+@router.post("/google-sheets", status_code=status.HTTP_201_CREATED, response_model=McpConnectorResponse)
 async def create_sheets_connector(
     request: SheetsConnectorCreate,
     user: Annotated[User, Depends(require_permission("connections.manage"))],

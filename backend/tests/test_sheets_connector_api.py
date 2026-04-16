@@ -7,6 +7,23 @@ import pytest
 from app.schemas.mcp_connector import SheetsConnectorCreate, SheetsTestRequest
 
 
+def _make_mock_db():
+    """Return a db mock that matches real SQLAlchemy async session behaviour.
+
+    db.add / db.add_all are synchronous in SQLAlchemy — using AsyncMock for
+    them causes RuntimeWarnings.  Only execute, commit, refresh, rollback and
+    flush are coroutines.
+    """
+    db = MagicMock()
+    db.execute = AsyncMock()
+    db.commit = AsyncMock()
+    db.refresh = AsyncMock()
+    db.rollback = AsyncMock()
+    db.flush = AsyncMock()
+    # db.add / db.add_all stay as synchronous MagicMock (the default)
+    return db
+
+
 class TestSheetsTestConnection:
     """POST /mcp-connectors/google-sheets/test"""
 
@@ -18,7 +35,7 @@ class TestSheetsTestConnection:
         mock_user = MagicMock()
         mock_user.tenant_id = uuid.uuid4()
         mock_user.id = uuid.uuid4()
-        mock_db = AsyncMock()
+        mock_db = _make_mock_db()
 
         with patch(
             "app.api.v1.mcp_connectors.validate_sheets_connection",
@@ -37,7 +54,7 @@ class TestSheetsTestConnection:
         mock_user = MagicMock()
         mock_user.tenant_id = uuid.uuid4()
         mock_user.id = uuid.uuid4()
-        mock_db = AsyncMock()
+        mock_db = _make_mock_db()
 
         with patch(
             "app.api.v1.mcp_connectors.validate_sheets_connection",
@@ -62,7 +79,7 @@ class TestSheetsTestConnection:
             "app.api.v1.mcp_connectors.validate_sheets_connection",
             new=AsyncMock(return_value={"valid": False}),
         ):
-            result = await test_sheets_connection(request, mock_user, AsyncMock())
+            result = await test_sheets_connection(request, mock_user, _make_mock_db())
 
         assert result.valid is False
         assert result.error is None
@@ -84,7 +101,7 @@ class TestSheetsCreateConnector:
         mock_user = MagicMock()
         mock_user.tenant_id = uuid.uuid4()
         mock_user.id = uuid.uuid4()
-        mock_db = AsyncMock()
+        mock_db = _make_mock_db()
 
         mock_result = MagicMock()
         mock_result.scalars.return_value.first.return_value = None
@@ -126,7 +143,7 @@ class TestSheetsCreateConnector:
             new=AsyncMock(return_value={"valid": False, "error": "bad creds"}),
         ):
             with pytest.raises(HTTPException) as exc_info:
-                await create_sheets_connector(request, mock_user, AsyncMock())
+                await create_sheets_connector(request, mock_user, _make_mock_db())
 
         assert exc_info.value.status_code == 400
 
@@ -139,7 +156,7 @@ class TestSheetsCreateConnector:
         mock_user = MagicMock()
         mock_user.tenant_id = uuid.uuid4()
         mock_user.id = uuid.uuid4()
-        mock_db = AsyncMock()
+        mock_db = _make_mock_db()
         mock_result = MagicMock()
         mock_result.scalars.return_value.first.return_value = None
         mock_db.execute = AsyncMock(return_value=mock_result)
@@ -172,7 +189,7 @@ class TestSheetsCreateConnector:
         mock_user = MagicMock()
         mock_user.tenant_id = uuid.uuid4()
         mock_user.id = uuid.uuid4()
-        mock_db = AsyncMock()
+        mock_db = _make_mock_db()
 
         old_connector = MagicMock()
         old_connector.status = "active"
@@ -203,7 +220,7 @@ class TestSheetsCreateConnector:
         mock_user = MagicMock()
         mock_user.tenant_id = uuid.uuid4()
         mock_user.id = uuid.uuid4()
-        mock_db = AsyncMock()
+        mock_db = _make_mock_db()
         mock_result = MagicMock()
         mock_result.scalars.return_value.first.return_value = None
         mock_db.execute = AsyncMock(return_value=mock_result)
@@ -236,7 +253,7 @@ class TestSheetsCreateConnector:
         mock_user = MagicMock()
         mock_user.tenant_id = uuid.uuid4()
         mock_user.id = uuid.uuid4()
-        mock_db = AsyncMock()
+        mock_db = _make_mock_db()
         mock_result = MagicMock()
         mock_result.scalars.return_value.first.return_value = None
         mock_db.execute = AsyncMock(return_value=mock_result)
@@ -269,7 +286,7 @@ class TestSheetsCreateConnector:
         mock_user = MagicMock()
         mock_user.tenant_id = uuid.uuid4()
         mock_user.id = uuid.uuid4()
-        mock_db = AsyncMock()
+        mock_db = _make_mock_db()
         mock_result = MagicMock()
         mock_result.scalars.return_value.first.return_value = None
         mock_db.execute = AsyncMock(return_value=mock_result)
@@ -289,6 +306,59 @@ class TestSheetsCreateConnector:
 
         connector = mock_db.add.call_args[0][0]
         assert connector.metadata_json["client_email"] == email
+
+
+    @pytest.mark.asyncio
+    async def test_response_does_not_leak_encrypted_credentials(self):
+        """Critical: the 201 response must NOT expose encrypted_credentials.
+
+        Two-part check:
+        1. The endpoint stores encrypted_credentials on the ORM object (so the
+           field IS present and populated before serialization).
+        2. McpConnectorResponse — the response_model — does NOT declare
+           encrypted_credentials, so FastAPI strips it before sending to the
+           client.  We assert the whitelist directly on the schema.
+        """
+        from app.api.v1.mcp_connectors import create_sheets_connector
+        from app.schemas.mcp_connector import McpConnectorResponse
+
+        request = SheetsConnectorCreate(
+            service_account_json={
+                "type": "service_account",
+                "client_email": "sa@x.iam.gserviceaccount.com",
+                "private_key": "...",
+            }
+        )
+        mock_user = MagicMock()
+        mock_user.tenant_id = uuid.uuid4()
+        mock_user.id = uuid.uuid4()
+        mock_db = _make_mock_db()
+        mock_result = MagicMock()
+        mock_result.scalars.return_value.first.return_value = None
+        mock_db.execute = AsyncMock(return_value=mock_result)
+
+        with (
+            patch(
+                "app.api.v1.mcp_connectors.validate_sheets_connection",
+                new=AsyncMock(return_value={"valid": True}),
+            ),
+            patch(
+                "app.api.v1.mcp_connectors.encrypt_credentials",
+                return_value=b"SUPER_SECRET_ENCRYPTED_BLOB",
+            ),
+            patch("app.api.v1.mcp_connectors.audit_service.log_event", new=AsyncMock()),
+        ):
+            connector = await create_sheets_connector(request, mock_user, mock_db)
+
+        # Part 1: the ORM object DOES carry the encrypted blob (proves the fix
+        # is needed — without response_model the raw object would expose it).
+        assert connector.encrypted_credentials == b"SUPER_SECRET_ENCRYPTED_BLOB"
+
+        # Part 2: McpConnectorResponse is the whitelist — encrypted_credentials
+        # must NOT be a declared field, so FastAPI will never include it in the
+        # HTTP response body.
+        response_field_names = set(McpConnectorResponse.model_fields.keys())
+        assert "encrypted_credentials" not in response_field_names
 
 
 class TestSheetsSchemas:

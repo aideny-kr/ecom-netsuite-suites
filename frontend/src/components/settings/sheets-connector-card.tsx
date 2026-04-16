@@ -76,11 +76,18 @@ export function SheetsConnectorCard() {
   function handleFileUpload(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
+    if (file.size > 100_000) {
+      toast({ title: "File too large", description: "Service account JSON should be under 100KB.", variant: "destructive" });
+      return;
+    }
     const reader = new FileReader();
     reader.onload = (event) => {
       setServiceAccountJson(event.target?.result as string);
       setJsonError(null);
       setTestResult(null);
+    };
+    reader.onerror = () => {
+      toast({ title: "Failed to read file", variant: "destructive" });
     };
     reader.readAsText(file);
     e.target.value = "";
