@@ -9,10 +9,20 @@ class TestPromptSize:
         line_count = _SYSTEM_PROMPT.count("\n")
         assert line_count < 350, f"Prompt is {line_count} lines, target is <350"
 
-    def test_prompt_under_18000_chars(self):
-        """Trimmed prompt should be under 18000 chars (dialect rules alone = ~11500)."""
+    def test_prompt_under_18500_chars(self):
+        """Trimmed prompt should be under 18500 chars.
+
+        Dialect rules alone are ~11500 chars. The 18500 ceiling is a leading
+        indicator — when it trips, audit additions for value vs. token cost.
+
+        Bumped from 18000 → 18500 on 2026-04-16 to accommodate the ADDRESS
+        TABLES block (Task 1 of `fix/restore-netsuite-knowledge-phase-1`).
+        Phase 2 will move ~150 lines of SuiteQL dialect rules out of
+        `_SYSTEM_PROMPT` into `knowledge_profiles/netsuite.yaml`, after
+        which this ceiling should be tightened back down (~13000 char target).
+        """
         char_count = len(_SYSTEM_PROMPT)
-        assert char_count < 18000, f"Prompt is {char_count} chars, target is <18000"
+        assert char_count < 18500, f"Prompt is {char_count} chars, target is <18500"
 
 
 class TestCriticalRulesPreserved:
