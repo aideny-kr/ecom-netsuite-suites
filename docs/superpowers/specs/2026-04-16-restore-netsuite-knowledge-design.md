@@ -22,7 +22,11 @@ Hour-of-staging-logs from 2026-04-16 (Framework, tenant `ce3dfaad-626f-4992-84e9
 - Agent emitted `t.status NOT IN ('SalesOrd:C', 'SalesOrd:H')` — the exact compound-status-code bug forbidden by `unified_agent.py:261-263` and CLAUDE.md rule #13. The rule is in the prompt; the agent ignored it.
 - `[LEARNED_RULES_RETRIEVAL] total=38` — Framework has 38 learned rules and the always-on slice is being injected, so the retrieval pipeline works in principle. Patterns and domain knowledge are the broken slice.
 
-This is not a one-off bug report. It is a regression in the trust contract: users were told the system would remember corrections, and on April 16 it does not.
+**DB verification 2026-04-16 (Supabase staging):**
+- `tenant_query_patterns` for Framework **contains 6 shipping-country patterns**, all created 2026-04-09 / 2026-04-10 during Olivia's session before auto-learn was disabled. All use `JOIN transactionShippingAddress sa ON sa.nKey = t.shippingAddress` + `BUILTIN.DF(sa.country)`. All `success_count=5`. `last_used_at` on all six is **2026-04-10 00:58** — **not used in the six days since**. Patterns are present; retrieval is failing.
+- `tenant_learned_rules` for Framework: 9 active field-guidance rules. **None** mention `transactionShippingAddress`, shipping country, `nKey`, or "don't use custbody for country." The parallel precedent exists for *location* (rule created 2026-03-16 says "use `tl.location`, NOT custom body fields like `custbody_fw_sent_to_panurgy`") but no equivalent rule was ever written for country. The "don't use custbody" guidance for country lived only as the shape of the saved patterns, never as an explicit rule.
+
+This is not a one-off bug report. It is a regression in the trust contract: users were told the system would remember corrections, and on April 16 it does not — the mechanism stored the patterns correctly in April and then stopped using them.
 
 ## Status Quo
 
@@ -47,7 +51,7 @@ This is not a one-off bug report. It is a regression in the trust contract: user
 
 ## Premises
 
-1. The user's report is accurate AND under-states the scope: pattern retrieval is empty for Framework, golden_dataset is orphaned, no `netsuite.yaml` exists, no admin-seed script exists. Fixing the symptom (one shipping-country pattern) without fixing the structure means the next "taught" rule rots the same way.
+1. The user's report is accurate AND under-states the scope — but the DB check reframes *which* structure is broken. Framework's 6 shipping-country patterns are still present in `tenant_query_patterns` (verified 2026-04-16 via Supabase). Retrieval — not storage — is the bleeding wound. Additionally: (a) no learned rule for country exists alongside the patterns (parallel to the existing location rule), (b) `golden_dataset/` files are orphaned from RAG, (c) no `netsuite.yaml` profile exists, (d) no admin-seed pipeline exists. Fixing retrieval alone restores Olivia's April 10 behavior; fixing the structural gaps prevents future losses.
 2. The fix is split into two waves to mirror the HITL+v2.0 release pattern: a same-day hotfix to restore user trust, then a structural fix this week to make it durable. This prevents "perfect-is-the-enemy-of-shipped."
 3. SuiteQL dialect rules currently live in two places (the unified base prompt and effectively nowhere else, since specialist prompts were deleted). They should be moved into `netsuite.yaml`'s `prompt_fragment` so they only inject when NetSuite tools are connected. This shrinks the base prompt for non-NS tenants and removes the duplication risk CLAUDE.md rule #24 warns about.
 4. Pattern retrieval must always run when SuiteQL or BigQuery tools are available. The current `_need_patterns` gate in `orchestrator.py:1387` ties patterns to `ContextNeed.DATA` only — `FULL` (investigation queries) deliberately skips patterns by the matrix design at `orchestrator.py:1374-1383`. That decision was made when patterns were noisy and live-learned. Now that patterns will be admin-seeded and high-quality, the gate should change: patterns retrieve whenever a NetSuite or BigQuery query tool is present, regardless of `ContextNeed`. Trade: marginally larger context window on FULL queries; benefit: seeded patterns can never be stranded by a context classifier choice.
@@ -85,29 +89,37 @@ Same-day hotfix restores user trust. Structural fix this week makes it durable. 
 
 ### Phase 1 — Today (~2-3 hours)
 
-**1. Seed Framework's `tenant_query_patterns` via a one-off async Python script.**
+**1. Diagnose why retrieval returned 0 despite 6 patterns being present.**
 
-Patterns require an embedding (computed by `query_pattern_service._embed_text()`, which is async and needs `OPENAI_EMBEDDING_API_KEY`), so a raw `INSERT` won't work. Write a one-off `python -m` script (not committed; runbook only) that:
-1. Imports `_embed_text` and the `TenantQueryPattern` model.
-2. For each pattern record, calls `await _embed_text(question)` to compute `intent_embedding`.
-3. Uses SQLAlchemy `pg_insert(...).on_conflict_do_update(constraint="uq_tenant_query_pattern", ...)` to upsert against the existing `(tenant_id, working_sql)` constraint (per `query_pattern_service.py:163`).
-4. Runs against staging Supabase using `.venv/bin/python -m`.
+Skip seeding — the 6 shipping-country patterns already exist in `tenant_query_patterns` (verified 2026-04-16 via DB query). The question is why `[PATTERN_RETRIEVAL] returned=0` in the live session. Two likely causes, to be tested in order:
 
-Insert 3-4 golden patterns covering the common shipping-country shapes:
-- "sales by shipping country (revenue)" — `JOIN transactionShippingAddress sa ON sa.nKey = t.shippingAddress`, `JOIN transactionline tl ON tl.transaction = t.id`, single-letter status, mainline/taxline/iscogs/assemblycomponent filters.
-- "order count by shipping country" — same join, distinct count.
-- "newly launched countries by first order date" — same join, MIN(trandate), GROUP BY country.
-- "monthly sales trend by shipping country" — same join, TO_CHAR(trandate,'YYYY-MM'), ORDER BY month.
+(a) **Gating failed to request patterns at all.** Phase 1 step 3 (below) fixes this at the source.
 
-Document the script verbatim in the Phase 1 PR description so Phase 2's `seed_tenant_patterns.py` can codify the same pattern.
+(b) **Similarity below threshold.** User's question *"4 new countries we recently launched"* may embed too far from seeded questions like *"sales data by shipping country"* or *"sales breakdown by country with laptop and desktop quantities"*. `PATTERN_MIN_SIMILARITY` is 0.45 per CLAUDE.md. Write a diagnostic script that:
+1. Embeds the user's question via `_embed_text`.
+2. Pulls the 6 seeded patterns' `intent_embedding` from DB.
+3. Computes cosine similarity for each.
+4. Prints the top match and confirms whether it clears 0.45.
 
-**2. Update `prompt_assembler.py:9-20` `DISAMBIGUATION_INSTRUCTION`.**
+If the top score is < 0.45: either lower `PATTERN_MIN_SIMILARITY` modestly (0.40?) or add 1-2 additional patterns with broader phrasings closer to how users actually ask ("countries launched recently," "new markets," "shipping destinations"). Prefer adding patterns over lowering threshold (threshold change is global blast radius; new patterns are tenant-scoped).
+
+If the top score is ≥ 0.45: the gate is the culprit (see step 3 below), not the similarity. No new patterns needed.
+
+**2. Add a Framework learned rule for shipping country (mirrors the location rule precedent).**
+
+Insert one `term_definition` rule (always-on category, not query-gated) via `tenant_save_learned_rule` tool or direct DB insert. Wording:
+
+> "For sales/order queries filtered or grouped by shipping country, ALWAYS use `JOIN transactionShippingAddress sa ON sa.nKey = t.shippingAddress` and read `BUILTIN.DF(sa.country)` for the country name (or `sa.country` for the 2-letter ISO code). Do NOT use custom body fields like `custbodyfw_ship_country_ext` — the shipping country is a standard NetSuite field on the shipping address, not a custom field. The `transactionShippingAddress` join key is `sa.nKey = t.shippingAddress`, NOT `sa.recordOwner = t.id` or `sa.transaction = t.id`."
+
+This is the exact parallel to the location rule from 2026-03-16. `term_definition` category keeps it always-injected regardless of query keywords, which is what we want — it's universally relevant whenever any NetSuite query touches country.
+
+**3. Update `prompt_assembler.py:9-20` `DISAMBIGUATION_INSTRUCTION`.**
 Add an explicit-naming clause as the FIRST rule (before "use the most authoritative one") so it has unambiguous precedence:
 > "PRECEDENCE: If the user explicitly names a source ('in NetSuite', 'from BigQuery', 'check NetSuite for ...'), use ONLY that source. Do not call any other source unless the user explicitly asks for both ('compare NetSuite to BigQuery', 'and also BigQuery'). The explicit-naming rule overrides the both-source rule."
 
 Keep the rest of the existing instruction intact below this clause.
 
-**3. Replace the `_need_patterns` gate in `orchestrator.py:1387` with tool-presence detection.**
+**4. Replace the `_need_patterns` gate in `orchestrator.py:1387` with tool-presence detection.**
 Today: `_need_patterns = context_need in (ContextNeed.DATA,)`. The `FULL` (investigation) path deliberately skips patterns by the matrix design at `orchestrator.py:1374-1383` — that design assumed patterns were noisy live-learned content. With admin-seeded high-quality patterns, the gate should change.
 
 Decision: patterns retrieve whenever `netsuite_suiteql` or `bigquery_sql` (or any `ext__*__ns_runCustomSuiteQL`) tool is in the available tool set, regardless of `ContextNeed`. Concretely (using existing `_tool_names` set computed at `orchestrator.py:1142`):
@@ -118,10 +130,10 @@ _need_patterns = bool({"netsuite_suiteql", "bigquery_sql"} & _tool_names) or any
 ```
 Trade-off: marginally larger context window on FULL queries (~1-2K tokens for top-K patterns). Benefit: seeded patterns can never be stranded by a context classifier choice. Document the change in the orchestrator's injection-matrix comment so the matrix at lines 1374-1383 stays honest.
 
-**4. Smoke-test on staging.**
-Re-run the broken query ("4 new countries we recently launched"). Expected outcome: agent generates correct SuiteQL on the first attempt, no rediscovery loop. If it still fails, look at retrieval similarity scores — the seeded pattern's embedding may not be matching the user's phrasing.
+**5. Smoke-test on staging.**
+Re-run the broken query ("4 new countries we recently launched"). Expected outcome: agent generates correct SuiteQL on the first attempt, no rediscovery loop. Pattern retrieval logs should show `returned≥1` with a matched pattern citing `sa.nKey = t.shippingAddress`.
 
-**Phase 1 deliverable:** one PR with the prompt change + the `_need_patterns` audit fix. Pattern seeding is a runbook step (separate from PR).
+**Phase 1 deliverable:** one PR with: (a) the disambiguation prompt change, (b) the `_need_patterns` gate replacement, (c) the new country learned rule (as a data insert documented in the PR, OR via a one-off runbook script). Pattern-similarity diagnostic is a runbook step (separate from PR).
 
 ### Phase 2 — This week (~1 day)
 
@@ -166,7 +178,7 @@ After Phase 1's narrow gating fix, do a fuller pass: ensure context-need classif
 
 ## Open Questions
 
-1. **Are there OTHER patterns Framework lost?** Beyond shipping-country, were there patterns Olivia or other users taught between PR #33 (auto-learn enabled briefly) and PR #40 that we should re-seed? Action: query `tenant_query_patterns` for Framework, dump current rows, compare against any audit log of pre-revamp patterns. Likely small number.
+1. **Are there OTHER patterns Framework "forgot"?** Partially resolved by DB check: 6 shipping-country patterns present, all `last_used_at = 2026-04-10`. Remaining unknowns: (a) how many other patterns exist across all categories — a full `SELECT user_question, last_used_at FROM tenant_query_patterns WHERE tenant_id = 'ce3dfaad...'` dump, (b) which ones haven't retrieved since April 10 (the auto-learn disable boundary), (c) whether any of those are also "forgotten rules" from the user's perspective. Action: dump full pattern inventory during Phase 1 diagnostic.
 2. **Do we need to gate the `netsuite.yaml` profile by connector health?** Today, `cross_source.yaml` triggers when both BQ and NS tools are present. `netsuite.yaml` should trigger when NS tools are present regardless of BQ. Verify the loader's `matches_tools()` does this correctly with no edge cases.
 3. **Should the prompt-rule attention failure (`SalesOrd:C` despite the rule being in the prompt) get its own ticket?** This is a separate, broader issue: the agent ignored a rule that was right there. Fix idea: surface the rule with worked examples (which Phase 2 partly addresses via patterns), or move the rule earlier in the prompt closer to the tool definition. Track separately.
 4. **Pattern admission threshold for nightly auto-improvement.** Once Phase 2 ships, the autonomous-improvement nightly job can promote eval-validated patterns. What's the minimum eval pass rate to promote? Defer to autonomous-improvement skill.
@@ -174,7 +186,7 @@ After Phase 1's narrow gating fix, do a fuller pass: ensure context-need classif
 
 ## Success Criteria
 
-- **Phase 1 success (today):** Re-running the broken query on staging — "what are the 4 new countries we recently launched?" — produces correct SuiteQL on the first attempt with no `recordOwner=t.id` or `transaction=t.id` misfires AND no compound status codes (`'SalesOrd:C'`). Pattern retrieval logs show `returned=1` (or more) for the matched pattern. User confirms via a fresh staging session. If `'SalesOrd:C'` still recurs despite seeded patterns, escalate — the prompt-attention gap (Open Question #3) is then a real blocker, not a deferred concern.
+- **Phase 1 success (today):** Re-running the broken query on staging — "what are the 4 new countries we recently launched?" — produces correct SuiteQL on the first attempt with `sa.nKey = t.shippingAddress` join, no `recordOwner=t.id` or `transaction=t.id` misfires, no `custbodyfw_ship_country_ext` misfires, AND no compound status codes (`'SalesOrd:C'`). Pattern retrieval logs show `returned≥1` for the matched pattern (one of the 6 April-10 patterns). Learned rules logs show the new country rule in the always-on slice. `last_used_at` on the matched pattern updates post-turn. User confirms via a fresh staging session. If `'SalesOrd:C'` still recurs despite pattern + rule + disambiguation fixes, escalate — the prompt-attention gap (Open Question #3) is then a real blocker, not a deferred concern.
 - **Phase 2 success (this week):** Three independent staging tests:
   - "Show sales by shipping country since Jan 1" → first-attempt correct SQL.
   - "Compare net revenue Q1 vs Q2 by subsidiary" → uses correct multi-currency rules from RAG.
@@ -186,7 +198,7 @@ After Phase 1's narrow gating fix, do a fuller pass: ensure context-need classif
 
 Existing pipeline. Phase 1 PR → CI → staging deploy via `saas-deployment` skill. Phase 2 PR → same path. No new infrastructure, no new secrets, no Alembic migrations.
 
-For the Phase 1 SQL pattern seed: run as a one-off via `.venv/bin/python` against staging Supabase. Document the SQL in the Phase 1 PR description so it's reproducible. Phase 2 replaces this manual step with `seed_tenant_patterns.py`.
+For the Phase 1 country learned-rule insert: use the existing `tenant_save_learned_rule` tool (via a chat session as Framework admin) OR a one-off `.venv/bin/python` insert into `tenant_learned_rules`. Document the rule verbatim in the Phase 1 PR description so it's reproducible. Phase 2 adds `seed_tenant_patterns.py` for bulk pattern operations — it should also support bulk learned-rule seeding, or a sibling `seed_tenant_learned_rules.py` script, so future "teach the agent" operations can be scripted.
 
 ## Dependencies
 
@@ -199,7 +211,7 @@ For the Phase 1 SQL pattern seed: run as a one-off via `.venv/bin/python` agains
 
 ## The Assignment
 
-Before opening the Phase 1 PR: open a fresh staging session as Framework, ask "what are the 4 new countries we recently launched?", and screenshot the assistant's first SuiteQL attempt. Save the screenshot. After Phase 1 ships, ask the same question again and screenshot. The before/after image is the single best artifact for explaining to the team why this fix mattered — and the "trust restored" moment for any other user who saw the bad behavior. Two minutes of work, permanent record of the regression and the fix.
+Before opening the Phase 1 PR: open a fresh staging session as Framework, ask "what are the 4 new countries we recently launched?", and screenshot the assistant's first SuiteQL attempt (will show `recordOwner=t.id` or similar wrong join, or the custbody_ fallback). Save the screenshot. After Phase 1 ships, ask the same question again and screenshot — expected: first-attempt `sa.nKey = t.shippingAddress` with `BUILTIN.DF(sa.country)`. The before/after image is the single best artifact for explaining to the team why this fix mattered — and the "trust restored" moment for any other user who saw the bad behavior. Two minutes of work, permanent record of the regression and the fix.
 
 ## What I noticed about how you think
 
