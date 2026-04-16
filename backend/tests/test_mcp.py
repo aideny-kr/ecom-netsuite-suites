@@ -242,6 +242,8 @@ class TestToolConfigs:
             "bigquery.sql",
             "bigquery.schema",
             "bigquery.cost_estimate",
+            "sheets.create",
+            "sheets.write_range",
         }
         assert set(TOOL_CONFIGS.keys()) == expected
 

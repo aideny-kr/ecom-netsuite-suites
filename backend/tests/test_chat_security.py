@@ -47,6 +47,8 @@ class TestAllowedChatTools:
             "pricing.convert",
             "pricing.config_read",
             "pricing.export",
+            "sheets.create",
+            "sheets.write_range",
         }
         assert ALLOWED_CHAT_TOOLS == expected
 
