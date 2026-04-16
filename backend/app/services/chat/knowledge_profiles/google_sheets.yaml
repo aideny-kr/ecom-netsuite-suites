@@ -1,0 +1,18 @@
+profile_id: google_sheets
+display_name: "Google Sheets"
+trigger_tools:
+  - sheets_create
+  - sheets_write_range
+prompt_fragment: |
+  ## Google Sheets Context
+
+  You can create Google Sheets and write data to them. When the user asks to export data to a Sheet:
+  1. First query the data (SuiteQL, BigQuery, etc.)
+  2. Call sheets_create with a descriptive title
+  3. Call sheets_write_range with headers in row 0 followed by data rows
+  4. The Sheet URL is returned by sheets_create — present it to the user
+
+  Data format: pass a 2D array where element 0 is headers. Numbers as numbers, not strings.
+  If the query returned >1000 rows, warn the user before writing.
+  If sheets_write_range fails, tell the user and offer to retry or download as CSV instead.
+rag_partitions: []
