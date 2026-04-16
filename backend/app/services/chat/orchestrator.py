@@ -291,11 +291,13 @@ def _assemble_system_prompt(*, template: str, tool_definitions: list[dict]) -> s
     what it can call AND how to choose between them stays in sync with the
     real schema.
     """
-    if "{{TOOL_INVENTORY}}" not in template:
-        return template
     inventory = build_tool_inventory_block(tool_definitions)
     guidance = build_mcp_execution_guidance(tool_definitions)
-    return template.replace("{{TOOL_INVENTORY}}", inventory + guidance)
+    combined = inventory + guidance
+    if "{{TOOL_INVENTORY}}" in template:
+        return template.replace("{{TOOL_INVENTORY}}", combined)
+    # DB-stored custom templates may lack the placeholder — append at end
+    return template + f"\n\n{combined}" if combined else template
 
 
 # ---------------------------------------------------------------------------
