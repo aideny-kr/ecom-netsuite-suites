@@ -105,13 +105,23 @@ If the top score is < 0.45: either lower `PATTERN_MIN_SIMILARITY` modestly (0.40
 
 If the top score is ≥ 0.45: the gate is the culprit (see step 3 below), not the similarity. No new patterns needed.
 
-**2. Add a Framework learned rule for shipping country (mirrors the location rule precedent).**
+**2. Append an ADDRESS TABLES block to `unified_agent.py` SuiteQL rules.**
 
-Insert one `term_definition` rule (always-on category, not query-gated) via `tenant_save_learned_rule` tool or direct DB insert. Wording:
+The shipping/billing address join pattern is a NetSuite *platform* quirk, not a Framework-specific behavior — every NetSuite tenant that queries by country hits the same trap. So the rule belongs in the universal layer (the unified prompt today, `netsuite.yaml` after Phase 2's migration), not in `tenant_learned_rules`.
 
-> "For sales/order queries filtered or grouped by shipping country, ALWAYS use `JOIN transactionShippingAddress sa ON sa.nKey = t.shippingAddress` and read `BUILTIN.DF(sa.country)` for the country name (or `sa.country` for the 2-letter ISO code). Do NOT use custom body fields like `custbodyfw_ship_country_ext` — the shipping country is a standard NetSuite field on the shipping address, not a custom field. The `transactionShippingAddress` join key is `sa.nKey = t.shippingAddress`, NOT `sa.recordOwner = t.id` or `sa.transaction = t.id`."
+Append the block immediately after the existing `CUSTOM LIST FIELDS` section at `unified_agent.py:204-205` (sits adjacent to the related TEXT RESOLUTION rule at line 195):
 
-This is the exact parallel to the location rule from 2026-03-16. `term_definition` category keeps it always-injected regardless of query keywords, which is what we want — it's universally relevant whenever any NetSuite query touches country.
+```
+ADDRESS TABLES — shipping/billing country, state, city:
+- Country lives on the address record, NOT the transaction header. Join: `JOIN transactionShippingAddress sa ON sa.nKey = t.shippingAddress` (or `transactionBillingAddress ba ON ba.nKey = t.billingAddress`).
+- The join key is `sa.nKey = t.shippingAddress`. NEVER `sa.recordOwner = t.id`, NEVER `sa.transaction = t.id`, NEVER `sa.id = t.shippingAddress`.
+- Read `BUILTIN.DF(sa.country)` for country name ("Switzerland") or `sa.country` for 2-letter ISO code ("CH"). Both work; prefer `BUILTIN.DF` for display, raw code for filtering.
+- Do NOT use custom body fields (`custbody*_ship_country*`, `custbody*_country*`) for country queries unless the user explicitly asks for the custom field. The standard address join is the source of truth.
+```
+
+Migration note: in Phase 2, this block moves into `netsuite.yaml`'s `prompt_fragment` along with the rest of the SuiteQL dialect rules. Until then it lives in the base prompt — no per-tenant duplication, no learned-rule for what's universal.
+
+(Framework-specific learned rules — like `custbody_fw_solidus_order_total` = service order — remain in `tenant_learned_rules`. The line is: NetSuite platform quirks → universal prompt; tenant business semantics → learned rules.)
 
 **3. Update `prompt_assembler.py:9-20` `DISAMBIGUATION_INSTRUCTION`.**
 Add an explicit-naming clause as the FIRST rule (before "use the most authoritative one") so it has unambiguous precedence:
@@ -131,9 +141,9 @@ _need_patterns = bool({"netsuite_suiteql", "bigquery_sql"} & _tool_names) or any
 Trade-off: marginally larger context window on FULL queries (~1-2K tokens for top-K patterns). Benefit: seeded patterns can never be stranded by a context classifier choice. Document the change in the orchestrator's injection-matrix comment so the matrix at lines 1374-1383 stays honest.
 
 **5. Smoke-test on staging.**
-Re-run the broken query ("4 new countries we recently launched"). Expected outcome: agent generates correct SuiteQL on the first attempt, no rediscovery loop. Pattern retrieval logs should show `returned≥1` with a matched pattern citing `sa.nKey = t.shippingAddress`.
+Re-run the broken query ("4 new countries we recently launched"). Expected outcome: agent generates correct SuiteQL on the first attempt, no rediscovery loop. Pattern retrieval logs should show `returned≥1` with a matched pattern citing `sa.nKey = t.shippingAddress`. The ADDRESS TABLES block in the system prompt provides the floor: even if no pattern retrieves, the agent should at minimum get the join right.
 
-**Phase 1 deliverable:** one PR with: (a) the disambiguation prompt change, (b) the `_need_patterns` gate replacement, (c) the new country learned rule (as a data insert documented in the PR, OR via a one-off runbook script). Pattern-similarity diagnostic is a runbook step (separate from PR).
+**Phase 1 deliverable:** one PR with: (a) the ADDRESS TABLES block appended to `unified_agent.py`, (b) the disambiguation prompt change in `prompt_assembler.py`, (c) the `_need_patterns` gate replacement in `orchestrator.py`. Pattern-similarity diagnostic is a runbook step (separate from PR). No DB writes required for this PR — patterns and learned rules are unchanged.
 
 ### Phase 2 — This week (~1 day)
 
@@ -148,7 +158,7 @@ Mirror the structure of `ingest_domain_knowledge.py`. Place under `backend/scrip
 **2. `netsuite.yaml` knowledge profile.**
 File: `backend/app/services/chat/knowledge_profiles/netsuite.yaml`
 - `trigger_tools`: ALL NetSuite read-side tools — `netsuite_suiteql`, `netsuite_financial_report`, `ns_runReport`, `ns_runSavedSearch`, `ext__*__ns_runCustomSuiteQL`, `ext__*__ns_getSuiteQLMetadata`, `ext__*__ns_getRecord`, `ext__*__ns_runReport`, `ext__*__ns_runSavedSearch`, `ext__*__ns_getSavedSearchSchema`. Reason: SuiteQL rules apply when ANY NetSuite read tool is present, because saved-search and financial-report sessions can spill into ad-hoc SuiteQL on follow-up turns. Write-side stays in `netsuite_writes.yaml`.
-- `prompt_fragment`: Move the 150 lines of SuiteQL dialect rules from `unified_agent.py:173-313` into here. Keep the same wording verbatim per CLAUDE.md rule #24. Add a worked `transactionShippingAddress` example.
+- `prompt_fragment`: Move the 150 lines of SuiteQL dialect rules from `unified_agent.py:173-313` into here, **including the ADDRESS TABLES block added in Phase 1 step 2**. Keep the same wording verbatim per CLAUDE.md rule #24. Add a worked `transactionShippingAddress` example with full revenue filters (mainline/taxline/iscogs/assemblycomponent).
 - `rag_partitions`: `netsuite/suiteql-rules`, `netsuite/joins`, `netsuite/transactions`, `netsuite/multi-currency`, `netsuite/record-types`.
 
 **Risk mitigation:** Before deleting the rules from `unified_agent.py`, confirm no tenant has zero NetSuite tools but still asks SuiteQL questions (CLAUDE.md rule #28 says one unified agent — a tenant with only BigQuery + Pricing tools should not be writing SuiteQL). Add a regression test that asserts `netsuite.yaml.prompt_fragment` contains the same dialect rules verbatim after the move.
@@ -186,7 +196,7 @@ After Phase 1's narrow gating fix, do a fuller pass: ensure context-need classif
 
 ## Success Criteria
 
-- **Phase 1 success (today):** Re-running the broken query on staging — "what are the 4 new countries we recently launched?" — produces correct SuiteQL on the first attempt with `sa.nKey = t.shippingAddress` join, no `recordOwner=t.id` or `transaction=t.id` misfires, no `custbodyfw_ship_country_ext` misfires, AND no compound status codes (`'SalesOrd:C'`). Pattern retrieval logs show `returned≥1` for the matched pattern (one of the 6 April-10 patterns). Learned rules logs show the new country rule in the always-on slice. `last_used_at` on the matched pattern updates post-turn. User confirms via a fresh staging session. If `'SalesOrd:C'` still recurs despite pattern + rule + disambiguation fixes, escalate — the prompt-attention gap (Open Question #3) is then a real blocker, not a deferred concern.
+- **Phase 1 success (today):** Re-running the broken query on staging — "what are the 4 new countries we recently launched?" — produces correct SuiteQL on the first attempt with `sa.nKey = t.shippingAddress` join, no `recordOwner=t.id` or `transaction=t.id` misfires, no `custbodyfw_ship_country_ext` misfires, AND no compound status codes (`'SalesOrd:C'`). Two layers of defense should activate: (a) the new ADDRESS TABLES block in `unified_agent.py` provides the floor, (b) at least one of the 6 April-10 patterns retrieves and matches (logs show `[PATTERN_RETRIEVAL] returned≥1`, and `last_used_at` on the matched pattern updates post-turn). User confirms via a fresh staging session. If `'SalesOrd:C'` still recurs despite both layers, escalate — the prompt-attention gap (Open Question #3) is then a real blocker, not a deferred concern.
 - **Phase 2 success (this week):** Three independent staging tests:
   - "Show sales by shipping country since Jan 1" → first-attempt correct SQL.
   - "Compare net revenue Q1 vs Q2 by subsidiary" → uses correct multi-currency rules from RAG.
@@ -198,7 +208,7 @@ After Phase 1's narrow gating fix, do a fuller pass: ensure context-need classif
 
 Existing pipeline. Phase 1 PR → CI → staging deploy via `saas-deployment` skill. Phase 2 PR → same path. No new infrastructure, no new secrets, no Alembic migrations.
 
-For the Phase 1 country learned-rule insert: use the existing `tenant_save_learned_rule` tool (via a chat session as Framework admin) OR a one-off `.venv/bin/python` insert into `tenant_learned_rules`. Document the rule verbatim in the Phase 1 PR description so it's reproducible. Phase 2 adds `seed_tenant_patterns.py` for bulk pattern operations — it should also support bulk learned-rule seeding, or a sibling `seed_tenant_learned_rules.py` script, so future "teach the agent" operations can be scripted.
+Phase 1 ships entirely as code changes in one PR — no DB writes, no runbook step. The ADDRESS TABLES block, disambiguation precedence, and `_need_patterns` gate replacement all land together. Phase 2 adds `seed_tenant_patterns.py` for future bulk pattern operations (and optionally a sibling `seed_tenant_learned_rules.py` for tenant-specific business rules).
 
 ## Dependencies
 
