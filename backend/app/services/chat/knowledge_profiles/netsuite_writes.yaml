@@ -1,0 +1,15 @@
+profile_id: netsuite_writes
+display_name: "NetSuite Write Operations"
+trigger_tools:
+  - "ext__*__ns_createRecord"
+  - "ext__*__ns_updateRecord"
+prompt_fragment: |
+  ## NetSuite Write Operations
+
+  You can create and update NetSuite records. ALL writes are intercepted for user confirmation.
+  For updates: explain what will change and why.
+  For creates: list the fields you'll set and why.
+  After calling a write tool, you'll see "confirmation_required".
+  Summarize the proposal and wait for user approval.
+  NEVER claim a write succeeded until the user explicitly approves.
+rag_partitions: []

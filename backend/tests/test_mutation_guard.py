@@ -113,39 +113,20 @@ class TestGetMutationType:
 
 
 class TestIsRecordTypeAllowed:
-    # Allowed types
     @pytest.mark.parametrize(
         "record_type",
         [
             "salesOrder",
-            "purchaseOrder",
-            "invoice",
-            "customerDeposit",
-            "customerPayment",
             "customer",
+            "inventoryItem",
             "vendor",
-            "vendorBill",
             "journalEntry",
-            "creditMemo",
-            "returnAuthorization",
-            "itemFulfillment",
-            "itemReceipt",
-            "transferOrder",
-            "intercompanyJournalEntry",
-            "estimate",
-            "opportunity",
-            "cashSale",
-            "check",
-            "vendorCredit",
-            "depositApplication",
-            "inventoryAdjustment",
-            "workOrder",
+            "somethingNew",
         ],
     )
-    def test_allowed_types(self, record_type: str):
+    def test_non_blocked_types_allowed(self, record_type: str):
         assert is_record_type_allowed(record_type) is True
 
-    # Blocked types
     @pytest.mark.parametrize(
         "record_type",
         [
@@ -165,14 +146,6 @@ class TestIsRecordTypeAllowed:
     )
     def test_blocked_types(self, record_type: str):
         assert is_record_type_allowed(record_type) is False
-
-    def test_unknown_type_returns_false(self):
-        # Unknown types that are neither explicitly allowed nor blocked
-        assert is_record_type_allowed("somethingWeird") is False
-
-    def test_case_sensitive(self):
-        # "salesorder" (lowercase) is not the same as "salesOrder"
-        assert is_record_type_allowed("salesorder") is False
 
 
 # ---------------------------------------------------------------------------

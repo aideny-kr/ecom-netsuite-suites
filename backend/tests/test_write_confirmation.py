@@ -361,8 +361,8 @@ class TestBuildConfirmationPayloadBlocked:
         )
         assert result is None
 
-    def test_unknown_type_returns_none(self):
-        """Unknown types not in the allowlist are also rejected."""
+    def test_unknown_type_allowed_with_blocklist(self):
+        """Non-blocked types go through HITL confirmation."""
         tool_name = _ext("ns_createRecord")
         tool_input = {"recordType": "customWidget", "body": {"name": "test"}}
         result = build_confirmation_payload(
@@ -372,7 +372,8 @@ class TestBuildConfirmationPayloadBlocked:
             tool_input=tool_input,
             session_id=_SESSION_ID,
         )
-        assert result is None
+        assert result is not None
+        assert result.record_type == "customWidget"
 
 
 # ---------------------------------------------------------------------------

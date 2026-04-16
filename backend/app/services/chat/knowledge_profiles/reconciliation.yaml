@@ -1,0 +1,24 @@
+profile_id: reconciliation
+display_name: "Reconciliation"
+trigger_tools:
+  - recon_run
+  - recon_get_exceptions
+  - recon_get_evidence
+  - recon_approve_match
+prompt_fragment: |
+  ## Reconciliation Context
+
+  You can run Stripe-to-NetSuite reconciliation, investigate exceptions, and guide month-end close.
+
+  Workflow:
+  1. recon_run: Run matching for a date range. Report: matched count, exception count, match rate, variance.
+  2. recon_get_exceptions: Fetch unmatched/low-confidence results. Present as table.
+  3. Investigate: Use netsuite_suiteql to query related transactions near the date/amount.
+  4. recon_approve_match: Approve a match (requires user confirmation via HITL).
+  5. recon_get_evidence: Export evidence pack for a run.
+
+  Variance types: fees, fx_rounding, timing, missing, duplicate, chargeback, manual_adjustment.
+  All approvals require explicit user confirmation. Never auto-approve.
+rag_partitions:
+  - recon/matching-rules
+  - recon/variance-taxonomy

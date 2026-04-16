@@ -49,15 +49,6 @@ class TestAllYAMLConfigs:
                 except re.error as e:
                     pytest.fail(f"{filename}: invalid regex '{rule.pattern}': {e}")
 
-    def test_no_identical_patterns_across_agents(self):
-        """No exact same regex pattern appears in 2+ configs."""
-        pattern_to_agents: dict[str, list[str]] = {}
-        for filename, config in _load_all_configs():
-            for rule in config.routing_rules:
-                pattern_to_agents.setdefault(rule.pattern, []).append(config.agent_id)
-        dupes = {p: agents for p, agents in pattern_to_agents.items() if len(agents) > 1}
-        assert not dupes, f"Duplicate patterns across agents: {dupes}"
-
     def test_all_prompt_files_exist(self):
         """Every config with prompt_file points to a real file in agents/prompts/."""
         for filename, config in _load_all_configs():
@@ -80,15 +71,6 @@ class TestAllYAMLConfigs:
                 assert config.routing_rules == [], "unified-agent should have no routing_rules"
                 return
         pytest.fail("unified-agent config not found")
-
-    def test_specialized_agents_have_routing_rules(self):
-        """Non-unified agents have >=1 routing_rule."""
-        for filename, config in _load_all_configs():
-            if config.agent_id == "unified-agent":
-                continue
-            assert len(config.routing_rules) >= 1, (
-                f"{filename}: specialized agent '{config.agent_id}' has no routing_rules"
-            )
 
     def test_max_steps_within_bounds(self):
         """All configs have 1 <= max_steps <= 20."""
@@ -147,10 +129,3 @@ class TestRequiresConnectorField:
         assert config.requires_connector == ["bigquery", "snowflake"]
 
 
-class TestBiAgentRequiresBigQuery:
-    def test_bi_agent_declares_bigquery_connector_requirement(self):
-        """bi-agent is BigQuery-dependent — the YAML must declare this."""
-        config = AgentYAMLConfig.from_yaml(CONFIGS_DIR / "bi_agent.yaml")
-        assert "bigquery" in config.requires_connector, (
-            f"bi_agent.yaml must list bigquery in requires_connector; got {config.requires_connector}"
-        )

@@ -1,0 +1,26 @@
+profile_id: pricing
+display_name: "Pricing Engine"
+trigger_tools:
+  - pricing_convert
+  - pricing_config_read
+  - pricing_config_update
+  - pricing_export
+prompt_fragment: |
+  ## Pricing Engine Context
+
+  You have access to the pricing conversion engine for margin calculations, tariff analysis, price list queries, and currency conversion.
+
+  Capabilities:
+  - Margin Analysis: gross/net margins on items, product lines, customers
+  - Tariff Impact: tariffs and duties effect on landed cost
+  - Price List Queries: item rates, base prices, MSRP, discount schedules
+  - Currency Conversion: use pricing_convert for FX conversion (never calculate manually)
+  - Config Management: update FX rates, VAT percentages via pricing_config_update
+
+  If user_instructions are present, follow them strictly — they contain item lists and pricing rules.
+
+  Results from pricing_convert render automatically in the frontend table.
+  Do NOT list individual prices in your response.
+rag_partitions:
+  - pricing/margin-rules
+  - pricing/tariff-schedules

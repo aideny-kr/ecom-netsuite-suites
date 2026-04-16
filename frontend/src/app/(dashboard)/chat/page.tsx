@@ -35,7 +35,6 @@ export default function ChatPage() {
   const [streamingMessage, setStreamingMessage] = useState<ChatMessage | null>(null);
   const [isStreaming, setIsStreaming] = useState(false);
   const isStreamingRef = useRef(false);
-  const [activeSourcePick, setActiveSourcePick] = useState<"netsuite" | "bigquery" | null>(null);
   const [financialReport, setFinancialReport] = useState<FinancialReportData | null>(null);
   const financialReportsRef = useRef<Map<string, FinancialReportData>>(new Map());
   const [dataTable, setDataTable] = useState<DataTableData | null>(null);
@@ -317,7 +316,6 @@ export default function ChatPage() {
         setDataTable(null);
         setCharts([]);
         setTaskOutput(null);
-        setActiveSourcePick(null);
       }
     },
     [flushBuffer, forceFlush, queryClient],
@@ -348,7 +346,7 @@ export default function ChatPage() {
   }, [sessionDetail?.active_run_id, sessionDetail?.status, activeSessionId]);
 
   const handleSend = useCallback(
-    async (content: string, fileId?: string, opts: { source_pick?: "netsuite" | "bigquery"; write_confirm?: { action: "approve" | "reject"; confirmation_id: string } } = {}) => {
+    async (content: string, fileId?: string, opts: { write_confirm?: { action: "approve" | "reject"; confirmation_id: string } } = {}) => {
       if (isStreamingRef.current || createSession.isPending) return;
       setError(null);
       setPendingMessage(content);
@@ -382,7 +380,6 @@ export default function ChatPage() {
           agent_id: pinnedAgentId || undefined,
           file_id: fileId || undefined,
         };
-        if (opts.source_pick) msgBody.source_pick = opts.source_pick;
         if (opts.write_confirm) msgBody.write_confirm = opts.write_confirm;
         const { run_id } = await apiClient.post<{ run_id: string }>(
           `/api/v1/chat/sessions/${sessionId}/messages`,
@@ -410,55 +407,6 @@ export default function ChatPage() {
       }
     },
     [activeSessionId, createSession, flushBuffer, queryClient, pinnedAgentId],
-  );
-
-  const handleSourcePick = useCallback(
-    async (messageId: string, source: "netsuite" | "bigquery") => {
-      const pickerMsg = sessionDetail?.messages.find((m) => m.id === messageId);
-      const so = pickerMsg?.structured_output as { user_question?: string } | null | undefined;
-      const originalQuestion = so?.user_question;
-      if (!originalQuestion) {
-        console.warn("[source-picker] no user_question in placeholder message");
-        return;
-      }
-      // Optimistic update: mark the picker card as selected immediately so
-      // the UI reflects the click without waiting for the backend round-trip.
-      // The backend will persist the same `selected` value via orchestrator.
-      if (activeSessionId && pickerMsg) {
-        queryClient.setQueryData(
-          ["chat-session", activeSessionId],
-          (prev: ChatSessionDetail | undefined) => {
-            if (!prev) return prev;
-            return {
-              ...prev,
-              messages: prev.messages.map((m) => {
-                if (m.id !== messageId) return m;
-                const mSo = (m.structured_output as Record<string, unknown> | null) ?? {};
-                return {
-                  ...m,
-                  structured_output: {
-                    ...mSo,
-                    selected: source,
-                  } as unknown as ChatMessage["structured_output"],
-                };
-              }),
-            };
-          },
-        );
-      }
-      // The picker's SSE stream may still be open (connectToRunStream hasn't
-      // finished its finally block). Clear streaming state so handleSend's
-      // isStreamingRef guard doesn't silently block the new request.
-      if (abortRef.current) {
-        abortRef.current.abort();
-        abortRef.current = null;
-      }
-      isStreamingRef.current = false;
-      setIsStreaming(false);
-      setActiveSourcePick(source);
-      await handleSend(originalQuestion, undefined, { source_pick: source });
-    },
-    [sessionDetail, handleSend, activeSessionId, queryClient],
   );
 
   const handleWriteConfirm = useCallback(
@@ -493,7 +441,6 @@ export default function ChatPage() {
     setTaskOutput(null);
     setPendingMessage(null);
     setError(null);
-    setActiveSourcePick(null);
   }, []);
 
   const handleNewChat = useCallback(() => {
@@ -572,7 +519,6 @@ export default function ChatPage() {
             isLoading={isLoadingDetail && !!activeSessionId}
             pendingUserMessage={pendingMessage}
             isWaitingForReply={isStreaming}
-            activeSourcePick={activeSourcePick}
             streamBlocks={streamBlocks}
             streamingMessage={streamingMessage}
             financialReports={financialReportsRef.current}
@@ -587,7 +533,6 @@ export default function ChatPage() {
             onTemplateUploaded={setTemplateFile}
             onRemoveTemplate={() => setTemplateFile(null)}
             onMentionClick={handleMentionClick}
-            onSourcePick={handleSourcePick}
             onWriteConfirm={handleWriteConfirm}
             onImportanceOverride={(messageId, newTier) => {
               queryClient.setQueryData<ChatSessionDetail>(

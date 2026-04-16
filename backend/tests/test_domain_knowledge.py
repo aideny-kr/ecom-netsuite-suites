@@ -260,6 +260,93 @@ class TestRetrievalService:
 
         assert results == []
 
+    @pytest.mark.asyncio
+    async def test_retrieve_with_partition_ids_keyword_path(self):
+        """partition_ids parameter is accepted and passed through in keyword fallback path."""
+        from app.services.chat.domain_knowledge import retrieve_domain_knowledge
+
+        mock_db = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.all.return_value = []
+        mock_db.execute = AsyncMock(return_value=mock_result)
+
+        with patch("app.services.chat.domain_knowledge.embed_domain_query", return_value=None):
+            result = await retrieve_domain_knowledge(
+                db=mock_db,
+                query_text="test query",
+                partition_ids=["bi/schema-docs", "bi/common-queries"],
+            )
+
+        assert result == []
+        # Verify execute was called (keyword fallback ran with partition filter)
+        assert mock_db.execute.called
+
+    @pytest.mark.asyncio
+    async def test_retrieve_without_partition_ids_unchanged(self):
+        """Without partition_ids, behavior is unchanged."""
+        from app.services.chat.domain_knowledge import retrieve_domain_knowledge
+
+        mock_db = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.all.return_value = []
+        mock_db.execute = AsyncMock(return_value=mock_result)
+
+        with patch("app.services.chat.domain_knowledge.embed_domain_query", return_value=None):
+            result = await retrieve_domain_knowledge(
+                db=mock_db,
+                query_text="test query",
+            )
+
+        assert result == []
+        assert mock_db.execute.called
+
+    @pytest.mark.asyncio
+    async def test_retrieve_with_partition_ids_vector_path(self):
+        """partition_ids filter is applied in the vector similarity path."""
+        from app.services.chat.domain_knowledge import retrieve_domain_knowledge
+
+        mock_db = AsyncMock()
+        mock_chunk = MagicMock()
+        mock_chunk.raw_text = "BigQuery schema overview"
+        mock_chunk.source_uri = "bi/schema-docs/tables.md"
+        mock_chunk.topic_tags = ["bigquery"]
+
+        mock_result = MagicMock()
+        mock_result.all.return_value = [(mock_chunk, 0.10)]
+        mock_db.execute = AsyncMock(return_value=mock_result)
+
+        fake_embedding = [0.1] * 1536
+        with patch("app.services.chat.domain_knowledge.embed_domain_query", return_value=fake_embedding):
+            results = await retrieve_domain_knowledge(
+                db=mock_db,
+                query_text="bigquery schema",
+                partition_ids=["bi/schema-docs"],
+            )
+
+        assert len(results) == 1
+        assert results[0]["raw_text"] == "BigQuery schema overview"
+        assert results[0]["similarity"] == 0.9  # 1.0 - 0.10
+
+    @pytest.mark.asyncio
+    async def test_retrieve_with_empty_partition_ids_no_filter(self):
+        """Empty partition_ids list is treated as 'no filter' (same as None)."""
+        from app.services.chat.domain_knowledge import retrieve_domain_knowledge
+
+        mock_db = AsyncMock()
+        mock_result = MagicMock()
+        mock_result.all.return_value = []
+        mock_db.execute = AsyncMock(return_value=mock_result)
+
+        with patch("app.services.chat.domain_knowledge.embed_domain_query", return_value=None):
+            result = await retrieve_domain_knowledge(
+                db=mock_db,
+                query_text="test query",
+                partition_ids=[],
+            )
+
+        assert result == []
+        assert mock_db.execute.called
+
 
 # ── Golden dataset validation ──
 
