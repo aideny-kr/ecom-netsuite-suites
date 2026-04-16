@@ -6,6 +6,12 @@ import pytest
 
 from app.schemas.mcp_connector import SheetsConnectorCreate, SheetsTestRequest
 
+_VALID_SA = {
+    "type": "service_account",
+    "client_email": "sa@proj.iam.gserviceaccount.com",
+    "private_key": "-----BEGIN PRIVATE KEY-----\nfake\n-----END PRIVATE KEY-----\n",
+}
+
 
 def _make_mock_db():
     """Return a db mock that matches real SQLAlchemy async session behaviour.
@@ -31,7 +37,7 @@ class TestSheetsTestConnection:
     async def test_valid_credentials_returns_true(self):
         from app.api.v1.mcp_connectors import test_sheets_connection
 
-        request = SheetsTestRequest(service_account_json={"type": "service_account"})
+        request = SheetsTestRequest(service_account_json=_VALID_SA)
         mock_user = MagicMock()
         mock_user.tenant_id = uuid.uuid4()
         mock_user.id = uuid.uuid4()
@@ -50,7 +56,7 @@ class TestSheetsTestConnection:
     async def test_invalid_credentials_returns_false_with_error(self):
         from app.api.v1.mcp_connectors import test_sheets_connection
 
-        request = SheetsTestRequest(service_account_json={"type": "bad"})
+        request = SheetsTestRequest(service_account_json={"type": "bad", "client_email": "x@y.com", "private_key": "pk"})
         mock_user = MagicMock()
         mock_user.tenant_id = uuid.uuid4()
         mock_user.id = uuid.uuid4()
@@ -70,7 +76,7 @@ class TestSheetsTestConnection:
         """If validation dict has no 'error' key, error should be None."""
         from app.api.v1.mcp_connectors import test_sheets_connection
 
-        request = SheetsTestRequest(service_account_json={"type": "service_account"})
+        request = SheetsTestRequest(service_account_json=_VALID_SA)
         mock_user = MagicMock()
         mock_user.tenant_id = uuid.uuid4()
         mock_user.id = uuid.uuid4()
@@ -92,12 +98,7 @@ class TestSheetsCreateConnector:
     async def test_creates_connector_on_valid_credentials(self):
         from app.api.v1.mcp_connectors import create_sheets_connector
 
-        request = SheetsConnectorCreate(
-            service_account_json={
-                "type": "service_account",
-                "client_email": "sa@proj.iam.gserviceaccount.com",
-            }
-        )
+        request = SheetsConnectorCreate(service_account_json=_VALID_SA)
         mock_user = MagicMock()
         mock_user.tenant_id = uuid.uuid4()
         mock_user.id = uuid.uuid4()
@@ -133,7 +134,7 @@ class TestSheetsCreateConnector:
 
         from app.api.v1.mcp_connectors import create_sheets_connector
 
-        request = SheetsConnectorCreate(service_account_json={"type": "bad"})
+        request = SheetsConnectorCreate(service_account_json={"type": "bad", "client_email": "x@y.com", "private_key": "pk"})
         mock_user = MagicMock()
         mock_user.tenant_id = uuid.uuid4()
         mock_user.id = uuid.uuid4()
@@ -151,7 +152,7 @@ class TestSheetsCreateConnector:
     async def test_encrypts_credentials(self):
         from app.api.v1.mcp_connectors import create_sheets_connector
 
-        sa_json = {"type": "service_account", "client_email": "sa@proj.iam.gserviceaccount.com"}
+        sa_json = _VALID_SA
         request = SheetsConnectorCreate(service_account_json=sa_json)
         mock_user = MagicMock()
         mock_user.tenant_id = uuid.uuid4()
@@ -184,7 +185,7 @@ class TestSheetsCreateConnector:
         from app.api.v1.mcp_connectors import create_sheets_connector
 
         request = SheetsConnectorCreate(
-            service_account_json={"type": "service_account"},
+            service_account_json=_VALID_SA,
         )
         mock_user = MagicMock()
         mock_user.tenant_id = uuid.uuid4()
@@ -216,7 +217,7 @@ class TestSheetsCreateConnector:
     async def test_audit_logged(self):
         from app.api.v1.mcp_connectors import create_sheets_connector
 
-        request = SheetsConnectorCreate(service_account_json={"type": "service_account"})
+        request = SheetsConnectorCreate(service_account_json=_VALID_SA)
         mock_user = MagicMock()
         mock_user.tenant_id = uuid.uuid4()
         mock_user.id = uuid.uuid4()
@@ -249,7 +250,7 @@ class TestSheetsCreateConnector:
         """Sheets tools are registered locally — discovered_tools must be None."""
         from app.api.v1.mcp_connectors import create_sheets_connector
 
-        request = SheetsConnectorCreate(service_account_json={"type": "service_account"})
+        request = SheetsConnectorCreate(service_account_json=_VALID_SA)
         mock_user = MagicMock()
         mock_user.tenant_id = uuid.uuid4()
         mock_user.id = uuid.uuid4()
@@ -281,7 +282,7 @@ class TestSheetsCreateConnector:
 
         email = "sa@myproject.iam.gserviceaccount.com"
         request = SheetsConnectorCreate(
-            service_account_json={"type": "service_account", "client_email": email}
+            service_account_json={**_VALID_SA, "client_email": email}
         )
         mock_user = MagicMock()
         mock_user.tenant_id = uuid.uuid4()
@@ -361,27 +362,101 @@ class TestSheetsCreateConnector:
         assert "encrypted_credentials" not in response_field_names
 
 
+_VALID_SA = {
+    "type": "service_account",
+    "client_email": "sa@proj.iam.gserviceaccount.com",
+    "private_key": "-----BEGIN PRIVATE KEY-----\nfake\n-----END PRIVATE KEY-----\n",
+}
+
+
 class TestSheetsSchemas:
     """Validate Pydantic schema constraints."""
 
     def test_test_request_valid(self):
-        req = SheetsTestRequest(service_account_json={"type": "service_account"})
+        req = SheetsTestRequest(service_account_json=_VALID_SA)
         assert req.service_account_json["type"] == "service_account"
 
     def test_connector_create_default_label(self):
-        req = SheetsConnectorCreate(service_account_json={"type": "service_account"})
+        req = SheetsConnectorCreate(service_account_json=_VALID_SA)
         assert req.label == "Google Sheets"
 
     def test_connector_create_custom_label(self):
-        req = SheetsConnectorCreate(
-            service_account_json={"type": "service_account"},
-            label="My Sheets",
-        )
+        req = SheetsConnectorCreate(service_account_json=_VALID_SA, label="My Sheets")
         assert req.label == "My Sheets"
 
     def test_connector_create_empty_label_rejected(self):
         with pytest.raises(Exception):
-            SheetsConnectorCreate(
-                service_account_json={"type": "service_account"},
-                label="",
-            )
+            SheetsConnectorCreate(service_account_json=_VALID_SA, label="")
+
+    def test_empty_service_account_json_rejected(self):
+        """Empty dict must fail at schema boundary, not surface as 500 from service layer."""
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError, match="service_account_json"):
+            SheetsTestRequest(service_account_json={})
+        with pytest.raises(ValidationError, match="service_account_json"):
+            SheetsConnectorCreate(service_account_json={})
+
+    def test_missing_client_email_rejected(self):
+        from pydantic import ValidationError
+
+        bad = {"type": "service_account", "private_key": "..."}
+        with pytest.raises(ValidationError, match="client_email"):
+            SheetsTestRequest(service_account_json=bad)
+        with pytest.raises(ValidationError, match="client_email"):
+            SheetsConnectorCreate(service_account_json=bad)
+
+    def test_missing_private_key_rejected(self):
+        from pydantic import ValidationError
+
+        bad = {"type": "service_account", "client_email": "sa@x.iam.gserviceaccount.com"}
+        with pytest.raises(ValidationError, match="private_key"):
+            SheetsTestRequest(service_account_json=bad)
+        with pytest.raises(ValidationError, match="private_key"):
+            SheetsConnectorCreate(service_account_json=bad)
+
+
+class TestSheetsEndpointErrorHandling:
+    """Endpoint must convert service-layer ValueError to HTTP 400, not 500."""
+
+    @pytest.mark.asyncio
+    async def test_test_endpoint_wraps_value_error_as_400(self):
+        """If validate_sheets_connection raises ValueError unexpectedly, endpoint returns 400."""
+        from fastapi import HTTPException
+
+        from app.api.v1.mcp_connectors import test_sheets_connection
+
+        request = SheetsTestRequest(service_account_json=_VALID_SA)
+        mock_user = MagicMock()
+        mock_user.tenant_id = uuid.uuid4()
+        mock_user.id = uuid.uuid4()
+
+        with patch(
+            "app.api.v1.mcp_connectors.validate_sheets_connection",
+            new=AsyncMock(side_effect=ValueError("credentials required")),
+        ):
+            with pytest.raises(HTTPException) as exc_info:
+                await test_sheets_connection(request, mock_user, _make_mock_db())
+
+        assert exc_info.value.status_code == 400
+        assert "credentials" in str(exc_info.value.detail).lower()
+
+    @pytest.mark.asyncio
+    async def test_create_endpoint_wraps_value_error_as_400(self):
+        from fastapi import HTTPException
+
+        from app.api.v1.mcp_connectors import create_sheets_connector
+
+        request = SheetsConnectorCreate(service_account_json=_VALID_SA)
+        mock_user = MagicMock()
+        mock_user.tenant_id = uuid.uuid4()
+        mock_user.id = uuid.uuid4()
+
+        with patch(
+            "app.api.v1.mcp_connectors.validate_sheets_connection",
+            new=AsyncMock(side_effect=ValueError("credentials required")),
+        ):
+            with pytest.raises(HTTPException) as exc_info:
+                await create_sheets_connector(request, mock_user, _make_mock_db())
+
+        assert exc_info.value.status_code == 400

@@ -401,11 +401,14 @@ async def test_bigquery_connection(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> BigQueryTestResponse:
     """Test BigQuery connection with service account credentials."""
-    validation = await validate_connection(
-        credentials=request.service_account_json,
-        project_id=request.project_id,
-        location=request.location,
-    )
+    try:
+        validation = await validate_connection(
+            credentials=request.service_account_json,
+            project_id=request.project_id,
+            location=request.location,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
     if not validation["valid"]:
         return BigQueryTestResponse(valid=False, error=validation["error"])
@@ -433,11 +436,14 @@ async def create_bigquery_connector(
     from app.models.mcp_connector import McpConnector
 
     # 1. Validate connection
-    validation = await validate_connection(
-        credentials=request.service_account_json,
-        project_id=request.project_id,
-        location=request.location,
-    )
+    try:
+        validation = await validate_connection(
+            credentials=request.service_account_json,
+            project_id=request.project_id,
+            location=request.location,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     if not validation["valid"]:
         raise HTTPException(status_code=400, detail=f"Connection failed: {validation['error']}")
 
@@ -660,7 +666,10 @@ async def test_sheets_connection(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> SheetsTestResponse:
     """Test Google Sheets connection with service account credentials."""
-    validation = await validate_sheets_connection(credentials=request.service_account_json)
+    try:
+        validation = await validate_sheets_connection(credentials=request.service_account_json)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     if not validation["valid"]:
         return SheetsTestResponse(valid=False, error=validation.get("error"))
     return SheetsTestResponse(valid=True)
@@ -678,7 +687,10 @@ async def create_sheets_connector(
     from app.models.mcp_connector import McpConnector
 
     # 1. Validate connection
-    validation = await validate_sheets_connection(credentials=request.service_account_json)
+    try:
+        validation = await validate_sheets_connection(credentials=request.service_account_json)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     if not validation["valid"]:
         raise HTTPException(status_code=400, detail=f"Connection failed: {validation.get('error')}")
 
