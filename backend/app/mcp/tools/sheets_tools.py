@@ -38,7 +38,7 @@ async def _get_sheets_connector(context: dict) -> McpConnector | None:
             McpConnector.is_enabled.is_(True),
         )
     )
-    return result.scalar_one_or_none()
+    return result.scalars().first()
 
 
 async def _get_user_email(context: dict) -> str | None:
