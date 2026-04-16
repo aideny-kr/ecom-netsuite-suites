@@ -110,12 +110,18 @@ async def validate_connection(*, credentials: dict | None) -> dict[str, Any]:
             fields="spreadsheetId",
         ).execute()
         test_id = result["spreadsheetId"]
-        drive = _build_drive_service(credentials)
-        drive.files().delete(fileId=test_id).execute()
+        try:
+            drive = _build_drive_service(credentials)
+            drive.files().delete(fileId=test_id).execute()
+        except Exception:
+            logger.warning("sheets_service.validate_cleanup_failed", exc_info=True)
         return {"valid": True}
 
     try:
-        return await asyncio.to_thread(_sync)
+        return await asyncio.wait_for(asyncio.to_thread(_sync), timeout=15.0)
+    except asyncio.TimeoutError:
+        logger.warning("sheets_service.validate_connection_timeout")
+        return {"valid": False, "error": "timeout"}
     except Exception as e:
         logger.warning("sheets_service.validate_connection_failed", exc_info=True)
         return {"valid": False, "error": str(e)}
