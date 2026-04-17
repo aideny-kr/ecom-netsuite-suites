@@ -1,12 +1,10 @@
-import pytest
 from app.services.chat.knowledge_profiles.loader import KnowledgeProfile
 from app.services.chat.prompt_assembler import (
     assemble_knowledge_context,
     build_disambiguation_instruction,
-    get_active_profiles,
     build_source_pin_hint,
+    get_active_profiles,
 )
-
 
 _BQ_PROFILE = KnowledgeProfile(
     profile_id="bigquery",
