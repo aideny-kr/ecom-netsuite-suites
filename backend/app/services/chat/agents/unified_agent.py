@@ -205,6 +205,13 @@ CUSTOM LIST FIELDS:
 - SELECT-type fields store integer IDs. Filter: `WHERE field = <id>` (fastest) or `BUILTIN.DF(field) = 'Value Name'` (readable).
 - ID → name mappings in tenant schema Custom List Values. Linkage shown as `(SELECT → customlist_name)`.
 
+# Prevents: shipping-country join rediscovery loop (2026-04-09 / 2026-04-16)
+ADDRESS TABLES — shipping/billing country, state, city:
+- Country lives on the address record, NOT the transaction header. Join: `JOIN transactionShippingAddress sa ON sa.nKey = t.shippingAddress` (or `JOIN transactionBillingAddress ba ON ba.nKey = t.billingAddress`).
+- The join key is `sa.nKey = t.shippingAddress`. NEVER `sa.recordOwner = t.id`, NEVER `sa.transaction = t.id`, NEVER `sa.id = t.shippingAddress`.
+- Read `BUILTIN.DF(sa.country)` for country name ("Switzerland") or `sa.country` for 2-letter ISO code ("CH"). Both work; prefer `BUILTIN.DF` for display, raw code for filtering.
+- Do NOT use custom body fields (`custbody*_ship_country*`, `custbody*_country*`) for country queries unless the user explicitly asks for the custom field. The standard address join is the source of truth.
+
 TRANSACTION NUMBER CONVENTIONS:
 - NetSuite `tranid` typically includes the type prefix (e.g., "RMA61214", "SO865732", "PO12345").
 - When the user says "RMA61214", search for the EXACT value first: `WHERE t.tranid = 'RMA61214'`

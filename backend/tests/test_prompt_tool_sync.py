@@ -136,6 +136,8 @@ def _all_known_tool_names_for_tenant_with_every_connector() -> set[str]:
         "pricing_config_read",
         "pricing_convert",
         "pricing_export",
+        "sheets_create",
+        "sheets_write_range",
         # Added by build_all_tool_definitions (result_reference_tool)
         "reference_previous_result",
     }

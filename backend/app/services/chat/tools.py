@@ -151,6 +151,7 @@ def build_external_tool_definitions(connectors: list) -> list[dict]:
 # Tools that require an active connector to be included (provider → tool name prefixes)
 _CONNECTOR_GATED_TOOLS: dict[str, set[str]] = {
     "bigquery": {"bigquery_sql", "bigquery_schema", "bigquery_cost_estimate"},
+    "google_sheets": {"sheets_create", "sheets_write_range"},
 }
 
 

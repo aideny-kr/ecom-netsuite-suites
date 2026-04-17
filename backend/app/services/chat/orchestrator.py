@@ -324,6 +324,33 @@ class ContextNeed:
     FINANCIAL = "financial"  # Financial report — inject only vernacular + onboarding
 
 
+def _compute_need_patterns(context_need: str, tool_names: set[str]) -> bool:
+    """Decide whether to retrieve seeded SuiteQL/BigQuery patterns this turn.
+
+    Pre-2026-04-16 this was `context_need in (ContextNeed.DATA,)` — patterns
+    only fired when the classifier said DATA. That stranded admin-seeded
+    patterns whenever a query classified as FULL (investigation), which is
+    exactly when worked examples are most useful. New rule: patterns retrieve
+    whenever a SQL query tool is connected, regardless of context_need.
+
+    The `context_need` parameter is intentionally unused today — kept in the
+    signature so call sites read self-documentingly and so future context-aware
+    tuning (e.g., suppressing patterns for WORKSPACE queries even when SuiteQL
+    tools are present) does not require touching call sites.
+
+    The ext__ match is intentionally broader than `_is_suiteql_tool_call` in
+    `query_pattern_service.py` — fetching patterns when a metadata tool
+    (`ns_getSuiteQLMetadata`) is present is harmless, while not fetching them
+    when a query tool is present is the bug we fixed. Similarly, `bigquery_sql`
+    triggers the gate even though `tenant_query_patterns` doesn't yet store
+    BigQuery patterns; `retrieve_similar_patterns` returns `[]` cheaply for
+    BQ-only sessions, and the gate is ready when Phase 2 adds BigQuery storage.
+    """
+    if {"netsuite_suiteql", "bigquery_sql"} & tool_names:
+        return True
+    return any(name.startswith("ext__") and "suiteql" in name.lower() for name in tool_names)
+
+
 _WORKSPACE_RE = re.compile(
     r"\b(?:scripts?|deploy(?:ment)?s?|triggers?|automation|scheduled|user\s*events?|"
     r"suitelets?|restlets?|map\s*reduce|client\s*scripts?|mass\s*updates?|portlets?|"
@@ -691,6 +718,37 @@ def _intercept_tool_result(
             default=str,
         )
         return "task_output", sse_event_data, condensed
+
+    # --- Sheets link path ---
+    if tool_name in ("sheets_create", "sheets.create"):
+        try:
+            parsed = json.loads(result_str)
+        except (json.JSONDecodeError, TypeError):
+            return None, None, result_str
+        if not isinstance(parsed, dict) or parsed.get("error") is True:
+            return None, None, result_str
+        url = parsed.get("url")
+        if not url:
+            return None, None, result_str
+        sse_event_data = {
+            "url": url,
+            "spreadsheet_id": parsed.get("spreadsheet_id", ""),
+            "title": parsed.get("title", "Spreadsheet"),
+            "shared_with": parsed.get("shared_with"),
+        }
+        condensed = json.dumps(
+            {
+                "success": True,
+                "spreadsheet_id": parsed.get("spreadsheet_id", ""),
+                "title": parsed.get("title", ""),
+                "note": (
+                    "The Sheet link is shown to the user as a clickable card. "
+                    "Confirm what was exported and any follow-ups — do NOT paste the URL in your reply."
+                ),
+            },
+            default=str,
+        )
+        return "sheets_link", sse_event_data, condensed
 
     # --- Not a data tool ---
     return None, None, result_str
@@ -1347,13 +1405,16 @@ async def run_chat_turn(
                     #   tenant_vernacular   ❌    ✅    ❌      ❌        ✅
                     #   domain_knowledge    ❌    ✅    ✅      ❌        ❌
                     #   onboarding_profile  ❌    ❌    ❌      ❌        ✅
-                    #   proven_patterns     ❌    ✅    ❌      ❌        ❌
+                    #   proven_patterns    (gate by tool presence — see _compute_need_patterns)
                     #   learned_rules       ✅    ✅    ✅      ✅        ✅    (always)
-                    # FULL = investigation ("why") — minimal context so agent reasons freely
+                    # FULL = investigation ("why") — minimal context so agent reasons freely.
+                    # proven_patterns: gated by tool presence (any SuiteQL/BQ tool in the toolset),
+                    # NOT by context_need. Admin-seeded patterns are high-quality and shouldn't be
+                    # stranded by the FULL classification. See _compute_need_patterns docstring.
 
                     _need_vernacular = context_need in (ContextNeed.DATA, ContextNeed.FINANCIAL)
                     _need_domain_knowledge = context_need in (ContextNeed.DATA, ContextNeed.DOCS)
-                    _need_patterns = context_need in (ContextNeed.DATA,)
+                    _need_patterns = _compute_need_patterns(context_need, _tool_names)
                     _need_schemas = context_need in (ContextNeed.FULL, ContextNeed.DATA)
                     _need_onboarding = context_need in (ContextNeed.FINANCIAL,)
 
@@ -1457,7 +1518,7 @@ async def run_chat_turn(
                             if sims:
                                 context["domain_knowledge_similarity"] = sum(sims) / len(sims)
 
-                    # proven_patterns (FULL, DATA — skip for DOCS, WORKSPACE, FINANCIAL)
+                    # proven_patterns (gate by tool presence — injects when _need_patterns is True)
                     if patterns_result is not None:
                         if isinstance(patterns_result, Exception):
                             logger.warning("unified_agent.proven_patterns_failed", exc_info=patterns_result)

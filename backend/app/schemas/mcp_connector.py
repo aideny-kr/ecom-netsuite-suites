@@ -1,6 +1,25 @@
 from datetime import datetime
+from typing import Annotated
 
-from pydantic import BaseModel, Field
+from pydantic import AfterValidator, BaseModel, Field
+
+
+def _validate_service_account_json(v: dict) -> dict:
+    """Reject service-account dicts that are empty or missing required auth fields.
+
+    Fails at the API boundary with a 422 so the service layer never has to handle
+    obviously-invalid credentials — preventing the empty-dict → ValueError → 500
+    failure mode.
+    """
+    if not v:
+        raise ValueError("service_account_json must not be empty")
+    missing = [f for f in ("client_email", "private_key") if f not in v]
+    if missing:
+        raise ValueError(f"service_account_json missing required fields: {missing}")
+    return v
+
+
+ServiceAccountJson = Annotated[dict, AfterValidator(_validate_service_account_json)]
 
 
 class McpConnectorCreate(BaseModel):
@@ -40,7 +59,7 @@ class McpConnectorTestResponse(BaseModel):
 
 class BigQueryTestRequest(BaseModel):
     project_id: str = Field(min_length=1, max_length=255)
-    service_account_json: dict
+    service_account_json: ServiceAccountJson
     location: str | None = Field(None, max_length=50)
 
 
@@ -52,10 +71,24 @@ class BigQueryTestResponse(BaseModel):
 
 class BigQueryConnectorCreate(BaseModel):
     project_id: str = Field(min_length=1, max_length=255)
-    service_account_json: dict
+    service_account_json: ServiceAccountJson
     default_dataset: str | None = None
     location: str | None = Field(None, max_length=50)
 
 
 class BigQueryTableSelection(BaseModel):
     selected_tables: dict[str, list[str]]  # dataset_id -> [table_ids]
+
+
+class SheetsTestRequest(BaseModel):
+    service_account_json: ServiceAccountJson
+
+
+class SheetsTestResponse(BaseModel):
+    valid: bool
+    error: str | None = None
+
+
+class SheetsConnectorCreate(BaseModel):
+    service_account_json: ServiceAccountJson
+    label: str = Field(default="Google Sheets", min_length=1, max_length=255)

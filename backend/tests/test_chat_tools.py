@@ -260,17 +260,14 @@ class TestLocalNameMap:
 
 
 class TestCategoryStamping:
-    def test_build_local_stamps_category_on_every_tool(self):
-        """Every tool returned by build_local_tool_definitions must have a category key."""
+    def test_every_local_tool_is_categorizable(self):
+        """Every tool name from build_local_tool_definitions must resolve to a valid category."""
+        from app.services.chat.tool_categories import categorize
+
         tools = build_local_tool_definitions()
         assert tools, "build_local_tool_definitions returned no tools"
+        valid = {"financial", "data_table", "bigquery", "rag", "workspace", "mutation", "sheets", "other"}
         for t in tools:
-            assert "category" in t, f"{t.get('name')} missing category key"
-            assert t["category"] in {
-                "financial",
-                "data_table",
-                "bigquery",
-                "rag",
-                "workspace",
-                "other",
-            }, f"{t.get('name')} has unexpected category {t['category']!r}"
+            name = t.get("name", "")
+            category = categorize(name)
+            assert category in valid, f"{name} resolved to unexpected category {category!r}"

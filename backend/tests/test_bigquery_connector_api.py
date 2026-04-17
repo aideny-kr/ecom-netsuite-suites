@@ -8,6 +8,12 @@ import pytest
 # These will be imported from the new schemas
 from app.schemas.mcp_connector import BigQueryConnectorCreate, BigQueryTestRequest
 
+_VALID_SA = {
+    "type": "service_account",
+    "client_email": "sa@proj.iam.gserviceaccount.com",
+    "private_key": "-----BEGIN PRIVATE KEY-----\nfake\n-----END PRIVATE KEY-----\n",
+}
+
 
 class TestBigQueryTestConnection:
     """POST /mcp-connectors/bigquery/test"""
@@ -18,7 +24,7 @@ class TestBigQueryTestConnection:
 
         request = BigQueryTestRequest(
             project_id="test-project",
-            service_account_json={"type": "service_account", "project_id": "test-project"},
+            service_account_json={**_VALID_SA, "project_id": "test-project"},
         )
         mock_user = MagicMock()
         mock_user.tenant_id = uuid.uuid4()
@@ -43,7 +49,7 @@ class TestBigQueryTestConnection:
 
         request = BigQueryTestRequest(
             project_id="bad-project",
-            service_account_json={"type": "service_account"},
+            service_account_json=_VALID_SA,
         )
         mock_user = MagicMock()
         mock_user.tenant_id = uuid.uuid4()
@@ -62,7 +68,7 @@ class TestBigQueryTestConnection:
         with pytest.raises(Exception):
             BigQueryTestRequest(
                 project_id="",
-                service_account_json={"type": "service_account"},
+                service_account_json=_VALID_SA,
             )
 
     def test_test_connection_missing_sa_json(self):
@@ -80,7 +86,7 @@ class TestBigQueryCreateConnector:
 
         request = BigQueryConnectorCreate(
             project_id="test-project",
-            service_account_json={"type": "service_account", "project_id": "test"},
+            service_account_json={**_VALID_SA, "project_id": "test"},
             default_dataset="analytics",
         )
         mock_user = MagicMock()
@@ -120,7 +126,7 @@ class TestBigQueryCreateConnector:
 
         request = BigQueryConnectorCreate(
             project_id="test-project",
-            service_account_json={"type": "service_account"},
+            service_account_json=_VALID_SA,
         )
         mock_user = MagicMock()
         mock_user.tenant_id = uuid.uuid4()
@@ -155,7 +161,7 @@ class TestBigQueryCreateConnector:
 
         request = BigQueryConnectorCreate(
             project_id="test-project",
-            service_account_json={"type": "service_account"},
+            service_account_json=_VALID_SA,
         )
         mock_user = MagicMock()
         mock_user.tenant_id = uuid.uuid4()
@@ -187,7 +193,7 @@ class TestBigQueryCreateConnector:
 
         request = BigQueryConnectorCreate(
             project_id="test-project",
-            service_account_json={"type": "service_account"},
+            service_account_json=_VALID_SA,
             default_dataset="analytics",
         )
         mock_user = MagicMock()
@@ -223,7 +229,7 @@ class TestBigQueryCreateConnector:
 
         request = BigQueryConnectorCreate(
             project_id="test-project",
-            service_account_json={"type": "service_account"},
+            service_account_json=_VALID_SA,
         )
         mock_user = MagicMock()
         mock_user.tenant_id = uuid.uuid4()
@@ -256,7 +262,7 @@ class TestBigQueryCreateConnector:
 
         request = BigQueryConnectorCreate(
             project_id="test-project",
-            service_account_json={"type": "service_account"},
+            service_account_json=_VALID_SA,
         )
         mock_user = MagicMock()
         mock_user.tenant_id = uuid.uuid4()
@@ -293,14 +299,14 @@ class TestBigQuerySchemas:
     def test_bigquery_test_request_valid(self):
         req = BigQueryTestRequest(
             project_id="my-project",
-            service_account_json={"type": "service_account"},
+            service_account_json=_VALID_SA,
         )
         assert req.project_id == "my-project"
 
     def test_bigquery_create_with_default_dataset(self):
         req = BigQueryConnectorCreate(
             project_id="my-project",
-            service_account_json={"type": "service_account"},
+            service_account_json=_VALID_SA,
             default_dataset="analytics",
         )
         assert req.default_dataset == "analytics"
@@ -308,6 +314,6 @@ class TestBigQuerySchemas:
     def test_bigquery_create_without_default_dataset(self):
         req = BigQueryConnectorCreate(
             project_id="my-project",
-            service_account_json={"type": "service_account"},
+            service_account_json=_VALID_SA,
         )
         assert req.default_dataset is None

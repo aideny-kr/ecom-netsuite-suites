@@ -10,7 +10,7 @@ import { useCreateSavedQuery } from "@/hooks/use-saved-queries";
 import { cn } from "@/lib/utils";
 import { useBranding } from "@/providers/branding-provider";
 import type { ChatMessage, WriteConfirmationData } from "@/lib/types";
-import type { FinancialReportData, DataTableData, TaskOutputData, StreamBlock } from "@/lib/chat-stream";
+import type { FinancialReportData, DataTableData, TaskOutputData, SheetsLinkData, StreamBlock } from "@/lib/chat-stream";
 import type { AgentSummary } from "@/hooks/use-agents";
 import type { ChartData } from "@/lib/types";
 import { WriteConfirmationCard } from "@/components/chat/write-confirmation-card";
@@ -22,6 +22,7 @@ import { ChangeProposalCard } from "@/components/chat/change-proposal-card";
 import { WorkspaceToolCard } from "@/components/chat/workspace-tool-card";
 import { SuiteQLToolCard } from "@/components/chat/suiteql-tool-card";
 import { TaskOutputCard } from "@/components/chat/task-output-card";
+import { SheetsLinkCard } from "@/components/chat/sheets-link-card";
 import { AgentChatHeader } from "@/components/chat/agent-chat-header";
 import { PricingConfigSection } from "@/components/settings/pricing-config-section";
 import { InstructionPanel } from "@/components/chat/instruction-panel";
@@ -615,6 +616,7 @@ interface MessageListProps {
   dataTables?: Map<string, DataTableData>;
   chartsByMessage?: Map<string, ChartData[]>;
   taskOutputs?: Map<string, TaskOutputData>;
+  sheetsLinks?: Map<string, SheetsLinkData>;
   pinnedAgentId?: string | null;
   agents?: AgentSummary[];
   agentTab?: "chat" | "config";
@@ -642,6 +644,7 @@ export function MessageList({
   dataTables,
   chartsByMessage,
   taskOutputs,
+  sheetsLinks,
   pinnedAgentId,
   agents,
   agentTab,
@@ -904,6 +907,7 @@ export function MessageList({
             dataTableData={dataTables?.get(message.id) ?? null}
             chartDataList={chartsByMessage?.get(message.id) ?? null}
             taskOutputData={taskOutputs?.get(message.id) ?? null}
+            sheetsLinkData={sheetsLinks?.get(message.id) ?? null}
             isTerminal={isTerminal}
           />
         ) : isTerminal ? (
@@ -1043,6 +1047,12 @@ export function MessageList({
                         <TaskOutputCard data={block.data} />
                       </div>
                     );
+                  case "sheets_link":
+                    return (
+                      <div key={block.id} className="animate-table-appear">
+                        <SheetsLinkCard data={block.data} />
+                      </div>
+                    );
                   default:
                     return null;
                 }
@@ -1092,6 +1102,7 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
   dataTableData = null,
   chartDataList = null,
   taskOutputData = null,
+  sheetsLinkData = null,
   isTerminal = false,
 }: {
   message: ChatMessage;
@@ -1106,6 +1117,7 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
   dataTableData?: DataTableData | null;
   chartDataList?: ChartData[] | null;
   taskOutputData?: TaskOutputData | null;
+  sheetsLinkData?: SheetsLinkData | null;
   isTerminal?: boolean;
 }) {
   const { brandName: agentName } = useBranding();
@@ -1222,6 +1234,10 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
 
         {taskOutputData && (
           <TaskOutputCard data={taskOutputData} />
+        )}
+
+        {sheetsLinkData && (
+          <SheetsLinkCard data={sheetsLinkData} />
         )}
 
         <div className="flex min-w-0 flex-col gap-2">

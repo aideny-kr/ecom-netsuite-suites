@@ -161,6 +161,43 @@ export function useUpdateBigQueryTables() {
   });
 }
 
+// ---------------------------------------------------------------------------
+// Google Sheets-specific hooks
+// ---------------------------------------------------------------------------
+
+interface SheetsTestPayload {
+  service_account_json: Record<string, unknown>;
+}
+
+interface SheetsTestResponse {
+  valid: boolean;
+  error: string | null;
+}
+
+interface SheetsCreatePayload {
+  service_account_json: Record<string, unknown>;
+  label?: string;
+}
+
+export function useTestSheetsConnection() {
+  return useMutation({
+    mutationFn: (data: SheetsTestPayload) =>
+      apiClient.post<SheetsTestResponse>("/api/v1/mcp-connectors/google-sheets/test", data),
+  });
+}
+
+export function useCreateSheetsConnector() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (data: SheetsCreatePayload) =>
+      apiClient.post("/api/v1/mcp-connectors/google-sheets", data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["mcp-connectors"] });
+      queryClient.invalidateQueries({ queryKey: ["connection-health"] });
+    },
+  });
+}
+
 export function useReauthorizeMcpConnector() {
   const queryClient = useQueryClient();
 

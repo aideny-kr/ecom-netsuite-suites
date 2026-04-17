@@ -223,6 +223,22 @@ TOOL_CONFIGS = {
         "requires_entitlement": "mcp_tools",
         "allowlisted_params": ["query"],
     },
+    "sheets.create": {
+        "default_limit": None,
+        "max_limit": None,
+        "timeout_seconds": 15,
+        "rate_limit_per_minute": 20,
+        "requires_entitlement": "mcp_tools",
+        "allowlisted_params": ["title"],
+    },
+    "sheets.write_range": {
+        "default_limit": None,
+        "max_limit": None,
+        "timeout_seconds": 30,
+        "rate_limit_per_minute": 20,
+        "requires_entitlement": "mcp_tools",
+        "allowlisted_params": ["spreadsheet_id", "data", "range"],
+    },
 }
 
 
