@@ -1,6 +1,7 @@
 ---
 topic_tags: ["suiteql", "errors", "debugging"]
 source_type: expert_rules
+partition_id: netsuite/suiteql-rules
 ---
 
 # Common Errors and Recovery

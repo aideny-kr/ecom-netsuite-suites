@@ -1,6 +1,7 @@
 ---
 topic_tags: ["suiteql", "schema", "record-types", "columns"]
 source_type: documentation
+partition_id: netsuite/record-types
 ---
 
 # Record Types and Core Columns

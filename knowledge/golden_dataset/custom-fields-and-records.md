@@ -1,6 +1,7 @@
 ---
 topic_tags: ["suiteql", "custom-fields", "custom-records"]
 source_type: documentation
+partition_id: netsuite/record-types
 ---
 
 # Custom Fields and Records

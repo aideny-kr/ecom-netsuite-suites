@@ -1,6 +1,7 @@
 ---
 topic_tags: ["suiteql", "joins", "aggregation"]
 source_type: expert_rules
+partition_id: netsuite/joins
 ---
 
 # Join Patterns and Aggregation Rules
