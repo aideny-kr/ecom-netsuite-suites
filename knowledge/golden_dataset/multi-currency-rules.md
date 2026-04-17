@@ -1,6 +1,7 @@
 ---
 topic_tags: ["suiteql", "currency", "multi-currency"]
 source_type: expert_rules
+partition_id: netsuite/multi-currency
 ---
 
 # Multi-Currency Rules

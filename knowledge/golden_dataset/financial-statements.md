@@ -1,6 +1,7 @@
 ---
 topic_tags: ["suiteql", "financial-reports", "income-statement", "balance-sheet", "gl", "accounting"]
 source_type: documentation
+partition_id: netsuite/transactions
 ---
 
 # Financial Statements via SuiteQL

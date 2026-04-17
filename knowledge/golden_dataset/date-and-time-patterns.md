@@ -1,6 +1,7 @@
 ---
 topic_tags: ["suiteql", "dates", "time"]
 source_type: expert_rules
+partition_id: netsuite/suiteql-rules
 ---
 
 # Date and Time Patterns

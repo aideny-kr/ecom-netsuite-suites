@@ -28,10 +28,25 @@ class TestWorkflowStructure:
         assert "</tool_selection>" in prompt
 
     def test_has_suiteql_dialect_rules(self):
+        """Phase 2 (PR A): SuiteQL dialect rules moved from base prompt to
+        netsuite.yaml's prompt_fragment. The base agent.system_prompt keeps
+        only the cross-reference pointer; the wrapped block lives in the
+        profile and is injected per-turn when NetSuite tools are present.
+        """
+        from app.services.chat.knowledge_profiles.loader import load_all_profiles
+
         agent = _make_agent()
         prompt = agent.system_prompt
+        # Cross-reference must remain so tool_selection's "Follow ALL ..." pointer resolves
         assert "<suiteql_dialect_rules>" in prompt
-        assert "</suiteql_dialect_rules>" in prompt
+        # Full wrapped block lives on the netsuite profile
+        netsuite = next(
+            (p for p in load_all_profiles() if p.profile_id == "netsuite"),
+            None,
+        )
+        assert netsuite is not None, "netsuite.yaml profile did not load"
+        assert "<suiteql_dialect_rules>" in netsuite.prompt_fragment
+        assert "</suiteql_dialect_rules>" in netsuite.prompt_fragment
 
     def test_has_agentic_workflow(self):
         agent = _make_agent()
@@ -56,9 +71,18 @@ class TestWorkflowStructure:
         assert "CHECK CONTEXT FIRST" in prompt or "tenant_vernacular" in prompt
 
     def test_has_preflight_schema_check(self):
-        agent = _make_agent()
-        prompt = agent.system_prompt
-        assert "PREFLIGHT SCHEMA CHECK" in prompt
+        """Phase 2 (PR A): PREFLIGHT SCHEMA CHECK moved from base prompt into
+        netsuite.yaml's prompt_fragment (part of the suiteql_dialect_rules
+        block). The rule is injected per-turn when NetSuite tools are present.
+        """
+        from app.services.chat.knowledge_profiles.loader import load_all_profiles
+
+        netsuite = next(
+            (p for p in load_all_profiles() if p.profile_id == "netsuite"),
+            None,
+        )
+        assert netsuite is not None, "netsuite.yaml profile did not load"
+        assert "PREFLIGHT SCHEMA CHECK" in netsuite.prompt_fragment
 
     def test_has_execute_one_query(self):
         agent = _make_agent()
@@ -115,31 +139,50 @@ class TestAntiEnrichmentRules:
 
 
 class TestRMAStatusCodes:
-    """RMA status codes must match the golden dataset."""
+    """RMA status codes must match the golden dataset.
+
+    Phase 2 (PR A): the detailed status-code mappings (D=..., E=..., F=...)
+    moved from the unified agent's base prompt into netsuite.yaml's
+    prompt_fragment. They're injected per-turn when NetSuite tools are
+    present. The anti-enrichment IN-clause example still lives in the
+    base prompt (it's generic workflow guidance, not dialect-specific).
+    """
+
+    def _netsuite_fragment(self) -> str:
+        from app.services.chat.knowledge_profiles.loader import load_all_profiles
+
+        netsuite = next(
+            (p for p in load_all_profiles() if p.profile_id == "netsuite"),
+            None,
+        )
+        assert netsuite is not None, "netsuite.yaml profile did not load"
+        return netsuite.prompt_fragment
 
     def test_rma_d_partially_received(self):
-        agent = _make_agent()
-        prompt = agent.system_prompt
-        assert "D=Partially Received" in prompt
+        fragment = self._netsuite_fragment()
+        assert "D=Partially Received" in fragment
 
     def test_rma_e_received(self):
         """E should be 'Received', not 'Pending Refund/Partially Received'."""
-        agent = _make_agent()
-        prompt = agent.system_prompt
+        fragment = self._netsuite_fragment()
         # The golden dataset says E=Received
-        assert "E=Received" in prompt
+        assert "E=Received" in fragment
         # The old wrong value should be gone
-        assert "E=Pending Refund/Partially Received" not in prompt
+        assert "E=Pending Refund/Partially Received" not in fragment
 
     def test_rma_f_closed(self):
         """F should be 'Closed', not 'Pending Refund'."""
-        agent = _make_agent()
-        prompt = agent.system_prompt
+        fragment = self._netsuite_fragment()
         # The golden dataset says F=Closed
-        assert "F=Closed" in prompt
+        assert "F=Closed" in fragment
 
     def test_rma_received_filter(self):
-        """'Received' RMAs should use status IN ('D', 'E', 'F', 'G', 'H')."""
+        """'Received' RMAs should use status IN ('D', 'E', 'F', 'G', 'H').
+
+        The anti-enrichment example lives in the base agentic_workflow block
+        (it's generic workflow guidance, not dialect-specific), so it stays
+        in the unified agent's system_prompt even after Phase 2.
+        """
         agent = _make_agent()
         prompt = agent.system_prompt
         assert "IN ('D', 'E', 'F', 'G', 'H')" in prompt or "IN ('D','E','F','G','H')" in prompt
@@ -149,16 +192,29 @@ class TestPromptSyncWithSuiteQLAgent:
     """Critical rules must exist in BOTH unified and SuiteQL agent prompts."""
 
     def test_both_have_preflight_schema_check(self):
+        """Phase 2 (PR A): the unified agent no longer carries PREFLIGHT
+        SCHEMA CHECK in its base prompt — it was moved to netsuite.yaml's
+        prompt_fragment for per-turn injection. The SuiteQL agent still
+        carries it inline. Sync now means: unified reaches the rule via
+        the profile, SuiteQL has it inline; both paths expose the rule.
+        """
         from app.services.chat.agents.suiteql_agent import SuiteQLAgent
+        from app.services.chat.knowledge_profiles.loader import load_all_profiles
 
-        unified = _make_agent().system_prompt
         suiteql = SuiteQLAgent(
             tenant_id=uuid.uuid4(),
             user_id=uuid.uuid4(),
             correlation_id="test",
         ).system_prompt
+        netsuite_profile = next(
+            (p for p in load_all_profiles() if p.profile_id == "netsuite"),
+            None,
+        )
+        assert netsuite_profile is not None, "netsuite.yaml profile did not load"
 
-        assert "PREFLIGHT SCHEMA CHECK" in unified
+        # Unified reaches the rule via the injected profile fragment
+        assert "PREFLIGHT SCHEMA CHECK" in netsuite_profile.prompt_fragment
+        # SuiteQL agent still carries the rule inline
         assert "PREFLIGHT SCHEMA CHECK" in suiteql
 
     def test_both_have_stop_when_done(self):

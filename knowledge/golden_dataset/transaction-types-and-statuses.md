@@ -1,6 +1,7 @@
 ---
 topic_tags: ["suiteql", "transactions", "types", "statuses"]
 source_type: documentation
+partition_id: netsuite/transactions
 ---
 
 # Transaction Types and Statuses

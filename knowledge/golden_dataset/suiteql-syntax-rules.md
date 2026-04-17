@@ -1,6 +1,7 @@
 ---
 topic_tags: ["suiteql", "syntax", "pagination"]
 source_type: expert_rules
+partition_id: netsuite/suiteql-rules
 ---
 
 # SuiteQL Syntax Rules
