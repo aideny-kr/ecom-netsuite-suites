@@ -124,3 +124,44 @@ SELECT BUILTIN.DF(t.currency) as currency, COUNT(*) as orders, SUM(t.foreigntota
 FROM transaction t WHERE t.type = 'SalesOrd' AND t.trandate = TRUNC(SYSDATE)
 GROUP BY BUILTIN.DF(t.currency) ORDER BY total DESC
 ```
+
+## Worked Example: Sales by Shipping Country
+
+Pattern verified 2026-04-09 (Olivia's country-sales session) and re-validated 2026-04-16 (Phase 1 staging benchmark — 1.00 accuracy, single tool call, $0.069 per query).
+
+### The canonical query
+
+```sql
+SELECT
+  BUILTIN.DF(sa.country) AS ship_country,
+  COUNT(DISTINCT t.id) AS total_orders,
+  SUM(ABS(tl.quantity)) AS total_qty,
+  ROUND(SUM(tl.amount * -1), 2) AS revenue_usd
+FROM transaction t
+JOIN transactionShippingAddress sa ON sa.nKey = t.shippingAddress
+JOIN transactionline tl ON tl.transaction = t.id
+WHERE t.type = 'SalesOrd'
+  AND t.status NOT IN ('C', 'H')
+  AND sa.country IN ('NO', 'CH', 'NZ', 'SG')
+  AND tl.mainline = 'F'
+  AND tl.taxline = 'F'
+  AND (tl.iscogs = 'F' OR tl.iscogs IS NULL)
+  AND tl.assemblycomponent = 'F'
+GROUP BY BUILTIN.DF(sa.country)
+ORDER BY revenue_usd DESC
+FETCH FIRST 100 ROWS ONLY
+```
+
+### Critical details
+
+- **Join key is `sa.nKey = t.shippingAddress`** — NOT `sa.recordOwner = t.id`, NOT `sa.transaction = t.id`, NOT `sa.id = t.shippingAddress`. These three wrong keys cause silent 0-row results.
+- Use `BUILTIN.DF(sa.country)` for display name ("Switzerland"), `sa.country` for 2-letter ISO code ("CH"). Both work; prefer `BUILTIN.DF` for the output label and raw code for the filter predicate.
+- Do NOT use custom body fields (`custbody*_ship_country*`, `custbody*_country*`) for country queries. The standard address join is the source of truth — custbody fields are stale or tenant-specific.
+- Single-letter status codes (`'C'`, `'H'`) — never compound codes (`'SalesOrd:C'`), which silently match nothing.
+- Standard transactionline revenue filters apply (`mainline='F'`, `taxline='F'`, `iscogs='F' OR NULL`, `assemblycomponent='F'`) to avoid double-counting and exclude tax/COGS/kit-component lines.
+
+### Variations
+
+- **Billing country** (for invoices or tax queries): same pattern but `JOIN transactionBillingAddress ba ON ba.nKey = t.billingAddress`.
+- **Recent-launch countries**: add `MIN(t.trandate) AS first_order_date` to the SELECT and `ORDER BY first_order_date DESC` to find newly-launched markets.
+- **Cross-tab by month × country**: run the flat GROUP BY above, then use the `pivot_query_result` tool with `rows=month`, `cols=ship_country`, `values=revenue_usd`. Do NOT hand-write CASE WHEN pivot SQL.
