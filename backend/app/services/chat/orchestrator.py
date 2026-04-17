@@ -1206,7 +1206,6 @@ async def run_chat_turn(
         )
 
     # ── Inject AI Soul (Tone & Quirks) ──
-    soul_bot_tone = ""
     if not is_onboarding:
         from app.services.soul_service import get_soul_config
 
@@ -1214,7 +1213,6 @@ async def run_chat_turn(
         if soul_config.exists:
             soul_parts = ["\n\n## Tenant-Specific AI Configuration & Logic\n"]
             if soul_config.bot_tone:
-                soul_bot_tone = soul_config.bot_tone
                 soul_parts.append(f"TONE & MANNER:\n{soul_config.bot_tone}\n")
             if soul_config.netsuite_quirks:
                 soul_parts.append(f"NETSUITE QUIRKS & LOGIC:\n{soul_config.netsuite_quirks}\n")
@@ -1323,7 +1321,7 @@ async def run_chat_turn(
                 _selected_agent_id = None  # no routing fork; kept for audit trail
                 is_financial = False
                 is_web_search = False
-                is_netsuite_entity = False
+                is_netsuite_entity = False  # noqa: F841  — defensive init (see test_orchestrator_paths.py)
                 _has_data_reference = False
 
                 from app.services.importance_classifier import ImportanceTier, classify_importance
@@ -1345,7 +1343,7 @@ async def run_chat_turn(
                     # Detect financial intent for task augmentation + domain knowledge boost
                     is_financial = bool(_FINANCIAL_RE.search(sanitized_input))
                     is_web_search = _detect_web_search_intent(sanitized_input)
-                    is_netsuite_entity = _detect_netsuite_entity(sanitized_input)
+                    is_netsuite_entity = _detect_netsuite_entity(sanitized_input)  # noqa: F841
                     _has_data_reference = _detect_data_reference(sanitized_input)
 
                     # Gate financial reports by permission

@@ -1,11 +1,13 @@
 import asyncio
-import pytest
 from unittest.mock import MagicMock, patch
+
+import pytest
+
 from app.services.sheets_service import (
     create_spreadsheet,
-    write_range,
     share_spreadsheet,
     validate_connection,
+    write_range,
 )
 
 

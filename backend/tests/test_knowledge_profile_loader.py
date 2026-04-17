@@ -1,5 +1,3 @@
-import pytest
-from pathlib import Path
 from app.services.chat.knowledge_profiles.loader import KnowledgeProfile, load_all_profiles
 
 

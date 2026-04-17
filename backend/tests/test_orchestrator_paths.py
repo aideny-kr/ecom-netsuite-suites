@@ -312,10 +312,10 @@ class TestOrchestratorWriteConfirmPaths:
             # Other exceptions are expected (mocked deps, DB errors, etc.)
             pass
 
-        # The early-exit should yield an error event (message not found)
-        error_chunks = [c for c in chunks if c.get("type") == "error"]
-        # If we got here without UnboundLocalError, the path is safe
-        # (whether or not the error chunk arrived depends on mock depth)
+        # The early-exit should yield an error event (message not found).
+        # If we got here without UnboundLocalError, the path is safe — whether
+        # or not the error chunk arrived depends on mock depth, so we don't
+        # assert on `chunks` content here.
 
     @pytest.mark.asyncio
     async def test_write_confirm_reject_path(self):

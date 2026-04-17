@@ -507,19 +507,41 @@ TOOL_REGISTRY = {
         },
     },
     "sheets.create": {
-        "description": "Create a new Google Spreadsheet. Returns the spreadsheet ID and URL. The sheet is automatically shared with the requesting user.",
+        "description": (
+            "Create a new Google Spreadsheet. Returns the spreadsheet ID and URL. "
+            "The sheet is automatically shared with the requesting user."
+        ),
         "execute": sheets_tools.sheets_create_execute,
         "params_schema": {
-            "title": {"type": "string", "required": True, "description": "Title for the new spreadsheet"},
+            "title": {
+                "type": "string",
+                "required": True,
+                "description": "Title for the new spreadsheet",
+            },
         },
     },
     "sheets.write_range": {
-        "description": "Write data to a Google Spreadsheet. Data should be a 2D array where row 0 is headers. Returns the updated range and row count.",
+        "description": (
+            "Write data to a Google Spreadsheet. Data should be a 2D array where row 0 is "
+            "headers. Returns the updated range and row count."
+        ),
         "execute": sheets_tools.sheets_write_range_execute,
         "params_schema": {
-            "spreadsheet_id": {"type": "string", "required": True, "description": "ID of the spreadsheet to write to"},
-            "data": {"type": "array", "required": True, "description": "2D array of values. Row 0 should be column headers."},
-            "range": {"type": "string", "required": False, "description": "Cell range to write to (default: Sheet1!A1)"},
+            "spreadsheet_id": {
+                "type": "string",
+                "required": True,
+                "description": "ID of the spreadsheet to write to",
+            },
+            "data": {
+                "type": "array",
+                "required": True,
+                "description": "2D array of values. Row 0 should be column headers.",
+            },
+            "range": {
+                "type": "string",
+                "required": False,
+                "description": "Cell range to write to (default: Sheet1!A1)",
+            },
         },
     },
     "pricing.convert": {

@@ -1,7 +1,6 @@
 """Tests for sheets_link SSE event interception in _intercept_tool_result."""
 
 import json
-import pytest
 
 from app.services.chat.orchestrator import _intercept_tool_result
 

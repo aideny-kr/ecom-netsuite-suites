@@ -1,7 +1,6 @@
 from app.services.chat.knowledge_profiles.loader import KnowledgeProfile, load_all_profiles
 from app.services.chat.prompt_assembler import build_disambiguation_instruction
 
-
 _BQ_PROFILE = KnowledgeProfile(
     profile_id="bigquery",
     display_name="BigQuery Analytics",

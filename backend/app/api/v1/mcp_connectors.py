@@ -28,12 +28,12 @@ from app.schemas.mcp_connector import (
 from app.services import audit_service, mcp_connector_service
 from app.services.bigquery_schema_seeder import seed_bigquery_schema
 from app.services.bigquery_service import discover_schema, validate_connection
-from app.services.sheets_service import validate_connection as validate_sheets_connection
 from app.services.netsuite_oauth_service import (
     build_mcp_authorize_url,
     exchange_code_with_client,
     generate_pkce_pair,
 )
+from app.services.sheets_service import validate_connection as validate_sheets_connection
 
 logger = structlog.get_logger()
 
