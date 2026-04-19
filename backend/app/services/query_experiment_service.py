@@ -29,11 +29,9 @@ from app.models.connection import Connection
 from app.models.experiment_log import ExperimentLog
 from app.models.mcp_connector import McpConnector
 
-# vs-MCP benchmark scoring — replaces the internal composite scorer.
-# Imported here so callers (and tests) can patch them in this module's namespace.
-from app.services.benchmarks.agent_runner import run_agent  # noqa: F401
-from app.services.benchmarks.baseline_runner import run_baseline  # noqa: F401
-from app.services.benchmarks.scorer import substring_score  # noqa: F401
+# Haiku LLM judge scores whether the SQL's returned rows answer the question.
+# Imported here so tests can patch in this module's namespace.
+from app.services.benchmarks.scorer import llm_judge_score
 from app.services.query_eval_harness import (
     EvalCase,
 )
@@ -46,7 +44,11 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _HAIKU_MODEL = "claude-haiku-4-5-20251001"
-_KEEP_THRESHOLD = 0.05  # experiment must beat baseline by this much
+# Judge score thresholds for KEEP / REVERT decisions. Middle band is SKIP.
+# Chosen to match the vs-MCP benchmark's rubric where 0.6 = partially correct
+# but useful, 0.2 = failed to answer despite mentioning keywords.
+_KEEP_THRESHOLD = 0.6
+_REVERT_THRESHOLD = 0.3
 _BIGQUERY_MAX_COST_USD = 0.20  # skip BigQuery if dry-run exceeds this
 
 _SUITEQL_DIALECT_RULES = """
@@ -559,61 +561,39 @@ async def run_single_experiment(
 
     result["executed_successfully"] = True
 
-    # Step 3: Run vs-MCP benchmark comparison
-    # Run our agent (which will use the candidate pattern if it's in the DB)
-    # and the Claude+MCP baseline on the same question, then score both
-    # with substring_score (fast, deterministic — no LLM judge needed).
-    agent_score = 0.0
-    bl_score = 0.0
-
+    # Step 3: Judge whether the SQL result answers the question.
+    # The judge reads the stringified rows (exec_result["result_text"]) and
+    # scores 0.0–1.0 on whether they satisfy the question + expected keywords.
+    # ~$0.001/call with Haiku. No agent loop, no baseline comparison —
+    # "does this candidate pattern produce useful rows?" is the only signal
+    # we need to decide KEEP/REVERT/SKIP. Cross-agent comparison lives in
+    # the vs-MCP benchmark harness, not here.
     try:
-        agent_result = await run_agent(
-            tenant_id=tenant_id,
+        judge = await llm_judge_score(
             question=case.question,
-            db=db,
-            model="claude-haiku-4-5-20251001",  # cheap model for experiment loop
+            answer_text=exec_result.get("result_text", ""),
+            expected_contains=case.expected_keywords,
         )
-        if agent_result.success and agent_result.answer_text:
-            agent_sr = substring_score(
-                answer_text=agent_result.answer_text,
-                expected_contains=case.expected_keywords,
-            )
-            agent_score = agent_sr.score
+        result["experiment_score"] = judge.score
     except Exception:
         logger.warning(
-            "Benchmark agent run failed for question=%s",
+            "LLM judge failed for question=%s",
             case.question[:60],
             exc_info=True,
         )
+        # Leave experiment_score at 0.0 → falls into REVERT band.
+        # Override decision to SKIP below so we don't penalize the candidate
+        # for our own judge outage.
 
-    try:
-        baseline_result = await run_baseline(
-            tenant_id=tenant_id,
-            question=case.question,
-            db=db,
-            model="claude-haiku-4-5-20251001",  # same cheap model for fair comparison
-        )
-        if baseline_result.success and baseline_result.answer_text:
-            baseline_sr = substring_score(
-                answer_text=baseline_result.answer_text,
-                expected_contains=case.expected_keywords,
-            )
-            bl_score = baseline_sr.score
-    except Exception:
-        logger.warning(
-            "Benchmark baseline run failed for question=%s",
-            case.question[:60],
-            exc_info=True,
-        )
-
-    result["experiment_score"] = agent_score
-    result["baseline_score"] = bl_score
-    result["delta"] = round(agent_score - bl_score, 4)
-
-    # Step 4: Decide based on vs-MCP comparison
-    if agent_score >= bl_score and agent_score > 0.5:
+    # Step 4: Decide based on judge score alone.
+    # baseline_score and delta are kept at 0.0 for ExperimentLog compatibility.
+    score = result["experiment_score"]
+    if score == 0.0 and exec_result["success"]:
+        # Judge errored or returned 0 — don't REVERT on judge outage.
+        result["decision"] = "SKIP"
+    elif score >= _KEEP_THRESHOLD:
         result["decision"] = "KEEP"
-    elif agent_score < bl_score - 0.1:
+    elif score <= _REVERT_THRESHOLD:
         result["decision"] = "REVERT"
     else:
         result["decision"] = "SKIP"
