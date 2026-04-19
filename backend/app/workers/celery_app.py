@@ -66,18 +66,12 @@ celery_app.conf.beat_schedule = {
         "task": "tasks.auto_learning",
         "schedule": crontab(hour=4, minute=0),
     },
-    "auto-query-improvement": {
-        "task": "tasks.auto_query_improvement",
-        "schedule": crontab(hour=10, minute=0),
-    },
-    # vs-MCP agent benchmark — runs nightly and alerts on regression.
-    # Gated by AGENT_BENCHMARK_VS_MCP_ENABLED env var (default false).
-    # Runs at 11:00 UTC, AFTER auto-query-improvement (10:00) so the
-    # benchmark measures the state AFTER the nightly pattern promotion.
-    "agent-benchmark-vs-mcp": {
-        "task": "tasks.agent_benchmark_vs_mcp",
-        "schedule": crontab(hour=11, minute=0),
-    },
+    # auto-query-improvement and agent-benchmark-vs-mcp removed from Beat
+    # on 2026-04-18 — scorer regression (all runs scoring 0.0 since 04-14)
+    # made the nightly a no-op that still cost ~$10/night. Tasks stay
+    # registered in `celery_app.conf.include` so they remain runnable via
+    # `celery -A app.workers.celery_app call tasks.<name>` and the
+    # `run_nightly_benchmark_sync()` CLI entrypoint.
     "proactive-token-refresh": {
         "task": "tasks.proactive_token_refresh",
         "schedule": 300.0,  # every 5 minutes
