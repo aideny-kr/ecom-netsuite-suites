@@ -1,3 +1,4 @@
+import re
 from datetime import datetime
 from typing import Annotated
 
@@ -20,6 +21,22 @@ def _validate_service_account_json(v: dict) -> dict:
 
 
 ServiceAccountJson = Annotated[dict, AfterValidator(_validate_service_account_json)]
+
+
+_DRIVE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{18,44}$")
+
+
+def _coerce_drive_id(v: str | None) -> str | None:
+    if v is None or v == "":
+        return None
+    if not _DRIVE_ID_RE.match(v):
+        raise ValueError(
+            "shared_drive_id must be 18-44 chars, alphanumeric with '_' or '-' only"
+        )
+    return v
+
+
+SharedDriveId = Annotated[str | None, AfterValidator(_coerce_drive_id)]
 
 
 class McpConnectorCreate(BaseModel):
@@ -82,6 +99,7 @@ class BigQueryTableSelection(BaseModel):
 
 class SheetsTestRequest(BaseModel):
     service_account_json: ServiceAccountJson
+    shared_drive_id: SharedDriveId = None
 
 
 class SheetsTestResponse(BaseModel):
@@ -92,3 +110,4 @@ class SheetsTestResponse(BaseModel):
 class SheetsConnectorCreate(BaseModel):
     service_account_json: ServiceAccountJson
     label: str = Field(default="Google Sheets", min_length=1, max_length=255)
+    shared_drive_id: SharedDriveId = None

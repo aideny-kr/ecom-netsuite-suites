@@ -13,6 +13,39 @@ _VALID_SA = {
 }
 
 
+class TestSheetsSharedDriveSchema:
+    def test_test_request_accepts_shared_drive_id(self):
+        from app.schemas.mcp_connector import SheetsTestRequest
+        r = SheetsTestRequest(
+            service_account_json=_VALID_SA,
+            shared_drive_id="0ACabcdEFGH1234567890",
+        )
+        assert r.shared_drive_id == "0ACabcdEFGH1234567890"
+
+    def test_test_request_defaults_shared_drive_id_to_none(self):
+        from app.schemas.mcp_connector import SheetsTestRequest
+        r = SheetsTestRequest(service_account_json=_VALID_SA)
+        assert r.shared_drive_id is None
+
+    def test_test_request_coerces_empty_string_to_none(self):
+        from app.schemas.mcp_connector import SheetsTestRequest
+        r = SheetsTestRequest(service_account_json=_VALID_SA, shared_drive_id="")
+        assert r.shared_drive_id is None
+
+    def test_test_request_rejects_invalid_format(self):
+        from app.schemas.mcp_connector import SheetsTestRequest
+        with pytest.raises(ValueError, match="shared_drive_id"):
+            SheetsTestRequest(service_account_json=_VALID_SA, shared_drive_id="too-short")
+
+    def test_create_request_accepts_shared_drive_id(self):
+        from app.schemas.mcp_connector import SheetsConnectorCreate
+        r = SheetsConnectorCreate(
+            service_account_json=_VALID_SA,
+            shared_drive_id="0ACabcdEFGH1234567890",
+        )
+        assert r.shared_drive_id == "0ACabcdEFGH1234567890"
+
+
 def _make_mock_db():
     """Return a db mock that matches real SQLAlchemy async session behaviour.
 
