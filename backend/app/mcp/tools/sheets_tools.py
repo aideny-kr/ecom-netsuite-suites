@@ -117,7 +117,8 @@ async def sheets_write_range_execute(params: dict, context: dict, **kwargs: Any)
     if not data:
         return {"error": True, "message": "data must be a non-empty 2D array."}
 
-    credentials = decrypt_credentials(connector.encrypted_credentials)
+    credentials_envelope = decrypt_credentials(connector.encrypted_credentials)
+    credentials = credentials_envelope.get("service_account_json", credentials_envelope)
 
     try:
         result = await write_range(
