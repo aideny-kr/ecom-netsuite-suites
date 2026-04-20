@@ -181,3 +181,49 @@ class TestValidateConnectionSharedDrive:
         mock_sheets.spreadsheets().create.assert_called()
         # drives().get was NOT used
         mock_drive.drives().get.assert_not_called()
+
+
+class TestCreateSpreadsheetSharedDrive:
+    @pytest.mark.asyncio
+    async def test_create_uses_drive_api_when_shared_drive_set(self):
+        mock_drive = MagicMock()
+        mock_drive.files().create().execute.return_value = {
+            "id": "sheet_id_abc",
+            "webViewLink": "https://docs.google.com/spreadsheets/d/sheet_id_abc/edit",
+        }
+
+        with patch("app.services.sheets_service._build_drive_service", return_value=mock_drive):
+            result = await create_spreadsheet(
+                credentials={"type": "service_account"},
+                title="Shared Drive Sheet",
+                shared_drive_id="0ACabcdEFGH1234567890",
+            )
+
+        assert result["spreadsheet_id"] == "sheet_id_abc"
+        assert result["url"] == "https://docs.google.com/spreadsheets/d/sheet_id_abc/edit"
+        create_kwargs = mock_drive.files().create.call_args.kwargs
+        assert create_kwargs["body"]["name"] == "Shared Drive Sheet"
+        assert create_kwargs["body"]["mimeType"] == "application/vnd.google-apps.spreadsheet"
+        assert create_kwargs["body"]["parents"] == ["0ACabcdEFGH1234567890"]
+        assert create_kwargs["supportsAllDrives"] is True
+
+    @pytest.mark.asyncio
+    async def test_create_uses_sheets_api_when_no_shared_drive(self):
+        """Existing behavior — create_spreadsheet without shared_drive_id works as before."""
+        mock_service = MagicMock()
+        mock_service.spreadsheets().create().execute.return_value = {
+            "spreadsheetId": "abc123",
+            "spreadsheetUrl": "https://docs.google.com/spreadsheets/d/abc123",
+        }
+        mock_drive = MagicMock()
+
+        with patch("app.services.sheets_service._build_sheets_service", return_value=mock_service), \
+             patch("app.services.sheets_service._build_drive_service", return_value=mock_drive):
+            result = await create_spreadsheet(
+                credentials={"type": "service_account"},
+                title="Regular Sheet",
+            )
+
+        assert result["spreadsheet_id"] == "abc123"
+        mock_service.spreadsheets().create.assert_called()
+        mock_drive.files().create.assert_not_called()

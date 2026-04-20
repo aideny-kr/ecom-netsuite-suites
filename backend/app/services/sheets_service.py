@@ -30,11 +30,13 @@ def _build_drive_service(credentials: dict):
     return build("drive", "v3", credentials=creds)
 
 
-async def create_spreadsheet(*, credentials: dict | None, title: str) -> dict[str, str]:
+async def create_spreadsheet(
+    *, credentials: dict | None, title: str, shared_drive_id: str | None = None
+) -> dict[str, str]:
     if not credentials:
         raise ValueError("credentials required")
 
-    def _sync():
+    def _sync_sheets_api():
         service = _build_sheets_service(credentials)
         result = service.spreadsheets().create(
             body={"properties": {"title": title}},
@@ -45,6 +47,23 @@ async def create_spreadsheet(*, credentials: dict | None, title: str) -> dict[st
             "url": result["spreadsheetUrl"],
         }
 
+    def _sync_drive_api():
+        drive = _build_drive_service(credentials)
+        result = drive.files().create(
+            body={
+                "name": title,
+                "mimeType": "application/vnd.google-apps.spreadsheet",
+                "parents": [shared_drive_id],
+            },
+            supportsAllDrives=True,
+            fields="id,webViewLink",
+        ).execute()
+        return {
+            "spreadsheet_id": result["id"],
+            "url": result["webViewLink"],
+        }
+
+    _sync = _sync_drive_api if shared_drive_id else _sync_sheets_api
     return await asyncio.to_thread(_sync)
 
 
