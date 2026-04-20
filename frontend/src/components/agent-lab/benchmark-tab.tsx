@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { AlertCircle } from "lucide-react";
 import { MasterDetailRunView } from "./master-detail-run-view";
 import { useAgentLabRun } from "@/hooks/use-agent-lab-run";
 import {
@@ -24,6 +25,7 @@ const BENCHMARK_CASE_IDS = [
 export function BenchmarkTab() {
   const qc = useQueryClient();
   const [activeRunId, setActiveRunId] = useState<string | null>(null);
+  const [runError, setRunError] = useState<string | null>(null);
   const live = useAgentLabRun(activeRunId);
 
   const { data: runs = [] } = useQuery({
@@ -57,12 +59,26 @@ export function BenchmarkTab() {
       }),
     onSuccess: (data) => {
       setActiveRunId(data.run_id);
+      setRunError(null);
       qc.invalidateQueries({ queryKey: ["agent-lab-runs", "benchmark"] });
+    },
+    onError: (err: Error) => {
+      const msg = err.message ?? "";
+      if (msg.includes("409") || msg.toLowerCase().includes("already in progress") || msg.toLowerCase().includes("concurrent")) {
+        setRunError("A run of this kind is already in progress. Cancel it first.");
+      } else if (msg.includes("403") || msg.toLowerCase().includes("permission")) {
+        setRunError("You don't have permission to run this.");
+      } else {
+        setRunError(`Failed to start run: ${msg || "unknown error"}`);
+      }
     },
   });
 
   const cancelMut = useMutation({
     mutationFn: (runId: string) => cancelRun(runId),
+    onError: (err: Error) => {
+      setRunError(`Failed to cancel run: ${err.message ?? "unknown error"}`);
+    },
   });
 
   const isRunning =
@@ -70,23 +86,33 @@ export function BenchmarkTab() {
     (live.status === "running" || live.status === "preparing" || live.status === "connecting");
 
   return (
-    <MasterDetailRunView
-      kind="benchmark"
-      runs={runs}
-      activeRun={activeRun}
-      cases={cases}
-      caseIds={BENCHMARK_CASE_IDS}
-      estimatedCost={estimatedCost}
-      isRunning={isRunning}
-      runStatus={live.status}
-      casesCompleted={live.casesCompleted || activeRun?.cases_completed || 0}
-      totalCases={live.totalCases || activeRun?.total_cases || 18}
-      runningCost={live.runningCost}
-      preparingPhase={live.preparingPhase}
-      onRunAll={() => startMut.mutate({ mode: "all" })}
-      onRunSingle={(caseId) => startMut.mutate({ mode: "single", caseId })}
-      onCancel={() => activeRunId && cancelMut.mutate(activeRunId)}
-      onSelectRun={(runId) => setActiveRunId(runId)}
-    />
+    <div className="flex flex-col h-full gap-2">
+      {runError && (
+        <div className="flex items-center gap-2 rounded-md border border-destructive bg-destructive/10 px-3 py-2 text-[13px] text-destructive">
+          <AlertCircle className="h-4 w-4 shrink-0" />
+          {runError}
+        </div>
+      )}
+      <div className="flex-1 min-h-0">
+        <MasterDetailRunView
+          kind="benchmark"
+          runs={runs}
+          activeRun={activeRun}
+          cases={cases}
+          caseIds={BENCHMARK_CASE_IDS}
+          estimatedCost={estimatedCost}
+          isRunning={isRunning}
+          runStatus={live.status}
+          casesCompleted={live.casesCompleted || activeRun?.cases_completed || 0}
+          totalCases={live.totalCases || activeRun?.total_cases || 18}
+          runningCost={live.runningCost}
+          preparingPhase={live.preparingPhase}
+          onRunAll={() => startMut.mutate({ mode: "all" })}
+          onRunSingle={(caseId) => startMut.mutate({ mode: "single", caseId })}
+          onCancel={() => activeRunId && cancelMut.mutate(activeRunId)}
+          onSelectRun={(runId) => setActiveRunId(runId)}
+        />
+      </div>
+    </div>
   );
 }

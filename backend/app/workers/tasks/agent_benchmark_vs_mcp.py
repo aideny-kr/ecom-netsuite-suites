@@ -93,6 +93,7 @@ async def _run_nightly_benchmark(
     baseline_model: str,
     emitter=None,
     run_id: uuid.UUID | None = None,
+    case_ids: list[str] | None = None,
 ) -> dict:
     """Run the benchmark and compare to yesterday's run.
 
@@ -123,7 +124,7 @@ async def _run_nightly_benchmark(
     run_date = date.today()
 
     try:
-        cases = load_cases(suite=suite)
+        cases = load_cases(suite=suite, case_ids=case_ids)
     except Exception as exc:
         print(f"[AGENT_BENCHMARK] load_cases failed: {exc}", flush=True)
         return {"status": "load_error", "error": str(exc)}

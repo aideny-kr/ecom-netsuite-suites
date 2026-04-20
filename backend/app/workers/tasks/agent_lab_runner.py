@@ -68,6 +68,10 @@ def agent_lab_run_task(self, run_id: str, config: dict):
         try:
             if config["kind"] == "benchmark":
                 from app.workers.tasks.agent_benchmark_vs_mcp import _run_nightly_benchmark
+                # Build case_ids list if single-case mode; None means "run all"
+                case_ids = None
+                if config.get("mode") == "single" and config.get("case_id"):
+                    case_ids = [config["case_id"]]
                 asyncio.run(_run_nightly_benchmark(
                     tenant_id=tenant_uuid,
                     suite="sales",
@@ -75,6 +79,7 @@ def agent_lab_run_task(self, run_id: str, config: dict):
                     baseline_model="claude-sonnet-4-6",
                     emitter=emitter,
                     run_id=run_uuid,  # key benchmark rows by agent_lab_run.id for cost reconciliation
+                    case_ids=case_ids,
                 ))
                 # Benchmark return dict has no total_cost — reconcile from persisted rows
                 cost = service.sum_benchmark_cost_for_run(db, run_uuid)
