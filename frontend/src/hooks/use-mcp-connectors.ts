@@ -167,6 +167,7 @@ export function useUpdateBigQueryTables() {
 
 interface SheetsTestPayload {
   service_account_json: Record<string, unknown>;
+  shared_drive_id?: string;
 }
 
 interface SheetsTestResponse {
@@ -177,6 +178,7 @@ interface SheetsTestResponse {
 interface SheetsCreatePayload {
   service_account_json: Record<string, unknown>;
   label?: string;
+  shared_drive_id?: string;
 }
 
 export function useTestSheetsConnection() {
