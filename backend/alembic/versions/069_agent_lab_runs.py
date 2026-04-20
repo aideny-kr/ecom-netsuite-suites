@@ -37,8 +37,8 @@ def upgrade() -> None:
         sa.Column("case_id", sa.String(255), nullable=True),
         sa.Column("status", sa.String(20), nullable=False, server_default="running"),
         sa.Column("total_cases", sa.Integer, nullable=False),
-        sa.Column("cases_completed", sa.Integer, nullable=False, server_default="0"),
-        sa.Column("cost_usd_actual", sa.Float, nullable=False, server_default="0.0"),
+        sa.Column("cases_completed", sa.Integer, nullable=False, server_default=sa.text("0")),
+        sa.Column("cost_usd_actual", sa.Float, nullable=False, server_default=sa.text("0.0")),
         sa.Column(
             "started_at",
             sa.DateTime(timezone=True),

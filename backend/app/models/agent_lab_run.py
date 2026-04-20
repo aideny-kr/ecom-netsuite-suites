@@ -9,7 +9,7 @@ enforces one-running-at-a-time per (tenant, kind).
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, Float, ForeignKey, Index, Integer, String, Text, func
+from sqlalchemy import DateTime, Float, ForeignKey, Index, Integer, String, Text, func, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -52,5 +52,12 @@ class AgentLabRun(Base, UUIDPrimaryKeyMixin, TimestampMixin):
             "tenant_id",
             "kind",
             "started_at",
+        ),
+        Index(
+            "agent_lab_runs_single_running",
+            "tenant_id",
+            "kind",
+            unique=True,
+            postgresql_where=text("status = 'running'"),
         ),
     )
