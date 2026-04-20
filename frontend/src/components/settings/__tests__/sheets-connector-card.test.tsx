@@ -7,11 +7,14 @@ vi.mock("@/hooks/use-permissions", () => ({
   usePermissions: () => ({ isAdmin: true }),
 }));
 
-const mockTestMutate = vi.fn(async (payload: unknown) => ({ valid: true, error: null }));
-const mockCreateMutate = vi.fn(async () => ({}));
+const { mockTestMutate, mockCreateMutate, mockUseMcpConnectors } = vi.hoisted(() => ({
+  mockTestMutate: vi.fn(async (_payload: unknown) => ({ valid: true, error: null })),
+  mockCreateMutate: vi.fn(async () => ({})),
+  mockUseMcpConnectors: vi.fn(() => ({ data: [] as unknown[] })),
+}));
 
 vi.mock("@/hooks/use-mcp-connectors", () => ({
-  useMcpConnectors: () => ({ data: [] }),
+  useMcpConnectors: mockUseMcpConnectors,
   useDeleteMcpConnector: () => ({ mutateAsync: vi.fn() }),
   useTestSheetsConnection: () => ({
     mutateAsync: mockTestMutate,
@@ -42,6 +45,8 @@ describe("SheetsConnectorCard — Shared Drive input", () => {
   beforeEach(() => {
     mockTestMutate.mockClear();
     mockCreateMutate.mockClear();
+    mockUseMcpConnectors.mockReset();
+    mockUseMcpConnectors.mockImplementation(() => ({ data: [] }));
   });
 
   it("renders the Shared Drive ID input in not-connected state", () => {
@@ -93,5 +98,41 @@ describe("SheetsConnectorCard — Shared Drive input", () => {
       expect(screen.getByText(/invalid shared drive id/i)).toBeInTheDocument(),
     );
     expect(mockTestMutate).not.toHaveBeenCalled();
+  });
+});
+
+describe("SheetsConnectorCard — connected state", () => {
+  it("shows Shared Drive ID when present in metadata_json", () => {
+    mockUseMcpConnectors.mockImplementationOnce(() => ({
+      data: [
+        {
+          id: "c1",
+          provider: "google_sheets",
+          status: "active",
+          metadata_json: {
+            client_email: "sa@x.iam.gserviceaccount.com",
+            shared_drive_id: "0ACabcdEFGH1234567890",
+          },
+        },
+      ],
+    }));
+    render(wrap(<SheetsConnectorCard />));
+    expect(screen.getByText(/shared drive/i)).toBeInTheDocument();
+    expect(screen.getByText(/0ACabcdEFGH1234567890/)).toBeInTheDocument();
+  });
+
+  it("does not show Shared Drive row when metadata omits the field", () => {
+    mockUseMcpConnectors.mockImplementationOnce(() => ({
+      data: [
+        {
+          id: "c1",
+          provider: "google_sheets",
+          status: "active",
+          metadata_json: { client_email: "sa@x.iam.gserviceaccount.com" },
+        },
+      ],
+    }));
+    render(wrap(<SheetsConnectorCard />));
+    expect(screen.queryByText(/shared drive/i)).not.toBeInTheDocument();
   });
 });

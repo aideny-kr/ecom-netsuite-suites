@@ -186,6 +186,14 @@ export function SheetsConnectorCard() {
             {(sheetsConnector.metadata_json?.client_email as string) ?? "—"}
           </code>
         </div>
+        {(sheetsConnector.metadata_json?.shared_drive_id as string | undefined) && (
+          <div className="mt-1.5 text-[13px] text-muted-foreground">
+            Shared Drive:{" "}
+            <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-[12px]">
+              {sheetsConnector.metadata_json?.shared_drive_id as string}
+            </code>
+          </div>
+        )}
         <div className="mt-3 flex items-center justify-end">
           <Button
             variant="ghost"
