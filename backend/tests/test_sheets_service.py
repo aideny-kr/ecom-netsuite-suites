@@ -126,7 +126,6 @@ class TestValidateConnectionSharedDrive:
     @pytest.mark.asyncio
     async def test_shared_drive_happy_path(self):
         mock_drive = MagicMock()
-        mock_drive.drives().get().execute.return_value = {"id": "0ACabc", "kind": "drive#drive"}
         mock_drive.files().create().execute.return_value = {"id": "file_abc"}
         mock_drive.files().delete().execute.return_value = None
 
@@ -137,8 +136,6 @@ class TestValidateConnectionSharedDrive:
             )
 
         assert result == {"valid": True}
-        # Pre-flight drives.get called with the drive ID
-        mock_drive.drives().get.assert_called_with(driveId="0ACabcdEFGH1234567890")
         # files.create body includes parents + spreadsheet mimeType + supportsAllDrives
         create_kwargs = mock_drive.files().create.call_args.kwargs
         assert create_kwargs["body"]["mimeType"] == "application/vnd.google-apps.spreadsheet"
@@ -152,9 +149,9 @@ class TestValidateConnectionSharedDrive:
     async def test_shared_drive_not_found_returns_valid_false(self):
         from googleapiclient.errors import HttpError
         mock_drive = MagicMock()
-        # Simulate Drive API 404 on drives.get
+        # Simulate Drive API 404 on files.create (drive doesn't exist or SA lacks access)
         err = HttpError(MagicMock(status=404), b'{"error": "not found"}')
-        mock_drive.drives().get().execute.side_effect = err
+        mock_drive.files().create().execute.side_effect = err
 
         with patch("app.services.sheets_service._build_drive_service", return_value=mock_drive):
             result = await validate_connection(
@@ -179,8 +176,8 @@ class TestValidateConnectionSharedDrive:
         assert result == {"valid": True}
         # Sheets API was used, not Drive API file creation
         mock_sheets.spreadsheets().create.assert_called()
-        # drives().get was NOT used
-        mock_drive.drives().get.assert_not_called()
+        # Drive API files.create was NOT used
+        mock_drive.files().create.assert_not_called()
 
 
 class TestCreateSpreadsheetSharedDrive:

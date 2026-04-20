@@ -140,9 +140,10 @@ async def validate_connection(
 
     def _sync_drive_api():
         drive = _build_drive_service(credentials)
-        # 1. Pre-flight: confirm it's a real Shared Drive
-        drive.drives().get(driveId=shared_drive_id).execute()
-        # 2. Create test file as a spreadsheet in that drive
+        # Create test file as a spreadsheet in the Shared Drive.
+        # files.create with parents=[drive_id] + supportsAllDrives=True will fail
+        # cleanly if the drive doesn't exist or the SA lacks access — no need for
+        # a separate drives.get preflight (which requires a broader OAuth scope).
         created = drive.files().create(
             body={
                 "name": "AI-den Connection Test",
