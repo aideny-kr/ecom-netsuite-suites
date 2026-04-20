@@ -120,3 +120,64 @@ class TestValidateConnection:
             result = await validate_connection(credentials={"type": "service_account"})
         assert result["valid"] is False
         assert result["error"] == "timeout"
+
+
+class TestValidateConnectionSharedDrive:
+    @pytest.mark.asyncio
+    async def test_shared_drive_happy_path(self):
+        mock_drive = MagicMock()
+        mock_drive.drives().get().execute.return_value = {"id": "0ACabc", "kind": "drive#drive"}
+        mock_drive.files().create().execute.return_value = {"id": "file_abc"}
+        mock_drive.files().delete().execute.return_value = None
+
+        with patch("app.services.sheets_service._build_drive_service", return_value=mock_drive):
+            result = await validate_connection(
+                credentials={"type": "service_account"},
+                shared_drive_id="0ACabcdEFGH1234567890",
+            )
+
+        assert result == {"valid": True}
+        # Pre-flight drives.get called with the drive ID
+        mock_drive.drives().get.assert_called_with(driveId="0ACabcdEFGH1234567890")
+        # files.create body includes parents + spreadsheet mimeType + supportsAllDrives
+        create_kwargs = mock_drive.files().create.call_args.kwargs
+        assert create_kwargs["body"]["mimeType"] == "application/vnd.google-apps.spreadsheet"
+        assert create_kwargs["body"]["parents"] == ["0ACabcdEFGH1234567890"]
+        assert create_kwargs["supportsAllDrives"] is True
+        # cleanup delete also uses supportsAllDrives
+        delete_kwargs = mock_drive.files().delete.call_args.kwargs
+        assert delete_kwargs["supportsAllDrives"] is True
+
+    @pytest.mark.asyncio
+    async def test_shared_drive_not_found_returns_valid_false(self):
+        from googleapiclient.errors import HttpError
+        mock_drive = MagicMock()
+        # Simulate Drive API 404 on drives.get
+        err = HttpError(MagicMock(status=404), b'{"error": "not found"}')
+        mock_drive.drives().get().execute.side_effect = err
+
+        with patch("app.services.sheets_service._build_drive_service", return_value=mock_drive):
+            result = await validate_connection(
+                credentials={"type": "service_account"},
+                shared_drive_id="0ACnotexists1234567890",
+            )
+
+        assert result["valid"] is False
+        assert "error" in result
+
+    @pytest.mark.asyncio
+    async def test_no_shared_drive_uses_sheets_api_branch(self):
+        """When shared_drive_id is None, original Sheets API path runs unchanged."""
+        mock_sheets = MagicMock()
+        mock_sheets.spreadsheets().create().execute.return_value = {"spreadsheetId": "abc"}
+        mock_drive = MagicMock()
+
+        with patch("app.services.sheets_service._build_sheets_service", return_value=mock_sheets), \
+             patch("app.services.sheets_service._build_drive_service", return_value=mock_drive):
+            result = await validate_connection(credentials={"type": "service_account"})
+
+        assert result == {"valid": True}
+        # Sheets API was used, not Drive API file creation
+        mock_sheets.spreadsheets().create.assert_called()
+        # drives().get was NOT used
+        mock_drive.drives().get.assert_not_called()

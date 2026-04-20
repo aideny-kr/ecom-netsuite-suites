@@ -99,11 +99,13 @@ async def share_spreadsheet(
     return await asyncio.to_thread(_sync)
 
 
-async def validate_connection(*, credentials: dict | None) -> dict[str, Any]:
+async def validate_connection(
+    *, credentials: dict | None, shared_drive_id: str | None = None
+) -> dict[str, Any]:
     if not credentials:
         raise ValueError("credentials required")
 
-    def _sync():
+    def _sync_sheets_api():
         sheets = _build_sheets_service(credentials)
         result = sheets.spreadsheets().create(
             body={"properties": {"title": "AI-den Connection Test"}},
@@ -117,6 +119,30 @@ async def validate_connection(*, credentials: dict | None) -> dict[str, Any]:
             logger.warning("sheets_service.validate_cleanup_failed", exc_info=True)
         return {"valid": True}
 
+    def _sync_drive_api():
+        drive = _build_drive_service(credentials)
+        # 1. Pre-flight: confirm it's a real Shared Drive
+        drive.drives().get(driveId=shared_drive_id).execute()
+        # 2. Create test file as a spreadsheet in that drive
+        created = drive.files().create(
+            body={
+                "name": "AI-den Connection Test",
+                "mimeType": "application/vnd.google-apps.spreadsheet",
+                "parents": [shared_drive_id],
+            },
+            supportsAllDrives=True,
+            fields="id",
+        ).execute()
+        # 3. Cleanup (best-effort)
+        try:
+            drive.files().delete(
+                fileId=created["id"], supportsAllDrives=True,
+            ).execute()
+        except Exception:
+            logger.warning("sheets_service.validate_cleanup_failed", exc_info=True)
+        return {"valid": True}
+
+    _sync = _sync_drive_api if shared_drive_id else _sync_sheets_api
     try:
         return await asyncio.wait_for(asyncio.to_thread(_sync), timeout=15.0)
     except asyncio.TimeoutError:
