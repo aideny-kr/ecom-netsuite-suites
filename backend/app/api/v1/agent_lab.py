@@ -19,6 +19,7 @@ from app.core.database import get_db
 from app.core.dependencies import get_current_superadmin
 from app.core.redis_client import get_sync_redis
 from app.models.user import User
+from app.services import audit_service
 from app.services.agent_lab import service
 from app.services.agent_lab.service import ConcurrentRunError
 
@@ -68,6 +69,17 @@ async def create_run(
     except ConcurrentRunError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
+    await audit_service.log_event(
+        db=db,
+        tenant_id=tenant_id,
+        category="agent_lab",
+        action="agent_lab.run.start",
+        actor_id=user.id,
+        resource_type="agent_lab_run",
+        resource_id=str(run.id),
+    )
+    await db.commit()
+
     return CreateRunResponse(run_id=str(run.id), status=run.status)
 
 
@@ -99,7 +111,6 @@ async def get_run(
 async def cancel_run_endpoint(
     run_id: uuid.UUID,
     user: Annotated[User, Depends(get_current_superadmin)],
-    db: Annotated[AsyncSession, Depends(get_db)],
 ):
     # Idempotent: OK if already cancelled/completed
     r = get_sync_redis()

@@ -15,7 +15,6 @@ from httpx import AsyncClient
 from app.core.config import settings
 from tests.conftest import create_test_tenant, create_test_user, make_auth_headers
 
-
 # ---------------------------------------------------------------------------
 # Ensure settings.AGENT_BENCHMARK_TENANT_ID is populated for all tests in
 # this module (uses a fixed Framework-like UUID — no real DB row needed for
@@ -184,3 +183,25 @@ async def test_get_run_snapshot_404_for_unknown(client, superadmin_user):
         headers=superadmin_user[1],
     )
     assert resp.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_post_runs_returns_400_when_single_mode_missing_case_id(
+    client, superadmin_user, monkeypatch
+):
+    """mode='single' without case_id returns 400, not 500."""
+    from unittest.mock import MagicMock
+
+    monkeypatch.setattr(
+        "app.workers.tasks.agent_lab_runner.agent_lab_run_task.apply_async",
+        MagicMock(),
+    )
+
+    _, headers = superadmin_user
+    resp = await client.post(
+        "/api/v1/agent-lab/runs",
+        json={"kind": "benchmark", "mode": "single"},  # no case_id
+        headers=headers,
+    )
+    assert resp.status_code == 400
+    assert "case_id" in resp.json().get("detail", "").lower()
