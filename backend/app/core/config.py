@@ -118,6 +118,9 @@ class Settings(BaseSettings):
     QUERY_IMPROVEMENT_MAX_EXPERIMENTS: int = 60
     QUERY_IMPROVEMENT_TENANT_ID: str = ""
 
+    # Agent Lab — v1 Framework-only tenant
+    AGENT_BENCHMARK_TENANT_ID: str = ""
+
     model_config = {"env_file": str(_env_file), "extra": "ignore"}
 
     @property
