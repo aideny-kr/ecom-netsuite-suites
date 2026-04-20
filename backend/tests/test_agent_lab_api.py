@@ -257,9 +257,17 @@ async def test_sse_endpoint_streams_events(client, superadmin_user, monkeypatch)
     ) as resp:
         assert resp.status_code == 200
         assert resp.headers["content-type"].startswith("text/event-stream")
+        assert resp.headers["cache-control"] == "no-cache"
+        assert resp.headers.get("x-accel-buffering") == "no"
         content = b""
         async for chunk in resp.aiter_bytes():
             content += chunk
 
     assert b"run_started" in content
     assert b'"total_cases":18' in content
+    # SSE wire-format assertions — guard against future framing regressions
+    assert b"id: 1-0" in content
+    assert b"event: run_started" in content
+    assert b"data: " in content
+    # SSE events must end with \n\n (event separator)
+    assert b"\n\n" in content
