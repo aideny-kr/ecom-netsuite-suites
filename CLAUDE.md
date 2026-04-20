@@ -229,6 +229,13 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 
 | What | Where |
 |------|-------|
+| Agent Lab API | `backend/app/api/v1/agent_lab.py` |
+| Agent Lab model | `backend/app/models/agent_lab_run.py` |
+| Agent Lab service | `backend/app/services/agent_lab/service.py` |
+| Agent Lab emitter | `backend/app/services/agent_lab/progress_emitter.py` |
+| Agent Lab task wrapper | `backend/app/workers/tasks/agent_lab_runner.py` |
+| Agent Lab page | `frontend/src/app/(dashboard)/agent-lab/page.tsx` |
+| Agent Lab hook | `frontend/src/hooks/use-agent-lab-run.ts` |
 | Chat agents | `backend/app/services/chat/agents/` |
 | Chat adapters | `backend/app/services/chat/adapters/` |
 | Entity resolver | `backend/app/services/chat/tenant_resolver.py` |
@@ -376,6 +383,7 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 ## Current State
 
 - **Product**: AI-den v2.0 deployed to staging 2026-04-15. PR #43 merged: knowledge-driven unified agent replacing three-tier routing with knowledge profiles. Net -6,686 lines. Follow-up 54(b) resolved. Next: cross-source queries + Google Sheets connector (spec + plan committed).
+- **Agent Lab (v1)**: super-admin-only dashboard at `/dashboard/agent-lab` for on-demand benchmark + experiment runs + read-only patterns view. Framework-tenant only (reads `AGENT_BENCHMARK_TENANT_ID` env var). Nightly scheduling stays off — on-demand only. Migration 069 adds `agent_lab_runs` table with partial unique index blocking concurrent same-kind runs.
 - **Latest migration**: 068_revoke_recon_ops (no new migrations in #40)
 - **Frontend tests**: Vitest + @testing-library/react (33 tests). Run: `cd frontend && npx vitest run`
 - **Backend tests**: 2,846 tests. Run: `cd backend && .venv/bin/python -m pytest`
