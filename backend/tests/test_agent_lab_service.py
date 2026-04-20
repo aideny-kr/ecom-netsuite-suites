@@ -123,3 +123,11 @@ async def test_list_patterns_returns_tenant_scoped_sorted():
     compiled = str(executed_stmt.compile(compile_kwargs={"literal_binds": True}))
     assert "tenant_id" in compiled.lower()
     assert "last_used_at desc" in compiled.lower()
+
+
+def test_agent_lab_run_task_registered():
+    """The Celery wrapper task must be registered in the app's task registry."""
+    from app.workers.celery_app import celery_app
+    from app.workers.tasks.agent_lab_runner import agent_lab_run_task  # noqa: F401
+
+    assert "tasks.agent_lab_run" in celery_app.tasks

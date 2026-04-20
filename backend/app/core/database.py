@@ -1,9 +1,11 @@
 import ssl
 import uuid
 from collections.abc import AsyncGenerator
+from contextlib import contextmanager
 
-from sqlalchemy import text
+from sqlalchemy import create_engine, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import settings
 
@@ -60,6 +62,27 @@ async def set_tenant_context(session: AsyncSession, tenant_id: str) -> None:
     """
     validated = str(uuid.UUID(str(tenant_id)))  # Raises ValueError if not a valid UUID
     await session.execute(text(f"SET LOCAL app.current_tenant_id = '{validated}'"))
+
+
+_sync_session_factory: sessionmaker | None = None
+
+
+@contextmanager
+def get_sync_session():
+    """Sync SQLAlchemy session for Celery workers.
+
+    Uses DATABASE_URL_SYNC (psycopg2 driver). Suitable for
+    ProgressEmitter and finalize_run_sync in the Celery worker.
+    """
+    global _sync_session_factory
+    if _sync_session_factory is None:
+        _sync_engine = create_engine(settings.DATABASE_URL_SYNC, pool_pre_ping=True)
+        _sync_session_factory = sessionmaker(bind=_sync_engine)
+    session: Session = _sync_session_factory()
+    try:
+        yield session
+    finally:
+        session.close()
 
 
 def worker_async_session():
