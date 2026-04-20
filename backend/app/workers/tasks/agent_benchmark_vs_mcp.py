@@ -91,6 +91,7 @@ async def _run_nightly_benchmark(
     suite: str,
     agent_model: str,
     baseline_model: str,
+    emitter=None,
 ) -> dict:
     """Run the benchmark and compare to yesterday's run."""
     from app.core.database import async_session_factory, set_tenant_context
@@ -122,6 +123,12 @@ async def _run_nightly_benchmark(
         flush=True,
     )
 
+    if emitter:
+        emitter.emit("run_started", {
+            "total_cases": len(cases),
+            "estimated_cost_usd": len(cases) * 0.35,  # rough benchmark estimate
+        })
+
     stats = {
         "run_id": str(run_id),
         "run_date": run_date.isoformat(),
@@ -141,6 +148,15 @@ async def _run_nightly_benchmark(
         await set_tenant_context(db, str(tenant_id))
 
         for i, case in enumerate(cases, 1):
+            if emitter and emitter.cancelled():
+                print("[AGENT_BENCHMARK] Cancelled via emitter", flush=True)
+                break
+            if emitter:
+                emitter.emit("case_started", {
+                    "case_id": case.case_id,
+                    "question": case.question,
+                    "index": i,
+                })
             print(
                 f"[AGENT_BENCHMARK] [{i}/{len(cases)}] {case.case_id}",
                 flush=True,
@@ -173,6 +189,18 @@ async def _run_nightly_benchmark(
 
             if result.mcp is not None:
                 deltas.append(result.ours.answer_acc - result.mcp.answer_acc)
+
+            if emitter:
+                emitter.emit("case_complete", {
+                    "case_id": case.case_id,
+                    "result": {
+                        "verdict": result.verdict,
+                        "ours_accuracy": result.ours.answer_acc if result.ours else 0.0,
+                        "mcp_accuracy": result.mcp.answer_acc if result.mcp else 0.0,
+                    },
+                    "running_cost_usd": 0.0,  # reconciled by Celery wrapper from agent_benchmark_runs
+                    "cases_completed": stats["cases_run"],
+                })
 
             # Persist both sides
             try:
@@ -247,6 +275,13 @@ async def _run_nightly_benchmark(
     stats["yesterday_delta"] = (
         round(yesterday_delta, 4) if yesterday_delta is not None else None
     )
+
+    if emitter:
+        emitter.emit("run_complete", {
+            "status": "completed",
+            "summary": stats,
+            "total_cost_usd": 0.0,  # reconciled by Celery wrapper from agent_benchmark_runs
+        })
 
     # Send email digest (daily summary + regression alert)
     try:

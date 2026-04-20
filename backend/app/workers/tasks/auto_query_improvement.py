@@ -39,7 +39,7 @@ def auto_query_improvement(self):
         loop.close()
 
 
-async def _run_experiments(settings) -> dict:
+async def _run_experiments(settings, emitter=None) -> dict:
     import uuid
 
     from app.core.database import async_session_factory
@@ -65,6 +65,8 @@ async def _run_experiments(settings) -> dict:
 
     async with async_session_factory() as db:
         # Phase 0: Generate new synthetic eval cases from schema hints
+        if emitter:
+            emitter.emit("preparing", {"phase": "generating"})
         try:
             from app.services.eval_case_generator import generate_eval_cases
 
@@ -78,6 +80,8 @@ async def _run_experiments(settings) -> dict:
             print(f"[AUTO_IMPROVE] Generation failed (non-fatal): {exc}", flush=True)
 
         # Phase 1: Mine new organic eval cases from recent successful queries
+        if emitter:
+            emitter.emit("preparing", {"phase": "mining"})
         try:
             new_cases = await mine_organic_eval_cases(db, tenant_id)
             if new_cases:
@@ -107,6 +111,11 @@ async def _run_experiments(settings) -> dict:
                 cases.append(bigquery_cases[i])
 
         cases = cases[:max_experiments]
+        if emitter:
+            emitter.emit("run_started", {
+                "total_cases": len(cases),
+                "estimated_cost_usd": sum(estimate_experiment_cost(c.dialect) for c in cases),
+            })
         print(
             f"[AUTO_IMPROVE] Starting: {len(cases)} experiments "
             f"({len(suiteql_organic)}+{len(bigquery_organic)} organic, "
@@ -131,6 +140,15 @@ async def _run_experiments(settings) -> dict:
         )
 
         for case in cases:
+            if emitter and emitter.cancelled():
+                print("[AUTO_IMPROVE] Cancelled via emitter", flush=True)
+                break
+            if emitter:
+                emitter.emit("case_started", {
+                    "case_id": case.question[:60],
+                    "question": case.question,
+                    "index": stats["total"] + 1,
+                })
             # Budget check
             est_cost = estimate_experiment_cost(case.dialect)
             if spent + est_cost > budget:
@@ -172,6 +190,17 @@ async def _run_experiments(settings) -> dict:
                     f"(score={result.get('experiment_score', 0):.2f})",
                     flush=True,
                 )
+                if emitter:
+                    emitter.emit("case_complete", {
+                        "case_id": case.question[:60],
+                        "result": {
+                            "decision": decision,
+                            "experiment_score": exp_score,
+                            "dialect": case.dialect,
+                        },
+                        "running_cost_usd": spent,
+                        "cases_completed": stats["total"],
+                    })
 
             except Exception as exc:
                 stats["errors"] += 1
@@ -212,5 +241,11 @@ async def _run_experiments(settings) -> dict:
 
         await db.commit()
 
+    if emitter:
+        emitter.emit("run_complete", {
+            "status": "completed",
+            "summary": stats,
+            "total_cost_usd": spent,
+        })
     print(f"[AUTO_IMPROVE] Complete: {stats}", flush=True)
     return stats
