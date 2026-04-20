@@ -64,17 +64,24 @@ async def sheets_create_execute(params: dict, context: dict, **kwargs: Any) -> d
     if not connector:
         return {"error": True, "message": "Google Sheets connector not configured. Set up in Settings."}
 
-    credentials = decrypt_credentials(connector.encrypted_credentials)
+    credentials_envelope = decrypt_credentials(connector.encrypted_credentials)
+    credentials = credentials_envelope.get("service_account_json", credentials_envelope)
     title = params.get("title", "AI-den Export")
+    shared_drive_id = (connector.metadata_json or {}).get("shared_drive_id")
 
     try:
-        result = await create_spreadsheet(credentials=credentials, title=title)
+        result = await create_spreadsheet(
+            credentials=credentials,
+            title=title,
+            shared_drive_id=shared_drive_id,
+        )
     except Exception as e:
         logger.warning("sheets_tools.create_failed", exc_info=True)
         return {"error": True, "message": f"Failed to create spreadsheet: {e}"}
 
     user_email = await _get_user_email(context)
-    if user_email:
+    # Skip share when sheet lives in a Shared Drive — members already have access.
+    if user_email and not shared_drive_id:
         try:
             await share_spreadsheet(
                 credentials=credentials,
@@ -88,7 +95,7 @@ async def sheets_create_execute(params: dict, context: dict, **kwargs: Any) -> d
         "error": False,
         "spreadsheet_id": result["spreadsheet_id"],
         "url": result["url"],
-        "shared_with": user_email,
+        "shared_with": user_email if not shared_drive_id else None,
         "title": title,
     }
 

@@ -137,3 +137,108 @@ class TestSheetsWriteRangeExecute:
                 _CONTEXT,
             )
         assert result["error"] is True
+
+
+class TestSheetsToolsSharedDrive:
+    @pytest.mark.asyncio
+    async def test_create_passes_shared_drive_id_when_set(self):
+        """metadata_json.shared_drive_id flows to create_spreadsheet."""
+        from app.mcp.tools.sheets_tools import sheets_create_execute
+
+        mock_connector = MagicMock()
+        mock_connector.encrypted_credentials = b"enc"
+        mock_connector.metadata_json = {
+            "client_email": "sa@x.iam.gserviceaccount.com",
+            "shared_drive_id": "0ACabcdEFGH1234567890",
+        }
+
+        with patch(
+            "app.mcp.tools.sheets_tools._get_sheets_connector",
+            new=AsyncMock(return_value=mock_connector),
+        ), patch(
+            "app.mcp.tools.sheets_tools.decrypt_credentials",
+            return_value={"service_account_json": {"type": "service_account"}},
+        ), patch(
+            "app.mcp.tools.sheets_tools.create_spreadsheet",
+            new=AsyncMock(return_value={"spreadsheet_id": "abc", "url": "https://..."}),
+        ) as mock_create, patch(
+            "app.mcp.tools.sheets_tools._get_user_email",
+            new=AsyncMock(return_value=None),
+        ):
+            result = await sheets_create_execute(
+                {"title": "My Sheet"},
+                {"tenant_id": "t", "db": MagicMock(), "actor_id": "a"},
+            )
+
+        assert result["error"] is False
+        mock_create.assert_awaited_once()
+        assert mock_create.call_args.kwargs["shared_drive_id"] == "0ACabcdEFGH1234567890"
+
+    @pytest.mark.asyncio
+    async def test_create_skips_share_when_in_shared_drive(self):
+        """When a Shared Drive is in play, share_spreadsheet should NOT be called
+        (members already have drive-level access)."""
+        from app.mcp.tools.sheets_tools import sheets_create_execute
+
+        mock_connector = MagicMock()
+        mock_connector.encrypted_credentials = b"enc"
+        mock_connector.metadata_json = {
+            "client_email": "sa@x.iam.gserviceaccount.com",
+            "shared_drive_id": "0ACabcdEFGH1234567890",
+        }
+
+        with patch(
+            "app.mcp.tools.sheets_tools._get_sheets_connector",
+            new=AsyncMock(return_value=mock_connector),
+        ), patch(
+            "app.mcp.tools.sheets_tools.decrypt_credentials",
+            return_value={"service_account_json": {}},
+        ), patch(
+            "app.mcp.tools.sheets_tools.create_spreadsheet",
+            new=AsyncMock(return_value={"spreadsheet_id": "abc", "url": "u"}),
+        ), patch(
+            "app.mcp.tools.sheets_tools._get_user_email",
+            new=AsyncMock(return_value="user@example.com"),
+        ), patch(
+            "app.mcp.tools.sheets_tools.share_spreadsheet",
+            new=AsyncMock(),
+        ) as mock_share:
+            result = await sheets_create_execute(
+                {"title": "My Sheet"},
+                {"tenant_id": "t", "db": MagicMock(), "actor_id": "a"},
+            )
+
+        assert result["error"] is False
+        mock_share.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_create_still_shares_when_no_shared_drive(self):
+        """Existing behavior: without Shared Drive, share_spreadsheet runs."""
+        from app.mcp.tools.sheets_tools import sheets_create_execute
+
+        mock_connector = MagicMock()
+        mock_connector.encrypted_credentials = b"enc"
+        mock_connector.metadata_json = {"client_email": "sa@x.iam.gserviceaccount.com"}
+
+        with patch(
+            "app.mcp.tools.sheets_tools._get_sheets_connector",
+            new=AsyncMock(return_value=mock_connector),
+        ), patch(
+            "app.mcp.tools.sheets_tools.decrypt_credentials",
+            return_value={"service_account_json": {}},
+        ), patch(
+            "app.mcp.tools.sheets_tools.create_spreadsheet",
+            new=AsyncMock(return_value={"spreadsheet_id": "abc", "url": "u"}),
+        ), patch(
+            "app.mcp.tools.sheets_tools._get_user_email",
+            new=AsyncMock(return_value="user@example.com"),
+        ), patch(
+            "app.mcp.tools.sheets_tools.share_spreadsheet",
+            new=AsyncMock(),
+        ) as mock_share:
+            await sheets_create_execute(
+                {"title": "My Sheet"},
+                {"tenant_id": "t", "db": MagicMock(), "actor_id": "a"},
+            )
+
+        mock_share.assert_awaited_once()
