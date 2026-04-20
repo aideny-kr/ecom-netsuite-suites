@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import type { RunKind } from "@/lib/agent-lab";
 
 interface Props {
@@ -27,6 +27,12 @@ export function RunControls({
   allowSingleCase = true,
 }: Props) {
   const [selectedCaseId, setSelectedCaseId] = useState(caseIds[0] ?? "");
+
+  useEffect(() => {
+    if (!selectedCaseId && caseIds[0]) {
+      setSelectedCaseId(caseIds[0]);
+    }
+  }, [caseIds, selectedCaseId]);
 
   if (isRunning) {
     return (
