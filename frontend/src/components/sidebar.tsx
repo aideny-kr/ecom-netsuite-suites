@@ -24,6 +24,7 @@ import {
   Tag,
   BarChart3,
   Scale,
+  FlaskConical,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { NAV_ITEMS, CANONICAL_TABLES } from "@/lib/constants";
@@ -47,6 +48,7 @@ const iconMap = {
   Database,
   Settings,
   Scale,
+  FlaskConical,
 } as const;
 
 const agentIconMap: Record<string, typeof Tag> = {
@@ -153,10 +155,11 @@ export function Sidebar({ collapsed = false, onToggle }: { collapsed?: boolean; 
           Menu
         </p>
         {NAV_ITEMS.filter((item) => {
+          if (item.superAdminOnly && user?.global_role !== "superadmin") return false;
           if (!item.featureFlag) return true;
           return features?.[item.featureFlag] !== false;
         }).map((item) => {
-          const Icon = iconMap[item.icon];
+          const Icon = iconMap[item.icon as keyof typeof iconMap];
           const isActive = pathname === item.href;
           return (
             <Link
