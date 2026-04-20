@@ -691,7 +691,10 @@ async def create_sheets_connector(
 
     # 1. Validate connection
     try:
-        validation = await validate_sheets_connection(credentials=request.service_account_json)
+        validation = await validate_sheets_connection(
+            credentials=request.service_account_json,
+            shared_drive_id=request.shared_drive_id,
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     if not validation["valid"]:
@@ -712,7 +715,12 @@ async def create_sheets_connector(
     # 3. Encrypt credentials
     encrypted = encrypt_credentials({"service_account_json": request.service_account_json})
 
-    # 4. Create connector (tools are registered locally — don't populate discovered_tools)
+    # 4. Build metadata_json (conditionally include shared_drive_id)
+    metadata: dict = {"client_email": request.service_account_json.get("client_email", "")}
+    if request.shared_drive_id:
+        metadata["shared_drive_id"] = request.shared_drive_id
+
+    # 5. Create connector (tools are registered locally — don't populate discovered_tools)
     connector = McpConnector(
         tenant_id=user.tenant_id,
         provider="google_sheets",
@@ -724,7 +732,7 @@ async def create_sheets_connector(
         status="active",
         is_enabled=True,
         created_by=user.id,
-        metadata_json={"client_email": request.service_account_json.get("client_email", "")},
+        metadata_json=metadata,
         discovered_tools=None,
     )
     db.add(connector)

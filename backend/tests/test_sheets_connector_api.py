@@ -541,3 +541,68 @@ class TestSheetsTestEndpointSharedDrive:
             credentials=_VALID_SA,
             shared_drive_id=None,
         )
+
+
+class TestSheetsCreateEndpointSharedDrive:
+    @pytest.mark.asyncio
+    async def test_create_endpoint_persists_shared_drive_id(self):
+        from app.api.v1.mcp_connectors import create_sheets_connector
+        from app.schemas.mcp_connector import SheetsConnectorCreate
+
+        request = SheetsConnectorCreate(
+            service_account_json=_VALID_SA,
+            shared_drive_id="0ACabcdEFGH1234567890",
+        )
+        mock_user = MagicMock()
+        mock_user.tenant_id = uuid.uuid4()
+        mock_user.id = uuid.uuid4()
+
+        with patch(
+            "app.api.v1.mcp_connectors.validate_sheets_connection",
+            new=AsyncMock(return_value={"valid": True}),
+        ), patch(
+            "app.api.v1.mcp_connectors.encrypt_credentials",
+            return_value=b"encrypted",
+        ), patch(
+            "app.api.v1.mcp_connectors.audit_service.log_event",
+            new=AsyncMock(),
+        ):
+            mock_db = _make_mock_db()
+            mock_result = MagicMock()
+            mock_result.scalars.return_value.first.return_value = None
+            mock_db.execute = AsyncMock(return_value=mock_result)
+            await create_sheets_connector(request, mock_user, mock_db)
+
+        added = mock_db.add.call_args.args[0]
+        assert added.metadata_json["client_email"] == _VALID_SA["client_email"]
+        assert added.metadata_json["shared_drive_id"] == "0ACabcdEFGH1234567890"
+
+    @pytest.mark.asyncio
+    async def test_create_endpoint_omits_shared_drive_when_absent(self):
+        """When shared_drive_id is None, metadata_json should NOT contain the key."""
+        from app.api.v1.mcp_connectors import create_sheets_connector
+        from app.schemas.mcp_connector import SheetsConnectorCreate
+
+        request = SheetsConnectorCreate(service_account_json=_VALID_SA)
+        mock_user = MagicMock()
+        mock_user.tenant_id = uuid.uuid4()
+        mock_user.id = uuid.uuid4()
+
+        with patch(
+            "app.api.v1.mcp_connectors.validate_sheets_connection",
+            new=AsyncMock(return_value={"valid": True}),
+        ), patch(
+            "app.api.v1.mcp_connectors.encrypt_credentials",
+            return_value=b"encrypted",
+        ), patch(
+            "app.api.v1.mcp_connectors.audit_service.log_event",
+            new=AsyncMock(),
+        ):
+            mock_db = _make_mock_db()
+            mock_result = MagicMock()
+            mock_result.scalars.return_value.first.return_value = None
+            mock_db.execute = AsyncMock(return_value=mock_result)
+            await create_sheets_connector(request, mock_user, mock_db)
+
+        added = mock_db.add.call_args.args[0]
+        assert "shared_drive_id" not in added.metadata_json
