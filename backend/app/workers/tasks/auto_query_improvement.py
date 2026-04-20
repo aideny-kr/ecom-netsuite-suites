@@ -250,11 +250,7 @@ async def _run_experiments(settings, emitter=None, run_id=None) -> dict:
 
         await db.commit()
 
-    if emitter:
-        emitter.emit("run_complete", {
-            "status": "completed",
-            "summary": stats,
-            "total_cost_usd": spent,
-        })
+    # NOTE: run_complete is emitted by the Celery wrapper (agent_lab_runner) so
+    # that cost is reconciled before emission. Do NOT emit run_complete here.
     print(f"[AUTO_IMPROVE] Complete: {stats}", flush=True)
     return stats

@@ -287,12 +287,8 @@ async def _run_nightly_benchmark(
         round(yesterday_delta, 4) if yesterday_delta is not None else None
     )
 
-    if emitter:
-        emitter.emit("run_complete", {
-            "status": "completed",
-            "summary": stats,
-            "total_cost_usd": 0.0,  # reconciled by Celery wrapper from agent_benchmark_runs
-        })
+    # NOTE: run_complete is emitted by the Celery wrapper (agent_lab_runner) so
+    # that cost is reconciled before emission. Do NOT emit run_complete here.
 
     # Send email digest (daily summary + regression alert)
     try:

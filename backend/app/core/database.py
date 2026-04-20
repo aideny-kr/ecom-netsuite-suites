@@ -67,18 +67,46 @@ async def set_tenant_context(session: AsyncSession, tenant_id: str) -> None:
 _sync_session_factory: sessionmaker | None = None
 
 
+def _init_sync_sessionmaker() -> None:
+    """Lazy-initialize the sync session factory, reusing base_task's engine.
+
+    base_task.py already creates ``sync_engine = create_engine(DATABASE_URL_SYNC)``
+    at module level. Reusing it avoids a second connection pool per worker
+    process. base_task is always imported before this factory is used because
+    Celery initialises task modules (which import base_task) during worker
+    startup.
+    """
+    global _sync_session_factory
+    if _sync_session_factory is None:
+        try:
+            # Reuse the engine already created in base_task to avoid double
+            # pool allocation in Celery worker processes.
+            from app.workers.base_task import sync_engine as _base_sync_engine
+            _sync_session_factory = sessionmaker(bind=_base_sync_engine)
+        except ImportError:
+            # Fallback for contexts where base_task is not available
+            # (e.g., alembic, standalone scripts).
+            _fallback_engine = create_engine(settings.DATABASE_URL_SYNC, pool_pre_ping=True)
+            _sync_session_factory = sessionmaker(bind=_fallback_engine)
+
+
 @contextmanager
 def get_sync_session():
     """Sync SQLAlchemy session for Celery workers.
 
-    Uses DATABASE_URL_SYNC (psycopg2 driver). Suitable for
-    ProgressEmitter and finalize_run_sync in the Celery worker.
+    Uses DATABASE_URL_SYNC (psycopg2 driver). Reuses the sync engine from
+    base_task.py so there is only one connection pool per worker process.
+
+    Suitable for ProgressEmitter and finalize_run_sync in the Celery worker.
+
+    Pool-size note: sessions can be held for 30+ minutes (benchmark runs), so
+    concurrent agent-lab runs consume connections from SQLAlchemy's default pool
+    (size 5 from base_task's create_engine defaults). Acceptable for v1
+    single-super-admin usage; v1.1 may need pool_size tuning if concurrent runs
+    are added.
     """
-    global _sync_session_factory
-    if _sync_session_factory is None:
-        _sync_engine = create_engine(settings.DATABASE_URL_SYNC, pool_pre_ping=True)
-        _sync_session_factory = sessionmaker(bind=_sync_engine)
-    session: Session = _sync_session_factory()
+    _init_sync_sessionmaker()
+    session: Session = _sync_session_factory()  # type: ignore[misc]
     try:
         yield session
     finally:

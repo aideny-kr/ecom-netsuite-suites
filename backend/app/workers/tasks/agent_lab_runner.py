@@ -39,14 +39,30 @@ def agent_lab_run_task(self, run_id: str, config: dict):
     from app.services.agent_lab import service
     from app.services.agent_lab.progress_emitter import ProgressEmitter
 
+    # Parse run_id first — if this fails we have no row to finalize, so let it
+    # propagate to Celery's on_failure handler.
     run_uuid = uuid.UUID(run_id)
-    tenant_uuid = uuid.UUID(config["tenant_id"])
 
     status = "failed"
     cost = 0.0
     error: str | None = None
 
-    r = get_sync_redis()
+    try:
+        tenant_uuid = uuid.UUID(config["tenant_id"])
+        r = get_sync_redis()
+    except Exception as exc:
+        # Setup failed (bad tenant_id, Redis down, etc.) — finalize the row
+        # directly so it doesn't stay at status='running' forever.
+        error = f"setup failed: {str(exc)[:460]}"
+        print(f"[AGENT_LAB_RUN] run_id={run_id} setup failed: {exc}", flush=True)
+        with get_sync_session() as db:
+            service.finalize_run_sync(
+                db=db, run_id=run_uuid,
+                status="failed", cost_usd_actual=0.0,
+                error_message=error,
+            )
+        return {"run_id": run_id, "status": "failed", "cost_usd": 0.0}
+
     with get_sync_session() as db:
         emitter = ProgressEmitter(run_uuid, r, db)
         try:
@@ -78,7 +94,10 @@ def agent_lab_run_task(self, run_id: str, config: dict):
             # status stays "failed"
             print(f"[AGENT_LAB_RUN] run_id={run_id} failed: {exc}", flush=True)
         finally:
-            # Emit terminal event so SSE subscribers get a close signal
+            # Emit terminal event so SSE subscribers get a close signal.
+            # This is the single authoritative run_complete emission — the
+            # inner functions (_run_nightly_benchmark, _run_experiments) must
+            # NOT emit run_complete themselves to avoid double-emission.
             try:
                 emitter.emit("run_complete", {
                     "status": status,
