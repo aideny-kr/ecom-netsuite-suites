@@ -11,7 +11,7 @@ are called from the Celery worker's try/finally block and the cancel endpoint.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Literal
 
 import redis
@@ -58,6 +58,15 @@ async def start_run(
 
     Raises ConcurrentRunError on IntegrityError from the partial unique
     index (caller returns 409).
+
+    Caller is responsible for audit logging — this service layer intentionally
+    does not log (matches the pattern elsewhere; audit lives at the API layer).
+
+    Known trade-off: if Celery dispatch (apply_async) fails after DB commit,
+    the row remains with status='running' with no worker attached. The partial
+    unique index will then block the next run until the row is manually updated.
+    This is an Outbox-pattern gap acceptable for v1 (super-admin dev tool).
+    v1.1 may introduce a sweeper task that marks orphan rows as 'failed'.
     """
     total_cases = _total_cases_for(kind, mode)
 
@@ -81,6 +90,11 @@ async def start_run(
 
     await db.refresh(run)
     await db.commit()
+
+    if agent_lab_run_task is None:
+        raise RuntimeError(
+            "agent_lab_run_task not yet implemented — Task 5 must be merged first"
+        )
 
     agent_lab_run_task.apply_async(
         kwargs={
@@ -145,8 +159,6 @@ async def list_runs(
     days: int = 14,
 ) -> list[AgentLabRun]:
     """Recent runs for tenant, filtered by kind and time window."""
-    from datetime import timedelta
-
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
     stmt = (
         select(AgentLabRun)
@@ -197,7 +209,7 @@ def finalize_run_sync(
         "finished_at": datetime.now(timezone.utc),
         "cost_usd_actual": cost_usd_actual,
     }
-    if error_message:
+    if error_message is not None:
         update_values["error_message"] = error_message
 
     db.query(AgentLabRun).filter_by(id=run_id).update(update_values)
