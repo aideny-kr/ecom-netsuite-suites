@@ -205,3 +205,61 @@ async def test_post_runs_returns_400_when_single_mode_missing_case_id(
     )
     assert resp.status_code == 400
     assert "case_id" in resp.json().get("detail", "").lower()
+
+
+@pytest.mark.asyncio
+async def test_sse_endpoint_streams_events(client, superadmin_user, monkeypatch):
+    """SSE endpoint reads from Redis stream and relays events."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    # Fake async Redis: first call returns run_started, second returns
+    # run_complete so the generator terminates naturally (no infinite loop).
+    events_data = [
+        [
+            (
+                b"agent_lab_run:abc",
+                [
+                    (b"1-0", {b"event": b"run_started", b"data": b'{"total_cases":18}'}),
+                    (b"2-0", {b"event": b"run_complete", b"data": b'{"status":"done"}'}),
+                ],
+            )
+        ],
+    ]
+    iter_events = iter(events_data)
+
+    async def fake_xread(*args, **kwargs):
+        return next(iter_events, [])
+
+    fake_async_redis = MagicMock()
+    fake_async_redis.xread = fake_xread
+    fake_async_redis.aclose = AsyncMock()
+    monkeypatch.setattr(
+        "app.api.v1.agent_lab.get_async_redis",
+        lambda: fake_async_redis,
+    )
+    monkeypatch.setattr(
+        "app.workers.tasks.agent_lab_runner.agent_lab_run_task.apply_async",
+        MagicMock(),
+    )
+
+    _, headers = superadmin_user
+    run_resp = await client.post(
+        "/api/v1/agent-lab/runs",
+        json={"kind": "benchmark", "mode": "all"},
+        headers=headers,
+    )
+    run_id = run_resp.json()["run_id"]
+
+    async with client.stream(
+        "GET",
+        f"/api/v1/agent-lab/runs/{run_id}/events",
+        headers=headers,
+    ) as resp:
+        assert resp.status_code == 200
+        assert resp.headers["content-type"].startswith("text/event-stream")
+        content = b""
+        async for chunk in resp.aiter_bytes():
+            content += chunk
+
+    assert b"run_started" in content
+    assert b'"total_cases":18' in content
