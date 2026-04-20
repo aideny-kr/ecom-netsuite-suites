@@ -39,7 +39,15 @@ def auto_query_improvement(self):
         loop.close()
 
 
-async def _run_experiments(settings, emitter=None) -> dict:
+async def _run_experiments(settings, emitter=None, run_id=None) -> dict:
+    """Run the nightly experiment loop.
+
+    Args:
+        run_id: When provided (agent-lab UI path), this UUID is stamped into
+            ExperimentLog.metadata_json so get_run_snapshot can query rows by
+            the agent_lab_run.id. When None (nightly Beat path), metadata_json
+            is left unset for ExperimentLog rows as before.
+    """
     import uuid
 
     from app.core.database import async_session_factory
@@ -160,6 +168,7 @@ async def _run_experiments(settings, emitter=None) -> dict:
                     case=case,
                     tenant_id=tenant_id,
                     db=db,
+                    run_id=run_id,
                 )
                 spent += result.get("cost_usd", est_cost)
                 stats["total"] += 1

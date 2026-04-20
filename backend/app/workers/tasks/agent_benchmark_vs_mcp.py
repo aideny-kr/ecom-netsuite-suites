@@ -92,8 +92,15 @@ async def _run_nightly_benchmark(
     agent_model: str,
     baseline_model: str,
     emitter=None,
+    run_id: uuid.UUID | None = None,
 ) -> dict:
-    """Run the benchmark and compare to yesterday's run."""
+    """Run the benchmark and compare to yesterday's run.
+
+    Args:
+        run_id: When provided (agent-lab UI path), benchmark rows are keyed by
+            this UUID so sum_benchmark_cost_for_run can reconcile costs. When
+            None (nightly Beat path), a fresh UUID is generated as before.
+    """
     from app.core.database import async_session_factory, set_tenant_context
     from app.services.benchmarks.agent_runner import run_agent
     from app.services.benchmarks.baseline_runner import run_baseline
@@ -108,7 +115,11 @@ async def _run_nightly_benchmark(
     # die with a late import error inside a worker.
     _ = (run_agent, run_baseline)
 
-    run_id = uuid.uuid4()
+    # Use caller-supplied run_id when available (agent-lab path) so that
+    # agent_benchmark_runs rows are keyed by the agent_lab_run.id and cost
+    # reconciliation via sum_benchmark_cost_for_run works correctly.
+    # Nightly Beat path passes no run_id → generate a fresh one as before.
+    run_id = run_id if run_id is not None else uuid.uuid4()
     run_date = date.today()
 
     try:

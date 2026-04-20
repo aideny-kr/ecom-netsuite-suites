@@ -58,13 +58,18 @@ def agent_lab_run_task(self, run_id: str, config: dict):
                     agent_model="claude-sonnet-4-6",
                     baseline_model="claude-sonnet-4-6",
                     emitter=emitter,
+                    run_id=run_uuid,  # key benchmark rows by agent_lab_run.id for cost reconciliation
                 ))
                 # Benchmark return dict has no total_cost — reconcile from persisted rows
                 cost = service.sum_benchmark_cost_for_run(db, run_uuid)
             else:  # experiment
                 from app.core.config import settings as app_settings
                 from app.workers.tasks.auto_query_improvement import _run_experiments
-                stats = asyncio.run(_run_experiments(app_settings, emitter=emitter))
+                stats = asyncio.run(_run_experiments(
+                    app_settings,
+                    emitter=emitter,
+                    run_id=run_uuid,  # stamp run_id into ExperimentLog.metadata_json for get_run_snapshot
+                ))
                 cost = float(stats.get("cost_usd", 0.0))
 
             status = "cancelled" if emitter.cancelled() else "completed"
