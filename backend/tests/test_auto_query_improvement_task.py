@@ -98,9 +98,7 @@ class TestEmitterRegressionPath:
         We patch all heavy I/O and verify the function completes.
         The important thing is that emitter=None causes no side-effects.
         """
-        import asyncio
-        import uuid
-        from unittest.mock import AsyncMock, MagicMock
+        from unittest.mock import AsyncMock
 
         from app.workers.tasks import auto_query_improvement as m
 
