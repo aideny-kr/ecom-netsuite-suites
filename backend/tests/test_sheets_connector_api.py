@@ -493,3 +493,51 @@ class TestSheetsEndpointErrorHandling:
                 await create_sheets_connector(request, mock_user, _make_mock_db())
 
         assert exc_info.value.status_code == 400
+
+
+class TestSheetsTestEndpointSharedDrive:
+    @pytest.mark.asyncio
+    async def test_test_endpoint_passes_shared_drive_id(self):
+        from app.api.v1.mcp_connectors import test_sheets_connection
+        from app.schemas.mcp_connector import SheetsTestRequest
+
+        request = SheetsTestRequest(
+            service_account_json=_VALID_SA,
+            shared_drive_id="0ACabcdEFGH1234567890",
+        )
+        mock_user = MagicMock()
+        mock_user.tenant_id = uuid.uuid4()
+        mock_db = _make_mock_db()
+
+        with patch(
+            "app.api.v1.mcp_connectors.validate_sheets_connection",
+            new=AsyncMock(return_value={"valid": True}),
+        ) as mock_validate:
+            result = await test_sheets_connection(request, mock_user, mock_db)
+
+        assert result.valid is True
+        mock_validate.assert_awaited_once_with(
+            credentials=_VALID_SA,
+            shared_drive_id="0ACabcdEFGH1234567890",
+        )
+
+    @pytest.mark.asyncio
+    async def test_test_endpoint_passes_none_when_shared_drive_absent(self):
+        from app.api.v1.mcp_connectors import test_sheets_connection
+        from app.schemas.mcp_connector import SheetsTestRequest
+
+        request = SheetsTestRequest(service_account_json=_VALID_SA)
+        mock_user = MagicMock()
+        mock_user.tenant_id = uuid.uuid4()
+        mock_db = _make_mock_db()
+
+        with patch(
+            "app.api.v1.mcp_connectors.validate_sheets_connection",
+            new=AsyncMock(return_value={"valid": True}),
+        ) as mock_validate:
+            await test_sheets_connection(request, mock_user, mock_db)
+
+        mock_validate.assert_awaited_once_with(
+            credentials=_VALID_SA,
+            shared_drive_id=None,
+        )

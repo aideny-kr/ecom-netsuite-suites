@@ -667,7 +667,10 @@ async def test_sheets_connection(
 ) -> SheetsTestResponse:
     """Test Google Sheets connection with service account credentials."""
     try:
-        validation = await validate_sheets_connection(credentials=request.service_account_json)
+        validation = await validate_sheets_connection(
+            credentials=request.service_account_json,
+            shared_drive_id=request.shared_drive_id,
+        )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     if not validation["valid"]:
