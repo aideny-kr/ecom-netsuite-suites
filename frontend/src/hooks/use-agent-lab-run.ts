@@ -56,7 +56,7 @@ export function useAgentLabRun(runId: string | null): UseAgentLabRunResult {
       const data = JSON.parse((evt as MessageEvent).data);
       setCasesCompleted(data.cases_completed);
       setRunningCost(data.running_cost_usd);
-      setCases((prev) => [...prev, { case_id: data.case_id, ...data.result }]);
+      setCases((prev) => [...prev, data.result as CaseResult]);
     });
 
     es.addEventListener("run_complete", (evt) => {

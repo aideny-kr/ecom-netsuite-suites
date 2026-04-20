@@ -53,7 +53,7 @@ describe("useAgentLabRun", () => {
       case_id: "c1",
       cases_completed: 1,
       running_cost_usd: 0.35,
-      result: { verdict: "TIE" },
+      result: { case_id: "c1", verdict: "TIE" },
     });
     await waitFor(() => expect(result.current.casesCompleted).toBe(1));
     expect(result.current.runningCost).toBeCloseTo(0.35);

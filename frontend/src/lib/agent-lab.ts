@@ -81,6 +81,7 @@ export type AgentLabEvent =
       status: "completed" | "cancelled" | "failed";
       summary?: Record<string, unknown>;
       total_cost_usd: number;
+      error_message?: string | null;
     }
   | { type: "heartbeat"; ts: number };
 
@@ -100,7 +101,7 @@ export async function listRuns(params: {
 }): Promise<AgentLabRun[]> {
   const q = new URLSearchParams();
   if (params.kind) q.set("kind", params.kind);
-  if (params.days) q.set("days", String(params.days));
+  if (params.days !== undefined) q.set("days", String(params.days));
   return apiClient.get(`/api/v1/agent-lab/runs?${q.toString()}`);
 }
 
