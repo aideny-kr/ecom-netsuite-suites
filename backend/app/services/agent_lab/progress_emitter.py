@@ -42,6 +42,10 @@ class ProgressEmitter:
 
         # 2. On case_complete, persist incremental progress so refreshed
         # /runs/{id} requests don't show stale 0/18 during in-flight runs.
+        # N DB commits per run (one per case) is intentional: the refresh-UX
+        # requirement for GET /runs/{id} mid-run outweighs the ~50ms/commit
+        # overhead at 18-60 cases per run. Don't batch — stale snapshots
+        # during in-flight runs are worse than ~1s of DB overhead per run.
         if event == "case_complete":
             self._db.query(AgentLabRun).filter_by(id=self._run_id).update({
                 "cases_completed": payload["cases_completed"],
