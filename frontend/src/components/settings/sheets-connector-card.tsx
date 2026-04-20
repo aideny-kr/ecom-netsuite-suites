@@ -47,6 +47,16 @@ export function SheetsConnectorCard() {
   const [jsonError, setJsonError] = useState<string | null>(null);
   const [testResult, setTestResult] = useState<{ valid: boolean; error?: string | null } | null>(null);
   const [deleteId, setDeleteId] = useState<string | null>(null);
+  const [sharedDriveId, setSharedDriveId] = useState("");
+  const [driveIdError, setDriveIdError] = useState<string | null>(null);
+
+  const DRIVE_ID_RE = /^[A-Za-z0-9_-]{18,44}$/;
+
+  function validateDriveId(value: string): string | null {
+    if (!value) return null; // empty is valid (optional)
+    if (!DRIVE_ID_RE.test(value)) return "Invalid Shared Drive ID format";
+    return null;
+  }
 
   const sheetsConnector = (mcpConnectors ?? []).find(
     (c) => c.provider === "google_sheets" && c.status !== "revoked",
@@ -96,8 +106,15 @@ export function SheetsConnectorCard() {
   async function handleTest() {
     const parsed = parseJson();
     if (!parsed) return;
+    const driveErr = validateDriveId(sharedDriveId);
+    setDriveIdError(driveErr);
+    if (driveErr) return;
     try {
-      const result = await testConnection.mutateAsync({ service_account_json: parsed });
+      const payload: { service_account_json: Record<string, unknown>; shared_drive_id?: string } = {
+        service_account_json: parsed,
+      };
+      if (sharedDriveId) payload.shared_drive_id = sharedDriveId;
+      const result = await testConnection.mutateAsync(payload);
       setTestResult(result);
       if (result.valid) {
         toast({ title: "Connection successful" });
@@ -112,12 +129,21 @@ export function SheetsConnectorCard() {
   async function handleSave() {
     const parsed = parseJson();
     if (!parsed) return;
+    const driveErr = validateDriveId(sharedDriveId);
+    setDriveIdError(driveErr);
+    if (driveErr) return;
     try {
-      await createConnector.mutateAsync({ service_account_json: parsed });
+      const payload: { service_account_json: Record<string, unknown>; shared_drive_id?: string } = {
+        service_account_json: parsed,
+      };
+      if (sharedDriveId) payload.shared_drive_id = sharedDriveId;
+      await createConnector.mutateAsync(payload);
       toast({ title: "Google Sheets connected" });
       setServiceAccountJson("");
+      setSharedDriveId("");
       setTestResult(null);
       setJsonError(null);
+      setDriveIdError(null);
     } catch (err) {
       toast({ title: "Failed to save connection", description: String(err), variant: "destructive" });
     }
@@ -241,6 +267,41 @@ export function SheetsConnectorCard() {
           <p className="text-[12px] text-destructive flex items-center gap-1">
             <XCircle className="h-3 w-3" />
             {jsonError}
+          </p>
+        )}
+      </div>
+
+      <div className="space-y-1.5">
+        <Label htmlFor="sheets-drive-id" className="text-[13px]">
+          Shared Drive ID <span className="text-muted-foreground">(optional)</span>
+        </Label>
+        <input
+          id="sheets-drive-id"
+          type="text"
+          placeholder="0ABcDeFghIj1234567890"
+          value={sharedDriveId}
+          onChange={(e) => {
+            setSharedDriveId(e.target.value);
+            setDriveIdError(null);
+            setTestResult(null);
+          }}
+          className="w-full rounded-lg border bg-background px-3 py-2 text-[13px] font-mono placeholder:text-muted-foreground/50 focus:outline-none focus:ring-1 focus:ring-ring"
+        />
+        <p className="text-[12px] text-muted-foreground">
+          For Google Workspace accounts that block service-account file creation.{" "}
+          <a
+            href="https://support.google.com/a/users/answer/9310351"
+            target="_blank"
+            rel="noreferrer"
+            className="underline"
+          >
+            How to find your Shared Drive ID →
+          </a>
+        </p>
+        {driveIdError && (
+          <p className="text-[12px] text-destructive flex items-center gap-1">
+            <XCircle className="h-3 w-3" />
+            {driveIdError}
           </p>
         )}
       </div>
