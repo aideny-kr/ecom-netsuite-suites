@@ -16,6 +16,7 @@ from app.core.encryption import decrypt_credentials
 from app.models.mcp_connector import McpConnector
 from app.services.sheets_service import (
     create_spreadsheet,
+    read_range,
     share_spreadsheet,
     write_range,
 )
@@ -136,4 +137,39 @@ async def sheets_write_range_execute(params: dict, context: dict, **kwargs: Any)
         "updated_rows": result["updated_rows"],
         "updated_columns": result["updated_columns"],
         "updated_range": result["updated_range"],
+    }
+
+
+async def sheets_read_range_execute(params: dict, context: dict, **kwargs: Any) -> dict:
+    if not context or not context.get("tenant_id") or not context.get("db"):
+        return {"error": True, "message": "Missing context — tenant_id and db are required."}
+
+    connector = await _get_sheets_connector(context)
+    if not connector:
+        return {"error": True, "message": "Google Sheets connector not configured."}
+
+    spreadsheet_id = params.get("spreadsheet_id")
+    range_str = params.get("range", "Sheet1")
+
+    if not spreadsheet_id:
+        return {"error": True, "message": "spreadsheet_id is required."}
+
+    credentials_envelope = decrypt_credentials(connector.encrypted_credentials)
+    credentials = credentials_envelope.get("service_account_json", credentials_envelope)
+
+    try:
+        result = await read_range(
+            credentials=credentials,
+            spreadsheet_id=spreadsheet_id,
+            range_str=range_str,
+        )
+    except Exception as e:
+        logger.warning("sheets_tools.read_failed", exc_info=True)
+        return {"error": True, "message": f"Failed to read spreadsheet: {e}"}
+
+    return {
+        "error": False,
+        "range": result["range"],
+        "values": result["values"],
+        "row_count": len(result["values"]),
     }

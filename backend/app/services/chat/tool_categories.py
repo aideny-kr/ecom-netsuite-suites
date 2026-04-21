@@ -34,6 +34,8 @@ _EXACT: dict[str, Category] = {
     "sheets.create": "sheets",
     "sheets_write_range": "sheets",
     "sheets.write_range": "sheets",
+    "sheets_read_range": "sheets",
+    "sheets.read_range": "sheets",
 }
 
 

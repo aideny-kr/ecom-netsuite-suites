@@ -55,6 +55,7 @@ ALLOWED_CHAT_TOOLS: frozenset[str] = frozenset(
         "pricing.export",
         "sheets.create",
         "sheets.write_range",
+        "sheets.read_range",
     }
 )
 

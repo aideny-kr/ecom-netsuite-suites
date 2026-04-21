@@ -96,6 +96,35 @@ async def write_range(
     return await asyncio.to_thread(_sync)
 
 
+async def read_range(
+    *,
+    credentials: dict | None,
+    spreadsheet_id: str,
+    range_str: str = "Sheet1",
+) -> dict[str, Any]:
+    """Read cell values from a Google Spreadsheet.
+
+    Returns: {"range": "<actual A1 range returned>", "values": [[...], ...]}
+    `values` is a list of rows. Empty cells on the trailing edge are omitted by
+    Sheets API (per-row length may vary).
+    """
+    if not credentials:
+        raise ValueError("credentials required")
+
+    def _sync():
+        service = _build_sheets_service(credentials)
+        result = service.spreadsheets().values().get(
+            spreadsheetId=spreadsheet_id,
+            range=range_str,
+        ).execute()
+        return {
+            "range": result.get("range", range_str),
+            "values": result.get("values", []),
+        }
+
+    return await asyncio.to_thread(_sync)
+
+
 async def share_spreadsheet(
     *,
     credentials: dict | None,

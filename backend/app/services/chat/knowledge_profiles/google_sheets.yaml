@@ -3,6 +3,7 @@ display_name: "Google Sheets"
 trigger_tools:
   - sheets_create
   - sheets_write_range
+  - sheets_read_range
 prompt_fragment: |
   ## Google Sheets Context
 

@@ -5,6 +5,7 @@ import pytest
 
 from app.services.sheets_service import (
     create_spreadsheet,
+    read_range,
     share_spreadsheet,
     validate_connection,
     write_range,
@@ -58,6 +59,43 @@ class TestWriteRange:
                 spreadsheet_id="abc123",
                 data=[],
             )
+
+
+class TestReadRange:
+    @pytest.mark.asyncio
+    async def test_reads_cell_values(self):
+        mock_service = MagicMock()
+        mock_service.spreadsheets().values().get().execute.return_value = {
+            "range": "Sheet1!A1:B3",
+            "values": [["Product", "Qty"], ["Apples", "12"], ["Pears", "7"]],
+        }
+        with patch("app.services.sheets_service._build_sheets_service", return_value=mock_service):
+            result = await read_range(
+                credentials={"type": "service_account"},
+                spreadsheet_id="abc123",
+                range_str="Sheet1!A1:B3",
+            )
+        assert result["range"] == "Sheet1!A1:B3"
+        assert result["values"][0] == ["Product", "Qty"]
+        assert len(result["values"]) == 3
+
+    @pytest.mark.asyncio
+    async def test_read_range_empty_sheet_returns_empty_values(self):
+        mock_service = MagicMock()
+        mock_service.spreadsheets().values().get().execute.return_value = {
+            "range": "Sheet1",
+        }
+        with patch("app.services.sheets_service._build_sheets_service", return_value=mock_service):
+            result = await read_range(
+                credentials={"type": "service_account"},
+                spreadsheet_id="abc",
+            )
+        assert result["values"] == []
+
+    @pytest.mark.asyncio
+    async def test_read_range_raises_on_missing_credentials(self):
+        with pytest.raises(ValueError, match="credentials"):
+            await read_range(credentials=None, spreadsheet_id="abc")
 
 
 class TestShareSpreadsheet:

@@ -242,3 +242,72 @@ class TestSheetsToolsSharedDrive:
             )
 
         mock_share.assert_awaited_once()
+
+
+class TestSheetsReadRangeExecute:
+    @pytest.mark.asyncio
+    async def test_reads_data(self):
+        from app.mcp.tools.sheets_tools import sheets_read_range_execute
+
+        mock_connector = MagicMock()
+        mock_connector.encrypted_credentials = b"enc"
+        mock_connector.metadata_json = {"client_email": "sa@x.iam.gserviceaccount.com"}
+
+        with patch(
+            "app.mcp.tools.sheets_tools._get_sheets_connector",
+            new=AsyncMock(return_value=mock_connector),
+        ), patch(
+            "app.mcp.tools.sheets_tools.decrypt_credentials",
+            return_value={"service_account_json": {"type": "service_account"}},
+        ), patch(
+            "app.mcp.tools.sheets_tools.read_range",
+            new=AsyncMock(return_value={
+                "range": "Sheet1!A1:B3",
+                "values": [["Product", "Qty"], ["Apples", "12"], ["Pears", "7"]],
+            }),
+        ) as mock_read:
+            result = await sheets_read_range_execute(
+                {"spreadsheet_id": "abc", "range": "Sheet1!A1:B3"},
+                {"tenant_id": "t", "db": MagicMock()},
+            )
+
+        assert result["error"] is False
+        assert result["range"] == "Sheet1!A1:B3"
+        assert result["row_count"] == 3
+        assert result["values"][0] == ["Product", "Qty"]
+        # Envelope unwrap: raw SA dict flows to service, not the envelope
+        assert mock_read.call_args.kwargs["credentials"] == {"type": "service_account"}
+
+    @pytest.mark.asyncio
+    async def test_returns_error_when_no_connector(self):
+        from app.mcp.tools.sheets_tools import sheets_read_range_execute
+
+        with patch(
+            "app.mcp.tools.sheets_tools._get_sheets_connector",
+            new=AsyncMock(return_value=None),
+        ):
+            result = await sheets_read_range_execute(
+                {"spreadsheet_id": "abc"},
+                {"tenant_id": "t", "db": MagicMock()},
+            )
+        assert result["error"] is True
+        assert "not configured" in result["message"]
+
+    @pytest.mark.asyncio
+    async def test_returns_error_on_missing_spreadsheet_id(self):
+        from app.mcp.tools.sheets_tools import sheets_read_range_execute
+
+        mock_connector = MagicMock()
+        mock_connector.encrypted_credentials = b"enc"
+        mock_connector.metadata_json = {}
+
+        with patch(
+            "app.mcp.tools.sheets_tools._get_sheets_connector",
+            new=AsyncMock(return_value=mock_connector),
+        ):
+            result = await sheets_read_range_execute(
+                {},
+                {"tenant_id": "t", "db": MagicMock()},
+            )
+        assert result["error"] is True
+        assert "spreadsheet_id" in result["message"]
