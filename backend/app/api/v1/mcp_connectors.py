@@ -752,7 +752,7 @@ async def create_sheets_connector(
     await db.commit()
     await db.refresh(connector)
 
-    return connector
+    return _connector_to_response(connector)
 
 
 # ---------------------------------------------------------------------------

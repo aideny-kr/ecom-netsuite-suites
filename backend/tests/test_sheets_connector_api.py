@@ -58,11 +58,26 @@ def _make_mock_db():
     db.add / db.add_all are synchronous in SQLAlchemy — using AsyncMock for
     them causes RuntimeWarnings.  Only execute, commit, refresh, rollback and
     flush are coroutines.
+
+    db.refresh simulates the DB-side defaults (id, created_at, updated_at)
+    being populated after flush, so response-model serialization doesn't
+    choke on None values.
     """
+    from datetime import datetime
+
     db = MagicMock()
     db.execute = AsyncMock()
     db.commit = AsyncMock()
-    db.refresh = AsyncMock()
+
+    async def _refresh_populates_defaults(obj):
+        if getattr(obj, "id", None) is None:
+            obj.id = uuid.uuid4()
+        if getattr(obj, "created_at", None) is None:
+            obj.created_at = datetime.utcnow()
+        if getattr(obj, "updated_at", None) is None:
+            obj.updated_at = datetime.utcnow()
+
+    db.refresh = AsyncMock(side_effect=_refresh_populates_defaults)
     db.rollback = AsyncMock()
     db.flush = AsyncMock()
     # db.add / db.add_all stay as synchronous MagicMock (the default)
@@ -389,15 +404,18 @@ class TestSheetsCreateConnector:
             ),
             patch("app.api.v1.mcp_connectors.audit_service.log_event", new=AsyncMock()),
         ):
-            connector = await create_sheets_connector(request, mock_user, mock_db)
+            response = await create_sheets_connector(request, mock_user, mock_db)
 
-        # Part 1: the ORM object DOES carry the encrypted blob (proves the fix
-        # is needed — without response_model the raw object would expose it).
-        assert connector.encrypted_credentials == b"SUPER_SECRET_ENCRYPTED_BLOB"
+        # Part 1: the ORM object staged for db.add DOES carry the encrypted blob
+        # (proves the response-model fix is needed — without it, the raw ORM
+        # would expose the blob to the client).
+        orm_obj = mock_db.add.call_args.args[0]
+        assert orm_obj.encrypted_credentials == b"SUPER_SECRET_ENCRYPTED_BLOB"
 
-        # Part 2: McpConnectorResponse is the whitelist — encrypted_credentials
-        # must NOT be a declared field, so FastAPI will never include it in the
-        # HTTP response body.
+        # Part 2: the endpoint returns McpConnectorResponse — a whitelist that
+        # does NOT declare encrypted_credentials, so it's never in the wire
+        # response.
+        assert isinstance(response, McpConnectorResponse)
         response_field_names = set(McpConnectorResponse.model_fields.keys())
         assert "encrypted_credentials" not in response_field_names
 
@@ -621,3 +639,48 @@ class TestSheetsCreateEndpointSharedDrive:
 
         added = mock_db.add.call_args.args[0]
         assert "shared_drive_id" not in added.metadata_json
+
+    @pytest.mark.asyncio
+    async def test_create_endpoint_returns_serializable_response(self):
+        """Response must be an McpConnectorResponse with UUIDs coerced to strings.
+
+        Regression: returning the raw ORM model caused a ResponseValidationError
+        on staging because id/tenant_id/created_by are UUID on the ORM but
+        str on the response schema.
+        """
+        from app.api.v1.mcp_connectors import create_sheets_connector
+        from app.schemas.mcp_connector import McpConnectorResponse, SheetsConnectorCreate
+
+        request = SheetsConnectorCreate(service_account_json=_VALID_SA)
+        mock_user = MagicMock()
+        mock_user.tenant_id = uuid.uuid4()
+        mock_user.id = uuid.uuid4()
+
+        with (
+            patch(
+                "app.api.v1.mcp_connectors.validate_sheets_connection",
+                new=AsyncMock(return_value={"valid": True}),
+            ),
+            patch(
+                "app.api.v1.mcp_connectors.encrypt_credentials",
+                return_value=b"encrypted",
+            ),
+            patch(
+                "app.api.v1.mcp_connectors.audit_service.log_event",
+                new=AsyncMock(),
+            ),
+        ):
+            mock_db = _make_mock_db()
+            mock_result = MagicMock()
+            mock_result.scalars.return_value.first.return_value = None
+            mock_db.execute = AsyncMock(return_value=mock_result)
+            response = await create_sheets_connector(request, mock_user, mock_db)
+
+        # Must be the Pydantic response model, not the raw ORM row
+        assert isinstance(response, McpConnectorResponse)
+        # UUID fields must be coerced to str for JSON serialization
+        assert isinstance(response.id, str)
+        assert isinstance(response.tenant_id, str)
+        assert response.created_by is None or isinstance(response.created_by, str)
+        # encrypted_credentials must NOT appear in response (privacy)
+        assert not hasattr(response, "encrypted_credentials")
