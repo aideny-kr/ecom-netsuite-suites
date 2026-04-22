@@ -12,10 +12,21 @@ class TestAgentLabRunModel:
     def test_model_has_expected_columns(self):
         columns = {c.name for c in AgentLabRun.__table__.columns}
         required = {
-            "id", "tenant_id", "triggered_by_user_id", "kind", "mode",
-            "case_id", "status", "total_cases", "cases_completed",
-            "cost_usd_actual", "started_at", "finished_at", "error_message",
-            "created_at", "updated_at",
+            "id",
+            "tenant_id",
+            "triggered_by_user_id",
+            "kind",
+            "mode",
+            "case_id",
+            "status",
+            "total_cases",
+            "cases_completed",
+            "cost_usd_actual",
+            "started_at",
+            "finished_at",
+            "error_message",
+            "created_at",
+            "updated_at",
         }
         assert required.issubset(columns), f"Missing: {required - columns}"
 
@@ -60,26 +71,47 @@ async def test_partial_unique_index_blocks_same_kind_running(
 @pytest.mark.asyncio
 async def test_partial_unique_index_allows_different_kinds(db: AsyncSession, tenant_a: Tenant):
     """Same tenant can have benchmark + experiment running concurrently."""
-    db.add(AgentLabRun(
-        tenant_id=tenant_a.id, kind="benchmark", mode="all",
-        status="running", total_cases=18,
-    ))
-    db.add(AgentLabRun(
-        tenant_id=tenant_a.id, kind="experiment", mode="all",
-        status="running", total_cases=60,
-    ))
+    db.add(
+        AgentLabRun(
+            tenant_id=tenant_a.id,
+            kind="benchmark",
+            mode="all",
+            status="running",
+            total_cases=18,
+        )
+    )
+    db.add(
+        AgentLabRun(
+            tenant_id=tenant_a.id,
+            kind="experiment",
+            mode="all",
+            status="running",
+            total_cases=60,
+        )
+    )
     await db.flush()  # should not raise
 
 
 @pytest.mark.asyncio
 async def test_partial_unique_index_allows_completed_to_rerun(db: AsyncSession, tenant_a: Tenant):
     """A completed run doesn't block a new running one of the same kind."""
-    db.add(AgentLabRun(
-        tenant_id=tenant_a.id, kind="benchmark", mode="all",
-        status="completed", total_cases=18, cases_completed=18,
-    ))
-    db.add(AgentLabRun(
-        tenant_id=tenant_a.id, kind="benchmark", mode="all",
-        status="running", total_cases=18,
-    ))
+    db.add(
+        AgentLabRun(
+            tenant_id=tenant_a.id,
+            kind="benchmark",
+            mode="all",
+            status="completed",
+            total_cases=18,
+            cases_completed=18,
+        )
+    )
+    db.add(
+        AgentLabRun(
+            tenant_id=tenant_a.id,
+            kind="benchmark",
+            mode="all",
+            status="running",
+            total_cases=18,
+        )
+    )
     await db.flush()  # should not raise

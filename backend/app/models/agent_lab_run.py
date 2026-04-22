@@ -28,22 +28,12 @@ class AgentLabRun(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     kind: Mapped[str] = mapped_column(String(20), nullable=False)  # benchmark | experiment
     mode: Mapped[str] = mapped_column(String(10), nullable=False)  # all | single
     case_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    status: Mapped[str] = mapped_column(
-        String(20), nullable=False, server_default="running"
-    )
+    status: Mapped[str] = mapped_column(String(20), nullable=False, server_default="running")
     total_cases: Mapped[int] = mapped_column(Integer, nullable=False)
-    cases_completed: Mapped[int] = mapped_column(
-        Integer, nullable=False, server_default="0"
-    )
-    cost_usd_actual: Mapped[float] = mapped_column(
-        Float, nullable=False, server_default="0.0"
-    )
-    started_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-    finished_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    cases_completed: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    cost_usd_actual: Mapped[float] = mapped_column(Float, nullable=False, server_default="0.0")
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     __table_args__ = (
