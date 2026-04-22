@@ -327,6 +327,7 @@ async def me(
         full_name=user.full_name,
         actor_type=user.actor_type,
         roles=[ur.role.name for ur in user.user_roles],
+        global_role=user.global_role,
         onboarding_completed_at=onboarding_completed_at,
     )
 
