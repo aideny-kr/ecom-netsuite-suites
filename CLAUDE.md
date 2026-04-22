@@ -383,7 +383,7 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 ## Current State
 
 - **Product**: AI-den v2.0 deployed to staging 2026-04-15. PR #43 merged: knowledge-driven unified agent replacing three-tier routing with knowledge profiles. Net -6,686 lines. Follow-up 54(b) resolved. Next: cross-source queries + Google Sheets connector (spec + plan committed).
-- **Agent Lab (v1)**: super-admin-only dashboard at `/dashboard/agent-lab` for on-demand benchmark + experiment runs + read-only patterns view. Framework-tenant only (reads `AGENT_BENCHMARK_TENANT_ID` env var). Nightly scheduling stays off — on-demand only. Migration 069 adds `agent_lab_runs` table with partial unique index blocking concurrent same-kind runs.
+- **Agent Lab (v1)**: super-admin-only dashboard at `/agent-lab` for on-demand benchmark + experiment runs + read-only patterns view. Framework-tenant only (reads `AGENT_BENCHMARK_TENANT_ID` env var). Nightly scheduling stays off — on-demand only. Migration 069 adds `agent_lab_runs` table with partial unique index blocking concurrent same-kind runs.
 - **Latest migration**: 068_revoke_recon_ops (no new migrations in #40)
 - **Frontend tests**: Vitest + @testing-library/react (33 tests). Run: `cd frontend && npx vitest run`
 - **Backend tests**: 2,846 tests. Run: `cd backend && .venv/bin/python -m pytest`
