@@ -86,16 +86,25 @@ export const PLAN_TIERS: Record<
   max: { label: "Max", color: "text-purple-600", bg: "bg-purple-100" },
 };
 
-export const NAV_ITEMS = [
-  { label: "Dashboard", href: "/dashboard", icon: "LayoutDashboard" as const, featureFlag: null },
-  { label: "Connections", href: "/connections", icon: "Plug" as const, featureFlag: null },
-  { label: "Audit Log", href: "/audit", icon: "ScrollText" as const, featureFlag: null },
-  { label: "Chat", href: "/chat", icon: "MessageSquare" as const, featureFlag: "chat" },
-  { label: "Saved Queries", href: "/queries", icon: "Database" as const, featureFlag: "analytics_export" },
-  { label: "Dev Workspace", href: "/workspace", icon: "Code" as const, featureFlag: "workspace" },
-  { label: "Reconciliation", href: "/reconciliation", icon: "Scale" as const, featureFlag: "reconciliation" },
-  { label: "Settings", href: "/settings", icon: "Settings" as const, featureFlag: null },
-] as const;
+export interface NavItem {
+  label: string;
+  href: string;
+  icon: string;
+  featureFlag: string | null;
+  superAdminOnly?: boolean;
+}
+
+export const NAV_ITEMS: NavItem[] = [
+  { label: "Dashboard", href: "/dashboard", icon: "LayoutDashboard", featureFlag: null },
+  { label: "Connections", href: "/connections", icon: "Plug", featureFlag: null },
+  { label: "Audit Log", href: "/audit", icon: "ScrollText", featureFlag: null },
+  { label: "Chat", href: "/chat", icon: "MessageSquare", featureFlag: "chat" },
+  { label: "Saved Queries", href: "/queries", icon: "Database", featureFlag: "analytics_export" },
+  { label: "Dev Workspace", href: "/workspace", icon: "Code", featureFlag: "workspace" },
+  { label: "Reconciliation", href: "/reconciliation", icon: "Scale", featureFlag: "reconciliation" },
+  { label: "Agent Lab", href: "/agent-lab", icon: "FlaskConical", featureFlag: null, superAdminOnly: true },
+  { label: "Settings", href: "/settings", icon: "Settings", featureFlag: null },
+];
 
 export const ADMIN_NAV_ITEMS = [
   { label: "Overview", href: "/admin/dashboard", icon: "LayoutDashboard" as const },

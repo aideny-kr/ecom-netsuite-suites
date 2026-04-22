@@ -229,6 +229,17 @@ class TestMe:
         resp = await client.get("/api/v1/auth/me")
         assert resp.status_code in (401, 403)
 
+    async def test_me_returns_global_role(self, client: AsyncClient, db: AsyncSession):
+        """/auth/me must surface the user's global_role so the frontend can gate super-admin UI."""
+        tenant = await create_test_tenant(db, name="Global Role Corp")
+        user, _ = await create_test_user(db, tenant, role_name="admin")
+        user.global_role = "superadmin"
+        await db.flush()
+        headers = make_auth_headers(user)
+        resp = await client.get("/api/v1/auth/me", headers=headers)
+        assert resp.status_code == 200
+        assert resp.json()["global_role"] == "superadmin"
+
 
 # ---------------------------------------------------------------------------
 # Tenant switching

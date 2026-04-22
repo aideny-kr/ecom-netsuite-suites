@@ -28,6 +28,7 @@ celery_app.conf.update(
 
 celery_app.conf.include = [
     "app.workers.tasks.agent_benchmark_vs_mcp",
+    "app.workers.tasks.agent_lab_runner",
     "app.workers.tasks.audit_retention",
     "app.workers.tasks.auto_learning",
     "app.workers.tasks.auto_query_improvement",

@@ -61,6 +61,7 @@ class UserProfile(BaseModel):
     full_name: str
     actor_type: str
     roles: list[str]
+    global_role: str = "user"
     onboarding_completed_at: str | None = None
 
     model_config = {"from_attributes": True}

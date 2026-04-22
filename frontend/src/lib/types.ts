@@ -31,6 +31,7 @@ export interface User {
   full_name: string;
   role?: Role;
   roles?: Role[];
+  global_role?: string;
   is_active: boolean;
   onboarding_completed_at: string | null;
   created_at: string;

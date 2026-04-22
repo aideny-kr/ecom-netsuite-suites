@@ -502,6 +502,7 @@ async def run_single_experiment(
     db: AsyncSession,
     baseline_score: float = 0.0,
     schema_hint: str = "",
+    run_id: uuid.UUID | None = None,
 ) -> dict[str, Any]:
     """Run a single experiment: generate → execute → score → decide.
 
@@ -622,7 +623,7 @@ async def run_single_experiment(
     # Use test_query key expected by promote_experiment_result
     promote_result = dict(result)
     promote_result["test_query"] = case.question
-    await promote_experiment_result(promote_result, tenant_id, db)
+    await promote_experiment_result(promote_result, tenant_id, db, run_id=run_id)
 
     return result
 
@@ -636,8 +637,20 @@ async def promote_experiment_result(
     result: dict,
     tenant_id: uuid.UUID,
     db: AsyncSession,
+    run_id: uuid.UUID | None = None,
 ) -> None:
-    """Promote KEEP experiments to proven patterns and log all experiments."""
+    """Promote KEEP experiments to proven patterns and log all experiments.
+
+    Args:
+        run_id: When provided (agent-lab UI path), stamped into
+            ExperimentLog.metadata_json so get_run_snapshot can find these
+            rows via ``metadata_json['run_id'].astext == str(run_id)``.
+            Nightly Beat path passes None → metadata_json is unset.
+    """
+
+    # Build metadata_json with run_id when called from the agent-lab path.
+    # This is what get_run_snapshot queries for kind="experiment".
+    metadata = {"run_id": str(run_id)} if run_id is not None else None
 
     # Store in experiment log regardless of decision
     log_entry = ExperimentLog(
@@ -656,6 +669,7 @@ async def promote_experiment_result(
         decision=result.get("decision"),
         error_message=result.get("error_message"),
         cost_usd=result.get("cost_usd"),
+        metadata_json=metadata,
     )
     db.add(log_entry)
 

@@ -91,8 +91,17 @@ async def _run_nightly_benchmark(
     suite: str,
     agent_model: str,
     baseline_model: str,
+    emitter=None,
+    run_id: uuid.UUID | None = None,
+    case_ids: list[str] | None = None,
 ) -> dict:
-    """Run the benchmark and compare to yesterday's run."""
+    """Run the benchmark and compare to yesterday's run.
+
+    Args:
+        run_id: When provided (agent-lab UI path), benchmark rows are keyed by
+            this UUID so sum_benchmark_cost_for_run can reconcile costs. When
+            None (nightly Beat path), a fresh UUID is generated as before.
+    """
     from app.core.database import async_session_factory, set_tenant_context
     from app.services.benchmarks.agent_runner import run_agent
     from app.services.benchmarks.baseline_runner import run_baseline
@@ -107,11 +116,15 @@ async def _run_nightly_benchmark(
     # die with a late import error inside a worker.
     _ = (run_agent, run_baseline)
 
-    run_id = uuid.uuid4()
+    # Use caller-supplied run_id when available (agent-lab path) so that
+    # agent_benchmark_runs rows are keyed by the agent_lab_run.id and cost
+    # reconciliation via sum_benchmark_cost_for_run works correctly.
+    # Nightly Beat path passes no run_id → generate a fresh one as before.
+    run_id = run_id if run_id is not None else uuid.uuid4()
     run_date = date.today()
 
     try:
-        cases = load_cases(suite=suite)
+        cases = load_cases(suite=suite, case_ids=case_ids)
     except Exception as exc:
         print(f"[AGENT_BENCHMARK] load_cases failed: {exc}", flush=True)
         return {"status": "load_error", "error": str(exc)}
@@ -121,6 +134,12 @@ async def _run_nightly_benchmark(
         f"suite={suite} cases={len(cases)} agent={agent_model} baseline={baseline_model}",
         flush=True,
     )
+
+    if emitter:
+        emitter.emit("run_started", {
+            "total_cases": len(cases),
+            "estimated_cost_usd": len(cases) * 0.35,  # rough benchmark estimate
+        })
 
     stats = {
         "run_id": str(run_id),
@@ -141,6 +160,15 @@ async def _run_nightly_benchmark(
         await set_tenant_context(db, str(tenant_id))
 
         for i, case in enumerate(cases, 1):
+            if emitter and emitter.cancelled():
+                print("[AGENT_BENCHMARK] Cancelled via emitter", flush=True)
+                break
+            if emitter:
+                emitter.emit("case_started", {
+                    "case_id": case.case_id,
+                    "question": case.question,
+                    "index": i,
+                })
             print(
                 f"[AGENT_BENCHMARK] [{i}/{len(cases)}] {case.case_id}",
                 flush=True,
@@ -173,6 +201,18 @@ async def _run_nightly_benchmark(
 
             if result.mcp is not None:
                 deltas.append(result.ours.answer_acc - result.mcp.answer_acc)
+
+            if emitter:
+                emitter.emit("case_complete", {
+                    "case_id": case.case_id,
+                    "result": {
+                        "verdict": result.verdict,
+                        "ours_accuracy": result.ours.answer_acc if result.ours else 0.0,
+                        "mcp_accuracy": result.mcp.answer_acc if result.mcp else 0.0,
+                    },
+                    "running_cost_usd": 0.0,  # reconciled by Celery wrapper from agent_benchmark_runs
+                    "cases_completed": stats["cases_run"],
+                })
 
             # Persist both sides
             try:
@@ -247,6 +287,9 @@ async def _run_nightly_benchmark(
     stats["yesterday_delta"] = (
         round(yesterday_delta, 4) if yesterday_delta is not None else None
     )
+
+    # NOTE: run_complete is emitted by the Celery wrapper (agent_lab_runner) so
+    # that cost is reconciled before emission. Do NOT emit run_complete here.
 
     # Send email digest (daily summary + regression alert)
     try:
