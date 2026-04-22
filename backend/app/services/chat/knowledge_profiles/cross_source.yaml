@@ -1,0 +1,14 @@
+profile_id: cross_source
+display_name: "Cross-Source Queries"
+trigger_tools:
+  - bigquery_sql
+  - netsuite_suiteql
+prompt_fragment: |
+  ## Cross-Source Query Guidance
+
+  When the user's question spans both NetSuite and BigQuery data:
+  1. Query each source independently (call both tools)
+  2. Identify the join key: SKU/item name, customer email, date range, order ID
+  3. Correlate the results in your response — present a unified answer, not two separate tables
+  4. If row counts differ significantly between sources, explain why (e.g., BigQuery has marketing data NetSuite doesn't track)
+rag_partitions: []

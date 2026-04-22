@@ -231,14 +231,14 @@ class TestInterceptResultStrBlocked:
         parsed = json.loads(result_str)
         assert "create" in parsed["error"]
 
-    def test_unknown_type_also_blocked(self):
-        """Unknown record types are not on the allowlist, so they're blocked."""
+    def test_unknown_type_requires_confirmation(self):
+        """Unknown record types (not on blocklist) pass through to HITL confirmation."""
         tool_name = _ext("ns_createRecord")
         tool_input = {"recordType": "customWidget", "body": {"name": "test"}}
         result_str = _build_intercept_result_str(tool_name, tool_input, _SESSION_ID)
         parsed = json.loads(result_str)
-        assert "error" in parsed
-        assert parsed["blocked"] is True
+        assert parsed.get("confirmation_required") is True
+        assert parsed.get("record_type") == "customWidget"
 
 
 # ---------------------------------------------------------------------------

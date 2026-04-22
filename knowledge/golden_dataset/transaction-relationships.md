@@ -2,6 +2,7 @@
 topic_tags: ["transaction_relationships", "createdfrom", "joins"]
 source_type: curated
 priority: high
+partition_id: netsuite/joins
 ---
 
 # Transaction Relationships in NetSuite

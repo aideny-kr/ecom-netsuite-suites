@@ -56,24 +56,28 @@ def extract_h1(content: str) -> str | None:
     return match.group(1).strip() if match else None
 
 
-def chunk_markdown(content: str, source_uri: str) -> list[dict]:
-    """Split markdown into chunks at H2/H3 boundaries.
+def build_chunk_dicts_for_file(*, source_uri: str, content: str) -> list[dict[str, Any]]:
+    """Split a markdown file's content into chunk dicts ready for DB insert.
 
-    Rules:
-    1. Never sever ```sql code blocks from their preceding paragraph
-    2. Prepend H1 title to each chunk for embedding context
-    3. Target 300-500 tokens per chunk
-    4. If a section exceeds CHUNK_MAX_TOKENS, split at paragraph boundaries
+    Each dict has: source_uri, chunk_index, raw_text, token_count,
+    topic_tags, source_type, partition_id. partition_id is None when not
+    declared in frontmatter.
+
+    Chunking: splits at H2/H3 boundaries, never severs code blocks from
+    their preceding text, prepends H1 title to each chunk for embedding
+    context. Large sections (over CHUNK_MAX_TOKENS) split at paragraph
+    boundaries via ``_split_large_section``.
     """
     frontmatter, body = parse_frontmatter(content)
     h1_title = extract_h1(body) or Path(source_uri).stem.replace("-", " ").title()
     topic_tags = frontmatter.get("topic_tags", [])
     source_type = frontmatter.get("source_type", "expert_rules")
+    partition_id = frontmatter.get("partition_id")
 
     # Split by H2/H3 headers (keep the header with its section)
     sections = re.split(r"(?=^#{2,3}\s+)", body, flags=re.MULTILINE)
 
-    chunks: list[dict] = []
+    chunks: list[dict[str, Any]] = []
     chunk_index = 0
 
     for section in sections:
@@ -103,6 +107,7 @@ def chunk_markdown(content: str, source_uri: str) -> list[dict]:
                         "token_count": estimate_tokens(sc),
                         "topic_tags": topic_tags,
                         "source_type": source_type,
+                        "partition_id": partition_id,
                     }
                 )
                 chunk_index += 1
@@ -117,11 +122,18 @@ def chunk_markdown(content: str, source_uri: str) -> list[dict]:
                     "token_count": estimate_tokens(chunk_text),
                     "topic_tags": topic_tags,
                     "source_type": source_type,
+                    "partition_id": partition_id,
                 }
             )
             chunk_index += 1
 
     return chunks
+
+
+# Backward-compatible alias (legacy callers used positional args)
+def chunk_markdown(content: str, source_uri: str) -> list[dict]:
+    """Deprecated: use ``build_chunk_dicts_for_file`` instead."""
+    return build_chunk_dicts_for_file(source_uri=source_uri, content=content)
 
 
 def _split_large_section(section: str, h1_title: str, h2_title: str | None = None) -> list[str]:
@@ -197,7 +209,7 @@ async def ingest(docs_dir: Path | None = None) -> int:
     for md_file in md_files:
         content = md_file.read_text(encoding="utf-8")
         source_uri = f"golden_dataset/{md_file.name}"
-        chunks = chunk_markdown(content, source_uri)
+        chunks = build_chunk_dicts_for_file(source_uri=source_uri, content=content)
         print(f"  {source_uri}: {len(chunks)} chunks")
         all_chunks.extend(chunks)
 
@@ -238,6 +250,7 @@ async def ingest(docs_dir: Path | None = None) -> int:
                     embedding=embedding,
                     topic_tags=chunk_data["topic_tags"],
                     source_type=chunk_data["source_type"],
+                    partition_id=chunk_data["partition_id"],
                     is_deprecated=False,
                 )
                 .on_conflict_do_update(
@@ -248,6 +261,7 @@ async def ingest(docs_dir: Path | None = None) -> int:
                         "embedding": embedding,
                         "topic_tags": chunk_data["topic_tags"],
                         "source_type": chunk_data["source_type"],
+                        "partition_id": chunk_data["partition_id"],
                         "is_deprecated": False,
                     },
                 )

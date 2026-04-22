@@ -1,6 +1,7 @@
 ---
 topic_tags: ["suiteql", "examples", "lookup", "aggregation", "inventory", "yoy"]
 source_type: expert_rules
+partition_id: netsuite/suiteql-rules
 ---
 
 # SuiteQL Example Query Patterns
