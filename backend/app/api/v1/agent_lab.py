@@ -153,8 +153,11 @@ async def stream_events(
     agent_lab_run:{run_id}, relays to the browser. Injects heartbeat
     every 10s. Closes on run_complete event.
 
-    Auth via HttpOnly JWT cookie — EventSource cannot set Authorization
-    headers. Same mechanism as chat SSE.
+    Authenticated via the standard Bearer-token flow (see
+    `get_current_superadmin`). Frontend consumers use
+    `apiClient.streamGet` + `consumeAgentLabStream`; the native
+    EventSource API cannot be used because it cannot attach
+    Authorization headers.
     """
     stream_key = f"agent_lab_run:{run_id}"
     r = get_async_redis()
