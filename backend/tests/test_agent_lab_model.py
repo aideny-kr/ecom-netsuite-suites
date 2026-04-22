@@ -1,7 +1,6 @@
 """Tests for AgentLabRun model — ORM shape + partial unique index behaviour."""
 
 import pytest
-import pytest_asyncio
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
