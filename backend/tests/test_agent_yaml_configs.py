@@ -127,5 +127,3 @@ class TestRequiresConnectorField:
         )
         config = AgentYAMLConfig.from_yaml(yaml_file)
         assert config.requires_connector == ["bigquery", "snowflake"]
-
-

@@ -121,8 +121,10 @@ class TestValidateConnection:
         }
         mock_drive = MagicMock()
         mock_drive.files().delete().execute.return_value = None
-        with patch("app.services.sheets_service._build_sheets_service", return_value=mock_service), \
-             patch("app.services.sheets_service._build_drive_service", return_value=mock_drive):
+        with (
+            patch("app.services.sheets_service._build_sheets_service", return_value=mock_service),
+            patch("app.services.sheets_service._build_drive_service", return_value=mock_drive),
+        ):
             result = await validate_connection(credentials={"type": "service_account"})
         assert result["valid"] is True
 
@@ -133,8 +135,10 @@ class TestValidateConnection:
         mock_service.spreadsheets().create().execute.return_value = {"spreadsheetId": "test123"}
         mock_drive = MagicMock()
         mock_drive.files().delete().execute.side_effect = Exception("delete failed")
-        with patch("app.services.sheets_service._build_sheets_service", return_value=mock_service), \
-             patch("app.services.sheets_service._build_drive_service", return_value=mock_drive):
+        with (
+            patch("app.services.sheets_service._build_sheets_service", return_value=mock_service),
+            patch("app.services.sheets_service._build_drive_service", return_value=mock_drive),
+        ):
             result = await validate_connection(credentials={"type": "service_account"})
         assert result["valid"] is True
 
@@ -151,6 +155,7 @@ class TestValidateConnection:
     @pytest.mark.asyncio
     async def test_returns_invalid_on_timeout(self):
         """Connection is invalid if validation times out."""
+
         async def _slow_thread(*args, **kwargs):
             raise asyncio.TimeoutError()
 
@@ -186,6 +191,7 @@ class TestValidateConnectionSharedDrive:
     @pytest.mark.asyncio
     async def test_shared_drive_not_found_returns_valid_false(self):
         from googleapiclient.errors import HttpError
+
         mock_drive = MagicMock()
         # Simulate Drive API 404 on files.create (drive doesn't exist or SA lacks access)
         err = HttpError(MagicMock(status=404), b'{"error": "not found"}')
@@ -207,8 +213,10 @@ class TestValidateConnectionSharedDrive:
         mock_sheets.spreadsheets().create().execute.return_value = {"spreadsheetId": "abc"}
         mock_drive = MagicMock()
 
-        with patch("app.services.sheets_service._build_sheets_service", return_value=mock_sheets), \
-             patch("app.services.sheets_service._build_drive_service", return_value=mock_drive):
+        with (
+            patch("app.services.sheets_service._build_sheets_service", return_value=mock_sheets),
+            patch("app.services.sheets_service._build_drive_service", return_value=mock_drive),
+        ):
             result = await validate_connection(credentials={"type": "service_account"})
 
         assert result == {"valid": True}
@@ -252,8 +260,10 @@ class TestCreateSpreadsheetSharedDrive:
         }
         mock_drive = MagicMock()
 
-        with patch("app.services.sheets_service._build_sheets_service", return_value=mock_service), \
-             patch("app.services.sheets_service._build_drive_service", return_value=mock_drive):
+        with (
+            patch("app.services.sheets_service._build_sheets_service", return_value=mock_service),
+            patch("app.services.sheets_service._build_drive_service", return_value=mock_drive),
+        ):
             result = await create_spreadsheet(
                 credentials={"type": "service_account"},
                 title="Regular Sheet",

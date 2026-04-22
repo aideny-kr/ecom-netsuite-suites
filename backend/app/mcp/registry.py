@@ -561,8 +561,7 @@ TOOL_REGISTRY = {
                 "type": "string",
                 "required": True,
                 "description": (
-                    "The Google Sheet ID. Extract from the URL: "
-                    "https://docs.google.com/spreadsheets/d/<ID>/edit"
+                    "The Google Sheet ID. Extract from the URL: https://docs.google.com/spreadsheets/d/<ID>/edit"
                 ),
             },
             "range": {

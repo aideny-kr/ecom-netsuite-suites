@@ -25,7 +25,7 @@ class TestParseFrontmatterPartitionId:
         assert fm.get("partition_id") is None
 
     def test_no_frontmatter_at_all(self):
-        content = '# Just a heading\n\nsome body\n'
+        content = "# Just a heading\n\nsome body\n"
         fm, body = parse_frontmatter(content)
         assert fm == {}
         assert body == content
@@ -44,14 +44,14 @@ class TestChunkPartitionIdPropagation:
 
         # A minimal markdown file string with frontmatter
         content = (
-            '---\n'
+            "---\n"
             'topic_tags: ["suiteql", "joins"]\n'
-            'source_type: expert_rules\n'
-            'partition_id: netsuite/joins\n'
-            '---\n\n'
-            '# Join Patterns\n\n'
-            '## Header vs Line\n\n'
-            'Some content about joins.\n'
+            "source_type: expert_rules\n"
+            "partition_id: netsuite/joins\n"
+            "---\n\n"
+            "# Join Patterns\n\n"
+            "## Header vs Line\n\n"
+            "Some content about joins.\n"
         )
         chunks = build_chunk_dicts_for_file(source_uri="test.md", content=content)
         assert len(chunks) >= 1
@@ -63,14 +63,7 @@ class TestChunkPartitionIdPropagation:
         partition_id=None (not a crash, not a default string)."""
         from scripts.ingest_domain_knowledge import build_chunk_dicts_for_file
 
-        content = (
-            '---\n'
-            'topic_tags: ["suiteql"]\n'
-            'source_type: expert_rules\n'
-            '---\n\n'
-            '# Something\n\n'
-            'body\n'
-        )
+        content = '---\ntopic_tags: ["suiteql"]\nsource_type: expert_rules\n---\n\n# Something\n\nbody\n'
         chunks = build_chunk_dicts_for_file(source_uri="test.md", content=content)
         assert len(chunks) >= 1
         for chunk in chunks:

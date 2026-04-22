@@ -469,9 +469,7 @@ class TestOrchestratorVariableInitExtended:
         # The default assignment must come BEFORE the multi-agent routing block
         routing_idx = source.index("Multi-agent routing")
         importance_idx = source.index("importance_tier = classify_importance(sanitized_input)")
-        assert importance_idx < routing_idx, (
-            "importance_tier default must be initialized before routing block"
-        )
+        assert importance_idx < routing_idx, "importance_tier default must be initialized before routing block"
 
     def test_context_need_gating_for_schema_injection(self):
         """The orchestrator must gate schema injection on context_need.
@@ -487,13 +485,9 @@ class TestOrchestratorVariableInitExtended:
         source = inspect.getsource(run_chat_turn)
 
         # The context_need gating check must exist
-        assert "_need_schemas = context_need in" in source, (
-            "_need_schemas flag must gate schema injection"
-        )
+        assert "_need_schemas = context_need in" in source, "_need_schemas flag must gate schema injection"
         # The schema injection must check _need_schemas before executing
-        assert "if not _need_schemas:" in source, (
-            "Schema injection must be guarded by 'if not _need_schemas:' check"
-        )
+        assert "if not _need_schemas:" in source, "Schema injection must be guarded by 'if not _need_schemas:' check"
 
     def test_importance_tier_casual_gates_haiku_routing(self):
         """importance_tier.value <= 2 (CASUAL/OPERATIONAL) gates Haiku routing.
@@ -508,10 +502,6 @@ class TestOrchestratorVariableInitExtended:
         source = inspect.getsource(run_chat_turn)
 
         # The Haiku routing check must use importance_tier.value
-        assert "importance_tier.value <= 2" in source, (
-            "Haiku routing must be gated by importance_tier.value <= 2"
-        )
+        assert "importance_tier.value <= 2" in source, "Haiku routing must be gated by importance_tier.value <= 2"
         # And it must reference HAIKU_MODEL
-        assert "HAIKU_MODEL" in source, (
-            "HAIKU_MODEL constant must be used when routing simple lookups"
-        )
+        assert "HAIKU_MODEL" in source, "HAIKU_MODEL constant must be used when routing simple lookups"

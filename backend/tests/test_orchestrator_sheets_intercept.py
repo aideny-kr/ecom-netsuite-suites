@@ -7,13 +7,15 @@ from app.services.chat.orchestrator import _intercept_tool_result
 
 class TestSheetsIntercept:
     def test_intercepts_successful_sheets_create(self):
-        result_str = json.dumps({
-            "error": False,
-            "spreadsheet_id": "abc123",
-            "url": "https://docs.google.com/spreadsheets/d/abc123",
-            "shared_with": "user@example.com",
-            "title": "Sales Export",
-        })
+        result_str = json.dumps(
+            {
+                "error": False,
+                "spreadsheet_id": "abc123",
+                "url": "https://docs.google.com/spreadsheets/d/abc123",
+                "shared_with": "user@example.com",
+                "title": "Sales Export",
+            }
+        )
         event_type, event_data, new_result = _intercept_tool_result("sheets_create", result_str)
         assert event_type == "sheets_link"
         assert event_data["url"] == "https://docs.google.com/spreadsheets/d/abc123"
@@ -41,20 +43,24 @@ class TestSheetsIntercept:
 
     def test_matches_dotted_name(self):
         """Supports both sheets_create and sheets.create tool names."""
-        result_str = json.dumps({
-            "error": False,
-            "spreadsheet_id": "abc",
-            "url": "https://docs.google.com/spreadsheets/d/abc",
-        })
+        result_str = json.dumps(
+            {
+                "error": False,
+                "spreadsheet_id": "abc",
+                "url": "https://docs.google.com/spreadsheets/d/abc",
+            }
+        )
         event_type, _, _ = _intercept_tool_result("sheets.create", result_str)
         assert event_type == "sheets_link"
 
     def test_defaults_title_when_missing(self):
-        result_str = json.dumps({
-            "error": False,
-            "spreadsheet_id": "xyz",
-            "url": "https://docs.google.com/spreadsheets/d/xyz",
-        })
+        result_str = json.dumps(
+            {
+                "error": False,
+                "spreadsheet_id": "xyz",
+                "url": "https://docs.google.com/spreadsheets/d/xyz",
+            }
+        )
         event_type, event_data, _ = _intercept_tool_result("sheets_create", result_str)
         assert event_type == "sheets_link"
         assert event_data["title"] == "Spreadsheet"

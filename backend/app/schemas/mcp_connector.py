@@ -30,9 +30,7 @@ def _coerce_drive_id(v: str | None) -> str | None:
     if v is None or v == "":
         return None
     if not _DRIVE_ID_RE.match(v):
-        raise ValueError(
-            "shared_drive_id must be 18-44 chars, alphanumeric with '_' or '-' only"
-        )
+        raise ValueError("shared_drive_id must be 18-44 chars, alphanumeric with '_' or '-' only")
     return v
 
 

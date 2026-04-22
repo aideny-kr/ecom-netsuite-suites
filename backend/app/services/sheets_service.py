@@ -3,6 +3,7 @@
 Synchronous google-api-python-client calls wrapped with asyncio.to_thread()
 to avoid blocking the event loop. Same pattern as bigquery_service.py.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -38,10 +39,14 @@ async def create_spreadsheet(
 
     def _sync_sheets_api():
         service = _build_sheets_service(credentials)
-        result = service.spreadsheets().create(
-            body={"properties": {"title": title}},
-            fields="spreadsheetId,spreadsheetUrl",
-        ).execute()
+        result = (
+            service.spreadsheets()
+            .create(
+                body={"properties": {"title": title}},
+                fields="spreadsheetId,spreadsheetUrl",
+            )
+            .execute()
+        )
         return {
             "spreadsheet_id": result["spreadsheetId"],
             "url": result["spreadsheetUrl"],
@@ -49,15 +54,19 @@ async def create_spreadsheet(
 
     def _sync_drive_api():
         drive = _build_drive_service(credentials)
-        result = drive.files().create(
-            body={
-                "name": title,
-                "mimeType": "application/vnd.google-apps.spreadsheet",
-                "parents": [shared_drive_id],
-            },
-            supportsAllDrives=True,
-            fields="id,webViewLink",
-        ).execute()
+        result = (
+            drive.files()
+            .create(
+                body={
+                    "name": title,
+                    "mimeType": "application/vnd.google-apps.spreadsheet",
+                    "parents": [shared_drive_id],
+                },
+                supportsAllDrives=True,
+                fields="id,webViewLink",
+            )
+            .execute()
+        )
         return {
             "spreadsheet_id": result["id"],
             "url": result["webViewLink"],
@@ -81,12 +90,17 @@ async def write_range(
 
     def _sync():
         service = _build_sheets_service(credentials)
-        result = service.spreadsheets().values().update(
-            spreadsheetId=spreadsheet_id,
-            range=range_str,
-            valueInputOption="RAW",
-            body={"values": data},
-        ).execute()
+        result = (
+            service.spreadsheets()
+            .values()
+            .update(
+                spreadsheetId=spreadsheet_id,
+                range=range_str,
+                valueInputOption="RAW",
+                body={"values": data},
+            )
+            .execute()
+        )
         return {
             "updated_range": result.get("updatedRange", ""),
             "updated_rows": result.get("updatedRows", 0),
@@ -113,10 +127,15 @@ async def read_range(
 
     def _sync():
         service = _build_sheets_service(credentials)
-        result = service.spreadsheets().values().get(
-            spreadsheetId=spreadsheet_id,
-            range=range_str,
-        ).execute()
+        result = (
+            service.spreadsheets()
+            .values()
+            .get(
+                spreadsheetId=spreadsheet_id,
+                range=range_str,
+            )
+            .execute()
+        )
         return {
             "range": result.get("range", range_str),
             "values": result.get("values", []),
@@ -137,28 +156,34 @@ async def share_spreadsheet(
 
     def _sync():
         drive = _build_drive_service(credentials)
-        result = drive.permissions().create(
-            fileId=spreadsheet_id,
-            body={"type": "user", "role": role, "emailAddress": email},
-            sendNotificationEmail=False,
-        ).execute()
+        result = (
+            drive.permissions()
+            .create(
+                fileId=spreadsheet_id,
+                body={"type": "user", "role": role, "emailAddress": email},
+                sendNotificationEmail=False,
+            )
+            .execute()
+        )
         return {"permission_id": result["id"]}
 
     return await asyncio.to_thread(_sync)
 
 
-async def validate_connection(
-    *, credentials: dict | None, shared_drive_id: str | None = None
-) -> dict[str, Any]:
+async def validate_connection(*, credentials: dict | None, shared_drive_id: str | None = None) -> dict[str, Any]:
     if not credentials:
         raise ValueError("credentials required")
 
     def _sync_sheets_api():
         sheets = _build_sheets_service(credentials)
-        result = sheets.spreadsheets().create(
-            body={"properties": {"title": "AI-den Connection Test"}},
-            fields="spreadsheetId",
-        ).execute()
+        result = (
+            sheets.spreadsheets()
+            .create(
+                body={"properties": {"title": "AI-den Connection Test"}},
+                fields="spreadsheetId",
+            )
+            .execute()
+        )
         test_id = result["spreadsheetId"]
         try:
             drive = _build_drive_service(credentials)
@@ -173,19 +198,24 @@ async def validate_connection(
         # files.create with parents=[drive_id] + supportsAllDrives=True will fail
         # cleanly if the drive doesn't exist or the SA lacks access — no need for
         # a separate drives.get preflight (which requires a broader OAuth scope).
-        created = drive.files().create(
-            body={
-                "name": "AI-den Connection Test",
-                "mimeType": "application/vnd.google-apps.spreadsheet",
-                "parents": [shared_drive_id],
-            },
-            supportsAllDrives=True,
-            fields="id",
-        ).execute()
+        created = (
+            drive.files()
+            .create(
+                body={
+                    "name": "AI-den Connection Test",
+                    "mimeType": "application/vnd.google-apps.spreadsheet",
+                    "parents": [shared_drive_id],
+                },
+                supportsAllDrives=True,
+                fields="id",
+            )
+            .execute()
+        )
         # 3. Cleanup (best-effort)
         try:
             drive.files().delete(
-                fileId=created["id"], supportsAllDrives=True,
+                fileId=created["id"],
+                supportsAllDrives=True,
             ).execute()
         except Exception:
             logger.warning("sheets_service.validate_cleanup_failed", exc_info=True)

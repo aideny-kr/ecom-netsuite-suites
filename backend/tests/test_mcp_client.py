@@ -58,6 +58,7 @@ EXPECTED_TOOLS = {
     "recon.get_evidence",
     "sheets.create",
     "sheets.write_range",
+    "sheets.read_range",
 }
 
 

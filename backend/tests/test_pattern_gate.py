@@ -48,10 +48,7 @@ class TestComputeNeedPatterns:
 
     def test_ext_mcp_non_suiteql_tool_returns_false(self):
         """ext__ prefix alone doesn't qualify — must be a SuiteQL variant."""
-        assert (
-            _compute_need_patterns(ContextNeed.FULL, {"ext__abc-123__ns_runReport"})
-            is False
-        )
+        assert _compute_need_patterns(ContextNeed.FULL, {"ext__abc-123__ns_runReport"}) is False
 
     def test_docs_with_suiteql_returns_true(self):
         """Tool presence wins over context-need across the board."""

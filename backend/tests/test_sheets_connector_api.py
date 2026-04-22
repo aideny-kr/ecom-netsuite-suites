@@ -1,4 +1,5 @@
 """Tests for the Google Sheets connector API endpoints."""
+
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -16,6 +17,7 @@ _VALID_SA = {
 class TestSheetsSharedDriveSchema:
     def test_test_request_accepts_shared_drive_id(self):
         from app.schemas.mcp_connector import SheetsTestRequest
+
         r = SheetsTestRequest(
             service_account_json=_VALID_SA,
             shared_drive_id="0ACabcdEFGH1234567890",
@@ -24,21 +26,25 @@ class TestSheetsSharedDriveSchema:
 
     def test_test_request_defaults_shared_drive_id_to_none(self):
         from app.schemas.mcp_connector import SheetsTestRequest
+
         r = SheetsTestRequest(service_account_json=_VALID_SA)
         assert r.shared_drive_id is None
 
     def test_test_request_coerces_empty_string_to_none(self):
         from app.schemas.mcp_connector import SheetsTestRequest
+
         r = SheetsTestRequest(service_account_json=_VALID_SA, shared_drive_id="")
         assert r.shared_drive_id is None
 
     def test_test_request_rejects_invalid_format(self):
         from app.schemas.mcp_connector import SheetsTestRequest
+
         with pytest.raises(ValueError, match="shared_drive_id"):
             SheetsTestRequest(service_account_json=_VALID_SA, shared_drive_id="too-short")
 
     def test_create_request_accepts_shared_drive_id(self):
         from app.schemas.mcp_connector import SheetsConnectorCreate
+
         r = SheetsConnectorCreate(
             service_account_json=_VALID_SA,
             shared_drive_id="0ACabcdEFGH1234567890",
@@ -89,7 +95,9 @@ class TestSheetsTestConnection:
     async def test_invalid_credentials_returns_false_with_error(self):
         from app.api.v1.mcp_connectors import test_sheets_connection
 
-        request = SheetsTestRequest(service_account_json={"type": "bad", "client_email": "x@y.com", "private_key": "pk"})
+        request = SheetsTestRequest(
+            service_account_json={"type": "bad", "client_email": "x@y.com", "private_key": "pk"}
+        )
         mock_user = MagicMock()
         mock_user.tenant_id = uuid.uuid4()
         mock_user.id = uuid.uuid4()
@@ -167,7 +175,9 @@ class TestSheetsCreateConnector:
 
         from app.api.v1.mcp_connectors import create_sheets_connector
 
-        request = SheetsConnectorCreate(service_account_json={"type": "bad", "client_email": "x@y.com", "private_key": "pk"})
+        request = SheetsConnectorCreate(
+            service_account_json={"type": "bad", "client_email": "x@y.com", "private_key": "pk"}
+        )
         mock_user = MagicMock()
         mock_user.tenant_id = uuid.uuid4()
         mock_user.id = uuid.uuid4()
@@ -314,9 +324,7 @@ class TestSheetsCreateConnector:
         from app.api.v1.mcp_connectors import create_sheets_connector
 
         email = "sa@myproject.iam.gserviceaccount.com"
-        request = SheetsConnectorCreate(
-            service_account_json={**_VALID_SA, "client_email": email}
-        )
+        request = SheetsConnectorCreate(service_account_json={**_VALID_SA, "client_email": email})
         mock_user = MagicMock()
         mock_user.tenant_id = uuid.uuid4()
         mock_user.id = uuid.uuid4()
@@ -340,7 +348,6 @@ class TestSheetsCreateConnector:
 
         connector = mock_db.add.call_args[0][0]
         assert connector.metadata_json["client_email"] == email
-
 
     @pytest.mark.asyncio
     async def test_response_does_not_leak_encrypted_credentials(self):
@@ -557,15 +564,19 @@ class TestSheetsCreateEndpointSharedDrive:
         mock_user.tenant_id = uuid.uuid4()
         mock_user.id = uuid.uuid4()
 
-        with patch(
-            "app.api.v1.mcp_connectors.validate_sheets_connection",
-            new=AsyncMock(return_value={"valid": True}),
-        ), patch(
-            "app.api.v1.mcp_connectors.encrypt_credentials",
-            return_value=b"encrypted",
-        ), patch(
-            "app.api.v1.mcp_connectors.audit_service.log_event",
-            new=AsyncMock(),
+        with (
+            patch(
+                "app.api.v1.mcp_connectors.validate_sheets_connection",
+                new=AsyncMock(return_value={"valid": True}),
+            ),
+            patch(
+                "app.api.v1.mcp_connectors.encrypt_credentials",
+                return_value=b"encrypted",
+            ),
+            patch(
+                "app.api.v1.mcp_connectors.audit_service.log_event",
+                new=AsyncMock(),
+            ),
         ):
             mock_db = _make_mock_db()
             mock_result = MagicMock()
@@ -588,15 +599,19 @@ class TestSheetsCreateEndpointSharedDrive:
         mock_user.tenant_id = uuid.uuid4()
         mock_user.id = uuid.uuid4()
 
-        with patch(
-            "app.api.v1.mcp_connectors.validate_sheets_connection",
-            new=AsyncMock(return_value={"valid": True}),
-        ), patch(
-            "app.api.v1.mcp_connectors.encrypt_credentials",
-            return_value=b"encrypted",
-        ), patch(
-            "app.api.v1.mcp_connectors.audit_service.log_event",
-            new=AsyncMock(),
+        with (
+            patch(
+                "app.api.v1.mcp_connectors.validate_sheets_connection",
+                new=AsyncMock(return_value={"valid": True}),
+            ),
+            patch(
+                "app.api.v1.mcp_connectors.encrypt_credentials",
+                return_value=b"encrypted",
+            ),
+            patch(
+                "app.api.v1.mcp_connectors.audit_service.log_event",
+                new=AsyncMock(),
+            ),
         ):
             mock_db = _make_mock_db()
             mock_result = MagicMock()

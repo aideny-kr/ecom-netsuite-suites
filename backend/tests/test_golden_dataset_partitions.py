@@ -26,6 +26,7 @@ NETSUITE_PARTITION_MAP = {
 
 def _parse_frontmatter(content: str) -> dict:
     import re
+
     match = re.match(r"^---\s*\n(.*?)\n---\s*\n", content, re.DOTALL)
     if not match:
         return {}

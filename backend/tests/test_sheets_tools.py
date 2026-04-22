@@ -15,11 +15,13 @@ _CONTEXT = {
 class TestSheetsCreateExecute:
     @pytest.mark.asyncio
     async def test_returns_spreadsheet_url(self):
-        with patch("app.mcp.tools.sheets_tools._get_sheets_connector") as mock_conn, \
-             patch("app.mcp.tools.sheets_tools.create_spreadsheet") as mock_create, \
-             patch("app.mcp.tools.sheets_tools.share_spreadsheet") as mock_share, \
-             patch("app.mcp.tools.sheets_tools.decrypt_credentials") as mock_decrypt, \
-             patch("app.mcp.tools.sheets_tools._get_user_email") as mock_email:
+        with (
+            patch("app.mcp.tools.sheets_tools._get_sheets_connector") as mock_conn,
+            patch("app.mcp.tools.sheets_tools.create_spreadsheet") as mock_create,
+            patch("app.mcp.tools.sheets_tools.share_spreadsheet") as mock_share,
+            patch("app.mcp.tools.sheets_tools.decrypt_credentials") as mock_decrypt,
+            patch("app.mcp.tools.sheets_tools._get_user_email") as mock_email,
+        ):
             mock_conn.return_value = MagicMock(encrypted_credentials="encrypted")
             mock_decrypt.return_value = {"type": "service_account"}
             mock_email.return_value = "user@example.com"
@@ -45,15 +47,20 @@ class TestSheetsCreateExecute:
     @pytest.mark.asyncio
     async def test_create_succeeds_when_share_fails(self):
         """Sheet is returned successfully even if auto-share step fails (share is best-effort)."""
-        with patch("app.mcp.tools.sheets_tools._get_sheets_connector") as mock_conn, \
-             patch("app.mcp.tools.sheets_tools.create_spreadsheet") as mock_create, \
-             patch("app.mcp.tools.sheets_tools.share_spreadsheet") as mock_share, \
-             patch("app.mcp.tools.sheets_tools.decrypt_credentials") as mock_decrypt, \
-             patch("app.mcp.tools.sheets_tools._get_user_email") as mock_email:
+        with (
+            patch("app.mcp.tools.sheets_tools._get_sheets_connector") as mock_conn,
+            patch("app.mcp.tools.sheets_tools.create_spreadsheet") as mock_create,
+            patch("app.mcp.tools.sheets_tools.share_spreadsheet") as mock_share,
+            patch("app.mcp.tools.sheets_tools.decrypt_credentials") as mock_decrypt,
+            patch("app.mcp.tools.sheets_tools._get_user_email") as mock_email,
+        ):
             mock_conn.return_value = MagicMock(encrypted_credentials="encrypted")
             mock_decrypt.return_value = {"type": "service_account"}
             mock_email.return_value = "user@example.com"
-            mock_create.return_value = {"spreadsheet_id": "abc123", "url": "https://docs.google.com/spreadsheets/d/abc123"}
+            mock_create.return_value = {
+                "spreadsheet_id": "abc123",
+                "url": "https://docs.google.com/spreadsheets/d/abc123",
+            }
             mock_share.side_effect = Exception("share failed")
             result = await sheets_create_execute({"title": "Test"}, _CONTEXT)
         assert result["error"] is False
@@ -62,15 +69,20 @@ class TestSheetsCreateExecute:
     @pytest.mark.asyncio
     async def test_create_succeeds_when_no_user_email(self):
         """Sheet created even if actor's email cannot be resolved."""
-        with patch("app.mcp.tools.sheets_tools._get_sheets_connector") as mock_conn, \
-             patch("app.mcp.tools.sheets_tools.create_spreadsheet") as mock_create, \
-             patch("app.mcp.tools.sheets_tools.share_spreadsheet") as mock_share, \
-             patch("app.mcp.tools.sheets_tools.decrypt_credentials") as mock_decrypt, \
-             patch("app.mcp.tools.sheets_tools._get_user_email") as mock_email:
+        with (
+            patch("app.mcp.tools.sheets_tools._get_sheets_connector") as mock_conn,
+            patch("app.mcp.tools.sheets_tools.create_spreadsheet") as mock_create,
+            patch("app.mcp.tools.sheets_tools.share_spreadsheet") as mock_share,
+            patch("app.mcp.tools.sheets_tools.decrypt_credentials") as mock_decrypt,
+            patch("app.mcp.tools.sheets_tools._get_user_email") as mock_email,
+        ):
             mock_conn.return_value = MagicMock(encrypted_credentials="encrypted")
             mock_decrypt.return_value = {"type": "service_account"}
             mock_email.return_value = None
-            mock_create.return_value = {"spreadsheet_id": "abc123", "url": "https://docs.google.com/spreadsheets/d/abc123"}
+            mock_create.return_value = {
+                "spreadsheet_id": "abc123",
+                "url": "https://docs.google.com/spreadsheets/d/abc123",
+            }
             result = await sheets_create_execute({"title": "Test"}, _CONTEXT)
         assert result["error"] is False
         assert result["shared_with"] is None
@@ -85,11 +97,13 @@ class TestSheetsCreateExecute:
     @pytest.mark.asyncio
     async def test_create_echoes_title_in_result(self):
         """Title passed in params must appear in the result so the orchestrator can display it on the card."""
-        with patch("app.mcp.tools.sheets_tools._get_sheets_connector") as mock_conn, \
-             patch("app.mcp.tools.sheets_tools.create_spreadsheet") as mock_create, \
-             patch("app.mcp.tools.sheets_tools.share_spreadsheet"), \
-             patch("app.mcp.tools.sheets_tools.decrypt_credentials") as mock_decrypt, \
-             patch("app.mcp.tools.sheets_tools._get_user_email") as mock_email:
+        with (
+            patch("app.mcp.tools.sheets_tools._get_sheets_connector") as mock_conn,
+            patch("app.mcp.tools.sheets_tools.create_spreadsheet") as mock_create,
+            patch("app.mcp.tools.sheets_tools.share_spreadsheet"),
+            patch("app.mcp.tools.sheets_tools.decrypt_credentials") as mock_decrypt,
+            patch("app.mcp.tools.sheets_tools._get_user_email") as mock_email,
+        ):
             mock_conn.return_value = MagicMock(encrypted_credentials="encrypted")
             mock_decrypt.return_value = {"type": "service_account"}
             mock_email.return_value = None
@@ -101,9 +115,11 @@ class TestSheetsCreateExecute:
 class TestSheetsWriteRangeExecute:
     @pytest.mark.asyncio
     async def test_writes_data(self):
-        with patch("app.mcp.tools.sheets_tools._get_sheets_connector") as mock_conn, \
-             patch("app.mcp.tools.sheets_tools.write_range") as mock_write, \
-             patch("app.mcp.tools.sheets_tools.decrypt_credentials") as mock_decrypt:
+        with (
+            patch("app.mcp.tools.sheets_tools._get_sheets_connector") as mock_conn,
+            patch("app.mcp.tools.sheets_tools.write_range") as mock_write,
+            patch("app.mcp.tools.sheets_tools.decrypt_credentials") as mock_decrypt,
+        ):
             mock_conn.return_value = MagicMock(encrypted_credentials="encrypted")
             mock_decrypt.return_value = {"type": "service_account"}
             mock_write.return_value = {"updated_rows": 3, "updated_range": "Sheet1!A1:B3", "updated_columns": 2}
@@ -119,8 +135,10 @@ class TestSheetsWriteRangeExecute:
 
     @pytest.mark.asyncio
     async def test_returns_error_on_empty_data(self):
-        with patch("app.mcp.tools.sheets_tools._get_sheets_connector") as mock_conn, \
-             patch("app.mcp.tools.sheets_tools.decrypt_credentials") as mock_decrypt:
+        with (
+            patch("app.mcp.tools.sheets_tools._get_sheets_connector") as mock_conn,
+            patch("app.mcp.tools.sheets_tools.decrypt_credentials") as mock_decrypt,
+        ):
             mock_conn.return_value = MagicMock(encrypted_credentials="encrypted")
             mock_decrypt.return_value = {"type": "service_account"}
             result = await sheets_write_range_execute(
@@ -152,18 +170,23 @@ class TestSheetsToolsSharedDrive:
             "shared_drive_id": "0ACabcdEFGH1234567890",
         }
 
-        with patch(
-            "app.mcp.tools.sheets_tools._get_sheets_connector",
-            new=AsyncMock(return_value=mock_connector),
-        ), patch(
-            "app.mcp.tools.sheets_tools.decrypt_credentials",
-            return_value={"service_account_json": {"type": "service_account"}},
-        ), patch(
-            "app.mcp.tools.sheets_tools.create_spreadsheet",
-            new=AsyncMock(return_value={"spreadsheet_id": "abc", "url": "https://..."}),
-        ) as mock_create, patch(
-            "app.mcp.tools.sheets_tools._get_user_email",
-            new=AsyncMock(return_value=None),
+        with (
+            patch(
+                "app.mcp.tools.sheets_tools._get_sheets_connector",
+                new=AsyncMock(return_value=mock_connector),
+            ),
+            patch(
+                "app.mcp.tools.sheets_tools.decrypt_credentials",
+                return_value={"service_account_json": {"type": "service_account"}},
+            ),
+            patch(
+                "app.mcp.tools.sheets_tools.create_spreadsheet",
+                new=AsyncMock(return_value={"spreadsheet_id": "abc", "url": "https://..."}),
+            ) as mock_create,
+            patch(
+                "app.mcp.tools.sheets_tools._get_user_email",
+                new=AsyncMock(return_value=None),
+            ),
         ):
             result = await sheets_create_execute(
                 {"title": "My Sheet"},
@@ -187,22 +210,28 @@ class TestSheetsToolsSharedDrive:
             "shared_drive_id": "0ACabcdEFGH1234567890",
         }
 
-        with patch(
-            "app.mcp.tools.sheets_tools._get_sheets_connector",
-            new=AsyncMock(return_value=mock_connector),
-        ), patch(
-            "app.mcp.tools.sheets_tools.decrypt_credentials",
-            return_value={"service_account_json": {}},
-        ), patch(
-            "app.mcp.tools.sheets_tools.create_spreadsheet",
-            new=AsyncMock(return_value={"spreadsheet_id": "abc", "url": "u"}),
-        ), patch(
-            "app.mcp.tools.sheets_tools._get_user_email",
-            new=AsyncMock(return_value="user@example.com"),
-        ), patch(
-            "app.mcp.tools.sheets_tools.share_spreadsheet",
-            new=AsyncMock(),
-        ) as mock_share:
+        with (
+            patch(
+                "app.mcp.tools.sheets_tools._get_sheets_connector",
+                new=AsyncMock(return_value=mock_connector),
+            ),
+            patch(
+                "app.mcp.tools.sheets_tools.decrypt_credentials",
+                return_value={"service_account_json": {}},
+            ),
+            patch(
+                "app.mcp.tools.sheets_tools.create_spreadsheet",
+                new=AsyncMock(return_value={"spreadsheet_id": "abc", "url": "u"}),
+            ),
+            patch(
+                "app.mcp.tools.sheets_tools._get_user_email",
+                new=AsyncMock(return_value="user@example.com"),
+            ),
+            patch(
+                "app.mcp.tools.sheets_tools.share_spreadsheet",
+                new=AsyncMock(),
+            ) as mock_share,
+        ):
             result = await sheets_create_execute(
                 {"title": "My Sheet"},
                 {"tenant_id": "t", "db": MagicMock(), "actor_id": "a"},
@@ -220,22 +249,28 @@ class TestSheetsToolsSharedDrive:
         mock_connector.encrypted_credentials = b"enc"
         mock_connector.metadata_json = {"client_email": "sa@x.iam.gserviceaccount.com"}
 
-        with patch(
-            "app.mcp.tools.sheets_tools._get_sheets_connector",
-            new=AsyncMock(return_value=mock_connector),
-        ), patch(
-            "app.mcp.tools.sheets_tools.decrypt_credentials",
-            return_value={"service_account_json": {}},
-        ), patch(
-            "app.mcp.tools.sheets_tools.create_spreadsheet",
-            new=AsyncMock(return_value={"spreadsheet_id": "abc", "url": "u"}),
-        ), patch(
-            "app.mcp.tools.sheets_tools._get_user_email",
-            new=AsyncMock(return_value="user@example.com"),
-        ), patch(
-            "app.mcp.tools.sheets_tools.share_spreadsheet",
-            new=AsyncMock(),
-        ) as mock_share:
+        with (
+            patch(
+                "app.mcp.tools.sheets_tools._get_sheets_connector",
+                new=AsyncMock(return_value=mock_connector),
+            ),
+            patch(
+                "app.mcp.tools.sheets_tools.decrypt_credentials",
+                return_value={"service_account_json": {}},
+            ),
+            patch(
+                "app.mcp.tools.sheets_tools.create_spreadsheet",
+                new=AsyncMock(return_value={"spreadsheet_id": "abc", "url": "u"}),
+            ),
+            patch(
+                "app.mcp.tools.sheets_tools._get_user_email",
+                new=AsyncMock(return_value="user@example.com"),
+            ),
+            patch(
+                "app.mcp.tools.sheets_tools.share_spreadsheet",
+                new=AsyncMock(),
+            ) as mock_share,
+        ):
             await sheets_create_execute(
                 {"title": "My Sheet"},
                 {"tenant_id": "t", "db": MagicMock(), "actor_id": "a"},
@@ -253,19 +288,25 @@ class TestSheetsReadRangeExecute:
         mock_connector.encrypted_credentials = b"enc"
         mock_connector.metadata_json = {"client_email": "sa@x.iam.gserviceaccount.com"}
 
-        with patch(
-            "app.mcp.tools.sheets_tools._get_sheets_connector",
-            new=AsyncMock(return_value=mock_connector),
-        ), patch(
-            "app.mcp.tools.sheets_tools.decrypt_credentials",
-            return_value={"service_account_json": {"type": "service_account"}},
-        ), patch(
-            "app.mcp.tools.sheets_tools.read_range",
-            new=AsyncMock(return_value={
-                "range": "Sheet1!A1:B3",
-                "values": [["Product", "Qty"], ["Apples", "12"], ["Pears", "7"]],
-            }),
-        ) as mock_read:
+        with (
+            patch(
+                "app.mcp.tools.sheets_tools._get_sheets_connector",
+                new=AsyncMock(return_value=mock_connector),
+            ),
+            patch(
+                "app.mcp.tools.sheets_tools.decrypt_credentials",
+                return_value={"service_account_json": {"type": "service_account"}},
+            ),
+            patch(
+                "app.mcp.tools.sheets_tools.read_range",
+                new=AsyncMock(
+                    return_value={
+                        "range": "Sheet1!A1:B3",
+                        "values": [["Product", "Qty"], ["Apples", "12"], ["Pears", "7"]],
+                    }
+                ),
+            ) as mock_read,
+        ):
             result = await sheets_read_range_execute(
                 {"spreadsheet_id": "abc", "range": "Sheet1!A1:B3"},
                 {"tenant_id": "t", "db": MagicMock()},

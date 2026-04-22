@@ -68,8 +68,7 @@ class TestLoadAllProfiles:
 
     def test_skips_malformed_yaml(self, tmp_path):
         (tmp_path / "good.yaml").write_text(
-            "profile_id: good\ndisplay_name: Good\n"
-            "trigger_tools: [foo]\nprompt_fragment: ok\nrag_partitions: []\n"
+            "profile_id: good\ndisplay_name: Good\ntrigger_tools: [foo]\nprompt_fragment: ok\nrag_partitions: []\n"
         )
         (tmp_path / "bad.yaml").write_text("not: valid: yaml: [[[")
         profiles = load_all_profiles(tmp_path)

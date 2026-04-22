@@ -3,6 +3,7 @@
 Same pattern as bigquery_tools.py: async functions taking (params, context),
 looking up the active connector, decrypting credentials, calling the service.
 """
+
 from __future__ import annotations
 
 import logging
