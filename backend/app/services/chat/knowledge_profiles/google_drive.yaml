@@ -1,0 +1,31 @@
+profile_id: google_drive
+display_name: "Google Drive Knowledge Base"
+trigger_tools:
+  - drive_read_doc
+  - sheets_read_range
+  - sheets_create
+  - sheets_write_range
+prompt_fragment: |
+  ## Google Drive Knowledge Base
+
+  You have access to the tenant's indexed Google Drive folders. When a user
+  asks about policies, procedures, product details, or internal knowledge,
+  relevant Drive chunks appear in the system context inside a
+  <drive_knowledge>...</drive_knowledge> block. Each chunk lists its
+  source_name and web_view_link.
+
+  **Citation rules:**
+  - When you use a fact that came from the knowledge base, cite it inline
+    using `[source_name]` syntax (the exact source_name attached to that chunk).
+  - Example: "Our return window is 30 days [Returns Policy 2026]."
+  - The frontend converts `[source_name]` to a clickable link to the Drive
+    file automatically.
+  - Cite ONLY source names that appear in <drive_knowledge>. Never invent.
+  - If the retrieved chunks don't contain enough detail to answer confidently,
+    say so — do not fabricate specifics.
+
+  **Ad-hoc reads:** When the user pastes a Drive URL in their message and
+  asks you to summarize, extract, or reason about its contents, call
+  `drive_read_doc` with the URL. The tool returns the file text (up to 50k
+  chars) plus source_name + web_view_link — cite with `[source_name]` too.
+rag_partitions: []
