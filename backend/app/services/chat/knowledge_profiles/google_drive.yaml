@@ -5,6 +5,7 @@ trigger_tools:
   - sheets_read_range
   - sheets_create
   - sheets_write_range
+  - docs_create
 prompt_fragment: |
   ## Google Drive Knowledge Base
 
@@ -28,4 +29,21 @@ prompt_fragment: |
   asks you to summarize, extract, or reason about its contents, call
   `drive_read_doc` with the URL. The tool returns the file text (up to 50k
   chars) plus source_name + web_view_link — cite with `[source_name]` too.
+
+  **Saving prose to a Google Doc:** When the user asks to save research,
+  notes, a summary, a brief, or any prose as a document, call `docs_create`
+  with the body as markdown. Drive's importer converts markdown headings,
+  bold/italic, bullet and numbered lists, code blocks, blockquotes, and
+  simple tables to native Doc formatting automatically.
+
+  Example — user: "save our Q1 analysis as a doc":
+    docs_create(
+      title="Q1 Analysis — 2026-04-23",
+      content_markdown="# Q1 Analysis\n\n## Revenue\n\n- Framework Desktop: ...\n- Laptop 13: ...\n\n## Takeaways\n\n1. ...\n"
+    )
+
+  The tool returns a shareable Doc link that the frontend renders as a
+  clickable card. Do NOT paste the URL in your reply — just confirm what
+  was saved in one short line (title and which sections it contains).
+  Never include secrets, API keys, or auth tokens in the doc body.
 rag_partitions: []
