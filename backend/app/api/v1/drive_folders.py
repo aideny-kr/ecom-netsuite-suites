@@ -29,9 +29,7 @@ from app.workers.tasks.drive_rag_sync import drive_rag_sync_folder
 router = APIRouter(prefix="/drive-folders", tags=["drive-folders"])
 
 
-def _folder_to_response(
-    folder: DriveFolder, *, chunk_count: int, file_count: int
-) -> DriveFolderResponse:
+def _folder_to_response(folder: DriveFolder, *, chunk_count: int, file_count: int) -> DriveFolderResponse:
     return DriveFolderResponse(
         id=str(folder.id),
         tenant_id=str(folder.tenant_id),
@@ -66,16 +64,10 @@ async def _sheets_connector(db: AsyncSession, tenant_id: uuid.UUID) -> McpConnec
 
 async def _counts_for(db: AsyncSession, folder_id: uuid.UUID) -> tuple[int, int]:
     chunk_count = (
-        await db.execute(
-            select(func.count(DriveChunk.id))
-            .join(DriveFile)
-            .where(DriveFile.folder_id == folder_id)
-        )
+        await db.execute(select(func.count(DriveChunk.id)).join(DriveFile).where(DriveFile.folder_id == folder_id))
     ).scalar() or 0
     file_count = (
-        await db.execute(
-            select(func.count(DriveFile.id)).where(DriveFile.folder_id == folder_id)
-        )
+        await db.execute(select(func.count(DriveFile.id)).where(DriveFile.folder_id == folder_id))
     ).scalar() or 0
     return chunk_count, file_count
 
@@ -88,9 +80,7 @@ async def list_drive_folders(
     folders = (
         (
             await db.execute(
-                select(DriveFolder)
-                .where(DriveFolder.tenant_id == user.tenant_id)
-                .order_by(DriveFolder.created_at)
+                select(DriveFolder).where(DriveFolder.tenant_id == user.tenant_id).order_by(DriveFolder.created_at)
             )
         )
         .scalars()
@@ -138,9 +128,7 @@ async def create_drive_folder(
     envelope = decrypt_credentials(connector.encrypted_credentials)
     credentials = envelope.get("service_account_json", envelope)
     try:
-        meta = await drive_client.get_folder_metadata(
-            credentials=credentials, folder_id=folder_id
-        )
+        meta = await drive_client.get_folder_metadata(credentials=credentials, folder_id=folder_id)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Cannot access folder: {e}")
 

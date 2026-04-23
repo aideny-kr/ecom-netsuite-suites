@@ -32,9 +32,10 @@ async def test_build_sheets_service_uses_expanded_scopes():
         "auth_uri": "x",
         "token_uri": "x",
     }
-    with patch(
-        "app.services.sheets_service.service_account.Credentials.from_service_account_info"
-    ) as mock_from_info, patch("app.services.sheets_service.build") as mock_build:
+    with (
+        patch("app.services.sheets_service.service_account.Credentials.from_service_account_info") as mock_from_info,
+        patch("app.services.sheets_service.build") as mock_build,
+    ):
         mock_from_info.return_value = MagicMock()
         mock_build.return_value = MagicMock()
         sheets_service._build_sheets_service(creds)
@@ -57,9 +58,10 @@ async def test_build_drive_service_uses_expanded_scopes():
         "auth_uri": "x",
         "token_uri": "x",
     }
-    with patch(
-        "app.services.sheets_service.service_account.Credentials.from_service_account_info"
-    ) as mock_from_info, patch("app.services.sheets_service.build") as mock_build:
+    with (
+        patch("app.services.sheets_service.service_account.Credentials.from_service_account_info") as mock_from_info,
+        patch("app.services.sheets_service.build") as mock_build,
+    ):
         mock_from_info.return_value = MagicMock()
         mock_build.return_value = MagicMock()
         sheets_service._build_drive_service(creds)

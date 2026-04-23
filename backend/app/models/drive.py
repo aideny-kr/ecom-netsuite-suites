@@ -45,9 +45,7 @@ class DriveFolder(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
 
-    files: Mapped[list["DriveFile"]] = relationship(
-        back_populates="folder", cascade="all, delete-orphan"
-    )
+    files: Mapped[list["DriveFile"]] = relationship(back_populates="folder", cascade="all, delete-orphan")
 
 
 class DriveFile(Base, UUIDPrimaryKeyMixin, TimestampMixin):
@@ -75,9 +73,7 @@ class DriveFile(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     last_extract_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     folder: Mapped["DriveFolder"] = relationship(back_populates="files")
-    chunks: Mapped[list["DriveChunk"]] = relationship(
-        back_populates="file", cascade="all, delete-orphan"
-    )
+    chunks: Mapped[list["DriveChunk"]] = relationship(back_populates="file", cascade="all, delete-orphan")
 
 
 class DriveChunk(Base, UUIDPrimaryKeyMixin, TimestampMixin):

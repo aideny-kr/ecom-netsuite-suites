@@ -34,11 +34,7 @@ def _build_drive(credentials: dict):
 async def get_folder_metadata(*, credentials: dict, folder_id: str) -> dict[str, Any]:
     def _sync():
         service = _build_drive(credentials)
-        return (
-            service.files()
-            .get(fileId=folder_id, fields="id,name,mimeType", supportsAllDrives=True)
-            .execute()
-        )
+        return service.files().get(fileId=folder_id, fields="id,name,mimeType", supportsAllDrives=True).execute()
 
     return await asyncio.to_thread(_sync)
 
@@ -96,11 +92,7 @@ async def download_file_bytes(*, credentials: dict, file_id: str) -> bytes:
 
     def _sync():
         service = _build_drive(credentials)
-        return (
-            service.files()
-            .get_media(fileId=file_id, supportsAllDrives=True)
-            .execute()
-        )
+        return service.files().get_media(fileId=file_id, supportsAllDrives=True).execute()
 
     return await asyncio.to_thread(_sync)
 

@@ -52,30 +52,20 @@ async def sync_folder(
     credentials: dict,
 ) -> dict:
     """Sync one folder. Returns counts."""
-    folder = (
-        await db.execute(select(DriveFolder).where(DriveFolder.id == folder_id))
-    ).scalar_one()
+    folder = (await db.execute(select(DriveFolder).where(DriveFolder.id == folder_id))).scalar_one()
     await _mark_syncing(db, folder)
 
     files_indexed = 0
     files_deleted = 0
     files_failed = 0
     try:
-        meta = await drive_client.get_folder_metadata(
-            credentials=credentials, folder_id=folder.folder_id
-        )
+        meta = await drive_client.get_folder_metadata(credentials=credentials, folder_id=folder.folder_id)
         if meta.get("name") and meta["name"] != folder.folder_name:
             folder.folder_name = meta["name"]
 
-        drive_files = await drive_client.list_folder_files(
-            credentials=credentials, folder_id=folder.folder_id
-        )
+        drive_files = await drive_client.list_folder_files(credentials=credentials, folder_id=folder.folder_id)
 
-        existing_rows = (
-            (await db.execute(select(DriveFile).where(DriveFile.folder_id == folder.id)))
-            .scalars()
-            .all()
-        )
+        existing_rows = (await db.execute(select(DriveFile).where(DriveFile.folder_id == folder.id))).scalars().all()
         existing_by_drive_id = {r.drive_file_id: r for r in existing_rows}
         drive_ids_now = {f["id"] for f in drive_files}
 
@@ -123,9 +113,7 @@ async def sync_folder(
             embeddings = await embed_texts([p["content"] for p in pieces])
 
             if existing:
-                await db.execute(
-                    delete(DriveChunk).where(DriveChunk.file_id == existing.id)
-                )
+                await db.execute(delete(DriveChunk).where(DriveChunk.file_id == existing.id))
                 existing.name = f["name"]
                 existing.mime_type = f["mimeType"]
                 existing.web_view_link = f["webViewLink"]
@@ -172,9 +160,7 @@ async def sync_folder(
 
         await _mark_finished(db, folder, success=True)
     except Exception as e:
-        logger.exception(
-            "drive_rag.sync_folder_failed", extra={"folder_id": str(folder_id)}
-        )
+        logger.exception("drive_rag.sync_folder_failed", extra={"folder_id": str(folder_id)})
         await _mark_finished(db, folder, success=False, error=str(e)[:500])
         raise
 

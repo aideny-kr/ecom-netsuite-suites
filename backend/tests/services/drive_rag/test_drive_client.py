@@ -26,17 +26,32 @@ async def test_list_folder_files_paginates_and_filters_unsupported():
     mock_service.files().list().execute.side_effect = [
         {
             "files": [
-                {"id": "1", "name": "doc", "mimeType": "application/vnd.google-apps.document",
-                 "modifiedTime": "2026-04-22T00:00:00Z", "webViewLink": "https://x"},
-                {"id": "2", "name": "unsup", "mimeType": "image/png",
-                 "modifiedTime": "2026-04-22T00:00:00Z", "webViewLink": "https://y"},
+                {
+                    "id": "1",
+                    "name": "doc",
+                    "mimeType": "application/vnd.google-apps.document",
+                    "modifiedTime": "2026-04-22T00:00:00Z",
+                    "webViewLink": "https://x",
+                },
+                {
+                    "id": "2",
+                    "name": "unsup",
+                    "mimeType": "image/png",
+                    "modifiedTime": "2026-04-22T00:00:00Z",
+                    "webViewLink": "https://y",
+                },
             ],
             "nextPageToken": "p2",
         },
         {
             "files": [
-                {"id": "3", "name": "pdf", "mimeType": "application/pdf",
-                 "modifiedTime": "2026-04-22T00:00:00Z", "webViewLink": "https://z"},
+                {
+                    "id": "3",
+                    "name": "pdf",
+                    "mimeType": "application/pdf",
+                    "modifiedTime": "2026-04-22T00:00:00Z",
+                    "webViewLink": "https://z",
+                },
             ],
         },
     ]
@@ -49,9 +64,7 @@ def test_is_supported_mime_types():
     assert drive_client.is_supported_mime("application/vnd.google-apps.document")
     assert drive_client.is_supported_mime("application/pdf")
     assert drive_client.is_supported_mime("application/vnd.google-apps.spreadsheet")
-    assert drive_client.is_supported_mime(
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-    )
+    assert drive_client.is_supported_mime("application/vnd.openxmlformats-officedocument.wordprocessingml.document")
     assert drive_client.is_supported_mime("text/plain")
     assert drive_client.is_supported_mime("text/markdown")
     assert not drive_client.is_supported_mime("image/png")

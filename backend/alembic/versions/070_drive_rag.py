@@ -57,9 +57,7 @@ def upgrade() -> None:
             nullable=False,
             server_default=sa.func.now(),
         ),
-        sa.UniqueConstraint(
-            "tenant_id", "folder_id", name="uq_drive_folder_tenant_folder"
-        ),
+        sa.UniqueConstraint("tenant_id", "folder_id", name="uq_drive_folder_tenant_folder"),
     )
     op.create_index(
         "ix_drive_folders_tenant_enabled",
@@ -107,9 +105,7 @@ def upgrade() -> None:
             nullable=False,
             server_default=sa.func.now(),
         ),
-        sa.UniqueConstraint(
-            "tenant_id", "drive_file_id", name="uq_drive_file_tenant_file"
-        ),
+        sa.UniqueConstraint("tenant_id", "drive_file_id", name="uq_drive_file_tenant_file"),
     )
     op.create_index("ix_drive_files_folder", "drive_files", ["folder_id"])
 

@@ -29,16 +29,25 @@ async def test_retrieve_is_tenant_scoped(db):
     await db.flush()
     now = dt.datetime.now(dt.timezone.utc)
     file = DriveFile(
-        tenant_id=t1.id, folder_id=folder.id, drive_file_id="f1", name="Docs",
-        mime_type="text/plain", web_view_link="https://x",
-        modified_time=now, indexed_at=now, chunk_count=1,
+        tenant_id=t1.id,
+        folder_id=folder.id,
+        drive_file_id="f1",
+        name="Docs",
+        mime_type="text/plain",
+        web_view_link="https://x",
+        modified_time=now,
+        indexed_at=now,
+        chunk_count=1,
     )
     db.add(file)
     await db.flush()
     db.add(
         DriveChunk(
-            tenant_id=t1.id, file_id=file.id, chunk_index=0,
-            content="tenant 1 content", token_count=5,
+            tenant_id=t1.id,
+            file_id=file.id,
+            chunk_index=0,
+            content="tenant 1 content",
+            token_count=5,
             embedding=[0.1] * 1024,
             metadata_={"source_name": "Docs", "web_view_link": "https://x"},
         )
@@ -80,16 +89,25 @@ async def test_retrieve_skips_null_embedding(db):
     await db.flush()
     now = dt.datetime.now(dt.timezone.utc)
     file = DriveFile(
-        tenant_id=tenant.id, folder_id=folder.id, drive_file_id="f1", name="Docs",
-        mime_type="text/plain", web_view_link="https://x",
-        modified_time=now, indexed_at=now, chunk_count=1,
+        tenant_id=tenant.id,
+        folder_id=folder.id,
+        drive_file_id="f1",
+        name="Docs",
+        mime_type="text/plain",
+        web_view_link="https://x",
+        modified_time=now,
+        indexed_at=now,
+        chunk_count=1,
     )
     db.add(file)
     await db.flush()
     db.add(
         DriveChunk(
-            tenant_id=tenant.id, file_id=file.id, chunk_index=0,
-            content="no embedding", token_count=5,
+            tenant_id=tenant.id,
+            file_id=file.id,
+            chunk_index=0,
+            content="no embedding",
+            token_count=5,
             embedding=None,
             metadata_={"source_name": "Docs", "web_view_link": "https://x"},
         )

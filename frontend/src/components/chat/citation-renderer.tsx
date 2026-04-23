@@ -16,7 +16,8 @@ export function CitationRenderer({ text, sources }: Props) {
   }
   const parts: React.ReactNode[] = [];
   let lastIdx = 0;
-  for (const match of text.matchAll(CITATION_RE)) {
+  // Array.from() works under ES5 target without downlevelIteration.
+  for (const match of Array.from(text.matchAll(CITATION_RE))) {
     const idx = match.index ?? 0;
     const full = match[0];
     const name = match[1];

@@ -41,10 +41,13 @@ async def test_extract_pdf_extracts_page_text():
     mock_page.extract_text.return_value = "pdf page text"
     mock_pdf_ctx = MagicMock()
     mock_pdf_ctx.__enter__.return_value.pages = [mock_page, mock_page]
-    with patch(
-        "app.services.drive_rag.extractors.drive_client.download_file_bytes",
-        new=AsyncMock(return_value=b"%PDF-FAKE"),
-    ), patch("app.services.drive_rag.extractors.pdfplumber.open", return_value=mock_pdf_ctx):
+    with (
+        patch(
+            "app.services.drive_rag.extractors.drive_client.download_file_bytes",
+            new=AsyncMock(return_value=b"%PDF-FAKE"),
+        ),
+        patch("app.services.drive_rag.extractors.pdfplumber.open", return_value=mock_pdf_ctx),
+    ):
         text = await extractors.extract_pdf(credentials={}, file_id="X")
     assert text.count("pdf page text") == 2
 
@@ -57,10 +60,13 @@ async def test_extract_pdf_tolerates_extract_text_error():
     mock_page_bad.extract_text.side_effect = RuntimeError("boom")
     mock_pdf_ctx = MagicMock()
     mock_pdf_ctx.__enter__.return_value.pages = [mock_page_ok, mock_page_bad]
-    with patch(
-        "app.services.drive_rag.extractors.drive_client.download_file_bytes",
-        new=AsyncMock(return_value=b"%PDF"),
-    ), patch("app.services.drive_rag.extractors.pdfplumber.open", return_value=mock_pdf_ctx):
+    with (
+        patch(
+            "app.services.drive_rag.extractors.drive_client.download_file_bytes",
+            new=AsyncMock(return_value=b"%PDF"),
+        ),
+        patch("app.services.drive_rag.extractors.pdfplumber.open", return_value=mock_pdf_ctx),
+    ):
         text = await extractors.extract_pdf(credentials={}, file_id="X")
     assert "good" in text
 
@@ -69,10 +75,13 @@ async def test_extract_pdf_tolerates_extract_text_error():
 async def test_extract_docx_reads_paragraphs():
     mock_doc = MagicMock()
     mock_doc.paragraphs = [MagicMock(text="para 1"), MagicMock(text=""), MagicMock(text="para 2")]
-    with patch(
-        "app.services.drive_rag.extractors.drive_client.download_file_bytes",
-        new=AsyncMock(return_value=b"fake-docx"),
-    ), patch("app.services.drive_rag.extractors.docx.Document", return_value=mock_doc):
+    with (
+        patch(
+            "app.services.drive_rag.extractors.drive_client.download_file_bytes",
+            new=AsyncMock(return_value=b"fake-docx"),
+        ),
+        patch("app.services.drive_rag.extractors.docx.Document", return_value=mock_doc),
+    ):
         text = await extractors.extract_docx(credentials={}, file_id="X")
     assert "para 1" in text and "para 2" in text
 
@@ -114,10 +123,9 @@ async def test_extract_by_mime_respects_timeout():
         await asyncio.sleep(60)  # way longer than the timeout
         return "never"
 
-    with patch(
-        "app.services.drive_rag.extractors.extract_plain_text", new=_slow
-    ), patch.object(extractors, "_EXTRACT_TIMEOUT_SECONDS", 0.1):
+    with (
+        patch("app.services.drive_rag.extractors.extract_plain_text", new=_slow),
+        patch.object(extractors, "_EXTRACT_TIMEOUT_SECONDS", 0.1),
+    ):
         with pytest.raises(asyncio.TimeoutError):
-            await extractors.extract_by_mime(
-                credentials={}, file_id="X", mime_type="text/plain"
-            )
+            await extractors.extract_by_mime(credentials={}, file_id="X", mime_type="text/plain")

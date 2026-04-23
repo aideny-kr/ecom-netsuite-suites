@@ -32,18 +32,23 @@ async def test_sync_folder_indexes_new_files(db):
             "webViewLink": "https://docs.google.com/document/d/f1/edit",
         }
     ]
-    with patch(
-        "app.services.drive_rag.indexer.drive_client.get_folder_metadata",
-        new=AsyncMock(return_value={"id": "FID", "name": "New Name", "mimeType": "x"}),
-    ), patch(
-        "app.services.drive_rag.indexer.drive_client.list_folder_files",
-        new=AsyncMock(return_value=drive_files),
-    ), patch(
-        "app.services.drive_rag.indexer.extractors.extract_by_mime",
-        new=AsyncMock(return_value="Return policy: 30 days."),
-    ), patch(
-        "app.services.drive_rag.indexer.embed_texts",
-        new=AsyncMock(return_value=[[0.01] * 1024]),
+    with (
+        patch(
+            "app.services.drive_rag.indexer.drive_client.get_folder_metadata",
+            new=AsyncMock(return_value={"id": "FID", "name": "New Name", "mimeType": "x"}),
+        ),
+        patch(
+            "app.services.drive_rag.indexer.drive_client.list_folder_files",
+            new=AsyncMock(return_value=drive_files),
+        ),
+        patch(
+            "app.services.drive_rag.indexer.extractors.extract_by_mime",
+            new=AsyncMock(return_value="Return policy: 30 days."),
+        ),
+        patch(
+            "app.services.drive_rag.indexer.embed_texts",
+            new=AsyncMock(return_value=[[0.01] * 1024]),
+        ),
     ):
         result = await sync_folder(db, folder_id=folder.id, credentials={})
 
@@ -55,15 +60,9 @@ async def test_sync_folder_indexes_new_files(db):
     assert folder.sync_status == "success"
     assert folder.last_synced_at is not None
 
-    drive_file = (
-        await db.execute(select(DriveFile).where(DriveFile.drive_file_id == "f1"))
-    ).scalar_one()
+    drive_file = (await db.execute(select(DriveFile).where(DriveFile.drive_file_id == "f1"))).scalar_one()
     assert drive_file.chunk_count == 1
-    chunks = (
-        (await db.execute(select(DriveChunk).where(DriveChunk.file_id == drive_file.id)))
-        .scalars()
-        .all()
-    )
+    chunks = (await db.execute(select(DriveChunk).where(DriveChunk.file_id == drive_file.id))).scalars().all()
     assert len(chunks) == 1
     assert chunks[0].tenant_id == tenant.id
 
@@ -72,9 +71,7 @@ async def test_sync_folder_indexes_new_files(db):
 async def test_sync_folder_skips_unchanged_files(db):
     tenant = await create_test_tenant(db)
     user, _ = await create_test_user(db, tenant)
-    folder = DriveFolder(
-        tenant_id=tenant.id, folder_id="FID", folder_name="F", created_by=user.id
-    )
+    folder = DriveFolder(tenant_id=tenant.id, folder_id="FID", folder_name="F", created_by=user.id)
     db.add(folder)
     await db.flush()
     existing = DriveFile(
@@ -101,17 +98,20 @@ async def test_sync_folder_skips_unchanged_files(db):
         }
     ]
     extract_mock = AsyncMock(return_value="body")
-    with patch(
-        "app.services.drive_rag.indexer.drive_client.get_folder_metadata",
-        new=AsyncMock(return_value={"id": "FID", "name": "F", "mimeType": "x"}),
-    ), patch(
-        "app.services.drive_rag.indexer.drive_client.list_folder_files",
-        new=AsyncMock(return_value=drive_files_unchanged),
-    ), patch(
-        "app.services.drive_rag.indexer.extractors.extract_by_mime", new=extract_mock
-    ), patch(
-        "app.services.drive_rag.indexer.embed_texts",
-        new=AsyncMock(return_value=[[0.0] * 1024]),
+    with (
+        patch(
+            "app.services.drive_rag.indexer.drive_client.get_folder_metadata",
+            new=AsyncMock(return_value={"id": "FID", "name": "F", "mimeType": "x"}),
+        ),
+        patch(
+            "app.services.drive_rag.indexer.drive_client.list_folder_files",
+            new=AsyncMock(return_value=drive_files_unchanged),
+        ),
+        patch("app.services.drive_rag.indexer.extractors.extract_by_mime", new=extract_mock),
+        patch(
+            "app.services.drive_rag.indexer.embed_texts",
+            new=AsyncMock(return_value=[[0.0] * 1024]),
+        ),
     ):
         result = await sync_folder(db, folder_id=folder.id, credentials={})
 
@@ -123,9 +123,7 @@ async def test_sync_folder_skips_unchanged_files(db):
 async def test_sync_folder_deletes_missing_files(db):
     tenant = await create_test_tenant(db)
     user, _ = await create_test_user(db, tenant)
-    folder = DriveFolder(
-        tenant_id=tenant.id, folder_id="FID", folder_name="F", created_by=user.id
-    )
+    folder = DriveFolder(tenant_id=tenant.id, folder_id="FID", folder_name="F", created_by=user.id)
     db.add(folder)
     await db.flush()
     stale = DriveFile(
@@ -142,20 +140,19 @@ async def test_sync_folder_deletes_missing_files(db):
     db.add(stale)
     await db.commit()
 
-    with patch(
-        "app.services.drive_rag.indexer.drive_client.get_folder_metadata",
-        new=AsyncMock(return_value={"id": "FID", "name": "F", "mimeType": "x"}),
-    ), patch(
-        "app.services.drive_rag.indexer.drive_client.list_folder_files",
-        new=AsyncMock(return_value=[]),
+    with (
+        patch(
+            "app.services.drive_rag.indexer.drive_client.get_folder_metadata",
+            new=AsyncMock(return_value={"id": "FID", "name": "F", "mimeType": "x"}),
+        ),
+        patch(
+            "app.services.drive_rag.indexer.drive_client.list_folder_files",
+            new=AsyncMock(return_value=[]),
+        ),
     ):
         result = await sync_folder(db, folder_id=folder.id, credentials={})
     assert result["files_deleted"] == 1
-    remaining = (
-        (await db.execute(select(DriveFile).where(DriveFile.folder_id == folder.id)))
-        .scalars()
-        .all()
-    )
+    remaining = (await db.execute(select(DriveFile).where(DriveFile.folder_id == folder.id))).scalars().all()
     assert remaining == []
 
 
@@ -163,9 +160,7 @@ async def test_sync_folder_deletes_missing_files(db):
 async def test_sync_folder_records_extract_error_and_continues(db):
     tenant = await create_test_tenant(db)
     user, _ = await create_test_user(db, tenant)
-    folder = DriveFolder(
-        tenant_id=tenant.id, folder_id="FID", folder_name="F", created_by=user.id
-    )
+    folder = DriveFolder(tenant_id=tenant.id, folder_id="FID", folder_name="F", created_by=user.id)
     db.add(folder)
     await db.commit()
     await db.refresh(folder)
@@ -192,24 +187,27 @@ async def test_sync_folder_records_extract_error_and_continues(db):
             raise RuntimeError("extract fail")
         return "ok body"
 
-    with patch(
-        "app.services.drive_rag.indexer.drive_client.get_folder_metadata",
-        new=AsyncMock(return_value={"id": "FID", "name": "F", "mimeType": "x"}),
-    ), patch(
-        "app.services.drive_rag.indexer.drive_client.list_folder_files",
-        new=AsyncMock(return_value=drive_files),
-    ), patch(
-        "app.services.drive_rag.indexer.extractors.extract_by_mime",
-        new=AsyncMock(side_effect=_extract),
-    ), patch(
-        "app.services.drive_rag.indexer.embed_texts",
-        new=AsyncMock(return_value=[[0.0] * 1024]),
+    with (
+        patch(
+            "app.services.drive_rag.indexer.drive_client.get_folder_metadata",
+            new=AsyncMock(return_value={"id": "FID", "name": "F", "mimeType": "x"}),
+        ),
+        patch(
+            "app.services.drive_rag.indexer.drive_client.list_folder_files",
+            new=AsyncMock(return_value=drive_files),
+        ),
+        patch(
+            "app.services.drive_rag.indexer.extractors.extract_by_mime",
+            new=AsyncMock(side_effect=_extract),
+        ),
+        patch(
+            "app.services.drive_rag.indexer.embed_texts",
+            new=AsyncMock(return_value=[[0.0] * 1024]),
+        ),
     ):
         result = await sync_folder(db, folder_id=folder.id, credentials={})
 
     assert result["files_indexed"] == 1
     assert result["files_failed"] == 1
-    bad_row = (
-        await db.execute(select(DriveFile).where(DriveFile.drive_file_id == "bad"))
-    ).scalar_one()
+    bad_row = (await db.execute(select(DriveFile).where(DriveFile.drive_file_id == "bad"))).scalar_one()
     assert bad_row.last_extract_error is not None

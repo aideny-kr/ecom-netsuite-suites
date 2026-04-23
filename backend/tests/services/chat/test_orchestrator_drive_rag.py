@@ -28,14 +28,10 @@ async def test_gather_drive_knowledge_returns_chunks_and_sources_map(monkeypatch
             "similarity": 0.75,
         },
     ]
-    monkeypatch.setattr(
-        orchestrator, "retrieve_drive_chunks", AsyncMock(return_value=mock_chunks)
-    )
+    monkeypatch.setattr(orchestrator, "retrieve_drive_chunks", AsyncMock(return_value=mock_chunks))
 
     tenant_id = uuid.uuid4()
-    result = await orchestrator._gather_drive_knowledge(
-        db=None, tenant_id=tenant_id, query_text="return policy"
-    )
+    result = await orchestrator._gather_drive_knowledge(db=None, tenant_id=tenant_id, query_text="return policy")
     assert result["chunks"] == mock_chunks
     assert result["sources"] == {
         "Returns Policy": "https://docs.google.com/document/d/r/edit",
@@ -62,12 +58,8 @@ async def test_gather_drive_knowledge_deduplicates_sources(monkeypatch):
             "similarity": 0.8,
         },
     ]
-    monkeypatch.setattr(
-        orchestrator, "retrieve_drive_chunks", AsyncMock(return_value=chunks)
-    )
-    result = await orchestrator._gather_drive_knowledge(
-        db=None, tenant_id=uuid.uuid4(), query_text="q"
-    )
+    monkeypatch.setattr(orchestrator, "retrieve_drive_chunks", AsyncMock(return_value=chunks))
+    result = await orchestrator._gather_drive_knowledge(db=None, tenant_id=uuid.uuid4(), query_text="q")
     assert result["sources"] == {"Doc": "https://first"}
 
 
@@ -76,9 +68,7 @@ async def test_gather_drive_knowledge_handles_empty(monkeypatch):
     from app.services.chat import orchestrator
 
     monkeypatch.setattr(orchestrator, "retrieve_drive_chunks", AsyncMock(return_value=[]))
-    result = await orchestrator._gather_drive_knowledge(
-        db=None, tenant_id=uuid.uuid4(), query_text="q"
-    )
+    result = await orchestrator._gather_drive_knowledge(db=None, tenant_id=uuid.uuid4(), query_text="q")
     assert result["chunks"] == []
     assert result["sources"] == {}
 

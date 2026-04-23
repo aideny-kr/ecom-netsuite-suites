@@ -58,9 +58,7 @@ async def extract_docx(*, credentials: dict, file_id: str) -> str:
 
 
 async def extract_sheet(*, credentials: dict, file_id: str) -> str:
-    result = await sheets_service.read_range(
-        credentials=credentials, spreadsheet_id=file_id, range_str="Sheet1"
-    )
+    result = await sheets_service.read_range(credentials=credentials, spreadsheet_id=file_id, range_str="Sheet1")
     rows = result.get("values", [])
     return "\n".join("\t".join(str(c) for c in row) for row in rows)
 

@@ -449,9 +449,7 @@ def _is_data_table_tool(tool_name: str) -> bool:
     return categorize(tool_name) in ("data_table", "bigquery")
 
 
-async def _gather_drive_knowledge(
-    *, db, tenant_id, query_text: str
-) -> dict:
+async def _gather_drive_knowledge(*, db, tenant_id, query_text: str) -> dict:
     """Retrieve Drive chunks and build a name→url source map.
 
     Returns {"chunks": [...], "sources": {source_name: web_view_link}}.

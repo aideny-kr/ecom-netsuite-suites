@@ -12,9 +12,7 @@ down_revision = "070_drive_rag"
 
 
 def upgrade() -> None:
-    op.drop_constraint(
-        "drive_folders_created_by_fkey", "drive_folders", type_="foreignkey"
-    )
+    op.drop_constraint("drive_folders_created_by_fkey", "drive_folders", type_="foreignkey")
     op.create_foreign_key(
         "drive_folders_created_by_fkey",
         "drive_folders",
@@ -26,9 +24,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_constraint(
-        "drive_folders_created_by_fkey", "drive_folders", type_="foreignkey"
-    )
+    op.drop_constraint("drive_folders_created_by_fkey", "drive_folders", type_="foreignkey")
     op.create_foreign_key(
         "drive_folders_created_by_fkey",
         "drive_folders",

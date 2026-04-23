@@ -37,13 +37,17 @@ async def main(tenant_ids: list[str]) -> None:
                 continue
 
             existing = (
-                await db.execute(
-                    select(TenantFeatureFlag).where(
-                        TenantFeatureFlag.tenant_id == tenant_uuid,
-                        TenantFeatureFlag.flag_key == "drive_rag",
+                (
+                    await db.execute(
+                        select(TenantFeatureFlag).where(
+                            TenantFeatureFlag.tenant_id == tenant_uuid,
+                            TenantFeatureFlag.flag_key == "drive_rag",
+                        )
                     )
                 )
-            ).scalars().first()
+                .scalars()
+                .first()
+            )
             if existing:
                 if existing.enabled:
                     print(f"noop {tid}: drive_rag already enabled")
