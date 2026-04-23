@@ -783,6 +783,37 @@ def _intercept_tool_result(
         )
         return "sheets_link", sse_event_data, condensed
 
+    # --- Docs link path ---
+    if tool_name in ("docs_create", "docs.create"):
+        try:
+            parsed = json.loads(result_str)
+        except (json.JSONDecodeError, TypeError):
+            return None, None, result_str
+        if not isinstance(parsed, dict) or parsed.get("error") is True:
+            return None, None, result_str
+        url = parsed.get("url")
+        if not url:
+            return None, None, result_str
+        sse_event_data = {
+            "url": url,
+            "doc_id": parsed.get("doc_id", ""),
+            "title": parsed.get("title", "Document"),
+            "shared_with": parsed.get("shared_with"),
+        }
+        condensed = json.dumps(
+            {
+                "success": True,
+                "doc_id": parsed.get("doc_id", ""),
+                "title": parsed.get("title", ""),
+                "note": (
+                    "The Doc link is shown to the user as a clickable card. "
+                    "Confirm what was saved in one short line — do NOT paste the URL in your reply."
+                ),
+            },
+            default=str,
+        )
+        return "docs_link", sse_event_data, condensed
+
     # --- Not a data tool ---
     return None, None, result_str
 
