@@ -36,6 +36,8 @@ _EXACT: dict[str, Category] = {
     "sheets.write_range": "sheets",
     "sheets_read_range": "sheets",
     "sheets.read_range": "sheets",
+    "drive.read_doc": "rag",
+    "drive_read_doc": "rag",
 }
 
 
