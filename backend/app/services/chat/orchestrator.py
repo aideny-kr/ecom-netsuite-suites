@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.services.chat.prompt_cache import split_system_prompt
 from app.services.chat.tool_categories import categorize
+from app.services.drive_rag.retriever import retrieve_drive_chunks
 
 # Regex to strip leaked Anthropic tool-call XML from assistant text
 _TOOL_XML_RE = re.compile(r"</?(?:invoke|parameter|tool_use)[^>]*>", re.DOTALL)
@@ -446,6 +447,38 @@ def _is_financial_tool(tool_name: str) -> bool:
 def _is_data_table_tool(tool_name: str) -> bool:
     """True for tools returning tabular data (SuiteQL, BigQuery, pivot)."""
     return categorize(tool_name) in ("data_table", "bigquery")
+
+
+async def _gather_drive_knowledge(*, db, tenant_id, query_text: str) -> dict:
+    """Retrieve Drive chunks and build a name→url source map.
+
+    Returns {"chunks": [...], "sources": {source_name: web_view_link}}.
+    When multiple chunks share a source_name, the first URL wins.
+    """
+    chunks = await retrieve_drive_chunks(db=db, tenant_id=tenant_id, query_text=query_text)
+    sources: dict[str, str] = {}
+    for c in chunks:
+        name = c.get("source_name")
+        link = c.get("web_view_link") or ""
+        if name and name not in sources:
+            sources[name] = link
+    return {"chunks": chunks, "sources": sources}
+
+
+def _build_drive_knowledge_block(chunks: list[dict]) -> str:
+    """Format Drive chunks as a <drive_knowledge> XML block for prompt injection."""
+    if not chunks:
+        return ""
+    lines = ["<drive_knowledge>"]
+    for c in chunks:
+        src = c.get("source_name", "")
+        url = c.get("web_view_link", "")
+        lines.append(f'  <chunk source="{src}" url="{url}">')
+        content = (c.get("content") or "").replace("\n", "\n    ")
+        lines.append(f"    {content}")
+        lines.append("  </chunk>")
+    lines.append("</drive_knowledge>")
+    return "\n".join(lines)
 
 
 def _is_bigquery_tool(tool_name: str) -> bool:
@@ -1415,6 +1448,7 @@ async def run_chat_turn(
                     _need_patterns = _compute_need_patterns(context_need, _tool_names)
                     _need_schemas = context_need in (ContextNeed.FULL, ContextNeed.DATA)
                     _need_onboarding = context_need in (ContextNeed.FINANCIAL,)
+                    _drive_active = any(p.profile_id == "google_drive" for p in _active_profiles)
 
                     # Assemble context concurrently (only fetch what we need)
                     from app.services.chat.domain_knowledge import retrieve_domain_knowledge
@@ -1450,6 +1484,11 @@ async def run_chat_turn(
                             )
                         )
                         _gather_keys.append("dk")
+                    if _drive_active and context_need in (ContextNeed.DATA, ContextNeed.DOCS):
+                        _gather_tasks.append(
+                            _gather_drive_knowledge(db=db, tenant_id=tenant_id, query_text=sanitized_input)
+                        )
+                        _gather_keys.append("drive")
                     if _need_patterns:
                         _gather_tasks.append(retrieve_similar_patterns(db, tenant_id, sanitized_input))
                         _gather_keys.append("patterns")
@@ -1515,6 +1554,20 @@ async def run_chat_turn(
                             sims = [r["similarity"] for r in dk_result if r.get("similarity")]
                             if sims:
                                 context["domain_knowledge_similarity"] = sum(sims) / len(sims)
+
+                    # drive_knowledge (DATA, DOCS when google_drive profile is active)
+                    drive_result = _results.get("drive")
+                    if drive_result is not None:
+                        if isinstance(drive_result, Exception):
+                            logger.warning("unified_agent.drive_knowledge_failed", exc_info=drive_result)
+                        elif drive_result.get("chunks"):
+                            context["drive_knowledge"] = _build_drive_knowledge_block(drive_result["chunks"])
+                            context["drive_sources"] = drive_result["sources"]
+                            print(
+                                f"[UNIFIED] Drive knowledge injected ({len(drive_result['chunks'])} chunks, "
+                                f"{len(drive_result['sources'])} sources)",
+                                flush=True,
+                            )
 
                     # proven_patterns (gate by tool presence — injects when _need_patterns is True)
                     if patterns_result is not None:
@@ -1666,6 +1719,8 @@ async def run_chat_turn(
                     knowledge_context = assemble_knowledge_context(_active_profiles)
                     if knowledge_context:
                         system_prompt += f"\n\n{knowledge_context}"
+                    if context.get("drive_knowledge"):
+                        system_prompt += "\n\n" + context["drive_knowledge"]
                     disambiguation = build_disambiguation_instruction(_active_profiles)
                     if disambiguation:
                         system_prompt += disambiguation
@@ -1775,6 +1830,11 @@ async def run_chat_turn(
                             query_text=event_data.get("query", ""),
                         )
                     )
+
+                # Emit Drive source map once per turn so the frontend can resolve
+                # [source_name] citations to clickable Drive links.
+                if context.get("drive_sources"):
+                    yield {"type": "drive_sources", "sources": context["drive_sources"]}
 
                 async for event_type, payload in unified_agent.run_streaming(
                     task=unified_task,

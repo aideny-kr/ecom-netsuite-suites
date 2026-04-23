@@ -1,6 +1,7 @@
 from app.mcp.tools import (
     bigquery_tools,
     data_sample,
+    drive_tools,
     health,
     netsuite_connectivity,
     netsuite_financial_report,
@@ -571,6 +572,27 @@ TOOL_REGISTRY = {
                     "A1 notation range (e.g. 'Sheet1!A1:D100' or 'Sheet1' for "
                     "the whole first tab). Defaults to 'Sheet1'."
                 ),
+            },
+        },
+    },
+    "drive.read_doc": {
+        "description": (
+            "Read the text content of a Google Drive file on demand. Accepts a "
+            "Drive URL (https://docs.google.com/document/d/.../edit or "
+            "https://drive.google.com/file/d/.../view) or a raw file ID. "
+            "Supports Google Docs, PDFs, Google Sheets, Word (.docx), plain "
+            "text, and Markdown. Use when the user pastes a Drive link and "
+            "asks to summarize, extract, or reason about its contents. The "
+            "service account must have access to the file (Shared Drive "
+            "membership or explicit share). Returns text up to 50k chars "
+            "plus source_name and web_view_link for citation."
+        ),
+        "execute": drive_tools.drive_read_doc_execute,
+        "params_schema": {
+            "file_id_or_url": {
+                "type": "string",
+                "required": True,
+                "description": "Drive URL or raw file ID",
             },
         },
     },

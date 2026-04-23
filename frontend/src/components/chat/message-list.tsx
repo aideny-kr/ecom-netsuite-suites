@@ -199,6 +199,24 @@ function parseThinkingBlocks(content: string): Array<{
 }
 
 /**
+ * Drive RAG citations: rewrite `[name]` tokens (not already markdown links) into
+ * `[name](url)` when `name` is in the per-turn sources map. ReactMarkdown then
+ * renders them as real anchors. Unmatched names are left as literal text.
+ */
+const DRIVE_CITATION_RE = /\[([^\[\]\n]+)\](?!\()/g;
+
+function applyDriveCitations(
+  text: string,
+  sources: Record<string, string> | undefined,
+): string {
+  if (!sources || Object.keys(sources).length === 0) return text;
+  return text.replace(DRIVE_CITATION_RE, (full, name) => {
+    const url = sources[name];
+    return url ? `[${name}](${url})` : full;
+  });
+}
+
+/**
  * Parse streaming content to separate thinking/reasoning blocks from text.
  * Handles incomplete (still-open) tags during streaming.
  */
@@ -1127,6 +1145,14 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
     | null
     | undefined;
 
+  // Drive RAG: if this turn carried a drive_sources map, rewrite `[source_name]`
+  // tokens into real markdown links so ReactMarkdown renders them as anchors.
+  const driveSources =
+    structuredOutput?.type === "drive_sources"
+      ? (structuredOutput.data as Record<string, string> | undefined)
+      : undefined;
+  const displayContent = applyDriveCitations(message.content, driveSources);
+
   if (structuredOutput?.type === "write_confirmation") {
     return (
       <div className="flex min-w-0 justify-start gap-3">
@@ -1241,7 +1267,7 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
         )}
 
         <div className="flex min-w-0 flex-col gap-2">
-          {parseThinkingBlocks(message.content).map((part, index) =>
+          {parseThinkingBlocks(displayContent).map((part, index) =>
             part.type === "thinking" ? (
               <ThinkingBlock key={index} content={part.content} isTerminal={isTerminal} />
             ) : (

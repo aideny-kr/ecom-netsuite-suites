@@ -47,6 +47,7 @@ celery_app.conf.include = [
     "app.workers.tasks.suitescript_sync",
     "app.workers.tasks.suiteql_export",
     "app.workers.tasks.workspace_run",
+    "app.workers.tasks.drive_rag_sync",
 ]
 
 celery_app.conf.beat_schedule = {
@@ -93,5 +94,9 @@ celery_app.conf.beat_schedule = {
     "netsuite-deposit-sync-nightly": {
         "task": "tasks.netsuite_deposit_sync_all",
         "schedule": crontab(hour=2, minute=0),  # 2 AM UTC nightly, 7-day delta
+    },
+    "drive-rag-sync-nightly": {
+        "task": "tasks.drive_rag_sync_all",
+        "schedule": crontab(hour=6, minute=0),  # 06:00 UTC nightly
     },
 }

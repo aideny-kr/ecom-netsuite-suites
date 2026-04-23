@@ -20,6 +20,7 @@ DEFAULT_FLAGS: dict[str, bool] = {
     "custom_branding": False,
     "custom_domain": False,
     "analytics_export": True,
+    "drive_rag": False,
 }
 
 # In-memory cache: (tenant_id, flag_key) → (enabled, timestamp)
