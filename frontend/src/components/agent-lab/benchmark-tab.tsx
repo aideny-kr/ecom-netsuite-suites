@@ -13,13 +13,16 @@ import {
   type CaseResult,
 } from "@/lib/agent-lab";
 
-// Placeholder case IDs for single-run mode. v1.1 will fetch from the API
-// (possibly via a new GET /agent-lab/eval-cases?kind=benchmark endpoint).
+// Representative case IDs for single-run mode. Must match `case_id` fields
+// inside backend/app/services/benchmarks/benchmark_cases/vs_mcp/*.yaml —
+// originally drifted from 4 placeholder strings that matched nothing, so
+// every "Run single" dispatched 0 cases. v1.1 will fetch from the API
+// (GET /agent-lab/eval-cases?kind=benchmark) to eliminate this hardcoded list.
 const BENCHMARK_CASE_IDS = [
-  "country.norway_sales",
-  "country.all_orders",
-  "class.refurb_split",
-  "platform.shopify_mix",
+  "sales_country_canonical",
+  "sales_country_single",
+  "sales_top_customers",
+  "sales_platform_top_5",
 ];
 
 export function BenchmarkTab() {
