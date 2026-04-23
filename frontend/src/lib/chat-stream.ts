@@ -53,6 +53,7 @@ export type ChatStreamEvent =
   | { type: "data_table"; data: DataTableData }
   | { type: "task_output"; data: TaskOutputData }
   | { type: "sheets_link"; data: SheetsLinkData }
+  | { type: "drive_sources"; sources: Record<string, string> }
   | { type: "chart"; data: ChartData }
   | { type: "error"; error: string }
   | { type: "message"; message: ChatMessage }
@@ -74,6 +75,7 @@ type StreamHandlers = {
   onChart?: (data: ChartData) => void;
   onTaskOutput?: (data: TaskOutputData) => void;
   onSheetsLink?: (data: SheetsLinkData) => void;
+  onDriveSources?: (sources: Record<string, string>) => void;
   onError?: (error: string) => void;
   onMessage?: (message: ChatMessage) => void;
   onToolStart?: (tool_name: string, tool_input: Record<string, unknown>, step: number) => void;
@@ -187,6 +189,8 @@ export async function consumeChatStream(
           handlers.onTaskOutput?.(event.data);
         } else if (event.type === "sheets_link") {
           handlers.onSheetsLink?.(event.data);
+        } else if (event.type === "drive_sources") {
+          handlers.onDriveSources?.(event.sources);
         } else if (event.type === "error") {
           handlers.onError?.(event.error);
           terminalSeen = true;
@@ -295,6 +299,9 @@ function normalizeStreamEvent(data: Record<string, unknown>): ChatStreamEvent | 
         shared_with: typeof d.shared_with === "string" ? d.shared_with : null,
       },
     };
+  }
+  if (type === "drive_sources" && data.sources && typeof data.sources === "object") {
+    return { type, sources: data.sources as Record<string, string> };
   }
   if (type === "error" && typeof data.error === "string") {
     return { type, error: data.error };

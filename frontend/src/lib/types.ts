@@ -753,6 +753,11 @@ export interface FeatureFlagsResponse {
   flags: Record<string, boolean>;
 }
 
+// Drive RAG: per-turn map of source_name -> web_view_link, emitted over SSE
+// as `drive_sources` and persisted on assistant messages via `structured_output`
+// of shape `{ type: "drive_sources", data: DriveSourcesMap }`.
+export type DriveSourcesMap = Record<string, string>;
+
 export interface WriteConfirmationData {
   type: "write_confirmation";
   mutation_type: "create" | "update" | "delete" | "upsert";
