@@ -172,7 +172,7 @@ async def test_sync_endpoint_enqueues_task(client, db):
             f"/api/v1/drive-folders/{folder.id}/sync", headers=make_auth_headers(user)
         )
     assert resp.status_code == 202
-    m.assert_called_once_with(str(folder.id))
+    m.assert_called_once_with(str(folder.id), tenant_id=str(tenant.id))
 
 
 @pytest.mark.asyncio

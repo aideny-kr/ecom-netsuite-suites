@@ -56,22 +56,26 @@ def test_sync_all_enqueues_only_enabled_folders(monkeypatch):
     enabled folder returned by the DB query. Disabled folders are excluded
     at the SQL layer (is_enabled.is_(True)), so the test asserts that each
     returned row is dispatched via the folder-sync task's `.delay`.
+
+    Also asserts that `tenant_id` is passed as a kwarg so `InstrumentedTask`
+    tags each per-folder Job row under the correct tenant.
     """
     from app.workers.tasks import drive_rag_sync as module
 
-    called_with: list[str] = []
+    calls: list[tuple[tuple, dict]] = []
 
     class FakeDelayTask:
-        def delay(self, folder_id):
-            called_with.append(folder_id)
+        def delay(self, *args, **kwargs):
+            calls.append((args, kwargs))
 
     monkeypatch.setattr(module, "drive_rag_sync_folder", FakeDelayTask())
 
     class FakeFolder:
-        def __init__(self, fid):
+        def __init__(self, fid, tid):
             self.id = fid
+            self.tenant_id = tid
 
-    folders = [FakeFolder("f1"), FakeFolder("f2")]
+    folders = [FakeFolder("f1", "t1"), FakeFolder("f2", "t2")]
 
     class FakeScalars:
         def all(self):
@@ -100,4 +104,7 @@ def test_sync_all_enqueues_only_enabled_folders(monkeypatch):
     result = module.drive_rag_sync_all.run()
 
     assert result == {"enqueued": 2}
-    assert called_with == ["f1", "f2"]
+    assert calls == [
+        (("f1",), {"tenant_id": "t1"}),
+        (("f2",), {"tenant_id": "t2"}),
+    ]

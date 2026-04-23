@@ -26,6 +26,7 @@ from app.core.encryption import decrypt_credentials
 from app.models.drive import DriveFolder
 from app.models.mcp_connector import McpConnector
 from app.services.drive_rag.indexer import sync_folder
+from app.workers.base_task import InstrumentedTask
 from app.workers.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
@@ -79,9 +80,18 @@ async def _sync_one_async(folder_id: str) -> dict:
         return await sync_folder(db, folder_id=fid, credentials=credentials)
 
 
-@celery_app.task(name="tasks.drive_rag_sync_folder", queue="sync")
-def drive_rag_sync_folder(folder_id: str) -> dict:
-    """Sync ONE Drive folder (manual button or per-folder dispatch)."""
+@celery_app.task(
+    base=InstrumentedTask, name="tasks.drive_rag_sync_folder", queue="sync"
+)
+def drive_rag_sync_folder(
+    folder_id: str, tenant_id: str | None = None, **kwargs
+) -> dict:
+    """Sync ONE Drive folder (manual button or per-folder dispatch).
+
+    `tenant_id` is an optional keyword arg used by `InstrumentedTask` to tag
+    the Job row. When omitted, the base class falls back to `SYSTEM_TENANT_ID`.
+    API call sites always pass it; `drive_rag_sync_all` passes it per-folder.
+    """
     return asyncio.run(_sync_one_async(folder_id))
 
 
@@ -102,7 +112,7 @@ async def _sync_all_async() -> dict:
     enqueued = 0
     for f in folders:
         try:
-            drive_rag_sync_folder.delay(str(f.id))
+            drive_rag_sync_folder.delay(str(f.id), tenant_id=str(f.tenant_id))
             enqueued += 1
         except Exception:
             logger.exception(
@@ -113,7 +123,13 @@ async def _sync_all_async() -> dict:
     return {"enqueued": enqueued}
 
 
-@celery_app.task(name="tasks.drive_rag_sync_all", queue="sync")
+@celery_app.task(
+    base=InstrumentedTask, name="tasks.drive_rag_sync_all", queue="sync"
+)
 def drive_rag_sync_all() -> dict:
-    """Beat-scheduled entry point — enqueue per-folder sync tasks across tenants."""
+    """Beat-scheduled entry point — enqueue per-folder sync tasks across tenants.
+
+    System-scoped: no `tenant_id` kwarg, so `InstrumentedTask` falls back to
+    `SYSTEM_TENANT_ID` for the Job row tracking this dispatch pass.
+    """
     return asyncio.run(_sync_all_async())

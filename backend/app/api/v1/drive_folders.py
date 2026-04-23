@@ -164,7 +164,7 @@ async def create_drive_folder(
     await db.commit()
     await db.refresh(folder)
 
-    drive_rag_sync_folder.delay(str(folder.id))
+    drive_rag_sync_folder.delay(str(folder.id), tenant_id=str(user.tenant_id))
     return _folder_to_response(folder, chunk_count=0, file_count=0)
 
 
@@ -249,7 +249,7 @@ async def sync_drive_folder(
     )
     if not folder:
         raise HTTPException(status_code=404, detail="Folder not found")
-    drive_rag_sync_folder.delay(str(folder.id))
+    drive_rag_sync_folder.delay(str(folder.id), tenant_id=str(user.tenant_id))
     return {"accepted": True, "folder_id": str(folder.id)}
 
 
