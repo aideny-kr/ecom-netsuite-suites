@@ -6,9 +6,10 @@ Create Date: 2026-04-22
 """
 
 import sqlalchemy as sa
-from alembic import op
 from pgvector.sqlalchemy import Vector
 from sqlalchemy.dialects.postgresql import JSON, UUID
+
+from alembic import op
 
 # revision identifiers
 revision = "070_drive_rag"
@@ -41,7 +42,7 @@ def upgrade() -> None:
         sa.Column(
             "created_by",
             UUID(as_uuid=True),
-            sa.ForeignKey("users.id"),
+            sa.ForeignKey("users.id", ondelete="SET NULL"),
             nullable=True,
         ),
         sa.Column(
