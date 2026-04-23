@@ -430,102 +430,282 @@ class TestAnthropicToolFieldStripping:
 
 
 # ---------------------------------------------------------------------------
-# Anthropic stream retry on transient errors
+# Anthropic stream retry — per-error-type backoff
 # ---------------------------------------------------------------------------
 
 
-class TestAnthropicStreamRetry:
-    """Regression for staging bug where overloaded_error surfaced after zero retries,
-    leaving the user with a fallback message and a stuck 'Processing...' spinner."""
+def _make_api_error(kind: str, status: int = 529, retry_after: str | None = None):
+    """Build an anthropic.APIStatusError with the given error type / status / header."""
+    import anthropic
+
+    exc = anthropic.APIStatusError.__new__(anthropic.APIStatusError)
+    exc.status_code = status
+    exc.body = {"error": {"type": kind, "message": kind}}
+    exc.message = kind
+    if retry_after is not None:
+        resp = MagicMock()
+        resp.headers = {"retry-after": retry_after}
+        exc.response = resp
+    else:
+        exc.response = None
+    return exc
+
+
+class _FakeStreamRaisingOnce:
+    """Context manager that raises `error` on first __aenter__, then yields a happy stream."""
+
+    _factory_state: dict
+
+    def __init__(self, error, state):
+        self._error = error
+        self._state = state
+
+    async def __aenter__(self):
+        if self._state["attempts"] == 1 and self._error is not None:
+            raise self._error
+        return self
+
+    async def __aexit__(self, *args):
+        return False
+
+    @property
+    def text_stream(self):
+        async def _gen():
+            yield "hello"
+
+        return _gen()
+
+    async def get_final_message(self):
+        final = MagicMock()
+        final.content = []
+        final.usage = MagicMock(
+            input_tokens=1,
+            output_tokens=1,
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=0,
+        )
+        return final
+
+
+def _install_stream(adapter, error):
+    """Wire adapter.messages.stream so the first call raises `error`, the second succeeds."""
+    state = {"attempts": 0}
+
+    def _stream(**kwargs):
+        state["attempts"] += 1
+        return _FakeStreamRaisingOnce(error, state)
+
+    adapter._client = MagicMock()
+    adapter._client.messages.stream = _stream
+    return state
+
+
+class TestAnthropicBackoffStrategy:
+    """Per-error-type backoff: overloaded_error uses long delays, rate_limit honors
+    Retry-After header, api_error keeps the short schedule. All delays jittered ±25%."""
 
     @pytest.mark.asyncio
-    async def test_retries_overloaded_error_then_succeeds(self, monkeypatch):
-        import anthropic
-
+    async def test_overload_uses_longer_backoff(self, monkeypatch):
         from app.services.chat.adapters import anthropic_adapter as mod
         from app.services.chat.adapters.anthropic_adapter import AnthropicAdapter
 
-        # Zero out sleeps so the test is fast
-        monkeypatch.setattr(mod, "_RETRY_DELAYS_SECONDS", (0, 0, 0))
-
-        call_count = {"n": 0}
-
-        def _make_overloaded_error():
-            exc = anthropic.APIStatusError.__new__(anthropic.APIStatusError)
-            exc.status_code = 529
-            exc.body = {"error": {"type": "overloaded_error", "message": "Overloaded"}}
-            exc.message = "Overloaded"
-            return exc
-
-        class _FakeStream:
-            def __init__(self, raise_once: bool):
-                self._raise = raise_once
-
-            async def __aenter__(self):
-                if self._raise:
-                    raise _make_overloaded_error()
-                return self
-
-            async def __aexit__(self, *args):
-                return False
-
-            @property
-            def text_stream(self):
-                async def _gen():
-                    yield "hello"
-
-                return _gen()
-
-            async def get_final_message(self):
-                final = MagicMock()
-                final.content = []
-                final.usage = MagicMock(
-                    input_tokens=1,
-                    output_tokens=1,
-                    cache_creation_input_tokens=0,
-                    cache_read_input_tokens=0,
-                )
-                return final
-
-        def _stream(**kwargs):
-            call_count["n"] += 1
-            return _FakeStream(raise_once=call_count["n"] == 1)
+        # Deterministic jitter (upper end) so we can assert the exact delay.
+        monkeypatch.setattr(mod.random, "uniform", lambda _lo, _hi: 1.0)
+        sleep_spy = AsyncMock()
+        monkeypatch.setattr(mod.asyncio, "sleep", sleep_spy)
 
         adapter = AnthropicAdapter(api_key="sk-test")
-        adapter._client = MagicMock()
-        adapter._client.messages.stream = _stream
+        state = _install_stream(adapter, _make_api_error("overloaded_error"))
 
         events = []
-        async for event_type, payload in adapter.stream_message(
+        async for ev, payload in adapter.stream_message(
             model="claude-sonnet-4-6",
             max_tokens=100,
             system="sys",
             messages=[{"role": "user", "content": "hi"}],
         ):
-            events.append((event_type, payload))
+            events.append((ev, payload))
 
-        # First attempt raised, second attempt succeeded
-        assert call_count["n"] == 2
-        assert any(e[0] == "text" for e in events)
-        assert any(e[0] == "response" for e in events)
+        assert state["attempts"] == 2
+        assert sleep_spy.await_count == 1
+        # First overload delay should be drawn from _OVERLOAD_BACKOFF_SECONDS, not the
+        # old 1s generic delay.
+        assert sleep_spy.await_args.args[0] == mod._OVERLOAD_BACKOFF_SECONDS[0]
+        assert sleep_spy.await_args.args[0] >= 10.0
 
     @pytest.mark.asyncio
-    async def test_does_not_retry_after_partial_output(self, monkeypatch):
+    async def test_rate_limit_respects_retry_after_header(self, monkeypatch):
+        from app.services.chat.adapters import anthropic_adapter as mod
+        from app.services.chat.adapters.anthropic_adapter import AnthropicAdapter
+
+        monkeypatch.setattr(mod.random, "uniform", lambda _lo, _hi: 1.0)
+        sleep_spy = AsyncMock()
+        monkeypatch.setattr(mod.asyncio, "sleep", sleep_spy)
+
+        adapter = AnthropicAdapter(api_key="sk-test")
+        err = _make_api_error("rate_limit_error", status=429, retry_after="7")
+        _install_stream(adapter, err)
+
+        async for _ in adapter.stream_message(
+            model="claude-sonnet-4-6",
+            max_tokens=100,
+            system="sys",
+            messages=[{"role": "user", "content": "hi"}],
+        ):
+            pass
+
+        assert sleep_spy.await_count == 1
+        assert sleep_spy.await_args.args[0] == pytest.approx(7.0)
+
+    @pytest.mark.asyncio
+    async def test_rate_limit_falls_back_when_header_absent(self, monkeypatch):
+        from app.services.chat.adapters import anthropic_adapter as mod
+        from app.services.chat.adapters.anthropic_adapter import AnthropicAdapter
+
+        monkeypatch.setattr(mod.random, "uniform", lambda _lo, _hi: 1.0)
+        sleep_spy = AsyncMock()
+        monkeypatch.setattr(mod.asyncio, "sleep", sleep_spy)
+
+        adapter = AnthropicAdapter(api_key="sk-test")
+        err = _make_api_error("rate_limit_error", status=429, retry_after=None)
+        _install_stream(adapter, err)
+
+        async for _ in adapter.stream_message(
+            model="claude-sonnet-4-6",
+            max_tokens=100,
+            system="sys",
+            messages=[{"role": "user", "content": "hi"}],
+        ):
+            pass
+
+        assert sleep_spy.await_count == 1
+        assert sleep_spy.await_args.args[0] == mod._RATE_LIMIT_BACKOFF_SECONDS[0]
+
+    @pytest.mark.asyncio
+    async def test_retry_after_capped_at_120s(self, monkeypatch):
+        """A misbehaving upstream returning Retry-After: 3600 must not block the turn
+        for an hour — delay is capped before jitter."""
+        from app.services.chat.adapters import anthropic_adapter as mod
+        from app.services.chat.adapters.anthropic_adapter import AnthropicAdapter
+
+        monkeypatch.setattr(mod.random, "uniform", lambda _lo, _hi: 1.0)
+        # Generous budget so the deadline guard doesn't abort first.
+        monkeypatch.setattr(mod, "_STREAM_TIMEOUT_SECONDS", 600)
+        sleep_spy = AsyncMock()
+        monkeypatch.setattr(mod.asyncio, "sleep", sleep_spy)
+
+        adapter = AnthropicAdapter(api_key="sk-test")
+        err = _make_api_error("rate_limit_error", status=429, retry_after="3600")
+        _install_stream(adapter, err)
+
+        async for _ in adapter.stream_message(
+            model="claude-sonnet-4-6",
+            max_tokens=100,
+            system="sys",
+            messages=[{"role": "user", "content": "hi"}],
+        ):
+            pass
+
+        assert sleep_spy.await_count == 1
+        assert sleep_spy.await_args.args[0] == mod._MAX_RETRY_AFTER_SECONDS
+
+    @pytest.mark.asyncio
+    async def test_retry_abandoned_when_budget_exhausted(self, monkeypatch):
+        """If the next retry delay would exceed the remaining per-turn budget, raise
+        instead of sleeping past the deadline."""
         import anthropic
 
         from app.services.chat.adapters import anthropic_adapter as mod
         from app.services.chat.adapters.anthropic_adapter import AnthropicAdapter
 
-        monkeypatch.setattr(mod, "_RETRY_DELAYS_SECONDS", (0, 0, 0))
+        # 6s budget, guard keeps 5s slack → remaining-5 = ~1s < 10s first overload delay.
+        monkeypatch.setattr(mod, "_STREAM_TIMEOUT_SECONDS", 6)
+        monkeypatch.setattr(mod.random, "uniform", lambda _lo, _hi: 1.0)
+        sleep_spy = AsyncMock()
+        monkeypatch.setattr(mod.asyncio, "sleep", sleep_spy)
 
-        call_count = {"n": 0}
+        adapter = AnthropicAdapter(api_key="sk-test")
+        _install_stream(adapter, _make_api_error("overloaded_error"))
 
-        def _make_overloaded_error():
-            exc = anthropic.APIStatusError.__new__(anthropic.APIStatusError)
-            exc.status_code = 529
-            exc.body = {"error": {"type": "overloaded_error", "message": "Overloaded"}}
-            exc.message = "Overloaded"
-            return exc
+        with pytest.raises(anthropic.APIStatusError):
+            async for _ in adapter.stream_message(
+                model="claude-sonnet-4-6",
+                max_tokens=100,
+                system="sys",
+                messages=[{"role": "user", "content": "hi"}],
+            ):
+                pass
+
+        assert sleep_spy.await_count == 0
+
+    @pytest.mark.asyncio
+    async def test_jitter_is_applied(self, monkeypatch):
+        """random.uniform(0.75, 1.25) is consulted for each retry delay."""
+        from app.services.chat.adapters import anthropic_adapter as mod
+        from app.services.chat.adapters.anthropic_adapter import AnthropicAdapter
+
+        jitter_calls: list[tuple[float, float]] = []
+
+        def _fake_uniform(lo, hi):
+            jitter_calls.append((lo, hi))
+            return 1.0
+
+        monkeypatch.setattr(mod.random, "uniform", _fake_uniform)
+        monkeypatch.setattr(mod.asyncio, "sleep", AsyncMock())
+
+        adapter = AnthropicAdapter(api_key="sk-test")
+        _install_stream(adapter, _make_api_error("overloaded_error"))
+
+        async for _ in adapter.stream_message(
+            model="claude-sonnet-4-6",
+            max_tokens=100,
+            system="sys",
+            messages=[{"role": "user", "content": "hi"}],
+        ):
+            pass
+
+        assert jitter_calls, "jitter helper was not consulted"
+        assert jitter_calls[0] == (0.75, 1.25)
+
+    @pytest.mark.asyncio
+    async def test_api_error_uses_generic_backoff(self, monkeypatch):
+        """api_error keeps the short (1, 2, 4)s schedule — longer delays are reserved
+        for overload."""
+        from app.services.chat.adapters import anthropic_adapter as mod
+        from app.services.chat.adapters.anthropic_adapter import AnthropicAdapter
+
+        monkeypatch.setattr(mod.random, "uniform", lambda _lo, _hi: 1.0)
+        sleep_spy = AsyncMock()
+        monkeypatch.setattr(mod.asyncio, "sleep", sleep_spy)
+
+        adapter = AnthropicAdapter(api_key="sk-test")
+        _install_stream(adapter, _make_api_error("api_error", status=500))
+
+        async for _ in adapter.stream_message(
+            model="claude-sonnet-4-6",
+            max_tokens=100,
+            system="sys",
+            messages=[{"role": "user", "content": "hi"}],
+        ):
+            pass
+
+        assert sleep_spy.await_count == 1
+        assert sleep_spy.await_args.args[0] == mod._GENERIC_BACKOFF_SECONDS[0]
+        assert sleep_spy.await_args.args[0] <= 4.0
+
+    @pytest.mark.asyncio
+    async def test_does_not_retry_after_partial_output(self, monkeypatch):
+        """Regression: once any text has streamed, an error from the ongoing stream
+        must propagate to the caller — partial output can't be rewound."""
+        import anthropic
+
+        from app.services.chat.adapters import anthropic_adapter as mod
+        from app.services.chat.adapters.anthropic_adapter import AnthropicAdapter
+
+        monkeypatch.setattr(mod.asyncio, "sleep", AsyncMock())
+
+        state = {"attempts": 0}
+        err = _make_api_error("overloaded_error")
 
         class _FakeStream:
             async def __aenter__(self):
@@ -538,7 +718,7 @@ class TestAnthropicStreamRetry:
             def text_stream(self):
                 async def _gen():
                     yield "partial "
-                    raise _make_overloaded_error()
+                    raise err
 
                 return _gen()
 
@@ -546,7 +726,7 @@ class TestAnthropicStreamRetry:
                 return MagicMock()
 
         def _stream(**kwargs):
-            call_count["n"] += 1
+            state["attempts"] += 1
             return _FakeStream()
 
         adapter = AnthropicAdapter(api_key="sk-test")
@@ -562,5 +742,4 @@ class TestAnthropicStreamRetry:
             ):
                 pass
 
-        # Only the original attempt — no retry after partial output streamed
-        assert call_count["n"] == 1
+        assert state["attempts"] == 1
