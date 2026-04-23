@@ -59,6 +59,7 @@ EXPECTED_TOOLS = {
     "sheets.create",
     "sheets.write_range",
     "sheets.read_range",
+    "drive.read_doc",
 }
 
 
