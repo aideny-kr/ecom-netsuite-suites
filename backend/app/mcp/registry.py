@@ -1,6 +1,7 @@
 from app.mcp.tools import (
     bigquery_tools,
     data_sample,
+    docs_tools,
     drive_tools,
     health,
     netsuite_connectivity,
@@ -593,6 +594,46 @@ TOOL_REGISTRY = {
                 "type": "string",
                 "required": True,
                 "description": "Drive URL or raw file ID",
+            },
+        },
+    },
+    "docs.create": {
+        "description": (
+            "Create a new Google Doc from markdown content. Drive's markdown "
+            "importer preserves formatting — headings, bold/italic, bullet "
+            "and numbered lists, code blocks, blockquotes, and simple tables "
+            "all convert to native Doc styling. The Doc is placed in the "
+            "tenant's configured Shared Drive when set (or a specific folder "
+            "via `folder_id`); otherwise it is created in the service "
+            "account's Drive and auto-shared with the requesting user. Use "
+            "when the user asks to save prose, research, notes, a brief, or "
+            "a summary as a Google Doc. Returns a shareable URL that the "
+            "frontend renders as a clickable card — do NOT paste the URL in "
+            "your reply."
+        ),
+        "execute": docs_tools.docs_create_execute,
+        "params_schema": {
+            "title": {
+                "type": "string",
+                "required": True,
+                "description": "Doc title (also becomes the filename in Drive).",
+            },
+            "content_markdown": {
+                "type": "string",
+                "required": True,
+                "description": (
+                    "Doc body as markdown. Headings (`#`, `##`, ...), bold "
+                    "(`**x**`), italic (`*x*`), inline code, code blocks, "
+                    "bullet and numbered lists, blockquotes, and simple "
+                    "tables all convert to native Doc formatting."
+                ),
+            },
+            "folder_id": {
+                "type": "string",
+                "required": False,
+                "description": (
+                    "Optional Drive folder ID to place the Doc in. Defaults to the connector's configured Shared Drive."
+                ),
             },
         },
     },
