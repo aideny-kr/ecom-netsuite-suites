@@ -16,6 +16,7 @@ from app.models.drive import DriveChunk, DriveFile, DriveFolder
 from app.models.mcp_connector import McpConnector
 from app.models.user import User
 from app.schemas.drive import (
+    DriveFileListItem,
     DriveFolderCreate,
     DriveFolderResponse,
     DriveFolderStatus,
@@ -42,6 +43,24 @@ def _folder_to_response(folder: DriveFolder, *, chunk_count: int, file_count: in
         chunk_count=chunk_count,
         file_count=file_count,
         created_at=folder.created_at,
+    )
+
+
+def _file_to_response(file: DriveFile, folder_name: str) -> DriveFileListItem:
+    """Coerce ORM row + folder join result into the picker schema.
+
+    `id` (internal UUID) and `drive_file_id` (Google's id) are kept separate so
+    the frontend can use `id` as a React Query key and `drive_file_id` when it
+    needs to call `drive_read_doc` or store a reference.
+    """
+    return DriveFileListItem(
+        id=str(file.id),
+        drive_file_id=file.drive_file_id,
+        name=file.name,
+        mime_type=file.mime_type,
+        web_view_link=file.web_view_link,
+        folder_name=folder_name,
+        chunk_count=file.chunk_count,
     )
 
 
@@ -91,6 +110,36 @@ async def list_drive_folders(
         chunks, files = await _counts_for(db, f.id)
         out.append(_folder_to_response(f, chunk_count=chunks, file_count=files))
     return out
+
+
+@router.get("/files", response_model=list[DriveFileListItem])
+async def list_drive_files(
+    user: Annotated[User, Depends(require_feature("drive_rag"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    q: str | None = None,
+    limit: int = 20,
+):
+    """Typeahead list of indexed Drive files for the `#` mention picker.
+
+    Scoped to enabled folders for the tenant. Optional `q` filters by
+    case-insensitive substring match against the file name. Capped at 100.
+    """
+    limit = max(1, min(limit, 100))
+    stmt = (
+        select(DriveFile, DriveFolder.folder_name)
+        .join(DriveFolder, DriveFolder.id == DriveFile.folder_id)
+        .where(
+            DriveFile.tenant_id == user.tenant_id,
+            DriveFolder.is_enabled.is_(True),
+        )
+        .order_by(DriveFile.name.asc())
+        .limit(limit)
+    )
+    if q:
+        stmt = stmt.where(DriveFile.name.ilike(f"%{q}%"))
+
+    rows = (await db.execute(stmt)).all()
+    return [_file_to_response(f, folder_name=folder_name) for f, folder_name in rows]
 
 
 @router.post("", response_model=DriveFolderResponse, status_code=status.HTTP_201_CREATED)
