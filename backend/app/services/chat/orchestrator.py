@@ -500,6 +500,40 @@ def _extract_drive_mentions(user_message: str) -> dict[str, str]:
     return {m.group(1): m.group(2) for m in _DRIVE_MENTION_RE.finditer(user_message)}
 
 
+def _merge_drive_mentions(context: dict, user_message: str) -> list[tuple[str, str]]:
+    """Hoist user-inserted Drive mentions into ``context["drive_sources"]``.
+
+    Retrieval-based entries are authoritative — if ``drive_sources`` already
+    contains an entry for the mentioned name, it's not overwritten. Returns the
+    list of newly-added ``(name, url)`` pairs so callers can build prompt hints
+    that list exactly what the user pointed at this turn.
+    """
+    mentions = _extract_drive_mentions(user_message)
+    if not mentions:
+        return []
+    existing = context.setdefault("drive_sources", {})
+    new_entries: list[tuple[str, str]] = []
+    for name, url in mentions.items():
+        if name not in existing:
+            existing[name] = url
+            new_entries.append((name, url))
+    return new_entries
+
+
+def _build_drive_mentions_hint(mentions: list[tuple[str, str]]) -> str:
+    """Render user-mentioned Drive files as a system-prompt hint fragment.
+
+    Emits a leading ``\\n\\n`` so the hint can be concatenated directly to an
+    existing prompt without worrying about preceding content.
+    """
+    if not mentions:
+        return ""
+    lines = ["\n\n## User-mentioned Drive files this turn:"]
+    for name, url in mentions:
+        lines.append(f"- [{name}]({url})")
+    return "\n".join(lines)
+
+
 def _is_bigquery_tool(tool_name: str) -> bool:
     """True for BigQuery query tools."""
     return categorize(tool_name) == "bigquery"
@@ -1619,6 +1653,13 @@ async def run_chat_turn(
                                 flush=True,
                             )
 
+                    # Hoist user-inserted Drive mentions ([Name](drive_url)) into
+                    # drive_sources so citations resolve even when RAG returned 0
+                    # chunks for that file. Always runs when google_drive profile
+                    # is active, regardless of whether retrieval produced chunks.
+                    if _drive_active:
+                        context["drive_mentions"] = _merge_drive_mentions(context, sanitized_input)
+
                     # proven_patterns (gate by tool presence — injects when _need_patterns is True)
                     if patterns_result is not None:
                         if isinstance(patterns_result, Exception):
@@ -1771,6 +1812,9 @@ async def run_chat_turn(
                         system_prompt += f"\n\n{knowledge_context}"
                     if context.get("drive_knowledge"):
                         system_prompt += "\n\n" + context["drive_knowledge"]
+                    drive_mentions = context.get("drive_mentions") or []
+                    if drive_mentions:
+                        system_prompt += _build_drive_mentions_hint(drive_mentions)
                     disambiguation = build_disambiguation_instruction(_active_profiles)
                     if disambiguation:
                         system_prompt += disambiguation

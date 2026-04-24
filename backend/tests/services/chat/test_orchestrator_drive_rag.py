@@ -192,3 +192,73 @@ def test_extract_drive_mentions_ignores_broken_markdown():
 
     assert _extract_drive_mentions("[unclosed (https://docs.google.com/document/d/a)") == {}
     assert _extract_drive_mentions("[name] (https://docs.google.com/document/d/a)") == {}
+
+
+def test_merge_drive_mentions_creates_drive_sources():
+    """When context has no drive_sources key, create it from mentions alone."""
+    from app.services.chat.orchestrator import _merge_drive_mentions
+
+    context: dict = {}
+    msg = "Summarize [Returns Policy](https://docs.google.com/document/d/r/edit)."
+    merged = _merge_drive_mentions(context, msg)
+    assert merged == [("Returns Policy", "https://docs.google.com/document/d/r/edit")]
+    assert context["drive_sources"] == {"Returns Policy": "https://docs.google.com/document/d/r/edit"}
+
+
+def test_merge_drive_mentions_respects_existing_retrieval_sources():
+    """An existing drive_sources entry from RAG retrieval wins over a user mention
+    for the same source name — retrieval URL is authoritative."""
+    from app.services.chat.orchestrator import _merge_drive_mentions
+
+    context = {"drive_sources": {"Returns Policy": "https://authoritative/retrieval"}}
+    msg = "Check [Returns Policy](https://docs.google.com/document/d/other/edit)."
+    merged = _merge_drive_mentions(context, msg)
+    assert merged == []  # Nothing new was added
+    assert context["drive_sources"] == {"Returns Policy": "https://authoritative/retrieval"}
+
+
+def test_merge_drive_mentions_adds_novel_names_while_keeping_existing():
+    from app.services.chat.orchestrator import _merge_drive_mentions
+
+    context = {"drive_sources": {"Returns Policy": "https://rp/from-retrieval"}}
+    msg = (
+        "Compare [Returns Policy](https://docs.google.com/document/d/rp/edit) "
+        "with [Shipping FAQ](https://docs.google.com/document/d/sf/edit)."
+    )
+    merged = _merge_drive_mentions(context, msg)
+    assert merged == [("Shipping FAQ", "https://docs.google.com/document/d/sf/edit")]
+    assert context["drive_sources"] == {
+        "Returns Policy": "https://rp/from-retrieval",
+        "Shipping FAQ": "https://docs.google.com/document/d/sf/edit",
+    }
+
+
+def test_merge_drive_mentions_no_mentions_is_noop():
+    from app.services.chat.orchestrator import _merge_drive_mentions
+
+    context = {"drive_sources": {"A": "https://a"}}
+    before = dict(context["drive_sources"])
+    assert _merge_drive_mentions(context, "no mentions here") == []
+    assert context["drive_sources"] == before
+
+
+def test_build_drive_mentions_hint_formats_markdown_list():
+    from app.services.chat.orchestrator import _build_drive_mentions_hint
+
+    hint = _build_drive_mentions_hint(
+        [
+            ("Returns Policy", "https://rp"),
+            ("Shipping FAQ", "https://sf"),
+        ]
+    )
+    assert "User-mentioned Drive files this turn" in hint
+    assert "- [Returns Policy](https://rp)" in hint
+    assert "- [Shipping FAQ](https://sf)" in hint
+    # Should be prefixed with blank lines so it doesn't collide with prior prompt content
+    assert hint.startswith("\n\n")
+
+
+def test_build_drive_mentions_hint_empty_returns_empty_string():
+    from app.services.chat.orchestrator import _build_drive_mentions_hint
+
+    assert _build_drive_mentions_hint([]) == ""
