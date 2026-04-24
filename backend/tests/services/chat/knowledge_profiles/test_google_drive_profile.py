@@ -23,6 +23,22 @@ def test_google_drive_profile_triggers_on_sheets_tools():
     assert drive.matches_tools({"sheets_write_range"})
 
 
+def test_google_drive_profile_triggers_on_docs_create():
+    profiles = load_all_profiles()
+    drive = next(p for p in profiles if p.profile_id == "google_drive")
+    assert drive.matches_tools({"docs_create"})
+
+
+def test_google_drive_profile_documents_docs_create_usage():
+    """Agent must know when / how to call docs_create."""
+    profiles = load_all_profiles()
+    drive = next(p for p in profiles if p.profile_id == "google_drive")
+    frag = drive.prompt_fragment.lower()
+    assert "docs_create" in frag
+    # "save this as a doc" / prose use-case is the trigger phrase
+    assert "save" in frag or "prose" in frag or "markdown" in frag
+
+
 def test_google_drive_profile_does_not_trigger_on_unrelated_tools():
     profiles = load_all_profiles()
     drive = next(p for p in profiles if p.profile_id == "google_drive")

@@ -5,7 +5,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiClient } from "@/lib/api-client";
 import { consumeChatStream } from "@/lib/chat-stream";
-import type { FinancialReportData, DataTableData, TaskOutputData, SheetsLinkData, StreamBlock } from "@/lib/chat-stream";
+import type { FinancialReportData, DataTableData, TaskOutputData, SheetsLinkData, DocsLinkData, StreamBlock } from "@/lib/chat-stream";
 import type { ChartData } from "@/lib/types";
 import type { ChatSession, ChatSessionDetail, ChatMessage, StreamingToolCall } from "@/lib/types";
 import { SessionSidebar } from "@/components/chat/session-sidebar";
@@ -45,6 +45,8 @@ export default function ChatPage() {
   const taskOutputsRef = useRef<Map<string, TaskOutputData>>(new Map());
   const [sheetsLink, setSheetsLink] = useState<SheetsLinkData | null>(null);
   const sheetsLinksRef = useRef<Map<string, SheetsLinkData>>(new Map());
+  const [docsLink, setDocsLink] = useState<DocsLinkData | null>(null);
+  const docsLinksRef = useRef<Map<string, DocsLinkData>>(new Map());
   const queryClient = useQueryClient();
   const router = useRouter();
 
@@ -165,6 +167,9 @@ export default function ChatPage() {
       } else if (type === "sheets_link" && data) {
         sheetsLinksRef.current.set(msg.id, data as unknown as SheetsLinkData);
         hydrated = true;
+      } else if (type === "docs_link" && data) {
+        docsLinksRef.current.set(msg.id, data as unknown as DocsLinkData);
+        hydrated = true;
       }
       // Hydrate persisted charts array (from v1.1 chart persistence)
       // Skip if charts already exist for this message (came from streaming)
@@ -233,6 +238,10 @@ export default function ChatPage() {
             setSheetsLink(data);
             setStreamBlocks(prev => [...prev, { type: "sheets_link" as const, data, id: `sl-${Date.now()}` }]);
           },
+          onDocsLink: (data) => {
+            setDocsLink(data);
+            setStreamBlocks(prev => [...prev, { type: "docs_link" as const, data, id: `dl-${Date.now()}` }]);
+          },
           onToolStart: (tool_name, tool_input, step) => {
             if (bufferRef.current.length > 0) {
               const text = bufferRef.current.join("");
@@ -286,6 +295,10 @@ export default function ChatPage() {
             });
             setSheetsLink((current) => {
               if (current) sheetsLinksRef.current.set(message.id, current);
+              return null;
+            });
+            setDocsLink((current) => {
+              if (current) docsLinksRef.current.set(message.id, current);
               return null;
             });
             setStreamingMessage(message);
@@ -539,6 +552,7 @@ export default function ChatPage() {
             chartsByMessage={chartsRef.current}
             taskOutputs={taskOutputsRef.current}
             sheetsLinks={sheetsLinksRef.current}
+            docsLinks={docsLinksRef.current}
             pinnedAgentId={pinnedAgentId}
             agents={agents}
             agentTab={agentTab}

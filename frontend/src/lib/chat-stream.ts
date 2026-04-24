@@ -33,6 +33,13 @@ export interface SheetsLinkData {
   shared_with?: string | null;
 }
 
+export interface DocsLinkData {
+  url: string;
+  doc_id: string;
+  title: string;
+  shared_with?: string | null;
+}
+
 export type StreamBlock =
   | { type: "text"; content: string; id: string }
   | { type: "tool"; tool: StreamingToolCall; id: string }
@@ -41,6 +48,7 @@ export type StreamBlock =
   | { type: "financial_report"; data: FinancialReportData; id: string }
   | { type: "task_output"; data: TaskOutputData; id: string }
   | { type: "sheets_link"; data: SheetsLinkData; id: string }
+  | { type: "docs_link"; data: DocsLinkData; id: string }
   | { type: "thinking"; content: string; isActive: boolean; id: string }
   | { type: "write_confirmation"; data: WriteConfirmationData; id: string };
 
@@ -53,6 +61,7 @@ export type ChatStreamEvent =
   | { type: "data_table"; data: DataTableData }
   | { type: "task_output"; data: TaskOutputData }
   | { type: "sheets_link"; data: SheetsLinkData }
+  | { type: "docs_link"; data: DocsLinkData }
   | { type: "drive_sources"; sources: Record<string, string> }
   | { type: "chart"; data: ChartData }
   | { type: "error"; error: string }
@@ -75,6 +84,7 @@ type StreamHandlers = {
   onChart?: (data: ChartData) => void;
   onTaskOutput?: (data: TaskOutputData) => void;
   onSheetsLink?: (data: SheetsLinkData) => void;
+  onDocsLink?: (data: DocsLinkData) => void;
   onDriveSources?: (sources: Record<string, string>) => void;
   onError?: (error: string) => void;
   onMessage?: (message: ChatMessage) => void;
@@ -189,6 +199,8 @@ export async function consumeChatStream(
           handlers.onTaskOutput?.(event.data);
         } else if (event.type === "sheets_link") {
           handlers.onSheetsLink?.(event.data);
+        } else if (event.type === "docs_link") {
+          handlers.onDocsLink?.(event.data);
         } else if (event.type === "drive_sources") {
           handlers.onDriveSources?.(event.sources);
         } else if (event.type === "error") {
@@ -214,7 +226,7 @@ export async function consumeChatStream(
   }
 }
 
-function normalizeStreamEvent(data: Record<string, unknown>): ChatStreamEvent | null {
+export function normalizeStreamEvent(data: Record<string, unknown>): ChatStreamEvent | null {
   const type = data.type;
 
   if (type === "text" && typeof data.content === "string") {
@@ -296,6 +308,18 @@ function normalizeStreamEvent(data: Record<string, unknown>): ChatStreamEvent | 
         url: String(d.url || ""),
         spreadsheet_id: String(d.spreadsheet_id || ""),
         title: String(d.title || "Spreadsheet"),
+        shared_with: typeof d.shared_with === "string" ? d.shared_with : null,
+      },
+    };
+  }
+  if (type === "docs_link" && data.data && typeof data.data === "object") {
+    const d = data.data as Record<string, unknown>;
+    return {
+      type,
+      data: {
+        url: String(d.url || ""),
+        doc_id: String(d.doc_id || ""),
+        title: String(d.title || "Document"),
         shared_with: typeof d.shared_with === "string" ? d.shared_with : null,
       },
     };
