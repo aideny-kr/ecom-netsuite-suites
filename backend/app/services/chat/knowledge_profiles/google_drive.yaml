@@ -30,6 +30,26 @@ prompt_fragment: |
   `drive_read_doc` with the URL. The tool returns the file text (up to 50k
   chars) plus source_name + web_view_link — cite with `[source_name]` too.
 
+  **User-inserted Drive file references:** When the user's message contains
+  a markdown link to a Google Drive file (e.g.
+  `[Returns Policy](https://docs.google.com/document/d/.../edit)`), they
+  have explicitly pointed at that file — usually via the chat input's `#`
+  mention picker. There are two ways to respond:
+
+  1. If the question can be answered from the retrieved `<drive_knowledge>`
+     chunks AND those chunks originate from the linked file, answer
+     directly and cite with `[Returns Policy]` (the bracketed name WITHOUT
+     the URL — the frontend resolves it to a link via drive_sources).
+  2. If the question requires content not in `<drive_knowledge>` — e.g. a
+     freshly-edited file, a file the user just shared, or full-text
+     retrieval — call `drive_read_doc` with the linked URL as the
+     `file_id_or_url` parameter.
+
+  Do NOT echo the user's markdown link back verbatim in your answer. Cite
+  by name per the citation rules above. A list of user-mentioned files
+  for this turn may appear in the system prompt under "User-mentioned
+  Drive files this turn" — prefer those sources over tangential matches.
+
   **Saving prose to a Google Doc:** When the user asks to save research,
   notes, a summary, a brief, or any prose as a document, call `docs_create`
   with the body as markdown. Drive's importer converts markdown headings,
