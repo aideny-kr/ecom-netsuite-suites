@@ -12,10 +12,13 @@ from app.services.chat.llm_adapter import BaseLLMAdapter, LLMResponse, TokenUsag
 
 logger = logging.getLogger(__name__)
 
-# Wall-clock deadline for a single stream_message call (seconds).
-# Sized to fit (10 + 30 + 60) worst-case overload backoff + slack for the
-# actual stream attempt, while staying under the 300s outer chat-turn budget.
-_STREAM_TIMEOUT_SECONDS = 180  # 3 minutes
+# Wall-clock deadline for a single stream_message call — PER LLM HOP, not per
+# turn. Each tool-use step in `base_agent.py` opens a fresh stream with its own
+# deadline; the outer 300s `_BACKGROUND_TASK_TIMEOUT` in `api/v1/chat.py` bounds
+# the whole turn (context gather + N hops + tool exec). Sized to fit (10+30+60)s
+# worst-case overload backoff plus a stream attempt, without implying that a
+# multi-hop turn has 180s * N of headroom — it doesn't.
+_STREAM_TIMEOUT_SECONDS = 180  # 3 minutes per hop
 
 # Per-request socket timeouts. The SDK default is read=600s, which means a
 # single stalled request (TCP open, no bytes flowing) can eat the entire

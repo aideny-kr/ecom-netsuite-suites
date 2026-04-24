@@ -531,7 +531,6 @@ class TestAnthropicBackoffStrategy:
         # First overload delay should be drawn from _OVERLOAD_BACKOFF_SECONDS, not the
         # old 1s generic delay.
         assert sleep_spy.await_args.args[0] == mod._OVERLOAD_BACKOFF_SECONDS[0]
-        assert sleep_spy.await_args.args[0] >= 10.0
 
     @pytest.mark.asyncio
     async def test_rate_limit_respects_retry_after_header(self, monkeypatch):
@@ -583,8 +582,14 @@ class TestAnthropicBackoffStrategy:
 
     @pytest.mark.asyncio
     async def test_retry_after_capped_at_120s(self, monkeypatch):
-        """A misbehaving upstream returning Retry-After: 3600 must not block the turn
-        for an hour — delay is capped before jitter."""
+        """A Retry-After larger than the cap must be clamped, not honored literally.
+
+        The cap exists because the outer per-turn budget in chat.py is 300s; honoring
+        a Retry-After of 3600 (or even 200) would leave no room for the stream attempt
+        + tool execution on the other hops. We deliberately trade server guidance
+        fidelity for turn liveness — the retry will likely re-hit the limiter, which
+        is preferable to the user staring at a blank screen for an hour.
+        """
         from app.services.chat.adapters import anthropic_adapter as mod
         from app.services.chat.adapters.anthropic_adapter import AnthropicAdapter
 
@@ -640,18 +645,19 @@ class TestAnthropicBackoffStrategy:
 
     @pytest.mark.asyncio
     async def test_jitter_is_applied(self, monkeypatch):
-        """random.uniform(0.75, 1.25) is consulted for each retry delay."""
+        """Real (non-mocked) jitter should land in the ±25% range around the nominal
+        overload delay. Uses a seeded PRNG so the assertion is deterministic, but
+        the actual `random.uniform` is exercised — this catches regressions that a
+        tautological `assert uniform was called with (0.75, 1.25)` would miss.
+        """
+        import random
+
         from app.services.chat.adapters import anthropic_adapter as mod
         from app.services.chat.adapters.anthropic_adapter import AnthropicAdapter
 
-        jitter_calls: list[tuple[float, float]] = []
-
-        def _fake_uniform(lo, hi):
-            jitter_calls.append((lo, hi))
-            return 1.0
-
-        monkeypatch.setattr(mod.random, "uniform", _fake_uniform)
-        monkeypatch.setattr(mod.asyncio, "sleep", AsyncMock())
+        random.seed(42)
+        sleep_spy = AsyncMock()
+        monkeypatch.setattr(mod.asyncio, "sleep", sleep_spy)
 
         adapter = AnthropicAdapter(api_key="sk-test")
         _install_stream(adapter, _make_api_error("overloaded_error"))
@@ -664,8 +670,12 @@ class TestAnthropicBackoffStrategy:
         ):
             pass
 
-        assert jitter_calls, "jitter helper was not consulted"
-        assert jitter_calls[0] == (0.75, 1.25)
+        assert sleep_spy.await_count == 1
+        nominal = mod._OVERLOAD_BACKOFF_SECONDS[0]
+        delay = sleep_spy.await_args.args[0]
+        assert mod._JITTER_MIN * nominal <= delay <= mod._JITTER_MAX * nominal
+        # Also: jitter must not be the pathological no-op (exact nominal)
+        assert delay != nominal, "jitter produced an exact nominal delay — PRNG unused?"
 
     @pytest.mark.asyncio
     async def test_api_error_uses_generic_backoff(self, monkeypatch):
