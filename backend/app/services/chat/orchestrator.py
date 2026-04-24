@@ -481,6 +481,25 @@ def _build_drive_knowledge_block(chunks: list[dict]) -> str:
     return "\n".join(lines)
 
 
+# User-inserted Drive mentions: `[Name](https://docs.google.com/...)` or
+# `[Name](https://drive.google.com/...)`. The frontend's `#` mention picker
+# emits this exact markdown-link form, but the regex also catches any Drive
+# URL a user pastes by hand in the same format.
+_DRIVE_MENTION_RE = re.compile(r"\[([^\]\n]+)\]\((https://(?:docs|drive)\.google\.com/[^\s)]+)\)")
+
+
+def _extract_drive_mentions(user_message: str) -> dict[str, str]:
+    """Parse markdown links to Drive / Docs URLs out of *user_message*.
+
+    Returns ``{name: url}`` for each `[name](drive_url)` match. Non-Drive URLs
+    are ignored. Broken markdown (missing paren, space between `]` and `(`,
+    unclosed bracket) produces no match — callers never need to catch errors.
+    """
+    if not user_message:
+        return {}
+    return {m.group(1): m.group(2) for m in _DRIVE_MENTION_RE.finditer(user_message)}
+
+
 def _is_bigquery_tool(tool_name: str) -> bool:
     """True for BigQuery query tools."""
     return categorize(tool_name) == "bigquery"
