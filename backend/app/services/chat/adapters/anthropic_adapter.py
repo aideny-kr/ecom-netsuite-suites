@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import random
 import time
 
 import anthropic
@@ -11,8 +12,13 @@ from app.services.chat.llm_adapter import BaseLLMAdapter, LLMResponse, TokenUsag
 
 logger = logging.getLogger(__name__)
 
-# Wall-clock deadline for a single stream_message call (seconds).
-_STREAM_TIMEOUT_SECONDS = 120  # 2 minutes
+# Wall-clock deadline for a single stream_message call — PER LLM HOP, not per
+# turn. Each tool-use step in `base_agent.py` opens a fresh stream with its own
+# deadline; the outer 300s `_BACKGROUND_TASK_TIMEOUT` in `api/v1/chat.py` bounds
+# the whole turn (context gather + N hops + tool exec). Sized to fit (10+30+60)s
+# worst-case overload backoff plus a stream attempt, without implying that a
+# multi-hop turn has 180s * N of headroom — it doesn't.
+_STREAM_TIMEOUT_SECONDS = 180  # 3 minutes per hop
 
 # Per-request socket timeouts. The SDK default is read=600s, which means a
 # single stalled request (TCP open, no bytes flowing) can eat the entire
@@ -23,9 +29,23 @@ _STREAM_TIMEOUT_SECONDS = 120  # 2 minutes
 _CLIENT_TIMEOUT = httpx.Timeout(connect=5.0, read=60.0, write=60.0, pool=60.0)
 _CLIENT_MAX_RETRIES = 2
 
-# Transient errors worth retrying with exponential backoff before any tokens stream.
-_RETRYABLE_ERROR_TYPES = {"overloaded_error", "rate_limit_error", "api_error"}
-_RETRY_DELAYS_SECONDS = (1.0, 2.0, 4.0)  # 3 retries = 4 total attempts
+# Per-error-type backoff schedule. Overload pools empirically recover in 30–120s,
+# so short (1, 2, 4)s retries almost always land on the same overloaded pool and
+# all fail. Rate limits carry a Retry-After header we honour directly when present.
+_OVERLOAD_BACKOFF_SECONDS = (10.0, 30.0, 60.0)
+_RATE_LIMIT_BACKOFF_SECONDS = (5.0, 15.0, 30.0)
+_GENERIC_BACKOFF_SECONDS = (1.0, 2.0, 4.0)
+
+# Uniform ±25% jitter prevents multiple workers from retrying in lockstep and
+# thundering-herding the recovered pool.
+_JITTER_MIN = 0.75
+_JITTER_MAX = 1.25
+
+# Cap a misbehaving upstream's Retry-After so a 3600s value doesn't hang the turn.
+_MAX_RETRY_AFTER_SECONDS = 120.0
+
+# Leave this much of the deadline budget for the actual stream attempt after a sleep.
+_RETRY_BUDGET_SLACK_SECONDS = 5.0
 
 # Tool dicts in this codebase carry internal-only fields like `category` (stamped
 # by `tool_categories.categorize()`). Anthropic rejects unknown keys with
@@ -38,15 +58,71 @@ def _to_api_tool(tool: dict) -> dict:
     return {k: v for k, v in tool.items() if k in _ANTHROPIC_TOOL_API_KEYS}
 
 
-def _is_retryable(exc: anthropic.APIStatusError) -> bool:
+def _jitter(delay: float) -> float:
+    return delay * random.uniform(_JITTER_MIN, _JITTER_MAX)
+
+
+def _retry_after_seconds(exc: anthropic.APIStatusError) -> float | None:
+    """Parse the Retry-After header (RFC 7231 seconds form) off a rate-limit error."""
+    resp = getattr(exc, "response", None)
+    if resp is None:
+        return None
+    headers = getattr(resp, "headers", None)
+    if not headers:
+        return None
+    raw = headers.get("retry-after")
+    if not raw:
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if value <= 0:
+        return None
+    return min(value, _MAX_RETRY_AFTER_SECONDS)
+
+
+def _classify_error(exc: anthropic.APIStatusError) -> str | None:
+    """Return 'overloaded' | 'rate_limit' | 'generic' | None (non-retryable)."""
     body = getattr(exc, "body", None)
     if isinstance(body, dict):
         err = body.get("error") or {}
-        if isinstance(err, dict) and err.get("type") in _RETRYABLE_ERROR_TYPES:
-            return True
-    # Also retry on 529/503 even if body shape is unexpected
-    status_code = getattr(exc, "status_code", None)
-    return status_code in {503, 529}
+        if isinstance(err, dict):
+            t = err.get("type")
+            if t == "overloaded_error":
+                return "overloaded"
+            if t == "rate_limit_error":
+                return "rate_limit"
+            if t == "api_error":
+                return "generic"
+    status = getattr(exc, "status_code", None)
+    if status in {503, 529}:
+        return "overloaded"
+    if status == 429:
+        return "rate_limit"
+    if status is not None and 500 <= status < 600:
+        return "generic"
+    return None
+
+
+def _compute_retry_delay(kind: str, attempt: int, exc: anthropic.APIStatusError) -> float | None:
+    """Jittered delay for this attempt, or None when retries are exhausted."""
+    if kind == "overloaded":
+        if attempt >= len(_OVERLOAD_BACKOFF_SECONDS):
+            return None
+        return _jitter(_OVERLOAD_BACKOFF_SECONDS[attempt])
+    if kind == "rate_limit":
+        header_delay = _retry_after_seconds(exc)
+        if header_delay is not None:
+            return _jitter(header_delay)
+        if attempt >= len(_RATE_LIMIT_BACKOFF_SECONDS):
+            return None
+        return _jitter(_RATE_LIMIT_BACKOFF_SECONDS[attempt])
+    if kind == "generic":
+        if attempt >= len(_GENERIC_BACKOFF_SECONDS):
+            return None
+        return _jitter(_GENERIC_BACKOFF_SECONDS[attempt])
+    return None
 
 
 class AnthropicAdapter(BaseLLMAdapter):
@@ -182,16 +258,31 @@ class AnthropicAdapter(BaseLLMAdapter):
                     final_message = await stream.get_final_message()
                 break
             except anthropic.APIStatusError as exc:
-                if first_chunk_received or not _is_retryable(exc) or attempt >= len(_RETRY_DELAYS_SECONDS):
+                if first_chunk_received:
                     raise
-                delay = _RETRY_DELAYS_SECONDS[attempt]
+                kind = _classify_error(exc)
+                if kind is None:
+                    raise
+                delay = _compute_retry_delay(kind, attempt, exc)
+                if delay is None:
+                    raise
+                remaining = deadline - time.monotonic()
+                if delay > remaining - _RETRY_BUDGET_SLACK_SECONDS:
+                    logger.warning(
+                        "anthropic_adapter.retry_abandoned kind=%s attempt=%d delay=%.1fs remaining=%.1fs",
+                        kind,
+                        attempt,
+                        delay,
+                        remaining,
+                    )
+                    raise
                 attempt += 1
                 logger.warning(
-                    "anthropic stream transient error (%s), retry %d/%d after %.1fs",
-                    getattr(exc, "status_code", "?"),
+                    "anthropic stream %s error, retry %d after %.1fs (request_id=%s)",
+                    kind,
                     attempt,
-                    len(_RETRY_DELAYS_SECONDS),
                     delay,
+                    getattr(exc, "request_id", "?"),
                 )
                 await asyncio.sleep(delay)
 

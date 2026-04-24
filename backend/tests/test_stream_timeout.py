@@ -181,4 +181,6 @@ async def test_stream_timeout_constant_exists():
 
     assert isinstance(_STREAM_TIMEOUT_SECONDS, (int, float))
     assert _STREAM_TIMEOUT_SECONDS > 0
-    assert _STREAM_TIMEOUT_SECONDS == 120  # 2 minutes as specified
+    # Must fit worst-case overload backoff (10 + 30 + 60) plus slack for the
+    # actual stream attempt, while staying under the 300s outer chat-turn budget.
+    assert _STREAM_TIMEOUT_SECONDS == 180  # 3 minutes
