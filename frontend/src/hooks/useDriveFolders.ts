@@ -66,3 +66,32 @@ export function useSyncDriveFolder() {
     },
   });
 }
+
+export interface DriveFileListItem {
+  id: string;
+  drive_file_id: string;
+  name: string;
+  mime_type: string;
+  web_view_link: string;
+  folder_name: string;
+  chunk_count: number;
+}
+
+/**
+ * Typeahead query for the chat-input `#` mention picker. Backed by
+ * GET /api/v1/drive-folders/files?q=...&limit=20. Drive file names change
+ * slowly, so cache aggressively.
+ */
+export function useDriveFiles(query: string, enabled = true) {
+  const trimmed = query.trim();
+  return useQuery<DriveFileListItem[]>({
+    queryKey: ["drive-folders", "files", trimmed],
+    queryFn: () => {
+      const params = new URLSearchParams({ limit: "20" });
+      if (trimmed) params.set("q", trimmed);
+      return apiClient.get<DriveFileListItem[]>(`/api/v1/drive-folders/files?${params}`);
+    },
+    enabled,
+    staleTime: 30_000,
+  });
+}
