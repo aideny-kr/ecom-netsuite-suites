@@ -43,3 +43,15 @@ class DriveFolderStatus(BaseModel):
     last_sync_error: str | None
     chunk_count: int
     file_count: int
+
+
+class DriveFileListItem(BaseModel):
+    """Typeahead row for the `#` mention picker in chat input."""
+
+    id: str  # internal UUID (string) — React Query key
+    drive_file_id: str  # Google Drive file ID (e.g. "1aB2c_-3D4Ef")
+    name: str
+    mime_type: str
+    web_view_link: str
+    folder_name: str
+    chunk_count: int

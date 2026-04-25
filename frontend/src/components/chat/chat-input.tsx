@@ -6,6 +6,11 @@ import { cn } from "@/lib/utils";
 import { useQuery } from "@tanstack/react-query";
 import { Button } from "@/components/ui/button";
 import { FileMentionPicker } from "@/components/chat/file-mention-picker";
+import { DriveFileMentionPicker } from "@/components/chat/drive-file-mention-picker";
+import {
+  detectDriveTrigger,
+  insertDriveMention,
+} from "@/components/chat/drive-mention-trigger";
 import { AnalyticsDashboard } from "@/components/analytics/AnalyticsDashboard";
 import { apiClient } from "@/lib/api-client";
 import type { AgentSkillMetadata } from "@/lib/types";
@@ -25,6 +30,8 @@ export function ChatInput({ onSend, onStop, isLoading, isRunning, workspaceId, v
   const [attachedFile, setAttachedFile] = useState<{ id: string; name: string } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [mentionOpen, setMentionOpen] = useState(false);
+  const [driveMentionOpen, setDriveMentionOpen] = useState(false);
+  const [driveMentionQuery, setDriveMentionQuery] = useState("");
   const [commandOpen, setCommandOpen] = useState(false);
   const [analyticsOpen, setAnalyticsOpen] = useState(false);
   const [selectedIndex, setSelectedIndex] = useState(0);
@@ -210,8 +217,28 @@ export function ChatInput({ onSend, onStop, isLoading, isRunning, workspaceId, v
       } else if (!newVal.startsWith("/")) {
         setCommandOpen(false);
       }
+
+      // Detect trailing `#<query>` to trigger the Drive file mention picker.
+      // Uses whitespace-or-start boundary so `foo#bar` doesn't open it.
+      const driveQuery = detectDriveTrigger(newVal);
+      if (driveQuery !== null) {
+        setDriveMentionOpen(true);
+        setDriveMentionQuery(driveQuery);
+      } else if (driveMentionOpen) {
+        setDriveMentionOpen(false);
+      }
     },
-    [workspaceId],
+    [workspaceId, driveMentionOpen],
+  );
+
+  const handleDriveMentionSelect = useCallback(
+    ({ name, url }: { name: string; url: string }) => {
+      setValue((prev) => insertDriveMention(prev, `[${name}](${url})`));
+      setDriveMentionOpen(false);
+      setDriveMentionQuery("");
+      textareaRef.current?.focus();
+    },
+    [],
   );
 
   return (
@@ -282,8 +309,8 @@ export function ChatInput({ onSend, onStop, isLoading, isRunning, workspaceId, v
             onKeyDown={handleKeyDown}
             placeholder={
               workspaceId
-                ? "Ask a question... (type / for skills, @ for files)"
-                : "Ask a question... (type / for skills)"
+                ? "Ask a question... (type / for skills, @ for workspace files, # for Drive files)"
+                : "Ask a question... (type / for skills, # for Drive files)"
             }
             disabled={isLoading}
             rows={1}
@@ -320,6 +347,14 @@ export function ChatInput({ onSend, onStop, isLoading, isRunning, workspaceId, v
               </Button>
             </FileMentionPicker>
           )}
+          <div className="relative">
+            <DriveFileMentionPicker
+              open={driveMentionOpen}
+              query={driveMentionQuery}
+              onSelect={handleDriveMentionSelect}
+              onClose={() => setDriveMentionOpen(false)}
+            />
+          </div>
           <button
             onClick={() => fileInputRef.current?.click()}
             className={cn(

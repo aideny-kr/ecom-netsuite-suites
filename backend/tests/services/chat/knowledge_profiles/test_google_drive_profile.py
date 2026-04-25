@@ -60,3 +60,16 @@ def test_google_drive_profile_rag_partitions_empty():
     profiles = load_all_profiles()
     drive = next(p for p in profiles if p.profile_id == "google_drive")
     assert drive.rag_partitions == []
+
+
+def test_profile_mentions_markdown_link_handling():
+    """Agent must know how to handle user-inserted [Name](drive_url) mentions."""
+    profiles = load_all_profiles()
+    drive = next(p for p in profiles if p.profile_id == "google_drive")
+    frag = drive.prompt_fragment
+    # Subsection header for the user-mentions behaviour
+    assert "User-inserted Drive file references" in frag
+    # Guardrail: cite by name without echoing the URL in the reply
+    assert "do not echo" in frag.lower()
+    # Fallback: call drive_read_doc when chunks don't cover the mentioned file
+    assert "drive_read_doc" in frag
