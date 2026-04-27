@@ -80,6 +80,39 @@ async def test_retrieve_returns_empty_when_embedding_unavailable(db):
 
 
 @pytest.mark.asyncio
+async def test_retrieve_issues_iterative_scan_set_local(db):
+    """pgvector ≥ 0.8 needs `SET LOCAL hnsw.iterative_scan = strict_order` for
+    multi-tenant queries. Without it, the global HNSW index returns approximate
+    top-K BEFORE the tenant_id filter applies, so a tenant with few chunks can
+    get fewer (or zero) results when other tenants' chunks dominate the global
+    ANN neighborhood. This test pins the SET LOCAL is issued so a future refactor
+    can't silently regress recall for small tenants.
+    """
+    tenant = await create_test_tenant(db)
+    captured: list[str] = []
+
+    real_execute = db.execute
+
+    async def _spy(stmt, *args, **kwargs):
+        sql_text = str(stmt) if stmt is not None else ""
+        captured.append(sql_text)
+        return await real_execute(stmt, *args, **kwargs)
+
+    with (
+        patch(
+            "app.services.drive_rag.retriever.embed_query",
+            new=AsyncMock(return_value=[0.1] * 1024),
+        ),
+        patch.object(db, "execute", _spy),
+    ):
+        await retrieve_drive_chunks(db, tenant_id=tenant.id, query_text="q")
+
+    assert any("hnsw.iterative_scan" in s and "strict_order" in s for s in captured), (
+        f"expected SET LOCAL hnsw.iterative_scan = strict_order in {captured}"
+    )
+
+
+@pytest.mark.asyncio
 async def test_retrieve_skips_null_embedding(db):
     """Chunks without embeddings (graceful degradation mode) must be excluded."""
     tenant = await create_test_tenant(db)

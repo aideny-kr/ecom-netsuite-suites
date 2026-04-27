@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 
+import httpx
 import openai
 
 from app.core.config import settings
@@ -17,6 +18,14 @@ logger = logging.getLogger(__name__)
 
 # DocChunk.embedding is Vector(1024), so we request 1024-dim from OpenAI.
 _DOC_CHUNK_DIMENSIONS = 1024
+
+# Override the OpenAI SDK's 600s default — see CLAUDE.md Mistake #51 and the
+# anthropic_adapter pattern. read=60s is well above the typical embedding
+# latency (200-500ms) so it only trips on actual hangs. The orchestrator's
+# outer asyncio.wait_for(15s) is the user-facing cap; this is the inner
+# transport guard for paths without that wrapper (e.g. background indexer).
+_CLIENT_TIMEOUT = httpx.Timeout(connect=5.0, read=60.0, write=60.0, pool=60.0)
+_CLIENT_MAX_RETRIES = 2
 
 _openai_client: openai.AsyncOpenAI | None = None
 _voyage_client = None  # lazy import
@@ -27,7 +36,11 @@ def _get_openai_client() -> openai.AsyncOpenAI | None:
     if _openai_client is None:
         if not settings.OPENAI_EMBEDDING_API_KEY:
             return None
-        _openai_client = openai.AsyncOpenAI(api_key=settings.OPENAI_EMBEDDING_API_KEY)
+        _openai_client = openai.AsyncOpenAI(
+            api_key=settings.OPENAI_EMBEDDING_API_KEY,
+            timeout=_CLIENT_TIMEOUT,
+            max_retries=_CLIENT_MAX_RETRIES,
+        )
     return _openai_client
 
 

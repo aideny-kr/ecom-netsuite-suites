@@ -285,3 +285,50 @@ async def test_gather_drive_knowledge_timeout_returns_empty(monkeypatch):
             orchestrator._gather_drive_knowledge(db=None, tenant_id=uuid.uuid4(), query_text="anything"),
             timeout=orchestrator._GATHER_DRIVE_TIMEOUT_SECONDS,
         )
+
+
+@pytest.mark.asyncio
+async def test_gather_with_wait_for_captures_timeout_in_gather(monkeypatch):
+    """Mirrors the orchestrator's run_chat_turn pattern: asyncio.wait_for
+    around the drive task inside asyncio.gather(..., return_exceptions=True).
+    Regression catch: if the wait_for wrapper is removed from run_chat_turn,
+    the gather would surface a hung coroutine (or never return) instead of
+    capturing TimeoutError. The sibling task must remain unaffected."""
+    from app.services.chat import orchestrator
+
+    async def _hang(*args, **kwargs):
+        await asyncio.sleep(60)
+        return []
+
+    async def _fast_sibling() -> str:
+        return "ok"
+
+    monkeypatch.setattr(orchestrator, "retrieve_drive_chunks", _hang)
+
+    drive_task = asyncio.wait_for(
+        orchestrator._gather_drive_knowledge(db=None, tenant_id=uuid.uuid4(), query_text="anything"),
+        timeout=0.05,
+    )
+    results = await asyncio.gather(drive_task, _fast_sibling(), return_exceptions=True)
+
+    assert isinstance(results[0], asyncio.TimeoutError), (
+        "wait_for around _gather_drive_knowledge must surface TimeoutError "
+        "into asyncio.gather(return_exceptions=True), so the orchestrator's "
+        "isinstance(drive_result, Exception) branch can degrade gracefully."
+    )
+    assert results[1] == "ok"  # sibling task unaffected by drive timeout
+
+
+def test_orchestrator_exposes_gather_drive_timeout():
+    """Pin the constant well under the 300s chat budget.
+
+    Defends against a future drift to e.g. 120s that would still pass the
+    timeout test above but undermine the reason it exists.
+    """
+    from app.services.chat.orchestrator import _GATHER_DRIVE_TIMEOUT_SECONDS
+
+    assert 0 < _GATHER_DRIVE_TIMEOUT_SECONDS <= 30, (
+        f"_GATHER_DRIVE_TIMEOUT_SECONDS={_GATHER_DRIVE_TIMEOUT_SECONDS} is "
+        "outside the interactive-chat band. Keep it <=30s so a stalled "
+        "embedding provider can never eat the 300s chat budget."
+    )
