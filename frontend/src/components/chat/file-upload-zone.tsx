@@ -2,7 +2,6 @@
 
 import { useState, useRef, useCallback } from "react";
 import { Upload, FileSpreadsheet, X, Loader2 } from "lucide-react";
-import { apiClient } from "@/lib/api-client";
 
 interface UploadedFile {
   id: string;
@@ -16,7 +15,7 @@ interface FileUploadZoneProps {
   acceptedTypes?: string[];
 }
 
-export function FileUploadZone({ onFileUploaded, onFileRemoved, acceptedTypes = [".xlsx", ".csv"] }: FileUploadZoneProps) {
+export function FileUploadZone({ onFileUploaded, onFileRemoved, acceptedTypes = [".xlsx", ".csv", ".xls", ".json"] }: FileUploadZoneProps) {
   const [file, setFile] = useState<UploadedFile | null>(null);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -34,9 +33,14 @@ export function FileUploadZone({ onFileUploaded, onFileRemoved, acceptedTypes = 
     try {
       const formData = new FormData();
       formData.append("file", selected);
-      const response = await fetch("/api/v1/task-files/upload", {
+      const baseUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+      const headers: Record<string, string> = {};
+      const token = typeof window !== "undefined" ? localStorage.getItem("access_token") : null;
+      if (token) headers["Authorization"] = `Bearer ${token}`;
+      const response = await fetch(`${baseUrl}/api/v1/task-files/upload`, {
         method: "POST",
         body: formData,
+        headers,
         credentials: "include",
       });
       if (!response.ok) {
@@ -82,7 +86,7 @@ export function FileUploadZone({ onFileUploaded, onFileRemoved, acceptedTypes = 
         className="flex items-center gap-2 rounded-lg border border-dashed border-muted-foreground/30 px-4 py-3 text-[13px] text-muted-foreground transition-colors hover:border-primary/50 hover:text-primary disabled:opacity-50"
       >
         {uploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Upload className="h-4 w-4" />}
-        {uploading ? "Uploading..." : "Upload spreadsheet (.xlsx, .csv)"}
+        {uploading ? "Uploading..." : "Upload file (.xlsx, .csv, .json)"}
       </button>
       <input
         ref={inputRef}

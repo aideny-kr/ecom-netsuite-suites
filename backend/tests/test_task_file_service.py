@@ -20,6 +20,11 @@ def test_validate_csv_extension(svc):
     svc._validate_upload("data.csv", b"data")
 
 
+def test_validate_json_extension(svc):
+    """Valid .json file passes without error."""
+    svc._validate_upload("payload.json", b'{"ok": true}')
+
+
 def test_reject_exe_extension(svc):
     """Disallowed extension raises ValueError."""
     with pytest.raises(ValueError, match="not allowed"):
