@@ -38,10 +38,12 @@ _FINANCIAL_MODE_TAG = "FINANCIAL REPORT MODE"
 _RESOLVE_ENTITIES_TIMEOUT_SECONDS = 15
 
 # Wall-clock cap on per-turn Drive RAG retrieval (embed query + cosine search).
-# Embedding API typically completes in 200-500ms; the SDK enforces its own
-# timeout but a stalled provider must not hang the chat turn. On timeout the
-# gather-result branch treats it as failed retrieval (existing Exception path)
-# and the turn proceeds with empty drive_knowledge / drive_sources.
+# Embedding API typically completes in 200-500ms. The OpenAI SDK has its own
+# 60s read timeout (configured in app/services/chat/embeddings.py — see
+# CLAUDE.md Mistake #51), but this 15s outer cap is the user-facing budget:
+# a stalled provider must not hang the chat turn. On timeout the gather-result
+# branch treats it as failed retrieval (existing Exception path) and the turn
+# proceeds with empty drive_knowledge / drive_sources.
 _GATHER_DRIVE_TIMEOUT_SECONDS = 15.0
 
 
