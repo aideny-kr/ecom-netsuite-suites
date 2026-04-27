@@ -1,3 +1,4 @@
+import asyncio
 import uuid
 from unittest.mock import AsyncMock
 
@@ -262,3 +263,25 @@ def test_build_drive_mentions_hint_empty_returns_empty_string():
     from app.services.chat.orchestrator import _build_drive_mentions_hint
 
     assert _build_drive_mentions_hint([]) == ""
+
+
+@pytest.mark.asyncio
+async def test_gather_drive_knowledge_timeout_returns_empty(monkeypatch):
+    """A stalled embedding API must NOT hang the chat turn — the timeout
+    wrapper should produce a TimeoutError that the orchestrator's gather
+    loop already handles (via isinstance(result, Exception)) rather than
+    re-raising into the request handler."""
+    from app.services.chat import orchestrator
+
+    async def _hang(*args, **kwargs):
+        await asyncio.sleep(60)
+        return []
+
+    monkeypatch.setattr(orchestrator, "retrieve_drive_chunks", _hang)
+    monkeypatch.setattr(orchestrator, "_GATHER_DRIVE_TIMEOUT_SECONDS", 0.05)
+
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(
+            orchestrator._gather_drive_knowledge(db=None, tenant_id=uuid.uuid4(), query_text="anything"),
+            timeout=orchestrator._GATHER_DRIVE_TIMEOUT_SECONDS,
+        )
