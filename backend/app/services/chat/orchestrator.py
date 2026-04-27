@@ -37,6 +37,13 @@ _FINANCIAL_MODE_TAG = "FINANCIAL REPORT MODE"
 # chat budget; this cap lets us proceed without vernacular if the call stalls.
 _RESOLVE_ENTITIES_TIMEOUT_SECONDS = 15
 
+# Wall-clock cap on per-turn Drive RAG retrieval (embed query + cosine search).
+# Embedding API typically completes in 200-500ms; the SDK enforces its own
+# timeout but a stalled provider must not hang the chat turn. On timeout the
+# gather-result branch treats it as failed retrieval (existing Exception path)
+# and the turn proceeds with empty drive_knowledge / drive_sources.
+_GATHER_DRIVE_TIMEOUT_SECONDS = 15.0
+
 
 def _build_financial_mode_task(user_message: str) -> str:
     """Build task for financial report queries.
@@ -1570,7 +1577,10 @@ async def run_chat_turn(
                         _gather_keys.append("dk")
                     if _drive_active and context_need in (ContextNeed.DATA, ContextNeed.DOCS):
                         _gather_tasks.append(
-                            _gather_drive_knowledge(db=db, tenant_id=tenant_id, query_text=sanitized_input)
+                            asyncio.wait_for(
+                                _gather_drive_knowledge(db=db, tenant_id=tenant_id, query_text=sanitized_input),
+                                timeout=_GATHER_DRIVE_TIMEOUT_SECONDS,
+                            )
                         )
                         _gather_keys.append("drive")
                     if _need_patterns:
@@ -1642,7 +1652,17 @@ async def run_chat_turn(
                     # drive_knowledge (DATA, DOCS when google_drive profile is active)
                     drive_result = _results.get("drive")
                     if drive_result is not None:
-                        if isinstance(drive_result, Exception):
+                        if isinstance(drive_result, asyncio.TimeoutError):
+                            print(
+                                f"[ORCHESTRATOR] drive_knowledge timed out after "
+                                f"{_GATHER_DRIVE_TIMEOUT_SECONDS}s — proceeding without drive context",
+                                flush=True,
+                            )
+                            logger.warning(
+                                "unified_agent.drive_knowledge_timeout",
+                                extra={"timeout_seconds": _GATHER_DRIVE_TIMEOUT_SECONDS},
+                            )
+                        elif isinstance(drive_result, Exception):
                             logger.warning("unified_agent.drive_knowledge_failed", exc_info=drive_result)
                         elif drive_result.get("chunks"):
                             context["drive_knowledge"] = _build_drive_knowledge_block(drive_result["chunks"])
