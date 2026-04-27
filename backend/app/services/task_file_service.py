@@ -11,7 +11,7 @@ from app.models.task_file import TaskFile
 
 TASK_FILE_ROOT = Path(os.getenv("TASK_FILE_ROOT", "/data/task_files"))
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
-ALLOWED_EXTENSIONS = {".xlsx", ".csv", ".xls"}
+ALLOWED_EXTENSIONS = {".xlsx", ".csv", ".xls", ".json"}
 
 
 class TaskFileService:
@@ -81,6 +81,7 @@ class TaskFileService:
     def _validate_upload(self, filename: str, content: bytes) -> None:
         ext = Path(filename).suffix.lower()
         if ext not in ALLOWED_EXTENSIONS:
-            raise ValueError(f"File type '{ext}' not allowed. Accepted: {ALLOWED_EXTENSIONS}")
+            accepted = ", ".join(sorted(ALLOWED_EXTENSIONS))
+            raise ValueError(f"File type '{ext}' not allowed. Accepted: {accepted}")
         if len(content) > MAX_FILE_SIZE:
             raise ValueError(f"File size {len(content)} exceeds {MAX_FILE_SIZE} byte limit")

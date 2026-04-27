@@ -28,6 +28,7 @@ export function ChatInput({ onSend, onStop, isLoading, isRunning, workspaceId, v
   const isTerminal = variant === "terminal";
   const [value, setValue] = useState("");
   const [attachedFile, setAttachedFile] = useState<{ id: string; name: string } | null>(null);
+  const [uploadError, setUploadError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [mentionOpen, setMentionOpen] = useState(false);
   const [driveMentionOpen, setDriveMentionOpen] = useState(false);
@@ -93,6 +94,14 @@ export function ChatInput({ onSend, onStop, isLoading, isRunning, workspaceId, v
   );
 
   const handleFileUpload = useCallback(async (file: File) => {
+    setUploadError(null);
+    setAttachedFile(null);
+    const ext = `.${file.name.split(".").pop()?.toLowerCase()}`;
+    const accepted = [".xlsx", ".csv", ".xls", ".json"];
+    if (!accepted.includes(ext)) {
+      setUploadError("Attach an Excel, CSV, or JSON file.");
+      return;
+    }
     const formData = new FormData();
     formData.append("file", file);
     const baseUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
@@ -109,9 +118,12 @@ export function ChatInput({ onSend, onStop, isLoading, isRunning, workspaceId, v
       if (res.ok) {
         const data = await res.json();
         setAttachedFile({ id: data.id, name: data.filename });
+      } else {
+        const body = await res.json().catch(() => ({}));
+        setUploadError(body.detail || "Upload failed.");
       }
-    } catch {
-      // Silently fail — user can retry
+    } catch (err) {
+      setUploadError(err instanceof Error ? err.message : "Upload failed.");
     }
   }, []);
 
@@ -121,6 +133,7 @@ export function ChatInput({ onSend, onStop, isLoading, isRunning, workspaceId, v
     onSend(trimmed, attachedFile?.id || undefined);
     setValue("");
     setAttachedFile(null);
+    setUploadError(null);
     setCommandOpen(false);
   }, [value, isLoading, onSend, attachedFile]);
 
@@ -284,10 +297,11 @@ export function ChatInput({ onSend, onStop, isLoading, isRunning, workspaceId, v
             </button>
           </div>
         )}
+        {uploadError && <p className="mb-1 text-[11px] text-red-500">{uploadError}</p>}
         <input
           ref={fileInputRef}
           type="file"
-          accept=".xlsx,.csv,.xls"
+          accept=".xlsx,.csv,.xls,.json"
           className="hidden"
           onChange={(e) => {
             const file = e.target.files?.[0];

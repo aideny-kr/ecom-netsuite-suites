@@ -18,6 +18,7 @@ from app.core.config import settings
 from app.core.database import get_db
 from app.core.dependencies import get_current_user, require_feature, require_permission
 from app.models.chat import ChatMessage, ChatSession
+from app.models.task_file import TaskFile
 from app.models.user import User
 from app.services import audit_service
 from app.services.chat.orchestrator import run_chat_turn
@@ -44,6 +45,7 @@ class UpdateSessionRequest(BaseModel):
 class SendMessageRequest(BaseModel):
     content: str = Field(..., max_length=4000)
     agent_id: str | None = Field(default=None, description="Pin to a specific agent (skip routing)")
+    file_id: str | None = Field(default=None, description="Uploaded task file ID attached to this message")
     write_confirm: dict | None = Field(
         default=None,
         description="Confirm or reject a pending write. Keys: action ('approve'|'reject'), confirmation_id (message ID)",
@@ -162,6 +164,21 @@ def _serialize_message(msg: ChatMessage) -> dict:
     return result
 
 
+async def _validate_task_file_access(db: AsyncSession, tenant_id: uuid.UUID, file_id: str | None) -> str | None:
+    """Validate an attached task file belongs to this tenant before the run starts."""
+    if not file_id:
+        return None
+    try:
+        fid = uuid.UUID(file_id)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid file ID")
+
+    result = await db.execute(select(TaskFile.id).where(TaskFile.id == fid, TaskFile.tenant_id == tenant_id))
+    if result.scalar_one_or_none() is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="File not found")
+    return str(fid)
+
+
 # --- Endpoints ---
 
 
@@ -263,6 +280,8 @@ async def send_message(
     if not session:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
 
+    attached_file_id = await _validate_task_file_access(db, user.tenant_id, body.file_id)
+
     # Stamp agent_id on session if this is the first agent-pinned message
     if body.agent_id and not session.agent_id:
         session.agent_id = body.agent_id
@@ -347,6 +366,7 @@ async def send_message(
             user_timezone=x_timezone,
             agent_id=body.agent_id,
             write_confirm=body.write_confirm,
+            attached_file_id=attached_file_id,
         )
     )
 
@@ -368,6 +388,7 @@ async def _run_chat_pipeline(
     user_timezone: str | None,
     agent_id: str | None,
     write_confirm: dict | None = None,
+    attached_file_id: str | None = None,
 ) -> None:
     """Inner pipeline coroutine — wrapped by asyncio.wait_for in _run_chat_background."""
     from app.core.database import async_session_factory
@@ -389,6 +410,7 @@ async def _run_chat_pipeline(
             agent_id=agent_id,
             run_id=run_id,
             write_confirm=write_confirm,
+            attached_file_id=attached_file_id,
         ):
             rm.write_event(run_id, chunk)
 
@@ -405,6 +427,7 @@ async def _run_chat_background(
     user_timezone: str | None,
     agent_id: str | None,
     write_confirm: dict | None = None,
+    attached_file_id: str | None = None,
 ) -> None:
     """Run the chat pipeline in background, writing events to Redis."""
     rm = get_run_manager()
@@ -422,6 +445,7 @@ async def _run_chat_background(
                 user_timezone=user_timezone,
                 agent_id=agent_id,
                 write_confirm=write_confirm,
+                attached_file_id=attached_file_id,
             ),
             timeout=_BACKGROUND_TASK_TIMEOUT,
         )
@@ -478,6 +502,7 @@ async def _send_message_inline_sse(
                     wizard_step=wizard_step,
                     user_timezone=x_timezone,
                     agent_id=body.agent_id,
+                    attached_file_id=body.file_id,
                 ):
                     await queue.put(chunk)
             except ValueError as exc:
