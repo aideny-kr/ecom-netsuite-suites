@@ -43,7 +43,7 @@ class UpdateSessionRequest(BaseModel):
 
 
 class SendMessageRequest(BaseModel):
-    content: str = Field(..., max_length=4000)
+    content: str = Field(..., max_length=settings.CHAT_MAX_INPUT_CHARS)
     agent_id: str | None = Field(default=None, description="Pin to a specific agent (skip routing)")
     file_id: str | None = Field(default=None, description="Uploaded task file ID attached to this message")
     write_confirm: dict | None = Field(
@@ -741,4 +741,5 @@ async def chat_health():
         "anthropic_configured": bool(settings.ANTHROPIC_API_KEY),
         "voyage_configured": bool(settings.VOYAGE_API_KEY),
         "model": settings.ANTHROPIC_MODEL,
+        "max_input_chars": settings.CHAT_MAX_INPUT_CHARS,
     }

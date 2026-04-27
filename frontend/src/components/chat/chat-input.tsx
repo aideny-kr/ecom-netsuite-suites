@@ -15,6 +15,9 @@ import { AnalyticsDashboard } from "@/components/analytics/AnalyticsDashboard";
 import { apiClient } from "@/lib/api-client";
 import type { AgentSkillMetadata } from "@/lib/types";
 
+const DEFAULT_CHAT_INPUT_MAX_CHARS = 32000;
+const CHAT_INPUT_WARNING_RATIO = 0.9;
+
 interface ChatInputProps {
   onSend: (content: string, fileId?: string) => void;
   onStop?: () => void;
@@ -22,6 +25,10 @@ interface ChatInputProps {
   isRunning?: boolean;
   workspaceId?: string | null;
   variant?: "default" | "terminal";
+}
+
+interface ChatHealth {
+  max_input_chars?: number;
 }
 
 export function ChatInput({ onSend, onStop, isLoading, isRunning, workspaceId, variant }: ChatInputProps) {
@@ -44,6 +51,24 @@ export function ChatInput({ onSend, onStop, isLoading, isRunning, workspaceId, v
     queryFn: () => apiClient.get<AgentSkillMetadata[]>("/api/v1/skills/catalog"),
     staleTime: 5 * 60 * 1000, // Cache for 5 minutes
   });
+
+  const { data: chatHealth } = useQuery<ChatHealth>({
+    queryKey: ["chat-health"],
+    queryFn: () => apiClient.get<ChatHealth>("/api/v1/chat/health"),
+    staleTime: 5 * 60 * 1000,
+  });
+
+  const maxInputChars =
+    typeof chatHealth?.max_input_chars === "number" && chatHealth.max_input_chars > 0
+      ? chatHealth.max_input_chars
+      : DEFAULT_CHAT_INPUT_MAX_CHARS;
+  const warningThreshold = Math.floor(maxInputChars * CHAT_INPUT_WARNING_RATIO);
+  const isNearLimit = value.length >= warningThreshold && value.length < maxInputChars;
+  const isAtLimit = value.length >= maxInputChars;
+  const isOverLimit = value.length > maxInputChars;
+  const remainingChars = maxInputChars - value.length;
+  const limitDeltaLabel = `${Math.abs(remainingChars).toLocaleString()} char${Math.abs(remainingChars) === 1 ? "" : "s"}`;
+  const canSend = Boolean(value.trim()) && !isLoading && !isOverLimit;
 
   // Build command list: agent skills + built-in commands
   const commands = useMemo(() => {
@@ -129,13 +154,13 @@ export function ChatInput({ onSend, onStop, isLoading, isRunning, workspaceId, v
 
   const handleSend = useCallback(() => {
     const trimmed = value.trim();
-    if (!trimmed || isLoading) return;
+    if (!trimmed || isLoading || value.length > maxInputChars) return;
     onSend(trimmed, attachedFile?.id || undefined);
     setValue("");
     setAttachedFile(null);
     setUploadError(null);
     setCommandOpen(false);
-  }, [value, isLoading, onSend, attachedFile]);
+  }, [value, isLoading, maxInputChars, onSend, attachedFile]);
 
   // Track when a command was just selected to prevent popover from reopening
   const commandJustSelected = useRef(false);
@@ -208,7 +233,7 @@ export function ChatInput({ onSend, onStop, isLoading, isRunning, workspaceId, v
 
   const handleChange = useCallback(
     (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-      const newVal = e.target.value.slice(0, 4000);
+      const newVal = e.target.value;
       setValue(newVal);
 
       // Detect @ at end of input (or after space) to trigger mention picker
@@ -394,7 +419,7 @@ export function ChatInput({ onSend, onStop, isLoading, isRunning, workspaceId, v
           ) : isTerminal ? (
             <button
               onClick={handleSend}
-              disabled={!value.trim() || isLoading}
+              disabled={!canSend}
               aria-label="Send message"
               title="Send message"
               className="w-10 h-10 flex items-center justify-center bg-[var(--chat-accent)] text-white hover:bg-[var(--chat-accent-hover)] transition-all active:scale-95 disabled:opacity-50"
@@ -406,7 +431,7 @@ export function ChatInput({ onSend, onStop, isLoading, isRunning, workspaceId, v
               size="icon"
               className="h-8 w-8 shrink-0 rounded-xl"
               onClick={handleSend}
-              disabled={!value.trim() || isLoading}
+              disabled={!canSend}
               aria-label="Send message"
               title="Send message"
             >
@@ -479,14 +504,28 @@ export function ChatInput({ onSend, onStop, isLoading, isRunning, workspaceId, v
           <div className="h-[2px] bg-[var(--chat-surface-mid)] transition-colors duration-500 group-focus-within:bg-[var(--chat-accent)]" />
         )}
         {!isTerminal && (
-          <p className="mt-1.5 text-right text-[11px] tabular-nums text-muted-foreground">
-            {value.length}/4000
-          </p>
+          <div
+            className={cn(
+              "mt-1.5 flex items-center justify-end gap-3 text-[11px] tabular-nums",
+              isAtLimit ? "text-red-500" : isNearLimit ? "text-amber-500" : "text-muted-foreground",
+            )}
+          >
+            {isOverLimit && <span>Reduce by {limitDeltaLabel}</span>}
+            {!isOverLimit && isNearLimit && <span>{limitDeltaLabel} left</span>}
+            <span>
+              {value.length.toLocaleString()}/{maxInputChars.toLocaleString()}
+            </span>
+          </div>
         )}
         {isTerminal && (
           <div className="flex justify-between items-center mt-3">
-            <span className="text-[9px] font-label text-muted-foreground uppercase tracking-widest">
-              Tokens: {value.length}
+            <span
+              className={cn(
+                "text-[9px] font-label uppercase tracking-widest",
+                isAtLimit ? "text-red-500" : isNearLimit ? "text-amber-500" : "text-muted-foreground",
+              )}
+            >
+              Chars: {value.length.toLocaleString()}/{maxInputChars.toLocaleString()}
             </span>
             <div className="flex gap-4">
               <button className="text-[9px] font-label text-muted-foreground hover:text-[var(--chat-accent)] uppercase tracking-widest">Clear History</button>
