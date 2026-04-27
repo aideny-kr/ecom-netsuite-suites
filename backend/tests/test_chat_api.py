@@ -5,10 +5,30 @@ from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 import pytest
+from pydantic import ValidationError
 from sqlalchemy import text
 
+from app.core.config import settings
 from app.models.chat import ChatMessage, ChatSession
 from app.models.task_file import TaskFile
+
+
+def test_send_message_request_accepts_configured_chat_input_limit():
+    """Chat message validation accepts the configured 32K input cap."""
+    from app.api.v1.chat import SendMessageRequest
+
+    req = SendMessageRequest(content="x" * settings.CHAT_MAX_INPUT_CHARS)
+    assert len(req.content) == settings.CHAT_MAX_INPUT_CHARS
+
+    with pytest.raises(ValidationError):
+        SendMessageRequest(content="x" * (settings.CHAT_MAX_INPUT_CHARS + 1))
+
+
+@pytest.mark.asyncio
+async def test_chat_health_exposes_input_limit(client):
+    resp = await client.get("/api/v1/chat/health")
+    assert resp.status_code == 200
+    assert resp.json()["max_input_chars"] == settings.CHAT_MAX_INPUT_CHARS
 
 
 @pytest.mark.asyncio
