@@ -1,6 +1,5 @@
 from pathlib import Path
 
-
 DOCKERFILE = Path(__file__).resolve().parents[1] / "Dockerfile.prod"
 
 
