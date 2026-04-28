@@ -5,9 +5,30 @@ from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 import pytest
+from pydantic import ValidationError
 from sqlalchemy import text
 
+from app.core.config import settings
 from app.models.chat import ChatMessage, ChatSession
+from app.models.task_file import TaskFile
+
+
+def test_send_message_request_accepts_configured_chat_input_limit():
+    """Chat message validation accepts the configured 32K input cap."""
+    from app.api.v1.chat import SendMessageRequest
+
+    req = SendMessageRequest(content="x" * settings.CHAT_MAX_INPUT_CHARS)
+    assert len(req.content) == settings.CHAT_MAX_INPUT_CHARS
+
+    with pytest.raises(ValidationError):
+        SendMessageRequest(content="x" * (settings.CHAT_MAX_INPUT_CHARS + 1))
+
+
+@pytest.mark.asyncio
+async def test_chat_health_exposes_input_limit(client):
+    resp = await client.get("/api/v1/chat/health")
+    assert resp.status_code == 200
+    assert resp.json()["max_input_chars"] == settings.CHAT_MAX_INPUT_CHARS
 
 
 @pytest.mark.asyncio
@@ -142,6 +163,55 @@ async def test_send_message(client, db, admin_user):
     # SSE streaming fallback returns 200
     assert resp.status_code == 200
     assert resp.headers["content-type"].startswith("text/event-stream")
+
+
+@pytest.mark.asyncio
+async def test_send_message_with_file_id_passes_attachment_to_orchestrator(client, db, admin_user, tmp_path):
+    """POST /messages preserves file_id so uploaded files reach the agent pipeline."""
+    user, headers = admin_user
+    await db.execute(text(f"SET LOCAL app.current_tenant_id = '{user.tenant_id}'"))
+
+    create_resp = await client.post("/api/v1/chat/sessions", json={"title": "Attachment Test"}, headers=headers)
+    session_id = create_resp.json()["id"]
+
+    file_id = uuid.uuid4()
+    storage_path = tmp_path / "sample.json"
+    storage_path.write_text('{"sku": "ABC", "price": 12.5}')
+    db.add(
+        TaskFile(
+            id=file_id,
+            tenant_id=user.tenant_id,
+            user_id=user.id,
+            filename="sample.json",
+            file_type="json",
+            file_size=storage_path.stat().st_size,
+            storage_path=str(storage_path),
+            direction="input",
+        )
+    )
+    await db.flush()
+
+    captured: dict = {}
+
+    async def mock_generator(**kwargs):
+        captured.update(kwargs)
+        yield {"type": "text", "content": "Done"}
+
+    mock_rm = MagicMock()
+    mock_rm.available = False
+
+    with (
+        patch("app.api.v1.chat.run_chat_turn", side_effect=mock_generator),
+        patch("app.api.v1.chat.get_run_manager", return_value=mock_rm),
+    ):
+        resp = await client.post(
+            f"/api/v1/chat/sessions/{session_id}/messages",
+            json={"content": "Analyze this file", "file_id": str(file_id)},
+            headers=headers,
+        )
+
+    assert resp.status_code == 200
+    assert captured["attached_file_id"] == str(file_id)
 
 
 @pytest.mark.asyncio

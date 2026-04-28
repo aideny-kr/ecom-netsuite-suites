@@ -949,6 +949,100 @@ def _sanitize_for_prompt(text: str) -> str:
     return cleaned[:500]
 
 
+def _truncate_attachment_preview(text: str, limit: int = 12000) -> str:
+    if len(text) <= limit:
+        return text
+    return text[:limit] + f"\n...[truncated {len(text) - limit} chars]"
+
+
+def _decode_text_attachment(content: bytes) -> str:
+    return content.decode("utf-8-sig", errors="replace")
+
+
+def _encode_attachment_preview_for_prompt(text: str) -> str:
+    """Encode file text as JSON so uploaded content cannot close prompt tags."""
+    encoded = json.dumps(text, ensure_ascii=False)
+    return encoded.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
+
+
+def _preview_xlsx_attachment(content: bytes) -> str:
+    import io
+
+    from openpyxl import load_workbook
+
+    workbook = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+    sheet = workbook.active
+    rows: list[str] = []
+    for row_index, row in enumerate(sheet.iter_rows(max_row=20, max_col=12, values_only=True), start=1):
+        values = ["" if value is None else str(value) for value in row]
+        rows.append(f"{row_index}: " + " | ".join(values))
+    sheet_names = ", ".join(workbook.sheetnames)
+    return f"Workbook sheets: {sheet_names}\nActive sheet preview:\n" + "\n".join(rows)
+
+
+async def _build_attached_file_context(
+    db: AsyncSession,
+    tenant_id: uuid.UUID,
+    attached_file_id: str | None,
+) -> str:
+    """Build a bounded prompt preview for an uploaded chat attachment."""
+    if not attached_file_id:
+        return ""
+
+    from app.services.task_file_service import TaskFileService
+
+    try:
+        task_file, content = await TaskFileService().get_file(db, tenant_id, uuid.UUID(attached_file_id))
+    except (ValueError, OSError):
+        logger.warning("attached_file.load_failed", exc_info=True)
+        return (
+            "<attached_file>\n"
+            f"file_id: {attached_file_id}\n"
+            "error: The attached file could not be loaded.\n"
+            "</attached_file>"
+        )
+
+    file_type = (task_file.file_type or "").lower()
+    preview = ""
+    try:
+        if file_type in {"csv", "json"}:
+            text = _decode_text_attachment(content)
+            if file_type == "json":
+                try:
+                    preview = json.dumps(json.loads(text), indent=2, ensure_ascii=False)
+                except json.JSONDecodeError:
+                    preview = text
+            else:
+                preview = text
+        elif file_type == "xlsx":
+            preview = _preview_xlsx_attachment(content)
+        else:
+            preview = (
+                "Binary Excel file attached. Use file-aware tools with the file_id below when the user's task "
+                "requires processing the full workbook."
+            )
+    except Exception:
+        logger.warning("attached_file.preview_failed", exc_info=True)
+        preview = "Preview unavailable. Use file-aware tools with the file_id below."
+
+    preview = _truncate_attachment_preview(preview)
+    safe_preview = _encode_attachment_preview_for_prompt(preview)
+    return (
+        "<attached_file>\n"
+        f"file_id: {attached_file_id}\n"
+        f"filename: {_sanitize_for_prompt(task_file.filename)}\n"
+        f"file_type: {file_type}\n"
+        f"size_bytes: {task_file.file_size}\n"
+        "Instructions: This is user-provided input for the current turn. "
+        "If you call a file-aware tool such as pricing.convert, pass this exact file_id. "
+        "For CSV, JSON, and XLSX questions, parse the JSON-encoded preview string below when it is sufficient.\n"
+        "<preview>\n"
+        f"{safe_preview}\n"
+        "</preview>\n"
+        "</attached_file>"
+    )
+
+
 def _is_valid_uuid(val: str) -> bool:
     """Check if a string is a valid UUID."""
     try:
@@ -1039,6 +1133,7 @@ async def run_chat_turn(
     agent_id: str | None = None,
     run_id: str | None = None,
     write_confirm: dict | None = None,
+    attached_file_id: str | None = None,
 ) -> AsyncGenerator[dict, None]:
     """Execute an agentic chat turn with Claude's native tool use.
 
@@ -1233,6 +1328,7 @@ async def run_chat_turn(
 
     # ── Pre-loop: RAG retrieval for doc context (skip for onboarding) ──
     sanitized_input = sanitize_user_input(user_message)
+    attached_file_context = await _build_attached_file_context(db, tenant_id, attached_file_id)
     rag_context = ""
     citations: list[dict] = []
 
@@ -1272,6 +1368,8 @@ async def run_chat_turn(
     user_content = f"{INPUT_SANITIZATION_PREFIX}\n\n"
     if rag_context:
         user_content += f"<context>\n{rag_context}\n</context>\n\n"
+    if attached_file_context:
+        user_content += f"{attached_file_context}\n\n"
     user_content += f"User question: {sanitized_input}"
     messages.append({"role": "user", "content": user_content})
 
@@ -1899,6 +1997,9 @@ async def run_chat_turn(
                         f"is available via the reference_previous_result tool. "
                         f"Use it instead of re-querying NetSuite or BigQuery."
                     )
+
+                if attached_file_context:
+                    unified_task = f"{unified_task}\n\n{attached_file_context}"
 
                 streamed_text_parts: list[str] = []
                 agent_result = None

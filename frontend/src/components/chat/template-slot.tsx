@@ -59,13 +59,13 @@ export function TemplateSlot({ template, onUpload, onRemove }: TemplateSlotProps
           disabled={uploading}
           className="text-[11px] text-blue-600 hover:text-blue-800 disabled:opacity-50"
         >
-          {uploading ? "Uploading..." : "Upload your spreadsheet (optional)"}
+          {uploading ? "Uploading..." : "Upload your file (optional)"}
         </button>
       )}
       <input
         ref={inputRef}
         type="file"
-        accept=".xlsx,.csv,.xls"
+        accept=".xlsx,.csv,.xls,.json"
         className="hidden"
         onChange={(e) => e.target.files?.[0] && handleFile(e.target.files[0])}
       />
