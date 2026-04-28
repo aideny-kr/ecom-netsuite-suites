@@ -29,9 +29,7 @@ def test_prod_dockerfile_prepares_celerybeat_data_dir_before_appuser():
     appuser_index = instructions.index("USER appuser")
     root_instructions = instructions[:appuser_index]
 
-    data_dir_setup = " ".join(
-        instruction for instruction in root_instructions if instruction.startswith("RUN ")
-    )
+    data_dir_setup = " ".join(instruction for instruction in root_instructions if instruction.startswith("RUN "))
 
     assert "mkdir -p /data" in data_dir_setup
     assert "chown -R appuser:appuser /data" in data_dir_setup
