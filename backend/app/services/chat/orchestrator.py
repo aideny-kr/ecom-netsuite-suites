@@ -2075,8 +2075,20 @@ async def run_chat_turn(
                         try_force_tool_choice,
                     )
 
-                    plan_mode_augmentation = maybe_augment_for_plan_mode(
-                        query=sanitized_input, plan_mode_enabled=plan_mode_enabled
+                    # On resume turns (`plan_mode_resume_source` is set) we
+                    # MUST skip the clarify augmentation. `sanitized_input`
+                    # is still the original financial query, so
+                    # `is_financial_ambiguous` would re-fire and the
+                    # augmentation block would tell the model "your only
+                    # first action is `clarify`" — but the resume tool
+                    # filter has stripped `clarify` from the inventory.
+                    # Contradictory instructions ⇒ undefined behavior.
+                    plan_mode_augmentation = (
+                        maybe_augment_for_plan_mode(
+                            query=sanitized_input, plan_mode_enabled=plan_mode_enabled
+                        )
+                        if plan_mode_resume_source is None
+                        else None
                     )
 
                     # Always use UnifiedAgent — no routing fork
@@ -2521,6 +2533,12 @@ async def run_chat_turn(
                 result_msg["query_importance"] = importance_tier.value
                 if _selected_agent_id:
                     result_msg["agent_id"] = _selected_agent_id
+                # Mirror `assistant_msg.structured_output` into the SSE
+                # payload so the frontend can render clarification /
+                # write-confirmation cards immediately on the terminal
+                # `message` event without waiting for a session refetch.
+                if assistant_msg.structured_output:
+                    result_msg["structured_output"] = assistant_msg.structured_output
                 yield {"type": "message", "message": result_msg}
                 return
 
@@ -2806,5 +2824,11 @@ async def run_chat_turn(
     if hasattr(assistant_msg, "created_at") and assistant_msg.created_at:
         result_msg["created_at"] = assistant_msg.created_at.isoformat()
     result_msg["query_importance"] = importance_tier.value
+    # Mirror `assistant_msg.structured_output` into the SSE payload so the
+    # frontend can render clarification / write-confirmation cards
+    # immediately on the terminal `message` event without waiting for a
+    # session refetch.
+    if assistant_msg.structured_output:
+        result_msg["structured_output"] = assistant_msg.structured_output
 
     yield {"type": "message", "message": result_msg}

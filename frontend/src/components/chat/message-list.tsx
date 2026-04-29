@@ -1201,6 +1201,15 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
   }
 
   if (structuredOutput?.type === "clarification") {
+    const clarification = structuredOutput as unknown as ClarificationData;
+    // Expiry is computed at render time only — no live countdown. If the
+    // user is sitting on a fresh card and time passes, the UI won't
+    // auto-disable until the next render. Acceptable for v1; real-time
+    // countdown is out of scope. Backend returns 410 on expired-card
+    // resume, so this matches the server-side gate.
+    const expired = clarification.expires_at
+      ? new Date(clarification.expires_at).getTime() < Date.now()
+      : false;
     return (
       <div className="flex min-w-0 justify-start gap-3">
         {isTerminal ? (
@@ -1219,7 +1228,8 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
             </div>
           )}
           <ClarificationCard
-            data={structuredOutput as unknown as ClarificationData}
+            data={clarification}
+            expired={expired}
             onChoose={(optionId) => onClarificationChoose?.(message.id, optionId)}
           />
         </div>

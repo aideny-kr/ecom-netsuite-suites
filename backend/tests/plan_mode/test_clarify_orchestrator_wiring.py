@@ -301,3 +301,55 @@ async def test_clarify_intercept_includes_rest_connections(monkeypatch):
     sources = {o["source"] for o in payload["options"]}
     assert "netsuite" in sources
     assert "bigquery" in sources
+
+
+def test_terminal_message_event_includes_structured_output():
+    """Codex P2 Bug 2b: the terminal SSE `message` event MUST include
+    `structured_output` when `assistant_msg.structured_output` is set.
+
+    The DB row has `structured_output` (persisted via
+    `assistant_msg.structured_output = _persisted_output`), but if the SSE
+    payload (`result_msg`) omits it, the frontend never sees the
+    clarification card during streaming and depends on a refetch to
+    discover it. Combined with the missing `clarification_required` parser
+    in chat-stream.ts, this means the card may not appear at all.
+
+    Source-level invariant: BOTH terminal message blocks in
+    `run_chat_turn()` (the UnifiedAgent path and the legacy single-agent
+    path) must copy `assistant_msg.structured_output` into `result_msg`
+    when present.
+    """
+    import inspect
+
+    from app.services.chat import orchestrator
+
+    source = inspect.getsource(orchestrator)
+
+    # The `result_msg = {` literal appears at both terminal-message
+    # construction points. We look at every occurrence and require that the
+    # immediately-following block reads `assistant_msg.structured_output`
+    # and assigns it onto `result_msg`.
+    # We accept either an explicit `if assistant_msg.structured_output:`
+    # guard or the same idiom inline — but the substring must be present
+    # within a window of a few hundred chars after each `result_msg = {`.
+    indices = []
+    start = 0
+    while True:
+        idx = source.find("result_msg = {", start)
+        if idx == -1:
+            break
+        indices.append(idx)
+        start = idx + 1
+
+    assert len(indices) >= 2, (
+        f"expected ≥2 `result_msg = {{` constructions in orchestrator; got {len(indices)}"
+    )
+
+    for idx in indices:
+        window = source[idx : idx + 1200]
+        assert "assistant_msg.structured_output" in window, (
+            "Terminal `message` SSE payload MUST include `structured_output` "
+            "when present on the persisted assistant message. Otherwise the "
+            "frontend never sees the clarification card during streaming. "
+            f"Failed at offset {idx}; window:\n{window}"
+        )
