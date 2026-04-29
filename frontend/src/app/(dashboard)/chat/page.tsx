@@ -450,6 +450,31 @@ export default function ChatPage() {
     [handleSend],
   );
 
+  const handleClarificationChoose = useCallback(
+    async (messageId: string, optionId: "A" | "B" | "C") => {
+      const sessionId = activeSessionId;
+      if (!sessionId) return;
+      // Plan-mode resume turn: SSE reconnect handles the streaming response.
+      // We just POST the choice; do not optimistically clear streaming state
+      // because the resume run will start its own stream.
+      try {
+        await apiClient.post(`/api/v1/chat/sessions/${sessionId}/messages`, {
+          content: `Picked option ${optionId}`,
+          plan_mode_choice: {
+            action: "approve",
+            confirmation_id: messageId,
+            option_id: optionId,
+          },
+        });
+        await queryClient.invalidateQueries({ queryKey: ["chat-session", sessionId] });
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : "Failed to submit clarification.";
+        setError(message);
+      }
+    },
+    [activeSessionId, queryClient],
+  );
+
   const clearStreamingState = useCallback(() => {
     // Abort any in-flight SSE connection so old handlers stop firing
     if (abortRef.current) {
@@ -562,6 +587,7 @@ export default function ChatPage() {
             onRemoveTemplate={() => setTemplateFile(null)}
             onMentionClick={handleMentionClick}
             onWriteConfirm={handleWriteConfirm}
+            onClarificationChoose={handleClarificationChoose}
             onImportanceOverride={(messageId, newTier) => {
               queryClient.setQueryData<ChatSessionDetail>(
                 ["chat-session", activeSessionId],
