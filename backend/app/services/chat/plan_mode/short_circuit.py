@@ -18,6 +18,7 @@ import logging
 import uuid as _uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Any
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -25,6 +26,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.chat import ChatMessage
 from app.models.chat_disclosure_event import ChatDisclosureEvent
 from app.services.chat.mutation_guard import verify_confirmation_token
+from app.services.chat.plan_mode.source_resolver import PROVIDER_TO_CANONICAL_SOURCE
+from app.services.chat.tools import parse_external_tool_name
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +97,40 @@ async def handle_plan_mode_choice(
             status_code=409,
             error=f"already_resolved (status={so.get('status')})",
         )
+
+    # Enforce expires_at — fail-closed.
+    #
+    # The mint path (clarify_intercept.py) stamps a 5-minute expiry. The
+    # HMAC token contains no timestamp, so without this check a stale
+    # pending card from hours/days ago could be replayed by anyone who can
+    # hit the endpoint. Treat missing or unparseable values as expired so a
+    # malformed structured_output cannot bypass the gate. (codex P2)
+    expires_raw = so.get("expires_at")
+    expired = False
+    if not expires_raw:
+        logger.warning(
+            "[PLAN_MODE] clarification %s missing expires_at — treating as expired",
+            confirmation_id,
+        )
+        expired = True
+    else:
+        try:
+            expires_dt = datetime.fromisoformat(str(expires_raw))
+            # Defensive: assume UTC if the stamp is naive (mint path always
+            # writes tz-aware ISO-8601, but be robust to upstream changes).
+            if expires_dt.tzinfo is None:
+                expires_dt = expires_dt.replace(tzinfo=timezone.utc)
+            if datetime.now(timezone.utc) >= expires_dt:
+                expired = True
+        except (ValueError, TypeError):
+            logger.warning(
+                "[PLAN_MODE] clarification %s has unparseable expires_at=%r — treating as expired",
+                confirmation_id,
+                expires_raw,
+            )
+            expired = True
+    if expired:
+        return PlanModeChoiceError(status_code=410, error="expired")
 
     # Verify HMAC token (event_type-bound to plan_mode_choice)
     payload_for_hmac = json.dumps(
@@ -174,8 +211,15 @@ async def handle_plan_mode_choice(
 
 # Tool name prefixes per source. Cross-source tools (see below) are
 # always included on resume turns regardless of chosen source.
+#
+# NOTE: ``ext__`` is intentionally NOT in any prefix list. ``ext__<uuid>__*``
+# is the format for EVERY external MCP connector (NetSuite, Shopify, Stripe,
+# BigQuery), so a prefix-only match would either keep them all (when chosen
+# is the connector that happens to be aliased) or drop them all. The filter
+# resolves each ``ext__`` tool's UUID to its connector provider via
+# ``parse_external_tool_name`` + ``active_connectors`` (codex P2).
 _SOURCE_TOOL_PREFIXES: dict[str, tuple[str, ...]] = {
-    "netsuite": ("netsuite_", "ext__"),  # ext__ is MCP NetSuite
+    "netsuite": ("netsuite_",),
     "bigquery": ("bigquery_",),
     "shopify": ("shopify_",),
     "stripe": ("stripe_",),
@@ -194,20 +238,73 @@ _CROSS_SOURCE_TOOLS: frozenset[str] = frozenset(
 )
 
 
-def filter_tools_for_chosen_source(tools: list[dict], chosen_source: str) -> list[dict]:
+def _build_connector_uuid_to_canonical_source(
+    active_connectors: list[Any] | None,
+) -> dict[_uuid.UUID, str]:
+    """Map each connector's UUID to its canonical clarify-source name.
+
+    Connector objects are duck-typed: anything with ``.id`` (UUID) and
+    ``.provider`` (string in ``PROVIDER_TO_CANONICAL_SOURCE``) qualifies.
+    Connectors whose provider isn't in the canonical map are skipped — their
+    ext__ tools won't survive any source filter (fail-closed).
+    """
+    if not active_connectors:
+        return {}
+    out: dict[_uuid.UUID, str] = {}
+    for conn in active_connectors:
+        conn_id = getattr(conn, "id", None)
+        provider = getattr(conn, "provider", None)
+        if conn_id is None or provider is None:
+            continue
+        canonical = PROVIDER_TO_CANONICAL_SOURCE.get(provider)
+        if canonical is None:
+            continue
+        # ``conn.id`` is sometimes already a UUID, sometimes a hex string.
+        try:
+            uuid_key = conn_id if isinstance(conn_id, _uuid.UUID) else _uuid.UUID(str(conn_id))
+        except (ValueError, TypeError):
+            continue
+        out[uuid_key] = canonical
+    return out
+
+
+def filter_tools_for_chosen_source(
+    tools: list[dict],
+    chosen_source: str,
+    active_connectors: list[Any] | None = None,
+) -> list[dict]:
     """Return only tools matching ``chosen_source`` + cross-source tools.
 
     Used on the resume turn after the user picks a clarification option, so
     the agent literally cannot call the wrong source's tools — even if the
     LLM tries, the schema doesn't include them. Order is preserved.
+
+    For ``ext__<uuid>__*`` (external MCP) tools, the connector's provider
+    is resolved from ``active_connectors`` and translated to a canonical
+    source via ``PROVIDER_TO_CANONICAL_SOURCE``. The tool survives only if
+    that canonical source matches ``chosen_source``. When
+    ``active_connectors`` is ``None`` or empty, ext__ tools are dropped
+    fail-closed (we cannot tell which provider they belong to).
     """
     keep_prefixes = _SOURCE_TOOL_PREFIXES.get(chosen_source, ())
+    uuid_to_source = _build_connector_uuid_to_canonical_source(active_connectors)
+
     filtered: list[dict] = []
     for tool in tools:
         name = tool.get("name", "")
         if name in _CROSS_SOURCE_TOOLS:
             filtered.append(tool)
-        elif keep_prefixes and any(name.startswith(p) for p in keep_prefixes):
+            continue
+        # External MCP tool — resolve via connector UUID, not by prefix.
+        parsed = parse_external_tool_name(name)
+        if parsed is not None:
+            connector_uuid, _raw = parsed
+            ext_source = uuid_to_source.get(connector_uuid)
+            if ext_source is not None and ext_source == chosen_source:
+                filtered.append(tool)
+            continue
+        # Local tool — fall back to prefix match against chosen_source.
+        if keep_prefixes and any(name.startswith(p) for p in keep_prefixes):
             filtered.append(tool)
     return filtered
 

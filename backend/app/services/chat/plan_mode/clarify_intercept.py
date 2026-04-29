@@ -8,6 +8,18 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+# Source-of-truth provider → canonical-source map lives in source_resolver
+# (codex P2 refactor — also consumed by short_circuit.filter_tools_for_chosen_source).
+from app.services.chat.plan_mode.source_resolver import (
+    canonicalize_connector_providers as _canonicalize_connector_providers,
+)
+
+__all__ = [
+    "InterceptError",
+    "InterceptResult",
+    "intercept_clarify_call",
+]
+
 
 @dataclass
 class InterceptResult:
@@ -22,46 +34,6 @@ class InterceptError:
     """Schema/validation failure — agent retries within turn (tool_result is_error=True)."""
 
     error_message: str
-
-
-# Provider-string → canonical clarify-schema source.
-#
-# The clarify tool's ``source`` enum (see ``clarify_tool.py``) uses bare
-# names: ``netsuite, bigquery, shopify, stripe, drive``. But callers pass
-# ``active_connectors`` as raw provider strings from two tables:
-#
-#   - ``mcp_connectors.provider``: ``netsuite_mcp, shopify_mcp, bigquery,
-#     google_sheets, custom``
-#   - ``connections.provider``: ``netsuite, shopify, stripe``
-#
-# Drive is a special case: there is no ``drive`` provider row. Drive RAG
-# auth piggybacks on the ``google_sheets`` MCP connector (see
-# ``app/api/v1/drive_folders.py:73``). We treat ``google_sheets`` as
-# evidence Drive is reachable until Drive gets its own provider row.
-_PROVIDER_TO_CANONICAL_SOURCE: dict[str, str] = {
-    # NetSuite — both MCP and REST count as "netsuite"
-    "netsuite_mcp": "netsuite",
-    "netsuite": "netsuite",
-    # BigQuery
-    "bigquery": "bigquery",
-    # Shopify — both MCP and direct API
-    "shopify_mcp": "shopify",
-    "shopify": "shopify",
-    # Stripe (REST only)
-    "stripe": "stripe",
-    # Google Drive RAG reuses the google_sheets MCP connector for OAuth
-    "google_sheets": "drive",
-    "drive": "drive",
-}
-
-
-def _canonicalize_connector_providers(active_connectors: list[str]) -> set[str]:
-    """Translate raw provider strings into the canonical clarify-source set.
-
-    Unknown providers (e.g., ``custom``) are dropped silently — they cannot
-    satisfy the clarify schema's ``source`` enum.
-    """
-    return {_PROVIDER_TO_CANONICAL_SOURCE[p] for p in active_connectors if p in _PROVIDER_TO_CANONICAL_SOURCE}
 
 
 async def intercept_clarify_call(

@@ -787,7 +787,11 @@ class UnifiedAgent(BaseSpecialistAgent):
                 filter_tools_for_chosen_source,
             )
 
-            self._tool_defs = filter_tools_for_chosen_source(self._tool_defs or [], plan_mode_resume_source)
+            self._tool_defs = filter_tools_for_chosen_source(
+                self._tool_defs or [],
+                plan_mode_resume_source,
+                active_connectors=self._connectors,
+            )
         return await super().run(task, context, db, adapter, model, tool_choice=tool_choice)
 
     async def run_streaming(
@@ -832,7 +836,11 @@ class UnifiedAgent(BaseSpecialistAgent):
                 filter_tools_for_chosen_source,
             )
 
-            self._tool_defs = filter_tools_for_chosen_source(self._tool_defs or [], plan_mode_resume_source)
+            self._tool_defs = filter_tools_for_chosen_source(
+                self._tool_defs or [],
+                plan_mode_resume_source,
+                active_connectors=self._connectors,
+            )
         async for event in super().run_streaming(
             task,
             context,

@@ -2,6 +2,7 @@
 
 import json
 import uuid
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -260,6 +261,122 @@ async def test_option_id_not_in_options():
         db=db,
     )
     assert isinstance(result, PlanModeChoiceError)
+
+
+# ---------------------------------------------------------------------------
+# expires_at enforcement (codex P2 — replay protection beyond HMAC)
+# ---------------------------------------------------------------------------
+#
+# The HMAC token contains no timestamp, so a stale "pending" card from hours
+# or days ago could be replayed by anyone who can hit the endpoint. The mint
+# path stamps ``expires_at`` (5 minutes ahead). The resume handler MUST
+# re-check that wall clock and refuse expired cards with HTTP 410 Gone.
+#
+# Fail-closed: a missing or unparseable ``expires_at`` is treated as expired,
+# so a malformed structured_output cannot bypass the check.
+
+
+def _build_so_with_expires_at(session_id: str, expires_at: str | None) -> dict:
+    """Like ``_build_so`` but caller controls ``expires_at`` (or omits it)."""
+    so = _build_so(session_id)
+    if expires_at is None:
+        so.pop("expires_at", None)
+    else:
+        so["expires_at"] = expires_at
+    return so
+
+
+@pytest.mark.asyncio
+async def test_expired_clarification_returns_410():
+    """A clarification stamped 1 minute ago must reject with 410 Gone."""
+    session_id = str(uuid.uuid4())
+    past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+    so = _build_so_with_expires_at(session_id, past)
+    msg = _mock_msg(session_id, so)
+    db = _mock_db_with_msg(msg)
+
+    result = await handle_plan_mode_choice(
+        plan_mode_choice={
+            "action": "approve",
+            "confirmation_id": str(msg.id),
+            "option_id": "A",
+        },
+        session_id=session_id,
+        tenant_id=uuid.uuid4(),
+        db=db,
+    )
+    assert isinstance(result, PlanModeChoiceError)
+    assert result.status_code == 410
+    assert result.error == "expired"
+
+
+@pytest.mark.asyncio
+async def test_unparseable_expires_at_treated_as_expired():
+    """Malformed expires_at must fail-closed (treat as expired -> 410)."""
+    session_id = str(uuid.uuid4())
+    so = _build_so_with_expires_at(session_id, "garbage")
+    msg = _mock_msg(session_id, so)
+    db = _mock_db_with_msg(msg)
+
+    result = await handle_plan_mode_choice(
+        plan_mode_choice={
+            "action": "approve",
+            "confirmation_id": str(msg.id),
+            "option_id": "A",
+        },
+        session_id=session_id,
+        tenant_id=uuid.uuid4(),
+        db=db,
+    )
+    assert isinstance(result, PlanModeChoiceError)
+    assert result.status_code == 410
+    assert result.error == "expired"
+
+
+@pytest.mark.asyncio
+async def test_missing_expires_at_treated_as_expired():
+    """Missing expires_at must fail-closed (treat as expired -> 410)."""
+    session_id = str(uuid.uuid4())
+    so = _build_so_with_expires_at(session_id, None)
+    msg = _mock_msg(session_id, so)
+    db = _mock_db_with_msg(msg)
+
+    result = await handle_plan_mode_choice(
+        plan_mode_choice={
+            "action": "approve",
+            "confirmation_id": str(msg.id),
+            "option_id": "A",
+        },
+        session_id=session_id,
+        tenant_id=uuid.uuid4(),
+        db=db,
+    )
+    assert isinstance(result, PlanModeChoiceError)
+    assert result.status_code == 410
+    assert result.error == "expired"
+
+
+@pytest.mark.asyncio
+async def test_fresh_clarification_within_5min_passes():
+    """expires_at = now + 4 minutes → happy path."""
+    session_id = str(uuid.uuid4())
+    future = (datetime.now(timezone.utc) + timedelta(minutes=4)).isoformat()
+    so = _build_so_with_expires_at(session_id, future)
+    msg = _mock_msg(session_id, so)
+    db = _mock_db_with_msg(msg)
+
+    result = await handle_plan_mode_choice(
+        plan_mode_choice={
+            "action": "approve",
+            "confirmation_id": str(msg.id),
+            "option_id": "A",
+        },
+        session_id=session_id,
+        tenant_id=uuid.uuid4(),
+        db=db,
+    )
+    assert isinstance(result, PlanModeChoiceResult)
+    assert result.chosen_source == "netsuite"
 
 
 # ---------------------------------------------------------------------------
