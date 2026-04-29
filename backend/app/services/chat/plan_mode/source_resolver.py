@@ -35,8 +35,9 @@ PROVIDER_TO_CANONICAL_SOURCE: dict[str, str] = {
     # Shopify — both MCP and direct API
     "shopify_mcp": "shopify",
     "shopify": "shopify",
-    # Stripe (REST only)
+    # Stripe — both MCP and direct REST count as "stripe"
     "stripe": "stripe",
+    "stripe_mcp": "stripe",
     # Google Drive RAG reuses the google_sheets MCP connector for OAuth
     "google_sheets": "drive",
     "drive": "drive",

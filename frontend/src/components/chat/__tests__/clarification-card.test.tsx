@@ -153,4 +153,23 @@ describe("ClarificationCard", () => {
     fireEvent.click(screen.getByRole("radio", { name: /NetSuite GL/ }));
     expect(onChoose).toHaveBeenCalledTimes(1);
   });
+
+  // Codex round 5 P3 Bug 3: stale closure in the keydown handler.
+  // The effect's deps intentionally omit pendingPick/disabled to avoid
+  // re-registering on every state change, so the listener closure holds a
+  // stale reference to handlePick. After the first keypress, the React state
+  // setter schedules pendingPick=A but the second synchronous keypress's
+  // closure still sees pendingPick=null and fires onChoose("B"). Result: a
+  // second resume request → backend 409 already_resolved → spurious toast.
+  // Fix uses a ref to short-circuit re-entry without changing deps.
+  it("keyboard picks only call onChoose once until response (no stale-closure race)", () => {
+    const onChoose = vi.fn();
+    render(<ClarificationCard data={_BASE} onChoose={onChoose} />);
+    // Two synchronous keypresses, before parent has had any chance to update
+    // pendingPick/disabled props. Stale closure would fire both.
+    fireEvent.keyDown(window, { key: "A" });
+    fireEvent.keyDown(window, { key: "B" });
+    expect(onChoose).toHaveBeenCalledTimes(1);
+    expect(onChoose).toHaveBeenCalledWith("A");
+  });
 });

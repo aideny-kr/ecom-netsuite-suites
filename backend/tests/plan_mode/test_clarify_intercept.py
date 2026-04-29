@@ -9,6 +9,9 @@ from app.services.chat.plan_mode.clarify_intercept import (
     InterceptResult,
     intercept_clarify_call,
 )
+from app.services.chat.plan_mode.source_resolver import (
+    canonicalize_connector_providers,
+)
 
 _VALID_INPUT = {
     "options": [
@@ -297,6 +300,49 @@ async def test_canonicalize_handles_rest_netsuite_provider():
         db=AsyncMock(),
     )
     assert isinstance(result, InterceptResult)
+
+
+def test_stripe_mcp_provider_canonicalizes_to_stripe():
+    """Codex round 5 P2 Bug 2: Stripe MCP tenants store their connector with
+    ``mcp_connectors.provider == 'stripe_mcp'``. The map only contained
+    bare ``'stripe'`` (REST). Without the alias entry, Stripe MCP tenants get
+    Stripe options dropped from clarify intercept (and ext__<uuid>__* tools
+    dropped on resume) — both call sites consume this same map.
+    """
+    result = canonicalize_connector_providers(["stripe_mcp"])
+    assert result == {"stripe"}
+
+
+def test_stripe_mcp_alongside_rest_stripe_canonicalizes():
+    """Both stripe and stripe_mcp providers canonicalize to ``stripe``."""
+    result = canonicalize_connector_providers(["stripe", "stripe_mcp"])
+    assert result == {"stripe"}
+
+
+@pytest.mark.asyncio
+async def test_intercept_accepts_stripe_option_with_stripe_mcp_provider():
+    """End-to-end: clarify intercept must accept a Stripe option when the
+    only connected source is the ``stripe_mcp`` provider literal.
+    """
+    bad_input = {
+        "options": [
+            {"id": "A", "title": "NetSuite", "rationale": "GL", "source": "netsuite", "is_default": True},
+            {"id": "B", "title": "Stripe", "rationale": "charges", "source": "stripe", "is_default": False},
+        ],
+        "ambiguity_summary": "summary",
+    }
+    result = await intercept_clarify_call(
+        tool_input=bad_input,
+        session_id="sess-1",
+        active_connectors=["netsuite_mcp", "stripe_mcp"],
+        db=AsyncMock(),
+    )
+    assert isinstance(result, InterceptResult), (
+        f"Expected InterceptResult; got {type(result).__name__}: {getattr(result, 'error_message', '')}"
+    )
+    sources = [o["source"] for o in result.structured_output["options"]]
+    assert "stripe" in sources
+    assert "netsuite" in sources
 
 
 @pytest.mark.asyncio

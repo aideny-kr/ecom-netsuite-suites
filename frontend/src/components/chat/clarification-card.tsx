@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { AlertCircle, Check, HelpCircle, Minus } from "lucide-react";
 
@@ -29,6 +29,12 @@ export function ClarificationCard({
   disabled = false,
 }: Props) {
   const [pendingPick, setPendingPick] = useState<string | null>(null);
+  // Synchronous "is picking" flag for the keydown listener. The effect's deps
+  // intentionally omit pendingPick/disabled to avoid re-registering on every
+  // state change, so the listener closure has stale state. Without a ref,
+  // back-to-back synchronous keypresses (A then B) both fire onChoose because
+  // the second closure still sees pendingPick=null. Codex round 5 P3 Bug 3.
+  const pickingRef = useRef(false);
   const isPending = data.status === "pending" && !expired;
   const isChosen = data.status === "chosen";
   const isSuperseded = data.status === "superseded";
@@ -69,7 +75,8 @@ export function ClarificationCard({
   }, [isPending, data.default_id, data.options.map((o) => o.id).join(",")]);
 
   function handlePick(id: "A" | "B" | "C") {
-    if (disabled || pendingPick) return;
+    if (disabled || pendingPick || pickingRef.current) return;
+    pickingRef.current = true;
     setPendingPick(id);
     onChoose(id);
   }

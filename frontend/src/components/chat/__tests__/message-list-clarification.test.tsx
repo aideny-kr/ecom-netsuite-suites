@@ -183,4 +183,81 @@ describe("MessageList — ClarificationCard rendering", () => {
     );
     expect(screen.getByText(/NetSuite GL/)).toBeInTheDocument();
   });
+
+  // Codex round 5 P2 Bug 1: when a user revisits a resolved (chosen / superseded)
+  // clarification from chat history, the original 5-minute expires_at is in the
+  // past. The naive `new Date(expires_at) < now` check fires for ALL stale
+  // resolved cards, causing the audit-trail "chosen ✅" UI to be replaced by
+  // the red "This card expired" UI. Audit context lost. Fix: gate expiry on
+  // status === "pending".
+  it("does not render expired state for resolved clarification with old expires_at", () => {
+    const tenDaysAgo = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000).toISOString();
+    const messages = [
+      {
+        id: "msg-1",
+        role: "assistant",
+        content: "",
+        structured_output: {
+          type: "clarification",
+          status: "chosen",
+          options: [
+            { id: "A", title: "NetSuite GL", rationale: "GL", source: "netsuite", is_default: true },
+            { id: "B", title: "BigQuery", rationale: "checkout", source: "bigquery", is_default: false },
+          ],
+          default_id: "A",
+          chosen_id: "A",
+          ambiguity_summary: "Revenue is ambiguous.",
+          confirmation_token: "deadbeef",
+          // Stale: original 5-minute card lived 10 days ago.
+          expires_at: tenDaysAgo,
+        },
+        created_at: tenDaysAgo,
+      },
+    ];
+    renderWithQueryClient(
+      <MessageList
+        messages={messages as unknown as Parameters<typeof MessageList>[0]["messages"]}
+        isLoading={false}
+        onClarificationChoose={() => {}}
+      />,
+    );
+    // Audit trail: chosen badge should render, expired must NOT render.
+    expect(screen.getByText(/chosen/i)).toBeInTheDocument();
+    expect(screen.getByText(/NetSuite GL/)).toBeInTheDocument();
+    expect(screen.queryByText(/This card expired/i)).not.toBeInTheDocument();
+  });
+
+  it("does not render expired state for superseded clarification with old expires_at", () => {
+    const tenDaysAgo = new Date(Date.now() - 10 * 24 * 60 * 60 * 1000).toISOString();
+    const messages = [
+      {
+        id: "msg-1",
+        role: "assistant",
+        content: "",
+        structured_output: {
+          type: "clarification",
+          status: "superseded",
+          options: [
+            { id: "A", title: "NetSuite GL", rationale: "GL", source: "netsuite", is_default: true },
+            { id: "B", title: "BigQuery", rationale: "checkout", source: "bigquery", is_default: false },
+          ],
+          default_id: "A",
+          ambiguity_summary: "Revenue is ambiguous.",
+          confirmation_token: "deadbeef",
+          expires_at: tenDaysAgo,
+        },
+        created_at: tenDaysAgo,
+      },
+    ];
+    renderWithQueryClient(
+      <MessageList
+        messages={messages as unknown as Parameters<typeof MessageList>[0]["messages"]}
+        isLoading={false}
+        onClarificationChoose={() => {}}
+      />,
+    );
+    // Superseded UI must render, not expired.
+    expect(screen.getByText(/Replaced by your follow-up/i)).toBeInTheDocument();
+    expect(screen.queryByText(/This card expired/i)).not.toBeInTheDocument();
+  });
 });

@@ -1207,9 +1207,16 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
     // auto-disable until the next render. Acceptable for v1; real-time
     // countdown is out of scope. Backend returns 410 on expired-card
     // resume, so this matches the server-side gate.
-    const expired = clarification.expires_at
-      ? new Date(clarification.expires_at).getTime() < Date.now()
-      : false;
+    //
+    // Gate on status === "pending": resolved cards (chosen / superseded) have
+    // already been processed; their stale 5-minute expires_at is in the past
+    // when revisited from history, but the audit-trail UI must still show the
+    // chosen / superseded state — not the red "expired" state. (Codex round 5
+    // P2 Bug 1.)
+    const expired =
+      clarification.status === "pending" && clarification.expires_at
+        ? new Date(clarification.expires_at).getTime() < Date.now()
+        : false;
     return (
       <div className="flex min-w-0 justify-start gap-3">
         {isTerminal ? (
