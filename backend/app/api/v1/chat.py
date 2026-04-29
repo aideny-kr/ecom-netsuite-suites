@@ -50,6 +50,14 @@ class SendMessageRequest(BaseModel):
         default=None,
         description="Confirm or reject a pending write. Keys: action ('approve'|'reject'), confirmation_id (message ID)",
     )
+    plan_mode_choice: dict | None = Field(
+        default=None,
+        description=(
+            "Resolve a pending Plan Mode clarification. Keys: action "
+            "('approve'|'reject'), confirmation_id (assistant message ID), "
+            "option_id ('A'|'B'|'C')"
+        ),
+    )
 
 
 class MessageResponse(BaseModel):
