@@ -774,7 +774,14 @@ class UnifiedAgent(BaseSpecialistAgent):
         if financial_mode:
             self._tool_defs = self.financial_tool_definitions
         if plan_mode_clarify_only:
-            self._tool_defs = [t for t in (self._tool_defs or []) if t.get("name") == "clarify"]
+            # Inject the canonical clarify schema unconditionally. ``_setup_context``
+            # rebuilds ``_tool_defs`` via ``build_all_tool_definitions`` WITHOUT
+            # ``plan_mode_enabled=True``, so the rebuild may not include clarify.
+            # A naive filter would yield ``[]`` and the provider would receive
+            # ``tool_choice=clarify`` with no clarify schema → silent gate failure.
+            from app.services.chat.plan_mode.clarify_tool import CLARIFY_TOOL_SCHEMA
+
+            self._tool_defs = [dict(CLARIFY_TOOL_SCHEMA)]
         if plan_mode_resume_source:
             from app.services.chat.plan_mode.short_circuit import (
                 filter_tools_for_chosen_source,
@@ -814,7 +821,12 @@ class UnifiedAgent(BaseSpecialistAgent):
         if financial_mode:
             self._tool_defs = self.financial_tool_definitions
         if plan_mode_clarify_only:
-            self._tool_defs = [t for t in (self._tool_defs or []) if t.get("name") == "clarify"]
+            # Inject the canonical clarify schema unconditionally. See ``run`` above
+            # for the full rationale — TL;DR ``_setup_context``'s rebuild may not
+            # include clarify, so a naive filter would silently disable the gate.
+            from app.services.chat.plan_mode.clarify_tool import CLARIFY_TOOL_SCHEMA
+
+            self._tool_defs = [dict(CLARIFY_TOOL_SCHEMA)]
         if plan_mode_resume_source:
             from app.services.chat.plan_mode.short_circuit import (
                 filter_tools_for_chosen_source,

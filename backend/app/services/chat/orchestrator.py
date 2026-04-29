@@ -448,6 +448,26 @@ def _sanitize_assistant_text(text: str) -> str:
     return text.strip()
 
 
+_NO_RESULT_FALLBACK = "I wasn't able to find relevant information for that question."
+
+
+def _coerce_assistant_content(final_text: str | None, persisted_output: dict | None) -> str:
+    """Decide what string to persist as ``ChatMessage.content``.
+
+    When ``persisted_output`` carries ``type == "clarification"``, the
+    clarification card IS the message — any text rendered above it (including
+    the empty-result fallback) confuses the user. So in that case we return
+    an empty string and let the frontend render the card alone.
+
+    Otherwise, return ``final_text`` if non-empty, else the empty-result
+    fallback. The fallback is fine for normal turns where the agent produced
+    no text and no structured output, but it must NEVER appear above a card.
+    """
+    if isinstance(persisted_output, dict) and persisted_output.get("type") == "clarification":
+        return ""
+    return final_text or _NO_RESULT_FALLBACK
+
+
 def _is_financial_tool(tool_name: str) -> bool:
     """True for local financial-report tools and external MCP ns_runReport."""
     return categorize(tool_name) == "financial"
@@ -2371,7 +2391,7 @@ async def run_chat_turn(
                     tenant_id=tenant_id,
                     session_id=session.id,
                     role="assistant",
-                    content=final_text or "I wasn't able to find relevant information for that question.",
+                    content=_coerce_assistant_content(final_text, _persisted_output),
                     tool_calls=coord_result_tool_calls if coord_result_tool_calls else None,
                     citations=citations if citations else None,
                     token_count=coord_result_tokens[0] + coord_result_tokens[1],
@@ -2686,8 +2706,7 @@ async def run_chat_turn(
         tenant_id=tenant_id,
         session_id=session.id,
         role="assistant",
-        content=final_text
-        or "I wasn't able to find relevant information for that question. Could you rephrase or provide more details?",
+        content=_coerce_assistant_content(final_text, last_structured_output),
         tool_calls=tool_calls_log if tool_calls_log else None,
         citations=citations if citations else None,
         token_count=total_input_tokens + total_output_tokens,
