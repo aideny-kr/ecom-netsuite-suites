@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.chat import ChatMessage
@@ -37,6 +37,12 @@ class PlanModeChoiceResult:
     chosen_option: dict
     chosen_source: str
     system_directive: str  # PRIOR CLARIFICATIONS block to inject into resume turn
+    # The id of the underlying ChatMessage row that was transitioned from
+    # ``status='pending'`` to ``status='chosen'``. Exposed so the caller can
+    # call ``revert_clarification_to_pending`` if a downstream FATAL step
+    # (e.g. audit emission) fails — making the choice + audit effectively
+    # atomic from the user's perspective. Optional for backward-compat.
+    chat_message_id: _uuid.UUID | None = None
 
 
 @dataclass
@@ -206,7 +212,60 @@ async def handle_plan_mode_choice(
         chosen_option=chosen,
         chosen_source=chosen.get("source", ""),
         system_directive=directive,
+        chat_message_id=msg.id,
     )
+
+
+async def revert_clarification_to_pending(
+    *,
+    message_id: _uuid.UUID,
+    tenant_id: _uuid.UUID,  # noqa: ARG001 — accepted for parity with sibling helpers
+    db: AsyncSession,
+) -> bool:
+    """Atomically flip ``structured_output.status`` from ``'chosen'`` back
+    to ``'pending'`` for ``message_id``.
+
+    Used by the orchestrator when a FATAL step that follows
+    ``handle_plan_mode_choice`` (e.g. ``log_event`` for ``plan_mode.chose``)
+    raises — without this revert the row would be stuck at ``'chosen'``
+    forever and the user would see HTTP 409 on every retry, with the card
+    consumed but no answer ever produced (codex round 6 P2 Bug 1).
+
+    Atomic: the CAS targets ``status='chosen'`` so a concurrent
+    ``supersede_pending_clarifications`` (which transitions
+    ``pending → superseded``) can never be silently undone — supersede
+    can only see ``status='pending'`` rows in the first place, so the
+    races don't overlap.
+
+    Returns ``True`` if a row was reverted, ``False`` if no-op (e.g. the
+    row had already been transitioned to a different state, or the id
+    doesn't exist).
+    """
+    cas = await db.execute(
+        update(ChatMessage)
+        .where(
+            ChatMessage.id == message_id,
+            ChatMessage.structured_output["status"].astext == "chosen",
+        )
+        .values(
+            # Surgical jsonb_set so we don't need to round-trip the row
+            # back to Python just to flip a single key. Path is `{status}`.
+            structured_output=func.jsonb_set(
+                ChatMessage.structured_output,
+                "{status}",
+                '"pending"',
+                False,
+            )
+        )
+    )
+    if cas.rowcount > 0:
+        await db.commit()
+        logger.warning(
+            "[PLAN_MODE] reverted clarification %s back to pending after downstream failure",
+            message_id,
+        )
+        return True
+    return False
 
 
 # Tool name prefixes per source. Cross-source tools (see below) are

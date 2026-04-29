@@ -1332,20 +1332,52 @@ async def run_chat_turn(
         # write fails, we error the turn rather than silently approving an
         # untraceable choice. Mirrors the write_confirm audit pattern at
         # ``record.{create,update}.{approved,failed}`` above.
-        await log_event(
-            db=db,
-            tenant_id=tenant_id,
-            category="chat",
-            action="plan_mode.chose",
-            actor_id=user_id,
-            resource_type="chat_session",
-            resource_id=str(session.id),
-            payload={
-                "chosen_id": plan_mode_choice.get("option_id"),
-                "chosen_source": plan_mode_resume_source,
-                "confirmation_id": plan_mode_choice.get("confirmation_id"),
-            },
-        )
+        #
+        # codex round 6 Bug 1 — to keep the choice + audit effectively
+        # atomic, on any audit failure we MUST revert the CAS that
+        # ``handle_plan_mode_choice`` just committed (pending → chosen).
+        # Without the revert, the user retries and gets HTTP 409 forever
+        # because the row is stuck at ``status='chosen'`` with no
+        # corresponding audit row — card consumed, no answer.
+        try:
+            await log_event(
+                db=db,
+                tenant_id=tenant_id,
+                category="chat",
+                action="plan_mode.chose",
+                actor_id=user_id,
+                resource_type="chat_session",
+                resource_id=str(session.id),
+                payload={
+                    "chosen_id": plan_mode_choice.get("option_id"),
+                    "chosen_source": plan_mode_resume_source,
+                    "confirmation_id": plan_mode_choice.get("confirmation_id"),
+                },
+            )
+        except Exception:
+            from app.services.chat.plan_mode.short_circuit import (
+                revert_clarification_to_pending,
+            )
+
+            _msg_id_to_revert = _pmc_result.chat_message_id
+            if _msg_id_to_revert is not None:
+                try:
+                    await revert_clarification_to_pending(
+                        message_id=_msg_id_to_revert,
+                        tenant_id=tenant_id,
+                        db=db,
+                    )
+                except Exception:
+                    logger.exception(
+                        "[PLAN_MODE] revert_clarification_to_pending failed "
+                        "after audit emission failure — clarification %s "
+                        "may be stranded at status='chosen'",
+                        _msg_id_to_revert,
+                    )
+            logger.exception("[PLAN_MODE] plan_mode.chose audit emission failed; reverting CAS so user can retry")
+            # Re-raise so the turn fails clearly rather than silently
+            # proceeding without an audit row.
+            raise
     # NOTE: do NOT return — fall through into the regular flow.
     # plan_mode_resume_* variables are consumed by Task 4.3 (tool filter)
     # and the system-prompt assembly path (just append the directive).
@@ -2084,9 +2116,7 @@ async def run_chat_turn(
                     # filter has stripped `clarify` from the inventory.
                     # Contradictory instructions ⇒ undefined behavior.
                     plan_mode_augmentation = (
-                        maybe_augment_for_plan_mode(
-                            query=sanitized_input, plan_mode_enabled=plan_mode_enabled
-                        )
+                        maybe_augment_for_plan_mode(query=sanitized_input, plan_mode_enabled=plan_mode_enabled)
                         if plan_mode_resume_source is None
                         else None
                     )
@@ -2429,6 +2459,14 @@ async def run_chat_turn(
                 # remembers prior clarifications across a session.
                 if isinstance(_persisted_output, dict) and _persisted_output.get("type") == "clarification":
                     from app.models.chat_disclosure_event import ChatDisclosureEvent
+
+                    # codex round 6 Bug 2 — `assistant_msg.id` uses
+                    # SQLAlchemy's Python-side ``default=uuid.uuid4`` which
+                    # only fires at flush time. Without this explicit flush
+                    # we'd persist ``chat_message_id=NULL`` on the
+                    # disclosure event and lose the link from the telemetry
+                    # row to the clarification message it describes.
+                    await db.flush()
 
                     db.add(
                         ChatDisclosureEvent(
