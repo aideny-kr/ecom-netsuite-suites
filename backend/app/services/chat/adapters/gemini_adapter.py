@@ -12,6 +12,9 @@ from app.services.chat.llm_adapter import BaseLLMAdapter, LLMResponse, TokenUsag
 # burning the 300s chat budget.
 _CLIENT_TIMEOUT_MS = 60_000
 
+# Models that support function_calling_config.mode='ANY' for forcing a single tool.
+_FCC_SUPPORTED_PREFIXES = ("gemini-1.5-", "gemini-2.")
+
 
 class GeminiAdapter(BaseLLMAdapter):
     def __init__(self, api_key: str):
@@ -19,6 +22,35 @@ class GeminiAdapter(BaseLLMAdapter):
             api_key=api_key,
             http_options=genai_types.HttpOptions(timeout=_CLIENT_TIMEOUT_MS),
         )
+
+    def force_tool_choice(self, tool_name: str, model: str | None = None) -> dict:
+        """Build Gemini's tool-choice forcing param.
+
+        Only Gemini 1.5+ and 2.x support function_calling_config.mode='ANY'. For
+        older models, raise PlanModeUnsupportedError so the orchestrator can
+        gracefully disable Plan Mode for the turn instead of hitting an API error
+        later.
+        """
+        from app.services.chat.plan_mode.errors import PlanModeUnsupportedError
+
+        if not tool_name or not isinstance(tool_name, str):
+            raise ValueError(f"tool_name must be a non-empty string, got {tool_name!r}")
+        if model is None:
+            raise PlanModeUnsupportedError(
+                "gemini",
+                reason="model required to determine function_calling_config support",
+            )
+        if not any(model.startswith(p) for p in _FCC_SUPPORTED_PREFIXES):
+            raise PlanModeUnsupportedError(
+                model,
+                reason="function_calling_config requires Gemini 1.5+",
+            )
+        return {
+            "function_calling_config": {
+                "mode": "ANY",
+                "allowed_function_names": [tool_name],
+            }
+        }
 
     def _convert_tools(self, tools: list[dict]) -> list[genai_types.Tool]:
         """Convert Anthropic tool format to Gemini FunctionDeclarations."""
