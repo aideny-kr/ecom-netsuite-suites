@@ -454,25 +454,31 @@ export default function ChatPage() {
     async (messageId: string, optionId: "A" | "B" | "C") => {
       const sessionId = activeSessionId;
       if (!sessionId) return;
-      // Plan-mode resume turn: SSE reconnect handles the streaming response.
-      // We just POST the choice; do not optimistically clear streaming state
-      // because the resume run will start its own stream.
+      // Plan-mode resume turn: capture run_id from POST response and
+      // immediately attach to the SSE stream (mirrors handleSend). Relying on
+      // a session refetch to observe ``active_run_id`` races against fast
+      // resume runs (errors fire before refetch; completed runs clear
+      // ``active_run_id`` before refetch sees it).
       try {
-        await apiClient.post(`/api/v1/chat/sessions/${sessionId}/messages`, {
-          content: `Picked option ${optionId}`,
-          plan_mode_choice: {
-            action: "approve",
-            confirmation_id: messageId,
-            option_id: optionId,
+        const { run_id } = await apiClient.post<{ run_id: string }>(
+          `/api/v1/chat/sessions/${sessionId}/messages`,
+          {
+            content: `Picked option ${optionId}`,
+            plan_mode_choice: {
+              action: "approve",
+              confirmation_id: messageId,
+              option_id: optionId,
+            },
           },
-        });
+        );
         await queryClient.invalidateQueries({ queryKey: ["chat-session", sessionId] });
+        await connectToRunStream(run_id, sessionId);
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : "Failed to submit clarification.";
         setError(message);
       }
     },
-    [activeSessionId, queryClient],
+    [activeSessionId, queryClient, connectToRunStream],
   );
 
   const clearStreamingState = useCallback(() => {

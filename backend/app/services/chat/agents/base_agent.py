@@ -958,8 +958,24 @@ class BaseSpecialistAgent(abc.ABC):
                             InterceptResult,
                             intercept_clarify_call,
                         )
+                        from app.services.connection_service import list_connections
 
-                        _connector_providers = [getattr(c, "provider", "") for c in getattr(self, "_connectors", [])]
+                        # Active connectors = MCP connectors + REST connections.
+                        # REST-only tenants (e.g., NetSuite via REST API without an
+                        # MCP connector) would otherwise be excluded from the
+                        # canonical-source set and every clarify option would drop.
+                        _mcp_providers = [getattr(c, "provider", "") for c in getattr(self, "_connectors", [])]
+                        _rest_connections: list = []
+                        try:
+                            _rest_connections = await list_connections(db, self.tenant_id)
+                        except Exception:
+                            logger.warning("clarify_intercept.rest_connections_failed", exc_info=True)
+                        _rest_providers = [
+                            getattr(c, "provider", "")
+                            for c in _rest_connections
+                            if getattr(c, "status", "active") == "active"
+                        ]
+                        _connector_providers = [*_mcp_providers, *_rest_providers]
                         clar_result = await intercept_clarify_call(
                             tool_input=block.input,
                             session_id=session_id or str(self.tenant_id),

@@ -233,3 +233,71 @@ async def test_clarify_intercept_error_feeds_back_to_agent(monkeypatch):
     # tool_result was fed back)
     response_event = next(e for e in events if e[0] == "response")
     assert response_event[1].data == "OK, I'll just answer with NetSuite."
+
+
+@pytest.mark.asyncio
+async def test_clarify_intercept_includes_rest_connections(monkeypatch):
+    """REST-only NetSuite tenant (no MCP) must still see netsuite as a canonical
+    source.
+
+    Regression: ``_connector_providers`` was built only from MCP ``_connectors``.
+    Tenants connected to NetSuite via the REST API (``connections.provider ==
+    'netsuite'``) but without an MCP connector ended up with empty canonical
+    sources, every clarify option dropped, and the gate returned
+    ``InterceptError`` instead of yielding ``clarification_required``.
+    """
+
+    async def _noop_pattern(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(
+        "app.services.chat.agents.base_agent._maybe_store_query_pattern",
+        _noop_pattern,
+    )
+
+    async def _get_policy(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr("app.services.policy_service.get_active_policy", _get_policy)
+
+    # Mock list_connections at the import site in base_agent so the agent sees
+    # a REST netsuite connection. The MCP connectors list is empty.
+    rest_netsuite = MagicMock(provider="netsuite", status="active")
+    bigquery_mcp = MagicMock(provider="bigquery", status="active")
+
+    async def _list_connections(_db, _tenant_id):
+        return [rest_netsuite]
+
+    monkeypatch.setattr(
+        "app.services.connection_service.list_connections",
+        _list_connections,
+    )
+
+    adapter = _make_mock_adapter(_make_clarify_response(_valid_clarify_input()))
+
+    # Only an MCP BigQuery connector — NetSuite is REST-only. Without the fix
+    # the canonical-sources set is {bigquery} and the netsuite option drops.
+    agent = _TestAgent(tool_defs=[{"name": "clarify"}], connectors=[bigquery_mcp])
+
+    db = AsyncMock()
+
+    events = []
+    async for evt in agent.run_streaming(
+        task="What's our revenue?",
+        context={},
+        db=db,
+        adapter=adapter,
+        model="claude-sonnet-4-6",
+        session_id="sess-1",
+    ):
+        events.append(evt)
+
+    event_types = [e[0] for e in events]
+    assert "clarification_required" in event_types, (
+        f"expected clarification_required (REST netsuite must be a canonical source); got {event_types}"
+    )
+    clarif_event = next(e for e in events if e[0] == "clarification_required")
+    payload = clarif_event[1]
+    sources = {o["source"] for o in payload["options"]}
+    assert "netsuite" in sources
+    assert "bigquery" in sources
