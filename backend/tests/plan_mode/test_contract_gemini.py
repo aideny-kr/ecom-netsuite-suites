@@ -14,8 +14,7 @@ from app.services.chat.plan_mode.ambiguity_signal import (
 from app.services.chat.plan_mode.errors import PlanModeUnsupportedError
 
 
-@pytest.mark.asyncio
-async def test_misbehaving_adapter_cannot_call_data_tool():
+def test_misbehaving_adapter_cannot_call_data_tool():
     """If model TRIES to call bigquery_sql first, the tool isn't in the inventory."""
     full_inventory = [
         {"name": "bigquery_sql"},
@@ -28,8 +27,7 @@ async def test_misbehaving_adapter_cannot_call_data_tool():
     assert [t["name"] for t in filtered] == ["clarify"]
 
 
-@pytest.mark.asyncio
-async def test_force_tool_choice_passed_to_adapter():
+def test_force_tool_choice_passed_to_adapter():
     """Verify orchestrator passes function_calling_config to Gemini for a 1.5+ model."""
     from app.services.chat.adapters.gemini_adapter import GeminiAdapter
 
@@ -43,8 +41,7 @@ async def test_force_tool_choice_passed_to_adapter():
     }
 
 
-@pytest.mark.asyncio
-async def test_force_tool_choice_supports_gemini_2x():
+def test_force_tool_choice_supports_gemini_2x():
     """Gemini 2.x family also supports function_calling_config.mode='ANY'."""
     from app.services.chat.adapters.gemini_adapter import GeminiAdapter
 
@@ -58,8 +55,7 @@ async def test_force_tool_choice_supports_gemini_2x():
     }
 
 
-@pytest.mark.asyncio
-async def test_force_tool_choice_rejects_legacy_models():
+def test_force_tool_choice_rejects_legacy_models():
     """Sub-1.5 Gemini models must raise PlanModeUnsupportedError so orchestrator can degrade gracefully."""
     from app.services.chat.adapters.gemini_adapter import GeminiAdapter
 
@@ -68,8 +64,7 @@ async def test_force_tool_choice_rejects_legacy_models():
         adapter.force_tool_choice("clarify", model="gemini-1.0-pro")
 
 
-@pytest.mark.asyncio
-async def test_force_tool_choice_requires_model_for_gemini():
+def test_force_tool_choice_requires_model_for_gemini():
     """Gemini needs the model name to gate by version; missing model must raise PlanModeUnsupportedError."""
     from app.services.chat.adapters.gemini_adapter import GeminiAdapter
 
@@ -78,8 +73,7 @@ async def test_force_tool_choice_requires_model_for_gemini():
         adapter.force_tool_choice("clarify")
 
 
-@pytest.mark.asyncio
-async def test_force_tool_choice_rejects_empty_tool_name():
+def test_force_tool_choice_rejects_empty_tool_name():
     """Defensive: empty/non-string tool_name must raise ValueError, not produce a malformed param."""
     from app.services.chat.adapters.gemini_adapter import GeminiAdapter
 

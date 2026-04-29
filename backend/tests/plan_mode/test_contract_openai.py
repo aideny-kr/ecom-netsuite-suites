@@ -13,8 +13,7 @@ from app.services.chat.plan_mode.ambiguity_signal import (
 )
 
 
-@pytest.mark.asyncio
-async def test_misbehaving_adapter_cannot_call_data_tool():
+def test_misbehaving_adapter_cannot_call_data_tool():
     """If model TRIES to call bigquery_sql first, the tool isn't in the inventory."""
     full_inventory = [
         {"name": "bigquery_sql"},
@@ -27,8 +26,7 @@ async def test_misbehaving_adapter_cannot_call_data_tool():
     assert [t["name"] for t in filtered] == ["clarify"]
 
 
-@pytest.mark.asyncio
-async def test_force_tool_choice_passed_to_adapter():
+def test_force_tool_choice_passed_to_adapter():
     """Verify orchestrator passes tool_choice={"type":"function","function":{"name":"clarify"}} to OpenAI."""
     from app.services.chat.adapters.openai_adapter import OpenAIAdapter
 
@@ -37,8 +35,7 @@ async def test_force_tool_choice_passed_to_adapter():
     assert forcing == {"type": "function", "function": {"name": "clarify"}}
 
 
-@pytest.mark.asyncio
-async def test_force_tool_choice_model_param_ignored_for_openai():
+def test_force_tool_choice_model_param_ignored_for_openai():
     """OpenAI shape is model-agnostic — `model` is accepted only for protocol uniformity."""
     from app.services.chat.adapters.openai_adapter import OpenAIAdapter
 
@@ -55,8 +52,7 @@ async def test_force_tool_choice_model_param_ignored_for_openai():
     )
 
 
-@pytest.mark.asyncio
-async def test_force_tool_choice_rejects_empty_tool_name():
+def test_force_tool_choice_rejects_empty_tool_name():
     """Defensive: empty/non-string tool_name must raise ValueError, not produce a malformed param."""
     from app.services.chat.adapters.openai_adapter import OpenAIAdapter
 
