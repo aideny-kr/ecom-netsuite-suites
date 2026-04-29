@@ -51,9 +51,9 @@ def test_try_force_tool_choice_returns_dict_when_supported():
 
 def test_try_force_tool_choice_returns_dict_with_model():
     adapter = MagicMock()
-    adapter.force_tool_choice = MagicMock(return_value={"function_calling_config": {}})
+    adapter.force_tool_choice = MagicMock(return_value={"type": "tool", "name": "clarify"})
     result = try_force_tool_choice(adapter, "clarify", model="gemini-1.5-pro")
-    assert result == {"function_calling_config": {}}
+    assert result == {"type": "tool", "name": "clarify"}
     adapter.force_tool_choice.assert_called_once_with("clarify", model="gemini-1.5-pro")
 
 

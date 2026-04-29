@@ -22,15 +22,26 @@ class OpenAIAdapter(BaseLLMAdapter):
         )
 
     def force_tool_choice(self, tool_name: str, model: str | None = None) -> dict:
-        """Build the OpenAI Chat Completions tool_choice param.
+        """Return the INTERNAL tool_choice shape for forcing a single tool.
 
-        Per OpenAI SDK: `tool_choice={"type": "function", "function": {"name": "..."}}`
-        forces the model to call exactly one named function. Model-agnostic — all
-        current GPT-4 / GPT-5 models support this.
+        We deliberately return `{"type": "tool", "name": tool_name}` (the same
+        shape Anthropic uses natively) instead of the OpenAI-native
+        `{"type": "function", "function": {"name": ...}}`. The adapter's
+        `_convert_tool_choice` translates internal → native at the SDK call
+        site. See `test_openai_force_tool_choice_reaches_api_kwargs` for the
+        end-to-end contract — that's what proves `tool_choice` actually
+        survives translation and reaches `chat.completions.create`.
+
+        Returning native shape here would short-circuit `_convert_tool_choice`'s
+        `tc_type == "tool"` branch and the kwarg would never be set on the API
+        call (the original P2 bug).
+
+        Model-agnostic — all current GPT-4 / GPT-5 models support forced
+        function call, so `model` is accepted only for protocol uniformity.
         """
         if not tool_name or not isinstance(tool_name, str):
             raise ValueError(f"tool_name must be a non-empty string, got {tool_name!r}")
-        return {"type": "function", "function": {"name": tool_name}}
+        return {"type": "tool", "name": tool_name}
 
     @staticmethod
     def _convert_tool_choice(tool_choice: dict | str | None) -> dict | str | None:

@@ -26,13 +26,17 @@ def test_misbehaving_adapter_cannot_call_data_tool():
     assert [t["name"] for t in filtered] == ["clarify"]
 
 
+# `force_tool_choice` returns the internal `{type: tool, name: ...}` shape for
+# all providers. Each adapter's `_convert_tool_choice` / `create_message`
+# translates internal → native at the API call site. End-to-end plumbing is
+# verified by `test_*_reaches_api_kwargs` in `tests/test_llm_adapters.py`.
 def test_force_tool_choice_passed_to_adapter():
-    """Verify orchestrator passes tool_choice={"type":"function","function":{"name":"clarify"}} to OpenAI."""
+    """Verify the OpenAI adapter returns the internal tool_choice shape."""
     from app.services.chat.adapters.openai_adapter import OpenAIAdapter
 
     adapter = OpenAIAdapter(api_key="test")
     forcing = adapter.force_tool_choice("clarify")
-    assert forcing == {"type": "function", "function": {"name": "clarify"}}
+    assert forcing == {"type": "tool", "name": "clarify"}
 
 
 def test_force_tool_choice_model_param_ignored_for_openai():
@@ -42,14 +46,7 @@ def test_force_tool_choice_model_param_ignored_for_openai():
     adapter = OpenAIAdapter(api_key="test")
     with_model = adapter.force_tool_choice("clarify", model="gpt-4o")
     without_model = adapter.force_tool_choice("clarify")
-    assert (
-        with_model
-        == without_model
-        == {
-            "type": "function",
-            "function": {"name": "clarify"},
-        }
-    )
+    assert with_model == without_model == {"type": "tool", "name": "clarify"}
 
 
 def test_force_tool_choice_rejects_empty_tool_name():

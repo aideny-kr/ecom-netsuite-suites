@@ -27,18 +27,22 @@ def test_misbehaving_adapter_cannot_call_data_tool():
     assert [t["name"] for t in filtered] == ["clarify"]
 
 
+# `force_tool_choice` returns the internal `{type: tool, name: ...}` shape for
+# all providers. Each adapter's `_convert_tool_choice` / `create_message`
+# translates internal → native at the API call site. For Gemini, the native
+# shape is `function_calling_config.mode='ANY'` + `allowed_function_names=[...]`,
+# built inside `create_message`. End-to-end plumbing is verified by
+# `test_*_reaches_api_kwargs` in `tests/test_llm_adapters.py`. The model-version
+# gating that raises `PlanModeUnsupportedError` for sub-1.5 / missing model
+# stays here — see `test_force_tool_choice_rejects_legacy_models` and
+# `test_force_tool_choice_requires_model_for_gemini` below.
 def test_force_tool_choice_passed_to_adapter():
-    """Verify orchestrator passes function_calling_config to Gemini for a 1.5+ model."""
+    """Verify the Gemini adapter returns the internal tool_choice shape for a 1.5+ model."""
     from app.services.chat.adapters.gemini_adapter import GeminiAdapter
 
     adapter = GeminiAdapter(api_key="test")
     forcing = adapter.force_tool_choice("clarify", model="gemini-1.5-pro")
-    assert forcing == {
-        "function_calling_config": {
-            "mode": "ANY",
-            "allowed_function_names": ["clarify"],
-        }
-    }
+    assert forcing == {"type": "tool", "name": "clarify"}
 
 
 def test_force_tool_choice_supports_gemini_2x():
@@ -47,12 +51,7 @@ def test_force_tool_choice_supports_gemini_2x():
 
     adapter = GeminiAdapter(api_key="test")
     forcing = adapter.force_tool_choice("clarify", model="gemini-2.0-flash")
-    assert forcing == {
-        "function_calling_config": {
-            "mode": "ANY",
-            "allowed_function_names": ["clarify"],
-        }
-    }
+    assert forcing == {"type": "tool", "name": "clarify"}
 
 
 def test_force_tool_choice_rejects_legacy_models():

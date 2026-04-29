@@ -24,12 +24,23 @@ class GeminiAdapter(BaseLLMAdapter):
         )
 
     def force_tool_choice(self, tool_name: str, model: str | None = None) -> dict:
-        """Build Gemini's tool-choice forcing param.
+        """Return the INTERNAL tool_choice shape for forcing a single tool.
 
-        Only Gemini 1.5+ and 2.x support function_calling_config.mode='ANY'. For
-        older models, raise PlanModeUnsupportedError so the orchestrator can
-        gracefully disable Plan Mode for the turn instead of hitting an API error
-        later.
+        We return `{"type": "tool", "name": tool_name}` (the same shape Anthropic
+        uses natively) so the orchestrator can pass a uniform value across
+        providers. `create_message` translates internal → native (Gemini's
+        `function_calling_config.mode='ANY'` + `allowed_function_names=[...]`)
+        at the SDK call site. See `test_gemini_force_tool_choice_reaches_api_kwargs`
+        for the end-to-end contract.
+
+        Returning Gemini-native shape here would never match `create_message`'s
+        `tc_type == "tool"` branch, so the kwarg would silently be dropped (the
+        original P2 bug).
+
+        Only Gemini 1.5+ and 2.x support function_calling_config.mode='ANY';
+        we still gate by model version here so PlanModeUnsupportedError fires
+        before the request goes out — the orchestrator can then disable Plan
+        Mode for the turn instead of hitting an API error later.
         """
         from app.services.chat.plan_mode.errors import PlanModeUnsupportedError
 
@@ -45,12 +56,7 @@ class GeminiAdapter(BaseLLMAdapter):
                 model,
                 reason="function_calling_config requires Gemini 1.5+",
             )
-        return {
-            "function_calling_config": {
-                "mode": "ANY",
-                "allowed_function_names": [tool_name],
-            }
-        }
+        return {"type": "tool", "name": tool_name}
 
     def _convert_tools(self, tools: list[dict]) -> list[genai_types.Tool]:
         """Convert Anthropic tool format to Gemini FunctionDeclarations."""
