@@ -319,6 +319,17 @@ class UnifiedAgent(BaseSpecialistAgent):
         self._active_skill: dict | None = None  # Set when a skill is triggered
         self._context: dict[str, Any] = {}  # Full context dict from orchestrator
         self._connectors: list = []  # Active MCP connectors for this tenant
+        # Plan Mode injections — set per-turn by the orchestrator. Empty by default.
+        # `_plan_mode_augmentation`: appended to system prompt when financial-ambiguity
+        #   regex matches AND plan_mode flag is on (initial gate intent).
+        # `_plan_mode_resume_directive`: appended AFTER augmentation so it overrides
+        #   initial gate intent on resume turns (after the user picks an option).
+        # The orchestrator USED to mutate a local `system_prompt` variable, but the
+        # UnifiedAgent.system_prompt property builds its own prompt and never read
+        # that local — so the augmentations were dead code. Setting them on the
+        # instance routes them through this property where the LLM can see them.
+        self._plan_mode_augmentation: str = ""
+        self._plan_mode_resume_directive: str = ""
 
     @property
     def agent_name(self) -> str:
@@ -644,6 +655,14 @@ class UnifiedAgent(BaseSpecialistAgent):
                 parts.append(f"Maximum rows per query: {self._policy.max_rows_per_query}")
             if self._policy.blocked_fields and isinstance(self._policy.blocked_fields, list):
                 parts.append(f"BLOCKED fields (never query these): {', '.join(self._policy.blocked_fields)}")
+
+        # Plan Mode injections — augmentation first, resume directive last
+        # so the resume directive (chosen-option turn) overrides the initial
+        # gate intent (financial-ambiguity turn) when both fire.
+        if self._plan_mode_augmentation:
+            parts.append("\n\n" + self._plan_mode_augmentation)
+        if self._plan_mode_resume_directive:
+            parts.append("\n\n" + self._plan_mode_resume_directive)
 
         prompt = "\n".join(parts)
 

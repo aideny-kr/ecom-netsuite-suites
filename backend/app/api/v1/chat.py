@@ -363,12 +363,20 @@ async def send_message(
     run_id = str(uuid.uuid4())
     rm.create_run(run_id, str(session_id))
 
+    # When write_confirm or plan_mode_choice is set, body.content is a
+    # control payload (e.g. "Picked option A") not a real user query —
+    # the original question lives in the reused user_msg. Pass that
+    # content to the agent so it answers the original question.
+    # write_confirm short-circuits before reaching the agent so user_message
+    # is moot for it, but applying the same fix uniformly is defensively consistent.
+    effective_user_message = user_msg.content if (body.write_confirm or body.plan_mode_choice) else body.content
+
     asyncio.create_task(
         _run_chat_background(
             run_id=run_id,
             session_id=str(session_id),
             session=session,
-            user_message=body.content,
+            user_message=effective_user_message,
             user_id=user.id,
             tenant_id=user.tenant_id,
             user_msg=user_msg,
@@ -504,13 +512,19 @@ async def _send_message_inline_sse(
         stream_completed = False
         queue: asyncio.Queue = asyncio.Queue()
 
+        # When write_confirm or plan_mode_choice is set, body.content is a
+        # control payload (e.g. "Picked option A") not a real user query —
+        # the original question lives in the reused user_msg. Use that so
+        # the agent answers the original question.
+        effective_user_message = user_msg.content if (body.write_confirm or body.plan_mode_choice) else body.content
+
         async def _producer():
             """Run the chat pipeline and put chunks into the queue."""
             try:
                 async for chunk in run_chat_turn(
                     db=db,
                     session=session,
-                    user_message=body.content,
+                    user_message=effective_user_message,
                     user_id=user.id,
                     tenant_id=user.tenant_id,
                     user_msg=user_msg,

@@ -1,5 +1,6 @@
 """Verify Plan Mode tool gate helpers + orchestrator wiring (unit tests)."""
 
+import inspect
 from unittest.mock import MagicMock
 
 import pytest
@@ -71,3 +72,51 @@ def test_try_force_tool_choice_lets_other_errors_bubble():
     adapter.force_tool_choice = MagicMock(side_effect=ValueError("boom"))
     with pytest.raises(ValueError, match="boom"):
         try_force_tool_choice(adapter, "clarify")
+
+
+def test_orchestrator_sets_plan_mode_augmentation_on_unified_agent():
+    """Codex P1: the orchestrator MUST set the augmentation on the agent
+    instance via attribute, not append to a local `system_prompt` variable
+    that the UnifiedAgent never reads.
+
+    Source-level invariant: after `maybe_augment_for_plan_mode(...)`, the
+    orchestrator must assign the result to `unified_agent._plan_mode_augmentation`
+    (NOT just `system_prompt += ...`), because UnifiedAgent.system_prompt is
+    a property that builds its own prompt and ignores the local variable.
+    """
+    from app.services.chat import orchestrator
+
+    source = inspect.getsource(orchestrator)
+
+    # Locate the augmentation block.
+    aug_idx = source.index("plan_mode_augmentation = maybe_augment_for_plan_mode(")
+    # Look in a window of ~1600 chars after the assignment for the agent
+    # attribute write — the agent constructor sits between them and is
+    # multi-line, so we need more breathing room than the local-mutation
+    # version did.
+    window = source[aug_idx : aug_idx + 1600]
+
+    assert "unified_agent._plan_mode_augmentation" in window, (
+        "Orchestrator must set unified_agent._plan_mode_augmentation so the "
+        "augmentation reaches the agent's system_prompt property — appending "
+        "to the local `system_prompt` variable is dead code on the UnifiedAgent path."
+    )
+
+
+def test_orchestrator_sets_plan_mode_resume_directive_on_unified_agent():
+    """Same fix as augmentation — the resume directive must reach the agent
+    via attribute, not the dead local `system_prompt` variable.
+    """
+    from app.services.chat import orchestrator
+
+    source = inspect.getsource(orchestrator)
+
+    # Locate the resume directive append line.
+    directive_idx = source.index("if plan_mode_resume_directive:")
+    window = source[directive_idx : directive_idx + 600]
+
+    assert "unified_agent._plan_mode_resume_directive" in window, (
+        "Orchestrator must set unified_agent._plan_mode_resume_directive so the "
+        "directive reaches the agent's system_prompt property — appending "
+        "to the local `system_prompt` variable is dead code on the UnifiedAgent path."
+    )

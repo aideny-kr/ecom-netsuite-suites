@@ -2066,18 +2066,9 @@ async def run_chat_turn(
                     if pin_hint:
                         system_prompt += pin_hint
 
-                    # Plan Mode resume directive — when the user just picked
-                    # a clarification option, append the server-authored
-                    # PRIOR CLARIFICATIONS block so the agent uses the
-                    # chosen interpretation. (Task 4.3 will additionally
-                    # filter the tool inventory by `plan_mode_resume_source`.)
-                    if plan_mode_resume_directive:
-                        system_prompt += "\n\n" + plan_mode_resume_directive
-
-                    # Plan Mode augmentation — appended after pin hint so it
-                    # overrides any pinned source for financial-ambiguous turns.
-                    # `plan_mode_enabled` is computed earlier (with the tool
-                    # inventory) so we don't refetch the flag here.
+                    # Plan Mode augmentation — `plan_mode_enabled` is computed
+                    # earlier (with the tool inventory) so we don't refetch the
+                    # flag here. Imported here to keep the import close to use.
                     from app.services.chat.plan_mode.ambiguity_signal import (
                         is_financial_ambiguous,
                         maybe_augment_for_plan_mode,
@@ -2087,8 +2078,6 @@ async def run_chat_turn(
                     plan_mode_augmentation = maybe_augment_for_plan_mode(
                         query=sanitized_input, plan_mode_enabled=plan_mode_enabled
                     )
-                    if plan_mode_augmentation:
-                        system_prompt += "\n\n" + plan_mode_augmentation
 
                     # Always use UnifiedAgent — no routing fork
                     unified_agent = UnifiedAgent(
@@ -2099,6 +2088,20 @@ async def run_chat_turn(
                         policy=active_policy,
                         context_need=context_need,
                     )
+
+                    # Pass Plan Mode injections to the agent via instance
+                    # attributes — UnifiedAgent.system_prompt is a property
+                    # that builds its own prompt from _SYSTEM_PROMPT + tool
+                    # inventory + metadata, so it never reads the orchestrator's
+                    # local `system_prompt` variable. Setting the attributes
+                    # routes the augmentation/directive into that property.
+                    #
+                    # Order in the agent: augmentation first, resume directive
+                    # last (so the resume directive overrides initial gate intent).
+                    if plan_mode_augmentation:
+                        unified_agent._plan_mode_augmentation = plan_mode_augmentation
+                    if plan_mode_resume_directive:
+                        unified_agent._plan_mode_resume_directive = plan_mode_resume_directive
 
                 # Classify follow-up intent (TRANSFORM vs NEW_DATA)
                 from app.services.chat.follow_up_classifier import FollowUpIntent, classify_follow_up
