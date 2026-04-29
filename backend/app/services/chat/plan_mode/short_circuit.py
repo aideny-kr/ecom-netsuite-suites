@@ -170,3 +170,43 @@ async def handle_plan_mode_choice(
         chosen_source=chosen.get("source", ""),
         system_directive=directive,
     )
+
+
+# Tool name prefixes per source. Cross-source tools (see below) are
+# always included on resume turns regardless of chosen source.
+_SOURCE_TOOL_PREFIXES: dict[str, tuple[str, ...]] = {
+    "netsuite": ("netsuite_", "ext__"),  # ext__ is MCP NetSuite
+    "bigquery": ("bigquery_",),
+    "shopify": ("shopify_",),
+    "stripe": ("stripe_",),
+    "drive": ("drive_",),
+}
+
+# Tools that work across all sources — keep regardless of chosen source.
+_CROSS_SOURCE_TOOLS: frozenset[str] = frozenset(
+    {
+        "pivot_query_result",
+        "docs_create",
+        "drive_read_doc",
+        "clarify",
+        "reference_previous_result",
+    }
+)
+
+
+def filter_tools_for_chosen_source(tools: list[dict], chosen_source: str) -> list[dict]:
+    """Return only tools matching ``chosen_source`` + cross-source tools.
+
+    Used on the resume turn after the user picks a clarification option, so
+    the agent literally cannot call the wrong source's tools — even if the
+    LLM tries, the schema doesn't include them. Order is preserved.
+    """
+    keep_prefixes = _SOURCE_TOOL_PREFIXES.get(chosen_source, ())
+    filtered: list[dict] = []
+    for tool in tools:
+        name = tool.get("name", "")
+        if name in _CROSS_SOURCE_TOOLS:
+            filtered.append(tool)
+        elif keep_prefixes and any(name.startswith(p) for p in keep_prefixes):
+            filtered.append(tool)
+    return filtered

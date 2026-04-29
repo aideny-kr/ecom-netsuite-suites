@@ -756,6 +756,7 @@ class UnifiedAgent(BaseSpecialistAgent):
         tool_choice: dict | str | None = None,
         financial_mode: bool = False,
         plan_mode_clarify_only: bool = False,
+        plan_mode_resume_source: str | None = None,
     ):
         """Override to inject context and discover external MCP tools.
 
@@ -763,12 +764,23 @@ class UnifiedAgent(BaseSpecialistAgent):
         ``clarify`` tool only — applied AFTER ``_setup_context`` so the
         rebuild inside setup doesn't clobber the gate. Mirrors the
         ``financial_mode`` pattern.
+
+        ``plan_mode_resume_source`` filters ``self._tool_defs`` to only the
+        chosen source's tools (plus cross-source tools) on the resume turn
+        after the user picks a clarification option. Applied AFTER
+        ``_setup_context`` and the ``plan_mode_clarify_only`` filter.
         """
         task = await self._setup_context(task, context, db)
         if financial_mode:
             self._tool_defs = self.financial_tool_definitions
         if plan_mode_clarify_only:
             self._tool_defs = [t for t in (self._tool_defs or []) if t.get("name") == "clarify"]
+        if plan_mode_resume_source:
+            from app.services.chat.plan_mode.short_circuit import (
+                filter_tools_for_chosen_source,
+            )
+
+            self._tool_defs = filter_tools_for_chosen_source(self._tool_defs or [], plan_mode_resume_source)
         return await super().run(task, context, db, adapter, model, tool_choice=tool_choice)
 
     async def run_streaming(
@@ -782,6 +794,7 @@ class UnifiedAgent(BaseSpecialistAgent):
         tool_choice: dict | str | None = None,
         financial_mode: bool = False,
         plan_mode_clarify_only: bool = False,
+        plan_mode_resume_source: str | None = None,
         tool_result_interceptor: Callable[[str, str], tuple[tuple[str, dict] | None, str]] | None = None,
         session_id: str | None = None,
         run_id: str | None = None,
@@ -791,12 +804,23 @@ class UnifiedAgent(BaseSpecialistAgent):
         ``plan_mode_clarify_only`` filters ``self._tool_defs`` to the
         ``clarify`` tool only — applied AFTER ``_setup_context`` so the
         rebuild inside setup doesn't clobber the gate.
+
+        ``plan_mode_resume_source`` filters ``self._tool_defs`` to only the
+        chosen source's tools (plus cross-source tools) on the resume turn
+        after the user picks a clarification option. Applied AFTER
+        ``_setup_context`` and the ``plan_mode_clarify_only`` filter.
         """
         task = await self._setup_context(task, context, db)
         if financial_mode:
             self._tool_defs = self.financial_tool_definitions
         if plan_mode_clarify_only:
             self._tool_defs = [t for t in (self._tool_defs or []) if t.get("name") == "clarify"]
+        if plan_mode_resume_source:
+            from app.services.chat.plan_mode.short_circuit import (
+                filter_tools_for_chosen_source,
+            )
+
+            self._tool_defs = filter_tools_for_chosen_source(self._tool_defs or [], plan_mode_resume_source)
         async for event in super().run_streaming(
             task,
             context,

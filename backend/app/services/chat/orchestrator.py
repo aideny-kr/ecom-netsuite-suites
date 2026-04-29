@@ -2132,7 +2132,17 @@ async def run_chat_turn(
                 # set on the non-chitchat path, so guard with _is_chitchat.
                 _plan_mode_active = False
                 _plan_mode_tool_choice: dict | None = None
-                if not _is_chitchat and plan_mode_enabled and is_financial_ambiguous(sanitized_input):
+                # Mutual exclusion: when plan_mode_resume_source is set, we
+                # are on the resume turn after the user already picked an
+                # option — never re-fire the new-clarify gate on the same
+                # turn (the clarify-only filter would narrow the resume
+                # filter to []).
+                if (
+                    not _is_chitchat
+                    and plan_mode_enabled
+                    and plan_mode_resume_source is None
+                    and is_financial_ambiguous(sanitized_input)
+                ):
                     _has_clarify = any(t.get("name") == "clarify" for t in (tool_definitions or []))
                     if _has_clarify:
                         _plan_mode_tool_choice = try_force_tool_choice(
@@ -2153,6 +2163,7 @@ async def run_chat_turn(
                     conversation_history=history_messages,
                     tool_choice=_plan_mode_tool_choice,
                     plan_mode_clarify_only=_plan_mode_active,
+                    plan_mode_resume_source=plan_mode_resume_source,
                     tool_result_interceptor=_make_tool_interceptor(context_need, cache_callback=_on_tool_intercepted),
                     session_id=str(session.id),
                     run_id=run_id,
