@@ -1311,6 +1311,28 @@ async def run_chat_turn(
     # plan_mode_resume_* variables are consumed by Task 4.3 (tool filter)
     # and the system-prompt assembly path (just append the directive).
 
+    # ── Plan Mode: supersede any stale pending clarification ──
+    # If this turn is NOT a plan_mode_choice resume, transition any pending
+    # clarification on this session to 'superseded'. The user typed instead
+    # of clicking the card — their typed message is the de-facto answer.
+    if plan_mode_choice is None:
+        try:
+            from app.services.chat.plan_mode.short_circuit import (
+                supersede_pending_clarifications,
+            )
+
+            await supersede_pending_clarifications(
+                session_id=session.id,
+                tenant_id=tenant_id,
+                db=db,
+            )
+        except Exception:
+            logger.warning(
+                "[PLAN_MODE] supersede_pending_clarifications failed",
+                exc_info=True,
+            )
+            # Non-fatal — telemetry only; chat continues normally.
+
     # ── Load conversation history (summary-based windowing) ──
     from app.services.chat.history_compactor import KEEP_RECENT
     from app.services.chat.history_tool_trace import build_history_dicts

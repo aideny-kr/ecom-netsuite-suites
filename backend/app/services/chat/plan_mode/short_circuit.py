@@ -210,3 +210,78 @@ def filter_tools_for_chosen_source(tools: list[dict], chosen_source: str) -> lis
         elif keep_prefixes and any(name.startswith(p) for p in keep_prefixes):
             filtered.append(tool)
     return filtered
+
+
+async def supersede_pending_clarifications(
+    *,
+    session_id: str | _uuid.UUID,
+    tenant_id: _uuid.UUID,
+    db: AsyncSession,
+) -> int:
+    """Mark any pending clarification on this session as 'superseded'.
+
+    Called at the top of every new turn when ``plan_mode_choice`` is NOT set
+    (user typed instead of clicking the card). Atomic per-row CAS via
+    ``UPDATE ... WHERE structured_output->>'status' = 'pending'``. Returns
+    the number of rows transitioned (0 in the common case).
+
+    Also writes a chat_disclosure_events row per superseded clarification
+    for cross-turn telemetry.
+    """
+    # Normalise session_id to UUID for the query
+    session_uuid = session_id if isinstance(session_id, _uuid.UUID) else _uuid.UUID(str(session_id))
+
+    # Find pending clarifications first (we need their IDs for the telemetry event)
+    pending_result = await db.execute(
+        select(ChatMessage).where(
+            ChatMessage.session_id == session_uuid,
+            ChatMessage.structured_output["type"].astext == "clarification",
+            ChatMessage.structured_output["status"].astext == "pending",
+        )
+    )
+    pending_msgs = pending_result.scalars().all()
+    if not pending_msgs:
+        return 0
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    transitioned = 0
+    for msg in pending_msgs:
+        so = msg.structured_output or {}
+        # Atomic per-row CAS — guards against the resume turn race
+        cas = await db.execute(
+            update(ChatMessage)
+            .where(
+                ChatMessage.id == msg.id,
+                ChatMessage.structured_output["status"].astext == "pending",
+            )
+            .values(
+                structured_output={
+                    **so,
+                    "status": "superseded",
+                    "chose_at": now_iso,
+                }
+            )
+        )
+        if cas.rowcount > 0:
+            transitioned += 1
+            db.add(
+                ChatDisclosureEvent(
+                    tenant_id=tenant_id,
+                    chat_session_id=msg.session_id,
+                    chat_message_id=msg.id,
+                    event_type="clarification_superseded",
+                    payload={
+                        "ambiguity_summary": so.get("ambiguity_summary", ""),
+                    },
+                )
+            )
+
+    if transitioned > 0:
+        await db.commit()
+        logger.info(
+            "[PLAN_MODE] superseded %d pending clarification(s) on session %s",
+            transitioned,
+            session_id,
+        )
+
+    return transitioned
