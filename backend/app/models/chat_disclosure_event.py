@@ -2,7 +2,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, String, func
+from sqlalchemy import DateTime, ForeignKey, Index, String, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -11,6 +11,9 @@ from app.models.base import Base, UUIDPrimaryKeyMixin
 
 class ChatDisclosureEvent(Base, UUIDPrimaryKeyMixin):
     __tablename__ = "chat_disclosure_events"
+    __table_args__ = (
+        Index("ix_chat_disclosure_events_tenant_session", "tenant_id", "chat_session_id"),
+    )
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
