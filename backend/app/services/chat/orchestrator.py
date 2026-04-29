@@ -1946,7 +1946,10 @@ async def run_chat_turn(
                     # overrides any pinned source for financial-ambiguous turns.
                     from app.services import feature_flag_service
                     from app.services.chat.plan_mode.ambiguity_signal import (
+                        filter_tools_to_clarify_only,
+                        is_financial_ambiguous,
                         maybe_augment_for_plan_mode,
+                        try_force_tool_choice,
                     )
 
                     plan_mode_enabled = await feature_flag_service.is_enabled(db, tenant_id, "plan_mode_enabled")
@@ -2067,6 +2070,29 @@ async def run_chat_turn(
                 if context.get("drive_sources"):
                     yield {"type": "drive_sources", "sources": context["drive_sources"]}
 
+                # ── Plan Mode hard gate ─────────────────────────────────
+                # If financial-ambiguity regex matches AND flag is on AND
+                # clarify is registered, force tool_choice=clarify and filter
+                # the agent's tool inventory to clarify-only. plan_mode_enabled
+                # is only set on the non-chitchat path, so guard with _is_chitchat.
+                _plan_mode_tool_choice: dict | None = None
+                if not _is_chitchat and plan_mode_enabled and is_financial_ambiguous(sanitized_input):
+                    # Trigger setup_context so unified_agent._tool_defs is populated
+                    # (normally happens inside run_streaming; we need it earlier).
+                    await unified_agent._setup_context(unified_task, context, db)
+                    _has_clarify = any(t.get("name") == "clarify" for t in (unified_agent._tool_defs or []))
+                    if _has_clarify:
+                        unified_agent._tool_defs = filter_tools_to_clarify_only(unified_agent._tool_defs)
+                        _plan_mode_tool_choice = try_force_tool_choice(
+                            specialist_adapter, "clarify", model=unified_model
+                        )
+                        if _plan_mode_tool_choice is None:
+                            # Adapter unsupported — undo the filter, skip gate.
+                            # build_all_tool_definitions is imported at module level (line 926).
+                            unified_agent._tool_defs = await build_all_tool_definitions(db, tenant_id)
+                    else:
+                        logger.warning("[PLAN_MODE] flag on but clarify tool missing — skipping gate")
+
                 async for event_type, payload in unified_agent.run_streaming(
                     task=unified_task,
                     context=context,
@@ -2074,7 +2100,7 @@ async def run_chat_turn(
                     adapter=specialist_adapter,
                     model=unified_model,
                     conversation_history=history_messages,
-                    tool_choice=None,
+                    tool_choice=_plan_mode_tool_choice,
                     tool_result_interceptor=_make_tool_interceptor(context_need, cache_callback=_on_tool_intercepted),
                     session_id=str(session.id),
                     run_id=run_id,
