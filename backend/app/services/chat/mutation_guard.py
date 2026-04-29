@@ -97,16 +97,36 @@ def is_record_type_allowed(record_type: str) -> bool:
     return record_type not in _BLOCKED_RECORD_TYPES
 
 
-def generate_confirmation_token(session_id: str, payload_json: str) -> str:
+def generate_confirmation_token(
+    session_id: str,
+    payload_json: str,
+    event_type: str = "write_confirm",
+) -> str:
     """Generate an HMAC-SHA256 token binding *payload_json* to *session_id*.
 
     The token is a 64-character hex digest.  Uses ``settings.JWT_SECRET_KEY``
     as the HMAC key so tokens are server-side secrets the browser cannot
     forge.
+
+    The ``event_type`` parameter scopes the token to a specific confirmation
+    namespace (e.g. ``"write_confirm"`` for PR #39 write-back confirmation,
+    ``"plan_mode_choice"`` for Plan Mode option selection). Cross-event
+    isolation is enforced by including the event type in the HMAC message
+    bytes so a write_confirm token cannot be replayed as a plan_mode_choice
+    (and vice versa).
+
+    Backward compat: ``event_type="write_confirm"`` (the default) reproduces
+    the pre-event-type message format byte-for-byte (``f"{session_id}:{payload_json}"``)
+    so existing PR #39 tokens remain valid with zero changes to callers.
     """
     from app.core.config import settings  # lazy import — avoids circular dep
 
-    message = f"{session_id}:{payload_json}".encode()
+    if event_type == "write_confirm":
+        # Backward-compatible bytes — preserve pre-event-type token format
+        # so PR #39 tokens generated before this kwarg existed still verify.
+        message = f"{session_id}:{payload_json}".encode()
+    else:
+        message = f"{event_type}:{session_id}:{payload_json}".encode()
     return hmac.new(
         settings.JWT_SECRET_KEY.encode(),
         message,
@@ -114,10 +134,17 @@ def generate_confirmation_token(session_id: str, payload_json: str) -> str:
     ).hexdigest()
 
 
-def verify_confirmation_token(token: str, session_id: str, payload_json: str) -> bool:
-    """Return True if *token* is valid for the given session and payload.
+def verify_confirmation_token(
+    token: str,
+    session_id: str,
+    payload_json: str,
+    event_type: str = "write_confirm",
+) -> bool:
+    """Return True if *token* is valid for the given session, payload, and event type.
 
-    Uses ``hmac.compare_digest`` to prevent timing attacks.
+    Uses ``hmac.compare_digest`` to prevent timing attacks. Default
+    ``event_type="write_confirm"`` preserves PR #39 backward compat — tokens
+    generated without an explicit event_type validate without one.
     """
-    expected = generate_confirmation_token(session_id, payload_json)
+    expected = generate_confirmation_token(session_id, payload_json, event_type=event_type)
     return hmac.compare_digest(expected, token)
