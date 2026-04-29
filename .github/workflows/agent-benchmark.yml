@@ -9,6 +9,7 @@ on:
       - 'backend/app/mcp/**'
       - 'backend/app/services/benchmarks/**'
       - 'backend/tests/agent_benchmarks/**'
+      - '.github/workflows/agent-benchmark.yml'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -78,6 +79,14 @@ jobs:
 
       - name: Run Alembic migrations
         run: cd backend && alembic upgrade head
+
+      - name: Plan Mode behavioral eval
+        # Static regex-only eval against 50 golden CFO/ops queries. No LLM
+        # calls — runs in <1s and is safe on every PR. Gates that
+        # `is_financial_ambiguous` keeps its contract: ~20% ask-rate, no
+        # regression on financial_ambiguous coverage, no false positives on
+        # concrete ops queries.
+        run: cd backend && python -m tests.agent_benchmarks.plan_mode.run
 
       - name: Skip benchmark when ANTHROPIC_API_KEY secret is missing
         id: check_secret
