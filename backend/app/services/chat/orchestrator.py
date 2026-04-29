@@ -2175,6 +2175,11 @@ async def run_chat_turn(
                                 )
                     elif event_type == "confirmation_required":
                         last_structured_output = {"type": "write_confirmation", **payload}
+                    elif event_type == "clarification_required":
+                        # Plan Mode HITL clarification — payload IS the structured_output
+                        last_structured_output = dict(payload)
+                        # Yield SSE event so frontend renders the card
+                        yield {"type": "clarification_required", "data": payload}
                     elif event_type == "response":
                         agent_result = payload
 
@@ -2269,6 +2274,27 @@ async def run_chat_turn(
                     created_at=datetime.now(timezone.utc),
                 )
                 db.add(assistant_msg)
+
+                # Plan Mode telemetry — clarification_pending event row.
+                # The chat_disclosure_events table survives chat history compaction
+                # (the system-prompt assembler re-reads it each turn) so the agent
+                # remembers prior clarifications across a session.
+                if isinstance(_persisted_output, dict) and _persisted_output.get("type") == "clarification":
+                    from app.models.chat_disclosure_event import ChatDisclosureEvent
+
+                    db.add(
+                        ChatDisclosureEvent(
+                            tenant_id=tenant_id,
+                            chat_session_id=session.id,
+                            chat_message_id=assistant_msg.id,
+                            event_type="clarification_pending",
+                            payload={
+                                "options": _persisted_output.get("options", []),
+                                "default_id": _persisted_output.get("default_id"),
+                                "ambiguity_summary": _persisted_output.get("ambiguity_summary", ""),
+                            },
+                        )
+                    )
 
                 # Flush pending result caches (for follow-up intelligence)
                 for _pc in _pending_caches:

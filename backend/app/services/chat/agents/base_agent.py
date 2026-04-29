@@ -946,6 +946,105 @@ class BaseSpecialistAgent(abc.ABC):
 
                     t0 = time.monotonic()
 
+                    # ── Plan Mode clarify intercept (TERMINAL) ──
+                    # When the agent calls the `clarify` tool we short-circuit
+                    # the turn: validate the schema, emit a clarification_required
+                    # SSE event, and return a synthetic empty response. On
+                    # validation failure, feed the error back to the agent as a
+                    # tool_result(is_error=True) so it can retry within the turn.
+                    if block.name == "clarify":
+                        from app.services.chat.plan_mode.clarify_intercept import (
+                            InterceptError,
+                            InterceptResult,
+                            intercept_clarify_call,
+                        )
+
+                        _connector_providers = [getattr(c, "provider", "") for c in getattr(self, "_connectors", [])]
+                        clar_result = await intercept_clarify_call(
+                            tool_input=block.input,
+                            session_id=session_id or str(self.tenant_id),
+                            active_connectors=_connector_providers,
+                            db=db,
+                        )
+
+                        if isinstance(clar_result, InterceptError):
+                            # Feed error back to agent — let it retry within the turn
+                            result_str = json.dumps({"error": clar_result.error_message, "retry": True})
+                            elapsed_ms = int((time.monotonic() - t0) * 1000)
+                            yield (
+                                "tool_end",
+                                {
+                                    "tool_name": block.name,
+                                    "step": step,
+                                    "duration_ms": elapsed_ms,
+                                    "success": False,
+                                    "result_summary": "Clarify schema invalid",
+                                },
+                            )
+                            tool_calls_log.append(
+                                build_tool_call_log_entry(
+                                    step=step,
+                                    agent_name=self.agent_name,
+                                    tool_name=block.name,
+                                    params=block.input,
+                                    result_str=result_str,
+                                    duration_ms=elapsed_ms,
+                                )
+                            )
+                            tool_results_content.append(
+                                {
+                                    "type": "tool_result",
+                                    "tool_use_id": block.id,
+                                    "content": result_str,
+                                    "is_error": True,
+                                }
+                            )
+                            continue
+
+                        # InterceptResult — emit clarification_required + terminal response
+                        assert isinstance(clar_result, InterceptResult)
+                        yield ("clarification_required", clar_result.sse_payload)
+                        elapsed_ms = int((time.monotonic() - t0) * 1000)
+                        yield (
+                            "tool_end",
+                            {
+                                "tool_name": block.name,
+                                "step": step,
+                                "duration_ms": elapsed_ms,
+                                "success": True,
+                                "result_summary": "Clarification card shown",
+                            },
+                        )
+                        tool_calls_log.append(
+                            build_tool_call_log_entry(
+                                step=step,
+                                agent_name=self.agent_name,
+                                tool_name=block.name,
+                                params=block.input,
+                                result_str=json.dumps({"sent_to_user": True}),
+                                duration_ms=elapsed_ms,
+                            )
+                        )
+                        # Terminal — emit final response with empty data and return
+                        yield (
+                            "response",
+                            AgentResult(
+                                success=True,
+                                data="",
+                                tool_calls_log=tool_calls_log,
+                                tokens_used=TokenUsage(
+                                    total_input_tokens,
+                                    total_output_tokens,
+                                    total_cache_creation,
+                                    total_cache_read,
+                                ),
+                                agent_name=self.agent_name,
+                                confidence_score=None,
+                            ),
+                        )
+                        return
+                    # ── End Plan Mode clarify intercept ──
+
                     # ── Mutation intercept: HITL write confirmation ──
                     from app.services.chat.mutation_guard import classify_mutation
 
