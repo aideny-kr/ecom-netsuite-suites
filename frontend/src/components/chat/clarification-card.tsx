@@ -44,6 +44,12 @@ export function ClarificationCard({
 
       const k = e.key;
       if (k === "Enter") {
+        // Skip Enter→default when the focused element is a button (e.g. an
+        // option). The button's native Enter activation handles the choice;
+        // submitting default here would race the click and submit the WRONG
+        // option (focused-B + global-Enter → backend got A then 409 on B).
+        const onButton = target instanceof HTMLButtonElement;
+        if (onButton) return;
         handlePick(data.default_id);
       } else if (k === "A" || k === "B" || k === "C") {
         if (data.options.some((o) => o.id === k)) {

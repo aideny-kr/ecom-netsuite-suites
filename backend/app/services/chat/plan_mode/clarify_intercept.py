@@ -76,6 +76,19 @@ async def intercept_clarify_call(
             error_message=("fewer than 2 connected sources in options; answer with the single connected source default")
         )
 
+    # Option-id validation: each id must be in {A, B, C} and unique within the
+    # set. Duplicates would render duplicate React keys client-side and the
+    # resume endpoint cannot disambiguate (returns 400 invalid option).
+    allowed_ids = {"A", "B", "C"}
+    seen_ids: set[str] = set()
+    for opt in connected_options:
+        opt_id = opt.get("id")
+        if opt_id not in allowed_ids:
+            return InterceptError(error_message=f"option id must be one of A/B/C, got {opt_id!r}")
+        if opt_id in seen_ids:
+            return InterceptError(error_message=f"option ids must be unique, got duplicate {opt_id!r}")
+        seen_ids.add(opt_id)
+
     # Default validation
     defaults = [o for o in connected_options if o.get("is_default") is True]
     if len(defaults) == 0:

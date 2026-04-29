@@ -324,6 +324,67 @@ async def test_canonicalize_drops_disconnected_with_raw_providers():
 
 
 @pytest.mark.asyncio
+async def test_duplicate_option_ids_returns_error():
+    """Two options with id='A' would render duplicate React keys client-side
+    and the resume endpoint cannot disambiguate. Reject before persisting."""
+    bad_input = {
+        "options": [
+            {"id": "A", "title": "NetSuite", "rationale": "GL", "source": "netsuite", "is_default": True},
+            {"id": "A", "title": "BigQuery", "rationale": "BQ", "source": "bigquery", "is_default": False},
+        ],
+        "ambiguity_summary": "summary",
+    }
+    result = await intercept_clarify_call(
+        tool_input=bad_input,
+        session_id="sess-1",
+        active_connectors=["netsuite", "bigquery"],
+        db=AsyncMock(),
+    )
+    assert isinstance(result, InterceptError)
+    assert "id" in result.error_message.lower()
+
+
+@pytest.mark.asyncio
+async def test_out_of_range_option_id_returns_error():
+    """Option ids must be in {A, B, C}. Reject 'X'."""
+    bad_input = {
+        "options": [
+            {"id": "A", "title": "NetSuite", "rationale": "GL", "source": "netsuite", "is_default": True},
+            {"id": "X", "title": "BigQuery", "rationale": "BQ", "source": "bigquery", "is_default": False},
+        ],
+        "ambiguity_summary": "summary",
+    }
+    result = await intercept_clarify_call(
+        tool_input=bad_input,
+        session_id="sess-1",
+        active_connectors=["netsuite", "bigquery"],
+        db=AsyncMock(),
+    )
+    assert isinstance(result, InterceptError)
+    assert "id" in result.error_message.lower()
+
+
+@pytest.mark.asyncio
+async def test_valid_unique_ids_passes():
+    """A/B/C unique ids → happy path."""
+    valid_input = {
+        "options": [
+            {"id": "A", "title": "NetSuite", "rationale": "GL", "source": "netsuite", "is_default": True},
+            {"id": "B", "title": "BigQuery", "rationale": "BQ", "source": "bigquery", "is_default": False},
+            {"id": "C", "title": "Shopify", "rationale": "Shop", "source": "shopify", "is_default": False},
+        ],
+        "ambiguity_summary": "Revenue can mean three things.",
+    }
+    result = await intercept_clarify_call(
+        tool_input=valid_input,
+        session_id="sess-1",
+        active_connectors=["netsuite", "bigquery", "shopify"],
+        db=AsyncMock(),
+    )
+    assert isinstance(result, InterceptResult)
+
+
+@pytest.mark.asyncio
 async def test_expires_at_iso_8601_utc():
     """expires_at is a 5-minute future timestamp in ISO-8601 UTC."""
     from datetime import datetime, timezone

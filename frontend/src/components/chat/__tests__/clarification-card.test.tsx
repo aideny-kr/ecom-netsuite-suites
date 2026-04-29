@@ -127,6 +127,22 @@ describe("ClarificationCard", () => {
     expect(screen.getByText(/just type your answer/i)).toBeInTheDocument();
   });
 
+  it("Enter on a focused option button does not also submit the default", () => {
+    // Regression: the global keydown handler treated Enter on any focused
+    // element as "pick default", overriding the focused button's native click
+    // activation. A keyboard user who tabbed to option B and pressed Enter
+    // ended up submitting option A (default) — exactly the wrong outcome.
+    const onChoose = vi.fn();
+    render(<ClarificationCard data={_BASE} onChoose={onChoose} />);
+    const optionB = screen.getByRole("radio", { name: /BigQuery checkout/ });
+    optionB.focus();
+    // Simulate Enter on the focused button. The global handler should detect
+    // a button target and skip its default-Enter shortcut.
+    fireEvent.keyDown(optionB, { key: "Enter" });
+    // The default option (A) MUST NOT be picked — that would be the bug.
+    expect(onChoose).not.toHaveBeenCalledWith("A");
+  });
+
   it("disables all options after first pick (prevents double-click)", () => {
     const onChoose = vi.fn();
     render(<ClarificationCard data={_BASE} onChoose={onChoose} />);

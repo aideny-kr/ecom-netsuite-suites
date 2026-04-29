@@ -13,7 +13,7 @@ from app.services.chat.llm_adapter import BaseLLMAdapter, LLMResponse, TokenUsag
 _CLIENT_TIMEOUT_MS = 60_000
 
 # Models that support function_calling_config.mode='ANY' for forcing a single tool.
-_FCC_SUPPORTED_PREFIXES = ("gemini-1.5-", "gemini-2.")
+_FCC_SUPPORTED_PREFIXES = ("gemini-1.5-", "gemini-2.", "gemini-3-")
 
 
 class GeminiAdapter(BaseLLMAdapter):
@@ -37,7 +37,7 @@ class GeminiAdapter(BaseLLMAdapter):
         `tc_type == "tool"` branch, so the kwarg would silently be dropped (the
         original P2 bug).
 
-        Only Gemini 1.5+ and 2.x support function_calling_config.mode='ANY';
+        Only Gemini 1.5+, 2.x, and 3.x support function_calling_config.mode='ANY';
         we still gate by model version here so PlanModeUnsupportedError fires
         before the request goes out — the orchestrator can then disable Plan
         Mode for the turn instead of hitting an API error later.

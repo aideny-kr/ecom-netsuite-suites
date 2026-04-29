@@ -28,6 +28,24 @@ def test_force_tool_choice_returns_internal_shape_20():
     assert result == {"type": "tool", "name": "clarify"}
 
 
+def test_force_tool_choice_returns_internal_shape_3_pro_preview():
+    """Gemini 3 supports function_calling_config.mode='ANY' — must not raise.
+
+    Without `gemini-3-` in the supported-prefix tuple, tenants on Gemini 3
+    silently lose Plan Mode (orchestrator's `try_force_tool_choice` swallows
+    PlanModeUnsupportedError → returns None → Plan Mode disabled for the turn).
+    """
+    adapter = GeminiAdapter(api_key="test-key")
+    result = adapter.force_tool_choice("clarify", model="gemini-3-pro-preview")
+    assert result == {"type": "tool", "name": "clarify"}
+
+
+def test_force_tool_choice_returns_internal_shape_3_flash_preview():
+    adapter = GeminiAdapter(api_key="test-key")
+    result = adapter.force_tool_choice("clarify", model="gemini-3-flash-preview")
+    assert result == {"type": "tool", "name": "clarify"}
+
+
 def test_force_tool_choice_unsupported_on_old_models():
     """Gemini 1.0 / Pro 1.0 models don't support function_calling_config."""
     adapter = GeminiAdapter(api_key="test-key")
