@@ -850,3 +850,30 @@ export interface ReconRunSummary {
   total_variance: number;
   match_rate: number;
 }
+
+// ── Plan Mode (clarification card) ───────────────────────────────────────
+// Backend source of truth: backend/app/services/chat/plan_mode/clarify_intercept.py
+// Shape mirrors the structured_output payload that the orchestrator persists
+// on chat_messages and emits via SSE clarification_required events.
+
+export interface ClarificationOption {
+  id: "A" | "B" | "C";
+  title: string;
+  rationale: string;
+  source: "netsuite" | "bigquery" | "shopify" | "stripe" | "drive";
+  is_default: boolean;
+}
+
+export type ClarificationStatus = "pending" | "chosen" | "superseded";
+
+export interface ClarificationData {
+  type: "clarification";
+  status: ClarificationStatus;
+  options: ClarificationOption[];
+  default_id: "A" | "B" | "C";
+  ambiguity_summary: string;
+  confirmation_token: string;
+  expires_at: string;
+  chosen_id?: "A" | "B" | "C" | null;
+  chose_at?: string | null;
+}
