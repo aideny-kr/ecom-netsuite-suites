@@ -21,6 +21,17 @@ class OpenAIAdapter(BaseLLMAdapter):
             max_retries=_CLIENT_MAX_RETRIES,
         )
 
+    def force_tool_choice(self, tool_name: str, model: str | None = None) -> dict:
+        """Build the OpenAI Chat Completions tool_choice param.
+
+        Per OpenAI SDK: `tool_choice={"type": "function", "function": {"name": "..."}}`
+        forces the model to call exactly one named function. Model-agnostic — all
+        current GPT-4 / GPT-5 models support this.
+        """
+        if not tool_name or not isinstance(tool_name, str):
+            raise ValueError(f"tool_name must be a non-empty string, got {tool_name!r}")
+        return {"type": "function", "function": {"name": tool_name}}
+
     @staticmethod
     def _convert_tool_choice(tool_choice: dict | str | None) -> dict | str | None:
         """Convert Anthropic-style tool_choice to OpenAI format."""
