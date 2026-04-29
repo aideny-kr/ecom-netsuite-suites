@@ -1134,6 +1134,7 @@ async def run_chat_turn(
     run_id: str | None = None,
     write_confirm: dict | None = None,
     attached_file_id: str | None = None,
+    plan_mode_choice: dict | None = None,
 ) -> AsyncGenerator[dict, None]:
     """Execute an agentic chat turn with Claude's native tool use.
 
@@ -1274,6 +1275,41 @@ async def run_chat_turn(
                 }
                 print(f"[WRITE-CONFIRM] rejected {_so.get('mutation_type')} on {_so.get('record_type')}", flush=True)
                 return
+
+    # ── Plan Mode resume short-circuit (HITL clarify) ──
+    # User picked an option; transition pending → chosen, then fall through
+    # into the regular agent flow with the chosen-source filter active.
+    plan_mode_resume_directive: str | None = None
+    plan_mode_resume_source: str | None = None
+    if plan_mode_choice and isinstance(plan_mode_choice, dict):
+        from app.services.chat.plan_mode.short_circuit import (
+            PlanModeChoiceError,
+            handle_plan_mode_choice,
+        )
+
+        _pmc_result = await handle_plan_mode_choice(
+            plan_mode_choice=plan_mode_choice,
+            session_id=str(session.id),
+            tenant_id=tenant_id,
+            db=db,
+        )
+        if isinstance(_pmc_result, PlanModeChoiceError):
+            yield {
+                "type": "error",
+                "error": _pmc_result.error,
+                "status_code": _pmc_result.status_code,
+            }
+            return
+
+        plan_mode_resume_directive = _pmc_result.system_directive
+        plan_mode_resume_source = _pmc_result.chosen_source
+        logger.info(
+            "[PLAN_MODE] resume turn: chosen_source=%s",
+            plan_mode_resume_source,
+        )
+    # NOTE: do NOT return — fall through into the regular flow.
+    # plan_mode_resume_* variables are consumed by Task 4.3 (tool filter)
+    # and the system-prompt assembly path (just append the directive).
 
     # ── Load conversation history (summary-based windowing) ──
     from app.services.chat.history_compactor import KEEP_RECENT
@@ -1951,6 +1987,14 @@ async def run_chat_turn(
                     pin_hint = build_source_pin_hint(getattr(session, "source_pin", None))
                     if pin_hint:
                         system_prompt += pin_hint
+
+                    # Plan Mode resume directive — when the user just picked
+                    # a clarification option, append the server-authored
+                    # PRIOR CLARIFICATIONS block so the agent uses the
+                    # chosen interpretation. (Task 4.3 will additionally
+                    # filter the tool inventory by `plan_mode_resume_source`.)
+                    if plan_mode_resume_directive:
+                        system_prompt += "\n\n" + plan_mode_resume_directive
 
                     # Plan Mode augmentation — appended after pin hint so it
                     # overrides any pinned source for financial-ambiguous turns.

@@ -299,10 +299,12 @@ async def send_message(
     # user message timestamp is strictly before the assistant message, preventing
     # ordering issues when both land in the same DB transaction.
     #
-    # Exception: when write_confirm is set, the user clicked approve/reject on a
-    # pending write. The original user question is already in the conversation;
-    # we do NOT create a duplicate user message.
-    if body.write_confirm:
+    # Exception: when write_confirm OR plan_mode_choice is set, the user
+    # clicked approve/reject on a pending write OR picked an option from a
+    # Plan Mode clarification card. Both flows continue an existing
+    # conversation rather than starting a new question — the original user
+    # question is already in the session, so we do NOT create a duplicate.
+    if body.write_confirm or body.plan_mode_choice:
         _last_user_result = await db.execute(
             select(ChatMessage)
             .where(
@@ -316,7 +318,7 @@ async def send_message(
         if _last_user_msg is None:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="write_confirm requires an existing user message in the session",
+                detail="write_confirm/plan_mode_choice requires an existing user message in the session",
             )
         user_msg = _last_user_msg
     else:
@@ -375,6 +377,7 @@ async def send_message(
             agent_id=body.agent_id,
             write_confirm=body.write_confirm,
             attached_file_id=attached_file_id,
+            plan_mode_choice=body.plan_mode_choice,
         )
     )
 
@@ -397,6 +400,7 @@ async def _run_chat_pipeline(
     agent_id: str | None,
     write_confirm: dict | None = None,
     attached_file_id: str | None = None,
+    plan_mode_choice: dict | None = None,
 ) -> None:
     """Inner pipeline coroutine — wrapped by asyncio.wait_for in _run_chat_background."""
     from app.core.database import async_session_factory
@@ -419,6 +423,7 @@ async def _run_chat_pipeline(
             run_id=run_id,
             write_confirm=write_confirm,
             attached_file_id=attached_file_id,
+            plan_mode_choice=plan_mode_choice,
         ):
             rm.write_event(run_id, chunk)
 
@@ -436,6 +441,7 @@ async def _run_chat_background(
     agent_id: str | None,
     write_confirm: dict | None = None,
     attached_file_id: str | None = None,
+    plan_mode_choice: dict | None = None,
 ) -> None:
     """Run the chat pipeline in background, writing events to Redis."""
     rm = get_run_manager()
@@ -454,6 +460,7 @@ async def _run_chat_background(
                 agent_id=agent_id,
                 write_confirm=write_confirm,
                 attached_file_id=attached_file_id,
+                plan_mode_choice=plan_mode_choice,
             ),
             timeout=_BACKGROUND_TASK_TIMEOUT,
         )
@@ -511,6 +518,7 @@ async def _send_message_inline_sse(
                     user_timezone=x_timezone,
                     agent_id=body.agent_id,
                     attached_file_id=body.file_id,
+                    plan_mode_choice=body.plan_mode_choice,
                 ):
                     await queue.put(chunk)
             except ValueError as exc:
