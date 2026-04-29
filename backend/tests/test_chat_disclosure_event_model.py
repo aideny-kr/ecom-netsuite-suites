@@ -1,4 +1,5 @@
 """Tests for ChatDisclosureEvent model — HITL telemetry events."""
+
 import uuid
 
 from app.models.chat_disclosure_event import ChatDisclosureEvent

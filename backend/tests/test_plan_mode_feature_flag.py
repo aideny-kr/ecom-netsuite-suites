@@ -1,5 +1,6 @@
 """Verify plan_mode_enabled flag is recognized and defaults off."""
-from app.services.feature_flag_service import is_known_flag, get_default_value
+
+from app.services.feature_flag_service import get_default_value, is_known_flag
 
 
 def test_plan_mode_enabled_is_known():
