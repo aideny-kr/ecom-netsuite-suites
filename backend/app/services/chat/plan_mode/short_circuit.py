@@ -217,16 +217,19 @@ async def supersede_pending_clarifications(
     session_id: str | _uuid.UUID,
     tenant_id: _uuid.UUID,
     db: AsyncSession,
-) -> int:
+) -> list[_uuid.UUID]:
     """Mark any pending clarification on this session as 'superseded'.
 
     Called at the top of every new turn when ``plan_mode_choice`` is NOT set
     (user typed instead of clicking the card). Atomic per-row CAS via
     ``UPDATE ... WHERE structured_output->>'status' = 'pending'``. Returns
-    the number of rows transitioned (0 in the common case).
+    the list of ``ChatMessage.id`` values that were transitioned (empty list
+    in the common case).
 
-    Also writes a chat_disclosure_events row per superseded clarification
-    for cross-turn telemetry.
+    Returning the IDs (not just a count) lets the caller emit a
+    ``chat.plan_mode.superseded`` audit event per row — required for
+    CFO-grade investigation trails (Task 6.4). Existing telemetry via
+    ``chat_disclosure_events`` is unchanged.
     """
     # Normalise session_id to UUID for the query
     session_uuid = session_id if isinstance(session_id, _uuid.UUID) else _uuid.UUID(str(session_id))
@@ -241,10 +244,10 @@ async def supersede_pending_clarifications(
     )
     pending_msgs = pending_result.scalars().all()
     if not pending_msgs:
-        return 0
+        return []
 
     now_iso = datetime.now(timezone.utc).isoformat()
-    transitioned = 0
+    transitioned_ids: list[_uuid.UUID] = []
     for msg in pending_msgs:
         so = msg.structured_output or {}
         # Atomic per-row CAS — guards against the resume turn race
@@ -263,7 +266,7 @@ async def supersede_pending_clarifications(
             )
         )
         if cas.rowcount > 0:
-            transitioned += 1
+            transitioned_ids.append(msg.id)
             db.add(
                 ChatDisclosureEvent(
                     tenant_id=tenant_id,
@@ -276,12 +279,12 @@ async def supersede_pending_clarifications(
                 )
             )
 
-    if transitioned > 0:
+    if transitioned_ids:
         await db.commit()
         logger.info(
             "[PLAN_MODE] superseded %d pending clarification(s) on session %s",
-            transitioned,
+            len(transitioned_ids),
             session_id,
         )
 
-    return transitioned
+    return transitioned_ids

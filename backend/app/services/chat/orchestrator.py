@@ -1307,6 +1307,25 @@ async def run_chat_turn(
             "[PLAN_MODE] resume turn: chosen_source=%s",
             plan_mode_resume_source,
         )
+
+        # CFO-grade audit trail (Task 6.4). FATAL by design — if this audit
+        # write fails, we error the turn rather than silently approving an
+        # untraceable choice. Mirrors the write_confirm audit pattern at
+        # ``record.{create,update}.{approved,failed}`` above.
+        await log_event(
+            db=db,
+            tenant_id=tenant_id,
+            category="chat",
+            action="plan_mode.chose",
+            actor_id=user_id,
+            resource_type="chat_session",
+            resource_id=str(session.id),
+            payload={
+                "chosen_id": plan_mode_choice.get("option_id"),
+                "chosen_source": plan_mode_resume_source,
+                "confirmation_id": plan_mode_choice.get("confirmation_id"),
+            },
+        )
     # NOTE: do NOT return — fall through into the regular flow.
     # plan_mode_resume_* variables are consumed by Task 4.3 (tool filter)
     # and the system-prompt assembly path (just append the directive).
@@ -1321,11 +1340,28 @@ async def run_chat_turn(
                 supersede_pending_clarifications,
             )
 
-            await supersede_pending_clarifications(
+            superseded_ids = await supersede_pending_clarifications(
                 session_id=session.id,
                 tenant_id=tenant_id,
                 db=db,
             )
+            # Emit one ``chat.plan_mode.superseded`` audit per row (Task 6.4).
+            # NON-FATAL on purpose — supersede is best-effort already, and the
+            # ChatDisclosureEvent row is the primary telemetry.
+            for _msg_id in superseded_ids:
+                await log_event(
+                    db=db,
+                    tenant_id=tenant_id,
+                    category="chat",
+                    action="plan_mode.superseded",
+                    actor_id=user_id,
+                    resource_type="chat_message",
+                    resource_id=str(_msg_id),
+                    payload={
+                        "reason": "free_text_reply",
+                        "session_id": str(session.id),
+                    },
+                )
         except Exception:
             logger.warning(
                 "[PLAN_MODE] supersede_pending_clarifications failed",
