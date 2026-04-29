@@ -94,3 +94,25 @@ def test_augmentation_mentions_default_explanation_directive():
 def test_augmentation_is_stable():
     """Pure function — same call twice returns identical output."""
     assert build_augmentation_prompt() == build_augmentation_prompt()
+
+
+from app.services.chat.plan_mode.ambiguity_signal import maybe_augment_for_plan_mode
+
+
+def test_helper_returns_block_when_flag_on_and_ambiguous():
+    block = maybe_augment_for_plan_mode(query="What's our revenue this quarter?", plan_mode_enabled=True)
+    assert block is not None
+    assert "CLARIFICATION REQUIRED" in block
+
+
+def test_helper_returns_none_when_flag_off():
+    assert maybe_augment_for_plan_mode(query="What's our revenue this quarter?", plan_mode_enabled=False) is None
+
+
+def test_helper_returns_none_when_query_not_ambiguous():
+    assert maybe_augment_for_plan_mode(query="How many sales orders today?", plan_mode_enabled=True) is None
+
+
+def test_helper_handles_empty_query():
+    assert maybe_augment_for_plan_mode(query="", plan_mode_enabled=True) is None
+    assert maybe_augment_for_plan_mode(query=None, plan_mode_enabled=True) is None  # type: ignore[arg-type]

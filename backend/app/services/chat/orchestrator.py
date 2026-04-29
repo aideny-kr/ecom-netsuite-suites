@@ -1942,6 +1942,20 @@ async def run_chat_turn(
                     if pin_hint:
                         system_prompt += pin_hint
 
+                    # Plan Mode augmentation — appended after pin hint so it
+                    # overrides any pinned source for financial-ambiguous turns.
+                    from app.services import feature_flag_service
+                    from app.services.chat.plan_mode.ambiguity_signal import (
+                        maybe_augment_for_plan_mode,
+                    )
+
+                    plan_mode_enabled = await feature_flag_service.is_enabled(db, tenant_id, "plan_mode_enabled")
+                    plan_mode_augmentation = maybe_augment_for_plan_mode(
+                        query=sanitized_input, plan_mode_enabled=plan_mode_enabled
+                    )
+                    if plan_mode_augmentation:
+                        system_prompt += "\n\n" + plan_mode_augmentation
+
                     # Always use UnifiedAgent — no routing fork
                     unified_agent = UnifiedAgent(
                         tenant_id=tenant_id,

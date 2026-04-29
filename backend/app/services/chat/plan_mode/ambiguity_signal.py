@@ -56,3 +56,17 @@ def build_augmentation_prompt() -> str:
     augmentation overrides any pinned source for financial queries.
     """
     return _AUGMENTATION_PROMPT
+
+
+def maybe_augment_for_plan_mode(*, query: str | None, plan_mode_enabled: bool) -> str | None:
+    """Return the Plan Mode augmentation block when both gates pass, else None.
+
+    Caller (orchestrator.run_chat_turn) appends the returned block to the
+    system prompt right after the source-pin hint, so Plan Mode overrides any
+    pinned source for financial-ambiguous turns.
+    """
+    if not plan_mode_enabled:
+        return None
+    if not is_financial_ambiguous(query):
+        return None
+    return build_augmentation_prompt()
