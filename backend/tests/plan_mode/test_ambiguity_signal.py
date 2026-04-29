@@ -58,3 +58,39 @@ def test_empty_string():
 def test_none_safe():
     """Defensive: None-safe (orchestrator may pass None for blank turns)."""
     assert is_financial_ambiguous(None) is False  # type: ignore[arg-type]
+
+
+from app.services.chat.plan_mode.ambiguity_signal import build_augmentation_prompt
+
+
+def test_augmentation_includes_clarify_directive():
+    prompt = build_augmentation_prompt()
+    assert "CLARIFICATION REQUIRED" in prompt
+    assert "clarify" in prompt
+    assert "MUST" in prompt or "ONLY" in prompt
+    assert "data tool" in prompt.lower() or "data tools" in prompt.lower()
+
+
+def test_augmentation_includes_default_preferences():
+    prompt = build_augmentation_prompt()
+    assert "NetSuite GL" in prompt
+    assert "BigQuery" in prompt
+
+
+def test_augmentation_mentions_ambiguity_axes():
+    prompt = build_augmentation_prompt()
+    assert "source" in prompt.lower()
+    assert "window" in prompt.lower() or "fiscal" in prompt.lower()
+    assert "scope" in prompt.lower() or "subsidiary" in prompt.lower() or "consolidated" in prompt.lower()
+
+
+def test_augmentation_mentions_default_explanation_directive():
+    """Plan-eng-review locked this: the agent must explain WHY the default."""
+    prompt = build_augmentation_prompt()
+    assert "ambiguity_summary" in prompt
+    assert "default" in prompt.lower()
+
+
+def test_augmentation_is_stable():
+    """Pure function — same call twice returns identical output."""
+    assert build_augmentation_prompt() == build_augmentation_prompt()
