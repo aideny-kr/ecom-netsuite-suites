@@ -133,6 +133,17 @@ class AnthropicAdapter(BaseLLMAdapter):
             max_retries=_CLIENT_MAX_RETRIES,
         )
 
+    def force_tool_choice(self, tool_name: str, model: str | None = None) -> dict:
+        """Build the Anthropic API tool_choice param to force a specific tool.
+
+        Per Anthropic SDK: `tool_choice={"type": "tool", "name": "<tool_name>"}`
+        forces the model's first response to be a tool_use block for that tool.
+        Model-agnostic — `model` param accepted only for protocol uniformity.
+        """
+        if not tool_name or not isinstance(tool_name, str):
+            raise ValueError(f"tool_name must be a non-empty string, got {tool_name!r}")
+        return {"type": "tool", "name": tool_name}
+
     async def create_message(
         self,
         *,
