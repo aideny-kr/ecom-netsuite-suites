@@ -1375,10 +1375,20 @@ async def run_chat_turn(
 
     # ── Build tool definitions (with policy-based filtering) ──
     connection_warnings: list[str] = []
+    # Initialize before branch (Mistake #47 — variables used after branches must
+    # be initialized first; the chitchat path skips the else block below).
+    plan_mode_enabled: bool = False
     if is_onboarding:
         tool_definitions = list(ONBOARDING_TOOL_DEFINITIONS)
     else:
-        tool_definitions = await build_all_tool_definitions(db, tenant_id)
+        # Plan Mode: register clarify in the tool inventory when the flag is on.
+        # The hard gate that ACTIVATES clarify (filters to clarify-only +
+        # forces tool_choice) lives further down — this just makes the tool
+        # available to the LLM.
+        from app.services import feature_flag_service as _ffs_for_inventory
+
+        plan_mode_enabled = await _ffs_for_inventory.is_enabled(db, tenant_id, "plan_mode_enabled")
+        tool_definitions = await build_all_tool_definitions(db, tenant_id, plan_mode_enabled=plan_mode_enabled)
 
         # Pre-flight connection health check — strip tools for dead connections
         connection_warnings = await _check_connection_health(db, tenant_id)
@@ -1944,15 +1954,14 @@ async def run_chat_turn(
 
                     # Plan Mode augmentation — appended after pin hint so it
                     # overrides any pinned source for financial-ambiguous turns.
-                    from app.services import feature_flag_service
+                    # `plan_mode_enabled` is computed earlier (with the tool
+                    # inventory) so we don't refetch the flag here.
                     from app.services.chat.plan_mode.ambiguity_signal import (
-                        filter_tools_to_clarify_only,
                         is_financial_ambiguous,
                         maybe_augment_for_plan_mode,
                         try_force_tool_choice,
                     )
 
-                    plan_mode_enabled = await feature_flag_service.is_enabled(db, tenant_id, "plan_mode_enabled")
                     plan_mode_augmentation = maybe_augment_for_plan_mode(
                         query=sanitized_input, plan_mode_enabled=plan_mode_enabled
                     )
@@ -2071,25 +2080,23 @@ async def run_chat_turn(
                     yield {"type": "drive_sources", "sources": context["drive_sources"]}
 
                 # ── Plan Mode hard gate ─────────────────────────────────
-                # If financial-ambiguity regex matches AND flag is on AND
-                # clarify is registered, force tool_choice=clarify and filter
-                # the agent's tool inventory to clarify-only. plan_mode_enabled
-                # is only set on the non-chitchat path, so guard with _is_chitchat.
+                # When financial-ambiguity regex matches AND flag is on AND
+                # clarify is in the inventory, pass `plan_mode_clarify_only=True`
+                # to run_streaming (it filters _tool_defs to clarify-only AFTER
+                # _setup_context, so we don't fight the rebuild) and force
+                # tool_choice=clarify on the adapter. plan_mode_enabled is only
+                # set on the non-chitchat path, so guard with _is_chitchat.
+                _plan_mode_active = False
                 _plan_mode_tool_choice: dict | None = None
                 if not _is_chitchat and plan_mode_enabled and is_financial_ambiguous(sanitized_input):
-                    # Trigger setup_context so unified_agent._tool_defs is populated
-                    # (normally happens inside run_streaming; we need it earlier).
-                    await unified_agent._setup_context(unified_task, context, db)
-                    _has_clarify = any(t.get("name") == "clarify" for t in (unified_agent._tool_defs or []))
+                    _has_clarify = any(t.get("name") == "clarify" for t in (tool_definitions or []))
                     if _has_clarify:
-                        unified_agent._tool_defs = filter_tools_to_clarify_only(unified_agent._tool_defs)
                         _plan_mode_tool_choice = try_force_tool_choice(
                             specialist_adapter, "clarify", model=unified_model
                         )
-                        if _plan_mode_tool_choice is None:
-                            # Adapter unsupported — undo the filter, skip gate.
-                            # build_all_tool_definitions is imported at module level (line 926).
-                            unified_agent._tool_defs = await build_all_tool_definitions(db, tenant_id)
+                        if _plan_mode_tool_choice is not None:
+                            _plan_mode_active = True
+                        # else: adapter unsupported (e.g., Gemini 1.0) — gate stays off.
                     else:
                         logger.warning("[PLAN_MODE] flag on but clarify tool missing — skipping gate")
 
@@ -2101,6 +2108,7 @@ async def run_chat_turn(
                     model=unified_model,
                     conversation_history=history_messages,
                     tool_choice=_plan_mode_tool_choice,
+                    plan_mode_clarify_only=_plan_mode_active,
                     tool_result_interceptor=_make_tool_interceptor(context_need, cache_callback=_on_tool_intercepted),
                     session_id=str(session.id),
                     run_id=run_id,

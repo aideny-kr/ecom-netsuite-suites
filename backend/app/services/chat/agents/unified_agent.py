@@ -755,11 +755,20 @@ class UnifiedAgent(BaseSpecialistAgent):
         model: str,
         tool_choice: dict | str | None = None,
         financial_mode: bool = False,
+        plan_mode_clarify_only: bool = False,
     ):
-        """Override to inject context and discover external MCP tools."""
+        """Override to inject context and discover external MCP tools.
+
+        ``plan_mode_clarify_only`` filters ``self._tool_defs`` to the
+        ``clarify`` tool only — applied AFTER ``_setup_context`` so the
+        rebuild inside setup doesn't clobber the gate. Mirrors the
+        ``financial_mode`` pattern.
+        """
         task = await self._setup_context(task, context, db)
         if financial_mode:
             self._tool_defs = self.financial_tool_definitions
+        if plan_mode_clarify_only:
+            self._tool_defs = [t for t in (self._tool_defs or []) if t.get("name") == "clarify"]
         return await super().run(task, context, db, adapter, model, tool_choice=tool_choice)
 
     async def run_streaming(
@@ -772,14 +781,22 @@ class UnifiedAgent(BaseSpecialistAgent):
         conversation_history: list[dict] | None = None,
         tool_choice: dict | str | None = None,
         financial_mode: bool = False,
+        plan_mode_clarify_only: bool = False,
         tool_result_interceptor: Callable[[str, str], tuple[tuple[str, dict] | None, str]] | None = None,
         session_id: str | None = None,
         run_id: str | None = None,
     ):
-        """Override to inject context before streaming."""
+        """Override to inject context before streaming.
+
+        ``plan_mode_clarify_only`` filters ``self._tool_defs`` to the
+        ``clarify`` tool only — applied AFTER ``_setup_context`` so the
+        rebuild inside setup doesn't clobber the gate.
+        """
         task = await self._setup_context(task, context, db)
         if financial_mode:
             self._tool_defs = self.financial_tool_definitions
+        if plan_mode_clarify_only:
+            self._tool_defs = [t for t in (self._tool_defs or []) if t.get("name") == "clarify"]
         async for event in super().run_streaming(
             task,
             context,
