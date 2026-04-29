@@ -21,6 +21,7 @@ DEFAULT_FLAGS: dict[str, bool] = {
     "custom_domain": False,
     "analytics_export": True,
     "drive_rag": False,
+    "plan_mode_enabled": False,
 }
 
 # In-memory cache: (tenant_id, flag_key) → (enabled, timestamp)
@@ -31,6 +32,16 @@ _CACHE_TTL = 60  # seconds
 def clear_cache() -> None:
     """Clear the flag cache (useful for tests)."""
     _FLAG_CACHE.clear()
+
+
+def is_known_flag(flag_key: str) -> bool:
+    """Return True if flag_key is in the known-flag registry."""
+    return flag_key in DEFAULT_FLAGS
+
+
+def get_default_value(flag_key: str) -> bool:
+    """Return the default enabled value for a flag, or False if unknown."""
+    return DEFAULT_FLAGS.get(flag_key, False)
 
 
 async def is_enabled(db: AsyncSession, tenant_id: uuid.UUID, flag_key: str) -> bool:
