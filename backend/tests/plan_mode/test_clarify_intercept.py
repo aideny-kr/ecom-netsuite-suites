@@ -227,6 +227,103 @@ async def test_hmac_token_event_type_isolated_from_write_confirm():
 
 
 @pytest.mark.asyncio
+async def test_raw_mcp_provider_strings_resolve_to_canonical_sources():
+    """Regression: ``active_connectors`` may arrive as raw mcp_connector.provider
+    strings (``netsuite_mcp``, ``shopify_mcp``) — not the canonical bare names
+    used by the clarify schema (``netsuite``, ``shopify``).
+
+    Without canonicalization, ``"netsuite" in ["netsuite_mcp", "bigquery"]``
+    is False, every option drops, and the gate degrades to InterceptError.
+
+    Caller site: ``base_agent.py`` builds ``active_connectors`` as
+    ``[c.provider for c in self._connectors]`` where ``_connectors`` is loaded
+    from ``mcp_connectors`` (provider literals: ``netsuite_mcp``,
+    ``shopify_mcp``, ``bigquery``, ``google_sheets``, ``custom``).
+    """
+    db = AsyncMock()
+    result = await intercept_clarify_call(
+        tool_input=_VALID_INPUT,
+        session_id="sess-1",
+        # Real production data shape — raw mcp_connector.provider strings
+        active_connectors=["netsuite_mcp", "bigquery"],
+        db=db,
+    )
+    assert isinstance(result, InterceptResult), (
+        f"Expected InterceptResult; got {type(result).__name__}: {getattr(result, 'error_message', '')}"
+    )
+    sources = [o["source"] for o in result.structured_output["options"]]
+    assert "netsuite" in sources
+    assert "bigquery" in sources
+
+
+@pytest.mark.asyncio
+async def test_canonicalize_handles_shopify_mcp_suffix():
+    """``shopify_mcp`` provider must canonicalize to ``shopify``."""
+    bad_input = {
+        "options": [
+            {"id": "A", "title": "NetSuite", "rationale": "GL", "source": "netsuite", "is_default": True},
+            {"id": "B", "title": "Shopify", "rationale": "Shop", "source": "shopify", "is_default": False},
+        ],
+        "ambiguity_summary": "Revenue can mean recognized GL or Shopify orders.",
+    }
+    result = await intercept_clarify_call(
+        tool_input=bad_input,
+        session_id="sess-1",
+        active_connectors=["netsuite_mcp", "shopify_mcp"],
+        db=AsyncMock(),
+    )
+    assert isinstance(result, InterceptResult), (
+        f"Expected InterceptResult; got {type(result).__name__}: {getattr(result, 'error_message', '')}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_canonicalize_handles_rest_netsuite_provider():
+    """REST NetSuite (``connections.provider == 'netsuite'``) is connected too —
+    canonicalization must accept the bare ``netsuite`` provider string verbatim.
+    """
+    bad_input = {
+        "options": [
+            {"id": "A", "title": "NetSuite", "rationale": "GL", "source": "netsuite", "is_default": True},
+            {"id": "B", "title": "BigQuery", "rationale": "BQ", "source": "bigquery", "is_default": False},
+        ],
+        "ambiguity_summary": "summary",
+    }
+    result = await intercept_clarify_call(
+        tool_input=bad_input,
+        session_id="sess-1",
+        # Mixed: NetSuite REST (bare) + BigQuery MCP
+        active_connectors=["netsuite", "bigquery"],
+        db=AsyncMock(),
+    )
+    assert isinstance(result, InterceptResult)
+
+
+@pytest.mark.asyncio
+async def test_canonicalize_drops_disconnected_with_raw_providers():
+    """Filtering still works after canonicalization — disconnected options drop."""
+    bad_input = {
+        "options": [
+            {"id": "A", "title": "NetSuite", "rationale": "GL", "source": "netsuite", "is_default": True},
+            {"id": "B", "title": "BigQuery", "rationale": "BQ", "source": "bigquery", "is_default": False},
+            {"id": "C", "title": "Shopify", "rationale": "Shop", "source": "shopify", "is_default": False},
+        ],
+        "ambiguity_summary": "summary",
+    }
+    result = await intercept_clarify_call(
+        tool_input=bad_input,
+        session_id="sess-1",
+        active_connectors=["netsuite_mcp", "shopify_mcp"],  # bigquery absent
+        db=AsyncMock(),
+    )
+    assert isinstance(result, InterceptResult)
+    sources = [o["source"] for o in result.structured_output["options"]]
+    assert "bigquery" not in sources
+    assert "netsuite" in sources
+    assert "shopify" in sources
+
+
+@pytest.mark.asyncio
 async def test_expires_at_iso_8601_utc():
     """expires_at is a 5-minute future timestamp in ISO-8601 UTC."""
     from datetime import datetime, timezone
