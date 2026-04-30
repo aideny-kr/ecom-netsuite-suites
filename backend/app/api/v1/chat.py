@@ -53,9 +53,11 @@ class SendMessageRequest(BaseModel):
     plan_mode_choice: dict | None = Field(
         default=None,
         description=(
-            "Resolve a pending Plan Mode clarification. Keys: action "
-            "('approve'|'reject'), confirmation_id (assistant message ID), "
-            "option_id ('A'|'B'|'C')"
+            "Resolve a pending Plan Mode clarification. Common keys: "
+            "action ('approve'), confirmation_id (assistant message ID). "
+            "Plus exactly one of: option_id ('A'|'B'|'C') for source pick, "
+            "OR manual_text (1-500 chars) for free-text clarification typed "
+            "inside the card."
         ),
     )
 

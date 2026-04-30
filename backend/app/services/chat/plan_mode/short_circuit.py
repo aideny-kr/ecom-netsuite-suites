@@ -47,6 +47,30 @@ class PlanModeChoiceResult:
 
 
 @dataclass
+class PlanModeManualResult:
+    """User typed free-text inside the clarification card instead of picking
+    A/B/C (dogfood follow-up 2026-04-30).
+
+    The orchestrator should:
+    - Append ``manual_text`` to the original user query so the agent has both.
+    - Inject ``system_directive`` into the resume turn's system prompt.
+    - SKIP source-based tool filtering (``chosen_source`` is intentionally
+      None — the user disambiguated by intent, not by source).
+    - Skip the clarify-gate this turn (user already disambiguated).
+    """
+
+    manual_text: str
+    system_directive: str
+    chat_message_id: _uuid.UUID | None = None
+    # Sentinel field so callers can use a single ``isinstance`` branch
+    # check identical to the source-pick path. Always None for manual.
+    chosen_source: str | None = None
+
+
+_MANUAL_TEXT_MAX_CHARS = 500
+
+
+@dataclass
 class PlanModeChoiceError:
     status_code: int  # 400, 403, 404, 409
     error: str
@@ -58,17 +82,26 @@ async def handle_plan_mode_choice(
     session_id: str,
     tenant_id: _uuid.UUID,
     db: AsyncSession,
-) -> PlanModeChoiceResult | PlanModeChoiceError:
+) -> PlanModeChoiceResult | PlanModeManualResult | PlanModeChoiceError:
     """Validate the user's clarification choice and transition the prior
-    structured_output from 'pending' to 'chosen'. Persists a
-    chat_disclosure_events row with event_type='clarification_chose'.
+    structured_output from 'pending' to 'chosen' (or 'manually_clarified').
 
-    Returns a PlanModeChoiceResult on success — caller injects
-    ``system_directive`` into the resume turn's system prompt and uses
-    ``chosen_source`` to filter the resume turn's tool inventory.
+    Two variants are accepted on the same payload (mutually exclusive):
+
+    - ``option_id`` (``"A"|"B"|"C"``): user clicked an option. Returns
+      ``PlanModeChoiceResult`` with ``chosen_source`` for tool filtering.
+      Persists ``chat_disclosure_events`` with ``event_type='clarification_chose'``.
+
+    - ``manual_text`` (1-500 chars): user typed free-text inside the card.
+      Returns ``PlanModeManualResult`` with the typed text echoed in the
+      ``system_directive`` and no ``chosen_source`` (the agent gets the full
+      tool inventory on resume, since the user disambiguated by intent
+      rather than picking a source). Persists with
+      ``event_type='clarification_manual_clarify'``.
     """
     confirmation_id_raw = plan_mode_choice.get("confirmation_id")
     option_id = plan_mode_choice.get("option_id")
+    manual_text_raw = plan_mode_choice.get("manual_text")
     action = plan_mode_choice.get("action")
 
     if action != "approve":
@@ -77,8 +110,31 @@ async def handle_plan_mode_choice(
             error=f"plan_mode_choice action must be 'approve', got {action!r}",
         )
 
-    if not confirmation_id_raw or option_id not in ("A", "B", "C"):
+    # Determine variant and validate variant-specific fields. Mutually
+    # exclusive — exactly one of option_id / manual_text must be provided.
+    is_manual = manual_text_raw is not None
+    if is_manual and option_id is not None:
+        return PlanModeChoiceError(
+            status_code=400,
+            error="option_id and manual_text are mutually exclusive",
+        )
+    if not is_manual and option_id not in ("A", "B", "C"):
         return PlanModeChoiceError(status_code=400, error="invalid plan_mode_choice payload")
+    if not confirmation_id_raw:
+        return PlanModeChoiceError(status_code=400, error="invalid plan_mode_choice payload")
+
+    manual_text: str | None = None
+    if is_manual:
+        if not isinstance(manual_text_raw, str):
+            return PlanModeChoiceError(status_code=400, error="manual_text must be a string")
+        manual_text = manual_text_raw.strip()
+        if not manual_text:
+            return PlanModeChoiceError(status_code=400, error="manual_text cannot be empty")
+        if len(manual_text) > _MANUAL_TEXT_MAX_CHARS:
+            return PlanModeChoiceError(
+                status_code=400,
+                error=f"manual_text exceeds {_MANUAL_TEXT_MAX_CHARS} chars",
+            )
 
     try:
         confirmation_id = _uuid.UUID(str(confirmation_id_raw))
@@ -151,6 +207,67 @@ async def handle_plan_mode_choice(
         event_type="plan_mode_choice",
     ):
         return PlanModeChoiceError(status_code=403, error="invalid_or_expired_token")
+
+    # Manual variant short-circuits BEFORE the option lookup. Atomic CAS
+    # to ``manually_clarified`` (distinct from ``chosen`` so telemetry/UI
+    # can render it differently), then audit + return.
+    if is_manual:
+        assert manual_text is not None  # validated above
+        now_iso = datetime.now(timezone.utc).isoformat()
+        cas = await db.execute(
+            update(ChatMessage)
+            .where(
+                ChatMessage.id == confirmation_id,
+                ChatMessage.structured_output["status"].astext == "pending",
+            )
+            .values(
+                structured_output={
+                    **so,
+                    "status": "manually_clarified",
+                    "manual_text": manual_text,
+                    "chose_at": now_iso,
+                }
+            )
+        )
+        if cas.rowcount == 0:
+            return PlanModeChoiceError(
+                status_code=409,
+                error="concurrent_resolve — another request already transitioned this clarification",
+            )
+        db.add(
+            ChatDisclosureEvent(
+                tenant_id=tenant_id,
+                chat_session_id=msg.session_id,
+                chat_message_id=msg.id,
+                event_type="clarification_manual_clarify",
+                payload={"manual_text": manual_text},
+            )
+        )
+        await db.commit()
+
+        # The manual_text comes from the user (HTTP body), not from the
+        # LLM, so echoing it inside the system prompt is safe in the same
+        # sense that any user message is safe — the agent already treats
+        # user input as untrusted-but-instructive content. Embed the
+        # text inside a clearly delimited block to reduce the chance of
+        # the model conflating user intent with system instructions.
+        manual_directive = (
+            "## PRIOR CLARIFICATIONS\n\n"
+            "The user typed a manual clarification of intent inside the "
+            "clarification card. Honor it on this turn:\n"
+            "<user_clarification>\n"
+            f"{manual_text}\n"
+            "</user_clarification>\n"
+            "- Do NOT call `clarify` again — the user has disambiguated.\n"
+            "- Use the user's typed clarification together with the "
+            "original question. If they conflict, prefer the typed "
+            "clarification."
+        )
+        return PlanModeManualResult(
+            manual_text=manual_text,
+            system_directive=manual_directive,
+            chat_message_id=msg.id,
+        )
 
     # Find chosen option
     chosen = next((o for o in so.get("options", []) if o.get("id") == option_id), None)

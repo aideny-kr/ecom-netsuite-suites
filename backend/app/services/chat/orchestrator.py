@@ -1304,13 +1304,24 @@ async def run_chat_turn(
                 return
 
     # ── Plan Mode resume short-circuit (HITL clarify) ──
-    # User picked an option; transition pending → chosen, then fall through
-    # into the regular agent flow with the chosen-source filter active.
+    # Two variants:
+    #   - Source pick (option A/B/C): transition pending → chosen, fall
+    #     through with chosen_source filter active.
+    #   - Manual clarification (typed text): transition pending →
+    #     manually_clarified, fall through with NO source filter and the
+    #     typed text appended to the user's task.
     plan_mode_resume_directive: str | None = None
     plan_mode_resume_source: str | None = None
+    plan_mode_manual_text: str | None = None
+    # True when EITHER resume variant fired (source pick or manual clarify).
+    # Both variants mean "the user just disambiguated this turn — do not
+    # re-fire the clarify-gate / augmentation". Set after the short-circuit
+    # below; consumed by the augmentation guard and the gate-arm guard.
+    _plan_mode_resume_active = False
     if plan_mode_choice and isinstance(plan_mode_choice, dict):
         from app.services.chat.plan_mode.short_circuit import (
             PlanModeChoiceError,
+            PlanModeManualResult,
             handle_plan_mode_choice,
         )
 
@@ -1329,11 +1340,20 @@ async def run_chat_turn(
             return
 
         plan_mode_resume_directive = _pmc_result.system_directive
-        plan_mode_resume_source = _pmc_result.chosen_source
-        logger.info(
-            "[PLAN_MODE] resume turn: chosen_source=%s",
-            plan_mode_resume_source,
-        )
+        _plan_mode_resume_active = True
+        if isinstance(_pmc_result, PlanModeManualResult):
+            plan_mode_manual_text = _pmc_result.manual_text
+            plan_mode_resume_source = None  # no source filter for manual
+            logger.info(
+                "[PLAN_MODE] resume turn: manual_clarify (len=%d)",
+                len(plan_mode_manual_text),
+            )
+        else:
+            plan_mode_resume_source = _pmc_result.chosen_source
+            logger.info(
+                "[PLAN_MODE] resume turn: chosen_source=%s",
+                plan_mode_resume_source,
+            )
 
         # CFO-grade audit trail (Task 6.4). FATAL by design — if this audit
         # write fails, we error the turn rather than silently approving an
@@ -1347,20 +1367,39 @@ async def run_chat_turn(
         # because the row is stuck at ``status='chosen'`` with no
         # corresponding audit row — card consumed, no answer.
         try:
-            await log_event(
-                db=db,
-                tenant_id=tenant_id,
-                category="chat",
-                action="plan_mode.chose",
-                actor_id=user_id,
-                resource_type="chat_session",
-                resource_id=str(session.id),
-                payload={
-                    "chosen_id": plan_mode_choice.get("option_id"),
-                    "chosen_source": plan_mode_resume_source,
-                    "confirmation_id": plan_mode_choice.get("confirmation_id"),
-                },
-            )
+            # Action verb + payload differ by variant. Keeping the literal
+            # action strings inline (instead of through an intermediate
+            # variable) so static analysis / grep can pin them at the call
+            # site (e.g., test_orchestrator_audit checks for "plan_mode.chose").
+            if plan_mode_manual_text is not None:
+                await log_event(
+                    db=db,
+                    tenant_id=tenant_id,
+                    category="chat",
+                    action="plan_mode.manual_clarify",
+                    actor_id=user_id,
+                    resource_type="chat_session",
+                    resource_id=str(session.id),
+                    payload={
+                        "manual_text_chars": len(plan_mode_manual_text),
+                        "confirmation_id": plan_mode_choice.get("confirmation_id"),
+                    },
+                )
+            else:
+                await log_event(
+                    db=db,
+                    tenant_id=tenant_id,
+                    category="chat",
+                    action="plan_mode.chose",
+                    actor_id=user_id,
+                    resource_type="chat_session",
+                    resource_id=str(session.id),
+                    payload={
+                        "chosen_id": plan_mode_choice.get("option_id"),
+                        "chosen_source": plan_mode_resume_source,
+                        "confirmation_id": plan_mode_choice.get("confirmation_id"),
+                    },
+                )
         except Exception:
             from app.services.chat.plan_mode.short_circuit import (
                 revert_clarification_to_pending,
@@ -1518,6 +1557,15 @@ async def run_chat_turn(
 
         # ── Pre-loop: RAG retrieval for doc context (skip for onboarding) ──
         sanitized_input = sanitize_user_input(user_message)
+
+        # Manual clarify variant: append the user's typed clarification to
+        # the original query so the agent has both pieces in context. The
+        # short_circuit handler already validated len <= 500 and stripped
+        # whitespace; sanitize defensively here too.
+        if plan_mode_manual_text:
+            _manual_sanitized = sanitize_user_input(plan_mode_manual_text)
+            if _manual_sanitized:
+                sanitized_input = f"{sanitized_input}\n\nClarification: {_manual_sanitized}"
         attached_file_context = await _build_attached_file_context(db, tenant_id, attached_file_id)
         rag_context = ""
         citations: list[dict] = []
@@ -2168,7 +2216,7 @@ async def run_chat_turn(
                         _plan_mode_connected_sources: list[str] = []
                         if (
                             plan_mode_enabled
-                            and plan_mode_resume_source is None
+                            and not _plan_mode_resume_active
                             and is_financial_ambiguous(sanitized_input)
                         ):
                             # Resolve connected sources so the augmentation can
@@ -2202,7 +2250,7 @@ async def run_chat_turn(
                                 plan_mode_enabled=plan_mode_enabled,
                                 connected_sources=_plan_mode_connected_sources,
                             )
-                            if plan_mode_resume_source is None
+                            if not _plan_mode_resume_active
                             else None
                         )
 
@@ -2340,15 +2388,14 @@ async def run_chat_turn(
                     # set on the non-chitchat path, so guard with _is_chitchat.
                     _plan_mode_active = False
                     _plan_mode_tool_choice: dict | None = None
-                    # Mutual exclusion: when plan_mode_resume_source is set, we
-                    # are on the resume turn after the user already picked an
-                    # option — never re-fire the new-clarify gate on the same
-                    # turn (the clarify-only filter would narrow the resume
-                    # filter to []).
+                    # Mutual exclusion: when EITHER resume variant is active
+                    # (source-pick or manual clarify), the user already
+                    # disambiguated. Re-firing the new-clarify gate would
+                    # force another card on top of the resumed turn.
                     if (
                         not _is_chitchat
                         and plan_mode_enabled
-                        and plan_mode_resume_source is None
+                        and not _plan_mode_resume_active
                         and is_financial_ambiguous(sanitized_input)
                     ):
                         _has_clarify = any(t.get("name") == "clarify" for t in (tool_definitions or []))

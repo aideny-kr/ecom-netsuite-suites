@@ -511,6 +511,37 @@ export default function ChatPage() {
     [activeSessionId, queryClient, connectToRunStream],
   );
 
+  // Manual clarification: user typed free-text inside the card instead of
+  // picking A/B/C. Backend appends manual_text to the original query and
+  // skips the source filter (full inventory available).
+  const handleClarificationManual = useCallback(
+    async (messageId: string, manualText: string) => {
+      const sessionId = activeSessionId;
+      if (!sessionId) return;
+      try {
+        const { run_id } = await apiClient.post<{ run_id: string }>(
+          `/api/v1/chat/sessions/${sessionId}/messages`,
+          {
+            content: `Clarified: ${manualText}`,
+            plan_mode_choice: {
+              action: "approve",
+              confirmation_id: messageId,
+              manual_text: manualText,
+            },
+          },
+        );
+        await queryClient.invalidateQueries({ queryKey: ["chat-session", sessionId] });
+        await connectToRunStream(run_id, sessionId);
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : "Failed to submit clarification.";
+        setError(message);
+        // Re-raise so ClarificationCard preserves the textarea content for retry
+        throw err;
+      }
+    },
+    [activeSessionId, queryClient, connectToRunStream],
+  );
+
   const clearStreamingState = useCallback(() => {
     // Abort any in-flight SSE connection so old handlers stop firing
     if (abortRef.current) {
@@ -624,6 +655,7 @@ export default function ChatPage() {
             onMentionClick={handleMentionClick}
             onWriteConfirm={handleWriteConfirm}
             onClarificationChoose={handleClarificationChoose}
+            onClarificationManual={handleClarificationManual}
             onImportanceOverride={(messageId, newTier) => {
               queryClient.setQueryData<ChatSessionDetail>(
                 ["chat-session", activeSessionId],

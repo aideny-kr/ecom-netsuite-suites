@@ -648,6 +648,9 @@ interface MessageListProps {
   onImportanceOverride?: (messageId: string, newTier: number) => void;
   onWriteConfirm?: (messageId: string, action: "approve" | "reject") => void;
   onClarificationChoose?: (messageId: string, optionId: "A" | "B" | "C") => void;
+  // Manual clarification typed inside the card (dogfood follow-up 2026-04-30).
+  // Returns a Promise so the card can await it and clear/preserve text.
+  onClarificationManual?: (messageId: string, manualText: string) => Promise<void>;
   variant?: "default" | "terminal";
 }
 
@@ -678,6 +681,7 @@ export function MessageList({
   onImportanceOverride,
   onWriteConfirm,
   onClarificationChoose,
+  onClarificationManual,
   variant,
 }: MessageListProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -928,6 +932,7 @@ export function MessageList({
             onImportanceOverride={onImportanceOverride}
             onWriteConfirm={onWriteConfirm}
             onClarificationChoose={onClarificationChoose}
+            onClarificationManual={onClarificationManual}
             financialReportData={financialReports?.get(message.id) ?? null}
             dataTableData={dataTables?.get(message.id) ?? null}
             chartDataList={chartsByMessage?.get(message.id) ?? null}
@@ -994,6 +999,7 @@ export function MessageList({
           onChangesetAction={onChangesetAction}
           onWriteConfirm={onWriteConfirm}
           onClarificationChoose={onClarificationChoose}
+          onClarificationManual={onClarificationManual}
           isStreamingPreview
           isTerminal={isTerminal}
         />
@@ -1132,6 +1138,7 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
   onImportanceOverride,
   onWriteConfirm,
   onClarificationChoose,
+  onClarificationManual,
   financialReportData = null,
   dataTableData = null,
   chartDataList = null,
@@ -1149,6 +1156,7 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
   onImportanceOverride?: (messageId: string, newTier: number) => void;
   onWriteConfirm?: (messageId: string, action: "approve" | "reject") => void;
   onClarificationChoose?: (messageId: string, optionId: "A" | "B" | "C") => void;
+  onClarificationManual?: (messageId: string, manualText: string) => Promise<void>;
   financialReportData?: FinancialReportData | null;
   dataTableData?: DataTableData | null;
   chartDataList?: ChartData[] | null;
@@ -1238,6 +1246,11 @@ const AssistantMessageRow = memo(function AssistantMessageRow({
             data={clarification}
             expired={expired}
             onChoose={(optionId) => onClarificationChoose?.(message.id, optionId)}
+            onManualClarify={
+              onClarificationManual
+                ? (text: string) => onClarificationManual(message.id, text)
+                : undefined
+            }
           />
         </div>
       </div>
