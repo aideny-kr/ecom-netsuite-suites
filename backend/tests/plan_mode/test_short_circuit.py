@@ -832,3 +832,159 @@ class TestDirectiveDoesNotEchoLLMText:
         assert isinstance(result, PlanModeChoiceResult)
         assert "netsuite" in result.system_directive
         assert "PRIOR CLARIFICATIONS" in result.system_directive
+
+
+# ---------------------------------------------------------------------------
+# Round 9 P2 — When two options share the same source (e.g. fiscal Q1 vs
+# calendar Q1, both ``source="netsuite"``), the round-8 directive (which
+# only echoes ``source``) cannot tell the agent WHICH definition the user
+# picked. The agent has the full options array in chat history (via the
+# prior assistant message's ``structured_output``), so it CAN look up the
+# chosen definition — but only if the directive identifies the chosen
+# option by a server-validated discriminator.
+#
+# ``id`` is constrained to {A, B, C} by the clarify schema enum + uniqueness
+# validation (round 4), so it is server-validated, not LLM free-text. Echoing
+# it is safe and does NOT regress the round-8 security fix.
+# ---------------------------------------------------------------------------
+
+
+class TestDirectiveIncludesChosenOptionId:
+    """The directive MUST include the chosen option's ID (A/B/C) so the
+    agent can look up the picked definition when multiple options share the
+    same source. ID is server-validated by the clarify schema enum.
+    """
+
+    @pytest.mark.asyncio
+    async def test_directive_includes_chosen_option_id(self) -> None:
+        """Picking option B must surface B in the directive (and not just A)."""
+        session_id = str(uuid.uuid4())
+        options = [
+            {
+                "id": "A",
+                "title": "Fiscal Q1 revenue (NetSuite GL)",
+                "rationale": "fiscal",
+                "source": "netsuite",
+                "is_default": True,
+            },
+            {
+                "id": "B",
+                "title": "Calendar Q1 revenue (NetSuite GL)",
+                "rationale": "calendar",
+                "source": "netsuite",
+                "is_default": False,
+            },
+        ]
+        so = _build_so(session_id, options=options)
+        msg = _mock_msg(session_id, so)
+        db = _mock_db_with_msg(msg)
+
+        result = await handle_plan_mode_choice(
+            plan_mode_choice={
+                "action": "approve",
+                "confirmation_id": str(msg.id),
+                "option_id": "B",
+            },
+            session_id=session_id,
+            tenant_id=uuid.uuid4(),
+            db=db,
+        )
+
+        assert isinstance(result, PlanModeChoiceResult)
+        # Discriminator must be present. We accept either "option B" or "B"
+        # standing on its own with whitespace boundaries — what matters is
+        # that the directive identifies the choice unambiguously.
+        assert "option B" in result.system_directive, (
+            "Directive must identify the chosen option by its server-validated "
+            "ID (A/B/C). Without the id, two options sharing the same source "
+            "are indistinguishable to the resumed agent. Round 9 P2."
+        )
+
+    @pytest.mark.asyncio
+    async def test_directive_handles_options_with_same_source(self) -> None:
+        """When A and B both have source=netsuite, picking A vs B must yield
+        DIFFERENT directives — otherwise the agent has no way to know which
+        definition was chosen.
+        """
+        session_id_a = str(uuid.uuid4())
+        session_id_b = str(uuid.uuid4())
+        options_template = [
+            {
+                "id": "A",
+                "title": "Fiscal Q1",
+                "rationale": "fiscal",
+                "source": "netsuite",
+                "is_default": True,
+            },
+            {
+                "id": "B",
+                "title": "Calendar Q1",
+                "rationale": "calendar",
+                "source": "netsuite",
+                "is_default": False,
+            },
+        ]
+        so_a = _build_so(session_id_a, options=options_template)
+        so_b = _build_so(session_id_b, options=options_template)
+        msg_a = _mock_msg(session_id_a, so_a)
+        msg_b = _mock_msg(session_id_b, so_b)
+        db_a = _mock_db_with_msg(msg_a)
+        db_b = _mock_db_with_msg(msg_b)
+
+        result_a = await handle_plan_mode_choice(
+            plan_mode_choice={
+                "action": "approve",
+                "confirmation_id": str(msg_a.id),
+                "option_id": "A",
+            },
+            session_id=session_id_a,
+            tenant_id=uuid.uuid4(),
+            db=db_a,
+        )
+        result_b = await handle_plan_mode_choice(
+            plan_mode_choice={
+                "action": "approve",
+                "confirmation_id": str(msg_b.id),
+                "option_id": "B",
+            },
+            session_id=session_id_b,
+            tenant_id=uuid.uuid4(),
+            db=db_b,
+        )
+
+        assert isinstance(result_a, PlanModeChoiceResult)
+        assert isinstance(result_b, PlanModeChoiceResult)
+        # Same source on both, so source alone cannot discriminate.
+        assert result_a.chosen_source == result_b.chosen_source == "netsuite"
+        # But the directives MUST differ — option ID is the discriminator.
+        assert result_a.system_directive != result_b.system_directive, (
+            "When two options share the same source, the directive must "
+            "still distinguish them via the option ID. Round 9 P2."
+        )
+
+    @pytest.mark.asyncio
+    async def test_directive_references_prior_card(self) -> None:
+        """The directive must instruct the agent to consult the prior
+        clarification card for the full chosen-option definition (since the
+        directive itself only carries the server-validated ID + source).
+        """
+        session_id = str(uuid.uuid4())
+        so = _build_so(session_id)
+        msg = _mock_msg(session_id, so)
+        db = _mock_db_with_msg(msg)
+
+        result = await handle_plan_mode_choice(
+            plan_mode_choice={
+                "action": "approve",
+                "confirmation_id": str(msg.id),
+                "option_id": "A",
+            },
+            session_id=session_id,
+            tenant_id=uuid.uuid4(),
+            db=db,
+        )
+
+        assert isinstance(result, PlanModeChoiceResult)
+        # The directive should point the agent at the prior card so it can
+        # resolve the full definition by ID.
+        assert "clarification card" in result.system_directive.lower()
