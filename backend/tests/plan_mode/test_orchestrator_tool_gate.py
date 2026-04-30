@@ -136,8 +136,11 @@ def test_resume_turn_skips_clarify_augmentation():
     in the inventory.
 
     Source-level invariant: the `maybe_augment_for_plan_mode(...)` call in
-    `run_chat_turn` must be gated by `plan_mode_resume_source is None` so
-    that resume turns receive an empty/None augmentation.
+    `run_chat_turn` must be gated by either `plan_mode_resume_source is None`
+    or `not _plan_mode_resume_active` so that resume turns receive an
+    empty/None augmentation. The second form is required when the orchestrator
+    handles the manual-clarify variant alongside the source-pick variant
+    (both are resume turns).
     """
     from app.services.chat import orchestrator
 
@@ -148,9 +151,9 @@ def test_resume_turn_skips_clarify_augmentation():
     window = source[aug_idx : aug_idx + 600]
 
     assert "maybe_augment_for_plan_mode" in window, "Augmentation block must call maybe_augment_for_plan_mode."
-    assert "plan_mode_resume_source is None" in window, (
-        "On resume turns (`plan_mode_resume_source` is set), the orchestrator "
-        "must skip the clarify augmentation. Otherwise the prompt instructs "
-        "the model to call `clarify` while the resume tool filter has stripped "
-        "it from the inventory — contradictory instructions."
+    assert "plan_mode_resume_source is None" in window or "not _plan_mode_resume_active" in window, (
+        "On resume turns the orchestrator must skip the clarify augmentation. "
+        "Either gate is acceptable — `plan_mode_resume_source is None` for "
+        "source-pick-only flows, or `not _plan_mode_resume_active` for the "
+        "broader gate that also covers manual-clarify resume turns."
     )

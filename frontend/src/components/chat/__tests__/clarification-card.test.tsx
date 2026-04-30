@@ -240,3 +240,97 @@ describe("ClarificationCard", () => {
     expect(onChoose).toHaveBeenCalledTimes(1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Manual clarification input (dogfood follow-up 2026-04-30): when the parent
+// passes onManualClarify, the card renders a textarea + Send button below
+// the A/B/C options. Submitting calls onManualClarify(text.trim()) and the
+// card transitions through pending → resolved (parent flips status).
+// ---------------------------------------------------------------------------
+
+describe("ClarificationCard manual clarify", () => {
+  it("renders manual textarea + Send button when onManualClarify is provided", () => {
+    render(
+      <ClarificationCard data={_BASE} onChoose={() => {}} onManualClarify={async () => {}} />,
+    );
+    expect(screen.getByPlaceholderText(/clarify/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /send/i })).toBeInTheDocument();
+  });
+
+  it("does NOT render textarea when onManualClarify is omitted (back-compat)", () => {
+    render(<ClarificationCard data={_BASE} onChoose={() => {}} />);
+    expect(screen.queryByPlaceholderText(/clarify/i)).not.toBeInTheDocument();
+  });
+
+  it("calls onManualClarify with trimmed text when Send is clicked", async () => {
+    const onManualClarify = vi.fn(async () => {});
+    render(
+      <ClarificationCard data={_BASE} onChoose={() => {}} onManualClarify={onManualClarify} />,
+    );
+
+    const textarea = screen.getByPlaceholderText(/clarify/i);
+    fireEvent.change(textarea, { target: { value: "  fiscal Q1 only  " } });
+    fireEvent.click(screen.getByRole("button", { name: /send/i }));
+
+    await waitFor(() => expect(onManualClarify).toHaveBeenCalledWith("fiscal Q1 only"));
+  });
+
+  it("disables Send when textarea is empty/whitespace", () => {
+    const onManualClarify = vi.fn(async () => {});
+    render(
+      <ClarificationCard data={_BASE} onChoose={() => {}} onManualClarify={onManualClarify} />,
+    );
+    const sendBtn = screen.getByRole("button", { name: /send/i }) as HTMLButtonElement;
+    expect(sendBtn.disabled).toBe(true);
+
+    const textarea = screen.getByPlaceholderText(/clarify/i);
+    fireEvent.change(textarea, { target: { value: "   " } });
+    expect(sendBtn.disabled).toBe(true);
+
+    fireEvent.change(textarea, { target: { value: "fiscal Q1" } });
+    expect(sendBtn.disabled).toBe(false);
+  });
+
+  it("clears textarea after a successful submit", async () => {
+    const onManualClarify = vi.fn(async () => {});
+    render(
+      <ClarificationCard data={_BASE} onChoose={() => {}} onManualClarify={onManualClarify} />,
+    );
+    const textarea = screen.getByPlaceholderText(/clarify/i) as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: "fiscal Q1" } });
+    fireEvent.click(screen.getByRole("button", { name: /send/i }));
+
+    await waitFor(() => expect(onManualClarify).toHaveBeenCalled());
+    await waitFor(() => expect(textarea.value).toBe(""));
+  });
+
+  it("does not call onChoose when manual Send is clicked", async () => {
+    const onChoose = vi.fn();
+    const onManualClarify = vi.fn(async () => {});
+    render(
+      <ClarificationCard data={_BASE} onChoose={onChoose} onManualClarify={onManualClarify} />,
+    );
+    const textarea = screen.getByPlaceholderText(/clarify/i);
+    fireEvent.change(textarea, { target: { value: "fiscal Q1" } });
+    fireEvent.click(screen.getByRole("button", { name: /send/i }));
+
+    await waitFor(() => expect(onManualClarify).toHaveBeenCalled());
+    expect(onChoose).not.toHaveBeenCalled();
+  });
+
+  it("preserves textarea content if submit rejects (so user can retry)", async () => {
+    const onManualClarify = vi.fn(async () => {
+      throw new Error("network");
+    });
+    render(
+      <ClarificationCard data={_BASE} onChoose={() => {}} onManualClarify={onManualClarify} />,
+    );
+    const textarea = screen.getByPlaceholderText(/clarify/i) as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: "fiscal Q1" } });
+    fireEvent.click(screen.getByRole("button", { name: /send/i }));
+
+    await waitFor(() => expect(onManualClarify).toHaveBeenCalled());
+    // Textarea content stays so the user can retry without retyping
+    expect(textarea.value).toBe("fiscal Q1");
+  });
+});

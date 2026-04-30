@@ -988,3 +988,195 @@ class TestDirectiveIncludesChosenOptionId:
         # The directive should point the agent at the prior card so it can
         # resolve the full definition by ID.
         assert "clarification card" in result.system_directive.lower()
+
+
+# ---------------------------------------------------------------------------
+# Manual clarification path (dogfood follow-up 2026-04-30): user types
+# free-text inside the card instead of picking A/B/C. The handler accepts a
+# `manual_text` field in place of `option_id`, returns PlanModeManualResult
+# with no chosen_source (full inventory on resume), and audit-logs as
+# `clarification_manual_clarify`.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_manual_text_returns_manual_result():
+    """When ``manual_text`` is provided (instead of ``option_id``), the
+    handler returns a PlanModeManualResult with the typed text echoed back
+    and chosen_source=None (no source filter on resume — user clarified by
+    intent, not by source pick)."""
+    from app.services.chat.plan_mode.short_circuit import PlanModeManualResult
+
+    session_id = str(uuid.uuid4())
+    so = _build_so(session_id)
+    msg = _mock_msg(session_id, so)
+    db = _mock_db_with_msg(msg)
+
+    result = await handle_plan_mode_choice(
+        plan_mode_choice={
+            "action": "approve",
+            "confirmation_id": str(msg.id),
+            "manual_text": "I want fiscal Q1 only, US subsidiary",
+        },
+        session_id=session_id,
+        tenant_id=uuid.uuid4(),
+        db=db,
+    )
+
+    assert isinstance(result, PlanModeManualResult)
+    assert result.manual_text == "I want fiscal Q1 only, US subsidiary"
+    # Manual clarification means the user disambiguated by intent, not by
+    # source — caller should not filter tools.
+    assert result.chosen_source is None or result.chosen_source == ""
+    # Directive must contain the manual text so the agent honors the
+    # user's typed clarification on resume.
+    assert "fiscal Q1 only, US subsidiary" in result.system_directive
+    # CAS + audit event committed
+    db.add.assert_called_once()
+    db.commit.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_manual_text_and_option_id_are_mutually_exclusive():
+    db = AsyncMock()
+    result = await handle_plan_mode_choice(
+        plan_mode_choice={
+            "action": "approve",
+            "confirmation_id": str(uuid.uuid4()),
+            "option_id": "A",
+            "manual_text": "something",
+        },
+        session_id=str(uuid.uuid4()),
+        tenant_id=uuid.uuid4(),
+        db=db,
+    )
+    assert isinstance(result, PlanModeChoiceError)
+    assert result.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_empty_manual_text_returns_400():
+    db = AsyncMock()
+    result = await handle_plan_mode_choice(
+        plan_mode_choice={
+            "action": "approve",
+            "confirmation_id": str(uuid.uuid4()),
+            "manual_text": "   ",
+        },
+        session_id=str(uuid.uuid4()),
+        tenant_id=uuid.uuid4(),
+        db=db,
+    )
+    assert isinstance(result, PlanModeChoiceError)
+    assert result.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_manual_text_too_long_returns_400():
+    db = AsyncMock()
+    result = await handle_plan_mode_choice(
+        plan_mode_choice={
+            "action": "approve",
+            "confirmation_id": str(uuid.uuid4()),
+            "manual_text": "x" * 501,
+        },
+        session_id=str(uuid.uuid4()),
+        tenant_id=uuid.uuid4(),
+        db=db,
+    )
+    assert isinstance(result, PlanModeChoiceError)
+    assert result.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_manual_text_validates_hmac():
+    """Manual variant goes through the same HMAC verification as the pick
+    variant (same event_type, same token). A tampered token must reject."""
+    session_id = str(uuid.uuid4())
+    so = _build_so(session_id)
+    so["confirmation_token"] = "deadbeef" * 8  # bogus
+    msg = _mock_msg(session_id, so)
+    db = _mock_db_with_msg(msg)
+
+    result = await handle_plan_mode_choice(
+        plan_mode_choice={
+            "action": "approve",
+            "confirmation_id": str(msg.id),
+            "manual_text": "fiscal Q1 only",
+        },
+        session_id=session_id,
+        tenant_id=uuid.uuid4(),
+        db=db,
+    )
+    assert isinstance(result, PlanModeChoiceError)
+    assert result.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_manual_text_transitions_status_to_manually_clarified():
+    """Atomic CAS sets structured_output.status = 'manually_clarified' (not
+    'chosen' — distinct state for telemetry/UI)."""
+    session_id = str(uuid.uuid4())
+    so = _build_so(session_id)
+    msg = _mock_msg(session_id, so)
+    db = _mock_db_with_msg(msg)
+
+    # Capture the executed update statement
+    captured_values: list[dict] = []
+    original_execute = db.execute
+
+    async def _capturing_execute(stmt, *args, **kwargs):
+        # Extract the values dict from update statements
+        try:
+            params = stmt.compile().params
+            if "structured_output" in params:
+                captured_values.append(params["structured_output"])
+        except Exception:
+            pass
+        return await original_execute(stmt, *args, **kwargs)
+
+    db.execute = _capturing_execute
+
+    await handle_plan_mode_choice(
+        plan_mode_choice={
+            "action": "approve",
+            "confirmation_id": str(msg.id),
+            "manual_text": "fiscal Q1 only",
+        },
+        session_id=session_id,
+        tenant_id=uuid.uuid4(),
+        db=db,
+    )
+
+    assert any(v.get("status") == "manually_clarified" for v in captured_values), (
+        f"Expected status=manually_clarified in update payload, got: {captured_values}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_manual_text_logs_manual_clarify_event():
+    """ChatDisclosureEvent with event_type='clarification_manual_clarify'."""
+    from app.models.chat_disclosure_event import ChatDisclosureEvent
+
+    session_id = str(uuid.uuid4())
+    so = _build_so(session_id)
+    msg = _mock_msg(session_id, so)
+    db = _mock_db_with_msg(msg)
+
+    await handle_plan_mode_choice(
+        plan_mode_choice={
+            "action": "approve",
+            "confirmation_id": str(msg.id),
+            "manual_text": "fiscal Q1 only",
+        },
+        session_id=session_id,
+        tenant_id=uuid.uuid4(),
+        db=db,
+    )
+
+    # db.add called once with a ChatDisclosureEvent instance
+    db.add.assert_called_once()
+    event = db.add.call_args[0][0]
+    assert isinstance(event, ChatDisclosureEvent)
+    assert event.event_type == "clarification_manual_clarify"
+    assert event.payload.get("manual_text") == "fiscal Q1 only"

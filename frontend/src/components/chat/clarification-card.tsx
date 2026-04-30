@@ -12,9 +12,16 @@ interface Props {
   // onChoose may be sync or return a Promise — the card awaits it so it
   // can reset its pending state on failure (codex round 10 P3 Bug 3).
   onChoose: (optionId: "A" | "B" | "C") => void | Promise<void>;
+  // Optional manual clarification handler. When provided, the card renders
+  // a textarea + Send button inside the pending state. Submission must
+  // return a Promise — the card awaits it, clears on success, preserves
+  // text on failure so the user can retry. Dogfood follow-up 2026-04-30.
+  onManualClarify?: (manualText: string) => Promise<void>;
   expired?: boolean;
   disabled?: boolean;
 }
+
+const _MANUAL_TEXT_MAX = 500;
 
 const SOURCE_LABEL: Record<string, string> = {
   netsuite: "NetSuite",
@@ -27,10 +34,13 @@ const SOURCE_LABEL: Record<string, string> = {
 export function ClarificationCard({
   data,
   onChoose,
+  onManualClarify,
   expired = false,
   disabled = false,
 }: Props) {
   const [pendingPick, setPendingPick] = useState<string | null>(null);
+  const [manualText, setManualText] = useState("");
+  const [manualSubmitting, setManualSubmitting] = useState(false);
   // Synchronous "is picking" flag for the keydown listener. The effect's deps
   // intentionally omit pendingPick/disabled to avoid re-registering on every
   // state change, so the listener closure has stale state. Without a ref,
@@ -105,6 +115,26 @@ export function ClarificationCard({
     },
     [onChoose, disabled],
   );
+
+  const handleManualSubmit = useCallback(async () => {
+    if (!onManualClarify) return;
+    const trimmed = manualText.trim();
+    if (!trimmed) return;
+    if (manualSubmitting || pickingRef.current || disabled) return;
+    setManualSubmitting(true);
+    try {
+      await onManualClarify(trimmed);
+      setManualText("");
+    } catch (err) {
+      // Preserve textarea content so the user can retry. Same rationale as
+      // handlePick: don't bubble the error here; let the parent surface it.
+      if (typeof console !== "undefined") {
+        console.warn("ClarificationCard: onManualClarify failed", err);
+      }
+    } finally {
+      setManualSubmitting(false);
+    }
+  }, [onManualClarify, manualText, manualSubmitting, disabled]);
 
   if (expired) {
     return (
@@ -234,9 +264,64 @@ export function ClarificationCard({
         </div>
       </details>
 
-      <p className="text-[11px] text-muted-foreground leading-relaxed">
-        Or just type your answer.
-      </p>
+      {onManualClarify ? (
+        <div className="space-y-1.5 pt-1">
+          <p className="text-[11px] text-muted-foreground leading-relaxed">
+            Or clarify your intent below.
+          </p>
+          <textarea
+            value={manualText}
+            onChange={(e) => setManualText(e.target.value.slice(0, _MANUAL_TEXT_MAX))}
+            onKeyDown={(e) => {
+              // Cmd/Ctrl-Enter submits — Enter alone inserts a newline so
+              // multi-line clarifications stay editable.
+              if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+                e.preventDefault();
+                void handleManualSubmit();
+              }
+            }}
+            placeholder="Clarify your intent (e.g., fiscal Q1, US subsidiary only)"
+            disabled={disabled || pendingPick !== null || manualSubmitting}
+            maxLength={_MANUAL_TEXT_MAX}
+            rows={2}
+            aria-label="manual clarification text"
+            className={cn(
+              "w-full px-3 py-2 rounded-lg border border-border bg-background",
+              "text-[13px] text-foreground placeholder:text-muted-foreground",
+              "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/40",
+              "resize-none",
+              "disabled:cursor-not-allowed disabled:opacity-60",
+            )}
+          />
+          <div className="flex items-center justify-between">
+            <span className="text-[11px] text-muted-foreground">
+              {manualText.length}/{_MANUAL_TEXT_MAX} · Cmd-Enter to send
+            </span>
+            <button
+              type="button"
+              onClick={() => void handleManualSubmit()}
+              disabled={
+                disabled ||
+                pendingPick !== null ||
+                manualSubmitting ||
+                manualText.trim().length === 0
+              }
+              className={cn(
+                "inline-flex items-center px-3 py-1 rounded-lg text-[12px] font-medium",
+                "bg-amber-600 text-white border border-amber-700 hover:bg-amber-700",
+                "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500/40",
+                "disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-amber-600",
+              )}
+            >
+              {manualSubmitting ? "Sending…" : "Send"}
+            </button>
+          </div>
+        </div>
+      ) : (
+        <p className="text-[11px] text-muted-foreground leading-relaxed">
+          Or just type your answer.
+        </p>
+      )}
     </div>
   );
 }
