@@ -108,13 +108,25 @@ def test_augmentation_lists_connected_sources_when_provided():
 
 def test_augmentation_requires_source_spanning_when_multi_source():
     """With ≥2 connected sources, the model must spread options across distinct
-    sources before falling back to within-source variation.
+    sources. Either via the generic source-spanning rule OR — when NetSuite is
+    one of the connected sources — via the more specific NS-split rule.
     """
     prompt = build_augmentation_prompt(connected_sources=["netsuite", "bigquery"])
     lower = prompt.lower()
-    assert "distinct" in lower or "different source" in lower or "span" in lower
-    # Should explicitly tell the model NOT to pick all options from one source.
-    assert "same source" in lower or "one source" in lower or "within-source" in lower
+    # Generic spanning OR NS-split rule satisfies "options span sources"
+    assert (
+        "distinct" in lower
+        or "different source" in lower
+        or "span" in lower
+        or "another connected source" in lower
+    )
+    # Both rule variants forbid collapsing to a single source slice
+    assert (
+        "same source" in lower
+        or "one source" in lower
+        or "within-source" in lower
+        or "two options must come from netsuite" in lower
+    )
 
 
 def test_augmentation_allows_within_source_when_single_source():
@@ -132,6 +144,34 @@ def test_augmentation_falls_back_to_static_when_no_sources_passed():
     """
     prompt = build_augmentation_prompt()
     assert "CLARIFICATION REQUIRED" in prompt
+
+
+def test_augmentation_requires_netsuite_split_when_netsuite_plus_other():
+    """When NetSuite is connected alongside ≥1 other canonical source, the
+    prompt must require BOTH NetSuite recognized revenue AND NetSuite booked
+    sales orders as separate options, plus one cross-source option.
+
+    Dogfood feedback (Framework, 2026-04-30): the recognized-vs-booked
+    distinction is materially different (bookings ≠ revenue) and must be
+    preserved alongside source diversity.
+    """
+    prompt = build_augmentation_prompt(connected_sources=["netsuite", "bigquery", "stripe"])
+    lower = prompt.lower()
+    assert "recognized revenue" in lower or "posted invoices" in lower
+    assert "booked" in lower and ("sales order" in lower or "sos" in lower)
+    # Must explicitly call out the slot allocation when NS + other sources
+    assert "two netsuite" in lower or "two options" in lower or "both netsuite" in lower
+
+
+def test_augmentation_skips_netsuite_split_when_only_netsuite():
+    """When NetSuite is the only connected source, source-spanning is
+    impossible. Within-source variation is allowed (window/scope/metric)
+    and the NS-split rule should not fire.
+    """
+    prompt = build_augmentation_prompt(connected_sources=["netsuite"])
+    lower = prompt.lower()
+    # The within-source variation rule should still apply
+    assert "window" in lower or "scope" in lower or "metric" in lower
 
 
 from app.services.chat.plan_mode.ambiguity_signal import maybe_augment_for_plan_mode

@@ -83,9 +83,31 @@ def build_augmentation_prompt(connected_sources: list[str] | None = None) -> str
     sources = connected_sources or []
     rendered_sources = _render_source_list(sources)
     distinct_canonical = [s for s in sources if s in _SOURCE_LABELS]
-    multi_source = len(set(distinct_canonical)) >= 2
+    canonical_set = set(distinct_canonical)
+    multi_source = len(canonical_set) >= 2
+    netsuite_plus_other = "netsuite" in canonical_set and len(canonical_set) >= 2
 
-    if multi_source:
+    if netsuite_plus_other:
+        # Dogfood feedback (Framework 2026-04-30): the recognized-vs-booked
+        # distinction inside NetSuite is materially different (bookings ≠
+        # revenue) and must be preserved alongside source diversity. Slot
+        # allocation: A=NS recognized, B=NS booked SOs, C=cross-source.
+        rule = (
+            "RULE — slot allocation when NetSuite is connected with another "
+            "source:\n"
+            "- Two options MUST come from NetSuite, covering both materially "
+            "different views:\n"
+            "  - Recognized revenue (posted invoices / cash sales / GL — the "
+            "GAAP accounting answer)\n"
+            "  - Booked sales orders (SOs created this period regardless of "
+            "fulfillment or invoicing — the bookings/pipeline answer)\n"
+            "- One option MUST come from another connected source (BigQuery "
+            "checkout totals for revenue/GMV/sales queries; Stripe collected "
+            "cash for cash/payout queries).\n"
+            "Bookings ≠ revenue — collapsing both into a single NetSuite "
+            "option hides a material number CFOs care about."
+        )
+    elif multi_source:
         rule = (
             "RULE: Build 2-3 options that span DISTINCT sources. Each option's "
             "`source` field MUST be different until every connected source has "
