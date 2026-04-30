@@ -91,39 +91,44 @@ class TestPlanModeChoiceAuditAtomicity:
 
 
 class TestRevertClarificationToPending:
-    """Unit tests for the new ``revert_clarification_to_pending`` helper.
+    """Unit tests for the ``revert_clarification_to_pending`` helper.
 
-    The helper must atomically flip ``structured_output.status`` from
-    ``'chosen'`` back to ``'pending'`` for a single chat_message id, only
-    if the row is currently in ``'chosen'`` (so a concurrent
+    The helper must flip ``structured_output.status`` from ``'chosen'``
+    back to ``'pending'`` for a single chat_message id, only if the row
+    is currently in ``'chosen'`` (so a concurrent
     ``supersede_pending_clarifications`` cannot be silently undone).
+
+    Round 7 Bug 3: the implementation switched from ``UPDATE ... jsonb_set``
+    to a Python round-trip via ``db.get`` because ``ChatMessage.structured_output``
+    is declared as JSON not JSONB; jsonb_set has no JSON signature in PG.
     """
 
     @pytest.mark.asyncio
-    async def test_revert_is_idempotent_atomic_cas(self) -> None:
+    async def test_revert_flips_status_when_chosen(self) -> None:
         from unittest.mock import AsyncMock as _AM
 
         from app.services.chat.plan_mode.short_circuit import (
             revert_clarification_to_pending,
         )
 
+        msg_id = uuid.uuid4()
+        tenant_id = uuid.uuid4()
+        msg = MagicMock()
+        msg.id = msg_id
+        msg.tenant_id = tenant_id
+        msg.structured_output = {"type": "clarification", "status": "chosen"}
+
         db = _AM()
-        update_result = MagicMock(rowcount=1)
-
-        async def _execute(*_args, **_kwargs):
-            return update_result
-
-        db.execute = _execute
+        db.get = _AM(return_value=msg)
         db.commit = _AM()
 
-        msg_id = uuid.uuid4()
         result = await revert_clarification_to_pending(
             message_id=msg_id,
-            tenant_id=uuid.uuid4(),
+            tenant_id=tenant_id,
             db=db,
         )
-        # Returns True when the CAS flipped a row back; False when no-op.
         assert result is True
+        assert msg.structured_output["status"] == "pending"
         db.commit.assert_awaited()
 
     @pytest.mark.asyncio
@@ -134,22 +139,25 @@ class TestRevertClarificationToPending:
             revert_clarification_to_pending,
         )
 
+        msg_id = uuid.uuid4()
+        tenant_id = uuid.uuid4()
+        msg = MagicMock()
+        msg.id = msg_id
+        msg.tenant_id = tenant_id
+        # Already pending -> revert should no-op.
+        msg.structured_output = {"type": "clarification", "status": "pending"}
+
         db = _AM()
-        update_result = MagicMock(rowcount=0)
-
-        async def _execute(*_args, **_kwargs):
-            return update_result
-
-        db.execute = _execute
+        db.get = _AM(return_value=msg)
         db.commit = _AM()
 
-        msg_id = uuid.uuid4()
         result = await revert_clarification_to_pending(
             message_id=msg_id,
-            tenant_id=uuid.uuid4(),
+            tenant_id=tenant_id,
             db=db,
         )
         assert result is False
+        db.commit.assert_not_awaited()
 
 
 class TestHandlePlanModeChoiceExposesMessageId:
@@ -306,3 +314,236 @@ class TestSupersedeAlreadyUsesLoadedMessageId:
         # is populated from the DB row, no flush dance required.
         assert "select(ChatMessage)" in source
         assert "chat_message_id=msg.id" in source
+
+
+# ---------------------------------------------------------------------------
+# Round 7 Bug 1 — broaden audit-revert to cover the resumed turn body.
+#
+# Round 6 only reverted on log_event failure. But the resumed turn has many
+# downstream failure points (LLM stream timeout, tool error, persist commit)
+# that ALSO need revert protection — otherwise the user's choice is locked
+# in (status='chosen') with no answer ever produced; retry → 409.
+#
+# These tests drive run_chat_turn through the plan_mode_choice path with
+# the audit succeeding, then force a downstream failure, and assert that
+# revert_clarification_to_pending is called.
+# ---------------------------------------------------------------------------
+
+
+def _build_session(session_id: uuid.UUID | None = None) -> MagicMock:
+    """Minimal ChatSession-shaped mock for orchestrator tests."""
+    sess = MagicMock()
+    sess.id = session_id or uuid.uuid4()
+    sess.tenant_id = uuid.uuid4()
+    sess.session_type = "chat"
+    sess.source_pin = None
+    sess.workspace_id = None
+    sess.agent_id = None
+    sess.messages = []
+    sess.title = None
+    return sess
+
+
+class TestResumeTurnFailureReverts:
+    """Round 7 Bug 1 — any failure AFTER handle_plan_mode_choice succeeds
+    must trigger revert_clarification_to_pending so the user can retry.
+    """
+
+    @pytest.mark.asyncio
+    async def test_resume_turn_failure_after_audit_reverts_choice(self, monkeypatch) -> None:
+        """If anything after the audit raises (history load, LLM, persist),
+        the orchestrator MUST call revert_clarification_to_pending so the
+        user can retry rather than being permanently stuck at status='chosen'.
+        """
+        from unittest.mock import AsyncMock as _AM
+
+        from app.services.chat import orchestrator as _orch
+        from app.services.chat.plan_mode.short_circuit import PlanModeChoiceResult
+
+        message_id = uuid.uuid4()
+
+        # 1. Stub handle_plan_mode_choice to return success with a known
+        #    chat_message_id we can match in the revert mock.
+        fake_pmc_result = PlanModeChoiceResult(
+            chosen_option={"id": "A", "source": "netsuite", "title": "GL"},
+            chosen_source="netsuite",
+            system_directive="## PRIOR CLARIFICATIONS\n...",
+            chat_message_id=message_id,
+        )
+
+        async def _fake_handle(**kwargs):
+            return fake_pmc_result
+
+        # The orchestrator imports handle_plan_mode_choice INSIDE the
+        # function body, so patch the source module.
+        monkeypatch.setattr(
+            "app.services.chat.plan_mode.short_circuit.handle_plan_mode_choice",
+            _fake_handle,
+        )
+
+        # 2. log_event SUCCEEDS — we want to test downstream failure, NOT
+        #    audit failure (round 6 covered that case).
+        async def _fake_log_event(**kwargs):
+            return MagicMock()
+
+        monkeypatch.setattr(_orch, "log_event", _fake_log_event)
+
+        # 3. Force a downstream failure. `sanitize_user_input` is called
+        #    early in the resumed turn body (line ~1476). Making it raise
+        #    simulates ANY downstream failure (LLM error, tool error,
+        #    persist failure) — they all need to trigger revert.
+        def _boom_sanitize(text):
+            raise RuntimeError("simulated downstream failure mid-resume-turn")
+
+        monkeypatch.setattr(_orch, "sanitize_user_input", _boom_sanitize)
+
+        # 4. Capture revert calls.
+        revert_calls = []
+
+        async def _fake_revert(**kwargs):
+            revert_calls.append(kwargs)
+            return True
+
+        monkeypatch.setattr(
+            "app.services.chat.plan_mode.short_circuit.revert_clarification_to_pending",
+            _fake_revert,
+        )
+
+        # 5. Drive run_chat_turn down the plan_mode_choice path. The body
+        #    is expected to raise (we set up _boom_sanitize), but BEFORE
+        #    raising it MUST have called the revert.
+        sess = _build_session()
+        db = _AM()
+
+        # Make supersede_pending_clarifications a no-op too — though we're
+        # on the resume path so it shouldn't be called anyway.
+        async def _fake_supersede(**kwargs):
+            return []
+
+        monkeypatch.setattr(
+            "app.services.chat.plan_mode.short_circuit.supersede_pending_clarifications",
+            _fake_supersede,
+        )
+
+        plan_mode_choice = {
+            "action": "approve",
+            "confirmation_id": str(message_id),
+            "option_id": "A",
+        }
+
+        with pytest.raises(Exception):
+            async for _chunk in _orch.run_chat_turn(
+                db=db,
+                session=sess,
+                user_message="resume turn",
+                user_id=uuid.uuid4(),
+                tenant_id=sess.tenant_id,
+                user_msg=MagicMock(id=uuid.uuid4()),
+                plan_mode_choice=plan_mode_choice,
+            ):
+                pass
+
+        # The crucial assertion: revert was called.
+        assert revert_calls, (
+            "After handle_plan_mode_choice succeeded and the audit fired, a "
+            "downstream failure (simulated via sanitize_user_input) MUST "
+            "trigger revert_clarification_to_pending so the user can retry. "
+            "Without this, the choice is locked in at status='chosen' with "
+            "no answer produced — round 7 Bug 1."
+        )
+        assert revert_calls[0]["message_id"] == message_id
+
+
+class TestAuditFailureRollbackOrder:
+    """Round 7 Bug 2 — when log_event raises during its flush, the SQLAlchemy
+    session is left in a failed-transaction state. The existing revert path
+    calls revert_clarification_to_pending on the same session BEFORE
+    rollback, which will raise PendingRollbackError and the revert never
+    actually executes — clarification stays at status='chosen'.
+
+    Fix: the orchestrator MUST call ``await db.rollback()`` BEFORE the
+    revert.
+    """
+
+    @pytest.mark.asyncio
+    async def test_audit_failure_rolls_back_before_revert(self, monkeypatch) -> None:
+        """Order check: db.rollback() is called BEFORE
+        revert_clarification_to_pending() in the audit-failure path.
+        """
+        from unittest.mock import AsyncMock as _AM
+
+        from app.services.chat import orchestrator as _orch
+        from app.services.chat.plan_mode.short_circuit import PlanModeChoiceResult
+
+        message_id = uuid.uuid4()
+        fake_pmc_result = PlanModeChoiceResult(
+            chosen_option={"id": "A", "source": "netsuite", "title": "GL"},
+            chosen_source="netsuite",
+            system_directive="## PRIOR CLARIFICATIONS\n...",
+            chat_message_id=message_id,
+        )
+
+        async def _fake_handle(**kwargs):
+            return fake_pmc_result
+
+        monkeypatch.setattr(
+            "app.services.chat.plan_mode.short_circuit.handle_plan_mode_choice",
+            _fake_handle,
+        )
+
+        # log_event raises — simulating audit flush failure.
+        async def _fake_log_event(**kwargs):
+            raise RuntimeError("simulated audit flush failure")
+
+        monkeypatch.setattr(_orch, "log_event", _fake_log_event)
+
+        # Track call order across db.rollback and the revert helper.
+        call_order: list[str] = []
+
+        sess = _build_session()
+        db = _AM()
+
+        async def _track_rollback(*args, **kwargs):
+            call_order.append("rollback")
+
+        db.rollback = _track_rollback
+
+        async def _fake_revert(**kwargs):
+            call_order.append("revert")
+            return True
+
+        monkeypatch.setattr(
+            "app.services.chat.plan_mode.short_circuit.revert_clarification_to_pending",
+            _fake_revert,
+        )
+
+        plan_mode_choice = {
+            "action": "approve",
+            "confirmation_id": str(message_id),
+            "option_id": "A",
+        }
+
+        with pytest.raises(Exception):
+            async for _chunk in _orch.run_chat_turn(
+                db=db,
+                session=sess,
+                user_message="resume turn",
+                user_id=uuid.uuid4(),
+                tenant_id=sess.tenant_id,
+                user_msg=MagicMock(id=uuid.uuid4()),
+                plan_mode_choice=plan_mode_choice,
+            ):
+                pass
+
+        assert "rollback" in call_order, (
+            "After log_event raises, the orchestrator MUST call "
+            "db.rollback() to clear the failed-transaction state before "
+            "running revert_clarification_to_pending — otherwise the "
+            "revert query raises PendingRollbackError and the row stays "
+            "stranded at status='chosen'. (round 7 Bug 2)"
+        )
+        assert "revert" in call_order, "revert must still run after rollback"
+        # Order: rollback BEFORE revert.
+        assert call_order.index("rollback") < call_order.index("revert"), (
+            f"db.rollback must run BEFORE revert_clarification_to_pending. Actual order: {call_order}"
+        )

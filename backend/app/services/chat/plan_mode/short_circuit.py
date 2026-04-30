@@ -20,8 +20,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import func, select, update
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.attributes import flag_modified
 
 from app.models.chat import ChatMessage
 from app.models.chat_disclosure_event import ChatDisclosureEvent
@@ -219,53 +220,59 @@ async def handle_plan_mode_choice(
 async def revert_clarification_to_pending(
     *,
     message_id: _uuid.UUID,
-    tenant_id: _uuid.UUID,  # noqa: ARG001 — accepted for parity with sibling helpers
+    tenant_id: _uuid.UUID,
     db: AsyncSession,
 ) -> bool:
-    """Atomically flip ``structured_output.status`` from ``'chosen'`` back
-    to ``'pending'`` for ``message_id``.
+    """Flip ``structured_output.status`` from ``'chosen'`` back to
+    ``'pending'`` for ``message_id``.
 
     Used by the orchestrator when a FATAL step that follows
-    ``handle_plan_mode_choice`` (e.g. ``log_event`` for ``plan_mode.chose``)
-    raises — without this revert the row would be stuck at ``'chosen'``
-    forever and the user would see HTTP 409 on every retry, with the card
-    consumed but no answer ever produced (codex round 6 P2 Bug 1).
+    ``handle_plan_mode_choice`` (e.g. ``log_event`` for ``plan_mode.chose``,
+    or any downstream failure during the resumed turn) raises — without
+    this revert the row would be stuck at ``'chosen'`` forever and the
+    user would see HTTP 409 on every retry, with the card consumed but no
+    answer ever produced (codex round 6 P2 Bug 1, broadened in round 7).
 
-    Atomic: the CAS targets ``status='chosen'`` so a concurrent
-    ``supersede_pending_clarifications`` (which transitions
-    ``pending → superseded``) can never be silently undone — supersede
-    can only see ``status='pending'`` rows in the first place, so the
-    races don't overlap.
+    Implementation note (codex round 7 Bug 3): the column
+    ``ChatMessage.structured_output`` is declared as SQLAlchemy ``JSON``,
+    not ``JSONB``. PostgreSQL's JSONB-mutating helpers have no ``JSON``
+    overload, so issuing them against this column raises a
+    function-signature error at runtime — the round 6 mocked tests never
+    compiled real SQL so the bug only surfaced in production. We do a
+    Python round-trip update via ``db.get`` + attribute assignment +
+    ``flag_modified`` instead. We lose atomicity vs. concurrent updates
+    between fetch and save, but the revert path is only reached on the
+    orchestrator's failure branch — the only writer is the original CAS
+    handler which is now in the failure path itself.
 
     Returns ``True`` if a row was reverted, ``False`` if no-op (e.g. the
     row had already been transitioned to a different state, or the id
     doesn't exist).
     """
-    cas = await db.execute(
-        update(ChatMessage)
-        .where(
-            ChatMessage.id == message_id,
-            ChatMessage.structured_output["status"].astext == "chosen",
-        )
-        .values(
-            # Surgical jsonb_set so we don't need to round-trip the row
-            # back to Python just to flip a single key. Path is `{status}`.
-            structured_output=func.jsonb_set(
-                ChatMessage.structured_output,
-                "{status}",
-                '"pending"',
-                False,
-            )
-        )
+    msg = await db.get(ChatMessage, message_id)
+    if msg is None:
+        return False
+    # Tenant guard — same row shouldn't be revert-able cross-tenant.
+    if getattr(msg, "tenant_id", None) != tenant_id:
+        return False
+    so = msg.structured_output
+    if not (isinstance(so, dict) and so.get("status") == "chosen"):
+        return False
+
+    # Build a NEW dict so SQLAlchemy's identity check sees a different
+    # value, then call flag_modified for belt-and-suspenders (JSON change
+    # tracking is shallow — without flag_modified a same-reference mutation
+    # is silently dropped from the UPDATE).
+    new_so = dict(so)
+    new_so["status"] = "pending"
+    msg.structured_output = new_so
+    flag_modified(msg, "structured_output")
+    await db.commit()
+    logger.warning(
+        "[PLAN_MODE] reverted clarification %s back to pending after downstream failure",
+        message_id,
     )
-    if cas.rowcount > 0:
-        await db.commit()
-        logger.warning(
-            "[PLAN_MODE] reverted clarification %s back to pending after downstream failure",
-            message_id,
-        )
-        return True
-    return False
+    return True
 
 
 # Tool name prefixes per source. Cross-source tools (see below) are

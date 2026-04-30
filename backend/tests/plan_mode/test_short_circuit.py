@@ -538,3 +538,159 @@ async def test_audit_log_emitted_on_plan_mode_choose(monkeypatch):
     assert call["payload"]["chosen_id"] == "A"
     assert call["payload"]["chosen_source"] == "netsuite"
     assert call["payload"]["confirmation_id"] == plan_mode_choice["confirmation_id"]
+
+
+# ---------------------------------------------------------------------------
+# Bug 3 (codex round 7) — `revert_clarification_to_pending` must NOT call
+# ``func.jsonb_set`` on ``ChatMessage.structured_output`` because the column
+# is declared as SQLAlchemy ``JSON``, not ``JSONB``. PostgreSQL's
+# ``jsonb_set(jsonb, ...)`` has no ``JSON`` signature, so the original
+# implementation raises a function-signature error in production. The mocked
+# tests in round 6 didn't catch this because ``db.execute`` was an
+# AsyncMock — the SQL was never actually compiled or run.
+#
+# Acceptable fixes:
+#   - Option A (preferred): Python round-trip update via ``db.get`` +
+#     attribute assignment + ``flag_modified``.
+#   - Option B: cast the column to JSONB in-place inside the UPDATE.
+#
+# We assert Option A by source inspection: the function MUST NOT contain
+# ``jsonb_set`` and MUST do a Python-side dict update.
+# ---------------------------------------------------------------------------
+
+
+class TestRevertClarificationDoesNotUseJsonbSet:
+    """Round 7 Bug 3 — production guard.
+
+    The structured_output column is JSON. PG's jsonb_set requires JSONB.
+    Calling jsonb_set on a JSON column raises ``function jsonb_set(json,
+    ...) does not exist``. The round-6 mocked tests didn't compile real
+    SQL so the bug only surfaces in production.
+    """
+
+    def test_revert_helper_does_not_use_jsonb_set(self) -> None:
+        import inspect
+
+        from app.services.chat.plan_mode.short_circuit import (
+            revert_clarification_to_pending,
+        )
+
+        source = inspect.getsource(revert_clarification_to_pending)
+        assert "jsonb_set" not in source, (
+            "revert_clarification_to_pending must NOT call func.jsonb_set on "
+            "ChatMessage.structured_output — that column is declared as "
+            "SQLAlchemy JSON (not JSONB), and PostgreSQL's jsonb_set has no "
+            "JSON signature so the SQL fails at runtime. Use a Python "
+            "round-trip update (db.get + flag_modified) or cast to JSONB "
+            "explicitly. (codex round 7 Bug 3)"
+        )
+
+    @pytest.mark.asyncio
+    async def test_revert_uses_python_dict_update(self) -> None:
+        """Functional check — the implementation must use db.get + attribute
+        update, not raw SQL UPDATE. We mock db.get and verify the message's
+        structured_output dict was mutated in place.
+        """
+        from unittest.mock import AsyncMock as _AM
+
+        from app.services.chat.plan_mode.short_circuit import (
+            revert_clarification_to_pending,
+        )
+
+        msg_id = uuid.uuid4()
+        tenant_id = uuid.uuid4()
+
+        msg = MagicMock()
+        msg.id = msg_id
+        msg.tenant_id = tenant_id
+        msg.structured_output = {"type": "clarification", "status": "chosen", "chosen_id": "A"}
+
+        db = _AM()
+        db.get = _AM(return_value=msg)
+        db.commit = _AM()
+
+        result = await revert_clarification_to_pending(
+            message_id=msg_id,
+            tenant_id=tenant_id,
+            db=db,
+        )
+
+        assert result is True
+        assert msg.structured_output["status"] == "pending"
+        # Other keys preserved.
+        assert msg.structured_output["type"] == "clarification"
+        db.commit.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_revert_no_op_when_status_not_chosen(self) -> None:
+        """If the row is already pending/superseded/something else, no commit
+        and return False. Guards against an over-eager revert turning a
+        ``superseded`` row back into ``pending``."""
+        from unittest.mock import AsyncMock as _AM
+
+        from app.services.chat.plan_mode.short_circuit import (
+            revert_clarification_to_pending,
+        )
+
+        msg_id = uuid.uuid4()
+        tenant_id = uuid.uuid4()
+
+        msg = MagicMock()
+        msg.id = msg_id
+        msg.tenant_id = tenant_id
+        msg.structured_output = {"type": "clarification", "status": "superseded"}
+
+        db = _AM()
+        db.get = _AM(return_value=msg)
+        db.commit = _AM()
+
+        result = await revert_clarification_to_pending(
+            message_id=msg_id,
+            tenant_id=tenant_id,
+            db=db,
+        )
+        assert result is False
+        db.commit.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_revert_no_op_when_message_not_found(self) -> None:
+        from unittest.mock import AsyncMock as _AM
+
+        from app.services.chat.plan_mode.short_circuit import (
+            revert_clarification_to_pending,
+        )
+
+        db = _AM()
+        db.get = _AM(return_value=None)
+        db.commit = _AM()
+
+        result = await revert_clarification_to_pending(
+            message_id=uuid.uuid4(),
+            tenant_id=uuid.uuid4(),
+            db=db,
+        )
+        assert result is False
+        db.commit.assert_not_awaited()
+
+    def test_revert_calls_flag_modified_at_source_level(self) -> None:
+        """SQLAlchemy's JSON change tracking is shallow — without
+        ``flag_modified`` on the structured_output attribute, a same-key
+        mutation of the dict is silently dropped from the UPDATE.
+
+        Asserted at source level because the production import is
+        ``from sqlalchemy.orm.attributes import flag_modified`` (resolved
+        once at module-import time), so monkeypatching the symbol after
+        import won't intercept the call.
+        """
+        import inspect
+
+        from app.services.chat.plan_mode.short_circuit import (
+            revert_clarification_to_pending,
+        )
+
+        source = inspect.getsource(revert_clarification_to_pending)
+        assert "flag_modified" in source, (
+            "revert_clarification_to_pending must call ``flag_modified`` on "
+            "the structured_output attribute — without it the JSON change "
+            "is invisible to SQLAlchemy and the UPDATE is silently skipped."
+        )
