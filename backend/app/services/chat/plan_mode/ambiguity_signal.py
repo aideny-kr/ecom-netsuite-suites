@@ -48,7 +48,19 @@ that's recognized revenue — if you want pre-refund checkout dollars, B is righ
 
 Default preferences: NetSuite GL for "revenue" / "income" / "earnings" /
 "recognized revenue"; BigQuery for "GMV" / "checkout" / "online sales"; fiscal
-calendar for quarterly windows."""
+calendar for quarterly windows.
+
+Metric-specific cross-source routing — when picking the cross-source slot,
+match the metric to where its canonical data actually lives:
+- "MRR" / "ARR" / "subscription revenue" / "recurring revenue" → Stripe is
+  the natural cross-source (subscription billing data lives there). Do not
+  drop the cross-source option for these queries — even if NetSuite has a
+  recognized-revenue answer, the subscription-side number is materially
+  different and worth surfacing.
+- "GMV" / "checkout" / "online sales" / "ecommerce revenue" → BigQuery is
+  the natural cross-source (order-level checkout data).
+- "cash" / "payouts" / "collected" / "deposited" → Stripe is the natural
+  cross-source (cash-in/processor-side gross)."""
 
 # Human-readable labels for canonical sources so the rendered prompt explains
 # what each source means rather than just naming it.
