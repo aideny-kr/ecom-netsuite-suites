@@ -114,12 +114,7 @@ def test_augmentation_requires_source_spanning_when_multi_source():
     prompt = build_augmentation_prompt(connected_sources=["netsuite", "bigquery"])
     lower = prompt.lower()
     # Generic spanning OR NS-split rule satisfies "options span sources"
-    assert (
-        "distinct" in lower
-        or "different source" in lower
-        or "span" in lower
-        or "another connected source" in lower
-    )
+    assert "distinct" in lower or "different source" in lower or "span" in lower or "another connected source" in lower
     # Both rule variants forbid collapsing to a single source slice
     assert (
         "same source" in lower
