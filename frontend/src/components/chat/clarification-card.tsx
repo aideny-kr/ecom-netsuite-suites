@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { AlertCircle, Check, HelpCircle, Minus } from "lucide-react";
 
@@ -9,7 +9,9 @@ import type { ClarificationData, ClarificationOption } from "@/lib/types";
 
 interface Props {
   data: ClarificationData;
-  onChoose: (optionId: "A" | "B" | "C") => void;
+  // onChoose may be sync or return a Promise — the card awaits it so it
+  // can reset its pending state on failure (codex round 10 P3 Bug 3).
+  onChoose: (optionId: "A" | "B" | "C") => void | Promise<void>;
   expired?: boolean;
   disabled?: boolean;
 }
@@ -74,12 +76,35 @@ export function ClarificationCard({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isPending, data.default_id, data.options.map((o) => o.id).join(",")]);
 
-  function handlePick(id: "A" | "B" | "C") {
-    if (disabled || pendingPick || pickingRef.current) return;
-    pickingRef.current = true;
-    setPendingPick(id);
-    onChoose(id);
-  }
+  // Codex round 10 P3 Bug 3: handlePick used to call onChoose without
+  // awaiting it. If the downstream POST rejected, pickingRef stayed true
+  // and pendingPick stayed set forever — the card was permanently dead.
+  // Fix: await onChoose (works for both sync and Promise-returning fns)
+  // and reset state on failure so the user can retry. On success we leave
+  // pendingPick set — the parent re-renders with status="chosen" or
+  // unmounts the card; clearing here would re-enable the buttons and
+  // permit a double-submit before the parent's update lands.
+  const handlePick = useCallback(
+    async (id: "A" | "B" | "C") => {
+      if (disabled || pickingRef.current) return;
+      pickingRef.current = true;
+      setPendingPick(id);
+      try {
+        await Promise.resolve(onChoose(id));
+      } catch (err) {
+        pickingRef.current = false;
+        setPendingPick(null);
+        // Don't rethrow — the parent's resume handler is responsible for
+        // surfacing the error to the user (toast, banner, etc.). Rethrowing
+        // here would bubble into React's unhandled-rejection handling and
+        // produce noisy console errors with no user-facing benefit.
+        if (typeof console !== "undefined") {
+          console.warn("ClarificationCard: onChoose failed", err);
+        }
+      }
+    },
+    [onChoose, disabled],
+  );
 
   if (expired) {
     return (

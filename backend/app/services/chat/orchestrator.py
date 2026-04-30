@@ -1478,6 +1478,12 @@ async def run_chat_turn(
                     "content": m.content,
                     "content_summary": m.content_summary,
                     "tool_calls": m.tool_calls,
+                    # Codex round 10 P2 Bug 1: surface clarification options
+                    # into LLM-facing content. Without this, the resume
+                    # directive ("Picked option B (source: netsuite)") refers
+                    # to an empty prior assistant message and the agent has
+                    # no way to know what option B's definition was.
+                    "structured_output": m.structured_output,
                 }
                 for m in session.messages
                 if m.role in ("user", "assistant")

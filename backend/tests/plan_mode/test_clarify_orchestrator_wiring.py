@@ -303,6 +303,46 @@ async def test_clarify_intercept_includes_rest_connections(monkeypatch):
     assert "bigquery" in sources
 
 
+def test_msg_dicts_include_structured_output_for_history():
+    """Codex round 10 P2 Bug 1: the orchestrator's msg_dicts construction
+    must include ``structured_output`` so ``build_history_dicts`` can
+    synthesize a clarification options summary into LLM-facing content.
+
+    Without this, clarification messages reach the LLM as empty strings
+    and the resume directive ("Picked option B") cannot be interpreted —
+    when two options share a source the agent picks the wrong one.
+
+    Source-level invariant: the dict comprehension that builds
+    ``msg_dicts`` from ``session.messages`` must reference
+    ``m.structured_output``.
+    """
+    import inspect
+
+    from app.services.chat import orchestrator
+
+    src = inspect.getsource(orchestrator)
+    # Locate every `msg_dicts = [` block and require structured_output is
+    # part of the dict literal that follows.
+    indices = []
+    start = 0
+    while True:
+        idx = src.find("msg_dicts = [", start)
+        if idx == -1:
+            break
+        indices.append(idx)
+        start = idx + 1
+
+    assert len(indices) >= 1, "no msg_dicts construction found in orchestrator"
+    for idx in indices:
+        # Window must be large enough to include the full dict comprehension.
+        window = src[idx : idx + 1500]
+        assert "m.structured_output" in window or "structured_output" in window, (
+            "msg_dicts must include structured_output so build_history_dicts "
+            "can surface clarification options into LLM-facing content. "
+            f"Failed at offset {idx}; window:\n{window}"
+        )
+
+
 def test_terminal_message_event_includes_structured_output():
     """Codex P2 Bug 2b: the terminal SSE `message` event MUST include
     `structured_output` when `assistant_msg.structured_output` is set.
@@ -341,9 +381,7 @@ def test_terminal_message_event_includes_structured_output():
         indices.append(idx)
         start = idx + 1
 
-    assert len(indices) >= 2, (
-        f"expected ≥2 `result_msg = {{` constructions in orchestrator; got {len(indices)}"
-    )
+    assert len(indices) >= 2, f"expected ≥2 `result_msg = {{` constructions in orchestrator; got {len(indices)}"
 
     for idx in indices:
         window = source[idx : idx + 1200]

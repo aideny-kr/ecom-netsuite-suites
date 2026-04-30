@@ -87,6 +87,10 @@ type StreamHandlers = {
   onSheetsLink?: (data: SheetsLinkData) => void;
   onDocsLink?: (data: DocsLinkData) => void;
   onDriveSources?: (sources: Record<string, string>) => void;
+  // Codex round 10 P2 Bug 2: Plan Mode mid-stream clarification gate.
+  // Without this, the card only appears via the terminal `message` event's
+  // structured_output — defeating the point of the mid-stream gate.
+  onClarificationRequired?: (data: ClarificationData) => void;
   onError?: (error: string) => void;
   onMessage?: (message: ChatMessage) => void;
   onToolStart?: (tool_name: string, tool_input: Record<string, unknown>, step: number) => void;
@@ -204,6 +208,8 @@ export async function consumeChatStream(
           handlers.onDocsLink?.(event.data);
         } else if (event.type === "drive_sources") {
           handlers.onDriveSources?.(event.sources);
+        } else if (event.type === "clarification_required") {
+          handlers.onClarificationRequired?.(event.data);
         } else if (event.type === "error") {
           handlers.onError?.(event.error);
           terminalSeen = true;

@@ -1,4 +1,4 @@
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { describe, it, expect, vi } from "vitest";
 import { ClarificationCard } from "../clarification-card";
 import type { ClarificationData } from "@/lib/types";
@@ -171,5 +171,72 @@ describe("ClarificationCard", () => {
     fireEvent.keyDown(window, { key: "B" });
     expect(onChoose).toHaveBeenCalledTimes(1);
     expect(onChoose).toHaveBeenCalledWith("A");
+  });
+
+  // Codex round 10 P3 Bug 3: handlePick sets pendingPick + pickingRef
+  // synchronously, calls onChoose, but never resets these on failure. If
+  // onChoose throws or its async resume POST rejects, the card is dead:
+  //   - pickingRef stays true → next keypress is ignored
+  //   - pendingPick stays set → buttons remain disabled
+  // Fix: await onChoose, reset state in a try/catch on failure. On success
+  // the parent unmounts/updates the message state, so we leave pendingPick
+  // set — the parent owns the post-success transition.
+  it("resets pending state when onChoose throws (so user can retry)", async () => {
+    const error = new Error("network timeout");
+    const onChoose = vi.fn(() => {
+      throw error;
+    });
+    render(<ClarificationCard data={_BASE} onChoose={onChoose} />);
+
+    fireEvent.click(screen.getByRole("radio", { name: /BigQuery checkout/ }));
+    expect(onChoose).toHaveBeenCalledTimes(1);
+
+    // Wait for the rejection to settle and the card to reset.
+    await waitFor(() => {
+      const optionA = screen.getByRole("radio", { name: /NetSuite GL/ });
+      expect((optionA as HTMLButtonElement).disabled).toBe(false);
+    });
+
+    // After reset, a NEW pick should fire onChoose again (pickingRef cleared).
+    fireEvent.keyDown(window, { key: "A" });
+    expect(onChoose).toHaveBeenCalledTimes(2);
+    expect(onChoose).toHaveBeenLastCalledWith("A");
+  });
+
+  it("resets pending state when onChoose returns a rejected promise", async () => {
+    const onChoose = vi.fn(() => Promise.reject(new Error("server 500")));
+    render(<ClarificationCard data={_BASE} onChoose={onChoose} />);
+
+    fireEvent.click(screen.getByRole("radio", { name: /BigQuery checkout/ }));
+    expect(onChoose).toHaveBeenCalledTimes(1);
+
+    await waitFor(() => {
+      const optionA = screen.getByRole("radio", { name: /NetSuite GL/ });
+      expect((optionA as HTMLButtonElement).disabled).toBe(false);
+    });
+
+    // Retry must work
+    fireEvent.keyDown(window, { key: "B" });
+    expect(onChoose).toHaveBeenCalledTimes(2);
+    expect(onChoose).toHaveBeenLastCalledWith("B");
+  });
+
+  it("does NOT reset on success (parent owns post-success transition)", async () => {
+    // Successful pick: card stays in pending UI state until the parent
+    // re-renders with status="chosen" (or unmounts the card). The card
+    // itself MUST NOT clear pendingPick on success — that would briefly
+    // re-enable the buttons and let a double-click fire onChoose twice.
+    const onChoose = vi.fn(() => Promise.resolve());
+    render(<ClarificationCard data={_BASE} onChoose={onChoose} />);
+
+    fireEvent.click(screen.getByRole("radio", { name: /BigQuery checkout/ }));
+    expect(onChoose).toHaveBeenCalledTimes(1);
+
+    // Even after the resolved promise is settled, options remain disabled
+    // and additional clicks/keypresses do NOT fire onChoose again.
+    await Promise.resolve();
+    await Promise.resolve();
+    fireEvent.keyDown(window, { key: "A" });
+    expect(onChoose).toHaveBeenCalledTimes(1);
   });
 });

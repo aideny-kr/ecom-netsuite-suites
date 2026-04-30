@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { normalizeStreamEvent, parseSseBuffer } from "@/lib/chat-stream";
+import { describe, it, expect, vi } from "vitest";
+import { consumeChatStream, normalizeStreamEvent, parseSseBuffer } from "@/lib/chat-stream";
 import type { ClarificationData } from "@/lib/types";
 
 describe("chat-stream parser — clarification_required SSE event", () => {
@@ -67,5 +67,53 @@ describe("chat-stream parser — clarification_required SSE event", () => {
       type: "clarification_required",
     };
     expect(normalizeStreamEvent(raw as unknown as Record<string, unknown>)).toBeNull();
+  });
+
+  // Codex round 10 P2 Bug 2: the parser recognizes the event but the
+  // dispatch loop in `consumeChatStream` had no branch for it — the
+  // `onClarificationRequired` handler is never called. The card only
+  // appears at the end of the turn (via the terminal `message`'s
+  // `structured_output`), defeating the whole point of the mid-stream
+  // gate event.
+  it("consumeChatStream dispatches clarification_required to onClarificationRequired", async () => {
+    const sseStream = [
+      `data: ${JSON.stringify({ type: "clarification_required", data: clarification })}\n\n`,
+      `data: ${JSON.stringify({
+        type: "message",
+        message: {
+          id: "msg-1",
+          role: "assistant",
+          content: "",
+          created_at: "2026-04-28T18:00:00Z",
+          structured_output: clarification,
+        },
+      })}\n\n`,
+    ].join("");
+
+    // Build a minimal Response whose body streams the SSE bytes.
+    const encoder = new TextEncoder();
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode(sseStream));
+        controller.close();
+      },
+    });
+    const res = new Response(body, {
+      headers: { "Content-Type": "text/event-stream" },
+    });
+
+    const onClarificationRequired = vi.fn();
+    const onMessage = vi.fn();
+
+    await consumeChatStream(res, {
+      onClarificationRequired,
+      onMessage,
+    });
+
+    expect(onClarificationRequired).toHaveBeenCalledTimes(1);
+    expect(onClarificationRequired).toHaveBeenCalledWith(clarification);
+    // The terminal `message` should still be dispatched — clarification_required
+    // is mid-stream, not terminal.
+    expect(onMessage).toHaveBeenCalledTimes(1);
   });
 });
