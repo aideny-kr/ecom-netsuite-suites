@@ -2166,8 +2166,10 @@ async def run_chat_turn(
                         # filter has stripped `clarify` from the inventory.
                         # Contradictory instructions ⇒ undefined behavior.
                         _plan_mode_connected_sources: list[str] = []
-                        if plan_mode_enabled and plan_mode_resume_source is None and is_financial_ambiguous(
-                            sanitized_input
+                        if (
+                            plan_mode_enabled
+                            and plan_mode_resume_source is None
+                            and is_financial_ambiguous(sanitized_input)
                         ):
                             # Resolve connected sources so the augmentation can
                             # require options to span distinct sources when ≥2
@@ -2190,13 +2192,9 @@ async def run_chat_turn(
                             except Exception:
                                 _rest = []
                             _raw_providers = [getattr(c, "provider", "") for c in _mcp] + [
-                                getattr(c, "provider", "")
-                                for c in _rest
-                                if getattr(c, "status", "active") == "active"
+                                getattr(c, "provider", "") for c in _rest if getattr(c, "status", "active") == "active"
                             ]
-                            _plan_mode_connected_sources = sorted(
-                                canonicalize_connector_providers(_raw_providers)
-                            )
+                            _plan_mode_connected_sources = sorted(canonicalize_connector_providers(_raw_providers))
 
                         plan_mode_augmentation = (
                             maybe_augment_for_plan_mode(
