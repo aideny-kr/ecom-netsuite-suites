@@ -1,0 +1,175 @@
+# Plan Mode 50-query behavioral eval — golden dataset.
+#
+# Buckets:
+#   financial_ambiguous (10) — must trigger `clarify` (ambiguous financial terms).
+#   financial_clear      (10) — must NOT trigger `clarify` (concrete operational queries
+#                                with explicit IDs, accounts, or sources).
+#   non_financial_ambiguous (10) — vague non-financial queries; warn-only (must_pass: false).
+#                                  Regex is conservative on non-financial; false positives
+#                                  are tracked but don't fail the run.
+#   non_financial_clear (20) — concrete ops queries (orders, inventory, lead times, support,
+#                              shipments). MUST NOT trigger `clarify` (must_pass: true).
+#
+# Total: 50.
+# Target ask-rate (clarify_triggers / 50): exactly 20% (10 from financial_ambiguous).
+
+financial_ambiguous:
+  - query: "What's our revenue this quarter?"
+    expected_first_tool: clarify
+    must_pass: true  # CFO test
+  - query: "How's our gross margin tracking?"
+    expected_first_tool: clarify
+    must_pass: true
+  - query: "MRR breakdown by product"
+    expected_first_tool: clarify
+    must_pass: true
+  - query: "Top line growth Q2 vs Q1"
+    expected_first_tool: clarify
+    must_pass: true
+  - query: "GMV last month"
+    expected_first_tool: clarify
+    must_pass: true
+  - query: "EBITDA YTD"
+    expected_first_tool: clarify
+    must_pass: true
+  - query: "Net income last fiscal year"
+    expected_first_tool: clarify
+    must_pass: true
+  - query: "What's our ARR right now?"
+    expected_first_tool: clarify
+    must_pass: true
+  - query: "Operating income trend last 6 months"
+    expected_first_tool: clarify
+    must_pass: true
+  - query: "Recognized revenue in May"
+    expected_first_tool: clarify
+    must_pass: true
+
+financial_clear:
+  - query: "Show me invoice INV-12345"
+    expected_first_tool_not: clarify
+    must_pass: true
+  - query: "Apply payment $5000 to customer ACME"
+    expected_first_tool_not: clarify
+    must_pass: true
+  - query: "What's the GL balance for account 4000?"
+    expected_first_tool_not: clarify
+    must_pass: true
+  - query: "Send invoice INV-99 to customer"
+    expected_first_tool_not: clarify
+    must_pass: true
+  - query: "Show me Q2 income statement from NetSuite"  # explicit source, no ambiguity
+    expected_first_tool_not: clarify
+    must_pass: true
+  - query: "Run trial balance for fiscal year 2026"
+    expected_first_tool_not: clarify
+    must_pass: true
+  - query: "Aging report for customer ACME"
+    expected_first_tool_not: clarify
+    must_pass: true
+  - query: "What's the total of invoice INV-1234?"
+    expected_first_tool_not: clarify
+    must_pass: true
+  - query: "Show me last 5 deposits"
+    expected_first_tool_not: clarify
+    must_pass: true
+  - query: "Who paid last week?"
+    expected_first_tool_not: clarify
+    must_pass: true
+
+non_financial_ambiguous:
+  # Vague non-financial queries. Regex is intentionally conservative on these —
+  # they're warn-only, not hard-fails. If >5/10 trigger, it's a coverage warning.
+  - query: "Top customers by what?"
+    expected_first_tool_not: clarify
+    must_pass: false
+  - query: "Active users last quarter"
+    expected_first_tool_not: clarify
+    must_pass: false
+  - query: "Biggest customers in EMEA"
+    expected_first_tool_not: clarify
+    must_pass: false
+  - query: "Most active accounts this month"
+    expected_first_tool_not: clarify
+    must_pass: false
+  - query: "Top items by performance"
+    expected_first_tool_not: clarify
+    must_pass: false
+  - query: "Best-selling SKUs"
+    expected_first_tool_not: clarify
+    must_pass: false
+  - query: "Power users last 30 days"
+    expected_first_tool_not: clarify
+    must_pass: false
+  - query: "Engagement trends"
+    expected_first_tool_not: clarify
+    must_pass: false
+  - query: "Most popular products"
+    expected_first_tool_not: clarify
+    must_pass: false
+  - query: "Top performers"
+    expected_first_tool_not: clarify
+    must_pass: false
+
+non_financial_clear:
+  # Concrete ops queries. MUST NOT trigger clarify.
+  - query: "Show me sales orders from yesterday"
+    expected_first_tool_not: clarify
+    must_pass: true
+  - query: "How many customers in California?"
+    expected_first_tool_not: clarify
+    must_pass: true
+  - query: "List open purchase orders"
+    expected_first_tool_not: clarify
+    must_pass: true
+  - query: "Inventory on hand for SKU ABC-123"
+    expected_first_tool_not: clarify
+    must_pass: true
+  - query: "Average lead time for vendor Acme Manufacturing"
+    expected_first_tool_not: clarify
+    must_pass: true
+  - query: "Open support tickets older than 7 days"
+    expected_first_tool_not: clarify
+    must_pass: true
+  - query: "Shipments out of warehouse 02 last week"
+    expected_first_tool_not: clarify
+    must_pass: true
+  - query: "How many SKUs are below reorder point?"
+    expected_first_tool_not: clarify
+    must_pass: true
+  - query: "Customers created in the last 30 days"
+    expected_first_tool_not: clarify
+    must_pass: true
+  - query: "Pending RMAs from this month"
+    expected_first_tool_not: clarify
+    must_pass: true
+  - query: "Items received against PO 4521"
+    expected_first_tool_not: clarify
+    must_pass: true
+  - query: "Show me backorders for customer ACME"
+    expected_first_tool_not: clarify
+    must_pass: true
+  - query: "Which warehouses shipped to Texas last month?"
+    expected_first_tool_not: clarify
+    must_pass: true
+  - query: "Vendor bills awaiting approval"
+    expected_first_tool_not: clarify
+    must_pass: true
+  - query: "Returns processed yesterday"
+    expected_first_tool_not: clarify
+    must_pass: true
+  - query: "How many sales orders are pending fulfillment?"
+    expected_first_tool_not: clarify
+    must_pass: true
+  - query: "Open cases assigned to support team"
+    expected_first_tool_not: clarify
+    must_pass: true
+  - query: "Tracking numbers for shipments to ZIP 94025"
+    expected_first_tool_not: clarify
+    must_pass: true
+  - query: "Items on hold by location"
+    expected_first_tool_not: clarify
+    must_pass: true
+  - query: "Show me drop-ship POs created this week"
+    expected_first_tool_not: clarify
+    must_pass: true

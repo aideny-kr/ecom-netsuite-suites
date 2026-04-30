@@ -70,6 +70,7 @@ class BaseLLMAdapter(abc.ABC):
             system_dynamic=system_dynamic,
             messages=messages,
             tools=tools,
+            tool_choice=tool_choice,
         )
         # Emit all text as a single chunk then yield the full response
         for text in response.text_blocks:

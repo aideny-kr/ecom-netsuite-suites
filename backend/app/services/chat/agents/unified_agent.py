@@ -319,6 +319,17 @@ class UnifiedAgent(BaseSpecialistAgent):
         self._active_skill: dict | None = None  # Set when a skill is triggered
         self._context: dict[str, Any] = {}  # Full context dict from orchestrator
         self._connectors: list = []  # Active MCP connectors for this tenant
+        # Plan Mode injections — set per-turn by the orchestrator. Empty by default.
+        # `_plan_mode_augmentation`: appended to system prompt when financial-ambiguity
+        #   regex matches AND plan_mode flag is on (initial gate intent).
+        # `_plan_mode_resume_directive`: appended AFTER augmentation so it overrides
+        #   initial gate intent on resume turns (after the user picks an option).
+        # The orchestrator USED to mutate a local `system_prompt` variable, but the
+        # UnifiedAgent.system_prompt property builds its own prompt and never read
+        # that local — so the augmentations were dead code. Setting them on the
+        # instance routes them through this property where the LLM can see them.
+        self._plan_mode_augmentation: str = ""
+        self._plan_mode_resume_directive: str = ""
 
     @property
     def agent_name(self) -> str:
@@ -645,6 +656,14 @@ class UnifiedAgent(BaseSpecialistAgent):
             if self._policy.blocked_fields and isinstance(self._policy.blocked_fields, list):
                 parts.append(f"BLOCKED fields (never query these): {', '.join(self._policy.blocked_fields)}")
 
+        # Plan Mode injections — augmentation first, resume directive last
+        # so the resume directive (chosen-option turn) overrides the initial
+        # gate intent (financial-ambiguity turn) when both fire.
+        if self._plan_mode_augmentation:
+            parts.append("\n\n" + self._plan_mode_augmentation)
+        if self._plan_mode_resume_directive:
+            parts.append("\n\n" + self._plan_mode_resume_directive)
+
         prompt = "\n".join(parts)
 
         # Resolve {{TOOL_INVENTORY}} with the real tool schema.
@@ -755,11 +774,43 @@ class UnifiedAgent(BaseSpecialistAgent):
         model: str,
         tool_choice: dict | str | None = None,
         financial_mode: bool = False,
+        plan_mode_clarify_only: bool = False,
+        plan_mode_resume_source: str | None = None,
     ):
-        """Override to inject context and discover external MCP tools."""
+        """Override to inject context and discover external MCP tools.
+
+        ``plan_mode_clarify_only`` filters ``self._tool_defs`` to the
+        ``clarify`` tool only — applied AFTER ``_setup_context`` so the
+        rebuild inside setup doesn't clobber the gate. Mirrors the
+        ``financial_mode`` pattern.
+
+        ``plan_mode_resume_source`` filters ``self._tool_defs`` to only the
+        chosen source's tools (plus cross-source tools) on the resume turn
+        after the user picks a clarification option. Applied AFTER
+        ``_setup_context`` and the ``plan_mode_clarify_only`` filter.
+        """
         task = await self._setup_context(task, context, db)
         if financial_mode:
             self._tool_defs = self.financial_tool_definitions
+        if plan_mode_clarify_only:
+            # Inject the canonical clarify schema unconditionally. ``_setup_context``
+            # rebuilds ``_tool_defs`` via ``build_all_tool_definitions`` WITHOUT
+            # ``plan_mode_enabled=True``, so the rebuild may not include clarify.
+            # A naive filter would yield ``[]`` and the provider would receive
+            # ``tool_choice=clarify`` with no clarify schema → silent gate failure.
+            from app.services.chat.plan_mode.clarify_tool import CLARIFY_TOOL_SCHEMA
+
+            self._tool_defs = [dict(CLARIFY_TOOL_SCHEMA)]
+        if plan_mode_resume_source:
+            from app.services.chat.plan_mode.short_circuit import (
+                filter_tools_for_chosen_source,
+            )
+
+            self._tool_defs = filter_tools_for_chosen_source(
+                self._tool_defs or [],
+                plan_mode_resume_source,
+                active_connectors=self._connectors,
+            )
         return await super().run(task, context, db, adapter, model, tool_choice=tool_choice)
 
     async def run_streaming(
@@ -772,14 +823,43 @@ class UnifiedAgent(BaseSpecialistAgent):
         conversation_history: list[dict] | None = None,
         tool_choice: dict | str | None = None,
         financial_mode: bool = False,
+        plan_mode_clarify_only: bool = False,
+        plan_mode_resume_source: str | None = None,
         tool_result_interceptor: Callable[[str, str], tuple[tuple[str, dict] | None, str]] | None = None,
         session_id: str | None = None,
         run_id: str | None = None,
     ):
-        """Override to inject context before streaming."""
+        """Override to inject context before streaming.
+
+        ``plan_mode_clarify_only`` filters ``self._tool_defs`` to the
+        ``clarify`` tool only — applied AFTER ``_setup_context`` so the
+        rebuild inside setup doesn't clobber the gate.
+
+        ``plan_mode_resume_source`` filters ``self._tool_defs`` to only the
+        chosen source's tools (plus cross-source tools) on the resume turn
+        after the user picks a clarification option. Applied AFTER
+        ``_setup_context`` and the ``plan_mode_clarify_only`` filter.
+        """
         task = await self._setup_context(task, context, db)
         if financial_mode:
             self._tool_defs = self.financial_tool_definitions
+        if plan_mode_clarify_only:
+            # Inject the canonical clarify schema unconditionally. See ``run`` above
+            # for the full rationale — TL;DR ``_setup_context``'s rebuild may not
+            # include clarify, so a naive filter would silently disable the gate.
+            from app.services.chat.plan_mode.clarify_tool import CLARIFY_TOOL_SCHEMA
+
+            self._tool_defs = [dict(CLARIFY_TOOL_SCHEMA)]
+        if plan_mode_resume_source:
+            from app.services.chat.plan_mode.short_circuit import (
+                filter_tools_for_chosen_source,
+            )
+
+            self._tool_defs = filter_tools_for_chosen_source(
+                self._tool_defs or [],
+                plan_mode_resume_source,
+                active_connectors=self._connectors,
+            )
         async for event in super().run_streaming(
             task,
             context,

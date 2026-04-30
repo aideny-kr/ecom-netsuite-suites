@@ -1,6 +1,6 @@
 "use client";
 
-import type { ChatMessage, ChartData, StreamingToolCall, WriteConfirmationData } from "@/lib/types";
+import type { ChatMessage, ChartData, ClarificationData, StreamingToolCall, WriteConfirmationData } from "@/lib/types";
 
 export interface FinancialReportData {
   report_type: string;
@@ -64,6 +64,7 @@ export type ChatStreamEvent =
   | { type: "docs_link"; data: DocsLinkData }
   | { type: "drive_sources"; sources: Record<string, string> }
   | { type: "chart"; data: ChartData }
+  | { type: "clarification_required"; data: ClarificationData }
   | { type: "error"; error: string }
   | { type: "message"; message: ChatMessage }
   | { type: "tool_start"; tool_name: string; tool_input: Record<string, unknown>; step: number }
@@ -86,6 +87,10 @@ type StreamHandlers = {
   onSheetsLink?: (data: SheetsLinkData) => void;
   onDocsLink?: (data: DocsLinkData) => void;
   onDriveSources?: (sources: Record<string, string>) => void;
+  // Codex round 10 P2 Bug 2: Plan Mode mid-stream clarification gate.
+  // Without this, the card only appears via the terminal `message` event's
+  // structured_output — defeating the point of the mid-stream gate.
+  onClarificationRequired?: (data: ClarificationData) => void;
   onError?: (error: string) => void;
   onMessage?: (message: ChatMessage) => void;
   onToolStart?: (tool_name: string, tool_input: Record<string, unknown>, step: number) => void;
@@ -203,6 +208,8 @@ export async function consumeChatStream(
           handlers.onDocsLink?.(event.data);
         } else if (event.type === "drive_sources") {
           handlers.onDriveSources?.(event.sources);
+        } else if (event.type === "clarification_required") {
+          handlers.onClarificationRequired?.(event.data);
         } else if (event.type === "error") {
           handlers.onError?.(event.error);
           terminalSeen = true;
@@ -326,6 +333,14 @@ export function normalizeStreamEvent(data: Record<string, unknown>): ChatStreamE
   }
   if (type === "drive_sources" && data.sources && typeof data.sources === "object") {
     return { type, sources: data.sources as Record<string, string> };
+  }
+  // Plan Mode mid-stream clarification gate event. Backend emits
+  //   {type: "clarification_required", data: ClarificationData}
+  // when the model calls the `clarify` tool. Surface as a typed event so
+  // the chat UI can render the card immediately rather than wait for the
+  // terminal `message` event + session refetch.
+  if (type === "clarification_required" && data.data && typeof data.data === "object") {
+    return { type, data: data.data as ClarificationData };
   }
   if (type === "error" && typeof data.error === "string") {
     return { type, error: data.error };

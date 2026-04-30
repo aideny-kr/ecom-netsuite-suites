@@ -356,3 +356,168 @@ class TestBuildHistoryDicts:
         history, _ = build_history_dicts(messages, keep_recent=4, include_tool_trace=False)
         for h in history:
             assert "<tool_trace" not in h.get("content", "")
+
+
+class TestClarificationHistorySurfacing:
+    """Codex round 10 P2 Bug 1: clarification turns persist with content="" so
+    chat history serialization passes the LLM an empty assistant message —
+    the agent has no way to look up what option B's definition was when the
+    resume directive says "Picked option B (source: netsuite)".
+
+    Fix: when an assistant message has empty content AND structured_output
+    of type "clarification", synthesize a compact options summary as the
+    message content so the next turn's LLM can interpret the directive's
+    option ID.
+    """
+
+    @staticmethod
+    def _clarification_msg(*, options, summary="Revenue can mean two things."):
+        return {
+            "role": "assistant",
+            "content": "",
+            "content_summary": None,
+            "tool_calls": None,
+            "structured_output": {
+                "type": "clarification",
+                "status": "pending",
+                "options": options,
+                "default_id": "A",
+                "ambiguity_summary": summary,
+                "confirmation_token": "deadbeef" * 8,
+                "expires_at": "2099-01-01T00:00:00Z",
+            },
+        }
+
+    def test_clarification_history_surfaces_options(self):
+        options = [
+            {
+                "id": "A",
+                "title": "NetSuite GL revenue",
+                "rationale": "GL recognized revenue",
+                "source": "netsuite",
+                "is_default": True,
+            },
+            {
+                "id": "B",
+                "title": "BigQuery checkout totals",
+                "rationale": "ecommerce gross totals",
+                "source": "bigquery",
+                "is_default": False,
+            },
+        ]
+        messages = [
+            {"role": "user", "content": "What's our revenue?", "content_summary": None, "tool_calls": None},
+            self._clarification_msg(options=options),
+            {"role": "user", "content": "Option B", "content_summary": None, "tool_calls": None},
+        ]
+        history, _ = build_history_dicts(messages, keep_recent=4)
+
+        # Find the (formerly empty) clarification assistant message
+        assistant_msgs = [h for h in history if h["role"] == "assistant"]
+        assert len(assistant_msgs) == 1
+        clarif_content = assistant_msgs[0]["content"]
+
+        # Must surface BOTH options' titles + sources so the agent can
+        # disambiguate the next turn's "Picked option B" directive.
+        assert "Option A" in clarif_content
+        assert "Option B" in clarif_content
+        assert "NetSuite GL revenue" in clarif_content
+        assert "BigQuery checkout totals" in clarif_content
+        assert "netsuite" in clarif_content
+        assert "bigquery" in clarif_content
+
+    def test_clarification_history_no_structured_output_no_surfacing(self):
+        """An empty assistant message without structured_output must NOT
+        be synthesized — that would invent content."""
+        messages = [
+            {"role": "user", "content": "hi", "content_summary": None, "tool_calls": None},
+            {
+                "role": "assistant",
+                "content": "",
+                "content_summary": None,
+                "tool_calls": None,
+                "structured_output": None,
+            },
+        ]
+        history, _ = build_history_dicts(messages, keep_recent=4)
+        assistant = next(h for h in history if h["role"] == "assistant")
+        assert assistant["content"] == ""
+
+    def test_clarification_history_non_clarification_type_no_surfacing(self):
+        """Other structured_output types (e.g. data_table) must NOT trigger
+        the synthesis — only ``type == "clarification"``."""
+        messages = [
+            {"role": "user", "content": "hi", "content_summary": None, "tool_calls": None},
+            {
+                "role": "assistant",
+                "content": "",
+                "content_summary": None,
+                "tool_calls": None,
+                "structured_output": {"type": "data_table", "data": {}},
+            },
+        ]
+        history, _ = build_history_dicts(messages, keep_recent=4)
+        assistant = next(h for h in history if h["role"] == "assistant")
+        # No "Option A" injected
+        assert "Option A" not in assistant["content"]
+
+    def test_clarification_history_truncates_long_titles(self):
+        """Bound size: titles are truncated to 200 chars per field."""
+        long_title = "x" * 500
+        long_rationale = "y" * 500
+        options = [
+            {
+                "id": "A",
+                "title": long_title,
+                "rationale": long_rationale,
+                "source": "netsuite",
+                "is_default": True,
+            },
+            {
+                "id": "B",
+                "title": "Short",
+                "rationale": "Short",
+                "source": "bigquery",
+                "is_default": False,
+            },
+        ]
+        messages = [
+            {"role": "user", "content": "q", "content_summary": None, "tool_calls": None},
+            self._clarification_msg(options=options),
+        ]
+        history, _ = build_history_dicts(messages, keep_recent=4)
+        clarif = next(h for h in history if h["role"] == "assistant")
+        # Long title appears truncated, not 500 chars verbatim
+        assert long_title not in clarif["content"]
+        assert "x" * 200 in clarif["content"]  # at least a 200-char run survived
+
+    def test_clarification_history_existing_content_unchanged(self):
+        """If the assistant message already has non-empty content, do not
+        overwrite it with the synthesized summary."""
+        msg = self._clarification_msg(
+            options=[
+                {
+                    "id": "A",
+                    "title": "X",
+                    "rationale": "x",
+                    "source": "netsuite",
+                    "is_default": True,
+                },
+                {
+                    "id": "B",
+                    "title": "Y",
+                    "rationale": "y",
+                    "source": "bigquery",
+                    "is_default": False,
+                },
+            ]
+        )
+        msg["content"] = "Pre-existing prose."
+        messages = [
+            {"role": "user", "content": "q", "content_summary": None, "tool_calls": None},
+            msg,
+        ]
+        history, _ = build_history_dicts(messages, keep_recent=4)
+        clarif = next(h for h in history if h["role"] == "assistant")
+        # Existing content survives — synthesized block not injected
+        assert clarif["content"].startswith("Pre-existing prose.")

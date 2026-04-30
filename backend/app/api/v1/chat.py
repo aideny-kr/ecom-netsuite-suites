@@ -50,6 +50,14 @@ class SendMessageRequest(BaseModel):
         default=None,
         description="Confirm or reject a pending write. Keys: action ('approve'|'reject'), confirmation_id (message ID)",
     )
+    plan_mode_choice: dict | None = Field(
+        default=None,
+        description=(
+            "Resolve a pending Plan Mode clarification. Keys: action "
+            "('approve'|'reject'), confirmation_id (assistant message ID), "
+            "option_id ('A'|'B'|'C')"
+        ),
+    )
 
 
 class MessageResponse(BaseModel):
@@ -291,10 +299,12 @@ async def send_message(
     # user message timestamp is strictly before the assistant message, preventing
     # ordering issues when both land in the same DB transaction.
     #
-    # Exception: when write_confirm is set, the user clicked approve/reject on a
-    # pending write. The original user question is already in the conversation;
-    # we do NOT create a duplicate user message.
-    if body.write_confirm:
+    # Exception: when write_confirm OR plan_mode_choice is set, the user
+    # clicked approve/reject on a pending write OR picked an option from a
+    # Plan Mode clarification card. Both flows continue an existing
+    # conversation rather than starting a new question — the original user
+    # question is already in the session, so we do NOT create a duplicate.
+    if body.write_confirm or body.plan_mode_choice:
         _last_user_result = await db.execute(
             select(ChatMessage)
             .where(
@@ -308,7 +318,7 @@ async def send_message(
         if _last_user_msg is None:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="write_confirm requires an existing user message in the session",
+                detail="write_confirm/plan_mode_choice requires an existing user message in the session",
             )
         user_msg = _last_user_msg
     else:
@@ -353,12 +363,20 @@ async def send_message(
     run_id = str(uuid.uuid4())
     rm.create_run(run_id, str(session_id))
 
+    # When write_confirm or plan_mode_choice is set, body.content is a
+    # control payload (e.g. "Picked option A") not a real user query —
+    # the original question lives in the reused user_msg. Pass that
+    # content to the agent so it answers the original question.
+    # write_confirm short-circuits before reaching the agent so user_message
+    # is moot for it, but applying the same fix uniformly is defensively consistent.
+    effective_user_message = user_msg.content if (body.write_confirm or body.plan_mode_choice) else body.content
+
     asyncio.create_task(
         _run_chat_background(
             run_id=run_id,
             session_id=str(session_id),
             session=session,
-            user_message=body.content,
+            user_message=effective_user_message,
             user_id=user.id,
             tenant_id=user.tenant_id,
             user_msg=user_msg,
@@ -367,6 +385,7 @@ async def send_message(
             agent_id=body.agent_id,
             write_confirm=body.write_confirm,
             attached_file_id=attached_file_id,
+            plan_mode_choice=body.plan_mode_choice,
         )
     )
 
@@ -389,6 +408,7 @@ async def _run_chat_pipeline(
     agent_id: str | None,
     write_confirm: dict | None = None,
     attached_file_id: str | None = None,
+    plan_mode_choice: dict | None = None,
 ) -> None:
     """Inner pipeline coroutine — wrapped by asyncio.wait_for in _run_chat_background."""
     from app.core.database import async_session_factory
@@ -411,6 +431,7 @@ async def _run_chat_pipeline(
             run_id=run_id,
             write_confirm=write_confirm,
             attached_file_id=attached_file_id,
+            plan_mode_choice=plan_mode_choice,
         ):
             rm.write_event(run_id, chunk)
 
@@ -428,6 +449,7 @@ async def _run_chat_background(
     agent_id: str | None,
     write_confirm: dict | None = None,
     attached_file_id: str | None = None,
+    plan_mode_choice: dict | None = None,
 ) -> None:
     """Run the chat pipeline in background, writing events to Redis."""
     rm = get_run_manager()
@@ -446,6 +468,7 @@ async def _run_chat_background(
                 agent_id=agent_id,
                 write_confirm=write_confirm,
                 attached_file_id=attached_file_id,
+                plan_mode_choice=plan_mode_choice,
             ),
             timeout=_BACKGROUND_TASK_TIMEOUT,
         )
@@ -489,13 +512,19 @@ async def _send_message_inline_sse(
         stream_completed = False
         queue: asyncio.Queue = asyncio.Queue()
 
+        # When write_confirm or plan_mode_choice is set, body.content is a
+        # control payload (e.g. "Picked option A") not a real user query —
+        # the original question lives in the reused user_msg. Use that so
+        # the agent answers the original question.
+        effective_user_message = user_msg.content if (body.write_confirm or body.plan_mode_choice) else body.content
+
         async def _producer():
             """Run the chat pipeline and put chunks into the queue."""
             try:
                 async for chunk in run_chat_turn(
                     db=db,
                     session=session,
-                    user_message=body.content,
+                    user_message=effective_user_message,
                     user_id=user.id,
                     tenant_id=user.tenant_id,
                     user_msg=user_msg,
@@ -503,6 +532,7 @@ async def _send_message_inline_sse(
                     user_timezone=x_timezone,
                     agent_id=body.agent_id,
                     attached_file_id=body.file_id,
+                    plan_mode_choice=body.plan_mode_choice,
                 ):
                     await queue.put(chunk)
             except ValueError as exc:

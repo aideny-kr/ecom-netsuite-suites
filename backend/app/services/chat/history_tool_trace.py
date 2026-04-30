@@ -240,6 +240,51 @@ def render_tool_trace(tool_calls: list[dict[str, Any]] | None) -> str:
 # ---------------------------------------------------------------------------
 
 
+# Max chars per clarification option field surfaced into history. The card's
+# UI fields (title/rationale) are user-facing prose and rarely need more —
+# 200 keeps a 3-option card under ~1.5 KB.
+_MAX_CLARIFY_FIELD_CHARS = 200
+
+
+def render_clarification_summary(structured_output: dict[str, Any] | None) -> str:
+    """Render a compact summary of a clarification's options.
+
+    Used to surface the chosen-option's full definition into chat history
+    when the assistant message itself was persisted with empty ``content``
+    (Plan Mode clarification turns intentionally suppress assistant prose —
+    the card IS the message).
+
+    Round 10 P2 Bug 1: without this, follow-up turns see the resume
+    directive ``"Picked option B (source: netsuite)"`` plus an empty prior
+    assistant message — so they cannot tell which definition was picked
+    when two options share a source (fiscal Q1 vs calendar Q1, both
+    NetSuite). Surfacing options as content lets the model interpret the
+    directive correctly.
+
+    Returns the empty string if ``structured_output`` is missing, malformed,
+    or not a clarification.
+    """
+    if not isinstance(structured_output, dict):
+        return ""
+    if structured_output.get("type") != "clarification":
+        return ""
+    options = structured_output.get("options")
+    if not isinstance(options, list) or not options:
+        return ""
+
+    lines: list[str] = ["Clarification offered:"]
+    for opt in options:
+        if not isinstance(opt, dict):
+            continue
+        opt_id = str(opt.get("id", "?"))[:4]
+        title = str(opt.get("title", ""))[:_MAX_CLARIFY_FIELD_CHARS]
+        source = str(opt.get("source", "?"))[:32]
+        lines.append(f"  - Option {opt_id}: {title} (source: {source})")
+    if len(lines) == 1:
+        return ""
+    return "\n".join(lines)
+
+
 def build_history_dicts(
     messages: list[dict[str, Any]],
     keep_recent: int,
@@ -249,9 +294,9 @@ def build_history_dicts(
 
     Args:
         messages: List of dicts representing ``ChatMessage`` rows, each with
-            keys: ``role``, ``content``, ``content_summary``, ``tool_calls``.
-            Only ``role`` and ``content`` are strictly required; the others
-            default to empty.
+            keys: ``role``, ``content``, ``content_summary``, ``tool_calls``,
+            ``structured_output``. Only ``role`` and ``content`` are
+            strictly required; the others default to empty.
         keep_recent: Number of most-recent messages kept verbatim (older
             assistant messages are replaced by their ``content_summary`` if
             available).
@@ -281,6 +326,18 @@ def build_history_dicts(
         content = msg.get("content") or ""
         content_summary = msg.get("content_summary")
         tool_calls = msg.get("tool_calls")
+        structured_output = msg.get("structured_output")
+
+        # Round 10 P2 Bug 1: clarification turns persist with content="" so
+        # the LLM cannot interpret a later "Picked option B" directive. If
+        # this assistant message has empty content + a clarification
+        # structured_output, synthesize a compact options summary as the
+        # LLM-facing content. Skipped when the message already has prose
+        # so we never overwrite real assistant content.
+        if role == "assistant" and not content:
+            clarify_summary = render_clarification_summary(structured_output)
+            if clarify_summary:
+                content = clarify_summary
 
         if is_recent or not content_summary:
             # Recent — keep full content

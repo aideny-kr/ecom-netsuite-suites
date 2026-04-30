@@ -133,6 +133,7 @@ class TestAgenticSingleStep:
 
         with (
             patch.object(settings, "MULTI_AGENT_ENABLED", False),
+            patch("app.services.feature_flag_service.is_enabled", new_callable=AsyncMock, return_value=False),
             patch(f"{_ORCH}.get_tenant_ai_config", new_callable=AsyncMock, return_value=_DEFAULT_AI_CONFIG),
             patch(f"{_ORCH}.get_adapter", return_value=mock_adapter),
             patch(f"{_ORCH}.retriever_node", new_callable=AsyncMock),
@@ -190,6 +191,7 @@ class TestAgenticToolCall:
 
         with (
             patch.object(settings, "MULTI_AGENT_ENABLED", False),
+            patch("app.services.feature_flag_service.is_enabled", new_callable=AsyncMock, return_value=False),
             patch(f"{_ORCH}.get_tenant_ai_config", new_callable=AsyncMock, return_value=_DEFAULT_AI_CONFIG),
             patch(f"{_ORCH}.get_adapter", return_value=mock_adapter),
             patch(f"{_ORCH}.retriever_node", new_callable=AsyncMock),
@@ -275,6 +277,7 @@ class TestAgenticToolRetry:
 
         with (
             patch.object(settings, "MULTI_AGENT_ENABLED", False),
+            patch("app.services.feature_flag_service.is_enabled", new_callable=AsyncMock, return_value=False),
             patch(f"{_ORCH}.get_tenant_ai_config", new_callable=AsyncMock, return_value=_DEFAULT_AI_CONFIG),
             patch(f"{_ORCH}.get_adapter", return_value=mock_adapter),
             patch(f"{_ORCH}.retriever_node", new_callable=AsyncMock),
@@ -351,6 +354,7 @@ class TestAgenticMaxSteps:
 
         with (
             patch.object(settings, "MULTI_AGENT_ENABLED", False),
+            patch("app.services.feature_flag_service.is_enabled", new_callable=AsyncMock, return_value=False),
             patch(f"{_ORCH}.get_tenant_ai_config", new_callable=AsyncMock, return_value=_DEFAULT_AI_CONFIG),
             patch(f"{_ORCH}.get_adapter", return_value=mock_adapter),
             patch(f"{_ORCH}.retriever_node", new_callable=AsyncMock),
@@ -422,6 +426,7 @@ class TestAgenticAllowlistEnforcement:
 
         with (
             patch.object(settings, "MULTI_AGENT_ENABLED", False),
+            patch("app.services.feature_flag_service.is_enabled", new_callable=AsyncMock, return_value=False),
             patch(f"{_ORCH}.get_tenant_ai_config", new_callable=AsyncMock, return_value=_DEFAULT_AI_CONFIG),
             patch(f"{_ORCH}.get_adapter", return_value=mock_adapter),
             patch(f"{_ORCH}.retriever_node", new_callable=AsyncMock),

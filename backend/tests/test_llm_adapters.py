@@ -753,3 +753,250 @@ class TestAnthropicBackoffStrategy:
                 pass
 
         assert state["attempts"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Plan Mode end-to-end plumbing — `tool_choice` must reach the SDK call site
+# ---------------------------------------------------------------------------
+
+
+class TestForceToolChoiceReachesAPI:
+    """`force_tool_choice` returns the INTERNAL `{"type":"tool","name":...}` shape
+    for all providers; each adapter's `_convert_tool_choice` (or `create_message`
+    branch) translates that to the provider-native shape at the SDK call site.
+
+    These tests mock the SDK call site and assert that the translated tool_choice
+    actually reaches `kwargs`. Pure-shape unit tests at the `force_tool_choice`
+    boundary alone are insufficient — they don't catch the case where the
+    converter drops the dict on the floor (the original P2 bug).
+    """
+
+    @pytest.mark.asyncio
+    async def test_openai_force_tool_choice_reaches_api_kwargs(self):
+        """OpenAI: create_message must surface tool_choice as the OpenAI-native
+        `{"type":"function","function":{"name":...}}` to chat.completions.create."""
+        from app.services.chat.adapters.openai_adapter import OpenAIAdapter
+
+        captured: dict = {}
+
+        async def _create(**kwargs):
+            captured.update(kwargs)
+            mock_choice = MagicMock()
+            mock_choice.message.content = "ok"
+            mock_choice.message.tool_calls = None
+            mock_response = MagicMock()
+            mock_response.choices = [mock_choice]
+            mock_response.usage = MagicMock(prompt_tokens=1, completion_tokens=1)
+            return mock_response
+
+        adapter = OpenAIAdapter(api_key="sk-test")
+        adapter._client = MagicMock()
+        adapter._client.chat.completions.create = _create
+
+        forcing = adapter.force_tool_choice("clarify")
+        await adapter.create_message(
+            model="gpt-4o",
+            max_tokens=100,
+            system="sys",
+            messages=[{"role": "user", "content": "hi"}],
+            tools=[
+                {
+                    "name": "clarify",
+                    "description": "Ask a question",
+                    "input_schema": {"type": "object", "properties": {}},
+                }
+            ],
+            tool_choice=forcing,
+        )
+
+        assert "tool_choice" in captured, "tool_choice was dropped before reaching the OpenAI SDK"
+        assert captured["tool_choice"] == {"type": "function", "function": {"name": "clarify"}}
+
+    @pytest.mark.asyncio
+    async def test_openai_stream_message_forwards_tool_choice(self):
+        """OpenAI: stream_message must also forward tool_choice to the SDK call."""
+        from app.services.chat.adapters.openai_adapter import OpenAIAdapter
+
+        captured: dict = {}
+
+        async def _empty_stream():
+            return
+            yield  # pragma: no cover - unreachable, makes this an async generator
+
+        async def _create(**kwargs):
+            captured.update(kwargs)
+            return _empty_stream()
+
+        adapter = OpenAIAdapter(api_key="sk-test")
+        adapter._client = MagicMock()
+        adapter._client.chat.completions.create = _create
+
+        forcing = adapter.force_tool_choice("clarify")
+        async for _ in adapter.stream_message(
+            model="gpt-4o",
+            max_tokens=100,
+            system="sys",
+            messages=[{"role": "user", "content": "hi"}],
+            tools=[
+                {
+                    "name": "clarify",
+                    "description": "Ask a question",
+                    "input_schema": {"type": "object", "properties": {}},
+                }
+            ],
+            tool_choice=forcing,
+        ):
+            pass
+
+        assert "tool_choice" in captured, "tool_choice was dropped before reaching the OpenAI SDK in stream_message"
+        assert captured["tool_choice"] == {"type": "function", "function": {"name": "clarify"}}
+
+    @pytest.mark.asyncio
+    async def test_gemini_force_tool_choice_reaches_api_kwargs(self):
+        """Gemini: create_message must surface tool_choice as a ToolConfig with
+        function_calling_config.mode='ANY' and allowed_function_names=[tool]."""
+        from app.services.chat.adapters.gemini_adapter import GeminiAdapter
+
+        captured: dict = {}
+
+        async def _generate_content(**kwargs):
+            captured.update(kwargs)
+            mock_response = MagicMock()
+            mock_response.candidates = []
+            mock_response.usage_metadata = MagicMock(prompt_token_count=1, candidates_token_count=1)
+            return mock_response
+
+        adapter = GeminiAdapter(api_key="test-key")
+        adapter._client = MagicMock()
+        adapter._client.aio.models.generate_content = _generate_content
+
+        forcing = adapter.force_tool_choice("clarify", model="gemini-1.5-pro")
+        await adapter.create_message(
+            model="gemini-1.5-pro",
+            max_tokens=100,
+            system="sys",
+            messages=[{"role": "user", "content": "hi"}],
+            tools=[
+                {
+                    "name": "clarify",
+                    "description": "Ask a question",
+                    "input_schema": {"type": "object", "properties": {}},
+                }
+            ],
+            tool_choice=forcing,
+        )
+
+        config = captured.get("config")
+        assert config is not None, "Gemini config was not built"
+        assert config.tool_config is not None, "tool_choice was dropped before reaching the Gemini SDK"
+        fcc = config.tool_config.function_calling_config
+        assert fcc.mode == "ANY"
+        assert list(fcc.allowed_function_names) == ["clarify"]
+
+    @pytest.mark.asyncio
+    async def test_gemini_stream_message_forwards_tool_choice(self):
+        """Gemini: stream_message has no override; default falls through to
+        create_message and must forward tool_choice (regression for the bug
+        where the default in BaseLLMAdapter dropped tool_choice silently)."""
+        from app.services.chat.adapters.gemini_adapter import GeminiAdapter
+
+        captured: dict = {}
+
+        async def _generate_content(**kwargs):
+            captured.update(kwargs)
+            mock_response = MagicMock()
+            mock_response.candidates = []
+            mock_response.usage_metadata = MagicMock(prompt_token_count=1, candidates_token_count=1)
+            return mock_response
+
+        adapter = GeminiAdapter(api_key="test-key")
+        adapter._client = MagicMock()
+        adapter._client.aio.models.generate_content = _generate_content
+
+        forcing = adapter.force_tool_choice("clarify", model="gemini-1.5-pro")
+        async for _ in adapter.stream_message(
+            model="gemini-1.5-pro",
+            max_tokens=100,
+            system="sys",
+            messages=[{"role": "user", "content": "hi"}],
+            tools=[
+                {
+                    "name": "clarify",
+                    "description": "Ask a question",
+                    "input_schema": {"type": "object", "properties": {}},
+                }
+            ],
+            tool_choice=forcing,
+        ):
+            pass
+
+        config = captured.get("config")
+        assert config is not None, "Gemini config was not built (stream_message didn't reach SDK)"
+        assert config.tool_config is not None, (
+            "tool_choice was dropped — default BaseLLMAdapter.stream_message must forward it to create_message"
+        )
+        fcc = config.tool_config.function_calling_config
+        assert fcc.mode == "ANY"
+        assert list(fcc.allowed_function_names) == ["clarify"]
+
+    @pytest.mark.asyncio
+    async def test_anthropic_stream_message_forwards_tool_choice(self):
+        """Anthropic: regression guard — its stream_message override must keep
+        forwarding tool_choice into the SDK kwargs."""
+        from app.services.chat.adapters.anthropic_adapter import AnthropicAdapter
+
+        captured: dict = {}
+
+        class _FakeStream:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            @property
+            def text_stream(self):
+                async def _gen():
+                    if False:
+                        yield ""
+
+                return _gen()
+
+            async def get_final_message(self):
+                final = MagicMock()
+                final.content = []
+                final.usage = MagicMock(
+                    input_tokens=1,
+                    output_tokens=1,
+                    cache_creation_input_tokens=0,
+                    cache_read_input_tokens=0,
+                )
+                return final
+
+        def _stream(**kwargs):
+            captured.update(kwargs)
+            return _FakeStream()
+
+        adapter = AnthropicAdapter(api_key="sk-test")
+        adapter._client = MagicMock()
+        adapter._client.messages.stream = _stream
+
+        forcing = adapter.force_tool_choice("clarify")
+        async for _ in adapter.stream_message(
+            model="claude-sonnet-4-6",
+            max_tokens=100,
+            system="sys",
+            messages=[{"role": "user", "content": "hi"}],
+            tools=[
+                {
+                    "name": "clarify",
+                    "description": "Ask a question",
+                    "input_schema": {"type": "object", "properties": {}},
+                }
+            ],
+            tool_choice=forcing,
+        ):
+            pass
+
+        assert "tool_choice" in captured, "tool_choice was dropped before reaching the Anthropic SDK"
+        assert captured["tool_choice"] == {"type": "tool", "name": "clarify"}

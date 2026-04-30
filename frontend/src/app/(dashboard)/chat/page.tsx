@@ -242,6 +242,32 @@ export default function ChatPage() {
             setDocsLink(data);
             setStreamBlocks(prev => [...prev, { type: "docs_link" as const, data, id: `dl-${Date.now()}` }]);
           },
+          onClarificationRequired: (data) => {
+            // Plan Mode mid-stream gate: render ClarificationCard immediately
+            // by stamping the structured_output onto the in-flight assistant
+            // streamingMessage. MessageList's AssistantMessageRow detects
+            // structured_output.type === "clarification" and renders the card.
+            // Without this, the card only appears at the terminal `message`
+            // event — defeating the point of the mid-stream gate
+            // (codex round 11 P3 Bug 2).
+            setStreamingMessage((prev) => ({
+              ...(prev ?? {
+                id: `stream-${Date.now()}`,
+                role: "assistant" as const,
+                content: "",
+                tool_calls: null,
+                citations: null,
+                created_at: new Date().toISOString(),
+              }),
+              // ClarificationData already carries `type: "clarification"`. The
+              // renderer (message-list.tsx) reads top-level fields via
+              // `as unknown as ClarificationData`, mirroring the persisted
+              // structured_output shape that the orchestrator emits.
+              structured_output: {
+                ...data,
+              } as unknown as ChatMessage["structured_output"],
+            }));
+          },
           onToolStart: (tool_name, tool_input, step) => {
             if (bufferRef.current.length > 0) {
               const text = bufferRef.current.join("");
@@ -450,6 +476,41 @@ export default function ChatPage() {
     [handleSend],
   );
 
+  const handleClarificationChoose = useCallback(
+    async (messageId: string, optionId: "A" | "B" | "C") => {
+      const sessionId = activeSessionId;
+      if (!sessionId) return;
+      // Plan-mode resume turn: capture run_id from POST response and
+      // immediately attach to the SSE stream (mirrors handleSend). Relying on
+      // a session refetch to observe ``active_run_id`` races against fast
+      // resume runs (errors fire before refetch; completed runs clear
+      // ``active_run_id`` before refetch sees it).
+      try {
+        const { run_id } = await apiClient.post<{ run_id: string }>(
+          `/api/v1/chat/sessions/${sessionId}/messages`,
+          {
+            content: `Picked option ${optionId}`,
+            plan_mode_choice: {
+              action: "approve",
+              confirmation_id: messageId,
+              option_id: optionId,
+            },
+          },
+        );
+        await queryClient.invalidateQueries({ queryKey: ["chat-session", sessionId] });
+        await connectToRunStream(run_id, sessionId);
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : "Failed to submit clarification.";
+        setError(message);
+        // Re-raise so ClarificationCard's awaited onChoose rejects and the card
+        // resets pendingPick (otherwise the card would stay permanently disabled
+        // after a failed resume — codex round 11 P2 Bug 1).
+        throw err;
+      }
+    },
+    [activeSessionId, queryClient, connectToRunStream],
+  );
+
   const clearStreamingState = useCallback(() => {
     // Abort any in-flight SSE connection so old handlers stop firing
     if (abortRef.current) {
@@ -562,6 +623,7 @@ export default function ChatPage() {
             onRemoveTemplate={() => setTemplateFile(null)}
             onMentionClick={handleMentionClick}
             onWriteConfirm={handleWriteConfirm}
+            onClarificationChoose={handleClarificationChoose}
             onImportanceOverride={(messageId, newTier) => {
               queryClient.setQueryData<ChatSessionDetail>(
                 ["chat-session", activeSessionId],

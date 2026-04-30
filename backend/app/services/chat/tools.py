@@ -155,8 +155,18 @@ _CONNECTOR_GATED_TOOLS: dict[str, set[str]] = {
 }
 
 
-async def build_all_tool_definitions(db: "AsyncSession", tenant_id: uuid.UUID) -> list[dict]:
-    """Build combined local + external tool definitions for Claude."""
+async def build_all_tool_definitions(
+    db: "AsyncSession",
+    tenant_id: uuid.UUID,
+    plan_mode_enabled: bool = False,
+) -> list[dict]:
+    """Build combined local + external tool definitions for Claude.
+
+    When ``plan_mode_enabled`` is True, the ``clarify`` tool is appended so the
+    LLM has access to it on financial-ambiguous turns. The gate that ACTIVATES
+    clarify (filters inventory to clarify-only + force tool_choice) lives in
+    the orchestrator + unified_agent — this builder just registers the tool.
+    """
     tools = build_local_tool_definitions()
 
     try:
@@ -185,6 +195,16 @@ async def build_all_tool_definitions(db: "AsyncSession", tenant_id: uuid.UUID) -
     from app.mcp.tools.result_reference_tool import TOOL_DEFINITION as _REF_RESULT_TOOL
 
     tools.append(dict(_REF_RESULT_TOOL))
+
+    if plan_mode_enabled:
+        from app.services.chat.plan_mode.clarify_tool import get_clarify_tool
+
+        clarify = get_clarify_tool(plan_mode_enabled)
+        if clarify is not None:
+            # Copy to avoid shared-mutation surprises (callers may stamp
+            # category/cache_control onto returned tool dicts).
+            tools.append(dict(clarify))
+
     return tools
 
 
