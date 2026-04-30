@@ -96,9 +96,7 @@ def test_orchestrator_sets_plan_mode_augmentation_on_unified_agent():
     # so we need more breathing room than the local-mutation version did.
     window = source[aug_idx : aug_idx + 2000]
 
-    assert "maybe_augment_for_plan_mode" in window, (
-        "Augmentation block must still call maybe_augment_for_plan_mode."
-    )
+    assert "maybe_augment_for_plan_mode" in window, "Augmentation block must still call maybe_augment_for_plan_mode."
     assert "unified_agent._plan_mode_augmentation" in window, (
         "Orchestrator must set unified_agent._plan_mode_augmentation so the "
         "augmentation reaches the agent's system_prompt property — appending "
@@ -149,9 +147,7 @@ def test_resume_turn_skips_clarify_augmentation():
     # Look at a window large enough to cover the call expression itself.
     window = source[aug_idx : aug_idx + 600]
 
-    assert "maybe_augment_for_plan_mode" in window, (
-        "Augmentation block must call maybe_augment_for_plan_mode."
-    )
+    assert "maybe_augment_for_plan_mode" in window, "Augmentation block must call maybe_augment_for_plan_mode."
     assert "plan_mode_resume_source is None" in window, (
         "On resume turns (`plan_mode_resume_source` is set), the orchestrator "
         "must skip the clarify augmentation. Otherwise the prompt instructs "

@@ -97,6 +97,7 @@ class TestMultiProviderOrchestrator:
 
         with (
             patch.object(settings, "MULTI_AGENT_ENABLED", False),
+            patch("app.services.feature_flag_service.is_enabled", new_callable=AsyncMock, return_value=False),
             patch(
                 f"{_ORCH}.get_tenant_ai_config",
                 new_callable=AsyncMock,
@@ -157,6 +158,7 @@ class TestMultiProviderOrchestrator:
 
         with (
             patch.object(settings, "MULTI_AGENT_ENABLED", False),
+            patch("app.services.feature_flag_service.is_enabled", new_callable=AsyncMock, return_value=False),
             patch(
                 f"{_ORCH}.get_tenant_ai_config",
                 new_callable=AsyncMock,
@@ -218,6 +220,7 @@ class TestMultiProviderOrchestrator:
 
         with (
             patch.object(settings, "MULTI_AGENT_ENABLED", False),
+            patch("app.services.feature_flag_service.is_enabled", new_callable=AsyncMock, return_value=False),
             patch(
                 f"{_ORCH}.get_tenant_ai_config",
                 new_callable=AsyncMock,
