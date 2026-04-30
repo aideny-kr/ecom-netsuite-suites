@@ -17,6 +17,7 @@ clarification telemetry could not be linked to its message.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import re
@@ -547,3 +548,120 @@ class TestAuditFailureRollbackOrder:
         assert call_order.index("rollback") < call_order.index("revert"), (
             f"db.rollback must run BEFORE revert_clarification_to_pending. Actual order: {call_order}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Round 8 Bug 1 — the existing wrap catches `Exception` only. On Python 3.11+
+# `asyncio.CancelledError` does NOT inherit from `Exception` (it's a
+# `BaseException`). When the outer `asyncio.wait_for(_run_chat_background,
+# timeout=300)` cancellation fires, the wrap is bypassed and the
+# clarification stays at status='chosen' despite the failed turn.
+#
+# Fix: catch `(Exception, asyncio.CancelledError)` explicitly. Run revert,
+# then re-raise (cancellation MUST propagate).
+# ---------------------------------------------------------------------------
+
+
+class TestResumeTurnCancelledReverts:
+    """Round 8 Bug 1 — `asyncio.CancelledError` (raised by outer
+    `asyncio.wait_for` timeout) must trigger `revert_clarification_to_pending`
+    and then re-raise so cancellation propagates to the asyncio loop.
+    """
+
+    @pytest.mark.asyncio
+    async def test_resume_turn_cancelled_reverts_choice(self, monkeypatch) -> None:
+        """If the resume turn body is cancelled (e.g. via
+        ``asyncio.wait_for`` timeout), the orchestrator MUST call
+        ``revert_clarification_to_pending`` so the user can retry — AND
+        the ``CancelledError`` must propagate to the caller (it's not an
+        ordinary error; the loop needs to know cancellation happened).
+        """
+        from unittest.mock import AsyncMock as _AM
+
+        from app.services.chat import orchestrator as _orch
+        from app.services.chat.plan_mode.short_circuit import PlanModeChoiceResult
+
+        message_id = uuid.uuid4()
+
+        fake_pmc_result = PlanModeChoiceResult(
+            chosen_option={"id": "A", "source": "netsuite", "title": "GL"},
+            chosen_source="netsuite",
+            system_directive="## PRIOR CLARIFICATIONS\n...",
+            chat_message_id=message_id,
+        )
+
+        async def _fake_handle(**kwargs):
+            return fake_pmc_result
+
+        monkeypatch.setattr(
+            "app.services.chat.plan_mode.short_circuit.handle_plan_mode_choice",
+            _fake_handle,
+        )
+
+        # log_event SUCCEEDS — we want the cancel to come AFTER audit.
+        async def _fake_log_event(**kwargs):
+            return MagicMock()
+
+        monkeypatch.setattr(_orch, "log_event", _fake_log_event)
+
+        # Force a CancelledError mid-resume-turn (simulates outer
+        # asyncio.wait_for(timeout=300) firing). Use sanitize_user_input
+        # like the round-7 test.
+        def _boom_cancel(text):
+            raise asyncio.CancelledError("simulated cancellation mid-resume-turn")
+
+        monkeypatch.setattr(_orch, "sanitize_user_input", _boom_cancel)
+
+        revert_calls: list[dict] = []
+
+        async def _fake_revert(**kwargs):
+            revert_calls.append(kwargs)
+            return True
+
+        monkeypatch.setattr(
+            "app.services.chat.plan_mode.short_circuit.revert_clarification_to_pending",
+            _fake_revert,
+        )
+
+        async def _fake_supersede(**kwargs):
+            return []
+
+        monkeypatch.setattr(
+            "app.services.chat.plan_mode.short_circuit.supersede_pending_clarifications",
+            _fake_supersede,
+        )
+
+        sess = _build_session()
+        db = _AM()
+
+        plan_mode_choice = {
+            "action": "approve",
+            "confirmation_id": str(message_id),
+            "option_id": "A",
+        }
+
+        # CancelledError MUST propagate (cancellation isn't a normal error;
+        # callers and the asyncio loop need to see it).
+        with pytest.raises(asyncio.CancelledError):
+            async for _chunk in _orch.run_chat_turn(
+                db=db,
+                session=sess,
+                user_message="resume turn",
+                user_id=uuid.uuid4(),
+                tenant_id=sess.tenant_id,
+                user_msg=MagicMock(id=uuid.uuid4()),
+                plan_mode_choice=plan_mode_choice,
+            ):
+                pass
+
+        # Crucial: revert was called BEFORE the CancelledError propagated —
+        # otherwise the clarification is stranded at status='chosen' and
+        # the user gets 409 on retry.
+        assert revert_calls, (
+            "After handle_plan_mode_choice succeeded and the audit fired, a "
+            "CancelledError (from outer asyncio.wait_for) MUST trigger "
+            "revert_clarification_to_pending. The current `except Exception` "
+            "wrap misses CancelledError on Python 3.11+ — it doesn't inherit "
+            "from Exception. Round 8 Bug 1."
+        )
+        assert revert_calls[0]["message_id"] == message_id

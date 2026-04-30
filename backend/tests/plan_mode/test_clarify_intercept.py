@@ -86,7 +86,11 @@ async def test_two_defaults_returns_error():
 
 @pytest.mark.asyncio
 async def test_disconnected_source_filtered_out():
-    """If only NetSuite is connected, BigQuery option is dropped."""
+    """If only NetSuite + Shopify are connected, BigQuery option is dropped.
+
+    Round 8 Bug 2: bare 'shopify' (REST) no longer canonicalizes — only
+    shopify_mcp does — so use the MCP provider here.
+    """
     bad_input = {
         "options": [
             {"id": "A", "title": "NetSuite GL", "rationale": "GL", "source": "netsuite", "is_default": True},
@@ -98,7 +102,7 @@ async def test_disconnected_source_filtered_out():
     result = await intercept_clarify_call(
         tool_input=bad_input,
         session_id="sess-1",
-        active_connectors=["netsuite", "shopify"],
+        active_connectors=["netsuite", "shopify_mcp"],
         db=AsyncMock(),
     )
     assert isinstance(result, InterceptResult)
@@ -449,3 +453,68 @@ async def test_expires_at_iso_8601_utc():
     parsed = datetime.fromisoformat(expires_at).timestamp()
     # 5 minutes after now() at call time
     assert before + 290 <= parsed <= after + 310
+
+
+# ---------------------------------------------------------------------------
+# Round 8 Bug 2 — REST-only Shopify/Stripe sources advertised but
+# unfulfillable.
+#
+# Round 2 extended ``active_connectors`` to include REST ``connections``
+# providers, but there are no local ``shopify_*`` / ``stripe_*`` chat tools
+# in the registry. So a tenant with REST Stripe but no Stripe MCP gets
+# ``source="stripe"`` advertised on the clarify card, picks it, and the
+# resume-turn tool filter drops everything → stuck.
+#
+# Fix: constrain canonical-source map to providers that have local chat
+# tools. REST shopify/stripe (provider == 'shopify' / 'stripe') are
+# reconciliation-only — no chat tools — so they MUST NOT canonicalize.
+# ---------------------------------------------------------------------------
+
+
+def test_rest_shopify_provider_does_not_canonicalize():
+    """REST Shopify (``connections.provider == 'shopify'``) has no local
+    chat tools — only the MCP variant does. Must NOT canonicalize so
+    clarify intercept doesn't advertise an unfulfillable source.
+    """
+    result = canonicalize_connector_providers(["shopify"])
+    assert "shopify" not in result, (
+        "REST shopify (connections.provider) has no chat tools — only "
+        "shopify_mcp does. Canonicalizing it would let clarify intercept "
+        "accept source='shopify' options that the resume turn cannot "
+        "fulfill (the tool filter would strip everything). Round 8 Bug 2."
+    )
+
+
+def test_rest_stripe_provider_does_not_canonicalize():
+    """REST Stripe (``connections.provider == 'stripe'``) is for
+    reconciliation only — no chat tools. Must NOT canonicalize.
+    """
+    result = canonicalize_connector_providers(["stripe"])
+    assert "stripe" not in result, (
+        "REST stripe (connections.provider) is reconciliation-only and "
+        "has no chat tools — only stripe_mcp does. Canonicalizing it "
+        "would advertise an unfulfillable source. Round 8 Bug 2."
+    )
+
+
+def test_mcp_shopify_still_canonicalizes():
+    """MCP Shopify still canonicalizes — it has chat tools via the
+    ext__<uuid>__* tool-naming convention.
+    """
+    result = canonicalize_connector_providers(["shopify_mcp"])
+    assert "shopify" in result
+
+
+def test_mcp_stripe_still_canonicalizes():
+    """MCP Stripe still canonicalizes — it has chat tools via ext__."""
+    result = canonicalize_connector_providers(["stripe_mcp"])
+    assert "stripe" in result
+
+
+def test_rest_netsuite_still_canonicalizes():
+    """REST NetSuite (``connections.provider == 'netsuite'``) DOES
+    canonicalize because there are local netsuite_* chat tools (e.g.
+    ``netsuite_suiteql``). Don't break the NetSuite path.
+    """
+    result = canonicalize_connector_providers(["netsuite"])
+    assert "netsuite" in result

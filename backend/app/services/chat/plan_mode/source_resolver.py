@@ -26,17 +26,27 @@ from __future__ import annotations
 # auth piggybacks on the ``google_sheets`` MCP connector (see
 # ``app/api/v1/drive_folders.py:73``). We treat ``google_sheets`` as
 # evidence Drive is reachable until Drive gets its own provider row.
+#
+# Round 8 Bug 2: a provider only canonicalizes if it actually has chat
+# tools the resume-turn filter can preserve. REST shopify/stripe
+# (``connections.provider == 'shopify' / 'stripe'``) are
+# reconciliation-only — they have NO local chat tools and no ext__ MCP
+# tools. If they canonicalized, clarify intercept would advertise
+# ``source='stripe'`` for a tenant with only REST Stripe, the user
+# would pick it, the resume turn would filter tools to chosen-source,
+# and the agent would be left with zero source-specific tools — stuck.
+# So those bare REST entries are intentionally absent below.
 PROVIDER_TO_CANONICAL_SOURCE: dict[str, str] = {
-    # NetSuite — both MCP and REST count as "netsuite"
+    # NetSuite — both MCP and REST have local chat tools (netsuite_*),
+    # so both count as "netsuite".
     "netsuite_mcp": "netsuite",
     "netsuite": "netsuite",
-    # BigQuery
+    # BigQuery — MCP only (no REST analogue).
     "bigquery": "bigquery",
-    # Shopify — both MCP and direct API
+    # Shopify — MCP only. REST 'shopify' has no chat tools (Round 8 Bug 2).
     "shopify_mcp": "shopify",
-    "shopify": "shopify",
-    # Stripe — both MCP and direct REST count as "stripe"
-    "stripe": "stripe",
+    # Stripe — MCP only. REST 'stripe' is reconciliation-only, no chat
+    # tools (Round 8 Bug 2).
     "stripe_mcp": "stripe",
     # Google Drive RAG reuses the google_sheets MCP connector for OAuth
     "google_sheets": "drive",

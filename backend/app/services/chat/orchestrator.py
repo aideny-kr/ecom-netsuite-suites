@@ -2921,7 +2921,17 @@ async def run_chat_turn(
             result_msg["structured_output"] = assistant_msg.structured_output
 
         yield {"type": "message", "message": result_msg}
-    except Exception:
+    except (Exception, asyncio.CancelledError):
+        # Round 8 Bug 1: catch ``asyncio.CancelledError`` explicitly. On
+        # Python 3.11+ ``CancelledError`` does NOT inherit from
+        # ``Exception`` — when the outer
+        # ``asyncio.wait_for(_run_chat_background, timeout=300)`` fires,
+        # the bare ``except Exception`` was bypassed and the
+        # clarification stayed at status='chosen' despite the failed
+        # turn. We must catch both, run the revert, then re-raise so
+        # cancellation still propagates to the asyncio loop. (Note: do
+        # NOT use ``except BaseException`` — that would also swallow
+        # ``SystemExit``/``KeyboardInterrupt``.)
         if _revert_message_id_on_failure is not None:
             try:
                 # Clear any failed-transaction state on the session before

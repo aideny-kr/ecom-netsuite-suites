@@ -47,7 +47,10 @@ _TOOLS = [
 _ALL_CONNECTORS = [
     _FakeConnector(id=_NETSUITE_MCP_UUID, provider="netsuite_mcp"),
     _FakeConnector(id=_SHOPIFY_MCP_UUID, provider="shopify_mcp"),
-    _FakeConnector(id=_STRIPE_MCP_UUID, provider="stripe"),
+    # Round 8 Bug 2: ext__<uuid>__ tools come from MCP connectors only —
+    # REST stripe (connections.provider == 'stripe') has no chat tools, so
+    # canonicalization no longer accepts bare 'stripe'. Test the MCP path.
+    _FakeConnector(id=_STRIPE_MCP_UUID, provider="stripe_mcp"),
 ]
 
 
@@ -168,7 +171,12 @@ def test_chose_shopify_keeps_shopify_ext_tools():
 
 
 def test_chose_stripe_with_ext_tools():
-    """ext__<stripe_uuid>__stripe_query must SURVIVE when chose=stripe."""
+    """ext__<stripe_uuid>__stripe_query must SURVIVE when chose=stripe.
+
+    Round 8 Bug 2: bare 'stripe' (REST connections.provider) no longer
+    canonicalizes — only stripe_mcp does. The ext__ tools come from the
+    MCP connector regardless.
+    """
     tools = [
         {"name": _STRIPE_EXT_TOOL, "description": "..."},
         {"name": _NS_EXT_TOOL, "description": "..."},
@@ -177,7 +185,7 @@ def test_chose_stripe_with_ext_tools():
         tools,
         "stripe",
         active_connectors=[
-            _FakeConnector(id=_STRIPE_MCP_UUID, provider="stripe"),
+            _FakeConnector(id=_STRIPE_MCP_UUID, provider="stripe_mcp"),
             _FakeConnector(id=_NETSUITE_MCP_UUID, provider="netsuite_mcp"),
         ],
     )
