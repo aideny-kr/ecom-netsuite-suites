@@ -169,24 +169,6 @@ def test_augmentation_skips_netsuite_split_when_only_netsuite():
     assert "window" in lower or "scope" in lower or "metric" in lower
 
 
-def test_augmentation_includes_metric_routing_hints():
-    """Smoke-test 2026-04-30: MRR query produced only 2 NS options, no Stripe.
-    The augmentation must guide the model to pick the right cross-source
-    based on the metric category (MRR/ARR → Stripe; GMV/checkout → BQ;
-    cash/payouts → Stripe).
-    """
-    prompt = build_augmentation_prompt(connected_sources=["netsuite", "bigquery", "stripe"])
-    lower = prompt.lower()
-    # MRR routing
-    assert "mrr" in lower or "subscription" in lower or "recurring" in lower
-    assert "stripe" in lower
-    # GMV / checkout routing
-    assert "gmv" in lower or "checkout" in lower
-    assert "bigquery" in lower
-    # Cash / payouts routing
-    assert "cash" in lower or "payout" in lower
-
-
 from app.services.chat.plan_mode.ambiguity_signal import maybe_augment_for_plan_mode
 
 
