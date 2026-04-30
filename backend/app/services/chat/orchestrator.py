@@ -2165,8 +2165,43 @@ async def run_chat_turn(
                         # first action is `clarify`" — but the resume tool
                         # filter has stripped `clarify` from the inventory.
                         # Contradictory instructions ⇒ undefined behavior.
+                        _plan_mode_connected_sources: list[str] = []
+                        if (
+                            plan_mode_enabled
+                            and plan_mode_resume_source is None
+                            and is_financial_ambiguous(sanitized_input)
+                        ):
+                            # Resolve connected sources so the augmentation can
+                            # require options to span distinct sources when ≥2
+                            # are connected. Mirrors the post-call resolution
+                            # in base_agent.py for clarify_intercept.
+                            from app.services.chat.plan_mode.source_resolver import (
+                                canonicalize_connector_providers,
+                            )
+                            from app.services.connection_service import list_connections
+                            from app.services.mcp_connector_service import (
+                                get_active_connectors_for_tenant,
+                            )
+
+                            try:
+                                _mcp = await get_active_connectors_for_tenant(db, tenant_id)
+                            except Exception:
+                                _mcp = []
+                            try:
+                                _rest = await list_connections(db, tenant_id)
+                            except Exception:
+                                _rest = []
+                            _raw_providers = [getattr(c, "provider", "") for c in _mcp] + [
+                                getattr(c, "provider", "") for c in _rest if getattr(c, "status", "active") == "active"
+                            ]
+                            _plan_mode_connected_sources = sorted(canonicalize_connector_providers(_raw_providers))
+
                         plan_mode_augmentation = (
-                            maybe_augment_for_plan_mode(query=sanitized_input, plan_mode_enabled=plan_mode_enabled)
+                            maybe_augment_for_plan_mode(
+                                query=sanitized_input,
+                                plan_mode_enabled=plan_mode_enabled,
+                                connected_sources=_plan_mode_connected_sources,
+                            )
                             if plan_mode_resume_source is None
                             else None
                         )

@@ -29,50 +29,106 @@ def is_financial_ambiguous(query: str | None) -> bool:
     return bool(_FINANCIAL_AMBIGUITY_RE.search(query))
 
 
-_AUGMENTATION_PROMPT = """## CLARIFICATION REQUIRED
+_AUGMENTATION_PREAMBLE = """## CLARIFICATION REQUIRED
 
 This query contains financial terminology that has multiple legitimate readings.
-Sources of ambiguity may include: which data source (NetSuite GL recognized
-revenue vs BigQuery checkout totals vs Shopify gross sales), which window (fiscal
-vs calendar quarter), which scope (consolidated vs subsidiary), which metric
-definition (booked vs paid, gross vs recognized).
+The CFO-grade ambiguity is FIRST about which data source has the answer (numbers
+differ materially between sources for the same metric: NetSuite GL recognized
+revenue ≠ BigQuery checkout totals ≠ Shopify gross sales ≠ Stripe collected
+cash), and only second about within-source axes (fiscal vs calendar window,
+consolidated vs subsidiary scope, booked vs paid metric definition).
 
-Your ONLY allowed first action is a single `clarify` tool call. Build 2-3
-plausible interpretation options grounded in the actual ambiguity axes for THIS
-query. Mark one as default. Default preferences: NetSuite GL for "revenue" /
-"income" / "earnings" / "recognized revenue"; BigQuery for "GMV" / "checkout" /
-"online sales"; fiscal calendar for quarterly windows. Use only connected
-sources.
+Your ONLY allowed first action is a single `clarify` tool call. You MUST NOT
+call any data tool in the same turn. The user's choice arrives on the next
+turn."""
 
-In `ambiguity_summary`, write a one-sentence framing in your own voice that
+_AUGMENTATION_TRAILER = """In `ambiguity_summary`, write a one-sentence framing in your own voice that
 NAMES THE DEFAULT REASON. Example: "I'm picking NetSuite GL by default because
 that's recognized revenue — if you want pre-refund checkout dollars, B is right."
 
-You MUST NOT call any data tool in the same turn as `clarify`. The user's
-choice arrives on the next turn."""
+Default preferences: NetSuite GL for "revenue" / "income" / "earnings" /
+"recognized revenue"; BigQuery for "GMV" / "checkout" / "online sales"; fiscal
+calendar for quarterly windows."""
+
+# Human-readable labels for canonical sources so the rendered prompt explains
+# what each source means rather than just naming it.
+_SOURCE_LABELS: dict[str, str] = {
+    "netsuite": "NetSuite (GL recognized revenue, posted invoices, sales orders)",
+    "bigquery": "BigQuery (ecommerce checkout totals, web/app analytics)",
+    "shopify": "Shopify (gross sales, refunds, online storefront)",
+    "stripe": "Stripe (collected cash, payouts, processor-side gross)",
+    "drive": "Google Drive (uploaded spreadsheets, finance docs)",
+}
 
 
-def build_augmentation_prompt() -> str:
+def _render_source_list(connected_sources: list[str]) -> str:
+    seen: list[str] = []
+    for src in connected_sources:
+        if src not in seen and src in _SOURCE_LABELS:
+            seen.append(src)
+    if not seen:
+        return ""
+    bullets = "\n".join(f"- {src}: {_SOURCE_LABELS[src]}" for src in seen)
+    return f"This tenant has these connected sources:\n{bullets}\n"
+
+
+def build_augmentation_prompt(connected_sources: list[str] | None = None) -> str:
     """Return the system-prompt augmentation block for financial-ambiguous turns.
 
-    Appended after the source-pin hint in `_assemble_system_prompt` so the
-    augmentation overrides any pinned source for financial queries.
+    When ``connected_sources`` lists ≥2 canonical sources, the prompt requires
+    options to span distinct sources before falling back to within-source
+    variation. With 0 or 1 sources, the prompt allows within-source variation
+    (window / scope / metric definition).
     """
-    return _AUGMENTATION_PROMPT
+    sources = connected_sources or []
+    rendered_sources = _render_source_list(sources)
+    distinct_canonical = [s for s in sources if s in _SOURCE_LABELS]
+    multi_source = len(set(distinct_canonical)) >= 2
+
+    if multi_source:
+        rule = (
+            "RULE: Build 2-3 options that span DISTINCT sources. Each option's "
+            "`source` field MUST be different until every connected source has "
+            "at least one option. Do NOT pick multiple options from the same "
+            "source while another connected source is unused — different "
+            "sources give materially different numbers and that is the "
+            "primary clarification axis. Within-source variation (window, "
+            "scope, metric definition) is allowed only after every connected "
+            "source already appears."
+        )
+    else:
+        rule = (
+            "Build 2-3 plausible interpretation options grounded in the "
+            "actual ambiguity axes for THIS query (window, scope, metric "
+            "definition). Use only the connected source(s)."
+        )
+
+    parts = [_AUGMENTATION_PREAMBLE]
+    if rendered_sources:
+        parts.append(rendered_sources)
+    parts.append(rule)
+    parts.append(_AUGMENTATION_TRAILER)
+    return "\n\n".join(parts)
 
 
-def maybe_augment_for_plan_mode(*, query: str | None, plan_mode_enabled: bool) -> str | None:
+def maybe_augment_for_plan_mode(
+    *,
+    query: str | None,
+    plan_mode_enabled: bool,
+    connected_sources: list[str] | None = None,
+) -> str | None:
     """Return the Plan Mode augmentation block when both gates pass, else None.
 
     Caller (orchestrator.run_chat_turn) appends the returned block to the
     system prompt right after the source-pin hint, so Plan Mode overrides any
-    pinned source for financial-ambiguous turns.
+    pinned source for financial-ambiguous turns. When ``connected_sources``
+    is supplied, the prompt is rendered with source-spanning rules.
     """
     if not plan_mode_enabled:
         return None
     if not is_financial_ambiguous(query):
         return None
-    return build_augmentation_prompt()
+    return build_augmentation_prompt(connected_sources=connected_sources)
 
 
 def filter_tools_to_clarify_only(tools: list[dict]) -> list[dict]:

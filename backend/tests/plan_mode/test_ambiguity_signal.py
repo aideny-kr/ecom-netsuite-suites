@@ -96,6 +96,44 @@ def test_augmentation_is_stable():
     assert build_augmentation_prompt() == build_augmentation_prompt()
 
 
+def test_augmentation_lists_connected_sources_when_provided():
+    """When ≥2 sources connected, prompt must name each by canonical name so the
+    model picks across them instead of slicing within one source.
+    """
+    prompt = build_augmentation_prompt(connected_sources=["netsuite", "bigquery", "stripe"])
+    assert "netsuite" in prompt.lower()
+    assert "bigquery" in prompt.lower()
+    assert "stripe" in prompt.lower()
+
+
+def test_augmentation_requires_source_spanning_when_multi_source():
+    """With ≥2 connected sources, the model must spread options across distinct
+    sources before falling back to within-source variation.
+    """
+    prompt = build_augmentation_prompt(connected_sources=["netsuite", "bigquery"])
+    lower = prompt.lower()
+    assert "distinct" in lower or "different source" in lower or "span" in lower
+    # Should explicitly tell the model NOT to pick all options from one source.
+    assert "same source" in lower or "one source" in lower or "within-source" in lower
+
+
+def test_augmentation_allows_within_source_when_single_source():
+    """With only one connected source, source-spanning is impossible — the
+    prompt should permit within-source variation (window/scope/metric definition).
+    """
+    prompt = build_augmentation_prompt(connected_sources=["netsuite"])
+    lower = prompt.lower()
+    assert "window" in lower or "scope" in lower or "fiscal" in lower or "metric" in lower
+
+
+def test_augmentation_falls_back_to_static_when_no_sources_passed():
+    """Backwards compat: callers that omit connected_sources still get a usable
+    prompt (used by tests and any legacy call sites).
+    """
+    prompt = build_augmentation_prompt()
+    assert "CLARIFICATION REQUIRED" in prompt
+
+
 from app.services.chat.plan_mode.ambiguity_signal import maybe_augment_for_plan_mode
 
 
@@ -116,3 +154,15 @@ def test_helper_returns_none_when_query_not_ambiguous():
 def test_helper_handles_empty_query():
     assert maybe_augment_for_plan_mode(query="", plan_mode_enabled=True) is None
     assert maybe_augment_for_plan_mode(query=None, plan_mode_enabled=True) is None  # type: ignore[arg-type]
+
+
+def test_helper_forwards_connected_sources():
+    """Helper must thread connected_sources through to build_augmentation_prompt."""
+    block = maybe_augment_for_plan_mode(
+        query="What's our revenue this quarter?",
+        plan_mode_enabled=True,
+        connected_sources=["netsuite", "bigquery"],
+    )
+    assert block is not None
+    assert "netsuite" in block.lower()
+    assert "bigquery" in block.lower()
