@@ -2678,13 +2678,15 @@ async def run_chat_turn(
                             )
                         )
 
-                    # No late flush needed — _on_tool_intercepted writes each
-                    # entry to Redis eagerly under a unique synthetic id so
-                    # same-turn follow-ups can read it. Re-keying under
-                    # assistant_msg.id would just create duplicate hash fields
-                    # (and prior code's single shared id silently overwrote
-                    # multi-entry turns). _pending_caches retained for any
-                    # downstream callers that inspect per-turn cache writes.
+                    # Eager writes already happened in _on_tool_intercepted under
+                    # unique synthetic ids (so same-turn follow-ups can read each
+                    # other's writes). Now also write an ALIAS under the persisted
+                    # assistant_msg.id so reference_previous_result(message_id=...)
+                    # still resolves. Multi-entry turns share the alias key — the
+                    # latest entry wins, matching prior behavior.
+                    for _pc in _pending_caches:
+                        _pc.message_id = str(assistant_msg.id)
+                        _cache_result_sync(str(session.id), str(assistant_msg.id), _pc)
 
                     if not session.title:
                         session.title = user_message[:100].strip()
@@ -2876,6 +2878,7 @@ async def run_chat_turn(
                             actor_id=user_id,
                             correlation_id=correlation_id,
                             db=db,
+                            session_id=str(session.id),
                         )
 
                         # Output redaction: strip blocked fields from tool results
