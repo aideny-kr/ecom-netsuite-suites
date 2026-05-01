@@ -531,9 +531,7 @@ class TestOrchestratorVariableInitExtended:
 
         # tools.py must call mcp_server.call_tool with session_id keyword.
         source = inspect.getsource(tools.execute_tool_call)
-        assert "session_id=session_id" in source, (
-            "execute_tool_call must forward session_id into mcp_server.call_tool"
-        )
+        assert "session_id=session_id" in source, "execute_tool_call must forward session_id into mcp_server.call_tool"
 
     def test_importance_tier_casual_gates_haiku_routing(self):
         """importance_tier.value <= 2 (CASUAL/OPERATIONAL) gates Haiku routing.

@@ -1005,9 +1005,7 @@ def _intercept_with_cache(
     either flow."""
     from app.services.chat.result_cache import _cache_result_sync
 
-    event_type, event_data, new_result_str = _intercept_tool_result(
-        tool_name, result_str, context_need=context_need
-    )
+    event_type, event_data, new_result_str = _intercept_tool_result(tool_name, result_str, context_need=context_need)
     if event_type is None or event_data is None:
         return event_type, event_data, new_result_str
 

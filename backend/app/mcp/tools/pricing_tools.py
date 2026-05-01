@@ -66,10 +66,7 @@ def _seed_pricing_state(
     pointers to the saved Excel + NetSuite CSV files. Row data is NOT cached
     — pricing_to_sheets re-parses the Excel file on demand.
     """
-    seed_items = [
-        {"sku": it.sku, "usd_price": str(it.usd_price), "item_name": it.item_name}
-        for it in items
-    ]
+    seed_items = [{"sku": it.sku, "usd_price": str(it.usd_price), "item_name": it.item_name} for it in items]
     currency_codes = list(pricing_config.currencies.keys())
     header_columns = ["SKU", "Item Name", "USD", *sorted(currency_codes)]
     return {
@@ -494,9 +491,7 @@ def _apply_overrides(state: dict, overrides: dict) -> dict | None:
     # 4. Currency ops
     currencies_to_remove = overrides.get("currencies_to_remove") or []
     if currencies_to_remove:
-        state["effective_currencies"] = [
-            c for c in state["effective_currencies"] if c not in set(currencies_to_remove)
-        ]
+        state["effective_currencies"] = [c for c in state["effective_currencies"] if c not in set(currencies_to_remove)]
         log_entry["currencies_to_remove"] = list(currencies_to_remove)
 
     # currencies_to_add is validated + appended by the caller after this returns
@@ -737,9 +732,7 @@ _ = CurrencyConfig
 # ---------------------------------------------------------------------------
 
 
-_SHEETS_CONNECTOR_MISSING = (
-    "Google Sheets connector not configured. Set it up in Settings → Connectors first."
-)
+_SHEETS_CONNECTOR_MISSING = "Google Sheets connector not configured. Set it up in Settings → Connectors first."
 _PRICING_NOT_RUN_FOR_SHEETS = (
     "No pricing run in this conversation yet. Run pricing_convert (with an upload) "
     "or pricing_export (with inline items) first, then export to Sheets."

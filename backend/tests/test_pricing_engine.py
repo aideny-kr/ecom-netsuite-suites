@@ -463,9 +463,7 @@ class TestUpliftByCurrency:
         )
         engine = PricingEngine()
         items = [PricingInput(sku="X", usd_price=Decimal("100"))]
-        results = engine.convert_batch(
-            items, config, uplift_by_currency={"TST": Decimal("0.05")}
-        )
+        results = engine.convert_batch(items, config, uplift_by_currency={"TST": Decimal("0.05")})
         # Uplift pre-round: 100 * 1.05 = 105 → round_9(105) = 109.
         # Post-round (the bug we're avoiding): round_9(100) * 1.05 = 109 * 1.05 = 114.45.
         assert results[0].results["TST"].final_price == Decimal("109")
@@ -484,9 +482,7 @@ class TestUpliftByCurrency:
         )
         engine = PricingEngine()
         items = [PricingInput(sku="X", usd_price=Decimal("5197"))]
-        results = engine.convert_batch(
-            items, config, uplift_by_currency={"TST": Decimal("0.05")}
-        )
+        results = engine.convert_batch(items, config, uplift_by_currency={"TST": Decimal("0.05")})
         # 5197 * 1.05 = 5456.85 → nearest_50 = 5450.
         assert results[0].results["TST"].final_price == Decimal("5450")
         # And the result IS a 50-multiple.
@@ -506,9 +502,7 @@ class TestUpliftByCurrency:
         )
         engine = PricingEngine()
         items = [PricingInput(sku="X", usd_price=Decimal("1000"))]
-        results = engine.convert_batch(
-            items, config, uplift_by_currency={"TST": Decimal("0.05")}
-        )
+        results = engine.convert_batch(items, config, uplift_by_currency={"TST": Decimal("0.05")})
         # 1000 * 1.05 = 1050 → offset 50, ≤ 490 → base_1000 + 490 = 1490.
         final = results[0].results["TST"].final_price
         assert final == Decimal("1490")
@@ -529,9 +523,7 @@ class TestUpliftByCurrency:
         )
         engine = PricingEngine()
         items = [PricingInput(sku="X", usd_price=Decimal("100"))]
-        results = engine.convert_batch(
-            items, config, uplift_by_currency={"TST": Decimal("-0.10")}
-        )
+        results = engine.convert_batch(items, config, uplift_by_currency={"TST": Decimal("-0.10")})
         # 100 * 0.90 = 90 → round_9(90) = 99.
         assert results[0].results["TST"].final_price == Decimal("99")
 
@@ -558,9 +550,7 @@ class TestUpliftByCurrency:
         engine = PricingEngine()
         items = [PricingInput(sku="X", usd_price=Decimal("1659"))]
         baseline = engine.convert_batch(items, accounting_config)
-        results = engine.convert_batch(
-            items, accounting_config, uplift_by_currency={"XYZ": Decimal("0.05")}
-        )
+        results = engine.convert_batch(items, accounting_config, uplift_by_currency={"XYZ": Decimal("0.05")})
         for code in baseline[0].results:
             assert results[0].results[code].final_price == baseline[0].results[code].final_price
 
@@ -577,9 +567,7 @@ class TestUpliftByCurrency:
         engine = PricingEngine()
         items = [PricingInput(sku="X", usd_price=Decimal("1659"))]
         baseline = engine.convert_batch(items, accounting_config)
-        results = engine.convert_batch(
-            items, accounting_config, uplift_by_currency={"SEK": Decimal("0.05")}
-        )
+        results = engine.convert_batch(items, accounting_config, uplift_by_currency={"SEK": Decimal("0.05")})
         # SEK rounds nearest_9 — the uplift output must still end in 9.
         assert int(results[0].results["SEK"].final_price) % 10 == 9
         # And it must be larger than baseline (positive uplift).

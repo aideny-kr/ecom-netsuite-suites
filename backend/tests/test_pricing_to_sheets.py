@@ -154,9 +154,7 @@ class TestConnectorCheckFirst:
 
 class TestCacheMiss:
     def test_cache_miss_returns_error_when_connector_present(self, sheets_context):
-        result, create_mock, write_mock, _ = _run(
-            {}, sheets_context, connector=_connector(), payload=None
-        )
+        result, create_mock, write_mock, _ = _run({}, sheets_context, connector=_connector(), payload=None)
         assert result["error"] is True
         assert "no pricing run" in result["message"].lower()
         create_mock.assert_not_awaited()

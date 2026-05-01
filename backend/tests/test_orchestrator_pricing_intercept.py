@@ -42,41 +42,31 @@ def _pricing_result_str(*, success: bool = True, with_state: bool = True) -> str
 
 class TestPricingInterceptPipesPricingState:
     def test_pricing_convert_event_includes_pricing_state(self):
-        event_type, event_data, _ = _intercept_tool_result(
-            "pricing_convert", _pricing_result_str()
-        )
+        event_type, event_data, _ = _intercept_tool_result("pricing_convert", _pricing_result_str())
         assert event_type == "task_output"
         assert "pricing_state" in event_data
         assert event_data["pricing_state"]["excel_file_id"] == "file-1"
         assert event_data["pricing_state"]["row_count"] == 2
 
     def test_pricing_export_event_includes_pricing_state(self):
-        event_type, event_data, _ = _intercept_tool_result(
-            "pricing_export", _pricing_result_str()
-        )
+        event_type, event_data, _ = _intercept_tool_result("pricing_export", _pricing_result_str())
         assert event_type == "task_output"
         assert "pricing_state" in event_data
 
     def test_pricing_revise_event_includes_pricing_state(self):
-        event_type, event_data, _ = _intercept_tool_result(
-            "pricing_revise", _pricing_result_str()
-        )
+        event_type, event_data, _ = _intercept_tool_result("pricing_revise", _pricing_result_str())
         assert event_type == "task_output"
         assert "pricing_state" in event_data
 
     def test_pricing_revise_dotted_alias(self):
-        event_type, event_data, _ = _intercept_tool_result(
-            "pricing.revise", _pricing_result_str()
-        )
+        event_type, event_data, _ = _intercept_tool_result("pricing.revise", _pricing_result_str())
         assert event_type == "task_output"
         assert "pricing_state" in event_data
 
     def test_pricing_state_absent_when_executor_omits_it(self):
         """Backward-compat: if pricing_state is missing the interceptor still
         emits a task_output event but pricing_state is absent (or None)."""
-        event_type, event_data, _ = _intercept_tool_result(
-            "pricing_convert", _pricing_result_str(with_state=False)
-        )
+        event_type, event_data, _ = _intercept_tool_result("pricing_convert", _pricing_result_str(with_state=False))
         assert event_type == "task_output"
         assert event_data.get("pricing_state") is None
 
@@ -92,9 +82,7 @@ class TestPricingToSheetsEmitsSheetsLink:
                 "sku_count": 50,
             }
         )
-        event_type, event_data, _ = _intercept_tool_result(
-            "pricing_to_sheets", result_str
-        )
+        event_type, event_data, _ = _intercept_tool_result("pricing_to_sheets", result_str)
         assert event_type == "sheets_link"
         assert event_data["url"].startswith("https://docs.google.com/")
         assert event_data["spreadsheet_id"] == "ss-123"
@@ -113,9 +101,7 @@ class TestPricingToSheetsEmitsSheetsLink:
 
     def test_error_passes_through(self):
         result_str = json.dumps({"error": True, "message": "no connector"})
-        event_type, event_data, _ = _intercept_tool_result(
-            "pricing_to_sheets", result_str
-        )
+        event_type, event_data, _ = _intercept_tool_result("pricing_to_sheets", result_str)
         assert event_type is None
         assert event_data is None
 

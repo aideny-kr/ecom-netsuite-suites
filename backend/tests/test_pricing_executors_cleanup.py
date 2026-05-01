@@ -117,9 +117,7 @@ class TestPricingConvertCleanup:
                 new=_patch_save_output(saved_files),
             ),
         ):
-            result = await pricing_convert_execute(
-                {"file_id": str(uuid.uuid4())}, pricing_context
-            )
+            result = await pricing_convert_execute({"file_id": str(uuid.uuid4())}, pricing_context)
 
         assert result["success"] is True
         # Markdown table absence — no separator row, no "show this EXACT" text.
@@ -154,9 +152,7 @@ class TestPricingConvertCleanup:
                 new=_patch_save_output(saved_files),
             ),
         ):
-            result = await pricing_convert_execute(
-                {"file_id": str(uuid.uuid4())}, pricing_context
-            )
+            result = await pricing_convert_execute({"file_id": str(uuid.uuid4())}, pricing_context)
 
         assert "pricing_state" in result
         ps = result["pricing_state"]
@@ -210,9 +206,7 @@ class TestPricingConvertCleanup:
                 new=_patch_save_output(saved_files),
             ),
         ):
-            result = await pricing_convert_execute(
-                {"file_id": str(uuid.uuid4())}, pricing_context
-            )
+            result = await pricing_convert_execute({"file_id": str(uuid.uuid4())}, pricing_context)
 
         assert isinstance(result["preview"], list)
         assert len(result["preview"]) == 1
