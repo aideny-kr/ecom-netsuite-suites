@@ -436,6 +436,156 @@ class TestEdgeCases:
         assert isinstance(result.final_price, Decimal)
 
 
+class TestUpliftByCurrency:
+    """Per-currency multiplicative uplift applied PRE-rounding so charm-price
+    rules still terminate on the charm digits (e.g. nearest_9, nearest_990)."""
+
+    def test_none_preserves_existing_behavior(self, accounting_config):
+        """convert_batch with no uplift kwarg matches previous output bit-for-bit."""
+        engine = PricingEngine()
+        items = [PricingInput(sku="X", usd_price=Decimal("1659"))]
+        baseline = engine.convert_batch(items, accounting_config)
+        with_kwarg = engine.convert_batch(items, accounting_config, uplift_by_currency=None)
+        assert with_kwarg[0].results["GBP"].final_price == baseline[0].results["GBP"].final_price
+        assert with_kwarg[0].results["JPY"].final_price == baseline[0].results["JPY"].final_price
+
+    def test_uplift_applied_pre_rounding_nearest_9(self):
+        """Base 100 + 5% uplift = 105, then round_9 = 109. Charm digit preserved."""
+        config = TenantPricingConfig(
+            currencies={
+                "TST": CurrencyConfig(
+                    fx_rate=Decimal("1.0"),
+                    tier="usd_based",
+                    vat_rate=None,
+                    rounding_rule="nearest_9",
+                ),
+            }
+        )
+        engine = PricingEngine()
+        items = [PricingInput(sku="X", usd_price=Decimal("100"))]
+        results = engine.convert_batch(
+            items, config, uplift_by_currency={"TST": Decimal("0.05")}
+        )
+        # Uplift pre-round: 100 * 1.05 = 105 → round_9(105) = 109.
+        # Post-round (the bug we're avoiding): round_9(100) * 1.05 = 109 * 1.05 = 114.45.
+        assert results[0].results["TST"].final_price == Decimal("109")
+
+    def test_uplift_applied_pre_rounding_nearest_50(self):
+        """nearest_50 uplift lands on a 50-multiple."""
+        config = TenantPricingConfig(
+            currencies={
+                "TST": CurrencyConfig(
+                    fx_rate=Decimal("1.0"),
+                    tier="usd_based",
+                    vat_rate=None,
+                    rounding_rule="nearest_50",
+                ),
+            }
+        )
+        engine = PricingEngine()
+        items = [PricingInput(sku="X", usd_price=Decimal("5197"))]
+        results = engine.convert_batch(
+            items, config, uplift_by_currency={"TST": Decimal("0.05")}
+        )
+        # 5197 * 1.05 = 5456.85 → nearest_50 = 5450.
+        assert results[0].results["TST"].final_price == Decimal("5450")
+        # And the result IS a 50-multiple.
+        assert results[0].results["TST"].final_price % 50 == 0
+
+    def test_uplift_applied_pre_rounding_nearest_990(self):
+        """nearest_990 with uplift still terminates on X490 / X990."""
+        config = TenantPricingConfig(
+            currencies={
+                "TST": CurrencyConfig(
+                    fx_rate=Decimal("1.0"),
+                    tier="usd_based",
+                    vat_rate=None,
+                    rounding_rule="nearest_990",
+                ),
+            }
+        )
+        engine = PricingEngine()
+        items = [PricingInput(sku="X", usd_price=Decimal("1000"))]
+        results = engine.convert_batch(
+            items, config, uplift_by_currency={"TST": Decimal("0.05")}
+        )
+        # 1000 * 1.05 = 1050 → offset 50, ≤ 490 → base_1000 + 490 = 1490.
+        final = results[0].results["TST"].final_price
+        assert final == Decimal("1490")
+        # Charm pattern preserved: ends in 490 or 990.
+        assert int(final) % 1000 in (490, 990)
+
+    def test_uplift_negative_value(self):
+        """Negative uplift = discount — also pre-rounding."""
+        config = TenantPricingConfig(
+            currencies={
+                "TST": CurrencyConfig(
+                    fx_rate=Decimal("1.0"),
+                    tier="usd_based",
+                    vat_rate=None,
+                    rounding_rule="nearest_9",
+                ),
+            }
+        )
+        engine = PricingEngine()
+        items = [PricingInput(sku="X", usd_price=Decimal("100"))]
+        results = engine.convert_batch(
+            items, config, uplift_by_currency={"TST": Decimal("-0.10")}
+        )
+        # 100 * 0.90 = 90 → round_9(90) = 99.
+        assert results[0].results["TST"].final_price == Decimal("99")
+
+    def test_uplift_multi_currency_independent(self, accounting_config):
+        """{GBP: 0.05, EUR: -0.10} affects GBP and EUR; CAD untouched."""
+        engine = PricingEngine()
+        items = [PricingInput(sku="X", usd_price=Decimal("1659"))]
+        baseline = engine.convert_batch(items, accounting_config)
+        results = engine.convert_batch(
+            items,
+            accounting_config,
+            uplift_by_currency={"GBP": Decimal("0.05"), "EUR": Decimal("-0.10")},
+        )
+        # GBP went up.
+        assert results[0].results["GBP"].final_price > baseline[0].results["GBP"].final_price
+        # EUR went down.
+        assert results[0].results["EUR"].final_price < baseline[0].results["EUR"].final_price
+        # CAD unchanged.
+        assert results[0].results["CAD"].final_price == baseline[0].results["CAD"].final_price
+
+    def test_uplift_unknown_currency_no_op(self, accounting_config):
+        """Uplift for a currency not in the config does not crash and does not
+        affect any other currency's output."""
+        engine = PricingEngine()
+        items = [PricingInput(sku="X", usd_price=Decimal("1659"))]
+        baseline = engine.convert_batch(items, accounting_config)
+        results = engine.convert_batch(
+            items, accounting_config, uplift_by_currency={"XYZ": Decimal("0.05")}
+        )
+        for code in baseline[0].results:
+            assert results[0].results[code].final_price == baseline[0].results[code].final_price
+
+    def test_uplift_empty_dict_is_noop(self, accounting_config):
+        engine = PricingEngine()
+        items = [PricingInput(sku="X", usd_price=Decimal("1659"))]
+        baseline = engine.convert_batch(items, accounting_config)
+        results = engine.convert_batch(items, accounting_config, uplift_by_currency={})
+        for code in baseline[0].results:
+            assert results[0].results[code].final_price == baseline[0].results[code].final_price
+
+    def test_uplift_eur_based_currency_pre_rounding(self, accounting_config):
+        """Tier-2 (EUR-based) uplift lands on charm digits via local rounding."""
+        engine = PricingEngine()
+        items = [PricingInput(sku="X", usd_price=Decimal("1659"))]
+        baseline = engine.convert_batch(items, accounting_config)
+        results = engine.convert_batch(
+            items, accounting_config, uplift_by_currency={"SEK": Decimal("0.05")}
+        )
+        # SEK rounds nearest_9 — the uplift output must still end in 9.
+        assert int(results[0].results["SEK"].final_price) % 10 == 9
+        # And it must be larger than baseline (positive uplift).
+        assert results[0].results["SEK"].final_price > baseline[0].results["SEK"].final_price
+
+
 class TestConvertSingle:
     def test_single_usd_to_gbp(self, accounting_config):
         engine = PricingEngine()
