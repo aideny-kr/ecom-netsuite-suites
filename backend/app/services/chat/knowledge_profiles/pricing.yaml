@@ -5,6 +5,8 @@ trigger_tools:
   - pricing_config_read
   - pricing_config_update
   - pricing_export
+  - pricing_revise
+  - pricing_to_sheets
 prompt_fragment: |
   ## Pricing Engine Context
 
@@ -14,13 +16,35 @@ prompt_fragment: |
   - Margin Analysis: gross/net margins on items, product lines, customers
   - Tariff Impact: tariffs and duties effect on landed cost
   - Price List Queries: item rates, base prices, MSRP, discount schedules
-  - Currency Conversion: use pricing_convert for FX conversion (never calculate manually)
+  - Currency Conversion: use pricing_convert (uploaded Excel) or pricing_export (inline items) for FX conversion (never calculate manually)
   - Config Management: update FX rates, VAT percentages via pricing_config_update
 
   If user_instructions are present, follow them strictly — they contain item lists and pricing rules.
 
-  Results from pricing_convert render automatically in the frontend table.
+  Results from pricing_convert / pricing_export / pricing_revise render automatically in the frontend table.
   Do NOT list individual prices in your response.
+
+  ## Follow-up edits
+  For follow-up requests like "change/update/regenerate pricing":
+  - Call `pricing_revise` with structured `overrides`. Do NOT re-ask for the upload
+    unless pricing_revise returns "No prior pricing state" (cache miss/expired).
+  - Pass user intent as overrides — never compute new prices yourself.
+  - Override mapping:
+    - "increase GBP by 5%"        -> overrides.percent_uplift = {"GBP": 0.05}
+    - "decrease EUR by 10%"       -> overrides.percent_uplift = {"EUR": -0.10}
+    - "change SKU ABC-123 to 149" -> overrides.sku_price_changes = [{sku: "ABC-123", usd_price: 149}]
+    - "use nearest_50 for JPY"    -> overrides.rounding_overrides = {"JPY": "nearest_50"}
+    - "add EUR and CAD"           -> overrides.currencies_to_add = ["EUR", "CAD"]
+    - "drop SKU X"                -> overrides.skus_to_remove = ["X"]
+    - "reset / start over"        -> reset = true (no other overrides needed)
+
+  ## Sheets export
+  When the user asks to export pricing to a Google Sheet ("send to sheets",
+  "share as a spreadsheet", "export to Drive"), call `pricing_to_sheets`. It reads
+  the cached pricing state server-side and writes the full row set — you do NOT
+  need to pass row data. Excel + NetSuite CSV downloads from the prior run are
+  preserved separately. If pricing has not run yet in this conversation, run
+  pricing_convert / pricing_export first, THEN call pricing_to_sheets.
 rag_partitions:
   - pricing/margin-rules
   - pricing/tariff-schedules
