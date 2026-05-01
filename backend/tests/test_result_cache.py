@@ -8,6 +8,7 @@ import pytest
 from app.services.chat.result_cache import (
     MAX_RESULTS_PER_CONVERSATION,
     CachedResult,
+    _cache_result_sync,
     cache_result,
     get_latest_result,
     get_latest_result_by_type,
@@ -322,6 +323,29 @@ class TestEvictionPinsLatestPerType:
         assert (await get_result_by_message("conv-1", "msg-financial-1")) is not None
         # Oldest suiteql entry is gone.
         assert (await get_result_by_message("conv-1", "msg-suiteql-1")) is None
+
+    def test_sync_helper_writes_immediately(self, mock_redis):
+        """_cache_result_sync must write to Redis synchronously so the
+        orchestrator's intercept callback can read its own writes back via
+        get_latest_result_by_type within the same turn (e.g.,
+        pricing_export → pricing_to_sheets in one assistant message)."""
+        import asyncio
+
+        cr = CachedResult(
+            message_id="pending-abc123",
+            conversation_id="conv-1",
+            result_type="pricing",
+            columns=[],
+            rows=[],
+            row_count=5,
+            payload={"excel_file_id": "file-xyz"},
+        )
+        # No await — pure sync write.
+        _cache_result_sync("conv-1", "pending-abc123", cr)
+        # Async helper sees the entry.
+        result = asyncio.run(get_latest_result_by_type("conv-1", "pricing"))
+        assert result is not None
+        assert result.payload == {"excel_file_id": "file-xyz"}
 
     @pytest.mark.asyncio
     async def test_pricing_survives_long_mixed_session(self, mock_redis):

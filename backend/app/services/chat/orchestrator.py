@@ -2311,7 +2311,11 @@ async def run_chat_turn(
 
                     # Classify follow-up intent (TRANSFORM vs NEW_DATA)
                     from app.services.chat.follow_up_classifier import FollowUpIntent, classify_follow_up
-                    from app.services.chat.result_cache import CachedResult, cache_result, get_latest_result
+                    from app.services.chat.result_cache import (
+                        CachedResult,
+                        _cache_result_sync,
+                        get_latest_result,
+                    )
 
                     _follow_up_intent = FollowUpIntent.NEW_DATA
                     _cached_result = None
@@ -2381,10 +2385,20 @@ async def run_chat_turn(
                     _in_chart_block = False
                     _chart_buffer = ""
 
-                    # Cache callback: collect intercepted results for Redis cache
+                    # Cache callback: write intercepted results to Redis IMMEDIATELY.
+                    # Same-turn follow-ups (e.g. pricing_export → pricing_to_sheets in
+                    # one assistant message) need to read each other's writes via
+                    # get_latest_result_by_type before the agent loop completes — a
+                    # deferred flush would always show them stale data.
                     _pending_caches: list[CachedResult] = []
+                    # Non-data SSE events that must NEVER write a cache entry —
+                    # otherwise they create empty placeholder rows that overwrite
+                    # the real pricing payload at flush time.
+                    _NON_DATA_EVENTS = frozenset({"sheets_link", "docs_link"})
 
                     def _on_tool_intercepted(tool_name: str, event_type_str: str, event_data: dict):
+                        if event_type_str in _NON_DATA_EVENTS:
+                            return
                         # Pricing-write tools persist a typed pricing_state payload
                         # that pricing_revise + pricing_to_sheets read on follow-ups.
                         # pricing_to_sheets is intentionally NOT in this set — it's
@@ -2401,19 +2415,25 @@ async def run_chat_turn(
                                 else "suiteql"
                             )
                             payload = None
-                        _pending_caches.append(
-                            CachedResult(
-                                message_id="pending",
-                                conversation_id=str(session.id),
-                                result_type=result_type,
-                                columns=event_data.get("columns", []),
-                                rows=event_data.get("rows", []),
-                                row_count=event_data.get("row_count", 0),
-                                summary=event_data.get("summary"),
-                                query_text=event_data.get("query", ""),
-                                payload=payload,
-                            )
+                        # Each intercept gets a unique synthetic id so multiple
+                        # tool calls within one turn don't collide on a shared
+                        # message_id (prior code used "pending" for every entry —
+                        # the second write would overwrite the first in Redis).
+                        synthetic_id = f"pending-{uuid.uuid4().hex[:12]}"
+                        cr = CachedResult(
+                            message_id=synthetic_id,
+                            conversation_id=str(session.id),
+                            result_type=result_type,
+                            columns=event_data.get("columns", []),
+                            rows=event_data.get("rows", []),
+                            row_count=event_data.get("row_count", 0),
+                            summary=event_data.get("summary"),
+                            query_text=event_data.get("query", ""),
+                            payload=payload,
                         )
+                        # Eager write so same-turn follow-ups can read it.
+                        _cache_result_sync(str(session.id), synthetic_id, cr)
+                        _pending_caches.append(cr)
 
                     # Emit Drive source map once per turn so the frontend can resolve
                     # [source_name] citations to clickable Drive links.
@@ -2658,10 +2678,13 @@ async def run_chat_turn(
                             )
                         )
 
-                    # Flush pending result caches (for follow-up intelligence)
-                    for _pc in _pending_caches:
-                        _pc.message_id = str(assistant_msg.id)
-                        await cache_result(str(session.id), str(assistant_msg.id), _pc)
+                    # No late flush needed — _on_tool_intercepted writes each
+                    # entry to Redis eagerly under a unique synthetic id so
+                    # same-turn follow-ups can read it. Re-keying under
+                    # assistant_msg.id would just create duplicate hash fields
+                    # (and prior code's single shared id silently overwrote
+                    # multi-entry turns). _pending_caches retained for any
+                    # downstream callers that inspect per-turn cache writes.
 
                     if not session.title:
                         session.title = user_message[:100].strip()

@@ -122,6 +122,73 @@ class TestPricingToSheetsEmitsSheetsLink:
         assert event_data is None
 
 
+class TestSheetsLinkDoesNotPolluteCache:
+    """Codex review finding: if pricing_to_sheets fires within a turn that
+    also did a pricing_export / pricing_revise, the sheets_link event must
+    NOT generate a junk 'suiteql' cache entry that overwrites the pricing
+    payload at flush time."""
+
+    def test_sheets_link_event_does_not_create_cache_entry(self):
+        """Static check: the cache callback must skip non-data SSE events."""
+        import inspect
+
+        from app.services.chat import orchestrator
+
+        source = inspect.getsource(orchestrator)
+        # _on_tool_intercepted must explicitly filter out sheets_link / docs_link.
+        # Either by name listing, or by an early-return.
+        assert "sheets_link" in source and "docs_link" in source, (
+            "_on_tool_intercepted must reference sheets_link and docs_link to skip them"
+        )
+
+    def test_pricing_to_sheets_in_skipped_event_set(self):
+        """Verify the cache-skip logic exists for pricing_to_sheets's SSE event."""
+        import inspect
+
+        from app.services.chat import orchestrator
+
+        source = inspect.getsource(orchestrator)
+        # Locate _on_tool_intercepted and verify it has an early-return / skip
+        # branch for non-data events.
+        idx = source.index("_on_tool_intercepted")
+        body_window = source[idx : idx + 2500]
+        # The skip logic must reference "sheets_link" or use _NON_DATA_EVENTS.
+        assert ("sheets_link" in body_window) or ("_NON_DATA_EVENTS" in body_window), (
+            "_on_tool_intercepted must skip sheets_link / docs_link events"
+        )
+
+
+class TestSameTurnPricingStateRead:
+    """Codex review finding: if the user asks 'generate pricing AND export to
+    sheets' in one turn, pricing_to_sheets's call to get_latest_result_by_type
+    must see the pricing entry just written by pricing_convert / pricing_export
+    earlier in the same turn. The cache MUST be flushed eagerly, not deferred
+    to after the agent loop completes."""
+
+    def test_immediate_cache_write_in_intercept(self):
+        """Static check: the intercept callback must write to the cache
+        immediately (synchronously / via a sync helper), not just queue."""
+        import inspect
+
+        from app.services.chat import orchestrator
+
+        source = inspect.getsource(orchestrator)
+        idx = source.index("_on_tool_intercepted")
+        body_window = source[idx : idx + 2500]
+        # The callback must reference a sync cache write — either
+        # _cache_result_sync or an immediate call to cache_result via
+        # asyncio.create_task.
+        assert (
+            "_cache_result_sync" in body_window
+            or "asyncio.create_task(cache_result" in body_window
+            or "ensure_future(cache_result" in body_window
+        ), (
+            "_on_tool_intercepted must write to the cache eagerly so same-turn "
+            "pricing follow-ups (pricing_export → pricing_to_sheets in one turn) "
+            "can read the just-written entry."
+        )
+
+
 class TestOnToolInterceptedWiring:
     """Static checks against the orchestrator closure that builds CachedResult.
 

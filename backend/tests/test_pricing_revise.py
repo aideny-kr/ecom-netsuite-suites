@@ -191,6 +191,39 @@ class TestPriceChanges:
         skus = {it["sku"] for it in ps["effective_items"]}
         assert "GHOST" not in skus
 
+    def test_reset_string_false_does_NOT_trigger_reset(self, revise_context):
+        """Codex review finding: bool('false') is True. If the LLM (or a
+        non-strict adapter) ever passes reset as the string 'false', the
+        executor must NOT silently discard the user's overrides."""
+        seed = _seed_state()
+        seed["effective_uplift_by_currency"] = {"GBP": "0.05"}
+        result, _ = _run_revise(
+            {
+                "reset": "false",  # string, not bool — must be parsed as False
+                "overrides": {"percent_uplift": {"EUR": 0.10}},
+            },
+            revise_context,
+            payload=seed,
+        )
+        ps = result["pricing_state"]
+        # The accumulated GBP uplift survives, EUR added per replace-per-key rule.
+        assert Decimal(ps["effective_uplift_by_currency"]["GBP"]) == Decimal("0.05")
+        assert Decimal(ps["effective_uplift_by_currency"]["EUR"]) == Decimal("0.10")
+        # No reset event in the audit log.
+        assert not any(e.get("reset") is True for e in ps["applied_overrides_log"])
+
+    def test_reset_string_true_DOES_trigger_reset(self, revise_context):
+        """The flip side: 'true' as a string should still trigger reset."""
+        seed = _seed_state()
+        seed["effective_uplift_by_currency"] = {"GBP": "0.05"}
+        result, _ = _run_revise(
+            {"reset": "true", "overrides": {}},
+            revise_context,
+            payload=seed,
+        )
+        ps = result["pricing_state"]
+        assert ps["effective_uplift_by_currency"] == {}
+
     def test_decimal_precision_through_json(self, revise_context):
         # 0.1 + 0.2 = 0.30000000000000004 in float.  Decimal(str(v)) must clamp.
         bad_float = 0.1 + 0.2

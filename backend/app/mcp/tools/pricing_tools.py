@@ -374,6 +374,25 @@ async def pricing_config_update_execute(params: dict, context: dict, **kwargs) -
 # ---------------------------------------------------------------------------
 
 
+def _coerce_bool(v: Any) -> bool:
+    """Strict bool coercion that won't be fooled by ``"false"`` strings.
+
+    Plain ``bool(v)`` is dangerous here: ``bool("false")`` is ``True``. If a
+    chat tool call ever surfaces ``reset`` as the string ``"false"`` (some
+    JSON-Schema-to-tool-input adapters round-trip booleans through strings),
+    ``bool(v)`` would silently discard the user's overrides and regenerate
+    from the seed. This helper treats only the values the LLM/JSON spec
+    actually means by "true" as truthy.
+    """
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, str):
+        return v.strip().lower() in {"true", "1", "yes"}
+    if isinstance(v, (int, float)):
+        return bool(v)
+    return False
+
+
 def _to_decimal_str(v: Any) -> str:
     """Coerce a JSON-supplied number to a stringified Decimal for cache storage.
 
@@ -591,7 +610,7 @@ async def pricing_revise_execute(params: dict, context: dict, **kwargs) -> dict:
     current_config = TenantPricingConfig(**config_row.config)
 
     overrides = params.get("overrides") or {}
-    reset = bool(params.get("reset"))
+    reset = _coerce_bool(params.get("reset"))
 
     # 3. Reset path — drop accumulated overrides, restore effective_items from seed.
     if reset:

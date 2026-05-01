@@ -70,13 +70,14 @@ def _cache_key(conversation_id: str) -> str:
     return f"result_cache:{conversation_id}"
 
 
-async def cache_result(conversation_id: str, message_id: str, result: CachedResult) -> None:
-    """Store a result in the cache.
+def _cache_result_sync(conversation_id: str, message_id: str, result: CachedResult) -> None:
+    """Synchronous cache write — used by the orchestrator's intercept callback
+    so same-turn follow-ups (e.g. ``pricing_export`` → ``pricing_to_sheets``
+    in one assistant message) can read the entry via
+    ``get_latest_result_by_type`` before the agent loop completes.
 
-    Eviction policy: when count exceeds ``MAX_RESULTS_PER_CONVERSATION``, pin
-    the most recent entry of each ``result_type`` and evict the oldest entry
-    from the unpinned set. This guarantees the latest pricing entry survives
-    even after a long mixed-tool session.
+    The Redis client is synchronous internally; this helper is pure-sync so
+    callers don't need an event loop.
     """
     r = _get_redis()
     if not r:
@@ -139,6 +140,15 @@ async def cache_result(conversation_id: str, message_id: str, result: CachedResu
 
     for mid in to_remove:
         r.hdel(key, mid)
+
+
+async def cache_result(conversation_id: str, message_id: str, result: CachedResult) -> None:
+    """Async wrapper around ``_cache_result_sync`` — kept for callers that
+    already live in an async context. Eviction policy: when count exceeds
+    ``MAX_RESULTS_PER_CONVERSATION``, pin the most recent entry of each
+    ``result_type`` and evict the oldest entry from the unpinned set.
+    """
+    _cache_result_sync(conversation_id, message_id, result)
 
 
 async def get_latest_result(conversation_id: str) -> CachedResult | None:
