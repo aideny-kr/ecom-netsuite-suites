@@ -489,6 +489,50 @@ class TestOrchestratorVariableInitExtended:
         # The schema injection must check _need_schemas before executing
         assert "if not _need_schemas:" in source, "Schema injection must be guarded by 'if not _need_schemas:' check"
 
+    def test_conversation_id_in_executor_context(self):
+        """``governed_execute`` must thread ``session_id`` into the executor
+        ``context`` dict as ``conversation_id`` so pricing follow-up tools can
+        read the cached pricing state for the current conversation.
+        """
+        import asyncio
+
+        from app.mcp.governance import governed_execute
+
+        captured: dict = {}
+
+        async def _fake_execute(params, context):
+            captured.update(context)
+            return {"success": True}
+
+        # Tool name not in TOOL_CONFIGS — picks default rate-limit + no allowlist.
+        result = asyncio.run(
+            governed_execute(
+                tool_name="pricing.revise",
+                params={},
+                tenant_id=str(uuid.uuid4()),
+                actor_id=str(uuid.uuid4()),
+                execute_fn=_fake_execute,
+                correlation_id=str(uuid.uuid4()),
+                db=None,
+                session_id="conv-abc",
+            )
+        )
+        assert result["success"] is True
+        assert captured.get("conversation_id") == "conv-abc"
+
+    def test_execute_tool_call_threads_session_id_to_governed_execute(self):
+        """The tools.py execute path must pass ``session_id`` into
+        ``mcp_server.call_tool`` and onward to ``governed_execute`` — guarantees
+        local tool executors can see ``context["conversation_id"]`` in addition
+        to the existing ``reference_previous_result`` short-circuit branch."""
+        import inspect
+
+        from app.services.chat import tools
+
+        # tools.py must call mcp_server.call_tool with session_id keyword.
+        source = inspect.getsource(tools.execute_tool_call)
+        assert "session_id=session_id" in source, "execute_tool_call must forward session_id into mcp_server.call_tool"
+
     def test_importance_tier_casual_gates_haiku_routing(self):
         """importance_tier.value <= 2 (CASUAL/OPERATIONAL) gates Haiku routing.
 

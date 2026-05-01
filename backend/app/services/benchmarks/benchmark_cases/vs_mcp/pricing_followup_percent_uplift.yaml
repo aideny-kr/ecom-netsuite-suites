@@ -1,0 +1,38 @@
+# Pricing follow-up: percent uplift on a single currency.
+#
+# This case verifies that the agent picks pricing_revise (NOT
+# pricing_convert / pricing_export) for a follow-up edit and translates
+# natural-language "increase GBP by 5%" into the right structured override
+# (overrides.percent_uplift = {"GBP": 0.05}).
+#
+# Single-turn note: the runner does not yet support multi-turn benchmark
+# cases, so this case runs against an empty session cache. The agent will
+# correctly return the cache-miss error from pricing_revise — the
+# benchmark verifies the AGENT REACHED FOR pricing_revise (not for
+# pricing_export), and that the response surfaces the right "no prior
+# pricing state" guidance back to the user. CI gate runs --suite sales
+# only, so this case is invoked manually via --case
+# pricing_followup_percent_uplift.
+
+case_id: pricing_followup_percent_uplift
+query: "increase GBP by 5% and regenerate"
+tags: ["pricing", "followup", "uplift", "knowledge-profile"]
+notes: |
+  Tests pricing_revise tool selection + override translation. Expected
+  tool: pricing_revise (NOT pricing_convert / pricing_export). Expected
+  override semantics: percent_uplift = {"GBP": 0.05}.
+
+  In a real conversation, the prior turn's pricing_export call would have
+  populated the session cache; here the cache is empty so the tool returns
+  a clear "no prior pricing" error. The benchmark verifies the agent does
+  the right thing both ways: reaches for pricing_revise first, surfaces
+  the cache-miss guidance to the user.
+expected_answer_contains:
+  - "pricing"
+expected_tools:
+  - "pricing_revise"
+expected_accuracy: 0.5
+max_cost: 0.50
+max_latency_ms: 120000
+baseline_expected_accuracy: 0.0
+baseline_expected_tools: []

@@ -82,6 +82,8 @@ class PricingEngine:
         config: CurrencyConfig,
         eur_fx_rate: Decimal,
         eur_config: CurrencyConfig | None = None,
+        *,
+        uplift: Decimal | None = None,
     ) -> CurrencyResult:
         """Convert a single USD price to the target currency.
 
@@ -90,6 +92,11 @@ class PricingEngine:
         NO local VAT. This matches the 2-tier conversion model:
           Step 1: USD → EUR with EUR VAT → round EUR
           Step 2: Rounded EUR × local FX → round local (no local VAT)
+
+        ``uplift`` (Decimal, e.g. ``Decimal("0.05")`` for +5%) is applied to
+        the post-VAT, pre-rounding value. This keeps charm-price rounding
+        rules (``nearest_9``, ``nearest_990``, ``nearest_50``) terminating on
+        their charm digits even after a "+5% on GBP" override.
         """
         if config.tier == "usd_based":
             # USD-based: direct FX + local VAT
@@ -100,8 +107,6 @@ class PricingEngine:
             else:
                 vat_amount = None
                 pre_round = converted
-            rounding_fn = _ROUNDING_FNS[config.rounding_rule]
-            final_price = rounding_fn(pre_round)
         else:
             # EUR-based: USD → EUR with EUR VAT → round → local FX → round
             eur_amount = usd_price * eur_fx_rate
@@ -121,8 +126,12 @@ class PricingEngine:
             converted = eur_rounded * config.fx_rate
             vat_amount = eur_amount * eur_vat_rate if eur_vat_rate else None
             pre_round = converted
-            rounding_fn = _ROUNDING_FNS[config.rounding_rule]
-            final_price = rounding_fn(pre_round)
+
+        if uplift is not None:
+            pre_round = pre_round * (Decimal("1") + uplift)
+
+        rounding_fn = _ROUNDING_FNS[config.rounding_rule]
+        final_price = rounding_fn(pre_round)
 
         return CurrencyResult(
             currency=currency,
@@ -140,10 +149,19 @@ class PricingEngine:
         self,
         items: list[PricingInput],
         config: TenantPricingConfig,
+        *,
+        uplift_by_currency: dict[str, Decimal] | None = None,
     ) -> list[PricingOutput]:
-        """Convert a list of items across all configured currencies."""
+        """Convert a list of items across all configured currencies.
+
+        ``uplift_by_currency`` is a per-currency multiplicative adjustment
+        applied PRE-rounding (e.g. ``{"GBP": Decimal("0.05")}`` adds 5% to GBP
+        prior to the rounding rule). Currencies absent from the dict are
+        unaffected.
+        """
         # Get EUR config for 2-tier VAT application
         eur_config = config.currencies.get("EUR")
+        uplift_by_currency = uplift_by_currency or {}
 
         outputs: list[PricingOutput] = []
         for item in items:
@@ -155,6 +173,7 @@ class PricingEngine:
                     config=currency_config,
                     eur_fx_rate=config.eur_fx_rate,
                     eur_config=eur_config,
+                    uplift=uplift_by_currency.get(currency_code),
                 )
             outputs.append(
                 PricingOutput(

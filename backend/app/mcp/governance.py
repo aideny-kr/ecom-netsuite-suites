@@ -341,6 +341,7 @@ async def governed_execute(
     correlation_id: str | None = None,
     db: AsyncSession | None = None,
     context_need: str | None = None,
+    session_id: str | None = None,
 ) -> dict[str, Any]:
     """
     Governance wrapper: entitlement → rate limit → param validation → execute → redact → audit.
@@ -441,6 +442,7 @@ async def governed_execute(
             "db": db,
             "correlation_id": correlation_id,
             "context_need": context_need,
+            "conversation_id": session_id,
         }
         result = await execute_fn(validated_params, context=context)
     except Exception as e:
