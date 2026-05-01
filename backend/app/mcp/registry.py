@@ -685,4 +685,39 @@ TOOL_REGISTRY = {
             },
         },
     },
+    "pricing.revise": {
+        "description": (
+            "Revise the most recent pricing result with the requested overrides and "
+            "regenerate Excel + NetSuite CSV outputs. Use for follow-up edits like "
+            "'increase GBP by 5%', 'change SKU ABC-123 USD to 149', 'use nearest_50 "
+            "rounding for JPY only', 'add EUR and CAD', 'remove SKU X'. "
+            "DO NOT call this for the first pricing run — use pricing_convert (uploaded "
+            "Excel) or pricing_export (inline items) instead. All numeric fields are "
+            "interpreted with full Decimal precision; pass values as JSON numbers."
+        ),
+        "execute": pricing_tools.pricing_revise_execute,
+        "params_schema": {
+            "reset": {
+                "type": "boolean",
+                "required": False,
+                "description": (
+                    "If true, drop all accumulated overrides and revert to the original "
+                    "seeded items + base config. Other override fields are ignored when reset=true."
+                ),
+            },
+            "overrides": {
+                "type": "object",
+                "required": True,
+                "description": (
+                    "Changes to apply. All fields optional; combine freely. Supports: "
+                    "sku_price_changes (list of {sku, usd_price}), skus_to_remove (list of "
+                    "sku strings), skus_to_add (list of {sku, usd_price, item_name?}), "
+                    "percent_uplift (dict by currency, e.g. {GBP: 0.05} = +5%), "
+                    "fx_rate_overrides / vat_rate_overrides (dict by currency), "
+                    "rounding_overrides (dict by currency, e.g. {JPY: 'nearest_50'}), "
+                    "currencies_to_add / currencies_to_remove (list of currency codes)."
+                ),
+            },
+        },
+    },
 }

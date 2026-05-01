@@ -3,13 +3,21 @@
 from __future__ import annotations
 
 import io
+import time
 import uuid
-from decimal import Decimal
+from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
+from typing import Any
 
 from openpyxl import load_workbook
 
 from app.models.pricing_conversion_log import PricingConversionLog
-from app.schemas.pricing import PricingInput, TenantPricingConfig
+from app.schemas.pricing import (
+    CurrencyConfig,
+    PricingInput,
+    TenantPricingConfig,
+)
+from app.services.chat.result_cache import get_latest_result_by_type
 from app.services.pricing_config_service import get_config, upsert_config
 from app.services.pricing_engine import PricingEngine
 from app.services.task_file_service import TaskFileService
@@ -18,6 +26,11 @@ from app.services.template_filler import TemplateFiller
 _engine = PricingEngine()
 _filler = TemplateFiller()
 _file_svc = TaskFileService()
+
+_CACHE_MISS_MESSAGE = (
+    "No prior pricing state in this conversation (cache expired or no pricing run yet). "
+    "Re-run pricing_convert with the upload, or pricing_export with inline items."
+)
 
 
 def _build_preview(results, max_rows: int = 10) -> list[dict]:
@@ -347,3 +360,347 @@ async def pricing_config_update_execute(params: dict, context: dict, **kwargs) -
         "message": f"Pricing config updated: {list(updates.keys())}",
         "updated_fields": list(updates.keys()),
     }
+
+
+# ---------------------------------------------------------------------------
+# pricing_revise — follow-up edits to a prior pricing run
+# ---------------------------------------------------------------------------
+
+
+def _to_decimal_str(v: Any) -> str:
+    """Coerce a JSON-supplied number to a stringified Decimal for cache storage.
+
+    Decimal(str(v)) is the spec's precision rule — float(0.1+0.2) becomes
+    Decimal("0.30000000000000004"), not Decimal("0.3"). We store as str so the
+    payload survives JSON round-trips without losing precision.
+    """
+    return str(Decimal(str(v)))
+
+
+def _items_from_state(items: list[dict]) -> list[PricingInput]:
+    out: list[PricingInput] = []
+    for raw in items:
+        try:
+            price = Decimal(str(raw.get("usd_price", 0)))
+        except (InvalidOperation, ValueError, TypeError):
+            continue
+        out.append(
+            PricingInput(
+                sku=str(raw["sku"]),
+                item_name=raw.get("item_name"),
+                usd_price=price,
+            )
+        )
+    return out
+
+
+def _apply_overrides(state: dict, overrides: dict) -> dict | None:
+    """Mutate effective_* in place per spec (Sec. "Cumulative semantics" + D3).
+
+    Order: skus_to_remove → skus_to_add → sku_price_changes → currency ops →
+    uplift / FX / VAT / rounding (replace per key).
+
+    Returns an error dict if validation fails, else None.
+    """
+    log_entry: dict[str, Any] = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "ignored": [],
+    }
+
+    # 1. skus_to_remove
+    to_remove = {str(s) for s in (overrides.get("skus_to_remove") or [])}
+    if to_remove:
+        kept: list[dict] = []
+        for it in state["effective_items"]:
+            if it["sku"] in to_remove:
+                continue
+            kept.append(it)
+        state["effective_items"] = kept
+        log_entry["skus_to_remove"] = sorted(to_remove)
+
+    # 2. skus_to_add (silent no-op for already present)
+    to_add = overrides.get("skus_to_add") or []
+    if to_add:
+        existing = {it["sku"] for it in state["effective_items"]}
+        added_log: list[str] = []
+        for raw in to_add:
+            sku = str(raw["sku"])
+            if sku in existing:
+                log_entry["ignored"].append({"action": "skus_to_add", "sku": sku, "reason": "already present"})
+                continue
+            state["effective_items"].append(
+                {
+                    "sku": sku,
+                    "usd_price": _to_decimal_str(raw["usd_price"]),
+                    "item_name": raw.get("item_name"),
+                }
+            )
+            existing.add(sku)
+            added_log.append(sku)
+        if added_log:
+            log_entry["skus_to_add"] = added_log
+
+    # 3. sku_price_changes (latest-wins, silent no-op for unknown SKU)
+    price_changes = overrides.get("sku_price_changes") or []
+    if price_changes:
+        by_sku: dict[str, str] = {}
+        # Latest-wins within a single revise call.
+        for raw in price_changes:
+            by_sku[str(raw["sku"])] = _to_decimal_str(raw["usd_price"])
+        applied_log: list[dict] = []
+        for it in state["effective_items"]:
+            if it["sku"] in by_sku:
+                it["usd_price"] = by_sku[it["sku"]]
+                applied_log.append({"sku": it["sku"], "usd_price": it["usd_price"]})
+        # Silent no-op for SKUs that didn't match.
+        unmatched = [s for s in by_sku if not any(it["sku"] == s for it in state["effective_items"])]
+        for s in unmatched:
+            log_entry["ignored"].append({"action": "sku_price_changes", "sku": s, "reason": "sku not in effective set"})
+        if applied_log:
+            log_entry["sku_price_changes"] = applied_log
+
+    if not state["effective_items"]:
+        return {
+            "error": True,
+            "message": "No SKUs left after removals. Use reset=true to start over, or add SKUs back.",
+        }
+
+    # 4. Currency ops
+    currencies_to_remove = overrides.get("currencies_to_remove") or []
+    if currencies_to_remove:
+        state["effective_currencies"] = [
+            c for c in state["effective_currencies"] if c not in set(currencies_to_remove)
+        ]
+        log_entry["currencies_to_remove"] = list(currencies_to_remove)
+
+    currencies_to_add = overrides.get("currencies_to_add") or []
+    # Validation handled by caller (needs fresh tenant config to check).
+
+    # 5. Replace-per-key dicts
+    for key in ("percent_uplift", "fx_rate_overrides", "vat_rate_overrides"):
+        incoming = overrides.get(key) or {}
+        if not incoming:
+            continue
+        target_key = {
+            "percent_uplift": "effective_uplift_by_currency",
+            "fx_rate_overrides": "effective_fx_overrides",
+            "vat_rate_overrides": "effective_vat_overrides",
+        }[key]
+        merged = dict(state.get(target_key) or {})
+        for cur, val in incoming.items():
+            merged[cur] = _to_decimal_str(val)
+        state[target_key] = merged
+        log_entry[key] = {k: _to_decimal_str(v) for k, v in incoming.items()}
+
+    rounding = overrides.get("rounding_overrides") or {}
+    if rounding:
+        merged_r = dict(state.get("effective_rounding_overrides") or {})
+        for cur, rule in rounding.items():
+            merged_r[cur] = str(rule)
+        state["effective_rounding_overrides"] = merged_r
+        log_entry["rounding_overrides"] = dict(rounding)
+
+    # Strip empty ignored if nothing was logged.
+    if not log_entry["ignored"]:
+        log_entry.pop("ignored")
+
+    state["applied_overrides_log"].append(log_entry)
+    return None
+
+
+def _compose_effective_config(
+    base_config: TenantPricingConfig,
+    *,
+    fx_overrides: dict[str, str],
+    vat_overrides: dict[str, str],
+    rounding_overrides: dict[str, str],
+    effective_currencies: list[str],
+) -> TenantPricingConfig:
+    """Return a new TenantPricingConfig with overrides applied + currencies filtered."""
+    base_dump = base_config.model_dump(mode="json")
+    filtered: dict[str, dict] = {}
+    for code, cc in base_dump["currencies"].items():
+        if code not in effective_currencies:
+            continue
+        cc_copy = dict(cc)
+        if code in fx_overrides:
+            cc_copy["fx_rate"] = fx_overrides[code]
+        if code in vat_overrides:
+            cc_copy["vat_rate"] = vat_overrides[code]
+        if code in rounding_overrides:
+            cc_copy["rounding_rule"] = rounding_overrides[code]
+        filtered[code] = cc_copy
+    base_dump["currencies"] = filtered
+    return TenantPricingConfig(**base_dump)
+
+
+def _state_uplift_to_decimals(uplift: dict[str, str]) -> dict[str, Decimal]:
+    out: dict[str, Decimal] = {}
+    for cur, val in (uplift or {}).items():
+        try:
+            out[cur] = Decimal(str(val))
+        except (InvalidOperation, ValueError, TypeError):
+            continue
+    return out
+
+
+async def pricing_revise_execute(params: dict, context: dict, **kwargs) -> dict:
+    """Apply override edits to the prior pricing run and regenerate outputs.
+
+    Reads the latest cached pricing payload, mutates effective_* state per the
+    spec's cumulative + replace-per-key rules, fetches a FRESH tenant config
+    every call (no stale FX from cache), runs the engine with the merged
+    uplift_by_currency, writes new Excel + NetSuite CSV outputs, and returns
+    a fresh pricing_state dict the orchestrator interceptor pipes back into
+    the cache.
+    """
+    if not context or not context.get("db") or not context.get("tenant_id"):
+        return {"error": True, "message": "Missing context — tenant_id and db are required."}
+    db = context["db"]
+    tenant_id = context["tenant_id"]
+    user_id = context.get("actor_id") or context.get("user_id")
+    conversation_id = context.get("conversation_id")
+    if not conversation_id:
+        return {"error": True, "message": "Missing conversation_id — pricing_revise needs a session-scoped cache."}
+
+    # 1. Read latest pricing payload from the typed cache.
+    cached = await get_latest_result_by_type(str(conversation_id), "pricing")
+    if not cached or not cached.payload:
+        return {"error": True, "message": _CACHE_MISS_MESSAGE}
+    state = dict(cached.payload)
+    state.setdefault("seed_items", [])
+    state.setdefault("effective_items", list(state["seed_items"]))
+    state.setdefault("effective_currencies", [])
+    state.setdefault("effective_fx_overrides", {})
+    state.setdefault("effective_vat_overrides", {})
+    state.setdefault("effective_rounding_overrides", {})
+    state.setdefault("effective_uplift_by_currency", {})
+    state.setdefault("applied_overrides_log", [])
+
+    # 2. Always fetch a FRESH tenant config (Spec D4 — never cache base config).
+    config_row = await get_config(db, tenant_id)
+    if not config_row:
+        return {"error": True, "message": "No pricing configuration found. Set up FX rates in Settings."}
+    current_config = TenantPricingConfig(**config_row.config)
+
+    overrides = params.get("overrides") or {}
+    reset = bool(params.get("reset"))
+
+    # 3. Reset path — drop accumulated overrides, restore effective_items from seed.
+    if reset:
+        state["effective_items"] = [dict(it) for it in state["seed_items"]]
+        state["effective_currencies"] = list(current_config.currencies.keys())
+        state["effective_fx_overrides"] = {}
+        state["effective_vat_overrides"] = {}
+        state["effective_rounding_overrides"] = {}
+        state["effective_uplift_by_currency"] = {}
+        state["applied_overrides_log"].append(
+            {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "reset": True,
+            }
+        )
+    else:
+        # 4a. Validate currencies_to_add against the FRESH config.
+        for cur in overrides.get("currencies_to_add") or []:
+            if cur not in current_config.currencies:
+                return {
+                    "error": True,
+                    "message": (
+                        f"Currency {cur} is not configured for this tenant. "
+                        "Add it in Settings → Pricing first, then retry."
+                    ),
+                }
+        # 4b. Apply overrides (mutates state, may return error dict).
+        err = _apply_overrides(state, overrides)
+        if err is not None:
+            return err
+        # 4c. Append currencies_to_add now (after validation passed).
+        for cur in overrides.get("currencies_to_add") or []:
+            if cur not in state["effective_currencies"]:
+                state["effective_currencies"].append(cur)
+
+    # 5. Compose the effective config for the engine call.
+    effective_config = _compose_effective_config(
+        current_config,
+        fx_overrides=state["effective_fx_overrides"],
+        vat_overrides=state["effective_vat_overrides"],
+        rounding_overrides=state["effective_rounding_overrides"],
+        effective_currencies=state["effective_currencies"],
+    )
+
+    # 6. Convert.
+    items = _items_from_state(state["effective_items"])
+    if not items:
+        return {
+            "error": True,
+            "message": "No SKUs left after removals. Use reset=true to start over, or add SKUs back.",
+        }
+    uplift_by_currency = _state_uplift_to_decimals(state["effective_uplift_by_currency"])
+    results = _engine.convert_batch(items, effective_config, uplift_by_currency=uplift_by_currency)
+
+    # 7. Generate output Excel (default 3-sheet workbook).
+    out_wb = _filler.generate_default_output(results)
+    buf = io.BytesIO()
+    out_wb.save(buf)
+    output_content = buf.getvalue()
+    suffix = int(time.time())
+
+    output_files: dict[str, str] = {}
+    excel_file = await _file_svc.save_output(
+        db=db,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        filename=f"pricing-revised-{len(items)}-skus-{suffix}.xlsx",
+        content=output_content,
+    )
+    output_files["excel"] = str(excel_file.id)
+
+    # 8. NetSuite CSV.
+    csv_str = _filler.generate_netsuite_csv(results)
+    csv_file = await _file_svc.save_output(
+        db=db,
+        tenant_id=tenant_id,
+        user_id=user_id,
+        filename=f"netsuite-import-revised-{len(items)}-skus-{suffix}.csv",
+        content=csv_str.encode("utf-8"),
+    )
+    output_files["netsuite_csv"] = str(csv_file.id)
+
+    # 9. Audit log — snapshot the FRESH config + the cumulative override log so
+    # the audit trail captures both the original seed run AND every revise's
+    # config-at-time-of-run.
+    snapshot = effective_config.model_dump(mode="json")
+    snapshot["applied_overrides_log"] = state["applied_overrides_log"]
+    db.add(
+        PricingConversionLog(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            input_file_id=None,
+            output_file_id=excel_file.id,
+            sku_count=len(items),
+            currency_count=len(effective_config.currencies),
+            config_snapshot=snapshot,
+        )
+    )
+
+    # 10. Update the pricing_state to reflect the new outputs.
+    state["excel_file_id"] = str(excel_file.id)
+    state["netsuite_csv_file_id"] = str(csv_file.id)
+    state["row_count"] = len(items)
+    state["header_columns"] = ["SKU", "Item Name", "USD", *sorted(state["effective_currencies"])]
+
+    return {
+        "success": True,
+        "sku_count": len(items),
+        "currency_count": len(effective_config.currencies),
+        "output_files": output_files,
+        "preview": _build_preview(results),
+        "pricing_state": state,
+        "template_mode": False,
+    }
+
+
+# Suppress unused-import warning — CurrencyConfig is referenced indirectly via
+# TenantPricingConfig serialization.
+_ = CurrencyConfig

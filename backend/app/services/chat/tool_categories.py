@@ -11,7 +11,17 @@ from __future__ import annotations
 
 from typing import Literal
 
-Category = Literal["financial", "data_table", "bigquery", "rag", "workspace", "mutation", "sheets", "other"]
+Category = Literal[
+    "financial",
+    "data_table",
+    "bigquery",
+    "rag",
+    "workspace",
+    "mutation",
+    "sheets",
+    "pricing",
+    "other",
+]
 
 _EXACT: dict[str, Category] = {
     "netsuite_suiteql": "data_table",
@@ -40,6 +50,16 @@ _EXACT: dict[str, Category] = {
     "docs.create": "sheets",
     "drive.read_doc": "rag",
     "drive_read_doc": "rag",
+    "pricing_convert": "pricing",
+    "pricing.convert": "pricing",
+    "pricing_export": "pricing",
+    "pricing.export": "pricing",
+    "pricing_revise": "pricing",
+    "pricing.revise": "pricing",
+    "pricing_config_read": "pricing",
+    "pricing.config_read": "pricing",
+    "pricing_config_update": "pricing",
+    "pricing.config_update": "pricing",
 }
 
 
