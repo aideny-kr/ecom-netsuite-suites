@@ -1,0 +1,41 @@
+# Pricing revise after an unrelated turn.
+#
+# Verifies that get_latest_result_by_type("pricing") returns the latest
+# pricing entry even when a different result_type (suiteql / bigquery) is
+# more recent. This is the regression case that motivated the per-type
+# pinning eviction policy in result_cache.py — without it, a SuiteQL turn
+# between two pricing turns would silently evict the pricing payload.
+#
+# Single-turn note: the runner does not yet support multi-turn cases, so
+# the cache is empty when this case runs standalone. The cache-eviction
+# behavior is verified at the unit-test level
+# (test_result_cache.py::TestEvictionPinsLatestPerType). This case
+# documents the integration intent so that when multi-turn benchmark
+# support lands, the test scenario is already encoded. CI gate runs
+# --suite sales only — invoke manually via --case
+# pricing_revise_after_unrelated_turn.
+
+case_id: pricing_revise_after_unrelated_turn
+query: "increase GBP by 5%"
+tags: ["pricing", "followup", "uplift", "cache-eviction"]
+notes: |
+  In a real conversation:
+    Turn 1: "convert these prices: SKU-1 $100, SKU-2 $200" → pricing_export
+    Turn 2: "what was our total revenue last month" → SuiteQL
+    Turn 3: "increase GBP by 5%" → pricing_revise (this case)
+  The agent must call pricing_revise (NOT re-ask for the upload) and
+  pricing_revise must find the pricing entry via get_latest_result_by_type
+  even though the SuiteQL turn is more recent.
+
+  Standalone, the cache is empty so the tool returns the cache-miss error.
+  Per-type pinning is verified directly in
+  test_result_cache.py::TestEvictionPinsLatestPerType.
+expected_answer_contains:
+  - "pricing"
+expected_tools:
+  - "pricing_revise"
+expected_accuracy: 0.5
+max_cost: 0.50
+max_latency_ms: 120000
+baseline_expected_accuracy: 0.0
+baseline_expected_tools: []

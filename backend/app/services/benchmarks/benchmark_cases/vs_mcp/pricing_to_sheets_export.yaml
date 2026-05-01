@@ -1,0 +1,31 @@
+# Pricing → Google Sheets export.
+#
+# Verifies the agent picks pricing_to_sheets (NOT manual sheets_create +
+# sheets_write_range composition). pricing_to_sheets reads the cached
+# pricing state server-side and writes the FULL row set; the manual
+# composition would require the LLM to pass row data through tool
+# arguments — a fast path to LLM-rounded numbers (CLAUDE.md Mistakes #41).
+#
+# Single-turn note: the runner does not yet support multi-turn cases, so
+# the cache is empty and the tool returns a clear "no pricing run" error.
+# The benchmark verifies the agent reaches for pricing_to_sheets first,
+# not for sheets_create + sheets_write_range. CI gate runs --suite sales
+# only — invoke manually via --case pricing_to_sheets_export.
+
+case_id: pricing_to_sheets_export
+query: "export the pricing to a Google Sheet"
+tags: ["pricing", "sheets", "export", "knowledge-profile"]
+notes: |
+  Tests that the pricing knowledge profile teaches the agent to prefer
+  pricing_to_sheets over a manual sheets_create + sheets_write_range
+  composition. Manual composition would force the LLM to pass row data
+  through tool arguments, which violates the "no LLM numbers" rule.
+expected_answer_contains:
+  - "pricing"
+expected_tools:
+  - "pricing_to_sheets"
+expected_accuracy: 0.5
+max_cost: 0.50
+max_latency_ms: 120000
+baseline_expected_accuracy: 0.0
+baseline_expected_tools: []
