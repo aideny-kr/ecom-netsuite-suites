@@ -169,6 +169,31 @@ def test_augmentation_skips_netsuite_split_when_only_netsuite():
     assert "window" in lower or "scope" in lower or "metric" in lower
 
 
+def test_augmentation_includes_pnl_escape_hatch():
+    """Smoke v1+v2+v3 (2026-04-30): net income / EBITDA / operating income
+    consistently force a fake BigQuery option ("BQ checkout-based operating
+    margin") because BQ doesn't have OpEx/D&A. Retained earnings + burn rate
+    correctly stayed all-NS, proving the model can avoid fake cross-source
+    when nudged. The escape hatch tells it explicitly: for income-statement
+    P&L metrics with no honest cross-source view, prefer within-NS variation.
+    """
+    prompt = build_augmentation_prompt(connected_sources=["netsuite", "bigquery", "stripe"])
+    lower = prompt.lower()
+    # Must explicitly cover income-statement / P&L territory
+    assert "income statement" in lower or "p&l" in lower or "income-statement" in lower
+    # Must mention the within-NS fallback (consolidated/subsidiary/department/etc.)
+    assert "consolidated" in lower or "subsidiary" in lower or "department" in lower or "within-netsuite" in lower
+    # Must steer away from forced cross-source when no honest view exists
+    assert (
+        "no honest" in lower
+        or "no meaningful" in lower
+        or "weak cross-source" in lower
+        or "rather than forcing" in lower
+        or "rather than force" in lower
+        or "instead of forcing" in lower
+    )
+
+
 from app.services.chat.plan_mode.ambiguity_signal import maybe_augment_for_plan_mode
 
 

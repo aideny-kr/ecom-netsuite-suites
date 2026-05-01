@@ -42,7 +42,16 @@ Your ONLY allowed first action is a single `clarify` tool call. You MUST NOT
 call any data tool in the same turn. The user's choice arrives on the next
 turn."""
 
-_AUGMENTATION_TRAILER = """In `ambiguity_summary`, write a one-sentence framing in your own voice that
+_AUGMENTATION_TRAILER = """ESCAPE HATCH — income-statement / P&L items: when the metric is net income,
+operating income, EBITDA, gross margin, or similar income-statement P&L items,
+there is usually NO honest cross-source view (BigQuery has checkout revenue but
+no OpEx, no D&A, no tax — Stripe has fees but no GAAP costs). For these
+metrics, prefer within-NetSuite variation (consolidated vs subsidiary, with vs
+without one-time items, by department/class) rather than forcing a weak
+cross-source option. Cross-source belongs on top-line metrics (revenue, GMV,
+sales) where the sources actually disagree about the same number.
+
+In `ambiguity_summary`, write a one-sentence framing in your own voice that
 NAMES THE DEFAULT REASON. Example: "I'm picking NetSuite GL by default because
 that's recognized revenue — if you want pre-refund checkout dollars, B is right."
 
