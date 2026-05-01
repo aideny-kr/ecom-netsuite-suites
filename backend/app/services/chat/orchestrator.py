@@ -931,8 +931,107 @@ def _intercept_tool_result(
     return None, None, result_str
 
 
+_NON_DATA_EVENTS = frozenset({"sheets_link", "docs_link"})
+
+
+def _build_intercept_cache_entry(
+    *,
+    tool_name: str,
+    event_type_str: str,
+    event_data: dict,
+    conversation_id: str,
+):
+    """Build the CachedResult for an intercepted tool event, or return None
+    when the event should not write to the cache (e.g., sheets_link).
+
+    Lazy-imports CachedResult to avoid the orchestrator-level circular import
+    chain. Used by both the unified-agent intercept callback and the legacy
+    single-agent intercept site so pricing follow-ups (pricing_revise /
+    pricing_to_sheets) work in either path.
+    """
+    if event_type_str in _NON_DATA_EVENTS:
+        return None
+    from app.services.chat.result_cache import CachedResult
+
+    if tool_name in _PRICING_WRITE_TOOLS:
+        result_type = "pricing"
+        payload = event_data.get("pricing_state")
+    else:
+        result_type = (
+            "financial_report"
+            if event_type_str == "financial_report"
+            else "bigquery"
+            if _is_bigquery_tool(tool_name)
+            else "suiteql"
+        )
+        payload = None
+    synthetic_id = f"pending-{uuid.uuid4().hex[:12]}"
+    return CachedResult(
+        message_id=synthetic_id,
+        conversation_id=conversation_id,
+        result_type=result_type,
+        columns=event_data.get("columns", []),
+        rows=event_data.get("rows", []),
+        row_count=event_data.get("row_count", 0),
+        summary=event_data.get("summary"),
+        query_text=event_data.get("query", ""),
+        payload=payload,
+    )
+
+
+def _strip_cache_only_fields_from_sse(event_data: dict) -> dict:
+    """Remove cache-only fields (e.g., pricing_state) before yielding to SSE.
+
+    pricing_state can carry the full seed_items / effective_items list for a
+    5K-SKU catalog (~150KB JSON). The frontend only renders the preview; the
+    cache callback already has the full payload.
+    """
+    if "pricing_state" in event_data:
+        return {k: v for k, v in event_data.items() if k != "pricing_state"}
+    return event_data
+
+
+def _intercept_with_cache(
+    tool_name: str,
+    result_str: str,
+    *,
+    context_need: str,
+    session_id: str | None,
+) -> tuple[str | None, dict | None, str]:
+    """Intercept a tool result, write to the cache (when applicable), and
+    return the SSE-safe event data with cache-only fields stripped. Both
+    the legacy single-agent path and the unified-agent path use this so
+    pricing_revise / pricing_to_sheets see the prior pricing_state in
+    either flow."""
+    from app.services.chat.result_cache import _cache_result_sync
+
+    event_type, event_data, new_result_str = _intercept_tool_result(
+        tool_name, result_str, context_need=context_need
+    )
+    if event_type is None or event_data is None:
+        return event_type, event_data, new_result_str
+
+    if session_id:
+        cr = _build_intercept_cache_entry(
+            tool_name=tool_name,
+            event_type_str=event_type,
+            event_data=event_data,
+            conversation_id=session_id,
+        )
+        if cr is not None:
+            _cache_result_sync(session_id, cr.message_id, cr)
+
+    return event_type, _strip_cache_only_fields_from_sse(event_data), new_result_str
+
+
 def _make_tool_interceptor(context_need: str = ContextNeed.DATA, cache_callback=None):
-    """Create a tool interceptor closure that captures context_need."""
+    """Create a tool interceptor closure that captures context_need.
+
+    The unified-agent path passes a ``cache_callback`` so it can also
+    accumulate ``_pending_caches`` for the assistant-message alias write
+    after the agent loop. The shared cache write lives in
+    ``_build_intercept_cache_entry`` so the legacy path stays in sync.
+    """
 
     def interceptor(tool_name: str, result_str: str) -> tuple[tuple[str, dict] | None, str]:
         event_type, event_data, new_result_str = _intercept_tool_result(
@@ -941,13 +1040,7 @@ def _make_tool_interceptor(context_need: str = ContextNeed.DATA, cache_callback=
         if event_type is not None and event_data is not None:
             if cache_callback:
                 cache_callback(tool_name, event_type, event_data)
-            # Strip cache-only fields before yielding to SSE — pricing_state can
-            # carry the full seed_items / effective_items for a 5K-SKU catalog.
-            # The frontend renders only the preview; the cache callback above
-            # already received the full payload.
-            if "pricing_state" in event_data:
-                event_data = {k: v for k, v in event_data.items() if k != "pricing_state"}
-            return (event_type, event_data), new_result_str
+            return (event_type, _strip_cache_only_fields_from_sse(event_data)), new_result_str
         return None, new_result_str
 
     return interceptor
@@ -2395,50 +2488,24 @@ async def run_chat_turn(
                     # Same-turn follow-ups (e.g. pricing_export → pricing_to_sheets in
                     # one assistant message) need to read each other's writes via
                     # get_latest_result_by_type before the agent loop completes — a
-                    # deferred flush would always show them stale data.
+                    # deferred flush would always show them stale data. Each entry
+                    # gets a unique synthetic id so multiple tool calls within one
+                    # turn don't collide on a shared message_id; an alias under
+                    # assistant_msg.id is added at flush time below for
+                    # reference_previous_result(message_id=...) lookups.
                     _pending_caches: list[CachedResult] = []
-                    # Non-data SSE events that must NEVER write a cache entry —
-                    # otherwise they create empty placeholder rows that overwrite
-                    # the real pricing payload at flush time.
-                    _NON_DATA_EVENTS = frozenset({"sheets_link", "docs_link"})
 
                     def _on_tool_intercepted(tool_name: str, event_type_str: str, event_data: dict):
-                        if event_type_str in _NON_DATA_EVENTS:
-                            return
-                        # Pricing-write tools persist a typed pricing_state payload
-                        # that pricing_revise + pricing_to_sheets read on follow-ups.
-                        # pricing_to_sheets is intentionally NOT in this set — it's
-                        # a read-only consumer.
-                        if tool_name in _PRICING_WRITE_TOOLS:
-                            result_type = "pricing"
-                            payload = event_data.get("pricing_state")
-                        else:
-                            result_type = (
-                                "financial_report"
-                                if event_type_str == "financial_report"
-                                else "bigquery"
-                                if _is_bigquery_tool(tool_name)
-                                else "suiteql"
-                            )
-                            payload = None
-                        # Each intercept gets a unique synthetic id so multiple
-                        # tool calls within one turn don't collide on a shared
-                        # message_id (prior code used "pending" for every entry —
-                        # the second write would overwrite the first in Redis).
-                        synthetic_id = f"pending-{uuid.uuid4().hex[:12]}"
-                        cr = CachedResult(
-                            message_id=synthetic_id,
+                        cr = _build_intercept_cache_entry(
+                            tool_name=tool_name,
+                            event_type_str=event_type_str,
+                            event_data=event_data,
                             conversation_id=str(session.id),
-                            result_type=result_type,
-                            columns=event_data.get("columns", []),
-                            rows=event_data.get("rows", []),
-                            row_count=event_data.get("row_count", 0),
-                            summary=event_data.get("summary"),
-                            query_text=event_data.get("query", ""),
-                            payload=payload,
                         )
+                        if cr is None:
+                            return
                         # Eager write so same-turn follow-ups can read it.
-                        _cache_result_sync(str(session.id), synthetic_id, cr)
+                        _cache_result_sync(str(session.id), cr.message_id, cr)
                         _pending_caches.append(cr)
 
                     # Emit Drive source map once per turn so the frontend can resolve
@@ -2897,9 +2964,15 @@ async def run_chat_turn(
                                 pass  # Non-JSON result, skip redaction
 
                 # Intercept data tool results: emit SSE event with full data,
-                # condense result_str to summary-only for the LLM.
-                intercept_type, intercept_data, result_str = _intercept_tool_result(
-                    block.name, result_str, context_need=ContextNeed.FULL
+                # condense result_str to summary-only for the LLM. Routed
+                # through _intercept_with_cache so pricing follow-up tools
+                # (pricing_revise / pricing_to_sheets) can read the cached
+                # pricing_state in this single-agent / legacy path too.
+                intercept_type, intercept_data, result_str = _intercept_with_cache(
+                    block.name,
+                    result_str,
+                    context_need=ContextNeed.FULL,
+                    session_id=str(session.id),
                 )
                 if intercept_type is not None:
                     last_structured_output = {"type": intercept_type, "data": intercept_data}

@@ -176,34 +176,132 @@ class TestSheetsLinkDoesNotPolluteCache:
     NOT generate a junk 'suiteql' cache entry that overwrites the pricing
     payload at flush time."""
 
-    def test_sheets_link_event_does_not_create_cache_entry(self):
-        """Static check: the cache callback must skip non-data SSE events."""
-        import inspect
+    def test_build_intercept_cache_entry_returns_none_for_sheets_link(self):
+        """The shared cache-entry builder used by both intercept paths must
+        skip non-data SSE events (sheets_link, docs_link) so they don't
+        create empty placeholder rows that overwrite the real pricing payload.
+        """
+        from app.services.chat.orchestrator import _build_intercept_cache_entry
 
-        from app.services.chat import orchestrator
+        cr = _build_intercept_cache_entry(
+            tool_name="pricing_to_sheets",
+            event_type_str="sheets_link",
+            event_data={"url": "https://docs.google.com/...", "spreadsheet_id": "ss"},
+            conversation_id="conv-1",
+        )
+        assert cr is None
 
-        source = inspect.getsource(orchestrator)
-        # _on_tool_intercepted must explicitly filter out sheets_link / docs_link.
-        # Either by name listing, or by an early-return.
-        assert "sheets_link" in source and "docs_link" in source, (
-            "_on_tool_intercepted must reference sheets_link and docs_link to skip them"
+    def test_build_intercept_cache_entry_returns_none_for_docs_link(self):
+        from app.services.chat.orchestrator import _build_intercept_cache_entry
+
+        cr = _build_intercept_cache_entry(
+            tool_name="docs_create",
+            event_type_str="docs_link",
+            event_data={"url": "https://docs.google.com/document/...", "doc_id": "d"},
+            conversation_id="conv-1",
+        )
+        assert cr is None
+
+    def test_build_intercept_cache_entry_returns_pricing_for_pricing_revise(self):
+        from app.services.chat.orchestrator import _build_intercept_cache_entry
+
+        cr = _build_intercept_cache_entry(
+            tool_name="pricing_revise",
+            event_type_str="task_output",
+            event_data={
+                "preview": [],
+                "pricing_state": {"excel_file_id": "f1", "row_count": 5},
+            },
+            conversation_id="conv-1",
+        )
+        assert cr is not None
+        assert cr.result_type == "pricing"
+        assert cr.payload == {"excel_file_id": "f1", "row_count": 5}
+        assert cr.message_id.startswith("pending-")
+
+
+class TestLegacyPathCachesPricing:
+    """Codex review finding: the single-agent / legacy intercept site (orch
+    line ~2820) historically called _intercept_tool_result directly and
+    skipped the cache callback entirely. After the refactor, both paths
+    route through _intercept_with_cache so pricing_revise / pricing_to_sheets
+    work in either flow.
+    """
+
+    def test_intercept_with_cache_writes_pricing_state(self):
+        from unittest.mock import MagicMock, patch
+
+        from app.services.chat.orchestrator import _intercept_with_cache
+
+        captured: dict = {}
+
+        def _fake_cache_write(conversation_id, message_id, cr):
+            captured["conversation_id"] = conversation_id
+            captured["message_id"] = message_id
+            captured["cr"] = cr
+
+        result_str = json.dumps(
+            {
+                "success": True,
+                "sku_count": 2,
+                "currency_count": 3,
+                "output_files": {"excel": "f1", "netsuite_csv": "f2"},
+                "preview": [{"SKU": "X", "USD": 100.0, "GBP": 99.0}],
+                "template_mode": False,
+                "pricing_state": {"excel_file_id": "f1", "row_count": 2},
+            }
         )
 
-    def test_pricing_to_sheets_in_skipped_event_set(self):
-        """Verify the cache-skip logic exists for pricing_to_sheets's SSE event."""
-        import inspect
+        with patch(
+            "app.services.chat.result_cache._cache_result_sync",
+            new=_fake_cache_write,
+        ):
+            event_type, sse_event_data, _ = _intercept_with_cache(
+                "pricing_revise",
+                result_str,
+                context_need="data",
+                session_id="conv-legacy",
+            )
 
-        from app.services.chat import orchestrator
+        # Cache write happened with full pricing_state.
+        assert captured.get("conversation_id") == "conv-legacy"
+        cr = captured["cr"]
+        assert cr.result_type == "pricing"
+        assert cr.payload == {"excel_file_id": "f1", "row_count": 2}
+        # SSE event stripped pricing_state.
+        assert event_type == "task_output"
+        assert "pricing_state" not in sse_event_data
 
-        source = inspect.getsource(orchestrator)
-        # Locate _on_tool_intercepted and verify it has an early-return / skip
-        # branch for non-data events.
-        idx = source.index("_on_tool_intercepted")
-        body_window = source[idx : idx + 2500]
-        # The skip logic must reference "sheets_link" or use _NON_DATA_EVENTS.
-        assert ("sheets_link" in body_window) or ("_NON_DATA_EVENTS" in body_window), (
-            "_on_tool_intercepted must skip sheets_link / docs_link events"
+    def test_intercept_with_cache_skips_when_no_session(self):
+        from unittest.mock import patch
+
+        from app.services.chat.orchestrator import _intercept_with_cache
+
+        called = {"flag": False}
+
+        def _spy(*args, **kwargs):
+            called["flag"] = True
+
+        result_str = json.dumps(
+            {
+                "success": True,
+                "sku_count": 1,
+                "currency_count": 1,
+                "output_files": {},
+                "preview": [],
+                "template_mode": False,
+                "pricing_state": {"excel_file_id": "f", "row_count": 1},
+            }
         )
+        with patch("app.services.chat.result_cache._cache_result_sync", new=_spy):
+            _intercept_with_cache(
+                "pricing_revise",
+                result_str,
+                context_need="data",
+                session_id=None,
+            )
+        # No session → no cache write.
+        assert called["flag"] is False
 
 
 class TestSameTurnPricingStateRead:
