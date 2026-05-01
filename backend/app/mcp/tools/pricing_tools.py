@@ -17,9 +17,16 @@ from app.schemas.pricing import (
     PricingInput,
     TenantPricingConfig,
 )
+from app.core.encryption import decrypt_credentials
 from app.services.chat.result_cache import get_latest_result_by_type
+from app.mcp.tools.sheets_tools import _get_sheets_connector, _get_user_email
 from app.services.pricing_config_service import get_config, upsert_config
 from app.services.pricing_engine import PricingEngine
+from app.services.sheets_service import (
+    create_spreadsheet,
+    share_spreadsheet,
+    write_range,
+)
 from app.services.task_file_service import TaskFileService
 from app.services.template_filler import TemplateFiller
 
@@ -704,3 +711,123 @@ async def pricing_revise_execute(params: dict, context: dict, **kwargs) -> dict:
 # Suppress unused-import warning — CurrencyConfig is referenced indirectly via
 # TenantPricingConfig serialization.
 _ = CurrencyConfig
+
+
+# ---------------------------------------------------------------------------
+# pricing_to_sheets — export the latest pricing run to a new Google Sheet
+# ---------------------------------------------------------------------------
+
+
+_SHEETS_CONNECTOR_MISSING = (
+    "Google Sheets connector not configured. Set it up in Settings → Connectors first."
+)
+_PRICING_NOT_RUN_FOR_SHEETS = (
+    "No pricing run in this conversation yet. Run pricing_convert (with an upload) "
+    "or pricing_export (with inline items) first, then export to Sheets."
+)
+
+
+def _parse_excel_to_sheets_data(content: bytes) -> list[list]:
+    """Re-parse a saved pricing Excel into [headers, *rows] for sheets.write_range.
+
+    The default 3-sheet workbook has the row-data on the active sheet (Prices).
+    Empty trailing cells are preserved as None to keep the column count stable.
+    """
+    wb = load_workbook(io.BytesIO(content), data_only=True)
+    ws = wb.active
+    rows: list[list] = []
+    for row in ws.iter_rows(values_only=True):
+        # Trim purely empty trailing rows.
+        if all(cell is None or (isinstance(cell, str) and not cell.strip()) for cell in row):
+            continue
+        rows.append(list(row))
+    return rows
+
+
+async def pricing_to_sheets_execute(params: dict, context: dict, **kwargs) -> dict:
+    """Export the most recent pricing result to a new Google Sheet.
+
+    Read-only consumer — calls get_latest_result_by_type("pricing"), re-parses
+    the cached Excel file via TaskFileService, and writes the full row set to
+    a new spreadsheet. The LLM never sees the rows. Connector check FIRST so
+    the user gets the right setup-vs-session error.
+    """
+    if not context or not context.get("db") or not context.get("tenant_id"):
+        return {"error": True, "message": "Missing context — tenant_id and db are required."}
+    db = context["db"]
+    tenant_id = context["tenant_id"]
+    conversation_id = context.get("conversation_id")
+    if not conversation_id:
+        return {"error": True, "message": "Missing conversation_id — pricing_to_sheets needs a session-scoped cache."}
+
+    # 1. Connector first.
+    connector = await _get_sheets_connector(context)
+    if not connector:
+        return {"error": True, "message": _SHEETS_CONNECTOR_MISSING}
+
+    # 2. Cache lookup.
+    cached = await get_latest_result_by_type(str(conversation_id), "pricing")
+    if not cached or not cached.payload:
+        return {"error": True, "message": _PRICING_NOT_RUN_FOR_SHEETS}
+    payload = cached.payload
+    excel_file_id = payload.get("excel_file_id")
+    if not excel_file_id:
+        return {"error": True, "message": "Cached pricing payload is missing excel_file_id."}
+
+    # 3. Re-parse the saved Excel into a 2D array.
+    try:
+        _task_file, content = await _file_svc.get_file(db, tenant_id, uuid.UUID(excel_file_id))
+    except (ValueError, FileNotFoundError) as e:
+        return {
+            "error": True,
+            "message": (
+                "The Excel file from the prior pricing run is no longer available "
+                f"({e}). Re-run pricing_convert / pricing_export and try again."
+            ),
+        }
+    data_rows = _parse_excel_to_sheets_data(content)
+    if not data_rows:
+        return {"error": True, "message": "Excel file is empty — nothing to export."}
+
+    # 4. Create + write + (optionally) share.
+    credentials_envelope = decrypt_credentials(connector.encrypted_credentials)
+    credentials = credentials_envelope.get("service_account_json", credentials_envelope)
+    shared_drive_id = (connector.metadata_json or {}).get("shared_drive_id")
+
+    title = params.get("title") or f"Pricing Export — {datetime.now(timezone.utc).strftime('%Y-%m-%d')}"
+
+    create_result = await create_spreadsheet(
+        credentials=credentials,
+        title=title,
+        shared_drive_id=shared_drive_id,
+    )
+    spreadsheet_id = create_result["spreadsheet_id"]
+    url = create_result["url"]
+
+    await write_range(
+        credentials=credentials,
+        spreadsheet_id=spreadsheet_id,
+        data=data_rows,
+        range_str="Sheet1!A1",
+    )
+
+    if not shared_drive_id:
+        user_email = await _get_user_email(context)
+        if user_email:
+            try:
+                await share_spreadsheet(
+                    credentials=credentials,
+                    spreadsheet_id=spreadsheet_id,
+                    email=user_email,
+                )
+            except Exception:
+                # Don't fail the export if share fails — user still has the URL.
+                pass
+
+    return {
+        "success": True,
+        "spreadsheet_id": spreadsheet_id,
+        "url": url,
+        "title": title,
+        "sku_count": payload.get("row_count", max(0, len(data_rows) - 1)),
+    }

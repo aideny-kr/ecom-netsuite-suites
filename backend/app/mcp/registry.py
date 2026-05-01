@@ -685,6 +685,23 @@ TOOL_REGISTRY = {
             },
         },
     },
+    "pricing.to_sheets": {
+        "description": (
+            "Export the most recent pricing result to a new Google Sheet. Use when "
+            "the user asks to export, share, or send pricing to a Sheet. Reads the "
+            "cached pricing state server-side — does NOT need row data passed in. "
+            "Returns the spreadsheet URL. The Excel + NetSuite CSV downloads from the "
+            "prior pricing run are preserved separately."
+        ),
+        "execute": pricing_tools.pricing_to_sheets_execute,
+        "params_schema": {
+            "title": {
+                "type": "string",
+                "required": False,
+                "description": "Optional spreadsheet title. Defaults to 'Pricing Export — <YYYY-MM-DD>'.",
+            },
+        },
+    },
     "pricing.revise": {
         "description": (
             "Revise the most recent pricing result with the requested overrides and "

@@ -60,6 +60,8 @@ _EXACT: dict[str, Category] = {
     "pricing.config_read": "pricing",
     "pricing_config_update": "pricing",
     "pricing.config_update": "pricing",
+    "pricing_to_sheets": "pricing",
+    "pricing.to_sheets": "pricing",
 }
 
 
