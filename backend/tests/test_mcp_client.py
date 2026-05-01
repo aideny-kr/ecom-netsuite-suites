@@ -53,6 +53,8 @@ EXPECTED_TOOLS = {
     "pricing.config_read",
     "pricing.config_update",
     "pricing.export",
+    "pricing.revise",
+    "pricing.to_sheets",
     "recon.approve_match",
     "recon.get_exceptions",
     "recon.get_evidence",

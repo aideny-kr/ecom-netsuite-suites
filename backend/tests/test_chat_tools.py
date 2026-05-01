@@ -266,7 +266,7 @@ class TestCategoryStamping:
 
         tools = build_local_tool_definitions()
         assert tools, "build_local_tool_definitions returned no tools"
-        valid = {"financial", "data_table", "bigquery", "rag", "workspace", "mutation", "sheets", "other"}
+        valid = {"financial", "data_table", "bigquery", "rag", "workspace", "mutation", "sheets", "pricing", "other"}
         for t in tools:
             name = t.get("name", "")
             category = categorize(name)

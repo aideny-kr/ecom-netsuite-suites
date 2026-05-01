@@ -47,6 +47,8 @@ class TestAllowedChatTools:
             "pricing.convert",
             "pricing.config_read",
             "pricing.export",
+            "pricing.revise",
+            "pricing.to_sheets",
             "sheets.create",
             "sheets.write_range",
             "sheets.read_range",
