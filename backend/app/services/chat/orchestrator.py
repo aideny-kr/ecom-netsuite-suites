@@ -568,6 +568,21 @@ def _is_bigquery_tool(tool_name: str) -> bool:
     return categorize(tool_name) == "bigquery"
 
 
+# Pricing tools that WRITE the typed pricing cache entry (CachedResult.payload).
+# pricing_to_sheets is intentionally absent — it's a read-only consumer that
+# reads the latest pricing entry via get_latest_result_by_type.
+_PRICING_WRITE_TOOLS = frozenset(
+    {
+        "pricing_convert",
+        "pricing.convert",
+        "pricing_export",
+        "pricing.export",
+        "pricing_revise",
+        "pricing.revise",
+    }
+)
+
+
 _SAVED_SEARCH_TOOLS = frozenset({"netsuite.saved_search", "netsuite_saved_search"})
 
 
@@ -800,8 +815,15 @@ def _intercept_tool_result(
         )
         return "data_table", sse_event_data, condensed
 
-    # --- Task output path (pricing conversion, etc.) ---
-    if tool_name in ("pricing_convert", "pricing.convert", "pricing_export", "pricing.export"):
+    # --- Task output path (pricing conversion + revise) ---
+    if tool_name in (
+        "pricing_convert",
+        "pricing.convert",
+        "pricing_export",
+        "pricing.export",
+        "pricing_revise",
+        "pricing.revise",
+    ):
         try:
             parsed = json.loads(result_str)
         except (json.JSONDecodeError, TypeError):
@@ -816,6 +838,10 @@ def _intercept_tool_result(
             "output_files": parsed.get("output_files", {}),
             "preview": parsed.get("preview", []),
             "template_mode": parsed.get("template_mode", False),
+            # pricing_state is consumed by the cache callback (orchestrator
+            # writes it as the typed CachedResult.payload). The frontend
+            # ignores unknown keys.
+            "pricing_state": parsed.get("pricing_state"),
         }
         condensed = json.dumps(
             {
@@ -834,8 +860,13 @@ def _intercept_tool_result(
         )
         return "task_output", sse_event_data, condensed
 
-    # --- Sheets link path ---
-    if tool_name in ("sheets_create", "sheets.create"):
+    # --- Sheets link path (sheets_create + pricing_to_sheets) ---
+    if tool_name in (
+        "sheets_create",
+        "sheets.create",
+        "pricing_to_sheets",
+        "pricing.to_sheets",
+    ):
         try:
             parsed = json.loads(result_str)
         except (json.JSONDecodeError, TypeError):
@@ -2354,13 +2385,22 @@ async def run_chat_turn(
                     _pending_caches: list[CachedResult] = []
 
                     def _on_tool_intercepted(tool_name: str, event_type_str: str, event_data: dict):
-                        result_type = (
-                            "financial_report"
-                            if event_type_str == "financial_report"
-                            else "bigquery"
-                            if _is_bigquery_tool(tool_name)
-                            else "suiteql"
-                        )
+                        # Pricing-write tools persist a typed pricing_state payload
+                        # that pricing_revise + pricing_to_sheets read on follow-ups.
+                        # pricing_to_sheets is intentionally NOT in this set — it's
+                        # a read-only consumer.
+                        if tool_name in _PRICING_WRITE_TOOLS:
+                            result_type = "pricing"
+                            payload = event_data.get("pricing_state")
+                        else:
+                            result_type = (
+                                "financial_report"
+                                if event_type_str == "financial_report"
+                                else "bigquery"
+                                if _is_bigquery_tool(tool_name)
+                                else "suiteql"
+                            )
+                            payload = None
                         _pending_caches.append(
                             CachedResult(
                                 message_id="pending",
@@ -2371,6 +2411,7 @@ async def run_chat_turn(
                                 row_count=event_data.get("row_count", 0),
                                 summary=event_data.get("summary"),
                                 query_text=event_data.get("query", ""),
+                                payload=payload,
                             )
                         )
 
