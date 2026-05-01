@@ -941,6 +941,12 @@ def _make_tool_interceptor(context_need: str = ContextNeed.DATA, cache_callback=
         if event_type is not None and event_data is not None:
             if cache_callback:
                 cache_callback(tool_name, event_type, event_data)
+            # Strip cache-only fields before yielding to SSE — pricing_state can
+            # carry the full seed_items / effective_items for a 5K-SKU catalog.
+            # The frontend renders only the preview; the cache callback above
+            # already received the full payload.
+            if "pricing_state" in event_data:
+                event_data = {k: v for k, v in event_data.items() if k != "pricing_state"}
             return (event_type, event_data), new_result_str
         return None, new_result_str
 

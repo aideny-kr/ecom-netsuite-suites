@@ -122,6 +122,54 @@ class TestPricingToSheetsEmitsSheetsLink:
         assert event_data is None
 
 
+class TestPricingStateStrippedFromSSE:
+    """Codex review finding: ``pricing_state`` carries the full seed_items /
+    effective_items list (~150KB on a 5K-SKU catalog). The frontend only
+    needs the preview to render the task_output card. Yielding pricing_state
+    over SSE inflates the payload AND ends up persisted in chat
+    structured_output. The cache callback gets the full payload; SSE gets
+    a stripped copy.
+    """
+
+    def test_make_tool_interceptor_strips_pricing_state_from_sse(self):
+        from app.services.chat.orchestrator import _make_tool_interceptor
+
+        captured: dict = {}
+
+        def _cache_cb(tool_name, event_type_str, event_data):
+            # Cache callback must see the FULL payload (pricing_state included).
+            captured["cache_event_data"] = dict(event_data)
+
+        interceptor = _make_tool_interceptor(cache_callback=_cache_cb)
+
+        result_str = json.dumps(
+            {
+                "success": True,
+                "sku_count": 2,
+                "currency_count": 3,
+                "output_files": {"excel": "f1", "netsuite_csv": "f2"},
+                "preview": [{"SKU": "X", "USD": 100.0, "GBP": 99.0}],
+                "template_mode": False,
+                "pricing_state": {
+                    "seed_items": [{"sku": "X", "usd_price": "100", "item_name": None}],
+                    "effective_items": [{"sku": "X", "usd_price": "100", "item_name": None}],
+                    "excel_file_id": "f1",
+                    "row_count": 2,
+                },
+            }
+        )
+        sse_tuple, _ = interceptor("pricing_revise", result_str)
+        assert sse_tuple is not None
+        sse_event_type, sse_event_data = sse_tuple
+        # Cache callback got pricing_state.
+        assert "pricing_state" in captured["cache_event_data"]
+        # SSE event data did NOT.
+        assert "pricing_state" not in sse_event_data
+        # Frontend-needed fields preserved.
+        assert sse_event_data["preview"] == [{"SKU": "X", "USD": 100.0, "GBP": 99.0}]
+        assert sse_event_data["sku_count"] == 2
+
+
 class TestSheetsLinkDoesNotPolluteCache:
     """Codex review finding: if pricing_to_sheets fires within a turn that
     also did a pricing_export / pricing_revise, the sheets_link event must
