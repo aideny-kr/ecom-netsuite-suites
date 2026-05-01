@@ -20,18 +20,52 @@ _filler = TemplateFiller()
 _file_svc = TaskFileService()
 
 
-def _build_markdown_table(results) -> str:
-    """Build a markdown table from pricing results for the agent to present verbatim."""
-    if not results:
-        return ""
-    currencies = sorted(results[0].results.keys())
-    header = "| SKU | USD | " + " | ".join(currencies) + " |"
-    separator = "|---|---|" + "|".join(["---"] * len(currencies)) + "|"
-    rows = []
-    for r in results:
-        vals = [str(r.results[c].final_price) for c in currencies]
-        rows.append(f"| {r.sku} | {r.usd_price} | " + " | ".join(vals) + " |")
-    return "\n".join([header, separator] + rows)
+def _build_preview(results, max_rows: int = 10) -> list[dict]:
+    """Frontend-friendly preview: flat dict per row with sorted currency keys."""
+    preview: list[dict] = []
+    for r in results[:max_rows]:
+        row = {"SKU": r.sku, "USD": float(r.usd_price)}
+        for code, cr in sorted(r.results.items()):
+            row[code] = float(cr.final_price)
+        preview.append(row)
+    return preview
+
+
+def _seed_pricing_state(
+    *,
+    items: list[PricingInput],
+    pricing_config: TenantPricingConfig,
+    excel_file_id: str,
+    netsuite_csv_file_id: str,
+    row_count: int,
+) -> dict:
+    """Build the initial pricing_state payload that will be cached for follow-ups.
+
+    Holds only what pricing_revise / pricing_to_sheets need: the seed inputs,
+    effective inputs/currencies/overrides (all empty on the seed run), and
+    pointers to the saved Excel + NetSuite CSV files. Row data is NOT cached
+    — pricing_to_sheets re-parses the Excel file on demand.
+    """
+    seed_items = [
+        {"sku": it.sku, "usd_price": str(it.usd_price), "item_name": it.item_name}
+        for it in items
+    ]
+    currency_codes = list(pricing_config.currencies.keys())
+    header_columns = ["SKU", "Item Name", "USD", *sorted(currency_codes)]
+    return {
+        "seed_items": seed_items,
+        "effective_items": [dict(s) for s in seed_items],
+        "effective_currencies": currency_codes,
+        "effective_fx_overrides": {},
+        "effective_vat_overrides": {},
+        "effective_rounding_overrides": {},
+        "effective_uplift_by_currency": {},
+        "applied_overrides_log": [],
+        "excel_file_id": excel_file_id,
+        "netsuite_csv_file_id": netsuite_csv_file_id,
+        "header_columns": header_columns,
+        "row_count": row_count,
+    }
 
 
 async def pricing_convert_execute(params: dict, context: dict, **kwargs) -> dict:
@@ -121,26 +155,21 @@ async def pricing_convert_execute(params: dict, context: dict, **kwargs) -> dict
         )
     )
 
-    # 8. Summary
-    preview = []
-    for r in results[:10]:
-        row = {"SKU": r.sku, "USD": float(r.usd_price)}
-        for code, cr in sorted(r.results.items()):
-            row[code] = float(cr.final_price)
-        preview.append(row)
+    pricing_state = _seed_pricing_state(
+        items=items,
+        pricing_config=pricing_config,
+        excel_file_id=str(excel_file.id),
+        netsuite_csv_file_id=str(csv_file.id),
+        row_count=len(items),
+    )
 
     return {
         "success": True,
         "sku_count": len(items),
         "currency_count": len(pricing_config.currencies),
         "output_files": output_files,
-        "preview": preview,
-        "response_instruction": (
-            "The Excel file has been generated with exact prices. "
-            "Tell the user: 'Your pricing file is ready for download below.' "
-            "Then show this EXACT table (copy it verbatim, do not modify any numbers):\n\n"
-            + _build_markdown_table(results[:10])
-        ),
+        "preview": _build_preview(results),
+        "pricing_state": pricing_state,
         "template_mode": bool(mapping.currency_cols),
     }
 
@@ -223,26 +252,21 @@ async def pricing_export_execute(params: dict, context: dict, **kwargs) -> dict:
         )
     )
 
-    # 7. Summary — pre-formatted table for the agent to present verbatim
-    preview = []
-    for r in results[:10]:
-        row = {"SKU": r.sku, "USD": float(r.usd_price)}
-        for code, cr in sorted(r.results.items()):
-            row[code] = float(cr.final_price)
-        preview.append(row)
+    pricing_state = _seed_pricing_state(
+        items=items,
+        pricing_config=pricing_config,
+        excel_file_id=str(excel_file.id),
+        netsuite_csv_file_id=str(csv_file.id),
+        row_count=len(items),
+    )
 
     return {
         "success": True,
         "sku_count": len(items),
         "currency_count": len(pricing_config.currencies),
         "output_files": output_files,
-        "preview": preview,
-        "response_instruction": (
-            "The Excel file has been generated with exact prices. "
-            "Tell the user: 'Your pricing file is ready for download below.' "
-            "Then show this EXACT table (copy it verbatim, do not modify any numbers):\n\n"
-            + _build_markdown_table(results[:10])
-        ),
+        "preview": _build_preview(results),
+        "pricing_state": pricing_state,
         "template_mode": False,
     }
 
