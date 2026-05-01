@@ -11,15 +11,15 @@ from typing import Any
 
 from openpyxl import load_workbook
 
+from app.core.encryption import decrypt_credentials
+from app.mcp.tools.sheets_tools import _get_sheets_connector, _get_user_email
 from app.models.pricing_conversion_log import PricingConversionLog
 from app.schemas.pricing import (
     CurrencyConfig,
     PricingInput,
     TenantPricingConfig,
 )
-from app.core.encryption import decrypt_credentials
 from app.services.chat.result_cache import get_latest_result_by_type
-from app.mcp.tools.sheets_tools import _get_sheets_connector, _get_user_email
 from app.services.pricing_config_service import get_config, upsert_config
 from app.services.pricing_engine import PricingEngine
 from app.services.sheets_service import (
@@ -499,8 +499,8 @@ def _apply_overrides(state: dict, overrides: dict) -> dict | None:
         ]
         log_entry["currencies_to_remove"] = list(currencies_to_remove)
 
-    currencies_to_add = overrides.get("currencies_to_add") or []
-    # Validation handled by caller (needs fresh tenant config to check).
+    # currencies_to_add is validated + appended by the caller after this returns
+    # (needs fresh tenant config to check, and must run after _apply_overrides).
 
     # 5. Replace-per-key dicts
     for key in ("percent_uplift", "fx_rate_overrides", "vat_rate_overrides"):

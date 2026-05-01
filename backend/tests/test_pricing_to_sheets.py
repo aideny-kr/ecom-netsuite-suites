@@ -141,7 +141,7 @@ def _run(params, ctx, *, connector, payload, excel_bytes=None, file_lookup_raise
 
 
 class TestConnectorCheckFirst:
-    def test_no_connector_returns_actionable_error_FIRST(self, sheets_context):
+    def test_no_connector_returns_actionable_error_first(self, sheets_context):
         # Even with no pricing run, the connector error MUST come first.
         result, create_mock, write_mock, _ = _run({}, sheets_context, connector=None, payload=None)
         assert result["error"] is True
@@ -253,7 +253,7 @@ class TestResultShape:
         assert result["url"].startswith("https://docs.google.com/")
         assert result["sku_count"] == 2
 
-    def test_does_NOT_emit_pricing_state(self, sheets_context):
+    def test_does_not_emit_pricing_state(self, sheets_context):
         """pricing_to_sheets is read-only — must NOT return pricing_state in
         its result, otherwise the orchestrator would think it's a write tool."""
         result, _, _, _ = _run({}, sheets_context, connector=_connector(), payload=_payload())

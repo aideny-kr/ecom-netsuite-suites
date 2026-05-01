@@ -191,7 +191,7 @@ class TestPriceChanges:
         skus = {it["sku"] for it in ps["effective_items"]}
         assert "GHOST" not in skus
 
-    def test_reset_string_false_does_NOT_trigger_reset(self, revise_context):
+    def test_reset_string_false_does_not_trigger_reset(self, revise_context):
         """Codex review finding: bool('false') is True. If the LLM (or a
         non-strict adapter) ever passes reset as the string 'false', the
         executor must NOT silently discard the user's overrides."""
@@ -212,7 +212,7 @@ class TestPriceChanges:
         # No reset event in the audit log.
         assert not any(e.get("reset") is True for e in ps["applied_overrides_log"])
 
-    def test_reset_string_true_DOES_trigger_reset(self, revise_context):
+    def test_reset_string_true_does_trigger_reset(self, revise_context):
         """The flip side: 'true' as a string should still trigger reset."""
         seed = _seed_state()
         seed["effective_uplift_by_currency"] = {"GBP": "0.05"}

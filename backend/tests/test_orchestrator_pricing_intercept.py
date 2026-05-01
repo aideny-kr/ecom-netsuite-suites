@@ -10,8 +10,6 @@ from __future__ import annotations
 import inspect
 import json
 
-import pytest
-
 from app.services.chat.orchestrator import _intercept_tool_result
 
 
@@ -229,7 +227,7 @@ class TestLegacyPathCachesPricing:
     """
 
     def test_intercept_with_cache_writes_pricing_state(self):
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import patch
 
         from app.services.chat.orchestrator import _intercept_with_cache
 
@@ -361,7 +359,7 @@ class TestOnToolInterceptedWiring:
         # Verify it reads pricing_state from event_data and assigns to payload.
         assert 'event_data.get("pricing_state")' in source
 
-    def test_pricing_to_sheets_NOT_in_write_tools(self):
+    def test_pricing_to_sheets_not_in_write_tools(self):
         """pricing_to_sheets is read-only — it must NOT appear in the write set."""
         from app.services.chat import orchestrator
 
