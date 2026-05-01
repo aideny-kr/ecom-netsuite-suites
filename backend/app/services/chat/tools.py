@@ -260,6 +260,7 @@ async def execute_tool_call(
             correlation_id=correlation_id,
             db=db,
             context_need=context_need,
+            session_id=session_id,
         )
         duration_ms = int((time.monotonic() - start) * 1000)
         logger.info(

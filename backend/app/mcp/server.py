@@ -49,6 +49,7 @@ class MCPServer:
         correlation_id: str | None = None,
         db: AsyncSession | None = None,
         context_need: str | None = None,
+        session_id: str | None = None,
     ) -> dict:
         """Call a tool with full governance wrapper."""
         if tool_name not in self.tools:
@@ -64,6 +65,7 @@ class MCPServer:
             correlation_id=correlation_id or str(uuid.uuid4()),
             db=db,
             context_need=context_need,
+            session_id=session_id,
         )
         return result
 
