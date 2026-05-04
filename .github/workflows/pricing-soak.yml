@@ -1,0 +1,242 @@
+name: Pricing Soak Check
+
+# Weekly soak check on the pricing agent. Runs the 3 vs-MCP pricing benchmark
+# cases and pulls staging error logs for any pricing-tool exceptions in the
+# past week. Surfaces regressions before the user does.
+#
+# History: introduced after PR #68 (cumulative pricing follow-ups + Sheets
+# export) shipped on 2026-05-01. The first scheduled run lands on 2026-05-08.
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Weekly on Fridays at 16:17 UTC (9:17am PT). Off-minute on purpose so
+    # it doesn't pile onto the :00/:30 marks shared with every other cron
+    # workflow on the planet.
+    - cron: "17 16 * * 5"
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  benchmark:
+    name: Pricing benchmark vs Claude+MCP
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: ecom_netsuite_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+    env:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/ecom_netsuite_test
+      DATABASE_URL_SYNC: postgresql://postgres:postgres@localhost:5432/ecom_netsuite_test
+      REDIS_URL: redis://localhost:6379/0
+      JWT_SECRET_KEY: test-secret-key-for-ci
+      ENCRYPTION_KEY: dGVzdC1lbmNyeXB0aW9uLWtleS0zMmJ5dGVzISEh
+      APP_ENV: test
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
+    outputs:
+      bench_status: ${{ steps.run_bench.outputs.status }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-soak-${{ hashFiles('backend/pyproject.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-soak-
+            ${{ runner.os }}-pip-
+
+      - name: Install backend dependencies
+        run: cd backend && pip install -e ".[dev]"
+
+      - name: Generate valid Fernet encryption key
+        run: |
+          FERNET_KEY=$(python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())")
+          echo "ENCRYPTION_KEY=$FERNET_KEY" >> "$GITHUB_ENV"
+
+      - name: Run Alembic migrations
+        run: cd backend && alembic upgrade head
+
+      - name: Skip when ANTHROPIC_API_KEY missing
+        id: check_secret
+        run: |
+          if [ -z "${ANTHROPIC_API_KEY}" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::warning::ANTHROPIC_API_KEY not set — skipping benchmark"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run pricing benchmark cases
+        id: run_bench
+        if: steps.check_secret.outputs.skip != 'true'
+        run: |
+          cd backend
+          set +e
+          python -m app.services.benchmarks.run_vs_mcp \
+            --suite pricing \
+            --tenant-id ce3dfaad-626f-4992-84e9-500c8291ca0a \
+            --skip-baseline \
+            --no-llm-judge 2>&1 | tee /tmp/bench.log
+          rc=${PIPESTATUS[0]}
+          if [ $rc -eq 0 ]; then
+            echo "status=pass" >> "$GITHUB_OUTPUT"
+          else
+            echo "status=fail" >> "$GITHUB_OUTPUT"
+          fi
+          {
+            echo "## Pricing benchmark"
+            echo ""
+            echo "Exit: \`$rc\`"
+            echo ""
+            echo "<details><summary>Last 60 lines</summary>"
+            echo ""
+            echo '```'
+            tail -60 /tmp/bench.log
+            echo '```'
+            echo ""
+            echo "</details>"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  staging-errors:
+    name: Pricing errors on staging (last 7d)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      error_count: ${{ steps.scan.outputs.count }}
+      reachable: ${{ steps.scan.outputs.reachable }}
+    steps:
+      - name: Set up SSH agent
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.STAGING_SSH_KEY }}
+
+      - name: Trust staging host key
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H "${{ secrets.STAGING_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Scan staging logs for pricing-tool errors
+        id: scan
+        # Doesn't fail the job on SSH errors — alert job reads `reachable` to
+        # decide whether the count is meaningful or the host was just down.
+        continue-on-error: true
+        run: |
+          set +e
+          PATTERNS='pricing_revise|pricing_to_sheets|pricing_export|pricing_convert|pricing_state|_intercept_with_cache|get_latest_result_by_type'
+          # Capture the full filtered log once, then derive count + sample from it.
+          ssh -o ConnectTimeout=10 -o BatchMode=yes \
+            "${{ secrets.STAGING_SSH_USER }}@${{ secrets.STAGING_HOST }}" \
+            "sudo docker logs ecom-netsuite-backend-1 --since 168h 2>&1 \
+              | grep -i -E '($PATTERNS)' \
+              | grep -i -E 'error|exception|traceback'" \
+            > /tmp/pricing-errors.log 2>/tmp/ssh-stderr.log
+          ssh_rc=$?
+          if [ $ssh_rc -ne 0 ]; then
+            echo "::warning::Staging SSH unreachable (rc=$ssh_rc) — count is meaningless this run"
+            cat /tmp/ssh-stderr.log
+            echo "reachable=false" >> "$GITHUB_OUTPUT"
+            echo "count=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          count=$(wc -l < /tmp/pricing-errors.log | tr -d ' ')
+          echo "Pricing-tool error lines in last 7 days: $count"
+          echo "reachable=true" >> "$GITHUB_OUTPUT"
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+          {
+            echo "## Staging pricing errors (last 7d)"
+            echo ""
+            echo "**Count:** $count"
+            echo ""
+            if [ "$count" -gt 0 ]; then
+              echo "<details><summary>Sample (last 30 lines)</summary>"
+              echo ""
+              echo '```'
+              tail -30 /tmp/pricing-errors.log
+              echo '```'
+              echo ""
+              echo "</details>"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  alert:
+    name: Open issue on regression
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    needs: [benchmark, staging-errors]
+    # Fire on either signal: benchmark regression OR staging errors > 0.
+    # Staging errors only count when SSH was reachable (else `count=0` is a
+    # placeholder, not a true zero).
+    if: >-
+      always() && (
+        needs.benchmark.outputs.bench_status == 'fail' ||
+        (needs.staging-errors.outputs.reachable == 'true' &&
+         needs.staging-errors.outputs.error_count != '0')
+      )
+    permissions:
+      issues: write
+    steps:
+      - name: Create regression issue
+        uses: actions/github-script@v7
+        env:
+          BENCH_STATUS: ${{ needs.benchmark.outputs.bench_status }}
+          ERROR_COUNT: ${{ needs.staging-errors.outputs.error_count }}
+          REACHABLE: ${{ needs.staging-errors.outputs.reachable }}
+        with:
+          script: |
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const benchStatus = process.env.BENCH_STATUS || '(skipped)';
+            const errorCount = process.env.ERROR_COUNT || '0';
+            const reachable = process.env.REACHABLE || 'false';
+            const triggers = [];
+            if (benchStatus === 'fail') triggers.push('benchmark fail');
+            if (reachable === 'true' && errorCount !== '0') triggers.push(`${errorCount} staging error lines`);
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `Pricing soak regression — ${new Date().toISOString().slice(0, 10)} (${triggers.join(', ')})`,
+              labels: ['regression', 'pricing'],
+              body: [
+                `Pricing soak workflow detected a regression.`,
+                ``,
+                `**Triggers:** ${triggers.join(', ') || '(unknown — check logs)'}`,
+                `**Benchmark status:** ${benchStatus}`,
+                `**Staging errors (last 7d):** ${errorCount} (reachable=${reachable})`,
+                `**Run:** ${runUrl}`,
+                ``,
+                `Open the run for the benchmark log + staging error sample. ClickUp ticket for the original work: https://app.clickup.com/t/86b9pgepx`,
+                ``,
+                `Originally introduced by PR #68 (squash commit 93c502d on main, merged 2026-05-01). If this is the first regression after merge, consider whether to revert vs. forward-fix.`,
+              ].join('\n'),
+            });
