@@ -133,70 +133,42 @@ jobs:
     name: Pricing errors on staging (last 7d)
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    outputs:
-      error_count: ${{ steps.scan.outputs.count }}
-      reachable: ${{ steps.scan.outputs.reachable }}
+    # No outputs — appleboy/ssh-action doesn't expose script stdout. We
+    # tried raw ssh first but the GHA runner can't reach the staging host
+    # (likely GCP firewall allowlist mismatch with GHA's wide IP range).
+    # appleboy works because deploy.yml already proves it. Alert job is
+    # benchmark-only; staging error count is print-to-step-summary, eyeball
+    # in the weekly run.
     steps:
-      - name: Install SSH key + trust staging host
-        # Direct file install (matches deploy.yml's appleboy/ssh-action pattern).
-        # webfactory/ssh-agent silently failed to load the key on the first
-        # dispatch; raw file is more tolerant of key format variations.
-        env:
-          SSH_KEY: ${{ secrets.STAGING_SSH_KEY }}
-          STAGING_HOST: ${{ secrets.STAGING_HOST }}
-        run: |
-          mkdir -p ~/.ssh
-          chmod 700 ~/.ssh
-          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_staging
-          chmod 600 ~/.ssh/id_staging
-          ssh-keyscan -H "$STAGING_HOST" >> ~/.ssh/known_hosts 2>&1 | head -5
-
-      - name: Scan staging logs for pricing-tool errors
-        id: scan
-        # Doesn't fail the job on SSH errors — alert job reads `reachable` to
-        # decide whether the count is meaningful or the host was just down.
+      - name: Pull pricing-tool errors from staging logs
         continue-on-error: true
-        env:
-          STAGING_USER: ${{ secrets.STAGING_SSH_USER }}
-          STAGING_HOST: ${{ secrets.STAGING_HOST }}
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.STAGING_HOST }}
+          username: ${{ secrets.STAGING_SSH_USER }}
+          key: ${{ secrets.STAGING_SSH_KEY }}
+          script: |
+            set -e
+            PATTERNS='pricing_revise|pricing_to_sheets|pricing_export|pricing_convert|pricing_state|_intercept_with_cache|get_latest_result_by_type'
+            sudo docker logs ecom-netsuite-backend-1 --since 168h 2>&1 \
+              | grep -i -E "($PATTERNS)" \
+              | grep -i -E 'error|exception|traceback' \
+              > /tmp/pricing-errors.log
+            count=$(wc -l < /tmp/pricing-errors.log | tr -d ' ')
+            echo "Pricing-tool error lines in last 7 days: $count"
+            if [ "$count" -gt 0 ]; then
+              echo "--- sample (last 30 lines) ---"
+              tail -30 /tmp/pricing-errors.log
+            fi
+
+      - name: Pointer to SSH script log
         run: |
-          set +e
-          PATTERNS='pricing_revise|pricing_to_sheets|pricing_export|pricing_convert|pricing_state|_intercept_with_cache|get_latest_result_by_type'
-          ssh -i ~/.ssh/id_staging \
-              -o ConnectTimeout=10 -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
-              "${STAGING_USER}@${STAGING_HOST}" \
-              "sudo docker logs ecom-netsuite-backend-1 --since 168h 2>&1 \
-                | grep -i -E '($PATTERNS)' \
-                | grep -i -E 'error|exception|traceback'" \
-              > /tmp/pricing-errors.log 2> /tmp/ssh-stderr.log
-          ssh_rc=$?
-          if [ $ssh_rc -ne 0 ]; then
-            echo "::warning::Staging SSH unreachable (rc=$ssh_rc) — count is meaningless this run"
-            echo "--- ssh stderr ---"
-            cat /tmp/ssh-stderr.log
-            echo "------------------"
-            echo "reachable=false" >> "$GITHUB_OUTPUT"
-            echo "count=0" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          count=$(wc -l < /tmp/pricing-errors.log | tr -d ' ')
-          echo "Pricing-tool error lines in last 7 days: $count"
-          echo "reachable=true" >> "$GITHUB_OUTPUT"
-          echo "count=$count" >> "$GITHUB_OUTPUT"
           {
             echo "## Staging pricing errors (last 7d)"
             echo ""
-            echo "**Count:** $count"
-            echo ""
-            if [ "$count" -gt 0 ]; then
-              echo "<details><summary>Sample (last 30 lines)</summary>"
-              echo ""
-              echo '```'
-              tail -30 /tmp/pricing-errors.log
-              echo '```'
-              echo ""
-              echo "</details>"
-            fi
+            echo "Count + sample logged in the previous step. Eyeball it weekly; "
+            echo "alerts are benchmark-only because GHA runners can't expose "
+            echo "appleboy/ssh-action stdout as a job output."
           } >> "$GITHUB_STEP_SUMMARY"
 
   alert:
@@ -204,15 +176,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 2
     needs: [benchmark, staging-errors]
-    # Fire on either signal: benchmark regression OR staging errors > 0.
-    # Staging errors only count when SSH was reachable (else `count=0` is a
-    # placeholder, not a true zero).
-    if: >-
-      always() && (
-        needs.benchmark.outputs.bench_status == 'fail' ||
-        (needs.staging-errors.outputs.reachable == 'true' &&
-         needs.staging-errors.outputs.error_count != '0')
-      )
+    # Benchmark-only alerting. Staging error count is informational
+    # (step summary) because appleboy/ssh-action doesn't expose script
+    # stdout as a job output.
+    if: always() && needs.benchmark.outputs.bench_status == 'fail'
     permissions:
       issues: write
     steps:
@@ -220,31 +187,24 @@ jobs:
         uses: actions/github-script@v7
         env:
           BENCH_STATUS: ${{ needs.benchmark.outputs.bench_status }}
-          ERROR_COUNT: ${{ needs.staging-errors.outputs.error_count }}
-          REACHABLE: ${{ needs.staging-errors.outputs.reachable }}
         with:
           script: |
             const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
             const benchStatus = process.env.BENCH_STATUS || '(skipped)';
-            const errorCount = process.env.ERROR_COUNT || '0';
-            const reachable = process.env.REACHABLE || 'false';
-            const triggers = [];
-            if (benchStatus === 'fail') triggers.push('benchmark fail');
-            if (reachable === 'true' && errorCount !== '0') triggers.push(`${errorCount} staging error lines`);
             await github.rest.issues.create({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              title: `Pricing soak regression — ${new Date().toISOString().slice(0, 10)} (${triggers.join(', ')})`,
+              title: `Pricing soak regression — ${new Date().toISOString().slice(0, 10)} (benchmark fail)`,
               labels: ['regression', 'pricing'],
               body: [
-                `Pricing soak workflow detected a regression.`,
+                `Pricing soak workflow detected a benchmark regression.`,
                 ``,
-                `**Triggers:** ${triggers.join(', ') || '(unknown — check logs)'}`,
                 `**Benchmark status:** ${benchStatus}`,
-                `**Staging errors (last 7d):** ${errorCount} (reachable=${reachable})`,
                 `**Run:** ${runUrl}`,
                 ``,
-                `Open the run for the benchmark log + staging error sample. ClickUp ticket for the original work: https://app.clickup.com/t/86b9pgepx`,
+                `Open the run for the benchmark log. Also check the staging-errors job step summary for any pricing-tool exceptions in the past week (eyeball — not auto-alerted).`,
+                ``,
+                `ClickUp ticket for the original work: https://app.clickup.com/t/86b9pgepx`,
                 ``,
                 `Originally introduced by PR #68 (squash commit 93c502d on main, merged 2026-05-01). If this is the first regression after merge, consider whether to revert vs. forward-fix.`,
               ].join('\n'),
