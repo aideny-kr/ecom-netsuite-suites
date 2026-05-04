@@ -148,7 +148,8 @@ jobs:
           username: ${{ secrets.STAGING_SSH_USER }}
           key: ${{ secrets.STAGING_SSH_KEY }}
           script: |
-            set -e
+            # No `set -e` — zero-match grep returns 1 on the happy path
+            # (no pricing errors in 7 days), and we still want to report count=0.
             PATTERNS='pricing_revise|pricing_to_sheets|pricing_export|pricing_convert|pricing_state|_intercept_with_cache|get_latest_result_by_type'
             sudo docker logs ecom-netsuite-backend-1 --since 168h 2>&1 \
               | grep -i -E "($PATTERNS)" \
