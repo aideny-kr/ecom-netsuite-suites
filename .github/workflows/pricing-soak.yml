@@ -137,35 +137,44 @@ jobs:
       error_count: ${{ steps.scan.outputs.count }}
       reachable: ${{ steps.scan.outputs.reachable }}
     steps:
-      - name: Set up SSH agent
-        uses: webfactory/ssh-agent@v0.9.0
-        with:
-          ssh-private-key: ${{ secrets.STAGING_SSH_KEY }}
-
-      - name: Trust staging host key
+      - name: Install SSH key + trust staging host
+        # Direct file install (matches deploy.yml's appleboy/ssh-action pattern).
+        # webfactory/ssh-agent silently failed to load the key on the first
+        # dispatch; raw file is more tolerant of key format variations.
+        env:
+          SSH_KEY: ${{ secrets.STAGING_SSH_KEY }}
+          STAGING_HOST: ${{ secrets.STAGING_HOST }}
         run: |
           mkdir -p ~/.ssh
-          ssh-keyscan -H "${{ secrets.STAGING_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null
+          chmod 700 ~/.ssh
+          printf '%s\n' "$SSH_KEY" > ~/.ssh/id_staging
+          chmod 600 ~/.ssh/id_staging
+          ssh-keyscan -H "$STAGING_HOST" >> ~/.ssh/known_hosts 2>&1 | head -5
 
       - name: Scan staging logs for pricing-tool errors
         id: scan
         # Doesn't fail the job on SSH errors — alert job reads `reachable` to
         # decide whether the count is meaningful or the host was just down.
         continue-on-error: true
+        env:
+          STAGING_USER: ${{ secrets.STAGING_SSH_USER }}
+          STAGING_HOST: ${{ secrets.STAGING_HOST }}
         run: |
           set +e
           PATTERNS='pricing_revise|pricing_to_sheets|pricing_export|pricing_convert|pricing_state|_intercept_with_cache|get_latest_result_by_type'
-          # Capture the full filtered log once, then derive count + sample from it.
-          ssh -o ConnectTimeout=10 -o BatchMode=yes \
-            "${{ secrets.STAGING_SSH_USER }}@${{ secrets.STAGING_HOST }}" \
-            "sudo docker logs ecom-netsuite-backend-1 --since 168h 2>&1 \
-              | grep -i -E '($PATTERNS)' \
-              | grep -i -E 'error|exception|traceback'" \
-            > /tmp/pricing-errors.log 2>/tmp/ssh-stderr.log
+          ssh -i ~/.ssh/id_staging \
+              -o ConnectTimeout=10 -o BatchMode=yes -o StrictHostKeyChecking=accept-new \
+              "${STAGING_USER}@${STAGING_HOST}" \
+              "sudo docker logs ecom-netsuite-backend-1 --since 168h 2>&1 \
+                | grep -i -E '($PATTERNS)' \
+                | grep -i -E 'error|exception|traceback'" \
+              > /tmp/pricing-errors.log 2> /tmp/ssh-stderr.log
           ssh_rc=$?
           if [ $ssh_rc -ne 0 ]; then
             echo "::warning::Staging SSH unreachable (rc=$ssh_rc) — count is meaningless this run"
+            echo "--- ssh stderr ---"
             cat /tmp/ssh-stderr.log
+            echo "------------------"
             echo "reachable=false" >> "$GITHUB_OUTPUT"
             echo "count=0" >> "$GITHUB_OUTPUT"
             exit 0
