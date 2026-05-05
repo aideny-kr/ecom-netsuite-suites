@@ -1,6 +1,7 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
+from googleapiclient.errors import HttpError
 
 from app.services.drive_rag import drive_client
 
@@ -18,6 +19,26 @@ async def test_get_folder_metadata_returns_name():
     with patch("app.services.drive_rag.drive_client._build_drive", return_value=mock_service):
         result = await drive_client.get_folder_metadata(credentials=CREDS, folder_id="FID")
     assert result["name"] == "My Docs"
+
+
+@pytest.mark.asyncio
+async def test_get_folder_metadata_wraps_disabled_drive_api_error():
+    mock_service = MagicMock()
+    content = (
+        b'{"error":{"message":"Google Drive API has not been used in project 704055641880 before or it is disabled. '
+        b'Enable it by visiting https://console.developers.google.com/apis/api/drive.googleapis.com/overview?'
+        b'project=704055641880 then retry."}}'
+    )
+    mock_service.files().get().execute.side_effect = HttpError(MagicMock(status=403), content)
+
+    with patch("app.services.drive_rag.drive_client._build_drive", return_value=mock_service):
+        with pytest.raises(drive_client.DriveApiError) as exc:
+            await drive_client.get_folder_metadata(credentials=CREDS, folder_id="FID")
+
+    message = str(exc.value)
+    assert "Google Drive API is disabled" in message
+    assert "704055641880" in message
+    assert "drive.googleapis.com" in message
 
 
 @pytest.mark.asyncio
