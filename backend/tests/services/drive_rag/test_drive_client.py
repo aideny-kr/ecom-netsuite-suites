@@ -26,7 +26,7 @@ async def test_get_folder_metadata_wraps_disabled_drive_api_error():
     mock_service = MagicMock()
     content = (
         b'{"error":{"message":"Google Drive API has not been used in project 704055641880 before or it is disabled. '
-        b'Enable it by visiting https://console.developers.google.com/apis/api/drive.googleapis.com/overview?'
+        b"Enable it by visiting https://console.developers.google.com/apis/api/drive.googleapis.com/overview?"
         b'project=704055641880 then retry."}}'
     )
     mock_service.files().get().execute.side_effect = HttpError(MagicMock(status=403), content)
