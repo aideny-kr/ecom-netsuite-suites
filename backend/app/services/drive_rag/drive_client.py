@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import re
 from typing import Any
 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
 from app.services.sheets_service import _SCOPES
 
@@ -31,12 +34,58 @@ def _build_drive(credentials: dict):
     return build("drive", "v3", credentials=creds)
 
 
+class DriveApiError(RuntimeError):
+    """Actionable wrapper for Google Drive API errors."""
+
+
+def _google_error_message(exc: HttpError) -> str:
+    raw = exc.content.decode("utf-8", errors="replace") if isinstance(exc.content, bytes) else str(exc.content)
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        payload = {}
+
+    error = payload.get("error") if isinstance(payload, dict) else None
+    if isinstance(error, dict):
+        message = error.get("message") or raw
+    elif isinstance(error, str):
+        message = error
+    else:
+        message = raw or str(exc)
+
+    project_match = re.search(r"project\s+(\d+)", message, flags=re.IGNORECASE)
+    normalized = message.lower()
+    drive_api_disabled = "drive api has not been used" in normalized or (
+        "drive api" in normalized and "disabled" in normalized
+    )
+    if drive_api_disabled:
+        project = project_match.group(1) if project_match else "the service account project"
+        return (
+            f"Google Drive API is disabled for Google Cloud project {project}. "
+            "Enable drive.googleapis.com for that project, wait a few minutes, then retry."
+        )
+
+    status = getattr(exc.resp, "status", None)
+    if status == 403:
+        return f"Google Drive permission or API access denied: {message}"
+    if status == 404:
+        return f"Google Drive folder or file was not found, or the service account lacks access: {message}"
+    return f"Google Drive API error: {message}"
+
+
+async def _to_thread_drive_call(fn):
+    try:
+        return await asyncio.to_thread(fn)
+    except HttpError as exc:
+        raise DriveApiError(_google_error_message(exc)) from exc
+
+
 async def get_folder_metadata(*, credentials: dict, folder_id: str) -> dict[str, Any]:
     def _sync():
         service = _build_drive(credentials)
         return service.files().get(fileId=folder_id, fields="id,name,mimeType", supportsAllDrives=True).execute()
 
-    return await asyncio.to_thread(_sync)
+    return await _to_thread_drive_call(_sync)
 
 
 async def list_folder_files(*, credentials: dict, folder_id: str) -> list[dict[str, Any]]:
@@ -68,7 +117,7 @@ async def list_folder_files(*, credentials: dict, folder_id: str) -> list[dict[s
                 break
         return files
 
-    return await asyncio.to_thread(_sync)
+    return await _to_thread_drive_call(_sync)
 
 
 async def get_file_metadata(*, credentials: dict, file_id: str) -> dict[str, Any]:
@@ -84,7 +133,7 @@ async def get_file_metadata(*, credentials: dict, file_id: str) -> dict[str, Any
             .execute()
         )
 
-    return await asyncio.to_thread(_sync)
+    return await _to_thread_drive_call(_sync)
 
 
 async def download_file_bytes(*, credentials: dict, file_id: str) -> bytes:
@@ -94,7 +143,7 @@ async def download_file_bytes(*, credentials: dict, file_id: str) -> bytes:
         service = _build_drive(credentials)
         return service.files().get_media(fileId=file_id, supportsAllDrives=True).execute()
 
-    return await asyncio.to_thread(_sync)
+    return await _to_thread_drive_call(_sync)
 
 
 async def export_google_doc_text(*, credentials: dict, file_id: str) -> str:
@@ -105,4 +154,4 @@ async def export_google_doc_text(*, credentials: dict, file_id: str) -> str:
         data = service.files().export(fileId=file_id, mimeType="text/plain").execute()
         return data.decode("utf-8") if isinstance(data, bytes) else str(data)
 
-    return await asyncio.to_thread(_sync)
+    return await _to_thread_drive_call(_sync)
