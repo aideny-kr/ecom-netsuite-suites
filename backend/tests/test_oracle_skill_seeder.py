@@ -168,6 +168,48 @@ class TestSeederPersistence:
         assert " IN (" in compiled.upper(), f"expected IN clause, got: {compiled}"
         assert " LIKE " not in compiled.upper(), f"unexpected LIKE clause: {compiled}"
 
+    @pytest.mark.asyncio
+    async def test_writes_rows_when_embedding_unavailable(self, tmp_path):
+        """When embed_domain_texts returns None, rows are still written with embedding=None."""
+        from app.services.oracle_skill_seeder import seed_all_oracle_skills
+
+        mock_db = AsyncMock()
+        mock_db.execute = AsyncMock(return_value=MagicMock())
+        _make_minimal_skills_tree(tmp_path)
+        with patch(
+            "app.services.oracle_skill_seeder.embed_domain_texts",
+            new=AsyncMock(return_value=None),
+        ):
+            count = await seed_all_oracle_skills(mock_db, root=tmp_path)
+        assert count > 0
+        # Every added chunk has embedding=None when the embedder is unavailable
+        for call in mock_db.add.call_args_list:
+            chunk = call.args[0]
+            assert chunk.embedding is None
+
+    @pytest.mark.asyncio
+    async def test_aborts_when_no_chunks_collected(self, tmp_path):
+        """If all skill files are empty, the seeder logs and returns 0 without deleting."""
+        from app.services.oracle_skill_seeder import seed_all_oracle_skills
+
+        mock_db = AsyncMock()
+        mock_db.execute = AsyncMock(return_value=MagicMock())
+        # Create skill dirs with empty SKILL.md files
+        for skill_name in SLUG_MAP:
+            d = tmp_path / ".claude" / "skills" / skill_name
+            d.mkdir(parents=True)
+            (d / "SKILL.md").write_text("")  # empty content → 0 chunks
+
+        with patch(
+            "app.services.oracle_skill_seeder.embed_domain_texts",
+            new=AsyncMock(return_value=[[0.0] * 1536]),
+        ):
+            count = await seed_all_oracle_skills(mock_db, root=tmp_path)
+        assert count == 0
+        # Crucially: no delete was executed
+        mock_db.execute.assert_not_called()
+        mock_db.add.assert_not_called()
+
     def test_partition_id_under_64_chars(self):
         """All partition slugs fit DomainKnowledgeChunk.partition_id String(64) limit."""
         for slug in SLUG_MAP.values():

@@ -189,6 +189,14 @@ async def seed_all_oracle_skills(
         for chunk_text in chunk_markdown(content):
             partition_chunks[slug].append((md_path, chunk_text))
 
+    # Guard: if every skill file was empty / whitespace-only, chunk_markdown returns []
+    # for each file, leaving all partition lists empty. Deleting without re-inserting
+    # would silently wipe the RAG store — bail out instead.
+    all_chunks = [c for chunks in partition_chunks.values() for c in chunks]
+    if not all_chunks:
+        logger.warning("[ORACLE_SEEDER] No chunks found — aborting to avoid empty re-seed.")
+        return 0
+
     # Idempotent delete — explicit IN list, not LIKE.
     partition_ids = list(SLUG_MAP.values())
     await db.execute(
