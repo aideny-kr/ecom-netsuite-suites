@@ -25,8 +25,13 @@ class TestSuitescriptWorkspaceProfile:
     def test_lists_seven_oracle_partitions(self):
         profile = self._get()
         expected = {
-            "oracle/ai-connector", "oracle/owasp", "oracle/sdf-docs",
-            "oracle/sdf-roles", "oracle/records", "oracle/upgrade", "oracle/uif-spa",
+            "oracle/ai-connector",
+            "oracle/owasp",
+            "oracle/sdf-docs",
+            "oracle/sdf-roles",
+            "oracle/records",
+            "oracle/upgrade",
+            "oracle/uif-spa",
         }
         assert set(profile.rag_partitions) == expected
 

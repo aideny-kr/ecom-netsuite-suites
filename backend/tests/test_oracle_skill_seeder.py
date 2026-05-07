@@ -43,11 +43,7 @@ class TestChunkMarkdown:
             assert _estimate_tokens(chunk) <= 1500
 
     def test_preserves_code_fences(self):
-        md = (
-            "## Code Section\n\n"
-            + "x" * 5000
-            + "\n\n```javascript\nrun = () => 'hello';\n```\n\nafter fence\n"
-        )
+        md = "## Code Section\n\n" + "x" * 5000 + "\n\n```javascript\nrun = () => 'hello';\n```\n\nafter fence\n"
         chunks = chunk_markdown(md, max_tokens=1500)
         for chunk in chunks:
             assert chunk.count("```") % 2 == 0, f"unbalanced fences in: {chunk[:200]}"

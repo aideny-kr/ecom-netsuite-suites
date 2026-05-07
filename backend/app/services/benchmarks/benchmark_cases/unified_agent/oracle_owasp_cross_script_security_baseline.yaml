@@ -1,0 +1,15 @@
+# Baseline mirror for workspace/oracle_owasp_cross_script_security.yaml.
+
+query: "What's the SuiteScript security model for cross-script function calls?"
+agent_id: unified-agent
+tags: ["workspace", "oracle", "owasp", "baseline"]
+notes: |
+  Unified-agent baseline for the cross-script-call security question.
+  Pre-RAG behavior; specialized workspace case retrieves Oracle's
+  netsuite-owasp-secure-coding (cross-script + module-scope sections).
+expected_answer_contains:
+  - "scope"
+expected_tools: []
+expected_accuracy: 0.0
+max_cost: 0.30
+max_latency_ms: 60000

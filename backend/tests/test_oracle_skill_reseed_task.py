@@ -34,24 +34,30 @@ class TestOracleSkillReseed:
         mock_db.execute = AsyncMock(return_value=MagicMock())
 
         # First run: empty stored hashes → reseed everything
-        with patch(
-            "app.workers.tasks.oracle_skill_reseed._read_stored_hashes",
-            new=AsyncMock(return_value={}),
-        ), patch(
-            "app.workers.tasks.oracle_skill_reseed.embed_domain_texts",
-            new=AsyncMock(return_value=None),
+        with (
+            patch(
+                "app.workers.tasks.oracle_skill_reseed._read_stored_hashes",
+                new=AsyncMock(return_value={}),
+            ),
+            patch(
+                "app.workers.tasks.oracle_skill_reseed.embed_domain_texts",
+                new=AsyncMock(return_value=None),
+            ),
         ):
             count1 = await _run_reseed(mock_db, root=tmp_path)
             assert count1 > 0
 
         # Second run: stored hashes match lockfile → 0 reseeds
         stored = {slug: "abc123" for slug in SLUG_MAP.values()}
-        with patch(
-            "app.workers.tasks.oracle_skill_reseed._read_stored_hashes",
-            new=AsyncMock(return_value=stored),
-        ), patch(
-            "app.workers.tasks.oracle_skill_reseed.embed_domain_texts",
-            new=AsyncMock(return_value=None),
+        with (
+            patch(
+                "app.workers.tasks.oracle_skill_reseed._read_stored_hashes",
+                new=AsyncMock(return_value=stored),
+            ),
+            patch(
+                "app.workers.tasks.oracle_skill_reseed.embed_domain_texts",
+                new=AsyncMock(return_value=None),
+            ),
         ):
             count2 = await _run_reseed(mock_db, root=tmp_path)
             assert count2 == 0
@@ -69,12 +75,15 @@ class TestOracleSkillReseed:
         mock_db = AsyncMock()
         mock_db.execute = AsyncMock(return_value=MagicMock())
 
-        with patch(
-            "app.workers.tasks.oracle_skill_reseed._read_stored_hashes",
-            new=AsyncMock(return_value=stored),
-        ), patch(
-            "app.workers.tasks.oracle_skill_reseed.embed_domain_texts",
-            new=AsyncMock(return_value=None),
+        with (
+            patch(
+                "app.workers.tasks.oracle_skill_reseed._read_stored_hashes",
+                new=AsyncMock(return_value=stored),
+            ),
+            patch(
+                "app.workers.tasks.oracle_skill_reseed.embed_domain_texts",
+                new=AsyncMock(return_value=None),
+            ),
         ):
             count = await _run_reseed(mock_db, root=tmp_path)
 

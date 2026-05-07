@@ -213,15 +213,12 @@ def walk_oracle_skills(root: Path | str) -> Iterator[tuple[str, Path, str]]:
         if skill_name == "netsuite-suitescript-records-reference":
             json_path = skill_dir / "references" / "records.json"
             if json_path.is_file():
-                for synthetic_path, synthetic_content in _records_json_to_synthetic_markdown(
-                    json_path
-                ):
+                for synthetic_path, synthetic_content in _records_json_to_synthetic_markdown(json_path):
                     yield slug, synthetic_path, synthetic_content
 
     if not found_any:
         raise FileNotFoundError(
-            f"No Oracle skills found under {skills_root}. "
-            "run scripts/refresh-oracle-skills.sh to vendor them first."
+            f"No Oracle skills found under {skills_root}. run scripts/refresh-oracle-skills.sh to vendor them first."
         )
 
 
@@ -252,9 +249,7 @@ async def seed_all_oracle_skills(
     root = Path(root)
 
     # Collect all chunks grouped by partition_id.
-    partition_chunks: dict[str, list[tuple[Path, str]]] = {
-        slug: [] for slug in SLUG_MAP.values()
-    }
+    partition_chunks: dict[str, list[tuple[Path, str]]] = {slug: [] for slug in SLUG_MAP.values()}
     for slug, md_path, content in walk_oracle_skills(root):
         for chunk_text in chunk_markdown(content):
             partition_chunks[slug].append((md_path, chunk_text))
@@ -269,11 +264,7 @@ async def seed_all_oracle_skills(
 
     # Idempotent delete — explicit IN list, not LIKE.
     partition_ids = list(SLUG_MAP.values())
-    await db.execute(
-        delete(DomainKnowledgeChunk).where(
-            DomainKnowledgeChunk.partition_id.in_(partition_ids)
-        )
-    )
+    await db.execute(delete(DomainKnowledgeChunk).where(DomainKnowledgeChunk.partition_id.in_(partition_ids)))
 
     total = 0
     for partition_id, file_chunks in partition_chunks.items():
@@ -285,8 +276,7 @@ async def seed_all_oracle_skills(
         embeddings = await embed_domain_texts(texts)
         if embeddings is None:
             logger.warning(
-                "[ORACLE_SEEDER] embed_domain_texts returned None for partition %s "
-                "— writing rows without embeddings",
+                "[ORACLE_SEEDER] embed_domain_texts returned None for partition %s — writing rows without embeddings",
                 partition_id,
             )
 

@@ -1,0 +1,15 @@
+# Baseline mirror for workspace/oracle_sdf_roles_least_privilege.yaml.
+
+query: "How do I configure a customrole XML for least-privilege access in SDF?"
+agent_id: unified-agent
+tags: ["workspace", "oracle", "sdf-roles", "baseline"]
+notes: |
+  Unified-agent baseline for the SDF customrole-XML question. Captures
+  pre-RAG behavior; specialized workspace case retrieves Oracle's
+  netsuite-sdf-roles-and-permissions content.
+expected_answer_contains:
+  - "permkey"
+expected_tools: []
+expected_accuracy: 0.0
+max_cost: 0.30
+max_latency_ms: 60000
