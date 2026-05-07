@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "skills": {
+    "netsuite-ai-connector-instructions": {
+      "source": "oracle/netsuite-suitecloud-sdk",
+      "sourceType": "github",
+      "skillPath": "packages/agent-skills/netsuite-ai-connector-instructions/SKILL.md",
+      "computedHash": "b2981c5f141f9979dde8e168078f27532dea5de6f4bc9fabd8f144f9362af4af"
+    },
+    "netsuite-owasp-secure-coding": {
+      "source": "oracle/netsuite-suitecloud-sdk",
+      "sourceType": "github",
+      "skillPath": "packages/agent-skills/netsuite-owasp-secure-coding/SKILL.md",
+      "computedHash": "01476bdc9a49d8a2c90b62f2cbfce46ae6a169af0b5e3dd9457b3620d350853e"
+    },
+    "netsuite-sdf-project-documentation": {
+      "source": "oracle/netsuite-suitecloud-sdk",
+      "sourceType": "github",
+      "skillPath": "packages/agent-skills/netsuite-sdf-project-documentation/SKILL.md",
+      "computedHash": "bf5f87685a2f9d644e57935a4584df7d4c94d892422cc9843304a080a83f1425"
+    },
+    "netsuite-sdf-roles-and-permissions": {
+      "source": "oracle/netsuite-suitecloud-sdk",
+      "sourceType": "github",
+      "skillPath": "packages/agent-skills/netsuite-sdf-roles-and-permissions/SKILL.md",
+      "computedHash": "56e3a1cc8e9ac4f16bba51c7446c1dce077ebb491c24c8a5165fe1421e60034d"
+    },
+    "netsuite-suitescript-records-reference": {
+      "source": "oracle/netsuite-suitecloud-sdk",
+      "sourceType": "github",
+      "skillPath": "packages/agent-skills/netsuite-suitescript-records-reference/SKILL.md",
+      "computedHash": "b33e4153f369533adccbc9052f5d974d9249ade0b7a3a5e8275439c699f79bdc"
+    },
+    "netsuite-suitescript-upgrade": {
+      "source": "oracle/netsuite-suitecloud-sdk",
+      "sourceType": "github",
+      "skillPath": "packages/agent-skills/netsuite-suitescript-upgrade/SKILL.md",
+      "computedHash": "4a13664df0cb6c9b9d06fa1a200eda55b5e49898d0af5d0737be52c52f90ad30"
+    },
+    "netsuite-uif-spa-reference": {
+      "source": "oracle/netsuite-suitecloud-sdk",
+      "sourceType": "github",
+      "skillPath": "packages/agent-skills/netsuite-uif-spa-reference/SKILL.md",
+      "computedHash": "6db9198f1fde9fe3118ab620cfb61c807278ee864514cbe7566c3c9536c49149"
+    }
+  }
+}
