@@ -14,6 +14,15 @@ import logging
 import re
 from collections.abc import Iterator
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+from sqlalchemy import delete
+
+from app.models.domain_knowledge import DomainKnowledgeChunk
+from app.services.chat.domain_knowledge import embed_domain_texts
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
 
@@ -144,3 +153,84 @@ def walk_oracle_skills(root: Path | str) -> Iterator[tuple[str, Path, str]]:
             f"No Oracle skills found under {skills_root}. "
             "run scripts/refresh-oracle-skills.sh to vendor them first."
         )
+
+
+async def seed_all_oracle_skills(
+    db: AsyncSession,
+    root: Path | str | None = None,
+) -> int:
+    """Seed all 7 Oracle skill partitions into the RAG store.
+
+    Walks .claude/skills/netsuite-*/, chunks each markdown file, embeds the
+    chunks via OpenAI text-embedding-3-small, and writes DomainKnowledgeChunk
+    rows. Idempotent — deletes all existing oracle/* partition rows via an
+    explicit IN clause before re-inserting.
+
+    Args:
+        db: Async DB session. Caller is responsible for committing.
+        root: Repo root directory. Defaults to the repo root derived from this
+              file's location (``Path(__file__).resolve().parents[3]``).
+
+    Returns:
+        Total number of chunks written across all partitions.
+    """
+    if root is None:
+        # oracle_skill_seeder.py is at backend/app/services/oracle_skill_seeder.py
+        # parents[0] = services/, [1] = app/, [2] = backend/, [3] = repo root
+        root = Path(__file__).resolve().parents[3]
+
+    root = Path(root)
+
+    # Collect all chunks grouped by partition_id.
+    partition_chunks: dict[str, list[tuple[Path, str]]] = {
+        slug: [] for slug in SLUG_MAP.values()
+    }
+    for slug, md_path, content in walk_oracle_skills(root):
+        for chunk_text in chunk_markdown(content):
+            partition_chunks[slug].append((md_path, chunk_text))
+
+    # Idempotent delete — explicit IN list, not LIKE.
+    partition_ids = list(SLUG_MAP.values())
+    await db.execute(
+        delete(DomainKnowledgeChunk).where(
+            DomainKnowledgeChunk.partition_id.in_(partition_ids)
+        )
+    )
+
+    total = 0
+    for partition_id, file_chunks in partition_chunks.items():
+        if not file_chunks:
+            continue
+
+        # Embed the whole partition in a single batch.
+        texts = [chunk_text for _, chunk_text in file_chunks]
+        embeddings = await embed_domain_texts(texts)
+        if embeddings is None:
+            logger.warning(
+                "[ORACLE_SEEDER] embed_domain_texts returned None for partition %s "
+                "— writing rows without embeddings",
+                partition_id,
+            )
+
+        for idx, (md_path, chunk_text) in enumerate(file_chunks):
+            vec = embeddings[idx] if embeddings is not None else None
+            db.add(
+                DomainKnowledgeChunk(
+                    source_uri=f"{partition_id}/{md_path.name}#chunk-{idx}",
+                    chunk_index=idx,
+                    raw_text=chunk_text,
+                    token_count=len(chunk_text) // 4,
+                    source_type="oracle_skill",
+                    partition_id=partition_id,
+                    embedding=vec,
+                    is_deprecated=False,
+                )
+            )
+            total += 1
+
+    await db.flush()
+    print(
+        f"[ORACLE_SEEDER] Seeded {total} chunks across {len(partition_ids)} partitions",
+        flush=True,
+    )
+    return total

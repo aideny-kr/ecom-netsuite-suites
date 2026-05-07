@@ -2,6 +2,8 @@
 
 import pytest
 from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
+from sqlalchemy.sql.expression import Delete
 
 from app.services.oracle_skill_seeder import chunk_markdown, _estimate_tokens, walk_oracle_skills, SLUG_MAP
 
@@ -102,3 +104,71 @@ class TestWalkOracleSkills:
         assert len(results) == 2
         for slug, _path, _content in results:
             assert slug == "oracle/owasp"
+
+
+def _make_minimal_skills_tree(tmp_path):
+    """Create a stub for each of the 7 expected skill dirs."""
+    for skill_name in SLUG_MAP:
+        d = tmp_path / ".claude" / "skills" / skill_name
+        d.mkdir(parents=True)
+        (d / "SKILL.md").write_text(f"## {skill_name}\n\nstub content for tests\n")
+
+
+class TestSeederPersistence:
+    @pytest.mark.asyncio
+    async def test_writes_partition_per_skill(self, tmp_path):
+        """All 7 partition slugs appear in the rows added to the DB."""
+        from app.services.oracle_skill_seeder import seed_all_oracle_skills
+
+        mock_db = AsyncMock()
+        mock_db.execute = AsyncMock(return_value=MagicMock())
+        _make_minimal_skills_tree(tmp_path)
+        with patch(
+            "app.services.oracle_skill_seeder.embed_domain_texts",
+            new=AsyncMock(return_value=[[0.0] * 1536]),
+        ):
+            await seed_all_oracle_skills(mock_db, root=tmp_path)
+        partitions = {call.args[0].partition_id for call in mock_db.add.call_args_list}
+        assert partitions == set(SLUG_MAP.values())
+
+    @pytest.mark.asyncio
+    async def test_idempotent_re_seed(self, tmp_path):
+        """Two consecutive seed runs produce identical add counts (delete + re-insert)."""
+        from app.services.oracle_skill_seeder import seed_all_oracle_skills
+
+        mock_db = AsyncMock()
+        mock_db.execute = AsyncMock(return_value=MagicMock())
+        _make_minimal_skills_tree(tmp_path)
+        with patch(
+            "app.services.oracle_skill_seeder.embed_domain_texts",
+            new=AsyncMock(return_value=[[0.0] * 1536]),
+        ):
+            count1 = await seed_all_oracle_skills(mock_db, root=tmp_path)
+            count2 = await seed_all_oracle_skills(mock_db, root=tmp_path)
+        assert count1 == count2 > 0
+
+    @pytest.mark.asyncio
+    async def test_uses_in_clause_not_like_for_delete(self, tmp_path):
+        """The DELETE statement enumerates partition IDs (IN), not LIKE prefix."""
+        from app.services.oracle_skill_seeder import seed_all_oracle_skills
+
+        mock_db = AsyncMock()
+        mock_db.execute = AsyncMock(return_value=MagicMock())
+        _make_minimal_skills_tree(tmp_path)
+        with patch(
+            "app.services.oracle_skill_seeder.embed_domain_texts",
+            new=AsyncMock(return_value=[[0.0] * 1536]),
+        ):
+            await seed_all_oracle_skills(mock_db, root=tmp_path)
+        delete_calls = [c for c in mock_db.execute.call_args_list if isinstance(c.args[0], Delete)]
+        assert len(delete_calls) >= 1
+        delete_stmt = delete_calls[0].args[0]
+        # Render the SQL and assert structure: must contain IN clause, not LIKE
+        compiled = str(delete_stmt.compile(compile_kwargs={"literal_binds": True}))
+        assert " IN (" in compiled.upper(), f"expected IN clause, got: {compiled}"
+        assert " LIKE " not in compiled.upper(), f"unexpected LIKE clause: {compiled}"
+
+    def test_partition_id_under_64_chars(self):
+        """All partition slugs fit DomainKnowledgeChunk.partition_id String(64) limit."""
+        for slug in SLUG_MAP.values():
+            assert len(slug) <= 64, f"{slug} exceeds 64-char limit"
