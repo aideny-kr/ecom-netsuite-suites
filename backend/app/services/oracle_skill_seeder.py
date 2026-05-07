@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Iterator
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -98,3 +100,47 @@ def _subsplit(section: str, max_tokens: int) -> list[str]:
             for i in range(0, len(chunk), char_cap):
                 final.append(chunk[i : i + char_cap])
     return final
+
+
+# Vendored skill name → partition slug. Locked in spec; do not rename without a migration.
+SLUG_MAP: dict[str, str] = {
+    "netsuite-ai-connector-instructions": "oracle/ai-connector",
+    "netsuite-owasp-secure-coding": "oracle/owasp",
+    "netsuite-sdf-project-documentation": "oracle/sdf-docs",
+    "netsuite-sdf-roles-and-permissions": "oracle/sdf-roles",
+    "netsuite-suitescript-records-reference": "oracle/records",
+    "netsuite-suitescript-upgrade": "oracle/upgrade",
+    "netsuite-uif-spa-reference": "oracle/uif-spa",
+}
+
+
+def walk_oracle_skills(root: Path | str) -> Iterator[tuple[str, Path, str]]:
+    """Yield (partition_slug, file_path, markdown_text) for every .md under .claude/skills/netsuite-*/.
+
+    Skips .json, .d.ts, and any non-markdown file. Logs and skips missing skill dirs.
+    Raises FileNotFoundError if NO expected skill dir exists (signals a fresh checkout
+    that never ran scripts/refresh-oracle-skills.sh).
+    """
+    root = Path(root)
+    skills_root = root / ".claude" / "skills"
+    found_any = False
+
+    for skill_name, slug in SLUG_MAP.items():
+        skill_dir = skills_root / skill_name
+        if not skill_dir.is_dir():
+            logger.warning("Skill dir missing, skipping: %s", skill_dir)
+            continue
+        found_any = True
+        for md_path in sorted(skill_dir.rglob("*.md")):
+            try:
+                content = md_path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                logger.warning("Failed to read %s", md_path, exc_info=True)
+                continue
+            yield slug, md_path, content
+
+    if not found_any:
+        raise FileNotFoundError(
+            f"No Oracle skills found under {skills_root}. "
+            "run scripts/refresh-oracle-skills.sh to vendor them first."
+        )

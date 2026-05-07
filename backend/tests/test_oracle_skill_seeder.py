@@ -53,3 +53,57 @@ class TestChunkMarkdown:
         chunks = chunk_markdown(md, max_tokens=1500)
         for chunk in chunks:
             assert chunk.count("```") % 2 == 0, f"unbalanced fence in: {chunk[:100]}"
+
+
+import tempfile
+from pathlib import Path
+
+from app.services.oracle_skill_seeder import walk_oracle_skills, SLUG_MAP
+
+
+class TestWalkOracleSkills:
+    def test_skips_non_markdown(self, tmp_path: Path):
+        skill_dir = tmp_path / ".claude" / "skills" / "netsuite-owasp-secure-coding"
+        skill_dir.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text("## A\n\nbody")
+        (skill_dir / "records.json").write_text('{"x": 1}')
+        (skill_dir / "core.d.ts").write_text("declare const x: number;")
+
+        results = list(walk_oracle_skills(root=tmp_path))
+        assert len(results) == 1
+        slug, path, content = results[0]
+        assert slug == "oracle/owasp"
+        assert "body" in content
+
+    def test_walks_all_seven_skills(self, tmp_path: Path):
+        for skill_name in SLUG_MAP:
+            d = tmp_path / ".claude" / "skills" / skill_name
+            d.mkdir(parents=True)
+            (d / "SKILL.md").write_text(f"## {skill_name}\n\ncontent")
+
+        results = list(walk_oracle_skills(root=tmp_path))
+        slugs = {r[0] for r in results}
+        assert slugs == set(SLUG_MAP.values())
+
+    def test_handles_missing_skill_dir(self, tmp_path: Path):
+        d = tmp_path / ".claude" / "skills" / "netsuite-owasp-secure-coding"
+        d.mkdir(parents=True)
+        (d / "SKILL.md").write_text("## A\n\nbody")
+
+        results = list(walk_oracle_skills(root=tmp_path))
+        assert len(results) == 1
+
+    def test_empty_skills_dir_raises(self, tmp_path: Path):
+        with pytest.raises(FileNotFoundError, match="run scripts/refresh-oracle-skills.sh"):
+            list(walk_oracle_skills(root=tmp_path))
+
+    def test_nested_references_md_files_included(self, tmp_path: Path):
+        skill_dir = tmp_path / ".claude" / "skills" / "netsuite-owasp-secure-coding"
+        (skill_dir / "references").mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text("## main")
+        (skill_dir / "references" / "01-injection.md").write_text("## inj\n\ndetails")
+
+        results = list(walk_oracle_skills(root=tmp_path))
+        assert len(results) == 2
+        for slug, _path, _content in results:
+            assert slug == "oracle/owasp"
