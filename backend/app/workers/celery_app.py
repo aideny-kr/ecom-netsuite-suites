@@ -37,6 +37,7 @@ celery_app.conf.include = [
     "app.workers.tasks.knowledge_crawler",
     "app.workers.tasks.metadata_discovery",
     "app.workers.tasks.onboarding_discovery",
+    "app.workers.tasks.oracle_skill_reseed",
     "app.workers.tasks.proactive_token_refresh",
     "app.workers.tasks.shopify_sync",
     "app.workers.tasks.stripe_health_check",
@@ -98,5 +99,9 @@ celery_app.conf.beat_schedule = {
     "drive-rag-sync-nightly": {
         "task": "tasks.drive_rag_sync_all",
         "schedule": crontab(hour=6, minute=0),  # 06:00 UTC nightly
+    },
+    "oracle-skill-reseed": {
+        "task": "tasks.oracle_skill_reseed",
+        "schedule": 6 * 60 * 60,  # every 6 hours; re-seeds when skills-lock.json hashes change
     },
 }
