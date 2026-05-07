@@ -214,3 +214,11 @@ class TestSeederPersistence:
         """All partition slugs fit DomainKnowledgeChunk.partition_id String(64) limit."""
         for slug in SLUG_MAP.values():
             assert len(slug) <= 64, f"{slug} exceeds 64-char limit"
+
+
+class TestCLIEntry:
+    def test_main_imports_and_is_callable(self):
+        """Smoke test: module imports cleanly and main() exists as a callable."""
+        from app.scripts import seed_oracle_skills as cli
+
+        assert callable(cli.main)
