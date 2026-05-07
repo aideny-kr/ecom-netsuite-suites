@@ -10,6 +10,7 @@ Idempotent — deletes existing oracle/<slug> chunks before re-seeding.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from collections.abc import Iterator
@@ -111,6 +112,65 @@ def _subsplit(section: str, max_tokens: int) -> list[str]:
     return final
 
 
+def _records_json_to_synthetic_markdown(json_path: Path) -> Iterator[tuple[Path, str]]:
+    """Convert records.json to one synthetic markdown chunk per NetSuite record type.
+
+    The records reference skill ships its actual data as JSON, not markdown. This helper
+    emits one synthetic markdown document per record so the chunker (text-based) can
+    embed it. Each yielded path is a synthetic Path derived from the record's script ID
+    (e.g. records.json#salesorder -> Path("records.json/salesorder.md")) for traceability
+    in source_uri.
+
+    Yields (synthetic_path, markdown_text) tuples.
+    """
+    try:
+        data = json.loads(json_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        logger.warning("Failed to parse %s", json_path, exc_info=True)
+        return
+    records = data.get("records") or {}
+    for script_id, record in sorted(records.items()):
+        if not isinstance(record, dict):
+            continue
+        lines = [f"## Record: {script_id}", ""]
+        record_name = record.get("recordName") or record.get("displayName")
+        if record_name:
+            lines.append(f"Display name: {record_name}")
+        for key in ("internalId", "recordCategory", "scriptingLevel", "supportsCustomFields"):
+            if key in record:
+                lines.append(f"{key}: {record[key]}")
+        lines.append("")
+
+        fields = record.get("fields") or []
+        if isinstance(fields, list) and fields:
+            lines.append("### Body Fields")
+            lines.append("")
+            for f in fields:
+                if not isinstance(f, dict):
+                    continue
+                fid = f.get("id") or f.get("scriptId") or "?"
+                ftype = f.get("type") or "?"
+                label = f.get("label") or ""
+                req = " (required)" if f.get("required") else ""
+                lines.append(f"- `{fid}` ({ftype}){req}{(': ' + label) if label else ''}")
+            lines.append("")
+
+        sublists = record.get("sublists") or []
+        if isinstance(sublists, list) and sublists:
+            lines.append("### Sublists")
+            lines.append("")
+            for s in sublists:
+                if not isinstance(s, dict):
+                    continue
+                sid = s.get("id") or s.get("scriptId") or "?"
+                slabel = s.get("label") or ""
+                lines.append(f"- `{sid}`{(': ' + slabel) if slabel else ''}")
+            lines.append("")
+
+        synthetic_path = json_path.parent / f"{json_path.stem}__{script_id}.md"
+        yield synthetic_path, "\n".join(lines)
+
+
 # Vendored skill name → partition slug. Locked in spec; do not rename without a migration.
 SLUG_MAP: dict[str, str] = {
     "netsuite-ai-connector-instructions": "oracle/ai-connector",
@@ -147,6 +207,16 @@ def walk_oracle_skills(root: Path | str) -> Iterator[tuple[str, Path, str]]:
                 logger.warning("Failed to read %s", md_path, exc_info=True)
                 continue
             yield slug, md_path, content
+
+        # The records-reference skill ships field data as JSON, not markdown.
+        # Emit one synthetic markdown chunk per record type so the chunker can embed it.
+        if skill_name == "netsuite-suitescript-records-reference":
+            json_path = skill_dir / "references" / "records.json"
+            if json_path.is_file():
+                for synthetic_path, synthetic_content in _records_json_to_synthetic_markdown(
+                    json_path
+                ):
+                    yield slug, synthetic_path, synthetic_content
 
     if not found_any:
         raise FileNotFoundError(

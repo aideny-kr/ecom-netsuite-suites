@@ -1,11 +1,19 @@
 """Tests for oracle_skill_seeder.chunk_markdown."""
 
-import pytest
+import json
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 from sqlalchemy.sql.expression import Delete
 
-from app.services.oracle_skill_seeder import chunk_markdown, _estimate_tokens, walk_oracle_skills, SLUG_MAP
+from app.services.oracle_skill_seeder import (
+    SLUG_MAP,
+    _estimate_tokens,
+    chunk_markdown,
+    seed_all_oracle_skills,
+    walk_oracle_skills,
+)
 
 
 class TestChunkMarkdown:
@@ -105,6 +113,37 @@ class TestWalkOracleSkills:
         for slug, _path, _content in results:
             assert slug == "oracle/owasp"
 
+    def test_yields_synthetic_markdown_from_records_json(self, tmp_path: Path):
+        """records.json is converted to one synthetic markdown chunk per NetSuite record."""
+        skill_dir = tmp_path / ".claude" / "skills" / "netsuite-suitescript-records-reference"
+        refs = skill_dir / "references"
+        refs.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text("## main\n")
+        records_data = {
+            "records": {
+                "salesorder": {
+                    "recordName": "Sales Order",
+                    "internalId": 30,
+                    "fields": [
+                        {"id": "entity", "type": "select", "label": "Customer", "required": True},
+                        {"id": "trandate", "type": "date", "label": "Transaction Date"},
+                    ],
+                },
+                "customer": {
+                    "fields": [{"id": "companyname", "type": "text", "label": "Company"}],
+                },
+            }
+        }
+        (refs / "records.json").write_text(json.dumps(records_data))
+
+        results = list(walk_oracle_skills(root=tmp_path))
+        contents = [c for _, _, c in results]
+        # Should have the SKILL.md plus one synthetic chunk per record
+        assert any("## Record: salesorder" in c for c in contents)
+        assert any("`entity` (select) (required): Customer" in c for c in contents)
+        assert any("`trandate` (date): Transaction Date" in c for c in contents)
+        assert any("## Record: customer" in c for c in contents)
+
 
 def _make_minimal_skills_tree(tmp_path):
     """Create a stub for each of the 7 expected skill dirs."""
@@ -118,8 +157,6 @@ class TestSeederPersistence:
     @pytest.mark.asyncio
     async def test_writes_partition_per_skill(self, tmp_path):
         """All 7 partition slugs appear in the rows added to the DB."""
-        from app.services.oracle_skill_seeder import seed_all_oracle_skills
-
         mock_db = AsyncMock()
         mock_db.execute = AsyncMock(return_value=MagicMock())
         _make_minimal_skills_tree(tmp_path)
@@ -134,8 +171,6 @@ class TestSeederPersistence:
     @pytest.mark.asyncio
     async def test_idempotent_re_seed(self, tmp_path):
         """Two consecutive seed runs produce identical add counts (delete + re-insert)."""
-        from app.services.oracle_skill_seeder import seed_all_oracle_skills
-
         mock_db = AsyncMock()
         mock_db.execute = AsyncMock(return_value=MagicMock())
         _make_minimal_skills_tree(tmp_path)
@@ -150,8 +185,6 @@ class TestSeederPersistence:
     @pytest.mark.asyncio
     async def test_uses_in_clause_not_like_for_delete(self, tmp_path):
         """The DELETE statement enumerates partition IDs (IN), not LIKE prefix."""
-        from app.services.oracle_skill_seeder import seed_all_oracle_skills
-
         mock_db = AsyncMock()
         mock_db.execute = AsyncMock(return_value=MagicMock())
         _make_minimal_skills_tree(tmp_path)
@@ -171,8 +204,6 @@ class TestSeederPersistence:
     @pytest.mark.asyncio
     async def test_writes_rows_when_embedding_unavailable(self, tmp_path):
         """When embed_domain_texts returns None, rows are still written with embedding=None."""
-        from app.services.oracle_skill_seeder import seed_all_oracle_skills
-
         mock_db = AsyncMock()
         mock_db.execute = AsyncMock(return_value=MagicMock())
         _make_minimal_skills_tree(tmp_path)
@@ -190,8 +221,6 @@ class TestSeederPersistence:
     @pytest.mark.asyncio
     async def test_aborts_when_no_chunks_collected(self, tmp_path):
         """If all skill files are empty, the seeder logs and returns 0 without deleting."""
-        from app.services.oracle_skill_seeder import seed_all_oracle_skills
-
         mock_db = AsyncMock()
         mock_db.execute = AsyncMock(return_value=MagicMock())
         # Create skill dirs with empty SKILL.md files
