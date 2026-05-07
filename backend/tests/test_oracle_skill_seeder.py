@@ -1,8 +1,9 @@
 """Tests for oracle_skill_seeder.chunk_markdown."""
 
 import pytest
+from pathlib import Path
 
-from app.services.oracle_skill_seeder import chunk_markdown, _estimate_tokens
+from app.services.oracle_skill_seeder import chunk_markdown, _estimate_tokens, walk_oracle_skills, SLUG_MAP
 
 
 class TestChunkMarkdown:
@@ -53,12 +54,6 @@ class TestChunkMarkdown:
         chunks = chunk_markdown(md, max_tokens=1500)
         for chunk in chunks:
             assert chunk.count("```") % 2 == 0, f"unbalanced fence in: {chunk[:100]}"
-
-
-import tempfile
-from pathlib import Path
-
-from app.services.oracle_skill_seeder import walk_oracle_skills, SLUG_MAP
 
 
 class TestWalkOracleSkills:
