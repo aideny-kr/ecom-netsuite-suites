@@ -58,5 +58,13 @@ for d in "${JUNK_DIRS[@]}" skills; do
   fi
 done
 
+echo "==> Seeding RAG partitions from refreshed skill content"
+if [ -d "backend/.venv" ]; then
+  ( cd backend && .venv/bin/python -m app.scripts.seed_oracle_skills )
+else
+  echo "WARNING: backend/.venv not found — skipping local RAG seed."
+  echo "         Celery Beat on staging/prod will pick up the changes within 6h."
+fi
+
 echo "==> Done. Review the diff:"
 echo "    git status --short .claude/skills/ skills-lock.json"
