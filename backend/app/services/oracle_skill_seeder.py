@@ -67,6 +67,7 @@ def _subsplit(section: str, max_tokens: int) -> list[str]:
     in_fence = False
 
     for para in paragraphs:
+        # Track ``` parity across paragraphs to avoid flushing mid-fence.
         fence_count = para.count("```")
         para_tokens = _estimate_tokens(para)
 
@@ -86,6 +87,11 @@ def _subsplit(section: str, max_tokens: int) -> list[str]:
     final: list[str] = []
     for chunk in chunks:
         if _estimate_tokens(chunk) <= max_tokens:
+            final.append(chunk)
+        elif chunk.count("```") > 0:
+            # Chunk contains code fence markers; character-boundary slicing would cut
+            # between opening and closing backticks, producing unbalanced fences.
+            # Emit as-is and accept the token-cap violation — fence correctness wins.
             final.append(chunk)
         else:
             char_cap = max_tokens * 4

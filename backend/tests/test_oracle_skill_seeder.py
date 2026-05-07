@@ -2,7 +2,7 @@
 
 import pytest
 
-from app.services.oracle_skill_seeder import chunk_markdown
+from app.services.oracle_skill_seeder import chunk_markdown, _estimate_tokens
 
 
 class TestChunkMarkdown:
@@ -47,6 +47,9 @@ class TestChunkMarkdown:
         assert len(chunks) == 1
         assert "first para" in chunks[0]
 
-
-def _estimate_tokens(text: str) -> int:
-    return len(text) // 4
+    def test_hard_split_preserves_fences_on_single_giant_fenced_para(self):
+        fenced = "```python\n" + "x" * 10000 + "\n```"
+        md = f"## Section\n\n{fenced}\n"
+        chunks = chunk_markdown(md, max_tokens=1500)
+        for chunk in chunks:
+            assert chunk.count("```") % 2 == 0, f"unbalanced fence in: {chunk[:100]}"
