@@ -1,0 +1,20 @@
+# Workspace agent: SuiteScript 2.0 → 2.1 migration question that must surface
+# Oracle's SuiteScript-upgrade skill via RAG retrieval.
+
+case_id: oracle_suitescript_2_to_21_migration
+query: "How do I migrate a SuiteScript 2.0 client script to 2.1?"
+tags: ["workspace", "oracle", "upgrade", "knowledge-profile"]
+notes: |
+  Triggers suitescript_workspace.yaml profile. Expected RAG hit:
+  oracle/upgrade partition. Agent should reference @NApiVersion 2.1
+  jsdoc tag and 2.1-specific API/breaking-change notes documented in
+  netsuite-suitescript-upgrade.
+expected_answer_contains:
+  - "2.1"
+  - "@NApiVersion"
+expected_tools: []
+expected_accuracy: 0.5
+max_cost: 0.30
+max_latency_ms: 60000
+baseline_expected_accuracy: 0.0
+baseline_expected_tools: []

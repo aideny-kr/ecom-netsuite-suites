@@ -1,0 +1,24 @@
+# Workspace agent: SuiteScript security question that must surface Oracle's
+# OWASP secure-coding skill via RAG retrieval.
+#
+# Verifies the suitescript_workspace knowledge profile triggers on
+# workspace_* tools and that retrieve_domain_knowledge() pulls relevant
+# chunks from the oracle/owasp partition seeded by oracle_skill_seeder.
+
+case_id: oracle_owasp_file_upload
+query: "What's the right way to handle file uploads in a SuiteScript RESTlet?"
+tags: ["workspace", "oracle", "owasp", "knowledge-profile"]
+notes: |
+  Triggers suitescript_workspace.yaml profile (workspace tools present).
+  Expected RAG hit: oracle/owasp partition. The agent should mention
+  validating MIME type, size limits, or extension allow-listing — all
+  documented in netsuite-owasp-secure-coding's file-upload reference.
+expected_answer_contains:
+  - "validat"  # validate / validation
+  - "size"
+expected_tools: []
+expected_accuracy: 0.5
+max_cost: 0.30
+max_latency_ms: 60000
+baseline_expected_accuracy: 0.0
+baseline_expected_tools: []

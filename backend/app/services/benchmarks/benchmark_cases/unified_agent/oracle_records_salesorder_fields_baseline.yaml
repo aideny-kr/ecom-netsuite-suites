@@ -1,0 +1,15 @@
+# Baseline mirror for workspace/oracle_records_salesorder_fields.yaml.
+
+query: "What field IDs are available on the salesorder record body?"
+agent_id: unified-agent
+tags: ["workspace", "oracle", "records", "baseline"]
+notes: |
+  Unified-agent baseline for the salesorder field-reference question.
+  Pre-RAG behavior; specialized workspace case retrieves Oracle's
+  netsuite-suitescript-records-reference (records.json synthetic chunks).
+expected_answer_contains:
+  - "entity"
+expected_tools: []
+expected_accuracy: 0.0
+max_cost: 0.30
+max_latency_ms: 60000

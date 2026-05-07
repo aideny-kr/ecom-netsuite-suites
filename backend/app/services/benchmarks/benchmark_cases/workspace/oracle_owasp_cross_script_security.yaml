@@ -1,0 +1,20 @@
+# Workspace agent: cross-script security question that must surface
+# Oracle's OWASP secure-coding skill via RAG retrieval.
+
+case_id: oracle_owasp_cross_script_security
+query: "What's the SuiteScript security model for cross-script function calls?"
+tags: ["workspace", "oracle", "owasp", "knowledge-profile"]
+notes: |
+  Triggers suitescript_workspace.yaml profile. Expected RAG hit:
+  oracle/owasp partition. Agent should reference @NModuleScope values
+  (SameAccount, Public) and how they gate cross-script invocation —
+  documented in netsuite-owasp-secure-coding's API/RESTlet hardening
+  sections.
+expected_answer_contains:
+  - "scope"  # @NModuleScope
+expected_tools: []
+expected_accuracy: 0.5
+max_cost: 0.30
+max_latency_ms: 60000
+baseline_expected_accuracy: 0.0
+baseline_expected_tools: []

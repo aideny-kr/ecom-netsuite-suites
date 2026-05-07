@@ -1,0 +1,19 @@
+# Workspace agent: SDF customrole XML question that must surface Oracle's
+# SDF roles-and-permissions skill via RAG retrieval.
+
+case_id: oracle_sdf_roles_least_privilege
+query: "How do I configure a customrole XML for least-privilege access in SDF?"
+tags: ["workspace", "oracle", "sdf-roles", "knowledge-profile"]
+notes: |
+  Triggers suitescript_workspace.yaml profile. Expected RAG hit:
+  oracle/sdf-roles partition. Agent should reference permkey/permlevel
+  values (FULL, EDIT, CREATE, VIEW) and the principle of least privilege.
+expected_answer_contains:
+  - "permkey"
+  - "permlevel"
+expected_tools: []
+expected_accuracy: 0.5
+max_cost: 0.30
+max_latency_ms: 60000
+baseline_expected_accuracy: 0.0
+baseline_expected_tools: []

@@ -1,0 +1,15 @@
+# Baseline mirror for workspace/oracle_suitescript_2_to_21_migration.yaml.
+
+query: "How do I migrate a SuiteScript 2.0 client script to 2.1?"
+agent_id: unified-agent
+tags: ["workspace", "oracle", "upgrade", "baseline"]
+notes: |
+  Unified-agent baseline for the SuiteScript 2.0 → 2.1 migration question.
+  Pre-RAG behavior; specialized workspace case retrieves Oracle's
+  netsuite-suitescript-upgrade content.
+expected_answer_contains:
+  - "2.1"
+expected_tools: []
+expected_accuracy: 0.0
+max_cost: 0.30
+max_latency_ms: 60000

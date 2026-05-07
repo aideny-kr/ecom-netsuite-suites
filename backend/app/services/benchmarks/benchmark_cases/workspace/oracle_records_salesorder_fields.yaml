@@ -1,0 +1,20 @@
+# Workspace agent: salesorder field-reference question that must surface
+# Oracle's SuiteScript records-reference skill via RAG retrieval.
+
+case_id: oracle_records_salesorder_fields
+query: "What field IDs are available on the salesorder record body?"
+tags: ["workspace", "oracle", "records", "knowledge-profile"]
+notes: |
+  Triggers suitescript_workspace.yaml profile. Expected RAG hit:
+  oracle/records partition. Agent should name standard salesorder body
+  fields (entity, trandate, memo, status, total) — all documented in
+  netsuite-suitescript-records-reference.
+expected_answer_contains:
+  - "entity"
+  - "trandate"
+expected_tools: []
+expected_accuracy: 0.5
+max_cost: 0.30
+max_latency_ms: 60000
+baseline_expected_accuracy: 0.0
+baseline_expected_tools: []

@@ -1,0 +1,28 @@
+profile_id: suitescript_workspace
+display_name: "SuiteScript Workspace"
+trigger_tools:
+  - workspace_list_files
+  - workspace_read_file
+  - workspace_search
+  - workspace_propose_patch
+  - workspace_apply_patch
+  - workspace_run_validate
+  - workspace_run_unit_tests
+  - workspace_run_suiteql_assertions
+  - workspace_deploy_sandbox
+prompt_fragment: |
+  ## SuiteScript Workspace Context
+
+  You are reviewing, editing, validating, or deploying SuiteScript code in a tenant's
+  workspace. Oracle's official SuiteScript guidance is available via RAG retrieval —
+  pull it when the question is about SuiteScript security, SDF roles/permissions,
+  record fields, or SuiteScript 1.0/2.0/2.x → 2.1 migration. Cite Oracle's documented
+  patterns over inferring from code.
+rag_partitions:
+  - oracle/ai-connector
+  - oracle/owasp
+  - oracle/sdf-docs
+  - oracle/sdf-roles
+  - oracle/records
+  - oracle/upgrade
+  - oracle/uif-spa
