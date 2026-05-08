@@ -1,0 +1,65 @@
+# .dockerignore — repo-root scope. The backend image build now uses repo-root
+# as context (so it can COPY .claude/skills/ for Oracle RAG seeding). Without
+# this file the daemon would tar gigabytes of unrelated content.
+
+# VCS / worktrees
+.git
+.git/**
+.worktrees
+.worktrees/**
+
+# Frontend (separate image)
+frontend/
+
+# SuiteApp (separate deploy path)
+suiteapp/
+suiteapp/**
+
+# Local dev artifacts
+**/__pycache__
+**/*.pyc
+**/.venv
+**/venv
+**/node_modules
+**/.next
+**/dist
+**/build
+**/.coverage
+**/.pytest_cache
+**/.ruff_cache
+**/.mypy_cache
+pgdata/
+
+# Docs / planning artifacts (local-only per CLAUDE.md, but keep this conservative)
+docs/
+memory/
+.claude/plans/
+.claude/specs/
+.claude/superpowers/
+.superpowers/
+
+# Local skills — only the Oracle ones are tracked + needed in the image.
+# Use ! to allow only oracle-vendored skills back in. Custom local skills
+# (suitescript-engineer, netsuite-mastery, etc.) stay out so a dev's local
+# state doesn't leak into a production image.
+.claude/skills/*
+!.claude/skills/netsuite-ai-connector-instructions
+!.claude/skills/netsuite-owasp-secure-coding
+!.claude/skills/netsuite-sdf-project-documentation
+!.claude/skills/netsuite-sdf-roles-and-permissions
+!.claude/skills/netsuite-suitescript-records-reference
+!.claude/skills/netsuite-suitescript-upgrade
+!.claude/skills/netsuite-uif-spa-reference
+
+# Secrets — belt and suspenders
+.env
+.env.production
+*.pem
+*.key
+*.p12
+
+# Editor / OS
+.vscode
+.idea
+**/.DS_Store
+**/Thumbs.db

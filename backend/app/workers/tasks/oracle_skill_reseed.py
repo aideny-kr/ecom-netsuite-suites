@@ -103,10 +103,15 @@ async def _run_reseed(db: "AsyncSession", root: Path | str | None = None) -> int
     """Compare lockfile hashes against sentinels and reseed only changed partitions.
 
     Returns total chunks reseeded across all partitions (0 if none changed).
+
+    Default ``root`` resolves through ``oracle_skill_seeder._default_skills_root()``
+    so it honours ``ORACLE_SKILLS_ROOT`` (set in the production Dockerfile to
+    ``/app``) and falls back to the repo root in dev.
     """
     if root is None:
-        # parents[4] from backend/app/workers/tasks/oracle_skill_reseed.py is the repo root
-        root = Path(__file__).resolve().parents[4]
+        from app.services.oracle_skill_seeder import _default_skills_root
+
+        root = _default_skills_root()
     root = Path(root)
 
     file_hashes = _read_lockfile_hashes(root)

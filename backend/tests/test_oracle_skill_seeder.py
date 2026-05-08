@@ -247,3 +247,49 @@ class TestCLIEntry:
         from app.scripts import seed_oracle_skills as cli
 
         assert callable(cli.main)
+
+
+class TestDefaultSkillsRoot:
+    """The seeder must look at ORACLE_SKILLS_ROOT in production.
+
+    The Dockerfile sets ORACLE_SKILLS_ROOT=/app and COPYs .claude/skills/ to
+    /app/.claude/skills/. Without this env var honoured, Beat's reseed task
+    fails with FileNotFoundError because parents[3] inside the container
+    resolves to /, not /app — which silently skips Oracle RAG seeding on
+    staging and prod.
+    """
+
+    def test_env_var_overrides_default(self, tmp_path, monkeypatch):
+        from app.services.oracle_skill_seeder import _default_skills_root
+
+        monkeypatch.setenv("ORACLE_SKILLS_ROOT", str(tmp_path))
+        assert _default_skills_root() == tmp_path
+
+    def test_falls_back_to_parents3_when_env_unset(self, monkeypatch):
+        from app.services.oracle_skill_seeder import _default_skills_root
+
+        monkeypatch.delenv("ORACLE_SKILLS_ROOT", raising=False)
+        # Walk up from oracle_skill_seeder.py: services/ → app/ → backend/ → repo root
+        expected = Path(__file__).resolve().parents[2]  # tests/ → backend/ → repo root
+        assert _default_skills_root() == expected
+
+    @pytest.mark.asyncio
+    async def test_seeder_uses_env_var_when_root_not_passed(self, tmp_path, monkeypatch):
+        """seed_all_oracle_skills with no root arg should honour ORACLE_SKILLS_ROOT."""
+        for skill_name in SLUG_MAP:
+            d = tmp_path / ".claude" / "skills" / skill_name
+            d.mkdir(parents=True)
+            (d / "SKILL.md").write_text(f"## {skill_name}\n\ncontent")
+        monkeypatch.setenv("ORACLE_SKILLS_ROOT", str(tmp_path))
+
+        mock_db = AsyncMock()
+        mock_db.execute = AsyncMock(return_value=MagicMock())
+        with patch(
+            "app.services.oracle_skill_seeder.embed_domain_texts",
+            new=AsyncMock(return_value=[[0.0] * 1536]),
+        ):
+            count = await seed_all_oracle_skills(mock_db)
+        assert count > 0
+        # Sanity: at least one chunk should have been added per skill
+        partitions = {call.args[0].partition_id for call in mock_db.add.call_args_list}
+        assert partitions == set(SLUG_MAP.values())
