@@ -1,14 +1,21 @@
-# Production Dockerfile for FastAPI backend + Celery worker
-# Usage:
-#   Backend: docker build -f Dockerfile.prod -t backend .
-#            docker run -p 8000:8000 backend
-#   Worker:  docker run backend celery -A app.workers.celery_app worker --loglevel=info -Q default,sync,recon,export
+# Production Dockerfile for FastAPI backend + Celery worker.
+#
+# Build context is the REPO ROOT (not backend/) so we can also COPY
+# .claude/skills/netsuite-*/ into the image — the oracle_skill_seeder reads
+# those files at runtime to populate the workspace agent's RAG partitions.
+#
+# Usage from repo root:
+#   docker build -f backend/Dockerfile.prod -t backend .
+#   docker run -p 8000:8000 backend
 
 FROM python:3.11-slim AS base
 
-# Prevent Python from writing .pyc files and enable unbuffered output
+# Prevent Python from writing .pyc files and enable unbuffered output.
+# ORACLE_SKILLS_ROOT tells oracle_skill_seeder where to walk for vendored
+# Oracle skill content (set to /app, where we COPY them below).
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    ORACLE_SKILLS_ROOT=/app
 
 WORKDIR /app
 
@@ -18,12 +25,18 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies
-COPY pyproject.toml .
+COPY backend/pyproject.toml .
 RUN pip install --no-cache-dir . && \
     apt-get purge -y --auto-remove gcc
 
-# Copy application code
-COPY . .
+# Copy backend application code (the build context is the repo root, so
+# select backend/ explicitly).
+COPY backend/ .
+
+# Copy vendored Oracle SuiteCloud SDK skill content for RAG seeding.
+# .dockerignore restricts this to oracle-vendored skills only — custom
+# local skills (suitescript-engineer, etc.) stay out of the image.
+COPY .claude/skills/ /app/.claude/skills/
 
 # Create non-root user
 RUN addgroup --system appuser && \

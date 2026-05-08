@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from collections.abc import Iterator
 from pathlib import Path
@@ -28,6 +29,23 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _MAX_TOKENS_DEFAULT = 1500
+
+
+def _default_skills_root() -> Path:
+    """Resolve the directory that contains ``.claude/skills/netsuite-*/``.
+
+    Production sets ``ORACLE_SKILLS_ROOT`` (typically ``/app`` — the Dockerfile
+    COPYs ``.claude/skills/`` there at build time). Dev falls back to walking
+    up from this file to the repo root.
+    """
+    env_root = os.environ.get("ORACLE_SKILLS_ROOT")
+    if env_root:
+        return Path(env_root)
+    # oracle_skill_seeder.py is at backend/app/services/oracle_skill_seeder.py
+    # parents[0] = services/, [1] = app/, [2] = backend/, [3] = repo root
+    return Path(__file__).resolve().parents[3]
+
+
 _HEADER_RE = re.compile(r"^(?:## |### )", re.MULTILINE)
 
 
@@ -235,16 +253,15 @@ async def seed_all_oracle_skills(
 
     Args:
         db: Async DB session. Caller is responsible for committing.
-        root: Repo root directory. Defaults to the repo root derived from this
-              file's location (``Path(__file__).resolve().parents[3]``).
+        root: Directory containing ``.claude/skills/netsuite-*/``. Defaults to
+              ``ORACLE_SKILLS_ROOT`` env var (set in production to ``/app``)
+              or, in dev, the repo root derived from this file's location.
 
     Returns:
         Total number of chunks written across all partitions.
     """
     if root is None:
-        # oracle_skill_seeder.py is at backend/app/services/oracle_skill_seeder.py
-        # parents[0] = services/, [1] = app/, [2] = backend/, [3] = repo root
-        root = Path(__file__).resolve().parents[3]
+        root = _default_skills_root()
 
     root = Path(root)
 
