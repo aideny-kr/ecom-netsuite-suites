@@ -80,8 +80,13 @@ def sheets_context():
     }
 
 
-def _run(params, ctx, *, connector, payload, excel_bytes=None, file_lookup_raises=None):
-    """Invoke pricing_to_sheets_execute with the standard mock harness."""
+def _run(params, ctx, *, connector, payload, excel_bytes=None, file_lookup_raises=None, styling_side_effect=None):
+    """Invoke pricing_to_sheets_execute with the standard mock harness.
+
+    Returns (result, create_mock, write_mock, share_mock, styling_mock).
+    `styling_side_effect`, if set, is attached to the styling mock so a test
+    can simulate a Sheets API failure during styling.
+    """
     if excel_bytes is None and payload is not None:
         excel_bytes = _build_excel_bytes(["SKU", "USD", "GBP"], [["SKU-1", 100, 99]])
 
@@ -92,6 +97,11 @@ def _run(params, ctx, *, connector, payload, excel_bytes=None, file_lookup_raise
         get_file_mock = AsyncMock(side_effect=file_lookup_raises)
     else:
         get_file_mock = AsyncMock(return_value=(task_file, excel_bytes))
+
+    if styling_side_effect is not None:
+        styling_mock = AsyncMock(side_effect=styling_side_effect)
+    else:
+        styling_mock = AsyncMock(return_value={"replies": []})
 
     with (
         patch(
@@ -127,6 +137,10 @@ def _run(params, ctx, *, connector, payload, excel_bytes=None, file_lookup_raise
             return_value={"permission_id": "p1"},
         ) as share_mock,
         patch(
+            "app.mcp.tools.pricing_tools.apply_pricing_styling",
+            new=styling_mock,
+        ),
+        patch(
             "app.mcp.tools.pricing_tools.decrypt_credentials",
             return_value={"service_account_json": {"foo": "bar"}},
         ),
@@ -137,13 +151,13 @@ def _run(params, ctx, *, connector, payload, excel_bytes=None, file_lookup_raise
         ),
     ):
         result = asyncio.run(pricing_to_sheets_execute(params, ctx))
-    return result, create_mock, write_mock, share_mock
+    return result, create_mock, write_mock, share_mock, styling_mock
 
 
 class TestConnectorCheckFirst:
     def test_no_connector_returns_actionable_error_first(self, sheets_context):
         # Even with no pricing run, the connector error MUST come first.
-        result, create_mock, write_mock, _ = _run({}, sheets_context, connector=None, payload=None)
+        result, create_mock, write_mock, _, _ = _run({}, sheets_context, connector=None, payload=None)
         assert result["error"] is True
         assert "google sheets" in result["message"].lower()
         assert "settings" in result["message"].lower()
@@ -154,7 +168,7 @@ class TestConnectorCheckFirst:
 
 class TestCacheMiss:
     def test_cache_miss_returns_error_when_connector_present(self, sheets_context):
-        result, create_mock, write_mock, _ = _run({}, sheets_context, connector=_connector(), payload=None)
+        result, create_mock, write_mock, _, _ = _run({}, sheets_context, connector=_connector(), payload=None)
         assert result["error"] is True
         assert "no pricing run" in result["message"].lower()
         create_mock.assert_not_awaited()
@@ -167,7 +181,7 @@ class TestExcelReparse:
         rows = [[f"SKU-{i}", float(100 + i), float(80 + i)] for i in range(50)]
         excel_bytes = _build_excel_bytes(["SKU", "USD", "GBP"], rows)
         payload = _payload(row_count=50)
-        result, create_mock, write_mock, _ = _run(
+        result, create_mock, write_mock, _, _ = _run(
             {"title": "My Pricing"},
             sheets_context,
             connector=_connector(),
@@ -192,7 +206,7 @@ class TestExcelReparse:
         )
         payload = _payload(row_count=3)
         assert "full_rows" not in payload
-        result, _, write_mock, _ = _run(
+        result, _, write_mock, _, _ = _run(
             {}, sheets_context, connector=_connector(), payload=payload, excel_bytes=excel_bytes
         )
         assert result["success"] is True
@@ -201,7 +215,7 @@ class TestExcelReparse:
         assert len(data) == 4
 
     def test_excel_file_missing_returns_error(self, sheets_context):
-        result, create_mock, write_mock, _ = _run(
+        result, create_mock, write_mock, _, _ = _run(
             {},
             sheets_context,
             connector=_connector(),
@@ -216,13 +230,13 @@ class TestExcelReparse:
 
 class TestSheetsCreation:
     def test_default_title_when_none_given(self, sheets_context):
-        result, create_mock, _, _ = _run({}, sheets_context, connector=_connector(), payload=_payload())
+        result, create_mock, _, _, _ = _run({}, sheets_context, connector=_connector(), payload=_payload())
         assert result["success"] is True
         kwargs = create_mock.call_args.kwargs
         assert "Pricing Export" in kwargs["title"]
 
     def test_explicit_title_passed_through(self, sheets_context):
-        result, create_mock, _, _ = _run(
+        result, create_mock, _, _, _ = _run(
             {"title": "Q1 Prices"}, sheets_context, connector=_connector(), payload=_payload()
         )
         kwargs = create_mock.call_args.kwargs
@@ -230,23 +244,23 @@ class TestSheetsCreation:
 
     def test_shared_drive_id_passed_through(self, sheets_context):
         connector = _connector(metadata={"shared_drive_id": "drive-456"})
-        _, create_mock, _, _ = _run({}, sheets_context, connector=connector, payload=_payload())
+        _, create_mock, _, _, _ = _run({}, sheets_context, connector=connector, payload=_payload())
         kwargs = create_mock.call_args.kwargs
         assert kwargs["shared_drive_id"] == "drive-456"
 
     def test_share_skipped_when_in_shared_drive(self, sheets_context):
         connector = _connector(metadata={"shared_drive_id": "drive-456"})
-        _, _, _, share_mock = _run({}, sheets_context, connector=connector, payload=_payload())
+        _, _, _, share_mock, _ = _run({}, sheets_context, connector=connector, payload=_payload())
         share_mock.assert_not_awaited()
 
     def test_share_called_when_no_shared_drive(self, sheets_context):
-        _, _, _, share_mock = _run({}, sheets_context, connector=_connector(), payload=_payload())
+        _, _, _, share_mock, _ = _run({}, sheets_context, connector=_connector(), payload=_payload())
         share_mock.assert_awaited_once()
 
 
 class TestResultShape:
     def test_returns_url_and_sku_count(self, sheets_context):
-        result, _, _, _ = _run({}, sheets_context, connector=_connector(), payload=_payload(row_count=2))
+        result, _, _, _, _ = _run({}, sheets_context, connector=_connector(), payload=_payload(row_count=2))
         assert result["success"] is True
         assert result["url"].startswith("https://docs.google.com/")
         assert result["sku_count"] == 2
@@ -254,7 +268,7 @@ class TestResultShape:
     def test_does_not_emit_pricing_state(self, sheets_context):
         """pricing_to_sheets is read-only — must NOT return pricing_state in
         its result, otherwise the orchestrator would think it's a write tool."""
-        result, _, _, _ = _run({}, sheets_context, connector=_connector(), payload=_payload())
+        result, _, _, _, _ = _run({}, sheets_context, connector=_connector(), payload=_payload())
         assert "pricing_state" not in result
 
 
@@ -265,5 +279,41 @@ class TestNoConversationId:
             "tenant_id": uuid.uuid4(),
             "actor_id": uuid.uuid4(),
         }
-        result, _, _, _ = _run({}, ctx, connector=_connector(), payload=_payload())
+        result, _, _, _, _ = _run({}, ctx, connector=_connector(), payload=_payload())
         assert result["error"] is True
+
+
+class TestApplyStyling:
+    def test_styling_is_applied_after_write(self, sheets_context):
+        result, _, write_mock, _, styling_mock = _run({}, sheets_context, connector=_connector(), payload=_payload())
+        assert result["success"] is True
+        write_mock.assert_awaited_once()
+        styling_mock.assert_awaited_once()
+
+    def test_styling_receives_headers_and_row_count(self, sheets_context):
+        # 5 SKU rows → row_count passed to styling should be 5.
+        rows = [[f"SKU-{i}", float(100 + i), float(80 + i)] for i in range(5)]
+        excel_bytes = _build_excel_bytes(["SKU", "USD", "GBP"], rows)
+        payload = _payload(row_count=5)
+        _, _, _, _, styling_mock = _run(
+            {}, sheets_context, connector=_connector(), payload=payload, excel_bytes=excel_bytes
+        )
+        styling_mock.assert_awaited_once()
+        kwargs = styling_mock.call_args.kwargs
+        assert kwargs["spreadsheet_id"] == "ss-123"
+        assert kwargs["headers"] == ["SKU", "USD", "GBP"]
+        assert kwargs["row_count"] == 5
+
+
+class TestStylingFailureNonFatal:
+    def test_export_succeeds_when_styling_raises(self, sheets_context):
+        # If the Sheets API rejects a batchUpdate, the user still gets the URL.
+        result, _, _, _, _ = _run(
+            {},
+            sheets_context,
+            connector=_connector(),
+            payload=_payload(),
+            styling_side_effect=RuntimeError("styling boom"),
+        )
+        assert result["success"] is True
+        assert "url" in result

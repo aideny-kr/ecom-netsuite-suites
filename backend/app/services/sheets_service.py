@@ -145,6 +145,203 @@ async def read_range(
     return await asyncio.to_thread(_sync)
 
 
+# Brand palette — matches excel_export_service.ExcelExportConfig (#1A73E8).
+_BRAND_BLUE = {"red": 26 / 255, "green": 115 / 255, "blue": 232 / 255}
+_WHITE = {"red": 1.0, "green": 1.0, "blue": 1.0}
+_LIGHT_GRAY = {"red": 248 / 255, "green": 249 / 255, "blue": 250 / 255}
+
+_CURRENCY_KEYWORDS = ("price", "amount", "total", "cost", "revenue", "subtotal")
+# Text keywords are checked first so a 3-letter "SKU" doesn't fall into the
+# ISO-4217 currency-code branch.
+_TEXT_KEYWORDS = ("sku", "id", "code", "name", "item", "description", "ref")
+
+
+def _detect_pricing_column_type(header: str) -> str:
+    """Header-only column-type detector for pricing exports."""
+    h = header.strip()
+    h_upper = h.upper()
+    h_lower = h.lower()
+
+    if any(k in h_lower for k in _TEXT_KEYWORDS):
+        return "text"
+    # ISO 4217 currency codes: exactly 3 uppercase alphabetic chars (USD, GBP, …).
+    if len(h_upper) == 3 and h_upper.isalpha():
+        return "currency"
+    if any(k in h_lower for k in _CURRENCY_KEYWORDS):
+        return "currency"
+    return "text"
+
+
+def _build_pricing_styling_requests(
+    *,
+    sheet_id: int,
+    headers: list[str],
+    row_count: int,
+) -> list[dict]:
+    """Build Sheets API batchUpdate requests to style a pricing-export sheet.
+
+    Layers (in render order):
+    - Frozen header row (1 row)
+    - Header cell format: bold + white text + brand-blue fill + center
+    - Per-column number formats: currency on currency-code columns
+    - Banded data rows (alternating white / light-gray)
+    - Auto-resize all columns
+
+    Pure function — returns the request list. The caller is responsible for
+    issuing the batchUpdate call.
+    """
+    if not headers:
+        return []
+
+    col_count = len(headers)
+    total_rows = row_count + 1  # header + data
+    requests: list[dict] = []
+
+    # 1. Freeze the header row.
+    requests.append(
+        {
+            "updateSheetProperties": {
+                "properties": {
+                    "sheetId": sheet_id,
+                    "gridProperties": {"frozenRowCount": 1},
+                },
+                "fields": "gridProperties.frozenRowCount",
+            }
+        }
+    )
+
+    # 2. Header row formatting.
+    requests.append(
+        {
+            "repeatCell": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "startRowIndex": 0,
+                    "endRowIndex": 1,
+                    "startColumnIndex": 0,
+                    "endColumnIndex": col_count,
+                },
+                "cell": {
+                    "userEnteredFormat": {
+                        "backgroundColor": _BRAND_BLUE,
+                        "horizontalAlignment": "CENTER",
+                        "verticalAlignment": "MIDDLE",
+                        "textFormat": {
+                            "bold": True,
+                            "foregroundColor": _WHITE,
+                        },
+                    }
+                },
+                "fields": ("userEnteredFormat(backgroundColor,textFormat,horizontalAlignment,verticalAlignment)"),
+            }
+        }
+    )
+
+    # 3. Per-column data formats — currency only for now.
+    for col_idx, header in enumerate(headers):
+        if _detect_pricing_column_type(header) != "currency":
+            continue
+        requests.append(
+            {
+                "repeatCell": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "startRowIndex": 1,
+                        "endRowIndex": total_rows,
+                        "startColumnIndex": col_idx,
+                        "endColumnIndex": col_idx + 1,
+                    },
+                    "cell": {
+                        "userEnteredFormat": {
+                            "numberFormat": {
+                                "type": "CURRENCY",
+                                "pattern": "#,##0.00;(#,##0.00)",
+                            }
+                        }
+                    },
+                    "fields": "userEnteredFormat.numberFormat",
+                }
+            }
+        )
+
+    # 4. Banded rows over header + data.
+    if row_count > 0:
+        requests.append(
+            {
+                "addBanding": {
+                    "bandedRange": {
+                        "range": {
+                            "sheetId": sheet_id,
+                            "startRowIndex": 0,
+                            "endRowIndex": total_rows,
+                            "startColumnIndex": 0,
+                            "endColumnIndex": col_count,
+                        },
+                        "rowProperties": {
+                            "headerColor": _BRAND_BLUE,
+                            "firstBandColor": _WHITE,
+                            "secondBandColor": _LIGHT_GRAY,
+                        },
+                    }
+                }
+            }
+        )
+
+    # 5. Auto-resize columns to fit content.
+    requests.append(
+        {
+            "autoResizeDimensions": {
+                "dimensions": {
+                    "sheetId": sheet_id,
+                    "dimension": "COLUMNS",
+                    "startIndex": 0,
+                    "endIndex": col_count,
+                }
+            }
+        }
+    )
+
+    return requests
+
+
+async def apply_pricing_styling(
+    *,
+    credentials: dict | None,
+    spreadsheet_id: str,
+    headers: list[str],
+    row_count: int,
+    sheet_id: int = 0,
+) -> dict[str, Any]:
+    """Issue a batchUpdate to apply pricing-export styling to a sheet.
+
+    Best-effort — caller should swallow exceptions so a styling failure
+    doesn't block the user from getting the spreadsheet URL.
+    """
+    if not credentials:
+        raise ValueError("credentials required")
+
+    requests = _build_pricing_styling_requests(
+        sheet_id=sheet_id,
+        headers=headers,
+        row_count=row_count,
+    )
+    if not requests:
+        return {"replies": []}
+
+    def _sync():
+        service = _build_sheets_service(credentials)
+        return (
+            service.spreadsheets()
+            .batchUpdate(
+                spreadsheetId=spreadsheet_id,
+                body={"requests": requests},
+            )
+            .execute()
+        )
+
+    return await asyncio.to_thread(_sync)
+
+
 async def share_spreadsheet(
     *,
     credentials: dict | None,
