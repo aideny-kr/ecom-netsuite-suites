@@ -828,12 +828,17 @@ async def pricing_to_sheets_execute(params: dict, context: dict, **kwargs) -> di
     )
 
     headers = [str(h) if h is not None else "" for h in data_rows[0]]
+    # USD is always the base column; effective_currencies contains the targets
+    # (e.g. ["GBP", "EUR"]). Pass the explicit set so styling matches actual
+    # currency columns, not header-string heuristics.
+    currency_columns = {"USD", *(payload.get("effective_currencies") or [])}
     try:
         await apply_pricing_styling(
             credentials=credentials,
             spreadsheet_id=spreadsheet_id,
             headers=headers,
             row_count=max(0, len(data_rows) - 1),
+            currency_columns=currency_columns,
         )
     except Exception:
         # Styling is best-effort — never block delivery of the spreadsheet URL.

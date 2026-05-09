@@ -27,11 +27,21 @@ def _find_all_requests(requests: list[dict], key: str) -> list[dict]:
     return [r for r in requests if key in r]
 
 
-def _build(headers: list[str], row_count: int = 5, sheet_id: int = 0) -> list[dict]:
+def _build(
+    headers: list[str],
+    row_count: int = 5,
+    sheet_id: int = 0,
+    currency_columns: set[str] | None = None,
+) -> list[dict]:
+    if currency_columns is None:
+        # Broad default lets the existing USD/GBP/EUR tests keep passing without
+        # touching every call site. Targeted tests override this set.
+        currency_columns = {"USD", "GBP", "EUR", "JPY", "IDR", "BHD"}
     return _build_pricing_styling_requests(
         sheet_id=sheet_id,
         headers=headers,
         row_count=row_count,
+        currency_columns=currency_columns,
     )
 
 
@@ -172,3 +182,75 @@ class TestSheetIdRouting:
                 bnd = body.get("bandedRange")
                 if bnd and "range" in bnd:
                     assert bnd["range"]["sheetId"] == 42
+
+
+class TestCurrencyColumnsExplicit:
+    """Currency formatting must come from the explicit currency_columns set,
+    not from header-string heuristics. Codex flagged the heuristic as buggy:
+    QTY/UPC got false-positive currency formatting; IDR got false-negative
+    (substring 'id' matched a text keyword).
+    """
+
+    def _currency_cols(self, requests: list[dict]) -> set[int]:
+        return {
+            r["repeatCell"]["range"]["startColumnIndex"]
+            for r in _find_all_requests(requests, "repeatCell")
+            if r["repeatCell"]["range"].get("startRowIndex") == 1
+            and (r["repeatCell"]["cell"]["userEnteredFormat"].get("numberFormat") or {}).get("type") == "CURRENCY"
+        }
+
+    def test_qty_column_is_not_currency_when_not_in_set(self):
+        # QTY is 3 letters but is "quantity", not a currency. Old heuristic
+        # marked any 3-letter alpha header as currency — this regression test
+        # locks in that the explicit set is now authoritative.
+        requests = _build(
+            ["SKU", "USD", "QTY"],
+            currency_columns={"USD"},
+        )
+        assert 2 not in self._currency_cols(requests), "QTY (col 2) must not get currency format"
+
+    def test_upc_column_is_not_currency_when_not_in_set(self):
+        requests = _build(
+            ["SKU", "USD", "UPC"],
+            currency_columns={"USD"},
+        )
+        assert 2 not in self._currency_cols(requests), "UPC (col 2) must not get currency format"
+
+    def test_idr_column_is_currency_when_in_set(self):
+        # IDR was incorrectly classified as text by the old heuristic because
+        # the lowercase form contains 'id' (a text keyword). The explicit set
+        # is unambiguous.
+        requests = _build(
+            ["SKU", "USD", "IDR"],
+            currency_columns={"USD", "IDR"},
+        )
+        assert 2 in self._currency_cols(requests), "IDR (col 2) must get currency format"
+
+    def test_currency_match_is_case_insensitive(self):
+        # Headers may come in upper- or mixed-case from arbitrary templates.
+        requests = _build(
+            ["SKU", "Usd", "gbp"],
+            currency_columns={"USD", "GBP"},
+        )
+        cols = self._currency_cols(requests)
+        assert 1 in cols and 2 in cols, "case mismatch must not block currency formatting"
+
+    def test_empty_currency_columns_means_no_currency_format(self):
+        # If a tenant somehow has zero currencies in the export, the styling
+        # layer should not invent any.
+        requests = _build(
+            ["SKU", "USD", "GBP"],
+            currency_columns=set(),
+        )
+        assert self._currency_cols(requests) == set(), "no currency cols → no currency formats"
+
+    def test_unknown_3_letter_uppercase_header_is_not_currency(self):
+        # Catch-all for arbitrary 3-letter codes that aren't currencies:
+        # SKU is in text keywords, but ABC, EAN, MPN are random uppercase.
+        requests = _build(
+            ["EAN", "MPN", "USD"],
+            currency_columns={"USD"},
+        )
+        cols = self._currency_cols(requests)
+        assert 0 not in cols and 1 not in cols, "EAN/MPN must not be currency"
+        assert 2 in cols, "USD must still be currency"

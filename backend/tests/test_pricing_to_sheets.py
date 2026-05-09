@@ -304,6 +304,16 @@ class TestApplyStyling:
         assert kwargs["headers"] == ["SKU", "USD", "GBP"]
         assert kwargs["row_count"] == 5
 
+    def test_styling_receives_currency_columns_from_payload(self, sheets_context):
+        # The pricing payload's effective_currencies is the source of truth for
+        # which columns get currency formatting. USD (the base) is always added.
+        # Regression guard for Codex's review of PR #77.
+        payload = _payload()
+        payload["effective_currencies"] = ["GBP", "EUR"]
+        _, _, _, _, styling_mock = _run({}, sheets_context, connector=_connector(), payload=payload)
+        kwargs = styling_mock.call_args.kwargs
+        assert kwargs["currency_columns"] == {"USD", "GBP", "EUR"}
+
 
 class TestStylingFailureNonFatal:
     def test_export_succeeds_when_styling_raises(self, sheets_context):
