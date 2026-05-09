@@ -150,48 +150,35 @@ _BRAND_BLUE = {"red": 26 / 255, "green": 115 / 255, "blue": 232 / 255}
 _WHITE = {"red": 1.0, "green": 1.0, "blue": 1.0}
 _LIGHT_GRAY = {"red": 248 / 255, "green": 249 / 255, "blue": 250 / 255}
 
-_CURRENCY_KEYWORDS = ("price", "amount", "total", "cost", "revenue", "subtotal")
-# Text keywords are checked first so a 3-letter "SKU" doesn't fall into the
-# ISO-4217 currency-code branch.
-_TEXT_KEYWORDS = ("sku", "id", "code", "name", "item", "description", "ref")
-
-
-def _detect_pricing_column_type(header: str) -> str:
-    """Header-only column-type detector for pricing exports."""
-    h = header.strip()
-    h_upper = h.upper()
-    h_lower = h.lower()
-
-    if any(k in h_lower for k in _TEXT_KEYWORDS):
-        return "text"
-    # ISO 4217 currency codes: exactly 3 uppercase alphabetic chars (USD, GBP, …).
-    if len(h_upper) == 3 and h_upper.isalpha():
-        return "currency"
-    if any(k in h_lower for k in _CURRENCY_KEYWORDS):
-        return "currency"
-    return "text"
-
 
 def _build_pricing_styling_requests(
     *,
     sheet_id: int,
     headers: list[str],
     row_count: int,
+    currency_columns: set[str],
 ) -> list[dict]:
     """Build Sheets API batchUpdate requests to style a pricing-export sheet.
 
     Layers (in render order):
     - Frozen header row (1 row)
     - Header cell format: bold + white text + brand-blue fill + center
-    - Per-column number formats: currency on currency-code columns
+    - Per-column number formats: currency only for headers in `currency_columns`
     - Banded data rows (alternating white / light-gray)
     - Auto-resize all columns
+
+    `currency_columns` is matched case-insensitively against each header.
+    Caller passes the actual currency codes from the pricing payload — no
+    header-string heuristics, so QTY/UPC don't get false-positive currency
+    formatting and IDR doesn't get false-negative text formatting.
 
     Pure function — returns the request list. The caller is responsible for
     issuing the batchUpdate call.
     """
     if not headers:
         return []
+
+    currency_set_upper = {c.strip().upper() for c in currency_columns}
 
     col_count = len(headers)
     total_rows = row_count + 1  # header + data
@@ -237,9 +224,10 @@ def _build_pricing_styling_requests(
         }
     )
 
-    # 3. Per-column data formats — currency only for now.
+    # 3. Per-column data formats — currency only when the header is in the
+    #    explicit currency_columns set (case-insensitive).
     for col_idx, header in enumerate(headers):
-        if _detect_pricing_column_type(header) != "currency":
+        if header.strip().upper() not in currency_set_upper:
             continue
         requests.append(
             {
@@ -310,6 +298,7 @@ async def apply_pricing_styling(
     spreadsheet_id: str,
     headers: list[str],
     row_count: int,
+    currency_columns: set[str],
     sheet_id: int = 0,
 ) -> dict[str, Any]:
     """Issue a batchUpdate to apply pricing-export styling to a sheet.
@@ -324,6 +313,7 @@ async def apply_pricing_styling(
         sheet_id=sheet_id,
         headers=headers,
         row_count=row_count,
+        currency_columns=currency_columns,
     )
     if not requests:
         return {"replies": []}
