@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import logging
 import time
 import uuid
 from datetime import datetime, timezone
@@ -10,6 +11,8 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from openpyxl import load_workbook
+
+logger = logging.getLogger(__name__)
 
 from app.core.encryption import decrypt_credentials
 from app.mcp.tools.sheets_tools import _get_sheets_connector, _get_user_email
@@ -23,6 +26,7 @@ from app.services.chat.result_cache import get_latest_result_by_type
 from app.services.pricing_config_service import get_config, upsert_config
 from app.services.pricing_engine import PricingEngine
 from app.services.sheets_service import (
+    apply_pricing_styling,
     create_spreadsheet,
     share_spreadsheet,
     write_range,
@@ -822,6 +826,18 @@ async def pricing_to_sheets_execute(params: dict, context: dict, **kwargs) -> di
         data=data_rows,
         range_str="Sheet1!A1",
     )
+
+    headers = [str(h) if h is not None else "" for h in data_rows[0]]
+    try:
+        await apply_pricing_styling(
+            credentials=credentials,
+            spreadsheet_id=spreadsheet_id,
+            headers=headers,
+            row_count=max(0, len(data_rows) - 1),
+        )
+    except Exception:
+        # Styling is best-effort — never block delivery of the spreadsheet URL.
+        logger.warning("pricing_to_sheets.styling_failed", exc_info=True)
 
     if not shared_drive_id:
         user_email = await _get_user_email(context)
