@@ -34,9 +34,9 @@ logger = structlog.get_logger()
 # --- Command Allowlist ---
 
 ALLOWED_COMMANDS: dict[str, dict] = {
-    "sdf_validate": {
-        "cmd": ["sdf", "validate"],
-        "timeout": 60,
+    "suitecloud_validate": {
+        "cmd": ["suitecloud", "project:validate", "--server"],
+        "timeout": 180,
     },
     "jest_unit_test": {
         "cmd": ["npx", "jest", "--json", "--coverage"],
@@ -74,6 +74,24 @@ def validate_run_type(run_type: str) -> dict:
 
 def _sha256(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+def _compute_snapshot_hash(
+    *,
+    workspace_id: uuid.UUID,
+    changeset_id: uuid.UUID | None,
+    file_count: int,
+    cli_version: str,
+    validator_engine: str,
+    account_id: str,
+) -> str:
+    """SHA-256 fingerprint over the inputs that determine validate result identity.
+
+    Used by the orchestrator to short-circuit redundant auto-revalidation when
+    nothing about the snapshot or validator has changed.
+    """
+    payload = f"{workspace_id}:{changeset_id or ''}:{file_count}:{cli_version}:{validator_engine}:{account_id}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _redact_sensitive_output(content: str) -> str:
@@ -349,6 +367,219 @@ async def _audit_run_event(
     )
 
 
+async def _execute_validate_run(
+    db: AsyncSession,
+    run: WorkspaceRun,
+    extra_params: dict[str, Any],
+) -> WorkspaceRun:
+    """Execute a ``suitecloud project:validate --server`` run.
+
+    Flow:
+      1. Materialize the workspace snapshot (with optional changeset overlay).
+      2. Seed the CLI credential file from the active NetSuite connection.
+         If the seed fails, abort early with ``gate_status=block`` and a
+         clear ``stderr`` artifact (no subprocess is launched).
+      3. Run the CLI via ``_run_subprocess`` (which sets HOME=cwd so the
+         seeded credential file is discovered).
+      4. Parse stdout into ``ValidationHit`` rows.
+      5. Update the run record with ``has_errors``, ``has_warnings``,
+         ``gate_status``, ``parser_version``, ``validator_engine``, and
+         ``snapshot_hash``. Gating is derived from PARSED output, NOT from
+         the raw exit code.
+    """
+    # Local imports keep test patches against the module attributes effective
+    # (the auth seeder + parser are mocked in test_validate_runner_integration).
+    from app.core.encryption import decrypt_credentials
+    from app.models.connection import Connection
+    from app.models.workspace import ValidationHit
+    from app.services.workspace.suitecloud_auth_seeder import (
+        AuthSeederError,
+        seed_credentials_for_run,
+    )
+    from app.services.workspace.validate_parser import (
+        PARSER_VERSION,
+        parse_suitecloud_validate_output,
+    )
+
+    cmd_config = ALLOWED_COMMANDS["suitecloud_validate"]
+    tmp_dir = tempfile.mkdtemp(prefix=f"workspace_validate_{run.tenant_id}_")
+    start_time = time.monotonic()
+
+    try:
+        file_count = await _materialize_snapshot(db, run, tmp_dir)
+
+        # Seed CLI credentials. If this fails, abort early with a clear stderr
+        # artifact and a blocking gate status.
+        try:
+            await seed_credentials_for_run(
+                db=db,
+                tenant_id=run.tenant_id,
+                auth_root=Path(tmp_dir),
+                project_id=str(run.workspace_id),
+            )
+        except AuthSeederError as exc:
+            duration_ms = int((time.monotonic() - start_time) * 1000)
+            run.status = "failed"
+            run.exit_code = -1
+            run.gate_status = "block"
+            run.has_errors = True
+            run.validator_engine = "suitecloud_server"
+            run.completed_at = datetime.now(timezone.utc)
+            run.duration_ms = duration_ms
+            await _store_artifact(db, run, "stderr", f"auth_required: {exc}")
+            await _audit_run_event(
+                db,
+                run,
+                action="run_failed",
+                status="error",
+                payload={
+                    "run_type": run.run_type,
+                    "error_category": "AUTH_REQUIRED",
+                    "duration_ms": duration_ms,
+                },
+                error_message=str(exc),
+            )
+            await db.flush()
+            return run
+
+        # Resolve account_id for the snapshot hash. The seeder above already
+        # confirmed an active NetSuite connection exists; we just need to
+        # decrypt the credentials to read account_id.
+        conn_result = await db.execute(
+            select(Connection).where(
+                Connection.tenant_id == run.tenant_id,
+                Connection.provider == "netsuite",
+                Connection.status == "active",
+            )
+        )
+        conn_row = conn_result.scalar_one_or_none()
+        account_id = "unknown"
+        if conn_row is not None:
+            try:
+                creds = decrypt_credentials(conn_row.encrypted_credentials)
+                account_id = creds.get("account_id") or "unknown"
+            except Exception:
+                # Best-effort — snapshot hash falls back to "unknown"
+                account_id = "unknown"
+
+        # Run the CLI. ``_run_subprocess`` sets HOME=cwd=tmp_dir, so the
+        # seeded credential file at ``$HOME/.suitecloud-sdk/credentials/...``
+        # is discoverable.
+        try:
+            exit_code, stdout, stderr = await _run_subprocess(
+                cmd_config["cmd"], tmp_dir, cmd_config["timeout"]
+            )
+        except asyncio.TimeoutError:
+            duration_ms = int((time.monotonic() - start_time) * 1000)
+            run.status = "failed"
+            run.exit_code = -2
+            run.gate_status = "block"
+            run.has_errors = True
+            run.validator_engine = "suitecloud_server"
+            run.completed_at = datetime.now(timezone.utc)
+            run.duration_ms = duration_ms
+            await _store_artifact(
+                db,
+                run,
+                "stderr",
+                f"timeout: suitecloud project:validate --server exceeded {cmd_config['timeout']}s",
+            )
+            await _audit_run_event(
+                db,
+                run,
+                action="run_failed",
+                status="error",
+                payload={
+                    "run_type": run.run_type,
+                    "error_category": "TIMEOUT",
+                    "duration_ms": duration_ms,
+                },
+                error_message="timeout",
+            )
+            await db.flush()
+            return run
+
+        duration_ms = int((time.monotonic() - start_time) * 1000)
+        parsed = parse_suitecloud_validate_output(stdout)
+
+        # Persist raw stdout/stderr always — the parser is best-effort and
+        # the raw artifact is the fallback for inspection / parser_error hits.
+        if stdout:
+            await _store_artifact(db, run, "stdout", stdout)
+        if stderr:
+            await _store_artifact(db, run, "stderr", stderr)
+
+        # Persist hits. ``rule_id`` is left NULL here — Task 10 (agent
+        # narration helper) populates Oracle rule IDs as a follow-up.
+        for parsed_hit in parsed.hits:
+            db.add(
+                ValidationHit(
+                    tenant_id=run.tenant_id,
+                    run_id=run.id,
+                    file_path=parsed_hit.file_path,
+                    line=parsed_hit.line,
+                    severity=parsed_hit.severity,
+                    code=parsed_hit.code,
+                    rule_id=None,
+                    message=parsed_hit.message,
+                    fingerprint=parsed_hit.fingerprint,
+                )
+            )
+
+        # Run-record updates. Gating derives from PARSED output, NOT exit_code
+        # (codex #11 — exit code is recorded but never load-bearing).
+        run.exit_code = exit_code
+        run.has_errors = parsed.has_errors
+        run.has_warnings = parsed.has_warnings
+        run.parser_version = PARSER_VERSION
+        run.validator_engine = "suitecloud_server"
+        if parsed.has_errors:
+            run.status = "failed"
+            run.gate_status = "block"
+        else:
+            run.status = "passed"
+            run.gate_status = "pass"
+        run.snapshot_hash = _compute_snapshot_hash(
+            workspace_id=run.workspace_id,
+            changeset_id=run.changeset_id,
+            file_count=file_count,
+            cli_version="suitecloud-cli@latest",
+            validator_engine="suitecloud_server",
+            account_id=account_id,
+        )
+        run.completed_at = datetime.now(timezone.utc)
+        run.duration_ms = duration_ms
+
+        result_payload = {
+            "run_id": str(run.id),
+            "run_type": run.run_type,
+            "status": run.status,
+            "gate_status": run.gate_status,
+            "has_errors": run.has_errors,
+            "has_warnings": run.has_warnings,
+            "hit_count": len(parsed.hits),
+            "duration_ms": duration_ms,
+            "parser_version": PARSER_VERSION,
+            "validator_engine": "suitecloud_server",
+        }
+        await _store_artifact(db, run, "result_json", json.dumps(result_payload, default=str))
+        await _audit_run_event(
+            db,
+            run,
+            action="run_succeeded" if run.status == "passed" else "run_failed",
+            status="success" if run.status == "passed" else "error",
+            payload={
+                **result_payload,
+                "artifact_count": (1 if stdout else 0) + (1 if stderr else 0) + 1,
+            },
+            error_message=None if run.status == "passed" else f"{len(parsed.hits)} validation hit(s)",
+        )
+        await db.flush()
+        return run
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
 async def _execute_assertions_run(
     db: AsyncSession,
     run: WorkspaceRun,
@@ -460,6 +691,10 @@ async def execute_run(
     )
 
     cmd_config = validate_run_type(run.run_type)
+
+    # --- suitecloud_validate: seed CLI creds, run subprocess, parse hits ---
+    if run.run_type == "suitecloud_validate":
+        return await _execute_validate_run(db, run, extra_params or {})
 
     # --- SuiteQL assertions: no subprocess, use assertion service ---
     if run.run_type == "suiteql_assertions":
