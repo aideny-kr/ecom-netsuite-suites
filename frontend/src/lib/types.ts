@@ -491,12 +491,28 @@ export interface DiffViewResponse {
 // --- Workspace Run Types ---
 
 export type RunType =
-  | "sdf_validate"
+  | "suitecloud_validate"
   | "jest_unit_test"
   | "suiteql_assertions"
   | "deploy_sandbox";
 
 export type RunStatus = "queued" | "running" | "passed" | "failed" | "error";
+
+export type ValidatorEngine = "suitecloud_server" | "sdf_legacy" | null;
+
+export type RunGateStatus = "pass" | "block" | "stale" | "unknown" | null;
+
+export interface ValidationHit {
+  id: string;
+  run_id: string;
+  file_path: string | null;
+  line: number | null;
+  severity: "error" | "warning" | "info" | "parser_error";
+  code: string | null;
+  rule_id: string | null;
+  message: string;
+  fingerprint: string;
+}
 
 export interface WorkspaceRun {
   id: string;
@@ -511,12 +527,26 @@ export interface WorkspaceRun {
   duration_ms: number | null;
   created_at: string;
   updated_at: string;
+  // Validate UX (feat/workspace-validate-ux) — populated by suitecloud_validate runs
+  validator_engine?: ValidatorEngine;
+  parser_version?: string | null;
+  has_errors?: boolean;
+  has_warnings?: boolean;
+  gate_status?: RunGateStatus;
+  snapshot_hash?: string | null;
+  // Populated when fetching a single run with its findings (suitecloud_validate only)
+  findings?: ValidationHit[];
 }
 
 export interface WorkspaceArtifact {
   id: string;
   run_id: string;
-  artifact_type: "stdout" | "stderr" | "report_json" | "coverage_json";
+  artifact_type:
+    | "stdout"
+    | "stderr"
+    | "report_json"
+    | "coverage_json"
+    | "result_json";
   content: string | null;
   size_bytes: number;
   sha256_hash: string | null;
