@@ -2,8 +2,9 @@
 
 Covers Task 10 of the workspace-validate-ux plan:
 - _batch_hits_by_family groups ValidationHits by code
-- _maybe_auto_propose_fix dispatches workspace_propose_patch ONLY for fixable
-  codes, under loop budget, with fingerprint dedup
+- _maybe_auto_propose_fix records orchestrator dedup/budget intent ONLY for
+  fixable codes, under loop budget, with fingerprint dedup
+  (real patch dispatch is deferred to Task 10b — see helper docstring)
 - workspace_run_validate is in the agent's tool allowlist
 - system prompt advertises the post_validate_workflow block
 """
@@ -11,7 +12,7 @@ Covers Task 10 of the workspace-validate-ux plan:
 from __future__ import annotations
 
 import uuid
-from unittest.mock import AsyncMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -61,43 +62,50 @@ def test_batches_uncoded_hits_under_uncoded_key() -> None:
 
 
 @pytest.mark.asyncio
-async def test_auto_propose_called_only_for_fixable_codes() -> None:
-    propose_mock = AsyncMock(return_value={"changeset_id": str(uuid.uuid4())})
+async def test_auto_propose_records_intent_for_fixable_codes() -> None:
+    """Fixable hit + under-budget + fingerprint-fresh → orchestrator records
+    auto-fix + auto-propose for dedup/budget tracking.
+
+    Real patch dispatch is deferred to Task 10b — see helper docstring.
+    """
     fixable_hit = _make_hit("SUITESCRIPT-DEPRECATED-2X", "nlapi deprecated", fingerprint="a" * 64)
     changeset_id = uuid.uuid4()
-    tenant_id = uuid.uuid4()
-    user_id = uuid.uuid4()
 
-    with (
-        patch("app.services.chat.agents.workspace_agent.get_orchestrator") as orch_mock,
-        patch("app.mcp.tools.workspace_tools.execute_propose_patch", new=propose_mock),
-    ):
+    record_propose = MagicMock()
+    record_fix = MagicMock()
+
+    with patch("app.services.chat.agents.workspace_agent.get_orchestrator") as orch_mock:
         orch = orch_mock.return_value
         orch.under_budget = lambda _cs: True
         orch.should_auto_propose = lambda _cs, _fp: True
-        orch.record_auto_propose = lambda _cs, _fp: None
-        orch.record_auto_fix = lambda _cs: None
+        orch.record_auto_propose = record_propose
+        orch.record_auto_fix = record_fix
 
         await _maybe_auto_propose_fix(
             hit=fixable_hit,
             changeset_id=changeset_id,
-            tenant_id=tenant_id,
-            user_id=user_id,
+            tenant_id=uuid.uuid4(),
+            user_id=uuid.uuid4(),
         )
-    propose_mock.assert_awaited_once()
+
+    record_propose.assert_called_once_with(changeset_id, "a" * 64)
+    record_fix.assert_called_once_with(changeset_id)
 
 
 @pytest.mark.asyncio
 async def test_auto_propose_skipped_for_owasp() -> None:
-    propose_mock = AsyncMock()
+    """OWASP hits are narrate-only — orchestrator state is NOT mutated."""
     owasp_hit = _make_hit("OWASP-A03", "injection", fingerprint="b" * 64)
-    with (
-        patch("app.services.chat.agents.workspace_agent.get_orchestrator") as orch_mock,
-        patch("app.mcp.tools.workspace_tools.execute_propose_patch", new=propose_mock),
-    ):
+
+    record_propose = MagicMock()
+    record_fix = MagicMock()
+
+    with patch("app.services.chat.agents.workspace_agent.get_orchestrator") as orch_mock:
         orch = orch_mock.return_value
         orch.under_budget = lambda _cs: True
         orch.should_auto_propose = lambda _cs, _fp: True
+        orch.record_auto_propose = record_propose
+        orch.record_auto_fix = record_fix
 
         await _maybe_auto_propose_fix(
             hit=owasp_hit,
@@ -105,20 +113,25 @@ async def test_auto_propose_skipped_for_owasp() -> None:
             tenant_id=uuid.uuid4(),
             user_id=uuid.uuid4(),
         )
-    propose_mock.assert_not_awaited()
+
+    record_propose.assert_not_called()
+    record_fix.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_auto_propose_skipped_when_over_budget() -> None:
-    """Once LOOP_BUDGET is exhausted, fixable hits also become narrate-only."""
-    propose_mock = AsyncMock()
+    """Once LOOP_BUDGET is exhausted, fixable hits also become narrate-only —
+    orchestrator state is NOT mutated."""
     fixable_hit = _make_hit("SUITESCRIPT-DEPRECATED-2X", "nlapi deprecated", fingerprint="c" * 64)
-    with (
-        patch("app.services.chat.agents.workspace_agent.get_orchestrator") as orch_mock,
-        patch("app.mcp.tools.workspace_tools.execute_propose_patch", new=propose_mock),
-    ):
+
+    record_propose = MagicMock()
+    record_fix = MagicMock()
+
+    with patch("app.services.chat.agents.workspace_agent.get_orchestrator") as orch_mock:
         orch = orch_mock.return_value
         orch.under_budget = lambda _cs: False  # over budget
+        orch.record_auto_propose = record_propose
+        orch.record_auto_fix = record_fix
 
         await _maybe_auto_propose_fix(
             hit=fixable_hit,
@@ -126,21 +139,26 @@ async def test_auto_propose_skipped_when_over_budget() -> None:
             tenant_id=uuid.uuid4(),
             user_id=uuid.uuid4(),
         )
-    propose_mock.assert_not_awaited()
+
+    record_propose.assert_not_called()
+    record_fix.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_auto_propose_skipped_when_fingerprint_already_proposed() -> None:
-    """Same fingerprint in same changeset should not be auto-proposed twice."""
-    propose_mock = AsyncMock()
+    """Same fingerprint in same changeset should not be auto-proposed twice —
+    orchestrator state is NOT mutated again."""
     fixable_hit = _make_hit("SUITESCRIPT-DEPRECATED-2X", "nlapi deprecated", fingerprint="d" * 64)
-    with (
-        patch("app.services.chat.agents.workspace_agent.get_orchestrator") as orch_mock,
-        patch("app.mcp.tools.workspace_tools.execute_propose_patch", new=propose_mock),
-    ):
+
+    record_propose = MagicMock()
+    record_fix = MagicMock()
+
+    with patch("app.services.chat.agents.workspace_agent.get_orchestrator") as orch_mock:
         orch = orch_mock.return_value
         orch.under_budget = lambda _cs: True
         orch.should_auto_propose = lambda _cs, _fp: False  # already proposed
+        orch.record_auto_propose = record_propose
+        orch.record_auto_fix = record_fix
 
         await _maybe_auto_propose_fix(
             hit=fixable_hit,
@@ -148,7 +166,9 @@ async def test_auto_propose_skipped_when_fingerprint_already_proposed() -> None:
             tenant_id=uuid.uuid4(),
             user_id=uuid.uuid4(),
         )
-    propose_mock.assert_not_awaited()
+
+    record_propose.assert_not_called()
+    record_fix.assert_not_called()
 
 
 def test_workspace_agent_allows_run_validate_tool() -> None:

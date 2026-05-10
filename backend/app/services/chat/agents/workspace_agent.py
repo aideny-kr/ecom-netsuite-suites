@@ -144,14 +144,16 @@ async def _maybe_auto_propose_fix(
     user_id: uuid.UUID,
 ) -> None:
     """If the hit's code is in the mechanical-fix allowlist AND we're under budget,
-    enqueue a draft fix patch via workspace_propose_patch.
+    auto-propose a draft fix patch.
+
+    v1 status: NARRATE-ONLY. The classifier identifies fixable rule_ids but the
+    deterministic patch generators (e.g. nlapi -> N/search transform) are not yet
+    implemented -- see Task 10b. This helper currently records the auto-propose
+    intent for orchestrator dedup/budget tracking but does NOT call
+    workspace_propose_patch (the call signature in the plan was fictional and
+    real patch generation requires per-rule code-transform logic).
 
     Codex #10: deny-by-default. The classifier is the only gate.
-
-    Note: the plan named this tool `workspace_propose_patch`, but the actual
-    callable in `app.mcp.tools.workspace_tools` is `execute_propose_patch`.
-    Using `execute_propose_patch` (the function that exists at the time of
-    writing); Task 8 may rewire dispatch later.
     """
     fix = classify(code=hit.code, message=hit.message, file_path=hit.file_path, line=hit.line)
     if fix is None:
@@ -163,16 +165,26 @@ async def _maybe_auto_propose_fix(
     if not orch.should_auto_propose(changeset_id, hit.fingerprint):
         return
 
-    from app.mcp.tools import workspace_tools  # local import to avoid cycle
+    # TODO(task-10b): once deterministic patch generators land per rule_id,
+    # produce a real unified_diff and call execute_propose_patch with the
+    # correct contract (workspace_id, file_path, unified_diff, title).
+    # Until then, narrate-only -- the agent's prompt instructs it to describe
+    # the fix in chat without an auto-applied patch.
+    import structlog
 
-    await workspace_tools.execute_propose_patch(
-        params={
-            "title": f"Auto-fix: {fix.replacement_summary}",
-            "rule_id": fix.rule_id,
-            "target_file": hit.file_path,
-            "target_line": hit.line,
-        },
-        context={"tenant_id": str(tenant_id), "user_id": str(user_id)},
+    structlog.get_logger().info(
+        "workspace.auto_propose.deferred",
+        rule_id=fix.rule_id,
+        code=hit.code,
+        file=hit.file_path,
+        line=hit.line,
+        fingerprint=hit.fingerprint,
+        tenant_id=str(tenant_id),
+        user_id=str(user_id),
+        reason="patch_generator_not_implemented",
     )
+
+    # Still record the intent so loop budget + fingerprint dedup are honored
+    # for forward-compat and so we don't double-narrate the same hit.
     orch.record_auto_propose(changeset_id, hit.fingerprint)
     orch.record_auto_fix(changeset_id)
