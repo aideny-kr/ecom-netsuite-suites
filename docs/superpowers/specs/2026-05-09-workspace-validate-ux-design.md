@@ -122,7 +122,7 @@ agent narrates: "validation infrastructure failed (<reason>); deploy blocked; re
 | Case | Behavior |
 |---|---|
 | NetSuite auth missing/expired in runner | Run fails fast with `auth_required` reason. No local-mode fallback. Surface "reconnect NetSuite" CTA. Deploy blocked. |
-| Server validate timeout (>180s) | Mark run `failed` with `timeout` reason. Don't auto-block deploy on NetSuite-side slowness — surface clearly, let user retry via manual button. |
+| Server validate timeout (>180s) | Mark run `failed` with `timeout` reason. Deploy gate blocks (consistent with any other failed validation — Flow C). The orchestrator does NOT auto-retry the validate (avoids cascading failures while NetSuite is slow); user clicks the manual Retry button when they think NetSuite has recovered. |
 | Parser failure on CLI output | Persist raw stdout/stderr verbatim. Synthesize one `parser_error` hit so it appears in the table. Stamp `parser_version` on the run. |
 | Loop budget exhausted (3 auto-fix rounds same changeset) | Agent stops auto-proposing. Narrates remaining hits without action. Chat: "Hit auto-fix limit; remaining hits need manual review." |
 | Same finding fingerprint re-appears mid-loop | Skip auto-propose. Narrate only. Prevents infinite cycle. |
