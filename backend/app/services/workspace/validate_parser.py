@@ -17,6 +17,9 @@ from dataclasses import dataclass, field
 from typing import Final
 
 PARSER_VERSION: Final[str] = "1.0.0"
+# Bump major when fingerprint inputs change (would invalidate existing
+# auto_validate dedup state). Bump minor when severity/code support
+# expands (new hit types). Bump patch for non-fingerprint-affecting fixes.
 
 # Match: ERROR: src/foo.js:42 [CODE-001] message...
 _LINE_RE = re.compile(
@@ -26,11 +29,16 @@ _LINE_RE = re.compile(
     r"(?P<message>.*?)$"
 )
 
-# Recognised top-level prefixes from suitecloud's output. If any of these appear,
-# the CLI ran and we understood the format — even if no diagnostic lines matched
-# the structured hit regex (e.g. a clean run is just INFO/SUCCESS lines without
-# bracketed codes). Used to suppress the parser_error fallback on clean runs.
-_KNOWN_PREFIX_RE = re.compile(r"^(ERROR|WARNING|INFO|SUCCESS|FAILURE):", re.MULTILINE)
+# Terminal status lines emitted by suitecloud at the end of every run. Their
+# presence means the CLI ran to completion — even if no structured diagnostic
+# lines matched _LINE_RE (a clean run is just INFO + SUCCESS lines, no bracketed
+# codes). Their ABSENCE is the strongest signal that stdout was truncated or
+# garbled, so we use it as the gate for synthesizing a parser_error fallback.
+# Using only SUCCESS|FAILURE here (not ERROR/WARNING/INFO) is deliberate:
+# prefix-headed garbage like "ERROR: this goes off the rails\nblah blah" must
+# still trigger the fallback so the runner reports the issue instead of
+# silently logging a clean result.
+_TERMINAL_STATUS_RE = re.compile(r"^(SUCCESS|FAILURE):", re.MULTILINE)
 
 
 @dataclass(frozen=True)
@@ -72,8 +80,6 @@ def parse_suitecloud_validate_output(stdout: str) -> ValidationParseResult:
         if not match:
             continue
         severity_word = match.group("severity").lower()
-        if severity_word not in ("error", "warning", "info"):
-            continue
         line_no = int(match.group("line"))
         file_path = match.group("file")
         code = match.group("code")
@@ -93,11 +99,10 @@ def parse_suitecloud_validate_output(stdout: str) -> ValidationParseResult:
         elif severity_word == "warning":
             result.has_warnings = True
 
-    # Only synthesize a parser_error if NONE of the recognised CLI prefixes
-    # appear in the output. A clean run produces INFO + SUCCESS lines (no
-    # bracketed codes, so they don't match _LINE_RE) but is still a valid,
-    # understood format — not a parser failure.
-    if not result.hits and not _KNOWN_PREFIX_RE.search(stdout):
+    # Only suppress the parser_error fallback when stdout contains a terminal
+    # status line (SUCCESS:/FAILURE:). Their absence means the CLI either
+    # didn't finish or emitted garbage we couldn't parse — surface it.
+    if not result.hits and not _TERMINAL_STATUS_RE.search(stdout):
         result.hits.append(
             ParsedHit(
                 severity="parser_error",

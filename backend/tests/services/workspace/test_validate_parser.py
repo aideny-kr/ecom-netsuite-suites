@@ -80,3 +80,28 @@ def test_fingerprint_is_stable_across_runs() -> None:
     # field validation_hits.fingerprint String(64) from Task 1).
     for hit in a.hits:
         assert len(hit.fingerprint) == 64
+
+
+def test_parser_falls_back_when_garbage_starts_with_known_prefix() -> None:
+    """A line that starts with `ERROR:` but doesn't match the diagnostic regex
+    must still trigger the parser_error fallback. The terminal-status gate
+    (SUCCESS:/FAILURE:) is what distinguishes a clean run with no findings
+    from truncated/garbage output."""
+    raw = "ERROR: this goes off the rails\nblah blah\nstuff stuff"
+    result = parse_suitecloud_validate_output(raw)
+    assert len(result.hits) == 1
+    assert result.hits[0].severity == "parser_error"
+
+
+def test_fingerprints_differ_within_a_run() -> None:
+    result = parse_suitecloud_validate_output(_load("suitecloud_validate_errors.txt"))
+    fingerprints = {h.fingerprint for h in result.hits}
+    assert len(fingerprints) == len(result.hits)
+
+
+def test_parser_error_fingerprint_is_stable() -> None:
+    raw = _load("suitecloud_validate_malformed.txt")
+    a = parse_suitecloud_validate_output(raw)
+    b = parse_suitecloud_validate_output(raw)
+    assert a.hits[0].severity == b.hits[0].severity == "parser_error"
+    assert a.hits[0].fingerprint == b.hits[0].fingerprint
