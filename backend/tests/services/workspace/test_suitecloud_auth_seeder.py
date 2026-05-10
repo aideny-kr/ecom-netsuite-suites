@@ -145,3 +145,33 @@ async def test_seeder_uses_refreshed_credentials(
     assert payload["oauth2"]["accessToken"] == "REFRESHED_TOKEN"
     assert payload["oauth2"]["refreshToken"] == "NEW_REFRESH"
     assert payload["oauth2"]["tokenExpiry"] == refreshed_creds["expires_at"]
+
+
+@pytest.mark.asyncio
+async def test_seeder_ignores_non_netsuite_connections(
+    db: AsyncSession,
+    tmp_path: Path,
+    tenant_a,
+) -> None:
+    """Tenant has a Stripe connection but no NetSuite — seeder MUST raise,
+    not silently seed Stripe creds into the suitecloud CLI credential file
+    (which would then get sent as an OAuth bearer token to NetSuite).
+    """
+    db.add(
+        Connection(
+            tenant_id=tenant_a.id,
+            provider="stripe",
+            label="Test Stripe",
+            status="active",
+            auth_type="api_key",
+            encrypted_credentials=encrypt_credentials({"api_key": "sk_test_x"}),
+        )
+    )
+    await db.flush()
+    with pytest.raises(AuthSeederError, match="no active NetSuite connection"):
+        await seed_credentials_for_run(
+            db=db,
+            tenant_id=tenant_a.id,
+            auth_root=tmp_path,
+            project_id="ws-1",
+        )

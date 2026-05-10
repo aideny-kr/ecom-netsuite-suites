@@ -83,6 +83,10 @@ async def seed_credentials_for_run(
     if access_token is None:
         raise AuthSeederError(f"could not obtain a valid NetSuite access token for tenant {tenant_id}")
 
+    # Re-decrypt AFTER get_valid_token so we read the (possibly refreshed)
+    # refresh_token and expires_at. See netsuite_oauth_service.py:220-225 for
+    # the in-place mutation + commit site. Do NOT cache the pre-call dict to
+    # skip this read — the post-refresh values are load-bearing for the file.
     creds = decrypt_credentials(connection.encrypted_credentials)
     account_id = creds.get("account_id")
     client_id = creds.get("client_id")
@@ -91,6 +95,7 @@ async def seed_credentials_for_run(
 
     cred_dir = auth_root / ".suitecloud-sdk" / "credentials"
     cred_dir.mkdir(parents=True, exist_ok=True)
+    cred_dir.chmod(0o700)  # self-contained: don't trust the caller's umask
     cred_path = cred_dir / f"{project_id}.json"
 
     payload: dict[str, Any] = {
@@ -100,6 +105,11 @@ async def seed_credentials_for_run(
             "clientId": client_id,
             "accessToken": access_token,
             "refreshToken": creds.get("refresh_token"),
+            # TODO(task-4): verify Oracle CLI accepts a Unix epoch float here.
+            # If it expects ISO-8601 or millis-int, fix the format at this
+            # seeder layer (it's the only writer). On most OAuth-aware CLIs
+            # this field is advisory — the CLI re-validates from refreshToken
+            # on first call regardless.
             "tokenExpiry": creds.get("expires_at"),
         },
     }
