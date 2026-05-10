@@ -1,0 +1,2 @@
+Some unexpected output that does not match the documented format.
+[unparseable garbage line]

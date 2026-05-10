@@ -1,0 +1,4 @@
+INFO: Validating project against account 6738075...
+WARNING: src/Suitelets/processOrder.js:12 [SUITESCRIPT-DEPRECATED-2X] nlapiLoadRecord is deprecated in 2.1.
+ERROR: src/Suitelets/processOrder.js:42 [OWASP-A03] Unsanitized user input flowed into N/query.runSuiteQL.
+FAILURE: Project validation failed with 1 error(s) and 1 warning(s).

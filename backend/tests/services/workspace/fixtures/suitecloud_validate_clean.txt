@@ -1,0 +1,4 @@
+INFO: Validating project against account 6738075...
+INFO: Account validation complete.
+INFO: Dependency validation complete.
+SUCCESS: Project validation completed successfully.
