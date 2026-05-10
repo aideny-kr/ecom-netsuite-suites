@@ -91,12 +91,35 @@ async def _cleanup_stale_jobs() -> None:
         logger.warning("stale_job_cleanup_failed", error=str(exc))
 
 
+def _wire_auto_validate_orchestrator() -> None:
+    """Inject a runner-aware closure into the auto-validate orchestrator.
+
+    The orchestrator is in-process state (debounce, loop budget, fingerprints).
+    Its `_create_run` callable must persist across requests, so we set it once
+    during the FastAPI lifespan. Each enqueue acquires a fresh DB session via
+    `async_session_factory()` — request-scoped sessions don't survive past the
+    request that created them.
+    """
+    from app.core.database import async_session_factory
+    from app.services import runner_service
+    from app.services.workspace.auto_validate_orchestrator import get_orchestrator
+
+    async def _create_run(**kwargs):
+        async with async_session_factory() as session:
+            run = await runner_service.create_run(db=session, **kwargs)
+            await session.commit()
+            return run.id
+
+    get_orchestrator()._create_run = _create_run
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _validate_production_secrets()
     _init_sentry()
     setup_logging()
     await _cleanup_stale_jobs()
+    _wire_auto_validate_orchestrator()
     yield
 
 

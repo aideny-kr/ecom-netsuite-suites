@@ -109,6 +109,25 @@ async def execute_apply_patch(params: dict[str, Any], context: dict[str, Any]) -
     except ValueError as e:
         return {"error": str(e), "row_count": 0}
 
+    # Enqueue auto-validate via the orchestrator. The patch is already applied —
+    # if the queue itself errors (e.g. dev container with no `_create_run`
+    # closure wired by the lifespan), log it but don't fail the apply.
+    try:
+        from app.services.workspace.auto_validate_orchestrator import get_orchestrator
+
+        await get_orchestrator().enqueue(
+            workspace_id=cs.workspace_id,
+            changeset_id=cs.id,
+            tenant_id=uuid.UUID(tenant_id),
+            triggered_by=actor_uuid,
+        )
+    except Exception as exc:  # pragma: no cover — defensive
+        logger.warning(
+            "workspace.apply_patch.enqueue_failed",
+            changeset_id=str(cs.id),
+            error=str(exc),
+        )
+
     return {
         "changeset_id": str(cs.id),
         "status": cs.status,
@@ -291,8 +310,8 @@ async def execute_deploy_sandbox(params: dict[str, Any], context: dict[str, Any]
 
 
 async def execute_run_validate(params: dict[str, Any], context: dict[str, Any]) -> dict:
-    """Trigger an SDF validate run against workspace files."""
-    return await _execute_privileged_run(params, context, run_type="sdf_validate")
+    """Trigger a SuiteCloud validate run against workspace files."""
+    return await _execute_privileged_run(params, context, run_type="suitecloud_validate")
 
 
 async def execute_run_unit_tests(params: dict[str, Any], context: dict[str, Any]) -> dict:
