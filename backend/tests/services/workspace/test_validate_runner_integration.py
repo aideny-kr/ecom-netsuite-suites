@@ -27,8 +27,14 @@ from app.models.workspace import (
     WorkspaceRun,
 )
 from app.services import runner_service
+from app.services.workspace.suitecloud_auth_seeder import SeededCredentials
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
+
+# Default fake seeded-credentials result. ``account_id`` matches the
+# ``seeded_netsuite_connection`` fixture so snapshot_hash inputs stay
+# consistent across tests.
+_FAKE_SEEDED = SeededCredentials(path=Path("/tmp/fake.json"), account_id="1234567")
 
 
 # --- Fixtures ---
@@ -140,14 +146,12 @@ async def test_execute_run_persists_validation_hits_on_errors(
         ),
         patch(
             "app.services.workspace.suitecloud_auth_seeder.seed_credentials_for_run",
-            new=AsyncMock(return_value=Path("/tmp/fake.json")),
+            new=AsyncMock(return_value=_FAKE_SEEDED),
         ),
     ):
         await runner_service.execute_run(db=db, run_id=run.id, tenant_id=run.tenant_id)
 
-    refreshed = (
-        await db.execute(select(WorkspaceRun).where(WorkspaceRun.id == run.id))
-    ).scalar_one()
+    refreshed = (await db.execute(select(WorkspaceRun).where(WorkspaceRun.id == run.id))).scalar_one()
     assert refreshed.status == "failed"
     assert refreshed.has_errors is True
     assert refreshed.has_warnings is False
@@ -158,9 +162,7 @@ async def test_execute_run_persists_validation_hits_on_errors(
     # exit_code is recorded raw — gating is independent of it
     assert refreshed.exit_code == 1
 
-    hits = (
-        await db.execute(select(ValidationHit).where(ValidationHit.run_id == run.id))
-    ).scalars().all()
+    hits = (await db.execute(select(ValidationHit).where(ValidationHit.run_id == run.id))).scalars().all()
     assert len(hits) == 2
     codes = {h.code for h in hits}
     assert codes == {"OWASP-A03", "SDF-SCHEMA-001"}
@@ -198,14 +200,12 @@ async def test_execute_run_passes_on_warnings_only(
         ),
         patch(
             "app.services.workspace.suitecloud_auth_seeder.seed_credentials_for_run",
-            new=AsyncMock(return_value=Path("/tmp/fake.json")),
+            new=AsyncMock(return_value=_FAKE_SEEDED),
         ),
     ):
         await runner_service.execute_run(db=db, run_id=run.id, tenant_id=run.tenant_id)
 
-    refreshed = (
-        await db.execute(select(WorkspaceRun).where(WorkspaceRun.id == run.id))
-    ).scalar_one()
+    refreshed = (await db.execute(select(WorkspaceRun).where(WorkspaceRun.id == run.id))).scalar_one()
     assert refreshed.status == "passed"
     assert refreshed.has_errors is False
     assert refreshed.has_warnings is True
@@ -213,9 +213,7 @@ async def test_execute_run_passes_on_warnings_only(
     assert refreshed.validator_engine == "suitecloud_server"
     assert refreshed.parser_version == "1.0.0"
 
-    hits = (
-        await db.execute(select(ValidationHit).where(ValidationHit.run_id == run.id))
-    ).scalars().all()
+    hits = (await db.execute(select(ValidationHit).where(ValidationHit.run_id == run.id))).scalars().all()
     assert len(hits) == 2
     for hit in hits:
         assert hit.severity == "warning"
@@ -250,9 +248,7 @@ async def test_execute_run_fails_on_auth_error(
     ):
         await runner_service.execute_run(db=db, run_id=run.id, tenant_id=run.tenant_id)
 
-    refreshed = (
-        await db.execute(select(WorkspaceRun).where(WorkspaceRun.id == run.id))
-    ).scalar_one()
+    refreshed = (await db.execute(select(WorkspaceRun).where(WorkspaceRun.id == run.id))).scalar_one()
     assert refreshed.status == "failed"
     assert refreshed.gate_status == "block"
     assert refreshed.validator_engine == "suitecloud_server"
@@ -260,9 +256,7 @@ async def test_execute_run_fails_on_auth_error(
     subprocess_mock.assert_not_awaited()
 
     # No validation hits were persisted (we never ran the CLI)
-    hits = (
-        await db.execute(select(ValidationHit).where(ValidationHit.run_id == run.id))
-    ).scalars().all()
+    hits = (await db.execute(select(ValidationHit).where(ValidationHit.run_id == run.id))).scalars().all()
     assert hits == []
 
 
@@ -285,8 +279,7 @@ async def test_execute_run_clean_validation_passes(
     await db.flush()
 
     clean_stdout = (
-        "INFO: Validating project against account 6738075...\n"
-        "SUCCESS: Project validation completed successfully.\n"
+        "INFO: Validating project against account 6738075...\nSUCCESS: Project validation completed successfully.\n"
     )
     with (
         patch.object(
@@ -296,20 +289,112 @@ async def test_execute_run_clean_validation_passes(
         ),
         patch(
             "app.services.workspace.suitecloud_auth_seeder.seed_credentials_for_run",
-            new=AsyncMock(return_value=Path("/tmp/fake.json")),
+            new=AsyncMock(return_value=_FAKE_SEEDED),
         ),
     ):
         await runner_service.execute_run(db=db, run_id=run.id, tenant_id=run.tenant_id)
 
-    refreshed = (
-        await db.execute(select(WorkspaceRun).where(WorkspaceRun.id == run.id))
-    ).scalar_one()
+    refreshed = (await db.execute(select(WorkspaceRun).where(WorkspaceRun.id == run.id))).scalar_one()
     assert refreshed.status == "passed"
     assert refreshed.has_errors is False
     assert refreshed.has_warnings is False
     assert refreshed.gate_status == "pass"
 
-    hits = (
-        await db.execute(select(ValidationHit).where(ValidationHit.run_id == run.id))
-    ).scalars().all()
+    hits = (await db.execute(select(ValidationHit).where(ValidationHit.run_id == run.id))).scalars().all()
     assert hits == []
+
+
+@pytest.mark.asyncio
+async def test_gate_status_independent_of_exit_code(
+    db: AsyncSession,
+    seeded_workspace_with_changeset,
+    seeded_netsuite_connection,
+) -> None:
+    """gate_status MUST come from parsed.has_errors, never exit_code (codex #11).
+
+    Pin: exit_code=0 + parsed has errors → gate=block. Locks in the
+    independence so a future refactor that adds
+    ``if exit_code != 0: gate_status = "block"`` (or vice versa) regresses
+    loudly instead of silently.
+    """
+    workspace, cs, user = seeded_workspace_with_changeset
+    run = await runner_service.create_run(
+        db=db,
+        tenant_id=workspace.tenant_id,
+        workspace_id=workspace.id,
+        run_type="suitecloud_validate",
+        triggered_by=user.id,
+        changeset_id=cs.id,
+    )
+    await db.flush()
+
+    fixture_stdout = (FIXTURES_DIR / "suitecloud_validate_errors.txt").read_text()
+    with (
+        patch.object(
+            runner_service,
+            "_run_subprocess",
+            # exit_code=0 (subprocess claims success), but stdout contains errors
+            new=AsyncMock(return_value=(0, fixture_stdout, "")),
+        ),
+        patch(
+            "app.services.workspace.suitecloud_auth_seeder.seed_credentials_for_run",
+            new=AsyncMock(return_value=_FAKE_SEEDED),
+        ),
+    ):
+        await runner_service.execute_run(db=db, run_id=run.id, tenant_id=run.tenant_id)
+
+    refreshed = (await db.execute(select(WorkspaceRun).where(WorkspaceRun.id == run.id))).scalar_one()
+    # Subprocess reported success...
+    assert refreshed.exit_code == 0
+    # ...but the gate must still block on parsed errors.
+    assert refreshed.gate_status == "block"
+    assert refreshed.has_errors is True
+    assert refreshed.status == "failed"
+
+
+@pytest.mark.asyncio
+async def test_execute_run_handles_mixed_severity(
+    db: AsyncSession,
+    seeded_workspace_with_changeset,
+    seeded_netsuite_connection,
+) -> None:
+    """Mixed errors + warnings → has_errors AND has_warnings both True; gate=block.
+
+    Exercises the realistic production case where a single run surfaces both
+    severities. Pure-warning and pure-error paths are covered above; this
+    pins the combined flag handling.
+    """
+    workspace, cs, user = seeded_workspace_with_changeset
+    run = await runner_service.create_run(
+        db=db,
+        tenant_id=workspace.tenant_id,
+        workspace_id=workspace.id,
+        run_type="suitecloud_validate",
+        triggered_by=user.id,
+        changeset_id=cs.id,
+    )
+    await db.flush()
+
+    fixture_stdout = (FIXTURES_DIR / "suitecloud_validate_mixed.txt").read_text()
+    with (
+        patch.object(
+            runner_service,
+            "_run_subprocess",
+            new=AsyncMock(return_value=(1, fixture_stdout, "")),
+        ),
+        patch(
+            "app.services.workspace.suitecloud_auth_seeder.seed_credentials_for_run",
+            new=AsyncMock(return_value=_FAKE_SEEDED),
+        ),
+    ):
+        await runner_service.execute_run(db=db, run_id=run.id, tenant_id=run.tenant_id)
+
+    refreshed = (await db.execute(select(WorkspaceRun).where(WorkspaceRun.id == run.id))).scalar_one()
+    assert refreshed.has_errors is True
+    assert refreshed.has_warnings is True
+    assert refreshed.gate_status == "block"
+    assert refreshed.status == "failed"
+
+    hits = (await db.execute(select(ValidationHit).where(ValidationHit.run_id == run.id))).scalars().all()
+    severities = {h.severity for h in hits}
+    assert severities == {"error", "warning"}

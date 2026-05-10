@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -35,13 +36,28 @@ class AuthSeederError(Exception):
     """Raised when credentials cannot be seeded for a runner subprocess."""
 
 
+@dataclass(frozen=True)
+class SeededCredentials:
+    """Result of seeding suitecloud CLI credentials for a runner subprocess.
+
+    Returning ``account_id`` here lets callers (the runner) avoid a redundant
+    ``Connection`` lookup + decrypt to read the same value. It also closes a
+    silent-corruption path where the runner's fallback ``account_id="unknown"``
+    would poison ``snapshot_hash`` if the post-seed lookup raced with a
+    connection delete or key rotation.
+    """
+
+    path: Path
+    account_id: str
+
+
 async def seed_credentials_for_run(
     *,
     db: AsyncSession,
     tenant_id: uuid.UUID,
     auth_root: Path,
     project_id: str,
-) -> Path:
+) -> SeededCredentials:
     """Write a suitecloud-CLI credential file for ``tenant_id``.
 
     Args:
@@ -55,7 +71,10 @@ async def seed_credentials_for_run(
         project_id: Suitecloud project id (file basename, no ``.json``).
 
     Returns:
-        Absolute path of the written credential file.
+        ``SeededCredentials`` with the absolute path of the written credential
+        file and the NetSuite ``account_id`` that was written into it. Callers
+        that need ``account_id`` (e.g. for snapshot hashing) should read it
+        from here instead of re-fetching + re-decrypting the ``Connection``.
 
     Raises:
         AuthSeederError: No active NetSuite connection for the tenant; or
@@ -120,4 +139,4 @@ async def seed_credentials_for_run(
         tenant_id=str(tenant_id),
         project_id=project_id,
     )
-    return cred_path
+    return SeededCredentials(path=cred_path, account_id=account_id)

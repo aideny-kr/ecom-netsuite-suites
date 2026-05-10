@@ -389,8 +389,6 @@ async def _execute_validate_run(
     """
     # Local imports keep test patches against the module attributes effective
     # (the auth seeder + parser are mocked in test_validate_runner_integration).
-    from app.core.encryption import decrypt_credentials
-    from app.models.connection import Connection
     from app.models.workspace import ValidationHit
     from app.services.workspace.suitecloud_auth_seeder import (
         AuthSeederError,
@@ -409,9 +407,13 @@ async def _execute_validate_run(
         file_count = await _materialize_snapshot(db, run, tmp_dir)
 
         # Seed CLI credentials. If this fails, abort early with a clear stderr
-        # artifact and a blocking gate status.
+        # artifact and a blocking gate status. The seeder also returns the
+        # resolved account_id (used below for the snapshot hash) so we avoid a
+        # redundant Connection lookup + decrypt — which had a silent-corruption
+        # path (account_id="unknown" → snapshot_hash collisions) if the row
+        # vanished mid-run.
         try:
-            await seed_credentials_for_run(
+            seeded = await seed_credentials_for_run(
                 db=db,
                 tenant_id=run.tenant_id,
                 auth_root=Path(tmp_dir),
@@ -442,33 +444,13 @@ async def _execute_validate_run(
             await db.flush()
             return run
 
-        # Resolve account_id for the snapshot hash. The seeder above already
-        # confirmed an active NetSuite connection exists; we just need to
-        # decrypt the credentials to read account_id.
-        conn_result = await db.execute(
-            select(Connection).where(
-                Connection.tenant_id == run.tenant_id,
-                Connection.provider == "netsuite",
-                Connection.status == "active",
-            )
-        )
-        conn_row = conn_result.scalar_one_or_none()
-        account_id = "unknown"
-        if conn_row is not None:
-            try:
-                creds = decrypt_credentials(conn_row.encrypted_credentials)
-                account_id = creds.get("account_id") or "unknown"
-            except Exception:
-                # Best-effort — snapshot hash falls back to "unknown"
-                account_id = "unknown"
+        account_id = seeded.account_id
 
         # Run the CLI. ``_run_subprocess`` sets HOME=cwd=tmp_dir, so the
         # seeded credential file at ``$HOME/.suitecloud-sdk/credentials/...``
         # is discoverable.
         try:
-            exit_code, stdout, stderr = await _run_subprocess(
-                cmd_config["cmd"], tmp_dir, cmd_config["timeout"]
-            )
+            exit_code, stdout, stderr = await _run_subprocess(cmd_config["cmd"], tmp_dir, cmd_config["timeout"])
         except asyncio.TimeoutError:
             duration_ms = int((time.monotonic() - start_time) * 1000)
             run.status = "failed"

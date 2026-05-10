@@ -16,6 +16,7 @@ from app.core.encryption import encrypt_credentials
 from app.models.connection import Connection
 from app.services.workspace.suitecloud_auth_seeder import (
     AuthSeederError,
+    SeededCredentials,
     seed_credentials_for_run,
 )
 
@@ -52,12 +53,15 @@ async def test_seeder_writes_credential_file(
     tenant_a,
 ) -> None:
     _conn, creds = seeded_netsuite_connection
-    cred_path = await seed_credentials_for_run(
+    seeded = await seed_credentials_for_run(
         db=db,
         tenant_id=tenant_a.id,
         auth_root=tmp_path,
         project_id="ws-1",
     )
+    assert isinstance(seeded, SeededCredentials)
+    assert seeded.account_id == creds["account_id"]
+    cred_path = seeded.path
     assert cred_path.exists()
     assert cred_path.parent.parts[-2:] == (".suitecloud-sdk", "credentials")
     assert cred_path.name == "ws-1.json"
@@ -135,13 +139,14 @@ async def test_seeder_uses_refreshed_credentials(
         "app.services.workspace.suitecloud_auth_seeder.get_valid_token",
         new=_fake_get_valid,
     ):
-        cred_path = await seed_credentials_for_run(
+        seeded = await seed_credentials_for_run(
             db=db,
             tenant_id=tenant_a.id,
             auth_root=tmp_path,
             project_id="ws-1",
         )
-    payload = json.loads(cred_path.read_text())
+    assert seeded.account_id == refreshed_creds["account_id"]
+    payload = json.loads(seeded.path.read_text())
     assert payload["oauth2"]["accessToken"] == "REFRESHED_TOKEN"
     assert payload["oauth2"]["refreshToken"] == "NEW_REFRESH"
     assert payload["oauth2"]["tokenExpiry"] == refreshed_creds["expires_at"]
