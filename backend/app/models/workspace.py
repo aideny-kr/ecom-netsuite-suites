@@ -126,7 +126,8 @@ class WorkspaceRun(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         nullable=True,
         index=True,
     )
-    run_type: Mapped[str] = mapped_column(String(50), nullable=False)  # sdf_validate | jest_unit_test | suitecloud_validate
+    # suitecloud_validate | jest_unit_test | suiteql_assertions | deploy_sandbox
+    run_type: Mapped[str] = mapped_column(String(50), nullable=False)
     status: Mapped[str] = mapped_column(
         String(50), default="queued", nullable=False
     )  # queued | running | passed | failed | error
@@ -197,8 +198,6 @@ class ValidationHit(Base, UUIDPrimaryKeyMixin):
     rule_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
     message: Mapped[str] = mapped_column(Text, nullable=False)
     fingerprint: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default="now()", nullable=False
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default="now()", nullable=False)
 
     run: Mapped["WorkspaceRun"] = relationship("WorkspaceRun", back_populates="validation_hits")

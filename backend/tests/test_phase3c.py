@@ -310,7 +310,7 @@ class TestDeployGating:
             tenant_id=cs.tenant_id,
             workspace_id=ws.id,
             changeset_id=cs.id,
-            run_type="sdf_validate",
+            run_type="suitecloud_validate",
             status="passed",
             triggered_by=user.id,
         )
@@ -326,7 +326,7 @@ class TestDeployGating:
         """Deploy should be allowed when validate + tests pass."""
         user, _ = admin_user
         ws, cs = ws_cs
-        for rt in ("sdf_validate", "jest_unit_test"):
+        for rt in ("suitecloud_validate", "jest_unit_test"):
             run = WorkspaceRun(
                 tenant_id=cs.tenant_id,
                 workspace_id=ws.id,
@@ -347,7 +347,7 @@ class TestDeployGating:
         """Deploy should be blocked if assertions are required but haven't run."""
         user, _ = admin_user
         ws, cs = ws_cs
-        for rt in ("sdf_validate", "jest_unit_test"):
+        for rt in ("suitecloud_validate", "jest_unit_test"):
             run = WorkspaceRun(
                 tenant_id=cs.tenant_id,
                 workspace_id=ws.id,
@@ -381,7 +381,7 @@ class TestDeployOverride:
         """Override may bypass assertions only after validate + unit tests pass."""
         user, _ = admin_user
         ws, cs = ws_cs
-        for rt in ("sdf_validate", "jest_unit_test"):
+        for rt in ("suitecloud_validate", "jest_unit_test"):
             run = WorkspaceRun(
                 tenant_id=cs.tenant_id,
                 workspace_id=ws.id,
@@ -408,7 +408,7 @@ class TestDeployOverride:
         """Without override_reason, missing required assertions should block deploy."""
         user, _ = admin_user
         ws, cs = ws_cs
-        for rt in ("sdf_validate", "jest_unit_test"):
+        for rt in ("suitecloud_validate", "jest_unit_test"):
             run = WorkspaceRun(
                 tenant_id=cs.tenant_id,
                 workspace_id=ws.id,
@@ -446,7 +446,7 @@ class TestUATReport:
         """UAT report should show correct status when all runs pass."""
         user, headers = admin_user
         ws, cs = ws_cs
-        for rt in ("sdf_validate", "jest_unit_test"):
+        for rt in ("suitecloud_validate", "jest_unit_test"):
             run = WorkspaceRun(
                 tenant_id=cs.tenant_id,
                 workspace_id=ws.id,
@@ -589,7 +589,7 @@ class TestAPIEndpoints:
         """Deploy should succeed with override only when mandatory gates already pass."""
         user, headers = admin_user
         ws, cs = ws_cs
-        for rt in ("sdf_validate", "jest_unit_test"):
+        for rt in ("suitecloud_validate", "jest_unit_test"):
             run = WorkspaceRun(
                 tenant_id=cs.tenant_id,
                 workspace_id=ws.id,
@@ -772,7 +772,7 @@ class TestAuditEvents:
 
         user, headers = admin_user
         ws, cs = ws_cs
-        for rt in ("sdf_validate", "jest_unit_test"):
+        for rt in ("suitecloud_validate", "jest_unit_test"):
             run = WorkspaceRun(
                 tenant_id=cs.tenant_id,
                 workspace_id=ws.id,

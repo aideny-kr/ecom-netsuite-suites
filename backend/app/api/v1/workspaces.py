@@ -750,7 +750,7 @@ async def get_uat_report(
             break
 
     # Compute overall status
-    validate_ok = latest_runs.get("sdf_validate") and latest_runs["sdf_validate"].status == "passed"
+    validate_ok = latest_runs.get("suitecloud_validate") and latest_runs["suitecloud_validate"].status == "passed"
     tests_ok = latest_runs.get("jest_unit_test") and latest_runs["jest_unit_test"].status == "passed"
     assertions_ok = assertion_run is None or assertion_run.status == "passed"
     deploy_ok = latest_runs.get("deploy_sandbox") and latest_runs["deploy_sandbox"].status == "passed"
@@ -769,7 +769,7 @@ async def get_uat_report(
         "changeset_title": cs.title,
         "changeset_status": cs.status,
         "gates": {
-            "validate": _gate_status(validate_ok, latest_runs.get("sdf_validate")),
+            "validate": _gate_status(validate_ok, latest_runs.get("suitecloud_validate")),
             "unit_tests": _gate_status(tests_ok, latest_runs.get("jest_unit_test")),
             "assertions": (
                 "passed"

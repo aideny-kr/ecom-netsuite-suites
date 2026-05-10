@@ -33,14 +33,22 @@ async def check_deploy_prerequisites(
     tenant_id: uuid.UUID,
     require_assertions: bool = False,
     override_reason: str | None = None,
+    expected_snapshot_hash: str | None = None,
 ) -> dict[str, Any]:
     """Check all prerequisites for sandbox deploy.
+
+    The validate gate looks up the latest `suitecloud_validate` run. When
+    `expected_snapshot_hash` is provided, the latest validate's snapshot_hash
+    must match — mismatch → ``status="stale"`` and the gate blocks deploy.
+    The pass/fail decision uses the run's `gate_status` field (``pass``
+    blocks/passes deterministically) when available, falling back to the run
+    lifecycle ``status`` otherwise.
 
     Returns a dict with gate status:
     {
         "allowed": bool,
         "gates": {
-            "validate": {"status": "passed"|"failed"|"missing", "run_id": ...},
+            "validate": {"status": "passed"|"failed"|"missing"|"stale", "run_id": ..., "fresh": bool},
             "unit_tests": {"status": ..., "run_id": ...},
             "assertions": {"status": ..., "run_id": ..., "skipped": bool},
         },
@@ -50,12 +58,31 @@ async def check_deploy_prerequisites(
     """
     gates: dict[str, Any] = {}
 
-    # Check validate
-    validate_run = await _get_latest_run(db, changeset_id, tenant_id, "sdf_validate")
+    # --- validate gate (suitecloud_validate, with snapshot-hash freshness) ---
+    validate_run = await _get_latest_run(db, changeset_id, tenant_id, "suitecloud_validate")
     if validate_run is None:
-        gates["validate"] = {"status": "missing", "run_id": None}
+        gates["validate"] = {"status": "missing", "run_id": None, "fresh": False}
     else:
-        gates["validate"] = {"status": validate_run.status, "run_id": str(validate_run.id)}
+        is_fresh = expected_snapshot_hash is None or validate_run.snapshot_hash == expected_snapshot_hash
+        if not is_fresh:
+            gates["validate"] = {
+                "status": "stale",
+                "run_id": str(validate_run.id),
+                "fresh": False,
+            }
+        elif validate_run.gate_status == "pass":
+            gates["validate"] = {
+                "status": "passed",
+                "run_id": str(validate_run.id),
+                "fresh": True,
+            }
+        else:
+            # gate_status is "block"/None → fall back to run lifecycle status
+            gates["validate"] = {
+                "status": validate_run.status,
+                "run_id": str(validate_run.id),
+                "fresh": True,
+            }
 
     # Check unit tests
     test_run = await _get_latest_run(db, changeset_id, tenant_id, "jest_unit_test")
@@ -78,8 +105,8 @@ async def check_deploy_prerequisites(
     else:
         gates["assertions"] = {"status": "not_required", "run_id": None, "skipped": True}
 
-    # Evaluate gates
-    validate_ok = gates["validate"]["status"] == "passed"
+    # Evaluate gates — validate must be both passed AND fresh.
+    validate_ok = gates["validate"]["status"] == "passed" and gates["validate"].get("fresh") is True
     tests_ok = gates["unit_tests"]["status"] == "passed"
     assertions_ok = gates["assertions"]["status"] in ("passed", "not_required")
     override_applied = False
@@ -148,7 +175,7 @@ async def get_latest_runs_for_changeset(
     tenant_id: uuid.UUID,
 ) -> dict[str, WorkspaceRun | None]:
     """Get the latest run of each type for a changeset."""
-    run_types = ["sdf_validate", "jest_unit_test", "suiteql_assertions", "deploy_sandbox"]
+    run_types = ["suitecloud_validate", "jest_unit_test", "suiteql_assertions", "deploy_sandbox"]
     runs = {}
     for rt in run_types:
         runs[rt] = await _get_latest_run(db, changeset_id, tenant_id, rt)
