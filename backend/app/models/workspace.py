@@ -126,7 +126,7 @@ class WorkspaceRun(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         nullable=True,
         index=True,
     )
-    run_type: Mapped[str] = mapped_column(String(50), nullable=False)  # sdf_validate | jest_unit_test
+    run_type: Mapped[str] = mapped_column(String(50), nullable=False)  # sdf_validate | jest_unit_test | suitecloud_validate
     status: Mapped[str] = mapped_column(
         String(50), default="queued", nullable=False
     )  # queued | running | passed | failed | error
@@ -138,10 +138,21 @@ class WorkspaceRun(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
+    # Validate-UX additions (PR: feat/workspace-validate-ux)
+    validator_engine: Mapped[str | None] = mapped_column(String(32), nullable=True)  # suitecloud_server | sdf_legacy
+    parser_version: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    has_errors: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    has_warnings: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    gate_status: Mapped[str | None] = mapped_column(String(32), nullable=True)  # pass | block | stale | unknown
+    snapshot_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+
     workspace: Mapped["Workspace"] = relationship("Workspace", back_populates="runs")
     trigger_user: Mapped["User"] = relationship("User", foreign_keys=[triggered_by])
     artifacts: Mapped[list["WorkspaceArtifact"]] = relationship(
         "WorkspaceArtifact", back_populates="run", cascade="all, delete-orphan"
+    )
+    validation_hits: Mapped[list["ValidationHit"]] = relationship(
+        "ValidationHit", back_populates="run", cascade="all, delete-orphan"
     )
 
 
@@ -163,3 +174,31 @@ class WorkspaceArtifact(Base, UUIDPrimaryKeyMixin):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default="now()", nullable=False)
 
     run: Mapped["WorkspaceRun"] = relationship("WorkspaceRun", back_populates="artifacts")
+
+
+class ValidationHit(Base, UUIDPrimaryKeyMixin):
+    """One structured validate finding (file / line / severity / code / message).
+
+    Belongs to a `WorkspaceRun` with `run_type == "suitecloud_validate"`.
+    """
+
+    __tablename__ = "validation_hits"
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False, index=True
+    )
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workspace_runs.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    file_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    line: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    severity: Mapped[str] = mapped_column(String(32), nullable=False)  # error | warning | info | parser_error
+    code: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    rule_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    message: Mapped[str] = mapped_column(Text, nullable=False)
+    fingerprint: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default="now()", nullable=False
+    )
+
+    run: Mapped["WorkspaceRun"] = relationship("WorkspaceRun", back_populates="validation_hits")
