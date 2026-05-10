@@ -353,6 +353,48 @@ async def test_gate_status_independent_of_exit_code(
 
 
 @pytest.mark.asyncio
+async def test_execute_run_succeeds_for_applied_changeset(
+    db: AsyncSession,
+    seeded_workspace_with_changeset,
+    seeded_netsuite_connection,
+) -> None:
+    """Validate runs queued after apply_patch (changeset.status='applied')
+    must execute successfully — the overlay short-circuits because the
+    workspace snapshot already reflects the patches."""
+    workspace, cs, admin = seeded_workspace_with_changeset
+
+    # Transition the changeset to 'applied' to simulate post-apply_patch state.
+    cs.status = "applied"
+    await db.flush()
+
+    run = await runner_service.create_run(
+        db=db,
+        tenant_id=workspace.tenant_id,
+        workspace_id=workspace.id,
+        run_type="suitecloud_validate",
+        triggered_by=admin.id,
+        changeset_id=cs.id,
+    )
+
+    fixture_stdout = (FIXTURES_DIR / "suitecloud_validate_clean.txt").read_text()
+    with (
+        patch(
+            "app.services.runner_service._run_subprocess",
+            new=AsyncMock(return_value=(0, fixture_stdout, "")),
+        ),
+        patch(
+            "app.services.workspace.suitecloud_auth_seeder.seed_credentials_for_run",
+            new=AsyncMock(return_value=_FAKE_SEEDED),
+        ),
+    ):
+        await runner_service.execute_run(db=db, run_id=run.id, tenant_id=run.tenant_id)
+
+    refreshed = (await db.execute(select(WorkspaceRun).where(WorkspaceRun.id == run.id))).scalar_one()
+    assert refreshed.status == "passed"
+    assert refreshed.gate_status == "pass"
+
+
+@pytest.mark.asyncio
 async def test_execute_run_handles_mixed_severity(
     db: AsyncSession,
     seeded_workspace_with_changeset,

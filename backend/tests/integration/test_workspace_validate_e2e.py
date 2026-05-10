@@ -147,17 +147,6 @@ async def test_apply_patch_to_validate_to_record_fix_intent_e2e(
     permission_mock = AsyncMock(return_value=True)
     seeded_creds = SeededCredentials(path=Path("/tmp/fake.json"), account_id="1234567")
 
-    # Stub out the changeset overlay. In production, after apply_patch the
-    # changeset has status="applied" and the workspace_files table already
-    # holds the post-apply content. The overlay step adds nothing useful for
-    # validate runs of already-applied changesets. The current overlay
-    # implementation in runner_service rejects non-"approved" changesets,
-    # which is a pre-existing constraint that doesn't fit the
-    # auto-validate-after-apply flow; bypassing it here lets the E2E test
-    # focus on the new wire-up.
-    async def _overlay_passthrough(db_, run_, files):
-        return files
-
     with (
         patch("app.core.dependencies.has_permission", new=permission_mock),
         patch(
@@ -167,10 +156,6 @@ async def test_apply_patch_to_validate_to_record_fix_intent_e2e(
         patch(
             "app.services.workspace.suitecloud_auth_seeder.seed_credentials_for_run",
             new=AsyncMock(return_value=seeded_creds),
-        ),
-        patch(
-            "app.services.runner_service._apply_changeset_overlay",
-            new=_overlay_passthrough,
         ),
     ):
         # -- Step 1+2: apply_patch enqueues + creates a real WorkspaceRun row --

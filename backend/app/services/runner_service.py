@@ -197,6 +197,16 @@ async def _apply_changeset_overlay(db: AsyncSession, run: WorkspaceRun, files: d
     changeset = cs_result.scalar_one_or_none()
     if changeset is None:
         raise ValueError("Changeset not found for run materialization")
+    if changeset.status == "applied":
+        # Patches already committed to workspace_files; snapshot is correct as-is.
+        # Auto-validate runs queued after apply_patch land here — preserve the
+        # changeset_id linkage for audit but skip re-applying the diffs.
+        logger.debug(
+            "runner.overlay_skipped_applied",
+            changeset_id=str(run.changeset_id),
+            run_id=str(run.id),
+        )
+        return files
     if changeset.status != "approved":
         raise ValueError(f"Changeset must be approved before run execution (current: {changeset.status})")
 
