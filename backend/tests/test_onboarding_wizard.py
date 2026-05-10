@@ -356,7 +356,7 @@ async def test_validate_step_first_success_requires_validate_and_unit_tests(
 ):
     user, headers = admin_user
     workspace = await _create_workspace(db, tenant_a, user)
-    await _create_run(db, tenant_a, workspace, user, run_type="sdf_validate", status="passed")
+    await _create_run(db, tenant_a, workspace, user, run_type="suitecloud_validate", status="passed")
     resp = await client.get(f"{BASE}/checklist/first_success/validate", headers=headers)
     assert resp.status_code == 200
     data = resp.json()
@@ -373,7 +373,7 @@ async def test_validate_step_first_success_with_both_run_types(
 ):
     user, headers = admin_user
     workspace = await _create_workspace(db, tenant_a, user)
-    await _create_run(db, tenant_a, workspace, user, run_type="sdf_validate", status="passed")
+    await _create_run(db, tenant_a, workspace, user, run_type="suitecloud_validate", status="passed")
     await _create_run(db, tenant_a, workspace, user, run_type="jest_unit_test", status="passed")
     resp = await client.get(f"{BASE}/checklist/first_success/validate", headers=headers)
     assert resp.status_code == 200

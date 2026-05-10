@@ -514,7 +514,7 @@ async def trigger_validate(
     user: User = Depends(require_permission("workspace.manage")),
     db: AsyncSession = Depends(get_db),
 ):
-    return await _trigger_run(changeset_id, "sdf_validate", user, db)
+    return await _trigger_run(changeset_id, "suitecloud_validate", user, db)
 
 
 @changeset_router.post("/{changeset_id}/unit-tests", status_code=status.HTTP_202_ACCEPTED)
