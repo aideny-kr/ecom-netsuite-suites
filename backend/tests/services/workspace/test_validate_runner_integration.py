@@ -440,3 +440,107 @@ async def test_execute_run_handles_mixed_severity(
     hits = (await db.execute(select(ValidationHit).where(ValidationHit.run_id == run.id))).scalars().all()
     severities = {h.severity for h in hits}
     assert severities == {"error", "warning"}
+
+
+@pytest.mark.asyncio
+async def test_execute_run_blocks_on_parser_error(
+    db: AsyncSession,
+    seeded_workspace_with_changeset,
+    seeded_netsuite_connection,
+) -> None:
+    """Parser fallback (synthetic parser_error hit) MUST block the gate.
+
+    When suitecloud emits garbage stdout, the parser synthesizes a single
+    parser_error hit. has_errors stays False (no matched ERROR lines), but
+    we cannot prove validation passed — the gate must block, not pass.
+    """
+    workspace, cs, user = seeded_workspace_with_changeset
+    run = await runner_service.create_run(
+        db=db,
+        tenant_id=workspace.tenant_id,
+        workspace_id=workspace.id,
+        run_type="suitecloud_validate",
+        triggered_by=user.id,
+        changeset_id=cs.id,
+    )
+    await db.flush()
+
+    # Garbage stdout with no terminal SUCCESS:/FAILURE: line — triggers the
+    # parser_error fallback in validate_parser.parse_suitecloud_validate_output.
+    garbage_stdout = "Some unexpected output that doesn't match anything.\n[garbage]"
+    with (
+        patch.object(
+            runner_service,
+            "_run_subprocess",
+            new=AsyncMock(return_value=(1, garbage_stdout, "")),
+        ),
+        patch(
+            "app.services.workspace.suitecloud_auth_seeder.seed_credentials_for_run",
+            new=AsyncMock(return_value=_FAKE_SEEDED),
+        ),
+    ):
+        await runner_service.execute_run(db=db, run_id=run.id, tenant_id=run.tenant_id)
+
+    refreshed = (await db.execute(select(WorkspaceRun).where(WorkspaceRun.id == run.id))).scalar_one()
+    assert refreshed.gate_status == "block", "parser_error must block the gate"
+    assert refreshed.has_errors is True, "has_errors should reflect the block decision"
+    assert refreshed.status == "failed"
+
+    hits = (await db.execute(select(ValidationHit).where(ValidationHit.run_id == run.id))).scalars().all()
+    assert len(hits) == 1
+    assert hits[0].severity == "parser_error"
+
+
+@pytest.mark.asyncio
+async def test_execute_run_blocks_on_terminal_failure_without_error_hits(
+    db: AsyncSession,
+    seeded_workspace_with_changeset,
+    seeded_netsuite_connection,
+) -> None:
+    """A FAILURE: terminal line with no parseable error lines MUST block.
+
+    Real Oracle CLI output can fail with diagnostics on stderr only, or with
+    new failure shapes the diagnostic regex doesn't cover. Either way, the
+    presence of a FAILURE: terminal line means validation failed — the
+    gate must block even when parsed.has_errors is False.
+    """
+    workspace, cs, user = seeded_workspace_with_changeset
+    run = await runner_service.create_run(
+        db=db,
+        tenant_id=workspace.tenant_id,
+        workspace_id=workspace.id,
+        run_type="suitecloud_validate",
+        triggered_by=user.id,
+        changeset_id=cs.id,
+    )
+    await db.flush()
+
+    # Terminal FAILURE: line but no diagnostic lines match _LINE_RE.
+    # parser_error fallback is suppressed (FAILURE: is a recognized terminal),
+    # so parsed.hits is empty and parsed.has_errors is False — only the new
+    # _TERMINAL_FAILURE_RE check in the runner blocks the gate.
+    failure_stdout = (
+        "INFO: Validating project against account 1234567...\nFAILURE: Project validation failed with 2 error(s)."
+    )
+    with (
+        patch.object(
+            runner_service,
+            "_run_subprocess",
+            new=AsyncMock(return_value=(1, failure_stdout, "diagnostics on stderr")),
+        ),
+        patch(
+            "app.services.workspace.suitecloud_auth_seeder.seed_credentials_for_run",
+            new=AsyncMock(return_value=_FAKE_SEEDED),
+        ),
+    ):
+        await runner_service.execute_run(db=db, run_id=run.id, tenant_id=run.tenant_id)
+
+    refreshed = (await db.execute(select(WorkspaceRun).where(WorkspaceRun.id == run.id))).scalar_one()
+    assert refreshed.gate_status == "block", "FAILURE: terminal must block the gate"
+    assert refreshed.has_errors is True
+    assert refreshed.status == "failed"
+
+    # Hits list is empty because no lines matched the diagnostic regex
+    # and the FAILURE: line suppressed the parser_error fallback.
+    hits = (await db.execute(select(ValidationHit).where(ValidationHit.run_id == run.id))).scalars().all()
+    assert hits == []

@@ -103,11 +103,21 @@ def _wire_auto_validate_orchestrator() -> None:
     from app.core.database import async_session_factory
     from app.services import runner_service
     from app.services.workspace.auto_validate_orchestrator import get_orchestrator
+    from app.workers.tasks.workspace_run import workspace_run_task
 
     async def _create_run(**kwargs):
         async with async_session_factory() as session:
             run = await runner_service.create_run(db=session, **kwargs)
             await session.commit()
+            # Dispatch execution to the Celery worker pool. Mirrors the manual
+            # workspace.run_validate path in workspace_tools.py — without this,
+            # auto-validate runs sit in `queued` forever because nothing else
+            # polls the table.
+            workspace_run_task.delay(
+                tenant_id=str(run.tenant_id),
+                run_id=str(run.id),
+                correlation_id=run.correlation_id,
+            )
             return run.id
 
     get_orchestrator()._create_run = _create_run

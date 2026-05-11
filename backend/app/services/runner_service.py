@@ -59,6 +59,11 @@ BEARER_PATTERN = re.compile(r"(?i)\b(bearer)\s+[A-Za-z0-9._\-+/=]+")
 KEY_VALUE_SECRET_PATTERN = re.compile(r"(?i)\b(api[_-]?key|token|secret|password)\b\s*[:=]\s*([^\s,;]+)")
 PRODUCTION_TARGET_PATTERN = re.compile(r"(?i)\b(prod|production|live)\b")
 SANDBOX_HINT_PATTERN = re.compile(r"(?i)(?:^|[-_])(sb\d*|sandbox\d*)$")
+# Matches `suitecloud project:validate --server`'s terminal FAILURE: line.
+# Used by _execute_validate_run as a belt-and-suspenders gate check: if the
+# CLI reports validation failed but no diagnostic lines matched _LINE_RE
+# (e.g., new failure shape, stderr-only diagnostics), block the gate anyway.
+_TERMINAL_FAILURE_RE = re.compile(r"^FAILURE:", re.MULTILINE)
 
 
 class CommandNotAllowedError(Exception):
@@ -520,12 +525,25 @@ async def _execute_validate_run(
 
         # Run-record updates. Gating derives from PARSED output, NOT exit_code
         # (codex #11 — exit code is recorded but never load-bearing).
+        #
+        # Block the gate when ANY of these is true:
+        #   - parser extracted at least one severity="error" hit
+        #   - parser fell back to a synthetic parser_error hit (CLI output was
+        #     unparseable; we cannot prove the validate passed)
+        #   - the CLI emitted a terminal FAILURE: line but no error lines
+        #     matched the diagnostic regex (e.g., diagnostics on stderr only,
+        #     or new FAILURE shapes the regex doesn't cover)
+        # Each of these means "we cannot trust this as a clean validate."
+        has_parser_error = any(h.severity == "parser_error" for h in parsed.hits)
+        has_terminal_failure = bool(_TERMINAL_FAILURE_RE.search(stdout))
+        gate_block = parsed.has_errors or has_parser_error or has_terminal_failure
+
         run.exit_code = exit_code
-        run.has_errors = parsed.has_errors
+        run.has_errors = parsed.has_errors or has_parser_error or has_terminal_failure
         run.has_warnings = parsed.has_warnings
         run.parser_version = PARSER_VERSION
         run.validator_engine = "suitecloud_server"
-        if parsed.has_errors:
+        if gate_block:
             run.status = "failed"
             run.gate_status = "block"
         else:
@@ -823,17 +841,28 @@ async def execute_run(
 
 
 async def get_run(db: AsyncSession, run_id: uuid.UUID, tenant_id: uuid.UUID) -> WorkspaceRun | None:
-    """Get a single run by ID."""
+    """Get a single run by ID with its validation_hits eager-loaded."""
+    from sqlalchemy.orm import selectinload
+
     result = await db.execute(
-        select(WorkspaceRun).where(WorkspaceRun.id == run_id, WorkspaceRun.tenant_id == tenant_id)
+        select(WorkspaceRun)
+        .options(selectinload(WorkspaceRun.validation_hits))
+        .where(WorkspaceRun.id == run_id, WorkspaceRun.tenant_id == tenant_id)
     )
     return result.scalar_one_or_none()
 
 
 async def list_runs(db: AsyncSession, workspace_id: uuid.UUID, tenant_id: uuid.UUID) -> list[WorkspaceRun]:
-    """List all runs for a workspace."""
+    """List all runs for a workspace with validation_hits eager-loaded.
+
+    Eager-loading avoids an N+1 when serializing — the runs panel needs the
+    findings for any suitecloud_validate runs in the list.
+    """
+    from sqlalchemy.orm import selectinload
+
     result = await db.execute(
         select(WorkspaceRun)
+        .options(selectinload(WorkspaceRun.validation_hits))
         .where(WorkspaceRun.workspace_id == workspace_id, WorkspaceRun.tenant_id == tenant_id)
         .order_by(WorkspaceRun.created_at.desc())
     )

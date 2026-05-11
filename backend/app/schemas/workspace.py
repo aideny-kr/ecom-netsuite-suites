@@ -138,6 +138,20 @@ class RunTriggerRequest(BaseModel):
     changeset_id: str | None = None
 
 
+class ValidationHitResponse(BaseModel):
+    id: str
+    run_id: str
+    file_path: str | None
+    line: int | None
+    severity: str
+    code: str | None
+    rule_id: str | None
+    message: str
+    fingerprint: str
+
+    model_config = {"from_attributes": True}
+
+
 class RunResponse(BaseModel):
     id: str
     workspace_id: str
@@ -151,6 +165,14 @@ class RunResponse(BaseModel):
     duration_ms: int | None
     created_at: str
     updated_at: str
+    # Validate-UX fields (suitecloud_validate runs only — None otherwise)
+    validator_engine: str | None = None
+    parser_version: str | None = None
+    has_errors: bool | None = None
+    has_warnings: bool | None = None
+    gate_status: str | None = None
+    snapshot_hash: str | None = None
+    findings: list[ValidationHitResponse] = []
 
     model_config = {"from_attributes": True}
 

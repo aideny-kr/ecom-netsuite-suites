@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 
 import structlog
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from sqlalchemy import inspect as _sql_inspect
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -421,7 +422,36 @@ async def apply_changeset(
 # --- Run serializers ---
 
 
+def _serialize_hit(hit) -> dict:
+    return {
+        "id": str(hit.id),
+        "run_id": str(hit.run_id),
+        "file_path": hit.file_path,
+        "line": hit.line,
+        "severity": hit.severity,
+        "code": hit.code,
+        "rule_id": hit.rule_id,
+        "message": hit.message,
+        "fingerprint": hit.fingerprint,
+    }
+
+
 def _serialize_run(run) -> dict:
+    # validation_hits is loaded via selectinload in list_runs/get_run; callers
+    # that pass freshly-created runs (e.g., POST endpoints returning the queued
+    # row right after create_run) have not eager-loaded the relation. Touching
+    # run.validation_hits directly would trigger a lazy load from the wrong
+    # greenlet context (asyncpg can't run sync IO mid-serialization). Use the
+    # SQLAlchemy inspector to check whether the relation is loaded; bail to []
+    # otherwise. Non-SQLA objects (e.g., MagicMock in tests) → no inspect state,
+    # fall back to getattr.
+    state = _sql_inspect(run, raiseerr=False)
+    if state is None:
+        raw_hits = getattr(run, "validation_hits", None) or []
+    elif "validation_hits" in state.unloaded:
+        raw_hits = []
+    else:
+        raw_hits = run.validation_hits or []
     return {
         "id": str(run.id),
         "workspace_id": str(run.workspace_id),
@@ -435,6 +465,14 @@ def _serialize_run(run) -> dict:
         "duration_ms": run.duration_ms,
         "created_at": run.created_at.isoformat(),
         "updated_at": run.updated_at.isoformat(),
+        # Validate-UX fields (suitecloud_validate runs only — None otherwise)
+        "validator_engine": run.validator_engine,
+        "parser_version": run.parser_version,
+        "has_errors": run.has_errors,
+        "has_warnings": run.has_warnings,
+        "gate_status": run.gate_status,
+        "snapshot_hash": run.snapshot_hash,
+        "findings": [_serialize_hit(h) for h in raw_hits],
     }
 
 
