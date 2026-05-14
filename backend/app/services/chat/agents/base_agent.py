@@ -79,8 +79,13 @@ def build_current_date_block(user_timezone: str | None) -> str:
 
         local_today = local_now.strftime("%Y-%m-%d")
         local_yesterday = (local_now - timedelta(days=1)).strftime("%Y-%m-%d")
+        # Wrapped in <current_datetime> tags so split_system_prompt routes the
+        # whole block to the per-turn ``dynamic`` system block. Without this
+        # wrapper, HH:MM lives in the cached static prefix and busts the
+        # prompt cache every minute.
         return (
-            "\n## CURRENT DATE & TIME\n"
+            "\n<current_datetime>\n"
+            "## CURRENT DATE & TIME\n"
             f"Timezone: {tz_label}. "
             f"Today: {local_today} ({local_now.strftime('%A, %B %d, %Y')}), "
             f"local time: {local_now.strftime('%H:%M')}. "
@@ -88,6 +93,7 @@ def build_current_date_block(user_timezone: str | None) -> str:
             f"'yesterday' = TO_DATE('{local_yesterday}', 'YYYY-MM-DD'). "
             f"When the user says 'last N months', anchor on the month BEFORE "
             f"today's month as the most recent complete month."
+            "\n</current_datetime>"
         )
     except Exception:
         # Date injection must NEVER break a turn
@@ -695,6 +701,8 @@ class BaseSpecialistAgent(abc.ABC):
             )
             total_input_tokens += response.usage.input_tokens
             total_output_tokens += response.usage.output_tokens
+            total_cache_creation += response.usage.cache_creation_input_tokens
+            total_cache_read += response.usage.cache_read_input_tokens
             final_text = "\n".join(response.text_blocks) if response.text_blocks else ""
 
             # Extract confidence BEFORE stripping tag so agent self-score is used
@@ -1319,6 +1327,8 @@ class BaseSpecialistAgent(abc.ABC):
             if response:
                 total_input_tokens += response.usage.input_tokens
                 total_output_tokens += response.usage.output_tokens
+                total_cache_creation += response.usage.cache_creation_input_tokens
+                total_cache_read += response.usage.cache_read_input_tokens
 
             final_text = "\n".join(response.text_blocks) if response and response.text_blocks else ""
 

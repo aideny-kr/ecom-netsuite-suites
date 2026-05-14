@@ -10,9 +10,23 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-# XML blocks that change every turn and should NOT be cached
+# XML blocks that change every turn and should NOT land in the cached static
+# prefix. Extracted into ``dynamic`` so the cacheable ``static`` block stays
+# byte-stable across turns.
+#
+# Members:
+#   - tenant_vernacular: per-turn NER + entity resolution
+#   - domain_knowledge: RAG chunks retrieved for this turn
+#   - proven_patterns: tenant query patterns matched for this turn
+#   - financial_context: financial intent classification
+#   - learned_rules: query-aware tenant business rules (rebuilt per-turn)
+#   - current_datetime: today/now block — HH:MM changes every minute
+#
+# learned_rules and current_datetime were added after a cache audit found
+# they were silently bleeding into the static prefix and invalidating cache
+# up to once per minute. See test_prompt_cache.py.
 _DYNAMIC_BLOCK_RE = re.compile(
-    r"<(tenant_vernacular|domain_knowledge|proven_patterns|financial_context)>"
+    r"<(tenant_vernacular|domain_knowledge|proven_patterns|financial_context|learned_rules|current_datetime)>"
     r".*?"
     r"</\1>",
     re.DOTALL,

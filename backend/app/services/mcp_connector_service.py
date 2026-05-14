@@ -138,13 +138,22 @@ async def delete_mcp_connector(db: AsyncSession, connector_id: uuid.UUID, tenant
 
 
 async def get_active_connectors_for_tenant(db: AsyncSession, tenant_id: uuid.UUID) -> list[McpConnector]:
-    """Get all active and enabled MCP connectors for a tenant."""
+    """Get all active and enabled MCP connectors for a tenant.
+
+    Ordered by ``id`` for byte-stable output. Without an explicit ORDER BY,
+    Postgres is free to return rows in any order, which would shift the
+    Anthropic prompt-cache breakpoint stamped on the last tool definition and
+    silently invalidate the cache. ``build_external_tool_definitions`` also
+    sorts defensively at the Python layer; this is the SQL-side guarantee.
+    """
     result = await db.execute(
-        select(McpConnector).where(
+        select(McpConnector)
+        .where(
             McpConnector.tenant_id == tenant_id,
             McpConnector.is_enabled.is_(True),
             McpConnector.status == "active",
         )
+        .order_by(McpConnector.id)
     )
     return list(result.scalars().all())
 

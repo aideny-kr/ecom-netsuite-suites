@@ -121,11 +121,16 @@ def build_external_tool_definitions(connectors: list) -> list[dict]:
     and will reject requests that exceed them; we let that be the
     authoritative bound rather than imposing our own arbitrary cap.
     """
+    # Sort for byte-stable output: connectors by UUID, tools within each by raw
+    # name. The Anthropic prompt-cache breakpoint is stamped on the last tool,
+    # so a non-deterministic order shifts the breakpoint and silently invalidates
+    # the cache.
     tools = []
-    for connector in connectors:
+    for connector in sorted(connectors, key=lambda c: str(c.id)):
         if not connector.discovered_tools:
             continue
-        for tool in connector.discovered_tools:
+        sorted_discovered = sorted(connector.discovered_tools, key=lambda t: t.get("name", ""))
+        for tool in sorted_discovered:
             raw_name = tool.get("name", "unknown")
             anthropic_name = _make_ext_tool_name(connector.id, raw_name)
             desc = tool.get("description", "") or ""

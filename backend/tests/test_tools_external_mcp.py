@@ -111,3 +111,53 @@ def test_tool_name_format_unchanged():
     assert tools[0]["name"].startswith("ext__")
     assert tools[0]["name"].endswith("__ns_runCustomSuiteQL")
     assert len(tools[0]["name"].split("__")[1]) == 32  # hex of UUID
+
+
+def test_tools_sorted_deterministically_per_connector():
+    """The cache_control breakpoint stamped on the LAST tool only sticks if
+    tool order is byte-stable across requests. Oracle MCP returns discovered
+    tools in arbitrary order; we must sort them by raw name so the cache key
+    is identical every call.
+
+    Caught by codex review of the prompt-cache audit (May 2026).
+    """
+    # Same set of tools fed in two different orders — output names must match.
+    schema_obj = {"type": "object", "properties": {}}
+    tools_input_a = [
+        {"name": "ns_getRecord", "description": "x", "input_schema": schema_obj},
+        {"name": "ns_runCustomSuiteQL", "description": "x", "input_schema": schema_obj},
+        {"name": "ns_listAllReports", "description": "x", "input_schema": schema_obj},
+    ]
+    tools_input_b = list(reversed(tools_input_a))
+
+    conn_a = _FakeConnector(tools_input_a)
+    conn_b = _FakeConnector(tools_input_b)
+    out_a = [t["name"] for t in build_external_tool_definitions([conn_a])]
+    out_b = [t["name"] for t in build_external_tool_definitions([conn_b])]
+
+    assert out_a == out_b, (
+        f"Tool order is non-deterministic — would invalidate prompt cache. "
+        f"input order A → {out_a}, input order B → {out_b}"
+    )
+    # Sort key is the raw tool name, ascending.
+    raw_names_in_order = [n.split("__", 2)[-1] for n in out_a]
+    assert raw_names_in_order == sorted(raw_names_in_order)
+
+
+def test_multiple_connectors_sorted_by_connector_id():
+    """Across connectors, ordering must also be deterministic. The natural
+    key is the connector UUID — combined with per-connector tool sort, the
+    full tool list becomes byte-stable across requests."""
+    schema_obj = {"type": "object", "properties": {}}
+    # Two connectors with different UUIDs.
+    conn_low = _FakeConnector([{"name": "alpha", "description": "x", "input_schema": schema_obj}])
+    conn_low.id = uuid.UUID("00000000-0000-0000-0000-000000000001")
+    conn_high = _FakeConnector([{"name": "alpha", "description": "x", "input_schema": schema_obj}])
+    conn_high.id = uuid.UUID("ffffffff-ffff-ffff-ffff-ffffffffffff")
+
+    out_ab = [t["name"] for t in build_external_tool_definitions([conn_low, conn_high])]
+    out_ba = [t["name"] for t in build_external_tool_definitions([conn_high, conn_low])]
+    assert out_ab == out_ba, (
+        "Connector input order changed output order — caller must pre-sort or "
+        "build_external_tool_definitions must sort internally"
+    )

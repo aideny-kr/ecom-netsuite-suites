@@ -2709,6 +2709,8 @@ async def run_chat_turn(
                         token_count=coord_result_tokens[0] + coord_result_tokens[1],
                         input_tokens=coord_result_tokens[0],
                         output_tokens=coord_result_tokens[1],
+                        cache_creation_tokens=coord_result_cache[0],
+                        cache_read_tokens=coord_result_cache[1],
                         model_used=unified_model,
                         provider_used=provider if is_byok else settings.MULTI_AGENT_SPECIALIST_PROVIDER,
                         is_byok=is_byok,
@@ -2862,6 +2864,8 @@ async def run_chat_turn(
         final_text = ""
         total_input_tokens = 0
         total_output_tokens = 0
+        total_cache_creation_tokens = 0
+        total_cache_read_tokens = 0
         last_structured_output: dict | None = None
 
         for step in range(MAX_STEPS):
@@ -2887,6 +2891,8 @@ async def run_chat_turn(
 
             total_input_tokens += response.usage.input_tokens
             total_output_tokens += response.usage.output_tokens
+            total_cache_creation_tokens += response.usage.cache_creation_input_tokens
+            total_cache_read_tokens += response.usage.cache_read_input_tokens
 
             if not response.tool_use_blocks:
                 # Pure text response — we're done
@@ -3038,6 +3044,8 @@ async def run_chat_turn(
             if response:
                 total_input_tokens += response.usage.input_tokens
                 total_output_tokens += response.usage.output_tokens
+                total_cache_creation_tokens += response.usage.cache_creation_input_tokens
+                total_cache_read_tokens += response.usage.cache_read_input_tokens
                 final_text = "\n".join(response.text_blocks) if response.text_blocks else ""
 
         # Strip raw tool reference tags / leaked XML the LLM may include
@@ -3054,6 +3062,8 @@ async def run_chat_turn(
             token_count=total_input_tokens + total_output_tokens,
             input_tokens=total_input_tokens,
             output_tokens=total_output_tokens,
+            cache_creation_tokens=total_cache_creation_tokens,
+            cache_read_tokens=total_cache_read_tokens,
             model_used=model,
             provider_used=provider,
             is_byok=is_byok,
