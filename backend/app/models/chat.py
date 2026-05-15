@@ -43,6 +43,11 @@ class ChatMessage(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     # Granular token tracking
     input_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Anthropic prompt-cache observability — populated from response.usage on
+    # the assistant turn. Cache health is a first-class metric: hit_rate =
+    # cache_read / (cache_read + cache_creation + input).
+    cache_creation_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cache_read_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     model_used: Mapped[str | None] = mapped_column(String(100), nullable=True)
     provider_used: Mapped[str | None] = mapped_column(String(20), nullable=True)
     is_byok: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=False)
