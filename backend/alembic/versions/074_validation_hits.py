@@ -12,7 +12,10 @@ from alembic import op
 
 # revision identifiers
 revision = "074_validation_hits"
-down_revision = "073_chat_disclosure_events"
+# Re-parented from 073 to 075 to resolve alembic multiple-heads after
+# 075_chat_cache_tokens (PR #79) landed on main with the same 073 parent.
+# Linear chain is now 073 → 075 → 074. Dev DBs already at 074 stay at head.
+down_revision = "075_chat_cache_tokens"
 branch_labels = None
 depends_on = None
 
