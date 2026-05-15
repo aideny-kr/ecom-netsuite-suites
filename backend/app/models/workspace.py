@@ -142,6 +142,10 @@ class WorkspaceRun(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     # Validate-UX additions (PR: feat/workspace-validate-ux)
     validator_engine: Mapped[str | None] = mapped_column(String(32), nullable=True)  # suitecloud_server | sdf_legacy
     parser_version: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # has_errors is True iff the gate decided to block — set by
+    # _execute_validate_run when ANY of: parsed.has_errors, a synthetic
+    # parser_error hit, or a terminal FAILURE: line in stdout. Not purely
+    # "parser found error-severity hits" — co-set with gate_status="block".
     has_errors: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     has_warnings: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     gate_status: Mapped[str | None] = mapped_column(String(32), nullable=True)  # pass | block | stale | unknown
