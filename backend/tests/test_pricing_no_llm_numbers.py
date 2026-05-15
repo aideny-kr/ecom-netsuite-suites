@@ -29,10 +29,7 @@ def test_pricing_task_output_suppresses_hallucinated_convert_prices():
     """Persisted prose must not keep SEK/NOK numbers that disagree with preview."""
     from app.services.chat.orchestrator import _coerce_assistant_content
 
-    assistant_prose = (
-        "Converted USD 99 across currencies: CAD 139, EUR 119, GBP 99, "
-        "SEK 1339, AUD 169, NOK 1089."
-    )
+    assistant_prose = "Converted USD 99 across currencies: CAD 139, EUR 119, GBP 99, SEK 1339, AUD 169, NOK 1089."
     persisted_output = _pricing_task_output(
         [
             {
@@ -106,4 +103,6 @@ def test_run_chat_turn_streaming_paths_suppress_pricing_text_after_task_output()
     assert source.count("if _is_pricing_task_output(last_structured_output):") == 2
     assert source.count("suppress_streamed_text = True") == 2
     assert "if suppress_streamed_text:\n                                continue" in source
-    assert "if not suppress_streamed_text:\n                        yield {\"type\": \"text\", \"content\": payload}" in source
+    assert (
+        'if not suppress_streamed_text:\n                        yield {"type": "text", "content": payload}' in source
+    )
