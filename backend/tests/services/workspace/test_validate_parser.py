@@ -1,13 +1,11 @@
 """Validate-output parser unit tests."""
+
 from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from app.services.workspace.validate_parser import (
     PARSER_VERSION,
-    ValidationParseResult,
     parse_suitecloud_validate_output,
 )
 

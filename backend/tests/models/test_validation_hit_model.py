@@ -60,9 +60,7 @@ async def test_validation_hit_persists_with_run(db: AsyncSession, seeded_workspa
     db.add(hit)
     await db.flush()
 
-    fetched = (
-        await db.execute(select(ValidationHit).where(ValidationHit.run_id == run.id))
-    ).scalar_one()
+    fetched = (await db.execute(select(ValidationHit).where(ValidationHit.run_id == run.id))).scalar_one()
     assert fetched.severity == "error"
     assert fetched.fingerprint == "0123456789abcdef" * 4
     assert fetched.code == "OWASP-A03"

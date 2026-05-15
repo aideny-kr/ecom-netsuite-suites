@@ -9,6 +9,7 @@ single `parser_error` hit so the issue surfaces to the user.
 Hit fingerprinting: `sha256(file + ":" + line + ":" + code + ":" + message)`.
 Used by the orchestrator to dedup repeat auto-propose attempts.
 """
+
 from __future__ import annotations
 
 import hashlib
