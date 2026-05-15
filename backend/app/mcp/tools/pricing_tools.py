@@ -42,6 +42,11 @@ _CACHE_MISS_MESSAGE = (
     "No prior pricing state in this conversation (cache expired or no pricing run yet). "
     "Re-run pricing_convert with the upload, or pricing_export with inline items."
 )
+_EUR_FINAL_PRICE_UNSUPPORTED_MESSAGE = (
+    "EUR final display price edits are not supported through fx_rate_overrides. "
+    "Ask whether to change the USD base price, apply a percent uplift to EUR, "
+    "or update the tenant EUR FX rate in pricing config."
+)
 
 
 def _build_preview(results, max_rows: int = 10) -> list[dict]:
@@ -569,6 +574,16 @@ def _state_uplift_to_decimals(uplift: dict[str, str]) -> dict[str, Decimal]:
     return out
 
 
+def _has_ambiguous_eur_fx_override(overrides: dict, current_config: TenantPricingConfig) -> bool:
+    fx_overrides = overrides.get("fx_rate_overrides") or {}
+    if not isinstance(fx_overrides, dict):
+        return False
+    if not any(str(cur).upper() == "EUR" for cur in fx_overrides):
+        return False
+    eur_config = current_config.currencies.get("EUR")
+    return eur_config is not None and eur_config.tier == "eur_based"
+
+
 async def pricing_revise_execute(params: dict, context: dict, **kwargs) -> dict:
     """Apply override edits to the prior pricing run and regenerate outputs.
 
@@ -626,7 +641,12 @@ async def pricing_revise_execute(params: dict, context: dict, **kwargs) -> dict:
             }
         )
     else:
-        # 4a. Validate currencies_to_add against the FRESH config.
+        # 4a. Reject the known ambiguous "set final EUR display price" failure
+        # mode before mutating cached state or generating revised files.
+        if _has_ambiguous_eur_fx_override(overrides, current_config):
+            return {"error": True, "message": _EUR_FINAL_PRICE_UNSUPPORTED_MESSAGE}
+
+        # 4b. Validate currencies_to_add against the FRESH config.
         for cur in overrides.get("currencies_to_add") or []:
             if cur not in current_config.currencies:
                 return {
@@ -636,11 +656,11 @@ async def pricing_revise_execute(params: dict, context: dict, **kwargs) -> dict:
                         "Add it in Settings → Pricing first, then retry."
                     ),
                 }
-        # 4b. Apply overrides (mutates state, may return error dict).
+        # 4c. Apply overrides (mutates state, may return error dict).
         err = _apply_overrides(state, overrides)
         if err is not None:
             return err
-        # 4c. Append currencies_to_add now (after validation passed).
+        # 4d. Append currencies_to_add now (after validation passed).
         for cur in overrides.get("currencies_to_add") or []:
             if cur not in state["effective_currencies"]:
                 state["effective_currencies"].append(cur)

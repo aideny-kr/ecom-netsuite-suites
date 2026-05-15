@@ -449,6 +449,14 @@ def _sanitize_assistant_text(text: str) -> str:
 
 
 _NO_RESULT_FALLBACK = "I wasn't able to find relevant information for that question."
+_PRICING_TASK_OUTPUT_MESSAGE = "Pricing output is ready. Review the table and download files below."
+
+
+def _is_pricing_task_output(persisted_output: dict | None) -> bool:
+    if not isinstance(persisted_output, dict) or persisted_output.get("type") != "task_output":
+        return False
+    data = persisted_output.get("data") or {}
+    return isinstance(data, dict) and data.get("task_kind") == "pricing"
 
 
 def _coerce_assistant_content(final_text: str | None, persisted_output: dict | None) -> str:
@@ -465,6 +473,8 @@ def _coerce_assistant_content(final_text: str | None, persisted_output: dict | N
     """
     if isinstance(persisted_output, dict) and persisted_output.get("type") == "clarification":
         return ""
+    if _is_pricing_task_output(persisted_output):
+        return _PRICING_TASK_OUTPUT_MESSAGE
     return final_text or _NO_RESULT_FALLBACK
 
 
@@ -833,6 +843,7 @@ def _intercept_tool_result(
 
         sse_event_data = {
             "type": "task_output",
+            "task_kind": "pricing",
             "sku_count": parsed.get("sku_count", 0),
             "currency_count": parsed.get("currency_count", 0),
             "output_files": parsed.get("output_files", {}),
@@ -2462,6 +2473,7 @@ async def run_chat_turn(
                     streamed_text_parts: list[str] = []
                     agent_result = None
                     last_structured_output: dict | None = None
+                    suppress_streamed_text = False
                     _charts_output: list[dict] = []
 
                     unified_model = model if is_byok else settings.MULTI_AGENT_SQL_MODEL
@@ -2559,6 +2571,8 @@ async def run_chat_turn(
                     ):
                         if event_type == "text":
                             streamed_text_parts.append(payload)
+                            if suppress_streamed_text:
+                                continue
                             # Suppress <chart> blocks from streaming text output
                             _chart_buffer += payload
                             while True:
@@ -2600,6 +2614,10 @@ async def run_chat_turn(
                             # payload is (event_type_str, event_data_dict)
                             last_structured_output = {"type": payload[0], "data": payload[1]}
                             yield {"type": payload[0], "data": payload[1]}
+                            if _is_pricing_task_output(last_structured_output):
+                                suppress_streamed_text = True
+                                _chart_buffer = ""
+                                _in_chart_block = False
 
                             # Auto-generate chart from financial reports (deterministic, no LLM)
                             if payload[0] == "financial_report":
@@ -2629,7 +2647,7 @@ async def run_chat_turn(
                             agent_result = payload
 
                     # Flush remaining buffered text (non-chart content)
-                    if _chart_buffer and not _in_chart_block:
+                    if _chart_buffer and not _in_chart_block and not suppress_streamed_text:
                         yield {"type": "text", "content": _chart_buffer}
 
                     if agent_result is None:
@@ -2867,6 +2885,7 @@ async def run_chat_turn(
         total_cache_creation_tokens = 0
         total_cache_read_tokens = 0
         last_structured_output: dict | None = None
+        suppress_streamed_text = False
 
         for step in range(MAX_STEPS):
             response = None
@@ -2882,7 +2901,8 @@ async def run_chat_turn(
                 tools=tool_definitions if tool_definitions else None,
             ):
                 if event_type == "text":
-                    yield {"type": "text", "content": payload}
+                    if not suppress_streamed_text:
+                        yield {"type": "text", "content": payload}
                 elif event_type == "response":
                     response = payload
 
@@ -2981,6 +3001,8 @@ async def run_chat_turn(
                 if intercept_type is not None:
                     last_structured_output = {"type": intercept_type, "data": intercept_data}
                     yield {"type": intercept_type, "data": intercept_data}
+                    if _is_pricing_task_output(last_structured_output):
+                        suppress_streamed_text = True
 
                 tool_results_content.append(
                     {
@@ -3037,7 +3059,8 @@ async def run_chat_turn(
                 messages=messages,
             ):
                 if event_type == "text":
-                    yield {"type": "text", "content": payload}
+                    if not suppress_streamed_text:
+                        yield {"type": "text", "content": payload}
                 elif event_type == "response":
                     response = payload
 
