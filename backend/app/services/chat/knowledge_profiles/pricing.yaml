@@ -29,6 +29,10 @@ prompt_fragment: |
   - Call `pricing_revise` with structured `overrides`. Do NOT re-ask for the upload
     unless pricing_revise returns "No prior pricing state" (cache miss/expired).
   - Pass user intent as overrides — never compute new prices yourself.
+  - Supported revise edits: SKU USD input prices, percent uplifts, rounding, configured FX/VAT overrides, and currency/SKU add/remove.
+  - `pricing_revise` does not support "set final displayed EUR price to X" unless a future `target_final_prices` feature is explicitly implemented.
+  - Do not use `fx_rate_overrides.EUR` to represent a final displayed EUR target price.
+  - Price outputs render automatically; assistant text must not list individual prices.
   - Override mapping:
     - "increase GBP by 5%"        -> overrides.percent_uplift = {"GBP": 0.05}
     - "decrease EUR by 10%"       -> overrides.percent_uplift = {"EUR": -0.10}

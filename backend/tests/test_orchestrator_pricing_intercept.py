@@ -41,6 +41,11 @@ def _pricing_result_str(*, success: bool = True, with_state: bool = True) -> str
 
 
 class TestPricingInterceptPipesPricingState:
+    def test_pricing_task_output_is_identifiable_as_pricing(self):
+        event_type, event_data, _ = _intercept_tool_result("pricing_export", _pricing_result_str())
+        assert event_type == "task_output"
+        assert event_data["task_kind"] == "pricing"
+
     def test_pricing_convert_event_includes_pricing_state(self):
         event_type, event_data, _ = _intercept_tool_result("pricing_convert", _pricing_result_str())
         assert event_type == "task_output"

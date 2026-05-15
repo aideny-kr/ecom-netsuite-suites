@@ -391,6 +391,35 @@ class TestUpliftSemantics:
         assert Decimal(ps["effective_uplift_by_currency"]["GBP"]) == Decimal("0.10")
 
 
+class TestFxOverrideSafety:
+    def test_rejects_ambiguous_eur_fx_override_for_eur_based_tier(self, revise_context):
+        """Do not accept the staging failure mode as a guessed target-EUR edit.
+
+        User intent was "set final EUR display price to 129"; the bad tool call
+        guessed EUR fx_rate_overrides = 129 / 99, which produces EUR 159 for an
+        eur_based EUR tier after the engine applies EUR conversion, VAT, and
+        rounding. Safe first pass is to reject this unsupported contract before
+        mutating cached pricing state or writing revised output files.
+        """
+        seed = _seed_state(items=[{"sku": "ITEM-001", "usd_price": "99", "item_name": None}])
+        result, saved = _run_revise(
+            {
+                "overrides": {
+                    "sku_price_changes": [{"sku": "ITEM-001", "usd_price": 99}],
+                    "fx_rate_overrides": {"EUR": 1.303030303030303},
+                }
+            },
+            revise_context,
+            payload=seed,
+        )
+
+        assert result["error"] is True
+        assert "EUR final display price edits are not supported through fx_rate_overrides" in result["message"]
+        assert saved == []
+        assert seed["effective_fx_overrides"] == {}
+        assert seed["applied_overrides_log"] == []
+
+
 class TestReset:
     def test_reset_clears_overrides(self, revise_context):
         seed = _seed_state()

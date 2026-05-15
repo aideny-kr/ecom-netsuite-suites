@@ -705,9 +705,14 @@ TOOL_REGISTRY = {
     "pricing.revise": {
         "description": (
             "Revise the most recent pricing result with the requested overrides and "
-            "regenerate Excel + NetSuite CSV outputs. Use for follow-up edits like "
-            "'increase GBP by 5%', 'change SKU ABC-123 USD to 149', 'use nearest_50 "
-            "rounding for JPY only', 'add EUR and CAD', 'remove SKU X'. "
+            "regenerate Excel + NetSuite CSV outputs. Supports SKU USD input prices, "
+            "percent uplifts, rounding, configured FX/VAT overrides, and currency/SKU "
+            "add/remove edits. Use for follow-up edits like 'increase GBP by 5%', "
+            "'change SKU ABC-123 USD to 149', 'use nearest_50 rounding for JPY only', "
+            "'add EUR and CAD', 'remove SKU X'. Does not support setting a final "
+            "displayed EUR price to X unless a future target_final_prices feature is "
+            "explicitly implemented. Price outputs render automatically; assistant text "
+            "must not list individual prices. "
             "DO NOT call this for the first pricing run — use pricing_convert (uploaded "
             "Excel) or pricing_export (inline items) instead. All numeric fields are "
             "interpreted with full Decimal precision; pass values as JSON numbers."
@@ -730,9 +735,11 @@ TOOL_REGISTRY = {
                     "sku_price_changes (list of {sku, usd_price}), skus_to_remove (list of "
                     "sku strings), skus_to_add (list of {sku, usd_price, item_name?}), "
                     "percent_uplift (dict by currency, e.g. {GBP: 0.05} = +5%), "
-                    "fx_rate_overrides / vat_rate_overrides (dict by currency), "
+                    "configured fx_rate_overrides / vat_rate_overrides (dict by currency), "
                     "rounding_overrides (dict by currency, e.g. {JPY: 'nearest_50'}), "
-                    "currencies_to_add / currencies_to_remove (list of currency codes)."
+                    "currencies_to_add / currencies_to_remove (list of currency codes). "
+                    "Do not use fx_rate_overrides to set a final displayed EUR price; "
+                    "target_final_prices is not implemented."
                 ),
             },
         },
