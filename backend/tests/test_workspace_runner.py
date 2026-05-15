@@ -53,10 +53,10 @@ async def changeset(db: AsyncSession, workspace, tenant, user):
 
 
 class TestCommandAllowlist:
-    def test_valid_sdf_validate(self):
-        config = validate_run_type("sdf_validate")
-        assert config["cmd"] == ["sdf", "validate"]
-        assert config["timeout"] == 60
+    def test_valid_suitecloud_validate(self):
+        config = validate_run_type("suitecloud_validate")
+        assert config["cmd"] == ["suitecloud", "project:validate", "--server"]
+        assert config["timeout"] == 180
 
     def test_valid_jest(self):
         config = validate_run_type("jest_unit_test")
@@ -69,7 +69,7 @@ class TestCommandAllowlist:
 
     def test_shell_injection_rejected(self):
         with pytest.raises(CommandNotAllowedError):
-            validate_run_type("sdf_validate; rm -rf /")
+            validate_run_type("suitecloud_validate; rm -rf /")
 
 
 # --- TestRunLifecycle ---
@@ -78,15 +78,18 @@ class TestCommandAllowlist:
 class TestRunLifecycle:
     @pytest.mark.asyncio
     async def test_create_run_queued(self, db, tenant, user, workspace):
-        run = await runner_service.create_run(db, tenant.id, workspace.id, "sdf_validate", user.id)
+        run = await runner_service.create_run(db, tenant.id, workspace.id, "suitecloud_validate", user.id)
         assert run.status == "queued"
-        assert run.run_type == "sdf_validate"
+        assert run.run_type == "suitecloud_validate"
         assert run.workspace_id == workspace.id
         assert run.correlation_id is not None
 
     @pytest.mark.asyncio
     async def test_execute_run_passed(self, db, tenant, user, workspace):
-        run = await runner_service.create_run(db, tenant.id, workspace.id, "sdf_validate", user.id)
+        # Uses jest_unit_test (simple subprocess path); suitecloud_validate now
+        # requires the auth-seeder + parser stack covered by the dedicated
+        # tests in tests/services/workspace/test_validate_runner_integration.py.
+        run = await runner_service.create_run(db, tenant.id, workspace.id, "jest_unit_test", user.id)
         await db.flush()
 
         with patch.object(
@@ -105,7 +108,7 @@ class TestRunLifecycle:
 
     @pytest.mark.asyncio
     async def test_execute_run_failed(self, db, tenant, user, workspace):
-        run = await runner_service.create_run(db, tenant.id, workspace.id, "sdf_validate", user.id)
+        run = await runner_service.create_run(db, tenant.id, workspace.id, "jest_unit_test", user.id)
         await db.flush()
 
         with patch.object(
@@ -151,7 +154,7 @@ class TestRunLifecycle:
             db,
             tenant.id,
             workspace.id,
-            "sdf_validate",
+            "jest_unit_test",
             user.id,
             changeset_id=cs_id,
         )
@@ -176,7 +179,7 @@ class TestRunLifecycle:
 class TestArtifactImmutability:
     @pytest.mark.asyncio
     async def test_artifacts_have_correct_sha256(self, db, tenant, user, workspace):
-        run = await runner_service.create_run(db, tenant.id, workspace.id, "sdf_validate", user.id)
+        run = await runner_service.create_run(db, tenant.id, workspace.id, "jest_unit_test", user.id)
         await db.flush()
 
         stdout_content = "Validation passed\n"
@@ -217,7 +220,7 @@ class TestArtifactImmutability:
 
     @pytest.mark.asyncio
     async def test_result_json_artifact_always_present(self, db, tenant, user, workspace):
-        run = await runner_service.create_run(db, tenant.id, workspace.id, "sdf_validate", user.id)
+        run = await runner_service.create_run(db, tenant.id, workspace.id, "jest_unit_test", user.id)
         await db.flush()
 
         with patch.object(
@@ -233,7 +236,7 @@ class TestArtifactImmutability:
 
     @pytest.mark.asyncio
     async def test_redaction_and_log_capping(self, db, tenant, user, workspace):
-        run = await runner_service.create_run(db, tenant.id, workspace.id, "sdf_validate", user.id)
+        run = await runner_service.create_run(db, tenant.id, workspace.id, "jest_unit_test", user.id)
         await db.flush()
 
         huge = "x" * (runner_service.MAX_ARTIFACT_BYTES + 500)
@@ -286,7 +289,7 @@ class TestTenantIsolation:
     @pytest.mark.asyncio
     async def test_tenant_a_run_invisible_to_tenant_b(self, db, user, workspace, tenant):
         # Create run for tenant A
-        run = await runner_service.create_run(db, tenant.id, workspace.id, "sdf_validate", user.id)
+        run = await runner_service.create_run(db, tenant.id, workspace.id, "suitecloud_validate", user.id)
         await db.flush()
 
         # Create tenant B
@@ -336,7 +339,7 @@ class TestAuditEvents:
 
         assert resp.status_code == 202
         data = resp.json()
-        assert data["run_type"] == "sdf_validate"
+        assert data["run_type"] == "suitecloud_validate"
         assert data["status"] == "queued"
 
         # Verify audit event was emitted
@@ -367,7 +370,7 @@ class TestAuditEvents:
     async def test_execute_run_emits_lifecycle_audits(self, db, tenant, user, workspace):
         from app.models.audit import AuditEvent
 
-        run = await runner_service.create_run(db, tenant.id, workspace.id, "sdf_validate", user.id)
+        run = await runner_service.create_run(db, tenant.id, workspace.id, "jest_unit_test", user.id)
         await db.flush()
 
         with patch.object(
@@ -403,13 +406,13 @@ class TestChangesetAssociation:
     @pytest.mark.asyncio
     async def test_run_links_to_changeset(self, db, tenant, user, workspace, changeset):
         run = await runner_service.create_run(
-            db, tenant.id, workspace.id, "sdf_validate", user.id, changeset_id=changeset.id
+            db, tenant.id, workspace.id, "suitecloud_validate", user.id, changeset_id=changeset.id
         )
         assert run.changeset_id == changeset.id
 
     @pytest.mark.asyncio
     async def test_run_without_changeset(self, db, tenant, user, workspace):
-        run = await runner_service.create_run(db, tenant.id, workspace.id, "sdf_validate", user.id)
+        run = await runner_service.create_run(db, tenant.id, workspace.id, "suitecloud_validate", user.id)
         assert run.changeset_id is None
 
 
@@ -419,7 +422,7 @@ class TestChangesetAssociation:
 class TestTimeoutEnforcement:
     @pytest.mark.asyncio
     async def test_timeout_sets_error_status(self, db, tenant, user, workspace):
-        run = await runner_service.create_run(db, tenant.id, workspace.id, "sdf_validate", user.id)
+        run = await runner_service.create_run(db, tenant.id, workspace.id, "jest_unit_test", user.id)
         await db.flush()
 
         import asyncio
@@ -464,8 +467,8 @@ class TestMcpTools:
 class TestIdempotency:
     @pytest.mark.asyncio
     async def test_two_validate_runs_create_separate_records(self, db, tenant, user, workspace):
-        run1 = await runner_service.create_run(db, tenant.id, workspace.id, "sdf_validate", user.id)
-        run2 = await runner_service.create_run(db, tenant.id, workspace.id, "sdf_validate", user.id)
+        run1 = await runner_service.create_run(db, tenant.id, workspace.id, "suitecloud_validate", user.id)
+        run2 = await runner_service.create_run(db, tenant.id, workspace.id, "suitecloud_validate", user.id)
         assert run1.id != run2.id
 
         runs = await runner_service.list_runs(db, workspace.id, tenant.id)

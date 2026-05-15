@@ -39,6 +39,7 @@ class TestAllowedChatTools:
             "workspace.read_file",
             "workspace.search",
             "workspace.propose_patch",
+            "workspace.run_validate",
             "suitescript.sync",
             "tenant.save_learned_rule",
             "bigquery.sql",

@@ -1,0 +1,42 @@
+# Verifies the workspace agent surfaces the post-validate workflow when the
+# user asks about validate hits. The case is single-turn: it doesn't seed an
+# OWASP-injected workspace (that requires fixture-loader infrastructure
+# beyond this task's scope — see Task 10b follow-up). Instead it checks the
+# agent reaches for workspace_run_validate and narrates the
+# post_validate_workflow when asked about validate behavior.
+
+case_id: workspace_owasp_validate
+query: |
+  Run suitecloud project:validate against my workspace and walk me through what
+  it finds. If there are OWASP-A03 hits, cite the relevant Oracle policy.
+tags: ["workspace", "validate", "owasp", "knowledge-profile"]
+notes: |
+  Tests the workspace agent's post-validate narration intent. Single-turn,
+  no seeded fixture — the test verifies AGENT BEHAVIOR (which tool it
+  reaches for + that it knows about the post_validate_workflow + oracle/owasp
+  RAG partition citations), not specific validate outputs.
+
+  Expected agent behavior:
+   1. Recognize the user is asking about validate.
+   2. Call workspace_run_validate (the explicit MCP tool — this requires
+      a workspace + changeset, so the agent will likely surface a graceful
+      error message asking the user to specify which workspace).
+   3. If the agent has a workspace context, mention the post_validate_workflow
+      semantics (citation per family, OWASP narrate-only).
+
+  Baseline (Claude+MCP) does NOT have workspace_* tools, so it cannot run
+  validate at all — accuracy 0.0 expected.
+
+  Future (Task 10b): add a fixture-loader hook that seeds a vulnerable
+  workspace + changeset before the case runs, so we can verify end-to-end
+  narration against actual OWASP-A03 hits.
+
+expected_answer_contains:
+  - "validate"
+expected_tools:
+  - "workspace_run_validate"
+expected_accuracy: 0.5
+max_cost: 0.50
+max_latency_ms: 120000
+baseline_expected_accuracy: 0.0
+baseline_expected_tools: []

@@ -1,0 +1,4 @@
+INFO: Validating project against account 6738075...
+WARNING: src/UserEvents/auditLog.js:18 [SUITESCRIPT-DEPRECATED-2X] nlapiSearchRecord is deprecated in 2.1; use N/search.
+WARNING: src/UserEvents/auditLog.js:34 [GOVERNANCE-CHECK] Missing remainingUsage check inside loop.
+SUCCESS: Project validation completed successfully (with warnings).

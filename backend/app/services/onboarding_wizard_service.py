@@ -207,11 +207,11 @@ async def validate_step(db: AsyncSession, tenant_id: uuid.UUID, step_key: str) -
             select(WorkspaceRun.run_type).where(
                 WorkspaceRun.workspace_id.in_(select(Workspace.id).where(Workspace.tenant_id == tenant_id)),
                 WorkspaceRun.status == "passed",
-                WorkspaceRun.run_type.in_(("sdf_validate", "jest_unit_test")),
+                WorkspaceRun.run_type.in_(("suitecloud_validate", "jest_unit_test")),
             )
         )
         passed_types = set(result.scalars().all())
-        required = {"sdf_validate", "jest_unit_test"}
+        required = {"suitecloud_validate", "jest_unit_test"}
         missing = sorted(required - passed_types)
         if not missing:
             return {"step_key": step_key, "valid": True}

@@ -29,6 +29,22 @@ COPY backend/pyproject.toml .
 RUN pip install --no-cache-dir . && \
     apt-get purge -y --auto-remove gcc
 
+# Install Node.js 20 + Java (JRE) + suitecloud CLI for workspace validate/deploy.
+# Pinned to major v3 of the CLI (plan's ^2 was unreachable — Oracle removed the
+# 2024.2.0 SDK JAR from their CDN, so npm postinstall fails on @^2). v3 ships
+# with cli-2025.2.1.jar and needs a JRE at runtime to invoke the SDK JAR.
+# DO NOT purge nodejs or default-jre-headless — suitecloud shells out to both.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends curl ca-certificates gnupg default-jre-headless && \
+    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+    apt-get install -y --no-install-recommends nodejs && \
+    npm install -g @oracle/suitecloud-cli@^3 --acceptsuitecloudsdklicense && \
+    apt-get purge -y --auto-remove curl gnupg && \
+    rm -rf /var/lib/apt/lists/* /root/.npm
+
+# Smoke check — fail the build if the suitecloud binary isn't on PATH (codex #14).
+RUN suitecloud --version
+
 # Copy backend application code (the build context is the repo root, so
 # select backend/ explicitly).
 COPY backend/ .

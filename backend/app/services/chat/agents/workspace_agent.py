@@ -8,9 +8,14 @@ the workspace codebase.
 from __future__ import annotations
 
 import uuid
+from collections import defaultdict
+from typing import Iterable
 
+from app.models.workspace import ValidationHit
 from app.services.chat.agents.base_agent import BaseSpecialistAgent
 from app.services.chat.tools import build_local_tool_definitions
+from app.services.workspace.auto_validate_orchestrator import get_orchestrator
+from app.services.workspace.mechanical_fix_classifier import classify
 
 # Tools this agent is allowed to use
 _WORKSPACE_TOOL_NAMES = frozenset(
@@ -19,12 +24,17 @@ _WORKSPACE_TOOL_NAMES = frozenset(
         "workspace_read_file",
         "workspace_search",
         "workspace_propose_patch",
+        "workspace_run_validate",
         "rag_search",
         "tenant_save_learned_rule",
     }
 )
 
-_SYSTEM_PROMPT = """\
+# How many error families the agent should narrate before deferring to the
+# runs panel. Referenced in the system prompt (post_validate_workflow block).
+_HIT_FAMILY_CITATION_CAP = 3
+
+_SYSTEM_PROMPT = f"""\
 <role>
 You are a SuiteScript workspace engineer. You have access to workspace files in the user's SDF project and can read, search, and propose code changes.
 </role>
@@ -60,8 +70,22 @@ FOR SEARCH / INVESTIGATION:
 - Wrap main logic in try/catch with proper N/log error logging.
 - Check governance limits in loops: runtime.getCurrentScript().getRemainingUsage().
 - Never hardcode internal IDs — use script parameters.
-- Return { success: true/false } envelope from RESTlets.
+- Return {{ success: true/false }} envelope from RESTlets.
 </suitescript_rules>
+
+<post_validate_workflow>
+WHEN VALIDATE RESULTS ARE INJECTED INTO THE CONVERSATION:
+1. The system has already grouped hits by code family. ONE narration per family.
+2. For EACH family: pull a citation from the appropriate oracle/* RAG partition
+   (ai-connector, owasp, sdf-docs, sdf-roles, records, upgrade, uif-spa) using
+   rag_search. Cite the partition + chunk in the narration.
+3. Limit narration to {_HIT_FAMILY_CITATION_CAP} families MAX. If more families,
+   say "X additional warnings — see the runs panel for details" rather than
+   narrating all.
+4. The system has already auto-proposed fixes for mechanically-fixable hits. Do
+   NOT propose fixes manually for OWASP, governance, or architectural hits —
+   narrate only and let the user decide.
+</post_validate_workflow>
 
 <output_instructions>
 - Show code in fenced code blocks with the language tag (```javascript).
@@ -101,3 +125,66 @@ class WorkspaceAgent(BaseSpecialistAgent):
             all_tools = build_local_tool_definitions()
             self._tool_defs = [t for t in all_tools if t["name"] in _WORKSPACE_TOOL_NAMES]
         return self._tool_defs
+
+
+def _batch_hits_by_family(hits: Iterable[ValidationHit]) -> dict[str, list[ValidationHit]]:
+    """Group hits by code so the agent narrates one citation per family (codex #8)."""
+    families: dict[str, list[ValidationHit]] = defaultdict(list)
+    for hit in hits:
+        key = hit.code or "UNCODED"
+        families[key].append(hit)
+    return dict(families)
+
+
+async def _maybe_auto_propose_fix(
+    *,
+    hit: ValidationHit,
+    changeset_id: uuid.UUID,
+    tenant_id: uuid.UUID,
+    user_id: uuid.UUID,
+) -> None:
+    """If the hit's code is in the mechanical-fix allowlist AND we're under budget,
+    auto-propose a draft fix patch.
+
+    v1 status: NARRATE-ONLY. The classifier identifies fixable rule_ids but the
+    deterministic patch generators (e.g. nlapi -> N/search transform) are not yet
+    implemented -- see Task 10b. This helper currently records the auto-propose
+    intent for orchestrator dedup/budget tracking but does NOT call
+    workspace_propose_patch (the call signature in the plan was fictional and
+    real patch generation requires per-rule code-transform logic).
+
+    Codex #10: deny-by-default. The classifier is the only gate.
+    """
+    fix = classify(code=hit.code, message=hit.message, file_path=hit.file_path, line=hit.line)
+    if fix is None:
+        return
+
+    orch = get_orchestrator()
+    if not orch.under_budget(changeset_id):
+        return
+    if not orch.should_auto_propose(changeset_id, hit.fingerprint):
+        return
+
+    # TODO(task-10b): once deterministic patch generators land per rule_id,
+    # produce a real unified_diff and call execute_propose_patch with the
+    # correct contract (workspace_id, file_path, unified_diff, title).
+    # Until then, narrate-only -- the agent's prompt instructs it to describe
+    # the fix in chat without an auto-applied patch.
+    import structlog
+
+    structlog.get_logger().info(
+        "workspace.auto_propose.deferred",
+        rule_id=fix.rule_id,
+        code=hit.code,
+        file=hit.file_path,
+        line=hit.line,
+        fingerprint=hit.fingerprint,
+        tenant_id=str(tenant_id),
+        user_id=str(user_id),
+        reason="patch_generator_not_implemented",
+    )
+
+    # Still record the intent so loop budget + fingerprint dedup are honored
+    # for forward-compat and so we don't double-narrate the same hit.
+    orch.record_auto_propose(changeset_id, hit.fingerprint)
+    orch.record_auto_fix(changeset_id)
