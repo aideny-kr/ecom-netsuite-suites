@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import io
 import logging
 import time
@@ -44,8 +45,24 @@ _CACHE_MISS_MESSAGE = (
 )
 _EUR_FINAL_PRICE_UNSUPPORTED_MESSAGE = (
     "EUR final display price edits are not supported through fx_rate_overrides. "
-    "Ask whether to change the USD base price, apply a percent uplift to EUR, "
-    "or update the tenant EUR FX rate in pricing config."
+    "Use target_final_prices.EUR for a supported final EUR display-price target."
+)
+_EUR_BASED_FINAL_PRICE_UNSUPPORTED_MESSAGE = (
+    "EUR-based currency final display price edits are not supported through fx_rate_overrides "
+    "for {currencies}. Use target_final_prices.EUR for a supported final EUR display-price target."
+)
+_EUR_CURRENCY_FX_UPDATE_UNSUPPORTED_MESSAGE = (
+    "Do not update currencies.EUR.fx_rate for EUR-based pricing. Use the top-level eur_fx_rate "
+    "when the user explicitly asks to change the EUR base rate and recompute EUR-based currencies."
+)
+_EUR_FX_RATE_INVALID_MESSAGE = (
+    "eur_fx_rate is the USD-to-EUR exchange rate, not a final EUR display price. "
+    "Pass a realistic exchange rate under 10 only when the user explicitly asks to update "
+    "the EUR base rate; use pricing_revise target_final_prices.EUR for final EUR display prices."
+)
+_TARGET_FINAL_EUR_SINGLE_SKU_MESSAGE = (
+    "target_final_prices.EUR currently requires exactly one SKU in the effective pricing set. "
+    "Specify one SKU or update the USD base prices instead."
 )
 
 
@@ -341,16 +358,32 @@ async def pricing_config_update_execute(params: dict, context: dict, **kwargs) -
     if not config_row:
         return {"error": True, "message": "No pricing configuration exists. Create one in Settings first."}
 
-    current_config = dict(config_row.config)
-
     # Apply updates
     updates = params.get("updates", {})
     if not updates:
         return {"error": True, "message": "No updates provided. Pass 'updates' with fields to change."}
 
-    # Update EUR FX rate
+    # Validate before mutating the nested config dict. A partial invalid request
+    # must not leak earlier per-currency changes into the loaded config object.
+    if "currencies" in updates:
+        for code, changes in updates["currencies"].items():
+            if code.upper() == "EUR" and "fx_rate" in changes:
+                return {"error": True, "message": _EUR_CURRENCY_FX_UPDATE_UNSUPPORTED_MESSAGE}
+
+    eur_fx_rate_update: Decimal | None = None
     if "eur_fx_rate" in updates:
-        current_config["eur_fx_rate"] = float(updates["eur_fx_rate"])
+        try:
+            eur_fx_rate_update = Decimal(str(updates["eur_fx_rate"]))
+        except (InvalidOperation, ValueError, TypeError):
+            return {"error": True, "message": _EUR_FX_RATE_INVALID_MESSAGE}
+        if eur_fx_rate_update <= 0 or eur_fx_rate_update >= Decimal("10"):
+            return {"error": True, "message": _EUR_FX_RATE_INVALID_MESSAGE}
+
+    current_config = copy.deepcopy(config_row.config)
+
+    # Update EUR FX rate
+    if eur_fx_rate_update is not None:
+        current_config["eur_fx_rate"] = float(eur_fx_rate_update)
 
     # Update individual currency configs
     if "currencies" in updates:
@@ -507,7 +540,7 @@ def _apply_overrides(state: dict, overrides: dict) -> dict | None:
     # (needs fresh tenant config to check, and must run after _apply_overrides).
 
     # 5. Replace-per-key dicts
-    for key in ("percent_uplift", "fx_rate_overrides", "vat_rate_overrides"):
+    for key in ("percent_uplift", "fx_rate_overrides", "vat_rate_overrides", "target_final_prices"):
         incoming = overrides.get(key) or {}
         if not incoming:
             continue
@@ -515,12 +548,13 @@ def _apply_overrides(state: dict, overrides: dict) -> dict | None:
             "percent_uplift": "effective_uplift_by_currency",
             "fx_rate_overrides": "effective_fx_overrides",
             "vat_rate_overrides": "effective_vat_overrides",
+            "target_final_prices": "effective_target_final_prices",
         }[key]
         merged = dict(state.get(target_key) or {})
         for cur, val in incoming.items():
-            merged[cur] = _to_decimal_str(val)
+            merged[str(cur).upper()] = _to_decimal_str(val)
         state[target_key] = merged
-        log_entry[key] = {k: _to_decimal_str(v) for k, v in incoming.items()}
+        log_entry[key] = {str(k).upper(): _to_decimal_str(v) for k, v in incoming.items()}
 
     rounding = overrides.get("rounding_overrides") or {}
     if rounding:
@@ -545,9 +579,12 @@ def _compose_effective_config(
     vat_overrides: dict[str, str],
     rounding_overrides: dict[str, str],
     effective_currencies: list[str],
+    eur_fx_rate_override: Decimal | None = None,
 ) -> TenantPricingConfig:
     """Return a new TenantPricingConfig with overrides applied + currencies filtered."""
     base_dump = base_config.model_dump(mode="json")
+    if eur_fx_rate_override is not None:
+        base_dump["eur_fx_rate"] = str(eur_fx_rate_override)
     filtered: dict[str, dict] = {}
     for code, cc in base_dump["currencies"].items():
         if code not in effective_currencies:
@@ -574,14 +611,102 @@ def _state_uplift_to_decimals(uplift: dict[str, str]) -> dict[str, Decimal]:
     return out
 
 
-def _has_ambiguous_eur_fx_override(overrides: dict, current_config: TenantPricingConfig) -> bool:
+def _eur_based_fx_override_currencies(overrides: dict, current_config: TenantPricingConfig) -> list[str]:
     fx_overrides = overrides.get("fx_rate_overrides") or {}
     if not isinstance(fx_overrides, dict):
-        return False
-    if not any(str(cur).upper() == "EUR" for cur in fx_overrides):
-        return False
-    eur_config = current_config.currencies.get("EUR")
-    return eur_config is not None and eur_config.tier == "eur_based"
+        return []
+    blocked: list[str] = []
+    for cur in fx_overrides:
+        code = str(cur).upper()
+        currency_config = current_config.currencies.get(code)
+        if currency_config is not None and currency_config.tier == "eur_based":
+            blocked.append(code)
+    return sorted(set(blocked))
+
+
+def _eur_based_fx_override_message(currencies: list[str]) -> str:
+    if currencies == ["EUR"]:
+        return _EUR_FINAL_PRICE_UNSUPPORTED_MESSAGE
+    return _EUR_BASED_FINAL_PRICE_UNSUPPORTED_MESSAGE.format(currencies=", ".join(currencies))
+
+
+def _derive_eur_fx_rate_for_target_final_prices(
+    state: dict,
+    effective_config: TenantPricingConfig,
+    items: list[PricingInput],
+    uplift_by_currency: dict[str, Decimal],
+) -> tuple[Decimal | None, dict | None]:
+    targets = state.get("effective_target_final_prices") or {}
+    if not targets:
+        return None, None
+
+    unsupported = sorted(cur for cur in targets if cur != "EUR")
+    if unsupported:
+        return (
+            None,
+            {
+                "error": True,
+                "message": (
+                    "target_final_prices currently supports EUR only. "
+                    f"Unsupported target currencies: {', '.join(unsupported)}."
+                ),
+            },
+        )
+
+    if "EUR" not in targets:
+        return None, None
+    if len(items) != 1:
+        return None, {"error": True, "message": _TARGET_FINAL_EUR_SINGLE_SKU_MESSAGE}
+    if "EUR" not in effective_config.currencies:
+        return None, {"error": True, "message": "target_final_prices.EUR requires EUR in the effective currencies."}
+    if "EUR" in uplift_by_currency:
+        return (
+            None,
+            {
+                "error": True,
+                "message": (
+                    "target_final_prices.EUR cannot be combined with percent_uplift.EUR in the same pricing state."
+                ),
+            },
+        )
+
+    item = items[0]
+    eur_config = effective_config.currencies["EUR"]
+    if eur_config.tier != "eur_based":
+        return None, {"error": True, "message": "target_final_prices.EUR requires EUR to be configured as eur_based."}
+    if item.usd_price <= 0:
+        return None, {"error": True, "message": "target_final_prices.EUR requires a positive USD price."}
+
+    try:
+        target = Decimal(str(targets["EUR"]))
+    except (InvalidOperation, ValueError, TypeError):
+        return None, {"error": True, "message": "target_final_prices.EUR must be a positive numeric price."}
+    if target <= 0:
+        return None, {"error": True, "message": "target_final_prices.EUR must be a positive numeric price."}
+
+    eur_vat_rate = eur_config.vat_rate or Decimal("0")
+    denominator = item.usd_price * (Decimal("1") + eur_vat_rate)
+    if denominator <= 0:
+        return None, {"error": True, "message": "target_final_prices.EUR could not derive a positive EUR base rate."}
+
+    eur_fx_rate = target / denominator
+    candidate_dump = effective_config.model_dump(mode="json")
+    candidate_dump["eur_fx_rate"] = str(eur_fx_rate)
+    candidate_config = TenantPricingConfig(**candidate_dump)
+    candidate_results = _engine.convert_batch(items, candidate_config, uplift_by_currency=uplift_by_currency)
+    actual = candidate_results[0].results["EUR"].final_price
+    if actual != target:
+        return (
+            None,
+            {
+                "error": True,
+                "message": (
+                    f"target_final_prices.EUR={target} is not reachable with current EUR "
+                    f"rounding rule {eur_config.rounding_rule}; deterministic output would be {actual}."
+                ),
+            },
+        )
+    return eur_fx_rate, None
 
 
 async def pricing_revise_execute(params: dict, context: dict, **kwargs) -> dict:
@@ -607,7 +732,7 @@ async def pricing_revise_execute(params: dict, context: dict, **kwargs) -> dict:
     cached = await get_latest_result_by_type(str(conversation_id), "pricing")
     if not cached or not cached.payload:
         return {"error": True, "message": _CACHE_MISS_MESSAGE}
-    state = dict(cached.payload)
+    state = copy.deepcopy(cached.payload)
     state.setdefault("seed_items", [])
     state.setdefault("effective_items", list(state["seed_items"]))
     state.setdefault("effective_currencies", [])
@@ -615,6 +740,8 @@ async def pricing_revise_execute(params: dict, context: dict, **kwargs) -> dict:
     state.setdefault("effective_vat_overrides", {})
     state.setdefault("effective_rounding_overrides", {})
     state.setdefault("effective_uplift_by_currency", {})
+    state.setdefault("effective_target_final_prices", {})
+    state.setdefault("effective_eur_fx_rate_override", None)
     state.setdefault("applied_overrides_log", [])
 
     # 2. Always fetch a FRESH tenant config (Spec D4 — never cache base config).
@@ -634,6 +761,8 @@ async def pricing_revise_execute(params: dict, context: dict, **kwargs) -> dict:
         state["effective_vat_overrides"] = {}
         state["effective_rounding_overrides"] = {}
         state["effective_uplift_by_currency"] = {}
+        state["effective_target_final_prices"] = {}
+        state["effective_eur_fx_rate_override"] = None
         state["applied_overrides_log"].append(
             {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -641,10 +770,11 @@ async def pricing_revise_execute(params: dict, context: dict, **kwargs) -> dict:
             }
         )
     else:
-        # 4a. Reject the known ambiguous "set final EUR display price" failure
-        # mode before mutating cached state or generating revised files.
-        if _has_ambiguous_eur_fx_override(overrides, current_config):
-            return {"error": True, "message": _EUR_FINAL_PRICE_UNSUPPORTED_MESSAGE}
+        # 4a. Reject ambiguous "set final display price" failures for EUR-based
+        # currencies before mutating cached state or generating revised files.
+        eur_based_fx_overrides = _eur_based_fx_override_currencies(overrides, current_config)
+        if eur_based_fx_overrides:
+            return {"error": True, "message": _eur_based_fx_override_message(eur_based_fx_overrides)}
 
         # 4b. Validate currencies_to_add against the FRESH config.
         for cur in overrides.get("currencies_to_add") or []:
@@ -665,16 +795,9 @@ async def pricing_revise_execute(params: dict, context: dict, **kwargs) -> dict:
             if cur not in state["effective_currencies"]:
                 state["effective_currencies"].append(cur)
 
-    # 5. Compose the effective config for the engine call.
-    effective_config = _compose_effective_config(
-        current_config,
-        fx_overrides=state["effective_fx_overrides"],
-        vat_overrides=state["effective_vat_overrides"],
-        rounding_overrides=state["effective_rounding_overrides"],
-        effective_currencies=state["effective_currencies"],
-    )
-
-    # 6. Convert.
+    # 5. Compose the effective config for the engine call. target_final_prices
+    # derives an EUR base-rate override server-side, then the normal deterministic
+    # engine recomputes EUR and all EUR-based currencies from that rate.
     items = _items_from_state(state["effective_items"])
     if not items:
         return {
@@ -682,6 +805,33 @@ async def pricing_revise_execute(params: dict, context: dict, **kwargs) -> dict:
             "message": "No SKUs left after removals. Use reset=true to start over, or add SKUs back.",
         }
     uplift_by_currency = _state_uplift_to_decimals(state["effective_uplift_by_currency"])
+    base_effective_config = _compose_effective_config(
+        current_config,
+        fx_overrides=state["effective_fx_overrides"],
+        vat_overrides=state["effective_vat_overrides"],
+        rounding_overrides=state["effective_rounding_overrides"],
+        effective_currencies=state["effective_currencies"],
+    )
+    eur_fx_rate_override, target_err = _derive_eur_fx_rate_for_target_final_prices(
+        state,
+        base_effective_config,
+        items,
+        uplift_by_currency,
+    )
+    if target_err is not None:
+        return target_err
+    state["effective_eur_fx_rate_override"] = str(eur_fx_rate_override) if eur_fx_rate_override is not None else None
+
+    effective_config = _compose_effective_config(
+        current_config,
+        fx_overrides=state["effective_fx_overrides"],
+        vat_overrides=state["effective_vat_overrides"],
+        rounding_overrides=state["effective_rounding_overrides"],
+        effective_currencies=state["effective_currencies"],
+        eur_fx_rate_override=eur_fx_rate_override,
+    )
+
+    # 6. Convert.
     results = _engine.convert_batch(items, effective_config, uplift_by_currency=uplift_by_currency)
 
     # 7. Generate output Excel (default 3-sheet workbook).

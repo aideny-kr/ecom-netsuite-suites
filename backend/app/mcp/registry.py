@@ -657,7 +657,10 @@ TOOL_REGISTRY = {
     "pricing.config_update": {
         "description": (
             "Update the tenant pricing configuration — change FX rates, VAT/GST percentages, or rounding rules. "
-            "Pass updates as a dict with 'eur_fx_rate' and/or 'currencies' containing per-currency changes."
+            "Pass updates as a dict with 'eur_fx_rate' and/or 'currencies' containing per-currency changes. "
+            "Use top-level eur_fx_rate only for realistic USD-to-EUR exchange rates when the user explicitly "
+            "asks to change the EUR base rate and recompute EUR-based currencies; use pricing_revise "
+            "target_final_prices for final EUR display prices, and do not update currencies.EUR.fx_rate."
         ),
         "execute": pricing_tools.pricing_config_update_execute,
         "params_schema": {
@@ -665,7 +668,10 @@ TOOL_REGISTRY = {
                 "type": "object",
                 "required": True,
                 "description": (
-                    "Fields to update. Example: {eur_fx_rate: 1.08, currencies: {GBP: {fx_rate: 0.79, vat_rate: 20}}}"
+                    "Fields to update. Example: {eur_fx_rate: 1.08, currencies: {GBP: {fx_rate: 0.79, vat_rate: 20}}}. "
+                    "Use top-level eur_fx_rate for explicit EUR base-rate changes with realistic USD-to-EUR "
+                    "exchange rates that should recompute EUR-based currencies. Use pricing_revise "
+                    "target_final_prices for final EUR display prices, and do not use currencies.EUR.fx_rate."
                 ),
             },
         },
@@ -706,13 +712,13 @@ TOOL_REGISTRY = {
         "description": (
             "Revise the most recent pricing result with the requested overrides and "
             "regenerate Excel + NetSuite CSV outputs. Supports SKU USD input prices, "
-            "percent uplifts, rounding, configured FX/VAT overrides, and currency/SKU "
+            "target final EUR display prices for a single-SKU pricing state, percent uplifts, "
+            "rounding, configured FX overrides for USD-based currencies, VAT overrides, and currency/SKU "
             "add/remove edits. Use for follow-up edits like 'increase GBP by 5%', "
+            "'set EUR to 149 and update EUR-based currencies', "
             "'change SKU ABC-123 USD to 149', 'use nearest_50 rounding for JPY only', "
-            "'add EUR and CAD', 'remove SKU X'. Does not support setting a final "
-            "displayed EUR price to X unless a future target_final_prices feature is "
-            "explicitly implemented. Price outputs render automatically; assistant text "
-            "must not list individual prices. "
+            "'add EUR and CAD', 'remove SKU X'. Price outputs render automatically; "
+            "assistant text must not list individual prices. "
             "DO NOT call this for the first pricing run — use pricing_convert (uploaded "
             "Excel) or pricing_export (inline items) instead. All numeric fields are "
             "interpreted with full Decimal precision; pass values as JSON numbers."
@@ -734,12 +740,15 @@ TOOL_REGISTRY = {
                     "Changes to apply. All fields optional; combine freely. Supports: "
                     "sku_price_changes (list of {sku, usd_price}), skus_to_remove (list of "
                     "sku strings), skus_to_add (list of {sku, usd_price, item_name?}), "
+                    "target_final_prices (dict by currency; currently supports {EUR: price} "
+                    "for exactly one effective SKU and recomputes EUR-based currencies), "
                     "percent_uplift (dict by currency, e.g. {GBP: 0.05} = +5%), "
-                    "configured fx_rate_overrides / vat_rate_overrides (dict by currency), "
+                    "configured fx_rate_overrides for USD-based currencies, "
+                    "vat_rate_overrides (dict by currency), "
                     "rounding_overrides (dict by currency, e.g. {JPY: 'nearest_50'}), "
                     "currencies_to_add / currencies_to_remove (list of currency codes). "
-                    "Do not use fx_rate_overrides to set a final displayed EUR price; "
-                    "target_final_prices is not implemented."
+                    "Do not use fx_rate_overrides for EUR-based currencies or to set "
+                    "final displayed prices."
                 ),
             },
         },

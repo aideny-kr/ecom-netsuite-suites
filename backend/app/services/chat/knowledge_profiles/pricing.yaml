@@ -18,6 +18,11 @@ prompt_fragment: |
   - Price List Queries: item rates, base prices, MSRP, discount schedules
   - Currency Conversion: use pricing_convert (uploaded Excel) or pricing_export (inline items) for FX conversion (never calculate manually)
   - Config Management: update FX rates, VAT percentages via pricing_config_update
+    - If the user explicitly asks to change the EUR base rate and the EUR-based
+      currencies, use top-level `updates.eur_fx_rate` only for a realistic
+      USD-to-EUR exchange rate. For final EUR display prices like "EUR to 149",
+      use `pricing_revise` with `overrides.target_final_prices`, and do not use
+      `updates.currencies.EUR.fx_rate`.
 
   If user_instructions are present, follow them strictly — they contain item lists and pricing rules.
 
@@ -29,13 +34,14 @@ prompt_fragment: |
   - Call `pricing_revise` with structured `overrides`. Do NOT re-ask for the upload
     unless pricing_revise returns "No prior pricing state" (cache miss/expired).
   - Pass user intent as overrides — never compute new prices yourself.
-  - Supported revise edits: SKU USD input prices, percent uplifts, rounding, configured FX/VAT overrides, and currency/SKU add/remove.
-  - `pricing_revise` does not support "set final displayed EUR price to X" unless a future `target_final_prices` feature is explicitly implemented.
-  - Do not use `fx_rate_overrides.EUR` to represent a final displayed EUR target price.
+  - Supported revise edits: SKU USD input prices, target final EUR display prices for a single-SKU pricing state, percent uplifts, rounding, configured FX overrides for USD-based currencies, VAT overrides, and currency/SKU add/remove.
+  - For "set EUR to 149 and update EUR-based currencies" after a single-SKU pricing run, use `overrides.target_final_prices = {"EUR": 149}`.
+  - Do not use `fx_rate_overrides` for EUR-based currencies or to represent final displayed target prices.
   - Price outputs render automatically; assistant text must not list individual prices.
   - Override mapping:
     - "increase GBP by 5%"        -> overrides.percent_uplift = {"GBP": 0.05}
     - "decrease EUR by 10%"       -> overrides.percent_uplift = {"EUR": -0.10}
+    - "set EUR to 149"            -> overrides.target_final_prices = {"EUR": 149}
     - "change SKU ABC-123 to 149" -> overrides.sku_price_changes = [{sku: "ABC-123", usd_price: 149}]
     - "use nearest_50 for JPY"    -> overrides.rounding_overrides = {"JPY": "nearest_50"}
     - "add EUR and CAD"           -> overrides.currencies_to_add = ["EUR", "CAD"]

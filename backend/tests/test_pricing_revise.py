@@ -7,11 +7,14 @@ absence of the legacy markdown-table response_instruction (Mistakes #41).
 
 from __future__ import annotations
 
+import csv
+import io
 import uuid
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from openpyxl import load_workbook
 
 from app.mcp.tools.pricing_tools import pricing_revise_execute
 from app.schemas.pricing import CurrencyConfig, TenantPricingConfig
@@ -81,6 +84,7 @@ def _patch_save_output(saved: list):
         f = MagicMock()
         f.id = uuid.uuid4()
         f.filename = filename
+        f.content = content
         saved.append(f)
         return f
 
@@ -418,6 +422,240 @@ class TestFxOverrideSafety:
         assert saved == []
         assert seed["effective_fx_overrides"] == {}
         assert seed["applied_overrides_log"] == []
+
+    def test_rejects_fx_override_for_non_eur_eur_based_currency(self, revise_context):
+        """Do not allow target-final-price guesses for any eur_based currency.
+
+        A follow-up like "change Euro to 139 and other euro base currencies" can
+        lead the LLM to put every EUR-derived currency in fx_rate_overrides. The
+        previous guard only rejected EUR itself; it still allowed SEK/NOK/etc.,
+        producing misleading revised outputs instead of asking the user which
+        supported edit type they intended.
+        """
+        config = TenantPricingConfig(
+            base_currency="USD",
+            eur_fx_rate=Decimal("0.92"),
+            currencies={
+                "EUR": CurrencyConfig(
+                    fx_rate=Decimal("1.00"),
+                    tier="eur_based",
+                    vat_rate=Decimal("0.23"),
+                    rounding_rule="nearest_9",
+                ),
+                "SEK": CurrencyConfig(
+                    fx_rate=Decimal("11.29"),
+                    tier="eur_based",
+                    vat_rate=Decimal("0.25"),
+                    rounding_rule="nearest_9",
+                ),
+                "GBP": CurrencyConfig(
+                    fx_rate=Decimal("0.79"),
+                    tier="usd_based",
+                    vat_rate=Decimal("0.20"),
+                    rounding_rule="nearest_9",
+                ),
+            },
+        ).model_dump(mode="json")
+        seed = _seed_state(items=[{"sku": "ITEM-001", "usd_price": "100", "item_name": None}])
+        seed["effective_currencies"] = ["EUR", "SEK", "GBP"]
+        seed["header_columns"] = ["SKU", "Item Name", "USD", "EUR", "GBP", "SEK"]
+
+        result, saved = _run_revise(
+            {
+                "overrides": {
+                    "fx_rate_overrides": {"SEK": 1.39},
+                }
+            },
+            revise_context,
+            payload=seed,
+            config_dict=config,
+        )
+
+        assert result["error"] is True
+        assert "EUR-based currency final display price edits are not supported" in result["message"]
+        assert "SEK" in result["message"]
+        assert saved == []
+        assert seed["effective_fx_overrides"] == {}
+        assert seed["applied_overrides_log"] == []
+
+    def test_allows_fx_override_for_usd_based_currency(self, revise_context):
+        seed = _seed_state(items=[{"sku": "ITEM-001", "usd_price": "100", "item_name": None}])
+        result, saved = _run_revise(
+            {
+                "overrides": {
+                    "fx_rate_overrides": {"GBP": 0.81},
+                }
+            },
+            revise_context,
+            payload=seed,
+        )
+
+        assert result["success"] is True
+        assert saved
+        assert result["pricing_state"]["effective_fx_overrides"]["GBP"] == "0.81"
+
+
+class TestEurBaseFollowup:
+    def test_target_final_eur_price_regenerates_eur_based_download_prices(self, revise_context):
+        """target_final_prices is the supported final-display-price contract."""
+        config = TenantPricingConfig(
+            base_currency="USD",
+            eur_fx_rate=Decimal("0.92"),
+            currencies={
+                "EUR": CurrencyConfig(
+                    fx_rate=Decimal("1.00"),
+                    tier="eur_based",
+                    vat_rate=Decimal("0.23"),
+                    rounding_rule="nearest_9",
+                ),
+                "SEK": CurrencyConfig(
+                    fx_rate=Decimal("11.29"),
+                    tier="eur_based",
+                    vat_rate=Decimal("0.25"),
+                    rounding_rule="nearest_9",
+                ),
+                "GBP": CurrencyConfig(
+                    fx_rate=Decimal("0.79"),
+                    tier="usd_based",
+                    vat_rate=Decimal("0.20"),
+                    rounding_rule="nearest_9",
+                ),
+            },
+        ).model_dump(mode="json")
+        seed = _seed_state(items=[{"sku": "ITEM-001", "usd_price": "100", "item_name": "Test Item"}])
+        seed["effective_currencies"] = ["EUR", "SEK", "GBP"]
+        seed["header_columns"] = ["SKU", "Item Name", "USD", "EUR", "GBP", "SEK"]
+
+        result, saved = _run_revise(
+            {"overrides": {"target_final_prices": {"EUR": 149}}},
+            revise_context,
+            payload=seed,
+            config_dict=config,
+        )
+
+        assert result["success"] is True
+        preview_row = result["preview"][0]
+        assert preview_row["EUR"] == 149.0
+        assert preview_row["SEK"] == 1689.0
+        ps = result["pricing_state"]
+        assert ps["effective_target_final_prices"]["EUR"] == "149"
+        assert Decimal(ps["effective_eur_fx_rate_override"]) == Decimal("149") / Decimal("123.00")
+
+        excel_file = next(f for f in saved if f.filename.endswith(".xlsx"))
+        wb = load_workbook(io.BytesIO(excel_file.content), data_only=True)
+        ws = wb["Prices"]
+        headers = [cell.value for cell in ws[1]]
+        values = [cell.value for cell in ws[2]]
+        excel_row = dict(zip(headers, values, strict=False))
+        assert excel_row["EUR"] == 149
+        assert excel_row["SEK"] == 1689
+
+        csv_file = next(f for f in saved if f.filename.endswith(".csv"))
+        csv_rows = list(csv.DictReader(io.StringIO(csv_file.content.decode("utf-8"))))
+        csv_prices = {row["Currency"]: row["Rate"] for row in csv_rows if row["External ID"] == "ITEM-001"}
+        assert csv_prices["EUR"] == "149"
+        assert csv_prices["SEK"] == "1689"
+
+    def test_target_final_eur_price_rejects_unreachable_rounding_target(self, revise_context):
+        config = TenantPricingConfig(
+            base_currency="USD",
+            eur_fx_rate=Decimal("0.92"),
+            currencies={
+                "EUR": CurrencyConfig(
+                    fx_rate=Decimal("1.00"),
+                    tier="eur_based",
+                    vat_rate=Decimal("0.23"),
+                    rounding_rule="nearest_9",
+                ),
+            },
+        ).model_dump(mode="json")
+        seed = _seed_state(items=[{"sku": "ITEM-001", "usd_price": "100", "item_name": "Test Item"}])
+        seed["effective_currencies"] = ["EUR"]
+
+        result, saved = _run_revise(
+            {"overrides": {"target_final_prices": {"EUR": 150}}},
+            revise_context,
+            payload=seed,
+            config_dict=config,
+        )
+
+        assert result["error"] is True
+        assert "not reachable" in result["message"]
+        assert saved == []
+        assert seed["applied_overrides_log"] == []
+
+    def test_target_final_eur_price_requires_single_effective_sku(self, revise_context):
+        result, saved = _run_revise(
+            {"overrides": {"target_final_prices": {"EUR": 149}}},
+            revise_context,
+            payload=_seed_state(),
+        )
+
+        assert result["error"] is True
+        assert "exactly one SKU" in result["message"]
+        assert saved == []
+
+    def test_top_level_eur_fx_rate_regenerates_eur_based_download_prices(self, revise_context):
+        """A fresh tenant EUR base rate recomputes EUR and EUR-based exports.
+
+        This covers the explicit follow-up path: when the tenant config's
+        top-level eur_fx_rate changes, pricing_revise reads the fresh config
+        and regenerates both task preview and downloadable files from it.
+        """
+        config = TenantPricingConfig(
+            base_currency="USD",
+            eur_fx_rate=Decimal("1.10"),
+            currencies={
+                "EUR": CurrencyConfig(
+                    fx_rate=Decimal("1.00"),
+                    tier="eur_based",
+                    vat_rate=Decimal("0.23"),
+                    rounding_rule="nearest_9",
+                ),
+                "SEK": CurrencyConfig(
+                    fx_rate=Decimal("11.29"),
+                    tier="eur_based",
+                    vat_rate=Decimal("0.25"),
+                    rounding_rule="nearest_9",
+                ),
+                "GBP": CurrencyConfig(
+                    fx_rate=Decimal("0.79"),
+                    tier="usd_based",
+                    vat_rate=Decimal("0.20"),
+                    rounding_rule="nearest_9",
+                ),
+            },
+        ).model_dump(mode="json")
+        seed = _seed_state(items=[{"sku": "ITEM-001", "usd_price": "100", "item_name": "Test Item"}])
+        seed["effective_currencies"] = ["EUR", "SEK", "GBP"]
+        seed["header_columns"] = ["SKU", "Item Name", "USD", "EUR", "GBP", "SEK"]
+
+        result, saved = _run_revise(
+            {"overrides": {}},
+            revise_context,
+            payload=seed,
+            config_dict=config,
+        )
+
+        assert result["success"] is True
+        preview_row = result["preview"][0]
+        assert preview_row["EUR"] == 139.0
+        assert preview_row["SEK"] == 1579.0
+
+        excel_file = next(f for f in saved if f.filename.endswith(".xlsx"))
+        wb = load_workbook(io.BytesIO(excel_file.content), data_only=True)
+        ws = wb["Prices"]
+        headers = [cell.value for cell in ws[1]]
+        values = [cell.value for cell in ws[2]]
+        excel_row = dict(zip(headers, values, strict=False))
+        assert excel_row["EUR"] == 139
+        assert excel_row["SEK"] == 1579
+
+        csv_file = next(f for f in saved if f.filename.endswith(".csv"))
+        csv_rows = list(csv.DictReader(io.StringIO(csv_file.content.decode("utf-8"))))
+        csv_prices = {row["Currency"]: row["Rate"] for row in csv_rows if row["External ID"] == "ITEM-001"}
+        assert csv_prices["EUR"] == "139"
+        assert csv_prices["SEK"] == "1579"
 
 
 class TestReset:
