@@ -70,6 +70,28 @@ class CommandNotAllowedError(Exception):
     """Raised when a run_type is not in the allowlist."""
 
 
+class StalePatchError(ValueError):
+    """Raised when a patch's baseline_sha256 no longer matches the live file.
+
+    Subclasses ValueError for backward compatibility — older callers that
+    caught the bare ValueError raised by `_apply_changeset_overlay` will
+    still catch this. The runner specifically catches `StalePatchError`
+    first so it can persist `error_category="STALE_PATCH"` and an actionable
+    error_message instead of the generic INTERNAL_ERROR.
+
+    Carries enough diagnostic detail (file_path, expected_sha, actual_sha)
+    for the frontend to surface a "re-create patch" workflow.
+    """
+
+    def __init__(self, file_path: str, expected_sha: str, actual_sha: str):
+        self.file_path = file_path
+        self.expected_sha = expected_sha
+        self.actual_sha = actual_sha
+        super().__init__(
+            f"Patch baseline hash mismatch for {file_path} (expected {expected_sha[:8]}…, got {actual_sha[:8]}…)"
+        )
+
+
 def validate_run_type(run_type: str) -> dict:
     """Validate run_type against allowlist. Returns command config."""
     if run_type not in ALLOWED_COMMANDS:
@@ -240,8 +262,14 @@ async def _apply_changeset_overlay(db: AsyncSession, run: WorkspaceRun, files: d
             raise ValueError(f"Patch modify target does not exist in workspace snapshot: {path}")
 
         original_content = files[path]
-        if patch.baseline_sha256 and _sha256(original_content) != patch.baseline_sha256:
-            raise ValueError(f"Patch baseline hash mismatch for {path}")
+        if patch.baseline_sha256:
+            actual_sha = _sha256(original_content)
+            if actual_sha != patch.baseline_sha256:
+                raise StalePatchError(
+                    file_path=path,
+                    expected_sha=patch.baseline_sha256,
+                    actual_sha=actual_sha,
+                )
 
         if patch.unified_diff:
             files[path] = ws_svc._apply_diff(original_content, patch.unified_diff)
@@ -769,6 +797,61 @@ async def execute_run(
             status="success" if run.status == "passed" else "error",
             payload={**result_payload, "artifact_count": artifact_count},
             error_message=None if run.status == "passed" else "Command exited non-zero",
+        )
+    except StalePatchError as exc:
+        # File drifted after the patch was proposed. Surface a STALE_PATCH
+        # category with an actionable message so the frontend can guide the
+        # user to re-create the patch instead of showing INTERNAL_ERROR.
+        logger.warning(
+            "runner.stale_patch",
+            run_id=str(run_id),
+            file_path=exc.file_path,
+            expected_sha=exc.expected_sha[:12],
+            actual_sha=exc.actual_sha[:12],
+        )
+        duration_ms = int((time.monotonic() - start_time) * 1000)
+        run.status = "error"
+        run.completed_at = datetime.now(timezone.utc)
+        run.duration_ms = duration_ms
+
+        actionable = (
+            f"The file '{exc.file_path}' has changed since this patch was created, "
+            "so the patch is stale and can't be applied cleanly. Re-create the patch "
+            "by asking the agent to redo the change against the current file content."
+        )
+        await _store_artifact(db, run, "stderr", actionable)
+        await _store_artifact(
+            db,
+            run,
+            "result_json",
+            json.dumps(
+                {
+                    "run_id": str(run.id),
+                    "run_type": run.run_type,
+                    "status": run.status,
+                    "error_category": "STALE_PATCH",
+                    "error_message": actionable,
+                    "stale_patch": {
+                        "file_path": exc.file_path,
+                        "expected_sha": exc.expected_sha,
+                        "actual_sha": exc.actual_sha,
+                    },
+                    "duration_ms": duration_ms,
+                }
+            ),
+        )
+        await _audit_run_event(
+            db,
+            run,
+            action="run_failed",
+            status="error",
+            payload={
+                "run_type": run.run_type,
+                "error_category": "STALE_PATCH",
+                "file_path": exc.file_path,
+                "duration_ms": duration_ms,
+            },
+            error_message=actionable,
         )
     except asyncio.TimeoutError:
         duration_ms = int((time.monotonic() - start_time) * 1000)
