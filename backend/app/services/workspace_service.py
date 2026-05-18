@@ -621,12 +621,62 @@ def _apply_diff(original: str, unified_diff: str) -> str:
     return "\n".join(applied_lines) + "\n" if applied_lines else ""
 
 
+def _reconstruct_from_unified_diff(
+    unified_diff: str,
+) -> tuple[str, str] | None:
+    """Reconstruct (expected_original, expected_modified) hunk-region text
+    directly from a unified diff. Used as a fallback for the side-by-side
+    viewer when the live file has drifted and `apply_diff` can't produce a
+    clean modified content. We extract the patch's own context+`-` lines as
+    "original" and context+`+` lines as "modified" — at least the user sees
+    WHAT the patch is meant to change instead of two identical panes.
+
+    Returns None when the diff body has no hunks.
+    """
+    diffs = list(whatthepatch.parse_patch(unified_diff))
+    if not diffs:
+        return None
+    diff = diffs[0]
+    if not getattr(diff, "changes", None):
+        return None
+
+    orig_lines: list[str] = []
+    mod_lines: list[str] = []
+    for change in diff.changes:
+        # whatthepatch.Change: (old_line, new_line, text, header_or_meta)
+        # old_line set + new_line None  → removal
+        # old_line None + new_line set  → addition
+        # both set                      → unchanged context
+        old_no = getattr(change, "old", None)
+        new_no = getattr(change, "new", None)
+        text = getattr(change, "line", "") or ""
+        if old_no is not None and new_no is not None:
+            orig_lines.append(text)
+            mod_lines.append(text)
+        elif old_no is not None:
+            orig_lines.append(text)
+        elif new_no is not None:
+            mod_lines.append(text)
+    return "\n".join(orig_lines) + "\n", "\n".join(mod_lines) + "\n"
+
+
 async def get_changeset_diff(
     db: AsyncSession,
     changeset_id: uuid.UUID,
     tenant_id: uuid.UUID,
 ) -> dict | None:
-    """Return diff view data for a changeset."""
+    """Return diff view data for a changeset.
+
+    Each file in the response carries:
+      - original_content / modified_content for the side-by-side viewer
+      - unified_diff: the raw patch (frontend fallback rendering)
+      - diff_status: "clean" | "stale" | "error"
+      - baseline_drift: True if the live file no longer matches the
+        recorded baseline_sha256 the patch was created against. Stale
+        diffs MUST NOT collapse to identical panes — the side-by-side
+        view falls back to the patch's own context (-/+) lines so the
+        user can see what the patch was meant to change.
+    """
     cs = await get_changeset(db, changeset_id, tenant_id)
     if not cs:
         return None
@@ -640,11 +690,12 @@ async def get_changeset_diff(
     for patch in patches:
         original = ""
         modified = ""
+        diff_status = "clean"
+        baseline_drift = False
 
         if patch.operation == "create":
             modified = patch.new_content or ""
         elif patch.operation == "delete":
-            # Get current content
             file_result = await db.execute(
                 select(WorkspaceFile).where(
                     WorkspaceFile.workspace_id == cs.workspace_id,
@@ -664,11 +715,23 @@ async def get_changeset_diff(
             )
             wf = file_result.scalar_one_or_none()
             original = (wf.content if wf else "") or ""
+
+            # Detect drift before attempting apply: a baseline_sha256 mismatch
+            # means the file has changed since this patch was proposed.
+            if patch.baseline_sha256 and patch.baseline_sha256 != _sha256(original):
+                baseline_drift = True
+
             if patch.unified_diff:
                 try:
                     modified = _apply_diff(original, patch.unified_diff)
-                except ValueError:
-                    modified = original  # fallback
+                except Exception:  # noqa: BLE001 — whatthepatch raises HunkApplyException
+                    diff_status = "stale" if baseline_drift else "error"
+                    fallback = _reconstruct_from_unified_diff(patch.unified_diff)
+                    if fallback is not None:
+                        original, modified = fallback
+                    else:
+                        # Last resort: never collapse to identical panes
+                        modified = ""
             elif patch.new_content is not None:
                 modified = patch.new_content
             else:
@@ -680,6 +743,9 @@ async def get_changeset_diff(
                 "operation": patch.operation,
                 "original_content": original,
                 "modified_content": modified,
+                "unified_diff": patch.unified_diff or "",
+                "diff_status": diff_status,
+                "baseline_drift": baseline_drift,
             }
         )
 
