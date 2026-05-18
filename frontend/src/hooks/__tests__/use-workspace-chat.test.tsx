@@ -120,6 +120,66 @@ describe("useWorkspaceChat — SSE stream contract", () => {
     expect(streamPath).toContain("last_id=0");
   });
 
+  it("keeps isSending true continuously from handleSend through stream connect", async () => {
+    // Bug: workspace chat looked dead because isSending dropped to false in
+    // the window between createSession resolving and connectToRunStream
+    // actually setting setIsStreaming(true). With no indicator the user
+    // assumed the chat stopped working.
+    const workspaceId = "ws-1";
+    const newSession = { id: "sess-busy", workspace_id: workspaceId };
+    const runId = "run-busy";
+
+    // Defer createSession + POST so we can sample isSending mid-flight
+    let resolveCreate: (v: typeof newSession) => void = () => {};
+    let resolvePost: (v: { run_id: string; session_id: string }) => void = () => {};
+    const createPromise = new Promise<typeof newSession>((r) => {
+      resolveCreate = r;
+    });
+    const postPromise = new Promise<{ run_id: string; session_id: string }>((r) => {
+      resolvePost = r;
+    });
+    (apiClient.post as ReturnType<typeof vi.fn>).mockImplementation((path: string) => {
+      if (path === "/api/v1/chat/sessions") return createPromise;
+      if (path.endsWith("/messages")) return postPromise;
+      return Promise.reject(new Error(`unexpected POST ${path}`));
+    });
+    (apiClient.streamGet as ReturnType<typeof vi.fn>).mockResolvedValue(
+      makeSseResponse([]),
+    );
+
+    const { result } = renderHook(() => useWorkspaceChat(workspaceId), { wrapper });
+
+    expect(result.current.isSending).toBe(false);
+
+    // Kick off send; do NOT await yet
+    let sendPromise: Promise<void> | undefined;
+    act(() => {
+      sendPromise = result.current.handleSend("hello");
+    });
+
+    // Immediately busy (createSession.isPending)
+    await waitFor(() => expect(result.current.isSending).toBe(true));
+
+    // The critical assertion: resolving createSession used to flip
+    // createSession.isPending to false, and because handleSend never set
+    // isStreaming up front, isSending briefly became false here. Tests
+    // post-fix: isSending must stay true through this transition so the
+    // typing indicator never blinks out.
+    await act(async () => {
+      resolveCreate(newSession);
+      await Promise.resolve();
+      await Promise.resolve(); // two ticks: createSession resolve → handleSend resumes
+    });
+    expect(result.current.isSending).toBe(true);
+
+    // Drain the rest cleanly so the test doesn't leave a pending promise.
+    await act(async () => {
+      resolvePost({ run_id: runId, session_id: newSession.id });
+      await sendPromise;
+    });
+    await waitFor(() => expect(result.current.isSending).toBe(false));
+  });
+
   it("reconnects to an active run when sessionDetail reports status=running", async () => {
     const workspaceId = "ws-1";
     const sessionId = "sess-2";

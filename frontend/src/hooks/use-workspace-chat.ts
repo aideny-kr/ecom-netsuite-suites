@@ -181,6 +181,13 @@ export function useWorkspaceChat(workspaceId: string | null) {
       if (isStreamingRef.current || createSession.isPending) return;
       setError(null);
       setPendingMessage(content);
+      // Mark busy immediately so the typing indicator paints without a gap
+      // between createSession resolving and connectToRunStream taking over.
+      // Without this, isSending flickers false while POST /messages is in
+      // flight (~hundreds of ms), so the UI looks frozen and the user
+      // assumes the chat broke.
+      isStreamingRef.current = true;
+      setIsStreaming(true);
 
       let sessionId = activeSessionId;
       if (!sessionId) {
@@ -189,6 +196,8 @@ export function useWorkspaceChat(workspaceId: string | null) {
           sessionId = session.id;
         } catch {
           setPendingMessage(null);
+          isStreamingRef.current = false;
+          setIsStreaming(false);
           setError("Failed to create chat session.");
           return;
         }
@@ -218,6 +227,11 @@ export function useWorkspaceChat(workspaceId: string | null) {
             : "Failed to send message. Please try again.";
         setError(message);
         setPendingMessage(null);
+        // Clear busy state on early failure (POST or invalidate threw before
+        // connectToRunStream took over — connectToRunStream's own finally
+        // would otherwise never run).
+        isStreamingRef.current = false;
+        setIsStreaming(false);
       }
     },
     [activeSessionId, createSession, connectToRunStream, queryClient],
