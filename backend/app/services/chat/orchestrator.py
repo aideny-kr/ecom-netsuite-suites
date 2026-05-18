@@ -2886,6 +2886,15 @@ async def run_chat_turn(
         total_cache_read_tokens = 0
         last_structured_output: dict | None = None
         suppress_streamed_text = False
+        # Dedup workspace_propose_patch per canonical file path across the
+        # whole turn so a single model response that emits two identical
+        # patch tool_uses doesn't create two draft changesets. Maps
+        # canonical_path -> changeset_id so the skip result can echo the real
+        # prior id back to the model instead of asking it to invent one.
+        # Only populated after a *successful* execution so a failed first
+        # patch doesn't block a corrected retry in the same turn.
+        # Mirrors the guard in BaseSpecialistAgent.run_streaming.
+        patched_files: dict[str, str] = {}
 
         for step in range(MAX_STEPS):
             response = None
@@ -2937,6 +2946,66 @@ async def run_chat_turn(
                                 block.input["workspace_id"] = resolved_ws_id
                                 if not workspace_context:
                                     workspace_context = {"workspace_id": resolved_ws_id, "name": "auto-resolved"}
+
+                # Dedup: skip duplicate workspace_propose_patch for same file
+                # within this turn. Without this, the LLM occasionally emits two
+                # identical tool_use blocks in a single response and the user
+                # ends up with two draft changesets to approve. The agent still
+                # sees a tool_result so the conversation flows normally.
+                #
+                # Use the canonicalised path (matching workspace_service
+                # .validate_path) as the key so the LLM can't bypass the guard
+                # by varying the prefix ('./foo.js' vs 'foo.js' vs 'foo.js ').
+                # Falls back to the raw input if normalization raises — the
+                # tool call would fail anyway, so the dedup match doesn't
+                # matter.
+                _dedup_patch_key: str | None = None
+                if block.name == "workspace_propose_patch":
+                    from app.services.workspace_service import validate_path as _ws_validate_path
+
+                    _raw_patch_path = block.input.get("file_path", "")
+                    try:
+                        _dedup_patch_key = _ws_validate_path(_raw_patch_path) if _raw_patch_path else None
+                    except ValueError:
+                        _dedup_patch_key = _raw_patch_path or None
+                    if _dedup_patch_key and _dedup_patch_key in patched_files:
+                        _prior_cs_id = patched_files[_dedup_patch_key]
+                        print(
+                            f"[WORKSPACE] Skipping duplicate patch for {_dedup_patch_key} "
+                            f"(reusing changeset_id={_prior_cs_id})",
+                            flush=True,
+                        )
+                        tool_results_content.append(
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": block.id,
+                                "content": json.dumps(
+                                    {
+                                        "skipped": "duplicate_patch_same_turn",
+                                        "message": (
+                                            f"Already proposed a patch for '{_dedup_patch_key}' this turn. "
+                                            "Use the changeset_id below; do not call workspace_propose_patch again."
+                                        ),
+                                        "changeset_id": _prior_cs_id,
+                                    }
+                                ),
+                            }
+                        )
+                        tool_calls_log.append(
+                            {
+                                "step": step,
+                                "tool": block.name,
+                                "params": block.input,
+                                "result_summary": json.dumps(
+                                    {
+                                        "skipped": "duplicate_patch_same_turn",
+                                        "changeset_id": _prior_cs_id,
+                                    }
+                                ),
+                                "duration_ms": 0,
+                            }
+                        )
+                        continue
 
                 yield {"type": "tool_status", "content": f"Executing {block.name}..."}
                 yield {
@@ -3041,6 +3110,21 @@ async def run_chat_turn(
                         duration_ms=elapsed_ms,
                     )
                 )
+
+                # Record successful propose_patch into dedup map AFTER execution
+                # succeeds (Codex review #2): if the first call failed
+                # (policy block, parse error, transient DB error), we want a
+                # corrected second call in the same turn to actually run, not
+                # be silently skipped. _had_error covers `{"error": ...}` and
+                # the tool-call helper's truthy error signal.
+                if block.name == "workspace_propose_patch" and _dedup_patch_key and not _had_error:
+                    try:
+                        _parsed_result = json.loads(result_str) if isinstance(result_str, str) else {}
+                    except (json.JSONDecodeError, TypeError):
+                        _parsed_result = {}
+                    _new_cs_id = _parsed_result.get("changeset_id") if isinstance(_parsed_result, dict) else None
+                    if _new_cs_id:
+                        patched_files[_dedup_patch_key] = _new_cs_id
 
             messages.append(adapter.build_tool_result_message(tool_results_content))
 

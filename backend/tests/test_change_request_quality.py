@@ -55,3 +55,20 @@ class TestDuplicatePatchPrevention:
 
         source = open(base_agent.__file__).read()
         assert "patched_files" in source or "_patched_files" in source
+
+    # Behavioral end-to-end tests for the orchestrator dedup live in
+    # tests/test_orchestrator_propose_patch_dedup.py — they drive a real
+    # run_chat_turn with a mocked adapter and assert on observable behavior
+    # (execute_tool_call call count, persisted tool_calls, etc). Each test
+    # there has been red/green verified by mutating the implementation and
+    # confirming the test catches the regression.
+    #
+    # The single source-scrape below stays only as a structural smoke check
+    # to catch the simplest mistake (someone deleting the dedup block from
+    # the wrong loop). Real coverage is the behavioral file.
+    def test_orchestrator_single_agent_loop_has_dedup(self):
+        from app.services.chat import orchestrator
+
+        source = open(orchestrator.__file__).read()
+        single_agent_section = source[source.index("Single-agent agentic loop") :]
+        assert "patched_files" in single_agent_section

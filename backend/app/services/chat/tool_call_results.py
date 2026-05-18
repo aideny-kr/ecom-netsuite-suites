@@ -57,6 +57,30 @@ def summarize_tool_result(tool_name: str, result_str: str) -> str:
         if error_message:
             return error_message[:500]
 
+        # workspace_propose_patch's result carries the changeset_id the frontend
+        # needs to render ChangeProposalCard's Approve/Apply buttons. Don't
+        # collapse it to "Returned 1 row" — return an allowlisted JSON payload
+        # so parseResult() in change-proposal-card.tsx can extract changeset_id.
+        #
+        # CRITICAL: the raw propose_patch result includes diff_preview with up
+        # to 32KB of original_content + modified_content (see workspace_service
+        # .propose_patch). SuiteScripts can contain credentials, tokens,
+        # internal IDs, customer data, or business logic. Persisting that into
+        # ChatMessage.tool_calls — which is replayed into LLM history and
+        # shipped to the frontend — would leak file contents downstream.
+        # Allowlist action-relevant fields only; the frontend already has the
+        # diff in step.params.unified_diff.
+        if tool_name == "workspace_propose_patch" and parsed.get("changeset_id"):
+            return json.dumps(
+                {
+                    "changeset_id": parsed["changeset_id"],
+                    "patch_id": parsed.get("patch_id", ""),
+                    "operation": parsed.get("operation", "modify"),
+                    "diff_status": parsed.get("diff_status", "unknown"),
+                    "risk_summary": parsed.get("risk_summary", ""),
+                }
+            )
+
     # Try to compute a row count from any known shape
     row_count: int | None = None
     if isinstance(parsed, dict):
