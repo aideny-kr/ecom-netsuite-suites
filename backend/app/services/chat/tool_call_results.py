@@ -57,6 +57,13 @@ def summarize_tool_result(tool_name: str, result_str: str) -> str:
         if error_message:
             return error_message[:500]
 
+        # workspace_propose_patch's result carries the changeset_id the frontend
+        # needs to render ChangeProposalCard's Approve/Apply buttons. Don't
+        # collapse it to "Returned 1 row" — preserve the JSON so parseResult()
+        # in change-proposal-card.tsx can extract changeset_id.
+        if tool_name == "workspace_propose_patch" and parsed.get("changeset_id"):
+            return result_str[:2000] if isinstance(result_str, str) else json.dumps(parsed)[:2000]
+
     # Try to compute a row count from any known shape
     row_count: int | None = None
     if isinstance(parsed, dict):
