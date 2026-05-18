@@ -56,56 +56,19 @@ class TestDuplicatePatchPrevention:
         source = open(base_agent.__file__).read()
         assert "patched_files" in source or "_patched_files" in source
 
-    def test_orchestrator_single_agent_loop_dedups_patches(self):
-        """orchestrator's single-agent loop must mirror the dedup.
-
-        Workspace sessions take the single-agent path (multi-agent branch is
-        gated by `not workspace_context`), so without dedup here the LLM can
-        emit two identical workspace_propose_patch tool_use blocks in one
-        response and the user ends up with two draft changesets. Staging
-        2026-05-18 hit this — see `403dba46` / `580af610` with identical
-        timestamps for SuiteScripts/Uncategorized/FW_reProcessSecondarySub_MR.js.
-        """
+    # Behavioral end-to-end tests for the orchestrator dedup live in
+    # tests/test_orchestrator_propose_patch_dedup.py — they drive a real
+    # run_chat_turn with a mocked adapter and assert on observable behavior
+    # (execute_tool_call call count, persisted tool_calls, etc). Each test
+    # there has been red/green verified by mutating the implementation and
+    # confirming the test catches the regression.
+    #
+    # The single source-scrape below stays only as a structural smoke check
+    # to catch the simplest mistake (someone deleting the dedup block from
+    # the wrong loop). Real coverage is the behavioral file.
+    def test_orchestrator_single_agent_loop_has_dedup(self):
         from app.services.chat import orchestrator
 
         source = open(orchestrator.__file__).read()
-        # Look in the single-agent loop section (after the multi-agent path
-        # bails out via `return` on its `yield message`).
-        single_agent_start = source.index("Single-agent agentic loop")
-        single_agent_section = source[single_agent_start:]
+        single_agent_section = source[source.index("Single-agent agentic loop") :]
         assert "patched_files" in single_agent_section
-        assert "Skipping duplicate patch" in single_agent_section
-
-    def test_orchestrator_dedup_records_after_success(self):
-        """Codex review #2: dedup must record after successful execution.
-
-        Recording the patch key BEFORE execute_tool_call means a transient
-        failure (policy block, parse error, DB error) on the first call
-        silently skips a corrected retry in the same turn. The fix records
-        AFTER parsing the result and confirming a real changeset_id.
-        """
-        from app.services.chat import orchestrator
-
-        source = open(orchestrator.__file__).read()
-        single_agent_section = source[source.index("Single-agent agentic loop") :]
-        record_block = "patched_files[_dedup_patch_key] = _new_cs_id"
-        assert record_block in single_agent_section
-        record_offset = single_agent_section.index(record_block)
-        log_offset = single_agent_section.index("tool_calls_log.append")
-        assert record_offset > log_offset, "dedup must be recorded AFTER tool execution + logging"
-        assert "not _had_error" in single_agent_section
-        assert '"changeset_id"' in single_agent_section
-
-    def test_orchestrator_dedup_normalizes_path(self):
-        """Codex review #3: dedup must canonicalize file_path.
-
-        Without normalization, the LLM bypasses the guard by varying the
-        prefix ('./foo.js' vs 'foo.js'). Use workspace_service.validate_path
-        for the dedup key so it matches the path the DB layer stores.
-        """
-        from app.services.chat import orchestrator
-
-        source = open(orchestrator.__file__).read()
-        single_agent_section = source[source.index("Single-agent agentic loop") :]
-        assert "validate_path as _ws_validate_path" in single_agent_section
-        assert "_ws_validate_path(_raw_patch_path)" in single_agent_section
