@@ -75,3 +75,37 @@ class TestDuplicatePatchPrevention:
         single_agent_section = source[single_agent_start:]
         assert "patched_files" in single_agent_section
         assert "Skipping duplicate patch" in single_agent_section
+
+    def test_orchestrator_dedup_records_after_success(self):
+        """Codex review #2: dedup must record after successful execution.
+
+        Recording the patch key BEFORE execute_tool_call means a transient
+        failure (policy block, parse error, DB error) on the first call
+        silently skips a corrected retry in the same turn. The fix records
+        AFTER parsing the result and confirming a real changeset_id.
+        """
+        from app.services.chat import orchestrator
+
+        source = open(orchestrator.__file__).read()
+        single_agent_section = source[source.index("Single-agent agentic loop") :]
+        record_block = "patched_files[_dedup_patch_key] = _new_cs_id"
+        assert record_block in single_agent_section
+        record_offset = single_agent_section.index(record_block)
+        log_offset = single_agent_section.index("tool_calls_log.append")
+        assert record_offset > log_offset, "dedup must be recorded AFTER tool execution + logging"
+        assert "not _had_error" in single_agent_section
+        assert '"changeset_id"' in single_agent_section
+
+    def test_orchestrator_dedup_normalizes_path(self):
+        """Codex review #3: dedup must canonicalize file_path.
+
+        Without normalization, the LLM bypasses the guard by varying the
+        prefix ('./foo.js' vs 'foo.js'). Use workspace_service.validate_path
+        for the dedup key so it matches the path the DB layer stores.
+        """
+        from app.services.chat import orchestrator
+
+        source = open(orchestrator.__file__).read()
+        single_agent_section = source[source.index("Single-agent agentic loop") :]
+        assert "validate_path as _ws_validate_path" in single_agent_section
+        assert "_ws_validate_path(_raw_patch_path)" in single_agent_section

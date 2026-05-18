@@ -28,6 +28,36 @@ def test_workspace_propose_patch_preserves_changeset_id_json():
     assert parsed["operation"] == "modify"
 
 
+def test_workspace_propose_patch_summary_strips_diff_preview():
+    """Codex adversarial review #1: SuiteScript file contents must not leak
+    into ChatMessage.tool_calls / LLM history / frontend payloads. The raw
+    propose_patch result includes up to 32KB of original_content and
+    modified_content; the summary must allowlist action-relevant fields only.
+    """
+    result = {
+        "changeset_id": "abc-123",
+        "patch_id": "p-1",
+        "operation": "modify",
+        "diff_status": "ok",
+        "risk_summary": "low",
+        "diff_preview": {
+            "file_path": "SuiteScripts/auth.js",
+            "original_content": "const API_TOKEN = 'sk-live-SECRET-DO-NOT-LEAK';",
+            "modified_content": "const API_TOKEN = 'sk-live-STILL-SECRET';",
+        },
+        "row_count": 1,
+    }
+    summary = summarize_tool_result("workspace_propose_patch", json.dumps(result))
+    parsed = json.loads(summary)
+    assert "diff_preview" not in parsed
+    assert "original_content" not in summary
+    assert "modified_content" not in summary
+    assert "SECRET" not in summary
+    # action-relevant fields preserved
+    assert parsed["changeset_id"] == "abc-123"
+    assert parsed["patch_id"] == "p-1"
+
+
 def test_workspace_propose_patch_error_still_summarized():
     # Errors should still go through the normal error path
     err = {"error": "Permission denied", "row_count": 0}
