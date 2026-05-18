@@ -55,3 +55,23 @@ class TestDuplicatePatchPrevention:
 
         source = open(base_agent.__file__).read()
         assert "patched_files" in source or "_patched_files" in source
+
+    def test_orchestrator_single_agent_loop_dedups_patches(self):
+        """orchestrator's single-agent loop must mirror the dedup.
+
+        Workspace sessions take the single-agent path (multi-agent branch is
+        gated by `not workspace_context`), so without dedup here the LLM can
+        emit two identical workspace_propose_patch tool_use blocks in one
+        response and the user ends up with two draft changesets. Staging
+        2026-05-18 hit this — see `403dba46` / `580af610` with identical
+        timestamps for SuiteScripts/Uncategorized/FW_reProcessSecondarySub_MR.js.
+        """
+        from app.services.chat import orchestrator
+
+        source = open(orchestrator.__file__).read()
+        # Look in the single-agent loop section (after the multi-agent path
+        # bails out via `return` on its `yield message`).
+        single_agent_start = source.index("Single-agent agentic loop")
+        single_agent_section = source[single_agent_start:]
+        assert "patched_files" in single_agent_section
+        assert "Skipping duplicate patch" in single_agent_section

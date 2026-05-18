@@ -2886,6 +2886,11 @@ async def run_chat_turn(
         total_cache_read_tokens = 0
         last_structured_output: dict | None = None
         suppress_streamed_text = False
+        # Dedup workspace_propose_patch per file across the whole turn so a
+        # single model response that emits two identical patch tool_uses (or a
+        # retry after partial failure) doesn't create two draft changesets.
+        # Mirrors the same guard in `BaseSpecialistAgent.run_streaming`.
+        patched_files: set[str] = set()
 
         for step in range(MAX_STEPS):
             response = None
@@ -2937,6 +2942,33 @@ async def run_chat_turn(
                                 block.input["workspace_id"] = resolved_ws_id
                                 if not workspace_context:
                                     workspace_context = {"workspace_id": resolved_ws_id, "name": "auto-resolved"}
+
+                # Dedup: skip duplicate workspace_propose_patch for same file
+                # within this turn. Without this, the LLM occasionally emits two
+                # identical tool_use blocks in a single response and the user
+                # ends up with two draft changesets to approve. The agent still
+                # sees a tool_result so the conversation flows normally.
+                if block.name == "workspace_propose_patch":
+                    _patch_file = block.input.get("file_path", "")
+                    if _patch_file and _patch_file in patched_files:
+                        print(f"[WORKSPACE] Skipping duplicate patch for {_patch_file}", flush=True)
+                        tool_results_content.append(
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": block.id,
+                                "content": json.dumps(
+                                    {
+                                        "skipped": (
+                                            "Already proposed a patch for this file this turn. "
+                                            "Reuse the existing changeset_id from the previous tool call."
+                                        )
+                                    }
+                                ),
+                            }
+                        )
+                        continue
+                    if _patch_file:
+                        patched_files.add(_patch_file)
 
                 yield {"type": "tool_status", "content": f"Executing {block.name}..."}
                 yield {
