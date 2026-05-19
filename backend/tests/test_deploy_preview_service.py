@@ -652,3 +652,184 @@ class TestMintAndConsume:
                 actor_id=user.id,
                 tenant_id=tenant_a.id,
             )
+
+
+# ---------------------------------------------------------------------------
+# Tests 10-14: drift + cross-user + concurrent + audit
+# ---------------------------------------------------------------------------
+
+
+class TestDriftAndReplay:
+    """Tests 10-13: state-change rejections between preview and confirm."""
+
+    @pytest.mark.asyncio
+    async def test_10_changeset_rolled_back_between_preview_and_confirm(
+        self, db: AsyncSession, fully_ready_changeset, tenant_a, admin_user
+    ):
+        """Test 10: cs flips from approved → pending_review after preview
+        but before confirm → DeployGateNotMetError. Defends against
+        out-of-band changeset rejection landing mid-confirm."""
+        from app.services.deploy_preview_service import (
+            DeployGateNotMetError,
+            verify_and_consume_deploy_token,
+        )
+
+        ws, cs, user = fully_ready_changeset
+        _, minted = await _mint_for(db, ws, cs, user, tenant_a.id)
+
+        cs.status = "pending_review"
+        await db.flush()
+
+        with pytest.raises(DeployGateNotMetError):
+            await verify_and_consume_deploy_token(
+                db=db,
+                jti=uuid.UUID(minted["jti"]),
+                confirmation_token=minted["confirmation_token"],
+                actor_id=user.id,
+                tenant_id=tenant_a.id,
+            )
+
+    @pytest.mark.asyncio
+    async def test_11_files_mutated_between_preview_and_confirm(
+        self, db: AsyncSession, fully_ready_changeset, tenant_a, admin_user
+    ):
+        """Test 11: a WorkspaceFile.content changes after preview →
+        SnapshotDriftError. Codex P1 #7 — the operator-reviewed snapshot
+        and the worker-applied snapshot are pinned identical via this
+        check; the worker re-check is a belt-and-suspenders layer."""
+        from app.services.deploy_preview_service import (
+            SnapshotDriftError,
+            verify_and_consume_deploy_token,
+        )
+
+        ws, cs, user = fully_ready_changeset
+        _, minted = await _mint_for(db, ws, cs, user, tenant_a.id)
+
+        # Mutate the baseline file post-mint.
+        file_row = await db.execute(
+            select(WorkspaceFile).where(
+                WorkspaceFile.workspace_id == ws.id,
+                WorkspaceFile.path == "SuiteScripts/baseline.js",
+            )
+        )
+        f = file_row.scalar_one()
+        f.content = "console.log('TAMPERED');"
+        f.sha256_hash = _sha256("console.log('TAMPERED');")
+        await db.flush()
+
+        with pytest.raises(SnapshotDriftError) as exc_info:
+            await verify_and_consume_deploy_token(
+                db=db,
+                jti=uuid.UUID(minted["jti"]),
+                confirmation_token=minted["confirmation_token"],
+                actor_id=user.id,
+                tenant_id=tenant_a.id,
+            )
+        assert exc_info.value.drift_field in ("snapshot_sha", "manifest_sha")
+
+    @pytest.mark.asyncio
+    async def test_12_cross_user_replay_rejected(
+        self, db: AsyncSession, fully_ready_changeset, tenant_a, admin_user
+    ):
+        """Test 12: actor at confirm differs from actor at preview →
+        CrossUserReplayError. Without this check, any tenant user with
+        workspace.manage could replay another user's preview token.
+        Codex P1 #4."""
+        from app.services.deploy_preview_service import (
+            CrossUserReplayError,
+            verify_and_consume_deploy_token,
+        )
+
+        ws, cs, user = fully_ready_changeset
+        _, minted = await _mint_for(db, ws, cs, user, tenant_a.id)
+
+        # A different user from the same tenant attempts to confirm.
+        impostor_id = uuid.uuid4()
+
+        with pytest.raises(CrossUserReplayError):
+            await verify_and_consume_deploy_token(
+                db=db,
+                jti=uuid.UUID(minted["jti"]),
+                confirmation_token=minted["confirmation_token"],
+                actor_id=impostor_id,
+                tenant_id=tenant_a.id,
+            )
+
+    @pytest.mark.asyncio
+    async def test_13_concurrent_preview_rejected_with_existing_jti(
+        self, db: AsyncSession, fully_ready_changeset, tenant_a, admin_user
+    ):
+        """Test 13: two preview calls for the same changeset → second
+        raises DeployInFlightError carrying the first jti so the UI can
+        re-render rather than spawning a fresh preview. Closes codex
+        P1 #3 (double-click queueing)."""
+        from app.services.deploy_preview_service import (
+            DeployInFlightError,
+            build_deploy_preview,
+            mint_deploy_token,
+        )
+
+        ws, cs, user = fully_ready_changeset
+
+        preview = await build_deploy_preview(
+            db=db,
+            changeset_id=cs.id,
+            sandbox_id="6738075-sb1",
+            require_assertions=False,
+            tenant_id=tenant_a.id,
+            actor_id=user.id,
+        )
+        first_minted = await mint_deploy_token(db=db, preview=preview)
+
+        with pytest.raises(DeployInFlightError) as exc_info:
+            await mint_deploy_token(db=db, preview=preview)
+        assert str(exc_info.value.existing_jti) == first_minted["jti"]
+
+
+class TestAuditEvents:
+    """Test 14: audit events emitted for preview_issued + confirmed."""
+
+    @pytest.mark.asyncio
+    async def test_14_audit_emitted_for_happy_path(
+        self, db: AsyncSession, fully_ready_changeset, tenant_a, admin_user
+    ):
+        """Mint emits workspace.deploy.preview_issued; consume emits
+        workspace.deploy.confirmed. The 16-hex token_fingerprint on the
+        confirmed event is sha256(token)[:16], not raw HMAC bits
+        (codex P3 #13).
+        """
+        from app.models.audit import AuditEvent
+        from app.services.deploy_preview_service import verify_and_consume_deploy_token
+
+        ws, cs, user = fully_ready_changeset
+        _, minted = await _mint_for(db, ws, cs, user, tenant_a.id)
+
+        await verify_and_consume_deploy_token(
+            db=db,
+            jti=uuid.UUID(minted["jti"]),
+            confirmation_token=minted["confirmation_token"],
+            actor_id=user.id,
+            tenant_id=tenant_a.id,
+        )
+
+        events = await db.execute(
+            select(AuditEvent)
+            .where(
+                AuditEvent.tenant_id == tenant_a.id,
+                AuditEvent.action.in_(
+                    ["workspace.deploy.preview_issued", "workspace.deploy.confirmed"]
+                ),
+            )
+            .order_by(AuditEvent.timestamp)
+        )
+        rows = list(events.scalars().all())
+        actions = [e.action for e in rows]
+        assert "workspace.deploy.preview_issued" in actions
+        assert "workspace.deploy.confirmed" in actions
+
+        confirmed = next(e for e in rows if e.action == "workspace.deploy.confirmed")
+        assert "token_fingerprint" in confirmed.payload
+        fp = confirmed.payload["token_fingerprint"]
+        assert len(fp) == 16
+        # Not a substring of the raw token — sha256(token)[:16] differs.
+        assert fp != minted["confirmation_token"][:16]

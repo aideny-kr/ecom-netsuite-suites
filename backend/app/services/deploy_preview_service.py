@@ -28,13 +28,20 @@ from app.models.workspace import (
     WorkspaceFile,
     WorkspacePatch,
 )
-from app.services import workspace_service as ws_svc
+from app.services import audit_service, workspace_service as ws_svc
 from app.services.chat.mutation_guard import (
     generate_confirmation_token,
     verify_confirmation_token,
 )
 from app.services.deploy_service import check_deploy_prerequisites
 from app.services.runner_service import _validate_sandbox_target
+
+
+def _token_fingerprint(token: str) -> str:
+    """Codex P3 #13 — derive a fingerprint via sha256(token) so audit
+    logs and error responses never carry raw HMAC bits.
+    """
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
 
 # Token TTL — operators have 10 minutes after preview to confirm. Codex
 # noted the choice was "open" in the spec; 10 min balances slow human
@@ -133,6 +140,17 @@ class CrossUserReplayError(DeployPreviewError):
     preview time. Codex P1 #4 — without this check, any tenant user with
     workspace.manage could replay another user's token. Maps to 403.
     """
+
+
+class DeployInFlightError(DeployPreviewError):
+    """Another unconsumed preview exists for the same (tenant, changeset).
+    Returns the existing jti so the UI can re-render that preview rather
+    than churning a new one. Maps to 409.
+    """
+
+    def __init__(self, existing_jti: uuid.UUID) -> None:
+        super().__init__(f"Deploy already in flight (jti={existing_jti})")
+        self.existing_jti = existing_jti
 
 
 def _sha256(content: str) -> str:
@@ -397,6 +415,20 @@ async def mint_deploy_token(
     effects, and means the partial-unique constraint on
     ``workspace_deploy_tokens`` is only hit on the happy path.
     """
+    # In-flight check — partial unique index would catch this at flush
+    # time, but raising up-front lets us return the existing jti so the
+    # UI re-renders the live preview instead of starting fresh.
+    inflight = await db.execute(
+        select(WorkspaceDeployToken).where(
+            WorkspaceDeployToken.tenant_id == uuid.UUID(preview["tenant_id"]),
+            WorkspaceDeployToken.changeset_id == uuid.UUID(preview["changeset_id"]),
+            WorkspaceDeployToken.consumed_at.is_(None),
+        )
+    )
+    existing = inflight.scalar_one_or_none()
+    if existing is not None:
+        raise DeployInFlightError(existing.id)
+
     jti = uuid.uuid4()
     issued_at = datetime.now(timezone.utc)
     expires_at = issued_at + timedelta(seconds=ttl_seconds)
@@ -435,6 +467,25 @@ async def mint_deploy_token(
         session_id=preview["actor_id"],
         payload_json=payload_json,
         event_type=_EVENT_TYPE,
+    )
+
+    await audit_service.log_event(
+        db=db,
+        tenant_id=uuid.UUID(preview["tenant_id"]),
+        category="workspace",
+        action="workspace.deploy.preview_issued",
+        actor_id=uuid.UUID(preview["actor_id"]),
+        resource_type="workspace_deploy_token",
+        resource_id=str(jti),
+        payload={
+            "changeset_id": preview["changeset_id"],
+            "sandbox_id": preview["sandbox_id"],
+            "snapshot_sha": preview["snapshot_sha"],
+            "manifest_sha": preview["manifest_sha"],
+            "file_count": len(preview["manifest"]),
+            "gates": preview.get("gates", {}),
+            "expires_at": expires_at.isoformat(),
+        },
     )
 
     return {
@@ -574,6 +625,23 @@ async def verify_and_consume_deploy_token(
     row.consumed_at = now
     row.consumed_reason = "confirmed"
     await db.flush()
+
+    await audit_service.log_event(
+        db=db,
+        tenant_id=tenant_id,
+        category="workspace",
+        action="workspace.deploy.confirmed",
+        actor_id=actor_id,
+        resource_type="workspace_deploy_token",
+        resource_id=str(row.id),
+        payload={
+            "changeset_id": str(row.changeset_id),
+            "sandbox_id": row.sandbox_id,
+            "snapshot_sha": row.snapshot_sha,
+            "manifest_sha": row.manifest_sha,
+            "token_fingerprint": _token_fingerprint(confirmation_token),
+        },
+    )
 
     return {
         "row": row,
