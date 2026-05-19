@@ -6,6 +6,7 @@ import type {
   WorkspaceRun,
   WorkspaceArtifact,
   AssertionDefinition,
+  DeployPreview,
   UATReport,
 } from "@/lib/types";
 
@@ -96,31 +97,49 @@ export function useTriggerAssertions() {
   });
 }
 
-export function useTriggerDeploySandbox() {
-  const queryClient = useQueryClient();
+/**
+ * Mint a deploy preview + HMAC token. Does NOT queue the deploy run —
+ * the caller renders the manifest in a DeployConfirmationCard and waits
+ * for the user to confirm via useConfirmDeploy.
+ */
+export function useDeployPreview() {
   return useMutation<
-    WorkspaceRun,
+    DeployPreview,
     Error,
     {
       changesetId: string;
       sandboxId: string;
-      overrideReason?: string;
       requireAssertions?: boolean;
     }
   >({
-    mutationFn: ({
-      changesetId,
-      sandboxId,
-      overrideReason,
-      requireAssertions,
-    }) =>
-      apiClient.post<WorkspaceRun>(
-        `/api/v1/changesets/${changesetId}/deploy-sandbox`,
+    mutationFn: ({ changesetId, sandboxId, requireAssertions }) =>
+      apiClient.post<DeployPreview>(
+        `/api/v1/changesets/${changesetId}/deploy-sandbox/preview`,
         {
           sandbox_id: sandboxId,
-          override_reason: overrideReason,
           require_assertions: requireAssertions ?? false,
         },
+      ),
+  });
+}
+
+/**
+ * Confirm a previously minted deploy preview, queueing the workspace run.
+ * Server re-verifies snapshot + gates + HMAC before dispatching to the
+ * worker, which re-verifies snapshot once more before suitecloud
+ * project:deploy.
+ */
+export function useConfirmDeploy() {
+  const queryClient = useQueryClient();
+  return useMutation<
+    WorkspaceRun,
+    Error,
+    { changesetId: string; jti: string; confirmationToken: string }
+  >({
+    mutationFn: ({ changesetId, jti, confirmationToken }) =>
+      apiClient.post<WorkspaceRun>(
+        `/api/v1/changesets/${changesetId}/deploy-sandbox/confirm`,
+        { jti, confirmation_token: confirmationToken },
       ),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["workspace-runs"] });

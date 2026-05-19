@@ -633,6 +633,36 @@ export interface AssertionsReport {
   total_duration_ms: number;
 }
 
+// --- Deploy preview / confirm (two-step gated API) ---
+
+export type DeployFileOperation = "create" | "modify" | "delete" | "unchanged";
+
+export interface DeployManifestEntry {
+  path: string;
+  operation: DeployFileOperation;
+  content_sha: string;
+  apply_order: number;
+}
+
+export interface DeployPreview {
+  jti: string;
+  manifest: DeployManifestEntry[];
+  gates: {
+    validate: string;
+    unit_tests: string;
+    assertions: string;
+  };
+  sandbox_id: string;
+  snapshot_sha: string;
+  manifest_sha: string;
+  require_assertions: boolean;
+  issued_at: string;
+  expires_at: string;
+  confirmation_token: string;
+  changeset_id: string;
+  workspace_id: string;
+}
+
 // --- UAT Report ---
 
 export interface UATReport {
