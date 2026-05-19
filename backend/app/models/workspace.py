@@ -205,3 +205,48 @@ class ValidationHit(Base, UUIDPrimaryKeyMixin):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default="now()", nullable=False)
 
     run: Mapped["WorkspaceRun"] = relationship("WorkspaceRun", back_populates="validation_hits")
+
+
+class WorkspaceDeployToken(Base, UUIDPrimaryKeyMixin):
+    """Per-preview token for two-step gated SuiteCloud sandbox deploy.
+
+    Each row binds the full HMAC payload for one preview so the confirm step
+    can replay-check (token already consumed?), expire-check (issued more
+    than TTL ago?), and snapshot-pin-check (does the live snapshot still
+    match the one the operator reviewed?).
+
+    A partial unique index in migration 076 prevents two concurrent in-flight
+    previews per (tenant, changeset) — closes codex P1 #3.
+    """
+
+    __tablename__ = "workspace_deploy_tokens"
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
+    )
+    changeset_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("workspace_changesets.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    sandbox_id: Mapped[str] = mapped_column(Text, nullable=False)
+    snapshot_sha: Mapped[str] = mapped_column(String(64), nullable=False)
+    manifest_sha: Mapped[str] = mapped_column(String(64), nullable=False)
+    require_assertions: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    actor_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    issued_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default="now()", nullable=False
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    consumed_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("workspace_runs.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    consumed_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
