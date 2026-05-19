@@ -177,3 +177,99 @@ class TestComputeDeployManifest:
             assert "content_sha" in entry
             assert "apply_order" in entry
             assert len(entry["content_sha"]) == 64
+
+
+# ---------------------------------------------------------------------------
+# Test 2: snapshot_sha vs manifest_sha distinguish patch ordering
+# ---------------------------------------------------------------------------
+
+
+class TestManifestShaDistinguishesOrder:
+    """Test 2 in spec: two patch sequences producing the same final tree but
+    different apply_order yield the same snapshot_sha but different
+    manifest_sha. snapshot_sha collapses on the post-image; manifest_sha
+    catches the intermediate state and operation history.
+    """
+
+    @pytest.mark.asyncio
+    async def test_same_final_tree_different_order_distinct_manifest_sha(
+        self, db: AsyncSession, tenant_a, admin_user
+    ):
+        """Two separate changesets land the same file content via different
+        apply_order. snapshot_sha matches; manifest_sha differs."""
+        from app.services.deploy_preview_service import compute_deploy_manifest
+
+        user, _ = admin_user
+
+        ws = Workspace(
+            tenant_id=tenant_a.id,
+            name="Manifest order WS",
+            created_by=user.id,
+            status="active",
+        )
+        db.add(ws)
+        await db.flush()
+
+        # Two approved changesets in the same workspace. Each ends with two
+        # files in identical final state, but the patches that get them there
+        # use different apply_order assignments.
+        cs_a = WorkspaceChangeSet(
+            tenant_id=tenant_a.id,
+            workspace_id=ws.id,
+            title="cs_a",
+            status="approved",
+            proposed_by=user.id,
+        )
+        cs_b = WorkspaceChangeSet(
+            tenant_id=tenant_a.id,
+            workspace_id=ws.id,
+            title="cs_b",
+            status="approved",
+            proposed_by=user.id,
+        )
+        db.add_all([cs_a, cs_b])
+        await db.flush()
+
+        # Two new files, same final content in both changesets.
+        for cs, orders in ((cs_a, (1, 2)), (cs_b, (2, 1))):
+            db.add(
+                WorkspacePatch(
+                    tenant_id=tenant_a.id,
+                    changeset_id=cs.id,
+                    file_path="SuiteScripts/a.js",
+                    operation="create",
+                    new_content="console.log('a');",
+                    baseline_sha256="",
+                    apply_order=orders[0],
+                )
+            )
+            db.add(
+                WorkspacePatch(
+                    tenant_id=tenant_a.id,
+                    changeset_id=cs.id,
+                    file_path="SuiteScripts/b.js",
+                    operation="create",
+                    new_content="console.log('b');",
+                    baseline_sha256="",
+                    apply_order=orders[1],
+                )
+            )
+        await db.flush()
+
+        result_a = await compute_deploy_manifest(
+            db=db, changeset_id=cs_a.id, tenant_id=tenant_a.id, workspace_id=ws.id
+        )
+        result_b = await compute_deploy_manifest(
+            db=db, changeset_id=cs_b.id, tenant_id=tenant_a.id, workspace_id=ws.id
+        )
+
+        # Same final tree → same snapshot_sha.
+        assert result_a["snapshot_sha"] == result_b["snapshot_sha"], (
+            "Identical post-patch tree must yield identical snapshot_sha"
+        )
+
+        # Different apply_order → different manifest_sha.
+        assert result_a["manifest_sha"] != result_b["manifest_sha"], (
+            "Different apply_order must yield different manifest_sha so the "
+            "operator-reviewed manifest is cryptographically distinguishable"
+        )
