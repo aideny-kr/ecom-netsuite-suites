@@ -449,6 +449,15 @@ def _sanitize_assistant_text(text: str) -> str:
 
 
 _NO_RESULT_FALLBACK = "I wasn't able to find relevant information for that question."
+# Used when the agent called at least one tool but still produced no final
+# text. The original "find relevant information" wording reads like the
+# agent has no knowledge of the topic — even when prior turns answered the
+# question — and consistently registers as memory loss to users. This
+# variant acknowledges the tool spiral and points at the prior answer.
+_TOOL_SPIRAL_FALLBACK = (
+    "My tool searches didn't surface a new answer for that. If an earlier "
+    "turn already covered it, refer back; otherwise try rephrasing."
+)
 _PRICING_TASK_OUTPUT_MESSAGE = "Pricing output is ready. Review the table and download files below."
 
 
@@ -459,7 +468,12 @@ def _is_pricing_task_output(persisted_output: dict | None) -> bool:
     return isinstance(data, dict) and data.get("task_kind") == "pricing"
 
 
-def _coerce_assistant_content(final_text: str | None, persisted_output: dict | None) -> str:
+def _coerce_assistant_content(
+    final_text: str | None,
+    persisted_output: dict | None,
+    *,
+    tool_calls: list[dict] | None = None,
+) -> str:
     """Decide what string to persist as ``ChatMessage.content``.
 
     When ``persisted_output`` carries ``type == "clarification"``, the
@@ -467,15 +481,73 @@ def _coerce_assistant_content(final_text: str | None, persisted_output: dict | N
     the empty-result fallback) confuses the user. So in that case we return
     an empty string and let the frontend render the card alone.
 
-    Otherwise, return ``final_text`` if non-empty, else the empty-result
-    fallback. The fallback is fine for normal turns where the agent produced
-    no text and no structured output, but it must NEVER appear above a card.
+    Otherwise, return ``final_text`` if non-empty. Empty text falls back to
+    one of two messages depending on whether tools were called:
+
+    - No tools called → the agent had nothing to say and didn't try; the
+      original "find relevant information" wording fits.
+    - Tools called → the agent went into a tool spiral and produced no
+      final text. Use the spiral-specific wording so the user doesn't read
+      this as "I don't remember anything we just discussed".
     """
     if isinstance(persisted_output, dict) and persisted_output.get("type") == "clarification":
         return ""
     if _is_pricing_task_output(persisted_output):
         return _PRICING_TASK_OUTPUT_MESSAGE
-    return final_text or _NO_RESULT_FALLBACK
+    if final_text:
+        return final_text
+    if tool_calls:
+        return _TOOL_SPIRAL_FALLBACK
+    return _NO_RESULT_FALLBACK
+
+
+def _build_workspace_context_block(
+    *,
+    workspace_name: str,
+    workspace_id: str,
+    file_paths: list[str],
+) -> str:
+    """Build the workspace context block appended to the system prompt.
+
+    Cap the file listing at 50 entries with a tail summary so very large
+    workspaces don't dominate the prompt.
+
+    The block also nudges the agent to prefer prior conversation history
+    on follow-up questions rather than re-running workspace searches.
+    Without this nudge, follow-up questions like "what does it convert
+    to?" trigger fresh searches for terms the prior answer already
+    explained — and when those searches turn up empty, the empty-text
+    fallback fires and reads to the user as memory loss.
+    """
+    file_listing = "\n".join(f"- {_sanitize_for_prompt(p)}" for p in file_paths[:50])
+    if len(file_paths) > 50:
+        file_listing += f"\n... and {len(file_paths) - 50} more files"
+
+    return (
+        f"\n\nWORKSPACE CONTEXT:\n"
+        f"Active workspace: '{workspace_name}' (ID: {workspace_id}).\n"
+        f"Files in workspace:\n{file_listing}\n\n"
+        f"Use workspace tools (workspace_list_files, workspace_read_file, "
+        f"workspace_search, workspace_propose_patch) to browse and modify files. "
+        f"The workspace_id is '{workspace_id}' — it will be auto-injected."
+        "\nWhen the user mentions they are 'viewing' or 'looking at' a specific file, "
+        "or when the message includes '[Currently viewing file: ...]', "
+        "use the workspace_read_file tool to read that file's content before responding. "
+        "This lets you see exactly what the user sees in their editor."
+        "\n\n## IDE Chat Behavior\n"
+        "You are an IDE assistant with direct file access. "
+        "Be concise — lead with the answer, use code blocks, no preambles.\n"
+        "For complex reasoning, use <thinking>...</thinking> tags before your answer. "
+        "This block is collapsed by default in the UI.\n"
+        "\n## Follow-up questions\n"
+        "If the user asks a follow-up that the conversation history already "
+        "covers (e.g. asking 'what does it convert to?' after you just "
+        "explained a conversion), answer from the prior answer instead of "
+        "re-running searches. Only reach for tools when you genuinely need "
+        "fresh info — a detail you didn't already cover, or a file you "
+        "haven't read yet. Re-searching for terms you already cited "
+        "wastes a turn and often returns empty.\n"
+    )
 
 
 def _is_financial_tool(tool_name: str) -> bool:
@@ -1852,29 +1924,10 @@ async def run_chat_turn(
                 }
                 files = await ws_svc.list_files(db, session.workspace_id, tenant_id)
                 file_paths = _extract_file_paths(files)
-                file_listing = "\n".join(f"- {_sanitize_for_prompt(p)}" for p in file_paths[:50])
-                if len(file_paths) > 50:
-                    file_listing += f"\n... and {len(file_paths) - 50} more files"
-                system_prompt += (
-                    f"\n\nWORKSPACE CONTEXT:\n"
-                    f"Active workspace: '{ws.name}' (ID: {session.workspace_id}).\n"
-                    f"Files in workspace:\n{file_listing}\n\n"
-                    f"Use workspace tools (workspace_list_files, workspace_read_file, "
-                    f"workspace_search, workspace_propose_patch) to browse and modify files. "
-                    f"The workspace_id is '{session.workspace_id}' — it will be auto-injected."
-                )
-                system_prompt += (
-                    "\nWhen the user mentions they are 'viewing' or 'looking at' a specific file, "
-                    "or when the message includes '[Currently viewing file: ...]', "
-                    "use the workspace_read_file tool to read that file's content before responding. "
-                    "This lets you see exactly what the user sees in their editor."
-                )
-                system_prompt += (
-                    "\n\n## IDE Chat Behavior\n"
-                    "You are an IDE assistant with direct file access. "
-                    "Be concise — lead with the answer, use code blocks, no preambles.\n"
-                    "For complex reasoning, use <thinking>...</thinking> tags before your answer. "
-                    "This block is collapsed by default in the UI.\n"
+                system_prompt += _build_workspace_context_block(
+                    workspace_name=ws.name,
+                    workspace_id=str(session.workspace_id),
+                    file_paths=file_paths,
                 )
 
         # ── Load active policy for tool gating + output redaction ──
@@ -2721,7 +2774,11 @@ async def run_chat_turn(
                         tenant_id=tenant_id,
                         session_id=session.id,
                         role="assistant",
-                        content=_coerce_assistant_content(final_text, _persisted_output),
+                        content=_coerce_assistant_content(
+                            final_text,
+                            _persisted_output,
+                            tool_calls=coord_result_tool_calls,
+                        ),
                         tool_calls=coord_result_tool_calls if coord_result_tool_calls else None,
                         citations=citations if citations else None,
                         token_count=coord_result_tokens[0] + coord_result_tokens[1],
@@ -3163,7 +3220,11 @@ async def run_chat_turn(
             tenant_id=tenant_id,
             session_id=session.id,
             role="assistant",
-            content=_coerce_assistant_content(final_text, last_structured_output),
+            content=_coerce_assistant_content(
+                final_text,
+                last_structured_output,
+                tool_calls=tool_calls_log,
+            ),
             tool_calls=tool_calls_log if tool_calls_log else None,
             citations=citations if citations else None,
             token_count=total_input_tokens + total_output_tokens,
