@@ -443,6 +443,147 @@ class TestTimeoutEnforcement:
         assert "timed out" in stderr_artifact.content
 
 
+# --- TestStalePatchHandling -------------------------------------------------
+# Staging bug 2026-05-18: when the workspace file drifts after a patch is
+# proposed, the runner's snapshot materializer raises ValueError("Patch
+# baseline hash mismatch...") which the outer except clause categorises as
+# INTERNAL_ERROR. Users running `validate` or `unit-tests` against a stale
+# changeset see a useless "Execution error: Patch baseline hash mismatch"
+# message with no idea what to do about it.
+#
+# Pin the contract:
+#   - `_load_workspace_snapshot` raises `StalePatchError` (a ValueError
+#     subclass for backward compat) on baseline drift. The exception carries
+#     `file_path`, `expected_sha`, `actual_sha`.
+#   - `execute_run` catches StalePatchError specifically and persists
+#     error_category="STALE_PATCH" with an actionable error_message.
+
+
+class TestStalePatchHandling:
+    @pytest.mark.asyncio
+    async def test_apply_changeset_overlay_raises_stale_patch_error_on_drift(self, db, tenant, user, workspace):
+        """Drift the file content after creating a patch — _apply_changeset_overlay
+        must raise StalePatchError (not bare ValueError) so callers can branch
+        on a specific category."""
+        from app.services import workspace_service as ws_svc
+        from app.services.runner_service import (
+            StalePatchError,
+            _apply_changeset_overlay,
+            _load_workspace_snapshot,
+        )
+
+        # Seed file, propose patch against live content
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr("src/foo.js", "old1\nold2\nold3\n")
+        await ws_svc.import_workspace(db, workspace.id, tenant.id, buf.getvalue())
+
+        propose = await ws_svc.propose_patch(
+            db,
+            workspace.id,
+            tenant.id,
+            "src/foo.js",
+            "--- a/src/foo.js\n+++ b/src/foo.js\n@@ -1,3 +1,4 @@\n old1\n+inserted\n old2\n old3\n",
+            "Insert one line",
+            user.id,
+        )
+        cs_id = uuid.UUID(propose["changeset_id"])
+        await ws_svc.transition_changeset(db, cs_id, tenant.id, "submit", user.id)
+        await ws_svc.transition_changeset(db, cs_id, tenant.id, "approve", user.id)
+
+        # Drift the file
+        from app.models.workspace import WorkspaceFile
+
+        wf = (
+            await db.execute(
+                select(WorkspaceFile).where(
+                    WorkspaceFile.workspace_id == workspace.id,
+                    WorkspaceFile.path == "src/foo.js",
+                    WorkspaceFile.tenant_id == tenant.id,
+                )
+            )
+        ).scalar_one()
+        wf.content = "DRIFTED-1\nDRIFTED-2\nDRIFTED-3\n"
+        wf.sha256_hash = hashlib.sha256(wf.content.encode("utf-8")).hexdigest()
+        await db.flush()
+
+        run = await runner_service.create_run(
+            db, tenant.id, workspace.id, "suitecloud_validate", user.id, changeset_id=cs_id
+        )
+        await db.flush()
+
+        files = await _load_workspace_snapshot(db, run)
+        with pytest.raises(StalePatchError) as exc_info:
+            await _apply_changeset_overlay(db, run, files)
+        # Backward compat — StalePatchError IS-A ValueError
+        assert isinstance(exc_info.value, ValueError)
+        # Diagnostics carried on the exception
+        assert exc_info.value.file_path == "src/foo.js"
+        assert exc_info.value.expected_sha is not None
+        assert exc_info.value.actual_sha is not None
+        assert exc_info.value.expected_sha != exc_info.value.actual_sha
+
+    @pytest.mark.asyncio
+    async def test_execute_run_categorises_stale_patch_with_actionable_message(self, db, tenant, user, workspace):
+        """When the runner hits drift, it must persist error_category=
+        STALE_PATCH and a user-readable error_message that explains the fix —
+        not the generic INTERNAL_ERROR users currently see."""
+        from app.services import workspace_service as ws_svc
+
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr("src/bar.js", "alpha\nbeta\ngamma\n")
+        await ws_svc.import_workspace(db, workspace.id, tenant.id, buf.getvalue())
+
+        propose = await ws_svc.propose_patch(
+            db,
+            workspace.id,
+            tenant.id,
+            "src/bar.js",
+            "--- a/src/bar.js\n+++ b/src/bar.js\n@@ -1,3 +1,4 @@\n alpha\n+inserted\n beta\n gamma\n",
+            "Insert one",
+            user.id,
+        )
+        cs_id = uuid.UUID(propose["changeset_id"])
+        await ws_svc.transition_changeset(db, cs_id, tenant.id, "submit", user.id)
+        await ws_svc.transition_changeset(db, cs_id, tenant.id, "approve", user.id)
+
+        from app.models.workspace import WorkspaceFile
+
+        wf = (
+            await db.execute(
+                select(WorkspaceFile).where(
+                    WorkspaceFile.workspace_id == workspace.id,
+                    WorkspaceFile.path == "src/bar.js",
+                    WorkspaceFile.tenant_id == tenant.id,
+                )
+            )
+        ).scalar_one()
+        wf.content = "ZZZ-1\nZZZ-2\nZZZ-3\n"
+        wf.sha256_hash = hashlib.sha256(wf.content.encode("utf-8")).hexdigest()
+        await db.flush()
+
+        run = await runner_service.create_run(
+            db, tenant.id, workspace.id, "jest_unit_test", user.id, changeset_id=cs_id
+        )
+        await db.flush()
+
+        result = await runner_service.execute_run(db, run.id, tenant.id)
+        assert result.status == "error"
+
+        artifacts = await runner_service.get_artifacts(db, run.id, tenant.id)
+        result_json = next((a for a in artifacts if a.artifact_type == "result_json"), None)
+        assert result_json is not None
+        payload = json.loads(result_json.content)
+        assert payload["error_category"] == "STALE_PATCH"
+        # Message must be actionable, not the technical hash-mismatch sentence
+        msg = payload["error_message"]
+        assert "src/bar.js" in msg
+        assert "re-create" in msg.lower() or "stale" in msg.lower(), (
+            f"error_message must guide the user to re-create the patch; got: {msg!r}"
+        )
+
+
 # --- TestMcpTools ---
 
 

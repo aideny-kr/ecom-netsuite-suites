@@ -979,7 +979,23 @@ export default function WorkspacePage() {
                               <Badge variant="outline" className="text-[9px] px-1 py-0">
                                 {file.operation}
                               </Badge>
+                              {file.diff_status === "stale" && (
+                                <Badge
+                                  variant="outline"
+                                  className="text-[9px] px-1 py-0 border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-400"
+                                  data-testid="diff-stale-badge"
+                                >
+                                  stale
+                                </Badge>
+                              )}
                             </div>
+                            {file.diff_status === "stale" && (
+                              <div className="px-4 py-2 text-[11px] text-amber-700 dark:text-amber-400 bg-amber-500/5 border-b">
+                                <strong>File has changed since this patch was created.</strong>{" "}
+                                Showing the patch&rsquo;s expected before/after context.
+                                Re-create the patch from the current file before applying.
+                              </div>
+                            )}
                             <div style={{ height: "400px" }}>
                               <DiffViewer
                                 original={file.original_content}

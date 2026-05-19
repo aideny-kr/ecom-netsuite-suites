@@ -485,6 +485,13 @@ export interface DiffViewResponse {
     operation: string;
     original_content: string;
     modified_content: string;
+    // unified_diff + diff_status surfaced for stale-drift handling. When the
+    // live file no longer matches the patch's baseline, the side-by-side
+    // viewer can't reconstruct cleanly — the frontend falls back to a stale
+    // banner + the patch's own context lines.
+    unified_diff?: string;
+    diff_status?: "clean" | "stale" | "error";
+    baseline_drift?: boolean;
   }>;
 }
 

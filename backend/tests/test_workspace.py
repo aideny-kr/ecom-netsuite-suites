@@ -428,6 +428,106 @@ async def test_get_changeset_diff_not_found(db, tenant):
     assert diff is None
 
 
+# --- Stale-diff drift handling -----------------------------------------------
+# Staging bug 2026-05-18: the workspace IDE's side-by-side diff for an
+# approved changeset rendered identical content in both panes, hiding the
+# actual changes. Root cause: the patch's baseline_sha256 no longer matches
+# the file's current content (drift), so whatthepatch.apply_diff fails. The
+# old service code caught the error and silently set `modified = original`,
+# so the viewer saw two identical strings and rendered no highlights.
+#
+# Contract the fix locks in:
+#   - get_changeset_diff returns a per-file `diff_status` of
+#     "clean" | "stale" | "error" instead of swallowing the failure.
+#   - It echoes the `unified_diff` text on each file so the frontend can
+#     fall back to a +/- list rendering when reconstruction fails.
+#   - When apply fails, original != modified — the response must not present
+#     two identical panes as if there's no change.
+
+
+@pytest.mark.asyncio
+async def test_get_changeset_diff_clean_when_baseline_matches(db, tenant, user, workspace):
+    # Seed a file via import
+    zip_bytes = _make_zip({"src/foo.js": "line1\nline2\nline3\n"})
+    await ws_svc.import_workspace(db, workspace.id, tenant.id, zip_bytes)
+
+    unified = "--- a/src/foo.js\n+++ b/src/foo.js\n@@ -1,3 +1,4 @@\n line1\n+inserted\n line2\n line3\n"
+    proposal = await ws_svc.propose_patch(
+        db=db,
+        workspace_id=workspace.id,
+        tenant_id=tenant.id,
+        file_path="src/foo.js",
+        unified_diff=unified,
+        title="Insert one line",
+        proposed_by=user.id,
+    )
+    cs_id = uuid.UUID(proposal["changeset_id"])
+
+    diff = await ws_svc.get_changeset_diff(db, cs_id, tenant.id)
+    assert diff is not None
+    file_entry = diff["files"][0]
+    assert file_entry["diff_status"] == "clean"
+    assert file_entry["unified_diff"] == unified
+    assert file_entry["original_content"] != file_entry["modified_content"]
+    assert "inserted" in file_entry["modified_content"]
+    assert "inserted" not in file_entry["original_content"]
+    assert file_entry.get("baseline_drift") is False
+
+
+@pytest.mark.asyncio
+async def test_get_changeset_diff_marks_stale_on_drift(db, tenant, user, workspace):
+    """The exact bug we saw on staging — file content drifted away from the
+    patch's baseline. The viewer must NOT show identical panes."""
+    zip_bytes = _make_zip({"src/bar.js": "original-line1\noriginal-line2\noriginal-line3\n"})
+    await ws_svc.import_workspace(db, workspace.id, tenant.id, zip_bytes)
+
+    unified = (
+        "--- a/src/bar.js\n+++ b/src/bar.js\n"
+        "@@ -1,3 +1,4 @@\n original-line1\n+brand-new\n original-line2\n original-line3\n"
+    )
+    proposal = await ws_svc.propose_patch(
+        db=db,
+        workspace_id=workspace.id,
+        tenant_id=tenant.id,
+        file_path="src/bar.js",
+        unified_diff=unified,
+        title="Insert into bar",
+        proposed_by=user.id,
+    )
+    cs_id = uuid.UUID(proposal["changeset_id"])
+
+    # Drift the file out from under the patch — context lines change
+    from sqlalchemy import select
+
+    from app.models.workspace import WorkspaceFile
+
+    file_row = (
+        await db.execute(
+            select(WorkspaceFile).where(
+                WorkspaceFile.workspace_id == workspace.id,
+                WorkspaceFile.path == "src/bar.js",
+                WorkspaceFile.tenant_id == tenant.id,
+            )
+        )
+    ).scalar_one()
+    file_row.content = "DRIFTED-line1\nDRIFTED-line2\nDRIFTED-line3\n"
+    await db.flush()
+
+    diff = await ws_svc.get_changeset_diff(db, cs_id, tenant.id)
+    assert diff is not None
+    file_entry = diff["files"][0]
+
+    # Stale — drift detected
+    assert file_entry["diff_status"] == "stale"
+    assert file_entry.get("baseline_drift") is True
+    # MUST surface the patch content for fallback rendering on the frontend
+    assert file_entry["unified_diff"] == unified
+    # MUST NOT pretend the diff is empty by sending identical panes
+    assert file_entry["original_content"] != file_entry["modified_content"], (
+        "Stale diff must not collapse to identical panes — this is the regression."
+    )
+
+
 # --- Idempotency ---
 
 
