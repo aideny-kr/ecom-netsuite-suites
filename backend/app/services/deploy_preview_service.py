@@ -27,6 +27,56 @@ from app.models.workspace import (
     WorkspacePatch,
 )
 from app.services import workspace_service as ws_svc
+from app.services.deploy_service import check_deploy_prerequisites
+from app.services.runner_service import _validate_sandbox_target
+
+
+# ---------------------------------------------------------------------------
+# Exceptions
+# ---------------------------------------------------------------------------
+
+
+class DeployPreviewError(Exception):
+    """Base class for deploy-preview rejection signals.
+
+    Subclasses map 1:1 to HTTP status codes in the API layer:
+      ChangesetNotFoundError   → 404
+      ChangesetNotApprovedError → 400
+      DeployGateNotMetError    → 400
+      InvalidSandboxTargetError → 400
+    """
+
+
+class ChangesetNotFoundError(DeployPreviewError):
+    """Requested changeset does not exist for this tenant/workspace."""
+
+
+class ChangesetNotApprovedError(DeployPreviewError):
+    """Changeset.status is not 'approved' — operator must approve first."""
+
+    def __init__(self, status: str) -> None:
+        super().__init__(f"Changeset must be approved (current: {status})")
+        self.status = status
+
+
+class DeployGateNotMetError(DeployPreviewError):
+    """check_deploy_prerequisites returned allowed=False — validate, tests, or
+    assertions are missing or failing. The wrapped ``blocked_reason`` mirrors
+    the existing endpoint's 400 response body so callers see consistent
+    diagnostics across the legacy and the gated endpoints.
+    """
+
+    def __init__(self, blocked_reason: str, gates: dict[str, Any]) -> None:
+        super().__init__(blocked_reason)
+        self.blocked_reason = blocked_reason
+        self.gates = gates
+
+
+class InvalidSandboxTargetError(DeployPreviewError):
+    """sandbox_id failed the runner_service pattern check (prod-shaped or
+    not sandbox-shaped). Reuses the runner's allowlist so preview and run
+    agree on which targets are deployable.
+    """
 
 
 def _sha256(content: str) -> str:
@@ -158,4 +208,85 @@ async def compute_deploy_manifest(
         "manifest": manifest,
         "snapshot_sha": snapshot_sha,
         "manifest_sha": manifest_sha,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Preview builder — entry point used by the HTTP preview endpoint and the
+# (future) MCP preview tool. Validates everything that can fail BEFORE any
+# token row is written or HMAC is computed, so rejection paths stay cheap
+# and audit-clean.
+# ---------------------------------------------------------------------------
+
+
+async def build_deploy_preview(
+    *,
+    db: AsyncSession,
+    changeset_id: uuid.UUID,
+    sandbox_id: str,
+    require_assertions: bool,
+    tenant_id: uuid.UUID,
+    actor_id: uuid.UUID,
+) -> dict[str, Any]:
+    """Validate prerequisites and compute the deploy preview payload.
+
+    Raises one of the ``DeployPreviewError`` subclasses on rejection. On the
+    happy path, returns the manifest + snapshot/manifest hashes ready for
+    the caller to mint a token (the token-issuing step lives in a follow-up
+    step gated on the ``workspace_deploy_tokens`` migration).
+    """
+    # 1. Load changeset, scoped to tenant + workspace via JOIN-free filter.
+    cs_result = await db.execute(
+        select(WorkspaceChangeSet).where(
+            WorkspaceChangeSet.id == changeset_id,
+            WorkspaceChangeSet.tenant_id == tenant_id,
+        )
+    )
+    changeset = cs_result.scalar_one_or_none()
+    if changeset is None:
+        raise ChangesetNotFoundError(f"Changeset {changeset_id} not found")
+    if changeset.status != "approved":
+        raise ChangesetNotApprovedError(changeset.status)
+
+    # 2. Sandbox-target shape check — fails fast on production-pattern strings.
+    try:
+        _validate_sandbox_target(sandbox_id)
+    except ValueError as e:
+        raise InvalidSandboxTargetError(str(e)) from e
+
+    # 3. Gate check — validate + tests must be passing; assertions may be
+    # required for sensitive deploys. Snapshot binding (codex P1 #6) happens
+    # below once we compute snapshot_sha, when we re-call this with the hash.
+    gate_result = await check_deploy_prerequisites(
+        db,
+        changeset_id,
+        tenant_id,
+        require_assertions=require_assertions,
+    )
+    if not gate_result["allowed"]:
+        raise DeployGateNotMetError(
+            gate_result.get("blocked_reason") or "Deploy gate failed",
+            gate_result.get("gates", {}),
+        )
+
+    # 4. Compute manifest + hashes. This is the operator-visible
+    # preview content and the cryptographic anchor for the token.
+    manifest_payload = await compute_deploy_manifest(
+        db=db,
+        changeset_id=changeset_id,
+        tenant_id=tenant_id,
+        workspace_id=changeset.workspace_id,
+    )
+
+    return {
+        "changeset_id": str(changeset_id),
+        "workspace_id": str(changeset.workspace_id),
+        "tenant_id": str(tenant_id),
+        "sandbox_id": sandbox_id,
+        "require_assertions": require_assertions,
+        "actor_id": str(actor_id),
+        "manifest": manifest_payload["manifest"],
+        "snapshot_sha": manifest_payload["snapshot_sha"],
+        "manifest_sha": manifest_payload["manifest_sha"],
+        "gates": gate_result.get("gates", {}),
     }

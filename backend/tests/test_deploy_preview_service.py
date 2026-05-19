@@ -19,6 +19,7 @@ import hashlib
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.workspace import (
@@ -26,6 +27,7 @@ from app.models.workspace import (
     WorkspaceChangeSet,
     WorkspaceFile,
     WorkspacePatch,
+    WorkspaceRun,
 )
 
 
@@ -273,3 +275,149 @@ class TestManifestShaDistinguishesOrder:
             "Different apply_order must yield different manifest_sha so the "
             "operator-reviewed manifest is cryptographically distinguishable"
         )
+
+
+# ---------------------------------------------------------------------------
+# Tests 3-5: build_deploy_preview rejection paths
+# ---------------------------------------------------------------------------
+
+
+@pytest_asyncio.fixture
+async def deploy_ready_changeset(db: AsyncSession, tenant_a, admin_user):
+    """An approved changeset baseline. The rejection-path tests perturb this
+    along exactly one axis:
+
+      - test 3 flips status to "pending_review"
+      - test 4 leaves gate runs missing (the default state for a fresh
+        changeset, which is itself a gate failure path)
+      - test 5 supplies a production-shaped sandbox_id
+
+    Test 4 deliberately omits creating ``WorkspaceRun`` rows with the
+    sub-project C columns (validator_engine, gate_status, snapshot_hash)
+    because the dev Supabase DB is currently mid-migration on those columns
+    and we don't want to depend on schema state we don't own.
+    """
+    user, _ = admin_user
+    ws = Workspace(
+        tenant_id=tenant_a.id,
+        name="Preview WS",
+        created_by=user.id,
+        status="active",
+    )
+    db.add(ws)
+    await db.flush()
+
+    db.add(
+        WorkspaceFile(
+            tenant_id=tenant_a.id,
+            workspace_id=ws.id,
+            path="SuiteScripts/x.js",
+            file_name="x.js",
+            content="console.log('x');",
+            sha256_hash=_sha256("console.log('x');"),
+            size_bytes=20,
+            is_directory=False,
+        )
+    )
+    cs = WorkspaceChangeSet(
+        tenant_id=tenant_a.id,
+        workspace_id=ws.id,
+        title="Preview cs",
+        status="approved",
+        proposed_by=user.id,
+    )
+    db.add(cs)
+    await db.flush()
+    return ws, cs, user
+
+
+class TestBuildDeployPreviewRejection:
+    """Tests 3-5 in spec: build_deploy_preview rejects bad input before
+    minting any token. Each test perturbs a deploy-ready changeset along
+    exactly one axis to isolate the rejection trigger."""
+
+    @pytest.mark.asyncio
+    async def test_3_rejects_unapproved_changeset(
+        self, db: AsyncSession, deploy_ready_changeset, tenant_a, admin_user
+    ):
+        """Test 3: changeset.status != 'approved' → ChangesetNotApprovedError."""
+        from app.services.deploy_preview_service import (
+            ChangesetNotApprovedError,
+            build_deploy_preview,
+        )
+
+        ws, cs, user = deploy_ready_changeset
+        cs.status = "pending_review"
+        await db.flush()
+
+        with pytest.raises(ChangesetNotApprovedError):
+            await build_deploy_preview(
+                db=db,
+                changeset_id=cs.id,
+                sandbox_id="6738075-sb1",
+                require_assertions=False,
+                tenant_id=tenant_a.id,
+                actor_id=user.id,
+            )
+
+    @pytest.mark.asyncio
+    async def test_4_rejects_when_gates_fail(
+        self, db: AsyncSession, deploy_ready_changeset, tenant_a, admin_user
+    ):
+        """Test 4: validate / test runs missing → DeployGateNotMetError.
+
+        A fresh approved changeset with no validate or jest_unit_test
+        ``WorkspaceRun`` rows fails the gate. This is the natural state
+        deploy guards must catch (someone approves a changeset without
+        running the gates).
+
+        Codex P1 #6 — the snapshot-pinned gate check applies on the happy
+        path; here we just verify the rejection fires before any token is
+        minted.
+        """
+        from app.services.deploy_preview_service import (
+            DeployGateNotMetError,
+            build_deploy_preview,
+        )
+
+        ws, cs, user = deploy_ready_changeset
+        # Fixture creates no validate/test runs → gates are missing → gate
+        # check returns allowed=False.
+
+        with pytest.raises(DeployGateNotMetError):
+            await build_deploy_preview(
+                db=db,
+                changeset_id=cs.id,
+                sandbox_id="6738075-sb1",
+                require_assertions=False,
+                tenant_id=tenant_a.id,
+                actor_id=user.id,
+            )
+
+    @pytest.mark.asyncio
+    async def test_5_rejects_production_pattern_sandbox(
+        self, db: AsyncSession, deploy_ready_changeset, tenant_a, admin_user
+    ):
+        """Test 5: production-shaped sandbox_id → InvalidSandboxTargetError.
+
+        Reuses runner_service._validate_sandbox_target which hard-blocks
+        production patterns and requires sandbox markers (sb*, sandbox*,
+        TSTDRV*).
+        """
+        from app.services.deploy_preview_service import (
+            InvalidSandboxTargetError,
+            build_deploy_preview,
+        )
+
+        ws, cs, user = deploy_ready_changeset
+
+        for bad_target in ("6738075-prod", "6738075", "6738075-live", "production-1"):
+            with pytest.raises(InvalidSandboxTargetError):
+                await build_deploy_preview(
+                    db=db,
+                    changeset_id=cs.id,
+                    sandbox_id=bad_target,
+                    require_assertions=False,
+                    tenant_id=tenant_a.id,
+                    actor_id=user.id,
+                )
