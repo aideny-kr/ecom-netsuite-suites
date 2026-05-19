@@ -15,6 +15,8 @@ from app.models.user import User
 from app.schemas.workspace import (
     ChangeSetCreate,
     ChangeSetTransition,
+    DeployConfirmRequest,
+    DeployPreviewRequest,
     DeploySandboxRequest,
     SuiteQLAssertionsRequest,
     WorkspaceCreate,
@@ -628,83 +630,187 @@ async def trigger_suiteql_assertions(
     return _serialize_run(run)
 
 
-@changeset_router.post("/{changeset_id}/deploy-sandbox", status_code=status.HTTP_202_ACCEPTED)
-async def trigger_deploy_sandbox(
+@changeset_router.post("/{changeset_id}/deploy-sandbox")
+async def trigger_deploy_sandbox_deprecated(
     changeset_id: uuid.UUID,
     body: DeploySandboxRequest,
     user: User = Depends(require_permission("workspace.manage")),
     db: AsyncSession = Depends(get_db),
 ):
-    """Trigger sandbox deploy. Requires approved changeset + validate pass + unit tests pass."""
-    from app.services.deploy_service import check_deploy_prerequisites
+    """Legacy one-click deploy — replaced by two-step preview→confirm flow.
 
-    cs = await ws_svc.get_changeset(db, changeset_id, user.tenant_id)
-    if not cs:
-        raise HTTPException(status_code=404, detail="Changeset not found")
-    if cs.status != "approved":
-        raise HTTPException(
-            status_code=400,
-            detail=f"Changeset must be approved before deploy (current: {cs.status})",
-        )
-
-    # Check deploy prerequisites
-    gate_result = await check_deploy_prerequisites(
-        db,
-        changeset_id,
-        user.tenant_id,
-        require_assertions=body.require_assertions,
-        override_reason=body.override_reason,
+    Returns 410 Gone with pointers to the new endpoints. Closes codex
+    P1 #2 once paired with the MCP tool change (workspace_tools.py).
+    """
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail={
+            "code": "deploy_one_click_deprecated",
+            "message": (
+                "POST /deploy-sandbox is gone. Use POST /deploy-sandbox/preview "
+                "to mint a preview token, then POST /deploy-sandbox/confirm "
+                "with the token to queue the run."
+            ),
+            "preview_endpoint": f"/api/v1/changesets/{changeset_id}/deploy-sandbox/preview",
+            "confirm_endpoint": f"/api/v1/changesets/{changeset_id}/deploy-sandbox/confirm",
+        },
     )
 
-    if not gate_result["allowed"]:
-        raise HTTPException(status_code=400, detail=gate_result["blocked_reason"])
 
-    # If override applied, audit it
-    if gate_result["override"]["applied"]:
-        await audit_service.log_event(
-            db=db,
-            tenant_id=user.tenant_id,
-            category="workspace",
-            action="deploy.gate_override",
-            actor_id=user.id,
-            resource_type="changeset",
-            resource_id=str(changeset_id),
-            payload={
-                "override_reason": body.override_reason,
-                "sandbox_id": body.sandbox_id,
-                "gates": gate_result["gates"],
+def _exception_to_http(e: Exception) -> HTTPException:
+    """Map deploy_preview_service exceptions to HTTP responses.
+
+    Kept here so the service stays HTTP-agnostic (called by MCP too).
+    """
+    from app.services.deploy_preview_service import (
+        ChangesetNotApprovedError,
+        ChangesetNotFoundError,
+        CrossUserReplayError,
+        DeployGateNotMetError,
+        DeployInFlightError,
+        InvalidSandboxTargetError,
+        SnapshotDriftError,
+        TokenConsumedError,
+        TokenExpiredError,
+        TokenInvalidError,
+        TokenNotFoundError,
+    )
+
+    if isinstance(e, ChangesetNotFoundError) or isinstance(e, TokenNotFoundError):
+        return HTTPException(status_code=404, detail=str(e))
+    if isinstance(e, ChangesetNotApprovedError):
+        return HTTPException(status_code=400, detail=str(e))
+    if isinstance(e, DeployGateNotMetError):
+        return HTTPException(status_code=400, detail=str(e))
+    if isinstance(e, InvalidSandboxTargetError):
+        return HTTPException(status_code=400, detail=str(e))
+    if isinstance(e, DeployInFlightError):
+        return HTTPException(
+            status_code=409,
+            detail={
+                "code": "deploy_in_flight",
+                "message": str(e),
+                "existing_jti": str(e.existing_jti),
             },
         )
+    if isinstance(e, SnapshotDriftError):
+        return HTTPException(
+            status_code=409,
+            detail={"code": "snapshot_drift", "field": e.drift_field, "message": str(e)},
+        )
+    if isinstance(e, TokenConsumedError) or isinstance(e, TokenExpiredError):
+        return HTTPException(status_code=410, detail=str(e))
+    if isinstance(e, TokenInvalidError):
+        return HTTPException(status_code=422, detail=str(e))
+    if isinstance(e, CrossUserReplayError):
+        return HTTPException(status_code=403, detail=str(e))
+    raise e
+
+
+@changeset_router.post(
+    "/{changeset_id}/deploy-sandbox/preview",
+    status_code=status.HTTP_200_OK,
+)
+async def deploy_sandbox_preview(
+    changeset_id: uuid.UUID,
+    body: "DeployPreviewRequest",
+    user: User = Depends(require_permission("workspace.manage")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Compute a deploy preview and mint a one-shot HMAC token.
+
+    The operator reviews the manifest + gates + sandbox target, then POSTs
+    to /deploy-sandbox/confirm with the returned token to queue the run.
+    The token is good for 10 minutes and consumed on first use.
+    """
+    from app.services.deploy_preview_service import (
+        DeployPreviewError,
+        build_deploy_preview,
+        mint_deploy_token,
+    )
+
+    try:
+        preview = await build_deploy_preview(
+            db=db,
+            changeset_id=changeset_id,
+            sandbox_id=body.sandbox_id,
+            require_assertions=body.require_assertions,
+            tenant_id=user.tenant_id,
+            actor_id=user.id,
+        )
+        minted = await mint_deploy_token(db=db, preview=preview)
+    except DeployPreviewError as e:
+        raise _exception_to_http(e) from e
+
+    await db.commit()
+
+    return {
+        **preview,
+        **minted,
+    }
+
+
+@changeset_router.post(
+    "/{changeset_id}/deploy-sandbox/confirm",
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def deploy_sandbox_confirm(
+    changeset_id: uuid.UUID,
+    body: "DeployConfirmRequest",
+    user: User = Depends(require_permission("workspace.manage")),
+    db: AsyncSession = Depends(get_db),
+):
+    """Verify a deploy-preview token, queue the run, mark the token consumed.
+
+    Re-checks all gates and re-computes snapshot+manifest hashes at confirm
+    time so files mutated between preview and confirm are rejected with 409.
+    The worker re-verifies snapshot_sha before invoking suitecloud
+    project:deploy (codex P1 #7 belt-and-suspenders).
+    """
+    from app.services.deploy_preview_service import (
+        DeployPreviewError,
+        verify_and_consume_deploy_token,
+    )
+
+    try:
+        jti = uuid.UUID(body.jti)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail="Invalid jti") from e
+
+    try:
+        result = await verify_and_consume_deploy_token(
+            db=db,
+            jti=jti,
+            confirmation_token=body.confirmation_token,
+            actor_id=user.id,
+            tenant_id=user.tenant_id,
+        )
+    except DeployPreviewError as e:
+        # The service has already updated audit + (where relevant) token
+        # state via the same db session. Roll back is not what we want
+        # here because the expired-token consume needs to land. Just
+        # commit and translate.
+        await db.commit()
+        raise _exception_to_http(e) from e
+
+    token_row = result["row"]
+    changeset = result["changeset"]
 
     try:
         run = await runner_service.create_run(
             db,
             tenant_id=user.tenant_id,
-            workspace_id=cs.workspace_id,
+            workspace_id=changeset.workspace_id,
             run_type="deploy_sandbox",
             triggered_by=user.id,
-            changeset_id=changeset_id,
+            changeset_id=changeset.id,
         )
     except runner_service.CommandNotAllowedError as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
-    await audit_service.log_event(
-        db=db,
-        tenant_id=user.tenant_id,
-        category="workspace",
-        action="workspace.run.triggered",
-        actor_id=user.id,
-        resource_type="workspace_run",
-        resource_id=str(run.id),
-        correlation_id=run.correlation_id,
-        payload={
-            "run_type": "deploy_sandbox",
-            "changeset_id": str(changeset_id),
-            "sandbox_id": body.sandbox_id,
-            "gates": gate_result["gates"],
-            "override": gate_result["override"],
-        },
-    )
+    # Link the consumed token to the run for traceability.
+    token_row.consumed_run_id = run.id
+    await db.flush()
     await db.commit()
 
     from app.workers.tasks.workspace_run import workspace_run_task
@@ -713,7 +819,10 @@ async def trigger_deploy_sandbox(
         tenant_id=str(user.tenant_id),
         run_id=str(run.id),
         correlation_id=run.correlation_id,
-        extra_params={"sandbox_id": body.sandbox_id},
+        extra_params={
+            "sandbox_id": token_row.sandbox_id,
+            "expected_snapshot_sha": token_row.snapshot_sha,
+        },
     )
 
     return _serialize_run(run)

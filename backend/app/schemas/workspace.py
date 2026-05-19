@@ -241,6 +241,31 @@ class DeploySandboxRequest(BaseModel):
         return value
 
 
+# --- Deploy preview / confirm (two-step gated API) ---
+
+
+class DeployPreviewRequest(BaseModel):
+    """Request body for POST /workspaces/changesets/{cs}/deploy-sandbox/preview."""
+
+    sandbox_id: str = Field(
+        ...,
+        description="Target NetSuite sandbox account identifier (e.g. 6738075-sb1)",
+        min_length=2,
+        max_length=128,
+    )
+    require_assertions: bool = Field(
+        False,
+        description="Whether SuiteQL assertions must pass before deploy",
+    )
+
+
+class DeployConfirmRequest(BaseModel):
+    """Request body for POST /workspaces/changesets/{cs}/deploy-sandbox/confirm."""
+
+    jti: str = Field(..., min_length=36, max_length=36)
+    confirmation_token: str = Field(..., min_length=64, max_length=64)
+
+
 # --- UAT Report ---
 
 
