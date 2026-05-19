@@ -89,20 +89,22 @@ export function DeployConfirmationCard({
         <div className="flex flex-wrap gap-x-4 gap-y-1">
           <span>
             validate:{" "}
-            <span className={GATE_STYLES[preview.gates.validate] ?? ""}>
-              {preview.gates.validate}
+            <span className={GATE_STYLES[preview.gates.validate.status] ?? ""}>
+              {preview.gates.validate.status}
             </span>
           </span>
           <span>
             tests:{" "}
-            <span className={GATE_STYLES[preview.gates.unit_tests] ?? ""}>
-              {preview.gates.unit_tests}
+            <span className={GATE_STYLES[preview.gates.unit_tests.status] ?? ""}>
+              {preview.gates.unit_tests.status}
             </span>
           </span>
           <span>
             assertions:{" "}
-            <span className={GATE_STYLES[preview.gates.assertions] ?? ""}>
-              {preview.gates.assertions}
+            <span
+              className={GATE_STYLES[preview.gates.assertions.status] ?? ""}
+            >
+              {preview.gates.assertions.status}
             </span>
           </span>
         </div>

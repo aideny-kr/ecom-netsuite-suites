@@ -644,13 +644,20 @@ export interface DeployManifestEntry {
   apply_order: number;
 }
 
+export interface DeployGate {
+  status: string;
+  run_id?: string | null;
+  fresh?: boolean;
+  skipped?: boolean;
+}
+
 export interface DeployPreview {
   jti: string;
   manifest: DeployManifestEntry[];
   gates: {
-    validate: string;
-    unit_tests: string;
-    assertions: string;
+    validate: DeployGate;
+    unit_tests: DeployGate;
+    assertions: DeployGate;
   };
   sandbox_id: string;
   snapshot_sha: string;

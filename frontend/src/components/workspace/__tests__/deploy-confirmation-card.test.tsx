@@ -14,7 +14,11 @@ const basePreview: DeployPreview = {
   issued_at: "2026-05-19T01:00:00Z",
   expires_at: "2026-05-19T01:10:00Z",
   confirmation_token: "c".repeat(64),
-  gates: { validate: "passed", unit_tests: "passed", assertions: "not_required" },
+  gates: {
+    validate: { status: "passed" },
+    unit_tests: { status: "passed" },
+    assertions: { status: "not_required", skipped: true },
+  },
   manifest: [
     { path: "Objects/customscript_a.xml", operation: "create", content_sha: "1".repeat(64), apply_order: 1 },
     { path: "SuiteScripts/edit.js", operation: "modify", content_sha: "2".repeat(64), apply_order: 2 },
