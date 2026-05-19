@@ -89,8 +89,15 @@ def test_run_chat_turn_assistant_persistence_sites_use_content_coercion():
 
     source = inspect.getsource(orchestrator.run_chat_turn)
 
-    assert source.count("_coerce_assistant_content(final_text, _persisted_output)") == 1
-    assert source.count("_coerce_assistant_content(final_text, last_structured_output)") == 1
+    # Both call sites must pass final_text + structured_output to the helper.
+    # tool_calls is also threaded in so the empty-text fallback can distinguish
+    # "didn't try" (no tools) from "tool spiral" (tools ran but no final text).
+    # Match the call shape without pinning to a specific line break.
+    normalized = " ".join(source.split())
+    assert (
+        "_coerce_assistant_content( final_text, _persisted_output, tool_calls=coord_result_tool_calls, )" in normalized
+    )
+    assert "_coerce_assistant_content( final_text, last_structured_output, tool_calls=tool_calls_log, )" in normalized
 
 
 def test_run_chat_turn_streaming_paths_suppress_pricing_text_after_task_output():
