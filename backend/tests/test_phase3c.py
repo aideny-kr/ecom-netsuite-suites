@@ -623,12 +623,18 @@ class TestMcpToolRegistration:
     def test_deploy_governance_config(self):
         from app.mcp.governance import TOOL_CONFIGS
 
+        # workspace.deploy_sandbox is now the preview-only tool (no
+        # override_reason; the legacy override path lived on the old
+        # one-click endpoint that's now 410). Confirm step is a
+        # separate tool — see test_workspace_tools_deploy.py.
         config = TOOL_CONFIGS["workspace.deploy_sandbox"]
         assert config["rate_limit_per_minute"] == 2
         assert config["requires_entitlement"] == "workspace"
         assert "changeset_id" in config["allowlisted_params"]
         assert "sandbox_id" in config["allowlisted_params"]
-        assert "override_reason" in config["allowlisted_params"]
+        assert "require_assertions" in config["allowlisted_params"]
+        # Confirm tool is registered alongside.
+        assert "workspace.deploy_sandbox_confirm" in TOOL_CONFIGS
 
 
 class TestTenantIsolation:

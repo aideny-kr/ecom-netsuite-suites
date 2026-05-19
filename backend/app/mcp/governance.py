@@ -197,7 +197,15 @@ TOOL_CONFIGS = {
         "timeout_seconds": 600,
         "rate_limit_per_minute": 2,
         "requires_entitlement": "workspace",
-        "allowlisted_params": ["changeset_id", "sandbox_id", "override_reason", "require_assertions"],
+        "allowlisted_params": ["changeset_id", "sandbox_id", "require_assertions"],
+    },
+    "workspace.deploy_sandbox_confirm": {
+        "default_limit": None,
+        "max_limit": None,
+        "timeout_seconds": 60,
+        "rate_limit_per_minute": 2,
+        "requires_entitlement": "workspace",
+        "allowlisted_params": ["jti", "confirmation_token"],
     },
     "bigquery.sql": {
         "default_limit": 1000,
