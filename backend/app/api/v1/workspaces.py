@@ -669,6 +669,7 @@ def _exception_to_http(e: Exception) -> HTTPException:
         DeployGateNotMetError,
         DeployInFlightError,
         InvalidSandboxTargetError,
+        ManifestComputationError,
         SnapshotDriftError,
         TokenConsumedError,
         TokenExpiredError,
@@ -697,6 +698,11 @@ def _exception_to_http(e: Exception) -> HTTPException:
         return HTTPException(
             status_code=409,
             detail={"code": "snapshot_drift", "field": e.drift_field, "message": str(e)},
+        )
+    if isinstance(e, ManifestComputationError):
+        return HTTPException(
+            status_code=409,
+            detail={"code": "manifest_drift", "message": str(e)},
         )
     if isinstance(e, TokenConsumedError) or isinstance(e, TokenExpiredError):
         return HTTPException(status_code=410, detail=str(e))

@@ -785,6 +785,117 @@ class TestDriftAndReplay:
             await mint_deploy_token(db=db, preview=preview)
         assert str(exc_info.value.existing_jti) == first_minted["jti"]
 
+    @pytest.mark.asyncio
+    async def test_13b_expired_token_does_not_block_new_preview(
+        self, db: AsyncSession, fully_ready_changeset, tenant_a, admin_user
+    ):
+        """Codex P1 regression: an expired-but-unconsumed token must not
+        permanently block fresh previews. mint_deploy_token sweeps stale
+        rows (marks consumed_reason='expired') before the in-flight
+        check, freeing the unique slot."""
+        from app.services.deploy_preview_service import (
+            build_deploy_preview,
+            mint_deploy_token,
+        )
+
+        ws, cs, user = fully_ready_changeset
+        preview = await build_deploy_preview(
+            db=db,
+            changeset_id=cs.id,
+            sandbox_id="6738075-sb1",
+            require_assertions=False,
+            tenant_id=tenant_a.id,
+            actor_id=user.id,
+        )
+        first = await mint_deploy_token(db=db, preview=preview)
+
+        # Expire the first token without consuming it.
+        first_row = await db.execute(
+            select(WorkspaceDeployToken).where(
+                WorkspaceDeployToken.id == uuid.UUID(first["jti"])
+            )
+        )
+        row = first_row.scalar_one()
+        row.expires_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+        await db.flush()
+
+        # A fresh preview should now mint successfully — the sweep
+        # marks the expired row consumed_reason='expired'.
+        second = await mint_deploy_token(db=db, preview=preview)
+        assert second["jti"] != first["jti"]
+
+        # Verify the expired row was tombstoned, not deleted.
+        first_row = await db.execute(
+            select(WorkspaceDeployToken).where(
+                WorkspaceDeployToken.id == uuid.UUID(first["jti"])
+            )
+        )
+        row = first_row.scalar_one()
+        assert row.consumed_at is not None
+        assert row.consumed_reason == "expired"
+
+    @pytest.mark.asyncio
+    async def test_13c_manifest_baseline_mismatch_raises_typed_error(
+        self, db: AsyncSession, tenant_a, admin_user
+    ):
+        """Codex P2 regression: compute_deploy_manifest must raise
+        ManifestComputationError (a DeployPreviewError subclass), not a
+        bare ValueError, so the API layer can map drift to a 409 instead
+        of leaking a 500."""
+        from app.services.deploy_preview_service import (
+            ManifestComputationError,
+            compute_deploy_manifest,
+        )
+
+        user, _ = admin_user
+        ws = Workspace(
+            tenant_id=tenant_a.id,
+            name="Drift WS",
+            created_by=user.id,
+            status="active",
+        )
+        db.add(ws)
+        await db.flush()
+        db.add(
+            WorkspaceFile(
+                tenant_id=tenant_a.id,
+                workspace_id=ws.id,
+                path="SuiteScripts/drift.js",
+                file_name="drift.js",
+                content="// current content",
+                sha256_hash=_sha256("// current content"),
+                size_bytes=20,
+                is_directory=False,
+            )
+        )
+        cs = WorkspaceChangeSet(
+            tenant_id=tenant_a.id,
+            workspace_id=ws.id,
+            title="Drift cs",
+            status="approved",
+            proposed_by=user.id,
+        )
+        db.add(cs)
+        await db.flush()
+        # Patch claims to modify based on a baseline that no longer matches.
+        db.add(
+            WorkspacePatch(
+                tenant_id=tenant_a.id,
+                changeset_id=cs.id,
+                file_path="SuiteScripts/drift.js",
+                operation="modify",
+                new_content="// new content",
+                baseline_sha256=_sha256("// STALE baseline that doesn't match"),
+                apply_order=1,
+            )
+        )
+        await db.flush()
+
+        with pytest.raises(ManifestComputationError):
+            await compute_deploy_manifest(
+                db=db, changeset_id=cs.id, tenant_id=tenant_a.id, workspace_id=ws.id
+            )
+
 
 class TestAuditEvents:
     """Test 14: audit events emitted for preview_issued + confirmed."""

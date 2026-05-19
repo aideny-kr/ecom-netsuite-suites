@@ -135,6 +135,16 @@ class SnapshotDriftError(DeployPreviewError):
         self.drift_field = drift_field
 
 
+class ManifestComputationError(DeployPreviewError):
+    """compute_deploy_manifest hit an inconsistent workspace state — a
+    modify patch's baseline_sha256 disagrees with the file content, a
+    modify target was deleted out from under us, or a patch operation is
+    unrecognized. Treated as 409 by the API since these are concurrent-
+    mutation problems the operator must resolve by re-uploading the
+    changeset or re-syncing the workspace, not server bugs.
+    """
+
+
 class CrossUserReplayError(DeployPreviewError):
     """The user at confirm time differs from the actor_id pinned at
     preview time. Codex P1 #4 — without this check, any tenant user with
@@ -230,21 +240,37 @@ async def compute_deploy_manifest(
             ops[path] = "delete"
             continue
         if patch.operation != "modify":
-            raise ValueError(f"Unsupported patch operation: {patch.operation}")
+            raise ManifestComputationError(
+                f"Unsupported patch operation: {patch.operation}"
+            )
 
         if path not in files:
-            raise ValueError(f"Modify target missing from workspace snapshot: {path}")
+            raise ManifestComputationError(
+                f"Modify target missing from workspace snapshot: {path}"
+            )
 
         original_content = files[path]
         if patch.baseline_sha256 and _sha256(original_content) != patch.baseline_sha256:
-            raise ValueError(f"Patch baseline hash mismatch for {path}")
+            raise ManifestComputationError(
+                f"Patch baseline hash mismatch for {path}"
+            )
 
         if patch.unified_diff:
-            files[path] = ws_svc._apply_diff(original_content, patch.unified_diff)
+            try:
+                files[path] = ws_svc._apply_diff(original_content, patch.unified_diff)
+            except Exception as exc:
+                # whatthepatch.HunkApplyException etc. — the diff no longer
+                # applies to the current file content. Surface as a clean
+                # 409 rather than a 500.
+                raise ManifestComputationError(
+                    f"Unified diff failed to apply for {path}: {exc}"
+                ) from exc
         elif patch.new_content is not None:
             files[path] = patch.new_content
         else:
-            raise ValueError(f"Modify patch has no diff/content for {path}")
+            raise ManifestComputationError(
+                f"Modify patch has no diff/content for {path}"
+            )
         ops[path] = "modify"
 
     # snapshot_sha — final on-disk tree (post-patch).
@@ -418,6 +444,26 @@ async def mint_deploy_token(
     # In-flight check — partial unique index would catch this at flush
     # time, but raising up-front lets us return the existing jti so the
     # UI re-renders the live preview instead of starting fresh.
+    # First sweep expired-but-unconsumed rows so they release the unique
+    # slot. Postgres can't put now() in an index predicate, so TTL
+    # enforcement has to happen here, app-side. Without this an
+    # abandoned/expired preview would permanently block deploys on the
+    # changeset (codex P1, observed during dev: deletes were needed
+    # between failed UI attempts).
+    now = datetime.now(timezone.utc)
+    expired_rows = await db.execute(
+        select(WorkspaceDeployToken).where(
+            WorkspaceDeployToken.tenant_id == uuid.UUID(preview["tenant_id"]),
+            WorkspaceDeployToken.changeset_id == uuid.UUID(preview["changeset_id"]),
+            WorkspaceDeployToken.consumed_at.is_(None),
+            WorkspaceDeployToken.expires_at < now,
+        )
+    )
+    for stale in expired_rows.scalars().all():
+        stale.consumed_at = now
+        stale.consumed_reason = "expired"
+    await db.flush()
+
     inflight = await db.execute(
         select(WorkspaceDeployToken).where(
             WorkspaceDeployToken.tenant_id == uuid.UUID(preview["tenant_id"]),

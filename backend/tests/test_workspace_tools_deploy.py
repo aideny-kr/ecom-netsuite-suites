@@ -238,6 +238,21 @@ class TestMcpDeployConfirm:
         assert "error" in confirm_result
 
 
+class TestMcpAuditRedaction:
+    """Codex P2 regression: confirmation_token must NOT land in
+    audit_events.payload. Token fingerprint (sha256(token)[:16]) is the
+    only token-derived value safe to persist.
+    """
+
+    def test_governance_redacts_confirmation_token(self):
+        from app.mcp.governance import _SENSITIVE_KEYS, redact_result
+
+        assert "confirmation_token" in _SENSITIVE_KEYS
+        redacted = redact_result({"confirmation_token": "abc" * 32, "jti": "x"})
+        assert redacted["confirmation_token"] == "***REDACTED***"
+        assert redacted["jti"] == "x"
+
+
 class TestMcpRegistryAndGovernance:
     """Test 24: tool registry + governance carry both preview + confirm."""
 
