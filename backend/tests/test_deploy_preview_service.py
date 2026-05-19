@@ -16,6 +16,8 @@ Test plan (28 backend + frontend tests):
 from __future__ import annotations
 
 import hashlib
+import uuid
+from datetime import datetime, timedelta, timezone
 
 import pytest
 import pytest_asyncio
@@ -25,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.workspace import (
     Workspace,
     WorkspaceChangeSet,
+    WorkspaceDeployToken,
     WorkspaceFile,
     WorkspacePatch,
     WorkspaceRun,
@@ -421,3 +424,231 @@ class TestBuildDeployPreviewRejection:
                     tenant_id=tenant_a.id,
                     actor_id=user.id,
                 )
+
+
+# ---------------------------------------------------------------------------
+# Tests 6-13: token mint + verify_and_consume happy path and rejections
+# ---------------------------------------------------------------------------
+
+
+@pytest_asyncio.fixture
+async def fully_ready_changeset(db: AsyncSession, tenant_a, admin_user):
+    """An approved changeset with passing validate + jest runs so the
+    deploy gate accepts the changeset. Provides a deploy-eligible
+    baseline for the mint/verify tests."""
+    user, _ = admin_user
+    ws = Workspace(
+        tenant_id=tenant_a.id,
+        name="Token tests WS",
+        created_by=user.id,
+        status="active",
+    )
+    db.add(ws)
+    await db.flush()
+
+    db.add(
+        WorkspaceFile(
+            tenant_id=tenant_a.id,
+            workspace_id=ws.id,
+            path="SuiteScripts/baseline.js",
+            file_name="baseline.js",
+            content="console.log('baseline');",
+            sha256_hash=_sha256("console.log('baseline');"),
+            size_bytes=25,
+            is_directory=False,
+        )
+    )
+    cs = WorkspaceChangeSet(
+        tenant_id=tenant_a.id,
+        workspace_id=ws.id,
+        title="Token tests cs",
+        status="approved",
+        proposed_by=user.id,
+    )
+    db.add(cs)
+    await db.flush()
+
+    # Validate + jest must be "passed" for the gate.
+    db.add(
+        WorkspaceRun(
+            tenant_id=tenant_a.id,
+            workspace_id=ws.id,
+            changeset_id=cs.id,
+            run_type="suitecloud_validate",
+            status="passed",
+            triggered_by=user.id,
+            has_errors=False,
+            gate_status="pass",
+        )
+    )
+    db.add(
+        WorkspaceRun(
+            tenant_id=tenant_a.id,
+            workspace_id=ws.id,
+            changeset_id=cs.id,
+            run_type="jest_unit_test",
+            status="passed",
+            triggered_by=user.id,
+        )
+    )
+    await db.flush()
+    return ws, cs, user
+
+
+async def _mint_for(db, ws, cs, user, tenant_id, sandbox_id="6738075-sb1", ttl=600):
+    """Helper: run build_deploy_preview + mint_deploy_token. Returns the
+    minted token dict + the preview body."""
+    from app.services.deploy_preview_service import (
+        build_deploy_preview,
+        mint_deploy_token,
+    )
+
+    preview = await build_deploy_preview(
+        db=db,
+        changeset_id=cs.id,
+        sandbox_id=sandbox_id,
+        require_assertions=False,
+        tenant_id=tenant_id,
+        actor_id=user.id,
+    )
+    minted = await mint_deploy_token(db=db, preview=preview, ttl_seconds=ttl)
+    return preview, minted
+
+
+class TestMintAndConsume:
+    """Tests 6-9 in spec: mint + verify_and_consume happy path and the
+    three core rejection paths (expired, already consumed, forged HMAC).
+    """
+
+    @pytest.mark.asyncio
+    async def test_6_happy_path(
+        self, db: AsyncSession, fully_ready_changeset, tenant_a, admin_user
+    ):
+        """Test 6: mint produces a token row; verify_and_consume marks it
+        consumed and returns the row + gates so the caller can queue the run."""
+        from app.services.deploy_preview_service import verify_and_consume_deploy_token
+
+        ws, cs, user = fully_ready_changeset
+        preview, minted = await _mint_for(db, ws, cs, user, tenant_a.id)
+
+        assert "confirmation_token" in minted
+        assert "jti" in minted
+        assert len(minted["confirmation_token"]) == 64  # sha256 hex
+
+        result = await verify_and_consume_deploy_token(
+            db=db,
+            jti=uuid.UUID(minted["jti"]),
+            confirmation_token=minted["confirmation_token"],
+            actor_id=user.id,
+            tenant_id=tenant_a.id,
+        )
+        assert result["snapshot_sha"] == preview["snapshot_sha"]
+        assert result["manifest_sha"] == preview["manifest_sha"]
+
+        # Token row now marked consumed.
+        token_row = await db.execute(
+            select(WorkspaceDeployToken).where(WorkspaceDeployToken.id == uuid.UUID(minted["jti"]))
+        )
+        row = token_row.scalar_one()
+        assert row.consumed_at is not None
+        assert row.consumed_reason == "confirmed"
+
+    @pytest.mark.asyncio
+    async def test_7_expired_token(
+        self, db: AsyncSession, fully_ready_changeset, tenant_a, admin_user
+    ):
+        """Test 7: token with expires_at in the past → TokenExpiredError +
+        row marked consumed_reason="expired" so the partial-unique slot
+        is freed for a fresh preview."""
+        from app.services.deploy_preview_service import (
+            TokenExpiredError,
+            verify_and_consume_deploy_token,
+        )
+
+        ws, cs, user = fully_ready_changeset
+        _, minted = await _mint_for(db, ws, cs, user, tenant_a.id)
+
+        # Force the token expired by rewinding expires_at.
+        jti = uuid.UUID(minted["jti"])
+        row_result = await db.execute(
+            select(WorkspaceDeployToken).where(WorkspaceDeployToken.id == jti)
+        )
+        row = row_result.scalar_one()
+        row.expires_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+        await db.flush()
+
+        with pytest.raises(TokenExpiredError):
+            await verify_and_consume_deploy_token(
+                db=db,
+                jti=jti,
+                confirmation_token=minted["confirmation_token"],
+                actor_id=user.id,
+                tenant_id=tenant_a.id,
+            )
+
+        # The row was marked consumed (reason=expired) to free the unique slot.
+        row_after = await db.execute(
+            select(WorkspaceDeployToken).where(WorkspaceDeployToken.id == jti)
+        )
+        after = row_after.scalar_one()
+        assert after.consumed_at is not None
+        assert after.consumed_reason == "expired"
+
+    @pytest.mark.asyncio
+    async def test_8_already_consumed_token(
+        self, db: AsyncSession, fully_ready_changeset, tenant_a, admin_user
+    ):
+        """Test 8: consuming an already-consumed token → TokenConsumedError
+        on the second call. Defends against double-click race + naive replay."""
+        from app.services.deploy_preview_service import (
+            TokenConsumedError,
+            verify_and_consume_deploy_token,
+        )
+
+        ws, cs, user = fully_ready_changeset
+        _, minted = await _mint_for(db, ws, cs, user, tenant_a.id)
+
+        # First call consumes.
+        await verify_and_consume_deploy_token(
+            db=db,
+            jti=uuid.UUID(minted["jti"]),
+            confirmation_token=minted["confirmation_token"],
+            actor_id=user.id,
+            tenant_id=tenant_a.id,
+        )
+        # Second call rejects.
+        with pytest.raises(TokenConsumedError):
+            await verify_and_consume_deploy_token(
+                db=db,
+                jti=uuid.UUID(minted["jti"]),
+                confirmation_token=minted["confirmation_token"],
+                actor_id=user.id,
+                tenant_id=tenant_a.id,
+            )
+
+    @pytest.mark.asyncio
+    async def test_9_forged_hmac_token(
+        self, db: AsyncSession, fully_ready_changeset, tenant_a, admin_user
+    ):
+        """Test 9: a token string that wasn't HMAC-signed by the server →
+        TokenInvalidError. Defends against client-side forgery and any
+        attempt to change a bound field (sandbox_id, snapshot_sha) while
+        keeping a stale token."""
+        from app.services.deploy_preview_service import (
+            TokenInvalidError,
+            verify_and_consume_deploy_token,
+        )
+
+        ws, cs, user = fully_ready_changeset
+        _, minted = await _mint_for(db, ws, cs, user, tenant_a.id)
+
+        forged = "f" * 64  # plausibly-shaped but unsigned
+
+        with pytest.raises(TokenInvalidError):
+            await verify_and_consume_deploy_token(
+                db=db,
+                jti=uuid.UUID(minted["jti"]),
+                confirmation_token=forged,
+                actor_id=user.id,
+                tenant_id=tenant_a.id,
+            )
