@@ -63,6 +63,7 @@ export function DeployConfirmationCard({
     <div
       role="region"
       aria-label="Sandbox deploy confirmation"
+      data-testid="deploy-confirmation-card"
       className={cn(
         "rounded-xl border border-amber-400/60 bg-amber-500/[0.02] p-3 space-y-3",
       )}
@@ -136,6 +137,7 @@ export function DeployConfirmationCard({
           <button
             type="button"
             onClick={() => setExpanded(true)}
+            data-testid="deploy-show-more-files"
             className="mt-1 text-[11px] text-muted-foreground underline"
           >
             … show {hidden} more
@@ -156,6 +158,7 @@ export function DeployConfirmationCard({
           type="button"
           onClick={onConfirm}
           disabled={disabled}
+          data-testid="deploy-confirm-button"
           className={cn(
             "flex items-center gap-1.5 rounded-md px-3 py-1.5 text-[13px] font-medium transition-colors",
             "bg-emerald-600 text-white hover:bg-emerald-700",
@@ -169,6 +172,7 @@ export function DeployConfirmationCard({
           type="button"
           onClick={onCancel}
           disabled={disabled}
+          data-testid="deploy-cancel-button"
           className={cn(
             "flex items-center gap-1.5 rounded-md px-3 py-1.5 text-[13px] font-medium transition-colors",
             "border border-border bg-background hover:bg-muted text-muted-foreground",
