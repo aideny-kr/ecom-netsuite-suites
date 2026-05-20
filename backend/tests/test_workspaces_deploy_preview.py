@@ -186,10 +186,7 @@ class TestDeployConfirmEndpoint:
             # runner can re-verify before invoking suitecloud project:deploy.
             assert fake_task.delay.called
             call_kwargs = fake_task.delay.call_args.kwargs
-            assert (
-                call_kwargs["extra_params"]["expected_snapshot_sha"]
-                == preview["snapshot_sha"]
-            )
+            assert call_kwargs["extra_params"]["expected_snapshot_sha"] == preview["snapshot_sha"]
             assert call_kwargs["extra_params"]["sandbox_id"] == "6738075-sb1"
 
         # Test 17 — token row consumed + consumed_run_id linked.
@@ -200,9 +197,7 @@ class TestDeployConfirmEndpoint:
         run_id = confirm_resp.json()["id"]
 
         token_row = await db.execute(
-            select(WorkspaceDeployToken).where(
-                WorkspaceDeployToken.id == __import__("uuid").UUID(preview["jti"])
-            )
+            select(WorkspaceDeployToken).where(WorkspaceDeployToken.id == __import__("uuid").UUID(preview["jti"]))
         )
         # The dep-overridden db session in the test client is the same as
         # `db` here, so the consumed_at/consumed_run_id updates are visible.
@@ -215,9 +210,7 @@ class TestLegacyEndpointGone:
     """Test 18: old one-click endpoint returns 410 Gone."""
 
     @pytest.mark.asyncio
-    async def test_18_old_endpoint_returns_410(
-        self, client: AsyncClient, deploy_eligible_changeset, tenant_a
-    ):
+    async def test_18_old_endpoint_returns_410(self, client: AsyncClient, deploy_eligible_changeset, tenant_a):
         ws, cs, user = deploy_eligible_changeset
 
         response = await client.post(

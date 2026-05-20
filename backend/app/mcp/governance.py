@@ -344,9 +344,7 @@ def create_audit_payload(
         effective_error = result.get("message", "Tool returned an error")
     return {
         "tool_name": tool_name,
-        "params": {
-            k: v for k, v in params.items() if k not in _SENSITIVE_KEYS
-        },
+        "params": {k: v for k, v in params.items() if k not in _SENSITIVE_KEYS},
         "result_summary": {
             "status": "error" if effective_error else "success",
             "error": effective_error,

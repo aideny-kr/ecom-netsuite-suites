@@ -28,7 +28,8 @@ from app.models.workspace import (
     WorkspaceFile,
     WorkspacePatch,
 )
-from app.services import audit_service, workspace_service as ws_svc
+from app.services import audit_service
+from app.services import workspace_service as ws_svc
 from app.services.chat.mutation_guard import (
     generate_confirmation_token,
     verify_confirmation_token,
@@ -42,6 +43,7 @@ def _token_fingerprint(token: str) -> str:
     logs and error responses never carry raw HMAC bits.
     """
     return hashlib.sha256(token.encode("utf-8")).hexdigest()[:16]
+
 
 # Token TTL — operators have 10 minutes after preview to confirm. Codex
 # noted the choice was "open" in the spec; 10 min balances slow human
@@ -240,20 +242,14 @@ async def compute_deploy_manifest(
             ops[path] = "delete"
             continue
         if patch.operation != "modify":
-            raise ManifestComputationError(
-                f"Unsupported patch operation: {patch.operation}"
-            )
+            raise ManifestComputationError(f"Unsupported patch operation: {patch.operation}")
 
         if path not in files:
-            raise ManifestComputationError(
-                f"Modify target missing from workspace snapshot: {path}"
-            )
+            raise ManifestComputationError(f"Modify target missing from workspace snapshot: {path}")
 
         original_content = files[path]
         if patch.baseline_sha256 and _sha256(original_content) != patch.baseline_sha256:
-            raise ManifestComputationError(
-                f"Patch baseline hash mismatch for {path}"
-            )
+            raise ManifestComputationError(f"Patch baseline hash mismatch for {path}")
 
         if patch.unified_diff:
             try:
@@ -262,15 +258,11 @@ async def compute_deploy_manifest(
                 # whatthepatch.HunkApplyException etc. — the diff no longer
                 # applies to the current file content. Surface as a clean
                 # 409 rather than a 500.
-                raise ManifestComputationError(
-                    f"Unified diff failed to apply for {path}: {exc}"
-                ) from exc
+                raise ManifestComputationError(f"Unified diff failed to apply for {path}: {exc}") from exc
         elif patch.new_content is not None:
             files[path] = patch.new_content
         else:
-            raise ManifestComputationError(
-                f"Modify patch has no diff/content for {path}"
-            )
+            raise ManifestComputationError(f"Modify patch has no diff/content for {path}")
         ops[path] = "modify"
 
     # snapshot_sha — final on-disk tree (post-patch).
@@ -401,10 +393,19 @@ async def build_deploy_preview(
 # ---------------------------------------------------------------------------
 
 
-def _canonical_payload(*, jti: str, tenant_id: str, workspace_id: str,
-                       changeset_id: str, sandbox_id: str, snapshot_sha: str,
-                       manifest_sha: str, require_assertions: bool,
-                       actor_id: str, issued_at: str) -> str:
+def _canonical_payload(
+    *,
+    jti: str,
+    tenant_id: str,
+    workspace_id: str,
+    changeset_id: str,
+    sandbox_id: str,
+    snapshot_sha: str,
+    manifest_sha: str,
+    require_assertions: bool,
+    actor_id: str,
+    issued_at: str,
+) -> str:
     """Canonical JSON used as HMAC body. ``sort_keys=True`` +
     ``separators=(",", ":")`` matches write_confirmation_service so the
     discipline is consistent across both gates.
@@ -584,9 +585,7 @@ async def verify_and_consume_deploy_token(
         raise TokenNotFoundError(f"Token {jti} not found")
 
     if row.consumed_at is not None:
-        raise TokenConsumedError(
-            f"Token {jti} already consumed at {row.consumed_at.isoformat()}"
-        )
+        raise TokenConsumedError(f"Token {jti} already consumed at {row.consumed_at.isoformat()}")
 
     now = datetime.now(timezone.utc)
     if row.expires_at < now:
@@ -594,9 +593,7 @@ async def verify_and_consume_deploy_token(
         row.consumed_at = now
         row.consumed_reason = "expired"
         await db.flush()
-        raise TokenExpiredError(
-            f"Token {jti} expired at {row.expires_at.isoformat()}"
-        )
+        raise TokenExpiredError(f"Token {jti} expired at {row.expires_at.isoformat()}")
 
     payload_json = _canonical_payload(
         jti=str(row.id),
@@ -621,9 +618,7 @@ async def verify_and_consume_deploy_token(
 
     # Codex P1 #4 — the user at confirm must match preview's actor.
     if row.actor_id != actor_id:
-        raise CrossUserReplayError(
-            f"Token issued to actor {row.actor_id} cannot be confirmed by {actor_id}"
-        )
+        raise CrossUserReplayError(f"Token issued to actor {row.actor_id} cannot be confirmed by {actor_id}")
 
     # Codex P1 #6 — re-run gate check with snapshot pinning AND confirm
     # state didn't flip between preview and confirm.

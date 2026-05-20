@@ -105,12 +105,8 @@ class TestComputeDeployManifest:
 
         ws, cs, _ = workspace_with_files
 
-        result_1 = await compute_deploy_manifest(
-            db=db, changeset_id=cs.id, tenant_id=tenant_a.id, workspace_id=ws.id
-        )
-        result_2 = await compute_deploy_manifest(
-            db=db, changeset_id=cs.id, tenant_id=tenant_a.id, workspace_id=ws.id
-        )
+        result_1 = await compute_deploy_manifest(db=db, changeset_id=cs.id, tenant_id=tenant_a.id, workspace_id=ws.id)
+        result_2 = await compute_deploy_manifest(db=db, changeset_id=cs.id, tenant_id=tenant_a.id, workspace_id=ws.id)
 
         # Manifest is sorted by path so order is stable.
         manifest_paths = [entry["path"] for entry in result_1["manifest"]]
@@ -126,9 +122,7 @@ class TestComputeDeployManifest:
         assert all(c in "0123456789abcdef" for c in result_1["snapshot_sha"])
 
     @pytest.mark.asyncio
-    async def test_stable_hashes_with_patches(
-        self, db: AsyncSession, workspace_with_files, tenant_a
-    ):
+    async def test_stable_hashes_with_patches(self, db: AsyncSession, workspace_with_files, tenant_a):
         """create + modify + delete patches → manifest reflects post-patch tree."""
         from app.services.deploy_preview_service import compute_deploy_manifest
 
@@ -160,9 +154,7 @@ class TestComputeDeployManifest:
         )
         await db.flush()
 
-        result = await compute_deploy_manifest(
-            db=db, changeset_id=cs.id, tenant_id=tenant_a.id, workspace_id=ws.id
-        )
+        result = await compute_deploy_manifest(db=db, changeset_id=cs.id, tenant_id=tenant_a.id, workspace_id=ws.id)
 
         # Manifest entries: 2 originals (one of which is "modify"-touched) + 1 new file.
         paths = {entry["path"] for entry in result["manifest"]}
@@ -197,9 +189,7 @@ class TestManifestShaDistinguishesOrder:
     """
 
     @pytest.mark.asyncio
-    async def test_same_final_tree_different_order_distinct_manifest_sha(
-        self, db: AsyncSession, tenant_a, admin_user
-    ):
+    async def test_same_final_tree_different_order_distinct_manifest_sha(self, db: AsyncSession, tenant_a, admin_user):
         """Two separate changesets land the same file content via different
         apply_order. snapshot_sha matches; manifest_sha differs."""
         from app.services.deploy_preview_service import compute_deploy_manifest
@@ -261,12 +251,8 @@ class TestManifestShaDistinguishesOrder:
             )
         await db.flush()
 
-        result_a = await compute_deploy_manifest(
-            db=db, changeset_id=cs_a.id, tenant_id=tenant_a.id, workspace_id=ws.id
-        )
-        result_b = await compute_deploy_manifest(
-            db=db, changeset_id=cs_b.id, tenant_id=tenant_a.id, workspace_id=ws.id
-        )
+        result_a = await compute_deploy_manifest(db=db, changeset_id=cs_a.id, tenant_id=tenant_a.id, workspace_id=ws.id)
+        result_b = await compute_deploy_manifest(db=db, changeset_id=cs_b.id, tenant_id=tenant_a.id, workspace_id=ws.id)
 
         # Same final tree → same snapshot_sha.
         assert result_a["snapshot_sha"] == result_b["snapshot_sha"], (
@@ -340,9 +326,7 @@ class TestBuildDeployPreviewRejection:
     exactly one axis to isolate the rejection trigger."""
 
     @pytest.mark.asyncio
-    async def test_3_rejects_unapproved_changeset(
-        self, db: AsyncSession, deploy_ready_changeset, tenant_a, admin_user
-    ):
+    async def test_3_rejects_unapproved_changeset(self, db: AsyncSession, deploy_ready_changeset, tenant_a, admin_user):
         """Test 3: changeset.status != 'approved' → ChangesetNotApprovedError."""
         from app.services.deploy_preview_service import (
             ChangesetNotApprovedError,
@@ -364,9 +348,7 @@ class TestBuildDeployPreviewRejection:
             )
 
     @pytest.mark.asyncio
-    async def test_4_rejects_when_gates_fail(
-        self, db: AsyncSession, deploy_ready_changeset, tenant_a, admin_user
-    ):
+    async def test_4_rejects_when_gates_fail(self, db: AsyncSession, deploy_ready_changeset, tenant_a, admin_user):
         """Test 4: validate / test runs missing → DeployGateNotMetError.
 
         A fresh approved changeset with no validate or jest_unit_test
@@ -521,9 +503,7 @@ class TestMintAndConsume:
     """
 
     @pytest.mark.asyncio
-    async def test_6_happy_path(
-        self, db: AsyncSession, fully_ready_changeset, tenant_a, admin_user
-    ):
+    async def test_6_happy_path(self, db: AsyncSession, fully_ready_changeset, tenant_a, admin_user):
         """Test 6: mint produces a token row; verify_and_consume marks it
         consumed and returns the row + gates so the caller can queue the run."""
         from app.services.deploy_preview_service import verify_and_consume_deploy_token
@@ -554,9 +534,7 @@ class TestMintAndConsume:
         assert row.consumed_reason == "confirmed"
 
     @pytest.mark.asyncio
-    async def test_7_expired_token(
-        self, db: AsyncSession, fully_ready_changeset, tenant_a, admin_user
-    ):
+    async def test_7_expired_token(self, db: AsyncSession, fully_ready_changeset, tenant_a, admin_user):
         """Test 7: token with expires_at in the past → TokenExpiredError +
         row marked consumed_reason="expired" so the partial-unique slot
         is freed for a fresh preview."""
@@ -570,9 +548,7 @@ class TestMintAndConsume:
 
         # Force the token expired by rewinding expires_at.
         jti = uuid.UUID(minted["jti"])
-        row_result = await db.execute(
-            select(WorkspaceDeployToken).where(WorkspaceDeployToken.id == jti)
-        )
+        row_result = await db.execute(select(WorkspaceDeployToken).where(WorkspaceDeployToken.id == jti))
         row = row_result.scalar_one()
         row.expires_at = datetime.now(timezone.utc) - timedelta(minutes=1)
         await db.flush()
@@ -587,17 +563,13 @@ class TestMintAndConsume:
             )
 
         # The row was marked consumed (reason=expired) to free the unique slot.
-        row_after = await db.execute(
-            select(WorkspaceDeployToken).where(WorkspaceDeployToken.id == jti)
-        )
+        row_after = await db.execute(select(WorkspaceDeployToken).where(WorkspaceDeployToken.id == jti))
         after = row_after.scalar_one()
         assert after.consumed_at is not None
         assert after.consumed_reason == "expired"
 
     @pytest.mark.asyncio
-    async def test_8_already_consumed_token(
-        self, db: AsyncSession, fully_ready_changeset, tenant_a, admin_user
-    ):
+    async def test_8_already_consumed_token(self, db: AsyncSession, fully_ready_changeset, tenant_a, admin_user):
         """Test 8: consuming an already-consumed token → TokenConsumedError
         on the second call. Defends against double-click race + naive replay."""
         from app.services.deploy_preview_service import (
@@ -627,9 +599,7 @@ class TestMintAndConsume:
             )
 
     @pytest.mark.asyncio
-    async def test_9_forged_hmac_token(
-        self, db: AsyncSession, fully_ready_changeset, tenant_a, admin_user
-    ):
+    async def test_9_forged_hmac_token(self, db: AsyncSession, fully_ready_changeset, tenant_a, admin_user):
         """Test 9: a token string that wasn't HMAC-signed by the server →
         TokenInvalidError. Defends against client-side forgery and any
         attempt to change a bound field (sandbox_id, snapshot_sha) while
@@ -728,9 +698,7 @@ class TestDriftAndReplay:
         assert exc_info.value.drift_field in ("snapshot_sha", "manifest_sha")
 
     @pytest.mark.asyncio
-    async def test_12_cross_user_replay_rejected(
-        self, db: AsyncSession, fully_ready_changeset, tenant_a, admin_user
-    ):
+    async def test_12_cross_user_replay_rejected(self, db: AsyncSession, fully_ready_changeset, tenant_a, admin_user):
         """Test 12: actor at confirm differs from actor at preview →
         CrossUserReplayError. Without this check, any tenant user with
         workspace.manage could replay another user's preview token.
@@ -811,9 +779,7 @@ class TestDriftAndReplay:
 
         # Expire the first token without consuming it.
         first_row = await db.execute(
-            select(WorkspaceDeployToken).where(
-                WorkspaceDeployToken.id == uuid.UUID(first["jti"])
-            )
+            select(WorkspaceDeployToken).where(WorkspaceDeployToken.id == uuid.UUID(first["jti"]))
         )
         row = first_row.scalar_one()
         row.expires_at = datetime.now(timezone.utc) - timedelta(minutes=1)
@@ -826,18 +792,14 @@ class TestDriftAndReplay:
 
         # Verify the expired row was tombstoned, not deleted.
         first_row = await db.execute(
-            select(WorkspaceDeployToken).where(
-                WorkspaceDeployToken.id == uuid.UUID(first["jti"])
-            )
+            select(WorkspaceDeployToken).where(WorkspaceDeployToken.id == uuid.UUID(first["jti"]))
         )
         row = first_row.scalar_one()
         assert row.consumed_at is not None
         assert row.consumed_reason == "expired"
 
     @pytest.mark.asyncio
-    async def test_13c_manifest_baseline_mismatch_raises_typed_error(
-        self, db: AsyncSession, tenant_a, admin_user
-    ):
+    async def test_13c_manifest_baseline_mismatch_raises_typed_error(self, db: AsyncSession, tenant_a, admin_user):
         """Codex P2 regression: compute_deploy_manifest must raise
         ManifestComputationError (a DeployPreviewError subclass), not a
         bare ValueError, so the API layer can map drift to a 409 instead
@@ -892,18 +854,14 @@ class TestDriftAndReplay:
         await db.flush()
 
         with pytest.raises(ManifestComputationError):
-            await compute_deploy_manifest(
-                db=db, changeset_id=cs.id, tenant_id=tenant_a.id, workspace_id=ws.id
-            )
+            await compute_deploy_manifest(db=db, changeset_id=cs.id, tenant_id=tenant_a.id, workspace_id=ws.id)
 
 
 class TestAuditEvents:
     """Test 14: audit events emitted for preview_issued + confirmed."""
 
     @pytest.mark.asyncio
-    async def test_14_audit_emitted_for_happy_path(
-        self, db: AsyncSession, fully_ready_changeset, tenant_a, admin_user
-    ):
+    async def test_14_audit_emitted_for_happy_path(self, db: AsyncSession, fully_ready_changeset, tenant_a, admin_user):
         """Mint emits workspace.deploy.preview_issued; consume emits
         workspace.deploy.confirmed. The 16-hex token_fingerprint on the
         confirmed event is sha256(token)[:16], not raw HMAC bits
@@ -927,9 +885,7 @@ class TestAuditEvents:
             select(AuditEvent)
             .where(
                 AuditEvent.tenant_id == tenant_a.id,
-                AuditEvent.action.in_(
-                    ["workspace.deploy.preview_issued", "workspace.deploy.confirmed"]
-                ),
+                AuditEvent.action.in_(["workspace.deploy.preview_issued", "workspace.deploy.confirmed"]),
             )
             .order_by(AuditEvent.timestamp)
         )

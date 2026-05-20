@@ -34,7 +34,6 @@ from app.models.workspace import (
     WorkspaceRun,
 )
 
-
 _FAKE_MOD_KEY = "app.workers.tasks.workspace_run"
 
 
@@ -157,18 +156,14 @@ class TestMcpDeployPreviewBypassClosed:
                 WorkspaceRun.run_type == "deploy_sandbox",
             )
         )
-        assert runs.scalar_one_or_none() is None, (
-            "MCP preview MUST NOT queue a deploy run — it only mints a token"
-        )
+        assert runs.scalar_one_or_none() is None, "MCP preview MUST NOT queue a deploy run — it only mints a token"
 
 
 class TestMcpDeployConfirm:
     """Tests 22 + 23: execute_deploy_sandbox_confirm tool."""
 
     @pytest.mark.asyncio
-    async def test_22_confirm_happy_path_queues_run(
-        self, db: AsyncSession, mcp_deploy_eligible, tenant_a
-    ):
+    async def test_22_confirm_happy_path_queues_run(self, db: AsyncSession, mcp_deploy_eligible, tenant_a):
         ws, cs, user = mcp_deploy_eligible
         ctx = _mcp_context(db, tenant_a.id, user.id)
 
@@ -193,27 +188,20 @@ class TestMcpDeployConfirm:
             assert "run_id" in confirm_result
             assert fake_task.delay.called
             call_kwargs = fake_task.delay.call_args.kwargs
-            assert (
-                call_kwargs["extra_params"]["expected_snapshot_sha"]
-                == preview["snapshot_sha"]
-            )
+            assert call_kwargs["extra_params"]["expected_snapshot_sha"] == preview["snapshot_sha"]
 
         # Token row marked consumed + linked to the run.
         import uuid as _uuid
 
         token_row = await db.execute(
-            select(WorkspaceDeployToken).where(
-                WorkspaceDeployToken.id == _uuid.UUID(preview["jti"])
-            )
+            select(WorkspaceDeployToken).where(WorkspaceDeployToken.id == _uuid.UUID(preview["jti"]))
         )
         row = token_row.scalar_one()
         assert row.consumed_at is not None
         assert str(row.consumed_run_id) == confirm_result["run_id"]
 
     @pytest.mark.asyncio
-    async def test_23_confirm_rejects_forged_token(
-        self, db: AsyncSession, mcp_deploy_eligible, tenant_a
-    ):
+    async def test_23_confirm_rejects_forged_token(self, db: AsyncSession, mcp_deploy_eligible, tenant_a):
         ws, cs, user = mcp_deploy_eligible
         ctx = _mcp_context(db, tenant_a.id, user.id)
 
@@ -266,9 +254,7 @@ class TestMcpRegistryAndGovernance:
 
         # Both require the workspace entitlement.
         for tool_name in ("workspace.deploy_sandbox", "workspace.deploy_sandbox_confirm"):
-            assert (
-                governance.TOOL_CONFIGS[tool_name]["requires_entitlement"] == "workspace"
-            )
+            assert governance.TOOL_CONFIGS[tool_name]["requires_entitlement"] == "workspace"
 
         # Confirm tool's allowlisted params are tightly scoped.
         confirm_gov = governance.TOOL_CONFIGS["workspace.deploy_sandbox_confirm"]

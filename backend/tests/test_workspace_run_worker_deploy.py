@@ -85,9 +85,7 @@ class TestWorkerSnapshotReverify:
     """Tests 19-20: deploy_sandbox worker re-verifies snapshot_sha."""
 
     @pytest.mark.asyncio
-    async def test_19_matching_snapshot_proceeds_to_subprocess(
-        self, db: AsyncSession, deploy_run_ready, tenant_a
-    ):
+    async def test_19_matching_snapshot_proceeds_to_subprocess(self, db: AsyncSession, deploy_run_ready, tenant_a):
         """When expected_snapshot_sha matches what the worker computes,
         the worker proceeds to invoke suitecloud project:deploy (here
         mocked). Run reaches "passed" with exit_code 0."""
@@ -128,9 +126,7 @@ class TestWorkerSnapshotReverify:
         assert result.exit_code == 0
 
     @pytest.mark.asyncio
-    async def test_20_drifted_snapshot_fails_without_subprocess(
-        self, db: AsyncSession, deploy_run_ready, tenant_a
-    ):
+    async def test_20_drifted_snapshot_fails_without_subprocess(self, db: AsyncSession, deploy_run_ready, tenant_a):
         """When expected_snapshot_sha disagrees with the worker's
         computation, the worker marks the run "error" and never invokes
         the subprocess. Audit event deploy.worker_snapshot_drift fires."""
@@ -163,9 +159,7 @@ class TestWorkerSnapshotReverify:
             )
 
         assert result.status == "error"
-        assert subprocess_called is False, (
-            "Drift should abort before suitecloud project:deploy runs"
-        )
+        assert subprocess_called is False, "Drift should abort before suitecloud project:deploy runs"
 
         # Audit event captures the drift reason.
         events = await db.execute(
