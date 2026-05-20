@@ -523,9 +523,13 @@ def _build_workspace_context_block(
     if len(file_paths) > 50:
         file_listing += f"\n... and {len(file_paths) - 50} more files"
 
+    # workspace_name comes from tenant-admin user input (POST /api/v1/workspaces)
+    # so strip control chars + cap length the same way file paths are handled.
+    # workspace_id is a UUID set by the server, no sanitization needed.
+    safe_name = _sanitize_for_prompt(workspace_name)
     return (
         f"\n\nWORKSPACE CONTEXT:\n"
-        f"Active workspace: '{workspace_name}' (ID: {workspace_id}).\n"
+        f"Active workspace: '{safe_name}' (ID: {workspace_id}).\n"
         f"Files in workspace:\n{file_listing}\n\n"
         f"Use workspace tools (workspace_list_files, workspace_read_file, "
         f"workspace_search, workspace_propose_patch) to browse and modify files. "
