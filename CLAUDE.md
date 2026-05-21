@@ -35,7 +35,7 @@
 - **White-Label Branding**: Per-tenant brand_name/color/logo in `tenant_configs`; `BrandingProvider` injects `--primary`.
 - **Feature Flags**: `tenant_feature_flags` table; `require_feature(flag_key)` returns 403 when disabled.
 - **Soul config**: file-based at `/tmp/workspace_storage/{tenant_id}/soul.md`. NEVER overwrite/seed without explicit user confirmation.
-- **react-resizable-panels v4**: Imports: `Panel`, `Group as PanelGroup`, `Separator as PanelResizeHandle`. Uses `orientation` prop (not `direction`). (Will move to frontend rules file.)
+- **react-resizable-panels v4**: Imports: `Panel`, `Group as PanelGroup`, `Separator as PanelResizeHandle`. Uses `orientation` prop (not `direction`).
 
 ## Key File Locations
 
@@ -85,4 +85,11 @@ Domain knowledge lives in `.claude/skills/`. Use the Skill tool to load when nee
 | `suitescript-engineer` | SuiteScript development, workspace, SDF, deploy pipeline |
 | `autonomous-improvement` | Nightly eval/experiment loop, scoring, pattern promotion |
 | `shopify-ops` | Shopify sync pipeline, order ingestion |
+| `netsuite-ai-connector-instructions` | Oracle NetSuite AI Connector setup, MCP integration record |
+| `netsuite-owasp-secure-coding` | SuiteScript secure coding (OWASP categories, server-side patterns) |
+| `netsuite-sdf-project-documentation` | SDF account-customization project structure and conventions |
+| `netsuite-sdf-roles-and-permissions` | NetSuite role + permission reference for SDF deploys |
+| `netsuite-suitescript-records-reference` | SuiteScript record API surface (fields, sublists, methods) |
+| `netsuite-suitescript-upgrade` | SuiteScript 2.0 → 2.1 migration guide |
+| `netsuite-uif-spa-reference` | NetSuite UIF / SPA framework reference |
 

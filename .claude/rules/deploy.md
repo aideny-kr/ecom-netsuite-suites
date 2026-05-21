@@ -15,5 +15,6 @@ paths:
 3. **`workflow_dispatch` doesn't update `:latest` on feature branches** — SHA tag gets built but `:latest` only tags on main. Manually retag on staging until automated.
 4. **Frontend deploy is manual** — CI only deploys backend. Run `./deploy-frontend.sh` from local after main merges that touch frontend.
 5. **JWT_SECRET_KEY differs per env** — tokens minted locally fail against staging. Mint via the target environment's backend.
+6. **Redis is required in production** — `token_denylist.py` and `rate_limit.py` are Redis-backed. The in-memory fallback only works in `APP_ENV=development`. Deploys without Redis will boot but silently drop denied tokens + skip rate limits.
 
 See `.claude/skills/saas-deployment/SKILL.md` for full deploy procedure.
