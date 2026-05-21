@@ -15,18 +15,20 @@ import {
   Rocket,
   FileCheck2,
 } from "lucide-react";
-import type { AssertionDefinition, ChangeSet } from "@/lib/types";
+import type { AssertionDefinition, ChangeSet, DeployPreview } from "@/lib/types";
 import {
   useTransitionChangeset,
   useApplyChangeset,
 } from "@/hooks/use-changesets";
 import {
+  useConfirmDeploy,
+  useDeployPreview,
   useTriggerAssertions,
-  useTriggerDeploySandbox,
   useTriggerUnitTests,
   useTriggerValidate,
   useUATReport,
 } from "@/hooks/use-runs";
+import { DeployConfirmationCard } from "./deploy-confirmation-card";
 
 interface ChangesetPanelProps {
   changesets: ChangeSet[];
@@ -66,7 +68,8 @@ export function ChangesetPanel({
   const triggerValidate = useTriggerValidate();
   const triggerTests = useTriggerUnitTests();
   const triggerAssertions = useTriggerAssertions();
-  const triggerDeploy = useTriggerDeploySandbox();
+  const deployPreviewMutation = useDeployPreview();
+  const confirmDeploy = useConfirmDeploy();
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [uatChangesetId, setUatChangesetId] = useState<string | null>(null);
   const [sandboxTargets, setSandboxTargets] = useState<Record<string, string>>(
@@ -76,6 +79,9 @@ export function ChangesetPanel({
     Record<string, string>
   >({});
   const [panelError, setPanelError] = useState<string | null>(null);
+  const [deployPreviews, setDeployPreviews] = useState<
+    Record<string, DeployPreview>
+  >({});
 
   const { data: uatReport, isLoading: isUatLoading } =
     useUATReport(uatChangesetId);
@@ -108,7 +114,53 @@ export function ChangesetPanel({
       setPanelError("Sandbox target is required (example: 6738075-sb1).");
       return;
     }
-    triggerDeploy.mutate({ changesetId, sandboxId });
+    deployPreviewMutation.mutate(
+      { changesetId, sandboxId },
+      {
+        onSuccess: (preview) => {
+          setDeployPreviews((prev) => ({ ...prev, [changesetId]: preview }));
+        },
+        onError: (err) => {
+          setPanelError(
+            err instanceof Error ? err.message : "Could not build deploy preview",
+          );
+        },
+      },
+    );
+  };
+
+  const confirmSandboxDeploy = (changesetId: string) => {
+    const preview = deployPreviews[changesetId];
+    if (!preview) return;
+    confirmDeploy.mutate(
+      {
+        changesetId,
+        jti: preview.jti,
+        confirmationToken: preview.confirmation_token,
+      },
+      {
+        onSuccess: () => {
+          setDeployPreviews((prev) => {
+            const next = { ...prev };
+            delete next[changesetId];
+            return next;
+          });
+        },
+        onError: (err) => {
+          setPanelError(
+            err instanceof Error ? err.message : "Deploy confirmation failed",
+          );
+        },
+      },
+    );
+  };
+
+  const cancelSandboxDeploy = (changesetId: string) => {
+    setDeployPreviews((prev) => {
+      const next = { ...prev };
+      delete next[changesetId];
+      return next;
+    });
   };
 
   if (changesets.length === 0) {
@@ -286,8 +338,11 @@ export function ChangesetPanel({
                         variant="outline"
                         className="h-7 text-[12px]"
                         onClick={() => triggerSandboxDeploy(cs.id)}
-                        disabled={triggerDeploy.isPending}
-                        title="Deploy to NetSuite sandbox (requires approved + validate + tests)"
+                        disabled={
+                          deployPreviewMutation.isPending ||
+                          Boolean(deployPreviews[cs.id])
+                        }
+                        title="Preview the sandbox deploy before running it"
                       >
                         <Rocket className="mr-1 h-3 w-3" />
                         Deploy Sandbox
@@ -353,6 +408,14 @@ export function ChangesetPanel({
                       </>
                     )}
                   </div>
+                )}
+                {deployPreviews[cs.id] && (
+                  <DeployConfirmationCard
+                    preview={deployPreviews[cs.id]}
+                    onConfirm={() => confirmSandboxDeploy(cs.id)}
+                    onCancel={() => cancelSandboxDeploy(cs.id)}
+                    disabled={confirmDeploy.isPending}
+                  />
                 )}
               </div>
             )}

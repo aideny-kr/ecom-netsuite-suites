@@ -209,11 +209,24 @@ async def execute_run_suiteql_assertions(params: dict[str, Any], context: dict[s
 
 
 async def execute_deploy_sandbox(params: dict[str, Any], context: dict[str, Any]) -> dict:
-    """Trigger gated sandbox deploy. Requires workspace.manage permission + prerequisites."""
+    """Build a deploy preview + mint an HMAC token. Does NOT queue the run.
+
+    Closes codex P1 #2 — the legacy MCP path queued deploys directly,
+    bypassing the workspace UI's two-step gate. Now the MCP tool returns
+    the same preview payload as the HTTP /preview endpoint, plus a
+    ``confirmation_required`` marker that the orchestrator's
+    ``_intercept_tool_result`` recognizes and surfaces as an SSE
+    ``confirmation_required`` event to the user. The agent waits for the
+    user to confirm via the workspace UI (or a chat confirmation card),
+    which calls ``workspace.deploy_sandbox_confirm`` to actually queue
+    the run.
+    """
     from app.core.dependencies import has_permission
-    from app.services import audit_service, runner_service
-    from app.services import workspace_service as ws_svc
-    from app.services.deploy_service import check_deploy_prerequisites
+    from app.services.deploy_preview_service import (
+        DeployPreviewError,
+        build_deploy_preview,
+        mint_deploy_token,
+    )
 
     db = context["db"]
     tenant_id = context["tenant_id"]
@@ -234,67 +247,85 @@ async def execute_deploy_sandbox(params: dict[str, Any], context: dict[str, Any]
     if not sandbox_id:
         return {"error": "sandbox_id is required", "row_count": 0}
 
-    cs = await ws_svc.get_changeset(db, changeset_id, uuid.UUID(tenant_id))
-    if cs is None:
-        return {"error": "Changeset not found", "row_count": 0}
-    if cs.status != "approved":
-        return {"error": f"Changeset must be approved (current: {cs.status})", "row_count": 0}
-
-    override_reason = params.get("override_reason")
     require_assertions = params.get("require_assertions", False)
 
-    gate_result = await check_deploy_prerequisites(
-        db,
-        changeset_id,
-        uuid.UUID(tenant_id),
-        require_assertions=require_assertions,
-        override_reason=override_reason,
+    try:
+        preview = await build_deploy_preview(
+            db=db,
+            changeset_id=changeset_id,
+            sandbox_id=sandbox_id,
+            require_assertions=require_assertions,
+            tenant_id=uuid.UUID(tenant_id),
+            actor_id=actor_uuid,
+        )
+        minted = await mint_deploy_token(db=db, preview=preview)
+    except DeployPreviewError as e:
+        return {"error": str(e), "row_count": 0}
+
+    await db.flush()
+
+    return {
+        "confirmation_required": True,
+        "confirmation_type": "sandbox_deploy",
+        "preview": {**preview, **minted},
+        "row_count": 0,
+    }
+
+
+async def execute_deploy_sandbox_confirm(params: dict[str, Any], context: dict[str, Any]) -> dict:
+    """Verify a deploy-preview token and queue the workspace_run.
+
+    Caller MUST have first received a ``confirmation_required`` payload
+    from ``execute_deploy_sandbox`` (or the HTTP /preview endpoint). The
+    user reviews + clicks Confirm in the workspace UI (or chat card),
+    which calls back into this tool with the jti + confirmation_token.
+    """
+    from app.core.dependencies import has_permission
+    from app.services import runner_service
+    from app.services.deploy_preview_service import (
+        DeployPreviewError,
+        verify_and_consume_deploy_token,
     )
 
-    if not gate_result["allowed"]:
-        return {"error": gate_result["blocked_reason"], "row_count": 0}
+    db = context["db"]
+    tenant_id = context["tenant_id"]
+    actor_id = context.get("actor_id")
+    actor_uuid = uuid.UUID(actor_id) if actor_id else None
+    if actor_uuid is None:
+        return {"error": "Actor ID required", "row_count": 0}
 
-    if gate_result["override"]["applied"]:
-        await audit_service.log_event(
+    allowed = await has_permission(db, actor_uuid, "workspace.manage")
+    if not allowed:
+        return {"error": "Permission denied: workspace.manage required", "row_count": 0}
+
+    jti_raw = params.get("jti")
+    token = params.get("confirmation_token")
+    if not jti_raw or not token:
+        return {"error": "jti and confirmation_token are required", "row_count": 0}
+
+    try:
+        result = await verify_and_consume_deploy_token(
             db=db,
-            tenant_id=uuid.UUID(tenant_id),
-            category="workspace",
-            action="deploy.gate_override",
+            jti=uuid.UUID(jti_raw),
+            confirmation_token=token,
             actor_id=actor_uuid,
-            resource_type="changeset",
-            resource_id=str(changeset_id),
-            payload={
-                "sandbox_id": sandbox_id,
-                "override_reason": override_reason,
-                "gates": gate_result["gates"],
-            },
+            tenant_id=uuid.UUID(tenant_id),
         )
+    except DeployPreviewError as e:
+        return {"error": str(e), "row_count": 0}
+
+    token_row = result["row"]
+    changeset = result["changeset"]
 
     run = await runner_service.create_run(
         db,
         tenant_id=uuid.UUID(tenant_id),
-        workspace_id=cs.workspace_id,
+        workspace_id=changeset.workspace_id,
         run_type="deploy_sandbox",
         triggered_by=actor_uuid,
-        changeset_id=changeset_id,
+        changeset_id=changeset.id,
     )
-    await audit_service.log_event(
-        db=db,
-        tenant_id=uuid.UUID(tenant_id),
-        category="workspace",
-        action="workspace.run.triggered",
-        actor_id=actor_uuid,
-        resource_type="workspace_run",
-        resource_id=str(run.id),
-        correlation_id=run.correlation_id,
-        payload={
-            "run_type": "deploy_sandbox",
-            "changeset_id": str(changeset_id),
-            "sandbox_id": sandbox_id,
-            "gates": gate_result["gates"],
-            "override": gate_result["override"],
-        },
-    )
+    token_row.consumed_run_id = run.id
     await db.flush()
 
     from app.workers.tasks.workspace_run import workspace_run_task
@@ -303,10 +334,17 @@ async def execute_deploy_sandbox(params: dict[str, Any], context: dict[str, Any]
         tenant_id=tenant_id,
         run_id=str(run.id),
         correlation_id=run.correlation_id,
-        extra_params={"sandbox_id": sandbox_id},
+        extra_params={
+            "sandbox_id": token_row.sandbox_id,
+            "expected_snapshot_sha": token_row.snapshot_sha,
+        },
     )
 
-    return {"run_id": str(run.id), "status": run.status, "gates": gate_result["gates"], "row_count": 1}
+    return {
+        "run_id": str(run.id),
+        "status": run.status,
+        "row_count": 1,
+    }
 
 
 async def execute_run_validate(params: dict[str, Any], context: dict[str, Any]) -> dict:

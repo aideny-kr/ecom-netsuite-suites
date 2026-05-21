@@ -197,7 +197,15 @@ TOOL_CONFIGS = {
         "timeout_seconds": 600,
         "rate_limit_per_minute": 2,
         "requires_entitlement": "workspace",
-        "allowlisted_params": ["changeset_id", "sandbox_id", "override_reason", "require_assertions"],
+        "allowlisted_params": ["changeset_id", "sandbox_id", "require_assertions"],
+    },
+    "workspace.deploy_sandbox_confirm": {
+        "default_limit": None,
+        "max_limit": None,
+        "timeout_seconds": 60,
+        "rate_limit_per_minute": 2,
+        "requires_entitlement": "workspace",
+        "allowlisted_params": ["jti", "confirmation_token"],
     },
     "bigquery.sql": {
         "default_limit": 1000,
@@ -294,9 +302,24 @@ def validate_params(tool_name: str, params: dict[str, Any], context_need: str | 
     return filtered
 
 
+_SENSITIVE_KEYS = frozenset(
+    {
+        "password",
+        "secret",
+        "token",
+        "api_key",
+        "credentials",
+        # Deploy preview/confirm token — codex P2: raw HMAC must not land
+        # in audit_events.payload. Token fingerprint is logged separately
+        # via the service layer (sha256(token)[:16], codex P3 #13).
+        "confirmation_token",
+    }
+)
+
+
 def redact_result(result: dict[str, Any]) -> dict[str, Any]:
     """Redact sensitive fields from tool results."""
-    sensitive_keys = {"password", "secret", "token", "api_key", "credentials"}
+    sensitive_keys = _SENSITIVE_KEYS
     redacted = {}
     for key, value in result.items():
         if key.lower() in sensitive_keys:
@@ -321,9 +344,7 @@ def create_audit_payload(
         effective_error = result.get("message", "Tool returned an error")
     return {
         "tool_name": tool_name,
-        "params": {
-            k: v for k, v in params.items() if k not in {"password", "secret", "token", "api_key", "credentials"}
-        },
+        "params": {k: v for k, v in params.items() if k not in _SENSITIVE_KEYS},
         "result_summary": {
             "status": "error" if effective_error else "success",
             "error": effective_error,

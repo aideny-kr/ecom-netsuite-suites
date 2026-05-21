@@ -515,7 +515,9 @@ class TestAPIEndpoints:
 
     @pytest.mark.asyncio
     async def test_deploy_endpoint_requires_approved(self, client, db, tenant_a, admin_user):
-        """Deploy endpoint should reject non-approved changeset."""
+        """Legacy one-click endpoint returns 410 Gone. Replaced by the
+        preview→confirm flow whose rejection semantics are covered in
+        test_workspaces_deploy_preview.py."""
         user, headers = admin_user
         ws = Workspace(tenant_id=tenant_a.id, name="W2", created_by=user.id, status="active")
         db.add(ws)
@@ -535,12 +537,11 @@ class TestAPIEndpoints:
             headers=headers,
             json={"sandbox_id": "6738075-sb1"},
         )
-        assert resp.status_code == 400
-        assert "approved" in resp.json()["detail"].lower()
+        assert resp.status_code == 410
 
     @pytest.mark.asyncio
     async def test_deploy_endpoint_blocked_without_prerequisites(self, client, ws_cs, admin_user):
-        """Deploy endpoint should 400 when prerequisites not met."""
+        """Legacy one-click endpoint returns 410 regardless of prerequisites."""
         _, headers = admin_user
         _, cs = ws_cs
         resp = await client.post(
@@ -548,8 +549,7 @@ class TestAPIEndpoints:
             headers=headers,
             json={"sandbox_id": "6738075-sb1"},
         )
-        assert resp.status_code == 400
-        assert "prerequisites" in resp.json()["detail"].lower()
+        assert resp.status_code == 410
 
     @pytest.mark.asyncio
     async def test_deploy_endpoint_requires_sandbox_id(self, client, ws_cs, admin_user):
@@ -585,36 +585,17 @@ class TestAPIEndpoints:
         assert data["status"] == "queued"
 
     @pytest.mark.asyncio
+    @pytest.mark.skip(
+        reason=(
+            "override_reason path lived on the legacy one-click endpoint, "
+            "which now returns 410. The preview→confirm flow does not "
+            "expose an override knob (spec out-of-scope). Tracked as a "
+            "follow-up if override is needed; for now the assertions gate "
+            "is mandatory when require_assertions=True."
+        )
+    )
     async def test_deploy_with_override_succeeds(self, client, db, ws_cs, admin_user):
-        """Deploy should succeed with override only when mandatory gates already pass."""
-        user, headers = admin_user
-        ws, cs = ws_cs
-        for rt in ("suitecloud_validate", "jest_unit_test"):
-            run = WorkspaceRun(
-                tenant_id=cs.tenant_id,
-                workspace_id=ws.id,
-                changeset_id=cs.id,
-                run_type=rt,
-                status="passed",
-                triggered_by=user.id,
-            )
-            db.add(run)
-        await db.flush()
-
-        with _mock_workspace_run_task():
-            resp = await client.post(
-                f"/api/v1/changesets/{cs.id}/deploy-sandbox",
-                headers=headers,
-                json={
-                    "sandbox_id": "6738075-sb1",
-                    "require_assertions": True,
-                    "override_reason": "Emergency hotfix",
-                },
-            )
-        assert resp.status_code == 202
-        data = resp.json()
-        assert data["run_type"] == "deploy_sandbox"
-        assert data["status"] == "queued"
+        """Deferred — see skip reason."""
 
 
 class TestMcpToolRegistration:
@@ -642,12 +623,18 @@ class TestMcpToolRegistration:
     def test_deploy_governance_config(self):
         from app.mcp.governance import TOOL_CONFIGS
 
+        # workspace.deploy_sandbox is now the preview-only tool (no
+        # override_reason; the legacy override path lived on the old
+        # one-click endpoint that's now 410). Confirm step is a
+        # separate tool — see test_workspace_tools_deploy.py.
         config = TOOL_CONFIGS["workspace.deploy_sandbox"]
         assert config["rate_limit_per_minute"] == 2
         assert config["requires_entitlement"] == "workspace"
         assert "changeset_id" in config["allowlisted_params"]
         assert "sandbox_id" in config["allowlisted_params"]
-        assert "override_reason" in config["allowlisted_params"]
+        assert "require_assertions" in config["allowlisted_params"]
+        # Confirm tool is registered alongside.
+        assert "workspace.deploy_sandbox_confirm" in TOOL_CONFIGS
 
 
 class TestTenantIsolation:
@@ -663,7 +650,10 @@ class TestTenantIsolation:
 
     @pytest.mark.asyncio
     async def test_deploy_cross_tenant_blocked(self, client, ws_cs, admin_user_b):
-        """Deploy should return 404 for another tenant's changeset."""
+        """Cross-tenant deploy returns 410 (legacy endpoint deprecated) —
+        the new preview→confirm flow handles cross-tenant via the
+        tenant-scoped service queries; covered in
+        test_workspaces_deploy_preview.py."""
         _, cs = ws_cs
         _, headers_b = admin_user_b
         resp = await client.post(
@@ -671,7 +661,7 @@ class TestTenantIsolation:
             headers=headers_b,
             json={"sandbox_id": "6738075-sb1"},
         )
-        assert resp.status_code == 404
+        assert resp.status_code == 410
 
 
 class TestIdempotency:
@@ -767,34 +757,16 @@ class TestAuditEvents:
         assert events[0].status == "passed"
 
     @pytest.mark.asyncio
+    @pytest.mark.skip(
+        reason=(
+            "override_reason path lived on the legacy one-click endpoint, "
+            "now 410. New preview/confirm endpoints don't expose override "
+            "— spec out-of-scope. Audit coverage for the new flow lives "
+            "in test_deploy_preview_service.py::TestAuditEvents."
+        )
+    )
     async def test_deploy_override_emits_audit(self, client, db, ws_cs, admin_user):
-        """Deploy with override should emit a gate_override audit event."""
-
-        user, headers = admin_user
-        ws, cs = ws_cs
-        for rt in ("suitecloud_validate", "jest_unit_test"):
-            run = WorkspaceRun(
-                tenant_id=cs.tenant_id,
-                workspace_id=ws.id,
-                changeset_id=cs.id,
-                run_type=rt,
-                status="passed",
-                triggered_by=user.id,
-            )
-            db.add(run)
-        await db.flush()
-
-        with _mock_workspace_run_task():
-            resp = await client.post(
-                f"/api/v1/changesets/{cs.id}/deploy-sandbox",
-                headers=headers,
-                json={
-                    "sandbox_id": "6738075-sb1",
-                    "require_assertions": True,
-                    "override_reason": "Emergency hotfix",
-                },
-            )
-        assert resp.status_code == 202
+        """Deferred — see skip reason."""
 
     @pytest.mark.asyncio
     async def test_assertions_api_emits_trigger_audit(self, client, db, ws_cs, admin_user):

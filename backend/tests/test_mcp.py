@@ -237,6 +237,7 @@ class TestToolConfigs:
             "workspace.run_validate",
             "workspace.run_unit_tests",
             "workspace.deploy_sandbox",
+            "workspace.deploy_sandbox_confirm",
             "workspace.run_suiteql_assertions",
             "suitescript.sync",
             "bigquery.sql",

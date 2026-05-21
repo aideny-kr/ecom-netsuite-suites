@@ -751,6 +751,47 @@ async def execute_run(
             run.command = " ".join(cmd)
             await db.flush()
 
+            # Codex P1 #7 belt-and-suspenders — verify the materialized
+            # snapshot still matches the snapshot_sha the operator
+            # confirmed in the preview. If files mutated between confirm
+            # and worker pickup, abort BEFORE invoking suitecloud
+            # project:deploy. The preview-confirm gate already catches
+            # most drift; this layer protects against the worker queue
+            # backlog window.
+            expected_sha = (extra_params or {}).get("expected_snapshot_sha")
+            if expected_sha and run.changeset_id is not None:
+                from app.services.deploy_preview_service import compute_deploy_manifest
+
+                fresh = await compute_deploy_manifest(
+                    db=db,
+                    changeset_id=run.changeset_id,
+                    tenant_id=run.tenant_id,
+                    workspace_id=run.workspace_id,
+                )
+                if fresh["snapshot_sha"] != expected_sha:
+                    drift_reason = (
+                        f"Worker snapshot_sha {fresh['snapshot_sha']} "
+                        f"does not match expected {expected_sha}. "
+                        "Files mutated between confirm and worker pickup; "
+                        "deploy aborted."
+                    )
+                    run.status = "error"
+                    run.completed_at = datetime.now(timezone.utc)
+                    run.duration_ms = int((time.monotonic() - start_time) * 1000)
+                    await _store_artifact(db, run, "stderr", drift_reason)
+                    await _audit_run_event(
+                        db,
+                        run,
+                        action="deploy.worker_snapshot_drift",
+                        status="error",
+                        payload={
+                            "expected_snapshot_sha": expected_sha,
+                            "computed_snapshot_sha": fresh["snapshot_sha"],
+                        },
+                    )
+                    await db.flush()
+                    return run
+
         exit_code, stdout, stderr = await _run_subprocess(cmd, tmp_dir, cmd_config["timeout"])
         duration_ms = int((time.monotonic() - start_time) * 1000)
 

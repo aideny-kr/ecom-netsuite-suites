@@ -347,8 +347,11 @@ TOOL_REGISTRY = {
     },
     "workspace.deploy_sandbox": {
         "description": (
-            "Deploy approved changeset to NetSuite sandbox. Requires validate + unit tests passed. "
-            "Returns run_id to poll for results."
+            "Compute a sandbox-deploy preview and mint a one-shot HMAC token. "
+            "Does NOT queue the deploy — the orchestrator will surface a "
+            "confirmation_required event with the preview manifest, and the "
+            "user must call workspace.deploy_sandbox_confirm with the returned "
+            "jti + confirmation_token to actually run the deploy."
         ),
         "execute": workspace_tools.execute_deploy_sandbox,
         "params_schema": {
@@ -362,16 +365,34 @@ TOOL_REGISTRY = {
                 "required": True,
                 "description": "Target sandbox account identifier (for example: 6738075-sb1)",
             },
-            "override_reason": {
-                "type": "string",
-                "required": False,
-                "description": "Admin override reason if prerequisites not fully met",
-            },
             "require_assertions": {
                 "type": "boolean",
                 "required": False,
                 "default": False,
                 "description": "Whether SuiteQL assertions must pass before deploy",
+            },
+        },
+    },
+    "workspace.deploy_sandbox_confirm": {
+        "description": (
+            "Confirm a previously minted sandbox-deploy preview token and "
+            "queue the actual deploy run. Caller must supply the jti + "
+            "confirmation_token from a workspace.deploy_sandbox preview "
+            "response. Snapshot + gates are re-verified at confirm time; "
+            "the worker re-verifies once more before invoking suitecloud "
+            "project:deploy."
+        ),
+        "execute": workspace_tools.execute_deploy_sandbox_confirm,
+        "params_schema": {
+            "jti": {
+                "type": "string",
+                "required": True,
+                "description": "Preview token id (jti) returned by workspace.deploy_sandbox",
+            },
+            "confirmation_token": {
+                "type": "string",
+                "required": True,
+                "description": "HMAC confirmation token returned by workspace.deploy_sandbox",
             },
         },
     },
