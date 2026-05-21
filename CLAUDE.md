@@ -22,16 +22,6 @@
 - **Discuss before fixing**: Always discuss approach AND research existing code before making changes.
 - **Commit frequently**: One commit per logical change. Never amend. Push to BOTH repos (`origin` + `framework`).
 
-## Tech Stack
-
-- **Frontend**: Next.js 14 (App Router), TypeScript strict, TanStack React Query, Tailwind CSS, shadcn/ui, react-resizable-panels v4
-- **Backend**: FastAPI (async), SQLAlchemy 2.0 (async), Pydantic v2, Alembic, Celery + Redis
-- **Database**: PostgreSQL (Supabase) with Row-Level Security
-- **Auth**: JWT (access + refresh in HttpOnly cookie), multi-tenant, role-based permissions
-- **Encryption**: Fernet symmetric for credentials at rest
-- **Testing**: pytest (async) + Playwright E2E + Jest (@oracle/suitecloud-unit-testing for SuiteScripts)
-- **SuiteApp**: SuiteScript 2.1, SDF (ACCOUNTCUSTOMIZATION), SuiteBundler for distribution
-
 ## Architecture Decisions
 
 - **Multi-tenant**: All tables have `tenant_id`. RLS enforced via `SET LOCAL app.current_tenant_id`.
@@ -373,27 +363,12 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 58. **Anthropic adapter must allowlist tool fields** (PR #41) — `tools.py` stamps internal-only `category` onto every tool dict (lines 74-77, 195-198) for the prompt's tool-inventory block. The Anthropic adapter is identity-mapping, so any extra key reached the API and chat broke with `400 tools.0.custom.category: Extra inputs are not permitted` after PR #37. Fix: `_to_api_tool()` in `anthropic_adapter.py` allowlists `name`, `description`, `input_schema`, `cache_control`, `type`. Adding new internal-only tool metadata is safe — unknown keys are silently dropped. OpenAI/Gemini unaffected (their `_convert_tools` builds fresh dicts). Regression test: `tests/test_llm_adapters.py::TestAnthropicToolFieldStripping`.
 59. **Deploy reports SUCCESS on partial image-pull failure** — `docker compose pull` runs backend AND frontend; if frontend `latest` 403s, the pull is interrupted but the post-deploy `curl /health` succeeds (old container still running, healthy) and the workflow reports green. Bit us with PR #41: backend image was 22min stale, fix appeared deployed but wasn't. To verify a deploy actually landed: `ssh aidenyi@34.73.236.64 "sudo docker inspect ecom-netsuite-backend-1 --format '{{.Image}}'"` and compare to the pushed image digest, not just container health. Action item: deploy workflow needs to fail-fast on pull errors and assert image digest match before reporting success.
 
-## Current State
-
-- **Product**: AI-den v2.0 deployed to staging 2026-04-15. PR #43 merged: knowledge-driven unified agent replacing three-tier routing with knowledge profiles. Net -6,686 lines. Follow-up 54(b) resolved. Next: cross-source queries + Google Sheets connector (spec + plan committed).
-- **Latest migration**: 068_revoke_recon_ops (no new migrations in #40)
-- **Frontend tests**: Vitest + @testing-library/react (33 tests). Run: `cd frontend && npx vitest run`
-- **Backend tests**: 2,846 tests. Run: `cd backend && .venv/bin/python -m pytest`
-- **Agent benchmark**: 18 sales cases vs Claude+MCP. Run: `cd backend && .venv/bin/python -m app.services.benchmarks.run_vs_mcp --suite sales --tenant-id ce3dfaad-626f-4992-84e9-500c8291ca0a`
-- **Staging**: `api-staging.suitestudio.ai` + `staging.suitestudio.ai`. GCP Docker + nginx + Let's Encrypt. Deploy: `saas-deployment` skill.
-- **Nightly benchmark**: 11:00 UTC, enabled on staging. Results in `agent_benchmark_runs` table. Regression alerts via Sentry + structured log.
-- **Nightly auto-improvement**: 10:00 UTC. KEEP/REVERT/SKIP decisions now based on vs-MCP comparison (not broken composite scorer).
-- **Auto-learning from live chat**: DISABLED (pattern pollution source). Patterns only via admin seed or eval-gated nightly promotion.
-- **Pattern retrieval threshold**: ≥ 0.45 similarity. Domain knowledge threshold: ≥ 0.50. Learned rules: query-aware (max 10 relevant).
-- **MCP tool descriptions**: NO local caps. Oracle's full descriptions flow through to the agent.
-
 ## Known Issues
 
 1. **LLM pivot limitation** — always use `pivot_query_result` tool, not CASE WHEN SQL.
 2. **Proven patterns** — auto-learning from live sessions DISABLED (2026-04-09). Only admin-seeded or nightly-promoted patterns are retrievable. 6 verified shipping-country patterns + 1 RAG chunk seeded for Framework.
 3. **Stripe initial sync is slow** — 400K+ payout lines, takes 30+ min first time. Batch commits every 200 lines. Hourly incremental via Beat after that.
-4. **Confidence scorer partially broken** — `query_pattern_similarity` zeroed out (was part of feedback loop). LLM self-score and tool_success_rate are the remaining signals. `final_text[:500]` truncation in confidence extractor still open.
-5. **Agent benchmark vs MCP baseline** — our north star. Every change to chat/agent code must match or beat Claude+MCP. CI gate enforces this on PRs. Nightly cron tracks trends. See `memory/feedback_benchmark_vs_claude_mcp.md`.
+4. **Agent benchmark vs MCP baseline** — our north star. Every change to chat/agent code must match or beat Claude+MCP. CI gate enforces this on PRs. Nightly cron tracks trends. See `memory/feedback_benchmark_vs_claude_mcp.md`.
 
 ## Skills Reference
 
@@ -412,17 +387,3 @@ Domain knowledge lives in `.claude/skills/`. Use the Skill tool to load when nee
 | `autonomous-improvement` | Nightly eval/experiment loop, scoring, pattern promotion |
 | `shopify-ops` | Shopify sync pipeline, order ingestion |
 
-## Resolved History
-
-Full changelog moved to skills. Key milestones:
-- **v1.0** (2026-03-18): Token refresh, entity seeder, 10x agent quality
-- **v1.1** (2026-03-23): Agent framework, BigQuery BI, chart pipeline, scalability
-- **v1.2** (2026-03-27): Pricing Agent, Agent Hub, follow-up intelligence, autonomous improvement
-- **v1.3** (2026-03-29): Reconciliation engine, data pipeline connectors, GCP frontend
-- **v1.5** (2026-03-30): Self-service sync, order-level matching, progress stepper, CI green
-- **v1.6** (2026-04-03): Background chat, streaming tool cards, ordered content blocks, trimmed prompt
-- **v0.1 Intent Clarification** (2026-04-09): Source picker cards (confidence-gated, ambiguous → two cards, < 0.85 threshold), fiscal calendar injection into agent prompts, abandoned v0 disclosure footer design after design mismatch
-- **v0.2 Source Picker Resilience** (2026-04-13): BQ comment stripping, stream/task timeouts, soft source pin with override, discussion guard, picker skip after first result, SSE reconnection on navigate-away, elapsed time indicator, orchestrator path regression tests
-- **v1.10 Adapter Timeout + Capability Sync** (2026-04-14, PR #36 + #37): Anthropic/OpenAI/Gemini SDK `read=60s` timeout caps + entity-resolver wrapped in `asyncio.wait_for(15s)`. Single source of truth for tool inventory: `{{TOOL_INVENTORY}}` placeholder in prompts resolved at runtime by `_assemble_system_prompt` from real tool schema. Killed five hardcoded tool lists (`prompts.py`, `unified_agent._UNIFIED_TOOL_NAMES`, three orchestrator frozensets, `base_agent.data_tools`) — replaced with `tool_categories.categorize()` registry. Tier 2 semantic router accepts conversation history. `session.source_pin` auto-updates from used tools. bi-agent regex widened (heap/funnel/attribution/segment/mixpanel/amplitude/firebase/GA/third-party). CI invariant `test_prompt_tool_sync.py` blocks future drift.
-- **v1.11 HITL Write Confirmation + Connector Gating** (2026-04-15, PR #39): HITL write confirmation — `mutation_guard.py` detects ext__ mutation tools, record-type allowlist (23 allowed, 12 blocked), HMAC session-bound tokens. `write_confirmation_service.py` builds payloads with Literal types. `base_agent.py` intercepts mutations via `classify_mutation()` (single-pass, reuses `parse_external_tool_name`), 5s timeout on ns_getRecord pre-fetch for update diffs. `orchestrator.py` `write_confirm` short-circuit runs before history/RAG assembly. Frontend `WriteConfirmationCard` with before/after diff, approve/reject. Non-streaming `run()` blocks mutations. Connector-aware agent enabledness — `requires_connector` in `AgentYAMLConfig`, `_get_active_connectors()` resolver, bi-agent gated by BigQuery. Resolves URGENT 54(a). 148 new backend tests, 9 new frontend tests. `/simplify` review applied. **Remaining follow-up**: 54(b) DB-stored custom prompt templates missing `{{TOOL_INVENTORY}}`.
-- **v2.0 Knowledge-Driven Unified Agent** (2026-04-15, PR #40): Replaced three-tier routing (regex → Haiku semantic → fallback) with knowledge profiles. Deleted: `routing/` directory, `coordinator.py` (1,313 lines), `source_picker.py`, `agent_registry.py`, `specialized_agent.py`, `tool_filter.py`, 3 specialist configs + 3 specialist prompts, frontend source picker card. Added: `knowledge_profiles/` package (loader + 4 YAML profiles), `prompt_assembler.py` (5 pure functions), `partition_ids` filter on `retrieve_domain_knowledge()`. One unified agent, model self-routes via tool_use, domain context injected per-turn based on available tools. Net -6,600 lines across 61 files. 2,846 backend + 33 frontend tests pass.
