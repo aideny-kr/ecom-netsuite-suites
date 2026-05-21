@@ -203,88 +203,16 @@ define(['N/file', 'N/log', 'N/runtime', 'N/error'], (file, log, runtime, error) 
 
 | What | Where |
 |------|-------|
-| Chat agents | `backend/app/services/chat/agents/` |
-| Chat adapters | `backend/app/services/chat/adapters/` |
-| Entity resolver | `backend/app/services/chat/tenant_resolver.py` |
-| Entity seeder | `backend/app/services/tenant_entity_seeder.py` |
-| Types | `frontend/src/lib/types.ts` |
-| API client | `frontend/src/lib/api-client.ts` |
-| Settings API | `backend/app/api/v1/settings.py` |
-| Feature flags | `backend/app/services/feature_flag_service.py` |
-| Branding provider | `frontend/src/providers/branding-provider.tsx` |
-| Knowledge crawler | `backend/app/services/knowledge/` |
-| Celery tasks/Beat | `backend/app/workers/tasks/`, `backend/app/workers/celery_app.py` |
-| Excel export | `backend/app/services/excel_export_service.py` |
-| Pivot service | `backend/app/services/pivot_service.py` |
-| Redis lock | `backend/app/core/redis_lock.py` |
-| Proactive refresh | `backend/app/workers/tasks/proactive_token_refresh.py` |
-| Connection alerts | `backend/app/api/v1/connection_alerts.py` |
-| SuiteScripts | `suiteapp/src/FileCabinet/SuiteScripts/` |
-| SDF Objects | `suiteapp/src/Objects/` |
-| Knowledge profiles (YAML) | `backend/app/services/chat/knowledge_profiles/` |
 | Knowledge profile loader | `backend/app/services/chat/knowledge_profiles/loader.py` |
 | Prompt assembler | `backend/app/services/chat/prompt_assembler.py` |
-| Agent configs (YAML) | `backend/app/services/chat/agents/configs/` |
-| Agent prompts | `backend/app/services/chat/agents/prompts/` |
-| Mutation guard | `backend/app/services/chat/mutation_guard.py` |
-| Write confirmation service | `backend/app/services/chat/write_confirmation_service.py` |
-| Write confirmation card | `frontend/src/components/chat/write-confirmation-card.tsx` |
-| Agent benchmarks | `backend/tests/agent_benchmarks/` |
-| Tool inventory helper (PR #37) | `backend/app/services/chat/tool_inventory.py` |
-| Tool category registry (PR #37) | `backend/app/services/chat/tool_categories.py` |
+| Tool inventory + category registry | `backend/app/services/chat/tool_inventory.py`, `tool_categories.py` |
+| Mutation guard + write confirmation | `backend/app/services/chat/mutation_guard.py`, `write_confirmation_service.py` |
 | Capability-sync CI invariant | `backend/tests/test_prompt_tool_sync.py` |
-| BigQuery service | `backend/app/services/bigquery_service.py` |
-| BigQuery tools | `backend/app/mcp/tools/bigquery_tools.py` |
-| BigQuery schema seeder | `backend/app/services/bigquery_schema_seeder.py` |
-| Chart extractor | `backend/app/services/chat/chart_extractor.py` |
-| Chart renderer | `frontend/src/components/chat/chart-renderer.tsx` |
-| Pricing engine | `backend/app/services/pricing_engine.py` |
-| Pricing schemas | `backend/app/schemas/pricing.py` |
-| Pricing config API | `backend/app/api/v1/pricing_config.py` |
-| Pricing config service | `backend/app/services/pricing_config_service.py` |
-| Pricing config defaults | `backend/app/services/pricing_config_defaults.py` |
-| Pricing tools | `backend/app/mcp/tools/pricing_tools.py` |
-| Template filler | `backend/app/services/template_filler.py` |
-| Task file service | `backend/app/services/task_file_service.py` |
-| Task files API | `backend/app/api/v1/task_files.py` |
-| Agent instructions API | `backend/app/api/v1/agent_instructions.py` |
-| Task output card | `frontend/src/components/chat/task-output-card.tsx` |
-| File upload zone | `frontend/src/components/chat/file-upload-zone.tsx` |
-| Instruction panel | `frontend/src/components/chat/instruction-panel.tsx` |
-| Template slot | `frontend/src/components/chat/template-slot.tsx` |
+| Permission helpers | `backend/app/core/dependencies.py` |
+| API client (frontend) | `frontend/src/lib/api-client.ts` |
+| SSE chat stream normalizer | `frontend/src/lib/chat-stream.ts` |
 | Specs / Plans | `docs/superpowers/specs/`, `docs/superpowers/plans/` |
 | Architecture memory | `memory/` |
-| Reconciliation engine | `backend/app/services/reconciliation/` |
-| Recon API | `backend/app/api/v1/reconciliation.py` |
-| Recon dashboard | `frontend/src/app/(dashboard)/reconciliation/` |
-| Connector status API | `backend/app/api/v1/connector_status.py` |
-| Stripe sync service | `backend/app/services/ingestion/stripe_sync.py` |
-| NetSuite deposit sync | `backend/app/services/ingestion/netsuite_deposit_sync.py` |
-| Recon pipeline | `backend/app/services/reconciliation/pipeline.py` |
-| Stripe health check | `backend/app/workers/tasks/stripe_health_check.py` |
-| Stripe sync all (Beat) | `backend/app/workers/tasks/stripe_sync_all.py` |
-| Recon progress stepper | `frontend/src/components/reconciliation/recon-progress-stepper.tsx` |
-| Data freshness banner | `frontend/src/components/reconciliation/data-freshness-banner.tsx` |
-| Stripe connector card | `frontend/src/components/settings/stripe-connector-card.tsx` |
-| Data source connectors | `frontend/src/components/settings/data-source-connectors-section.tsx` |
-| Permission helpers | `backend/app/core/dependencies.py` (require_any_permission) |
-| Streaming tool card | `frontend/src/components/chat/streaming-tool-card.tsx` |
-| Chat run manager | `backend/app/services/chat/run_manager.py` |
-| Chat runs API | `backend/app/api/v1/chat_runs.py` |
-| Frontend tests | `frontend/src/components/chat/__tests__/` |
-| Vitest config | `frontend/vitest.config.ts` |
-| nginx config | `/etc/nginx/sites-available/suitestudio` (on GCP VM) |
-| Benchmark CLI | `backend/app/services/benchmarks/run_vs_mcp.py` |
-| Benchmark cases | `backend/tests/agent_benchmarks/benchmark_cases/vs_mcp/` |
-| Baseline runner | `backend/tests/agent_benchmarks/baseline_runner.py` |
-| Agent runner | `backend/tests/agent_benchmarks/agent_runner.py` |
-| Benchmark scorer | `backend/tests/agent_benchmarks/scorer.py` |
-| Benchmark persistence | `backend/tests/agent_benchmarks/persistence.py` |
-| Benchmark API | `backend/app/api/v1/agent_benchmarks.py` |
-| Benchmark nightly task | `backend/app/workers/tasks/agent_benchmark_vs_mcp.py` |
-| Benchmark email | `backend/app/services/benchmark_email_service.py` |
-| History tool trace | `backend/app/services/chat/history_tool_trace.py` |
-| CI benchmark gate | `.github/workflows/agent-benchmark.yml` |
 
 ## Common Mistakes to Avoid
 
