@@ -93,3 +93,17 @@ Domain knowledge lives in `.claude/skills/`. Use the Skill tool to load when nee
 | `netsuite-suitescript-upgrade` | SuiteScript 2.0 → 2.1 migration guide |
 | `netsuite-uif-spa-reference` | NetSuite UIF / SPA framework reference |
 
+## Path-Scoped Rules
+
+Claude Code auto-loads matching rules from `.claude/rules/` when editing files in their declared paths:
+
+| Rule | Loads When Editing |
+|------|--------------------|
+| `alembic.md` | `backend/alembic/**` |
+| `sqlalchemy-fastapi.md` | all backend Python (`backend/app/**`, `backend/tests/**`) |
+| `chat-orchestration.md` | chat pipeline (`backend/app/services/chat/**`, `backend/app/mcp/**`, chat APIs) |
+| `frontend.md` | `frontend/src/**`, `**/*.tsx`, `**/*.ts` |
+| `recon-stripe.md` | reconciliation + ingestion + Stripe workers |
+| `suitescript.md` | `suiteapp/**` |
+| `deploy.md` | workflows + compose + Dockerfiles + infra |
+
