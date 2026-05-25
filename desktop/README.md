@@ -102,13 +102,16 @@ The `default` agent powers the smoke test and the Electron-driven default chat s
 
 ```bash
 cd desktop
-python -m venv .venv && source .venv/bin/activate
-pip install -e .                                  # installs hermes-agent from the submodule + pytest
-export ANTHROPIC_API_KEY=sk-ant-...               # operator's BYOK Anthropic key
+python3.13 -m venv .venv && source .venv/bin/activate
+pip install -e ./runtime/hermes-agent              # Hermes Agent's runtime deps (dotenv, openai, etc.)
+pip install -e '.[dev]'                            # pytest
+export ANTHROPIC_API_KEY=sk-ant-...                # operator's BYOK Anthropic key
 python runtime/sidecar.py
 ```
 
-Expected: a non-empty Claude response printed to stdout. If the API key is missing, the sidecar exits with a clear error rather than running with an arbitrary key.
+Expected: a non-empty Claude response printed to stdout. The sidecar's smoke prompt is benign ("Hello from Suite Studio sidecar smoke test. Reply in one sentence.") and the chosen model defaults to `claude-sonnet-4-6` per ADR-008.
+
+If the API key is missing, the sidecar exits with code `2` and prints to stderr — no arbitrary-key fallback.
 
 ### Running the CI-safe test (no API key needed)
 
@@ -117,7 +120,55 @@ cd desktop
 pytest tests/
 ```
 
-The test mocks the `AIAgent` class — no live API call, safe to run anywhere.
+The test mocks the `AIAgent` class — no live API call, safe to run anywhere. Does NOT require Hermes Agent's runtime deps to be installed; the mock replaces the class object before any of its dependencies would be touched.
+
+---
+
+## First successful smoke test
+
+**Status as of 2026-05-25: DEFERRED to operator.**
+
+The B0 scaffold `/goal` ran in an environment where `ANTHROPIC_API_KEY` was not set, and the harness sandbox blocks PyPI access — so neither (a) installing the Hermes Agent runtime deps (`dotenv`, `openai`, `pydantic`, ~70 transitive packages) nor (b) the live API call to `api.anthropic.com` could happen during the `/goal`.
+
+Per the B0 plan's documented failure mode for this case, the smoke test is deferred. The operator runs the steps under "Running the smoke test locally" above and captures the output here.
+
+### Steps for the operator
+
+1. `cd desktop && python3.13 -m venv .venv && source .venv/bin/activate`
+2. `pip install -e ./runtime/hermes-agent` (pulls Hermes Agent's runtime deps)
+3. `pip install -e '.[dev]'` (pytest)
+4. `pytest tests/` should print `4 passed`
+5. `export ANTHROPIC_API_KEY=sk-ant-...`
+6. `python runtime/sidecar.py`
+7. Expected: a one-sentence reply from Claude. Paste a 1-2 sentence excerpt below (and the date), then commit.
+
+### When the operator fills this in
+
+```
+Date:           2026-05-XX
+Model:          claude-sonnet-4-6 (default from SUITE_STUDIO_MODEL_DEFAULT)
+Prompt:         Hello from Suite Studio sidecar smoke test. Reply in one sentence.
+Response (excerpt): <paste 1-2 sentences here>
+```
+
+---
+
+## Gate-8 verification — env-var model swap is a config change, never a code change
+
+ADR-008 mandates that swapping models must be a config change (env var), not a code change. This is verified at the **test level** by `desktop/tests/test_sidecar.py::test_build_agents_respects_env_var_model_overrides`, which sets:
+
+```bash
+SUITE_STUDIO_MODEL_DEFAULT=claude-haiku-4-5-20251001
+SUITE_STUDIO_MODEL_PLAN=claude-sonnet-4-6
+```
+
+…and asserts that `build_agents()` returns AIAgent instances whose `model` kwargs match exactly those env-var values, with no code edit anywhere in `sidecar.py`. Verified locally `2026-05-25` — `pytest tests/` reports `4 passed`.
+
+For the operator: re-run the same test with the haiku override active to confirm the contract in your environment:
+
+```bash
+SUITE_STUDIO_MODEL_DEFAULT=claude-haiku-4-5-20251001 pytest tests/test_sidecar.py::test_build_agents_respects_env_var_model_overrides -v
+```
 
 ---
 
