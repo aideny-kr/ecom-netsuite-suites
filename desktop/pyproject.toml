@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "suite-studio-desktop"
+version = "0.0.0"
+description = "Suite Studio Desktop — library-mode sidecar driving vendored Hermes Agent."
+requires-python = ">=3.11"
+license = { text = "MIT" }
+readme = "README.md"
+
+# Hermes Agent is vendored as a git submodule at runtime/hermes-agent and
+# installed in editable mode via the optional-dependency entry below. We
+# do not declare hermes-agent as a PyPI dep here because the submodule is
+# the source of truth (per ADR-007 §Decision 7: pinned + auto-update off).
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[tool.setuptools]
+# No package code at the top level yet; the sidecar is a single-file script
+# at runtime/sidecar.py and tests/ holds the test suite.
+py-modules = []
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["runtime", "runtime/hermes-agent"]
