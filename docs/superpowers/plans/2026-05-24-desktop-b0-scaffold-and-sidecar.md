@@ -69,9 +69,10 @@ This /goal closes those three.
 
 **Vault (read-only — separate repo at `/Users/aidenyi/projects/suite-studio-vault/`):**
 1. `10-Architecture/Decision-Records/ADR-007-agentic-os-foundation.md` — locked composition + §Decision 6 repo layout + §OQ-047 RESOLVED block
-2. `30-Specs/Desktop-Architecture-v1.md` §3 — composed-runtime design (updated 2026-05-24 with library mode locked)
-3. `10-Architecture/Principles.md` §1.7, §7.1 (TDD), §7.8 (`/goal`), §7.11 (dev cycle)
-4. `10-Architecture/Reusable-Packages.md` — module organization (Desktop-specific section)
+2. `10-Architecture/Decision-Records/ADR-008-model-strategy-desktop-v0.md` — Sonnet default + Opus plan-mode + Haiku deferred + env-var contract (locked 2026-05-24)
+3. `30-Specs/Desktop-Architecture-v1.md` §3 — composed-runtime design (updated 2026-05-24 with library mode locked)
+4. `10-Architecture/Principles.md` §1.7, §7.1 (TDD), §7.8 (`/goal`), §7.11 (dev cycle)
+5. `10-Architecture/Reusable-Packages.md` — module organization (Desktop-specific section)
 
 **External (URL-verify per §1.7; do not assume from prior conversation):**
 - `https://github.com/NousResearch/hermes-agent` at tag/SHA `v0.14.0` — verified MIT, accessed 2026-05-24
@@ -101,7 +102,7 @@ This /goal closes those three.
 |---|---|---|
 | **Vendoring strategy for Hermes Agent** | `git submodule add https://github.com/NousResearch/hermes-agent desktop/runtime/hermes-agent` pinned at tag `v0.14.0`. Visible in repo; standard upgrade via `git submodule update`. | If you prefer pip-install-from-pin (`hermes-agent==0.14.0` in `desktop/pyproject.toml`), say so in your /goal invocation. Avoid vendored copy (`cp -r`) — bloats repo. |
 | **Python env for the sidecar** | New `desktop/.venv` (Python 3.11+, isolated from `backend/.venv`). `desktop/pyproject.toml` declares `hermes-agent` (via submodule path or pin) + minimal sidecar deps. | If you prefer reusing `backend/.venv`, say so; the /goal will install Hermes Agent into it instead. Trade-off: faster onboarding vs dependency entanglement with the FastAPI backend. |
-| **Model for the smoke test** | `claude-opus-4-7` (per your latest dogfood preference; matches Hermes Agent docstring example shape) | Override if you want a cheaper model for the smoke test (`claude-haiku-4-5-20251001`). |
+| **Model strategy** | Per **[[ADR-008-model-strategy-desktop-v0]]** (locked 2026-05-24): Sonnet default + explicit Opus plan-mode + Haiku deferred to v1.1. Sidecar instantiates TWO `AIAgent` objects (one per role) reading `SUITE_STUDIO_MODEL_DEFAULT` (= `claude-sonnet-4-6`) and `SUITE_STUDIO_MODEL_PLAN` (= `claude-opus-4-7`) env vars. Smoke test uses default (Sonnet) — cheaper, matches operational default. | If you want a single-instance sidecar for v0 and defer the second AIAgent until B2, say so — trade-off is plan-mode unavailable at smoke-test time. Default keeps both. |
 | **Sidecar entry-point shape** | Single-file `desktop/runtime/sidecar.py` with a `main()` function that instantiates `AIAgent` and runs one `run_conversation()` call. Designed to grow into an IPC server in the fourth /goal. | Larger module structure now? Defer — keep small for this /goal. |
 | **Test framework for `desktop/tests/`** | `pytest` (matches `backend/`). One test that mocks `AIAgent` and asserts the sidecar wires correctly without a live API call (CI-safe). | If you want a different framework, say so. |
 
@@ -149,7 +150,12 @@ git add .gitmodules desktop/runtime/hermes-agent
 If submodule fails (sandbox, network, or operator-overrode to pip-install), document the chosen alternative in desktop/README.md and proceed. Either way: pin to v0.14.0, disable bundled auto-update by NOT including any auto-update scripts in this scaffold.
 
 SIDECAR (desktop/runtime/sidecar.py):
-Thin wrapper. Loads AIAgent from the vendored path. Single main() function. Reads ANTHROPIC_API_KEY from env. Calls agent.run_conversation() with a single prompt. Prints the response. Designed to grow into an IPC server in the fourth /goal — DO NOT add IPC scaffolding yet.
+Thin wrapper. Loads AIAgent from the vendored path. Per [[ADR-008-model-strategy-desktop-v0]]: instantiate TWO AIAgent objects in a dict keyed by role:
+  agents = {
+      "default": AIAgent(base_url=BASE_URL, model=os.environ.get("SUITE_STUDIO_MODEL_DEFAULT", "claude-sonnet-4-6")),
+      "plan":    AIAgent(base_url=BASE_URL, model=os.environ.get("SUITE_STUDIO_MODEL_PLAN",    "claude-opus-4-7")),
+  }
+The smoke test in main() uses agents["default"] only. The plan-mode instance is constructed but not exercised at smoke test (B2+ exercises it). Single main() function. Reads ANTHROPIC_API_KEY from env. Calls agents["default"].run_conversation() with a single prompt. Prints the response. Designed to grow into an IPC server in the fourth /goal — DO NOT add IPC scaffolding yet.
 
 PROBE the AIAgent.__init__ signature in full (per ADR-007 §OQ-047 caveat) before locking sidecar kwargs:
 $ grep -n "^class AIAgent\|def __init__\|def run_conversation" desktop/runtime/hermes-agent/run_agent.py | head -20
@@ -196,12 +202,13 @@ COMPLETION GATE (the supervisor judges):
 2. Hermes Agent vendored at v0.14.0 (submodule, pip pin, or documented alternative)
 3. desktop/runtime/sidecar.py exists and has a module docstring documenting the AIAgent kwargs probed
 4. desktop/tests/test_sidecar.py passes (CI-safe; mocks AIAgent)
-5. ONE OF: (a) live smoke test succeeded — captured output in desktop/README.md, OR (b) ANTHROPIC_API_KEY missing — README documents deferral to operator
-6. desktop/README.md exists with vendoring strategy + upgrade procedure + smoke test instructions
+5. ONE OF: (a) live smoke test succeeded with model=claude-sonnet-4-6 (per ADR-008 default) — captured output in desktop/README.md, OR (b) ANTHROPIC_API_KEY missing — README documents deferral to operator
+6. desktop/README.md exists with vendoring strategy + upgrade procedure + smoke test instructions + model strategy section linking to ADR-008
 7. desktop/skills/suite-studio-netsuite/SKILL.md is a valid agentskills.io SKILL.md stub (name + description frontmatter + body)
-8. Commits on spike/desktop-b0-scaffold branch only; not on main
-9. desktop/SPIKE-RESULTS.md untouched
-10. backend/, frontend/, CLAUDE.md, vault — all untouched
+8. Sidecar accepts SUITE_STUDIO_MODEL_DEFAULT + SUITE_STUDIO_MODEL_PLAN env vars per ADR-008; swapping models is a config change, never a code change. Verify by setting SUITE_STUDIO_MODEL_DEFAULT=claude-haiku-4-5-20251001 in a test environment and confirming the sidecar instantiates AIAgent with that model ID (no code edit). Document in README.
+9. Commits on spike/desktop-b0-scaffold branch only; not on main
+10. desktop/SPIKE-RESULTS.md untouched
+11. backend/, frontend/, CLAUDE.md, vault — all untouched
 ````
 
 ---
