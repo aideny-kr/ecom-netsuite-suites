@@ -1,0 +1,3 @@
+[submodule "desktop/runtime/hermes-agent"]
+	path = desktop/runtime/hermes-agent
+	url = https://github.com/NousResearch/hermes-agent.git
