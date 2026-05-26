@@ -14,7 +14,26 @@ readme = "README.md"
 # installed in editable mode via the optional-dependency entry below. We
 # do not declare hermes-agent as a PyPI dep here because the submodule is
 # the source of truth (per ADR-007 §Decision 7: pinned + auto-update off).
-dependencies = []
+#
+# Runtime deps for Suite-Studio-authored MCP servers (see
+# `runtime/mcp-servers/`): `mcp` ships the official MIT-licensed FastMCP
+# framework (`from mcp.server.fastmcp import FastMCP`) and is the same
+# library Hermes Agent's MCP-client transport already speaks. `httpx` is
+# used by ns-suiteql to call NetSuite's SuiteTalk REST endpoint.
+#
+# License audit (/goal #3, URL-verified 2026-05-25 against pypi.org):
+#   - mcp 1.27.1   — MIT (Anthropic / modelcontextprotocol/python-sdk)
+#   - httpx 0.27+  — BSD-3-Clause
+#
+# Rationale for `mcp` over the standalone `fastmcp` PyPI package
+# (jlowin/PrefectHQ, current `3.3.1`): the standalone package is
+# Apache-2.0 — diverges from this project's MIT licensing — and the
+# official `mcp` SDK exposes the same `FastMCP` API (`fastmcp` was
+# upstreamed). Plan doc §Glossary anticipates this fallback.
+dependencies = [
+    "mcp>=1.27.1,<2.0.0",
+    "httpx>=0.27,<1.0",
+]
 
 [project.optional-dependencies]
 dev = [
