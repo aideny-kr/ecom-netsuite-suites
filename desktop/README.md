@@ -126,30 +126,38 @@ The test mocks the `AIAgent` class — no live API call, safe to run anywhere. D
 
 ## First successful smoke test
 
-**Status as of 2026-05-25: DEFERRED to operator.**
-
-The B0 scaffold `/goal` ran in an environment where `ANTHROPIC_API_KEY` was not set, and the harness sandbox blocks PyPI access — so neither (a) installing the Hermes Agent runtime deps (`dotenv`, `openai`, `pydantic`, ~70 transitive packages) nor (b) the live API call to `api.anthropic.com` could happen during the `/goal`.
-
-Per the B0 plan's documented failure mode for this case, the smoke test is deferred. The operator runs the steps under "Running the smoke test locally" above and captures the output here.
-
-### Steps for the operator
-
-1. `cd desktop && python3.13 -m venv .venv && source .venv/bin/activate`
-2. `pip install -e ./runtime/hermes-agent` (pulls Hermes Agent's runtime deps)
-3. `pip install -e '.[dev]'` (pytest)
-4. `pytest tests/` should print `4 passed`
-5. `export ANTHROPIC_API_KEY=sk-ant-...`
-6. `python runtime/sidecar.py`
-7. Expected: a one-sentence reply from Claude. Paste a 1-2 sentence excerpt below (and the date), then commit.
-
-### When the operator fills this in
+**Status: PASSED on 2026-05-25.**
 
 ```
-Date:           2026-05-XX
-Model:          claude-sonnet-4-6 (default from SUITE_STUDIO_MODEL_DEFAULT)
+Date:           2026-05-25
+Vendor pin:     desktop/runtime/hermes-agent @ v2026.5.16 (== package v0.14.0)
+Provider:       anthropic (api.anthropic.com, native messages mode)
+Model:          claude-sonnet-4-6 (default, from SUITE_STUDIO_MODEL_DEFAULT)
 Prompt:         Hello from Suite Studio sidecar smoke test. Reply in one sentence.
-Response (excerpt): <paste 1-2 sentences here>
+Response:       Hello! Suite Studio sidecar smoke test acknowledged — all systems
+                are responding normally.
+API call:       #1 of 90, completed in 1.57s (cache 0/11,632 tokens — cold start)
+Tool surface:   26 tools loaded (full Hermes Agent default set; none exercised
+                because the smoke prompt completed in one assistant turn).
 ```
+
+The `plan` AIAgent (`claude-opus-4-7`) was instantiated in the same run but not exercised — Plan Mode wiring lands at B2+. Both AIAgent objects log their model on init; both showed the expected ADR-008 defaults.
+
+### Reproducing locally
+
+```bash
+cd desktop
+python3.13 -m venv .venv && source .venv/bin/activate
+pip install -e ./runtime/hermes-agent              # Hermes Agent runtime deps
+pip install -e '.[dev]'                            # pytest
+export ANTHROPIC_API_KEY=sk-ant-...                # your BYOK Anthropic key
+python runtime/sidecar.py
+```
+
+### Notes for the next bumper
+
+- Hermes Agent emits a banner of import warnings about missing optional tool modules (`browser-cdp`, `computer_use`, `image_gen`, `vision`, `web`, etc.). All non-fatal — the listed tools are not in the default toolset and the smoke prompt does not exercise them. Suppression is a B1+ concern (sidecar's `quiet_mode=True` kwarg).
+- Hermes Agent attempts to create `~/.hermes/` for its permanent allowlist. The B0 macOS sandbox blocks that path; the warning `Failed to load permanent allowlist: '~/.hermes'` is benign for a one-shot smoke test. The Electron sidecar at B5 will need to either pre-create `~/.hermes/` or override the path via `HERMES_HOME`.
 
 ---
 
