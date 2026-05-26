@@ -16,17 +16,97 @@ desktop/
 ├── pyproject.toml                   # desktop-specific Python deps
 ├── runtime/
 │   ├── hermes-agent/                # vendored Hermes Agent (git submodule, pinned)
-│   └── sidecar.py                   # library-mode wrapper around AIAgent
+│   ├── sidecar.py                   # library-mode wrapper around AIAgent + MCP wiring
+│   └── mcp-servers/
+│       └── ns-suiteql/              # Suite-Studio-authored FastMCP server
+│           ├── README.md            # server contract + config schema
+│           ├── server.py            # FastMCP stdio entry point
+│           └── netsuite_client.py   # SuiteQL REST call + validation
 ├── skills/
-│   └── suite-studio-netsuite/       # placeholder Suite Studio skill pack
+│   └── suite-studio-netsuite/       # Suite Studio NetSuite skill pack
 │       ├── README.md
-│       └── SKILL.md
+│       ├── SKILL.md                 # top-level skill manifest
+│       └── suiteql/
+│           └── SKILL.md             # dialect rules — verbatim from netsuite.yaml
 └── tests/
     ├── __init__.py
-    └── test_sidecar.py              # CI-safe mocked test
+    ├── test_sidecar.py              # sidecar + MCP wiring tests (mocked)
+    └── test_ns_suiteql_server.py    # MCP server + REST client tests (mocked)
 ```
 
-Out of scope for this `/goal` (tracked in subsequent ones): `electron/`, `packaging/`, `signing/`, `update/`, `runtime/obsidian-memory-mcp/`, `tools/self-evolution/`.
+Out of scope for this `/goal` (tracked in subsequent ones): `electron/`, `packaging/`, `signing/`, `update/`, `runtime/obsidian-memory-mcp/`, `tools/self-evolution/`. Other NetSuite MCP tools (`ns_runReport`, `ns_runSavedSearch`, `ns_getRecord`, `ns_createRecord`, etc.) are also out of scope — they layer in at subsequent `/goal`s.
+
+---
+
+## MCP server architecture (/goal #3)
+
+Suite Studio Desktop runs Hermes Agent in **library mode** (per ADR-007 §OQ-047 + SPIKE-RESULTS.md). To extend the agent with NetSuite capability, the sidecar spawns **Suite-Studio-authored MCP servers** as stdio subprocesses and registers them with Hermes Agent's built-in MCP-client transport.
+
+```
+┌────────────────────────────────────────────────────────────┐
+│              desktop/runtime/sidecar.py                    │
+│  ┌─────────────────┐   ┌─────────────────────────────────┐ │
+│  │  AIAgent("default")│ │ register_mcp_servers({...})    │ │
+│  │  AIAgent("plan")   │ │  ↑ from tools.mcp_tool         │ │
+│  └─────────────────┘   └────────┬────────────────────────┘ │
+│                                  │ stdio JSON-RPC          │
+└──────────────────────────────────┼─────────────────────────┘
+                                   ▼
+              ┌───────────────────────────────────────┐
+              │  runtime/mcp-servers/ns-suiteql/      │
+              │  server.py  (FastMCP, exposes         │
+              │     ns_runSuiteQL → netsuite_client)  │
+              └──────────────────┬────────────────────┘
+                                 │ HTTPS Bearer token
+                                 ▼
+              https://{account}.suitetalk.api.netsuite.com
+                  /services/rest/query/v1/suiteql
+```
+
+**Registration is explicit, not config-file driven.** Hermes Agent reads MCP servers from `~/.hermes/config.yaml` by default; the sidecar instead calls `register_mcp_servers({"ns-suiteql": {...}})` directly so Suite Studio Desktop never pollutes the operator's global Hermes config. See the probed-surface notes in `runtime/sidecar.py`'s module docstring.
+
+**The MCP server framework is the official `mcp` SDK** (MIT, Anthropic) — specifically `from mcp.server.fastmcp import FastMCP`. We chose this over the standalone `fastmcp` PyPI package (jlowin/PrefectHQ, Apache-2.0) because: (1) the official SDK provides the same `FastMCP` API surface (jlowin's project was upstreamed), (2) Hermes Agent already depends on `mcp`, so we add zero net new transitive deps, (3) MIT alignment with this project's license. See the inline license-audit comment in `pyproject.toml`.
+
+### Populating `~/SuiteStudio/{org}/netsuite-connection.json`
+
+The first time you run the sidecar, it auto-creates a placeholder at `~/SuiteStudio/default/netsuite-connection.json` with `REPLACE_ME` markers. **The operator populates this file out-of-band** — see [`feedback_api_key_in_goal_sessions.md`](../memory/feedback_api_key_in_goal_sessions.md): never paste real Bearer tokens into a `/goal` session, since Claude Code persists every turn to `~/.claude/projects/<repo>/<session>.jsonl` indefinitely.
+
+```json
+{
+  "account_id": "TSTDRV1234567",
+  "bearer_token": "eyJ...<your OAuth 2.0 access token>...",
+  "expires_at": "2026-12-31T00:00:00Z"
+}
+```
+
+Where to get these values:
+
+- **`account_id`** — your NetSuite account ID, the one that appears in your SuiteTalk subdomain (e.g., `TSTDRV1234567`). Find it in NetSuite under *Setup → Company → Company Information → Account ID*.
+- **`bearer_token`** — an OAuth 2.0 access token issued by NetSuite. Easiest path: use the existing Hosted backend's onboarding flow at `https://api-staging.suitestudio.ai` to complete the OAuth 2.0 PKCE handshake, then copy the access token from the `connections` table. Token refresh on 401 is **deliberately deferred** at B0 (operator re-mints when expired). Keychain integration lands at `/goal #5` (Electron + macOS keychain).
+- **`expires_at`** — currently informational only; the server doesn't preemptively refresh. Set to the actual NetSuite-issued expiry so you remember when to rotate.
+
+To switch orgs: set `SUITE_STUDIO_ORG=acme` in the env when running the sidecar — the server reads from `~/SuiteStudio/acme/netsuite-connection.json` instead.
+
+### Smoke test commands
+
+```bash
+cd desktop
+source .venv/bin/activate           # or your venv strategy
+pip install -e ./runtime/hermes-agent
+pip install -e '.[dev]'
+
+# Benign smoke (no NetSuite call) — just verifies the runtime + MCP registration:
+python runtime/sidecar.py
+
+# /goal #3 gate-7 — calls NetSuite, returns subsidiary list (requires real creds):
+python runtime/sidecar.py "list my NetSuite subsidiaries"
+```
+
+The CI-safe pytest suite covers both paths with mocks; the live smoke is operator-run.
+
+### What the MCP tool surface looks like to the LLM
+
+After `register_mcp_servers` returns, the AIAgent sees a tool named `mcp_ns_suiteql_ns_runSuiteQL(query: str) → dict` (Hermes Agent's standard `mcp_<server>_<tool>` sanitization). The tool description carries a pointer to the SuiteQL dialect rules at `desktop/skills/suite-studio-netsuite/suiteql/SKILL.md`, which is the canonical (verbatim) lift from `backend/app/services/chat/knowledge_profiles/netsuite.yaml`.
 
 ---
 
@@ -158,6 +238,65 @@ python runtime/sidecar.py
 
 - Hermes Agent emits a banner of import warnings about missing optional tool modules (`browser-cdp`, `computer_use`, `image_gen`, `vision`, `web`, etc.). All non-fatal — the listed tools are not in the default toolset and the smoke prompt does not exercise them. Suppression is a B1+ concern (sidecar's `quiet_mode=True` kwarg).
 - Hermes Agent attempts to create `~/.hermes/` for its permanent allowlist. The B0 macOS sandbox blocks that path; the warning `Failed to load permanent allowlist: '~/.hermes'` is benign for a one-shot smoke test. The Electron sidecar at B5 will need to either pre-create `~/.hermes/` or override the path via `HERMES_HOME`.
+
+---
+
+## /goal #3 — `ns_runSuiteQL` live smoke test
+
+**Gate #7 status: DEFERRED to operator (OR-branch).**
+
+The CI-safe pytest suite (38 tests on `spike/desktop-b0-mcp-suiteql`, all green as of 2026-05-25) covers the MCP server, the NetSuite REST client, and the sidecar MCP wiring with mocks. The live smoke test — running `python runtime/sidecar.py "list my NetSuite subsidiaries"` against the operator's real NetSuite — requires the operator to populate `~/SuiteStudio/default/netsuite-connection.json` out-of-band first.
+
+This is the **same OR-branch deferral pattern as /goal #2's gate #5**, and the rule is documented in [`feedback_api_key_in_goal_sessions.md`](../memory/feedback_api_key_in_goal_sessions.md): Claude Code persists every `/goal` session turn to `~/.claude/projects/<repo>/<session>.jsonl` indefinitely; pasting a real Bearer token inline would survive there as plaintext. The `/goal` agent must defer key-touching steps to the operator.
+
+### Operator run-through (when ready)
+
+```bash
+cd desktop
+source .venv/bin/activate
+pip install -e ./runtime/hermes-agent
+pip install -e '.[dev]'
+export ANTHROPIC_API_KEY=sk-ant-...   # operator's BYOK Anthropic key
+
+# 1. One-shot run to auto-create the placeholder:
+python runtime/sidecar.py
+# → creates ~/SuiteStudio/default/netsuite-connection.json with REPLACE_ME stubs
+# → prints a "[ns-suiteql] note: ... still has placeholder values" hint
+
+# 2. Populate the file with real NetSuite OAuth 2.0 creds (out-of-band):
+#    {"account_id": "TSTDRV1234567", "bearer_token": "eyJ...", "expires_at": "..."}
+#    See "Populating ~/SuiteStudio/{org}/netsuite-connection.json" above.
+
+# 3. Run the gate-7 query:
+python runtime/sidecar.py "list my NetSuite subsidiaries"
+# Expected: a one-paragraph reply naming the subsidiaries in the operator's account.
+```
+
+### Capturing the result
+
+Once the live smoke completes, paste the operator's output below (truncating sensitive subsidiary names to a count + first 1–2 entries is enough; do not commit the Bearer token or full subsidiary list if either is confidential):
+
+```
+Date:          <YYYY-MM-DD>
+Account:       <account_id>
+Model:         claude-sonnet-4-6
+Prompt:        list my NetSuite subsidiaries
+Response:      <agent's natural-language reply>
+Tool surface:  ns_runSuiteQL (via mcp_ns_suiteql_ns_runSuiteQL) — 1 invocation
+SuiteQL:       SELECT id, name FROM subsidiary ORDER BY name FETCH FIRST 100 ROWS ONLY
+Rows:          <count> (e.g., "12 subsidiaries returned")
+First entries: <Subsidiary A>, <Subsidiary B>, ...
+```
+
+Commit the capture on `spike/desktop-b0-mcp-suiteql` so the next `/goal` can see gate #7 closed.
+
+### Failure modes (per plan doc)
+
+If the live smoke surfaces a problem, consult the plan doc's failure-modes table at `docs/superpowers/plans/2026-05-25-desktop-b0-mcp-suiteql.md`. Most common cases:
+
+- **401 from NetSuite** → Bearer token expired. Refresh via the Hosted backend's OAuth flow and update the file.
+- **Agent doesn't call `ns_runSuiteQL`** → strengthen the `SKILL.md` description (rare; the tool name + the canonical smoke query in the SKILL.md already guide the LLM).
+- **0 rows from `subsidiary`** → the account isn't OneWorld and the single root subsidiary may have a NULL `name`; try `SELECT id, country FROM subsidiary` instead.
 
 ---
 
