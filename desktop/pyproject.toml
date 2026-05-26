@@ -38,6 +38,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
+    "pytest-asyncio>=0.23",
 ]
 
 [tool.setuptools]
@@ -47,4 +48,5 @@ py-modules = []
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["runtime", "runtime/hermes-agent"]
+pythonpath = ["runtime", "runtime/hermes-agent", "runtime/mcp-servers/ns-suiteql"]
+asyncio_mode = "auto"
