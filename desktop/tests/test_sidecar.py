@@ -262,3 +262,176 @@ def test_main_creates_connection_template_if_missing(monkeypatch, tmp_path):
 
     assert template_path.exists(), \
         f"main() must auto-create the connection-template at {template_path}"
+
+
+# ---------------------------------------------------------------------------
+# /goal #4 — obsidian-memory MCP server + vault scaffold
+# ---------------------------------------------------------------------------
+
+
+def test_build_mcp_server_config_includes_obsidian_memory(tmp_path, monkeypatch):
+    """Per gate #4: the sidecar must register BOTH ns-suiteql AND
+    obsidian-memory before constructing the AIAgent."""
+    monkeypatch.setenv("SUITE_STUDIO_HOME", str(tmp_path / "SuiteStudio"))
+
+    config = sidecar.build_mcp_server_config()
+
+    assert "ns-suiteql" in config, \
+        f"ns-suiteql must remain registered (gate #4 regression), got {list(config.keys())}"
+    assert "obsidian-memory" in config, \
+        f"obsidian-memory must be registered (gate #4), got {list(config.keys())}"
+
+
+def test_obsidian_memory_config_has_correct_cwd_and_env(tmp_path, monkeypatch):
+    """The obsidian-memory MCP server must spawn from the shim directory
+    with OBSIDIAN_VAULT_PATH pointing at the org's vault."""
+    monkeypatch.setenv("SUITE_STUDIO_HOME", str(tmp_path / "SuiteStudio"))
+
+    config = sidecar.build_mcp_server_config(org="default")
+
+    om_cfg = config["obsidian-memory"]
+    assert "command" in om_cfg
+    assert "args" in om_cfg and isinstance(om_cfg["args"], list)
+    # cwd must be the shim directory (mcp-servers/obsidian-memory/)
+    assert "cwd" in om_cfg
+    assert om_cfg["cwd"].endswith(os.path.join("mcp-servers", "obsidian-memory")), \
+        f"cwd must point at the obsidian-memory shim dir, got {om_cfg['cwd']!r}"
+    # env must carry OBSIDIAN_VAULT_PATH (the Suite-Studio-namespaced var
+    # the shim reads — NOT the vendored MEMORY_DIR)
+    vault_env = om_cfg["env"].get("OBSIDIAN_VAULT_PATH")
+    assert vault_env, f"env must set OBSIDIAN_VAULT_PATH, got {om_cfg['env']}"
+    # The vault path must point at ~/SuiteStudio/{org}/ (not netsuite-connection.json)
+    assert vault_env.endswith(os.path.join("SuiteStudio", "default")), \
+        f"OBSIDIAN_VAULT_PATH must point at the org's vault directory, got {vault_env!r}"
+
+
+def test_obsidian_memory_config_respects_suite_studio_org(tmp_path, monkeypatch):
+    """Switching SUITE_STUDIO_ORG must change which vault subdir is wired
+    into the obsidian-memory env."""
+    monkeypatch.setenv("SUITE_STUDIO_HOME", str(tmp_path / "SuiteStudio"))
+
+    config = sidecar.build_mcp_server_config(org="acme")
+
+    vault_env = config["obsidian-memory"]["env"]["OBSIDIAN_VAULT_PATH"]
+    assert vault_env.endswith(os.path.join("SuiteStudio", "acme"))
+
+
+def test_ensure_vault_scaffold_creates_org_directory(tmp_path, monkeypatch):
+    """The sidecar must scaffold ~/SuiteStudio/{org}/ (with .obsidian/ and
+    a frontmatter-only 00-Home.md) on first run."""
+    monkeypatch.setenv("SUITE_STUDIO_HOME", str(tmp_path / "SuiteStudio"))
+
+    vault = sidecar.ensure_vault_scaffold(org="default")
+
+    assert os.path.isdir(vault), f"vault directory must be created at {vault}"
+    assert vault.endswith(os.path.join("SuiteStudio", "default"))
+    # .obsidian/ must exist (Obsidian's app-config dir; presence is what
+    # tells Obsidian "this is a vault, not a random folder")
+    assert os.path.isdir(os.path.join(vault, ".obsidian")), \
+        "vault must contain .obsidian/ subdirectory"
+    # 00-Home.md is the canonical landing note; must be present but
+    # FRONTMATTER ONLY — no fabricated operator content
+    home_path = os.path.join(vault, "00-Home.md")
+    assert os.path.isfile(home_path), f"00-Home.md must be created at {home_path}"
+
+
+def test_ensure_vault_scaffold_home_md_is_frontmatter_only(tmp_path, monkeypatch):
+    """Per plan non-negotiable #5 + failure-modes table: vault scaffold
+    must NOT fabricate operator content. 00-Home.md gets YAML frontmatter
+    only; body is empty."""
+    monkeypatch.setenv("SUITE_STUDIO_HOME", str(tmp_path / "SuiteStudio"))
+
+    vault = sidecar.ensure_vault_scaffold(org="default")
+    body = open(os.path.join(vault, "00-Home.md")).read()
+
+    # Must have YAML frontmatter delimiters
+    assert body.startswith("---\n"), f"00-Home.md must start with YAML frontmatter, got: {body[:80]!r}"
+    # Must close the frontmatter
+    assert "\n---\n" in body, "00-Home.md must close its YAML frontmatter"
+    # Whatever follows the closing `---\n` must contain no prose. The
+    # only allowed content is whitespace. (We deliberately permit no `#`
+    # heading, no body paragraph, no example links.)
+    parts = body.split("\n---\n", 1)
+    assert len(parts) == 2, f"frontmatter split malformed: {body!r}"
+    assert parts[1].strip() == "", \
+        f"00-Home.md body must be empty (no fabricated content), got: {parts[1]!r}"
+
+
+def test_ensure_vault_scaffold_is_idempotent(tmp_path, monkeypatch):
+    """Per plan gate #5: running the scaffold twice must NEVER overwrite
+    existing files. Operator-authored 00-Home.md content must survive."""
+    monkeypatch.setenv("SUITE_STUDIO_HOME", str(tmp_path / "SuiteStudio"))
+
+    # First run scaffolds the empty skeleton
+    vault = sidecar.ensure_vault_scaffold(org="default")
+    home_path = os.path.join(vault, "00-Home.md")
+
+    # Operator hand-edits 00-Home.md with their real content
+    operator_content = (
+        "---\ntitle: home\n---\n\n"
+        "# My Suite Studio Home\n\n"
+        "Operator-authored content here, with [[links]] and observations.\n"
+    )
+    with open(home_path, "w") as fh:
+        fh.write(operator_content)
+
+    # Second run must NOT clobber the operator's content
+    sidecar.ensure_vault_scaffold(org="default")
+
+    assert open(home_path).read() == operator_content, \
+        "ensure_vault_scaffold must NEVER overwrite operator-authored files"
+
+
+def test_main_creates_vault_scaffold(tmp_path, monkeypatch):
+    """End-to-end: `python sidecar.py` must scaffold the vault on first run."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-dummy")
+    monkeypatch.setenv("SUITE_STUDIO_HOME", str(tmp_path / "SuiteStudio"))
+    vault_path = tmp_path / "SuiteStudio" / "default"
+    home_path = vault_path / "00-Home.md"
+    assert not vault_path.exists()
+
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        sidecar.main()
+
+    assert vault_path.is_dir(), f"main() must scaffold {vault_path}"
+    assert home_path.is_file(), f"main() must create {home_path}"
+
+
+def test_main_registers_both_mcp_servers_before_agent(monkeypatch, tmp_path):
+    """Per gate #4: BOTH ns-suiteql and obsidian-memory must be registered
+    BEFORE the AIAgent is constructed."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-dummy")
+    monkeypatch.setenv("SUITE_STUDIO_HOME", str(tmp_path / "SuiteStudio"))
+
+    captured: list[dict] = []
+
+    def _stub_register(servers):
+        captured.append(servers)
+        return list(servers.keys())
+
+    order: list[str] = []
+
+    class _OrderTrackingAgent(_StubAIAgent):
+        def __init__(self, **kwargs):
+            order.append("AIAgent.__init__")
+            super().__init__(**kwargs)
+
+    def _ordered_stub_register(servers):
+        order.append("register_mcp")
+        captured.append(servers)
+        return list(servers.keys())
+
+    monkeypatch.setattr(sidecar, "register_mcp_servers", _ordered_stub_register)
+    monkeypatch.setattr(sidecar, "AIAgent", _OrderTrackingAgent)
+
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        sidecar.main()
+
+    assert captured, "register_mcp_servers must be called"
+    registered = set(captured[0].keys())
+    assert {"ns-suiteql", "obsidian-memory"}.issubset(registered), \
+        f"both MCP servers must be registered, got {registered}"
+    assert order.index("register_mcp") < order.index("AIAgent.__init__"), \
+        f"register_mcp_servers must run BEFORE AIAgent.__init__; saw order: {order}"
