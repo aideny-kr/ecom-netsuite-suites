@@ -34,6 +34,16 @@ export interface SidecarOptions {
 export interface AgentResult {
   response?: string;
   error?: string;
+  /**
+   * Per-turn sum of input + output tokens from the Python sidecar's JSON
+   * response (gate #2 — see `desktop/runtime/sidecar.py::serve_json_protocol`
+   * and `_extract_tokens_used`). Always present alongside `response` on the
+   * success path; absent on error responses. Renderer surfaces this for
+   * cost/budget telemetry; the breakdown (input vs output, cache reads,
+   * etc.) stays inside Hermes Agent's `run_conversation` result dict and
+   * is not currently propagated across the JSON-line boundary.
+   */
+  tokens_used?: number;
 }
 
 interface PendingRequest {

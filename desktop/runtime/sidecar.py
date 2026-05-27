@@ -312,6 +312,38 @@ def _extract_response_text(result: Any) -> str:
     return str(result)
 
 
+def _extract_tokens_used(result: Any) -> int:
+    """Pull a single ``tokens_used`` integer from a ``run_conversation`` result.
+
+    This is the **sum** of ``input_tokens + output_tokens`` for the turn —
+    a single number is the right shape for the JSON-line protocol (gate
+    #2) because consumers (Electron renderer, future TUI clients) want a
+    cost/budget signal without having to do arithmetic. The constituent
+    counters remain available on the underlying ``run_conversation``
+    dict for callers who need the breakdown.
+
+    Hermes Agent populates ``input_tokens`` / ``output_tokens`` /
+    ``total_tokens`` on the result dict from its session counters (see
+    ``run_agent.py`` ~line 15933 — ``self.session_input_tokens`` etc.).
+    We prefer ``total_tokens`` when present (it's authoritative on the
+    Hermes side and may include reasoning/cache contributions on some
+    providers); fall back to ``input + output`` when only those are
+    surfaced; default to ``0`` when the agent omits all three (older
+    Hermes builds, error paths, or future shape drift) so the JSON
+    contract never emits ``null``/missing for ``tokens_used``.
+    """
+    if not isinstance(result, dict):
+        return 0
+    total = result.get("total_tokens")
+    if isinstance(total, int):
+        return total
+    inp = result.get("input_tokens")
+    out = result.get("output_tokens")
+    inp_n = inp if isinstance(inp, int) else 0
+    out_n = out if isinstance(out, int) else 0
+    return inp_n + out_n
+
+
 def serve_json_protocol(stdin: Any = None, stdout: Any = None) -> None:
     """Newline-delimited JSON protocol for the Electron parent process.
 
@@ -325,8 +357,14 @@ def serve_json_protocol(stdin: Any = None, stdout: Any = None) -> None:
     Schema::
 
         request: {"action": "run", "query": "<user prompt>"}
-        success: {"response": "<assistant text>"}
+        success: {"response": "<assistant text>", "tokens_used": <int>}
         error:   {"error": "<diagnostic message>"}
+
+    ``tokens_used`` is the per-turn sum of input + output tokens (gate
+    #2). See ``_extract_tokens_used`` for the exact derivation rule. The
+    field is always an integer and always present on success — never
+    ``null`` and never missing — even when the agent omits its token
+    counters (defaults to ``0`` in that defensive case).
 
     Lifecycle and failure handling:
 
@@ -389,7 +427,12 @@ def serve_json_protocol(stdin: Any = None, stdout: Any = None) -> None:
         try:
             current_agent = _ensure_agent()
             result = current_agent.run_conversation(request.get("query", ""))
-            _emit({"response": _extract_response_text(result)})
+            _emit({
+                "response": _extract_response_text(result),
+                # Sum of input + output tokens for this turn (gate #2).
+                # See _extract_tokens_used for the derivation rule.
+                "tokens_used": _extract_tokens_used(result),
+            })
         except Exception as exc:  # noqa: BLE001 — surface every failure to renderer
             _emit({"error": str(exc)})
 
