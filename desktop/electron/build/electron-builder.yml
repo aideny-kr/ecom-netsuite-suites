@@ -1,0 +1,92 @@
+# electron-builder configuration for the B0 spike (/goal #5 Phase B).
+#
+# This is a research spike, not a packaging-perfection config — full
+# hardening (code signing, notarization, auto-updates, universal binary)
+# lands in a later /goal. Bundle is unsigned; operator must
+# `xattr -dr com.apple.quarantine /Applications/Suite-Studio-Desktop.app`
+# after the first download on macOS.
+#
+# Polyglot packaging strategy (per the plan's pre-flight defaults):
+#   - Python sidecar: bundled via PyInstaller into `dist-sidecar/sidecar`
+#     and shipped as an extraResource. Built by the `build/build-sidecar.sh`
+#     script that the operator runs before `npm run dist`.
+#   - Node runtime for obsidian-memory MCP: shipped as a sibling Node binary
+#     via extraResources. Electron's bundled Node CANNOT be reused by child
+#     processes (it's the Electron runtime, not a standalone interpreter),
+#     so a separate node executable is downloaded into `build/node/` by the
+#     same build-sidecar.sh helper.
+#
+# See ../README.md §"Phase B packaging spike" for the full runbook,
+# bundle-size measurements, and tradeoff analysis.
+
+appId: ai.suitestudio.desktop
+productName: Suite Studio Desktop
+copyright: Copyright © 2026 Suite Studio
+
+directories:
+  output: out
+  buildResources: build
+
+files:
+  - dist/**/*
+  - renderer.html
+  - package.json
+
+# Extra resources are copied verbatim into the app bundle's
+# Resources/ directory. Resolved at runtime via
+# `process.resourcesPath` from the Electron main process.
+#
+# `from`: path relative to this electron/ directory.
+# `to`:   path inside Resources/ in the final .app.
+extraResources:
+  # PyInstaller-bundled Python sidecar. We point at the inner one-folder
+  # COLLECT output (dist-sidecar/sidecar/) so the binary lands at
+  # Resources/sidecar/sidecar — exactly the path resolvePythonPath in
+  # main.ts expects.
+  #
+  # If this directory is absent (operator skipped build-sidecar.sh),
+  # electron-builder fails the build. Gate #10's OR-branch deferral
+  # means commenting out this entry and falling back to system python3
+  # — see ../SMOKE-DEFERRAL-ELECTRON-LAUNCH.md for the recipe.
+  - from: ../runtime/dist-sidecar/sidecar
+    to: sidecar
+    filter:
+      - "**/*"
+  # Standalone Node binary for the obsidian-memory MCP server. Downloaded
+  # to ./build/node-runtime/ by build/build-sidecar.sh. If absent, the
+  # bundled app falls back to the operator's system Node on PATH —
+  # gate #9's OR-branch deferral path. Commented out by default so the
+  # default `npm run dist` works without the optional Node download.
+  # Uncomment after running build-sidecar.sh to validate gate #9
+  # end-to-end.
+  # - from: build/node-runtime
+  #   to: node-runtime
+  #   filter:
+  #     - "**/*"
+  #     - "!**/.DS_Store"
+
+mac:
+  category: public.app-category.productivity
+  target:
+    - target: dir       # one .app, no DMG/zip — this is a spike, not a release
+      arch:
+        - arm64         # match the PyInstaller bundle's host arch.
+                        # Universal binary (arm64 + x64) is a /goal #6 concern.
+  # The B0 spike is intentionally unsigned. Real signing config lands in
+  # the next /goal alongside the Apple Developer ID.
+  identity: null
+  hardenedRuntime: false
+  gatekeeperAssess: false
+
+# Same minimal approach on Linux + Windows — present so the operator can
+# experiment, but the gate-#11 smoke is macOS-only for /goal #5.
+linux:
+  target: dir
+  category: Development
+
+win:
+  target: dir
+
+# `asar` is enabled by default. We keep it that way for the spike — the
+# performance + integrity benefits outweigh the negligible debug cost.
+asar: true

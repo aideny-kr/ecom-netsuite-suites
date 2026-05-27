@@ -312,6 +312,131 @@ def _extract_response_text(result: Any) -> str:
     return str(result)
 
 
+def _extract_tokens_used(result: Any) -> int:
+    """Pull a single ``tokens_used`` integer from a ``run_conversation`` result.
+
+    This is the **sum** of ``input_tokens + output_tokens`` for the turn —
+    a single number is the right shape for the JSON-line protocol (gate
+    #2) because consumers (Electron renderer, future TUI clients) want a
+    cost/budget signal without having to do arithmetic. The constituent
+    counters remain available on the underlying ``run_conversation``
+    dict for callers who need the breakdown.
+
+    Hermes Agent populates ``input_tokens`` / ``output_tokens`` /
+    ``total_tokens`` on the result dict from its session counters (see
+    ``run_agent.py`` ~line 15933 — ``self.session_input_tokens`` etc.).
+    We prefer ``total_tokens`` when present (it's authoritative on the
+    Hermes side and may include reasoning/cache contributions on some
+    providers); fall back to ``input + output`` when only those are
+    surfaced; default to ``0`` when the agent omits all three (older
+    Hermes builds, error paths, or future shape drift) so the JSON
+    contract never emits ``null``/missing for ``tokens_used``.
+    """
+    if not isinstance(result, dict):
+        return 0
+    total = result.get("total_tokens")
+    if isinstance(total, int):
+        return total
+    inp = result.get("input_tokens")
+    out = result.get("output_tokens")
+    inp_n = inp if isinstance(inp, int) else 0
+    out_n = out if isinstance(out, int) else 0
+    return inp_n + out_n
+
+
+def serve_json_protocol(stdin: Any = None, stdout: Any = None) -> None:
+    """Newline-delimited JSON protocol for the Electron parent process.
+
+    Reads one JSON object per line from ``stdin`` and writes one JSON
+    object per line to ``stdout``. The Electron main process spawns this
+    sidecar with ``python -u runtime/sidecar.py --serve`` and pipes
+    queries from the renderer through it; ``-u`` is required because
+    Python buffers stdout under a pipe by default and the readline-based
+    parser on the Electron side would deadlock.
+
+    Schema::
+
+        request: {"action": "run", "query": "<user prompt>"}
+        success: {"response": "<assistant text>", "tokens_used": <int>}
+        error:   {"error": "<diagnostic message>"}
+
+    ``tokens_used`` is the per-turn sum of input + output tokens (gate
+    #2). See ``_extract_tokens_used`` for the exact derivation rule. The
+    field is always an integer and always present on success — never
+    ``null`` and never missing — even when the agent omits its token
+    counters (defaults to ``0`` in that defensive case).
+
+    Lifecycle and failure handling:
+
+    - One ``AIAgent`` is constructed lazily on the first ``run`` request
+      and reused across all subsequent queries on the same process
+      (one sidecar = one default agent).
+    - The vault scaffold + connection template + MCP server registration
+      happen at agent-construction time, on first query only.
+    - Malformed JSON, unknown actions, and any exception raised by the
+      agent all surface as ``{"error": ...}`` on stdout and the loop
+      keeps serving. The loop exits cleanly on EOF (parent closed
+      stdin).
+    - Missing ``ANTHROPIC_API_KEY`` surfaces as an error JSON on the
+      first ``run`` query rather than crashing the process — that way
+      the Electron renderer can show the misconfiguration to the user
+      without the parent process having to inspect exit codes.
+    """
+    if stdin is None:
+        stdin = sys.stdin
+    if stdout is None:
+        stdout = sys.stdout
+
+    agent: Optional[Any] = None
+
+    def _emit(payload: Dict[str, Any]) -> None:
+        stdout.write(json.dumps(payload) + "\n")
+        stdout.flush()
+
+    def _ensure_agent() -> Any:
+        nonlocal agent
+        if agent is not None:
+            return agent
+        if not os.environ.get("ANTHROPIC_API_KEY"):
+            raise RuntimeError(
+                "ANTHROPIC_API_KEY not set — refusing to construct agent. "
+                "Set the env var in the shell that launches Electron."
+            )
+        org = os.environ.get("SUITE_STUDIO_ORG", "default")
+        ensure_connection_template(org=org)
+        ensure_vault_scaffold(org=org)
+        register_mcp_servers(build_mcp_server_config(org=org))
+        agent = build_agents()["default"]
+        return agent
+
+    for line in stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            request = json.loads(line)
+        except json.JSONDecodeError as exc:
+            _emit({"error": f"malformed JSON request: {exc}"})
+            continue
+
+        action = request.get("action")
+        if action != "run":
+            _emit({"error": f"unknown action: {action!r}"})
+            continue
+
+        try:
+            current_agent = _ensure_agent()
+            result = current_agent.run_conversation(request.get("query", ""))
+            _emit({
+                "response": _extract_response_text(result),
+                # Sum of input + output tokens for this turn (gate #2).
+                # See _extract_tokens_used for the derivation rule.
+                "tokens_used": _extract_tokens_used(result),
+            })
+        except Exception as exc:  # noqa: BLE001 — surface every failure to renderer
+            _emit({"error": str(exc)})
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     """Run a single conversation against Claude. Returns exit code.
 
@@ -325,8 +450,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     live smoke test::
 
         python runtime/sidecar.py "list my NetSuite subsidiaries"
+
+    With ``--serve`` as the first argument, the sidecar enters the
+    newline-delimited JSON protocol loop (see ``serve_json_protocol``) —
+    this is how the Electron main process drives the sidecar in /goal #5.
     """
     argv = argv if argv is not None else sys.argv
+
+    if len(argv) > 1 and argv[1] == "--serve":
+        serve_json_protocol()
+        return 0
 
     if not os.environ.get("ANTHROPIC_API_KEY"):
         print(

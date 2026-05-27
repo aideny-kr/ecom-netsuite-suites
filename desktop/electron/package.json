@@ -1,0 +1,22 @@
+{
+  "name": "suite-studio-desktop-electron",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Suite Studio Desktop — Electron shell (B0 spike). See ../../docs/superpowers/plans/2026-05-26-desktop-b0-electron-shell.md.",
+  "main": "dist/main.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "npm run build && electron .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "dist": "npm run build && electron-builder --config build/electron-builder.yml"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "electron": "^31.0.0",
+    "electron-builder": "^25.0.0",
+    "jsdom": "^25.0.0",
+    "typescript": "^5.5.0",
+    "vitest": "^2.0.0"
+  }
+}
