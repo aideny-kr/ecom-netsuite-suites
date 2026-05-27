@@ -435,3 +435,204 @@ def test_main_registers_both_mcp_servers_before_agent(monkeypatch, tmp_path):
         f"both MCP servers must be registered, got {registered}"
     assert order.index("register_mcp") < order.index("AIAgent.__init__"), \
         f"register_mcp_servers must run BEFORE AIAgent.__init__; saw order: {order}"
+
+
+# ---------------------------------------------------------------------------
+# /goal #5 — JSON-line stdin/stdout protocol for Electron parent process
+# ---------------------------------------------------------------------------
+
+
+def test_serve_json_protocol_responds_to_run_action(monkeypatch, tmp_path):
+    """The serve loop must read {"action":"run","query":"..."} from stdin
+    and emit {"response":"...","tokens_used":N} to stdout, one JSON per line.
+
+    Plan gate #2: this is the contract the Electron main process speaks.
+    """
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-dummy")
+    monkeypatch.setenv("SUITE_STUDIO_HOME", str(tmp_path / "SuiteStudio"))
+
+    stdin = io.StringIO(json.dumps({"action": "run", "query": "say hello"}) + "\n")
+    stdout = io.StringIO()
+
+    sidecar.serve_json_protocol(stdin=stdin, stdout=stdout)
+
+    out = stdout.getvalue().strip().splitlines()
+    assert len(out) == 1, f"expected one response line, got {out!r}"
+    payload = json.loads(out[0])
+    assert "response" in payload, f"expected 'response' key, got {payload!r}"
+    assert "say hello" in payload["response"], \
+        f"stub agent should echo the query, got {payload['response']!r}"
+
+
+def test_serve_json_protocol_handles_multiple_queries_on_same_agent(monkeypatch, tmp_path):
+    """One AIAgent instance must serve multiple queries — the agent is built
+    once before the serve loop, then reused per query (no per-query
+    construction)."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-dummy")
+    monkeypatch.setenv("SUITE_STUDIO_HOME", str(tmp_path / "SuiteStudio"))
+
+    stdin_lines = (
+        json.dumps({"action": "run", "query": "first"}) + "\n" +
+        json.dumps({"action": "run", "query": "second"}) + "\n"
+    )
+    stdout = io.StringIO()
+
+    sidecar.serve_json_protocol(stdin=io.StringIO(stdin_lines), stdout=stdout)
+
+    out = stdout.getvalue().strip().splitlines()
+    assert len(out) == 2, f"expected two response lines, got {out!r}"
+    p1, p2 = json.loads(out[0]), json.loads(out[1])
+    assert "first" in p1.get("response", ""), p1
+    assert "second" in p2.get("response", ""), p2
+    # Only one AIAgent instance constructed across both queries (efficient reuse)
+    default_agents = [a for a in _StubAIAgent.instances if a.kwargs.get("model") == "claude-sonnet-4-6"]
+    assert len(default_agents) == 1, \
+        f"only one default AIAgent should be constructed, got {len(default_agents)}"
+
+
+def test_serve_json_protocol_returns_error_for_malformed_json(monkeypatch, tmp_path):
+    """Malformed JSON must yield {"error":"..."} on stdout, NEVER crash the
+    serve loop. Subsequent valid lines must continue to be handled."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-dummy")
+    monkeypatch.setenv("SUITE_STUDIO_HOME", str(tmp_path / "SuiteStudio"))
+
+    stdin_lines = (
+        "this is not json\n" +
+        json.dumps({"action": "run", "query": "after error"}) + "\n"
+    )
+    stdout = io.StringIO()
+
+    sidecar.serve_json_protocol(stdin=io.StringIO(stdin_lines), stdout=stdout)
+
+    out = stdout.getvalue().strip().splitlines()
+    assert len(out) == 2, f"expected error + recovery, got {out!r}"
+    err = json.loads(out[0])
+    assert "error" in err, f"first line must be an error response, got {err!r}"
+    recovery = json.loads(out[1])
+    assert "response" in recovery and "after error" in recovery["response"], \
+        f"loop must keep serving after a malformed input, got {recovery!r}"
+
+
+def test_serve_json_protocol_returns_error_for_unknown_action(monkeypatch, tmp_path):
+    """Unknown action verbs must yield an error without crashing the loop."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-dummy")
+    monkeypatch.setenv("SUITE_STUDIO_HOME", str(tmp_path / "SuiteStudio"))
+
+    stdin = io.StringIO(json.dumps({"action": "telekinesis", "query": "nope"}) + "\n")
+    stdout = io.StringIO()
+
+    sidecar.serve_json_protocol(stdin=stdin, stdout=stdout)
+
+    payload = json.loads(stdout.getvalue().strip())
+    assert "error" in payload, f"unknown action must yield error, got {payload!r}"
+    assert "telekinesis" in payload["error"] or "action" in payload["error"].lower(), \
+        f"error must reference the bad action, got {payload!r}"
+
+
+def test_serve_json_protocol_emits_error_when_agent_raises(monkeypatch, tmp_path):
+    """If AIAgent.run_conversation raises, the serve loop must emit
+    {"error":"..."} on stdout (so the Electron renderer can surface it),
+    NOT silently swallow it or kill the process."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-dummy")
+    monkeypatch.setenv("SUITE_STUDIO_HOME", str(tmp_path / "SuiteStudio"))
+
+    class _RaisingAgent(_StubAIAgent):
+        def run_conversation(self, user_message, **kwargs):
+            raise RuntimeError("upstream LLM blew up")
+
+    monkeypatch.setattr(sidecar, "AIAgent", _RaisingAgent)
+
+    stdin = io.StringIO(json.dumps({"action": "run", "query": "trigger fail"}) + "\n")
+    stdout = io.StringIO()
+
+    sidecar.serve_json_protocol(stdin=stdin, stdout=stdout)
+
+    payload = json.loads(stdout.getvalue().strip())
+    assert "error" in payload, f"agent crash must surface as error, got {payload!r}"
+    assert "upstream LLM blew up" in payload["error"]
+
+
+def test_serve_json_protocol_emits_each_line_with_trailing_newline(monkeypatch, tmp_path):
+    """Newline-delimited JSON: every response must end with '\\n' so the
+    Electron parent's readline-based reader can frame messages correctly."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-dummy")
+    monkeypatch.setenv("SUITE_STUDIO_HOME", str(tmp_path / "SuiteStudio"))
+
+    stdin = io.StringIO(json.dumps({"action": "run", "query": "framing test"}) + "\n")
+    stdout = io.StringIO()
+
+    sidecar.serve_json_protocol(stdin=stdin, stdout=stdout)
+
+    raw = stdout.getvalue()
+    assert raw.endswith("\n"), f"response must end with newline, got: {raw!r}"
+    # And exactly one newline between JSON objects when there is only one
+    assert raw.count("\n") == 1, f"expected one framing newline, got {raw!r}"
+
+
+def test_main_serve_flag_invokes_serve_loop(monkeypatch, tmp_path):
+    """`python sidecar.py --serve` must enter the JSON-line serve loop
+    instead of running a one-shot conversation. This is how the Electron
+    main process boots the sidecar.
+
+    The flag must be ARGV[1] so it lives in the same slot the CLI prompt
+    used to occupy — no breaking change to the prompt-arg path because
+    --serve is unambiguous (no real prompt starts with two dashes).
+    """
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-dummy")
+    monkeypatch.setenv("SUITE_STUDIO_HOME", str(tmp_path / "SuiteStudio"))
+
+    called = {"serve": False, "stdin": None, "stdout": None}
+
+    def _stub_serve(stdin=None, stdout=None):
+        called["serve"] = True
+        called["stdin"] = stdin
+        called["stdout"] = stdout
+
+    monkeypatch.setattr(sidecar, "serve_json_protocol", _stub_serve)
+
+    exit_code = sidecar.main(argv=["sidecar.py", "--serve"])
+
+    assert exit_code == 0
+    assert called["serve"], "main(--serve) must invoke serve_json_protocol"
+
+
+def test_main_without_serve_flag_keeps_existing_cli_behaviour(monkeypatch, tmp_path):
+    """Back-compat: `python sidecar.py "some prompt"` must still run a
+    single conversation and exit, exactly as before. The CLI mode is
+    documented in README §"Live entity-write smoke runbook" and the
+    /goal #3 sidecar smoke."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-dummy")
+    monkeypatch.setenv("SUITE_STUDIO_HOME", str(tmp_path / "SuiteStudio"))
+
+    serve_called = {"hit": False}
+
+    def _stub_serve(stdin=None, stdout=None):
+        serve_called["hit"] = True
+
+    monkeypatch.setattr(sidecar, "serve_json_protocol", _stub_serve)
+
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        exit_code = sidecar.main(argv=["sidecar.py", "list my subsidiaries"])
+
+    assert exit_code == 0
+    assert not serve_called["hit"], \
+        "main with a CLI prompt must NOT enter the serve loop"
+    assert "list my subsidiaries" in buf.getvalue(), \
+        "CLI mode must still echo the user prompt response"
+
+
+def test_serve_json_protocol_refuses_without_anthropic_key(monkeypatch):
+    """Even in serve mode, the sidecar must refuse to construct an agent
+    without ANTHROPIC_API_KEY — and emit an error JSON on the first
+    incoming query so Electron can surface the misconfiguration."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    stdin = io.StringIO(json.dumps({"action": "run", "query": "anything"}) + "\n")
+    stdout = io.StringIO()
+
+    sidecar.serve_json_protocol(stdin=stdin, stdout=stdout)
+
+    payload = json.loads(stdout.getvalue().strip())
+    assert "error" in payload, payload
+    assert "ANTHROPIC_API_KEY" in payload["error"]
