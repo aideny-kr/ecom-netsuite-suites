@@ -13,15 +13,21 @@ This subtree is intentionally minimal. Subsequent `/goal`s layer Electron, Obsid
 desktop/
 ├── README.md                        # this file
 ├── SPIKE-RESULTS.md                 # B0 pre-flight spike (do not edit)
+├── SMOKE-DEFERRAL-NS-SUITEQL.md     # /goal #3 gate-7 OR-branch closure
+├── SMOKE-DEFERRAL-OBSIDIAN-VAULT.md # /goal #4 gate-7 OR-branch closure (if applicable)
 ├── pyproject.toml                   # desktop-specific Python deps
 ├── runtime/
 │   ├── hermes-agent/                # vendored Hermes Agent (git submodule, pinned)
+│   ├── obsidian-memory-mcp/         # vendored Obsidian Memory MCP Node server (git submodule, pinned)
 │   ├── sidecar.py                   # library-mode wrapper around AIAgent + MCP wiring
 │   └── mcp-servers/
-│       └── ns-suiteql/              # Suite-Studio-authored FastMCP server
-│           ├── README.md            # server contract + config schema
-│           ├── server.py            # FastMCP stdio entry point
-│           └── netsuite_client.py   # SuiteQL REST call + validation
+│       ├── ns-suiteql/              # Suite-Studio-authored FastMCP server
+│       │   ├── README.md            # server contract + config schema
+│       │   ├── server.py            # FastMCP stdio entry point
+│       │   └── netsuite_client.py   # SuiteQL REST call + validation
+│       └── obsidian-memory/         # Python shim around vendored Node MCP server
+│           ├── README.md            # shim contract + tool surface
+│           └── server.py            # `node dist/index.js` exec wrapper
 ├── skills/
 │   └── suite-studio-netsuite/       # Suite Studio NetSuite skill pack
 │       ├── README.md
@@ -31,10 +37,11 @@ desktop/
 └── tests/
     ├── __init__.py
     ├── test_sidecar.py              # sidecar + MCP wiring tests (mocked)
-    └── test_ns_suiteql_server.py    # MCP server + REST client tests (mocked)
+    ├── test_ns_suiteql_server.py    # ns-suiteql server + REST client tests (mocked)
+    └── test_obsidian_memory_server.py # obsidian-memory shim tests (mocked)
 ```
 
-Out of scope for this `/goal` (tracked in subsequent ones): `electron/`, `packaging/`, `signing/`, `update/`, `runtime/obsidian-memory-mcp/`, `tools/self-evolution/`. Other NetSuite MCP tools (`ns_runReport`, `ns_runSavedSearch`, `ns_getRecord`, `ns_createRecord`, etc.) are also out of scope — they layer in at subsequent `/goal`s.
+Out of scope for this `/goal` (tracked in subsequent ones): `electron/`, `packaging/`, `signing/`, `update/`, `tools/self-evolution/`. Other NetSuite MCP tools (`ns_runReport`, `ns_runSavedSearch`, `ns_getRecord`, `ns_createRecord`, etc.) are also out of scope — they layer in at subsequent `/goal`s.
 
 ---
 
@@ -107,6 +114,207 @@ The CI-safe pytest suite covers both paths with mocks; the live smoke is operato
 ### What the MCP tool surface looks like to the LLM
 
 After `register_mcp_servers` returns, the AIAgent sees a tool named `mcp_ns_suiteql_ns_runSuiteQL(query: str) → dict` (Hermes Agent's standard `mcp_<server>_<tool>` sanitization). The tool description carries a pointer to the SuiteQL dialect rules at `desktop/skills/suite-studio-netsuite/suiteql/SKILL.md`, which is the canonical (verbatim) lift from `backend/app/services/chat/knowledge_profiles/netsuite.yaml`.
+
+---
+
+## Vault scaffold + `obsidian-memory` MCP server (/goal #4)
+
+`/goal #4` wires a SECOND MCP server alongside `ns-suiteql`: a Python shim
+around the vendored Node.js `yunaga224/obsidian-memory-mcp` server. The
+shim translates the Suite-Studio-scoped `OBSIDIAN_VAULT_PATH` env var
+into the vendored server's `MEMORY_DIR` contract, then `os.execvpe`s
+`node dist/index.js` so the parent process is replaced and Hermes
+Agent's stdio JSON-RPC pipes stay intact.
+
+```
+┌────────────────────────────────────────────────────────────────────┐
+│                  desktop/runtime/sidecar.py                        │
+│  ┌──────────────────┐   ┌──────────────────────────────────────┐  │
+│  │ AIAgent          │   │ register_mcp_servers({                │  │
+│  │  ("default")     │   │   "ns-suiteql":      {python, ...},   │  │
+│  │ AIAgent("plan")  │   │   "obsidian-memory": {python, ...},   │  │
+│  └──────────────────┘   │ })                                    │  │
+│                         └────┬──────────────────────┬───────────┘  │
+└──────────────────────────────┼──────────────────────┼──────────────┘
+                               │ stdio                │ stdio
+            ┌──────────────────▼──┐        ┌──────────▼──────────────┐
+            │ mcp-servers/        │        │ mcp-servers/            │
+            │   ns-suiteql/       │        │   obsidian-memory/      │
+            │   server.py         │        │   server.py (shim)      │
+            └─────────┬───────────┘        └────────────┬────────────┘
+                      │ HTTPS                           │ os.execvpe(node, ...)
+                      ▼                                 ▼
+       NetSuite SuiteTalk REST          desktop/runtime/obsidian-memory-mcp/
+                                                  dist/index.js
+                                                      │
+                                                      │ reads/writes .md
+                                                      ▼
+                                          ~/SuiteStudio/{org}/  ← THE VAULT
+                                            ├── .obsidian/
+                                            ├── 00-Home.md (frontmatter only)
+                                            └── *.md  (entities, operator-authored)
+```
+
+### Vault scaffold contract
+
+On first run, the sidecar's `ensure_vault_scaffold(org)` creates:
+
+| Path | Content |
+| --- | --- |
+| `~/SuiteStudio/{org}/`               | Empty directory                                  |
+| `~/SuiteStudio/{org}/.obsidian/`     | Empty — marks the folder as an Obsidian vault    |
+| `~/SuiteStudio/{org}/00-Home.md`     | **Frontmatter only** — `title`, `tags: [home]`. Body strictly empty per plan non-negotiable #5 |
+
+**The scaffold never fabricates operator content.** Vault contents
+(entities, observations, relations) are tenant data, created by the
+operator or written by the agent at the operator's direction via
+`mcp_obsidian-memory_create_entities`. The scaffold is also idempotent:
+running the sidecar twice never overwrites a 00-Home.md that the
+operator has hand-edited (same idempotency contract as the ns-suiteql
+connection-file template).
+
+### Building the vendored Node.js MCP server
+
+The vendored repo at `desktop/runtime/obsidian-memory-mcp/` ships
+TypeScript source only — `dist/` is `.gitignore`d upstream and must
+be rebuilt locally after every `git submodule update`:
+
+```bash
+cd desktop/runtime/obsidian-memory-mcp
+npm install      # ~30s, pulls @modelcontextprotocol/sdk + gray-matter
+npm run build    # ~3s, emits dist/index.js
+```
+
+If the shim is spawned before this is done, it refuses to launch with
+a structured error containing the runbook above. Subsequent submodule
+bumps may require re-running `npm install` + `npm run build`.
+
+### Tool surface (post-registration)
+
+The shim exposes 9 vendored tools, each prefixed with
+`mcp_obsidian-memory_` per Hermes Agent's sanitization:
+
+| Sanitized tool name                       | Purpose                                          |
+| ----------------------------------------- | ------------------------------------------------ |
+| `mcp_obsidian-memory_create_entities`     | Create one or more entity `.md` files            |
+| `mcp_obsidian-memory_read_graph`          | Read the full knowledge graph                    |
+| `mcp_obsidian-memory_search_nodes`        | Substring search across observations/names       |
+| `mcp_obsidian-memory_open_nodes`          | Open specific nodes by name                      |
+| `mcp_obsidian-memory_add_observations`    | Append observations to an existing entity        |
+| `mcp_obsidian-memory_create_relations`    | Connect two entities with a relation             |
+| `mcp_obsidian-memory_delete_entities`     | Delete entity files                              |
+| `mcp_obsidian-memory_delete_observations` | Remove specific observations                     |
+| `mcp_obsidian-memory_delete_relations`    | Remove edges between entities                    |
+
+### Live entity-write smoke runbook (gate #7)
+
+```bash
+cd desktop
+source .venv/bin/activate
+pip install -e ./runtime/hermes-agent
+pip install -e '.[dev]'
+
+# 1. Build the vendored Node MCP server (one-time, see runbook above)
+( cd runtime/obsidian-memory-mcp && npm install && npm run build )
+
+# 2. Set the operator's BYOK Anthropic key (out-of-band, NEVER in a /goal session)
+export ANTHROPIC_API_KEY=sk-ant-...
+
+# 3. First run scaffolds the vault (idempotent):
+python runtime/sidecar.py
+# → creates ~/SuiteStudio/default/ + .obsidian/ + 00-Home.md (frontmatter only)
+
+# 4. The gate-7 entity-write prompt:
+python runtime/sidecar.py "create an entity called 'TestEntity' with observation 'first vault write 2026-05-XX'"
+
+# 5. Verify the file landed:
+ls ~/SuiteStudio/default/
+# Expected: 00-Home.md, .obsidian/, TestEntity.md (the new entity file)
+cat ~/SuiteStudio/default/TestEntity.md
+# Expected: YAML frontmatter (entityType, created, updated) + Observations + Relations sections
+```
+
+### Capturing the live smoke result
+
+If/when the operator runs the gate-7 smoke, paste the verbatim output
+below (truncate sensitive paths if needed):
+
+```
+Date:          <YYYY-MM-DD>
+Vault:         ~/SuiteStudio/default/
+Model:         claude-sonnet-4-6
+Prompt:        create an entity called 'TestEntity' with observation '...'
+Response:      <agent's natural-language reply>
+Tool surface:  mcp_obsidian-memory_create_entities — 1 invocation
+File created:  ~/SuiteStudio/default/TestEntity.md
+Frontmatter:   entityType: <…>, created: <…>, updated: <…>
+Observations:  - first vault write 2026-05-XX
+```
+
+If gate #7 is deferred (same OR-branch precedent as /goal #2 gate #5
+and /goal #3 gate #7), see `SMOKE-DEFERRAL-OBSIDIAN-VAULT.md` in this
+directory for the four-source citation.
+
+---
+
+## Vendoring strategy — Obsidian Memory MCP at `c3708dd`
+
+`yunaga224/obsidian-memory-mcp` is vendored as a **git submodule** at
+`desktop/runtime/obsidian-memory-mcp`, pinned at commit
+**`c3708dd33d92b3b5e37d75dc7bb79be3b18606a2`** (2025-08-02).
+
+### Why a commit SHA instead of a CalVer or SemVer tag
+
+Unlike Hermes Agent (which uses CalVer tags), `obsidian-memory-mcp`
+publishes **neither git tags nor formal releases** — verified
+2026-05-26 via `git ls-remote --tags https://github.com/YuNaga224/obsidian-memory-mcp`
+(returns no output). A commit SHA pin is the only stable option, and
+the plan doc's OQ-049 "tag with matching package version" convention
+from /goal #3 does not apply.
+
+Commit `c3708dd` is the merge of PR #1 (a Glama badge addition by
+@punkpeye) and the most recent commit on `main` as of dispatch. The
+package metadata at this commit:
+
+- `name`: `obsidian-memory-mcp`
+- `version`: `1.0.0` (from `package.json`)
+- `license`: **MIT** (verified at the pinned commit; LICENSE retains
+  the original 2024 Anthropic copyright for the upstream memory
+  server, plus 2025 YuNaga224 for the Obsidian-specific modifications)
+- `type`: Node.js / TypeScript (ESM)
+- `entrypoint`: `dist/index.js` (compiled via `npm run build`)
+- `runtime env`: `MEMORY_DIR`
+
+### Adding the submodule (reference)
+
+```bash
+git submodule add https://github.com/YuNaga224/obsidian-memory-mcp.git desktop/runtime/obsidian-memory-mcp
+cd desktop/runtime/obsidian-memory-mcp
+git checkout c3708dd33d92b3b5e37d75dc7bb79be3b18606a2
+cd ../../..
+git add .gitmodules desktop/runtime/obsidian-memory-mcp
+git commit -m "feat(desktop): vendor obsidian-memory-mcp at c3708dd"
+```
+
+If the host sandbox blocks submodule operations on `.git/objects` or
+`.gitmodules`, approve `dangerouslyDisableSandbox` for the single
+`git submodule add` invocation (same pattern the Hermes Agent vendor
+required at /goal #2 / /goal #3).
+
+### Upgrading
+
+```bash
+cd desktop/runtime/obsidian-memory-mcp
+git fetch
+git checkout <new-sha>
+cd ../../..
+( cd desktop/runtime/obsidian-memory-mcp && npm install && npm run build )
+cd desktop && pytest tests/test_obsidian_memory_server.py
+git add desktop/runtime/obsidian-memory-mcp
+git commit -m "chore(desktop): bump obsidian-memory-mcp to <new-sha>"
+```
+
+Always re-check the upstream `LICENSE` for divergence at bump time.
 
 ---
 
@@ -325,10 +533,12 @@ SUITE_STUDIO_MODEL_DEFAULT=claude-haiku-4-5-20251001 pytest tests/test_sidecar.p
 |---|---|---|
 | OQ-047 (Electron ↔ Hermes Agent integration mode) | RESOLVED — library mode | `SPIKE-RESULTS.md`, ADR-007 §OQ-047 |
 | OQ-048 (in-tree Obsidian skill overlap) | RESOLVED — keep Obsidian-memory-MCP | `SPIKE-RESULTS.md`, ADR-007 §OQ-048 |
+| OQ-049 (obsidian-memory-mcp pin target) | RESOLVED — commit SHA `c3708dd` (no tags/releases upstream) | this file §Vendoring strategy — Obsidian Memory MCP |
 | Vendoring strategy for Hermes Agent | RESOLVED — git submodule at `v2026.5.16` | this file |
+| Vendoring strategy for obsidian-memory-mcp | RESOLVED — git submodule at `c3708dd` | this file |
 | Python env for the sidecar | RESOLVED — isolated `desktop/.venv` | `pyproject.toml` |
 | Model strategy | RESOLVED — Sonnet default + Opus plan, env-var override | ADR-008 |
-| Sidecar IPC contract | OPEN — locked at fourth `/goal` (Electron wiring) | next plans |
+| Sidecar IPC contract | OPEN — locked at fifth `/goal` (Electron wiring) | next plans |
 | Packaging (PyInstaller / PyOxidizer) | OPEN — operator decision after bundle-size measurement | OQ-038 |
 | DB persistence (Postgres / SQLite) | OPEN — operator decision | OQ-031 |
 
