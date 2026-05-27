@@ -59,7 +59,7 @@ async def create_policy(
         allowed_record_types=data.get("allowed_record_types"),
         blocked_fields=data.get("blocked_fields"),
         tool_allowlist=data.get("tool_allowlist"),
-        max_rows_per_query=data.get("max_rows_per_query", 1000),
+        max_rows_per_query=data.get("max_rows_per_query", 50000),
         require_row_limit=data.get("require_row_limit", True),
         custom_rules=data.get("custom_rules"),
         created_by=user_id,
@@ -284,7 +284,7 @@ def evaluate_tool_call(
         if isinstance(query, str) and query:
             query_upper = query.upper()
             if "ROWNUM" not in query_upper and "FETCH" not in query_upper:
-                max_rows = policy.max_rows_per_query or 1000
+                max_rows = policy.max_rows_per_query or 50000
                 return {
                     "allowed": False,
                     "reason": f"Query must include a row limit (max {max_rows} rows). "

@@ -30,7 +30,7 @@ class PolicyProfile(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     allowed_record_types: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
     blocked_fields: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
     tool_allowlist: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
-    max_rows_per_query: Mapped[int] = mapped_column(Integer, default=1000, nullable=False)
+    max_rows_per_query: Mapped[int] = mapped_column(Integer, default=50000, nullable=False)
     require_row_limit: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     custom_rules: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
     created_by: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=True)
