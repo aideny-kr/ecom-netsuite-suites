@@ -22,8 +22,9 @@ const RENDERER_DOM = `
       <h1 id="title">Suite Studio Desktop v0 — spike</h1>
     </header>
     <div id="history" role="log" aria-live="polite"></div>
-    <form id="composer">
-      <input id="prompt" type="text" autocomplete="off" />
+    <form id="composer" aria-label="Send a chat query to the Suite Studio agent">
+      <label for="prompt" class="visually-hidden">Chat query</label>
+      <input id="prompt" type="text" autocomplete="off" aria-label="Chat query" />
       <button id="send" type="submit">Send</button>
     </form>
   </main>

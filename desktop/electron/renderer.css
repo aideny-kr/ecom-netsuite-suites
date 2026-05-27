@@ -67,6 +67,20 @@ header h1 {
   gap: 0.5rem;
 }
 
+/* Screen-reader-only label: hides visually but stays in the
+ * accessibility tree. Standard a11y pattern. */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 #prompt {
   flex: 1;
   font-size: 0.95rem;

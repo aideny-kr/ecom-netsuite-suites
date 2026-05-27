@@ -459,7 +459,7 @@ Tool surface:   <which MCP tools were available>
 | Surface | File | Count | Framework |
 |---|---|---|---|
 | Sidecar JSON-line protocol | `tests/test_sidecar.py` (the `/goal #5` block at the bottom) | 9 new | pytest |
-| Sidecar wrapper class | `electron/tests/sidecar.test.ts` | 11 (start: 3 — incl. packaged-mode; runAgent: 4; kill: 2; onCrash: 2) | vitest, node env |
+| Sidecar wrapper class | `electron/tests/sidecar.test.ts` | 11 (start: 3 — dev + env + packaged-mode; runAgent: 4; kill: 2; onCrash: 2) | vitest, node env |
 | Electron main lifecycle | `electron/tests/main.test.ts` | 8 (whenReady: 3; IPC: 3; before-quit: 1; crash: 1) | vitest, node env |
 | Renderer DOM wiring + XSS guardrail | `electron/tests/renderer.test.ts` | 6 (wire: 1; render: 1; XSS: 1; error: 1; clear: 1; empty: 1) | vitest, jsdom env |
 
@@ -472,7 +472,7 @@ cd desktop && .venv/bin/python -m pytest tests/ -q
 
 # Electron tests:
 cd desktop/electron && npx vitest run
-# 25 tests passed (10 sidecar + 8 main + 6 renderer + 1 packaged-mode)
+# 25 tests passed (11 sidecar + 8 main + 6 renderer)
 ```
 
 ---
