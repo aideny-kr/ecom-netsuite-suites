@@ -11,37 +11,56 @@ This subtree is intentionally minimal. Subsequent `/goal`s layer Electron, Obsid
 
 ```
 desktop/
-├── README.md                        # this file
-├── SPIKE-RESULTS.md                 # B0 pre-flight spike (do not edit)
-├── SMOKE-DEFERRAL-NS-SUITEQL.md     # /goal #3 gate-7 OR-branch closure
-├── SMOKE-DEFERRAL-OBSIDIAN-VAULT.md # /goal #4 gate-7 OR-branch closure (if applicable)
-├── pyproject.toml                   # desktop-specific Python deps
+├── README.md                            # this file
+├── SPIKE-RESULTS.md                     # B0 pre-flight spike (do not edit)
+├── SMOKE-DEFERRAL-NS-SUITEQL.md         # /goal #3 gate-7 OR-branch closure
+├── SMOKE-DEFERRAL-OBSIDIAN-VAULT.md     # /goal #4 gate-7 OR-branch closure
+├── SMOKE-DEFERRAL-ELECTRON-LAUNCH.md    # /goal #5 gate-11 OR-branch closure
+├── pyproject.toml                       # desktop-specific Python deps
+├── electron/                            # Electron shell (/goal #5)
+│   ├── package.json                     # Electron + electron-builder + vitest deps
+│   ├── tsconfig.json                    # TS config (CJS for main/preload; renderer non-module)
+│   ├── vitest.config.ts                 # vitest config (node default, jsdom per-file)
+│   ├── main.ts                          # Electron main: app lifecycle, IPC, sidecar wiring
+│   ├── preload.ts                       # contextBridge exposing window.suiteStudio
+│   ├── sidecar.ts                       # Sidecar class — Python child process wrapper
+│   ├── renderer.html / renderer.css     # bare chat UI (strict CSP, no inline scripts)
+│   ├── renderer.ts                      # vanilla TS — XSS-safe textContent rendering
+│   ├── types.d.ts                       # ambient types (SuiteStudioBridge, Window)
+│   ├── build/
+│   │   ├── electron-builder.yml         # packaging config (mac arm64, unsigned spike)
+│   │   └── build-sidecar.sh             # operator-runs polyglot bundle helper
+│   └── tests/
+│       ├── sidecar.test.ts              # Sidecar wrapper tests (mocked child_process)
+│       ├── main.test.ts                 # Electron lifecycle tests (mocked electron)
+│       └── renderer.test.ts             # DOM tests in jsdom (XSS guardrail asserted)
 ├── runtime/
-│   ├── hermes-agent/                # vendored Hermes Agent (git submodule, pinned)
-│   ├── obsidian-memory-mcp/         # vendored Obsidian Memory MCP Node server (git submodule, pinned)
-│   ├── sidecar.py                   # library-mode wrapper around AIAgent + MCP wiring
+│   ├── hermes-agent/                    # vendored Hermes Agent (git submodule, pinned)
+│   ├── obsidian-memory-mcp/             # vendored Obsidian Memory MCP Node server (git submodule, pinned)
+│   ├── sidecar.py                       # library-mode wrapper around AIAgent + MCP wiring
+│   ├── sidecar.spec                     # PyInstaller one-folder spec (/goal #5 Phase B)
 │   └── mcp-servers/
-│       ├── ns-suiteql/              # Suite-Studio-authored FastMCP server
-│       │   ├── README.md            # server contract + config schema
-│       │   ├── server.py            # FastMCP stdio entry point
-│       │   └── netsuite_client.py   # SuiteQL REST call + validation
-│       └── obsidian-memory/         # Python shim around vendored Node MCP server
-│           ├── README.md            # shim contract + tool surface
-│           └── server.py            # `node dist/index.js` exec wrapper
+│       ├── ns-suiteql/                  # Suite-Studio-authored FastMCP server
+│       │   ├── README.md                # server contract + config schema
+│       │   ├── server.py                # FastMCP stdio entry point
+│       │   └── netsuite_client.py       # SuiteQL REST call + validation
+│       └── obsidian-memory/             # Python shim around vendored Node MCP server
+│           ├── README.md                # shim contract + tool surface
+│           └── server.py                # `node dist/index.js` exec wrapper
 ├── skills/
-│   └── suite-studio-netsuite/       # Suite Studio NetSuite skill pack
+│   └── suite-studio-netsuite/           # Suite Studio NetSuite skill pack
 │       ├── README.md
-│       ├── SKILL.md                 # top-level skill manifest
+│       ├── SKILL.md                     # top-level skill manifest
 │       └── suiteql/
-│           └── SKILL.md             # dialect rules — verbatim from netsuite.yaml
+│           └── SKILL.md                 # dialect rules — verbatim from netsuite.yaml
 └── tests/
     ├── __init__.py
-    ├── test_sidecar.py              # sidecar + MCP wiring tests (mocked)
-    ├── test_ns_suiteql_server.py    # ns-suiteql server + REST client tests (mocked)
-    └── test_obsidian_memory_server.py # obsidian-memory shim tests (mocked)
+    ├── test_sidecar.py                  # sidecar + JSON-line protocol + MCP wiring (mocked)
+    ├── test_ns_suiteql_server.py        # ns-suiteql server + REST client tests (mocked)
+    └── test_obsidian_memory_server.py   # obsidian-memory shim tests (mocked)
 ```
 
-Out of scope for this `/goal` (tracked in subsequent ones): `electron/`, `packaging/`, `signing/`, `update/`, `tools/self-evolution/`. Other NetSuite MCP tools (`ns_runReport`, `ns_runSavedSearch`, `ns_getRecord`, `ns_createRecord`, etc.) are also out of scope — they layer in at subsequent `/goal`s.
+Out of scope for `/goal #5` (tracked in subsequent ones): Next.js renderer integration, browser-OAuth PKCE for NetSuite, OS keychain, code signing + notarization, auto-updates, multi-window, tray/menubar. Bundle-size optimization beyond measurement is `/goal #6+`.
 
 ---
 
@@ -254,6 +273,207 @@ Observations:  - first vault write 2026-05-XX
 If gate #7 is deferred (same OR-branch precedent as /goal #2 gate #5
 and /goal #3 gate #7), see `SMOKE-DEFERRAL-OBSIDIAN-VAULT.md` in this
 directory for the four-source citation.
+
+---
+
+## Electron shell (/goal #5)
+
+`/goal #5` adds the **Electron desktop shell** at `desktop/electron/`,
+turning the Python sidecar (a CLI process) into a real launchable
+desktop application with a chat UI. Phase A (gates 1–8) gets the
+dev-mode launch working; Phase B (gates 9–11) is a packaging research
+spike that produces a launchable `.app` bundle.
+
+This is the slice that takes Suite Studio Desktop from "Python CLI +
+Node submodule" to "icon you can double-click".
+
+### Architecture diagram
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                     Suite Studio Desktop.app                        │
+│  ┌───────────────────────────────────────────────────────────────┐  │
+│  │  Electron renderer (BrowserWindow)                            │  │
+│  │   ┌───────────────────────────────────────────────────────┐   │  │
+│  │   │  renderer.html + renderer.css + renderer.js          │   │  │
+│  │   │  • bare HTML chat UI, strict CSP, no inline scripts  │   │  │
+│  │   │  • textContent ONLY — XSS-safe (non-negotiable #5)   │   │  │
+│  │   │  • talks to main via window.suiteStudio.runAgent     │   │  │
+│  │   └───────────────────────────────────────────────────────┘   │  │
+│  │                          ▲                                    │  │
+│  │                          │ contextBridge (preload.js)         │  │
+│  │                          │   - exposes runAgent(query)        │  │
+│  │                          │   - exposes onSidecarCrashed(cb)   │  │
+│  │                          ▼                                    │  │
+│  │  Electron main (main.js)                                      │  │
+│  │   • ipcMain.handle('agent:run', q ⇒ sidecar.runAgent(q))      │  │
+│  │   • app.whenReady → spawn Sidecar + create BrowserWindow      │  │
+│  │   • app.before-quit → sidecar.kill()                          │  │
+│  │   • sidecar.onCrash → webContents.send('sidecar:crashed')     │  │
+│  └───────────────────────────────────────────────────────────────┘  │
+│                            ▲                                        │
+│                            │ Sidecar class (electron/sidecar.ts)    │
+│                            │   • spawns `python -u sidecar.py       │
+│                            │     --serve` (dev) OR the PyInstaller  │
+│                            │     binary `sidecar --serve` (packaged)│
+│                            │   • newline-delimited JSON over stdio  │
+│                            │   • sequential request queue           │
+│                            ▼                                        │
+│  ┌───────────────────────────────────────────────────────────────┐  │
+│  │  Python sidecar (runtime/sidecar.py::serve_json_protocol)     │  │
+│  │   • {"action":"run","query":"..."} → {"response":"..."}/      │  │
+│  │     {"error":"..."} over stdin/stdout, newline-framed         │  │
+│  │   • lazy AIAgent — one instance for the process lifetime      │  │
+│  │   • register_mcp_servers(ns-suiteql + obsidian-memory) before │  │
+│  │     constructing the agent (unchanged from /goal #4)          │  │
+│  └───────────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+The renderer has **no Node access** (`nodeIntegration:false`,
+`contextIsolation:true`, `sandbox:true`). The ONLY surface it can call
+is `window.suiteStudio.runAgent(query)` — every renderer-facing
+capability must be added explicitly to `preload.ts`, which is the
+point: every exposed surface is auditable.
+
+### Dev-mode runbook (gate #8)
+
+```bash
+cd desktop/electron
+npm install                          # one-time, ~489 packages including Electron 31
+
+# Set the operator's BYOK Anthropic key out-of-band — NEVER paste into
+# a /goal session (see feedback_api_key_in_goal_sessions.md):
+export ANTHROPIC_API_KEY=sk-ant-...
+
+npm start                            # compiles TS and launches Electron
+# A window titled "Suite Studio Desktop v0 — spike" opens. Type "say hello"
+# and press Enter. Expected: Anthropic's response renders as plain text
+# beneath the prompt in the message history.
+```
+
+What this exercises end-to-end (without packaging):
+
+- Electron main spawns `python -u runtime/sidecar.py --serve` and pipes JSON.
+- `serve_json_protocol` builds an AIAgent + registers `ns-suiteql` and
+  `obsidian-memory` MCP servers (same path as `/goal #3 + #4` smoke).
+- `agent:run` IPC delegates renderer queries to the sidecar.
+- Response renders in the history via `textContent`.
+
+### Phase B packaging runbook (gates #9–11)
+
+Phase B is a **research spike**, not packaging perfection — the goal is
+to validate ONE strategy per pre-flight and document tradeoffs. Full
+hardening (signing, notarization, auto-updates, universal binary) lands
+in `/goal #6+`.
+
+```bash
+cd desktop
+
+# 1. Build the polyglot bundle:
+#    - PyInstaller-bundles the sidecar + Hermes Agent into
+#      runtime/dist-sidecar/sidecar/ (one-folder, ~76MB).
+#    - Downloads standalone Node v20.18.0 LTS into
+#      electron/build/node-runtime/ (~70MB extracted) for the
+#      obsidian-memory shim's `node` lookup.
+#    - Builds the vendored obsidian-memory-mcp's dist/index.js if absent.
+./electron/build/build-sidecar.sh
+
+# 2. Produce the .app. electron-builder downloads the Electron framework
+#    on first run (~100MB), bundles main/preload/renderer + the
+#    PyInstaller dist via extraResources, and emits the .app at
+#    out/mac-arm64/. ~311MB total.
+cd electron
+npm run dist
+
+# 3. Clear macOS quarantine (one-time per machine; .app is unsigned):
+xattr -dr com.apple.quarantine "out/mac-arm64/Suite Studio Desktop.app"
+
+# 4. Launch from terminal so the .app inherits the operator's env vars:
+export ANTHROPIC_API_KEY=sk-ant-...
+open "out/mac-arm64/Suite Studio Desktop.app"
+```
+
+### Bundle-size measurements (validated on arm64 Darwin)
+
+| Component | Size | Notes |
+|---|---|---|
+| PyInstaller sidecar bundle (`runtime/dist-sidecar/sidecar/`) | **76MB** | One-folder mode. Anthropic SDK + Hermes Agent + `mcp` SDK + httpx + their transitive deps. Excludes tkinter, pytest, unittest (pruned in spec). |
+| Bundled Node v20.18.0 LTS (`electron/build/node-runtime/`) | ~70MB | Standalone Node runtime for the obsidian-memory shim. Extracted from the official nodejs.org tarball. Disabled by default in `electron-builder.yml` (uncomment the extraResources entry to enable). |
+| Electron framework (downloaded on first `npm run dist`) | ~250MB | Chromium + Node + Electron's own runtime. Unavoidable cost of any Electron app. |
+| Final `.app` (`out/mac-arm64/Suite Studio Desktop.app/`) | **311MB** | With PyInstaller sidecar shipped; without bundled Node (default). With bundled Node it grows to ~380MB. |
+
+### Strategy choices + tradeoffs
+
+**Python sidecar bundling — chose PyInstaller (gate #10 PRIMARY):**
+
+| Option | Decision | Reasoning |
+|---|---|---|
+| (a) PyInstaller one-folder | **chosen** | Mature, well-trodden, ~76MB, no decompression latency at launch. Cold-launch time matters more than disk for an interactive desktop app. |
+| (a') PyInstaller --onefile | rejected | ~50MB but extracts to /tmp on every launch (5–10s decompression overhead — wrong tradeoff). |
+| (b) PyOxidizer | deferred | Smaller bundle (~30MB) but much more setup work + less mature for projects with Hermes Agent's plugin/lazy-import surface. Re-evaluate in `/goal #6` if cold-launch latency is unacceptable. |
+| (c) Defer entirely (system python3) | rejected | Fragile — depends on operator-machine Python version + venv. Bad UX. |
+
+**Node runtime bundling — chose sibling binary (gate #9 PRIMARY):**
+
+| Option | Decision | Reasoning |
+|---|---|---|
+| (a) Standalone Node binary via electron-builder extraResources | **chosen** | Simple, official LTS, ~70MB, no compilation pipeline to maintain. Main.ts prepends `Resources/node-runtime/bin` to the sidecar's PATH so the obsidian-memory shim transparently uses the bundled binary — no changes to the sidecar's MCP registration logic (which the /goal-prompt non-negotiable forbids touching). |
+| (b) `pkg` or `nexe` compilation | rejected | Compiles `dist/index.js` into a single executable. Smaller (~30MB) but requires re-compilation on every vendored MCP server update; pkg in particular is unmaintained as of 2024. |
+| (c) Defer entirely | partial | The `extraResources` entry is **commented out by default** in `electron-builder.yml` to keep `npm run dist` minimal. Operator uncomments after running `build-sidecar.sh` to validate Phase B fully. |
+
+### Electron .app live smoke (gate #11)
+
+The .app builds, contains the working PyInstaller-bundled sidecar at
+the correct Resources path, and the sidecar binary smoke-passes the
+JSON-line protocol contract independently. The remaining gate-11 step
+— double-click the .app, type "say hello" in the chat window, verify
+an Anthropic response renders — is **deferred via OR-branch** per
+plan §"11 completion gates" gate #11 and the precedent set by `/goal
+#2 gate #5`, `/goal #3 gate #7`, and `/goal #4 gate #7`. See
+[`SMOKE-DEFERRAL-ELECTRON-LAUNCH.md`](SMOKE-DEFERRAL-ELECTRON-LAUNCH.md)
+for the four-source citation.
+
+The deferral cost is one bullet in this file. The deferral benefit is
+that no `ANTHROPIC_API_KEY` is pasted into the /goal session JSONL.
+
+### Capturing the live smoke result
+
+If/when the operator runs the gate-11 smoke, paste the verbatim
+exchange below (truncate sensitive paths if needed):
+
+```
+Date:           <YYYY-MM-DD>
+Build:          out/mac-arm64/Suite Studio Desktop.app (311MB)
+Electron:       31.7.7
+Model:          claude-sonnet-4-6
+Prompt:         say hello
+Response:       <agent's natural-language reply>
+Latency:        <ms or s>
+Sidecar PID:    <pid>
+Tool surface:   <which MCP tools were available>
+```
+
+### Test coverage (gate #7)
+
+| Surface | File | Count | Framework |
+|---|---|---|---|
+| Sidecar JSON-line protocol | `tests/test_sidecar.py` (the `/goal #5` block at the bottom) | 9 new | pytest |
+| Sidecar wrapper class | `electron/tests/sidecar.test.ts` | 11 (start: 3 — incl. packaged-mode; runAgent: 4; kill: 2; onCrash: 2) | vitest, node env |
+| Electron main lifecycle | `electron/tests/main.test.ts` | 8 (whenReady: 3; IPC: 3; before-quit: 1; crash: 1) | vitest, node env |
+| Renderer DOM wiring + XSS guardrail | `electron/tests/renderer.test.ts` | 6 (wire: 1; render: 1; XSS: 1; error: 1; clear: 1; empty: 1) | vitest, jsdom env |
+
+Run all:
+
+```bash
+# Python sidecar tests:
+cd desktop && .venv/bin/python -m pytest tests/ -q
+# 66 passed
+
+# Electron tests:
+cd desktop/electron && npx vitest run
+# 25 tests passed (10 sidecar + 8 main + 6 renderer + 1 packaged-mode)
+```
 
 ---
 

@@ -39,23 +39,31 @@ files:
 # `from`: path relative to this electron/ directory.
 # `to`:   path inside Resources/ in the final .app.
 extraResources:
-  # PyInstaller-bundled Python sidecar — the single-file or one-folder
-  # output of `pyinstaller sidecar.spec`. Built out-of-band by the
-  # operator before `npm run dist`; presence of this directory is what
-  # makes Phase B's gate #10 satisfied vs. deferred-via-OR-branch.
-  - from: ../runtime/dist-sidecar
+  # PyInstaller-bundled Python sidecar. We point at the inner one-folder
+  # COLLECT output (dist-sidecar/sidecar/) so the binary lands at
+  # Resources/sidecar/sidecar — exactly the path resolvePythonPath in
+  # main.ts expects.
+  #
+  # If this directory is absent (operator skipped build-sidecar.sh),
+  # electron-builder fails the build. Gate #10's OR-branch deferral
+  # means commenting out this entry and falling back to system python3
+  # — see ../SMOKE-DEFERRAL-ELECTRON-LAUNCH.md for the recipe.
+  - from: ../runtime/dist-sidecar/sidecar
     to: sidecar
     filter:
       - "**/*"
   # Standalone Node binary for the obsidian-memory MCP server. Downloaded
   # to ./build/node-runtime/ by build/build-sidecar.sh. If absent, the
-  # bundled app falls back to system `node` (degraded UX — operator must
-  # have Node 20+ on PATH); this is what gate #9 deferral looks like.
-  - from: build/node-runtime
-    to: node-runtime
-    filter:
-      - "**/*"
-      - "!**/.DS_Store"
+  # bundled app falls back to the operator's system Node on PATH —
+  # gate #9's OR-branch deferral path. Commented out by default so the
+  # default `npm run dist` works without the optional Node download.
+  # Uncomment after running build-sidecar.sh to validate gate #9
+  # end-to-end.
+  # - from: build/node-runtime
+  #   to: node-runtime
+  #   filter:
+  #     - "**/*"
+  #     - "!**/.DS_Store"
 
 mac:
   category: public.app-category.productivity
