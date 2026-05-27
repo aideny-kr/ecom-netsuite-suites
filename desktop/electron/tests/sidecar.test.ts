@@ -90,6 +90,26 @@ describe("Sidecar.start()", () => {
     expect(opts.env.SUITE_STUDIO_ORG).toBe("acme");
     expect(opts.env.ANTHROPIC_API_KEY).toBe("sk-xyz");
   });
+
+  it("packaged-mode (empty sidecarPath) spawns the PyInstaller binary directly with only --serve", () => {
+    // Per /goal #5 gate #11: in packaged builds the Python sidecar is a
+    // PyInstaller-bundled binary — there's no separate .py script. The
+    // wrapper must spawn `<bundle>/sidecar --serve` with no -u flag
+    // (PyInstaller binaries are not python; -u is a python flag).
+    const fake = makeFakeChild();
+    spawnMock.mockReturnValue(fake);
+
+    const s = new Sidecar({
+      pythonPath: "/abs/Resources/sidecar/sidecar",
+      sidecarPath: "",  // empty = packaged-mode signal
+    });
+    s.start();
+
+    const [cmd, args] = spawnMock.mock.calls[0] as [string, string[]];
+    expect(cmd).toBe("/abs/Resources/sidecar/sidecar");
+    expect(args).toEqual(["--serve"]);
+    expect(args).not.toContain("-u");  // -u is invalid for PyInstaller binaries
+  });
 });
 
 describe("Sidecar.runAgent()", () => {
