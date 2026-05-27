@@ -124,6 +124,7 @@ _SMOKE_PROMPT = "Hello from Suite Studio sidecar smoke test. Reply in one senten
 # location at import time so the sidecar can be invoked from any cwd.
 _SIDECAR_DIR = os.path.dirname(os.path.abspath(__file__))
 _NS_SUITEQL_DIR = os.path.join(_SIDECAR_DIR, "mcp-servers", "ns-suiteql")
+_OBSIDIAN_MEMORY_DIR = os.path.join(_SIDECAR_DIR, "mcp-servers", "obsidian-memory")
 
 # Placeholder marker the operator replaces out-of-band. Mirrors
 # `netsuite_client.PLACEHOLDER_MARKER` so the agent's structured error
@@ -138,6 +139,62 @@ def _suite_studio_home() -> str:
 
 def _connection_file_path(org: str) -> str:
     return os.path.join(_suite_studio_home(), org, "netsuite-connection.json")
+
+
+def _vault_path(org: str) -> str:
+    """The Obsidian vault directory for the given org.
+
+    Co-located with the org's connection-file under
+    ``~/SuiteStudio/{org}/`` — one directory per org holds everything
+    Suite Studio owns about that tenant: credentials, vault notes,
+    skill-pack overrides, future per-org config.
+    """
+    return os.path.join(_suite_studio_home(), org)
+
+
+def ensure_vault_scaffold(org: str = "default") -> str:
+    """Create ``~/SuiteStudio/{org}/`` as an Obsidian vault skeleton.
+
+    Idempotent — never overwrites existing files. The skeleton consists of:
+
+    - the org directory itself
+    - ``.obsidian/`` (Obsidian's app-config dir; presence is what marks
+      the folder as a vault rather than a random directory)
+    - ``00-Home.md`` with YAML frontmatter only — body strictly empty.
+
+    The empty body is deliberate per plan non-negotiable #5: vault
+    content is operator-authored tenant data; the sidecar never
+    fabricates prose, headings, or example links. (Same lesson as the
+    2026-05-22 subagent "60/40 buyer split" fabrication incident — see
+    ``feedback_subagent_no_strategic_docs.md``.)
+
+    Args:
+        org: The Suite Studio org. Defaults to ``"default"``.
+
+    Returns:
+        Absolute path to the vault directory.
+    """
+    vault = _vault_path(org)
+    os.makedirs(vault, exist_ok=True)
+
+    obsidian_config = os.path.join(vault, ".obsidian")
+    os.makedirs(obsidian_config, exist_ok=True)
+
+    home_path = os.path.join(vault, "00-Home.md")
+    if not os.path.exists(home_path):
+        # Frontmatter-only. No body. The trailing newline is to keep the
+        # file POSIX-compliant; everything between the closing `---\n` and
+        # EOF must be whitespace per the body-empty test.
+        frontmatter = (
+            "---\n"
+            f'title: "{org} home"\n'
+            "tags: [home]\n"
+            "---\n"
+        )
+        with open(home_path, "w", encoding="utf-8") as fh:
+            fh.write(frontmatter)
+
+    return vault
 
 
 def ensure_connection_template(org: str = "default") -> str:
@@ -176,13 +233,21 @@ def ensure_connection_template(org: str = "default") -> str:
 def build_mcp_server_config(org: str = "default") -> Dict[str, dict]:
     """Build the MCP server config dict consumed by `register_mcp_servers`.
 
-    One server only: ``ns-suiteql``. Stdio transport — Hermes Agent's MCP
-    client spawns the subprocess and pipes JSON-RPC over stdin/stdout.
+    Two servers as of /goal #4: ``ns-suiteql`` (Suite-Studio-authored
+    Python FastMCP) and ``obsidian-memory`` (Python shim around the
+    vendored Node.js MCP server). Both use stdio transport — Hermes
+    Agent's MCP client spawns each subprocess and pipes JSON-RPC over
+    stdin/stdout.
 
-    The subprocess inherits ``PATH`` so it can find ``python``, plus the
-    ``SUITE_STUDIO_NS_CONNECTION_FILE`` env var pointing at the operator's
-    creds file. Everything else is deliberately scrubbed — the MCP server
-    has no reason to see the operator's general environment, including
+    Each subprocess inherits ``PATH`` so it can find its runtime
+    (``python`` for ns-suiteql, ``node`` for obsidian-memory's
+    downstream exec), plus exactly one Suite-Studio-namespaced env var
+    pointing at the relevant on-disk resource:
+        - ns-suiteql:       ``SUITE_STUDIO_NS_CONNECTION_FILE``
+        - obsidian-memory:  ``OBSIDIAN_VAULT_PATH``
+
+    Everything else is deliberately scrubbed — the MCP servers have no
+    reason to see the operator's general environment, including
     ``ANTHROPIC_API_KEY``.
     """
     return {
@@ -192,6 +257,15 @@ def build_mcp_server_config(org: str = "default") -> Dict[str, dict]:
             "cwd": _NS_SUITEQL_DIR,
             "env": {
                 "SUITE_STUDIO_NS_CONNECTION_FILE": _connection_file_path(org),
+                "PATH": os.environ.get("PATH", ""),
+            },
+        },
+        "obsidian-memory": {
+            "command": sys.executable or "python",
+            "args": ["-m", "server"],
+            "cwd": _OBSIDIAN_MEMORY_DIR,
+            "env": {
+                "OBSIDIAN_VAULT_PATH": _vault_path(org),
                 "PATH": os.environ.get("PATH", ""),
             },
         },
@@ -264,6 +338,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     org = os.environ.get("SUITE_STUDIO_ORG", "default")
     template_path = ensure_connection_template(org=org)
+    ensure_vault_scaffold(org=org)
 
     mcp_config = build_mcp_server_config(org=org)
     register_mcp_servers(mcp_config)
