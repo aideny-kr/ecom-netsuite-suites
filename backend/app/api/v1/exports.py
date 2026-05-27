@@ -11,6 +11,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.database import get_db
 from app.core.dependencies import get_current_user
 from app.models.user import User
@@ -135,12 +136,13 @@ async def query_export(
     account_id = (creds.get("account_id") or "").replace("_", "-").lower()
 
     # Preserve the original FETCH FIRST limit if present — user expects
-    # the same row count they saw in the chat. Only use 50K as a safety cap.
+    # the same row count they saw in the chat. Cap at the global setting
+    # so the export ceiling stays in lockstep with NETSUITE_SUITEQL_MAX_ROWS.
     result = await execute_suiteql_via_rest(
         access_token,
         account_id,
         request.query_text.strip(),
-        limit=50_000,
+        limit=settings.NETSUITE_SUITEQL_MAX_ROWS,
         paginate=True,
         timeout_seconds=120,
     )
