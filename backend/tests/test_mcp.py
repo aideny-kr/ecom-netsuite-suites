@@ -37,14 +37,16 @@ class TestParamValidation:
         assert result["limit"] == 100  # default_limit
 
     def test_caps_at_max_limit(self):
+        # max_limit now tracks settings.NETSUITE_SUITEQL_MAX_ROWS (50000).
+        # Anything above that should clamp; under it passes through.
         result = validate_params(
             "netsuite.suiteql",
             {
                 "query": "SELECT * FROM transaction",
-                "limit": 5000,
+                "limit": 100000,
             },
         )
-        assert result["limit"] == 1000  # max_limit
+        assert result["limit"] == 50000  # max_limit (== settings.NETSUITE_SUITEQL_MAX_ROWS)
 
     def test_no_allowlist_passes_all(self):
         # schedule.list has empty allowlisted_params
