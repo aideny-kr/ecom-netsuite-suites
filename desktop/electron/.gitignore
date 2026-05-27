@@ -1,0 +1,20 @@
+node_modules/
+dist/
+out/
+.DS_Store
+*.log
+electron-builder-*.log
+
+# The root .gitignore in the repo ignores all `build/` directories
+# (Next.js / Python build artifacts). We DO want to track the
+# electron-builder config + assets under build/, so re-include them
+# here. Generated outputs like build/node-runtime/ are still excluded
+# below.
+!build/
+!build/**
+
+# But: ignore downloaded Node binaries + PyInstaller dist staged in build/.
+# These are produced by build-sidecar.sh / npm run dist on the operator's
+# machine and must not be checked in.
+build/node-runtime/
+build/sidecar-dist/
