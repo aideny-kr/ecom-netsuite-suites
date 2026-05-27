@@ -139,6 +139,28 @@ describe("Sidecar.runAgent()", () => {
     expect(result.error).toBeUndefined();
   });
 
+  it("propagates tokens_used from the sidecar response (gate #2 schema)", async () => {
+    // Plan gate #2: the JSON-line success payload is
+    //   {"response": "...", "tokens_used": N}
+    // The wrapper's AgentResult type must surface tokens_used so the
+    // renderer (or any other consumer) can read it without an
+    // unchecked-property cast.
+    const fake = makeFakeChild();
+    spawnMock.mockReturnValue(fake);
+    const s = new Sidecar({ pythonPath: "python", sidecarPath: "/x.py" });
+    s.start();
+
+    const pending = s.runAgent("count my tokens");
+    await new Promise((r) => setImmediate(r));
+
+    fake.stdout.write(JSON.stringify({ response: "done", tokens_used: 42 }) + "\n");
+
+    const result = await pending;
+    expect(result.response).toBe("done");
+    // Typed field access — fails at compile time if AgentResult lacks the field.
+    expect(result.tokens_used).toBe(42);
+  });
+
   it("serializes concurrent calls — second runAgent waits for first response", async () => {
     const fake = makeFakeChild();
     spawnMock.mockReturnValue(fake);
