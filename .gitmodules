@@ -1,3 +1,6 @@
 [submodule "desktop/runtime/hermes-agent"]
 	path = desktop/runtime/hermes-agent
 	url = https://github.com/NousResearch/hermes-agent.git
+[submodule "desktop/runtime/obsidian-memory-mcp"]
+	path = desktop/runtime/obsidian-memory-mcp
+	url = https://github.com/YuNaga224/obsidian-memory-mcp.git
