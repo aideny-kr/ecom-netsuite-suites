@@ -31,7 +31,7 @@ class SetupPolicyRequest(BaseModel):
     allowed_record_types: list[str] | None = None
     blocked_fields: list[str] | None = None
     tool_allowlist: list[str] | None = None
-    max_rows_per_query: int = 1000
+    max_rows_per_query: int = 50000
     require_row_limit: bool = True
 
 

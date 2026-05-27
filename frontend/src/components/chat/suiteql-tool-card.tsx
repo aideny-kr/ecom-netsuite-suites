@@ -18,6 +18,12 @@ import {
 } from "lucide-react";
 import { TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 
+// Cap rendered rows in the chat UI. Larger result sets are still streamed in
+// the SSE payload (so the LLM can reason over them and CSV/Excel can export
+// them inline), but the DOM stays responsive. Export routes through the
+// server endpoint when the cap is exceeded so the user always gets full data.
+const DISPLAY_ROW_CAP = 1000;
+
 interface SuiteQLToolCardProps {
   step: ToolCallStep;
   userQuestion?: string;
@@ -145,7 +151,7 @@ export function SuiteQLToolCard({ step, userQuestion }: SuiteQLToolCardProps) {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {resultPayload.rows.map((row, rowIndex) => (
+              {resultPayload.rows.slice(0, DISPLAY_ROW_CAP).map((row, rowIndex) => (
                 <TableRow key={rowIndex}>
                   {row.map((cell, cellIndex) => (
                     <TableCell
@@ -165,9 +171,11 @@ export function SuiteQLToolCard({ step, userQuestion }: SuiteQLToolCardProps) {
       <div className="space-y-3 border-t px-4 py-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="text-[11px] text-muted-foreground">
-            {resultPayload.truncated
-              ? `Showing ${resultPayload.rows.length} of ${resultPayload.row_count} rows`
-              : `${resultPayload.row_count} row${resultPayload.row_count === 1 ? "" : "s"} returned`}
+            {resultPayload.rows.length > DISPLAY_ROW_CAP
+              ? `Showing ${DISPLAY_ROW_CAP} of ${resultPayload.rows.length} rows — export for full data`
+              : resultPayload.truncated
+                ? `Showing ${resultPayload.rows.length} of ${resultPayload.row_count} rows`
+                : `${resultPayload.row_count} row${resultPayload.row_count === 1 ? "" : "s"} returned`}
           </div>
           {effectiveQueryText && (
             <button
@@ -195,6 +203,19 @@ export function SuiteQLToolCard({ step, userQuestion }: SuiteQLToolCardProps) {
           <button
             onClick={() => {
               if (!resultPayload) return;
+              // Route through the server when display cap was hit or the
+              // backend already truncated — keeps inline path for small
+              // results so they download instantly without a round-trip.
+              const needsServerExport =
+                resultPayload.rows.length > DISPLAY_ROW_CAP || resultPayload.truncated;
+              if (needsServerExport && queryText) {
+                exportFromQuery({
+                  queryText,
+                  title: `query-results-${new Date().toISOString().slice(0, 10)}`,
+                  format: "csv",
+                });
+                return;
+              }
               const escape = (v: unknown) => {
                 const s = String(v ?? "");
                 return s.includes(",") || s.includes('"') || s.includes("\n")
@@ -213,7 +234,7 @@ export function SuiteQLToolCard({ step, userQuestion }: SuiteQLToolCardProps) {
               a.click();
               URL.revokeObjectURL(url);
             }}
-            disabled={!resultPayload}
+            disabled={isExporting || !resultPayload}
             className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground hover:text-primary transition-colors disabled:opacity-50"
           >
             <Download className="h-3 w-3" />

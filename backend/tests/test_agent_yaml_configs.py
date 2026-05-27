@@ -73,9 +73,9 @@ class TestAllYAMLConfigs:
         pytest.fail("unified-agent config not found")
 
     def test_max_steps_within_bounds(self):
-        """All configs have 1 <= max_steps <= 20."""
+        """All configs have 1 <= max_steps <= 50."""
         for filename, config in _load_all_configs():
-            assert 1 <= config.max_steps <= 20, f"{filename}: max_steps={config.max_steps} out of bounds [1,20]"
+            assert 1 <= config.max_steps <= 50, f"{filename}: max_steps={config.max_steps} out of bounds [1,50]"
 
 
 class TestRequiresConnectorField:

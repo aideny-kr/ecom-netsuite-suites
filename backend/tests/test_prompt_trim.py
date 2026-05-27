@@ -139,7 +139,7 @@ class TestMaxSteps:
             correlation_id="test",
             context_need="full",
         )
-        assert agent.max_steps == 15
+        assert agent.max_steps == 40
 
 
 class TestDiagnoseBeforeSwitching:

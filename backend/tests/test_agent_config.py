@@ -97,7 +97,7 @@ class TestAgentYAMLConfig:
             )
 
     def test_max_steps_bounds(self):
-        """max_steps must be 1-20."""
+        """max_steps must be 1-50."""
         import pytest
 
         with pytest.raises(Exception):
@@ -105,7 +105,7 @@ class TestAgentYAMLConfig:
                 agent_id="test",
                 display_name="Test",
                 description="Test",
-                max_steps=50,
+                max_steps=51,
             )
 
 
