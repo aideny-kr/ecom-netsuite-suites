@@ -6,6 +6,7 @@ from typing import Any, Callable
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.mcp.metrics import record_call, record_duration, record_rate_limit_rejection
 from app.services import audit_service
 
@@ -25,7 +26,11 @@ TOOL_CONFIGS = {
     },
     "netsuite.suiteql": {
         "default_limit": 100,
-        "max_limit": 1000,
+        # Source of truth: tie to settings so the governance clamp moves in
+        # lockstep with NETSUITE_SUITEQL_MAX_ROWS. Without this, the LLM's
+        # `limit: 50000` would be clamped back to 1000 here before the tool
+        # implementation ever sees the real Settings cap.
+        "max_limit": settings.NETSUITE_SUITEQL_MAX_ROWS,
         "timeout_seconds": 30,
         "rate_limit_per_minute": 30,
         "requires_entitlement": "mcp_tools",
@@ -33,7 +38,8 @@ TOOL_CONFIGS = {
     },
     "netsuite.suiteql_stub": {
         "default_limit": 100,
-        "max_limit": 1000,
+        # Stub mirrors prod so tests/dev paths don't silently diverge.
+        "max_limit": settings.NETSUITE_SUITEQL_MAX_ROWS,
         "timeout_seconds": 30,
         "rate_limit_per_minute": 30,
         "requires_entitlement": "mcp_tools",

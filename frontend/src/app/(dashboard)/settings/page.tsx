@@ -2384,7 +2384,7 @@ function GovernancePolicySection() {
   const [sensitivityDefault, setSensitivityDefault] = useState("financial");
   const [enforceToolAllowlist, setEnforceToolAllowlist] = useState(false);
   const [toolAllowlist, setToolAllowlist] = useState<string[]>([]);
-  const [maxRows, setMaxRows] = useState(1000);
+  const [maxRows, setMaxRows] = useState(50000);
   const [requireRowLimit, setRequireRowLimit] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [error, setError] = useState("");
@@ -2611,7 +2611,7 @@ function GovernancePolicySection() {
                 value={maxRows}
                 onChange={(e) => setMaxRows(Number(e.target.value))}
                 min={1}
-                max={10000}
+                max={50000}
                 className="w-full rounded-lg border bg-background px-3 py-2 text-[13px] focus:outline-none focus:ring-1 focus:ring-ring"
               />
             </div>
