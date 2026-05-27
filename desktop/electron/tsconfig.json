@@ -15,6 +15,6 @@
     "forceConsistentCasingInFileNames": true,
     "types": ["node"]
   },
-  "include": ["main.ts", "preload.ts", "renderer.ts", "sidecar.ts"],
+  "include": ["main.ts", "preload.ts", "renderer.ts", "sidecar.ts", "types.d.ts"],
   "exclude": ["node_modules", "dist", "tests"]
 }

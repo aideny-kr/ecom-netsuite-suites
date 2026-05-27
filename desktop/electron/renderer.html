@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta http-equiv="X-Content-Type-Options" content="nosniff" />
+    <!--
+      Strict CSP — block remote sources, inline scripts, inline styles.
+      The B0 renderer ships exactly one local script (dist/renderer.js)
+      loaded as an external file; everything else is denied. If a future
+      change needs a remote stylesheet or font, widen this directive
+      explicitly — never relax to `unsafe-inline`.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none';"
+    />
+    <title>Suite Studio Desktop v0 — spike</title>
+    <link rel="stylesheet" href="renderer.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1 id="title">Suite Studio Desktop v0 — spike</h1>
+      </header>
+      <div id="history" role="log" aria-live="polite"></div>
+      <form id="composer">
+        <input
+          id="prompt"
+          type="text"
+          autocomplete="off"
+          placeholder="Type a query, e.g. 'say hello'"
+        />
+        <button id="send" type="submit">Send</button>
+      </form>
+    </main>
+    <script src="dist/renderer.js"></script>
+  </body>
+</html>

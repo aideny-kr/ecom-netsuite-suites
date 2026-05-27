@@ -1,0 +1,90 @@
+/* Suite Studio Desktop v0 — spike renderer styles.
+ *
+ * Minimum-viable readability. No design system, no theme, no animations.
+ * Polished UI is a later /goal — this file exists only so the spike
+ * doesn't look like a 1996 form. Every rule here is intentionally easy
+ * to throw away when the real renderer (Next.js, per /goal #7) lands.
+ */
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  background: #fafafa;
+  color: #111;
+}
+
+main {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  max-width: 840px;
+  margin: 0 auto;
+  padding: 1rem;
+}
+
+header h1 {
+  font-size: 0.95rem;
+  font-weight: 500;
+  color: #666;
+  margin: 0 0 0.75rem 0;
+}
+
+#history {
+  flex: 1;
+  overflow-y: auto;
+  background: #fff;
+  border: 1px solid #e2e2e2;
+  border-radius: 6px;
+  padding: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+
+#history .turn {
+  padding: 0.5rem 0;
+  border-bottom: 1px solid #f0f0f0;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+#history .turn:last-child { border-bottom: none; }
+
+#history .turn.user { color: #444; }
+#history .turn.agent { color: #111; }
+#history .turn.error { color: #b00020; }
+#history .turn.error::before { content: "Error: "; font-weight: 600; }
+
+#history .role {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #888;
+  margin-right: 0.5rem;
+}
+
+#composer {
+  display: flex;
+  gap: 0.5rem;
+}
+
+#prompt {
+  flex: 1;
+  font-size: 0.95rem;
+  padding: 0.55rem 0.75rem;
+  border: 1px solid #d0d0d0;
+  border-radius: 6px;
+  background: #fff;
+}
+
+#prompt:focus { outline: 2px solid #4a90e2; outline-offset: 1px; }
+
+#send {
+  padding: 0.55rem 1.25rem;
+  font-size: 0.95rem;
+  background: #111;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+}
+#send:disabled { background: #888; cursor: wait; }
