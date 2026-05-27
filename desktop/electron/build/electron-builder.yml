@@ -62,7 +62,8 @@ mac:
   target:
     - target: dir       # one .app, no DMG/zip — this is a spike, not a release
       arch:
-        - x64           # universal binary is /goal #6+; for spike, x64 only.
+        - arm64         # match the PyInstaller bundle's host arch.
+                        # Universal binary (arm64 + x64) is a /goal #6 concern.
   # The B0 spike is intentionally unsigned. Real signing config lands in
   # the next /goal alongside the Apple Developer ID.
   identity: null

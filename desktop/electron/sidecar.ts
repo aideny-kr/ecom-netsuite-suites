@@ -61,7 +61,14 @@ export class Sidecar {
     if (this.child) {
       return;
     }
-    const args = ["-u", this.opts.sidecarPath, "--serve"];
+    // Dev: spawn python with -u and the sidecar.py script path.
+    // Packaged: pythonPath IS the PyInstaller-bundled binary (which is
+    // NOT a python interpreter — it embeds Python), so -u is invalid
+    // and there's no separate script to pass. Empty sidecarPath is the
+    // signal that we're in packaged-mode.
+    const args = this.opts.sidecarPath
+      ? ["-u", this.opts.sidecarPath, "--serve"]
+      : ["--serve"];
     const env = { ...process.env, ...(this.opts.env ?? {}) } as NodeJS.ProcessEnv;
     this.child = spawn(this.opts.pythonPath, args, {
       cwd: this.opts.cwd,

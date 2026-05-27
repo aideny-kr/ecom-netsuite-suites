@@ -26,6 +26,7 @@
  *     OR-branch with a fall-back to system `python3`.
  */
 import { app, BrowserWindow, ipcMain } from "electron";
+import fs from "node:fs";
 import path from "node:path";
 import { Sidecar, type AgentResult } from "./sidecar";
 
@@ -90,10 +91,30 @@ ipcMain.handle("agent:run", async (_event, query: string): Promise<AgentResult> 
   }
 });
 
+function buildSidecarEnv(): Record<string, string> {
+  // Phase B (gate #9): if the .app shipped a bundled standalone Node
+  // runtime at Resources/node-runtime/bin/node, prepend that directory
+  // to the sidecar's PATH so the obsidian-memory shim's `node` lookup
+  // finds the bundled binary instead of the operator's system Node.
+  //
+  // In dev (npm start) the bundled runtime doesn't exist; PATH falls
+  // through unchanged and the operator's system Node is used. That's
+  // the right behavior — dev mode trusts the operator's machine.
+  const env: Record<string, string> = {};
+  if (app.isPackaged) {
+    const bundledNodeBin = path.join(process.resourcesPath, "node-runtime", "bin");
+    if (fs.existsSync(bundledNodeBin)) {
+      env.PATH = `${bundledNodeBin}:${process.env.PATH ?? ""}`;
+    }
+  }
+  return env;
+}
+
 app.whenReady().then(() => {
   sidecar = new Sidecar({
     pythonPath: resolvePythonPath(),
     sidecarPath: resolveSidecarPath(),
+    env: buildSidecarEnv(),
   });
   sidecar.start();
 
