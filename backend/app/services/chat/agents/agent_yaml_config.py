@@ -38,7 +38,7 @@ class AgentYAMLConfig(BaseModel):
 
     # Model
     model_preference: str | None = None
-    max_steps: int = Field(default=6, ge=1, le=20)
+    max_steps: int = Field(default=6, ge=1, le=50)
     cost_budget: float | None = None
 
     # Prompt

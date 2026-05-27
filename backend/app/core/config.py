@@ -54,7 +54,7 @@ class Settings(BaseSettings):
     DOMAIN_KNOWLEDGE_MIN_SIMILARITY: float = 0.50
     PATTERN_MIN_SIMILARITY: float = 0.45
     CHAT_MAX_HISTORY_TURNS: int = 20
-    CHAT_MAX_TOOL_CALLS_PER_TURN: int = 5
+    CHAT_MAX_TOOL_CALLS_PER_TURN: int = 40
     CHAT_RAG_TOP_K: int = 5
     CHAT_MAX_INPUT_CHARS: int = 32000
 

@@ -250,7 +250,7 @@ class TestInvestigationMode:
     def test_max_steps_investigation(self):
         agent = _make_agent()
         agent._context_need = "full"
-        assert agent.max_steps == 15
+        assert agent.max_steps == 40
 
     def test_max_steps_data(self):
         agent = _make_agent()

@@ -1163,7 +1163,7 @@ from app.services.prompt_template_service import get_active_template
 
 logger = logging.getLogger(__name__)
 
-MAX_STEPS = settings.CHAT_MAX_TOOL_CALLS_PER_TURN  # default 5
+MAX_STEPS = settings.CHAT_MAX_TOOL_CALLS_PER_TURN  # default 40
 
 
 def _extract_file_paths(nodes: list[dict]) -> list[str]:
