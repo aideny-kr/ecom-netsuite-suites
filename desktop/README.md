@@ -512,7 +512,7 @@ Tool surface:   <which MCP tools were available>
 | Sidecar JSON-line protocol + routing regressions | `tests/test_sidecar.py` (the `/goal #5` + `/goal #5.5` blocks) | 11 new | pytest |
 | Real MCP stdio handshakes | `tests/test_mcp_integration.py` | 2 | pytest + official MCP client |
 | Runtime dependency smoke | `tests/test_runtime_dependencies.py` | 1 | pytest |
-| Sidecar wrapper class | `electron/tests/sidecar.test.ts` | 11 (start: 3 — dev + env + packaged-mode; runAgent: 4; kill: 2; onCrash: 2) | vitest, node env |
+| Sidecar wrapper class | `electron/tests/sidecar.test.ts` | 12 | vitest, node env |
 | Electron main lifecycle | `electron/tests/main.test.ts` | 8 (whenReady: 3; IPC: 3; before-quit: 1; crash: 1) | vitest, node env |
 | Renderer DOM wiring + XSS guardrail | `electron/tests/renderer.test.ts` | 6 (wire: 1; render: 1; XSS: 1; error: 1; clear: 1; empty: 1) | vitest, jsdom env |
 
@@ -521,11 +521,11 @@ Run all:
 ```bash
 # Python sidecar tests:
 cd desktop && .venv/bin/python -m pytest tests/ -q
-# 66 passed
+# 74 passed
 
 # Electron tests:
 cd desktop/electron && npx vitest run
-# 25 tests passed (11 sidecar + 8 main + 6 renderer)
+# 26 tests passed (12 sidecar + 8 main + 6 renderer)
 ```
 
 ---
