@@ -508,6 +508,32 @@ def test_serve_json_protocol_handles_multiple_queries_on_same_agent(monkeypatch,
         f"only one default AIAgent should be constructed, got {len(default_agents)}"
 
 
+def test_serve_json_protocol_default_run_constructs_only_default_agent(monkeypatch, tmp_path):
+    """A normal Electron chat request must stay on the default/Sonnet agent.
+
+    The plan/Opus agent is for explicit plan-mode requests only; constructing
+    it during a default run makes the launch log look like the turn is routed
+    to Opus and risks accidental high-cost routing later.
+    """
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-dummy")
+    monkeypatch.setenv("SUITE_STUDIO_HOME", str(tmp_path / "SuiteStudio"))
+    monkeypatch.setenv("SUITE_STUDIO_MODEL_DEFAULT", "claude-sonnet-test")
+    monkeypatch.setenv("SUITE_STUDIO_MODEL_PLAN", "claude-opus-test")
+
+    stdin = io.StringIO(json.dumps({"action": "run", "query": "say hello"}) + "\n")
+    stdout = io.StringIO()
+
+    sidecar.serve_json_protocol(stdin=stdin, stdout=stdout)
+
+    payload = json.loads(stdout.getvalue().strip())
+    assert "response" in payload, payload
+    constructed_models = [agent.kwargs["model"] for agent in _StubAIAgent.instances]
+    assert constructed_models == ["claude-sonnet-test"], (
+        "default run must construct only the default/Sonnet agent; "
+        f"saw models {constructed_models!r}"
+    )
+
+
 def test_serve_json_protocol_returns_error_for_malformed_json(monkeypatch, tmp_path):
     """Malformed JSON must yield {"error":"..."} on stdout, NEVER crash the
     serve loop. Subsequent valid lines must continue to be handled."""
