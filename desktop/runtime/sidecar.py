@@ -126,6 +126,8 @@ _SMOKE_PROMPT = "Hello from Suite Studio sidecar smoke test. Reply in one senten
 _SIDECAR_DIR = os.path.dirname(os.path.abspath(__file__))
 _NS_SUITEQL_DIR = os.path.join(_SIDECAR_DIR, "mcp-servers", "ns-suiteql")
 _OBSIDIAN_MEMORY_DIR = os.path.join(_SIDECAR_DIR, "mcp-servers", "obsidian-memory")
+_NS_SUITEQL_SERVER = os.path.join(_NS_SUITEQL_DIR, "server.py")
+_OBSIDIAN_MEMORY_SERVER = os.path.join(_OBSIDIAN_MEMORY_DIR, "server.py")
 
 # Placeholder marker the operator replaces out-of-band. Mirrors
 # `netsuite_client.PLACEHOLDER_MARKER` so the agent's structured error
@@ -254,7 +256,7 @@ def build_mcp_server_config(org: str = "default") -> Dict[str, dict]:
     return {
         "ns-suiteql": {
             "command": sys.executable or "python",
-            "args": ["-m", "server"],
+            "args": [_NS_SUITEQL_SERVER],
             "cwd": _NS_SUITEQL_DIR,
             "env": {
                 "SUITE_STUDIO_NS_CONNECTION_FILE": _connection_file_path(org),
@@ -263,7 +265,7 @@ def build_mcp_server_config(org: str = "default") -> Dict[str, dict]:
         },
         "obsidian-memory": {
             "command": sys.executable or "python",
-            "args": ["-m", "server"],
+            "args": [_OBSIDIAN_MEMORY_SERVER],
             "cwd": _OBSIDIAN_MEMORY_DIR,
             "env": {
                 "OBSIDIAN_VAULT_PATH": _vault_path(org),
