@@ -23,7 +23,7 @@ import io
 import json
 import os
 import sys
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 
 import pytest
 
@@ -654,6 +654,43 @@ def test_serve_json_protocol_refuses_without_anthropic_key(monkeypatch):
     payload = json.loads(stdout.getvalue().strip())
     assert "error" in payload, payload
     assert "ANTHROPIC_API_KEY" in payload["error"]
+
+
+def test_serve_json_protocol_keeps_agent_stdout_chatter_off_protocol_stdout(monkeypatch, tmp_path):
+    """Hermes Agent prints human-readable status lines to sys.stdout during
+    real runs. The Electron JSON-line channel must still carry only protocol
+    JSON so the parent can correlate the response to the inflight request."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-dummy")
+    monkeypatch.setenv("SUITE_STUDIO_HOME", str(tmp_path / "SuiteStudio"))
+
+    class _ChattyAgent(_StubAIAgent):
+        def run_conversation(self, user_message, **kwargs):
+            print("Hermes status line: starting conversation")
+            return {
+                "final_response": f"chatty-response to: {user_message}",
+                "input_tokens": 2,
+                "output_tokens": 3,
+                "total_tokens": 5,
+            }
+
+    monkeypatch.setattr(sidecar, "AIAgent", _ChattyAgent)
+
+    stdin = io.StringIO(json.dumps({"action": "run", "query": "say hello"}) + "\n")
+    protocol_stdout = io.StringIO()
+    human_stderr = io.StringIO()
+
+    with redirect_stdout(protocol_stdout), redirect_stderr(human_stderr):
+        sidecar.serve_json_protocol(stdin=stdin)
+
+    lines = protocol_stdout.getvalue().strip().splitlines()
+    assert len(lines) == 1, f"protocol stdout must contain exactly one JSON line, got {lines!r}"
+    payload = json.loads(lines[0])
+    assert payload == {
+        "response": "chatty-response to: say hello",
+        "tokens_used": 5,
+    }
+    assert "Hermes status line" not in protocol_stdout.getvalue()
+    assert "Hermes status line: starting conversation" in human_stderr.getvalue()
 
 
 # ---------------------------------------------------------------------------
