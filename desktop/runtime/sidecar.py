@@ -63,7 +63,7 @@ Each server config follows Hermes Agent's stdio-transport schema documented in
 
     {
         "command": "python",
-        "args": ["-m", "server"],
+        "args": ["/path/to/mcp-servers/ns-suiteql/server.py"],
         "cwd": "/path/to/mcp-servers/ns-suiteql",
         "env": {
             "SUITE_STUDIO_NS_CONNECTION_FILE": "/Users/.../netsuite-connection.json",
@@ -72,6 +72,12 @@ Each server config follows Hermes Agent's stdio-transport schema documented in
         "timeout": 120,           # per-tool-call timeout (default: 120)
         "connect_timeout": 60,    # initial connection timeout (default: 60)
     }
+
+The server entrypoint is absolute on purpose. Hermes Agent v2026.5.16's stdio
+transport accepts but does not forward Suite Studio's ``cwd`` key when it builds
+``StdioServerParameters``. Absolute ``server.py`` args keep the MCP handshake
+independent of the parent process's working directory; ``cwd`` remains in the
+config for transports and tests that do honor it.
 
 After ``register_mcp_servers`` returns, the tool surface exposed to AIAgent
 includes ``mcp_ns_suiteql_ns_runSuiteQL`` (name-sanitized per Hermes Agent's

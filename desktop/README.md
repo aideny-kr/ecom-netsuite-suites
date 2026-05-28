@@ -360,6 +360,57 @@ What this exercises end-to-end (without packaging):
 - `agent:run` IPC delegates renderer queries to the sidecar.
 - Response renders in the history via `textContent`.
 
+### Protocol stdout contract (/goal #5.5)
+
+The Python sidecar's stdout is a strict newline-delimited JSON protocol:
+every line consumed by `electron/sidecar.ts` must parse as a protocol
+response. Hermes Agent prints human-readable status lines during real
+runs, so `serve_json_protocol` redirects agent-side `sys.stdout` to
+stderr while constructing/running the agent and writes protocol JSON to
+the saved stdout handle. Electron forwards stderr to the main-process
+log with a `[sidecar]` prefix; the renderer correlation path only sees
+JSON.
+
+The regression guard is
+`tests/test_sidecar.py::test_serve_json_protocol_keeps_agent_stdout_chatter_off_protocol_stdout`.
+
+### MCP spawn contract (/goal #5.5)
+
+`build_mcp_server_config()` registers both local MCP servers with
+absolute Python entrypoint paths:
+
+- `runtime/mcp-servers/ns-suiteql/server.py`
+- `runtime/mcp-servers/obsidian-memory/server.py`
+
+`cwd` is still included for transports that honor it, but the spawn must
+not rely on `cwd`: Hermes Agent v2026.5.16's stdio adapter accepts the
+config key but does not forward it to `StdioServerParameters`. The
+absolute entrypoint keeps sibling imports and shim startup working from
+any parent cwd. The env remains deliberately small: ns-suiteql receives
+`SUITE_STUDIO_NS_CONNECTION_FILE` + `PATH`; obsidian-memory receives
+`OBSIDIAN_VAULT_PATH` + `PATH` so the shim can exec system `node` in
+dev mode.
+
+### Real MCP integration test runbook
+
+No Anthropic key is needed for the MCP handshake tests.
+
+```bash
+cd desktop
+source .venv/bin/activate
+pip install -e '.[dev]'
+
+# Required after a fresh submodule checkout because dist/ is gitignored
+# upstream in the vendored Node MCP server:
+( cd runtime/obsidian-memory-mcp && npm install && npm run build )
+
+python -m pytest tests/test_mcp_integration.py -q
+```
+
+Expected: both real stdio servers connect and expose tools:
+`ns_runSuiteQL` for ns-suiteql, and at least `create_entities` +
+`read_graph` for obsidian-memory.
+
 ### Phase B packaging runbook (gates #9–11)
 
 Phase B is a **research spike**, not packaging perfection — the goal is
@@ -458,7 +509,9 @@ Tool surface:   <which MCP tools were available>
 
 | Surface | File | Count | Framework |
 |---|---|---|---|
-| Sidecar JSON-line protocol | `tests/test_sidecar.py` (the `/goal #5` block at the bottom) | 9 new | pytest |
+| Sidecar JSON-line protocol + routing regressions | `tests/test_sidecar.py` (the `/goal #5` + `/goal #5.5` blocks) | 11 new | pytest |
+| Real MCP stdio handshakes | `tests/test_mcp_integration.py` | 2 | pytest + official MCP client |
+| Runtime dependency smoke | `tests/test_runtime_dependencies.py` | 1 | pytest |
 | Sidecar wrapper class | `electron/tests/sidecar.test.ts` | 11 (start: 3 — dev + env + packaged-mode; runAgent: 4; kill: 2; onCrash: 2) | vitest, node env |
 | Electron main lifecycle | `electron/tests/main.test.ts` | 8 (whenReady: 3; IPC: 3; before-quit: 1; crash: 1) | vitest, node env |
 | Renderer DOM wiring + XSS guardrail | `electron/tests/renderer.test.ts` | 6 (wire: 1; render: 1; XSS: 1; error: 1; clear: 1; empty: 1) | vitest, jsdom env |
