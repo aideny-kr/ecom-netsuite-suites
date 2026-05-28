@@ -100,6 +100,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from contextlib import redirect_stdout
 from typing import Any, Dict, List, Optional
 
 # Hermes Agent imports — `run_agent` is the vendored AIAgent module,
@@ -425,8 +426,9 @@ def serve_json_protocol(stdin: Any = None, stdout: Any = None) -> None:
             continue
 
         try:
-            current_agent = _ensure_agent()
-            result = current_agent.run_conversation(request.get("query", ""))
+            with redirect_stdout(sys.stderr):
+                current_agent = _ensure_agent()
+                result = current_agent.run_conversation(request.get("query", ""))
             _emit({
                 "response": _extract_response_text(result),
                 # Sum of input + output tokens for this turn (gate #2).
