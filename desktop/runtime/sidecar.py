@@ -275,8 +275,24 @@ def build_mcp_server_config(org: str = "default") -> Dict[str, dict]:
     }
 
 
+def build_agent(role: str = "default") -> Any:
+    """Construct one AIAgent instance per ADR-008 role."""
+    if role == "default":
+        model = os.environ.get("SUITE_STUDIO_MODEL_DEFAULT", _DEFAULT_MODEL_DEFAULT)
+    elif role == "plan":
+        model = os.environ.get("SUITE_STUDIO_MODEL_PLAN", _DEFAULT_MODEL_PLAN)
+    else:
+        raise ValueError(f"unknown agent role: {role!r}")
+
+    return AIAgent(
+        provider="anthropic",
+        base_url=_ANTHROPIC_BASE_URL,
+        model=model,
+    )
+
+
 def build_agents() -> Dict[str, Any]:
-    """Construct the two AIAgent instances per ADR-008.
+    """Construct both AIAgent instances per ADR-008.
 
     Returns a dict keyed by role:
 
@@ -288,16 +304,8 @@ def build_agents() -> Dict[str, Any]:
     at B2+ when Plan Mode lands.
     """
     return {
-        "default": AIAgent(
-            provider="anthropic",
-            base_url=_ANTHROPIC_BASE_URL,
-            model=os.environ.get("SUITE_STUDIO_MODEL_DEFAULT", _DEFAULT_MODEL_DEFAULT),
-        ),
-        "plan": AIAgent(
-            provider="anthropic",
-            base_url=_ANTHROPIC_BASE_URL,
-            model=os.environ.get("SUITE_STUDIO_MODEL_PLAN", _DEFAULT_MODEL_PLAN),
-        ),
+        "default": build_agent("default"),
+        "plan": build_agent("plan"),
     }
 
 
@@ -409,7 +417,7 @@ def serve_json_protocol(stdin: Any = None, stdout: Any = None) -> None:
         ensure_connection_template(org=org)
         ensure_vault_scaffold(org=org)
         register_mcp_servers(build_mcp_server_config(org=org))
-        agent = build_agents()["default"]
+        agent = build_agent("default")
         return agent
 
     for line in stdin:
