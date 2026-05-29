@@ -211,7 +211,16 @@ jobs:
               echo "::error::Backend container still on stale image after 60s. Pulled $PULLED_DIGEST but container has $RUNNING_DIGEST"
               exit 1
             fi
-            curl -f http://localhost:8000/api/v1/health
+            # Health check with retry: the container was just recreated and the digest
+            # poll above breaks at container-creation, not app-ready, so uvicorn may not be
+            # listening yet (a single immediate curl raced startup and false-failed). Poll
+            # up to 60s; fail loud if it never comes up.
+            health_ok=
+            for _ in $(seq 1 12); do
+              if curl -fsS -o /dev/null http://localhost:8000/api/v1/health; then health_ok=1; break; fi
+              sleep 5
+            done
+            [ -n "$health_ok" ] || { echo "::error::backend health check never passed after 60s"; exit 1; }
 
   # ── Deploy to Production (manual approval required) ─────────
   deploy-production:
@@ -272,7 +281,16 @@ jobs:
               echo "::error::Backend container still on stale image after 60s. Pulled $PULLED_DIGEST but container has $RUNNING_DIGEST"
               exit 1
             fi
-            curl -f http://localhost:8000/api/v1/health
+            # Health check with retry: the container was just recreated and the digest
+            # poll above breaks at container-creation, not app-ready, so uvicorn may not be
+            # listening yet (a single immediate curl raced startup and false-failed). Poll
+            # up to 60s; fail loud if it never comes up.
+            health_ok=
+            for _ in $(seq 1 12); do
+              if curl -fsS -o /dev/null http://localhost:8000/api/v1/health; then health_ok=1; break; fi
+              sleep 5
+            done
+            [ -n "$health_ok" ] || { echo "::error::backend health check never passed after 60s"; exit 1; }
             docker compose -f docker-compose.prod.yml up -d --no-deps worker
 
       - name: Production health verification
