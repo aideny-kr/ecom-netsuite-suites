@@ -30,9 +30,7 @@ async def test_upsert_file_resilient_skips_path_collision(db):
 
     # File B (netsuite id 2) already occupies dup_path.
     assert (
-        await svc._upsert_file_resilient(
-            db, tenant.id, ws.id, dup_path, "B", netsuite_file_id="2", script_type="Other"
-        )
+        await svc._upsert_file_resilient(db, tenant.id, ws.id, dup_path, "B", netsuite_file_id="2", script_type="Other")
         is True
     )
     # File A (netsuite id 1) lives elsewhere.
@@ -53,9 +51,7 @@ async def test_upsert_file_resilient_skips_path_collision(db):
 
     # Session still usable and no rows lost: both files remain.
     count = (
-        await db.execute(
-            select(func.count()).select_from(WorkspaceFile).where(WorkspaceFile.workspace_id == ws.id)
-        )
+        await db.execute(select(func.count()).select_from(WorkspaceFile).where(WorkspaceFile.workspace_id == ws.id))
     ).scalar()
     assert count == 2
 
