@@ -7,6 +7,9 @@ from google.auth.transport import requests as google_requests
 from google.oauth2 import id_token as google_id_token_lib
 
 GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "")
+# verify_oauth2_token fetches Google's certs over the network with no built-in
+# timeout; bound it so /auth/google fails fast instead of hanging under pressure.
+GOOGLE_VERIFY_TIMEOUT = float(os.environ.get("GOOGLE_VERIFY_TIMEOUT", "10"))
 
 
 async def verify_google_token(token: str) -> dict:
@@ -19,12 +22,17 @@ async def verify_google_token(token: str) -> dict:
         raise ValueError("Google Sign-In is not configured (GOOGLE_CLIENT_ID not set).")
 
     try:
-        id_info = await asyncio.to_thread(
-            google_id_token_lib.verify_oauth2_token,
-            token,
-            google_requests.Request(),
-            GOOGLE_CLIENT_ID,
+        id_info = await asyncio.wait_for(
+            asyncio.to_thread(
+                google_id_token_lib.verify_oauth2_token,
+                token,
+                google_requests.Request(),
+                GOOGLE_CLIENT_ID,
+            ),
+            timeout=GOOGLE_VERIFY_TIMEOUT,
         )
+    except asyncio.TimeoutError:
+        raise ValueError("Google token verification timed out; please retry.")
     except Exception as e:
         raise ValueError(f"Invalid Google token: {e}")
 
