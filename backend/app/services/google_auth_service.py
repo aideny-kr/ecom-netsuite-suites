@@ -22,6 +22,11 @@ async def verify_google_token(token: str) -> dict:
         raise ValueError("Google Sign-In is not configured (GOOGLE_CLIENT_ID not set).")
 
     try:
+        # NOTE: wait_for cancels the await, but asyncio.to_thread cannot cancel the
+        # worker thread — the underlying verify_oauth2_token network call keeps
+        # running until it returns. This bounds request latency, not thread usage.
+        # TODO: pass a transport-level timeout (custom requests.Session) so hung
+        # cert fetches don't accumulate threads in the default pool under load.
         id_info = await asyncio.wait_for(
             asyncio.to_thread(
                 google_id_token_lib.verify_oauth2_token,
