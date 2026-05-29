@@ -489,7 +489,11 @@ async def _upsert_file_resilient(
             )
             await db.flush()
         return True
-    except IntegrityError:
+    except IntegrityError as e:
+        # Only the path-uniqueness collision is recoverable; re-raise anything else
+        # (FK, NOT NULL, other unique constraints) so real bugs aren't silently masked.
+        if "uq_workspace_files_workspace_path" not in str(getattr(e, "orig", e)):
+            raise
         logger.warning(
             "suitescript_sync.file_skipped_path_collision",
             tenant_id=str(tenant_id),

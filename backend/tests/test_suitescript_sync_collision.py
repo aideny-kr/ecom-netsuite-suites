@@ -8,7 +8,11 @@ transaction went into PendingRollbackError and every subsequent file in the sync
 failed.
 """
 
+import uuid
+
+import pytest
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 
 import app.services.suitescript_sync_service as svc
 from app.models.workspace import Workspace, WorkspaceFile
@@ -54,3 +58,20 @@ async def test_upsert_file_resilient_skips_path_collision(db):
         )
     ).scalar()
     assert count == 2
+
+
+async def test_upsert_file_resilient_reraises_unrelated_integrity_error(db):
+    """Only path collisions are swallowed; other integrity errors must propagate."""
+    tenant = await create_test_tenant(db)
+    bogus_workspace_id = uuid.uuid4()  # no such workspace -> FK violation, not a path collision
+
+    with pytest.raises(IntegrityError):
+        await svc._upsert_file_resilient(
+            db,
+            tenant.id,
+            bogus_workspace_id,
+            "SuiteScripts/Other/x.js",
+            "X",
+            netsuite_file_id="9",
+            script_type="Other",
+        )
