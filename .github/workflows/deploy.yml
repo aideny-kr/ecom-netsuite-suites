@@ -174,20 +174,28 @@ jobs:
 
       - name: Deploy backend to staging
         uses: appleboy/ssh-action@v1
+        env:
+          SHORT_SHA: ${{ needs.build-images.outputs.short_sha }}
         with:
           host: ${{ secrets.STAGING_HOST }}
           username: ${{ secrets.STAGING_SSH_USER }}
           key: ${{ secrets.STAGING_SSH_KEY }}
           script_stop: true
+          envs: SHORT_SHA
           script: |
             set -euo pipefail
             cd /opt/ecom-netsuite
+            : "${SHORT_SHA:?SHORT_SHA missing — build-images output not propagated}"
             echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
-            # Pull only the image this workflow built. Frontend is deployed via deploy-frontend.sh,
-            # and a frontend pull failure (e.g. 403) used to silently abort the whole pull and leave
-            # backend on the old image while the deploy reported green.
-            docker compose -f docker-compose.prod.yml pull backend
-            PULLED_DIGEST=$(docker inspect --format '{{.Id}}' ghcr.io/aideny-kr/ecom-netsuite-suites/backend:latest)
+            # Pull the immutable SHA-tagged image this workflow built, not :latest. :latest is
+            # only published on the default branch, so workflow_dispatch deploys of feature
+            # branches pulled a stale :latest and the digest guard false-passed (pulled ==
+            # running == both stale). Retag locally as :latest so docker-compose.prod.yml
+            # (which pins :latest) brings up this exact image. Frontend is deployed separately.
+            IMG="ghcr.io/aideny-kr/ecom-netsuite-suites/backend"
+            docker pull "${IMG}:sha-${SHORT_SHA}"
+            docker tag "${IMG}:sha-${SHORT_SHA}" "${IMG}:latest"
+            PULLED_DIGEST=$(docker inspect --format '{{.Id}}' "${IMG}:sha-${SHORT_SHA}")
             docker compose -f docker-compose.prod.yml up -d --no-deps backend worker beat
             # Verify the running container advances to the freshly-pulled image. Container
             # recreation can lag `up -d`, so poll instead of a single check after a fixed
@@ -233,17 +241,24 @@ jobs:
 
       - name: Deploy backend to production
         uses: appleboy/ssh-action@v1
+        env:
+          SHORT_SHA: ${{ needs.build-images.outputs.short_sha }}
         with:
           host: ${{ secrets.PROD_HOST }}
           username: ${{ secrets.PROD_SSH_USER }}
           key: ${{ secrets.PROD_SSH_KEY }}
           script_stop: true
+          envs: SHORT_SHA
           script: |
             set -euo pipefail
             cd /opt/ecom-netsuite
+            : "${SHORT_SHA:?SHORT_SHA missing — build-images output not propagated}"
             echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
-            docker compose -f docker-compose.prod.yml pull backend
-            PULLED_DIGEST=$(docker inspect --format '{{.Id}}' ghcr.io/aideny-kr/ecom-netsuite-suites/backend:latest)
+            # Pull the SHA-tagged image, not :latest — see staging deploy comment for rationale.
+            IMG="ghcr.io/aideny-kr/ecom-netsuite-suites/backend"
+            docker pull "${IMG}:sha-${SHORT_SHA}"
+            docker tag "${IMG}:sha-${SHORT_SHA}" "${IMG}:latest"
+            PULLED_DIGEST=$(docker inspect --format '{{.Id}}' "${IMG}:sha-${SHORT_SHA}")
             docker compose -f docker-compose.prod.yml up -d --no-deps backend
             # Poll until the container advances to the pulled image (recreation lags
             # `up -d`); only fail if it never matches. Avoids the fixed-sleep race.
