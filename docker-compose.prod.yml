@@ -13,7 +13,10 @@ services:
       - "3000:3000"
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000"]
+      # Use 127.0.0.1, not localhost: the Next.js server binds IPv4 0.0.0.0:3000,
+      # but `localhost` resolves to IPv6 ::1 in the container -> connection refused
+      # (caused a permanently-"unhealthy" frontend despite serving fine).
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:3000"]
       interval: 30s
       timeout: 10s
       retries: 3
