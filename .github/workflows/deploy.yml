@@ -189,13 +189,18 @@ jobs:
             docker compose -f docker-compose.prod.yml pull backend
             PULLED_DIGEST=$(docker inspect --format '{{.Id}}' ghcr.io/aideny-kr/ecom-netsuite-suites/backend:latest)
             docker compose -f docker-compose.prod.yml up -d --no-deps backend worker beat
-            sleep 30
-            # Belt-and-suspenders: verify the running container is on the freshly-pulled image.
-            # `up -d` is a no-op when the image digest hasn't changed, so this catches any case
-            # where the pull silently succeeded but didn't actually advance the digest.
-            RUNNING_DIGEST=$(docker inspect --format '{{.Image}}' ecom-netsuite-backend-1)
+            # Verify the running container advances to the freshly-pulled image. Container
+            # recreation can lag `up -d`, so poll instead of a single check after a fixed
+            # sleep — that race false-failed deploys that had actually succeeded. Still
+            # catches a genuinely stale image: the digest just never matches and we exit 1.
+            RUNNING_DIGEST=""
+            for _ in $(seq 1 12); do
+              RUNNING_DIGEST=$(docker inspect --format '{{.Image}}' ecom-netsuite-backend-1 2>/dev/null || true)
+              [ "$PULLED_DIGEST" = "$RUNNING_DIGEST" ] && break
+              sleep 5
+            done
             if [ "$PULLED_DIGEST" != "$RUNNING_DIGEST" ]; then
-              echo "::error::Backend container is on stale image. Pulled $PULLED_DIGEST but container has $RUNNING_DIGEST"
+              echo "::error::Backend container still on stale image after 60s. Pulled $PULLED_DIGEST but container has $RUNNING_DIGEST"
               exit 1
             fi
             curl -f http://localhost:8000/api/v1/health
@@ -240,10 +245,16 @@ jobs:
             docker compose -f docker-compose.prod.yml pull backend
             PULLED_DIGEST=$(docker inspect --format '{{.Id}}' ghcr.io/aideny-kr/ecom-netsuite-suites/backend:latest)
             docker compose -f docker-compose.prod.yml up -d --no-deps backend
-            sleep 15
-            RUNNING_DIGEST=$(docker inspect --format '{{.Image}}' ecom-netsuite-backend-1)
+            # Poll until the container advances to the pulled image (recreation lags
+            # `up -d`); only fail if it never matches. Avoids the fixed-sleep race.
+            RUNNING_DIGEST=""
+            for _ in $(seq 1 12); do
+              RUNNING_DIGEST=$(docker inspect --format '{{.Image}}' ecom-netsuite-backend-1 2>/dev/null || true)
+              [ "$PULLED_DIGEST" = "$RUNNING_DIGEST" ] && break
+              sleep 5
+            done
             if [ "$PULLED_DIGEST" != "$RUNNING_DIGEST" ]; then
-              echo "::error::Backend container is on stale image. Pulled $PULLED_DIGEST but container has $RUNNING_DIGEST"
+              echo "::error::Backend container still on stale image after 60s. Pulled $PULLED_DIGEST but container has $RUNNING_DIGEST"
               exit 1
             fi
             curl -f http://localhost:8000/api/v1/health
