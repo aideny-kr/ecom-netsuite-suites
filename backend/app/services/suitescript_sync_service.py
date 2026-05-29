@@ -17,6 +17,7 @@ from typing import Any
 
 import structlog
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.script_sync import ScriptSyncState
@@ -459,6 +460,46 @@ async def _upsert_workspace_file(
     return wf
 
 
+async def _upsert_file_resilient(
+    db: AsyncSession,
+    tenant_id: uuid.UUID,
+    workspace_id: uuid.UUID,
+    path: str,
+    content: str,
+    netsuite_file_id: str | None = None,
+    script_type: str | None = None,
+) -> bool:
+    """Upsert one workspace file inside a savepoint.
+
+    Returns True if loaded, False if skipped because the target path is already
+    held by another file (uq_workspace_files_workspace_path). The savepoint keeps
+    a single collision from poisoning the whole sync transaction (the 2026-05-28
+    PendingRollbackError cascade).
+    """
+    try:
+        async with db.begin_nested():
+            await _upsert_workspace_file(
+                db,
+                tenant_id,
+                workspace_id,
+                path,
+                content,
+                netsuite_file_id=netsuite_file_id,
+                script_type=script_type,
+            )
+            await db.flush()
+        return True
+    except IntegrityError:
+        logger.warning(
+            "suitescript_sync.file_skipped_path_collision",
+            tenant_id=str(tenant_id),
+            workspace_id=str(workspace_id),
+            path=path,
+            netsuite_file_id=netsuite_file_id,
+        )
+        return False
+
+
 async def _ensure_directories(
     db: AsyncSession,
     tenant_id: uuid.UUID,
@@ -594,7 +635,7 @@ async def sync_scripts_to_workspace(
 
             path = _build_file_path(file_meta, script_type=stype)
             file_paths.add(path)
-            await _upsert_workspace_file(
+            if await _upsert_file_resilient(
                 db,
                 tenant_id,
                 ws.id,
@@ -602,8 +643,12 @@ async def sync_scripts_to_workspace(
                 content,
                 netsuite_file_id=fid,
                 script_type=stype,
-            )
-            loaded += 1
+            ):
+                loaded += 1
+            else:
+                # Path collision with another file — skip it, count as failed,
+                # and keep syncing the rest (don't wedge the whole transaction).
+                failed_ids.append(fid)
 
         # 6. Ensure directories exist
         await _ensure_directories(db, tenant_id, ws.id, file_paths)
