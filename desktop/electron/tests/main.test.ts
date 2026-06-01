@@ -21,11 +21,19 @@ interface FakeApp extends EventEmitter {
   whenReady: ReturnType<typeof vi.fn>;
   on: EventEmitter["on"];
   quit: ReturnType<typeof vi.fn>;
+  isPackaged: boolean;
+}
+
+interface FakeWebContents {
+  send: ReturnType<typeof vi.fn>;
+  on: ReturnType<typeof vi.fn>;
+  _on: Record<string, (...args: unknown[]) => unknown>;
 }
 
 interface FakeBrowserWindow {
   loadFile: ReturnType<typeof vi.fn>;
-  webContents: { send: ReturnType<typeof vi.fn> };
+  loadURL: ReturnType<typeof vi.fn>;
+  webContents: FakeWebContents;
   on: ReturnType<typeof vi.fn>;
   _opts: unknown;
 }
@@ -33,13 +41,22 @@ interface FakeBrowserWindow {
 const fakeApp = new EventEmitter() as FakeApp;
 fakeApp.whenReady = vi.fn(() => Promise.resolve());
 fakeApp.quit = vi.fn();
+fakeApp.isPackaged = false;
 
 const browserWindowInstances: FakeBrowserWindow[] = [];
 const BrowserWindowMock = vi.fn((opts: unknown) => {
+  const wcOn: Record<string, (...args: unknown[]) => unknown> = {};
   const w: FakeBrowserWindow = {
     _opts: opts,
     loadFile: vi.fn(),
-    webContents: { send: vi.fn() },
+    loadURL: vi.fn(),
+    webContents: {
+      send: vi.fn(),
+      _on: wcOn,
+      on: vi.fn((channel: string, fn: (...args: unknown[]) => unknown) => {
+        wcOn[channel] = fn;
+      }),
+    },
     on: vi.fn(),
   };
   browserWindowInstances.push(w);
@@ -47,9 +64,13 @@ const BrowserWindowMock = vi.fn((opts: unknown) => {
 });
 
 const ipcHandlers: Record<string, (...args: unknown[]) => unknown> = {};
+const ipcOnHandlers: Record<string, (...args: unknown[]) => unknown> = {};
 const ipcMainMock = {
   handle: vi.fn((channel: string, fn: (...args: unknown[]) => unknown) => {
     ipcHandlers[channel] = fn;
+  }),
+  on: vi.fn((channel: string, fn: (...args: unknown[]) => unknown) => {
+    ipcOnHandlers[channel] = fn;
   }),
 };
 
@@ -63,6 +84,12 @@ vi.mock("electron", () => ({
 const sidecarStartSpy = vi.fn();
 const sidecarKillSpy = vi.fn();
 const sidecarRunAgentSpy = vi.fn(async (q: string) => ({ response: `echo: ${q}` }));
+const sidecarRunAgentStreamSpy = vi.fn(
+  async (query: string, onEvent: (e: Record<string, unknown>) => void) => {
+    onEvent({ type: "text", content: `echo: ${query}` });
+    onEvent({ type: "done", tokens_used: 1 });
+  },
+);
 const sidecarOnCrashSpy = vi.fn();
 
 vi.mock("../sidecar", () => ({
@@ -70,6 +97,7 @@ vi.mock("../sidecar", () => ({
     start: sidecarStartSpy,
     kill: sidecarKillSpy,
     runAgent: sidecarRunAgentSpy,
+    runAgentStream: sidecarRunAgentStreamSpy,
     onCrash: sidecarOnCrashSpy,
   })),
 }));
@@ -79,18 +107,22 @@ vi.mock("../sidecar", () => ({
 // register against a clean event emitter.
 // ---------------------------------------------------------------------------
 
-async function loadMain(): Promise<void> {
+async function loadMain(opts: { packaged?: boolean } = {}): Promise<void> {
   // Reset our shared state
   fakeApp.removeAllListeners();
   fakeApp.whenReady = vi.fn(() => Promise.resolve());
+  fakeApp.isPackaged = opts.packaged ?? false;
   browserWindowInstances.length = 0;
   Object.keys(ipcHandlers).forEach((k) => delete ipcHandlers[k]);
+  Object.keys(ipcOnHandlers).forEach((k) => delete ipcOnHandlers[k]);
   sidecarStartSpy.mockClear();
   sidecarKillSpy.mockClear();
   sidecarRunAgentSpy.mockClear();
+  sidecarRunAgentStreamSpy.mockClear();
   sidecarOnCrashSpy.mockClear();
   BrowserWindowMock.mockClear();
   ipcMainMock.handle.mockClear();
+  ipcMainMock.on.mockClear();
 
   // Re-import main.ts — vitest caches module state, so use vi.resetModules()
   vi.resetModules();
@@ -125,15 +157,33 @@ describe("Electron main: app.whenReady wiring", () => {
     expect(opts.webPreferences.preload).toMatch(/preload\.js$/);
   });
 
-  it("loads renderer.html into the BrowserWindow", async () => {
-    await loadMain();
+  it("dev (not packaged): loads the renderer via loadURL (dev server), not loadFile", async () => {
+    await loadMain({ packaged: false });
     await Promise.resolve();
     await Promise.resolve();
 
     const w = browserWindowInstances[0];
-    expect(w.loadFile).toHaveBeenCalledTimes(1);
-    const [arg] = w.loadFile.mock.calls[0];
-    expect(arg).toMatch(/renderer\.html$/);
+    expect(w.loadURL).toHaveBeenCalledTimes(1);
+    expect(w.loadFile).not.toHaveBeenCalled();
+    const [url] = w.loadURL.mock.calls[0];
+    expect(String(url)).toMatch(/^https?:\/\//);
+  });
+
+  it("packaged: loads the bundled Next static export via loadFile (renderer/index.html)", async () => {
+    (process as { resourcesPath?: string }).resourcesPath = "/fake/Resources";
+    try {
+      await loadMain({ packaged: true });
+      await Promise.resolve();
+      await Promise.resolve();
+
+      const w = browserWindowInstances[0];
+      expect(w.loadFile).toHaveBeenCalledTimes(1);
+      expect(w.loadURL).not.toHaveBeenCalled();
+      const [arg] = w.loadFile.mock.calls[0];
+      expect(String(arg)).toMatch(/renderer[/\\]index\.html$/);
+    } finally {
+      delete (process as { resourcesPath?: string }).resourcesPath;
+    }
   });
 });
 
@@ -172,6 +222,95 @@ describe("Electron main: agent:run IPC contract", () => {
   });
 });
 
+describe("Electron main: agent:run-stream streaming IPC (rich-pipe)", () => {
+  const flush = () => Promise.resolve();
+
+  it("registers an ipcMain.on handler named 'agent:run-stream'", async () => {
+    await loadMain();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(ipcMainMock.on).toHaveBeenCalledWith("agent:run-stream", expect.any(Function));
+    expect(ipcOnHandlers["agent:run-stream"]).toBeDefined();
+  });
+
+  it("forwards each sidecar stream event to the renderer on a per-run channel", async () => {
+    await loadMain();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const sent: Array<[string, unknown]> = [];
+    const fakeEvent = { sender: { send: vi.fn((ch: string, ev: unknown) => sent.push([ch, ev])) } };
+    ipcOnHandlers["agent:run-stream"](fakeEvent, { runId: "r1", query: "show data" });
+    await flush();
+
+    expect(sidecarRunAgentStreamSpy).toHaveBeenCalledWith("show data", expect.any(Function));
+    expect(sent.map(([ch]) => ch)).toEqual(["agent:stream:r1", "agent:stream:r1"]);
+    expect(sent.map(([, ev]) => (ev as { type: string }).type)).toEqual(["text", "done"]);
+  });
+
+  it("does not send to a destroyed renderer sender (guards event.sender.send)", async () => {
+    await loadMain();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // A destroyed WebContents throws synchronously on .send(); the adapter must
+    // skip delivery entirely rather than let it throw on the sidecar's stdout
+    // handler stack and wedge the single-inflight queue.
+    const send = vi.fn();
+    const fakeEvent = { sender: { send, isDestroyed: () => true } };
+    ipcOnHandlers["agent:run-stream"](fakeEvent, { runId: "r3", query: "show data" });
+    await flush();
+
+    // The sidecar stream still ran (two events emitted), but none were sent.
+    expect(sidecarRunAgentStreamSpy).toHaveBeenCalledWith("show data", expect.any(Function));
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it("rejects a non-string query with an error event instead of running the agent", async () => {
+    await loadMain();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const sent: Array<[string, unknown]> = [];
+    const fakeEvent = { sender: { send: vi.fn((ch: string, ev: unknown) => sent.push([ch, ev])) } };
+    ipcOnHandlers["agent:run-stream"](fakeEvent, { runId: "r2", query: 123 });
+    await flush();
+
+    expect(sidecarRunAgentStreamSpy).not.toHaveBeenCalled();
+    expect(sent).toHaveLength(1);
+    expect(sent[0][0]).toBe("agent:stream:r2");
+    expect((sent[0][1] as { type: string }).type).toBe("error");
+  });
+
+  it("rejects a non-string runId with an error event and does not run the agent", async () => {
+    await loadMain();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const sent: Array<[string, unknown]> = [];
+    const fakeEvent = { sender: { send: vi.fn((ch: string, ev: unknown) => sent.push([ch, ev])) } };
+    ipcOnHandlers["agent:run-stream"](fakeEvent, { runId: 123, query: "a valid query" });
+    await flush();
+
+    expect(sidecarRunAgentStreamSpy).not.toHaveBeenCalled();
+    expect(sent).toHaveLength(1);
+    expect((sent[0][1] as { type: string }).type).toBe("error");
+  });
+});
+
+describe("Electron main: agent:run query validation (B0 review MINOR main.ts:83)", () => {
+  it("returns an error for a non-string query instead of forwarding it to the sidecar", async () => {
+    await loadMain();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const result = (await ipcHandlers["agent:run"]({}, { not: "a string" })) as { error?: string };
+    expect(result.error).toMatch(/query/i);
+    expect(sidecarRunAgentSpy).not.toHaveBeenCalled();
+  });
+});
+
 describe("Electron main: before-quit lifecycle", () => {
   it("kills the sidecar on before-quit", async () => {
     await loadMain();
@@ -204,5 +343,60 @@ describe("Electron main: crash propagation (gate #6)", () => {
       "sidecar:crashed",
       expect.objectContaining({ code: 137, signal: "SIGKILL" }),
     );
+  });
+});
+
+describe("Electron main: CSP-violation console gate (key-free hydration proof)", () => {
+  // The packaged renderer hydrates only if its inline RSC-bootstrap scripts run
+  // under the strict script-src. If the post-build CSP hashes (inject-csp.mjs)
+  // ever drift, Chromium logs "Refused to execute inline script because it
+  // violates ... Content-Security-Policy" to the renderer console. main.ts wires
+  // a console-message listener that surfaces exactly those violations — the
+  // key-free signal an operator/CI watches during `npm start` to prove the
+  // packaged export hydrates (no Anthropic key needed). See main.ts loadRenderer.
+  it("registers a console-message listener on the window webContents", async () => {
+    await loadMain();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const wc = browserWindowInstances[0].webContents;
+    expect(wc.on).toHaveBeenCalledWith("console-message", expect.any(Function));
+    expect(wc._on["console-message"]).toBeDefined();
+  });
+
+  it("flags a CSP inline-script violation to the renderer as a typed event", async () => {
+    await loadMain();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const wc = browserWindowInstances[0].webContents;
+    wc.send.mockClear();
+    // Electron's console-message signature: (event, level, message, line, sourceId)
+    wc._on["console-message"](
+      {},
+      3,
+      "Refused to execute inline script because it violates the following Content-Security-Policy directive: \"script-src 'self'\".",
+      1,
+      "file:///renderer/index.html",
+    );
+
+    expect(wc.send).toHaveBeenCalledWith(
+      "renderer:csp-violation",
+      expect.objectContaining({
+        message: expect.stringMatching(/Refused to execute inline script/),
+      }),
+    );
+  });
+
+  it("ignores ordinary (non-CSP) console messages — no false alarms", async () => {
+    await loadMain();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const wc = browserWindowInstances[0].webContents;
+    wc.send.mockClear();
+    wc._on["console-message"]({}, 1, "hydration complete", 1, "file:///renderer/index.html");
+
+    expect(wc.send).not.toHaveBeenCalledWith("renderer:csp-violation", expect.anything());
   });
 });

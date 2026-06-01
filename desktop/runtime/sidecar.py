@@ -122,6 +122,12 @@ except ImportError:  # pragma: no cover — covered indirectly by sidecar tests
     def register_mcp_servers(servers: Dict[str, dict]) -> List[str]:  # type: ignore[no-redef]
         return []
 
+# Extraction-shaped orchestration seed (rich-pipe slice 1). The runner is the
+# transport-agnostic core; this sidecar is the only adapter that serializes its
+# typed events to the protocol stdout. Imported at module level so the streaming
+# serve path (and the tests that patch it) reference `sidecar.run_agent_stream`.
+from orchestration.runner import run_agent_stream  # noqa: E402
+
 _ANTHROPIC_BASE_URL = "https://api.anthropic.com"
 _DEFAULT_MODEL_DEFAULT = "claude-sonnet-4-6"
 _DEFAULT_MODEL_PLAN = "claude-opus-4-7"
@@ -377,6 +383,19 @@ def serve_json_protocol(stdin: Any = None, stdout: Any = None) -> None:
         success: {"response": "<assistant text>", "tokens_used": <int>}
         error:   {"error": "<diagnostic message>"}
 
+        # Rich-pipe streaming variant (slice 1) — set "stream": true:
+        request: {"action": "run", "query": "<prompt>", "stream": true}
+        stream:  {"type": "text", "content": "<delta>"}            (0+)
+                 {"type": "data_table", "data": {columns, rows,
+                          row_count, query, truncated}}            (0+)
+                 {"type": "done", "tokens_used": <int>}            (terminal)
+        error:   {"error": "<diagnostic message>"}
+
+    The streaming event shapes match the webapp's ``ChatStreamEvent`` union
+    (``frontend/src/lib/chat-stream.ts``) verbatim so the desktop renderer can
+    reuse the webapp normalizer + ``data-frame-table`` card unchanged. ``done``
+    is a desktop-local terminal marker carrying the per-turn token count.
+
     ``tokens_used`` is the per-turn sum of input + output tokens (gate
     #2). See ``_extract_tokens_used`` for the exact derivation rule. The
     field is always an integer and always present on success — never
@@ -410,6 +429,16 @@ def serve_json_protocol(stdin: Any = None, stdout: Any = None) -> None:
         stdout.write(json.dumps(payload) + "\n")
         stdout.flush()
 
+    def _emit_event(event: Any) -> None:
+        """Serialize one typed orchestration event to the protocol stdout.
+
+        Writes via the captured ``stdout`` (closure reference), so it reaches the
+        real protocol stdout even while the agent run is wrapped in
+        ``redirect_stdout(sys.stderr)`` — that is exactly the B0 #5.5 stdout
+        isolation: typed events here, agent chatter to stderr.
+        """
+        _emit(event.to_dict() if hasattr(event, "to_dict") else event)
+
     def _ensure_agent() -> Any:
         nonlocal agent
         if agent is not None:
@@ -423,6 +452,10 @@ def serve_json_protocol(stdin: Any = None, stdout: Any = None) -> None:
         ensure_connection_template(org=org)
         ensure_vault_scaffold(org=org)
         register_mcp_servers(build_mcp_server_config(org=org))
+        # Register the local sample_dataset demo tool BEFORE constructing the
+        # agent so it is in the registry when AIAgent loads its tool definitions
+        # (rich-pipe slice 1). Import side effect; idempotent.
+        import suite_tools.sample_dataset  # noqa: F401
         agent = build_agent("default")
         return agent
 
@@ -442,15 +475,27 @@ def serve_json_protocol(stdin: Any = None, stdout: Any = None) -> None:
             continue
 
         try:
+            stream = bool(request.get("stream"))
             with redirect_stdout(sys.stderr):
                 current_agent = _ensure_agent()
-                result = current_agent.run_conversation(request.get("query", ""))
-            _emit({
-                "response": _extract_response_text(result),
-                # Sum of input + output tokens for this turn (gate #2).
-                # See _extract_tokens_used for the derivation rule.
-                "tokens_used": _extract_tokens_used(result),
-            })
+                if stream:
+                    # Rich-pipe path: drive the orchestration runner; each typed
+                    # event (text / data_table / done) is emitted as its own
+                    # newline-JSON line via _emit_event during the run.
+                    run_agent_stream(
+                        request.get("query", ""),
+                        _emit_event,
+                        agent=current_agent,
+                    )
+                else:
+                    result = current_agent.run_conversation(request.get("query", ""))
+            if not stream:
+                _emit({
+                    "response": _extract_response_text(result),
+                    # Sum of input + output tokens for this turn (gate #2).
+                    # See _extract_tokens_used for the derivation rule.
+                    "tokens_used": _extract_tokens_used(result),
+                })
         except Exception as exc:  # noqa: BLE001 — surface every failure to renderer
             _emit({"error": str(exc)})
 

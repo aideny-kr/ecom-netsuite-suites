@@ -1,0 +1,33 @@
+{
+  "name": "suite-studio-desktop-renderer",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Suite Studio Desktop renderer — minimal Next.js (static export) chat UI reusing the webapp's chat-stream normalizer + data-frame-table card over the streaming IPC bridge. See ../../../docs/superpowers/plans/2026-05-31-desktop-rich-pipe-slice-1.md.",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build && node scripts/inject-csp.mjs",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "clsx": "^2.1.0",
+    "lucide-react": "^0.344.0",
+    "next": "^14.2.0",
+    "react": "^18.3.0",
+    "react-dom": "^18.3.0",
+    "tailwind-merge": "^2.2.0"
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@types/react": "^18.2.0",
+    "@types/react-dom": "^18.2.0",
+    "@vitejs/plugin-react": "^6.0.1",
+    "autoprefixer": "^10.4.0",
+    "jsdom": "^29.0.1",
+    "postcss": "^8.4.0",
+    "tailwindcss": "^3.4.0",
+    "tailwindcss-animate": "^1.0.7",
+    "typescript": "^5.4.0",
+    "vitest": "^4.1.2"
+  }
+}

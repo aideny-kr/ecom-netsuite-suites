@@ -28,7 +28,7 @@
 import { app, BrowserWindow, ipcMain } from "electron";
 import fs from "node:fs";
 import path from "node:path";
-import { Sidecar, type AgentResult } from "./sidecar";
+import { Sidecar, type AgentResult, type SidecarEvent } from "./sidecar";
 
 let mainWindow: BrowserWindow | null = null;
 let sidecar: Sidecar | null = null;
@@ -70,8 +70,64 @@ function createWindow(): BrowserWindow {
       preload: path.join(__dirname, "preload.js"),
     },
   });
-  win.loadFile(path.join(__dirname, "..", "renderer.html"));
+  loadRenderer(win);
+  wireCspViolationGate(win);
   return win;
+}
+
+/**
+ * Key-free hydration gate: watch the renderer console for CSP violations.
+ *
+ * The packaged Next static export hydrates only if its inline RSC-bootstrap
+ * `<script>` tags execute under the strict `script-src` (their per-build sha256
+ * hashes are injected post-build by renderer/scripts/inject-csp.mjs). If those
+ * hashes ever drift, Chromium refuses the inline scripts and logs
+ * "Refused to execute inline script because it violates ... Content-Security-Policy".
+ *
+ * We forward exactly those messages to the renderer on `renderer:csp-violation`
+ * and log them to the main-process stderr. The ABSENCE of any such message
+ * during `npm start` is the deterministic, no-Anthropic-key signal that the
+ * bootstrap scripts ran and hydration started — the operator's gate for the
+ * CSP/hydration fix. Ordinary console output is ignored (no false alarms).
+ */
+function wireCspViolationGate(win: BrowserWindow): void {
+  win.webContents.on(
+    "console-message",
+    (
+      _event: unknown,
+      _level: number,
+      message: string,
+      line: number,
+      sourceId: string,
+    ) => {
+      if (/Content-Security-Policy/i.test(message)) {
+        // eslint-disable-next-line no-console
+        console.error(`[csp-violation] ${message} (${sourceId}:${line})`);
+        if (!win.isDestroyed?.()) {
+          win.webContents.send("renderer:csp-violation", { message, line, sourceId });
+        }
+      }
+    },
+  );
+}
+
+/**
+ * Load the Next.js rich renderer (rich-pipe slice 1), branching on packaging:
+ *
+ *   - Packaged: `loadFile` the bundled static export at
+ *     `Resources/renderer/index.html` (electron-builder extraResources). The
+ *     export carries the strict CSP (see renderer/src/lib/csp.ts).
+ *   - Dev: `loadURL` the Next dev server (default http://localhost:3000, or
+ *     SUITE_STUDIO_RENDERER_URL) — the renderer serves its dev CSP for HMR.
+ *
+ * Replaces the bare B0 renderer.html for the chat path.
+ */
+function loadRenderer(win: BrowserWindow): void {
+  if (app.isPackaged) {
+    win.loadFile(path.join(process.resourcesPath ?? "", "renderer", "index.html"));
+  } else {
+    win.loadURL(process.env.SUITE_STUDIO_RENDERER_URL ?? "http://localhost:3000");
+  }
 }
 
 // IPC handler is registered at module-load time so it survives across
@@ -80,7 +136,12 @@ function createWindow(): BrowserWindow {
 // instance; if the sidecar isn't running yet (or has died) we return a
 // structured error instead of throwing across the IPC boundary —
 // renderer surfaces the error to the user.
-ipcMain.handle("agent:run", async (_event, query: string): Promise<AgentResult> => {
+ipcMain.handle("agent:run", async (_event, query: unknown): Promise<AgentResult> => {
+  // Validate the query crossing the IPC boundary (B0 review MINOR main.ts:83) —
+  // the renderer is untrusted; never forward a non-string straight to the agent.
+  if (typeof query !== "string") {
+    return { error: "invalid query: expected a string" };
+  }
   if (!sidecar) {
     return { error: "sidecar not yet ready" };
   }
@@ -89,6 +150,44 @@ ipcMain.handle("agent:run", async (_event, query: string): Promise<AgentResult> 
   } catch (err) {
     return { error: (err as Error).message };
   }
+});
+
+// Rich-pipe streaming channel. The renderer (preload.runAgentStream) sends one
+// {runId, query} per run; we forward each typed sidecar event back on the
+// per-run channel `agent:stream:<runId>`. Fire-and-forget (ipcMain.on); the
+// renderer unsubscribes on the terminal done/error. Errors and invalid input
+// surface as a typed error event on the same channel rather than throwing.
+ipcMain.on("agent:run-stream", (event, payload: unknown) => {
+  const { runId, query } = (payload ?? {}) as { runId?: unknown; query?: unknown };
+  const channel = typeof runId === "string" ? `agent:stream:${runId}` : "agent:stream:unknown";
+  const sendEvent = (ev: SidecarEvent) => {
+    // Guard against a destroyed sender (window closed / reloaded / navigated
+    // mid-stream) — event.sender.send() throws synchronously on a destroyed
+    // WebContents. Mirrors the onCrash guard (`!mainWindow.isDestroyed?.()`).
+    // Optional-chain isDestroyed so the unit-test fake sender (no isDestroyed)
+    // still sends.
+    if (!event.sender.isDestroyed?.()) {
+      event.sender.send(channel, ev);
+    }
+  };
+
+  // Validate BOTH IPC inputs before use (the renderer is untrusted) — consistent
+  // with agent:run. A non-string runId means we can't scope the channel, so bail.
+  if (typeof runId !== "string") {
+    sendEvent({ type: "error", error: "invalid runId: expected a string" });
+    return;
+  }
+  if (typeof query !== "string") {
+    sendEvent({ type: "error", error: "invalid query: expected a string" });
+    return;
+  }
+  if (!sidecar) {
+    sendEvent({ type: "error", error: "sidecar not yet ready" });
+    return;
+  }
+  sidecar.runAgentStream(query, sendEvent).catch((err) => {
+    sendEvent({ type: "error", error: (err as Error).message });
+  });
 });
 
 function buildSidecarEnv(): Record<string, string> {

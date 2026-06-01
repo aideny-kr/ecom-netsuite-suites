@@ -8,8 +8,14 @@ interface AgentResult {
   error?: string;
 }
 
+// One typed streaming event forwarded from the sidecar (rich-pipe slice 1).
+// The bridge stays schema-agnostic; the renderer's chat-stream.ts normalizer
+// validates the concrete shapes (text / data_table / done / error).
+type AgentStreamEvent = Record<string, unknown>;
+
 interface SuiteStudioBridge {
   runAgent(query: string): Promise<AgentResult>;
+  runAgentStream(query: string, onEvent: (event: AgentStreamEvent) => void): void;
   onSidecarCrashed?(cb: (info: { code: number | null; signal: string | null }) => void): void;
 }
 
