@@ -1,7 +1,11 @@
-"""Tests for query experiment service."""
+"""Tests for query experiment service.
+
+Decision-threshold tests live in test_experiment_benchmark_scoring.py —
+this file covers SQL generation/execution failure paths, cost estimation,
+and pattern-promotion side effects.
+"""
 
 import uuid
-from dataclasses import dataclass, field
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -11,76 +15,7 @@ from app.services.query_eval_harness import EvalCase
 _SVC = "app.services.query_experiment_service"
 
 
-@dataclass
-class _FakeAgentResult:
-    answer_text: str = ""
-    tool_calls: list[dict] = field(default_factory=list)
-    input_tokens: int = 100
-    output_tokens: int = 200
-    cost_usd: float = 0.01
-    latency_ms: int = 500
-    success: bool = True
-    error: str | None = None
-    confidence_score: float | None = None
-    num_steps: int = 1
-    context_chars: int = 500
-
-
-@dataclass
-class _FakeBaselineResult:
-    answer_text: str = ""
-    tool_calls: list[dict] = field(default_factory=list)
-    input_tokens: int = 100
-    output_tokens: int = 200
-    cost_usd: float = 0.01
-    latency_ms: int = 500
-    success: bool = True
-    error: str | None = None
-
-
 class TestRunExperiment:
-    @pytest.mark.asyncio
-    async def test_successful_experiment_returns_result(self):
-        from app.services.query_experiment_service import run_single_experiment
-
-        case = EvalCase(
-            question="Top 10 sales orders",
-            dialect="suiteql",
-            expected_keywords=["sales", "order"],
-            expected_sql_contains=["FETCH FIRST"],
-            tables=["transaction"],
-            difficulty="easy",
-        )
-
-        agent_result = _FakeAgentResult(answer_text="Here are top sales order results.", success=True)
-        baseline_result = _FakeBaselineResult(answer_text="Sales order list.", success=True)
-
-        with (
-            patch(f"{_SVC}._generate_sql", new_callable=AsyncMock) as mock_gen,
-            patch(f"{_SVC}._execute_sql", new_callable=AsyncMock) as mock_exec,
-            patch(f"{_SVC}.run_agent", new_callable=AsyncMock, return_value=agent_result),
-            patch(f"{_SVC}.run_baseline", new_callable=AsyncMock, return_value=baseline_result),
-            patch(f"{_SVC}.promote_experiment_result", new_callable=AsyncMock),
-        ):
-            mock_gen.return_value = "SELECT tranid, total FROM transaction WHERE type = 'SalesOrd' ORDER BY total DESC FETCH FIRST 10 ROWS ONLY"
-            mock_exec.return_value = {
-                "success": True,
-                "result_text": "Found 10 sales orders with amounts",
-                "rows": 10,
-                "bytes_processed": 5000,
-            }
-
-            result = await run_single_experiment(
-                case=case,
-                tenant_id=uuid.uuid4(),
-                db=AsyncMock(),
-            )
-
-        assert result["decision"] in ("KEEP", "REVERT", "SKIP")
-        assert "experiment_score" in result
-        assert "generated_sql" in result
-        assert result["dialect"] == "suiteql"
-
     @pytest.mark.asyncio
     async def test_execution_error_returns_skip(self):
         from app.services.query_experiment_service import run_single_experiment
@@ -139,149 +74,6 @@ class TestRunExperiment:
             )
 
         assert result["decision"] == "SKIP"
-
-    @pytest.mark.asyncio
-    async def test_keep_when_above_threshold(self):
-        from app.services.query_experiment_service import run_single_experiment
-
-        case = EvalCase(
-            question="Revenue by region",
-            dialect="bigquery",
-            expected_keywords=["revenue", "region"],
-            expected_sql_contains=["GROUP BY"],
-            tables=["sales"],
-            difficulty="easy",
-        )
-
-        # Agent gives a great answer, baseline fails
-        agent_result = _FakeAgentResult(
-            answer_text="Revenue by region: US $4.2M, EU $2.8M",
-            success=True,
-        )
-        baseline_result = _FakeBaselineResult(
-            answer_text="I couldn't find the revenue data.",
-            success=True,
-        )
-
-        with (
-            patch(f"{_SVC}._generate_sql", new_callable=AsyncMock) as mock_gen,
-            patch(f"{_SVC}._execute_sql", new_callable=AsyncMock) as mock_exec,
-            patch(f"{_SVC}.run_agent", new_callable=AsyncMock, return_value=agent_result),
-            patch(f"{_SVC}.run_baseline", new_callable=AsyncMock, return_value=baseline_result),
-            patch(f"{_SVC}.promote_experiment_result", new_callable=AsyncMock),
-        ):
-            mock_gen.return_value = "SELECT region, SUM(revenue) FROM `proj.ds.sales` GROUP BY region LIMIT 20"
-            mock_exec.return_value = {
-                "success": True,
-                "result_text": "Revenue by region: US $4.2M, EU $2.8M",
-                "rows": 5,
-                "bytes_processed": 10000,
-            }
-
-            result = await run_single_experiment(
-                case=case,
-                tenant_id=uuid.uuid4(),
-                db=AsyncMock(),
-            )
-
-        # Agent has all keywords + no failure phrase => 1.0
-        # Baseline has failure phrase => capped at 0.5
-        assert result["decision"] == "KEEP"
-
-    @pytest.mark.asyncio
-    async def test_revert_when_below_threshold(self):
-        from app.services.query_experiment_service import run_single_experiment
-
-        case = EvalCase(
-            question="Find transactions",
-            dialect="suiteql",
-            expected_keywords=["customer", "amount", "date", "status"],
-            expected_sql_contains=[],
-            tables=["transaction"],
-            difficulty="medium",
-        )
-
-        # Agent fails, baseline has all keywords
-        agent_result = _FakeAgentResult(
-            answer_text="I couldn't find the transactions. Error occurred.",
-            success=True,
-        )
-        baseline_result = _FakeBaselineResult(
-            answer_text="Here are customer transactions with amount, date, and status details.",
-            success=True,
-        )
-
-        with (
-            patch(f"{_SVC}._generate_sql", new_callable=AsyncMock) as mock_gen,
-            patch(f"{_SVC}._execute_sql", new_callable=AsyncMock) as mock_exec,
-            patch(f"{_SVC}.run_agent", new_callable=AsyncMock, return_value=agent_result),
-            patch(f"{_SVC}.run_baseline", new_callable=AsyncMock, return_value=baseline_result),
-            patch(f"{_SVC}.promote_experiment_result", new_callable=AsyncMock),
-        ):
-            mock_gen.return_value = "SELECT id FROM transaction FETCH FIRST 5 ROWS ONLY"
-            mock_exec.return_value = {
-                "success": True,
-                "result_text": "id: 123, id: 456",
-                "rows": 2,
-                "bytes_processed": 0,
-            }
-
-            result = await run_single_experiment(
-                case=case,
-                tenant_id=uuid.uuid4(),
-                db=AsyncMock(),
-            )
-
-        assert result["decision"] == "REVERT"
-
-    @pytest.mark.asyncio
-    async def test_result_contains_all_score_fields(self):
-        from app.services.query_experiment_service import run_single_experiment
-
-        case = EvalCase(
-            question="Count items",
-            dialect="suiteql",
-            expected_keywords=["count"],
-            expected_sql_contains=[],
-            tables=["item"],
-            difficulty="easy",
-        )
-
-        agent_result = _FakeAgentResult(answer_text="The count of items is 42.", success=True)
-        baseline_result = _FakeBaselineResult(answer_text="Item count: 42.", success=True)
-
-        with (
-            patch(f"{_SVC}._generate_sql", new_callable=AsyncMock) as mock_gen,
-            patch(f"{_SVC}._execute_sql", new_callable=AsyncMock) as mock_exec,
-            patch(f"{_SVC}.run_agent", new_callable=AsyncMock, return_value=agent_result),
-            patch(f"{_SVC}.run_baseline", new_callable=AsyncMock, return_value=baseline_result),
-            patch(f"{_SVC}.promote_experiment_result", new_callable=AsyncMock),
-        ):
-            mock_gen.return_value = "SELECT COUNT(*) AS cnt FROM item FETCH FIRST 1 ROWS ONLY"
-            mock_exec.return_value = {
-                "success": True,
-                "result_text": "count: 42",
-                "rows": 1,
-                "bytes_processed": 0,
-            }
-
-            result = await run_single_experiment(
-                case=case,
-                tenant_id=uuid.uuid4(),
-                db=AsyncMock(),
-            )
-
-        # Core scoring fields still present (may be 0.0 for legacy fields)
-        assert "score_accuracy" in result
-        assert "score_syntax" in result
-        assert "score_efficiency" in result
-        assert "experiment_score" in result
-        assert "delta" in result
-        assert "cost_usd" in result
-        assert isinstance(result["score_accuracy"], float)
-        assert isinstance(result["score_syntax"], float)
-        assert isinstance(result["score_efficiency"], float)
-
 
 class TestBudgetEstimation:
     def test_suiteql_cost(self):
