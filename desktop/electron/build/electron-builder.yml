@@ -39,6 +39,14 @@ files:
 # `from`: path relative to this electron/ directory.
 # `to`:   path inside Resources/ in the final .app.
 extraResources:
+  # Next.js static export for the rich renderer (rich-pipe slice 1). Built by
+  # `cd renderer && npm install && npm run build` (emits renderer/out/) BEFORE
+  # `npm run dist`. Lands at Resources/renderer/ — exactly the path
+  # loadRenderer() in main.ts loads when app.isPackaged.
+  - from: ../electron/renderer/out
+    to: renderer
+    filter:
+      - "**/*"
   # PyInstaller-bundled Python sidecar. We point at the inner one-folder
   # COLLECT output (dist-sidecar/sidecar/) so the binary lands at
   # Resources/sidecar/sidecar — exactly the path resolvePythonPath in

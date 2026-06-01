@@ -70,8 +70,27 @@ function createWindow(): BrowserWindow {
       preload: path.join(__dirname, "preload.js"),
     },
   });
-  win.loadFile(path.join(__dirname, "..", "renderer.html"));
+  loadRenderer(win);
   return win;
+}
+
+/**
+ * Load the Next.js rich renderer (rich-pipe slice 1), branching on packaging:
+ *
+ *   - Packaged: `loadFile` the bundled static export at
+ *     `Resources/renderer/index.html` (electron-builder extraResources). The
+ *     export carries the strict CSP (see renderer/src/lib/csp.ts).
+ *   - Dev: `loadURL` the Next dev server (default http://localhost:3000, or
+ *     SUITE_STUDIO_RENDERER_URL) — the renderer serves its dev CSP for HMR.
+ *
+ * Replaces the bare B0 renderer.html for the chat path.
+ */
+function loadRenderer(win: BrowserWindow): void {
+  if (app.isPackaged) {
+    win.loadFile(path.join(process.resourcesPath ?? "", "renderer", "index.html"));
+  } else {
+    win.loadURL(process.env.SUITE_STUDIO_RENDERER_URL ?? "http://localhost:3000");
+  }
 }
 
 // IPC handler is registered at module-load time so it survives across

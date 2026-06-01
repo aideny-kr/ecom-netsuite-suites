@@ -21,10 +21,12 @@ interface FakeApp extends EventEmitter {
   whenReady: ReturnType<typeof vi.fn>;
   on: EventEmitter["on"];
   quit: ReturnType<typeof vi.fn>;
+  isPackaged: boolean;
 }
 
 interface FakeBrowserWindow {
   loadFile: ReturnType<typeof vi.fn>;
+  loadURL: ReturnType<typeof vi.fn>;
   webContents: { send: ReturnType<typeof vi.fn> };
   on: ReturnType<typeof vi.fn>;
   _opts: unknown;
@@ -33,12 +35,14 @@ interface FakeBrowserWindow {
 const fakeApp = new EventEmitter() as FakeApp;
 fakeApp.whenReady = vi.fn(() => Promise.resolve());
 fakeApp.quit = vi.fn();
+fakeApp.isPackaged = false;
 
 const browserWindowInstances: FakeBrowserWindow[] = [];
 const BrowserWindowMock = vi.fn((opts: unknown) => {
   const w: FakeBrowserWindow = {
     _opts: opts,
     loadFile: vi.fn(),
+    loadURL: vi.fn(),
     webContents: { send: vi.fn() },
     on: vi.fn(),
   };
@@ -90,10 +94,11 @@ vi.mock("../sidecar", () => ({
 // register against a clean event emitter.
 // ---------------------------------------------------------------------------
 
-async function loadMain(): Promise<void> {
+async function loadMain(opts: { packaged?: boolean } = {}): Promise<void> {
   // Reset our shared state
   fakeApp.removeAllListeners();
   fakeApp.whenReady = vi.fn(() => Promise.resolve());
+  fakeApp.isPackaged = opts.packaged ?? false;
   browserWindowInstances.length = 0;
   Object.keys(ipcHandlers).forEach((k) => delete ipcHandlers[k]);
   Object.keys(ipcOnHandlers).forEach((k) => delete ipcOnHandlers[k]);
@@ -139,15 +144,33 @@ describe("Electron main: app.whenReady wiring", () => {
     expect(opts.webPreferences.preload).toMatch(/preload\.js$/);
   });
 
-  it("loads renderer.html into the BrowserWindow", async () => {
-    await loadMain();
+  it("dev (not packaged): loads the renderer via loadURL (dev server), not loadFile", async () => {
+    await loadMain({ packaged: false });
     await Promise.resolve();
     await Promise.resolve();
 
     const w = browserWindowInstances[0];
-    expect(w.loadFile).toHaveBeenCalledTimes(1);
-    const [arg] = w.loadFile.mock.calls[0];
-    expect(arg).toMatch(/renderer\.html$/);
+    expect(w.loadURL).toHaveBeenCalledTimes(1);
+    expect(w.loadFile).not.toHaveBeenCalled();
+    const [url] = w.loadURL.mock.calls[0];
+    expect(String(url)).toMatch(/^https?:\/\//);
+  });
+
+  it("packaged: loads the bundled Next static export via loadFile (renderer/index.html)", async () => {
+    (process as { resourcesPath?: string }).resourcesPath = "/fake/Resources";
+    try {
+      await loadMain({ packaged: true });
+      await Promise.resolve();
+      await Promise.resolve();
+
+      const w = browserWindowInstances[0];
+      expect(w.loadFile).toHaveBeenCalledTimes(1);
+      expect(w.loadURL).not.toHaveBeenCalled();
+      const [arg] = w.loadFile.mock.calls[0];
+      expect(String(arg)).toMatch(/renderer[/\\]index\.html$/);
+    } finally {
+      delete (process as { resourcesPath?: string }).resourcesPath;
+    }
   });
 });
 
