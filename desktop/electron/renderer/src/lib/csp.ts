@@ -11,11 +11,17 @@
  * dev-server websocket so `next dev` HMR works; it is NEVER shipped (layout
  * selects PACKAGED_CSP whenever NODE_ENV === "production", i.e. the export).
  *
- * NOTE (operator-deferred live render): Next's static export may emit an inline
- * bootstrap script for hydration; reconciling that with `script-src 'self'`
- * (nonce/hash or a single external island) is finalized during the deferred live
- * render smoke — see desktop/SMOKE-DEFERRAL-RICH-PIPE.md. The policy stays
- * strict (never `'unsafe-inline'`/`'unsafe-eval'` for scripts).
+ * KNOWN BLOCKER (operator-deferred live render): `next build` of this app emits
+ * ~5 INLINE bootstrap <script> tags (the app-router hydration chunks). Under
+ * PACKAGED_CSP's `script-src 'self'` (no `'unsafe-inline'`) those are blocked, so
+ * the static HTML renders but hydration/interactivity (runAgentStream) does NOT
+ * run. This MUST be reconciled before the live render works — options: add the
+ * per-build sha256 hashes of those inline scripts to `script-src` (a post-build
+ * step), or ship the interactivity as a single external-script island. The
+ * policy intentionally stays strict (never `'unsafe-inline'`/`'unsafe-eval'` for
+ * scripts) — confirmed during slice 1, tracked in
+ * desktop/SMOKE-DEFERRAL-RICH-PIPE.md. The key-free DONE proof (renderer vitest
+ * tests) does not exercise Next hydration and is unaffected.
  */
 export const PACKAGED_CSP =
   "default-src 'self'; " +

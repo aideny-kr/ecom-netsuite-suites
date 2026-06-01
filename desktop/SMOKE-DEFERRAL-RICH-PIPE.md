@@ -37,6 +37,20 @@ The only thing the live steps add is the real LLM deciding to call the tool —
 the interception, event shapes, transport, and card render are all already
 proven without a key.
 
+## Known blocker for the live render (discovered in slice 1)
+
+`next build` of `desktop/electron/renderer` succeeds and emits a static export
+to `out/index.html` with the strict packaged CSP baked in (verified). BUT the
+export contains ~5 **inline** bootstrap `<script>` tags (Next app-router
+hydration chunks). Under the strict `script-src 'self'` (no `'unsafe-inline'`),
+those inline scripts are blocked at runtime — so the static HTML renders but
+**hydration/interactivity does not run** (the composer's `runAgentStream` won't
+fire). Before the live render works, reconcile this WITHOUT weakening script CSP:
+add the per-build `sha256-…` hashes of the inline scripts to `script-src`
+(post-build step), or ship the interactivity as one external-script island. See
+`renderer/src/lib/csp.ts`. The key-free DONE proof (renderer vitest tests) does
+not go through Next hydration, so it is unaffected by this blocker.
+
 ## Four-source citation
 
 ### 1. Plan doc gates (A4 + C3 + success criteria §2)
