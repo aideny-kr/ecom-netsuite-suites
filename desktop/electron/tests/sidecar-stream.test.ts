@@ -149,6 +149,56 @@ describe("Sidecar.runAgentStream()", () => {
     await expect(pending).rejects.toThrow(/exit|crashed|terminated|before responding/i);
   });
 
+  it("serializes concurrent streams — the second waits until the first finalizes", async () => {
+    const fake = makeFakeChild();
+    spawnMock.mockReturnValue(fake);
+    const s = new Sidecar({ pythonPath: "python", sidecarPath: "/x.py" });
+    s.start();
+
+    const writes: string[] = [];
+    fake.stdin.on("data", (c: Buffer) => writes.push(c.toString()));
+
+    const a: Array<Record<string, unknown>> = [];
+    const b: Array<Record<string, unknown>> = [];
+    const p1 = s.runAgentStream("first", (e) => a.push(e));
+    s.runAgentStream("second", (e) => b.push(e));
+    await flush();
+
+    // Only the first stream's request has been written; the second is queued.
+    expect(writes.join("")).toContain('"query":"first"');
+    expect(writes.join("")).not.toContain('"query":"second"');
+
+    // Finalize the first; the second is then dispatched.
+    fake.stdout.write(JSON.stringify({ type: "done", tokens_used: 0 }) + "\n");
+    await p1;
+    await flush();
+    expect(writes.join("")).toContain('"query":"second"');
+
+    // First stream's events never leaked into the second's callback.
+    expect(b).toHaveLength(0);
+  });
+
+  it("does not invoke onEvent after the terminal done", async () => {
+    const fake = makeFakeChild();
+    spawnMock.mockReturnValue(fake);
+    const s = new Sidecar({ pythonPath: "python", sidecarPath: "/x.py" });
+    s.start();
+
+    const events: Array<Record<string, unknown>> = [];
+    const done = s.runAgentStream("q", (e) => events.push(e));
+    await flush();
+    fake.stdout.write(JSON.stringify({ type: "done", tokens_used: 1 }) + "\n");
+    await done;
+
+    const countAtTerminal = events.length;
+    // A stray line after the stream finalized must NOT reach onEvent (it's an
+    // orphan — no inflight request).
+    fake.stdout.write(JSON.stringify({ type: "text", content: "late" }) + "\n");
+    await flush();
+    expect(events).toHaveLength(countAtTerminal);
+    expect(events.map((e) => e.type)).toEqual(["done"]);
+  });
+
   it("keeps single-shot runAgent working alongside streaming (back-compat)", async () => {
     const fake = makeFakeChild();
     spawnMock.mockReturnValue(fake);

@@ -251,6 +251,21 @@ describe("Electron main: agent:run-stream streaming IPC (rich-pipe)", () => {
     expect(sent[0][0]).toBe("agent:stream:r2");
     expect((sent[0][1] as { type: string }).type).toBe("error");
   });
+
+  it("rejects a non-string runId with an error event and does not run the agent", async () => {
+    await loadMain();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const sent: Array<[string, unknown]> = [];
+    const fakeEvent = { sender: { send: vi.fn((ch: string, ev: unknown) => sent.push([ch, ev])) } };
+    ipcOnHandlers["agent:run-stream"](fakeEvent, { runId: 123, query: "a valid query" });
+    await flush();
+
+    expect(sidecarRunAgentStreamSpy).not.toHaveBeenCalled();
+    expect(sent).toHaveLength(1);
+    expect((sent[0][1] as { type: string }).type).toBe("error");
+  });
 });
 
 describe("Electron main: agent:run query validation (B0 review MINOR main.ts:83)", () => {

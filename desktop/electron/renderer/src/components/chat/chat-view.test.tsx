@@ -74,6 +74,24 @@ describe("ChatView streams text + data_table over the IPC bridge", () => {
     expect(screen.getByText(/ANTHROPIC_API_KEY not set/)).toBeInTheDocument();
   });
 
+  it("does not crash or render a card when a malformed data_table event arrives", () => {
+    // Exercises the reused normalizer's defensive coercion in the renderer path:
+    // a data_table event with wrong-typed fields is coerced (columns -> []), so
+    // the card renders nothing rather than throwing.
+    const bridge = installBridge();
+    render(<ChatView />);
+    submit("q");
+    act(() => {
+      bridge.last()({
+        type: "data_table",
+        data: { columns: "not-an-array", rows: 99, row_count: "x", query: 5, truncated: "yes" },
+      });
+      bridge.last()({ type: "done", tokens_used: 0 });
+    });
+    // columns coerced to [] -> the card returns null -> no "Query Results" header, no crash.
+    expect(screen.queryByText("Query Results")).toBeNull();
+  });
+
   it("renders a graceful message when the desktop bridge is unavailable", () => {
     render(<ChatView />); // no window.suiteStudio installed
     submit("q");

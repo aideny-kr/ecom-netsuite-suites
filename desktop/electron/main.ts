@@ -125,6 +125,12 @@ ipcMain.on("agent:run-stream", (event, payload: unknown) => {
   const channel = typeof runId === "string" ? `agent:stream:${runId}` : "agent:stream:unknown";
   const sendEvent = (ev: SidecarEvent) => event.sender.send(channel, ev);
 
+  // Validate BOTH IPC inputs before use (the renderer is untrusted) — consistent
+  // with agent:run. A non-string runId means we can't scope the channel, so bail.
+  if (typeof runId !== "string") {
+    sendEvent({ type: "error", error: "invalid runId: expected a string" });
+    return;
+  }
   if (typeof query !== "string") {
     sendEvent({ type: "error", error: "invalid query: expected a string" });
     return;
