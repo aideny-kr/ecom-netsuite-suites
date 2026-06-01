@@ -201,20 +201,51 @@ export class Sidecar {
     } catch (err) {
       // Surface, never silently drop (B0 deliver() MINOR). A non-JSON line means
       // chatter leaked onto the protocol stdout — terminal for this stream.
-      req.onEvent({ type: "error", error: `malformed sidecar event: ${(err as Error).message}` });
-      this.finalizeStream(req);
+      // A throwing sink must NOT skip finalization, so guard the delivery and
+      // ALWAYS finalize.
+      try {
+        req.onEvent({ type: "error", error: `malformed sidecar event: ${(err as Error).message}` });
+      } catch (sinkErr) {
+        process.stderr.write(
+          `[sidecar] stream sink threw on malformed-line event: ${(sinkErr as Error).message}\n`,
+        );
+      } finally {
+        this.finalizeStream(req);
+      }
       return;
     }
     // A sidecar error line ({"error":...}, no type) is terminal — normalize it to
     // a typed error event so the renderer's normalizer recognizes it.
     const errMsg = (event as { error?: unknown }).error;
     if (errMsg) {
-      req.onEvent({ type: "error", error: String(errMsg) });
+      try {
+        req.onEvent({ type: "error", error: String(errMsg) });
+      } catch (sinkErr) {
+        process.stderr.write(
+          `[sidecar] stream sink threw on error event: ${(sinkErr as Error).message}\n`,
+        );
+      } finally {
+        this.finalizeStream(req); // ALWAYS unblock the queue
+      }
+      return;
+    }
+    // Capture the terminal check BEFORE delivery: on the throw path we synthesize
+    // finalization regardless of event type, so we must not depend on reading the
+    // event after onEvent has run.
+    const isTerminal = (event as { type?: unknown }).type === "done";
+    try {
+      req.onEvent(event);
+    } catch (sinkErr) {
+      // A throwing sink (e.g. a destroyed renderer's event.sender.send) MUST NOT
+      // wedge the single-inflight queue. Treat it as terminal for this stream:
+      // finalize so inflight clears and pump() dispatches the next queued run.
+      process.stderr.write(
+        `[sidecar] stream sink threw; finalizing stream: ${(sinkErr as Error).message}\n`,
+      );
       this.finalizeStream(req);
       return;
     }
-    req.onEvent(event);
-    if ((event as { type?: unknown }).type === "done") {
+    if (isTerminal) {
       this.finalizeStream(req);
     }
   }

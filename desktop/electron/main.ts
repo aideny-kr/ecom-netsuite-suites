@@ -123,7 +123,16 @@ ipcMain.handle("agent:run", async (_event, query: unknown): Promise<AgentResult>
 ipcMain.on("agent:run-stream", (event, payload: unknown) => {
   const { runId, query } = (payload ?? {}) as { runId?: unknown; query?: unknown };
   const channel = typeof runId === "string" ? `agent:stream:${runId}` : "agent:stream:unknown";
-  const sendEvent = (ev: SidecarEvent) => event.sender.send(channel, ev);
+  const sendEvent = (ev: SidecarEvent) => {
+    // Guard against a destroyed sender (window closed / reloaded / navigated
+    // mid-stream) — event.sender.send() throws synchronously on a destroyed
+    // WebContents. Mirrors the onCrash guard (`!mainWindow.isDestroyed?.()`).
+    // Optional-chain isDestroyed so the unit-test fake sender (no isDestroyed)
+    // still sends.
+    if (!event.sender.isDestroyed?.()) {
+      event.sender.send(channel, ev);
+    }
+  };
 
   // Validate BOTH IPC inputs before use (the renderer is untrusted) — consistent
   // with agent:run. A non-string runId means we can't scope the channel, so bail.

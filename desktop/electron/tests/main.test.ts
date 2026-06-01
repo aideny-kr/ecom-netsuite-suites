@@ -236,6 +236,24 @@ describe("Electron main: agent:run-stream streaming IPC (rich-pipe)", () => {
     expect(sent.map(([, ev]) => (ev as { type: string }).type)).toEqual(["text", "done"]);
   });
 
+  it("does not send to a destroyed renderer sender (guards event.sender.send)", async () => {
+    await loadMain();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // A destroyed WebContents throws synchronously on .send(); the adapter must
+    // skip delivery entirely rather than let it throw on the sidecar's stdout
+    // handler stack and wedge the single-inflight queue.
+    const send = vi.fn();
+    const fakeEvent = { sender: { send, isDestroyed: () => true } };
+    ipcOnHandlers["agent:run-stream"](fakeEvent, { runId: "r3", query: "show data" });
+    await flush();
+
+    // The sidecar stream still ran (two events emitted), but none were sent.
+    expect(sidecarRunAgentStreamSpy).toHaveBeenCalledWith("show data", expect.any(Function));
+    expect(send).not.toHaveBeenCalled();
+  });
+
   it("rejects a non-string query with an error event instead of running the agent", async () => {
     await loadMain();
     await Promise.resolve();

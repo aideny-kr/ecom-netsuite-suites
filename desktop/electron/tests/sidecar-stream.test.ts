@@ -199,6 +199,46 @@ describe("Sidecar.runAgentStream()", () => {
     expect(events.map((e) => e.type)).toEqual(["done"]);
   });
 
+  it("a throwing onEvent finalizes the stream so a queued second stream still runs", async () => {
+    const fake = makeFakeChild();
+    spawnMock.mockReturnValue(fake);
+    const s = new Sidecar({ pythonPath: "python", sidecarPath: "/x.py" });
+    s.start();
+
+    const writes: string[] = [];
+    fake.stdin.on("data", (c: Buffer) => writes.push(c.toString()));
+
+    // First stream: its sink throws on the very first event (simulates
+    // event.sender.send() on a destroyed renderer mid-stream).
+    const p1 = s.runAgentStream("first", () => {
+      throw new Error("Object has been destroyed");
+    });
+
+    // Second stream queued behind it. If the throw wedges inflight, this
+    // never dispatches and never receives events -> test hangs/fails.
+    const b: Array<Record<string, unknown>> = [];
+    const p2 = s.runAgentStream("second", (e) => b.push(e));
+    await flush();
+
+    // Drive the first stream's first event -> sink throws.
+    // Must NOT reject the run and MUST NOT throw out of the stdout handler;
+    // the stream finalizes (resolves) and the queue advances.
+    fake.stdout.write(JSON.stringify({ type: "text", content: "boom" }) + "\n");
+    await expect(p1).resolves.toBeUndefined(); // finalized despite the throw
+    await flush();
+
+    // The second stream's request was written -> pump() ran -> inflight cleared.
+    expect(writes.join("")).toContain('"query":"second"');
+
+    // And the second stream actually delivers events through to its sink.
+    fake.stdout.write(
+      JSON.stringify({ type: "text", content: "ok" }) + "\n" +
+        JSON.stringify({ type: "done", tokens_used: 7 }) + "\n",
+    );
+    await p2;
+    expect(b.map((e) => e.type)).toEqual(["text", "done"]);
+  });
+
   it("keeps single-shot runAgent working alongside streaming (back-compat)", async () => {
     const fake = makeFakeChild();
     spawnMock.mockReturnValue(fake);
