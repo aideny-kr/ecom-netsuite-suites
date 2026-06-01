@@ -47,9 +47,13 @@ const BrowserWindowMock = vi.fn((opts: unknown) => {
 });
 
 const ipcHandlers: Record<string, (...args: unknown[]) => unknown> = {};
+const ipcOnHandlers: Record<string, (...args: unknown[]) => unknown> = {};
 const ipcMainMock = {
   handle: vi.fn((channel: string, fn: (...args: unknown[]) => unknown) => {
     ipcHandlers[channel] = fn;
+  }),
+  on: vi.fn((channel: string, fn: (...args: unknown[]) => unknown) => {
+    ipcOnHandlers[channel] = fn;
   }),
 };
 
@@ -63,6 +67,12 @@ vi.mock("electron", () => ({
 const sidecarStartSpy = vi.fn();
 const sidecarKillSpy = vi.fn();
 const sidecarRunAgentSpy = vi.fn(async (q: string) => ({ response: `echo: ${q}` }));
+const sidecarRunAgentStreamSpy = vi.fn(
+  async (query: string, onEvent: (e: Record<string, unknown>) => void) => {
+    onEvent({ type: "text", content: `echo: ${query}` });
+    onEvent({ type: "done", tokens_used: 1 });
+  },
+);
 const sidecarOnCrashSpy = vi.fn();
 
 vi.mock("../sidecar", () => ({
@@ -70,6 +80,7 @@ vi.mock("../sidecar", () => ({
     start: sidecarStartSpy,
     kill: sidecarKillSpy,
     runAgent: sidecarRunAgentSpy,
+    runAgentStream: sidecarRunAgentStreamSpy,
     onCrash: sidecarOnCrashSpy,
   })),
 }));
@@ -85,12 +96,15 @@ async function loadMain(): Promise<void> {
   fakeApp.whenReady = vi.fn(() => Promise.resolve());
   browserWindowInstances.length = 0;
   Object.keys(ipcHandlers).forEach((k) => delete ipcHandlers[k]);
+  Object.keys(ipcOnHandlers).forEach((k) => delete ipcOnHandlers[k]);
   sidecarStartSpy.mockClear();
   sidecarKillSpy.mockClear();
   sidecarRunAgentSpy.mockClear();
+  sidecarRunAgentStreamSpy.mockClear();
   sidecarOnCrashSpy.mockClear();
   BrowserWindowMock.mockClear();
   ipcMainMock.handle.mockClear();
+  ipcMainMock.on.mockClear();
 
   // Re-import main.ts — vitest caches module state, so use vi.resetModules()
   vi.resetModules();
@@ -169,6 +183,62 @@ describe("Electron main: agent:run IPC contract", () => {
 
     const result = await ipcHandlers["agent:run"]({}, "anything");
     expect(result).toEqual({ error: "sidecar crashed" });
+  });
+});
+
+describe("Electron main: agent:run-stream streaming IPC (rich-pipe)", () => {
+  const flush = () => Promise.resolve();
+
+  it("registers an ipcMain.on handler named 'agent:run-stream'", async () => {
+    await loadMain();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(ipcMainMock.on).toHaveBeenCalledWith("agent:run-stream", expect.any(Function));
+    expect(ipcOnHandlers["agent:run-stream"]).toBeDefined();
+  });
+
+  it("forwards each sidecar stream event to the renderer on a per-run channel", async () => {
+    await loadMain();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const sent: Array<[string, unknown]> = [];
+    const fakeEvent = { sender: { send: vi.fn((ch: string, ev: unknown) => sent.push([ch, ev])) } };
+    ipcOnHandlers["agent:run-stream"](fakeEvent, { runId: "r1", query: "show data" });
+    await flush();
+
+    expect(sidecarRunAgentStreamSpy).toHaveBeenCalledWith("show data", expect.any(Function));
+    expect(sent.map(([ch]) => ch)).toEqual(["agent:stream:r1", "agent:stream:r1"]);
+    expect(sent.map(([, ev]) => (ev as { type: string }).type)).toEqual(["text", "done"]);
+  });
+
+  it("rejects a non-string query with an error event instead of running the agent", async () => {
+    await loadMain();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const sent: Array<[string, unknown]> = [];
+    const fakeEvent = { sender: { send: vi.fn((ch: string, ev: unknown) => sent.push([ch, ev])) } };
+    ipcOnHandlers["agent:run-stream"](fakeEvent, { runId: "r2", query: 123 });
+    await flush();
+
+    expect(sidecarRunAgentStreamSpy).not.toHaveBeenCalled();
+    expect(sent).toHaveLength(1);
+    expect(sent[0][0]).toBe("agent:stream:r2");
+    expect((sent[0][1] as { type: string }).type).toBe("error");
+  });
+});
+
+describe("Electron main: agent:run query validation (B0 review MINOR main.ts:83)", () => {
+  it("returns an error for a non-string query instead of forwarding it to the sidecar", async () => {
+    await loadMain();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const result = (await ipcHandlers["agent:run"]({}, { not: "a string" })) as { error?: string };
+    expect(result.error).toMatch(/query/i);
+    expect(sidecarRunAgentSpy).not.toHaveBeenCalled();
   });
 });
 

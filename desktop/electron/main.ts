@@ -28,7 +28,7 @@
 import { app, BrowserWindow, ipcMain } from "electron";
 import fs from "node:fs";
 import path from "node:path";
-import { Sidecar, type AgentResult } from "./sidecar";
+import { Sidecar, type AgentResult, type SidecarEvent } from "./sidecar";
 
 let mainWindow: BrowserWindow | null = null;
 let sidecar: Sidecar | null = null;
@@ -80,7 +80,12 @@ function createWindow(): BrowserWindow {
 // instance; if the sidecar isn't running yet (or has died) we return a
 // structured error instead of throwing across the IPC boundary —
 // renderer surfaces the error to the user.
-ipcMain.handle("agent:run", async (_event, query: string): Promise<AgentResult> => {
+ipcMain.handle("agent:run", async (_event, query: unknown): Promise<AgentResult> => {
+  // Validate the query crossing the IPC boundary (B0 review MINOR main.ts:83) —
+  // the renderer is untrusted; never forward a non-string straight to the agent.
+  if (typeof query !== "string") {
+    return { error: "invalid query: expected a string" };
+  }
   if (!sidecar) {
     return { error: "sidecar not yet ready" };
   }
@@ -89,6 +94,29 @@ ipcMain.handle("agent:run", async (_event, query: string): Promise<AgentResult> 
   } catch (err) {
     return { error: (err as Error).message };
   }
+});
+
+// Rich-pipe streaming channel. The renderer (preload.runAgentStream) sends one
+// {runId, query} per run; we forward each typed sidecar event back on the
+// per-run channel `agent:stream:<runId>`. Fire-and-forget (ipcMain.on); the
+// renderer unsubscribes on the terminal done/error. Errors and invalid input
+// surface as a typed error event on the same channel rather than throwing.
+ipcMain.on("agent:run-stream", (event, payload: unknown) => {
+  const { runId, query } = (payload ?? {}) as { runId?: unknown; query?: unknown };
+  const channel = typeof runId === "string" ? `agent:stream:${runId}` : "agent:stream:unknown";
+  const sendEvent = (ev: SidecarEvent) => event.sender.send(channel, ev);
+
+  if (typeof query !== "string") {
+    sendEvent({ type: "error", error: "invalid query: expected a string" });
+    return;
+  }
+  if (!sidecar) {
+    sendEvent({ type: "error", error: "sidecar not yet ready" });
+    return;
+  }
+  sidecar.runAgentStream(query, sendEvent).catch((err) => {
+    sendEvent({ type: "error", error: (err as Error).message });
+  });
 });
 
 function buildSidecarEnv(): Record<string, string> {
