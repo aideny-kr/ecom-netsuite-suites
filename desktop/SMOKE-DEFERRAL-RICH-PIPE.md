@@ -1,7 +1,8 @@
 # Rich-pipe live smoke — operator deferral
 
 **Status: /goal #6c slice 1 live-key gate OPERATOR-DEFERRED.**
-**Date: 2026-05-31.**
+**CSP/hydration blocker: RESOLVED 2026-06-01 (post-build sha256 hashing) — see below.**
+**Date: 2026-05-31 (updated 2026-06-01).**
 **Branch: `spike/desktop-6c-rich-pipe-slice-1`.**
 
 This file is the closing artifact for the two live-key steps of the desktop
@@ -37,19 +38,49 @@ The only thing the live steps add is the real LLM deciding to call the tool —
 the interception, event shapes, transport, and card render are all already
 proven without a key.
 
-## Known blocker for the live render (discovered in slice 1)
+## CSP/hydration blocker — RESOLVED (post-build hashing)
 
-`next build` of `desktop/electron/renderer` succeeds and emits a static export
-to `out/index.html` with the strict packaged CSP baked in (verified). BUT the
-export contains ~5 **inline** bootstrap `<script>` tags (Next app-router
-hydration chunks). Under the strict `script-src 'self'` (no `'unsafe-inline'`),
-those inline scripts are blocked at runtime — so the static HTML renders but
-**hydration/interactivity does not run** (the composer's `runAgentStream` won't
-fire). Before the live render works, reconcile this WITHOUT weakening script CSP:
-add the per-build `sha256-…` hashes of the inline scripts to `script-src`
-(post-build step), or ship the interactivity as one external-script island. See
-`renderer/src/lib/csp.ts`. The key-free DONE proof (renderer vitest tests) does
-not go through Next hydration, so it is unaffected by this blocker.
+**Update 2026-06-01:** the inline-script CSP blocker is fixed WITHOUT weakening
+`script-src`. `next build` emits ~5 **inline** bootstrap `<script>` tags (Next
+app-router RSC Flight payload) that hydration requires; under the strict
+`script-src 'self'` they would be blocked. The fix:
+
+- `renderer/scripts/inject-csp.mjs` — a post-build step (chained into the
+  renderer `build`: `next build && node scripts/inject-csp.mjs`) that recomputes
+  each inline script's **per-build sha256** byte-exact (raw slice between `>` and
+  `</script>`, matching what Chromium hashes) and appends `'sha256-…'` to
+  `script-src` in **every** `out/*.html` (index.html + 404.html — each has its
+  own hashes). `PACKAGED_CSP` in `renderer/src/lib/csp.ts` is the single
+  source-of-truth base; the step only augments `script-src`. The policy stays
+  strict — **never** `'unsafe-inline'`/`'unsafe-eval'` for scripts.
+- `next.config.mjs` pins `generateBuildId: () => "suite-studio"` so the inline
+  bytes (which embed the buildId) are stable across rebuilds — hashes are
+  reproducible (verified: a rebuild produced byte-identical `script-src` hashes).
+
+### Evidence (in-session, key-free)
+
+- `npm run build` ran end-to-end and injected **5 hashes into each** of
+  `out/index.html` and `out/404.html`.
+- Static verification of both files: every inline `<script>` body's sha256 is
+  present in the meta `script-src`; `'self'` preserved; **no** `'unsafe-inline'`
+  / `'unsafe-eval'` in `script-src`; `style-src 'self' 'unsafe-inline'` unchanged.
+- TDD regression wall: `renderer/scripts/inject-csp.test.mjs` (11 cases) pins the
+  byte-exact hashing, `src=` exclusion, dedupe, `unsafe-*` exclusion, non-script
+  directive preservation, byte-stable idempotence, and multi-file CLI behavior.
+
+### What this proves vs. what remains for the operator
+
+This proves the **packaged CSP no longer blocks the inline bootstrap scripts**:
+the policy that ships now explicitly allows exactly those scripts by hash. What
+it does NOT prove in-session is a live Chromium actually executing them — a real
+Electron run can't happen headlessly here (the `electron` binary is not installed
+in this sandbox). The operator confirms the live render via `npm start` using the
+**key-free console gate** added to `main.ts`: it forwards any
+`renderer:csp-violation` (Chromium's "Refused to execute inline script because it
+violates … Content-Security-Policy"). **Zero such messages = the bootstrap
+scripts ran = hydration started** — no Anthropic key needed. Only the final
+`data_table` live render (the LLM deciding to call `sample_dataset`) still needs
+the key.
 
 ## Four-source citation
 
@@ -92,12 +123,21 @@ Run these OUTSIDE any `/goal` transcript, with the Anthropic key already present
 in `~/.hermes/.env` (not exported in the shell):
 
 ```bash
+# 0. Key-free hydration gate (NO Anthropic key needed). Build, then launch and
+#    watch for CSP violations — their ABSENCE proves hydration started.
+cd desktop/electron/renderer && npm run build      # injects per-build CSP hashes
+cd ../ && npm start
+#   Watch the terminal for "[csp-violation] Refused to execute inline script …".
+#   NONE should appear — that means the inline bootstrap scripts ran and React
+#   hydrated. The composer's Send button should also become enabled once you
+#   type (it ships `disabled` in the static HTML; hydration enables it).
+
 # 1. Live streaming integration test (real agent → data_table → done)
 cd desktop
 RUN_RICH_PIPE_LIVE=1 .venv/bin/python -m pytest \
   tests/test_rich_pipe_integration.py -k live -v
 
-# 2. Live render smoke (after the renderer is wired — Phase C)
+# 2. Live render smoke (needs the Anthropic key in ~/.hermes/.env)
 cd desktop/electron
 npm start
 #   In the window, type: "show me the sample dataset / demo table"
