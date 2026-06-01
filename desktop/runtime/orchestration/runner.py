@@ -91,7 +91,14 @@ def run_agent_stream(
         if tool_name not in data_table_tools:
             return
         parsed = _parse_tool_result(tool_result)
-        if isinstance(parsed, dict) and "columns" in parsed and "rows" in parsed:
+        # Require list-typed columns AND rows — a malformed tool result is
+        # skipped (no data_table) rather than crashing the turn; the assistant's
+        # text reply still streams.
+        if (
+            isinstance(parsed, dict)
+            and isinstance(parsed.get("columns"), list)
+            and isinstance(parsed.get("rows"), list)
+        ):
             emit(DataTableEvent.from_tool_result(parsed))
 
     agent.stream_delta_callback = on_text

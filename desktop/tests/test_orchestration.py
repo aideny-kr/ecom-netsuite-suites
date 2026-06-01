@@ -16,14 +16,18 @@ is Task A4 (operator-deferred — needs a live key).
 
 from __future__ import annotations
 
+import json
 import pathlib
 import sys
 import os
+
+import pytest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, os.pardir, "runtime"))
 
 from orchestration import runner  # noqa: E402
+from orchestration.runner import _tokens_used  # noqa: E402
 from orchestration.events import TextEvent, DataTableEvent, DoneEvent  # noqa: E402
 from suite_tools.sample_dataset import sample_dataset, sample_dataset_handler  # noqa: E402
 
@@ -130,6 +134,39 @@ def test_non_sample_dataset_tool_results_do_not_become_data_tables():
     events: list = []
     runner.run_agent_stream("q", events.append, agent=agent)
     assert not any(isinstance(e, DataTableEvent) for e in events)
+
+
+@pytest.mark.parametrize(
+    ("bad_result", "why"),
+    [
+        ("this is not json at all", "malformed JSON"),
+        (json.dumps({"rows": [[1]]}), "missing columns key"),
+        (json.dumps({"columns": ["x"]}), "missing rows key"),
+        (json.dumps({"columns": 5, "rows": [[1]]}), "columns is not a list"),
+        (json.dumps({"columns": ["x"], "rows": "nope"}), "rows is not a list"),
+        (json.dumps(None), "tool result is JSON null"),
+    ],
+)
+def test_malformed_tool_result_skips_data_table_but_still_streams(bad_result, why):
+    # The interception must tolerate a malformed tool result: skip the
+    # data_table (no crash), and the assistant's text + done still stream.
+    agent = _FakeHermesAgent(bad_result)
+    events: list = []
+    runner.run_agent_stream("q", events.append, agent=agent)
+
+    assert not any(isinstance(e, DataTableEvent) for e in events), f"should skip data_table when {why}"
+    assert any(isinstance(e, TextEvent) for e in events), f"text must still stream when {why}"
+    assert isinstance(events[-1], DoneEvent), f"done must still terminate when {why}"
+
+
+def test_tokens_used_prefers_total_then_falls_back_then_defaults_zero():
+    assert _tokens_used({"total_tokens": 9}) == 9
+    assert _tokens_used({"input_tokens": 5, "output_tokens": 7}) == 12
+    # Non-int / non-dict / missing all counters → 0 (the done event never carries null).
+    assert _tokens_used({"total_tokens": "42"}) == 0
+    assert _tokens_used({"input_tokens": None, "output_tokens": 3}) == 3
+    assert _tokens_used("not a dict") == 0
+    assert _tokens_used({}) == 0
 
 
 def test_runner_is_extraction_shaped_no_transport_imports():

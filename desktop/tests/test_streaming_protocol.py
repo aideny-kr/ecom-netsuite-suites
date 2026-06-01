@@ -124,6 +124,49 @@ def test_streaming_run_surfaces_runner_errors_as_error_json(monkeypatch, tmp_pat
     assert "runner exploded" in payloads[-1]["error"]
 
 
+class _FakeHermesAgent:
+    """Fake AIAgent that fires the SAME callbacks the real Hermes agent fires,
+    so the REAL orchestration runner can drive it key-free (no run_agent_stream
+    stubbing). Used for the runner<->serve-loop integration test below."""
+
+    def __init__(self, **kwargs):
+        self.stream_delta_callback = None
+        self.tool_complete_callback = None
+
+    def run_conversation(self, user_message, **kwargs):
+        self.stream_delta_callback("Here are the sample account balances:")
+        self.tool_complete_callback("c1", "sample_dataset", {}, json.dumps(sample_dataset()))
+        self.stream_delta_callback(None)  # terminal None delta
+        return {"final_response": "...", "total_tokens": 11}
+
+
+def test_real_runner_drives_serve_loop_with_a_fake_agent(monkeypatch, tmp_path):
+    # Integration: NO stubbing of run_agent_stream — the REAL runner runs through
+    # the REAL serve_json_protocol, driven by a fake AIAgent that fires the
+    # Hermes callbacks. Proves the runner<->sidecar wiring (callback signatures,
+    # event emission, _emit_event serialization) that the per-layer unit tests
+    # don't exercise together. Key-free.
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-dummy")
+    monkeypatch.setenv("SUITE_STUDIO_HOME", str(tmp_path / "SuiteStudio"))
+    monkeypatch.setattr(sidecar, "register_mcp_servers", lambda servers: list(servers.keys()))
+    monkeypatch.setattr(sidecar, "AIAgent", _FakeHermesAgent)
+    # run_agent_stream is intentionally NOT patched — the real one runs.
+
+    stdin = io.StringIO(json.dumps({"action": "run", "query": "show data", "stream": True}) + "\n")
+    stdout = io.StringIO()
+    sidecar.serve_json_protocol(stdin=stdin, stdout=stdout)
+
+    payloads = [json.loads(line) for line in stdout.getvalue().strip().splitlines()]
+    types = [p["type"] for p in payloads]
+    assert "text" in types, f"real runner must stream text; got {types}"
+    assert types[-1] == "done", f"stream must terminate with done; got {types}"
+    data_table = next(p for p in payloads if p["type"] == "data_table")
+    expected = sample_dataset()
+    assert data_table["data"]["columns"] == expected["columns"]
+    assert data_table["data"]["rows"] == expected["rows"]
+    assert payloads[-1]["tokens_used"] == 11
+
+
 def test_non_streaming_run_keeps_legacy_blob_response(monkeypatch, tmp_path):
     # Back-compat: a request WITHOUT stream:true must still get the single
     # {"response","tokens_used"} blob (the existing Electron runAgert path).
