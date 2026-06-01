@@ -46,11 +46,32 @@ export interface AgentResult {
   tokens_used?: number;
 }
 
-interface PendingRequest {
+/**
+ * One typed streaming event forwarded from the Python sidecar to the renderer
+ * (rich-pipe slice 1). The wrapper stays schema-agnostic — it forwards the
+ * parsed JSON (`{type:"text",...}`, `{type:"data_table",...}`, `{type:"done",...}`)
+ * verbatim and only synthesizes `{type:"error",...}` for sidecar error / malformed
+ * lines, so the renderer's `chat-stream.ts` normalizer validates the shapes.
+ */
+export type SidecarEvent = Record<string, unknown>;
+export type SidecarEventListener = (event: SidecarEvent) => void;
+
+interface SingleRequest {
+  mode: "single";
   resolve: (result: AgentResult) => void;
   reject: (err: Error) => void;
   query: string;
 }
+
+interface StreamRequest {
+  mode: "stream";
+  resolve: () => void;
+  reject: (err: Error) => void;
+  query: string;
+  onEvent: SidecarEventListener;
+}
+
+type PendingRequest = SingleRequest | StreamRequest;
 
 export type CrashListener = (info: { code: number | null; signal: NodeJS.Signals | string | null }) => void;
 
@@ -100,8 +121,21 @@ export class Sidecar {
 
   runAgent(query: string): Promise<AgentResult> {
     return new Promise<AgentResult>((resolve, reject) => {
-      const req: PendingRequest = { resolve, reject, query };
-      this.queue.push(req);
+      this.queue.push({ mode: "single", resolve, reject, query });
+      this.pump();
+    });
+  }
+
+  /**
+   * Streaming variant (rich-pipe slice 1). Sends a `stream:true` run request and
+   * delivers each typed event (text / data_table / done / error) to `onEvent` in
+   * order, resolving when the terminal `done` (or an error) arrives. Malformed or
+   * `{error:...}` lines are surfaced to `onEvent` as a `{type:"error"}` event,
+   * never silently dropped, then finalize the stream.
+   */
+  runAgentStream(query: string, onEvent: SidecarEventListener): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      this.queue.push({ mode: "stream", resolve, reject, query, onEvent });
       this.pump();
     });
   }
@@ -121,8 +155,11 @@ export class Sidecar {
     }
     const next = this.queue.shift()!;
     this.inflight = next;
-    const payload = JSON.stringify({ action: "run", query: next.query }) + "\n";
-    this.child.stdin?.write(payload);
+    const request =
+      next.mode === "stream"
+        ? { action: "run", query: next.query, stream: true }
+        : { action: "run", query: next.query };
+    this.child.stdin?.write(JSON.stringify(request) + "\n");
   }
 
   private onStdout(chunk: string): void {
@@ -138,17 +175,53 @@ export class Sidecar {
 
   private deliver(line: string): void {
     const req = this.inflight;
-    this.inflight = null;
     if (!req) {
       process.stderr.write(`[sidecar] orphan response (no inflight request): ${line}\n`);
       return;
     }
+    if (req.mode === "stream") {
+      this.deliverStreamLine(req, line);
+      return;
+    }
+    // Single-shot (back-compat): resolve on the first line.
+    this.inflight = null;
     try {
       const parsed = JSON.parse(line) as AgentResult;
       req.resolve(parsed);
     } catch (err) {
       req.resolve({ error: `malformed sidecar response: ${(err as Error).message}` });
     }
+    this.pump();
+  }
+
+  private deliverStreamLine(req: StreamRequest, line: string): void {
+    let event: SidecarEvent;
+    try {
+      event = JSON.parse(line) as SidecarEvent;
+    } catch (err) {
+      // Surface, never silently drop (B0 deliver() MINOR). A non-JSON line means
+      // chatter leaked onto the protocol stdout — terminal for this stream.
+      req.onEvent({ type: "error", error: `malformed sidecar event: ${(err as Error).message}` });
+      this.finalizeStream(req);
+      return;
+    }
+    // A sidecar error line ({"error":...}, no type) is terminal — normalize it to
+    // a typed error event so the renderer's normalizer recognizes it.
+    const errMsg = (event as { error?: unknown }).error;
+    if (errMsg) {
+      req.onEvent({ type: "error", error: String(errMsg) });
+      this.finalizeStream(req);
+      return;
+    }
+    req.onEvent(event);
+    if ((event as { type?: unknown }).type === "done") {
+      this.finalizeStream(req);
+    }
+  }
+
+  private finalizeStream(req: StreamRequest): void {
+    this.inflight = null;
+    req.resolve();
     this.pump();
   }
 
