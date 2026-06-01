@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "suite-studio-desktop"
+version = "0.0.0"
+description = "Suite Studio Desktop — library-mode sidecar driving vendored Hermes Agent."
+requires-python = ">=3.11"
+license = { text = "MIT" }
+readme = "README.md"
+
+# Hermes Agent is vendored as a git submodule at runtime/hermes-agent and
+# installed in editable mode via the optional-dependency entry below. We
+# do not declare hermes-agent as a PyPI dep here because the submodule is
+# the source of truth (per ADR-007 §Decision 7: pinned + auto-update off).
+#
+# Runtime deps for Suite-Studio-authored MCP servers (see
+# `runtime/mcp-servers/`): `mcp` ships the official MIT-licensed FastMCP
+# framework (`from mcp.server.fastmcp import FastMCP`) and is the same
+# library Hermes Agent's MCP-client transport already speaks. `httpx` is
+# used by ns-suiteql to call NetSuite's SuiteTalk REST endpoint.
+#
+# License audit (/goal #3, URL-verified 2026-05-25 against pypi.org):
+#   - mcp 1.27.1   — MIT (Anthropic / modelcontextprotocol/python-sdk)
+#   - httpx 0.27+  — BSD-3-Clause
+#
+# Rationale for `mcp` over the standalone `fastmcp` PyPI package
+# (jlowin/PrefectHQ, current `3.3.1`): the standalone package is
+# Apache-2.0 — diverges from this project's MIT licensing — and the
+# official `mcp` SDK exposes the same `FastMCP` API (`fastmcp` was
+# upstreamed). Plan doc §Glossary anticipates this fallback.
+dependencies = [
+    "mcp>=1.27.1,<2.0.0",
+    "httpx>=0.27,<1.0",
+    "websockets>=12.0,<16.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+]
+
+[tool.setuptools]
+# No package code at the top level yet; the sidecar is a single-file script
+# at runtime/sidecar.py and tests/ holds the test suite.
+py-modules = []
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["runtime", "runtime/hermes-agent", "runtime/mcp-servers/ns-suiteql"]
+asyncio_mode = "auto"

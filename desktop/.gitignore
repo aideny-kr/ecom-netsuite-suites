@@ -1,0 +1,10 @@
+# PyInstaller-produced bundles for the Phase B packaging spike (/goal #5).
+# These are large (~80MB each) and reproducible from `runtime/sidecar.spec`
+# via `electron/build/build-sidecar.sh` — never check in.
+runtime/dist-sidecar/
+runtime/build-sidecar/
+
+# Local venv (root .gitignore already excludes `.venv/`, but stated
+# explicitly here for clarity since this directory is the canonical
+# place an operator runs `python -m venv`).
+.venv/
