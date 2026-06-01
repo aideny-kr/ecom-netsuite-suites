@@ -24,10 +24,16 @@ interface FakeApp extends EventEmitter {
   isPackaged: boolean;
 }
 
+interface FakeWebContents {
+  send: ReturnType<typeof vi.fn>;
+  on: ReturnType<typeof vi.fn>;
+  _on: Record<string, (...args: unknown[]) => unknown>;
+}
+
 interface FakeBrowserWindow {
   loadFile: ReturnType<typeof vi.fn>;
   loadURL: ReturnType<typeof vi.fn>;
-  webContents: { send: ReturnType<typeof vi.fn> };
+  webContents: FakeWebContents;
   on: ReturnType<typeof vi.fn>;
   _opts: unknown;
 }
@@ -39,11 +45,18 @@ fakeApp.isPackaged = false;
 
 const browserWindowInstances: FakeBrowserWindow[] = [];
 const BrowserWindowMock = vi.fn((opts: unknown) => {
+  const wcOn: Record<string, (...args: unknown[]) => unknown> = {};
   const w: FakeBrowserWindow = {
     _opts: opts,
     loadFile: vi.fn(),
     loadURL: vi.fn(),
-    webContents: { send: vi.fn() },
+    webContents: {
+      send: vi.fn(),
+      _on: wcOn,
+      on: vi.fn((channel: string, fn: (...args: unknown[]) => unknown) => {
+        wcOn[channel] = fn;
+      }),
+    },
     on: vi.fn(),
   };
   browserWindowInstances.push(w);
@@ -330,5 +343,60 @@ describe("Electron main: crash propagation (gate #6)", () => {
       "sidecar:crashed",
       expect.objectContaining({ code: 137, signal: "SIGKILL" }),
     );
+  });
+});
+
+describe("Electron main: CSP-violation console gate (key-free hydration proof)", () => {
+  // The packaged renderer hydrates only if its inline RSC-bootstrap scripts run
+  // under the strict script-src. If the post-build CSP hashes (inject-csp.mjs)
+  // ever drift, Chromium logs "Refused to execute inline script because it
+  // violates ... Content-Security-Policy" to the renderer console. main.ts wires
+  // a console-message listener that surfaces exactly those violations — the
+  // key-free signal an operator/CI watches during `npm start` to prove the
+  // packaged export hydrates (no Anthropic key needed). See main.ts loadRenderer.
+  it("registers a console-message listener on the window webContents", async () => {
+    await loadMain();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const wc = browserWindowInstances[0].webContents;
+    expect(wc.on).toHaveBeenCalledWith("console-message", expect.any(Function));
+    expect(wc._on["console-message"]).toBeDefined();
+  });
+
+  it("flags a CSP inline-script violation to the renderer as a typed event", async () => {
+    await loadMain();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const wc = browserWindowInstances[0].webContents;
+    wc.send.mockClear();
+    // Electron's console-message signature: (event, level, message, line, sourceId)
+    wc._on["console-message"](
+      {},
+      3,
+      "Refused to execute inline script because it violates the following Content-Security-Policy directive: \"script-src 'self'\".",
+      1,
+      "file:///renderer/index.html",
+    );
+
+    expect(wc.send).toHaveBeenCalledWith(
+      "renderer:csp-violation",
+      expect.objectContaining({
+        message: expect.stringMatching(/Refused to execute inline script/),
+      }),
+    );
+  });
+
+  it("ignores ordinary (non-CSP) console messages — no false alarms", async () => {
+    await loadMain();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const wc = browserWindowInstances[0].webContents;
+    wc.send.mockClear();
+    wc._on["console-message"]({}, 1, "hydration complete", 1, "file:///renderer/index.html");
+
+    expect(wc.send).not.toHaveBeenCalledWith("renderer:csp-violation", expect.anything());
   });
 });

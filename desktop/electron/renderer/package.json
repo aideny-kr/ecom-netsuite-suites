@@ -5,7 +5,7 @@
   "description": "Suite Studio Desktop renderer — minimal Next.js (static export) chat UI reusing the webapp's chat-stream normalizer + data-frame-table card over the streaming IPC bridge. See ../../../docs/superpowers/plans/2026-05-31-desktop-rich-pipe-slice-1.md.",
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
+    "build": "next build && node scripts/inject-csp.mjs",
     "test": "vitest run"
   },
   "dependencies": {

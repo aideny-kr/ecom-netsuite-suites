@@ -148,7 +148,7 @@ export function injectCspIntoHtml(html, basePolicy) {
 }
 
 /** Recursively collect every `*.html` file under `dir`. */
-function findHtmlFiles(dir) {
+export function findHtmlFiles(dir) {
   const out = [];
   for (const entry of readdirSync(dir)) {
     const full = path.join(dir, entry);
@@ -166,19 +166,53 @@ function findHtmlFiles(dir) {
  * module (this script is plain ESM and runs under bare node). Extracts the
  * exported template-concatenation literal.
  */
-function readPackagedCspFromSource(cspTsPath) {
+export function readPackagedCspFromSource(cspTsPath) {
   const src = readFileSync(cspTsPath, "utf8");
-  const m = src.match(/export\s+const\s+PACKAGED_CSP\s*=\s*([\s\S]*?);/);
+  // The value is a sequence of "..." string literals concatenated with `+`,
+  // terminated by `;`. The directive separators (`;`) live INSIDE the string
+  // literals, so we must match the whole quoted-string-concat run — never a
+  // bare `[\s\S]*?;` (that stops at the first in-string `;`).
+  const m = src.match(
+    /export\s+const\s+PACKAGED_CSP\s*=\s*((?:"(?:[^"\\]|\\.)*"\s*\+?\s*)+);/,
+  );
   if (!m) {
-    throw new Error(`could not locate PACKAGED_CSP in ${cspTsPath}`);
+    throw new Error(`could not locate a PACKAGED_CSP string-literal concat in ${cspTsPath}`);
   }
-  // The value is a series of "..." string literals concatenated with `+`.
   // Pull each double-quoted segment and join — robust to the formatting.
-  const segments = [...m[1].matchAll(/"([^"]*)"/g)].map((x) => x[1]);
+  const segments = [...m[1].matchAll(/"((?:[^"\\]|\\.)*)"/g)].map((x) => x[1]);
   if (segments.length === 0) {
     throw new Error(`PACKAGED_CSP in ${cspTsPath} is not a string-literal concat`);
   }
   return segments.join("");
+}
+
+/**
+ * Walk every `*.html` under `outDir` and rewrite its CSP meta with the page's
+ * inline-script hashes, using PACKAGED_CSP (read from `cspTsPath`) as the base.
+ * Returns a per-file summary. Throws if the export has no HTML files (fail loud:
+ * a silent no-op would ship a hydration-broken bundle).
+ *
+ * @param {string} outDir static-export dir (renderer/out)
+ * @param {string} cspTsPath path to src/lib/csp.ts (source of truth)
+ * @param {(msg: string) => void} [log] optional logger
+ * @returns {{file: string, hashCount: number}[]}
+ */
+export function injectCspInDir(outDir, cspTsPath, log = () => {}) {
+  const basePolicy = readPackagedCspFromSource(cspTsPath);
+  const htmlFiles = findHtmlFiles(outDir);
+  if (htmlFiles.length === 0) {
+    throw new Error(`no *.html files found under ${outDir} — did next build run?`);
+  }
+  const results = [];
+  for (const file of htmlFiles) {
+    const before = readFileSync(file, "utf8");
+    const after = injectCspIntoHtml(before, basePolicy);
+    writeFileSync(file, after, "utf8");
+    const hashCount = extractInlineScriptHashes(before).length;
+    results.push({ file, hashCount });
+    log(`[inject-csp] ${file} — injected ${hashCount} inline-script hash(es)`);
+  }
+  return results;
 }
 
 function main() {
@@ -187,25 +221,10 @@ function main() {
   const outDir = path.join(rendererRoot, "out");
   const cspTsPath = path.join(rendererRoot, "src", "lib", "csp.ts");
 
-  const basePolicy = readPackagedCspFromSource(cspTsPath);
-  const htmlFiles = findHtmlFiles(outDir);
-  if (htmlFiles.length === 0) {
-    throw new Error(`no *.html files found under ${outDir} — did next build run?`);
-  }
-
-  let total = 0;
-  for (const file of htmlFiles) {
-    const before = readFileSync(file, "utf8");
-    const after = injectCspIntoHtml(before, basePolicy);
-    writeFileSync(file, after, "utf8");
-    const count = extractInlineScriptHashes(before).length;
-    total += count;
-    console.log(
-      `[inject-csp] ${path.relative(rendererRoot, file)} — injected ${count} inline-script hash(es)`,
-    );
-  }
+  const results = injectCspInDir(outDir, cspTsPath, (m) => console.log(m));
+  const total = results.reduce((n, r) => n + r.hashCount, 0);
   console.log(
-    `[inject-csp] done: ${htmlFiles.length} file(s), ${total} hash injection(s) total.`,
+    `[inject-csp] done: ${results.length} file(s), ${total} hash injection(s) total.`,
   );
 }
 

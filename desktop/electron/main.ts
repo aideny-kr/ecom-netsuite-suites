@@ -71,7 +71,44 @@ function createWindow(): BrowserWindow {
     },
   });
   loadRenderer(win);
+  wireCspViolationGate(win);
   return win;
+}
+
+/**
+ * Key-free hydration gate: watch the renderer console for CSP violations.
+ *
+ * The packaged Next static export hydrates only if its inline RSC-bootstrap
+ * `<script>` tags execute under the strict `script-src` (their per-build sha256
+ * hashes are injected post-build by renderer/scripts/inject-csp.mjs). If those
+ * hashes ever drift, Chromium refuses the inline scripts and logs
+ * "Refused to execute inline script because it violates ... Content-Security-Policy".
+ *
+ * We forward exactly those messages to the renderer on `renderer:csp-violation`
+ * and log them to the main-process stderr. The ABSENCE of any such message
+ * during `npm start` is the deterministic, no-Anthropic-key signal that the
+ * bootstrap scripts ran and hydration started — the operator's gate for the
+ * CSP/hydration fix. Ordinary console output is ignored (no false alarms).
+ */
+function wireCspViolationGate(win: BrowserWindow): void {
+  win.webContents.on(
+    "console-message",
+    (
+      _event: unknown,
+      _level: number,
+      message: string,
+      line: number,
+      sourceId: string,
+    ) => {
+      if (/Content-Security-Policy/i.test(message)) {
+        // eslint-disable-next-line no-console
+        console.error(`[csp-violation] ${message} (${sourceId}:${line})`);
+        if (!win.isDestroyed?.()) {
+          win.webContents.send("renderer:csp-violation", { message, line, sourceId });
+        }
+      }
+    },
+  );
 }
 
 /**

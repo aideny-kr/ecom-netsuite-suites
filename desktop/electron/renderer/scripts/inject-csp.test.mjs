@@ -15,7 +15,18 @@
  */
 import { describe, it, expect } from "vitest";
 import { createHash } from "node:crypto";
-import { injectCspIntoHtml, extractInlineScriptHashes } from "./inject-csp.mjs";
+import { mkdtempSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import {
+  injectCspIntoHtml,
+  extractInlineScriptHashes,
+  readPackagedCspFromSource,
+  injectCspInDir,
+} from "./inject-csp.mjs";
+
+const here = path.dirname(fileURLToPath(import.meta.url));
 
 // A base policy shaped exactly like PACKAGED_CSP but with a bare `script-src
 // 'self'` that the injector must augment (never weaken) with the computed hashes.
@@ -140,5 +151,65 @@ describe("injectCspIntoHtml", () => {
 
   it("throws if the HTML has no CSP meta tag (fail loud, never silently no-op)", () => {
     expect(() => injectCspIntoHtml("<html><head></head></html>", BASE_CSP)).toThrow();
+  });
+});
+
+describe("readPackagedCspFromSource", () => {
+  it("extracts PACKAGED_CSP verbatim from the real src/lib/csp.ts", () => {
+    const cspTsPath = path.resolve(here, "..", "src", "lib", "csp.ts");
+    const policy = readPackagedCspFromSource(cspTsPath);
+    // Single source of truth — must keep script-src strict (no unsafe-*) and the
+    // style-src inline allowance, exactly as csp.ts declares.
+    expect(policy).toContain("script-src 'self'");
+    expect(policy).not.toContain("script-src 'self' 'unsafe-inline'");
+    expect(policy).toContain("style-src 'self' 'unsafe-inline'");
+    expect(policy).toContain("default-src 'self'");
+  });
+});
+
+describe("injectCspInDir (CLI integration over a temp out/ dir)", () => {
+  it("rewrites EVERY *.html under the dir (index + 404) with their own hashes", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "inject-csp-"));
+    try {
+      const indexInline = '(self.__next_f=self.__next_f||[]).push([0])';
+      const notFoundInline = 'self.__next_f.push([1,"404"])';
+      const page = (inline) =>
+        [
+          "<head>",
+          '<meta http-equiv="Content-Security-Policy" content="' + BASE_CSP + '"/>',
+          "</head><body>",
+          '<script src="./_next/x.js" async=""></script>',
+          "<script>" + inline + "</script>",
+          "</body>",
+        ].join("");
+      writeFileSync(path.join(dir, "index.html"), page(indexInline));
+      writeFileSync(path.join(dir, "404.html"), page(notFoundInline));
+
+      const cspTsPath = path.resolve(here, "..", "src", "lib", "csp.ts");
+      const results = injectCspInDir(dir, cspTsPath);
+      expect(results).toHaveLength(2);
+
+      const idx = metaPolicy(readFileSync(path.join(dir, "index.html"), "utf8"));
+      const nf = metaPolicy(readFileSync(path.join(dir, "404.html"), "utf8"));
+      // Each page got ITS OWN inline hash, not the other page's.
+      expect(scriptSrcOf(idx)).toContain("'sha256-" + sha256b64(indexInline) + "'");
+      expect(scriptSrcOf(idx)).not.toContain("'sha256-" + sha256b64(notFoundInline) + "'");
+      expect(scriptSrcOf(nf)).toContain("'sha256-" + sha256b64(notFoundInline) + "'");
+      // Still strict — no unsafe-* leaked into either page's script-src.
+      expect(scriptSrcOf(idx)).not.toContain("'unsafe-inline'");
+      expect(scriptSrcOf(nf)).not.toContain("'unsafe-eval'");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("throws when the dir has no *.html (fail loud — never ship hydration-broken)", () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "inject-csp-empty-"));
+    try {
+      const cspTsPath = path.resolve(here, "..", "src", "lib", "csp.ts");
+      expect(() => injectCspInDir(dir, cspTsPath)).toThrow();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
