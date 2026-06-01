@@ -8,7 +8,7 @@
  * the composer re-enables on the terminal `done`. The live render (real agent)
  * is operator-deferred — see desktop/SMOKE-DEFERRAL-RICH-PIPE.md.
  */
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
 import { render, screen, fireEvent, act } from "@testing-library/react";
 import { ChatView } from "@/components/chat/chat-view";
 
@@ -96,5 +96,25 @@ describe("ChatView streams text + data_table over the IPC bridge", () => {
     render(<ChatView />); // no window.suiteStudio installed
     submit("q");
     expect(screen.getByText(/bridge unavailable/i)).toBeInTheDocument();
+  });
+});
+
+describe("ChatView surfaces unhandled stream event types", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("console.warns when a normalized-but-unhandled event type arrives", () => {
+    // `tool_status` normalizes successfully via the reused normalizer but is not
+    // one of the three branches (text/data_table/error) the renderer handles.
+    // Without a default branch it would be silently dropped — a latent footgun
+    // for future rich-pipe slices. Assert the default branch logs a visible warn.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const bridge = installBridge();
+    render(<ChatView />);
+    submit("q");
+    act(() => bridge.last()({ type: "tool_status", content: "Running SuiteQL…" }));
+
+    expect(warn).toHaveBeenCalledWith("unhandled stream event type: tool_status");
   });
 });

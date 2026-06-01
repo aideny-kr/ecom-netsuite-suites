@@ -60,6 +60,12 @@ export function ChatView() {
         } else if (event.type === "error") {
           setBlocks((prev) => [...prev, { kind: "error", error: event.error }]);
           setBusy(false);
+        } else {
+          // The reused normalizer can return many event types (tool_status,
+          // confidence, chart, message, …) that this slice does not yet render.
+          // Surface the drop so a future silent loss becomes visible instead of
+          // vanishing into the void.
+          console.warn(`unhandled stream event type: ${event.type}`);
         }
       });
     },
