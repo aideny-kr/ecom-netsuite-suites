@@ -431,7 +431,7 @@ async def get_run_results(
         select(ReconciliationResult)
         .where(
             ReconciliationResult.tenant_id == user.tenant_id,
-            ReconciliationResult.run_id == uuid.UUID(run_id),
+            ReconciliationResult.run_id == _parse_uuid(run_id),
         )
         .order_by(ReconciliationResult.confidence.asc())
         .limit(limit)
@@ -466,6 +466,20 @@ async def get_run_bucket_summary(
     these counts are computed server-side via the SQL twin of the classifier.
     """
     run_uuid = _parse_uuid(run_id)
+
+    # 404 on a missing/foreign run (a bogus run would otherwise return 200 with
+    # all-zero counts, mirroring approve_bucket's run-existence guard).
+    run = (
+        await db.execute(
+            select(ReconciliationRun).where(
+                ReconciliationRun.id == run_uuid,
+                ReconciliationRun.tenant_id == user.tenant_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if run is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
+
     counts: dict[str, ReconBucketCount] = {}
     for bucket in ALL_BUCKETS:
         row = (
@@ -495,7 +509,7 @@ async def approve_result(
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     stmt = select(ReconciliationResult).where(
-        ReconciliationResult.id == uuid.UUID(result_id),
+        ReconciliationResult.id == _parse_uuid(result_id),
         ReconciliationResult.tenant_id == user.tenant_id,
     )
     result = await db.execute(stmt)
@@ -572,6 +586,15 @@ async def approve_bucket(
     ).scalar_one_or_none()
     if run is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
+
+    # Reject a closed/locked period: close_period sets run.status="closed" but only
+    # locks 'approved'/'auto_matched' rows, leaving 'suggested'/'pending' rows
+    # un-locked and thus still bulk-approvable. Guard the run itself.
+    if run.status in ("closed", "locked"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Period is closed; cannot approve.",
+        )
 
     now = datetime.now(timezone.utc)
     correlation_id = str(uuid.uuid4())

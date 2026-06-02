@@ -288,6 +288,66 @@ async def test_bulk_approve_unknown_run_404(client, db, finance_user):
     assert resp.status_code == 404
 
 
+async def test_bulk_approve_rejects_closed_period(client, db, finance_user):
+    """A closed/locked period must reject bulk approve; rows stay un-flipped."""
+    user, headers = finance_user
+    run = await create_test_recon_run(db, user.tenant_id, status="closed")
+    res = await create_test_recon_result(db, user.tenant_id, run.id, match_type="deterministic", status="suggested")
+    await db.commit()
+
+    resp = await client.post(
+        f"/api/v1/reconciliation/runs/{run.id}/approve-bucket",
+        json={"bucket": "matches"},
+        headers=headers,
+    )
+    assert resp.status_code == 400
+
+    refreshed = (
+        await db.execute(select(ReconciliationResult.status).where(ReconciliationResult.id == res.id))
+    ).scalar_one()
+    assert refreshed == "suggested"
+
+
+# ---------------------------------------------------------------------------
+# Malformed-id 404 (consistent _parse_uuid across read + single-approve)
+# ---------------------------------------------------------------------------
+
+
+async def test_get_results_malformed_run_id_404(client, db, finance_user):
+    user, headers = finance_user
+    await _enable_recon(db, user.tenant_id)
+    resp = await client.get(
+        "/api/v1/reconciliation/runs/not-a-uuid/results?bucket=matches",
+        headers=headers,
+    )
+    assert resp.status_code == 404
+
+
+async def test_approve_result_malformed_id_404(client, db, finance_user):
+    user, headers = finance_user
+    resp = await client.patch(
+        "/api/v1/reconciliation/results/not-a-uuid/approve",
+        json={"result_id": str(uuid.uuid4()), "notes": None},
+        headers=headers,
+    )
+    assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Bucket summary must 404 on an unknown/foreign run (not return all-zeros 200)
+# ---------------------------------------------------------------------------
+
+
+async def test_bucket_summary_unknown_run_404(client, db, finance_user):
+    user, headers = finance_user
+    await _enable_recon(db, user.tenant_id)
+    resp = await client.get(
+        f"/api/v1/reconciliation/runs/{uuid.uuid4()}/buckets",
+        headers=headers,
+    )
+    assert resp.status_code == 404
+
+
 # ---------------------------------------------------------------------------
 # Single-line approve must reject locked (period-closed) rows
 # ---------------------------------------------------------------------------
