@@ -553,6 +553,20 @@ async def approve_bucket(
             detail="Bucket is not bulk-approvable",
         )
     run_uuid = _parse_uuid(run_id)
+
+    # 404 on a missing/foreign run (a non-existent run would otherwise silently
+    # match 0 rows and return 200 with approved_count=0).
+    run = (
+        await db.execute(
+            select(ReconciliationRun).where(
+                ReconciliationRun.id == run_uuid,
+                ReconciliationRun.tenant_id == user.tenant_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if run is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
+
     now = datetime.now(timezone.utc)
     correlation_id = str(uuid.uuid4())
 
@@ -562,9 +576,6 @@ async def approve_bucket(
         bucket_conditions(request.bucket),
     )
 
-    # total in bucket (for skipped_count)
-    total_in_bucket = (await db.execute(select(func.count(ReconciliationResult.id)).where(*base_filter))).scalar_one()
-
     # set-based update of only the approvable rows; RETURNING the ids we touched
     upd = (
         update(ReconciliationResult)
@@ -573,6 +584,14 @@ async def approve_bucket(
         .returning(ReconciliationResult.id)
     )
     approved_ids = (await db.execute(upd)).scalars().all()
+
+    # accurate skipped_count: count rows in a skip status AFTER the update that we
+    # did NOT just approve (atomic — pre-update total minus approved is wrong under
+    # concurrency, and the freshly-approved rows now match _SKIP_STATUSES too).
+    skip_filter = [*base_filter, ReconciliationResult.status.in_(_SKIP_STATUSES)]
+    if approved_ids:
+        skip_filter.append(ReconciliationResult.id.notin_(approved_ids))
+    skipped_count = (await db.execute(select(func.count(ReconciliationResult.id)).where(*skip_filter))).scalar_one()
 
     # one immutable per-line audit row per approved result (multi-row insert)
     if approved_ids:
@@ -617,7 +636,7 @@ async def approve_bucket(
         run_id=run_id,
         bucket=request.bucket,
         approved_count=len(approved_ids),
-        skipped_count=total_in_bucket - len(approved_ids),
+        skipped_count=skipped_count,
         correlation_id=correlation_id,
     )
 

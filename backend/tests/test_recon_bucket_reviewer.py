@@ -1,3 +1,4 @@
+import uuid
 from decimal import Decimal
 
 import pytest
@@ -275,3 +276,13 @@ async def test_bulk_approve_requires_permission(client, db, readonly_user):
         headers=headers,
     )
     assert resp.status_code == 403
+
+
+async def test_bulk_approve_unknown_run_404(client, db, finance_user):
+    user, headers = finance_user
+    resp = await client.post(
+        f"/api/v1/reconciliation/runs/{uuid.uuid4()}/approve-bucket",
+        json={"bucket": "matches"},
+        headers=headers,
+    )
+    assert resp.status_code == 404
