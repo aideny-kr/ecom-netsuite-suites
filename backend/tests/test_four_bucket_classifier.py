@@ -42,3 +42,41 @@ def test_unknown_match_type_is_needs_review():
 def test_needs_review_not_bulk_approvable():
     assert BUCKET_NEEDS_REVIEW not in BULK_APPROVABLE_BUCKETS
     assert set(BULK_APPROVABLE_BUCKETS) == {BUCKET_MATCHES, BUCKET_RULES, BUCKET_AUTO_CLASSIFICATIONS}
+
+
+from app.schemas.reconciliation import ReconResultResponse
+
+
+def _result_payload(**over):
+    base = dict(
+        id="11111111-1111-1111-1111-111111111111",
+        run_id="22222222-2222-2222-2222-222222222222",
+        payout_id=None,
+        deposit_id=None,
+        match_type="deterministic",
+        confidence=Decimal("1.0"),
+        status="auto_matched",
+        stripe_amount=Decimal("10.00"),
+        netsuite_amount=Decimal("10.00"),
+        variance_amount=Decimal("0"),
+        variance_type=None,
+        variance_explanation=None,
+        currency="USD",
+        match_rule="order_reference_exact",
+        approved_by=None,
+        approved_at=None,
+        created_at="2026-06-01T00:00:00Z",
+    )
+    base.update(over)
+    return base
+
+
+def test_response_exposes_bucket_matches():
+    resp = ReconResultResponse(**_result_payload())
+    assert resp.bucket == BUCKET_MATCHES
+    assert "bucket" in resp.model_dump()
+
+
+def test_response_bucket_auto_classifications_on_variance():
+    resp = ReconResultResponse(**_result_payload(variance_type="amount_mismatch", variance_amount=Decimal("0.12")))
+    assert resp.bucket == BUCKET_AUTO_CLASSIFICATIONS
