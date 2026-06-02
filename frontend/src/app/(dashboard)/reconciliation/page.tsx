@@ -42,6 +42,9 @@ export default function ReconciliationPage() {
 
   const { data: runs } = useReconRuns();
   const { data: results } = useReconResults(selectedRunId, undefined, activeTab);
+  // Unbucketed fetch — the CloseChecklist gates period close by scanning the
+  // ENTIRE run for pending/suggested rows, so it must not be bucket-scoped.
+  const { data: allResults } = useReconResults(selectedRunId);
   const summary = useReconBucketSummary(selectedRunId);
   const approveBucket = useApproveBucket(selectedRunId || "");
   const reconEnabled = useFeature("reconciliation");
@@ -52,7 +55,15 @@ export default function ReconciliationPage() {
   const activeBucket = BUCKET_TABS.find((t) => t.id === activeTab)!;
   const activeCount = summary.data?.[activeTab]?.count ?? 0;
   const activeVariance = Number(summary.data?.[activeTab]?.total_variance ?? 0);
-  const isBulkApprovable = BULK_APPROVABLE.includes(activeTab);
+  const isRunClosed = selectedRun?.status === "closed";
+  const isBulkApprovable = BULK_APPROVABLE.includes(activeTab) && !isRunClosed;
+
+  // The approve-bucket mutation returns { approved_count, skipped_count, ... }
+  // (ReconBucketApproveResult). The bucket count is status-agnostic, so surface
+  // what actually changed rather than implying every line was approved.
+  const approveResult = approveBucket.data as
+    | { approved_count: number; skipped_count: number }
+    | undefined;
 
   const handleRunRecon = () => {
     if (!dateFrom || !dateTo) return;
@@ -175,7 +186,7 @@ export default function ReconciliationPage() {
 
       {/* Summary bar */}
       {!pipeline.isRunning && selectedRunId && (
-        <ReconSummaryBar summary={summary.data ?? null} />
+        <ReconSummaryBar summary={summary.data ?? null} run={selectedRun} />
       )}
 
       {/* Tabs + results */}
@@ -197,16 +208,27 @@ export default function ReconciliationPage() {
             ))}
           </div>
 
-          {/* Bulk-approval card for bulk-approvable buckets */}
+          {/* Bulk-approval card for bulk-approvable buckets.
+              Never offered on a closed run (mirrors the CloseChecklist gate). */}
           {isBulkApprovable && (
-            <BulkApprovalCard
-              bucketLabel={activeBucket.label}
-              count={activeCount}
-              totalVariance={activeVariance}
-              onApprove={handleApproveBucket}
-              isApproving={approveBucket.isPending}
-              disabled={!reconEnabled || activeCount === 0}
-            />
+            <div className="space-y-2">
+              <BulkApprovalCard
+                bucketLabel={activeBucket.label}
+                count={activeCount}
+                totalVariance={activeVariance}
+                onApprove={handleApproveBucket}
+                isApproving={approveBucket.isPending}
+                disabled={!reconEnabled || activeCount === 0 || isRunClosed}
+              />
+              {/* Surface what bulk-approve actually did — the bucket count is
+                  status-agnostic and can overstate the eligible set. */}
+              {approveResult && (
+                <p className="text-[13px] text-green-700">
+                  Approved {approveResult.approved_count} · skipped{" "}
+                  {approveResult.skipped_count} already-decided
+                </p>
+              )}
+            </div>
           )}
 
           {/* Exception cards (needs-review tab, top 5) */}
@@ -228,11 +250,11 @@ export default function ReconciliationPage() {
             onInvestigate={handleInvestigate}
           />
 
-          {/* Close checklist */}
+          {/* Close checklist — gated on the FULL run, not the active bucket */}
           {selectedRun && selectedRun.date_from && selectedRun.status !== "closed" && (
             <CloseChecklist
               run={selectedRun}
-              results={results || []}
+              results={allResults || []}
               period={selectedRun.date_from.substring(0, 7)}
             />
           )}

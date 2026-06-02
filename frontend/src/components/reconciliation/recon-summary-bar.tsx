@@ -1,13 +1,14 @@
 "use client";
 
 import { CheckCircle2, Wand2, Sparkles, AlertTriangle, DollarSign } from "lucide-react";
-import type { ReconBucketSummary } from "@/lib/types";
+import type { ReconBucketSummary, ReconRun } from "@/lib/types";
 
 interface ReconSummaryBarProps {
   summary: ReconBucketSummary | null;
+  run: ReconRun | null;
 }
 
-export function ReconSummaryBar({ summary }: ReconSummaryBarProps) {
+export function ReconSummaryBar({ summary, run }: ReconSummaryBarProps) {
   if (!summary) {
     return (
       <div className="rounded-xl border bg-card p-5 shadow-soft text-center text-muted-foreground">
@@ -16,11 +17,10 @@ export function ReconSummaryBar({ summary }: ReconSummaryBarProps) {
     );
   }
 
-  const totalVariance =
-    Number(summary.matches?.total_variance ?? 0) +
-    Number(summary.rules?.total_variance ?? 0) +
-    Number(summary.auto_classifications?.total_variance ?? 0) +
-    Number(summary.needs_review?.total_variance ?? 0);
+  // Total Variance is the SIGNED NET for the whole run (matches the evidence
+  // pack). The per-bucket totals are sum-of-absolutes (gross) and must NOT be
+  // summed here — that would disagree with run.total_variance.
+  const totalVariance = Number(run?.total_variance ?? 0);
 
   const cards = [
     {
@@ -53,7 +53,12 @@ export function ReconSummaryBar({ summary }: ReconSummaryBarProps) {
     },
     {
       label: "Total Variance",
-      value: `$${totalVariance.toLocaleString("en-US", { minimumFractionDigits: 2 })}`,
+      // Currency formatting keeps the sign in front of the symbol (-$42.50),
+      // making the signed net unambiguous.
+      value: totalVariance.toLocaleString("en-US", {
+        style: "currency",
+        currency: "USD",
+      }),
       icon: DollarSign,
       color: "text-blue-600",
       bg: "bg-blue-50",
