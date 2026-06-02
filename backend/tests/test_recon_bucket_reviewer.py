@@ -71,3 +71,69 @@ async def test_sql_twin_partitions_identically_to_classify(db, tenant_a):
 def test_bucket_conditions_rejects_unknown_bucket():
     with pytest.raises(ValueError):
         bucket_conditions("not_a_bucket")
+
+
+# ---------------------------------------------------------------------------
+# Task 5: GET /runs/{run_id}/buckets — authoritative per-bucket counts + variance
+# ---------------------------------------------------------------------------
+
+
+async def _enable_recon(db, tenant_id):
+    """Enable the reconciliation feature flag (defaults off) for HTTP tests."""
+    from app.services.feature_flag_service import clear_cache, set_flag
+
+    clear_cache()
+    await set_flag(db, tenant_id, "reconciliation", True)
+    await db.flush()
+    clear_cache()
+
+
+async def _seed_one_run_per_bucket(db, tenant_id):
+    run = await create_test_recon_run(db, tenant_id)
+    # 2 matches, 1 rule, 3 auto-classifications, 2 needs-review
+    await create_test_recon_result(db, tenant_id, run.id, match_type="deterministic")
+    await create_test_recon_result(db, tenant_id, run.id, match_type="deterministic")
+    await create_test_recon_result(db, tenant_id, run.id, match_type="fuzzy", confidence=Decimal("0.85"))
+    for amt in ("0.12", "4.12", "5.00"):
+        await create_test_recon_result(
+            db,
+            tenant_id,
+            run.id,
+            match_type="deterministic",
+            variance_type="amount_mismatch",
+            variance_amount=Decimal(amt),
+        )
+    await create_test_recon_result(
+        db,
+        tenant_id,
+        run.id,
+        match_type="unmatched",
+        variance_type="missing_in_netsuite",
+        variance_amount=Decimal("100"),
+        status="pending",
+    )
+    await create_test_recon_result(
+        db,
+        tenant_id,
+        run.id,
+        match_type="unmatched",
+        variance_type="missing",
+        status="pending",
+    )
+    await db.commit()
+    return run
+
+
+async def test_bucket_summary_counts(client, db, finance_user):
+    user, headers = finance_user
+    await _enable_recon(db, user.tenant_id)
+    run = await _seed_one_run_per_bucket(db, user.tenant_id)
+    resp = await client.get(f"/api/v1/reconciliation/runs/{run.id}/buckets", headers=headers)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["matches"]["count"] == 2
+    assert body["rules"]["count"] == 1
+    assert body["auto_classifications"]["count"] == 3
+    assert body["needs_review"]["count"] == 2
+    # auto-classifications total variance = 0.12 + 4.12 + 5.00
+    assert Decimal(str(body["auto_classifications"]["total_variance"])) == Decimal("9.24")

@@ -16,7 +16,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -28,6 +28,8 @@ from app.models.pipeline import CursorState
 from app.models.reconciliation import ReconciliationResult, ReconciliationRun
 from app.models.user import User
 from app.schemas.reconciliation import (
+    ReconBucketCount,
+    ReconBucketSummary,
     ReconResultApprove,
     ReconResultResponse,
     ReconRunCreate,
@@ -36,10 +38,22 @@ from app.schemas.reconciliation import (
 )
 from app.services import audit_service
 from app.services.reconciliation.evidence_service import EvidencePackGenerator
+from app.services.reconciliation.four_bucket_classifier import (
+    ALL_BUCKETS,
+    bucket_conditions,
+)
 from app.services.reconciliation.pipeline import ReconPipeline
 from app.services.reconciliation.recon_job import ReconJobRunner
 
 router = APIRouter(prefix="/reconciliation", tags=["reconciliation"])
+
+
+def _parse_uuid(value: str) -> uuid.UUID:
+    """Parse a path UUID, returning 404 (not 500) on a malformed id."""
+    try:
+        return uuid.UUID(value)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
 
 
 # ---------------------------------------------------------------------------
@@ -425,6 +439,39 @@ async def get_run_results(
     result = await db.execute(stmt)
     results = result.scalars().all()
     return [ReconResultResponse.model_validate(r) for r in results]
+
+
+# ---------------------------------------------------------------------------
+# Four-bucket summary (authoritative per-bucket counts + variance over the run)
+# ---------------------------------------------------------------------------
+@router.get("/runs/{run_id}/buckets", response_model=ReconBucketSummary)
+async def get_run_bucket_summary(
+    run_id: str,
+    user: Annotated[User, Depends(require_feature("reconciliation"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Authoritative per-bucket counts + total variance over the FULL run.
+
+    The FE only fetches a page of results, so it cannot count buckets itself;
+    these counts are computed server-side via the SQL twin of the classifier.
+    """
+    run_uuid = _parse_uuid(run_id)
+    counts: dict[str, ReconBucketCount] = {}
+    for bucket in ALL_BUCKETS:
+        row = (
+            await db.execute(
+                select(
+                    func.count(ReconciliationResult.id),
+                    func.coalesce(func.sum(func.abs(ReconciliationResult.variance_amount)), 0),
+                ).where(
+                    ReconciliationResult.run_id == run_uuid,
+                    ReconciliationResult.tenant_id == user.tenant_id,
+                    bucket_conditions(bucket),
+                )
+            )
+        ).one()
+        counts[bucket] = ReconBucketCount(count=row[0], total_variance=row[1])
+    return ReconBucketSummary(run_id=run_id, **counts)
 
 
 # ---------------------------------------------------------------------------
