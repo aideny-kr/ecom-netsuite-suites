@@ -7,7 +7,8 @@ Tests run against real Postgres to ensure RLS, UUID types, and JSON columns work
 
 import ssl
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
 
 import pytest
 import pytest_asyncio
@@ -21,6 +22,7 @@ from app.core.database import get_db
 from app.core.security import create_access_token, hash_password
 from app.main import create_app
 from app.models.feature_flag import TenantFeatureFlag
+from app.models.reconciliation import ReconciliationResult, ReconciliationRun
 from app.models.tenant import Tenant, TenantConfig
 from app.models.user import Role, User, UserRole
 
@@ -167,6 +169,73 @@ def make_auth_headers(user: User) -> dict[str, str]:
     token_data = {"sub": str(user.id), "tenant_id": str(user.tenant_id)}
     token = create_access_token(token_data)
     return {"Authorization": f"Bearer {token}"}
+
+
+# ---------------------------------------------------------------------------
+# Reconciliation factories (run/result) — FK-ordered: run flushed before result
+# ---------------------------------------------------------------------------
+
+
+async def create_test_recon_run(
+    db: AsyncSession,
+    tenant_id,
+    *,
+    status: str = "completed",
+    parameters: dict | None = None,
+) -> ReconciliationRun:
+    """Create a ReconciliationRun for tests. Flushes so its id is available for results."""
+    run = ReconciliationRun(
+        tenant_id=tenant_id,
+        date_from=date(2026, 4, 20),
+        date_to=date(2026, 4, 24),
+        status=status,
+        total_payouts=0,
+        total_deposits=0,
+        matched_count=0,
+        exception_count=0,
+        unmatched_count=0,
+        total_variance=Decimal("0"),
+        parameters=parameters or {"match_level": "order", "subsidiary_id": None},
+    )
+    db.add(run)
+    await db.flush()
+    return run
+
+
+async def create_test_recon_result(
+    db: AsyncSession,
+    tenant_id,
+    run_id,
+    *,
+    match_type: str = "deterministic",
+    confidence: Decimal = Decimal("1.0"),
+    status: str = "suggested",
+    variance_type: str | None = None,
+    variance_amount: Decimal = Decimal("0"),
+    match_rule: str | None = "order_reference_exact",
+    stripe_amount: Decimal = Decimal("10.00"),
+    netsuite_amount: Decimal = Decimal("10.00"),
+    currency: str = "USD",
+) -> ReconciliationResult:
+    """Create a ReconciliationResult bound to an existing run. Flushes for its id."""
+    result = ReconciliationResult(
+        tenant_id=tenant_id,
+        run_id=run_id,
+        payout_id=None,
+        deposit_id=None,
+        match_type=match_type,
+        confidence=confidence,
+        status=status,
+        stripe_amount=stripe_amount,
+        netsuite_amount=netsuite_amount,
+        variance_amount=variance_amount,
+        variance_type=variance_type,
+        currency=currency,
+        match_rule=match_rule,
+    )
+    db.add(result)
+    await db.flush()
+    return result
 
 
 # ---------------------------------------------------------------------------

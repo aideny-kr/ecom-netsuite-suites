@@ -2,7 +2,12 @@
 
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiClient } from "@/lib/api-client";
-import type { ReconRun, ReconResult, ReconRunSummary } from "@/lib/types";
+import type {
+  ReconRun,
+  ReconResult,
+  ReconRunSummary,
+  ReconBucketSummary,
+} from "@/lib/types";
 
 export function useReconRuns() {
   return useQuery<ReconRun[]>({
@@ -11,12 +16,17 @@ export function useReconRuns() {
   });
 }
 
-export function useReconResults(runId: string | null, statusFilter?: string) {
+export function useReconResults(
+  runId: string | null,
+  statusFilter?: string,
+  bucket?: string
+) {
   const params = new URLSearchParams();
   if (statusFilter) params.set("status_filter", statusFilter);
+  if (bucket) params.set("bucket", bucket);
 
   return useQuery<ReconResult[]>({
-    queryKey: ["recon-results", runId, statusFilter],
+    queryKey: ["recon-results", runId, statusFilter, bucket],
     queryFn: () =>
       apiClient.get<ReconResult[]>(
         `/api/v1/reconciliation/runs/${runId}/results?${params.toString()}`
@@ -56,6 +66,35 @@ export function useClosePeriod() {
     mutationFn: (period: string) =>
       apiClient.post(`/api/v1/reconciliation/close/${period}`, {}),
     onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["recon-runs"] });
+    },
+  });
+}
+
+export function useReconBucketSummary(runId: string | null) {
+  return useQuery<ReconBucketSummary>({
+    queryKey: ["recon-bucket-summary", runId],
+    queryFn: () =>
+      apiClient.get<ReconBucketSummary>(
+        `/api/v1/reconciliation/runs/${runId}/buckets`
+      ),
+    enabled: !!runId,
+  });
+}
+
+export function useApproveBucket(runId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (data: { bucket: string; notes?: string }) =>
+      apiClient.post(
+        `/api/v1/reconciliation/runs/${runId}/approve-bucket`,
+        data
+      ),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["recon-results"] });
+      queryClient.invalidateQueries({
+        queryKey: ["recon-bucket-summary", runId],
+      });
       queryClient.invalidateQueries({ queryKey: ["recon-runs"] });
     },
   });

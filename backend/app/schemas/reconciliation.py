@@ -7,7 +7,9 @@ from decimal import Decimal
 from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, BeforeValidator, Field
+from pydantic import BaseModel, BeforeValidator, Field, computed_field
+
+from app.services.reconciliation.four_bucket_classifier import classify
 
 # Coerce UUID objects to str for response schemas
 StrFromUUID = Annotated[str, BeforeValidator(lambda v: str(v) if isinstance(v, UUID) else v)]
@@ -112,6 +114,11 @@ class ReconResultResponse(BaseModel):
     approved_at: datetime | None = None
     created_at: datetime
 
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def bucket(self) -> str:
+        return classify(self.match_type, self.variance_type, self.variance_amount)
+
     model_config = {"from_attributes": True}
 
 
@@ -143,3 +150,32 @@ class ReconRunSummary(BaseModel):
     unmatched_count: int
     total_variance: Decimal
     match_rate: Decimal = Field(description="Percentage of payouts matched (0-100)")
+
+
+# ---------------------------------------------------------------------------
+# Four-bucket reviewer schemas (R1)
+# ---------------------------------------------------------------------------
+class ReconBucketCount(BaseModel):
+    count: int
+    total_variance: Decimal
+
+
+class ReconBucketSummary(BaseModel):
+    run_id: str
+    matches: ReconBucketCount
+    rules: ReconBucketCount
+    auto_classifications: ReconBucketCount
+    needs_review: ReconBucketCount
+
+
+class ReconBucketApprove(BaseModel):
+    bucket: str
+    notes: str | None = None
+
+
+class ReconBucketApproveResult(BaseModel):
+    run_id: str
+    bucket: str
+    approved_count: int
+    skipped_count: int
+    correlation_id: str

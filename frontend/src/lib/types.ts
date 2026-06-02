@@ -911,7 +911,27 @@ export interface ReconResult {
   approved_by: string | null;
   approved_at: string | null;
   created_at: string;
+  bucket?: string;
 }
+
+export interface ReconBucketCount {
+  count: number;
+  total_variance: number;
+}
+
+export interface ReconBucketSummary {
+  run_id: string;
+  matches: ReconBucketCount;
+  rules: ReconBucketCount;
+  auto_classifications: ReconBucketCount;
+  needs_review: ReconBucketCount;
+}
+
+export type ReconBucketId =
+  | "matches"
+  | "rules"
+  | "auto_classifications"
+  | "needs_review";
 
 export interface ReconRunSummary {
   run_id: string;

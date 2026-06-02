@@ -16,18 +16,23 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
-from sqlalchemy import select
+from sqlalchemy import func, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.dependencies import require_feature, require_permission
 from app.core.redis_lock import acquire_lock, release_lock
+from app.models.audit import AuditEvent
 from app.models.canonical import NetsuitePosting, Payout, PayoutLine
 from app.models.connection import Connection
 from app.models.pipeline import CursorState
 from app.models.reconciliation import ReconciliationResult, ReconciliationRun
 from app.models.user import User
 from app.schemas.reconciliation import (
+    ReconBucketApprove,
+    ReconBucketApproveResult,
+    ReconBucketCount,
+    ReconBucketSummary,
     ReconResultApprove,
     ReconResultResponse,
     ReconRunCreate,
@@ -36,10 +41,23 @@ from app.schemas.reconciliation import (
 )
 from app.services import audit_service
 from app.services.reconciliation.evidence_service import EvidencePackGenerator
+from app.services.reconciliation.four_bucket_classifier import (
+    ALL_BUCKETS,
+    BULK_APPROVABLE_BUCKETS,
+    bucket_conditions,
+)
 from app.services.reconciliation.pipeline import ReconPipeline
 from app.services.reconciliation.recon_job import ReconJobRunner
 
 router = APIRouter(prefix="/reconciliation", tags=["reconciliation"])
+
+
+def _parse_uuid(value: str) -> uuid.UUID:
+    """Parse a path UUID, returning 404 (not 500) on a malformed id."""
+    try:
+        return uuid.UUID(value)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
 
 
 # ---------------------------------------------------------------------------
@@ -405,6 +423,7 @@ async def get_run_results(
     user: Annotated[User, Depends(require_feature("reconciliation"))],
     db: Annotated[AsyncSession, Depends(get_db)],
     status_filter: str | None = None,
+    bucket: str | None = None,
     limit: int = 100,
     offset: int = 0,
 ):
@@ -412,7 +431,7 @@ async def get_run_results(
         select(ReconciliationResult)
         .where(
             ReconciliationResult.tenant_id == user.tenant_id,
-            ReconciliationResult.run_id == uuid.UUID(run_id),
+            ReconciliationResult.run_id == _parse_uuid(run_id),
         )
         .order_by(ReconciliationResult.confidence.asc())
         .limit(limit)
@@ -422,9 +441,61 @@ async def get_run_results(
     if status_filter:
         stmt = stmt.where(ReconciliationResult.status == status_filter)
 
+    if bucket is not None:
+        if bucket not in ALL_BUCKETS:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid bucket")
+        stmt = stmt.where(bucket_conditions(bucket))
+
     result = await db.execute(stmt)
     results = result.scalars().all()
     return [ReconResultResponse.model_validate(r) for r in results]
+
+
+# ---------------------------------------------------------------------------
+# Four-bucket summary (authoritative per-bucket counts + variance over the run)
+# ---------------------------------------------------------------------------
+@router.get("/runs/{run_id}/buckets", response_model=ReconBucketSummary)
+async def get_run_bucket_summary(
+    run_id: str,
+    user: Annotated[User, Depends(require_feature("reconciliation"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Authoritative per-bucket counts + total variance over the FULL run.
+
+    The FE only fetches a page of results, so it cannot count buckets itself;
+    these counts are computed server-side via the SQL twin of the classifier.
+    """
+    run_uuid = _parse_uuid(run_id)
+
+    # 404 on a missing/foreign run (a bogus run would otherwise return 200 with
+    # all-zero counts, mirroring approve_bucket's run-existence guard).
+    run = (
+        await db.execute(
+            select(ReconciliationRun).where(
+                ReconciliationRun.id == run_uuid,
+                ReconciliationRun.tenant_id == user.tenant_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if run is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
+
+    counts: dict[str, ReconBucketCount] = {}
+    for bucket in ALL_BUCKETS:
+        row = (
+            await db.execute(
+                select(
+                    func.count(ReconciliationResult.id),
+                    func.coalesce(func.sum(func.abs(ReconciliationResult.variance_amount)), 0),
+                ).where(
+                    ReconciliationResult.run_id == run_uuid,
+                    ReconciliationResult.tenant_id == user.tenant_id,
+                    bucket_conditions(bucket),
+                )
+            )
+        ).one()
+        counts[bucket] = ReconBucketCount(count=row[0], total_variance=row[1])
+    return ReconBucketSummary(run_id=run_id, **counts)
 
 
 # ---------------------------------------------------------------------------
@@ -438,7 +509,7 @@ async def approve_result(
     db: Annotated[AsyncSession, Depends(get_db)],
 ):
     stmt = select(ReconciliationResult).where(
-        ReconciliationResult.id == uuid.UUID(result_id),
+        ReconciliationResult.id == _parse_uuid(result_id),
         ReconciliationResult.tenant_id == user.tenant_id,
     )
     result = await db.execute(stmt)
@@ -449,6 +520,12 @@ async def approve_result(
 
     if recon_result.status == "approved":
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Already approved")
+
+    if recon_result.status == "locked":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Result is locked (period closed)",
+        )
 
     recon_result.status = "approved"
     recon_result.approved_by = user.id
@@ -467,6 +544,130 @@ async def approve_result(
     await db.refresh(recon_result)
 
     return ReconResultResponse.model_validate(recon_result)
+
+
+# ---------------------------------------------------------------------------
+# Bulk-approve a whole bucket (set-based, per-line audit, no auto-post)
+# ---------------------------------------------------------------------------
+_SKIP_STATUSES = ("approved", "rejected", "locked")
+
+
+@router.post("/runs/{run_id}/approve-bucket", response_model=ReconBucketApproveResult)
+async def approve_bucket(
+    run_id: str,
+    request: ReconBucketApprove,
+    user: Annotated[User, Depends(require_permission("recon.run"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Set-based bulk approve of every approvable line in a bucket.
+
+    One server-side ``UPDATE ... RETURNING`` flips status, plus one immutable
+    per-line audit row per approved line and one summary audit event — all
+    sharing a batch ``correlation_id``. Skips already-approved/rejected/locked
+    lines. Rejects ``needs_review``. This is a DB status flip + audit only; it
+    never posts to NetSuite (no auto-post).
+    """
+    if request.bucket not in BULK_APPROVABLE_BUCKETS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Bucket is not bulk-approvable",
+        )
+    run_uuid = _parse_uuid(run_id)
+
+    # 404 on a missing/foreign run (a non-existent run would otherwise silently
+    # match 0 rows and return 200 with approved_count=0).
+    run = (
+        await db.execute(
+            select(ReconciliationRun).where(
+                ReconciliationRun.id == run_uuid,
+                ReconciliationRun.tenant_id == user.tenant_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if run is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
+
+    # Reject a closed/locked period: close_period sets run.status="closed" but only
+    # locks 'approved'/'auto_matched' rows, leaving 'suggested'/'pending' rows
+    # un-locked and thus still bulk-approvable. Guard the run itself.
+    if run.status in ("closed", "locked"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Period is closed; cannot approve.",
+        )
+
+    now = datetime.now(timezone.utc)
+    correlation_id = str(uuid.uuid4())
+
+    base_filter = (
+        ReconciliationResult.run_id == run_uuid,
+        ReconciliationResult.tenant_id == user.tenant_id,
+        bucket_conditions(request.bucket),
+    )
+
+    # set-based update of only the approvable rows; RETURNING the ids we touched
+    upd = (
+        update(ReconciliationResult)
+        .where(*base_filter, ReconciliationResult.status.notin_(_SKIP_STATUSES))
+        .values(status="approved", approved_by=user.id, approved_at=now)
+        .returning(ReconciliationResult.id)
+    )
+    approved_ids = (await db.execute(upd)).scalars().all()
+
+    # accurate skipped_count: count rows in a skip status AFTER the update that we
+    # did NOT just approve (atomic — pre-update total minus approved is wrong under
+    # concurrency, and the freshly-approved rows now match _SKIP_STATUSES too).
+    skip_filter = [*base_filter, ReconciliationResult.status.in_(_SKIP_STATUSES)]
+    if approved_ids:
+        skip_filter.append(ReconciliationResult.id.notin_(approved_ids))
+    skipped_count = (await db.execute(select(func.count(ReconciliationResult.id)).where(*skip_filter))).scalar_one()
+
+    # one immutable per-line audit row per approved result (multi-row insert)
+    if approved_ids:
+        await db.execute(
+            insert(AuditEvent),
+            [
+                {
+                    "tenant_id": user.tenant_id,
+                    "actor_id": user.id,
+                    "actor_type": "user",
+                    "category": "reconciliation",
+                    "action": "recon.approve",
+                    "resource_type": "reconciliation_result",
+                    "resource_id": str(rid),
+                    "correlation_id": correlation_id,
+                    "status": "success",
+                }
+                for rid in approved_ids
+            ],
+        )
+
+    # one summary event for the human bulk action
+    await audit_service.log_event(
+        db=db,
+        tenant_id=user.tenant_id,
+        category="reconciliation",
+        action="recon.bulk_approve",
+        actor_id=user.id,
+        resource_type="reconciliation_run",
+        resource_id=run_id,
+        correlation_id=correlation_id,
+        payload={
+            "bucket": request.bucket,
+            "approved_count": len(approved_ids),
+            "notes": request.notes,
+        },
+    )
+
+    await db.commit()
+
+    return ReconBucketApproveResult(
+        run_id=run_id,
+        bucket=request.bucket,
+        approved_count=len(approved_ids),
+        skipped_count=skipped_count,
+        correlation_id=correlation_id,
+    )
 
 
 # ---------------------------------------------------------------------------
