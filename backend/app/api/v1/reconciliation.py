@@ -419,6 +419,7 @@ async def get_run_results(
     user: Annotated[User, Depends(require_feature("reconciliation"))],
     db: Annotated[AsyncSession, Depends(get_db)],
     status_filter: str | None = None,
+    bucket: str | None = None,
     limit: int = 100,
     offset: int = 0,
 ):
@@ -435,6 +436,11 @@ async def get_run_results(
 
     if status_filter:
         stmt = stmt.where(ReconciliationResult.status == status_filter)
+
+    if bucket is not None:
+        if bucket not in ALL_BUCKETS:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid bucket")
+        stmt = stmt.where(bucket_conditions(bucket))
 
     result = await db.execute(stmt)
     results = result.scalars().all()

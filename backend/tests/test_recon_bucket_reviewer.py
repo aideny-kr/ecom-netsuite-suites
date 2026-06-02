@@ -137,3 +137,30 @@ async def test_bucket_summary_counts(client, db, finance_user):
     assert body["needs_review"]["count"] == 2
     # auto-classifications total variance = 0.12 + 4.12 + 5.00
     assert Decimal(str(body["auto_classifications"]["total_variance"])) == Decimal("9.24")
+
+
+# ---------------------------------------------------------------------------
+# Task 6: bucket filter param on get_run_results
+# ---------------------------------------------------------------------------
+
+
+async def test_get_results_filtered_by_bucket(client, db, finance_user):
+    user, headers = finance_user
+    await _enable_recon(db, user.tenant_id)
+    run = await _seed_one_run_per_bucket(db, user.tenant_id)
+    resp = await client.get(
+        f"/api/v1/reconciliation/runs/{run.id}/results?bucket=auto_classifications&limit=100",
+        headers=headers,
+    )
+    assert resp.status_code == 200
+    rows = resp.json()
+    assert len(rows) == 3
+    assert all(r["bucket"] == "auto_classifications" for r in rows)
+
+
+async def test_get_results_invalid_bucket_is_422(client, db, finance_user):
+    user, headers = finance_user
+    await _enable_recon(db, user.tenant_id)
+    run = await _seed_one_run_per_bucket(db, user.tenant_id)
+    resp = await client.get(f"/api/v1/reconciliation/runs/{run.id}/results?bucket=nope", headers=headers)
+    assert resp.status_code in (400, 422)
