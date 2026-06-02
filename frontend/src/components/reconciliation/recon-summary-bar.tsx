@@ -1,14 +1,14 @@
 "use client";
 
-import { CheckCircle2, AlertTriangle, XCircle, DollarSign } from "lucide-react";
-import type { ReconRun } from "@/lib/types";
+import { CheckCircle2, Wand2, Sparkles, AlertTriangle, DollarSign } from "lucide-react";
+import type { ReconBucketSummary } from "@/lib/types";
 
 interface ReconSummaryBarProps {
-  run: ReconRun | null;
+  summary: ReconBucketSummary | null;
 }
 
-export function ReconSummaryBar({ run }: ReconSummaryBarProps) {
-  if (!run) {
+export function ReconSummaryBar({ summary }: ReconSummaryBarProps) {
+  if (!summary) {
     return (
       <div className="rounded-xl border bg-card p-5 shadow-soft text-center text-muted-foreground">
         No reconciliation run selected. Start a new run or select a previous one.
@@ -16,31 +16,44 @@ export function ReconSummaryBar({ run }: ReconSummaryBarProps) {
     );
   }
 
+  const totalVariance =
+    Number(summary.matches?.total_variance ?? 0) +
+    Number(summary.rules?.total_variance ?? 0) +
+    Number(summary.auto_classifications?.total_variance ?? 0) +
+    Number(summary.needs_review?.total_variance ?? 0);
+
   const cards = [
     {
-      label: "Matched",
-      value: run.matched_count,
+      label: "Matches",
+      value: summary.matches?.count ?? 0,
       icon: CheckCircle2,
       color: "text-green-600",
       bg: "bg-green-50",
     },
     {
-      label: "Exceptions",
-      value: run.exception_count,
-      icon: AlertTriangle,
-      color: "text-orange-600",
-      bg: "bg-orange-50",
+      label: "Rules",
+      value: summary.rules?.count ?? 0,
+      icon: Wand2,
+      color: "text-indigo-600",
+      bg: "bg-indigo-50",
     },
     {
-      label: "Unmatched",
-      value: run.unmatched_count,
-      icon: XCircle,
+      label: "Auto-Classifications",
+      value: summary.auto_classifications?.count ?? 0,
+      icon: Sparkles,
+      color: "text-amber-600",
+      bg: "bg-amber-50",
+    },
+    {
+      label: "Needs Review",
+      value: summary.needs_review?.count ?? 0,
+      icon: AlertTriangle,
       color: "text-red-600",
       bg: "bg-red-50",
     },
     {
       label: "Total Variance",
-      value: `$${Number(run.total_variance).toLocaleString("en-US", { minimumFractionDigits: 2 })}`,
+      value: `$${totalVariance.toLocaleString("en-US", { minimumFractionDigits: 2 })}`,
       icon: DollarSign,
       color: "text-blue-600",
       bg: "bg-blue-50",

@@ -9,33 +9,50 @@ import { ReconExceptionCard } from "@/components/reconciliation/recon-exception-
 import { ReconProgressStepper } from "@/components/reconciliation/recon-progress-stepper";
 import { DataFreshnessBanner } from "@/components/reconciliation/data-freshness-banner";
 import { CloseChecklist } from "@/components/reconciliation/close-checklist";
+import { BulkApprovalCard } from "@/components/reconciliation/bulk-approval-card";
 import {
   useReconRuns,
   useReconResults,
+  useReconBucketSummary,
+  useApproveBucket,
 } from "@/hooks/use-reconciliation";
 import { useReconPipeline } from "@/hooks/use-recon-pipeline";
-import type { ReconResult } from "@/lib/types";
+import { useFeature } from "@/hooks/use-features";
+import type { ReconResult, ReconBucketId } from "@/lib/types";
 
-type TabId = "all" | "exceptions" | "unmatched";
+const BUCKET_TABS: { id: ReconBucketId; label: string }[] = [
+  { id: "matches", label: "Matches" },
+  { id: "rules", label: "Rules" },
+  { id: "auto_classifications", label: "Auto-Classifications" },
+  { id: "needs_review", label: "Needs Review" },
+];
+
+const BULK_APPROVABLE: ReconBucketId[] = [
+  "matches",
+  "rules",
+  "auto_classifications",
+];
 
 export default function ReconciliationPage() {
   const router = useRouter();
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<TabId>("all");
+  const [activeTab, setActiveTab] = useState<ReconBucketId>("matches");
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
 
   const { data: runs } = useReconRuns();
-  const { data: results } = useReconResults(selectedRunId);
+  const { data: results } = useReconResults(selectedRunId, undefined, activeTab);
+  const summary = useReconBucketSummary(selectedRunId);
+  const approveBucket = useApproveBucket(selectedRunId || "");
+  const reconEnabled = useFeature("reconciliation");
   const pipeline = useReconPipeline();
 
   const selectedRun = runs?.find((r) => r.id === selectedRunId) || null;
 
-  const filteredResults = (results || []).filter((r) => {
-    if (activeTab === "exceptions") return r.status === "suggested" || r.status === "pending";
-    if (activeTab === "unmatched") return r.match_type === "unmatched";
-    return true;
-  });
+  const activeBucket = BUCKET_TABS.find((t) => t.id === activeTab)!;
+  const activeCount = summary.data?.[activeTab]?.count ?? 0;
+  const activeVariance = Number(summary.data?.[activeTab]?.total_variance ?? 0);
+  const isBulkApprovable = BULK_APPROVABLE.includes(activeTab);
 
   const handleRunRecon = () => {
     if (!dateFrom || !dateTo) return;
@@ -48,6 +65,18 @@ export default function ReconciliationPage() {
       setSelectedRunId(pipeline.runId);
     }
   }, [pipeline.runId]);
+
+  // Auto-select the latest run when none is selected yet
+  useEffect(() => {
+    if (!selectedRunId && runs && runs.length > 0) {
+      setSelectedRunId(runs[0].id);
+    }
+  }, [runs, selectedRunId]);
+
+  const handleApproveBucket = () => {
+    if (!selectedRunId || !isBulkApprovable) return;
+    approveBucket.mutate({ bucket: activeTab });
+  };
 
   const handleInvestigate = (result: ReconResult) => {
     const orderRef = result.evidence?.order_reference;
@@ -65,11 +94,10 @@ export default function ReconciliationPage() {
     router.push(`/chat?prefill=${encodeURIComponent(query)}&new_session=true`);
   };
 
-  const tabs: { id: TabId; label: string; count: number }[] = [
-    { id: "all", label: "All Results", count: results?.length || 0 },
-    { id: "exceptions", label: "Exceptions", count: results?.filter((r) => r.status === "suggested" || r.status === "pending").length || 0 },
-    { id: "unmatched", label: "Unmatched", count: results?.filter((r) => r.match_type === "unmatched").length || 0 },
-  ];
+  const tabs = BUCKET_TABS.map((t) => ({
+    ...t,
+    count: summary.data?.[t.id]?.count ?? 0,
+  }));
 
   return (
     <div className="animate-fade-in space-y-8 p-8">
@@ -146,7 +174,9 @@ export default function ReconciliationPage() {
       )}
 
       {/* Summary bar */}
-      {!pipeline.isRunning && selectedRunId && <ReconSummaryBar run={selectedRun} />}
+      {!pipeline.isRunning && selectedRunId && (
+        <ReconSummaryBar summary={summary.data ?? null} />
+      )}
 
       {/* Tabs + results */}
       {!pipeline.isRunning && selectedRunId && (
@@ -167,10 +197,22 @@ export default function ReconciliationPage() {
             ))}
           </div>
 
-          {/* Exception cards (exceptions tab, top 5) */}
-          {activeTab === "exceptions" && filteredResults.length > 0 && (
+          {/* Bulk-approval card for bulk-approvable buckets */}
+          {isBulkApprovable && (
+            <BulkApprovalCard
+              bucketLabel={activeBucket.label}
+              count={activeCount}
+              totalVariance={activeVariance}
+              onApprove={handleApproveBucket}
+              isApproving={approveBucket.isPending}
+              disabled={!reconEnabled || activeCount === 0}
+            />
+          )}
+
+          {/* Exception cards (needs-review tab, top 5) */}
+          {activeTab === "needs_review" && (results || []).length > 0 && (
             <div className="space-y-4">
-              {filteredResults.slice(0, 5).map((result) => (
+              {(results || []).slice(0, 5).map((result) => (
                 <ReconExceptionCard
                   key={result.id}
                   result={result}
@@ -182,12 +224,12 @@ export default function ReconciliationPage() {
 
           {/* Results table */}
           <ReconResultsTable
-            results={filteredResults}
+            results={results || []}
             onInvestigate={handleInvestigate}
           />
 
           {/* Close checklist */}
-          {selectedRun && selectedRun.status !== "closed" && (
+          {selectedRun && selectedRun.date_from && selectedRun.status !== "closed" && (
             <CloseChecklist
               run={selectedRun}
               results={results || []}
