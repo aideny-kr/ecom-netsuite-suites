@@ -507,6 +507,12 @@ async def approve_result(
     if recon_result.status == "approved":
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Already approved")
 
+    if recon_result.status == "locked":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Result is locked (period closed)",
+        )
+
     recon_result.status = "approved"
     recon_result.approved_by = user.id
     recon_result.approved_at = datetime.now(timezone.utc)

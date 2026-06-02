@@ -286,3 +286,22 @@ async def test_bulk_approve_unknown_run_404(client, db, finance_user):
         headers=headers,
     )
     assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Single-line approve must reject locked (period-closed) rows
+# ---------------------------------------------------------------------------
+
+
+async def test_approve_single_locked_result_400(client, db, finance_user):
+    user, headers = finance_user
+    run = await create_test_recon_run(db, user.tenant_id)
+    res = await create_test_recon_result(db, user.tenant_id, run.id, match_type="deterministic", status="locked")
+    await db.commit()
+
+    resp = await client.patch(
+        f"/api/v1/reconciliation/results/{res.id}/approve",
+        json={"result_id": str(res.id), "notes": None},
+        headers=headers,
+    )
+    assert resp.status_code == 400
