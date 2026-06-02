@@ -33,3 +33,25 @@ def classify(match_type: str, variance_type: str | None, variance_amount: Decima
         return BUCKET_RULES
     # unmatched, exception (payout dup), or any unknown future type → safe default
     return BUCKET_NEEDS_REVIEW
+
+
+def bucket_conditions(bucket: str):
+    """SQLAlchemy boolean condition selecting one bucket's rows. Mirror of classify().
+
+    Lazy-imports the model to keep module import-time stdlib-only (schemas import classify()).
+    """
+    from sqlalchemy import and_, or_
+
+    from app.models.reconciliation import ReconciliationResult as R
+
+    has_variance = or_(R.variance_type.isnot(None), R.variance_amount != 0)
+
+    if bucket == BUCKET_MATCHES:
+        return and_(R.match_type == "deterministic", R.variance_type.is_(None), R.variance_amount == 0)
+    if bucket == BUCKET_AUTO_CLASSIFICATIONS:
+        return and_(R.match_type == "deterministic", has_variance)
+    if bucket == BUCKET_RULES:
+        return R.match_type == "fuzzy"
+    if bucket == BUCKET_NEEDS_REVIEW:
+        return R.match_type.notin_(["deterministic", "fuzzy"])
+    raise ValueError(f"unknown bucket: {bucket}")
