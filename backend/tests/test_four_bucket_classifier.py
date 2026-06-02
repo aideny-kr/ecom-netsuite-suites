@@ -1,10 +1,10 @@
 from decimal import Decimal
 
 from app.services.reconciliation.four_bucket_classifier import (
-    BUCKET_MATCHES,
-    BUCKET_RULES,
     BUCKET_AUTO_CLASSIFICATIONS,
+    BUCKET_MATCHES,
     BUCKET_NEEDS_REVIEW,
+    BUCKET_RULES,
     BULK_APPROVABLE_BUCKETS,
     classify,
 )
