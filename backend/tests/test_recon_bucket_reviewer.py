@@ -3,6 +3,7 @@ from decimal import Decimal
 import pytest
 from sqlalchemy import select
 
+from app.models.audit import AuditEvent
 from app.models.reconciliation import ReconciliationResult
 from app.services.reconciliation.four_bucket_classifier import (
     ALL_BUCKETS,
@@ -164,3 +165,113 @@ async def test_get_results_invalid_bucket_is_422(client, db, finance_user):
     run = await _seed_one_run_per_bucket(db, user.tenant_id)
     resp = await client.get(f"/api/v1/reconciliation/runs/{run.id}/results?bucket=nope", headers=headers)
     assert resp.status_code in (400, 422)
+
+
+# ---------------------------------------------------------------------------
+# Task 7: POST /runs/{run_id}/approve-bucket — set-based bulk approve
+# ---------------------------------------------------------------------------
+
+
+async def test_bulk_approve_matches_emits_per_line_audit(client, db, finance_user):
+    user, headers = finance_user
+    run = await _seed_one_run_per_bucket(db, user.tenant_id)  # 2 matches
+
+    resp = await client.post(
+        f"/api/v1/reconciliation/runs/{run.id}/approve-bucket",
+        json={"bucket": "matches", "notes": "Q2 close"},
+        headers=headers,
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["approved_count"] == 2
+    assert body["skipped_count"] == 0
+    corr = body["correlation_id"]
+
+    # statuses flipped
+    statuses = (
+        (
+            await db.execute(
+                select(ReconciliationResult.status).where(
+                    ReconciliationResult.run_id == run.id,
+                    bucket_conditions("matches"),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert statuses == ["approved", "approved"]
+
+    # one per-line audit event per approved line + one summary event, sharing correlation_id
+    per_line = (
+        (
+            await db.execute(
+                select(AuditEvent).where(
+                    AuditEvent.action == "recon.approve",
+                    AuditEvent.correlation_id == corr,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(per_line) == 2
+    assert {e.resource_type for e in per_line} == {"reconciliation_result"}
+
+    summary = (
+        (
+            await db.execute(
+                select(AuditEvent).where(
+                    AuditEvent.action == "recon.bulk_approve",
+                    AuditEvent.correlation_id == corr,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(summary) == 1
+    assert summary[0].resource_type == "reconciliation_run"
+    assert summary[0].payload["bucket"] == "matches"
+    assert summary[0].payload["approved_count"] == 2
+
+
+async def test_bulk_approve_skips_locked_and_already_approved(client, db, finance_user):
+    user, headers = finance_user
+    run = await create_test_recon_run(db, user.tenant_id)
+    await create_test_recon_result(db, user.tenant_id, run.id, match_type="deterministic", status="approved")
+    await create_test_recon_result(db, user.tenant_id, run.id, match_type="deterministic", status="locked")
+    await create_test_recon_result(db, user.tenant_id, run.id, match_type="deterministic", status="suggested")
+    await db.commit()
+
+    resp = await client.post(
+        f"/api/v1/reconciliation/runs/{run.id}/approve-bucket",
+        json={"bucket": "matches"},
+        headers=headers,
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["approved_count"] == 1  # only the suggested one
+    assert body["skipped_count"] == 2  # approved + locked untouched
+
+
+async def test_bulk_approve_rejects_needs_review(client, db, finance_user):
+    user, headers = finance_user
+    run = await create_test_recon_run(db, user.tenant_id)
+    resp = await client.post(
+        f"/api/v1/reconciliation/runs/{run.id}/approve-bucket",
+        json={"bucket": "needs_review"},
+        headers=headers,
+    )
+    assert resp.status_code == 400
+
+
+async def test_bulk_approve_requires_permission(client, db, readonly_user):
+    user, headers = readonly_user
+    run = await create_test_recon_run(db, user.tenant_id)
+    resp = await client.post(
+        f"/api/v1/reconciliation/runs/{run.id}/approve-bucket",
+        json={"bucket": "matches"},
+        headers=headers,
+    )
+    assert resp.status_code == 403

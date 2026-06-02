@@ -16,18 +16,21 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
-from sqlalchemy import func, select
+from sqlalchemy import func, insert, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.dependencies import require_feature, require_permission
 from app.core.redis_lock import acquire_lock, release_lock
+from app.models.audit import AuditEvent
 from app.models.canonical import NetsuitePosting, Payout, PayoutLine
 from app.models.connection import Connection
 from app.models.pipeline import CursorState
 from app.models.reconciliation import ReconciliationResult, ReconciliationRun
 from app.models.user import User
 from app.schemas.reconciliation import (
+    ReconBucketApprove,
+    ReconBucketApproveResult,
     ReconBucketCount,
     ReconBucketSummary,
     ReconResultApprove,
@@ -40,6 +43,7 @@ from app.services import audit_service
 from app.services.reconciliation.evidence_service import EvidencePackGenerator
 from app.services.reconciliation.four_bucket_classifier import (
     ALL_BUCKETS,
+    BULK_APPROVABLE_BUCKETS,
     bucket_conditions,
 )
 from app.services.reconciliation.pipeline import ReconPipeline
@@ -520,6 +524,102 @@ async def approve_result(
     await db.refresh(recon_result)
 
     return ReconResultResponse.model_validate(recon_result)
+
+
+# ---------------------------------------------------------------------------
+# Bulk-approve a whole bucket (set-based, per-line audit, no auto-post)
+# ---------------------------------------------------------------------------
+_SKIP_STATUSES = ("approved", "rejected", "locked")
+
+
+@router.post("/runs/{run_id}/approve-bucket", response_model=ReconBucketApproveResult)
+async def approve_bucket(
+    run_id: str,
+    request: ReconBucketApprove,
+    user: Annotated[User, Depends(require_permission("recon.run"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Set-based bulk approve of every approvable line in a bucket.
+
+    One server-side ``UPDATE ... RETURNING`` flips status, plus one immutable
+    per-line audit row per approved line and one summary audit event — all
+    sharing a batch ``correlation_id``. Skips already-approved/rejected/locked
+    lines. Rejects ``needs_review``. This is a DB status flip + audit only; it
+    never posts to NetSuite (no auto-post).
+    """
+    if request.bucket not in BULK_APPROVABLE_BUCKETS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Bucket is not bulk-approvable",
+        )
+    run_uuid = _parse_uuid(run_id)
+    now = datetime.now(timezone.utc)
+    correlation_id = str(uuid.uuid4())
+
+    base_filter = (
+        ReconciliationResult.run_id == run_uuid,
+        ReconciliationResult.tenant_id == user.tenant_id,
+        bucket_conditions(request.bucket),
+    )
+
+    # total in bucket (for skipped_count)
+    total_in_bucket = (await db.execute(select(func.count(ReconciliationResult.id)).where(*base_filter))).scalar_one()
+
+    # set-based update of only the approvable rows; RETURNING the ids we touched
+    upd = (
+        update(ReconciliationResult)
+        .where(*base_filter, ReconciliationResult.status.notin_(_SKIP_STATUSES))
+        .values(status="approved", approved_by=user.id, approved_at=now)
+        .returning(ReconciliationResult.id)
+    )
+    approved_ids = (await db.execute(upd)).scalars().all()
+
+    # one immutable per-line audit row per approved result (multi-row insert)
+    if approved_ids:
+        await db.execute(
+            insert(AuditEvent),
+            [
+                {
+                    "tenant_id": user.tenant_id,
+                    "actor_id": user.id,
+                    "actor_type": "user",
+                    "category": "reconciliation",
+                    "action": "recon.approve",
+                    "resource_type": "reconciliation_result",
+                    "resource_id": str(rid),
+                    "correlation_id": correlation_id,
+                    "status": "success",
+                }
+                for rid in approved_ids
+            ],
+        )
+
+    # one summary event for the human bulk action
+    await audit_service.log_event(
+        db=db,
+        tenant_id=user.tenant_id,
+        category="reconciliation",
+        action="recon.bulk_approve",
+        actor_id=user.id,
+        resource_type="reconciliation_run",
+        resource_id=run_id,
+        correlation_id=correlation_id,
+        payload={
+            "bucket": request.bucket,
+            "approved_count": len(approved_ids),
+            "notes": request.notes,
+        },
+    )
+
+    await db.commit()
+
+    return ReconBucketApproveResult(
+        run_id=run_id,
+        bucket=request.bucket,
+        approved_count=len(approved_ids),
+        skipped_count=total_in_bucket - len(approved_ids),
+        correlation_id=correlation_id,
+    )
 
 
 # ---------------------------------------------------------------------------
