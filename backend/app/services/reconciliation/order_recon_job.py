@@ -13,12 +13,20 @@ from sqlalchemy.orm import aliased
 
 from app.models.canonical import NetsuitePosting, Payout, PayoutLine
 from app.models.reconciliation import ReconciliationResult, ReconciliationRun
+from app.models.tenant import TenantConfig
 from app.schemas.order_reconciliation import (
     ChargeRecord,
     NSPaymentRecord,
     OrderMatchCandidate,
 )
 from app.schemas.reconciliation import ReconRunSummary
+from app.services.reconciliation.four_bucket_classifier import (
+    BUCKET_AUTO_CLASSIFICATIONS,
+    BUCKET_MATCHES,
+    BUCKET_NEEDS_REVIEW,
+    BUCKET_RULES,
+    classify,
+)
 from app.services.reconciliation.order_matching_engine import (
     OrderMatchingEngine,
     extract_order_ref,
@@ -27,6 +35,11 @@ from app.services.reconciliation.order_matching_engine import (
 logger = structlog.get_logger()
 
 _DATE_BUFFER = timedelta(days=14)
+
+# Materiality defaults when a tenant has no TenantConfig row (R2a). Mirror the
+# TenantConfig.recon_materiality_* server defaults: $50 OR 1% relative.
+_DEFAULT_MATERIALITY_ABS = Decimal("50")
+_DEFAULT_MATERIALITY_PCT = Decimal("0.01")
 
 
 class OrderReconJob:
@@ -98,8 +111,8 @@ class OrderReconJob:
             # 6. Run matching
             candidates = self.engine.match(charges, deposits)
 
-            # 7. Store results
-            await self._store_results(run_id, candidates)
+            # 7. Store results (returns the computed bucket per candidate, in order)
+            buckets = await self._store_results(run_id, candidates)
 
             # Compute summary
             matched = [c for c in candidates if c.match_type in ("deterministic", "fuzzy")]
@@ -115,6 +128,11 @@ class OrderReconJob:
             run.exception_count = len(exceptions)
             run.unmatched_count = len(unmatched)
             run.total_variance = total_variance
+            # R2a: per-bucket rollup counts (from the persisted classification)
+            run.matches_count = buckets.count(BUCKET_MATCHES)
+            run.rules_count = buckets.count(BUCKET_RULES)
+            run.auto_classifications_count = buckets.count(BUCKET_AUTO_CLASSIFICATIONS)
+            run.needs_review_count = buckets.count(BUCKET_NEEDS_REVIEW)
             await self.db.commit()
 
             match_rate = Decimal(len(matched)) / Decimal(len(charges)) * 100 if charges else Decimal("0")
@@ -226,18 +244,35 @@ class OrderReconJob:
             for r in rows
         ]
 
+    async def _load_materiality(self) -> tuple[Decimal, Decimal]:
+        """Load this tenant's recon materiality thresholds (abs, pct).
+
+        Falls back to the $50 / 1% defaults when no TenantConfig row exists.
+        """
+        cfg = (
+            await self.db.execute(select(TenantConfig).where(TenantConfig.tenant_id == self.tenant_id))
+        ).scalar_one_or_none()
+        if cfg is None:
+            return _DEFAULT_MATERIALITY_ABS, _DEFAULT_MATERIALITY_PCT
+        return cfg.recon_materiality_abs, cfg.recon_materiality_pct
+
     async def _store_results(
         self,
         run_id: uuid.UUID,
         candidates: list[OrderMatchCandidate],
-    ) -> None:
+    ) -> list[str]:
         """Persist match candidates as ReconciliationResult rows.
+
+        Returns the computed four-bucket classification for each candidate, in
+        order, so the caller can roll up per-bucket counts onto the run.
 
         Key differences from payout-level:
         - payout_id is always NULL (order-level, not payout-level)
         - deposit_id set when matched
         - evidence contains charge_source_id, order_reference, charge_payout_line_id
         """
+        mat_abs, mat_pct = await self._load_materiality()
+        buckets: list[str] = []
         for candidate in candidates:
             # Determine status based on confidence
             if candidate.match_type == "unmatched":
@@ -254,6 +289,19 @@ class OrderReconJob:
             if candidate.deposit:
                 deposit_id = uuid.UUID(candidate.deposit.id)
 
+            # R2a: persist the four-bucket classification at write-time. The
+            # materiality base is the gross charge amount (also stored below as
+            # stripe_amount), matching the migration backfill's relative base.
+            bucket = classify(
+                candidate.match_type,
+                candidate.variance_type,
+                candidate.variance_amount,
+                materiality_abs=mat_abs,
+                materiality_pct=mat_pct,
+                matched_amount=candidate.charge.amount,
+            )
+            buckets.append(bucket)
+
             result = ReconciliationResult(
                 id=uuid.uuid4(),
                 tenant_id=self.tenant_id,
@@ -263,6 +311,7 @@ class OrderReconJob:
                 match_type=candidate.match_type,
                 confidence=candidate.confidence,
                 status=status,
+                bucket=bucket,
                 stripe_amount=candidate.charge.amount,
                 netsuite_amount=candidate.deposit.amount if candidate.deposit else None,
                 variance_amount=candidate.variance_amount,
@@ -279,3 +328,4 @@ class OrderReconJob:
             self.db.add(result)
 
         await self.db.commit()
+        return buckets

@@ -7,7 +7,7 @@ from decimal import Decimal
 from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, BeforeValidator, Field, computed_field
+from pydantic import BaseModel, BeforeValidator, Field, model_validator
 
 from app.services.reconciliation.four_bucket_classifier import classify
 
@@ -112,12 +112,19 @@ class ReconResultResponse(BaseModel):
     match_rule: str | None
     approved_by: StrFromUUID | None = None
     approved_at: datetime | None = None
+    # Persisted four-bucket classification (R2a). Populated from the stored
+    # ``ReconciliationResult.bucket`` column via from_attributes; the materiality
+    # routing is already baked into that value at write-time. Falls back to the
+    # legacy ``classify()`` (no materiality) when the stored value is missing/None
+    # — e.g. rows written before the column existed.
+    bucket: str | None = None
     created_at: datetime
 
-    @computed_field  # type: ignore[prop-decorator]
-    @property
-    def bucket(self) -> str:
-        return classify(self.match_type, self.variance_type, self.variance_amount)
+    @model_validator(mode="after")
+    def _fallback_bucket(self) -> ReconResultResponse:
+        if self.bucket is None:
+            self.bucket = classify(self.match_type, self.variance_type, self.variance_amount)
+        return self
 
     model_config = {"from_attributes": True}
 
@@ -135,6 +142,12 @@ class ReconRunResponse(BaseModel):
     exception_count: int
     unmatched_count: int
     total_variance: Decimal
+    # Per-bucket rollup counts (R2a) for the runs-list view. Default 0 for runs
+    # predating the columns.
+    matches_count: int = 0
+    rules_count: int = 0
+    auto_classifications_count: int = 0
+    needs_review_count: int = 0
     created_at: datetime
 
     model_config = {"from_attributes": True}
