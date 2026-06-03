@@ -68,7 +68,9 @@ class TestReconJobRunner:
         with (
             patch.object(runner, "_fetch_payouts", return_value=sample_payouts),
             patch.object(runner, "_fetch_deposits", return_value=sample_deposits),
-            patch.object(runner, "_store_results", return_value=None),
+            # _store_results is typed -> list[str] (the per-candidate buckets); honor
+            # that contract so the run() rollup .count() calls have a real list.
+            patch.object(runner, "_store_results", return_value=[]),
         ):
             summary = await runner.run(
                 date_from=date(2026, 3, 1),
@@ -89,6 +91,8 @@ class TestReconJobRunner:
 
         async def capture_store(run_id, candidates):
             stored_results.extend(candidates)
+            # Mirror the real _store_results contract: returns the per-candidate buckets.
+            return ["needs_review"] * len(candidates)
 
         with (
             patch.object(runner, "_fetch_payouts", return_value=sample_payouts),
@@ -108,7 +112,7 @@ class TestReconJobRunner:
         with (
             patch.object(runner, "_fetch_payouts", return_value=[]) as mock_fetch_p,
             patch.object(runner, "_fetch_deposits", return_value=[]),
-            patch.object(runner, "_store_results", return_value=None),
+            patch.object(runner, "_store_results", return_value=[]),
         ):
             await runner.run(
                 date_from=date(2026, 3, 1),

@@ -881,8 +881,15 @@ export interface ReconRun {
   matched_count: number;
   exception_count: number;
   unmatched_count: number;
+  /** Signed-net total variance for the run (matches the evidence pack). */
   total_variance: number;
   created_at: string;
+  // Per-bucket rollup counts persisted on the run (R2a) for the runs-list view.
+  // Optional: older runs predate the rollup columns.
+  matches_count?: number;
+  rules_count?: number;
+  auto_classifications_count?: number;
+  needs_review_count?: number;
 }
 
 export interface ReconResult {
@@ -916,6 +923,7 @@ export interface ReconResult {
 
 export interface ReconBucketCount {
   count: number;
+  /** Gross absolute variance for this bucket (SUM of ABS). NOT summable to run.total_variance, which is the signed-net run total. */
   total_variance: number;
 }
 

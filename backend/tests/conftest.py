@@ -172,6 +172,87 @@ def make_auth_headers(user: User) -> dict[str, str]:
 
 
 # ---------------------------------------------------------------------------
+# Canonical parent-row factories — satisfy reconciliation_results FKs
+# (reconciliation_results.payout_id -> payouts.id, .deposit_id -> netsuite_postings.id)
+# ---------------------------------------------------------------------------
+
+
+async def create_test_payout(
+    db: AsyncSession,
+    tenant_id,
+    *,
+    id=None,
+    source_id: str = "po_test",
+    amount: Decimal = Decimal("1000.00"),
+    fee_amount: Decimal = Decimal("30.00"),
+    net_amount: Decimal = Decimal("970.00"),
+    currency: str = "USD",
+    status: str = "paid",
+    arrival_date: date | None = None,
+) -> "Payout":  # noqa: F821
+    """Seed a canonical ``payouts`` row so a result can reference it via payout_id.
+
+    Pass ``id=`` (a UUID) to match the UUID a MatchCandidate.payout carries so the
+    reconciliation_results_payout_id_fkey is satisfied. Flushes for its id.
+    """
+    from app.models.canonical import Payout
+
+    payout = Payout(
+        id=id or uuid.uuid4(),
+        tenant_id=tenant_id,
+        dedupe_key=f"payout-{uuid.uuid4().hex}",
+        source="stripe",
+        source_id=source_id,
+        amount=amount,
+        fee_amount=fee_amount,
+        net_amount=net_amount,
+        currency=currency,
+        status=status,
+        arrival_date=arrival_date or date(2026, 3, 10),
+    )
+    db.add(payout)
+    await db.flush()
+    return payout
+
+
+async def create_test_netsuite_posting(
+    db: AsyncSession,
+    tenant_id,
+    *,
+    id=None,
+    netsuite_internal_id: str = "12345",
+    record_type: str = "custdep",
+    transaction_date: date | None = None,
+    amount: Decimal = Decimal("100.00"),
+    currency: str = "USD",
+    related_payout_id: str | None = None,
+) -> "NetsuitePosting":  # noqa: F821
+    """Seed a canonical ``netsuite_postings`` row so a result can reference it via deposit_id.
+
+    Pass ``id=`` (a UUID) to match the UUID a deposit/NSPaymentRecord carries so the
+    reconciliation_results_deposit_id_fkey is satisfied. Flushes for its id.
+    """
+    from app.models.canonical import NetsuitePosting
+
+    posting = NetsuitePosting(
+        id=id or uuid.uuid4(),
+        tenant_id=tenant_id,
+        dedupe_key=f"posting-{uuid.uuid4().hex}",
+        source="netsuite",
+        source_id=netsuite_internal_id or uuid.uuid4().hex,
+        netsuite_internal_id=netsuite_internal_id,
+        record_type=record_type,
+        transaction_date=transaction_date or date(2026, 3, 16),
+        amount=amount,
+        currency=currency,
+        related_payout_id=related_payout_id,
+    )
+    db.add(posting)
+    await db.flush()
+    return posting
+
+
+# ---------------------------------------------------------------------------
 # Reconciliation factories (run/result) — FK-ordered: run flushed before result
 # ---------------------------------------------------------------------------
 
@@ -216,8 +297,22 @@ async def create_test_recon_result(
     stripe_amount: Decimal = Decimal("10.00"),
     netsuite_amount: Decimal = Decimal("10.00"),
     currency: str = "USD",
+    bucket: str | None = None,
 ) -> ReconciliationResult:
-    """Create a ReconciliationResult bound to an existing run. Flushes for its id."""
+    """Create a ReconciliationResult bound to an existing run. Flushes for its id.
+
+    R2a persists the four-bucket classification on the row (compute-at-write), and
+    the read-side / SQL twin now select on that stored ``bucket`` column. So the
+    factory mirrors production by computing ``bucket`` via ``classify()`` (R1
+    parity — no materiality thresholds, so immaterial variance stays in
+    auto_classifications/rules). Pass ``bucket=`` to override, e.g. to seed a
+    *material* matched row stored as ``needs_review`` while keeping its
+    ``match_type='deterministic'``.
+    """
+    from app.services.reconciliation.four_bucket_classifier import classify
+
+    if bucket is None:
+        bucket = classify(match_type, variance_type, variance_amount)
     result = ReconciliationResult(
         tenant_id=tenant_id,
         run_id=run_id,
@@ -226,6 +321,7 @@ async def create_test_recon_result(
         match_type=match_type,
         confidence=confidence,
         status=status,
+        bucket=bucket,
         stripe_amount=stripe_amount,
         netsuite_amount=netsuite_amount,
         variance_amount=variance_amount,

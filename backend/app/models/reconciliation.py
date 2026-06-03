@@ -4,7 +4,7 @@ import uuid
 from datetime import date, datetime
 from decimal import Decimal
 
-from sqlalchemy import Date, DateTime, ForeignKey, Numeric, String, Text
+from sqlalchemy import Date, DateTime, ForeignKey, Index, Numeric, String, Text
 from sqlalchemy.dialects.postgresql import JSON, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -26,11 +26,18 @@ class ReconciliationRun(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     exception_count: Mapped[int] = mapped_column(default=0, nullable=False)
     unmatched_count: Mapped[int] = mapped_column(default=0, nullable=False)
     total_variance: Mapped[Decimal] = mapped_column(Numeric(15, 2), default=Decimal("0"), nullable=False)
+    # Per-bucket rollup counts for the runs-list view (R2a). Computed at write-time
+    # from the persisted ReconciliationResult.bucket values.
+    matches_count: Mapped[int] = mapped_column(default=0, server_default="0", nullable=False)
+    rules_count: Mapped[int] = mapped_column(default=0, server_default="0", nullable=False)
+    auto_classifications_count: Mapped[int] = mapped_column(default=0, server_default="0", nullable=False)
+    needs_review_count: Mapped[int] = mapped_column(default=0, server_default="0", nullable=False)
     parameters: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
 
 class ReconciliationResult(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     __tablename__ = "reconciliation_results"
+    __table_args__ = (Index("ix_reconciliation_results_run_bucket", "run_id", "bucket"),)
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
     run_id: Mapped[uuid.UUID] = mapped_column(
@@ -43,6 +50,12 @@ class ReconciliationResult(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     match_type: Mapped[str] = mapped_column(String(50), nullable=False)
     confidence: Mapped[Decimal] = mapped_column(Numeric(5, 4), nullable=False)
     status: Mapped[str] = mapped_column(String(50), default="pending", nullable=False)
+    # Persisted four-bucket classification (R2a). Computed at write-time via
+    # classify() with the tenant's materiality thresholds; the read-side and the
+    # SQL twin select on this column instead of recomputing.
+    bucket: Mapped[str] = mapped_column(
+        String(50), default="needs_review", server_default="needs_review", nullable=False
+    )
     stripe_amount: Mapped[Decimal | None] = mapped_column(Numeric(15, 2), nullable=True)
     netsuite_amount: Mapped[Decimal | None] = mapped_column(Numeric(15, 2), nullable=True)
     variance_amount: Mapped[Decimal] = mapped_column(Numeric(15, 2), default=Decimal("0"), nullable=False)

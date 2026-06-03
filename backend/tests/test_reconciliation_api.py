@@ -51,6 +51,92 @@ class TestReconAPI:
         )
         assert resp.match_type == "deterministic"
 
+    def test_recon_result_response_uses_persisted_bucket(self):
+        """R2a: bucket is a stored field read from the persisted column, NOT recomputed.
+
+        A deterministic + no-variance row would classify() to 'matches', but if the
+        persisted column says 'needs_review' (materiality routing baked in at
+        write-time), the response MUST surface the stored value.
+        """
+        from app.schemas.reconciliation import ReconResultResponse
+
+        class _Row:
+            id = str(uuid.uuid4())
+            run_id = str(uuid.uuid4())
+            payout_id = None
+            deposit_id = None
+            match_type = "deterministic"
+            confidence = Decimal("1.0")
+            status = "auto_matched"
+            bucket = "needs_review"  # persisted; differs from a naive classify()
+            stripe_amount = Decimal("1000.00")
+            netsuite_amount = Decimal("1000.00")
+            variance_amount = Decimal("0")
+            variance_type = None
+            variance_explanation = None
+            currency = "USD"
+            match_rule = "exact_payout_id"
+            approved_by = None
+            approved_at = None
+            created_at = datetime.now(timezone.utc)
+
+        resp = ReconResultResponse.model_validate(_Row())
+        assert resp.bucket == "needs_review"
+
+    def test_recon_result_response_bucket_falls_back_when_none(self):
+        """R2a: when the stored bucket is missing/None, fall back to legacy classify()
+        (no materiality — back-compat)."""
+        from app.schemas.reconciliation import ReconResultResponse
+
+        class _Row:
+            id = str(uuid.uuid4())
+            run_id = str(uuid.uuid4())
+            payout_id = None
+            deposit_id = None
+            match_type = "deterministic"
+            confidence = Decimal("1.0")
+            status = "auto_matched"
+            bucket = None  # not persisted → fall back
+            stripe_amount = Decimal("1000.00")
+            netsuite_amount = Decimal("1000.00")
+            variance_amount = Decimal("0")
+            variance_type = None
+            variance_explanation = None
+            currency = "USD"
+            match_rule = "exact_payout_id"
+            approved_by = None
+            approved_at = None
+            created_at = datetime.now(timezone.utc)
+
+        resp = ReconResultResponse.model_validate(_Row())
+        # deterministic + no variance → 'matches' via classify() fallback
+        assert resp.bucket == "matches"
+
+    def test_recon_result_response_schema_default_bucket(self):
+        """Constructing without an explicit bucket still validates (defaults to None,
+        then falls back to classify())."""
+        from app.schemas.reconciliation import ReconResultResponse
+
+        resp = ReconResultResponse(
+            id=str(uuid.uuid4()),
+            run_id=str(uuid.uuid4()),
+            payout_id=None,
+            deposit_id=None,
+            match_type="fuzzy",
+            confidence=Decimal("0.85"),
+            status="suggested",
+            stripe_amount=Decimal("1000.00"),
+            netsuite_amount=Decimal("999.50"),
+            variance_amount=Decimal("0.50"),
+            variance_type="fees",
+            variance_explanation=None,
+            currency="USD",
+            match_rule="fuzzy_amount_date",
+            created_at=datetime.now(timezone.utc),
+        )
+        # fuzzy → 'rules' via classify() fallback (no materiality)
+        assert resp.bucket == "rules"
+
     def test_recon_run_response_schema(self):
         from app.schemas.reconciliation import ReconRunResponse
 
@@ -67,9 +153,41 @@ class TestReconAPI:
             exception_count=5,
             unmatched_count=10,
             total_variance=Decimal("432.50"),
+            matches_count=80,
+            rules_count=5,
+            auto_classifications_count=5,
+            needs_review_count=10,
             created_at=datetime.now(timezone.utc),
         )
         assert resp.matched_count == 90
+        assert resp.matches_count == 80
+        assert resp.rules_count == 5
+        assert resp.auto_classifications_count == 5
+        assert resp.needs_review_count == 10
+
+    def test_recon_run_response_rollup_counts_default_zero(self):
+        """R2a rollup counts default to 0 (back-compat for runs predating the columns)."""
+        from app.schemas.reconciliation import ReconRunResponse
+
+        resp = ReconRunResponse(
+            id=str(uuid.uuid4()),
+            tenant_id=str(uuid.uuid4()),
+            date_from=date(2026, 3, 1),
+            date_to=date(2026, 3, 31),
+            subsidiary_id=None,
+            status="completed",
+            total_payouts=0,
+            total_deposits=0,
+            matched_count=0,
+            exception_count=0,
+            unmatched_count=0,
+            total_variance=Decimal("0"),
+            created_at=datetime.now(timezone.utc),
+        )
+        assert resp.matches_count == 0
+        assert resp.rules_count == 0
+        assert resp.auto_classifications_count == 0
+        assert resp.needs_review_count == 0
 
     def test_recon_approve_schema(self):
         from app.schemas.reconciliation import ReconResultApprove

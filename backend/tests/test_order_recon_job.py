@@ -78,6 +78,11 @@ def _mock_db() -> AsyncMock:
     db.add = MagicMock()
     db.commit = AsyncMock()
     db.refresh = AsyncMock()
+    # _store_results loads the tenant's materiality config; with no real DB the
+    # query resolves to None so the runner falls back to the $50 / 1% defaults.
+    no_config = MagicMock()
+    no_config.scalar_one_or_none = MagicMock(return_value=None)
+    db.execute = AsyncMock(return_value=no_config)
     return db
 
 

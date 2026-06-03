@@ -1,7 +1,17 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 
-const mutate = vi.fn();
+// mutate mirrors React Query's signature: (vars, options?) — the page passes a
+// per-call onSuccess to bump the reset-signal, so the mock must invoke it to
+// exercise the "note clears after a successful approve" path.
+const mutate = vi.fn(
+  (
+    _vars: unknown,
+    options?: { onSuccess?: () => void },
+  ) => {
+    options?.onSuccess?.();
+  },
+);
 
 // Mutable run + approve-result state so individual tests can drive the
 // run status (completed vs closed) and the mutation success payload.
@@ -84,14 +94,30 @@ describe("ReconciliationPage four buckets", () => {
     render(<ReconciliationPage />);
     fireEvent.click(screen.getByRole("button", { name: /approve all/i }));
     await waitFor(() => expect(mutate).toHaveBeenCalled());
+    // Second arg is the per-call React Query options ({ onSuccess }).
     expect(mutate).toHaveBeenCalledWith(
       expect.objectContaining({ bucket: expect.any(String) }),
+      expect.objectContaining({ onSuccess: expect.any(Function) }),
+    );
+  });
+
+  it("threads bulk-approval notes into the mutation payload", async () => {
+    render(<ReconciliationPage />);
+    const notes = screen.getByPlaceholderText(/note/i);
+    fireEvent.change(notes, { target: { value: "Q2 close" } });
+    fireEvent.click(screen.getByRole("button", { name: /approve all/i }));
+    await waitFor(() => expect(mutate).toHaveBeenCalled());
+    expect(mutate).toHaveBeenCalledWith(
+      expect.objectContaining({ bucket: expect.any(String), notes: "Q2 close" }),
+      expect.objectContaining({ onSuccess: expect.any(Function) }),
     );
   });
 
   it("shows the signed-net Total Variance from the run, not the bucket sum", () => {
-    // Bucket sum would be 0 + 12 + 9.24 + 1203 = 1224.24 (gross).
-    // The run's signed net is -42.5 — that is what must render.
+    // Bucket sum would be 0 + 12 + 9.24 + 1203 = 1224.24 (sum of per-bucket
+    // gross-abs totals). run.total_variance is the run-level SIGNED-NET figure
+    // (matches the evidence pack; can be negative on refund-heavy periods) —
+    // that is what must render, not the re-summed per-bucket gross-abs totals.
     render(<ReconciliationPage />);
     // Exact-case label on the summary-bar card (the bulk-approval card uses
     // lowercase "total variance", so match the capitalized summary label).
@@ -127,5 +153,34 @@ describe("ReconciliationPage four buckets", () => {
     render(<ReconciliationPage />);
     expect(screen.getByText(/Approved 7000/)).toBeInTheDocument();
     expect(screen.getByText(/skipped 335/)).toBeInTheDocument();
+  });
+
+  it("does NOT carry a typed note across buckets", () => {
+    render(<ReconciliationPage />);
+    // Type a note on the Matches bucket.
+    const notes = screen.getByPlaceholderText(/note/i) as HTMLInputElement;
+    fireEvent.change(notes, { target: { value: "for matches only" } });
+    expect(notes.value).toBe("for matches only");
+    // Switch to the Rules bucket (also bulk-approvable). The card is keyed by
+    // active bucket, so it remounts with a fresh, empty note — the audit note
+    // for one bucket must never ride into another bucket's approve.
+    fireEvent.click(screen.getByRole("button", { name: /^Rules \(/i }));
+    expect(
+      (screen.getByPlaceholderText(/note/i) as HTMLInputElement).value,
+    ).toBe("");
+  });
+
+  it("clears the note after a successful bulk approve", async () => {
+    render(<ReconciliationPage />);
+    const notes = screen.getByPlaceholderText(/note/i) as HTMLInputElement;
+    fireEvent.change(notes, { target: { value: "Q2 close" } });
+    fireEvent.click(screen.getByRole("button", { name: /approve all/i }));
+    // mutate's mock invokes onSuccess → page bumps the reset-signal → card
+    // clears its note so it can't ride into a re-approval.
+    await waitFor(() =>
+      expect(
+        (screen.getByPlaceholderText(/note/i) as HTMLInputElement).value,
+      ).toBe(""),
+    );
   });
 });
