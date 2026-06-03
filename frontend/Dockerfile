@@ -19,8 +19,12 @@ COPY . .
 # Build-time env vars (NEXT_PUBLIC_* are inlined at build time)
 ARG NEXT_PUBLIC_API_URL=http://localhost:8000
 ARG NEXT_PUBLIC_GOOGLE_CLIENT_ID=
+# Build id (e.g. `git rev-parse --short HEAD`) — inlined so the client bundle
+# and the /version route both carry THIS build's id for stale-bundle detection.
+ARG NEXT_PUBLIC_BUILD_ID=dev
 ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
 ENV NEXT_PUBLIC_GOOGLE_CLIENT_ID=$NEXT_PUBLIC_GOOGLE_CLIENT_ID
+ENV NEXT_PUBLIC_BUILD_ID=$NEXT_PUBLIC_BUILD_ID
 
 RUN npm run build
 

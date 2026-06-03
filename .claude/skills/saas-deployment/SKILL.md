@@ -460,6 +460,35 @@ server {
 
 SSE streaming works natively through nginx without special configuration.
 
+### Frontend deploy — the stale-bundle skew (read before redeploying the FE)
+
+The frontend deploy is **manual** (CI deploys backend only). A new FE build replaces the
+chunk/action IDs the previous build served, so **any browser tab opened before the deploy
+keeps running the OLD bundle against the NEW single-instance build** and silently breaks:
+the page renders (SSR) but is **"static, no interaction, and things pop up."**
+
+Server-side fingerprint in `ecom-netsuite-frontend-1` logs:
+`Error: Failed to find Server Action "x". This request might be from an older or newer deployment.`
+and `⨯ TypeError: Cannot read properties of undefined (reading 'bind') at NextNodeServer.handleRequestImpl`.
+The app defines **no `"use server"` actions** — this is purely the stale client bundle, not a
+code/infra bug, and the backend stays healthy (200s).
+
+**Operator process — required after every FE deploy:**
+1. **Pass the build-arg.** The FE buildx command MUST include `--build-arg NEXT_PUBLIC_BUILD_ID=$(git rev-parse --short HEAD)`. This inlines the build id into both the client bundle and the same-origin `/version` route, which is what the self-recovery check compares. Without it `BUILD_ID` falls back to `"dev"` and the version check is a deliberate no-op (no recovery).
+2. The FIRST deploy that ships the self-recovery fix still needs one final hard-refresh (`Cmd+Shift+R`) — yourself and any active tester — to seed the new build's id into open tabs. Every deploy after that self-recovers.
+3. Triage shortcut: if FE log errors are old + `curl -s -o /dev/null -w '%{http_code}' https://staging.suitestudio.ai/login` → 200, it's client cache, not an outage.
+
+**Durable fix — BUILT** (branch `fix/fe-stale-bundle-self-recovery`): the build id is injected
+via `NEXT_PUBLIC_BUILD_ID` (git SHA build-arg) into `frontend/src/lib/build-id.ts` and the
+same-origin `frontend/src/app/version/route.ts`. `useVersionCheck` polls `/version`
+(`cache: "no-store"`) on mount/focus/visibility/5-min and, on a build-id mismatch, surfaces a
+non-blocking `NewVersionBanner` ("A new version is available." + **Refresh**). Separately,
+`chunk-reload-guard.tsx` + `app/global-error.tsx`/`app/error.tsx` catch `ChunkLoadError` /
+dynamic-import failures and auto-reload **once** — guarded by a 10s sessionStorage timestamp
+(`__sb_chunk_reload_at`) so it can never infinite-loop. All `BUILD_ID === "dev"` paths no-op
+locally. Covered by vitest unit tests + `e2e/version-skew.spec.ts`. See memory
+`reference_frontend_stale_bundle_server_action_skew`.
+
 ### DNS Records
 
 ```
