@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from decimal import Decimal
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Numeric, String, Text
 from sqlalchemy.dialects.postgresql import JSON, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -79,5 +80,16 @@ class TenantConfig(Base, UUIDPrimaryKeyMixin, TimestampMixin):
 
     # Onboarding deep discovery profile
     onboarding_profile: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+    # Reconciliation materiality thresholds (R2a). A matched (deterministic|fuzzy)
+    # line with variance routes to needs_review when abs(variance) exceeds the
+    # absolute threshold OR the relative (pct of stripe amount) threshold.
+    # Default: $50 OR 1% relative (operator-ratified).
+    recon_materiality_abs: Mapped[Decimal] = mapped_column(
+        Numeric(15, 2), nullable=False, default=Decimal("50"), server_default="50"
+    )
+    recon_materiality_pct: Mapped[Decimal] = mapped_column(
+        Numeric(6, 4), nullable=False, default=Decimal("0.01"), server_default="0.0100"
+    )
 
     tenant: Mapped["Tenant"] = relationship("Tenant", back_populates="config")
