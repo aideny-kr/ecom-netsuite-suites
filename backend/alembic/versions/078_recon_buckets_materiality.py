@@ -92,6 +92,27 @@ def upgrade() -> None:
         """
     )
 
+    # --- backfill reconciliation_runs per-bucket rollup counts ---------------
+    # Recompute the 4 rollup counts from the just-backfilled bucket column so
+    # pre-078 runs aren't left at 0/0/0/0. Correlated subqueries per run.
+    op.execute(
+        """
+        UPDATE reconciliation_runs r SET
+          matches_count = (
+            SELECT count(*) FROM reconciliation_results x
+            WHERE x.run_id = r.id AND x.bucket = 'matches'),
+          rules_count = (
+            SELECT count(*) FROM reconciliation_results x
+            WHERE x.run_id = r.id AND x.bucket = 'rules'),
+          auto_classifications_count = (
+            SELECT count(*) FROM reconciliation_results x
+            WHERE x.run_id = r.id AND x.bucket = 'auto_classifications'),
+          needs_review_count = (
+            SELECT count(*) FROM reconciliation_results x
+            WHERE x.run_id = r.id AND x.bucket = 'needs_review')
+        """
+    )
+
 
 def downgrade() -> None:
     op.drop_column("tenant_configs", "recon_materiality_pct")

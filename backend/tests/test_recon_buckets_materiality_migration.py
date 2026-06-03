@@ -348,3 +348,96 @@ async def test_run_rollup_counts_persist(db, tenant_a):
     assert run.rules_count == 2
     assert run.auto_classifications_count == 3
     assert run.needs_review_count == 7
+
+
+# ---------------------------------------------------------------------------
+# 3. Run-rollup-count backfill — the literal migration-078 rollup UPDATE must
+#    recompute the 4 per-run counts from the (already-backfilled) bucket column,
+#    so pre-078 runs aren't left at 0/0/0/0.
+# ---------------------------------------------------------------------------
+
+# The literal rollup backfill copied verbatim from migration 078 upgrade().
+_MIGRATION_078_ROLLUP_SQL = text(
+    """
+    UPDATE reconciliation_runs r SET
+      matches_count = (
+        SELECT count(*) FROM reconciliation_results x
+        WHERE x.run_id = r.id AND x.bucket = 'matches'),
+      rules_count = (
+        SELECT count(*) FROM reconciliation_results x
+        WHERE x.run_id = r.id AND x.bucket = 'rules'),
+      auto_classifications_count = (
+        SELECT count(*) FROM reconciliation_results x
+        WHERE x.run_id = r.id AND x.bucket = 'auto_classifications'),
+      needs_review_count = (
+        SELECT count(*) FROM reconciliation_results x
+        WHERE x.run_id = r.id AND x.bucket = 'needs_review')
+    """
+)
+
+
+async def test_rollup_backfill_recomputes_run_counts(db, tenant_a):
+    """The literal migration-078 rollup UPDATE sets each run.*_count from rows.
+
+    Seeds a run whose 4 rollup counts are stale at the column default (0/0/0/0)
+    plus a mix of results carrying varied stored buckets, runs the EXACT rollup
+    SQL the migration uses, and asserts each count equals the per-bucket row
+    count — i.e. a pre-078 run is no longer left at zero. A second run is seeded
+    to prove the correlated subquery is scoped per run (no cross-run bleed)."""
+    run = await create_test_recon_run(db, tenant_a.id)
+    other = await create_test_recon_run(db, tenant_a.id)
+
+    # Bucket distribution for `run` (override bucket= so counts are explicit and
+    # independent of classify()): 3 matches, 1 rules, 2 auto_classifications,
+    # 4 needs_review.
+    distribution = (
+        [BUCKET_MATCHES] * 3 + [BUCKET_RULES] * 1 + [BUCKET_AUTO_CLASSIFICATIONS] * 2 + [BUCKET_NEEDS_REVIEW] * 4
+    )
+    for bucket in distribution:
+        await create_test_recon_result(db, tenant_a.id, run.id, bucket=bucket)
+    # A different bucket mix on `other` to confirm per-run scoping.
+    for bucket in [BUCKET_MATCHES, BUCKET_NEEDS_REVIEW, BUCKET_NEEDS_REVIEW]:
+        await create_test_recon_result(db, tenant_a.id, other.id, bucket=bucket)
+    await db.flush()
+
+    # Stale at the column default before the backfill runs.
+    await db.refresh(run)
+    assert (
+        run.matches_count,
+        run.rules_count,
+        run.auto_classifications_count,
+        run.needs_review_count,
+    ) == (0, 0, 0, 0)
+
+    # Run the EXACT rollup backfill SQL the migration uses.
+    await db.execute(_MIGRATION_078_ROLLUP_SQL)
+    await db.flush()
+    await db.refresh(run)
+    await db.refresh(other)
+
+    # Each count equals the per-bucket row count for `run`.
+    assert run.matches_count == 3
+    assert run.rules_count == 1
+    assert run.auto_classifications_count == 2
+    assert run.needs_review_count == 4
+
+    # Per-run scoping: `other`'s counts come only from its own rows.
+    assert other.matches_count == 1
+    assert other.rules_count == 0
+    assert other.auto_classifications_count == 0
+    assert other.needs_review_count == 2
+
+    # Cross-check each count against a direct per-bucket query (single source of truth).
+    for bucket, attr in (
+        (BUCKET_MATCHES, "matches_count"),
+        (BUCKET_RULES, "rules_count"),
+        (BUCKET_AUTO_CLASSIFICATIONS, "auto_classifications_count"),
+        (BUCKET_NEEDS_REVIEW, "needs_review_count"),
+    ):
+        expected = (
+            await db.execute(
+                text("SELECT count(*) FROM reconciliation_results WHERE run_id = :rid AND bucket = :b"),
+                {"rid": run.id, "b": bucket},
+            )
+        ).scalar_one()
+        assert getattr(run, attr) == expected
