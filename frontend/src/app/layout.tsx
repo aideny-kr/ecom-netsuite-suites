@@ -7,6 +7,8 @@ import { BrandingProvider } from "@/providers/branding-provider";
 import { ThemeProvider } from "@/providers/theme-provider";
 import { Toaster } from "@/components/ui/toaster";
 import { ImpersonationBanner } from "@/components/impersonation-banner";
+import { ChunkReloadGuard } from "@/components/chunk-reload-guard";
+import { NewVersionBanner } from "@/components/new-version-banner";
 import { GoogleOAuthWrapper } from "@/providers/google-oauth-provider";
 
 const inter = Inter({ subsets: ["latin"] });
@@ -32,6 +34,8 @@ export default function RootLayout({
                   <ImpersonationBanner />
                   {children}
                 </BrandingProvider>
+                <ChunkReloadGuard />
+                <NewVersionBanner />
                 <Toaster />
               </AuthProvider>
             </QueryProvider>
