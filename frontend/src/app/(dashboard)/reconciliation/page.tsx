@@ -39,6 +39,9 @@ export default function ReconciliationPage() {
   const [activeTab, setActiveTab] = useState<ReconBucketId>("matches");
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
+  // Bumped after every successful bulk-approve so the BulkApprovalCard clears its
+  // notes — a note must not survive an approve and ride into a re-approval.
+  const [approveResetSignal, setApproveResetSignal] = useState(0);
 
   const { data: runs } = useReconRuns();
   const { data: results } = useReconResults(selectedRunId, undefined, activeTab);
@@ -89,7 +92,9 @@ export default function ReconciliationPage() {
     // notes are audit-only — only send the field when the operator typed one.
     const trimmed = notes.trim();
     approveBucket.mutate(
-      trimmed ? { bucket: activeTab, notes: trimmed } : { bucket: activeTab }
+      trimmed ? { bucket: activeTab, notes: trimmed } : { bucket: activeTab },
+      // Clear the card's note on success so it can't carry into a re-approval.
+      { onSuccess: () => setApproveResetSignal((n) => n + 1) }
     );
   };
 
@@ -216,13 +221,17 @@ export default function ReconciliationPage() {
               Never offered on a closed run (mirrors the CloseChecklist gate). */}
           {isBulkApprovable && (
             <div className="space-y-2">
+              {/* key={activeTab}: remount per bucket so a note typed for one
+                  bucket can't carry into the next bucket's approve. */}
               <BulkApprovalCard
+                key={activeTab}
                 bucketLabel={activeBucket.label}
                 count={activeCount}
                 totalVariance={activeVariance}
                 onApprove={handleApproveBucket}
                 isApproving={approveBucket.isPending}
                 disabled={!reconEnabled || activeCount === 0 || isRunClosed}
+                resetSignal={approveResetSignal}
               />
               {/* Surface what bulk-approve actually did — the bucket count is
                   status-agnostic and can overstate the eligible set. */}

@@ -46,4 +46,24 @@ describe("BulkApprovalCard", () => {
     fireEvent.click(screen.getByRole("button", { name: /approve all/i }));
     expect(onApprove).toHaveBeenCalledWith("");
   });
+
+  it("disables the notes input when count is 0", () => {
+    render(<BulkApprovalCard {...base} count={0} onApprove={vi.fn()} />);
+    expect(screen.getByPlaceholderText(/note/i)).toBeDisabled();
+  });
+
+  it("clears the note when resetSignal changes (after a successful approve)", () => {
+    const { rerender } = render(
+      <BulkApprovalCard {...base} onApprove={vi.fn()} resetSignal={0} />,
+    );
+    const notes = screen.getByPlaceholderText(/note/i) as HTMLInputElement;
+    fireEvent.change(notes, { target: { value: "Q2 close" } });
+    expect(notes.value).toBe("Q2 close");
+    // Parent bumps resetSignal on a successful approve → note must clear so it
+    // cannot ride into a re-approval and mislabel the next audit record.
+    rerender(<BulkApprovalCard {...base} onApprove={vi.fn()} resetSignal={1} />);
+    expect(
+      (screen.getByPlaceholderText(/note/i) as HTMLInputElement).value,
+    ).toBe("");
+  });
 });

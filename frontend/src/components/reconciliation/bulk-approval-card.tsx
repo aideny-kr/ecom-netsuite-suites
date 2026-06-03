@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { CheckCircle2 } from "lucide-react";
 
 interface BulkApprovalCardProps {
@@ -13,6 +13,11 @@ interface BulkApprovalCardProps {
   onApprove: (notes: string) => void;
   isApproving: boolean;
   disabled?: boolean;
+  // Audit-integrity guard: a note typed for one bucket/approval must NOT carry
+  // into the next. The parent bumps this counter on every successful approve so
+  // the card clears its local notes. (The parent also keys the card by active
+  // bucket so a bucket switch remounts with fresh notes.)
+  resetSignal?: number;
 }
 
 export function BulkApprovalCard({
@@ -23,8 +28,14 @@ export function BulkApprovalCard({
   onApprove,
   isApproving,
   disabled,
+  resetSignal,
 }: BulkApprovalCardProps) {
   const [notes, setNotes] = useState("");
+  // Clear the note after a successful approve so it can't ride into a re-approval
+  // and mislabel the next immutable audit record.
+  useEffect(() => {
+    setNotes("");
+  }, [resetSignal]);
   const money = new Intl.NumberFormat("en-US", {
     style: "currency",
     currency,
@@ -57,7 +68,7 @@ export function BulkApprovalCard({
         type="text"
         value={notes}
         onChange={(e) => setNotes(e.target.value)}
-        disabled={disabled || isApproving}
+        disabled={blocked}
         placeholder="Optional note for the audit trail (e.g. month-end close)"
         className="mt-3 w-full rounded-md border bg-background px-3 py-1.5 text-[13px] text-foreground placeholder:text-muted-foreground disabled:cursor-not-allowed disabled:opacity-50"
       />
