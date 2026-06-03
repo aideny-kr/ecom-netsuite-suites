@@ -539,6 +539,7 @@ async def approve_result(
         actor_id=user.id,
         resource_type="reconciliation_result",
         resource_id=result_id,
+        payload={"notes": request.notes},
     )
     await db.commit()
     await db.refresh(recon_result)
@@ -614,13 +615,19 @@ async def approve_bucket(
     )
     approved_ids = (await db.execute(upd)).scalars().all()
 
-    # accurate skipped_count: count rows in a skip status AFTER the update that we
-    # did NOT just approve (atomic — pre-update total minus approved is wrong under
-    # concurrency, and the freshly-approved rows now match _SKIP_STATUSES too).
-    skip_filter = [*base_filter, ReconciliationResult.status.in_(_SKIP_STATUSES)]
-    if approved_ids:
-        skip_filter.append(ReconciliationResult.id.notin_(approved_ids))
-    skipped_count = (await db.execute(select(func.count(ReconciliationResult.id)).where(*skip_filter))).scalar_one()
+    # accurate skipped_count, atomically (same txn, post-update): the freshly
+    # approved rows now also match _SKIP_STATUSES, so the count of skip-status rows
+    # in the bucket equals pre-existing skips PLUS the rows we just approved.
+    # Subtract len(approved_ids) arithmetically rather than excluding their ids via
+    # NOT IN — cheaper, and the bucket is run-scoped so the ids are this batch's.
+    skip_status_count = (
+        await db.execute(
+            select(func.count(ReconciliationResult.id)).where(
+                *base_filter, ReconciliationResult.status.in_(_SKIP_STATUSES)
+            )
+        )
+    ).scalar_one()
+    skipped_count = skip_status_count - len(approved_ids)
 
     # one immutable per-line audit row per approved result (multi-row insert)
     if approved_ids:
