@@ -203,7 +203,15 @@ jobs:
       # frontend) to be running before Playwright tests can execute meaningful assertions.
       # Until a docker-compose-based stack-up step is wired in, this step will exit
       # gracefully so it does not block the required-checks gate.
+      #
+      # NEXT_PUBLIC_BUILD_ID MUST be a fixed non-"dev" value so the served app's
+      # BUILD_ID is non-dev and `useVersionCheck` actually runs. With BUILD_ID
+      # === "dev" the version check is a deliberate no-op and version-skew.spec.ts
+      # could never see the banner. The spec's /version intercept returns a
+      # DIFFERENT id, producing the skew the banner needs.
       - name: Run Playwright tests
+        env:
+          NEXT_PUBLIC_BUILD_ID: e2e-baseline
         run: |
           cd frontend && npx playwright test || true
         # TODO: Remove the `|| true` fallback and add a docker-compose stack-up step
