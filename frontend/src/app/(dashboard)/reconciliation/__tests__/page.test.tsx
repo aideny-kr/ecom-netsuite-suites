@@ -89,9 +89,22 @@ describe("ReconciliationPage four buckets", () => {
     );
   });
 
-  it("shows the signed-net Total Variance from the run, not the bucket sum", () => {
-    // Bucket sum would be 0 + 12 + 9.24 + 1203 = 1224.24 (gross).
-    // The run's signed net is -42.5 — that is what must render.
+  it("threads bulk-approval notes into the mutation payload", async () => {
+    render(<ReconciliationPage />);
+    const notes = screen.getByPlaceholderText(/note/i);
+    fireEvent.change(notes, { target: { value: "Q2 close" } });
+    fireEvent.click(screen.getByRole("button", { name: /approve all/i }));
+    await waitFor(() => expect(mutate).toHaveBeenCalled());
+    expect(mutate).toHaveBeenCalledWith(
+      expect.objectContaining({ bucket: expect.any(String), notes: "Q2 close" }),
+    );
+  });
+
+  it("shows the gross-abs Total Variance from the run, not the bucket sum", () => {
+    // Bucket sum would be 0 + 12 + 9.24 + 1203 = 1224.24 (sum of per-bucket
+    // gross-abs totals). run.total_variance is the run-level gross-abs figure
+    // (engine emits abs(); the run sum includes unmatched exposure) — that is
+    // what must render, not the re-summed per-bucket totals.
     render(<ReconciliationPage />);
     // Exact-case label on the summary-bar card (the bulk-approval card uses
     // lowercase "total variance", so match the capitalized summary label).

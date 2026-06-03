@@ -17,9 +17,10 @@ export function ReconSummaryBar({ summary, run }: ReconSummaryBarProps) {
     );
   }
 
-  // Total Variance is the SIGNED NET for the whole run (matches the evidence
-  // pack). The per-bucket totals are sum-of-absolutes (gross) and must NOT be
-  // summed here — that would disagree with run.total_variance.
+  // Total Variance is GROSS-ABSOLUTE for the whole run (the engine emits abs()
+  // per line; the run sum also includes unmatched exposure). It is NOT a signed
+  // net. The per-bucket totals are also gross-abs and must NOT be re-summed here
+  // — that would disagree with run.total_variance.
   const totalVariance = Number(run?.total_variance ?? 0);
 
   const cards = [
@@ -53,8 +54,8 @@ export function ReconSummaryBar({ summary, run }: ReconSummaryBarProps) {
     },
     {
       label: "Total Variance",
-      // Currency formatting keeps the sign in front of the symbol (-$42.50),
-      // making the signed net unambiguous.
+      // Currency-formatted gross-absolute total. If the stored figure ever
+      // carries a sign, the formatter keeps it in front of the symbol (-$42.50).
       value: totalVariance.toLocaleString("en-US", {
         style: "currency",
         currency: "USD",

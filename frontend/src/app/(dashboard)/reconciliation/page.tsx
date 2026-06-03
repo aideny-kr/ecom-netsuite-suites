@@ -84,9 +84,13 @@ export default function ReconciliationPage() {
     }
   }, [runs, selectedRunId]);
 
-  const handleApproveBucket = () => {
+  const handleApproveBucket = (notes: string) => {
     if (!selectedRunId || !isBulkApprovable) return;
-    approveBucket.mutate({ bucket: activeTab });
+    // notes are audit-only — only send the field when the operator typed one.
+    const trimmed = notes.trim();
+    approveBucket.mutate(
+      trimmed ? { bucket: activeTab, notes: trimmed } : { bucket: activeTab }
+    );
   };
 
   const handleInvestigate = (result: ReconResult) => {

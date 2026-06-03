@@ -30,4 +30,20 @@ describe("BulkApprovalCard", () => {
     rerender(<BulkApprovalCard {...base} count={0} onApprove={vi.fn()} />);
     expect(screen.getByRole("button", { name: /approve all/i })).toBeDisabled();
   });
+
+  it("threads the optional notes value into onApprove", () => {
+    const onApprove = vi.fn();
+    render(<BulkApprovalCard {...base} onApprove={onApprove} />);
+    const notes = screen.getByPlaceholderText(/note/i);
+    fireEvent.change(notes, { target: { value: "month-end close" } });
+    fireEvent.click(screen.getByRole("button", { name: /approve all/i }));
+    expect(onApprove).toHaveBeenCalledWith("month-end close");
+  });
+
+  it("calls onApprove with empty notes when none typed", () => {
+    const onApprove = vi.fn();
+    render(<BulkApprovalCard {...base} onApprove={onApprove} />);
+    fireEvent.click(screen.getByRole("button", { name: /approve all/i }));
+    expect(onApprove).toHaveBeenCalledWith("");
+  });
 });
