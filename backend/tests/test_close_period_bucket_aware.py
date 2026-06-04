@@ -11,9 +11,7 @@ The skipped count must be surfaced (response + audit payload) as
 ``results_left_for_review`` for transparency.
 """
 
-import uuid
-
-from sqlalchemy import func, select
+from sqlalchemy import select
 
 from app.api.v1.reconciliation import close_period
 from app.models.audit import AuditEvent
@@ -33,25 +31,15 @@ async def test_close_period_does_not_lock_needs_review_auto_matched(db, tenant_a
     run = await create_test_recon_run(db, tenant_a.id, status="completed")
 
     # (a) approved + matches → locks
-    r_a = await create_test_recon_result(
-        db, tenant_a.id, run.id, status="approved", bucket="matches"
-    )
+    r_a = await create_test_recon_result(db, tenant_a.id, run.id, status="approved", bucket="matches")
     # (b) auto_matched + matches → locks
-    r_b = await create_test_recon_result(
-        db, tenant_a.id, run.id, status="auto_matched", bucket="matches"
-    )
+    r_b = await create_test_recon_result(db, tenant_a.id, run.id, status="auto_matched", bucket="matches")
     # (c) auto_matched + needs_review → must NOT lock (material, unreviewed)
-    r_c = await create_test_recon_result(
-        db, tenant_a.id, run.id, status="auto_matched", bucket=BUCKET_NEEDS_REVIEW
-    )
+    r_c = await create_test_recon_result(db, tenant_a.id, run.id, status="auto_matched", bucket=BUCKET_NEEDS_REVIEW)
     # (d) approved + needs_review → locks (a human single-approved it)
-    r_d = await create_test_recon_result(
-        db, tenant_a.id, run.id, status="approved", bucket=BUCKET_NEEDS_REVIEW
-    )
+    r_d = await create_test_recon_result(db, tenant_a.id, run.id, status="approved", bucket=BUCKET_NEEDS_REVIEW)
     # (e) pending + needs_review → stays pending (never lockable)
-    r_e = await create_test_recon_result(
-        db, tenant_a.id, run.id, status="pending", bucket=BUCKET_NEEDS_REVIEW
-    )
+    r_e = await create_test_recon_result(db, tenant_a.id, run.id, status="pending", bucket=BUCKET_NEEDS_REVIEW)
     await db.flush()
 
     resp = await close_period("2026-04", user=user, db=db)

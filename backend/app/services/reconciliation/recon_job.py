@@ -12,7 +12,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.canonical import NetsuitePosting, Payout
 from app.models.reconciliation import ReconciliationResult, ReconciliationRun
-from app.models.tenant import TenantConfig
 from app.schemas.reconciliation import (
     DepositRecord,
     MatchCandidate,
@@ -27,13 +26,9 @@ from app.services.reconciliation.four_bucket_classifier import (
     classify,
 )
 from app.services.reconciliation.matching_engine import MatchingEngine
+from app.services.reconciliation.materiality import load_materiality
 
 logger = structlog.get_logger()
-
-# Materiality defaults when a tenant has no TenantConfig row (R2a). Mirror the
-# TenantConfig.recon_materiality_* server defaults: $50 OR 1% relative.
-_DEFAULT_MATERIALITY_ABS = Decimal("50")
-_DEFAULT_MATERIALITY_PCT = Decimal("0.01")
 
 
 class ReconJobRunner:
@@ -240,14 +235,10 @@ class ReconJobRunner:
     async def _load_materiality(self) -> tuple[Decimal, Decimal]:
         """Load this tenant's recon materiality thresholds (abs, pct).
 
-        Falls back to the $50 / 1% defaults when no TenantConfig row exists.
+        Delegates to the shared loader (single source of truth). Falls back to the
+        $50 / 1% defaults when no TenantConfig row exists.
         """
-        cfg = (
-            await self.db.execute(select(TenantConfig).where(TenantConfig.tenant_id == self.tenant_id))
-        ).scalar_one_or_none()
-        if cfg is None:
-            return _DEFAULT_MATERIALITY_ABS, _DEFAULT_MATERIALITY_PCT
-        return cfg.recon_materiality_abs, cfg.recon_materiality_pct
+        return await load_materiality(self.db, self.tenant_id)
 
     async def _store_results(
         self,

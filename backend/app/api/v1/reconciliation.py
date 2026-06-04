@@ -803,10 +803,14 @@ async def close_period(
 
         # Count the auto_matched + needs_review lines deliberately left unlocked,
         # so the close response + audit trail make the skipped items visible.
-        skipped_stmt = select(func.count()).select_from(ReconciliationResult).where(
-            ReconciliationResult.run_id == run.id,
-            ReconciliationResult.status == "auto_matched",
-            ReconciliationResult.bucket == BUCKET_NEEDS_REVIEW,
+        skipped_stmt = (
+            select(func.count())
+            .select_from(ReconciliationResult)
+            .where(
+                ReconciliationResult.run_id == run.id,
+                ReconciliationResult.status == "auto_matched",
+                ReconciliationResult.bucket == BUCKET_NEEDS_REVIEW,
+            )
         )
         left_for_review_count += (await db.execute(skipped_stmt)).scalar_one()
 
