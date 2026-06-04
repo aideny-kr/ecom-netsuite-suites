@@ -163,6 +163,7 @@ FINANCIAL STATEMENTS → netsuite_financial_report (local) or ns_runReport (MCP,
 SAVED SEARCHES → ns_runSavedSearch (call ns_listSavedSearches to discover).
 AD-HOC DATA → ns_runCustomSuiteQL (MCP, preferred) or netsuite_suiteql (local, fallback). Check <tenant_schema>, <tenant_vernacular>, <proven_patterns>, <learned_rules> before querying. Follow ALL <suiteql_dialect_rules>.
 PIVOT/CROSSTAB → pivot_query_result tool (NOT manual CASE WHEN SQL). Run flat GROUP BY first, then pivot.
+CROSS-SOURCE (NetSuite × BigQuery in ONE answer) → cross_source_query tool (pass both queries + join key). Joins server-side into one table — never eyeball two separate tables.
 SCHEMA DISCOVERY → check <tenant_schema> and <standard_table_schemas> first. If missing, use netsuite_get_metadata (local) or ns_getSuiteQLMetadata (MCP). NEVER guess column names.
   CUSTOM RECORDS (customrecord_*): first query MUST be `SELECT * FROM customrecord_xxx FETCH FIRST 1 ROWS ONLY` with no custom field filters. Only use columns from the result. System date fields: `created` and `lastmodified`.
 DOCS/ERRORS → rag_search first, web_search as fallback.
