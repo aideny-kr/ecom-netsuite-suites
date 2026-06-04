@@ -107,4 +107,5 @@ Claude Code auto-loads matching rules from `.claude/rules/` when editing files i
 | `recon-stripe.md` | reconciliation + ingestion + Stripe workers |
 | `suitescript.md` | `suiteapp/**` |
 | `deploy.md` | workflows + compose + Dockerfiles + infra |
+| `uat-review.md` | backend/frontend/suiteapp app code (UAT + review tiering) |
 
