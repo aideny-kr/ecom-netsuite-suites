@@ -437,6 +437,7 @@ _SOURCE_TOOL_PREFIXES: dict[str, tuple[str, ...]] = {
 _CROSS_SOURCE_TOOLS: frozenset[str] = frozenset(
     {
         "pivot_query_result",
+        "cross_source_query",
         "docs_create",
         "drive_read_doc",
         "clarify",

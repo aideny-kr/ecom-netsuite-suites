@@ -1,5 +1,6 @@
 from app.mcp.tools import (
     bigquery_tools,
+    cross_source_tool,
     data_sample,
     docs_tools,
     drive_tools,
@@ -128,6 +129,57 @@ TOOL_REGISTRY = {
                 "required": False,
                 "default": "suiteql",
                 "description": "SQL dialect: 'suiteql' or 'bigquery'",
+            },
+        },
+    },
+    "cross_source.query": {
+        "description": (
+            "Join data across TWO sources (NetSuite SuiteQL and BigQuery) into one "
+            "unified table. Pass both queries + the join key; the backend re-runs both, "
+            "joins them deterministically (DuckDB), and returns one table. Use this "
+            "INSTEAD of correlating two separate result tables yourself."
+        ),
+        "execute": cross_source_tool.execute,
+        "params_schema": {
+            "left_query": {"type": "string", "required": True, "description": "SQL for source A"},
+            "left_dialect": {
+                "type": "string",
+                "required": True,
+                "description": "'suiteql' or 'bigquery' for source A",
+            },
+            "right_query": {"type": "string", "required": True, "description": "SQL for source B"},
+            "right_dialect": {
+                "type": "string",
+                "required": True,
+                "description": "'suiteql' or 'bigquery' for source B",
+            },
+            "join_keys": {
+                "type": "array",
+                "required": True,
+                "description": (
+                    'Equality keys, e.g. [{"left": "sku", "right": "item"}]. '
+                    "Numeric-looking keys are matched by value (123 == 123.0); avoid this tool "
+                    "for zero-padded string keys (SKUs/zips with significant leading zeros)."
+                ),
+            },
+            "join_type": {
+                "type": "string",
+                "required": False,
+                "default": "inner",
+                "description": "'inner' or 'left'",
+            },
+            "select": {
+                "type": "array",
+                "required": False,
+                "description": "Optional output columns to keep (default: all)",
+            },
+            "pivot": {
+                "type": "object",
+                "required": False,
+                "description": (
+                    "Optional crosstab on the joined result: "
+                    '{"row_field", "column_field", "value_field", "aggregation"}'
+                ),
             },
         },
     },
