@@ -362,6 +362,13 @@ async def readonly_user(db: AsyncSession, tenant_a: Tenant) -> tuple[User, dict]
 
 
 @pytest_asyncio.fixture
+async def member_user(db: AsyncSession, tenant_a: Tenant) -> tuple[User, dict]:
+    # A non-admin user with no metrics.manage permission (role: readonly).
+    user, _ = await create_test_user(db, tenant_a, role_name="readonly")
+    return user, make_auth_headers(user)
+
+
+@pytest_asyncio.fixture
 async def finance_user(db: AsyncSession, tenant_a: Tenant) -> tuple[User, dict]:
     user, _ = await create_test_user(db, tenant_a, role_name="finance")
     return user, make_auth_headers(user)

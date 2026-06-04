@@ -1,6 +1,12 @@
 # backend/app/services/metrics/metric_authoring.py
 """Author-time validation for metric definitions (one-of, key-allowlist, DAG, params)."""
 
+import uuid
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models.metric_definition import MetricDefinition
+from app.services.chat.domain_knowledge import embed_domain_query
 from app.services.metrics.expression_evaluator import ExpressionError, extract_dependencies
 
 _SINGLE_SOURCE_KEYS = {"query", "dialect"}
@@ -35,3 +41,35 @@ def validate_definition(d: dict, *, allowed_cross_source_keys: set[str] | None =
         unknown = set(spec) - allowed
         if unknown:
             raise AuthoringError(f"blessed_spec has keys not in the live tool schema: {sorted(unknown)}")
+
+
+def _embed_text(payload: dict) -> str:
+    parts = [payload.get("display_name", ""), payload.get("definition", "")]
+    parts.extend(payload.get("synonyms") or [])
+    return " | ".join(p for p in parts if p)
+
+
+async def create_metric(db: AsyncSession, *, tenant_id: uuid.UUID, payload: dict) -> MetricDefinition:
+    """Persist a tenant (or SYSTEM) metric definition with a 1536-d intent embedding."""
+    embedding = await embed_domain_query(_embed_text(payload))
+    metric = MetricDefinition(
+        tenant_id=tenant_id,
+        key=payload["key"],
+        display_name=payload["display_name"],
+        definition=payload["definition"],
+        unit=payload["unit"],
+        source_kind=payload["source_kind"],
+        blessed_spec=payload.get("blessed_spec"),
+        expression=payload.get("expression"),
+        depends_on=payload.get("depends_on"),
+        params_schema=payload.get("params_schema"),
+        dimensions=payload.get("dimensions"),
+        synonyms=payload.get("synonyms"),
+        intent_embedding=embedding,
+        status="active",
+        version=1,
+        provenance={"author": "tenant_admin"},
+    )
+    db.add(metric)
+    await db.flush()
+    return metric
