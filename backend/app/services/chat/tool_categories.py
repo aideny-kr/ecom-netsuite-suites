@@ -62,6 +62,8 @@ _EXACT: dict[str, Category] = {
     "pricing.config_update": "pricing",
     "pricing_to_sheets": "pricing",
     "pricing.to_sheets": "pricing",
+    "metric_compute": "data_table",
+    "metric.compute": "data_table",
 }
 
 

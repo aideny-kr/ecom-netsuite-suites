@@ -4,6 +4,7 @@ from app.mcp.tools import (
     docs_tools,
     drive_tools,
     health,
+    metric_tools,
     netsuite_connectivity,
     netsuite_financial_report,
     netsuite_metadata_tool,
@@ -771,6 +772,33 @@ TOOL_REGISTRY = {
                     "Do not use fx_rate_overrides for EUR-based currencies or to set "
                     "final displayed prices."
                 ),
+            },
+        },
+    },
+    "metric.resolve": {
+        "description": (
+            "Resolve a named business metric from natural language or a key. Returns the blessed "
+            "definition, params_schema, and dimensions. Definitions are DISPLAY-ONLY — never compute "
+            "a number from them; call metric.compute to get a value."
+        ),
+        "execute": metric_tools.resolve,
+        "params_schema": {
+            "query": {"type": "string", "required": True, "description": "NL phrase or metric key"},
+            "top_k": {"type": "integer", "required": False, "description": "max matches (default 5)"},
+        },
+    },
+    "metric.compute": {
+        "description": (
+            "Deterministically compute a named metric by key with typed params (e.g. period token). "
+            "Executes the blessed query/expression; the result renders as a table automatically."
+        ),
+        "execute": metric_tools.compute,
+        "params_schema": {
+            "key": {"type": "string", "required": True, "description": "metric key (from metric.resolve)"},
+            "params": {
+                "type": "object",
+                "required": False,
+                "description": 'typed params, e.g. {"period": "last_quarter"}',
             },
         },
     },
