@@ -1,5 +1,6 @@
 import uuid
-from app.models.metric_definition import MetricDefinition, SYSTEM_TENANT_ID
+
+from app.models.metric_definition import SYSTEM_TENANT_ID, MetricDefinition
 
 
 async def test_metric_definition_roundtrip(db, tenant_a):
