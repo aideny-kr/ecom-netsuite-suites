@@ -92,4 +92,11 @@ class TenantConfig(Base, UUIDPrimaryKeyMixin, TimestampMixin):
         Numeric(6, 4), nullable=False, default=Decimal("0.01"), server_default="0.0100"
     )
 
+    # Tenant-configurable order-reference extraction pattern (R3 Part 1). A regex
+    # applied to Stripe payout-line descriptions / NetSuite sales-order refs to
+    # extract the order key. NULL is the sentinel meaning "use the engine default"
+    # (``DEFAULT_ORDER_REF_PATTERN`` = ``R\d{9}``), so existing tenants (e.g.
+    # Framework) extract byte-identically to the prior hardcoded pattern.
+    order_ref_pattern: Mapped[str | None] = mapped_column(String(200), nullable=True)
+
     tenant: Mapped["Tenant"] = relationship("Tenant", back_populates="config")
