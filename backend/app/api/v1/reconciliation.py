@@ -16,7 +16,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
-from sqlalchemy import and_, func, insert, or_, select, update
+from sqlalchemy import and_, func, insert, not_, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -797,11 +797,12 @@ async def close_period(
             ReconciliationResult.status == "approved",
             and_(
                 ReconciliationResult.status == "auto_matched",
-                ReconciliationResult.bucket != BUCKET_NEEDS_REVIEW,
+                not_(bucket_conditions(BUCKET_NEEDS_REVIEW)),
             ),
         )
         stmt = select(ReconciliationResult).where(
             ReconciliationResult.run_id == run.id,
+            ReconciliationResult.tenant_id == user.tenant_id,
             lock_predicate,
         )
         result = await db.execute(stmt)
@@ -818,8 +819,9 @@ async def close_period(
             .select_from(ReconciliationResult)
             .where(
                 ReconciliationResult.run_id == run.id,
+                ReconciliationResult.tenant_id == user.tenant_id,
                 ReconciliationResult.status == "auto_matched",
-                ReconciliationResult.bucket == BUCKET_NEEDS_REVIEW,
+                bucket_conditions(BUCKET_NEEDS_REVIEW),
             )
         )
         left_for_review_count += (await db.execute(skipped_stmt)).scalar_one()
@@ -843,5 +845,5 @@ async def close_period(
         "runs_closed": len(runs),
         "results_locked": locked_count,
         "results_left_for_review": left_for_review_count,
-        "message": f"Period {period} closed. {locked_count} results locked.",
+        "message": (f"Period {period} closed. {locked_count} results locked, {left_for_review_count} left for review."),
     }

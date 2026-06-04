@@ -59,6 +59,11 @@ async def test_close_period_does_not_lock_needs_review_auto_matched(db, tenant_a
     assert resp["results_locked"] == 3  # a, b, d
     assert resp["runs_closed"] == 1
 
+    # The human-facing message surfaces BOTH the locked count and the
+    # left-for-review count so the skipped (material, unreviewed) items are visible.
+    assert "3 results locked" in resp["message"]
+    assert "1 left for review" in resp["message"]
+
     # The run itself is closed.
     await db.refresh(run)
     assert run.status == "closed"
