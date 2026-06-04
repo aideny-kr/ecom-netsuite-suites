@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 from decimal import Decimal
 
 from app.schemas.order_reconciliation import (
@@ -11,22 +10,10 @@ from app.schemas.order_reconciliation import (
     OrderMatchCandidate,
 )
 
-_ORDER_REF_RE = re.compile(r"(R\d{9})")
-
-
-def extract_order_ref(text: str | None) -> str | None:
-    """Extract order reference (R followed by exactly 9 digits) from text.
-
-    Examples:
-        "Framework Marketplace Order ID: R628489275-XU9EPZPD" → "R628489275"
-        "Sales Order #R577684612" → "R577684612"
-        "R123456789" → "R123456789"
-        "STRIPE PAYOUT" → None
-    """
-    if not text:
-        return None
-    m = _ORDER_REF_RE.search(text)
-    return m.group(1) if m else None
+# Back-compat re-export: extraction now lives in the shared, tenant-configurable
+# ``order_ref`` module (R3 Part 1). Existing call sites / tests that import
+# ``extract_order_ref`` from here keep working.
+from app.services.reconciliation.order_ref import extract_order_ref  # noqa: F401
 
 
 class OrderMatchingEngine:

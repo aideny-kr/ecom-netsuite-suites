@@ -27,9 +27,10 @@ from app.services.reconciliation.four_bucket_classifier import (
     BUCKET_RULES,
     classify,
 )
-from app.services.reconciliation.order_matching_engine import (
-    OrderMatchingEngine,
+from app.services.reconciliation.order_matching_engine import OrderMatchingEngine
+from app.services.reconciliation.order_ref import (
     extract_order_ref,
+    load_order_ref_pattern,
 )
 
 logger = structlog.get_logger()
@@ -171,8 +172,12 @@ class OrderReconJob:
         """Fetch charges from payout_lines with line_type='charge'.
 
         Joins payouts to get arrival_date for date filtering and charge_date.
-        Extracts order_reference from description using extract_order_ref().
+        Extracts order_reference from description using extract_order_ref() with
+        this tenant's configured pattern (NULL -> engine default).
         """
+        # Load this tenant's order-reference pattern once (NULL -> engine default).
+        order_ref_pattern = await load_order_ref_pattern(self.db, self.tenant_id)
+
         p = aliased(Payout)
         stmt = (
             select(PayoutLine, p.arrival_date)
@@ -202,7 +207,7 @@ class OrderReconJob:
                 currency=pl.currency,
                 charge_date=arrival_date,
                 description=pl.description,
-                order_reference=extract_order_ref(pl.description),
+                order_reference=extract_order_ref(pl.description, order_ref_pattern),
             )
             for pl, arrival_date in rows
         ]
