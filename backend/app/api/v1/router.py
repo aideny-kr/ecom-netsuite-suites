@@ -19,6 +19,7 @@ from app.api.v1 import (
     health,
     invites,
     jobs,
+    learned_rules,
     mcp_connectors,
     netsuite_api_logs,
     netsuite_auth,
@@ -73,6 +74,7 @@ api_router.include_router(exports.router)
 api_router.include_router(invites.router)
 api_router.include_router(connection_alerts.router)
 api_router.include_router(pricing_config.router)
+api_router.include_router(learned_rules.router)
 api_router.include_router(task_files.router)
 api_router.include_router(agents.router)
 api_router.include_router(agent_instructions.router)
