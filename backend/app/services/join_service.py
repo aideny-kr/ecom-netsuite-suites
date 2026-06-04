@@ -28,6 +28,17 @@ def _to_cell(v: Any) -> Any:
     return str(v)
 
 
+def _unique_name(base: str, used: set[str]) -> str:
+    """Return a name not already in ``used`` (appending _2, _3, ...), and record it."""
+    name = base
+    i = 2
+    while name in used:
+        name = f"{base}_{i}"
+        i += 1
+    used.add(name)
+    return name
+
+
 def join_rows(
     left: dict,
     right: dict,
@@ -63,15 +74,17 @@ def join_rows(
             raise ValueError(f"right join key '{k.get('right')}' not in columns: {right_cols}")
 
     # Output columns: all left columns, then right columns except the join keys,
-    # suffixing any name that collides with a left column.
+    # suffixing right names that collide with a left column. All emitted names are
+    # made unique so two source columns never produce identically-named output.
     key_right = {k["right"] for k in join_keys}
-    left_set = set(left_cols)
-    out_specs: list[tuple[str, str, str]] = [("l", c, c) for c in left_cols]
+    left_names = set(left_cols)
+    used: set[str] = set()
+    out_specs: list[tuple[str, str, str]] = [("l", c, _unique_name(c, used)) for c in left_cols]
     for c in right_cols:
         if c in key_right:
             continue
-        out_name = c if c not in left_set else f"{c}{suffixes[1]}"
-        out_specs.append(("r", c, out_name))
+        base = c if c not in left_names else f"{c}{suffixes[1]}"
+        out_specs.append(("r", c, _unique_name(base, used)))
 
     con = duckdb.connect(database=":memory:")
     try:
@@ -104,6 +117,9 @@ def join_rows(
         con.close()
 
     if select:
+        unknown = [c for c in select if c not in out_columns]
+        if unknown:
+            raise ValueError(f"select columns not found in result: {unknown}. Available: {out_columns}")
         keep = [i for i, c in enumerate(out_columns) if c in select]
         out_columns = [out_columns[i] for i in keep]
         out_rows = [[r[i] for i in keep] for r in out_rows]

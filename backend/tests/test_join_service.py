@@ -98,3 +98,24 @@ def test_join_then_pivot():
     )
     assert out["pivoted"] is True
     assert "Web" in out["columns"] and "Retail" in out["columns"]
+
+
+def test_select_unknown_column_raises():
+    with pytest.raises(ValueError):
+        join_rows(LEFT, RIGHT, [{"left": "sku", "right": "item"}], "inner", select=["nope"])
+
+
+def test_duplicate_output_names_disambiguated():
+    # left already has 'amount' AND 'amount_r'; right 'amount' collides -> suffixed -> deduped.
+    left = {"columns": ["sku", "amount", "amount_r"], "rows": [["A", "1", "x"]]}
+    right = {"columns": ["item", "amount"], "rows": [["A", "2"]]}
+    out = join_rows(left, right, [{"left": "sku", "right": "item"}], "inner")
+    assert len(out["columns"]) == len(set(out["columns"]))  # all unique
+    assert out["columns"] == ["sku", "amount", "amount_r", "amount_r_2"]
+
+
+def test_inner_join_null_key_does_not_match():
+    left = {"columns": ["k", "v"], "rows": [[None, "1"]]}
+    right = {"columns": ["k", "w"], "rows": [[None, "2"]]}
+    out = join_rows(left, right, [{"left": "k", "right": "k"}], "inner")
+    assert out["row_count"] == 0  # NULL never equals NULL

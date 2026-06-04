@@ -118,3 +118,27 @@ def test_tool_categorized_data_table():
 
     assert categorize("cross_source_query") == "data_table"
     assert categorize("cross_source.query") == "data_table"
+
+
+@pytest.mark.asyncio
+async def test_execute_surfaces_join_error(monkeypatch):
+    """A downstream join/pivot error returns a structured {'error': ...}, never crashes."""
+
+    async def fake_run_source(query, dialect, context):
+        if dialect == "suiteql":
+            return {"columns": ["sku", "v"], "rows": [["A", "1"]], "truncated": False}
+        return {"columns": ["item", "w"], "rows": [["A", "2"]], "truncated": False}
+
+    monkeypatch.setattr(cross_source_tool, "_run_source", fake_run_source)
+    out = await cross_source_tool.execute(
+        {
+            "left_query": "a",
+            "left_dialect": "suiteql",
+            "right_query": "b",
+            "right_dialect": "bigquery",
+            "join_keys": [{"left": "sku", "right": "item"}],
+            "pivot": {"row_field": "nope", "column_field": "v", "value_field": "w"},
+        },
+        context={"db": object(), "tenant_id": "t-1"},
+    )
+    assert "error" in out

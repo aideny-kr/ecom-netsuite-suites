@@ -91,6 +91,7 @@ async def _run_source(query: str, dialect: str, context: dict) -> dict:
             account_id=account_id,
             query=clean,
             limit=_MAX_ROWS_PER_SIDE,
+            paginate=True,
         )
 
     rows = raw.get("rows", []) or []
@@ -136,8 +137,8 @@ async def execute(params: dict, context: dict | None = None, **kwargs: Any) -> d
         result = await asyncio.to_thread(
             join_rows, left, right, join_keys, join_type, select, ("_l", "_r"), "256MB", tmpdir, pivot
         )
-    except ValueError as e:
-        return {"error": str(e)}
+    except Exception as e:  # noqa: BLE001 — surface a structured error, never crash the turn
+        return {"error": f"Join failed: {str(e)[:300]}"}
 
     warnings: list[str] = []
     if left.get("truncated"):

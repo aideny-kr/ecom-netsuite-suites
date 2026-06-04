@@ -156,7 +156,11 @@ TOOL_REGISTRY = {
             "join_keys": {
                 "type": "array",
                 "required": True,
-                "description": 'Equality keys, e.g. [{"left": "sku", "right": "item"}]',
+                "description": (
+                    'Equality keys, e.g. [{"left": "sku", "right": "item"}]. '
+                    "Numeric-looking keys are matched by value (123 == 123.0); avoid this tool "
+                    "for zero-padded string keys (SKUs/zips with significant leading zeros)."
+                ),
             },
             "join_type": {
                 "type": "string",
