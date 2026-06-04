@@ -29,10 +29,15 @@ def _add_months(year: int, month: int, delta: int) -> tuple[int, int]:
 
 
 def _fiscal_quarter_start_month(today: date, fy_start: int, quarters_back: int) -> tuple[int, int]:
+    # Anchor on the calendar year the current fiscal year began. During the
+    # trailing calendar months (today.month < fy_start) the fiscal year started
+    # the previous calendar year, so roll the anchor back — mirroring the
+    # this_year/ytd branches. Without this the bounds land ~1 year in the future.
+    fy_year = today.year if today.month >= fy_start else today.year - 1
     months_since_fy = (today.month - fy_start) % 12
     q_index = months_since_fy // 3  # 0..3 within current fiscal year
     start_month_offset = q_index * 3 - quarters_back * 3
-    return _add_months(today.year, fy_start, start_month_offset)
+    return _add_months(fy_year, fy_start, start_month_offset)
 
 
 def resolve_period(token: str, *, fiscal_year_start_month: int, today: date) -> tuple[date, date]:
