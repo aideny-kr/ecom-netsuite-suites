@@ -519,6 +519,15 @@ async def approve_result(
     if not recon_result:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Result not found")
 
+    # Close = hard freeze. close_period leaves auto_matched+needs_review lines unlocked
+    # for human review; without this guard such a line could still be single-approved
+    # post-close, flipping it to 'approved' inside a closed period and never re-locked.
+    run = (
+        await db.execute(select(ReconciliationRun).where(ReconciliationRun.id == recon_result.run_id))
+    ).scalar_one_or_none()
+    if run is not None and run.status in ("closed", "locked"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Period is closed; cannot approve.")
+
     if recon_result.status == "approved":
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Already approved")
 
