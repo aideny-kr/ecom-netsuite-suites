@@ -33,3 +33,54 @@ async def test_admin_can_author_tenant_metric(client, admin_user):
     )
     assert resp.status_code == 201
     assert resp.json()["key"] == "net_margin"
+
+
+_SYSTEM_METRIC_PAYLOAD = {
+    "key": "net_margin",
+    "display_name": "Net Margin",
+    "definition": "x",
+    "unit": "percent",
+    "source_kind": "expression",
+    "expression": "net_income / gross_revenue",
+    "depends_on": ["net_income", "gross_revenue"],
+}
+
+
+async def test_tenant_admin_cannot_author_system_metric(client, admin_user):
+    # A tenant admin holds metrics.manage but is NOT a superadmin: the SYSTEM
+    # endpoint must reject them so cross-tenant authority stays superadmin-gated.
+    _, headers = admin_user
+    resp = await client.post(
+        "/api/v1/metrics/system",
+        json=_SYSTEM_METRIC_PAYLOAD,
+        headers=headers,
+    )
+    assert resp.status_code == 403
+
+
+async def test_superadmin_can_author_system_metric(client, superadmin_user, db):
+    from sqlalchemy import select
+
+    from app.models.metric_definition import SYSTEM_TENANT_ID, MetricDefinition
+    from app.models.tenant import Tenant
+
+    # SYSTEM-default metric rows FK to tenants.id; seed the canonical SYSTEM tenant
+    # parent row (rolled back per test by the db fixture) so the insert is valid.
+    exists = (await db.execute(select(Tenant.id).where(Tenant.id == SYSTEM_TENANT_ID))).scalar_one_or_none()
+    if exists is None:
+        db.add(Tenant(id=SYSTEM_TENANT_ID, name="System", slug="system", plan="free", is_active=True))
+        await db.flush()
+
+    _, headers = superadmin_user
+    resp = await client.post(
+        "/api/v1/metrics/system",
+        json=_SYSTEM_METRIC_PAYLOAD,
+        headers=headers,
+    )
+    assert resp.status_code == 201
+    assert resp.json()["key"] == "net_margin"
+
+    # The row must be written under SYSTEM_TENANT_ID (cross-tenant default), not
+    # the superadmin's own tenant.
+    row = (await db.execute(select(MetricDefinition).where(MetricDefinition.key == "net_margin"))).scalar_one()
+    assert row.tenant_id == SYSTEM_TENANT_ID

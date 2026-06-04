@@ -4,7 +4,8 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.core.dependencies import require_permission
+from app.core.dependencies import get_current_superadmin, require_permission
+from app.models.metric_definition import SYSTEM_TENANT_ID
 from app.models.user import User
 from app.schemas.metric import MetricCreate, MetricResponse
 from app.services import audit_service
@@ -15,6 +16,18 @@ from app.services.metrics.metric_authoring import (
 )
 
 router = APIRouter(prefix="/metrics", tags=["metrics"])
+
+
+def _to_response(metric) -> MetricResponse:
+    return MetricResponse(
+        id=str(metric.id),
+        key=metric.key,
+        display_name=metric.display_name,
+        unit=metric.unit,
+        source_kind=metric.source_kind,
+        status=metric.status,
+        version=metric.version,
+    )
 
 
 @router.post("", response_model=MetricResponse, status_code=status.HTTP_201_CREATED)
@@ -38,12 +51,29 @@ async def create_tenant_metric(
         resource_id=str(metric.id),
     )
     await db.commit()
-    return MetricResponse(
-        id=str(metric.id),
-        key=metric.key,
-        display_name=metric.display_name,
-        unit=metric.unit,
-        source_kind=metric.source_kind,
-        status=metric.status,
-        version=metric.version,
+    return _to_response(metric)
+
+
+@router.post("/system", response_model=MetricResponse, status_code=status.HTTP_201_CREATED)
+async def create_system_metric(
+    payload: MetricCreate,
+    user: Annotated[User, Depends(get_current_superadmin)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Author a SYSTEM-default (cross-tenant) metric. Superadmin-only by row grain."""
+    try:
+        validate_definition(payload.model_dump())
+    except AuthoringError as ex:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(ex)) from ex
+    metric = await create_metric(db, tenant_id=SYSTEM_TENANT_ID, payload=payload.model_dump())
+    await audit_service.log_event(
+        db=db,
+        tenant_id=SYSTEM_TENANT_ID,
+        category="metrics",
+        action="metric.create",
+        actor_id=user.id,
+        resource_type="metric_definition",
+        resource_id=str(metric.id),
     )
+    await db.commit()
+    return _to_response(metric)
