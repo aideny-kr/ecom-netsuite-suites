@@ -8,13 +8,17 @@ from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from sqlalchemy import select
 
+from app.models.canonical import PayoutLine
+from app.models.tenant import TenantConfig
 from app.schemas.order_reconciliation import (
     ChargeRecord,
     NSPaymentRecord,
     OrderMatchCandidate,
 )
 from app.services.reconciliation.order_recon_job import OrderReconJob
+from tests.conftest import create_test_payout
 
 TENANT_ID = str(uuid.uuid4())
 
@@ -107,13 +111,22 @@ class TestFetchChargesFromPayoutLines:
         )
 
         db = _mock_db()
-        # _fetch_charges uses result.all() returning (PayoutLine, arrival_date) tuples
-        execute_result = MagicMock()
-        execute_result.all.return_value = [
+        # _fetch_charges now issues TWO queries in order:
+        #   1. load_order_ref_pattern -> select(TenantConfig); scalar_one_or_none()
+        #      returns None here so the runner falls back to the engine default
+        #      R\d{9} pattern (mirrors a NULL-config / Framework tenant).
+        #   2. the charges query -> result.all() yields (PayoutLine, arrival_date)
+        #      tuples.
+        # The mock must be query-order-aware: a single return value would feed the
+        # MagicMock-typed pattern into re.compile and raise. Use a side_effect list.
+        pattern_result = MagicMock()
+        pattern_result.scalar_one_or_none = MagicMock(return_value=None)
+        charges_result = MagicMock()
+        charges_result.all.return_value = [
             (pl1, pl1.arrival_date),
             (pl2, pl2.arrival_date),
         ]
-        db.execute = AsyncMock(return_value=execute_result)
+        db.execute = AsyncMock(side_effect=[pattern_result, charges_result])
 
         job = OrderReconJob(db=db, tenant_id=TENANT_ID)
         charges = await job._fetch_charges(
@@ -121,8 +134,8 @@ class TestFetchChargesFromPayoutLines:
             date_to=date(2026, 3, 20),
         )
 
-        # Verify the query was executed
-        db.execute.assert_called_once()
+        # Two queries executed: the order_ref_pattern load then the charges query.
+        assert db.execute.call_count == 2
 
         assert len(charges) == 2
 
@@ -364,3 +377,158 @@ class TestStoresResultsWithNullPayoutId:
         assert result.deposit_id is None
         assert result.match_type == "unmatched"
         assert result.evidence["charge_source_id"] == "ch_002"
+
+
+# ---------------------------------------------------------------------------
+# DB-backed: per-tenant order_ref_pattern threading through _fetch_charges
+# (R3 Part 1, Task T3). These run against the local docker Postgres via the
+# conftest ``db`` fixture (each test is rolled back). They assert that the
+# extraction pattern loaded once in _fetch_charges comes from THIS tenant's
+# TenantConfig.order_ref_pattern, and that a NULL pattern (Framework) extracts
+# the R\d{9} ref byte-identically to the prior hardcoded behavior.
+#
+# Written rigorously following the recon DB-test patterns but NOT run in the
+# implementer environment (no DB here); the PM runs them post-flight.
+# ---------------------------------------------------------------------------
+
+
+async def _seed_charge_line(
+    db,
+    tenant_id,
+    *,
+    description: str,
+    source_id: str = "ch_db",
+    amount: Decimal = Decimal("100.00"),
+    fee: Decimal = Decimal("3.00"),
+    net: Decimal = Decimal("97.00"),
+    currency: str = "USD",
+    arrival_date: date = date(2026, 3, 15),
+    subsidiary_id: str | None = None,
+) -> PayoutLine:
+    """Seed a real Payout + PayoutLine(line_type='charge') for _fetch_charges.
+
+    _fetch_charges JOINs payout_lines -> payouts for arrival_date, so the parent
+    Payout must carry the arrival_date that lands inside the queried window
+    (+/- _DATE_BUFFER).
+    """
+    payout = await create_test_payout(db, tenant_id, arrival_date=arrival_date)
+    line = PayoutLine(
+        id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        dedupe_key=f"pl-{uuid.uuid4().hex}",
+        source="stripe",
+        source_id=source_id,
+        subsidiary_id=subsidiary_id,
+        payout_id=payout.id,
+        line_type="charge",
+        amount=amount,
+        fee=fee,
+        net=net,
+        currency=currency,
+        description=description,
+    )
+    db.add(line)
+    await db.flush()
+    return line
+
+
+class TestFetchChargesUsesTenantPattern:
+    """_fetch_charges threads THIS tenant's order_ref_pattern through extraction."""
+
+    async def test_custom_pattern_tenant_extracts_via_that_pattern(self, db, tenant_a):
+        """A tenant whose order_ref_pattern is set extracts using that pattern.
+
+        The same description that yields nothing under the default R\\d{9} pattern
+        yields the order-number under a custom ``(#\\d{4,})`` pattern.
+        """
+        cfg = (await db.execute(select(TenantConfig).where(TenantConfig.tenant_id == tenant_a.id))).scalar_one()
+        cfg.order_ref_pattern = r"(#\d{4,})"
+        await db.flush()
+
+        # No R\d{9} present — only a #-prefixed order number the custom pattern matches.
+        await _seed_charge_line(
+            db,
+            tenant_a.id,
+            source_id="ch_custom",
+            description="Order #100423 settled",
+        )
+
+        job = OrderReconJob(db=db, tenant_id=str(tenant_a.id))
+        charges = await job._fetch_charges(
+            date_from=date(2026, 3, 10),
+            date_to=date(2026, 3, 20),
+        )
+
+        assert len(charges) == 1
+        assert charges[0].source_id == "ch_custom"
+        # Extracted via the tenant's custom pattern, NOT the default R\d{9}.
+        assert charges[0].order_reference == "#100423"
+
+    async def test_null_pattern_tenant_extracts_r9_identically(self, db, tenant_a):
+        """A NULL-pattern tenant (Framework) extracts R\\d{9} byte-identically.
+
+        This is the #1 behavior-preserving invariant: NULL order_ref_pattern must
+        produce the same order_reference as the prior hardcoded pattern.
+        """
+        # conftest leaves order_ref_pattern NULL — assert that precondition.
+        cfg = (await db.execute(select(TenantConfig).where(TenantConfig.tenant_id == tenant_a.id))).scalar_one()
+        assert cfg.order_ref_pattern is None
+
+        await _seed_charge_line(
+            db,
+            tenant_a.id,
+            source_id="ch_fw",
+            description="Framework Marketplace Order ID: R628489275-XU9EPZPD",
+        )
+
+        job = OrderReconJob(db=db, tenant_id=str(tenant_a.id))
+        charges = await job._fetch_charges(
+            date_from=date(2026, 3, 10),
+            date_to=date(2026, 3, 20),
+        )
+
+        assert len(charges) == 1
+        assert charges[0].source_id == "ch_fw"
+        assert charges[0].order_reference == "R628489275"
+
+    async def test_custom_pattern_differs_from_default_on_same_description(self, db, tenant_a, tenant_b):
+        """Two tenants, same description, different patterns -> different refs.
+
+        Proves the pattern is loaded per-tenant (not a process-global), so the
+        custom-pattern tenant extracts differently than the default tenant on an
+        identical payout-line description.
+        """
+        # tenant_a: custom pattern that captures a 10-digit run.
+        cfg_a = (await db.execute(select(TenantConfig).where(TenantConfig.tenant_id == tenant_a.id))).scalar_one()
+        cfg_a.order_ref_pattern = r"(\d{10})"
+        await db.flush()
+        # tenant_b: default (NULL) pattern.
+
+        # Description contains BOTH a 10-digit run and an R\d{9}.
+        shared_description = "Order 1004230001 ref R628489275 settled"
+
+        await _seed_charge_line(
+            db,
+            tenant_a.id,
+            source_id="ch_a",
+            description=shared_description,
+        )
+        await _seed_charge_line(
+            db,
+            tenant_b.id,
+            source_id="ch_b",
+            description=shared_description,
+        )
+
+        job_a = OrderReconJob(db=db, tenant_id=str(tenant_a.id))
+        charges_a = await job_a._fetch_charges(date_from=date(2026, 3, 10), date_to=date(2026, 3, 20))
+
+        job_b = OrderReconJob(db=db, tenant_id=str(tenant_b.id))
+        charges_b = await job_b._fetch_charges(date_from=date(2026, 3, 10), date_to=date(2026, 3, 20))
+
+        assert len(charges_a) == 1
+        assert len(charges_b) == 1
+        # Custom-pattern tenant -> 10-digit run; default tenant -> R\d{9}.
+        assert charges_a[0].order_reference == "1004230001"
+        assert charges_b[0].order_reference == "R628489275"
+        assert charges_a[0].order_reference != charges_b[0].order_reference

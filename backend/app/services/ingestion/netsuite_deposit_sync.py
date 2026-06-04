@@ -21,6 +21,14 @@ from app.models.connection import Connection
 from app.services.netsuite_client import execute_suiteql_via_rest
 from app.services.netsuite_oauth_service import get_valid_token
 
+# Back-compat re-export: order-reference extraction now lives in the shared,
+# tenant-configurable ``order_ref`` module (R3 Part 1). Existing imports of
+# ``extract_order_ref`` from this module keep working.
+from app.services.reconciliation.order_ref import (  # noqa: F401
+    extract_order_ref,
+    load_order_ref_pattern,
+)
+
 logger = structlog.get_logger()
 
 # Regex patterns for extracting Stripe payout IDs from memo/description fields
@@ -29,9 +37,6 @@ _PAYOUT_ID_PATTERNS = [
     re.compile(r"payout[:\s_-]*([A-Za-z0-9]{20,30})", re.IGNORECASE),
     re.compile(r"stripe\.com/payouts/(\w+)", re.IGNORECASE),
 ]
-
-# Regex for extracting order references (R followed by 9 digits) from sales order display names
-_ORDER_REF_PATTERN = re.compile(r"(R\d{9})")
 
 # SuiteQL query template — pagination handled by execute_suiteql_via_rest(paginate=True)
 _DEPOSIT_QUERY = """\
@@ -68,18 +73,6 @@ class DepositSyncResult:
     records_updated: int = 0
     records_new: int = 0
     errors: list[str] = field(default_factory=list)
-
-
-def extract_order_ref(sales_order_ref: str | None) -> str | None:
-    """Extract an order reference (R followed by 9 digits) from a sales order display name.
-
-    E.g. "Sales Order #R577684612" → "R577684612"
-    Returns the first match, or None.
-    """
-    if not sales_order_ref:
-        return None
-    m = _ORDER_REF_PATTERN.search(sales_order_ref)
-    return m.group(1) if m else None
 
 
 def extract_payout_id(memo: str | None) -> str | None:
@@ -144,6 +137,9 @@ async def sync_netsuite_deposits(
         result.errors.append("Failed to get valid NetSuite OAuth token")
         return result
 
+    # Load this tenant's order-reference pattern once (NULL -> engine default).
+    order_ref_pattern = await load_order_ref_pattern(db, tenant_id)
+
     # 3. Build and execute SuiteQL query
     creds = decrypt_credentials(connection.encrypted_credentials)
     account_id = creds.get("account_id", "")
@@ -196,7 +192,7 @@ async def sync_netsuite_deposits(
 
         # Extract order reference from linked sales order (primary)
         sales_order_ref = row_dict.get("sales_order_ref", "")
-        order_ref = extract_order_ref(sales_order_ref) if sales_order_ref else None
+        order_ref = extract_order_ref(sales_order_ref, order_ref_pattern) if sales_order_ref else None
 
         # Fallback: extract payout ID from memo (legacy path)
         payout_id = extract_payout_id(memo) if not order_ref else None
