@@ -807,6 +807,26 @@ def _intercept_tool_result(
             "query": query,
             "truncated": truncated,
         }
+        # Metric trust boundary: a metric_data_table is a single computed number.
+        # The SSE event_data above STILL carries the full rows (the FE renders the
+        # value), but the LLM-facing condensed string must withhold every row value
+        # so the model cannot state or recompute the number (anti-hallucination
+        # invariant). Opt-in via the flag — every other data_table tool is byte-
+        # identical because the flag is absent.
+        if parsed.get("suppress_llm_value") is True:
+            condensed = json.dumps(
+                {
+                    "row_count": row_count,
+                    "columns": columns,
+                    "note": (
+                        "1-row metric table rendered on the frontend. "
+                        "Do NOT state or recompute the number; provide commentary only."
+                    ),
+                },
+                default=str,
+            )
+            return "data_table", sse_event_data, condensed
+
         # Investigation queries (FULL context): send all rows so LLM can reason
         # over system notes, field changes, timelines, etc.
         # Standard queries: 5-row preview to save tokens.

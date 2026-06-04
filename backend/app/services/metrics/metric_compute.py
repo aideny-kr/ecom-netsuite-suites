@@ -81,6 +81,10 @@ def metric_data_table(display_name: str, value, unit: str, period_label: str, sp
         "row_count": 1,
         "query": spec,
         "truncated": False,
+        # Trust boundary: the whole table is ONE computed number. The orchestrator's
+        # data_table interception must render it on the frontend but withhold the
+        # value from the LLM-facing condensed string (anti-hallucination invariant).
+        "suppress_llm_value": True,
     }
 
 
