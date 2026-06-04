@@ -1,9 +1,10 @@
 # backend/tests/services/metrics/test_expression_evaluator.py
 import pytest
+
 from app.services.metrics.expression_evaluator import (
+    ExpressionError,
     evaluate_expression,
     extract_dependencies,
-    ExpressionError,
 )
 
 
