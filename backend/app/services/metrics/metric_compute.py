@@ -4,11 +4,11 @@
 import re
 from datetime import date, datetime
 
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.metric_definition import MetricDefinition
+from app.models.metric_definition import SYSTEM_TENANT_ID, MetricDefinition
 from app.services.metrics.expression_evaluator import evaluate_expression
-from app.services.metrics.metric_resolver import resolve_metrics
 from app.services.metrics.period_resolver import resolve_period
 
 
@@ -96,9 +96,31 @@ async def _execute_scalar_query(db, tenant_id, metric: MetricDefinition, coerced
     return float(rows[0][0])
 
 
+async def resolve_metric_by_key(db: AsyncSession, *, tenant_id, key: str) -> MetricDefinition | None:
+    """Exact-key lookup with tenant-override-by-key semantics (tenant row wins over SYSTEM).
+
+    Compute requests name a metric by its exact key, so this must NOT route through the
+    embedding-similarity resolver: with seeded intent_embeddings a sibling metric whose
+    embedding ranks nearer to the key string can evict the requested row out of a narrow
+    top_k slice, yielding a false 'no_blessed_definition'/'missing_dependency'. A direct
+    keyed query is independent of embeddings and catalog size.
+    """
+    stmt = select(MetricDefinition).where(
+        or_(
+            MetricDefinition.tenant_id == tenant_id,
+            MetricDefinition.tenant_id == SYSTEM_TENANT_ID,
+        ),
+        MetricDefinition.status == "active",
+        MetricDefinition.key == key,
+    )
+    rows = list((await db.execute(stmt)).scalars().all())
+    # Tenant override wins by key (mirrors resolve_metrics' by_key precedence).
+    tenant_row = next((r for r in rows if r.tenant_id == tenant_id), None)
+    return tenant_row or next((r for r in rows), None)
+
+
 async def compute_metric(db: AsyncSession, *, tenant_id, key: str, params: dict, context: dict) -> dict:
-    matches = await resolve_metrics(db, tenant_id=tenant_id, query=key, top_k=1)
-    metric = next((m for m in matches if m.key == key), None)
+    metric = await resolve_metric_by_key(db, tenant_id=tenant_id, key=key)
     if metric is None:
         return {
             "error": "no_blessed_definition",
@@ -112,10 +134,7 @@ async def compute_metric(db: AsyncSession, *, tenant_id, key: str, params: dict,
     if metric.source_kind == "expression":
         leaves = {}
         for dep in metric.depends_on or []:
-            dmatch = next(
-                (m for m in await resolve_metrics(db, tenant_id=tenant_id, query=dep, top_k=1) if m.key == dep),
-                None,
-            )
+            dmatch = await resolve_metric_by_key(db, tenant_id=tenant_id, key=dep)
             if dmatch is None:
                 return {
                     "error": "missing_dependency",
