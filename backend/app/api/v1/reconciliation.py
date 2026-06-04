@@ -16,7 +16,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
-from sqlalchemy import func, insert, select, update
+from sqlalchemy import and_, func, insert, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -43,6 +43,7 @@ from app.services import audit_service
 from app.services.reconciliation.evidence_service import EvidencePackGenerator
 from app.services.reconciliation.four_bucket_classifier import (
     ALL_BUCKETS,
+    BUCKET_NEEDS_REVIEW,
     BULK_APPROVABLE_BUCKETS,
     bucket_conditions,
 )
@@ -775,10 +776,23 @@ async def close_period(
         )
 
     locked_count = 0
+    left_for_review_count = 0
     for run in runs:
+        # Lock a result iff it was approved (a human reviewed it — even a
+        # needs_review line that was single-approved), OR it is an auto_matched
+        # line that is NOT routed to needs_review. A confident match with a
+        # MATERIAL variance (status='auto_matched', bucket='needs_review') is left
+        # unlocked so the discrepancy is not silently buried on close (HITL).
+        lock_predicate = or_(
+            ReconciliationResult.status == "approved",
+            and_(
+                ReconciliationResult.status == "auto_matched",
+                ReconciliationResult.bucket != BUCKET_NEEDS_REVIEW,
+            ),
+        )
         stmt = select(ReconciliationResult).where(
             ReconciliationResult.run_id == run.id,
-            ReconciliationResult.status.in_(["approved", "auto_matched"]),
+            lock_predicate,
         )
         result = await db.execute(stmt)
         period_results = result.scalars().all()
@@ -786,6 +800,15 @@ async def close_period(
         for r in period_results:
             r.status = "locked"
             locked_count += 1
+
+        # Count the auto_matched + needs_review lines deliberately left unlocked,
+        # so the close response + audit trail make the skipped items visible.
+        skipped_stmt = select(func.count()).select_from(ReconciliationResult).where(
+            ReconciliationResult.run_id == run.id,
+            ReconciliationResult.status == "auto_matched",
+            ReconciliationResult.bucket == BUCKET_NEEDS_REVIEW,
+        )
+        left_for_review_count += (await db.execute(skipped_stmt)).scalar_one()
 
         run.status = "closed"
 
@@ -797,6 +820,7 @@ async def close_period(
         actor_id=user.id,
         resource_type="reconciliation_period",
         resource_id=period,
+        payload={"results_left_for_review": left_for_review_count},
     )
     await db.commit()
 
@@ -804,5 +828,6 @@ async def close_period(
         "period": period,
         "runs_closed": len(runs),
         "results_locked": locked_count,
+        "results_left_for_review": left_for_review_count,
         "message": f"Period {period} closed. {locked_count} results locked.",
     }
