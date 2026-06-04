@@ -267,3 +267,32 @@ class TestNonQueryableEntityAdvisory:
         assert "<resolved_entities>" in result
         assert "<internal_script_id>custitem_fw_platform</internal_script_id>" in result
         assert "<ambiguous_entities>" not in result
+
+    @pytest.mark.asyncio
+    async def test_instruction_header_scopes_filter_authority_to_resolved(self):
+        """With only an advisory match, the instruction header must scope the
+        FROM/WHERE 'prefer these script IDs' guidance to resolved entities — it
+        must NOT blanket-authorize using the matched (advisory) ids as filters."""
+        adapter = _make_adapter(["Laptop 13"])
+        db = _make_db_with_matches(
+            [
+                {
+                    "script_id": "customlist_fw_cpu_platform.14",
+                    "entity_type": "customlistvalue",
+                    "sim": 1.0,
+                    "description": "Value for list: customlist_fw_cpu_platform",
+                },
+            ]
+        )
+
+        result = await TenantEntityResolver.resolve_entities(
+            "How many Laptop 13 did we sell?", TENANT_ID, db, adapter, "haiku"
+        )
+
+        # New scoped wording present...
+        assert "Prefer the resolved entity script IDs" in result
+        # ...and the old blanket FROM/WHERE authorization is gone.
+        assert (
+            "Prefer these internal script IDs and rules when constructing your SuiteQL FROM and WHERE clauses."
+            not in result
+        )

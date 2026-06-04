@@ -12,13 +12,14 @@ from app.services.chat.llm_adapter import BaseLLMAdapter
 
 logger = structlog.get_logger(__name__)
 
-# Entity types that are NOT directly queryable columns. A match here is a list
-# *value* (customlistvalue → "list_name.internal_id"), a list definition, or an
-# operational reference (saved search / script / workflow) — none can go into a
-# SuiteQL WHERE clause on their own. Injecting them as authoritative "use this
-# script_id" filters caused confident-wrong answers (e.g. "Laptop 13" resolved to
-# customlist_fw_cpu_platform.14, a value carried only by 12 spare-part SKUs).
-# These are surfaced as advisory hints instead of resolved filters.
+# Entity types that are NOT safe to inject as authoritative WHERE-clause filters.
+# A match here is a list *value* (customlistvalue → "list_name.internal_id"), a
+# list *definition* (customlist — queryable as a FROM target, but not a WHERE
+# filter), or an operational reference (saved search / script / workflow). A list
+# value especially can't be filtered on without knowing which field references it
+# — injecting these as authoritative "use this script_id" filters caused confident-
+# wrong answers (e.g. "Laptop 13" resolved to customlist_fw_cpu_platform.14, a value
+# carried only by 12 spare-part SKUs). They are surfaced as advisory hints instead.
 _NON_QUERYABLE_ENTITY_TYPES = frozenset(
     {"customlistvalue", "customlist", "savedsearch", "script", "scriptdeployment", "workflow"}
 )
@@ -193,8 +194,9 @@ class TenantEntityResolver:
         xml_parts = [
             "<tenant_vernacular>",
             "    <instruction_context>",
-            "        The following entities and rules have been mapped to their specific internal NetSuite constraints for this particular tenant. ",
-            "        Prefer these internal script IDs and rules when constructing your SuiteQL FROM and WHERE clauses.",
+            "        The following have been mapped to this tenant's internal NetSuite constraints. ",
+            "        Prefer the resolved entity script IDs and learned rules when constructing SuiteQL FROM and WHERE clauses. ",
+            "        Any ambiguous entries below are ADVISORY ONLY — verify the field and value before using; never filter on them blindly.",
             "    </instruction_context>",
         ]
 
