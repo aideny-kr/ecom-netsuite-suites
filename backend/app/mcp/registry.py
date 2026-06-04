@@ -169,6 +169,14 @@ TOOL_REGISTRY = {
                 "required": False,
                 "description": "Optional output columns to keep (default: all)",
             },
+            "pivot": {
+                "type": "object",
+                "required": False,
+                "description": (
+                    "Optional crosstab on the joined result: "
+                    '{"row_field", "column_field", "value_field", "aggregation"}'
+                ),
+            },
         },
     },
     "netsuite.financial_report": {

@@ -83,3 +83,18 @@ def test_invalid_join_key_raises():
 def test_unsupported_join_type_raises():
     with pytest.raises(ValueError):
         join_rows(LEFT, RIGHT, [{"left": "sku", "right": "item"}], "cross")
+
+
+def test_join_then_pivot():
+    # Join produces sku/platform/qty, then pivot platform -> columns.
+    left = {"columns": ["sku", "platform"], "rows": [["A", "Web"], ["B", "Retail"]]}
+    right = {"columns": ["item", "qty"], "rows": [["A", "10"], ["B", "20"]]}
+    out = join_rows(
+        left,
+        right,
+        [{"left": "sku", "right": "item"}],
+        "inner",
+        pivot={"row_field": "sku", "column_field": "platform", "value_field": "qty"},
+    )
+    assert out["pivoted"] is True
+    assert "Web" in out["columns"] and "Retail" in out["columns"]

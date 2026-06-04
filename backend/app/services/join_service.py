@@ -37,6 +37,7 @@ def join_rows(
     suffixes: tuple[str, str] = ("_l", "_r"),
     memory_limit: str = "256MB",
     temp_directory: str | None = None,
+    pivot: dict | None = None,
 ) -> dict:
     """Join two {columns, rows} result sets deterministically.
 
@@ -106,6 +107,27 @@ def join_rows(
         keep = [i for i, c in enumerate(out_columns) if c in select]
         out_columns = [out_columns[i] for i in keep]
         out_rows = [[r[i] for i in keep] for r in out_rows]
+
+    if pivot:
+        from app.services.pivot_service import pivot_rows
+
+        out_columns, out_rows = pivot_rows(
+            columns=out_columns,
+            rows=out_rows,
+            row_field=pivot["row_field"],
+            column_field=pivot["column_field"],
+            value_field=pivot["value_field"],
+            aggregation=pivot.get("aggregation", "sum"),
+            include_total=pivot.get("include_total", True),
+        )
+        return {
+            "columns": out_columns,
+            "rows": out_rows,
+            "row_count": len(out_rows),
+            "joined": True,
+            "join_type": join_type,
+            "pivoted": True,
+        }
 
     return {
         "columns": out_columns,

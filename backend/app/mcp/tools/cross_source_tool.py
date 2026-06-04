@@ -114,6 +114,7 @@ async def execute(params: dict, context: dict | None = None, **kwargs: Any) -> d
     join_keys = params.get("join_keys") or []
     join_type = params.get("join_type", "inner")
     select = params.get("select")
+    pivot = params.get("pivot")
 
     if not left_query or not right_query:
         return {"error": "left_query and right_query are required"}
@@ -133,7 +134,7 @@ async def execute(params: dict, context: dict | None = None, **kwargs: Any) -> d
     os.makedirs(tmpdir, exist_ok=True)
     try:
         result = await asyncio.to_thread(
-            join_rows, left, right, join_keys, join_type, select, ("_l", "_r"), "256MB", tmpdir
+            join_rows, left, right, join_keys, join_type, select, ("_l", "_r"), "256MB", tmpdir, pivot
         )
     except ValueError as e:
         return {"error": str(e)}
