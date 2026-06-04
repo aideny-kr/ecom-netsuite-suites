@@ -1,6 +1,7 @@
 # backend/tests/services/metrics/test_metric_compute_integration.py
 from sqlalchemy import select
 
+from app.models.audit import AuditEvent
 from app.models.metric_definition import SYSTEM_TENANT_ID, MetricDefinition
 from app.models.tenant import Tenant
 from app.services.metrics.metric_compute import compute_metric
@@ -210,3 +211,175 @@ async def test_expression_leaf_survives_embedding_decoy_eviction(db, tenant_a, m
     assert "error" not in out, out
     assert out["rows"][0][0] == "Net Margin"
     assert round(out["rows"][0][1], 4) == 0.25
+
+
+# --- R2 fail-closed execution: a failed blessed query must NOT return 0.0 ---
+
+
+async def test_failed_blessed_query_does_not_fabricate_zero(db, tenant_a, monkeypatch):
+    """THE anti-hallucination invariant. When the blessed SuiteQL query errors
+    (schema drift, NetSuite down, bad credentials), the tool path returns
+    {"error": True, "message": ...} — it carries NO 'rows'. The prior code did
+    `result.get("rows") or [[0]]` and silently returned a fabricated 0.0 as the
+    metric value. compute_metric MUST instead fail closed: a NUMBER-FREE error
+    dict, never a value/rows, AND the metric row is flipped to needs_review."""
+    await _ensure_system_tenant(db)
+    db.add(
+        MetricDefinition(
+            tenant_id=SYSTEM_TENANT_ID,
+            key="gross_revenue",
+            display_name="Gross Revenue",
+            definition="x",
+            unit="currency",
+            source_kind="suiteql",
+            blessed_spec={"query": "SELECT SUM(amount) FROM transactionline", "dialect": "suiteql"},
+            params_schema={"period": {"type": "period"}},
+            status="active",
+            version=1,
+        )
+    )
+    await db.flush()
+
+    # Stub the REAL boundary (the tool), so _execute_scalar_query runs for real.
+    async def _boom_execute(params, context=None, **kwargs):
+        return {"error": True, "message": "boom"}
+
+    monkeypatch.setattr("app.mcp.tools.netsuite_suiteql.execute", _boom_execute)
+
+    out = await compute_metric(
+        db,
+        tenant_id=tenant_a.id,
+        key="gross_revenue",
+        params={"period": "this_month"},
+        context={"fiscal_year_start_month": 1},
+    )
+
+    # (a) it is a number-free structured error — NOT a data_table with a value
+    assert out.get("error") == "blessed_query_failed", out
+    assert out.get("status") == "needs_review"
+    assert out.get("key") == "gross_revenue"
+    assert "rows" not in out
+    assert "value" not in out
+    # the fabricated zero must appear NOWHERE in the payload
+    assert 0 not in out.values()
+    assert 0.0 not in out.values()
+
+    # (b) the metric row is flipped to needs_review and persisted (flush visible in-session)
+    row = (
+        await db.execute(
+            select(MetricDefinition).where(
+                MetricDefinition.tenant_id == SYSTEM_TENANT_ID,
+                MetricDefinition.key == "gross_revenue",
+            )
+        )
+    ).scalar_one()
+    assert row.status == "needs_review"
+
+    # (c) the failure is audit-logged
+    audit = (await db.execute(select(AuditEvent).where(AuditEvent.action == "metric.compute.failed"))).scalars().all()
+    assert len(audit) >= 1
+
+
+async def test_empty_rows_does_not_fabricate_zero(db, tenant_a, monkeypatch):
+    """A successful-but-empty result (no rows / empty list) must also fail closed,
+    not coerce to 0.0 via `or [[0]]`. Empty means 'no value to report', not 'zero'."""
+    await _ensure_system_tenant(db)
+    db.add(
+        MetricDefinition(
+            tenant_id=SYSTEM_TENANT_ID,
+            key="net_revenue",
+            display_name="Net Revenue",
+            definition="x",
+            unit="currency",
+            source_kind="suiteql",
+            blessed_spec={"query": "SELECT SUM(amount) FROM transactionline", "dialect": "suiteql"},
+            params_schema={"period": {"type": "period"}},
+            status="active",
+            version=1,
+        )
+    )
+    await db.flush()
+
+    async def _empty_execute(params, context=None, **kwargs):
+        return {"columns": ["c"], "rows": []}
+
+    monkeypatch.setattr("app.mcp.tools.netsuite_suiteql.execute", _empty_execute)
+
+    out = await compute_metric(
+        db,
+        tenant_id=tenant_a.id,
+        key="net_revenue",
+        params={"period": "this_month"},
+        context={"fiscal_year_start_month": 1},
+    )
+    assert out.get("error") == "blessed_query_failed", out
+    assert out.get("status") == "needs_review"
+    assert "rows" not in out
+    assert "value" not in out
+
+
+async def test_division_by_zero_yields_needs_review_no_number(db, tenant_a, monkeypatch):
+    """A division-by-zero in an expression metric (e.g. denominator leaf = 0) must
+    NOT throw or fabricate; it returns a number-free error dict and marks the
+    expression metric needs_review."""
+    await _ensure_system_tenant(db)
+    for key in ("net_income", "gross_revenue"):
+        db.add(
+            MetricDefinition(
+                tenant_id=SYSTEM_TENANT_ID,
+                key=key,
+                display_name=key,
+                definition="x",
+                unit="currency",
+                source_kind="suiteql",
+                blessed_spec={"query": "SELECT 1", "dialect": "suiteql"},
+                params_schema={"period": {"type": "period"}},
+                status="active",
+                version=1,
+            )
+        )
+    db.add(
+        MetricDefinition(
+            tenant_id=SYSTEM_TENANT_ID,
+            key="net_margin",
+            display_name="Net Margin",
+            definition="x",
+            unit="percent",
+            source_kind="expression",
+            expression="net_income / gross_revenue",
+            depends_on=["net_income", "gross_revenue"],
+            params_schema={"period": {"type": "period"}},
+            status="active",
+            version=1,
+        )
+    )
+    await db.flush()
+
+    # denominator resolves to 0 → div-by-zero in the safe evaluator
+    async def _fake_scalar(db, tenant_id, metric, coerced, context):
+        return {"net_income": 30.0, "gross_revenue": 0.0}[metric.key]
+
+    monkeypatch.setattr("app.services.metrics.metric_compute._execute_scalar_query", _fake_scalar)
+
+    out = await compute_metric(
+        db,
+        tenant_id=tenant_a.id,
+        key="net_margin",
+        params={"period": "this_month"},
+        context={"fiscal_year_start_month": 1},
+    )
+    assert out.get("error") == "division_by_zero", out
+    assert out.get("status") == "needs_review"
+    assert out.get("key") == "net_margin"
+    assert "rows" not in out
+    assert "value" not in out
+
+    row = (
+        await db.execute(
+            select(MetricDefinition).where(
+                MetricDefinition.tenant_id == SYSTEM_TENANT_ID,
+                MetricDefinition.key == "net_margin",
+            )
+        )
+    ).scalar_one()
+    assert row.status == "needs_review"
