@@ -96,3 +96,25 @@ async def test_execute_warns_on_truncation_and_no_match(monkeypatch):
     assert out["left_truncated"] is True
     assert any("truncated" in w for w in out["warnings"])
     assert any("No rows matched" in w for w in out["warnings"])
+
+
+def test_tool_registered():
+    from app.mcp.registry import TOOL_REGISTRY
+
+    assert "cross_source.query" in TOOL_REGISTRY
+    schema = TOOL_REGISTRY["cross_source.query"]["params_schema"]
+    for p in ("left_query", "left_dialect", "right_query", "right_dialect", "join_keys"):
+        assert p in schema
+
+
+def test_tool_in_allowlist():
+    from app.services.chat.nodes import ALLOWED_CHAT_TOOLS
+
+    assert "cross_source.query" in ALLOWED_CHAT_TOOLS
+
+
+def test_tool_categorized_data_table():
+    from app.services.chat.tool_categories import categorize
+
+    assert categorize("cross_source_query") == "data_table"
+    assert categorize("cross_source.query") == "data_table"

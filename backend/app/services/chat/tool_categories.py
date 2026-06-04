@@ -28,6 +28,8 @@ _EXACT: dict[str, Category] = {
     "netsuite.suiteql": "data_table",
     "pivot_query_result": "data_table",
     "pivot.query_result": "data_table",
+    "cross_source_query": "data_table",
+    "cross_source.query": "data_table",
     "netsuite_financial_report": "financial",
     "netsuite.financial_report": "financial",
     "bigquery_sql": "bigquery",
