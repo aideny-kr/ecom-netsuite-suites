@@ -45,6 +45,7 @@ EXPECTED_TOOLS = {
     "workspace.deploy_sandbox_confirm",
     "workspace.run_suiteql_assertions",
     "pivot.query_result",
+    "cross_source.query",
     "suitescript.sync",
     "tenant.save_learned_rule",
     "bigquery.sql",
