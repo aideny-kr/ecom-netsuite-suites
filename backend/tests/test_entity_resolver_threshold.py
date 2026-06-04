@@ -191,3 +191,79 @@ class TestEntityResolverThreshold:
         assert "prefer" in result.lower()
         # Should NOT contain the old "MUST use" language
         assert "MUST use these exact" not in result
+
+
+class TestNonQueryableEntityAdvisory:
+    """Non-column matches (customlistvalue, customlist, savedsearch, script,
+    scriptdeployment, workflow) must NOT be injected as authoritative filters —
+    a list *value* like 'customlist_fw_cpu_platform.14' cannot go in a WHERE
+    clause and caused a confident-wrong answer. They go to an advisory block.
+    """
+
+    @pytest.mark.asyncio
+    async def test_customlistvalue_not_in_resolved_entities(self):
+        """A customlistvalue match must not appear as a resolved <internal_script_id>."""
+        adapter = _make_adapter(["Laptop 13"])
+        db = _make_db_with_matches(
+            [
+                {
+                    "script_id": "customlist_fw_cpu_platform.14",
+                    "entity_type": "customlistvalue",
+                    "sim": 1.0,
+                    "description": "Value for list: customlist_fw_cpu_platform",
+                },
+            ]
+        )
+
+        result = await TenantEntityResolver.resolve_entities(
+            "How many Laptop 13 did we sell?", TENANT_ID, db, adapter, "haiku"
+        )
+
+        assert "<internal_script_id>customlist_fw_cpu_platform.14</internal_script_id>" not in result
+        assert "<resolved_entities>" not in result
+
+    @pytest.mark.asyncio
+    async def test_customlistvalue_emitted_as_advisory(self):
+        """The matched list value is surfaced as advisory, with caution + the user term."""
+        adapter = _make_adapter(["Laptop 13"])
+        db = _make_db_with_matches(
+            [
+                {
+                    "script_id": "customlist_fw_cpu_platform.14",
+                    "entity_type": "customlistvalue",
+                    "sim": 1.0,
+                    "description": "Value for list: customlist_fw_cpu_platform",
+                },
+            ]
+        )
+
+        result = await TenantEntityResolver.resolve_entities(
+            "How many Laptop 13 did we sell?", TENANT_ID, db, adapter, "haiku"
+        )
+
+        assert "<ambiguous_entities>" in result
+        assert "Laptop 13" in result
+        assert "customlist_fw_cpu_platform.14" in result  # surfaced, but advisory only
+        assert "advisory" in result.lower()
+
+    @pytest.mark.asyncio
+    async def test_queryable_field_still_resolved(self):
+        """Regression guard: a real custom field (queryable column) is still
+        injected authoritatively in <resolved_entities>."""
+        adapter = _make_adapter(["platform"])
+        db = _make_db_with_matches(
+            [
+                {
+                    "script_id": "custitem_fw_platform",
+                    "entity_type": "itemcustomfield",
+                    "sim": 0.9,
+                    "description": "Type: SELECT",
+                },
+            ]
+        )
+
+        result = await TenantEntityResolver.resolve_entities("platform breakdown", TENANT_ID, db, adapter, "haiku")
+
+        assert "<resolved_entities>" in result
+        assert "<internal_script_id>custitem_fw_platform</internal_script_id>" in result
+        assert "<ambiguous_entities>" not in result

@@ -532,10 +532,11 @@ class UnifiedAgent(BaseSpecialistAgent):
         if self._tenant_vernacular:
             parts.append("\n## EXPLICIT TENANT ENTITY RESOLUTION — MANDATORY")
             parts.append(
-                "**CRITICAL**: The entities below have been pre-resolved to their exact NetSuite script IDs. "
+                "**CRITICAL**: The entities in the <resolved_entities> block below have been pre-resolved to their exact NetSuite script IDs. "
                 "You MUST use these script IDs — they OVERRIDE any column names used in prior conversation messages. "
                 "If earlier queries in this conversation used a different column for the same concept, IGNORE the earlier column and use the resolved script ID instead. "
-                "Example: if 'platform' resolves to custitem_fw_platform (item field), use `BUILTIN.DF(i.custitem_fw_platform)` — NOT tl.class or any other field from prior queries."
+                "Example: if 'platform' resolves to custitem_fw_platform (item field), use `BUILTIN.DF(i.custitem_fw_platform)` — NOT tl.class or any other field from prior queries. "
+                "Entities in any <ambiguous_entities> block are ADVISORY ONLY — they matched a list value or non-column reference; do NOT filter on them directly. Identify the correct field and confirm the value matches the user's intent first."
             )
             parts.append(self._tenant_vernacular)
             parts.append(
