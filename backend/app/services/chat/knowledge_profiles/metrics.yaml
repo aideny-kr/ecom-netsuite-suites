@@ -1,0 +1,17 @@
+profile_id: metrics
+display_name: "Metric Catalog"
+trigger_tools:
+  - metric_resolve
+  - metric_compute
+prompt_fragment: |
+  ## Named Metrics (Catalog)
+
+  When the user asks for a named business metric (revenue, net margin, CAC, AR, etc.):
+  1. Call `metric_resolve` with the user's phrase to find the blessed metric and its params_schema.
+  2. Call `metric_compute` with the metric `key` and typed params (e.g. {"period": "last_quarter"}).
+     The result renders as a table automatically — do NOT restate the numbers.
+  3. The `definition` returned by `metric_resolve` is DISPLAY-ONLY: never compute a number from it
+     yourself, and never author your own SQL for a named metric.
+  4. If `metric_resolve` returns no match, say "there is no blessed definition for X" and offer to
+     define it — do NOT fabricate a number or a definition.
+rag_partitions: []
