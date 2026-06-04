@@ -590,8 +590,9 @@ async def approve_bucket(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
 
     # Reject a closed/locked period: close_period sets run.status="closed" but only
-    # locks 'approved'/'auto_matched' rows, leaving 'suggested'/'pending' rows
-    # un-locked and thus still bulk-approvable. Guard the run itself.
+    # locks 'approved' rows and non-needs_review 'auto_matched' rows, leaving
+    # 'suggested'/'pending' (and unreviewed needs_review) rows un-locked and thus
+    # still bulk-approvable. Guard the run itself.
     if run.status in ("closed", "locked"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
