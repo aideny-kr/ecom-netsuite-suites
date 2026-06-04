@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.reconciliation import ReconciliationResult
+from app.services import audit_service
 
 
 async def execute(params: dict, **kwargs) -> dict:
@@ -51,6 +52,16 @@ async def execute(params: dict, **kwargs) -> dict:
     recon_result.approved_by = uuid.UUID(str(user_id)) if user_id else None
     recon_result.approved_at = datetime.now(timezone.utc)
 
+    await audit_service.log_event(
+        db=db,
+        tenant_id=uuid.UUID(str(tenant_id)),
+        category="reconciliation",
+        action="recon.approve",
+        actor_id=uuid.UUID(str(user_id)) if user_id else None,
+        actor_type="user",
+        resource_type="reconciliation_result",
+        resource_id=result_id,
+    )
     await db.commit()
 
     return {
