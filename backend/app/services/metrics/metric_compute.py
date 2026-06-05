@@ -161,6 +161,7 @@ async def _validate_and_execute_by_source(db, tenant_id, source_kind: str, query
     with the dialect-correct read-only check (SuiteQL vs BigQuery SQL differ).
     """
     if source_kind == "bigquery":
+        from app.core.config import settings
         from app.mcp.tools import bigquery_tools
         from app.services.bigquery_service import _validate_read_only
 
@@ -172,6 +173,17 @@ async def _validate_and_execute_by_source(db, tenant_id, source_kind: str, query
             # caller param error. Raise ComputeError so compute_metric's uniform handler
             # audit-logs the failure and returns a number-free dict (compute is read-only).
             raise ComputeError(f"filled bigquery query failed read-only validation: {ex}") from ex
+        # R1#7: symmetric dataset-allowlist enforcement (mirrors SuiteQL table-allowlist).
+        # Empty setting = no restriction (backward compatible). When set, extract every
+        # dataset reference from FROM/JOIN clauses and reject any that are off-allowlist.
+        allowed = {
+            d.strip().lower() for d in getattr(settings, "BIGQUERY_ALLOWED_DATASETS", "").split(",") if d.strip()
+        }
+        if allowed:
+            refs = {m.group(1).lower() for m in re.finditer(r"\bFROM\s+`?([a-zA-Z0-9_]+)\.", query)}
+            illegal = refs - allowed
+            if illegal:
+                raise ComputeError(f"filled bigquery query selects off-allowlist datasets: {sorted(illegal)}")
         return await bigquery_tools.bigquery_sql_execute({"query": query}, {"tenant_id": str(tenant_id), "db": db})
 
     # Default / "suiteql": NetSuite SuiteTalk REST. Expression-leaf metrics are

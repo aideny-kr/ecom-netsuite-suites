@@ -1,7 +1,21 @@
 # backend/tests/services/metrics/test_metric_compute.py
+import uuid
+
 import pytest
 
 from app.services.metrics.metric_compute import ParamError, coerce_params, fill_query
+
+
+@pytest.mark.asyncio
+async def test_bigquery_metric_offallowlist_dataset_refuses(db, monkeypatch):
+    from app.services.metrics import metric_compute
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "BIGQUERY_ALLOWED_DATASETS", "analytics", raising=False)
+    with pytest.raises(metric_compute.ComputeError, match="allowlist"):
+        await metric_compute._validate_and_execute_by_source(
+            db, uuid.uuid4(), "bigquery", "SELECT x FROM secret_dataset.t"
+        )
 
 
 def test_coerce_rejects_unknown_param():
