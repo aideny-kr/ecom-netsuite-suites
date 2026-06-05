@@ -77,8 +77,13 @@ if (diffLines > 4000) log(`WARNING: large diff (${diffLines} lines) — finder r
 function fileSlice(fullDiff, file) {
   if (!file) return ''
   const parts = fullDiff.split(/\n(?=diff --git )/)
-  const baseName = file.split('/').pop()
-  return parts.find(p => p.includes(`a/${file}`) || p.includes(`b/${file}`) || (baseName && p.includes(`/${baseName}\n`)) || (baseName && p.includes(`/${baseName} `))) || ''
+  // EXACT match on the `diff --git a/<old> b/<new>` header paths only. No basename
+  // fuzzy fallback (it could feed a verifier another file's hunk on basename collision).
+  // No match -> '' -> the verifier prompt tells it to Read the file / `git diff -- <file>`.
+  return parts.find(p => {
+    const m = p.match(/^diff --git a\/(\S+) b\/(\S+)/)
+    return !!m && (m[1] === file || m[2] === file)
+  }) || ''
 }
 
 const FINDER_CTX = `You are reviewing a code change for RECALL (catch every real bug a careful reviewer would catch). cwd = repo root.
