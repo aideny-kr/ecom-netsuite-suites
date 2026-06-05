@@ -247,6 +247,24 @@ class TestDetectPerfAntiPatterns:
         )
         assert "unbounded_address_join" in detect_perf_anti_patterns(sql)
 
+    def test_lower_wrapped_country_filter_detected(self):
+        # LOWER(BUILTIN.DF(sa.country)) = 'x' is an even worse per-row pattern (two
+        # functions) and must still be flagged despite the wrapper paren.
+        sql = (
+            "SELECT 1 FROM transactionShippingAddress sa "
+            "WHERE LOWER(BUILTIN.DF(sa.country)) = 'singapore' "
+            "AND t.trandate >= TO_DATE('2025-06-01','YYYY-MM-DD')"
+        )
+        assert "builtin_df_country_filter" in detect_perf_anti_patterns(sql)
+
+    def test_upper_wrapped_country_filter_in_detected(self):
+        sql = (
+            "SELECT 1 FROM transactionShippingAddress sa "
+            "WHERE UPPER(BUILTIN.DF(sa.country)) IN ('SG','NO') "
+            "AND t.trandate >= TO_DATE('2025-06-01','YYYY-MM-DD')"
+        )
+        assert "builtin_df_country_filter" in detect_perf_anti_patterns(sql)
+
     def test_commented_trandate_predicate_is_not_a_bound(self):
         # A trandate predicate inside a SQL comment must not count as a real scan bound.
         sql = (

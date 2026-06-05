@@ -117,7 +117,9 @@ def _format_custom_list_values(list_name: str, values: list[dict]) -> str:
     lines = [
         f"Custom List Values for: {list_name}",
         "Use these exact internal IDs when filtering records by this custom list field.",
-        "SuiteQL: WHERE field_name = <id> (or use BUILTIN.DF(field_name) = '<name>')",
+        "SuiteQL: WHERE field_name = <id> (or BUILTIN.DF(field_name) = '<name>' for small "
+        "static lists; on a JOIN-backed or large table filter the raw <id> — BUILTIN.DF is a "
+        "per-row function that forces a full scan).",
         "",
     ]
     for v in values:

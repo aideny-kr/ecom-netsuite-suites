@@ -22,6 +22,13 @@ class TestFormatCustomListValues:
         assert "ID 3: Failed [INACTIVE]" in result
         assert "WHERE field_name" in result
 
+    def test_filter_guidance_has_perf_caveat(self):
+        # This RAG chunk is retrieved into the live agent context — it must not teach a
+        # blanket BUILTIN.DF(field)='<name>' filter without the small-list perf caveat
+        # (grill round 3).
+        result = _format_custom_list_values("customlist_order_status", [{"id": 1, "name": "Pending"}])
+        assert "per-row function" in result.lower()
+
     def test_empty_values(self):
         result = _format_custom_list_values("customlist_empty", [])
         assert "customlist_empty" in result

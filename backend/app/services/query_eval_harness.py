@@ -125,7 +125,12 @@ def score_accuracy(result_text: str, expected_keywords: list[str]) -> float:
 # also catches a spaced-out `BUILTIN . DF` evasion.
 _DF_COUNTRY = r"BUILTIN\s*\.\s*DF\s*\(\s*(?:\w+\.)?COUNTRY\s*\)"
 _CMP = r"(?:>=|<=|<>|!=|>|<|=|(?:NOT\s+)?IN\b|(?:NOT\s+)?LIKE\b)"
-_BUILTIN_DF_COUNTRY_FILTER = re.compile(rf"{_DF_COUNTRY}\s*{_CMP}|{_CMP}\s*{_DF_COUNTRY}")
+# Tolerate single-level wrappers around the country DF: a closing wrapper paren before
+# the operator (`LOWER(BUILTIN.DF(sa.country)) = ...`) and a wrapper function-open after
+# the operator (`... = LOWER(BUILTIN.DF(sa.country))`). Documented residual: multi-arg
+# wrappers (`NVL(BUILTIN.DF(sa.country), '')`) still evade this static check — the live
+# latency gate (follow-up #2) is the backstop for arbitrarily-shaped slow SQL.
+_BUILTIN_DF_COUNTRY_FILTER = re.compile(rf"{_DF_COUNTRY}\s*\)*\s*{_CMP}|{_CMP}\s*(?:[A-Z_]+\s*\(\s*)*{_DF_COUNTRY}")
 
 # A real trandate predicate bounds the scan to a date RANGE (uses the trandate index).
 # Allow an optional ')' so both `t.trandate >= ...` and `TRUNC(t.trandate) >= ...` count;
