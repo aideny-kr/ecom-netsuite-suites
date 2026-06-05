@@ -1270,6 +1270,19 @@ class BaseSpecialistAgent(abc.ABC):
                         if intercept_data is not None:
                             yield "tool_intercept", intercept_data
 
+                    # Metric trust boundary — TOOL-enforced, not interceptor-dependent.
+                    # When no interceptor is wired (e.g. the vs-MCP benchmark runner in
+                    # benchmarks/agent_runner.py), llm_result_str is the raw result above
+                    # and a metric_compute payload would hand its computed number straight
+                    # to the LLM — the exact anti-hallucination breach the catalog exists to
+                    # prevent, leaking into the north-star CI gate. Mirror the non-streaming
+                    # run() guard: pass llm_result_str through the SAME suppressor so a
+                    # metric's number can never reach the model on EITHER path. This is a
+                    # no-op for non-metric results (opt-in via suppress_llm_value) and
+                    # idempotent over an interceptor that already condensed a metric (the
+                    # condensed string carries no suppress_llm_value flag).
+                    llm_result_str = _suppress_metric_value_for_llm(llm_result_str)
+
                     tool_calls_log.append(
                         build_tool_call_log_entry(
                             step=step,
