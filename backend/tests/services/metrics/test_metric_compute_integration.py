@@ -718,3 +718,87 @@ async def test_seam_january_default_yields_calendar_window(db, tenant_a, monkeyp
     assert "error" not in out, out
     assert captured.get("period_start") == "2026-01-01", captured
     assert captured.get("period_end") == "2026-12-31", captured
+
+
+# --- F2 fiscal-window flow through the *PRODUCTION* governed_execute seam ---
+#
+# The two seam tests above hand-BUILD the context dict with fiscal_year_start_month
+# already in it — so they prove metric_tools.compute -> compute_metric -> resolve_period
+# honors a fiscal month *that is already in the context*. But in production the agent
+# never builds that context: it calls mcp_server.call_tool -> governance.governed_execute,
+# and THAT seam builds the context dict (governance.py ~466-474) WITHOUT
+# fiscal_year_start_month. So the value never reaches compute and the period resolver
+# always runs calendar-year for every tenant. This test drives the REAL governed_execute
+# seam (exactly what the agent invokes) for a tenant whose tenant_configs row carries
+# fiscal_year_start_month=4, and asserts the leaf executor receives the FISCAL window
+# (Apr 1 2026 -> Mar 31 2027 on a frozen today=2026-05-15), not the calendar window.
+# Pre-fix this FAILS — the resolver runs January-default and lands Jan 1 -> Dec 31 2026.
+
+
+async def test_governed_execute_seam_threads_tenant_fiscal_month(db, tenant_a, monkeypatch):
+    """REAL PRODUCTION-seam F2 invariant. Drive mcp.governance.governed_execute (the
+    exact path the agent's tool call flows through) for metric.compute, with a tenant
+    whose tenant_configs.fiscal_year_start_month=4. governed_execute builds the tool
+    context WITHOUT a fiscal month, so the fix must source it from tenant_configs before
+    the period resolver runs. With a frozen today=2026-05-15 and token 'this_year', the
+    leaf executor must receive the FISCAL window (Apr 1 2026 -> Mar 31 2027), NOT the
+    calendar window (Jan 1 -> Dec 31 2026)."""
+    from app.mcp.governance import _rate_limits, governed_execute
+    from app.mcp.registry import TOOL_REGISTRY
+    from app.models.tenant import TenantConfig
+
+    await _ensure_system_tenant(db)
+
+    # The tenant runs an April fiscal year. This is the production source of truth the
+    # governed_execute seam must read from — NOT a hand-passed context value.
+    cfg = (await db.execute(select(TenantConfig).where(TenantConfig.tenant_id == tenant_a.id))).scalar_one()
+    cfg.fiscal_year_start_month = 4
+    await db.flush()
+
+    db.add(
+        MetricDefinition(
+            tenant_id=SYSTEM_TENANT_ID,
+            key="gross_revenue",
+            display_name="Gross Revenue",
+            definition="x",
+            unit="currency",
+            source_kind="suiteql",
+            blessed_spec={"query": "SELECT 1", "dialect": "suiteql"},
+            params_schema={"period": {"type": "period"}},
+            status="active",
+            version=1,
+        )
+    )
+    await db.flush()
+
+    _freeze_today(monkeypatch, date(2026, 5, 15))
+
+    captured: dict = {}
+
+    async def _capture_scalar(db, tenant_id, metric, coerced, context):
+        captured.update(coerced)
+        return 123.0
+
+    monkeypatch.setattr("app.services.metrics.metric_compute._execute_scalar_query", _capture_scalar)
+
+    # Avoid cross-test rate-limit bleed for this tool/tenant.
+    _rate_limits.pop(str(tenant_a.id), None)
+
+    out = await governed_execute(
+        tool_name="metric.compute",
+        params={"key": "gross_revenue", "params": {"period": "this_year"}},
+        tenant_id=str(tenant_a.id),
+        actor_id=None,
+        execute_fn=TOOL_REGISTRY["metric.compute"]["execute"],
+        db=db,
+    )
+
+    assert "error" not in out, out
+    # FISCAL window for fy_start=4 on 2026-05-15 — proves the tenant's fiscal month
+    # reached the resolver THROUGH the production governed_execute seam.
+    assert captured.get("period_start") == "2026-04-01", captured
+    assert captured.get("period_end") == "2027-03-31", captured
+    # ...and explicitly NOT the calendar (fy=1) window — proves the divergence is real,
+    # so this would fail under the pre-fix calendar-year regression.
+    assert captured.get("period_start") != "2026-01-01", captured
+    assert captured.get("period_end") != "2026-12-31", captured

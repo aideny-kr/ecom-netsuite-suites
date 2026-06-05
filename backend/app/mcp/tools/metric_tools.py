@@ -39,10 +39,38 @@ async def compute(params: dict, context: dict | None = None, **kwargs: Any) -> d
     from app.services.metrics.metric_compute import compute_metric
 
     ctx = context or {}
+    tenant_id = uuid.UUID(str(ctx["tenant_id"]))
+
+    # F2: thread the tenant's fiscal_year_start_month into the compute context.
+    # The production tool seam (governance.governed_execute) builds the context
+    # dict WITHOUT a fiscal month, so without this every period resolves to the
+    # calendar year — wrong windows for any non-January-fiscal tenant. The chat
+    # orchestrator pre-injects this value, so we only fetch when it is absent (no
+    # extra query on the hot path) and never overwrite an explicit value.
+    if "fiscal_year_start_month" not in ctx:
+        ctx = {**ctx, "fiscal_year_start_month": await _tenant_fiscal_month(ctx.get("db"), tenant_id)}
+
     return await compute_metric(
         ctx["db"],
-        tenant_id=uuid.UUID(str(ctx["tenant_id"])),
+        tenant_id=tenant_id,
         key=params["key"],
         params=params.get("params", {}),
         context=ctx,
     )
+
+
+async def _tenant_fiscal_month(db, tenant_id: uuid.UUID) -> int:
+    """Read tenant_configs.fiscal_year_start_month (the fiscal-calendar source of
+    truth) for `tenant_id`, defaulting to 1 (calendar year) when there is no DB
+    handle or no config row. Keeps the period resolver fiscal-correct on the
+    governed_execute seam, which does not carry the value in its context."""
+    if db is None:
+        return 1
+    from sqlalchemy import select
+
+    from app.models.tenant import TenantConfig
+
+    fy = (
+        await db.execute(select(TenantConfig.fiscal_year_start_month).where(TenantConfig.tenant_id == tenant_id))
+    ).scalar_one_or_none()
+    return int(fy or 1)
