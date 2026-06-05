@@ -14,6 +14,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable
+from xml.sax.saxutils import escape as _xml_escape
 
 from app.services.chat.llm_adapter import BaseLLMAdapter, LLMResponse, TokenUsage
 from app.services.chat.prompt_cache import split_system_prompt
@@ -24,6 +25,21 @@ from app.services.chat.tool_call_results import (
 )
 from app.services.chat.tool_categories import categorize
 from app.services.chat.write_confirmation_service import build_confirmation_payload
+
+
+def _build_learned_rules_block(learned_rules: list) -> str:
+    """Render the tenant <learned_rules> block, XML-escaping each rule so admin
+    rule text containing markup can't break out of the block or inject prompt
+    instructions. Returns "" when there are no rules."""
+    if not learned_rules:
+        return ""
+    block = "\n<learned_rules>\nTenant-specific business rules — FOLLOW THESE STRICTLY:\n"
+    for rule in learned_rules:
+        block += f"- {_xml_escape(str(rule))}\n"
+    block += "</learned_rules>"
+    return block
+
+
 from app.services.confidence_extractor import extract_structured_confidence
 from app.services.confidence_service import CompositeScorer
 
@@ -497,13 +513,7 @@ class BaseSpecialistAgent(abc.ABC):
 
         # Inject learned rules into system prompt for all agents
         _system_prompt = self.system_prompt
-        _learned_rules = context.get("learned_rules", [])
-        if _learned_rules:
-            lr_block = "\n<learned_rules>\nTenant-specific business rules — FOLLOW THESE STRICTLY:\n"
-            for rule in _learned_rules:
-                lr_block += f"- {rule}\n"
-            lr_block += "</learned_rules>"
-            _system_prompt += lr_block
+        _system_prompt += _build_learned_rules_block(context.get("learned_rules", []))
 
         prompt_parts = split_system_prompt(_system_prompt)
 
@@ -802,13 +812,7 @@ class BaseSpecialistAgent(abc.ABC):
 
         # Inject learned rules into system prompt for all agents
         _system_prompt = self.system_prompt
-        _learned_rules = context.get("learned_rules", [])
-        if _learned_rules:
-            lr_block = "\n<learned_rules>\nTenant-specific business rules — FOLLOW THESE STRICTLY:\n"
-            for rule in _learned_rules:
-                lr_block += f"- {rule}\n"
-            lr_block += "</learned_rules>"
-            _system_prompt += lr_block
+        _system_prompt += _build_learned_rules_block(context.get("learned_rules", []))
 
         prompt_parts = split_system_prompt(_system_prompt)
 
