@@ -19,11 +19,11 @@ class LearnedRuleResponse(BaseModel):
 
 
 class LearnedRuleCreate(BaseModel):
-    rule_description: str = Field(min_length=1)
+    rule_description: str = Field(min_length=1, max_length=4000)
     rule_category: str | None = Field(default=None, max_length=50)
 
 
 class LearnedRuleUpdate(BaseModel):
-    rule_description: str | None = Field(default=None, min_length=1)
+    rule_description: str | None = Field(default=None, min_length=1, max_length=4000)
     rule_category: str | None = Field(default=None, max_length=50)
     is_active: bool | None = None

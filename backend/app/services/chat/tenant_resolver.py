@@ -1,6 +1,8 @@
 import json
 import time
 import uuid
+from xml.sax.saxutils import escape as _xml_escape
+from xml.sax.saxutils import quoteattr as _xml_quoteattr
 
 import structlog
 from sqlalchemy import func, select
@@ -23,6 +25,14 @@ logger = structlog.get_logger(__name__)
 _NON_QUERYABLE_ENTITY_TYPES = frozenset(
     {"customlistvalue", "customlist", "savedsearch", "script", "scriptdeployment", "workflow"}
 )
+
+
+def _esc(value: object) -> str:
+    """XML-escape a tenant/LLM-controlled value before interpolating it into the
+    vernacular XML that is injected into the system prompt (prevents element
+    break-out / prompt injection via a rule description or extracted entity)."""
+    return _xml_escape(str(value))
+
 
 EXTRACTOR_SYSTEM_PROMPT = """\
 You are a fast named entity extractor for NetSuite business context.
@@ -204,10 +214,12 @@ class TenantEntityResolver:
             xml_parts.append("    <resolved_entities>")
             for r in resolved:
                 xml_parts.append("        <entity>")
-                xml_parts.append(f"            <user_term>{r['user_term']}</user_term>")
-                xml_parts.append(f"            <internal_script_id>{r['internal_script_id']}</internal_script_id>")
-                xml_parts.append(f"            <entity_type>{r['entity_type']}</entity_type>")
-                xml_parts.append(f"            <metadata>{r['metadata']}</metadata>")
+                xml_parts.append(f"            <user_term>{_esc(r['user_term'])}</user_term>")
+                xml_parts.append(
+                    f"            <internal_script_id>{_esc(r['internal_script_id'])}</internal_script_id>"
+                )
+                xml_parts.append(f"            <entity_type>{_esc(r['entity_type'])}</entity_type>")
+                xml_parts.append(f"            <metadata>{_esc(r['metadata'])}</metadata>")
                 xml_parts.append(f"            <confidence_score>{r['confidence_score']}</confidence_score>")
                 xml_parts.append("        </entity>")
             xml_parts.append("    </resolved_entities>")
@@ -223,9 +235,9 @@ class TenantEntityResolver:
             )
             for a in advisory:
                 xml_parts.append("        <ambiguous_term>")
-                xml_parts.append(f"            <user_term>{a['user_term']}</user_term>")
-                xml_parts.append(f"            <matched_value>{a['internal_script_id']}</matched_value>")
-                xml_parts.append(f"            <entity_type>{a['entity_type']}</entity_type>")
+                xml_parts.append(f"            <user_term>{_esc(a['user_term'])}</user_term>")
+                xml_parts.append(f"            <matched_value>{_esc(a['internal_script_id'])}</matched_value>")
+                xml_parts.append(f"            <entity_type>{_esc(a['entity_type'])}</entity_type>")
                 xml_parts.append("        </ambiguous_term>")
             xml_parts.append("    </ambiguous_entities>")
 
@@ -235,8 +247,8 @@ class TenantEntityResolver:
                 "        <!-- Explicit business logic / schema rules learned for this tenant. FOLLOW THESE STRICTLY. -->"
             )
             for rule in learned_rules:
-                xml_parts.append(f'        <rule category="{rule.rule_category or "general"}">')
-                xml_parts.append(f"            {rule.rule_description}")
+                xml_parts.append(f"        <rule category={_xml_quoteattr(rule.rule_category or 'general')}>")
+                xml_parts.append(f"            {_esc(rule.rule_description)}")
                 xml_parts.append("        </rule>")
             xml_parts.append("    </learned_rules>")
 
