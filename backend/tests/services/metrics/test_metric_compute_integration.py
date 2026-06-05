@@ -1252,3 +1252,110 @@ async def test_governed_execute_seam_threads_tenant_fiscal_month(db, tenant_a, m
     # so this would fail under the pre-fix calendar-year regression.
     assert captured.get("period_start") != "2026-01-01", captured
     assert captured.get("period_end") != "2026-12-31", captured
+
+
+# --- Task 12: definition_version must be cited in the compute payload + failure audit ---
+#
+# §4/§10 promise: "cite the exact definition version it used". The compute data_table
+# payload must carry `definition_version` equal to the metric row's `version` column, so
+# downstream consumers (the SSE renderer, the audit trail, the LLM condensed string) can
+# attribute a number to the exact definition that produced it. The failure audit log must
+# also record the version that was active when the failure occurred.
+
+
+async def test_successful_compute_payload_carries_definition_version(db, tenant_a, monkeypatch):
+    """§10 audit-citation invariant. compute_metric must return a data_table dict whose
+    `definition_version` key equals the metric row's `version` column. Pre-fix this key
+    is absent — the payload carries no version citation."""
+    await _ensure_system_tenant(db)
+    known_version = 7  # deliberately non-trivial version to prove it flows through
+    db.add(
+        MetricDefinition(
+            tenant_id=SYSTEM_TENANT_ID,
+            key="gross_revenue",
+            display_name="Gross Revenue",
+            definition="x",
+            unit="currency",
+            source_kind="suiteql",
+            blessed_spec={"query": "SELECT 1", "dialect": "suiteql"},
+            params_schema={"period": {"type": "period"}},
+            status="active",
+            version=known_version,
+        )
+    )
+    await db.flush()
+
+    async def _fake_scalar(db, tenant_id, metric, coerced, context):
+        return 42000.0
+
+    monkeypatch.setattr("app.services.metrics.metric_compute._execute_scalar_query", _fake_scalar)
+
+    out = await compute_metric(
+        db,
+        tenant_id=tenant_a.id,
+        key="gross_revenue",
+        params={"period": "this_month"},
+        context={"fiscal_year_start_month": 1},
+    )
+
+    # (a) successful compute — must be a data_table, not an error
+    assert "error" not in out, out
+    assert out.get("row_count") == 1
+    assert out["rows"][0][1] == 42000.0
+
+    # (b) §10 citation: definition_version must equal the seeded metric's version
+    assert "definition_version" in out, f"definition_version missing from payload: {out}"
+    assert out["definition_version"] == known_version, (
+        f"definition_version={out['definition_version']!r} != seeded version={known_version}"
+    )
+
+
+async def test_failure_audit_carries_version(db, tenant_a, monkeypatch):
+    """§10 audit-citation invariant for the failure path. When compute_metric fails and
+    audit-logs via _log_compute_failure, the audit payload must include the metric's
+    `version` so the failure record cites which definition version was active."""
+    await _ensure_system_tenant(db)
+    known_version = 3
+    db.add(
+        MetricDefinition(
+            tenant_id=SYSTEM_TENANT_ID,
+            key="gross_revenue",
+            display_name="Gross Revenue",
+            definition="x",
+            unit="currency",
+            source_kind="suiteql",
+            blessed_spec={"query": "SELECT SUM(amount) FROM transactionline", "dialect": "suiteql"},
+            params_schema={"period": {"type": "period"}},
+            status="active",
+            version=known_version,
+        )
+    )
+    await db.flush()
+
+    async def _boom_execute(params, context=None, **kwargs):
+        return {"error": True, "message": "boom"}
+
+    monkeypatch.setattr("app.mcp.tools.netsuite_suiteql.execute", _boom_execute)
+
+    out = await compute_metric(
+        db,
+        tenant_id=tenant_a.id,
+        key="gross_revenue",
+        params={"period": "this_month"},
+        context={"fiscal_year_start_month": 1},
+    )
+
+    # (a) compute failed — must be a number-free error dict
+    assert out.get("error") == "blessed_query_failed", out
+    assert "rows" not in out
+
+    # (b) §10 audit citation: the failure audit log payload must carry the version
+    audit_rows = (
+        await db.execute(select(AuditEvent).where(AuditEvent.action == "metric.compute.failed"))
+    ).scalars().all()
+    assert audit_rows, "no audit row found for the failure"
+    audit_payload = audit_rows[-1].payload or {}
+    assert "version" in audit_payload, f"version missing from audit payload: {audit_payload}"
+    assert audit_payload["version"] == known_version, (
+        f"audit version={audit_payload['version']!r} != seeded version={known_version}"
+    )

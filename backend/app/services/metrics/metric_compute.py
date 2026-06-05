@@ -102,14 +102,22 @@ def fill_query(query: str, coerced: dict) -> str:
     return filled
 
 
-def metric_data_table(display_name: str, value, unit: str, period_label: str, query_label) -> dict:
+def metric_data_table(
+    display_name: str,
+    value,
+    unit: str,
+    period_label: str,
+    query_label,
+    *,
+    definition_version: int | None = None,
+) -> dict:
     # F4 (c): the `query` field is copied verbatim into the data_table SSE payload that
     # reaches the FRONTEND. It MUST be a plain string label (the metric key), NOT the
     # internal blessed_spec dict — exposing blessed_spec would ship the raw blessed
     # SuiteQL/BigQuery text (table names, dialect) to the client. Coerce defensively so a
     # dict can never land here even if a caller regresses.
     label = query_label if isinstance(query_label, str) else ""
-    return {
+    payload: dict = {
         "columns": ["Metric", "Value", "Unit", "Period"],
         "rows": [[display_name, value, unit, period_label]],
         "row_count": 1,
@@ -120,6 +128,13 @@ def metric_data_table(display_name: str, value, unit: str, period_label: str, qu
         # value from the LLM-facing condensed string (anti-hallucination invariant).
         "suppress_llm_value": True,
     }
+    # §10 audit-citation: include the definition version that produced this number so
+    # downstream consumers (SSE renderer, audit trail) can attribute the number to the
+    # exact definition version. Only set when the caller supplies the version (the
+    # production call site always does; test helpers that don't care may omit it).
+    if definition_version is not None:
+        payload["definition_version"] = definition_version
+    return payload
 
 
 def is_suppressed_metric_payload(parsed: object) -> bool:
@@ -287,7 +302,9 @@ async def _log_compute_failure(
         resource_id=str(metric.id),
         status="failed",
         error_message=message,
-        payload={"key": metric.key, "error": error_code},
+        # §10 audit-citation: include the definition version that was active when the
+        # failure occurred, so the audit trail cites which version failed.
+        payload={"key": metric.key, "error": error_code, "version": metric.version},
     )
     return {"error": error_code, "key": metric.key, "message": message}
 
@@ -362,4 +379,7 @@ async def compute_metric(db: AsyncSession, *, tenant_id, key: str, params: dict,
 
     # F4 (c): label the data_table with the metric KEY (a string), never the
     # blessed_spec/expression — keep the internal execution spec OUT of the SSE payload.
-    return metric_data_table(metric.display_name, value, metric.unit, period_label, metric.key)
+    # §10: pass definition_version so the payload cites which definition produced the number.
+    return metric_data_table(
+        metric.display_name, value, metric.unit, period_label, metric.key, definition_version=metric.version
+    )
