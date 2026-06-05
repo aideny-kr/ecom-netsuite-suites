@@ -3,6 +3,7 @@
 from app.services.query_eval_harness import (
     EvalCase,
     composite_score,
+    detect_perf_anti_patterns,
     load_eval_cases,
     score_accuracy,
     score_efficiency,
@@ -72,10 +73,25 @@ class TestScoreEfficiency:
         # Has SELECT * penalty but CTE bonus
         assert 0.5 < score < 1.0
 
-    def test_builtin_df_in_where_penalized(self):
-        # BUILTIN.DF() in a WHERE is a per-row function → full scan → timeout.
-        slow = score_efficiency("SELECT i.itemid FROM item i WHERE BUILTIN.DF(i.custitem_fw_platform) = 'Laptop 13'")
+    def test_builtin_df_country_filter_penalized(self):
+        # BUILTIN.DF(<addr>.country) used as a FILTER is a per-row function → full
+        # scan → timeout. Date-scoped here so ONLY the country-filter penalty fires.
+        slow = score_efficiency(
+            "SELECT i.itemid FROM transactionShippingAddress sa "
+            "JOIN transaction t ON t.shippingaddress = sa.nkey "
+            "JOIN transactionline tl ON tl.transaction = t.id "
+            "JOIN item i ON i.id = tl.item "
+            "WHERE BUILTIN.DF(sa.country) IN ('Singapore','Norway') "
+            "AND t.trandate >= TO_DATE('2025-06-01','YYYY-MM-DD')"
+        )
         assert slow < 1.0
+
+    def test_builtin_df_small_list_filter_not_penalized(self):
+        # BUILTIN.DF(field) = 'Value' on a small static custom list is a blessed
+        # readability pattern (netsuite.yaml CUSTOM LIST FIELDS), NOT a perf killer.
+        # The penalty is scoped to address-country filters only — this must NOT trip.
+        ok = score_efficiency("SELECT i.itemid FROM item i WHERE BUILTIN.DF(i.custitem_fw_platform) = 'Laptop 13'")
+        assert ok >= 0.9
 
     def test_builtin_df_in_select_only_not_penalized(self):
         # BUILTIN.DF in the SELECT list (for display) is fine; filter is on the raw value.
@@ -114,6 +130,77 @@ class TestScoreEfficiency:
             "JOIN item i ON i.id = tl.item WHERE sa.country IN ('SG') ORDER BY t.trandate"
         )
         assert s < 1.0
+
+    def test_fetch_first_alone_is_not_a_scope(self):
+        # FETCH FIRST limits returned rows, NOT the scan — an all-time address join
+        # with only FETCH FIRST still full-scans → must stay penalized (needs trandate).
+        s = score_efficiency(
+            "SELECT i.itemid FROM transactionShippingAddress sa "
+            "JOIN transaction t ON t.shippingaddress = sa.nkey "
+            "JOIN item i ON i.id = tl.item WHERE sa.country IN ('SG') "
+            "FETCH FIRST 500 ROWS ONLY"
+        )
+        assert s < 1.0
+
+    def test_trunc_trandate_predicate_counts_as_bound(self):
+        # TRUNC(t.trandate) >= ... is a real date bound — the ')' before >= must not
+        # hide the predicate (closes the regex false-negative).
+        bounded = score_efficiency(
+            "SELECT i.itemid FROM transactionShippingAddress sa "
+            "JOIN transaction t ON t.shippingaddress = sa.nkey "
+            "JOIN item i ON i.id = tl.item WHERE sa.country IN ('SG') "
+            "AND TRUNC(t.trandate) >= TRUNC(SYSDATE) - 365"
+        )
+        assert bounded >= 0.9
+
+
+class TestDetectPerfAntiPatterns:
+    def test_country_filter_detected(self):
+        sql = (
+            "SELECT 1 FROM transactionShippingAddress sa "
+            "WHERE BUILTIN.DF(sa.country) = 'Singapore' "
+            "AND t.trandate >= TO_DATE('2025-06-01','YYYY-MM-DD')"
+        )
+        assert "builtin_df_country_filter" in detect_perf_anti_patterns(sql)
+
+    def test_unbounded_address_join_detected(self):
+        sql = (
+            "SELECT 1 FROM transactionShippingAddress sa "
+            "JOIN transaction t ON t.shippingaddress = sa.nkey WHERE sa.country = 'SG'"
+        )
+        assert "unbounded_address_join" in detect_perf_anti_patterns(sql)
+
+    def test_both_detected(self):
+        sql = "SELECT 1 FROM transactionShippingAddress sa WHERE BUILTIN.DF(sa.country) IN ('SG','NO')"
+        reasons = detect_perf_anti_patterns(sql)
+        assert "builtin_df_country_filter" in reasons
+        assert "unbounded_address_join" in reasons
+
+    def test_display_use_not_flagged(self):
+        sql = (
+            "SELECT BUILTIN.DF(sa.country) AS country FROM transactionShippingAddress sa "
+            "WHERE sa.country = 'SG' AND t.trandate >= TO_DATE('2025-06-01','YYYY-MM-DD') "
+            "GROUP BY BUILTIN.DF(sa.country)"
+        )
+        assert detect_perf_anti_patterns(sql) == []
+
+    def test_clean_query_no_patterns(self):
+        assert detect_perf_anti_patterns("SELECT COUNT(*) FROM transaction WHERE type = 'SalesOrd'") == []
+
+    def test_small_list_builtin_df_not_flagged(self):
+        # non-country BUILTIN.DF filter (small custom list) is not an address/country
+        # perf pattern — must not be flagged (reconciles with netsuite.yaml line 52).
+        sql = "SELECT i.itemid FROM item i WHERE BUILTIN.DF(i.custitem_fw_platform) = 'Laptop 13'"
+        assert detect_perf_anti_patterns(sql) == []
+
+    def test_billing_address_country_filter_detected(self):
+        sql = "SELECT 1 FROM transactionBillingAddress ba WHERE BUILTIN.DF(ba.country) = 'US'"
+        reasons = detect_perf_anti_patterns(sql)
+        assert "builtin_df_country_filter" in reasons
+        assert "unbounded_address_join" in reasons
+
+    def test_empty_sql_no_patterns(self):
+        assert detect_perf_anti_patterns("") == []
 
 
 class TestCompositeScore:
