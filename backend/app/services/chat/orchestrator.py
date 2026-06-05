@@ -3158,6 +3158,13 @@ async def run_chat_turn(
                 # through _intercept_with_cache so pricing follow-up tools
                 # (pricing_revise / pricing_to_sheets) can read the cached
                 # pricing_state in this single-agent / legacy path too.
+                # LATENT (grill R3 / M4): this legacy single-agent path (reached only
+                # when UNIFIED_AGENT_ENABLED / tenant.unified_agent_enabled is false)
+                # builds the persisted tool log from the condensed string, which omits
+                # the metric `source_kind`. So _compute_source_pin_update can't read a
+                # BigQuery metric's real source on this path and may mis-pin NetSuite.
+                # Closed on the production UnifiedAgent path (raw tool log preserves
+                # source_kind); fix here only if the legacy path is put back into use.
                 intercept_type, intercept_data, result_str = _intercept_with_cache(
                     block.name,
                     result_str,
