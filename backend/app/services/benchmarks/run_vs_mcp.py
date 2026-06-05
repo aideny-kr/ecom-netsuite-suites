@@ -369,24 +369,51 @@ async def _run_single_case(
         print(f"    ours score rationale: {ours_rationale}")
 
         # NEW-4: value-absent invariant check for metric cases.
-        # When the case declares computed_value_absent: true, the computed
-        # numeric value from the metric_compute data_table must NOT appear
-        # verbatim in the model's text answer (anti-hallucination invariant).
-        # A leak means the SSE interception was bypassed — hard-fail: score=0.0.
+        # When the case declares computed_value_absent: true, the agent MUST
+        # have routed through metric_compute (evidenced by metric_data_tables
+        # being non-empty), AND the computed numeric value from the data_table
+        # must NOT appear in the model's text answer (anti-hallucination).
+        #
+        # NEW-4a: if no metric data_table was produced, metric_compute was
+        # bypassed entirely — hard-fail regardless of answer content. The gate
+        # enforces that a named-metric ask uses the blessed catalog path.
+        # Without this, an agent that answers via ad-hoc SuiteQL would pass
+        # vacuously (no values to check → check skipped → OURS ONLY).
+        #
+        # NEW-4b: value leak detection uses value_leak_variants() to catch
+        # common alternate numeric renderings (0.125 for 12.5%, 12,500 for
+        # 12500, etc.) — not just exact-substring matching.
         if case.computed_value_absent and agent_result.success:
             from app.services.benchmarks.scorer import assert_computed_value_absent
 
             computed_values = _extract_computed_values_from_metric_tables(agent_result.metric_data_tables)
-            if computed_values:
+            if not computed_values:
+                # NEW-4a: no metric data_table produced → metric_compute was bypassed.
+                # Hard-fail: the metric gate requires the blessed routing was used.
+                bypass_reason = (
+                    "metric case did not route through metric_compute "
+                    "(no metric data_table produced) — metric_compute bypass detected"
+                )
+                print(f"    [NEW-4a] HARD FAIL: {bypass_reason}")
+                ours_side = SideScore(
+                    answer_acc=0.0,
+                    tool_acc=ours_side.tool_acc,
+                    cost_usd=ours_side.cost_usd,
+                    latency_ms=ours_side.latency_ms,
+                    success=False,
+                    error=bypass_reason,
+                    answer_preview=ours_side.answer_preview,
+                )
+            else:
                 value_absent_ok = assert_computed_value_absent(agent_result.answer_text, computed_values)
                 if not value_absent_ok:
-                    # Find which value leaked
-                    leaked = next(
-                        (v for v in computed_values if v.lower() in (agent_result.answer_text or "").lower()),
-                        computed_values[0],
+                    # NEW-4b: a numeric variant of the computed value leaked into
+                    # the answer — SSE interception was bypassed. Hard-fail.
+                    violation_reason = (
+                        f"computed_value_absent violated: a numeric variant of "
+                        f"'{computed_values[0]}' appeared in the answer"
                     )
-                    violation_reason = f"computed_value_absent violated: '{leaked}' appeared in the answer"
-                    print(f"    [NEW-4] HARD FAIL: {violation_reason}")
+                    print(f"    [NEW-4b] HARD FAIL: {violation_reason}")
                     ours_side = SideScore(
                         answer_acc=0.0,
                         tool_acc=ours_side.tool_acc,

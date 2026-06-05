@@ -282,18 +282,148 @@ async def llm_judge_score(
 # ---------------------------------------------------------------------------
 
 
+def value_leak_variants(value: str) -> set[str]:
+    """Generate a set of numeric rendering variants for a computed value.
+
+    NEW-4b: The original check only caught exact-substring matches (e.g.
+    "12.5" in "Your margin is 12.5%"). This helper broadens the check to
+    catch common alternate renderings of the *same* number so that an agent
+    writing "~12%", "0.125", "12,500", or "12500" (instead of "12.5%") is
+    still detected as a leak.
+
+    Variants generated (all length >= 2, deterministic):
+      - raw value and stripped forms (remove $, %, ,, whitespace)
+      - if parseable as float:
+          - integer form (e.g. 12.0 → "12")
+          - 1-decimal rounded form (e.g. 12.567 → "12.6")
+          - 2-decimal rounded form (e.g. 12.567 → "12.57")
+          - thousands-separated form (e.g. 12500 → "12,500")
+          - thousands-unseparated form (e.g. "12,500" → "12500")
+          - percent-scaled variants (both directions):
+              • if value looks like a percent (N or N%), divide by 100
+                (e.g. 12.5 → "0.125", "0.13")
+              • if value looks like a 0–1 proportion, multiply by 100
+                (e.g. 0.125 → "12.5", "12.5%")
+
+    Limitations (accepted, out of scope):
+      - Word-form numbers ("twelve point five") are NOT generated — pure
+        substring matching cannot reliably identify them without NLP.
+      - Variants shorter than 2 chars are excluded to prevent trivial
+        matches (e.g. "5" matching "in 5 years").
+
+    Args:
+        value: A raw string value cell from a metric data_table row.
+
+    Returns:
+        A set of string variants (all lowercase-safe — callers lowercase
+        both sides for case-insensitive matching).
+    """
+    _MIN_LEN = 2
+    variants: set[str] = set()
+
+    # --- Always include raw and progressively stripped forms ---
+    raw = value.strip()
+    if len(raw) >= _MIN_LEN:
+        variants.add(raw)
+
+    # Strip currency/percent/comma/space to get a "clean" string
+    stripped = re.sub(r"[\$%,\s]", "", raw)
+    if len(stripped) >= _MIN_LEN:
+        variants.add(stripped)
+
+    # Also strip just $ or % individually to catch "$12.5" → "12.5"
+    for ch in ("$", "%", ","):
+        s = raw.replace(ch, "").strip()
+        if len(s) >= _MIN_LEN:
+            variants.add(s)
+
+    # --- Numeric forms ---
+    # Try to parse as float (handles "12.5", "12.5%", "$12,500", etc.)
+    try:
+        numeric_str = re.sub(r"[\$%,\s]", "", raw)
+        num = float(numeric_str)
+    except (ValueError, TypeError):
+        # Non-numeric: return what we have so far
+        return variants
+
+    # Integer form
+    int_form = str(int(round(num)))
+    if len(int_form) >= _MIN_LEN:
+        variants.add(int_form)
+
+    # 1-decimal and 2-decimal rounded forms
+    for dp in (1, 2):
+        f = f"{num:.{dp}f}"
+        if len(f) >= _MIN_LEN:
+            variants.add(f)
+
+    # Thousands-separated (only meaningful for |num| >= 1000)
+    abs_num = abs(num)
+    if abs_num >= 1000:
+        # Use Python's locale-independent thousands grouping
+        sep_form = f"{num:,.0f}"  # e.g. "12,500"
+        if len(sep_form) >= _MIN_LEN:
+            variants.add(sep_form)
+        # Also add 2-dp thousands form for fractional thousands
+        sep_form2 = f"{num:,.2f}"
+        if len(sep_form2) >= _MIN_LEN:
+            variants.add(sep_form2)
+
+    # Unseparated form — strip commas from the raw value
+    unsep = re.sub(r",", "", raw.replace("$", "").replace("%", "").strip())
+    if len(unsep) >= _MIN_LEN:
+        variants.add(unsep)
+
+    # --- Percent-scaling (both directions) ---
+    # If num is in a typical percent range (0.1 .. 1000), also include /100 form
+    if 0.1 <= abs_num <= 1000:
+        scaled_down = num / 100.0
+        # 2-decimal and 3-decimal forms of the scaled-down value
+        for dp in (2, 3, 4):
+            f = f"{scaled_down:.{dp}f}"
+            # Strip trailing zeros after decimal but keep at least 2 chars
+            f_stripped = f.rstrip("0").rstrip(".")
+            for candidate in (f, f_stripped):
+                if len(candidate) >= _MIN_LEN:
+                    variants.add(candidate)
+
+    # If num is in a 0–1 range (looks like a proportion), also include *100 form
+    if 0.001 <= abs_num <= 1.0:
+        scaled_up = num * 100.0
+        for dp in (0, 1, 2):
+            f = f"{scaled_up:.{dp}f}"
+            if len(f) >= _MIN_LEN:
+                variants.add(f)
+        # Also with % suffix
+        pct = f"{scaled_up:.1f}%"
+        if len(pct) >= _MIN_LEN:
+            variants.add(pct)
+
+    # Remove any variants that are too short to be meaningful
+    variants = {v for v in variants if len(v) >= _MIN_LEN}
+    return variants
+
+
 def assert_computed_value_absent(
     answer_text: str,
     computed_values: list[str],
 ) -> bool:
-    """Return True if none of the computed_values appear in answer_text.
+    """Return True if none of the computed_values (or their numeric variants)
+    appear in answer_text.
 
-    This is the primary anti-hallucination invariant for metric benchmark
-    cases: the COMPUTED VALUE (e.g. a net margin percentage produced by
-    metric_compute) must NOT appear verbatim in the model's text answer.
-    Numeric values belong exclusively in the data_table SSE event — the
-    LLM's prose must NEVER re-state them (that would be the model reading
-    the number back from its context window, bypassing the interception).
+    NEW-4b strengthening: instead of exact-substring matching only, this
+    function expands each computed value to a set of numeric rendering
+    variants via value_leak_variants() and checks all of them. This catches
+    common alternate renderings of the same number:
+      - "0.125" when the value is "12.5%" (percent → 0-1 scaled)
+      - "12,500" when the value is "12500" (thousands separator)
+      - "12500" when the value is "12,500" (unseparated)
+      - "12" when the value is "12.5%" (integer form)
+      - "$12.5" → "12.5" (currency stripped)
+
+    Accepted limitation: word-form numbers (e.g. "twelve point five") are
+    NOT detected — this is a known, documented limitation of substring-based
+    heuristic matching.
 
     Args:
         answer_text: The model's final text answer.
@@ -301,8 +431,9 @@ def assert_computed_value_absent(
             data_table / tool result (e.g. ["12.5", "12.5%"]).
 
     Returns:
-        True  — no value leaked into the answer (invariant holds).
-        False — at least one value appears as a substring in the answer
+        True  — no value (or numeric variant) leaked into the answer
+                (invariant holds).
+        False — at least one variant appears as a substring in the answer
                 (invariant violated; scorer should cap the case score at 0.0).
 
     How it is wired into the benchmark runner:
@@ -329,8 +460,13 @@ def assert_computed_value_absent(
         return True
     lower_answer = answer_text.lower()
     for value in computed_values:
-        if value.lower() in lower_answer:
-            return False
+        # Build the full set of variants for this value and check each
+        variants = value_leak_variants(value)
+        # Also always check the raw value itself (case-insensitive)
+        all_candidates = variants | {value.strip()}
+        for candidate in all_candidates:
+            if len(candidate) >= 2 and candidate.lower() in lower_answer:
+                return False
     return True
 
 

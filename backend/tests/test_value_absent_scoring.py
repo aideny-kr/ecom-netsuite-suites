@@ -121,14 +121,26 @@ class TestAssertComputedValueAbsent:
             is False
         )
 
-    def test_partial_number_does_not_match(self):
-        """'125' should NOT match when computed value is '12.5' — exact substring only."""
+    def test_partial_number_integer_form_detected(self):
+        """NEW-4b: With variant matching, the integer form '12' of computed
+        value '12.5' IS a generated variant (len>=2) and WILL be found as a
+        substring in '125'. This is an accepted heuristic trade-off — the
+        variant check is broader than exact-substring (as specified in NEW-4b).
+        The old 'exact substring only' semantics no longer apply.
+
+        For true production use, computed values are real metric outputs
+        (e.g. '12.53457'); an answer containing '125' as a count would be
+        an unlikely collision in a real metric-case answer. The check is
+        documented as heuristic.
+        """
+        # '12' is the integer form of 12.5 → IS a substring of '125' → leak detected.
+        # This is the NEW-4b heuristic behavior; the old exact-only test is superseded.
         assert (
             assert_computed_value_absent(
                 "The count was 125 items.",
                 ["12.5"],
             )
-            is True
+            is False
         )
 
 
@@ -402,19 +414,210 @@ class TestRunSingleCaseValueAbsent:
         assert "computed_value_absent violated" not in (result.ours.error or "")
         assert result.ours.answer_acc == 1.0
 
-    def test_no_metric_tables_skips_check(self):
-        """When the agent result has no metric_data_tables (metric_compute was
-        not called), the check is skipped — no false-positive hard-fail."""
+    # NEW-4a: vacuous-pass bug — no metric data_table → must now HARD FAIL
+    def test_no_metric_tables_hard_fails_metric_case(self):
+        """NEW-4a: When a computed_value_absent case runs successfully but
+        produces NO metric data_table (metric_compute was never called), the
+        gate must HARD FAIL — not skip the check.
+
+        This closes the vacuous-pass gap: an agent that answers a metric
+        question via ad-hoc SuiteQL (bypassing metric_compute entirely) would
+        produce no metric data_table, previously causing the check to be
+        silently skipped and the case to pass as 'OURS ONLY'.  Now the gate
+        enforces that the blessed routing was used.
+        """
         case = _make_metric_case(computed_value_absent=True)
-        # No metric tables — metric_compute was not called
+        # No metric tables — metric_compute was NOT called; agent bypassed it
         agent_result = AgentRunResult(
-            answer_text="Net margin is 12.5% (computed ad-hoc).",
+            answer_text="Net margin is great this quarter.",
             tool_calls=[],
             success=True,
-            metric_data_tables=[],  # no metric payloads
+            metric_data_tables=[],  # no metric payloads → bypass detected
         )
         result = self._run(case, agent_result)
 
-        # With no metric tables, no computed values to check — not hard-failed
-        assert "computed_value_absent violated" not in (result.ours.error or "")
-        assert result.ours.answer_acc == 1.0
+        # Must HARD FAIL because metric_compute was not used
+        assert result.ours.answer_acc == 0.0
+        assert result.ours.success is False
+        assert result.ours.error is not None
+        assert "metric_compute" in result.ours.error.lower() or "metric data_table" in result.ours.error.lower()
+
+    def test_no_metric_tables_bypass_verdict_is_failed(self):
+        """NEW-4a: The CaseResult verdict for a bypassed metric case must
+        reflect failure (OURS FAILED), not OURS ONLY."""
+        case = _make_metric_case(computed_value_absent=True)
+        agent_result = AgentRunResult(
+            answer_text="Margin looks fine.",
+            tool_calls=[],
+            success=True,
+            metric_data_tables=[],
+        )
+        result = self._run(case, agent_result)
+
+        # With skip_baseline=True, a failed ours → OURS FAILED
+        assert result.verdict == "OURS FAILED"
+
+
+# ---------------------------------------------------------------------------
+# NEW-4b — value_leak_variants helper + strengthened assert_computed_value_absent
+# ---------------------------------------------------------------------------
+
+
+class TestValueLeakVariants:
+    """Tests for the value_leak_variants() helper introduced in NEW-4b.
+
+    Spec:
+    - Raw value and stripped ($, %, ,) forms always included.
+    - If parseable as a number: int form, 1-decimal, 2-decimal, thousands-sep
+      and unsep forms.
+    - Percent-scale variants: if value looks like a percent (N or N%), also
+      include the 0-1 scaled form (N/100) and vice-versa.
+    - Variants shorter than 2 chars are excluded (prevent trivial matches).
+    """
+
+    def _variants(self, value: str) -> set[str]:
+        from app.services.benchmarks.scorer import value_leak_variants
+
+        return value_leak_variants(value)
+
+    def test_percent_string_includes_raw_and_stripped(self):
+        v = self._variants("12.5%")
+        assert "12.5%" in v
+        assert "12.5" in v
+
+    def test_percent_string_includes_scaled_form(self):
+        """12.5% → 0.125 (divided by 100)."""
+        v = self._variants("12.5%")
+        assert "0.125" in v or "0.13" in v  # 0-1 scaled form
+
+    def test_plain_number_includes_percent_scaled_form(self):
+        """12.5 (plain) → 0.125 (as if it were a percent)."""
+        v = self._variants("12.5")
+        # Either the 0-1 form or rounded variant must appear
+        assert "0.125" in v or "0.13" in v
+
+    def test_thousands_and_unseparated_forms(self):
+        """12500 → '12,500' and '12500' both present."""
+        v = self._variants("12500")
+        assert "12500" in v
+        assert "12,500" in v
+
+    def test_thousands_separated_input_includes_unseparated(self):
+        """'12,500' → '12500' also present."""
+        v = self._variants("12,500")
+        assert "12500" in v
+        assert "12,500" in v
+
+    def test_integer_form_for_float(self):
+        """12.0 → '12' (integer form)."""
+        v = self._variants("12.0")
+        assert "12" in v
+
+    def test_dollar_stripped(self):
+        """'$12.5' → '12.5' in variants."""
+        v = self._variants("$12.5")
+        assert "12.5" in v
+
+    def test_min_length_guard_excludes_short_tokens(self):
+        """Single-char or single-digit tokens must be excluded (avoid 'in 5%' matches)."""
+        v = self._variants("5")
+        # '5' is length 1, must not appear
+        assert "5" not in v
+
+    def test_variants_are_deterministic(self):
+        """Calling twice must return the same set."""
+        from app.services.benchmarks.scorer import value_leak_variants
+
+        assert value_leak_variants("12.5%") == value_leak_variants("12.5%")
+
+    def test_non_numeric_string_not_crash(self):
+        """Non-numeric raw values must not crash — return what we can."""
+        v = self._variants("Q1 2025")
+        # At minimum the raw value should be present
+        assert "Q1 2025" in v or "q1 2025" in v or len(v) >= 1
+
+    def test_rounded_forms_for_long_decimal(self):
+        """12.567 → '12.57' (2 dp) and '12.6' (1 dp) in variants."""
+        v = self._variants("12.567")
+        assert "12.57" in v
+        assert "12.6" in v
+
+
+class TestAssertComputedValueAbsentVariants:
+    """Tests for the strengthened assert_computed_value_absent that uses
+    value_leak_variants() to detect alternate numeric renderings.
+
+    These complement (not replace) the existing TestAssertComputedValueAbsent
+    tests — they exercise the variant paths added in NEW-4b.
+    """
+
+    def test_percent_scaled_form_detected(self):
+        """'0.125' in answer while computed value is '12.5%' → leak detected."""
+        from app.services.benchmarks.scorer import assert_computed_value_absent
+
+        # The agent wrote the percent as a 0-1 decimal
+        result = assert_computed_value_absent(
+            "net margin ~0.125 this quarter",
+            ["12.5%"],
+        )
+        assert result is False, "0.125 is a variant of 12.5% — should detect leak"
+
+    def test_thousands_separated_form_detected(self):
+        """'12,500' in answer while computed value is '12500' → leak."""
+        from app.services.benchmarks.scorer import assert_computed_value_absent
+
+        result = assert_computed_value_absent(
+            "revenue was 12,500 units",
+            ["12500"],
+        )
+        assert result is False, "12,500 is a thousands-sep variant of 12500"
+
+    def test_unseparated_form_detected(self):
+        """'12500' in answer while computed value is '12,500' → leak."""
+        from app.services.benchmarks.scorer import assert_computed_value_absent
+
+        result = assert_computed_value_absent(
+            "revenue was 12500 units",
+            ["12,500"],
+        )
+        assert result is False, "12500 is an unseparated variant of 12,500"
+
+    def test_tilde_approximation_with_variant(self):
+        """'~12%' in answer while computed value is '12.5%' → detect via '12' integer form."""
+        # NOTE: '~12%' contains '12' which is the integer form of 12.5
+        from app.services.benchmarks.scorer import assert_computed_value_absent
+
+        result = assert_computed_value_absent(
+            "net margin is approximately ~12% this quarter",
+            ["12.5%"],
+        )
+        # '12' (integer form of 12.5) must be in variants AND len('12') >= 2 → leak
+        assert result is False, "integer form '12' of '12.5%' should be detected"
+
+    def test_clean_answer_still_passes(self):
+        """An answer with NO numeric mention of the computed value passes."""
+        from app.services.benchmarks.scorer import assert_computed_value_absent
+
+        result = assert_computed_value_absent(
+            "Net margin results are shown in the table above. Performance was strong.",
+            ["12.5%"],
+        )
+        assert result is True, "Answer with no numeric variant should pass"
+
+    def test_dollar_amount_variant_detected(self):
+        """'5000' in answer while computed value is '$5,000' → leak."""
+        from app.services.benchmarks.scorer import assert_computed_value_absent
+
+        result = assert_computed_value_absent(
+            "total revenue was 5000 this period",
+            ["$5,000"],
+        )
+        assert result is False, "5000 is a stripped/unseparated variant of $5,000"
+
+    def test_existing_exact_match_still_works(self):
+        """Regression: existing exact-match behavior must be preserved."""
+        from app.services.benchmarks.scorer import assert_computed_value_absent
+
+        # This worked before — must still work
+        assert assert_computed_value_absent("margin is 12.5% for Q1", ["12.5"]) is False
+        assert assert_computed_value_absent("Net margin is healthy.", ["12.5"]) is True
