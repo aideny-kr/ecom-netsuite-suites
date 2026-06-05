@@ -1,4 +1,6 @@
 # backend/tests/services/metrics/test_metric_compute_integration.py
+from datetime import date
+
 from sqlalchemy import delete, select
 
 from app.models.audit import AuditEvent
@@ -591,3 +593,128 @@ async def test_bigquery_metric_failure_fails_closed_no_fabricated_number(db, ten
     assert "value" not in out
     assert 0 not in out.values()
     assert 0.0 not in out.values()
+
+
+# --- F2 fiscal-window flow through the REAL tool seam ---
+#
+# Spec acceptance criterion #6: "Period bounds come from the deterministic resolver,
+# not the LLM." A non-January fiscal tenant must get FISCAL (not calendar) windows via
+# the REAL tool seam the agent invokes (metric_tools.compute -> compute_metric ->
+# coerce_params -> resolve_period). The fiscal-aware assertions in test_period_resolver
+# bypass the seam by calling resolve_period directly; the seam-level tests all pass the
+# January default (calendar==fiscal), so a regression that drops/ignores the context
+# fiscal month anywhere in the seam (compute_metric hardcoding fy=1, metric_tools.compute
+# failing to forward context, or coerce_params ignoring it) passes 100% of those tests.
+# These tests freeze `today` and drive the WHOLE seam, capturing the `coerced`
+# period_start/period_end the leaf executor actually receives.
+
+
+def _freeze_today(monkeypatch, frozen: date):
+    """Pin coerce_params' `date.today()` (used by resolve_period) to a fixed date so the
+    resolved window is deterministic, while `date(y, m, d)` construction still works."""
+
+    class _FrozenDate(date):
+        @classmethod
+        def today(cls):
+            return frozen
+
+    monkeypatch.setattr("app.services.metrics.metric_compute.date", _FrozenDate)
+
+
+async def test_seam_forwards_fiscal_month_to_resolver_for_fiscal_window(db, tenant_a, monkeypatch):
+    """REAL-seam F2 invariant. Driving metric_tools.compute (the exact path the agent
+    invokes) with context={'fiscal_year_start_month': 4} and a fiscal-sensitive token
+    ('this_year') must resolve to the FISCAL window (Apr 1 2026 -> Mar 31 2027 on a
+    frozen today=2026-05-15), NOT the calendar window (Jan 1 -> Dec 31 2026).
+
+    The leaf executor captures the `coerced` params it actually receives, so the
+    resolved bounds are proven to flow through metric_tools.compute -> compute_metric ->
+    coerce_params -> resolve_period. A regression that hardcodes fy=1, fails to forward
+    context, or ignores the fiscal month anywhere in the seam lands the calendar window
+    and fails here."""
+    from app.mcp.tools import metric_tools
+
+    await _ensure_system_tenant(db)
+    db.add(
+        MetricDefinition(
+            tenant_id=SYSTEM_TENANT_ID,
+            key="gross_revenue",
+            display_name="Gross Revenue",
+            definition="x",
+            unit="currency",
+            source_kind="suiteql",
+            blessed_spec={"query": "SELECT 1", "dialect": "suiteql"},
+            params_schema={"period": {"type": "period"}},
+            status="active",
+            version=1,
+        )
+    )
+    await db.flush()
+
+    _freeze_today(monkeypatch, date(2026, 5, 15))
+
+    captured: dict = {}
+
+    async def _capture_scalar(db, tenant_id, metric, coerced, context):
+        captured.update(coerced)
+        return 123.0
+
+    monkeypatch.setattr("app.services.metrics.metric_compute._execute_scalar_query", _capture_scalar)
+
+    out = await metric_tools.compute(
+        {"key": "gross_revenue", "params": {"period": "this_year"}},
+        {"db": db, "tenant_id": str(tenant_a.id), "fiscal_year_start_month": 4},
+    )
+
+    assert "error" not in out, out
+    # FISCAL window for fy_start=4 on 2026-05-15 (mirrors resolve_period's this_year branch).
+    assert captured.get("period_start") == "2026-04-01", captured
+    assert captured.get("period_end") == "2027-03-31", captured
+    # ...and explicitly NOT the calendar (fy=1) window — proves the divergence is real,
+    # not a tautology that would also pass under a fy=1 regression.
+    assert captured.get("period_start") != "2026-01-01", captured
+    assert captured.get("period_end") != "2026-12-31", captured
+
+
+async def test_seam_january_default_yields_calendar_window(db, tenant_a, monkeypatch):
+    """Control for the test above: the SAME frozen today + token through the SAME seam,
+    but with the January default (fy=1), must yield the CALENDAR window (Jan 1 -> Dec 31
+    2026). This proves the fiscal/calendar split is driven by the forwarded context value
+    and that the assertions above aren't passing by accident."""
+    from app.mcp.tools import metric_tools
+
+    await _ensure_system_tenant(db)
+    db.add(
+        MetricDefinition(
+            tenant_id=SYSTEM_TENANT_ID,
+            key="gross_revenue",
+            display_name="Gross Revenue",
+            definition="x",
+            unit="currency",
+            source_kind="suiteql",
+            blessed_spec={"query": "SELECT 1", "dialect": "suiteql"},
+            params_schema={"period": {"type": "period"}},
+            status="active",
+            version=1,
+        )
+    )
+    await db.flush()
+
+    _freeze_today(monkeypatch, date(2026, 5, 15))
+
+    captured: dict = {}
+
+    async def _capture_scalar(db, tenant_id, metric, coerced, context):
+        captured.update(coerced)
+        return 123.0
+
+    monkeypatch.setattr("app.services.metrics.metric_compute._execute_scalar_query", _capture_scalar)
+
+    out = await metric_tools.compute(
+        {"key": "gross_revenue", "params": {"period": "this_year"}},
+        {"db": db, "tenant_id": str(tenant_a.id), "fiscal_year_start_month": 1},
+    )
+
+    assert "error" not in out, out
+    assert captured.get("period_start") == "2026-01-01", captured
+    assert captured.get("period_end") == "2026-12-31", captured
