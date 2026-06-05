@@ -281,6 +281,79 @@ def test_rejects_enum_value_with_backslash():
             )
 
 
+# ── (d) dialect vs source_kind cross-check ────────────────────────────────────
+
+
+def test_dialect_must_match_source_kind():
+    """REAL invariant (R1#12). The blessed_spec `dialect` field is author-supplied but
+    compute routes entirely by source_kind — dialect is effectively a doc annotation.
+    However, a contradictory dialect (e.g. source_kind=bigquery + dialect=suiteql)
+    signals a copy-paste error and would silently compute via BigQuery while the metric
+    claims to be SuiteQL. validate_definition MUST reject this mismatch at author-time
+    so a blessed definition is internally consistent. A missing dialect (None) is
+    allowed (authors need not always set it), and a matching dialect passes."""
+    with pytest.raises(AuthoringError, match="dialect"):
+        validate_definition(
+            {
+                "key": "k",
+                "source_kind": "bigquery",
+                "params_schema": {},
+                "blessed_spec": {"query": "SELECT 0", "dialect": "suiteql"},
+            }
+        )
+
+
+def test_dialect_mismatch_suiteql_bigquery_also_rejected():
+    """Mirror case: source_kind=suiteql with dialect=bigquery is equally contradictory
+    and must be rejected. Proves the guard is symmetric."""
+    with pytest.raises(AuthoringError, match="dialect"):
+        validate_definition(
+            {
+                "key": "k",
+                "source_kind": "suiteql",
+                "params_schema": {},
+                "blessed_spec": {"query": "SELECT 0", "dialect": "bigquery"},
+            }
+        )
+
+
+def test_dialect_absent_is_allowed():
+    """A missing dialect (key absent) is valid — authors need not always set it.
+    Ensures the guard does not force a dialect declaration."""
+    validate_definition(
+        {
+            "key": "cash",
+            "source_kind": "suiteql",
+            "params_schema": {"period": {"type": "period"}},
+            "blessed_spec": {"query": "SELECT 0"},
+        }
+    )
+
+
+def test_matching_dialect_passes():
+    """source_kind=suiteql + dialect=suiteql is consistent and must pass."""
+    validate_definition(
+        {
+            "key": "cash",
+            "source_kind": "suiteql",
+            "params_schema": {"period": {"type": "period"}},
+            "blessed_spec": {"query": "SELECT 0", "dialect": "suiteql"},
+        }
+    )
+
+
+def test_bigquery_matching_dialect_passes():
+    """source_kind=bigquery + dialect=bigquery is consistent and must pass."""
+    validate_definition(
+        {
+            "key": "bq_metric",
+            "source_kind": "bigquery",
+            "params_schema": {"period": {"type": "period"}},
+            "blessed_spec": {"query": "SELECT 0", "dialect": "bigquery"},
+        }
+    )
+
+
 # ── (c) expression-over-expression DB check ────────────────────────────────────
 
 

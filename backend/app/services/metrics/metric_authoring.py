@@ -131,6 +131,14 @@ def validate_definition(d: dict, *, allowed_cross_source_keys: set[str] | None =
         unknown = set(spec) - allowed
         if unknown:
             raise AuthoringError(f"blessed_spec has keys not in the live tool schema: {sorted(unknown)}")
+        # Cross-check: if dialect is explicitly set, it must agree with source_kind.
+        # Compute routes exclusively by source_kind; a contradictory dialect
+        # (e.g. source_kind=bigquery + dialect=suiteql) signals a copy-paste error
+        # that would silently compute via the wrong engine. A missing dialect (None)
+        # is allowed — authors need not always set it.
+        dialect = spec.get("dialect")
+        if kind in ("suiteql", "bigquery") and dialect not in (None, kind):
+            raise AuthoringError(f"blessed_spec dialect '{dialect}' must match source_kind '{kind}'")
 
     _validate_params_schema(d)
 
