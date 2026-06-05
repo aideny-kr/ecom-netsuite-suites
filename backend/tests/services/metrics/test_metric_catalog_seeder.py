@@ -105,9 +105,10 @@ async def test_concurrent_reseed_uses_upsert_not_unique_violation(db):
 async def test_placeholder_defaults_are_draft_not_active(db):
     """D3: SELECT 0 placeholder rows must seed as draft, not active.
     §12.2: all seeded rows must carry a non-null 1536-d embedding."""
-    from app.services.metrics.metric_catalog_seeder import seed_system_metrics
-    from app.models.metric_definition import SYSTEM_TENANT_ID, MetricDefinition
     from sqlalchemy import select
+
+    from app.models.metric_definition import SYSTEM_TENANT_ID, MetricDefinition
+    from app.services.metrics.metric_catalog_seeder import seed_system_metrics
 
     await seed_system_metrics(db)
     rows = (
