@@ -160,7 +160,7 @@ async def validate_leaves_exist(db: AsyncSession, *, tenant_id: uuid.UUID, d: di
     deps = list(d.get("depends_on") or [])
     if not deps:
         return
-    stmt = select(MetricDefinition.key).where(
+    stmt = select(MetricDefinition.key, MetricDefinition.source_kind).where(
         or_(
             MetricDefinition.tenant_id == tenant_id,
             MetricDefinition.tenant_id == SYSTEM_TENANT_ID,
@@ -168,11 +168,17 @@ async def validate_leaves_exist(db: AsyncSession, *, tenant_id: uuid.UUID, d: di
         MetricDefinition.status == "active",
         MetricDefinition.key.in_(deps),
     )
-    present = set((await db.execute(stmt)).scalars().all())
-    missing = [k for k in deps if k not in present]
+    found = {k: sk for k, sk in (await db.execute(stmt)).all()}
+    missing = [k for k in deps if k not in found]
     if missing:
         raise AuthoringError(
             f"expression references metric keys that do not exist in the catalog (tenant ∪ system): {sorted(missing)}"
+        )
+    non_query = [k for k, sk in found.items() if sk == "expression"]
+    if non_query:
+        raise AuthoringError(
+            f"expression leaves must be query-backed, not expressions: {sorted(non_query)} "
+            "(expressions are one-level; compose only over suiteql/bigquery metrics)"
         )
 
 

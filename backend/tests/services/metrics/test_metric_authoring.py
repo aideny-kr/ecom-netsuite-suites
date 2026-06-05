@@ -279,3 +279,45 @@ def test_rejects_enum_value_with_backslash():
                     "params_schema": {"region": {"type": "enum", "values": ["eu", poison]}},
                 }
             )
+
+
+# ── (c) expression-over-expression DB check ────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_expression_leaf_must_be_query_backed(db):
+    """REAL compute-safety invariant (R1#4). validate_leaves_exist currently only checks
+    that the leaf keys EXIST and are active — it does not check that those leaves are
+    query-backed. An expression whose leaf is also an expression is accepted at author
+    time, then crashes at compute: _execute_scalar_query does
+    `metric.blessed_spec["query"]`, and an expression leaf has `blessed_spec=None` →
+    TypeError → 500. validate_leaves_exist MUST reject expression leaves at author time.
+
+    Pre-fix this PASSES (currently any active key satisfies the check); post-fix it
+    raises AuthoringError with 'query-backed' in the message."""
+    from app.services.metrics.metric_authoring import AuthoringError, validate_leaves_exist
+    from app.models.metric_definition import SYSTEM_TENANT_ID, MetricDefinition
+    import uuid
+
+    db.add(
+        MetricDefinition(
+            tenant_id=SYSTEM_TENANT_ID,
+            key="leaf_expr",
+            display_name="x",
+            definition="x",
+            unit="ratio",
+            source_kind="expression",
+            expression="a/b",
+            depends_on=["a", "b"],
+            status="active",
+            version=1,
+            provenance={"author": "t"},
+        )
+    )
+    await db.flush()
+    with pytest.raises(AuthoringError, match="query-backed"):
+        await validate_leaves_exist(
+            db,
+            tenant_id=uuid.uuid4(),
+            d={"source_kind": "expression", "depends_on": ["leaf_expr"], "key": "top"},
+        )
