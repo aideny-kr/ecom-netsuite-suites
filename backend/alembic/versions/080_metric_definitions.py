@@ -17,6 +17,18 @@ SYSTEM_TENANT = "00000000-0000-0000-0000-000000000000"
 
 
 def upgrade() -> None:
+    # SYSTEM-default metric rows (tenant_id = SYSTEM_TENANT) FK to tenants.id. The
+    # synthetic SYSTEM tenant row does not exist on a fresh DB, so provision it
+    # BEFORE the table/seeder can reference it — otherwise the seeder FK-violates.
+    # Idempotent: ON CONFLICT (id) DO NOTHING. Mirrors app/models/tenant.py NOT NULL
+    # columns (name, slug, plan, is_active). 080 is not on remote yet, so it only
+    # runs on fresh DBs.
+    op.execute(
+        sa.text(
+            "INSERT INTO tenants (id, name, slug, plan, is_active) "
+            "VALUES (CAST(:id AS uuid), :name, :slug, :plan, :is_active) ON CONFLICT (id) DO NOTHING"
+        ).bindparams(id=SYSTEM_TENANT, name="System", slug="system", plan="free", is_active=True)
+    )
     op.create_table(
         "metric_definitions",
         sa.Column("id", UUID(as_uuid=True), primary_key=True, server_default=sa.text("gen_random_uuid()")),

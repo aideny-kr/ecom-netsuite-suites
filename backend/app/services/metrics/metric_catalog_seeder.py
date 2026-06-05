@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.metric_definition import SYSTEM_TENANT_ID, MetricDefinition
 from app.services.chat.domain_knowledge import embed_domain_texts
+from app.services.metrics.system_tenant import ensure_system_tenant
 
 # Small generic core + a couple DTC-flavored extras (spec §13 Q1). Expression leaves reference other keys.
 _SYSTEM_METRICS: list[dict] = [
@@ -92,6 +93,10 @@ def _embed_text(m: dict) -> str:
 
 
 async def seed_system_metrics(db: AsyncSession) -> int:
+    # Defense-in-depth: SYSTEM metric rows FK to tenants.id; provision the parent
+    # so the seeder is self-sufficient even on a fresh DB (mig 080 also seeds it).
+    await ensure_system_tenant(db)
+    await db.flush()
     await db.execute(delete(MetricDefinition).where(MetricDefinition.tenant_id == SYSTEM_TENANT_ID))
     embeddings = await embed_domain_texts([_embed_text(m) for m in _SYSTEM_METRICS])
     for idx, m in enumerate(_SYSTEM_METRICS):

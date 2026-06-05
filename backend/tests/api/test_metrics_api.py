@@ -59,7 +59,7 @@ async def test_tenant_admin_cannot_author_system_metric(client, admin_user):
 
 
 async def test_superadmin_can_author_system_metric(client, superadmin_user, db):
-    from sqlalchemy import select
+    from sqlalchemy import delete, select
 
     from app.models.metric_definition import SYSTEM_TENANT_ID, MetricDefinition
     from app.models.tenant import Tenant
@@ -70,6 +70,11 @@ async def test_superadmin_can_author_system_metric(client, superadmin_user, db):
     if exists is None:
         db.add(Tenant(id=SYSTEM_TENANT_ID, name="System", slug="system", plan="free", is_active=True))
         await db.flush()
+    # Test hygiene: writes a SYSTEM net_margin row, which collides on
+    # UNIQUE(tenant_id, key) with the seeder's net_margin if the catalog is already
+    # seeded. Clear the catalog first (rolled back per the db fixture).
+    await db.execute(delete(MetricDefinition))
+    await db.flush()
 
     _, headers = superadmin_user
     resp = await client.post(

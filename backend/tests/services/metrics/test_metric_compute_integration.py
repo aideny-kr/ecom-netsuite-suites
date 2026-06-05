@@ -1,5 +1,5 @@
 # backend/tests/services/metrics/test_metric_compute_integration.py
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from app.models.audit import AuditEvent
 from app.models.metric_definition import SYSTEM_TENANT_ID, MetricDefinition
@@ -20,6 +20,12 @@ async def _ensure_system_tenant(db):
     if exists is None:
         db.add(Tenant(id=SYSTEM_TENANT_ID, name="System", slug="system", plan="free", is_active=True))
         await db.flush()
+    # Test hygiene: every test below inserts SYSTEM rows whose keys (net_margin,
+    # gross_revenue, net_income, net_revenue, ...) collide on UNIQUE(tenant_id, key)
+    # with the system seeder's keys if the catalog is already seeded. Clear it first
+    # (rolled back per the db fixture).
+    await db.execute(delete(MetricDefinition))
+    await db.flush()
 
 
 async def test_expression_metric_computes_as_one_row_data_table(db, tenant_a, monkeypatch):

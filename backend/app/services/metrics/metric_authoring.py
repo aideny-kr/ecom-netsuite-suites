@@ -5,9 +5,10 @@ import uuid
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.metric_definition import MetricDefinition
+from app.models.metric_definition import SYSTEM_TENANT_ID, MetricDefinition
 from app.services.chat.domain_knowledge import embed_domain_query
 from app.services.metrics.expression_evaluator import ExpressionError, extract_dependencies
+from app.services.metrics.system_tenant import ensure_system_tenant
 
 _SINGLE_SOURCE_KEYS = {"query", "dialect"}
 
@@ -51,6 +52,11 @@ def _embed_text(payload: dict) -> str:
 
 async def create_metric(db: AsyncSession, *, tenant_id: uuid.UUID, payload: dict) -> MetricDefinition:
     """Persist a tenant (or SYSTEM) metric definition with a 1536-d intent embedding."""
+    # Defense-in-depth so the authoring CLI is self-sufficient: a SYSTEM-default row
+    # FKs to the synthetic SYSTEM tenant, which may not exist yet on a fresh DB.
+    if tenant_id == SYSTEM_TENANT_ID:
+        await ensure_system_tenant(db)
+        await db.flush()
     embedding = await embed_domain_query(_embed_text(payload))
     metric = MetricDefinition(
         tenant_id=tenant_id,

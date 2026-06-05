@@ -1,9 +1,17 @@
 # backend/tests/services/metrics/test_metric_resolver.py
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from app.models.metric_definition import SYSTEM_TENANT_ID, MetricDefinition
 from app.models.tenant import Tenant
 from app.services.metrics.metric_resolver import resolve_metrics
+
+
+async def _clear_catalog(db):
+    # Test hygiene: these tests insert SYSTEM rows whose keys collide on
+    # UNIQUE(tenant_id, key) with the system seeder's keys if the catalog is
+    # already seeded. Clear the catalog first (rolled back per the db fixture).
+    await db.execute(delete(MetricDefinition))
+    await db.flush()
 
 
 async def _ensure_system_tenant(db):
@@ -37,6 +45,7 @@ async def _add(db, tenant_id, key, synonyms=None):
 
 
 async def test_resolve_returns_system_and_tenant_excludes_other(db, tenant_a, tenant_b):
+    await _clear_catalog(db)
     await _add(db, SYSTEM_TENANT_ID, "gross_revenue")
     await _add(db, tenant_a.id, "net_margin", synonyms=["bottom line margin"])
     await _add(db, tenant_b.id, "secret_metric")
@@ -48,6 +57,7 @@ async def test_resolve_returns_system_and_tenant_excludes_other(db, tenant_a, te
 
 
 async def test_tenant_override_wins_by_key(db, tenant_a):
+    await _clear_catalog(db)
     await _add(db, SYSTEM_TENANT_ID, "net_margin")
     await _add(db, tenant_a.id, "net_margin")
     matches = await resolve_metrics(db, tenant_id=tenant_a.id, query="net_margin", top_k=10)
