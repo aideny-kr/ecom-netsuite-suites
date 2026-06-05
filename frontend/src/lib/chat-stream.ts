@@ -16,6 +16,10 @@ export interface DataTableData {
   row_count: number;
   query: string;
   truncated: boolean;
+  /** True when this table came from metric_compute (suppress_llm_value=true in the SSE payload).
+   *  When set, the component must hide SuiteQL-specific affordances (query expander,
+   *  re-run/export-as-query, save-query) because `query` is a metric key, not SQL. */
+  isMetric?: boolean;
 }
 
 export interface TaskOutputData {
@@ -276,6 +280,10 @@ export function normalizeStreamEvent(data: Record<string, unknown>): ChatStreamE
         row_count: typeof d.row_count === "number" ? d.row_count : 0,
         query: typeof d.query === "string" ? d.query : "",
         truncated: Boolean(d.truncated),
+        // Derive isMetric from suppress_llm_value — metric_compute sets this flag
+        // to signal that `query` is a metric key (not SQL) and LLM should not narrate
+        // the value. The FE uses isMetric to hide SQL-specific affordances.
+        isMetric: Boolean(d.suppress_llm_value),
       },
     };
   }
