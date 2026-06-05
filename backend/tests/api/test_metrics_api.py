@@ -89,3 +89,48 @@ async def test_superadmin_can_author_system_metric(client, superadmin_user, db):
     # the superadmin's own tenant.
     row = (await db.execute(select(MetricDefinition).where(MetricDefinition.key == "net_margin"))).scalar_one()
     assert row.tenant_id == SYSTEM_TENANT_ID
+
+
+async def test_create_metric_is_self_sufficient_when_system_tenant_absent(db, monkeypatch):
+    """REAL invariant (blocker #3, authoring path): on a FRESH DB the SYSTEM tenant
+    row does NOT exist, so create_metric()'s INSERT INTO metric_definitions FKs to a
+    missing parent and raises ForeignKeyViolationError. The API test above masks this
+    by pre-inserting the SYSTEM tenant in test code (vacuous — the create_metric
+    defense-in-depth ensure_system_tenant() block can be deleted and that test stays
+    green). Here we target the service fn directly: DELETE the SYSTEM tenant + its
+    metric rows, then call create_metric(tenant_id=SYSTEM_TENANT_ID) WITHOUT seeding
+    the tenant ourselves — create_metric must upsert the SYSTEM tenant first and
+    persist the row with no FK violation."""
+    from sqlalchemy import delete, select
+
+    from app.models.metric_definition import SYSTEM_TENANT_ID, MetricDefinition
+    from app.models.tenant import Tenant
+    from app.services.metrics import metric_authoring
+    from app.services.metrics.metric_authoring import create_metric
+
+    # Isolate the FK-provisioning invariant from embedding availability (network).
+    async def _fake_embed(_text):
+        return None
+
+    monkeypatch.setattr(metric_authoring, "embed_domain_query", _fake_embed)
+
+    # Tear down to mimic a fresh DB: SYSTEM metric rows then the SYSTEM tenant row.
+    await db.execute(delete(MetricDefinition).where(MetricDefinition.tenant_id == SYSTEM_TENANT_ID))
+    await db.execute(delete(Tenant).where(Tenant.id == SYSTEM_TENANT_ID))
+    await db.flush()
+    assert (
+        await db.execute(select(Tenant.id).where(Tenant.id == SYSTEM_TENANT_ID))
+    ).scalar_one_or_none() is None  # genuinely absent — create_metric is on its own
+
+    # No pre-seed of the SYSTEM tenant here — create_metric itself must provision it.
+    metric = await create_metric(db, tenant_id=SYSTEM_TENANT_ID, payload=_SYSTEM_METRIC_PAYLOAD)
+    await db.flush()
+
+    assert metric.tenant_id == SYSTEM_TENANT_ID
+    assert metric.key == "net_margin"
+    # create_metric created the SYSTEM tenant parent row (defense-in-depth upsert).
+    assert (
+        await db.execute(select(Tenant.id).where(Tenant.id == SYSTEM_TENANT_ID))
+    ).scalar_one_or_none() == SYSTEM_TENANT_ID
+    persisted = (await db.execute(select(MetricDefinition).where(MetricDefinition.key == "net_margin"))).scalar_one()
+    assert persisted.tenant_id == SYSTEM_TENANT_ID
