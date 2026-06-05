@@ -383,8 +383,9 @@ def _validate_blessed_query_for_activation(source_kind: str, blessed_spec: dict 
         except ValueError as ex:
             raise AuthoringError(f"cannot activate: blessed query failed read-only validation: {ex}") from ex
         # Dataset allowlist (mirrors metric_compute._validate_and_execute_by_source).
-        from app.core.config import settings
         import re as _re
+
+        from app.core.config import settings
 
         allowed = {
             d.strip().lower() for d in getattr(settings, "BIGQUERY_ALLOWED_DATASETS", "").split(",") if d.strip()
