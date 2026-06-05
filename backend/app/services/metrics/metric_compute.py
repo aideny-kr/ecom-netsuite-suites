@@ -100,14 +100,36 @@ def metric_data_table(display_name: str, value, unit: str, period_label: str, sp
     }
 
 
-async def _execute_scalar_query(db, tenant_id, metric: MetricDefinition, coerced: dict, context: dict) -> float:
+async def _validate_and_execute_by_source(db, tenant_id, source_kind: str, query: str) -> dict:
+    """Route the FILLED blessed query to the executor for its source_kind, applying
+    THAT tool's own read-only validation before execution. Hardcoding one tool would
+    run a bigquery metric's query against NetSuite (wrong data source) — surfacing a
+    number from the wrong system under the catalog's authority. Each branch validates
+    with the dialect-correct read-only check (SuiteQL vs BigQuery SQL differ).
+    """
+    if source_kind == "bigquery":
+        from app.mcp.tools import bigquery_tools
+        from app.services.bigquery_service import _validate_read_only
+
+        try:
+            _validate_read_only(query)
+        except ValueError as ex:
+            raise ParamError("filled query failed read-only validation") from ex
+        return await bigquery_tools.bigquery_sql_execute({"query": query}, {"tenant_id": str(tenant_id), "db": db})
+
+    # Default / "suiteql": NetSuite SuiteTalk REST. Expression-leaf metrics are
+    # themselves single-source rows (suiteql) and route here.
     from app.mcp.tools import netsuite_suiteql
 
-    query = fill_query(metric.blessed_spec["query"], coerced)
     if not netsuite_suiteql.is_read_only_sql(query):
         raise ParamError("filled query failed read-only validation")
-    # Execute via the existing tool path; returns the first scalar cell.
-    result = await netsuite_suiteql.execute({"query": query}, {"tenant_id": str(tenant_id), "db": db})
+    return await netsuite_suiteql.execute({"query": query}, {"tenant_id": str(tenant_id), "db": db})
+
+
+async def _execute_scalar_query(db, tenant_id, metric: MetricDefinition, coerced: dict, context: dict) -> float:
+    query = fill_query(metric.blessed_spec["query"], coerced)
+    # Branch on source_kind so the number comes from the RIGHT data source.
+    result = await _validate_and_execute_by_source(db, tenant_id, metric.source_kind, query)
     # Fail closed: a failed query must NEVER be coerced into a fabricated 0.0.
     if isinstance(result, dict) and result.get("error"):
         raise ComputeError(str(result.get("message") or "blessed query failed"))

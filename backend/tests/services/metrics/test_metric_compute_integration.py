@@ -389,3 +389,109 @@ async def test_division_by_zero_yields_needs_review_no_number(db, tenant_a, monk
         )
     ).scalar_one()
     assert row.status == "needs_review"
+
+
+# --- R4 source-kind routing: a bigquery metric must NOT execute against NetSuite ---
+
+
+async def test_bigquery_metric_routes_to_bigquery_executor_not_netsuite(db, tenant_a, monkeypatch):
+    """THE anti-hallucination invariant for major #6. A metric whose source_kind is
+    'bigquery' must execute through the BigQuery executor — NOT netsuite_suiteql.
+
+    The prior _execute_scalar_query hardcoded netsuite_suiteql for every metric, so a
+    bigquery metric silently ran its blessed query against the WRONG data source
+    (NetSuite SuiteTalk). That surfaces a number computed from the wrong system under
+    the catalog's authority — exactly the hallucination this catalog exists to prevent.
+
+    We stub BOTH boundaries with disjoint sentinels: BigQuery returns the real value;
+    netsuite_suiteql, if ever called, returns a poison value. The test fails if the
+    poison number leaks (= the metric was routed to NetSuite) OR if netsuite_suiteql
+    was touched at all."""
+    await _ensure_system_tenant(db)
+    db.add(
+        MetricDefinition(
+            tenant_id=SYSTEM_TENANT_ID,
+            key="warehouse_gmv",
+            display_name="Warehouse GMV",
+            definition="x",
+            unit="currency",
+            source_kind="bigquery",
+            blessed_spec={"query": "SELECT SUM(gmv) FROM analytics.orders", "dialect": "bigquery"},
+            params_schema={"period": {"type": "period"}},
+            status="active",
+            version=1,
+        )
+    )
+    await db.flush()
+
+    bq_calls: list[str] = []
+    ns_calls: list[str] = []
+
+    async def _bq_execute(params, context=None, **kwargs):
+        bq_calls.append(params.get("query", ""))
+        return {"columns": ["gmv"], "rows": [[4242.0]]}
+
+    async def _ns_poison(params, context=None, **kwargs):
+        ns_calls.append(params.get("query", ""))
+        return {"columns": ["x"], "rows": [[-9999.0]]}  # poison: wrong-source value
+
+    monkeypatch.setattr("app.mcp.tools.bigquery_tools.bigquery_sql_execute", _bq_execute)
+    monkeypatch.setattr("app.mcp.tools.netsuite_suiteql.execute", _ns_poison)
+
+    out = await compute_metric(
+        db,
+        tenant_id=tenant_a.id,
+        key="warehouse_gmv",
+        params={"period": "this_month"},
+        context={"fiscal_year_start_month": 1},
+    )
+
+    # (a) the number came from BigQuery, not the NetSuite poison source
+    assert "error" not in out, out
+    assert out["row_count"] == 1
+    assert out["rows"][0][0] == "Warehouse GMV"
+    assert out["rows"][0][1] == 4242.0
+    # (b) the NetSuite tool was NEVER touched for a bigquery metric
+    assert ns_calls == [], f"bigquery metric leaked into netsuite_suiteql: {ns_calls}"
+    # (c) the bigquery executor actually ran the filled blessed query
+    assert bq_calls and "analytics.orders" in bq_calls[0]
+
+
+async def test_bigquery_metric_failure_fails_closed_no_fabricated_number(db, tenant_a, monkeypatch):
+    """A bigquery metric whose executor errors must fail closed (number-free
+    needs_review), same as the suiteql path — never coerce to a fabricated value."""
+    await _ensure_system_tenant(db)
+    db.add(
+        MetricDefinition(
+            tenant_id=SYSTEM_TENANT_ID,
+            key="warehouse_gmv",
+            display_name="Warehouse GMV",
+            definition="x",
+            unit="currency",
+            source_kind="bigquery",
+            blessed_spec={"query": "SELECT SUM(gmv) FROM analytics.orders", "dialect": "bigquery"},
+            params_schema={"period": {"type": "period"}},
+            status="active",
+            version=1,
+        )
+    )
+    await db.flush()
+
+    async def _bq_boom(params, context=None, **kwargs):
+        return {"error": True, "message": "dataset not found"}
+
+    monkeypatch.setattr("app.mcp.tools.bigquery_tools.bigquery_sql_execute", _bq_boom)
+
+    out = await compute_metric(
+        db,
+        tenant_id=tenant_a.id,
+        key="warehouse_gmv",
+        params={"period": "this_month"},
+        context={"fiscal_year_start_month": 1},
+    )
+    assert out.get("error") == "blessed_query_failed", out
+    assert out.get("status") == "needs_review"
+    assert "rows" not in out
+    assert "value" not in out
+    assert 0 not in out.values()
+    assert 0.0 not in out.values()
