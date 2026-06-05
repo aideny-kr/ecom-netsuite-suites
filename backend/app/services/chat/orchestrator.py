@@ -21,6 +21,7 @@ from app.core.config import settings
 from app.services.chat.prompt_cache import split_system_prompt
 from app.services.chat.tool_categories import categorize
 from app.services.drive_rag.retriever import retrieve_drive_chunks
+from app.services.metrics.metric_compute import condense_metric_for_llm, is_suppressed_metric_payload
 
 # Regex to strip leaked Anthropic tool-call XML from assistant text
 _TOOL_XML_RE = re.compile(r"</?(?:invoke|parameter|tool_use)[^>]*>", re.DOTALL)
@@ -813,18 +814,8 @@ def _intercept_tool_result(
         # so the model cannot state or recompute the number (anti-hallucination
         # invariant). Opt-in via the flag — every other data_table tool is byte-
         # identical because the flag is absent.
-        if parsed.get("suppress_llm_value") is True:
-            condensed = json.dumps(
-                {
-                    "row_count": row_count,
-                    "columns": columns,
-                    "note": (
-                        "1-row metric table rendered on the frontend. "
-                        "Do NOT state or recompute the number; provide commentary only."
-                    ),
-                },
-                default=str,
-            )
+        if is_suppressed_metric_payload(parsed):
+            condensed = condense_metric_for_llm(parsed)
             return "data_table", sse_event_data, condensed
 
         # Investigation queries (FULL context): send all rows so LLM can reason

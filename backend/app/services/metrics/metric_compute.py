@@ -100,6 +100,37 @@ def metric_data_table(display_name: str, value, unit: str, period_label: str, sp
     }
 
 
+def is_suppressed_metric_payload(parsed: object) -> bool:
+    """True iff `parsed` is a metric data_table that opted into value suppression.
+
+    The single predicate both the streaming interceptor (orchestrator) and the
+    non-streaming agent path use to recognize a metric trust-boundary payload, so
+    the two paths cannot drift on what counts as 'a number to withhold'.
+    """
+    return isinstance(parsed, dict) and parsed.get("suppress_llm_value") is True
+
+
+def condense_metric_for_llm(parsed: dict) -> str:
+    """Return the LLM-facing condensed string for a suppressed metric payload:
+    shape + a do-not-recompute note, but NO value/rows. This is the ONE definition
+    of the metric trust boundary's LLM-facing view — reused by both the streaming
+    interceptor and the non-streaming run() path so a metric number can never reach
+    the model on either path (anti-hallucination invariant)."""
+    import json as _json
+
+    return _json.dumps(
+        {
+            "row_count": parsed.get("row_count"),
+            "columns": parsed.get("columns"),
+            "note": (
+                "1-row metric table rendered on the frontend. "
+                "Do NOT state or recompute the number; provide commentary only."
+            ),
+        },
+        default=str,
+    )
+
+
 async def _validate_and_execute_by_source(db, tenant_id, source_kind: str, query: str) -> dict:
     """Route the FILLED blessed query to the executor for its source_kind, applying
     THAT tool's own read-only validation before execution. Hardcoding one tool would
