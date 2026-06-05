@@ -20,9 +20,10 @@ class ComputeError(RuntimeError):
     """A blessed query failed or returned an unusable result.
 
     Raised instead of fabricating a value (never `or [[0]]`). compute_metric
-    catches this, flips the metric to needs_review, and returns a number-free
-    error dict — honoring the anti-hallucination invariant that a failed query
-    must NEVER surface a wrong/zero number.
+    catches this, audit-logs the failure via _log_compute_failure, and returns a
+    number-free error dict — NEVER mutating the definition (D1: compute is
+    read-only). Honors the anti-hallucination invariant that a failed query must
+    NEVER surface a wrong/zero number.
     """
 
     pass
