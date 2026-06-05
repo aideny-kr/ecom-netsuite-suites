@@ -225,9 +225,13 @@ async def test_create_expression_metric_rejects_when_only_committed_namesake_is_
 
     monkeypatch.setattr("app.services.metrics.metric_authoring.embed_domain_query", _fake_embed)
 
-    # Sanity: the committed migration-080 active net_income IS visible in this tx (we
-    # never deleted it) — this is the leakage source the old shared-key seeding fell to.
-    committed_active = (
+    # Sanity: the committed migration-080 net_income IS visible in this tx (we never
+    # deleted it) — this is the leakage source the old shared-key seeding fell to.
+    # After D3 the seeder seeds query-backed defaults as "draft" (not "active"), so we
+    # accept active, draft, or None (bare DB without the migration run yet).  The status
+    # of this committed row is irrelevant to the test's actual assertion — this block
+    # merely confirms the row is present and visible (i.e. the global DELETE was NOT run).
+    committed_status = (
         await db.execute(
             select(MetricDefinition.status).where(
                 MetricDefinition.tenant_id == SYSTEM_TENANT_ID,
@@ -235,9 +239,7 @@ async def test_create_expression_metric_rejects_when_only_committed_namesake_is_
             )
         )
     ).scalar_one_or_none()
-    # Either the catalog is seeded (status active) or not present on a bare DB; both are
-    # fine — the point is our unique-key leaf is what drives the assertion, not this row.
-    assert committed_active in ("active", None)
+    assert committed_status in ("active", "draft", None)
 
     p = _kp()
     leaf_inactive, leaf_active = f"{p}net_income", f"{p}gross_revenue"
