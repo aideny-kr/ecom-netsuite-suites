@@ -1,3 +1,78 @@
+import pytest
+
+
+async def test_put_bumps_version_and_can_reactivate(client, admin_user, db):
+    """PUT /metrics/{id} must bump version and allow status transitions (incl. reactivating)."""
+    user, headers = admin_user
+    created = await client.post(
+        "/api/v1/metrics",
+        headers=headers,
+        json={
+            "key": "rev_v2",
+            "display_name": "Revenue",
+            "definition": "revenue",
+            "unit": "currency",
+            "source_kind": "suiteql",
+            "blessed_spec": {"query": "SELECT 0", "dialect": "suiteql"},
+            "params_schema": {"period": {"type": "period"}},
+        },
+    )
+    assert created.status_code == 201, created.text
+    mid = created.json()["id"]
+    resp = await client.put(
+        f"/api/v1/metrics/{mid}",
+        headers=headers,
+        json={
+            "blessed_spec": {"query": "SELECT SUM(amount) FROM transaction", "dialect": "suiteql"},
+            "status": "active",
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["version"] == 2
+    assert body["status"] == "active"
+
+
+async def test_put_returns_404_when_not_found(client, admin_user):
+    """PUT /metrics/{id} must return 404 when the metric id does not belong to the tenant."""
+    _, headers = admin_user
+    import uuid
+
+    fake_id = str(uuid.uuid4())
+    resp = await client.put(
+        f"/api/v1/metrics/{fake_id}",
+        headers=headers,
+        json={"blessed_spec": {"query": "SELECT 1", "dialect": "suiteql"}},
+    )
+    assert resp.status_code == 404, resp.text
+
+
+async def test_put_non_admin_forbidden(client, member_user):
+    """PUT /metrics/{id} must be gated on metrics.manage permission."""
+    import uuid
+
+    _, headers = member_user
+    resp = await client.put(
+        f"/api/v1/metrics/{uuid.uuid4()}",
+        headers=headers,
+        json={"display_name": "X"},
+    )
+    assert resp.status_code == 403, resp.text
+
+
+async def test_put_system_metric_forbidden_for_tenant_admin(client, admin_user):
+    """PUT /metrics/system/{id} must reject a tenant admin (non-superadmin)."""
+    import uuid
+
+    _, headers = admin_user
+    resp = await client.put(
+        f"/api/v1/metrics/system/{uuid.uuid4()}",
+        headers=headers,
+        json={"display_name": "X"},
+    )
+    assert resp.status_code == 403, resp.text
+
+
 async def test_non_admin_forbidden(client, member_user):
     _, headers = member_user
     resp = await client.post(

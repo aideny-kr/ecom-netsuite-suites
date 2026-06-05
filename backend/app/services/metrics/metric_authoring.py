@@ -190,6 +190,67 @@ async def validate_leaves_exist(db: AsyncSession, *, tenant_id: uuid.UUID, d: di
         )
 
 
+async def update_metric(
+    db: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    metric_id: uuid.UUID,
+    payload: dict,
+) -> MetricDefinition:
+    """Edit a definition: re-validate, bump version, allow status transitions (incl.
+    reactivating a draft/needs_review row). Tenant-scoped: a tenant may only update its
+    own rows; SYSTEM rows update under SYSTEM_TENANT_ID via the superadmin route."""
+    metric = (
+        await db.execute(
+            select(MetricDefinition).where(
+                MetricDefinition.id == metric_id,
+                MetricDefinition.tenant_id == tenant_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if metric is None:
+        raise AuthoringError("metric not found for this tenant")
+
+    # Merge current values with the incoming patch (exclude None so unset fields keep
+    # the existing value).
+    _MUTABLE_FIELDS = (
+        "key",
+        "display_name",
+        "definition",
+        "unit",
+        "source_kind",
+        "blessed_spec",
+        "expression",
+        "depends_on",
+        "params_schema",
+        "dimensions",
+    )
+    merged = {c: getattr(metric, c) for c in _MUTABLE_FIELDS}
+    merged.update({k: v for k, v in payload.items() if v is not None and k != "status"})
+
+    validate_definition(merged)
+    await validate_leaves_exist(db, tenant_id=tenant_id, d=merged)
+
+    # Apply mutable fields (excluding key — key is the stable identity of a metric).
+    for field in (
+        "display_name",
+        "definition",
+        "unit",
+        "blessed_spec",
+        "expression",
+        "depends_on",
+        "params_schema",
+        "dimensions",
+        "status",
+    ):
+        if payload.get(field) is not None:
+            setattr(metric, field, payload[field])
+
+    metric.version += 1
+    await db.flush()
+    return metric
+
+
 def _embed_text(payload: dict) -> str:
     parts = [payload.get("display_name", ""), payload.get("definition", "")]
     parts.extend(payload.get("synonyms") or [])
