@@ -115,6 +115,7 @@ export function LearnedRulesSection() {
               <Input
                 className="h-8 text-[13px]"
                 placeholder="Category (e.g. term_definition, query_logic) — optional"
+                maxLength={50}
                 value={newCategory}
                 onChange={(e) => setNewCategory(e.target.value)}
               />
@@ -166,6 +167,7 @@ export function LearnedRulesSection() {
                         variant={rule.is_active ? "outline" : "ghost"}
                         onClick={() => handleToggle(rule)}
                         disabled={updateRule.isPending}
+                        aria-pressed={rule.is_active}
                         title={rule.is_active ? "Active — click to deactivate" : "Inactive — click to activate"}
                       >
                         {rule.is_active ? "Active" : "Inactive"}
@@ -188,7 +190,12 @@ export function LearnedRulesSection() {
                           </AlertDialogHeader>
                           <AlertDialogFooter>
                             <AlertDialogCancel>Cancel</AlertDialogCancel>
-                            <AlertDialogAction onClick={() => handleDelete(rule)}>Delete</AlertDialogAction>
+                            <AlertDialogAction
+                              onClick={() => handleDelete(rule)}
+                              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                            >
+                              Delete
+                            </AlertDialogAction>
                           </AlertDialogFooter>
                         </AlertDialogContent>
                       </AlertDialog>
