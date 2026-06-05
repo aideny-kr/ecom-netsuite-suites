@@ -22,6 +22,21 @@
 - **Discuss before fixing**: Always discuss approach AND research existing code before making changes.
 - **Commit frequently**: One commit per logical change. Never amend. Push to BOTH repos (`origin` + `framework`).
 
+## UAT + Review — tier EVERY PR
+
+Review + UAT depth is decided by a risk **tier** (not by vibes). Pick the tier; the tier decides the gates.
+
+**T2 (high-risk)** if ANY: mutates customer data (approve/lock/post) · HITL invariant (per-line audit / no-auto-post / period freeze) · financial close-lock / money-variance · auth/RLS/tenant-scoping · alembic migration · secrets/encryption · cron/Beat jobs · deploy/runtime infra · prompt-pollution surface (chat prompts/knowledge profiles/golden datasets/SSE numbers) · soul config · file-cabinet/MCP writes · key-billed chat · **the review/UAT tooling or policy itself**.
+**T1** = code, none of the above. **T0** = docs/comments/formatting/rename only (config/dep-bumps are NOT auto-T0).
+
+| Tier | CI | Live smoke | Review |
+|------|----|-----------|--------|
+| T0 | existing | — | optional |
+| T1 | existing (+e2e if covered) | — | `/code-review` light |
+| T2 | existing **+ seeded-tenant e2e** | **safe-envelope live smoke** | **blocking multi-angle review pre-merge** |
+
+T2 review = `Workflow({name:"code-review-multiangle", args:{target:"<PR#|branch>"}})` — it fails CLOSED (non-empty `failed_angles` ⇒ re-run; `UNVERIFIED` ⇒ needs human). How-to-run detail + the full checklist: `.claude/rules/uat-review.md`. Self-review does NOT substitute for the T2 gate.
+
 ## Architecture Invariants
 
 - **Multi-tenant**: All tables have `tenant_id`. RLS via `SET LOCAL app.current_tenant_id` (use `set_tenant_context()`).
