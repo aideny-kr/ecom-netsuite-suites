@@ -13,6 +13,7 @@ import logging
 import re
 import uuid
 from typing import TYPE_CHECKING, Any, Callable
+from xml.sax.saxutils import escape as _xml_escape
 
 from app.services.chat.agents.base_agent import BaseSpecialistAgent
 from app.services.chat.tools import build_local_tool_definitions
@@ -524,7 +525,9 @@ class UnifiedAgent(BaseSpecialistAgent):
         if _learned_rules:
             lr_block = "\n<learned_rules>\nTenant-specific business rules — FOLLOW THESE STRICTLY:\n"
             for rule in _learned_rules:
-                lr_block += f"  [{rule['category']}] {rule['description']}\n"
+                # Escape tenant-controlled text so a rule containing markup can't
+                # break out of <learned_rules> or inject prompt instructions.
+                lr_block += f"  [{_xml_escape(str(rule['category']))}] {_xml_escape(str(rule['description']))}\n"
             lr_block += "</learned_rules>"
             parts.append(lr_block)
 
