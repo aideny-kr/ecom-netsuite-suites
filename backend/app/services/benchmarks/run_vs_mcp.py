@@ -102,6 +102,10 @@ class Case:
     notes: str
     baseline_expected_tools: list[str]
     baseline_expected_accuracy: float
+    # NEW-4: if True, the runner verifies that the computed metric value
+    # does NOT appear verbatim in the model's text answer (anti-hallucination
+    # invariant). Hard-fails the case (score = 0.0) on violation.
+    computed_value_absent: bool = False
 
 
 def _load_case_file(path: Path) -> Case:
@@ -118,6 +122,7 @@ def _load_case_file(path: Path) -> Case:
         notes=str(data.get("notes", "")),
         baseline_expected_tools=data.get("baseline_expected_tools", []),
         baseline_expected_accuracy=float(data.get("baseline_expected_accuracy", 0.7)),
+        computed_value_absent=bool(data.get("computed_value_absent", False)),
     )
 
 
@@ -207,6 +212,52 @@ def _score_tools(
         if any(expected in used for used in used_names):
             hits += 1
     return hits / len(expected_tools)
+
+
+# ---------------------------------------------------------------------------
+# Metric value extraction — NEW-4 value-absent invariant
+# ---------------------------------------------------------------------------
+
+
+def _extract_computed_values_from_metric_tables(
+    metric_data_tables: list[dict],
+) -> list[str]:
+    """Extract the computed Value cell(s) from metric data_table payloads.
+
+    Metric data_tables produced by metric_compute have the shape:
+        columns: ["Metric", "Value", "Unit", "Period"]
+        rows:    [[display_name, value, unit, period], ...]
+
+    The Value cell is at index 1 in each row. We collect the raw value and
+    its str() form so downstream matching is forgiving of type differences
+    (e.g. float 12.5 vs string "12.5").
+
+    Returns a deduplicated list of string representations of the value.
+    Empty list if no metric payloads or no rows.
+    """
+    _METRIC_COLUMNS_PREFIX = ["Metric", "Value", "Unit", "Period"]
+    values: list[str] = []
+    seen: set[str] = set()
+
+    for payload in metric_data_tables or []:
+        cols = payload.get("columns")
+        rows = payload.get("rows")
+        if not isinstance(cols, list) or cols[:4] != _METRIC_COLUMNS_PREFIX:
+            continue
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, (list, tuple)) or len(row) < 2:
+                continue
+            raw_value = row[1]
+            # Collect the raw form and str() form
+            for candidate in (raw_value, str(raw_value)):
+                s = str(candidate).strip()
+                if s and s not in seen:
+                    seen.add(s)
+                    values.append(s)
+
+    return values
 
 
 # ---------------------------------------------------------------------------
@@ -316,6 +367,35 @@ async def _run_single_case(
             answer_preview=(agent_result.answer_text or "")[:240],
         )
         print(f"    ours score rationale: {ours_rationale}")
+
+        # NEW-4: value-absent invariant check for metric cases.
+        # When the case declares computed_value_absent: true, the computed
+        # numeric value from the metric_compute data_table must NOT appear
+        # verbatim in the model's text answer (anti-hallucination invariant).
+        # A leak means the SSE interception was bypassed — hard-fail: score=0.0.
+        if case.computed_value_absent and agent_result.success:
+            from app.services.benchmarks.scorer import assert_computed_value_absent
+
+            computed_values = _extract_computed_values_from_metric_tables(agent_result.metric_data_tables)
+            if computed_values:
+                value_absent_ok = assert_computed_value_absent(agent_result.answer_text, computed_values)
+                if not value_absent_ok:
+                    # Find which value leaked
+                    leaked = next(
+                        (v for v in computed_values if v.lower() in (agent_result.answer_text or "").lower()),
+                        computed_values[0],
+                    )
+                    violation_reason = f"computed_value_absent violated: '{leaked}' appeared in the answer"
+                    print(f"    [NEW-4] HARD FAIL: {violation_reason}")
+                    ours_side = SideScore(
+                        answer_acc=0.0,
+                        tool_acc=ours_side.tool_acc,
+                        cost_usd=ours_side.cost_usd,
+                        latency_ms=ours_side.latency_ms,
+                        success=False,
+                        error=violation_reason,
+                        answer_preview=ours_side.answer_preview,
+                    )
 
     # Run baseline
     if skip_baseline:
