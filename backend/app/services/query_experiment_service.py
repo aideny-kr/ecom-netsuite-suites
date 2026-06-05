@@ -546,6 +546,20 @@ async def run_single_experiment(
         return result
 
     result["generated_sql"] = generated_sql
+    result["score_efficiency"] = score_efficiency(generated_sql)
+
+    # Perf-guard veto (pre-execution): a candidate whose SQL carries a proven perf
+    # anti-pattern is never executed, benchmarked, or promoted — short-circuit to SKIP.
+    # Catches patterns that run fast enough on today's data but time out at scale, and
+    # avoids paying the (up-to-60s) candidate execution + two benchmark agent runs.
+    perf_issues = detect_perf_anti_patterns(generated_sql)
+    if perf_issues:
+        result["decision"] = "SKIP"
+        result["error_message"] = "perf-guard veto: " + ", ".join(perf_issues)
+        promote_result = dict(result)
+        promote_result["test_query"] = case.question
+        await promote_experiment_result(promote_result, tenant_id, db)
+        return result
 
     # Step 2: Execute SQL
     exec_result = await _execute_sql(
@@ -560,12 +574,6 @@ async def run_single_experiment(
         return result
 
     result["executed_successfully"] = True
-
-    # Score the candidate SQL's efficiency (replaces the legacy hardcoded 0.0). This
-    # is the only place score_efficiency has teeth: a perf anti-pattern here vetoes
-    # promotion below, so a timeout-prone pattern can never become a proven pattern.
-    result["score_efficiency"] = score_efficiency(generated_sql)
-    perf_issues = detect_perf_anti_patterns(generated_sql)
 
     # Step 3: Run vs-MCP benchmark comparison
     # Run our agent (which will use the candidate pattern if it's in the DB)
@@ -618,18 +626,11 @@ async def run_single_experiment(
     result["baseline_score"] = bl_score
     result["delta"] = round(agent_score - bl_score, 4)
 
-    # Step 4: Decide based on vs-MCP comparison.
-    # The answer-quality comparison (substring_score) decides KEEP/REVERT/SKIP, but a
-    # would-be KEEP is vetoed to SKIP when the candidate SQL carries a proven perf
-    # anti-pattern — we never promote a timeout-prone pattern even if its answer wins.
-    # The veto only ever downgrades KEEP→SKIP; REVERT and natural SKIP are untouched,
-    # so it cannot bias the (efficiency-blind) baseline comparison toward REVERT.
+    # Step 4: Decide based on vs-MCP comparison. (Candidates whose SQL carries a proven
+    # perf anti-pattern were already vetoed to SKIP pre-execution above, so they never
+    # reach this answer-quality comparison and can never be promoted.)
     if agent_score >= bl_score and agent_score > 0.5:
-        if perf_issues:
-            result["decision"] = "SKIP"
-            result["error_message"] = "perf-guard veto: " + ", ".join(perf_issues)
-        else:
-            result["decision"] = "KEEP"
+        result["decision"] = "KEEP"
     elif agent_score < bl_score - 0.1:
         result["decision"] = "REVERT"
     else:

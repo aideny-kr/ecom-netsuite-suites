@@ -202,6 +202,60 @@ class TestDetectPerfAntiPatterns:
     def test_empty_sql_no_patterns(self):
         assert detect_perf_anti_patterns("") == []
 
+    # --- leak hardening (grill round 2) ---
+
+    def test_country_filter_not_in_detected(self):
+        sql = (
+            "SELECT 1 FROM transactionShippingAddress sa "
+            "WHERE BUILTIN.DF(sa.country) NOT IN ('SG','NO') "
+            "AND t.trandate >= TO_DATE('2025-06-01','YYYY-MM-DD')"
+        )
+        assert "builtin_df_country_filter" in detect_perf_anti_patterns(sql)
+
+    def test_country_filter_aliasless_detected(self):
+        sql = (
+            "SELECT 1 FROM transactionShippingAddress sa "
+            "WHERE BUILTIN.DF(country) = 'Singapore' "
+            "AND t.trandate >= TO_DATE('2025-06-01','YYYY-MM-DD')"
+        )
+        assert "builtin_df_country_filter" in detect_perf_anti_patterns(sql)
+
+    def test_country_filter_reversed_comparison_detected(self):
+        sql = (
+            "SELECT 1 FROM transactionShippingAddress sa "
+            "WHERE 'Singapore' = BUILTIN.DF(sa.country) "
+            "AND t.trandate >= TO_DATE('2025-06-01','YYYY-MM-DD')"
+        )
+        assert "builtin_df_country_filter" in detect_perf_anti_patterns(sql)
+
+    def test_country_suffix_field_not_flagged(self):
+        # BUILTIN.DF(sa.shipcountry) is a different column — COUNTRY as a suffix must
+        # not be mistaken for the country column (anchored on the '(' of the DF arg).
+        sql = (
+            "SELECT 1 FROM transactionShippingAddress sa "
+            "WHERE BUILTIN.DF(sa.shipcountry) = 'X' "
+            "AND t.trandate >= TO_DATE('2025-06-01','YYYY-MM-DD')"
+        )
+        assert "builtin_df_country_filter" not in detect_perf_anti_patterns(sql)
+
+    def test_trandate_not_equal_is_not_a_bound(self):
+        # `<>` (not-equal) does not bound the scan to a date range → still unbounded.
+        sql = (
+            "SELECT 1 FROM transactionShippingAddress sa "
+            "JOIN transaction t ON t.shippingaddress = sa.nkey "
+            "WHERE sa.country IN ('SG') AND t.trandate <> TO_DATE('2025-06-01','YYYY-MM-DD')"
+        )
+        assert "unbounded_address_join" in detect_perf_anti_patterns(sql)
+
+    def test_commented_trandate_predicate_is_not_a_bound(self):
+        # A trandate predicate inside a SQL comment must not count as a real scan bound.
+        sql = (
+            "SELECT 1 FROM transactionShippingAddress sa "
+            "JOIN transaction t ON t.shippingaddress = sa.nkey "
+            "WHERE sa.country IN ('SG')  -- t.trandate >= TO_DATE('2025-01-01','YYYY-MM-DD')"
+        )
+        assert "unbounded_address_join" in detect_perf_anti_patterns(sql)
+
 
 class TestCompositeScore:
     def test_weighted_composite(self):

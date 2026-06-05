@@ -112,24 +112,30 @@ def score_accuracy(result_text: str, expected_keywords: list[str]) -> float:
     return round(hits / len(expected_keywords), 4)
 
 
-# BUILTIN.DF(<alias>.country) used as a FILTER predicate — a per-row function in a
-# filter defeats the index → full scan → 60s timeout (2026-06 ship-to-country
-# incident). Matched in ANY clause (WHERE / JOIN-ON / HAVING) by requiring a
-# comparison/IN/LIKE right after the closing paren, so it cannot escape via ON/HAVING.
+# BUILTIN.DF(<addr>.country) used as a FILTER predicate — a per-row function in a filter
+# defeats the index → full scan → 60s timeout (2026-06 ship-to-country incident). The
+# country arg is anchored on the '(' of the DF call (with optional `<alias>.`) so COUNTRY
+# cannot match as a suffix of another identifier (e.g. shipcountry). A comparison /
+# (NOT) IN / (NOT) LIKE adjacent on EITHER side marks a filter — matched in ANY clause
+# (WHERE / JOIN-ON / HAVING) and for reversed forms (`'SG' = BUILTIN.DF(sa.country)`).
 # Display use — BUILTIN.DF(sa.country) AS country, GROUP BY BUILTIN.DF(sa.country) — has
-# no operator after ')' and is NOT matched. Scoped to .country on purpose:
+# no adjacent operator and is NOT matched. Scoped to .country on purpose:
 # BUILTIN.DF(field) = 'Value' on small static custom lists is a blessed readability
 # pattern (netsuite.yaml CUSTOM LIST FIELDS) and must not be flagged. `BUILTIN\s*\.\s*DF`
 # also catches a spaced-out `BUILTIN . DF` evasion.
-_BUILTIN_DF_COUNTRY_FILTER = re.compile(
-    r"BUILTIN\s*\.\s*DF\s*\(\s*\w+\.COUNTRY\s*\)\s*(?:=|<>|!=|>=|<=|>|<|\bIN\b|\bLIKE\b)"
-)
+_DF_COUNTRY = r"BUILTIN\s*\.\s*DF\s*\(\s*(?:\w+\.)?COUNTRY\s*\)"
+_CMP = r"(?:>=|<=|<>|!=|>|<|=|(?:NOT\s+)?IN\b|(?:NOT\s+)?LIKE\b)"
+_BUILTIN_DF_COUNTRY_FILTER = re.compile(rf"{_DF_COUNTRY}\s*{_CMP}|{_CMP}\s*{_DF_COUNTRY}")
 
-# A real trandate predicate bounds the scan to a date range (uses the trandate index).
+# A real trandate predicate bounds the scan to a date RANGE (uses the trandate index).
 # Allow an optional ')' so both `t.trandate >= ...` and `TRUNC(t.trandate) >= ...` count;
-# a SELECT/ORDER BY mention (trandate followed by ',' or end) does NOT (no operator).
-# FETCH FIRST / ROWNUM are deliberately NOT bounds — they cap returned rows, not the scan.
-_TRANDATE_PREDICATE = re.compile(r"\bTRANDATE\s*\)?\s*(?:>=|<=|>|<|=|\bBETWEEN\b)")
+# a SELECT/ORDER BY mention (trandate followed by ',' or end) does NOT (no operator), and
+# `<>` / `!=` (not-equal) are NOT range bounds. FETCH FIRST / ROWNUM are deliberately NOT
+# bounds — they cap returned rows, not the scan.
+# Known residual: this is alias-blind, so a stray `<other>.trandate >=` predicate in the
+# same query would also satisfy the bound — acceptable, since an address-country query
+# scans the transaction it joins and an unrelated trandate predicate is implausible.
+_TRANDATE_PREDICATE = re.compile(r"\bTRANDATE\s*\)?\s*(?:>=|<=|<(?!>)|>|=|\bBETWEEN\b)")
 
 _ADDRESS_TABLES = ("TRANSACTIONSHIPPINGADDRESS", "TRANSACTIONBILLINGADDRESS")
 
@@ -157,7 +163,11 @@ def detect_perf_anti_patterns(sql: str) -> list[str]:
     """
     if not sql or not sql.strip():
         return []
-    sql_upper = sql.upper()
+    # Strip SQL comments first so a commented-out predicate can't satisfy a scan bound
+    # and a commented BUILTIN.DF can't trip the filter check.
+    cleaned = re.sub(r"--[^\n]*", " ", sql)
+    cleaned = re.sub(r"/\*.*?\*/", " ", cleaned, flags=re.DOTALL)
+    sql_upper = cleaned.upper()
     reasons: list[str] = []
     if _BUILTIN_DF_COUNTRY_FILTER.search(sql_upper):
         reasons.append("builtin_df_country_filter")

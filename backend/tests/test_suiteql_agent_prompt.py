@@ -71,3 +71,31 @@ class TestMetadataReference:
         assert "SELECT → customlist_order_status" in result
         assert "'Pending': ID 1" in result
         assert "'Failed': ID 2" in result
+
+    def test_list_field_filter_guidance_has_perf_caveat(self):
+        # The live metadata reference (injected into the unified agent prompt) must not
+        # teach a blanket BUILTIN.DF(field)='<name>' filter — it needs the same perf
+        # caveat as netsuite.yaml so it stops seeding the country anti-pattern (grill r2).
+        agent = SuiteQLAgent.__new__(SuiteQLAgent)
+
+        class FakeMD:
+            transaction_body_fields = None
+            transaction_column_fields = None
+            entity_custom_fields = None
+            item_custom_fields = None
+            custom_record_types = None
+            custom_record_fields = None
+            custom_lists = None
+            subsidiaries = None
+            departments = None
+            classifications = None
+            locations = None
+            scripts = None
+            script_deployments = None
+            workflows = None
+            custom_list_values = {"customlist_order_status": [{"id": 1, "name": "Pending"}]}
+            saved_searches = None
+
+        agent._metadata = FakeMD()
+        result = agent._build_metadata_reference()
+        assert "per-row function" in result.lower()

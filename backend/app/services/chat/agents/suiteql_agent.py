@@ -632,7 +632,11 @@ class SuiteQLAgent(BaseSpecialistAgent):
 
         if getattr(md, "custom_list_values", None) and isinstance(md.custom_list_values, dict):
             parts.append("\n**Custom List Values** — Use exact Internal IDs for WHERE clauses instead of text:")
-            parts.append("When filtering by a list field, use `WHERE field = <id>` or `BUILTIN.DF(field) = '<name>'`.")
+            parts.append(
+                "When filtering by a SMALL static list field, use `WHERE field = <id>` (fastest) or "
+                "`BUILTIN.DF(field) = '<name>'` (readable). On a JOIN-backed or large table, filter the "
+                "raw ID/code — `BUILTIN.DF` is a per-row function that forces a full scan."
+            )
             for list_name, values in md.custom_list_values.items():
                 if values:
                     val_str = ", ".join([f"'{v.get('name')}': ID {v.get('id')}" for v in values[:50]])
