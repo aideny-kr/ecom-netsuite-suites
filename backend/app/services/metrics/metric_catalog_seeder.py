@@ -136,6 +136,13 @@ async def seed_system_metrics(db: AsyncSession) -> int:
         # rather than racing into a UNIQUE(tenant_id, key) violation.
         # All mutable seed columns are refreshed on conflict so re-seeding after
         # a definition update propagates correctly.
+        # B2: only refresh rows that the seeder still owns (provenance.author ==
+        # 'system_seed').  When a superadmin has edited a SYSTEM metric on a
+        # canonical key the existing row's provenance.author will be something
+        # other than 'system_seed'; the WHERE predicate evaluates to FALSE on the
+        # *existing target row*, so PostgreSQL leaves it untouched (the
+        # conflicting INSERT is silently dropped).  Seeder-owned rows are still
+        # refreshed normally — the predicate is TRUE → same behaviour as before.
         stmt = (
             pg_insert(MetricDefinition)
             .values(**values)
@@ -156,6 +163,7 @@ async def seed_system_metrics(db: AsyncSession) -> int:
                     "version": values["version"],
                     "provenance": values["provenance"],
                 },
+                where=(MetricDefinition.provenance["author"].astext == "system_seed"),
             )
         )
         await db.execute(stmt)

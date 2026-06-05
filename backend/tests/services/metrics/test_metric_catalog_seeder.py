@@ -172,3 +172,113 @@ async def test_seeder_sets_system_tenant_context_before_writes(db):
     # before the INSERT loop begins, the ordering invariant is structurally
     # guaranteed by the implementation if the call is at the top of seed_system_metrics.
     assert execute_calls, "seeder must execute at least one statement (the metric upserts)"
+
+
+async def test_reseed_preserves_superadmin_edited_canonical_metric(db):
+    """B2: reseed must NOT clobber a superadmin-authored SYSTEM metric.
+
+    Scenario: superadmin edits the canonical 'cash' metric via PUT /metrics/system/{id},
+    stamping provenance.author='superadmin', a real GL query, and status='active'.
+    The nightly Beat reseed must leave the row untouched (WHERE predicate on existing
+    provenance.author == 'system_seed' is FALSE → no update, existing row preserved).
+    """
+    from sqlalchemy import update
+
+    await _ensure_system_tenant(db)
+
+    # Step 1: seed once — all rows are system_seed-owned
+    await seed_system_metrics(db)
+    await db.flush()
+
+    # Step 2: simulate a superadmin edit on the 'cash' row
+    await db.execute(
+        update(MetricDefinition)
+        .where(
+            MetricDefinition.tenant_id == SYSTEM_TENANT_ID,
+            MetricDefinition.key == "cash",
+        )
+        .values(
+            blessed_spec={"query": "SELECT SUM(amount) FROM transaction", "dialect": "suiteql"},
+            status="active",
+            provenance={"author": "superadmin"},
+        )
+    )
+    await db.flush()
+
+    # Step 3: reseed — must NOT overwrite the superadmin row
+    await seed_system_metrics(db)
+    await db.flush()
+
+    row = (
+        await db.execute(
+            select(MetricDefinition).where(
+                MetricDefinition.tenant_id == SYSTEM_TENANT_ID,
+                MetricDefinition.key == "cash",
+            )
+        )
+    ).scalar_one()
+
+    assert row.blessed_spec == {"query": "SELECT SUM(amount) FROM transaction", "dialect": "suiteql"}, (
+        "B2: reseed clobbered superadmin's blessed_spec back to SELECT 0 draft"
+    )
+    assert row.status == "active", "B2: reseed reverted status to 'draft'"
+    assert row.provenance["author"] == "superadmin", "B2: reseed overwrote provenance.author back to 'system_seed'"
+
+
+async def test_reseed_still_refreshes_seeder_owned_rows(db):
+    """B2 complement: conditional upsert must still update rows that remain seeder-owned.
+
+    Scenario: a seeder-owned row is accidentally corrupted (e.g. display_name='STALE').
+    The nightly reseed should detect provenance.author=='system_seed' and restore it.
+    """
+    from sqlalchemy import update
+
+    await _ensure_system_tenant(db)
+
+    # Step 1: seed once
+    await seed_system_metrics(db)
+    await db.flush()
+
+    # Step 2: corrupt a seeder-owned row (provenance.author still 'system_seed')
+    await db.execute(
+        update(MetricDefinition)
+        .where(
+            MetricDefinition.tenant_id == SYSTEM_TENANT_ID,
+            MetricDefinition.key == "cash",
+        )
+        .values(display_name="STALE")
+    )
+    await db.flush()
+
+    # Verify corruption is in place
+    stale_row = (
+        await db.execute(
+            select(MetricDefinition).where(
+                MetricDefinition.tenant_id == SYSTEM_TENANT_ID,
+                MetricDefinition.key == "cash",
+            )
+        )
+    ).scalar_one()
+    assert stale_row.display_name == "STALE"
+    assert stale_row.provenance["author"] == "system_seed"
+
+    # Step 3: reseed — must refresh the seeder-owned row
+    await seed_system_metrics(db)
+    await db.flush()
+    # Expire the identity map so the following SELECT hits the DB, not the
+    # in-session cache (pg_insert upserts bypass ORM tracking).
+    db.expire_all()
+
+    refreshed_row = (
+        await db.execute(
+            select(MetricDefinition).where(
+                MetricDefinition.tenant_id == SYSTEM_TENANT_ID,
+                MetricDefinition.key == "cash",
+            )
+        )
+    ).scalar_one()
+
+    assert refreshed_row.display_name == "Cash", (
+        "B2 complement: conditional upsert failed to refresh a seeder-owned row — "
+        f"display_name is still '{refreshed_row.display_name}'"
+    )
