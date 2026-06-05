@@ -1132,6 +1132,59 @@ async def test_leaf_param_error_in_expression_path_refuses_no_raise(db, tenant_a
     assert "value" not in out
 
 
+async def test_undeclared_query_placeholder_refuses_no_raise(db, tenant_a, monkeypatch):
+    """A blessed query that references a placeholder (:undeclared) NOT present in
+    params_schema slips past coerce_params (which only fills declared params), so
+    fill_query finds a residual placeholder and raises ParamError('unfilled
+    placeholder remains') deep inside _execute_scalar_query — which runs inside
+    compute_metric's outer try that historically caught only ExpressionError/
+    ComputeError. Pre-fix that ParamError bare-raises out of compute_metric (500).
+    Post-fix the outer try ALSO catches ParamError and returns the §9 number-free
+    {'error': 'invalid_params'} refusal, never raising and never reaching the executor."""
+    await _ensure_system_tenant(db)
+    db.add(
+        MetricDefinition(
+            tenant_id=SYSTEM_TENANT_ID,
+            key="gross_revenue",
+            display_name="Gross Revenue",
+            definition="x",
+            unit="currency",
+            source_kind="suiteql",
+            # :undeclared is NOT in params_schema → coerce_params never fills it →
+            # fill_query raises ParamError on the residual placeholder.
+            blessed_spec={"query": "SELECT 1 WHERE x=:undeclared", "dialect": "suiteql"},
+            params_schema={"period": {"type": "period"}},
+            status="active",
+            version=1,
+        )
+    )
+    await db.flush()
+
+    # Guard: the executor must NEVER be reached — fill_query fails before execution.
+    async def _ns_poison(params, context=None, **kwargs):
+        raise AssertionError("executor reached despite unfilled placeholder")
+
+    monkeypatch.setattr("app.mcp.tools.netsuite_suiteql.execute", _ns_poison)
+
+    # MUST NOT raise: compute_metric must catch the fill_query ParamError and fail closed.
+    out = await compute_metric(
+        db,
+        tenant_id=tenant_a.id,
+        key="gross_revenue",
+        params={"period": "this_month"},
+        context={"fiscal_year_start_month": 1},
+    )
+
+    # (a) structured number-free refusal, NOT a data_table with a value
+    assert out.get("error") == "invalid_params", out
+    assert out.get("key") == "gross_revenue", out
+    assert "rows" not in out
+    assert "value" not in out
+    # (b) no fabricated number anywhere in the payload
+    assert 0 not in out.values()
+    assert 0.0 not in out.values()
+
+
 async def test_governed_execute_seam_threads_tenant_fiscal_month(db, tenant_a, monkeypatch):
     """REAL PRODUCTION-seam F2 invariant. Drive mcp.governance.governed_execute (the
     exact path the agent's tool call flows through) for metric.compute, with a tenant

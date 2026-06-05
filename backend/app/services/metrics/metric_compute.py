@@ -170,8 +170,7 @@ async def _validate_and_execute_by_source(db, tenant_id, source_kind: str, query
             # F4 (d): symmetric with the suiteql branch below — a FILLED blessed query
             # that fails read-only re-validation is a spec/schema-drift condition, NOT a
             # caller param error. Raise ComputeError so compute_metric's uniform handler
-            # flips the metric to needs_review + audit-logs + returns a number-free dict.
-            # (ParamError here would escape compute_metric's catch and 500 the request.)
+            # audit-logs the failure and returns a number-free dict (compute is read-only).
             raise ComputeError(f"filled bigquery query failed read-only validation: {ex}") from ex
         return await bigquery_tools.bigquery_sql_execute({"query": query}, {"tenant_id": str(tenant_id), "db": db})
 
@@ -192,9 +191,9 @@ async def _validate_and_execute_by_source(db, tenant_id, source_kind: str, query
         netsuite_suiteql.validate_query(query, allowed_tables)
     except ValueError as ex:
         # A blessed query that fails the table-allowlist (or read-only) re-validation is
-        # a spec/schema-drift condition: raise ComputeError so compute_metric flips the
-        # metric to needs_review and returns a NUMBER-FREE error — never a wrong number,
-        # never the off-allowlist result.
+        # a spec/schema-drift condition: raise ComputeError so compute_metric audit-logs
+        # the failure and returns a NUMBER-FREE error dict (compute is read-only) — never a
+        # wrong number, never the off-allowlist result.
         raise ComputeError(f"filled query failed allowlist validation: {ex}") from ex
     return await netsuite_suiteql.execute({"query": query}, {"tenant_id": str(tenant_id), "db": db})
 
@@ -319,6 +318,14 @@ async def compute_metric(db: AsyncSession, *, tenant_id, key: str, params: dict,
             value = evaluate_expression(metric.expression, leaves)
         else:
             value = await _execute_scalar_query(db, tenant_id, metric, coerced, context)
+    except ParamError as ex:
+        # fill_query raises ParamError ('unfilled placeholder remains') deep inside
+        # _execute_scalar_query when the blessed query references a placeholder that
+        # coerce_params never filled (e.g. a :token NOT declared in params_schema).
+        # This is a caller/spec-param condition, NOT a metric/schema-drift failure, so it
+        # mirrors the coerce gates above: return the §9 number-free structured refusal —
+        # NOT bare-raise out of compute_metric and 500 the request, and NOT flip status.
+        return {"error": "invalid_params", "key": key, "message": str(ex)}
     except ExpressionError as ex:
         # Runtime evaluator failure → no number. Div-by-zero is the canonical case
         # (missing-dep/cycle are author-time rejections); label it precisely.
