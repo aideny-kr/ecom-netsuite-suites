@@ -434,6 +434,56 @@ async def test_superadmin_can_author_system_metric(client, superadmin_user, db):
     assert row.tenant_id == SYSTEM_TENANT_ID
 
 
+async def test_create_metric_rejects_invalid_unit(client, admin_user):
+    """REAL bug (Task 11): MetricCreate.unit was a bare str and accepted arbitrary values.
+    It is now a Literal of the five valid units, so an invalid unit → 422 at schema validation
+    (before any DB write)."""
+    _, headers = admin_user
+    resp = await client.post(
+        "/api/v1/metrics",
+        headers=headers,
+        json={
+            "key": "bad_unit_metric",
+            "display_name": "Bad Unit",
+            "definition": "x",
+            "unit": "bananas",
+            "source_kind": "suiteql",
+            "blessed_spec": {"query": "SELECT 0", "dialect": "suiteql"},
+        },
+    )
+    assert resp.status_code == 422, resp.text
+
+
+async def test_create_metric_persists_format(client, admin_user, db):
+    """REAL bug (Task 11): format is accepted in MetricCreate but was silently dropped
+    (not set in MetricDefinition constructor). A POST carrying format must persist it
+    to the row (verified via direct DB read — MetricResponse doesn't expose format)."""
+    from sqlalchemy import select
+
+    from app.models.metric_definition import MetricDefinition
+
+    _, headers = admin_user
+    resp = await client.post(
+        "/api/v1/metrics",
+        headers=headers,
+        json={
+            "key": "fmt_metric",
+            "display_name": "Formatted Metric",
+            "definition": "x",
+            "unit": "currency",
+            "source_kind": "suiteql",
+            "blessed_spec": {"query": "SELECT 0", "dialect": "suiteql"},
+            "format": "$#,##0",
+        },
+    )
+    assert resp.status_code == 201, resp.text
+    mid = resp.json()["id"]
+
+    row = (await db.execute(select(MetricDefinition).where(MetricDefinition.id == mid))).scalar_one()
+    await db.refresh(row)
+    assert row.format == "$#,##0"
+
+
 async def test_create_metric_is_self_sufficient_when_system_tenant_absent(db, monkeypatch):
     """REAL invariant (blocker #3, authoring path): on a FRESH DB the SYSTEM tenant
     row does NOT exist, so create_metric()'s INSERT INTO metric_definitions FKs to a

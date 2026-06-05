@@ -2,13 +2,18 @@ from typing import Literal
 
 from pydantic import BaseModel
 
+# The five valid unit values from the §4 data model.  Constraining to a Literal
+# means FastAPI/Pydantic rejects any other value with a 422 before any DB write.
+_UnitLiteral = Literal["currency", "percent", "ratio", "count", "days"]
+
 
 class MetricCreate(BaseModel):
     key: str
     display_name: str
     definition: str
-    unit: str
+    unit: _UnitLiteral
     source_kind: str
+    format: str | None = None
     blessed_spec: dict | None = None
     expression: str | None = None
     depends_on: list[str] | None = None
@@ -22,7 +27,8 @@ class MetricUpdate(BaseModel):
 
     display_name: str | None = None
     definition: str | None = None
-    unit: str | None = None
+    unit: _UnitLiteral | None = None
+    format: str | None = None
     blessed_spec: dict | None = None
     expression: str | None = None
     depends_on: list[str] | None = None
