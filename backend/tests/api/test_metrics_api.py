@@ -1,6 +1,3 @@
-import pytest
-
-
 async def test_put_bumps_version_and_can_reactivate(client, admin_user, db):
     """PUT /metrics/{id} must bump version and allow status transitions (incl. reactivating)."""
     user, headers = admin_user
@@ -71,6 +68,227 @@ async def test_put_system_metric_forbidden_for_tenant_admin(client, admin_user):
         json={"display_name": "X"},
     )
     assert resp.status_code == 403, resp.text
+
+
+async def test_put_cross_tenant_isolation_404(client, admin_user, admin_user_b, db):
+    """A metric authored by tenant B MUST be invisible to tenant A's PUT: the tenant
+    route scopes on user.tenant_id, so tenant A editing tenant B's row → 404, and the
+    row is NOT mutated. Guards against a cross-tenant edit via a guessed/leaked id."""
+    from sqlalchemy import select
+
+    from app.models.metric_definition import MetricDefinition
+
+    _, headers_a = admin_user
+    user_b, headers_b = admin_user_b
+
+    created = await client.post(
+        "/api/v1/metrics",
+        headers=headers_b,
+        json={
+            "key": "rev_tenant_b",
+            "display_name": "Revenue B",
+            "definition": "revenue",
+            "unit": "currency",
+            "source_kind": "suiteql",
+            "blessed_spec": {"query": "SELECT 0", "dialect": "suiteql"},
+        },
+    )
+    assert created.status_code == 201, created.text
+    mid = created.json()["id"]
+
+    # Tenant A attempts to edit tenant B's row → 404 (not found in A's scope).
+    resp = await client.put(
+        f"/api/v1/metrics/{mid}",
+        headers=headers_a,
+        json={"display_name": "Hijacked"},
+    )
+    assert resp.status_code == 404, resp.text
+
+    # The row is byte-identical: no display_name change, version still 1.
+    row = (await db.execute(select(MetricDefinition).where(MetricDefinition.id == mid))).scalar_one()
+    assert row.display_name == "Revenue B"
+    assert row.version == 1
+    assert row.tenant_id == user_b.tenant_id
+
+
+async def test_put_system_row_via_tenant_route_404(client, superadmin_user, admin_user, db):
+    """A SYSTEM-default row is owned by SYSTEM_TENANT_ID, not the tenant. Editing it
+    through the TENANT route (scoped on user.tenant_id) must 404 — only the superadmin
+    /system route may touch it. Guards against a tenant editing a cross-tenant default."""
+    from sqlalchemy import delete, select
+
+    from app.models.metric_definition import SYSTEM_TENANT_ID, MetricDefinition
+    from app.models.tenant import Tenant
+
+    # Seed the SYSTEM tenant parent row (FK target) + clear catalog for a clean insert.
+    exists = (await db.execute(select(Tenant.id).where(Tenant.id == SYSTEM_TENANT_ID))).scalar_one_or_none()
+    if exists is None:
+        db.add(Tenant(id=SYSTEM_TENANT_ID, name="System", slug="system", plan="free", is_active=True))
+        await db.flush()
+    await db.execute(delete(MetricDefinition))
+    await db.flush()
+
+    _, su_headers = superadmin_user
+    created = await client.post(
+        "/api/v1/metrics/system",
+        headers=su_headers,
+        json={
+            "key": "sys_rev",
+            "display_name": "System Revenue",
+            "definition": "revenue",
+            "unit": "currency",
+            "source_kind": "suiteql",
+            "blessed_spec": {"query": "SELECT 0", "dialect": "suiteql"},
+        },
+    )
+    assert created.status_code == 201, created.text
+    system_id = created.json()["id"]
+
+    # A tenant admin tries to edit the SYSTEM row via the TENANT route → 404.
+    _, admin_headers = admin_user
+    resp = await client.put(
+        f"/api/v1/metrics/{system_id}",
+        headers=admin_headers,
+        json={"display_name": "Hijacked"},
+    )
+    assert resp.status_code == 404, resp.text
+
+    # Unchanged + still owned by SYSTEM.
+    row = (await db.execute(select(MetricDefinition).where(MetricDefinition.id == system_id))).scalar_one()
+    assert row.display_name == "System Revenue"
+    assert row.tenant_id == SYSTEM_TENANT_ID
+
+
+async def test_put_persists_synonyms(client, admin_user, db):
+    """REAL bug (#1): synonyms is accepted in MetricUpdate but was silently dropped on
+    PUT. A PUT carrying synonyms must persist them to the row (verified via direct DB
+    read — there is no GET route and MetricResponse doesn't expose synonyms)."""
+    from sqlalchemy import select
+
+    from app.models.metric_definition import MetricDefinition
+
+    _, headers = admin_user
+    created = await client.post(
+        "/api/v1/metrics",
+        headers=headers,
+        json={
+            "key": "rev_syn",
+            "display_name": "Revenue",
+            "definition": "revenue",
+            "unit": "currency",
+            "source_kind": "suiteql",
+            "blessed_spec": {"query": "SELECT 0", "dialect": "suiteql"},
+        },
+    )
+    assert created.status_code == 201, created.text
+    mid = created.json()["id"]
+
+    resp = await client.put(
+        f"/api/v1/metrics/{mid}",
+        headers=headers,
+        json={"synonyms": ["rev", "topline"]},
+    )
+    assert resp.status_code == 200, resp.text
+
+    row = (await db.execute(select(MetricDefinition).where(MetricDefinition.id == mid))).scalar_one()
+    await db.refresh(row)
+    assert row.synonyms == ["rev", "topline"]
+
+
+async def test_put_rejects_invalid_status(client, admin_user, db):
+    """REAL bug (#2): MetricUpdate.status was a bare str and accepted "garbage". It is
+    now a Literal of the lifecycle states, so an invalid status → 422 (schema reject)."""
+    from sqlalchemy import select
+
+    from app.models.metric_definition import MetricDefinition
+
+    _, headers = admin_user
+    created = await client.post(
+        "/api/v1/metrics",
+        headers=headers,
+        json={
+            "key": "rev_status",
+            "display_name": "Revenue",
+            "definition": "revenue",
+            "unit": "currency",
+            "source_kind": "suiteql",
+            "blessed_spec": {"query": "SELECT 0", "dialect": "suiteql"},
+        },
+    )
+    assert created.status_code == 201, created.text
+    mid = created.json()["id"]
+
+    resp = await client.put(
+        f"/api/v1/metrics/{mid}",
+        headers=headers,
+        json={"status": "garbage"},
+    )
+    assert resp.status_code == 422, resp.text
+
+    # The row's status is untouched (still the create-time "active"), version not bumped.
+    row = (await db.execute(select(MetricDefinition).where(MetricDefinition.id == mid))).scalar_one()
+    assert row.status == "active"
+    assert row.version == 1
+
+
+async def test_put_refreshes_intent_embedding_on_text_change(client, admin_user, db, monkeypatch):
+    """REAL bug (#3): the intent embedding (used by resolve) went stale on PUT —
+    create_metric derives it from display_name|definition|synonyms but update_metric
+    never recomputed it. A PUT changing display_name must REFRESH the stored vector to
+    the embedding of the NEW merged text. We stub embed_domain_query to a deterministic
+    text-keyed vector so 'embedding == embedding(new text)' is observable (the real
+    embedder returns None in tests, which would mask the staleness)."""
+    from sqlalchemy import select
+
+    from app.models.metric_definition import MetricDefinition
+    from app.services.metrics import metric_authoring
+
+    # Deterministic, text-sensitive fake: maps text → a 1536-d vector (the column is
+    # Vector(1536)) whose first cell is a stable hash of the text. Distinct text ⇒
+    # distinct vector ⇒ staleness is observable. Stable across calls for the same text.
+    def _vec(text):
+        return [float(hash(text) % 1000)] + [0.0] * 1535
+
+    async def _fake_embed(text):
+        return _vec(text)
+
+    monkeypatch.setattr(metric_authoring, "embed_domain_query", _fake_embed)
+
+    _, headers = admin_user
+    created = await client.post(
+        "/api/v1/metrics",
+        headers=headers,
+        json={
+            "key": "rev_embed",
+            "display_name": "Revenue",
+            "definition": "revenue",
+            "unit": "currency",
+            "source_kind": "suiteql",
+            "blessed_spec": {"query": "SELECT 0", "dialect": "suiteql"},
+        },
+    )
+    assert created.status_code == 201, created.text
+    mid = created.json()["id"]
+
+    row = (await db.execute(select(MetricDefinition).where(MetricDefinition.id == mid))).scalar_one()
+    await db.refresh(row)
+    embed_before = list(row.intent_embedding)
+    # Sanity: the create-time embedding is the embedding of the create-time text.
+    assert embed_before == await _fake_embed("Revenue | revenue")
+
+    resp = await client.put(
+        f"/api/v1/metrics/{mid}",
+        headers=headers,
+        json={"display_name": "Total Revenue"},
+    )
+    assert resp.status_code == 200, resp.text
+
+    row = (await db.execute(select(MetricDefinition).where(MetricDefinition.id == mid))).scalar_one()
+    await db.refresh(row)
+    embed_after = list(row.intent_embedding)
+    # The embedding moved AND now equals the embedding of the NEW merged text.
+    assert embed_after != embed_before
+    assert embed_after == await _fake_embed("Total Revenue | revenue")
 
 
 async def test_non_admin_forbidden(client, member_user):

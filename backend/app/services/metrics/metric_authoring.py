@@ -212,8 +212,10 @@ async def update_metric(
         raise AuthoringError("metric not found for this tenant")
 
     # Merge current values with the incoming patch (exclude None so unset fields keep
-    # the existing value).
-    _MUTABLE_FIELDS = (
+    # the existing value). synonyms is carried so the embedding recompute below sees the
+    # row's current synonyms even when this PUT only touches display_name/definition;
+    # validate_definition ignores synonyms, so its presence in merged is inert there.
+    _MERGE_FIELDS = (
         "key",
         "display_name",
         "definition",
@@ -224,14 +226,17 @@ async def update_metric(
         "depends_on",
         "params_schema",
         "dimensions",
+        "synonyms",
     )
-    merged = {c: getattr(metric, c) for c in _MUTABLE_FIELDS}
+    merged = {c: getattr(metric, c) for c in _MERGE_FIELDS}
     merged.update({k: v for k, v in payload.items() if v is not None and k != "status"})
 
     validate_definition(merged)
     await validate_leaves_exist(db, tenant_id=tenant_id, d=merged)
 
     # Apply mutable fields (excluding key — key is the stable identity of a metric).
+    # synonyms is intentionally included: create_metric persists it, so an edit must
+    # too (else a client-supplied synonyms patch is silently dropped on update).
     for field in (
         "display_name",
         "definition",
@@ -241,10 +246,19 @@ async def update_metric(
         "depends_on",
         "params_schema",
         "dimensions",
+        "synonyms",
         "status",
     ):
         if payload.get(field) is not None:
             setattr(metric, field, payload[field])
+
+    # Keep the intent embedding in sync with the embedded text. create_metric derives
+    # it from display_name | definition | synonyms via _embed_text; if any of those
+    # changed on this PUT the stored vector is now stale and resolve would match on
+    # out-of-date text, so recompute it from the MERGED definition. Tolerate a None
+    # embedding exactly as create_metric does (embed_domain_query may return None).
+    if any(payload.get(f) is not None for f in ("display_name", "definition", "synonyms")):
+        metric.intent_embedding = await embed_domain_query(_embed_text(merged))
 
     metric.version += 1
     await db.flush()
