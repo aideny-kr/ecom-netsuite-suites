@@ -538,3 +538,112 @@ async def test_create_metric_is_self_sufficient_when_system_tenant_absent(db, mo
     ).scalar_one_or_none() == SYSTEM_TENANT_ID
     persisted = (await db.execute(select(MetricDefinition).where(MetricDefinition.key == "gross_revenue"))).scalar_one()
     assert persisted.tenant_id == SYSTEM_TENANT_ID
+
+
+# ── Minor: format field length validation ─────────────────────────────────────
+
+
+async def test_post_rejects_format_over_64_chars(client, admin_user):
+    """format is constrained to max_length=64. A garbage long string must → 422 at the
+    schema layer before any DB write."""
+    _, headers = admin_user
+    resp = await client.post(
+        "/api/v1/metrics",
+        headers=headers,
+        json={
+            "key": "fmt_too_long",
+            "display_name": "Long Format",
+            "definition": "x",
+            "unit": "currency",
+            "source_kind": "suiteql",
+            "blessed_spec": {"query": "SELECT 0", "dialect": "suiteql"},
+            "format": "x" * 65,
+        },
+    )
+    assert resp.status_code == 422, resp.text
+
+
+async def test_put_rejects_format_over_64_chars(client, admin_user, db):
+    """PUT with format > 64 chars must → 422 at the schema layer."""
+    _, headers = admin_user
+    created = await client.post(
+        "/api/v1/metrics",
+        headers=headers,
+        json={
+            "key": "fmt_too_long_put",
+            "display_name": "Long Format Put",
+            "definition": "x",
+            "unit": "currency",
+            "source_kind": "suiteql",
+            "blessed_spec": {"query": "SELECT 0", "dialect": "suiteql"},
+        },
+    )
+    assert created.status_code == 201, created.text
+    mid = created.json()["id"]
+
+    resp = await client.put(
+        f"/api/v1/metrics/{mid}",
+        headers=headers,
+        json={"format": "y" * 65},
+    )
+    assert resp.status_code == 422, resp.text
+
+
+async def test_post_accepts_normal_format(client, admin_user, db):
+    """A well-formed format string like '$#,##0' (len ≤ 64) must be accepted on POST."""
+    from sqlalchemy import select
+
+    from app.models.metric_definition import MetricDefinition
+
+    _, headers = admin_user
+    resp = await client.post(
+        "/api/v1/metrics",
+        headers=headers,
+        json={
+            "key": "fmt_normal",
+            "display_name": "Normal Format",
+            "definition": "x",
+            "unit": "currency",
+            "source_kind": "suiteql",
+            "blessed_spec": {"query": "SELECT 0", "dialect": "suiteql"},
+            "format": "$#,##0",
+        },
+    )
+    assert resp.status_code == 201, resp.text
+    mid = resp.json()["id"]
+    row = (await db.execute(select(MetricDefinition).where(MetricDefinition.id == mid))).scalar_one()
+    await db.refresh(row)
+    assert row.format == "$#,##0"
+
+
+async def test_put_accepts_normal_format(client, admin_user, db):
+    """A well-formed format string on PUT must be accepted and persisted."""
+    from sqlalchemy import select
+
+    from app.models.metric_definition import MetricDefinition
+
+    _, headers = admin_user
+    created = await client.post(
+        "/api/v1/metrics",
+        headers=headers,
+        json={
+            "key": "fmt_put_normal",
+            "display_name": "Normal Put Format",
+            "definition": "x",
+            "unit": "currency",
+            "source_kind": "suiteql",
+            "blessed_spec": {"query": "SELECT 0", "dialect": "suiteql"},
+        },
+    )
+    assert created.status_code == 201, created.text
+    mid = created.json()["id"]
+
+    resp = await client.put(
+        f"/api/v1/metrics/{mid}",
+        headers=headers,
+        json={"format": "#,##0.00%"},
+    )
+    assert resp.status_code == 200, resp.text
+    row = (await db.execute(select(MetricDefinition).where(MetricDefinition.id == mid))).scalar_one()
+    await db.refresh(row)
+    assert row.format == "#,##0.00%"

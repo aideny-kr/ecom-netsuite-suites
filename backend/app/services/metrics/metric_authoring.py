@@ -190,6 +190,45 @@ async def validate_leaves_exist(db: AsyncSession, *, tenant_id: uuid.UUID, d: di
         )
 
 
+async def _check_reverse_dependencies(
+    db: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    key: str,
+) -> None:
+    """M3: reverse-dependency guard for update_metric.
+
+    If an edit would change a query-backed leaf's `source_kind` to `'expression'` OR
+    change its `status` away from `'active'`, that leaf would disappear from compute's
+    active-only resolution (resolve_metric_by_key filters `status == 'active'` and
+    rejects expression metrics used as leaves).  Any active expression metric that
+    currently depends on the edited key would then return `missing_dependency` at compute
+    time — silently breaking the catalog with no author-time warning.
+
+    Query the catalog for active expression metrics across tenant ∪ SYSTEM whose
+    `depends_on` array contains `key`. If any are found, raise AuthoringError naming them.
+
+    Only called when the edit changes `source_kind` to `'expression'` OR changes `status`
+    away from `'active'` (harmless edits like display_name never trigger this).
+    """
+    stmt = select(MetricDefinition.key).where(
+        or_(
+            MetricDefinition.tenant_id == tenant_id,
+            MetricDefinition.tenant_id == SYSTEM_TENANT_ID,
+        ),
+        MetricDefinition.source_kind == "expression",
+        MetricDefinition.status == "active",
+        # PostgreSQL @> operator: array contains the given element.
+        MetricDefinition.depends_on.contains([key]),
+    )
+    dependent_keys = list((await db.execute(stmt)).scalars().all())
+    if dependent_keys:
+        raise AuthoringError(
+            f"cannot edit '{key}': active expression metric(s) depend on it as a "
+            f"query-backed leaf: {sorted(dependent_keys)}"
+        )
+
+
 async def update_metric(
     db: AsyncSession,
     *,
@@ -216,6 +255,19 @@ async def update_metric(
     ).scalar_one_or_none()
     if metric is None:
         raise AuthoringError("metric not found for this tenant")
+
+    # M3: reverse-dependency guard. If the edit changes source_kind to 'expression'
+    # (making it no longer a valid query-backed leaf) OR changes status away from
+    # 'active' (making it invisible to compute's active-only leaf resolver), any active
+    # expression metric that currently depends on this key would silently break at compute
+    # time. Reject BEFORE applying the edit so the catalog invariant is maintained.
+    _new_source_kind = payload.get("source_kind")
+    _new_status = payload.get("status")
+    _edit_breaks_leaf = (_new_source_kind is not None and _new_source_kind == "expression") or (
+        _new_status is not None and _new_status != "active"
+    )
+    if _edit_breaks_leaf:
+        await _check_reverse_dependencies(db, tenant_id=tenant_id, key=metric.key)
 
     # Merge current values with the incoming patch (exclude None so unset fields keep
     # the existing value). synonyms is carried so the embedding recompute below sees the
@@ -278,6 +330,16 @@ async def update_metric(
         _new_embedding = await embed_domain_query(_embed_text(merged))
         if _new_embedding is not None and len(_new_embedding) != 1536:
             raise AuthoringError("intent embedding must be 1536-d (use embed_domain_*)")
+        # Intentional: None means the embedding provider is unconfigured. The metric
+        # becomes keyword-only searchable (vector similarity disabled). Not an error.
+        if _new_embedding is None:
+            print(
+                f"[metric_authoring] WARNING: embed_domain_query returned None on update "
+                f"for key='{metric.key}' — metric will be keyword-only searchable "
+                f"(intent_embedding=None). Configure the embedding provider to enable "
+                f"vector similarity routing.",
+                flush=True,
+            )
         metric.intent_embedding = _new_embedding
 
     metric.version += 1
@@ -371,6 +433,18 @@ async def create_metric(db: AsyncSession, *, tenant_id: uuid.UUID, payload: dict
     embedding = await embed_domain_query(_embed_text(payload))
     if embedding is not None and len(embedding) != 1536:
         raise AuthoringError("intent embedding must be 1536-d (use embed_domain_*)")
+    # Intentional: a None embedding means the embedding provider is unconfigured (no
+    # OPENAI_API_KEY / vector backend). The row is persisted with intent_embedding=None
+    # and the metric becomes keyword-only searchable (vector similarity disabled).
+    # This is acceptable for local / CI environments — not a silent error.
+    if embedding is None:
+        print(
+            f"[metric_authoring] WARNING: embed_domain_query returned None for key="
+            f"'{payload.get('key')}' — metric will be keyword-only searchable "
+            f"(intent_embedding=None). Configure the embedding provider to enable "
+            f"vector similarity routing.",
+            flush=True,
+        )
     metric = MetricDefinition(
         tenant_id=tenant_id,
         key=payload["key"],

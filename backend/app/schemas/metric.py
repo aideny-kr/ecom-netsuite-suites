@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 # The five valid unit values from the §4 data model.  Constraining to a Literal
 # means FastAPI/Pydantic rejects any other value with a 422 before any DB write.
@@ -13,7 +13,7 @@ class MetricCreate(BaseModel):
     definition: str
     unit: _UnitLiteral
     source_kind: str
-    format: str | None = None
+    format: str | None = Field(default=None, max_length=64)
     blessed_spec: dict | None = None
     expression: str | None = None
     depends_on: list[str] | None = None
@@ -28,7 +28,7 @@ class MetricUpdate(BaseModel):
     display_name: str | None = None
     definition: str | None = None
     unit: _UnitLiteral | None = None
-    format: str | None = None
+    format: str | None = Field(default=None, max_length=64)
     blessed_spec: dict | None = None
     expression: str | None = None
     depends_on: list[str] | None = None

@@ -773,3 +773,267 @@ async def test_update_metric_reactivation_skipped_for_expression_metrics(db, ten
         payload={"status": "active"},
     )
     assert updated.status == "active"
+
+
+# ── M3: reverse-dependency guard — editing a leaf that active expressions depend on ──
+
+
+async def test_update_metric_deactivate_leaf_rejected_when_expression_depends_on_it(db, tenant_a, monkeypatch):
+    """M3 (a): deactivating (status→draft) a query-backed leaf that an active expression
+    metric depends on must raise AuthoringError naming the dependent. Without this guard
+    the leaf disappears from compute's active-only resolution, so the dependent expression
+    silently returns missing_dependency at compute time — a blessed metric that can never
+    compute after an innocuous-looking edit.
+
+    Pre-fix: update_metric only validates the EDITED row; it does not check downstream
+    dependents, so it happily writes status='draft' even though gm actively depends on gp.
+    Post-fix: AuthoringError("cannot edit 'gp': active expression metric(s) depend …")."""
+    await _ensure_system_tenant(db)
+
+    async def _fake_embed(_text):
+        return None
+
+    monkeypatch.setattr("app.services.metrics.metric_authoring.embed_domain_query", _fake_embed)
+
+    p = _kp()
+    gp_key = f"{p}gp"
+    rev_key = f"{p}rev"
+    gm_key = f"{p}gm"
+
+    # Leaf gp (query-backed, active)
+    db.add(_leaf(tenant_a.id, gp_key, status="active"))
+    # Leaf rev (query-backed, active)
+    db.add(_leaf(tenant_a.id, rev_key, status="active"))
+    await db.flush()
+
+    # Expression metric gm depends on gp and rev
+    gm = MetricDefinition(
+        tenant_id=tenant_a.id,
+        key=gm_key,
+        display_name="Gross Margin",
+        definition="gross margin",
+        unit="percent",
+        source_kind="expression",
+        expression=f"{gp_key} / {rev_key}",
+        depends_on=[gp_key, rev_key],
+        params_schema={},
+        status="active",
+        version=1,
+        provenance={"author": "tenant_admin"},
+    )
+    db.add(gm)
+    await db.flush()
+
+    # Fetch the gp row by key so we have its id
+    gp_row = (
+        await db.execute(
+            select(MetricDefinition).where(
+                MetricDefinition.tenant_id == tenant_a.id,
+                MetricDefinition.key == gp_key,
+            )
+        )
+    ).scalar_one()
+
+    with pytest.raises(AuthoringError, match=gm_key):
+        await update_metric(
+            db,
+            tenant_id=tenant_a.id,
+            metric_id=gp_row.id,
+            payload={"status": "draft"},
+        )
+
+
+async def test_update_metric_leaf_to_expression_rejected_when_expression_depends_on_it(db, tenant_a, monkeypatch):
+    """M3 (b): changing a query-backed leaf's source_kind to 'expression' (making it no
+    longer query-backed) while an active expression metric depends on it must raise
+    AuthoringError. `validate_leaves_exist` rejects expression metrics used as leaves
+    at CREATE time, but the same hazard arises at UPDATE when a leaf becomes an expression.
+
+    Pre-fix: update_metric validates only the EDITED row; the reverse-dep scan is absent.
+    Post-fix: AuthoringError naming the dependent expression metric."""
+    await _ensure_system_tenant(db)
+
+    async def _fake_embed(_text):
+        return None
+
+    monkeypatch.setattr("app.services.metrics.metric_authoring.embed_domain_query", _fake_embed)
+
+    p = _kp()
+    gp_key = f"{p}gp"
+    rev_key = f"{p}rev"
+    gm_key = f"{p}gm"
+
+    db.add(_leaf(tenant_a.id, gp_key, status="active"))
+    db.add(_leaf(tenant_a.id, rev_key, status="active"))
+    await db.flush()
+
+    gm = MetricDefinition(
+        tenant_id=tenant_a.id,
+        key=gm_key,
+        display_name="Gross Margin",
+        definition="gross margin",
+        unit="percent",
+        source_kind="expression",
+        expression=f"{gp_key} / {rev_key}",
+        depends_on=[gp_key, rev_key],
+        params_schema={},
+        status="active",
+        version=1,
+        provenance={"author": "tenant_admin"},
+    )
+    db.add(gm)
+    await db.flush()
+
+    gp_row = (
+        await db.execute(
+            select(MetricDefinition).where(
+                MetricDefinition.tenant_id == tenant_a.id,
+                MetricDefinition.key == gp_key,
+            )
+        )
+    ).scalar_one()
+
+    # Trying to flip gp to an expression — should fail because gm actively depends on it
+    with pytest.raises(AuthoringError, match=gm_key):
+        await update_metric(
+            db,
+            tenant_id=tenant_a.id,
+            metric_id=gp_row.id,
+            payload={
+                "source_kind": "expression",
+                "expression": f"{rev_key} / {rev_key}",
+                "depends_on": [rev_key],
+                "blessed_spec": None,
+            },
+        )
+
+
+async def test_update_metric_display_name_only_no_false_positive(db, tenant_a, monkeypatch):
+    """M3 (c): editing a leaf's display_name (no source_kind or status change) must
+    succeed even when an active expression metric depends on it — the reverse-dep check
+    must NOT fire on harmless edits. Guards against false positives that would make the
+    guard overly restrictive."""
+    await _ensure_system_tenant(db)
+
+    async def _fake_embed(_text):
+        return None
+
+    monkeypatch.setattr("app.services.metrics.metric_authoring.embed_domain_query", _fake_embed)
+
+    p = _kp()
+    gp_key = f"{p}gp"
+    rev_key = f"{p}rev"
+    gm_key = f"{p}gm"
+
+    db.add(_leaf(tenant_a.id, gp_key, status="active"))
+    db.add(_leaf(tenant_a.id, rev_key, status="active"))
+    await db.flush()
+
+    gm = MetricDefinition(
+        tenant_id=tenant_a.id,
+        key=gm_key,
+        display_name="Gross Margin",
+        definition="gross margin",
+        unit="percent",
+        source_kind="expression",
+        expression=f"{gp_key} / {rev_key}",
+        depends_on=[gp_key, rev_key],
+        params_schema={},
+        status="active",
+        version=1,
+        provenance={"author": "tenant_admin"},
+    )
+    db.add(gm)
+    await db.flush()
+
+    gp_row = (
+        await db.execute(
+            select(MetricDefinition).where(
+                MetricDefinition.tenant_id == tenant_a.id,
+                MetricDefinition.key == gp_key,
+            )
+        )
+    ).scalar_one()
+
+    # Display-name-only edit must NOT trigger the reverse-dep check
+    updated = await update_metric(
+        db,
+        tenant_id=tenant_a.id,
+        metric_id=gp_row.id,
+        payload={"display_name": "Gross Profit (renamed)"},
+    )
+    assert updated.display_name == "Gross Profit (renamed)"
+    assert updated.version == 2
+
+
+# ── Minor: embedding-None intentional handling ────────────────────────────────
+
+
+async def test_create_metric_succeeds_with_none_embedding(db, tenant_a, monkeypatch):
+    """Embedding-None: when embed_domain_query returns None (provider unconfigured),
+    create_metric must still persist the row with intent_embedding=None and not raise.
+    This is intentional behavior (keyword-only searchable) — must not hard-reject None."""
+    await _ensure_system_tenant(db)
+
+    async def _fake_embed(_text):
+        return None
+
+    monkeypatch.setattr("app.services.metrics.metric_authoring.embed_domain_query", _fake_embed)
+
+    p = _kp()
+    key = f"{p}revenue"
+    metric = await create_metric(
+        db,
+        tenant_id=tenant_a.id,
+        payload={
+            "key": key,
+            "display_name": "Revenue",
+            "definition": "total revenue",
+            "unit": "currency",
+            "source_kind": "suiteql",
+            "blessed_spec": {"query": "SELECT 0", "dialect": "suiteql"},
+        },
+    )
+    await db.flush()
+    assert metric.key == key
+    assert metric.intent_embedding is None
+
+
+async def test_update_metric_succeeds_with_none_embedding(db, tenant_a, monkeypatch):
+    """Embedding-None on update: when embed_domain_query returns None during an update,
+    update_metric must persist the row with intent_embedding=None and not raise."""
+    await _ensure_system_tenant(db)
+
+    async def _fake_embed(_text):
+        return None
+
+    monkeypatch.setattr("app.services.metrics.metric_authoring.embed_domain_query", _fake_embed)
+
+    p = _kp()
+    key = f"{p}revenue"
+    # Seed the row first
+    metric = MetricDefinition(
+        tenant_id=tenant_a.id,
+        key=key,
+        display_name="Revenue",
+        definition="total revenue",
+        unit="currency",
+        source_kind="suiteql",
+        blessed_spec={"query": "SELECT 0", "dialect": "suiteql"},
+        params_schema={"period": {"type": "period"}},
+        status="active",
+        version=1,
+        provenance={"author": "tenant_admin"},
+    )
+    db.add(metric)
+    await db.flush()
+
+    # Update triggers embedding recompute which returns None
+    updated = await update_metric(
+        db,
+        tenant_id=tenant_a.id,
+        metric_id=metric.id,
+        payload={"display_name": "Total Revenue"},
+    )
+    assert updated.display_name == "Total Revenue"
+    assert updated.intent_embedding is None
