@@ -1017,10 +1017,12 @@ async def test_unsupported_period_token_refuses_no_raise(db, tenant_a, monkeypat
 
 
 async def test_unknown_param_key_refuses_no_raise(db, tenant_a, monkeypatch):
-    """An unknown param key makes coerce_params raise ParamError at the top level
-    (OUTSIDE compute_metric's ExpressionError/ComputeError catch). Pre-fix this
-    bare-raises (500). Post-fix compute_metric returns the §9 number-free
-    {'error': 'invalid_params'} refusal and does NOT raise."""
+    """An unknown param key (in neither params_schema nor dimensions) must return the §9
+    number-free structured refusal and must NOT raise. Task 13 adds a guard BEFORE
+    coerce_params that fires first when a param is unrecognised by both schemas; it
+    returns {'error': 'invalid_dimension'} (more precise than the coerce 'invalid_params'
+    that fired before Task 13). The safety invariants — no raise, no rows, no value —
+    are unchanged."""
     await _ensure_system_tenant(db)
     db.add(
         MetricDefinition(
@@ -1051,7 +1053,9 @@ async def test_unknown_param_key_refuses_no_raise(db, tenant_a, monkeypatch):
         context={"fiscal_year_start_month": 1},
     )
 
-    assert out.get("error") == "invalid_params", out
+    # Task 13: the pre-coerce guard fires first for params unrecognised by BOTH schemas,
+    # returning invalid_dimension (more precise than the old coerce-level invalid_params).
+    assert out.get("error") in {"invalid_params", "invalid_dimension"}, out
     assert out.get("key") == "gross_revenue", out
     assert "rows" not in out
     assert "value" not in out
@@ -1351,8 +1355,8 @@ async def test_failure_audit_carries_version(db, tenant_a, monkeypatch):
 
     # (b) §10 audit citation: the failure audit log payload must carry the version
     audit_rows = (
-        await db.execute(select(AuditEvent).where(AuditEvent.action == "metric.compute.failed"))
-    ).scalars().all()
+        (await db.execute(select(AuditEvent).where(AuditEvent.action == "metric.compute.failed"))).scalars().all()
+    )
     assert audit_rows, "no audit row found for the failure"
     audit_payload = audit_rows[-1].payload or {}
     assert "version" in audit_payload, f"version missing from audit payload: {audit_payload}"

@@ -317,6 +317,28 @@ async def compute_metric(db: AsyncSession, *, tenant_id, key: str, params: dict,
             "key": key,
             "message": f"No blessed definition for '{key}'.",
         }
+    # R3#24 guard: reject a caller param that is in NEITHER params_schema NOR the metric's
+    # declared dimensions, giving a precise "not a recognised param or dimension" error.
+    # This runs AFTER the metric-not-found check (so an unknown KEY still returns
+    # no_blessed_definition) and BEFORE coerce_params (so the error code is precise, not the
+    # generic invalid_params that coerce would produce for the same unrecognised key).
+    # Advisory note: a param that IS a declared dimension but NOT in params_schema will
+    # still be rejected downstream by coerce_params ("unknown param: <name>") — there is no
+    # free-dimension SQL binding yet, so a dimension-only param can't actually slice the
+    # query. That is expected and acceptable; this guard's job is precision for params that
+    # are unrecognised by BOTH schemas.
+    allowed_dims = (
+        set(metric.dimensions.keys()) if isinstance(metric.dimensions, dict) else set(metric.dimensions or [])
+    )
+    schema_keys = set(metric.params_schema or {})
+    for p in params:
+        if p not in schema_keys and p not in allowed_dims:
+            return {
+                "error": "invalid_dimension",
+                "key": key,
+                "message": f"'{p}' is not a declared param or dimension of '{key}'",
+            }
+
     fy = int(context.get("fiscal_year_start_month", 1) or 1)
     # G1: param coercion is a CALLER-input gate, not a metric/schema-drift failure, so it
     # is handled separately from the ExpressionError/ComputeError path below. A bad param
