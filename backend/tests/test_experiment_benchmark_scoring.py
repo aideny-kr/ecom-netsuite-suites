@@ -339,3 +339,101 @@ async def test_return_keys_match_caller_expectations():
     assert isinstance(result["baseline_score"], float)
     assert isinstance(result["delta"], float)
     assert result["decision"] in ("KEEP", "REVERT", "SKIP")
+
+
+@pytest.mark.asyncio
+async def test_perf_anti_pattern_sql_vetoes_keep():
+    """A candidate whose answer beats the baseline is normally KEPT — but if its
+    generated SQL carries a proven perf anti-pattern (BUILTIN.DF country filter on an
+    unbounded address join) the perf-guard veto forces SKIP, so a timeout-prone pattern
+    is never promoted to the proven-pattern store.
+    """
+    agent_result = _FakeAgentResult(
+        answer_text="There are 42 open sales orders in your NetSuite account.",
+        success=True,
+    )
+    baseline_result = _FakeBaselineResult(
+        answer_text="I couldn't find the data for open sales orders.",
+        success=True,
+    )
+    db = _mock_db()
+    slow_sql = (
+        "SELECT BUILTIN.DF(sa.country) AS country, COUNT(*) "
+        "FROM transactionShippingAddress sa "
+        "JOIN transaction t ON t.shippingaddress = sa.nkey "
+        "WHERE BUILTIN.DF(sa.country) IN ('Singapore','Norway') "
+        "GROUP BY BUILTIN.DF(sa.country)"
+    )
+
+    with (
+        patch(f"{_SVC}._generate_sql", new_callable=AsyncMock, return_value=slow_sql),
+        patch(
+            f"{_SVC}._execute_sql",
+            new_callable=AsyncMock,
+            return_value={"success": True, "result_text": "...", "rows": 1, "bytes_processed": 0},
+        ),
+        patch(f"{_SVC}.run_agent", new_callable=AsyncMock, return_value=agent_result),
+        patch(f"{_SVC}.run_baseline", new_callable=AsyncMock, return_value=baseline_result),
+        patch(f"{_SVC}.promote_experiment_result", new_callable=AsyncMock),
+    ):
+        from app.services.query_experiment_service import run_single_experiment
+
+        result = await run_single_experiment(
+            case=_make_case(),
+            tenant_id=_TENANT_ID,
+            db=db,
+        )
+
+    # The agent WOULD have been kept (beat the baseline, score > 0.5)...
+    assert result["experiment_score"] > 0.5
+    assert result["experiment_score"] >= result["baseline_score"]
+    # ...but the perf-guard veto downgrades it to SKIP and records why.
+    assert result["decision"] == "SKIP", f"perf anti-pattern SQL must be vetoed, got {result['decision']}"
+    assert result["score_efficiency"] < 1.0
+    assert "perf-guard veto" in (result["error_message"] or "")
+
+
+@pytest.mark.asyncio
+async def test_clean_country_query_still_kept():
+    """The perf-guard veto must NOT false-positive on the FAST pattern: a date-scoped
+    raw-ISO country query (BUILTIN.DF only for display) that beats the baseline is KEPT.
+    """
+    agent_result = _FakeAgentResult(
+        answer_text="There are 42 open sales orders in your NetSuite account.",
+        success=True,
+    )
+    baseline_result = _FakeBaselineResult(
+        answer_text="I couldn't find the data for open sales orders.",
+        success=True,
+    )
+    db = _mock_db()
+    fast_sql = (
+        "SELECT BUILTIN.DF(sa.country) AS country, COUNT(*) "
+        "FROM transactionShippingAddress sa "
+        "JOIN transaction t ON t.shippingaddress = sa.nkey "
+        "WHERE sa.country IN ('SG','NO') "
+        "AND t.trandate >= TO_DATE('2025-06-01','YYYY-MM-DD') "
+        "GROUP BY BUILTIN.DF(sa.country)"
+    )
+
+    with (
+        patch(f"{_SVC}._generate_sql", new_callable=AsyncMock, return_value=fast_sql),
+        patch(
+            f"{_SVC}._execute_sql",
+            new_callable=AsyncMock,
+            return_value={"success": True, "result_text": "...", "rows": 1, "bytes_processed": 0},
+        ),
+        patch(f"{_SVC}.run_agent", new_callable=AsyncMock, return_value=agent_result),
+        patch(f"{_SVC}.run_baseline", new_callable=AsyncMock, return_value=baseline_result),
+        patch(f"{_SVC}.promote_experiment_result", new_callable=AsyncMock),
+    ):
+        from app.services.query_experiment_service import run_single_experiment
+
+        result = await run_single_experiment(
+            case=_make_case(),
+            tenant_id=_TENANT_ID,
+            db=db,
+        )
+
+    assert result["decision"] == "KEEP", f"clean fast-pattern query must be kept, got {result['decision']}"
+    assert result["score_efficiency"] >= 0.9

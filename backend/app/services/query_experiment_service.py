@@ -36,6 +36,8 @@ from app.services.benchmarks.baseline_runner import run_baseline  # noqa: F401
 from app.services.benchmarks.scorer import substring_score  # noqa: F401
 from app.services.query_eval_harness import (
     EvalCase,
+    detect_perf_anti_patterns,
+    score_efficiency,
 )
 from app.services.query_pattern_service import extract_and_store_pattern
 
@@ -559,6 +561,12 @@ async def run_single_experiment(
 
     result["executed_successfully"] = True
 
+    # Score the candidate SQL's efficiency (replaces the legacy hardcoded 0.0). This
+    # is the only place score_efficiency has teeth: a perf anti-pattern here vetoes
+    # promotion below, so a timeout-prone pattern can never become a proven pattern.
+    result["score_efficiency"] = score_efficiency(generated_sql)
+    perf_issues = detect_perf_anti_patterns(generated_sql)
+
     # Step 3: Run vs-MCP benchmark comparison
     # Run our agent (which will use the candidate pattern if it's in the DB)
     # and the Claude+MCP baseline on the same question, then score both
@@ -610,9 +618,18 @@ async def run_single_experiment(
     result["baseline_score"] = bl_score
     result["delta"] = round(agent_score - bl_score, 4)
 
-    # Step 4: Decide based on vs-MCP comparison
+    # Step 4: Decide based on vs-MCP comparison.
+    # The answer-quality comparison (substring_score) decides KEEP/REVERT/SKIP, but a
+    # would-be KEEP is vetoed to SKIP when the candidate SQL carries a proven perf
+    # anti-pattern — we never promote a timeout-prone pattern even if its answer wins.
+    # The veto only ever downgrades KEEP→SKIP; REVERT and natural SKIP are untouched,
+    # so it cannot bias the (efficiency-blind) baseline comparison toward REVERT.
     if agent_score >= bl_score and agent_score > 0.5:
-        result["decision"] = "KEEP"
+        if perf_issues:
+            result["decision"] = "SKIP"
+            result["error_message"] = "perf-guard veto: " + ", ".join(perf_issues)
+        else:
+            result["decision"] = "KEEP"
     elif agent_score < bl_score - 0.1:
         result["decision"] = "REVERT"
     else:
