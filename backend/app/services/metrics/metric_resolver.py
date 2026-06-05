@@ -9,6 +9,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.metric_definition import SYSTEM_TENANT_ID, MetricDefinition
 from app.services.chat.domain_knowledge import embed_domain_query
 
+# Cosine distance threshold for the vector branch (tunable).
+# pgvector cosine_distance = 1 - cosine_similarity, range [0, 2].
+# 0.55 ≈ cosine_similarity ≥ 0.45 — rejects clearly unrelated queries
+# (e.g. "airspeed velocity" vs finance metrics, distance ≈ 1.0) while
+# admitting on-topic paraphrases (distance typically < 0.3).
+_SIMILARITY_MAX_DISTANCE = 0.55
+
 
 async def resolve_metrics(
     db: AsyncSession, *, tenant_id: uuid.UUID, query: str, top_k: int = 5
@@ -24,7 +31,12 @@ async def resolve_metrics(
     if embedding is not None:
         stmt = (
             select(MetricDefinition)
-            .where(visible, MetricDefinition.status == "active", MetricDefinition.intent_embedding.isnot(None))
+            .where(
+                visible,
+                MetricDefinition.status == "active",
+                MetricDefinition.intent_embedding.isnot(None),
+                MetricDefinition.intent_embedding.cosine_distance(embedding) <= _SIMILARITY_MAX_DISTANCE,
+            )
             .order_by(MetricDefinition.intent_embedding.cosine_distance(embedding))
             .limit(top_k * 3)
         )
