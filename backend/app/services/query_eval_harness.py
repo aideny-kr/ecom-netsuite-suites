@@ -146,6 +146,21 @@ def score_efficiency(
     if re.search(r"\bWITH\s+\w", sql_upper):
         score = min(1.0, score + 0.05)
 
+    # Anti-pattern: BUILTIN.DF() (a per-row function) inside a WHERE clause defeats
+    # index usage → full scan → timeout. Filter on the raw value; use BUILTIN.DF only
+    # in the SELECT list for display. (Guards the 2026-06 ship-to-country timeout.)
+    _where = re.search(r"\bWHERE\b(.*?)(?:\bGROUP\s+BY\b|\bORDER\s+BY\b|\bFETCH\b|$)", sql_upper, re.DOTALL)
+    if _where and "BUILTIN.DF" in _where.group(1):
+        score -= 0.3
+
+    # Anti-pattern: an address-table join (transactionShippingAddress / billing) with
+    # NO scope (no trandate range, ROWNUM, or FETCH FIRST) — these joins are heavy and
+    # time out unbounded on large accounts.
+    if ("TRANSACTIONSHIPPINGADDRESS" in sql_upper or "TRANSACTIONBILLINGADDRESS" in sql_upper) and not (
+        "TRANDATE" in sql_upper or "ROWNUM" in sql_upper or re.search(r"\bFETCH\s+FIRST\b", sql_upper)
+    ):
+        score -= 0.2
+
     return max(0.0, round(score, 4))
 
 

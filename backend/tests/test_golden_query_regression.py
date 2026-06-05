@@ -24,8 +24,8 @@ GOLDEN_QUERIES = load_golden_queries()
 class TestGoldenQuerySchema:
     """Validate the fixture file itself."""
 
-    def test_fixture_has_30_queries(self):
-        assert len(GOLDEN_QUERIES) == 30
+    def test_fixture_has_31_queries(self):
+        assert len(GOLDEN_QUERIES) == 31
 
     @pytest.mark.parametrize("spec", GOLDEN_QUERIES, ids=lambda s: s["id"])
     def test_schema_valid(self, spec):

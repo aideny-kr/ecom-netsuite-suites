@@ -298,5 +298,15 @@
         "expected_sql_contains": ["transactionaccountingline", "account", "Income", "COGS", "GROUP BY"],
         "expected_sql_not_contains": ["DELETE"],
         "expected_tables": ["transactionaccountingline", "account", "transaction", "transactionline"]
+    },
+    {
+        "id": "gq-031",
+        "tier": 2,
+        "category": "operational",
+        "question": "List the items we shipped to Singapore, New Zealand, Switzerland, and Norway in the last 12 months",
+        "sample_sql": "SELECT DISTINCT i.itemid AS sku, sa.country FROM transactionShippingAddress sa JOIN transaction t ON t.shippingaddress = sa.nkey JOIN transactionline tl ON tl.transaction = t.id JOIN item i ON i.id = tl.item WHERE sa.country IN ('SG','NZ','CH','NO') AND t.type IN ('SalesOrd','CustInvc') AND t.status NOT IN ('C','H') AND tl.mainline = 'F' AND tl.taxline = 'F' AND t.trandate >= TO_DATE('2025-06-01','YYYY-MM-DD') FETCH FIRST 500 ROWS ONLY",
+        "expected_sql_contains": ["transactionShippingAddress", "sa.country", "trandate"],
+        "expected_sql_not_contains": ["BUILTIN.DF(sa.country)", "DELETE", "UPDATE", "DROP"],
+        "expected_tables": ["transaction", "transactionShippingAddress", "transactionline", "item"]
     }
 ]

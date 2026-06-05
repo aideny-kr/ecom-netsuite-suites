@@ -72,6 +72,39 @@ class TestScoreEfficiency:
         # Has SELECT * penalty but CTE bonus
         assert 0.5 < score < 1.0
 
+    def test_builtin_df_in_where_penalized(self):
+        # BUILTIN.DF() in a WHERE is a per-row function → full scan → timeout.
+        slow = score_efficiency("SELECT i.itemid FROM item i WHERE BUILTIN.DF(i.custitem_fw_platform) = 'Laptop 13'")
+        assert slow < 1.0
+
+    def test_builtin_df_in_select_only_not_penalized(self):
+        # BUILTIN.DF in the SELECT list (for display) is fine; filter is on the raw value.
+        ok = score_efficiency(
+            "SELECT BUILTIN.DF(sa.country) AS country FROM transactionShippingAddress sa "
+            "WHERE sa.country = 'SG' AND t.trandate >= TO_DATE('2025-01-01','YYYY-MM-DD')"
+        )
+        assert ok >= 0.9
+
+    def test_unbounded_address_join_penalized(self):
+        # Address-table join with no trandate / ROWNUM / FETCH bound → times out unbounded.
+        unbounded = score_efficiency(
+            "SELECT i.itemid FROM transactionShippingAddress sa "
+            "JOIN transaction t ON t.shippingaddress = sa.nkey "
+            "JOIN transactionline tl ON tl.transaction = t.id "
+            "JOIN item i ON i.id = tl.item WHERE sa.country IN ('SG','NZ')"
+        )
+        assert unbounded < 1.0
+
+    def test_bounded_address_join_ok(self):
+        bounded = score_efficiency(
+            "SELECT i.itemid FROM transactionShippingAddress sa "
+            "JOIN transaction t ON t.shippingaddress = sa.nkey "
+            "JOIN transactionline tl ON tl.transaction = t.id "
+            "JOIN item i ON i.id = tl.item WHERE sa.country IN ('SG','NZ') "
+            "AND t.trandate >= TO_DATE('2025-06-01','YYYY-MM-DD') FETCH FIRST 500 ROWS ONLY"
+        )
+        assert bounded >= 0.9
+
 
 class TestCompositeScore:
     def test_weighted_composite(self):
