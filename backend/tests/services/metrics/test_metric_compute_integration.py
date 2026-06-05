@@ -1363,3 +1363,187 @@ async def test_failure_audit_carries_version(db, tenant_a, monkeypatch):
     assert audit_payload["version"] == known_version, (
         f"audit version={audit_payload['version']!r} != seeded version={known_version}"
     )
+
+
+# --- R2 grill round-2 findings ---
+#
+# M1: _execute_scalar_query error message must NOT leak a computed cell value (number)
+# M3: expression metric with an expression-kind leaf must return structured error, not crash
+# M4: successful compute payload must carry source_kind
+
+
+async def test_non_numeric_cell_error_message_does_not_leak_number(db, tenant_a, monkeypatch):
+    """M1 (major) — number-free error message invariant. When _execute_scalar_query
+    receives a non-numeric cell (e.g. '$1,234.00') from the executor, the prior code
+    raised ComputeError(f'blessed query value is not numeric: {cell!r}') which embedded
+    the formatted number string in the error message. That message flows through
+    _log_compute_failure into the returned dict's 'message' key — which is NOT a
+    suppressed metric payload and therefore reaches the LLM. A formatted dollar string
+    like '$1,234.00' still contains '1,234' which is a leaked number.
+
+    Post-fix: the error message is static, number-free
+    ('blessed query returned a non-numeric value'). The returned error dict's 'message'
+    must NOT contain the digit sequences from the cell value."""
+    await _ensure_system_tenant(db)
+    db.add(
+        MetricDefinition(
+            tenant_id=SYSTEM_TENANT_ID,
+            key="gross_revenue",
+            display_name="Gross Revenue",
+            definition="x",
+            unit="currency",
+            source_kind="suiteql",
+            blessed_spec={"query": "SELECT SUM(amount) FROM transactionline", "dialect": "suiteql"},
+            params_schema={"period": {"type": "period"}},
+            status="active",
+            version=1,
+        )
+    )
+    await db.flush()
+
+    # Stub the executor to return a non-numeric cell — a formatted dollar string.
+    async def _string_execute(params, context=None, **kwargs):
+        return {"columns": ["s"], "rows": [["$1,234.00"]]}
+
+    monkeypatch.setattr("app.mcp.tools.netsuite_suiteql.execute", _string_execute)
+
+    out = await compute_metric(
+        db,
+        tenant_id=tenant_a.id,
+        key="gross_revenue",
+        params={"period": "this_month"},
+        context={"fiscal_year_start_month": 1},
+    )
+
+    # (a) must be a structured error (not a data_table)
+    assert out.get("error") == "blessed_query_failed", out
+    assert "rows" not in out
+    assert "value" not in out
+
+    # (b) THE INVARIANT: the message must NOT contain any digit sequences from the
+    # leaked cell value ('1234' or '1,234'). A formatted number in the error message
+    # reaches the LLM directly — this is the anti-hallucination leak being fixed.
+    msg = out.get("message", "")
+    assert "1,234" not in msg, f"number leaked into error message: {msg!r}"
+    assert "1234" not in msg, f"number leaked into error message: {msg!r}"
+    assert "$" not in msg, f"dollar sign leaked into error message: {msg!r}"
+
+
+async def test_expression_leaf_that_is_itself_expression_returns_structured_error(db, tenant_a, monkeypatch):
+    """M3 (partial) — nested expression at compute time. Author-time validation rejects
+    NEW metrics whose depends_on includes another expression-kind leaf. But a
+    seeded/pre-existing/edited metric can have an expression leaf that bypassed
+    author-time. The prior code called _execute_scalar_query(dmatch, ...) which
+    dereferences dmatch.blessed_spec['query'] — but expression metrics have
+    blessed_spec=None — causing a TypeError crash instead of a structured error.
+
+    Post-fix: in the expression branch, BEFORE calling _execute_scalar_query, check
+    dmatch.source_kind. If it is 'expression', return a number-free structured error
+    {'error': 'nested_expression_unsupported', 'key': dep_key, ...} without raising."""
+    await _ensure_system_tenant(db)
+
+    # Inner expression leaf (bypassed author-time by direct DB insert).
+    db.add(
+        MetricDefinition(
+            tenant_id=SYSTEM_TENANT_ID,
+            key="inner_expr",
+            display_name="Inner Expr",
+            definition="x",
+            unit="currency",
+            source_kind="expression",
+            expression="1.0",
+            depends_on=[],
+            blessed_spec=None,
+            params_schema={"period": {"type": "period"}},
+            status="active",
+            version=1,
+        )
+    )
+    # Outer expression metric whose depends_on includes the expression leaf.
+    db.add(
+        MetricDefinition(
+            tenant_id=SYSTEM_TENANT_ID,
+            key="outer_expr",
+            display_name="Outer Expr",
+            definition="x",
+            unit="currency",
+            source_kind="expression",
+            expression="inner_expr",
+            depends_on=["inner_expr"],
+            blessed_spec=None,
+            params_schema={"period": {"type": "period"}},
+            status="active",
+            version=1,
+        )
+    )
+    await db.flush()
+
+    # The executor must NEVER be reached — the nested-expression guard fires before execute.
+    async def _ns_poison(params, context=None, **kwargs):
+        raise AssertionError("executor reached for an expression-kind leaf — should not happen")
+
+    monkeypatch.setattr("app.mcp.tools.netsuite_suiteql.execute", _ns_poison)
+
+    # MUST NOT raise (no TypeError crash from blessed_spec=None).
+    out = await compute_metric(
+        db,
+        tenant_id=tenant_a.id,
+        key="outer_expr",
+        params={"period": "this_month"},
+        context={"fiscal_year_start_month": 1},
+    )
+
+    # (a) structured number-free error, not a crash and not a data_table
+    assert out.get("error") == "nested_expression_unsupported", out
+    # (b) the error must identify the unsupported dep key
+    assert out.get("key") == "inner_expr", out
+    assert "rows" not in out
+    assert "value" not in out
+
+
+async def test_successful_compute_payload_carries_source_kind(db, tenant_a, monkeypatch):
+    """M4 (payload half) — source_kind must be present in the compute payload. The
+    orchestrator's source-pin logic needs to know whether a metric came from BigQuery or
+    SuiteQL/NetSuite. The prior metric_data_table dict omitted 'source_kind', so the
+    orchestrator could not distinguish and wrongly pinned NetSuite for every metric.
+
+    Post-fix: compute_metric passes the metric's source_kind to metric_data_table, which
+    includes it in the returned dict. The payload's 'source_kind' must equal the metric
+    row's source_kind field."""
+    await _ensure_system_tenant(db)
+    db.add(
+        MetricDefinition(
+            tenant_id=SYSTEM_TENANT_ID,
+            key="gross_revenue",
+            display_name="Gross Revenue",
+            definition="x",
+            unit="currency",
+            source_kind="suiteql",
+            blessed_spec={"query": "SELECT 1", "dialect": "suiteql"},
+            params_schema={"period": {"type": "period"}},
+            status="active",
+            version=1,
+        )
+    )
+    await db.flush()
+
+    async def _fake_scalar(db, tenant_id, metric, coerced, context):
+        return 42.0
+
+    monkeypatch.setattr("app.services.metrics.metric_compute._execute_scalar_query", _fake_scalar)
+
+    out = await compute_metric(
+        db,
+        tenant_id=tenant_a.id,
+        key="gross_revenue",
+        params={"period": "this_month"},
+        context={"fiscal_year_start_month": 1},
+    )
+
+    # (a) successful compute — must be a data_table
+    assert "error" not in out, out
+    assert out.get("row_count") == 1
+
+    # (b) M4 invariant: source_kind must be present and equal the metric's source_kind
+    assert "source_kind" in out, f"source_kind missing from payload: {out}"
+    assert out["source_kind"] == "suiteql", f"source_kind={out['source_kind']!r} != 'suiteql'"

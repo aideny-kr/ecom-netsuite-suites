@@ -110,6 +110,7 @@ def metric_data_table(
     query_label,
     *,
     definition_version: int | None = None,
+    source_kind: str | None = None,
 ) -> dict:
     # F4 (c): the `query` field is copied verbatim into the data_table SSE payload that
     # reaches the FRONTEND. It MUST be a plain string label (the metric key), NOT the
@@ -134,6 +135,11 @@ def metric_data_table(
     # production call site always does; test helpers that don't care may omit it).
     if definition_version is not None:
         payload["definition_version"] = definition_version
+    # M4: expose source_kind so the orchestrator's source-pin logic can distinguish a
+    # BigQuery metric from a SuiteQL/NetSuite one (without it the orchestrator wrongly
+    # pins NetSuite for every metric). Only set when the caller supplies it.
+    if source_kind is not None:
+        payload["source_kind"] = source_kind
     return payload
 
 
@@ -255,7 +261,10 @@ async def _execute_scalar_query(db, tenant_id, metric: MetricDefinition, coerced
     try:
         return float(cell)
     except (TypeError, ValueError) as ex:
-        raise ComputeError(f"blessed query value is not numeric: {cell!r}") from ex
+        # M1: never embed the cell value in the error message — it is a computed number
+        # (e.g. "$1,234.00") that would leak through the error dict's 'message' key to
+        # the LLM (error dicts are NOT suppressed metric payloads). Static message only.
+        raise ComputeError("blessed query returned a non-numeric value") from ex
 
 
 async def resolve_metric_by_key(db: AsyncSession, *, tenant_id, key: str) -> MetricDefinition | None:
@@ -366,6 +375,20 @@ async def compute_metric(db: AsyncSession, *, tenant_id, key: str, params: dict,
                         "key": dep,
                         "message": f"Missing leaf metric '{dep}'.",
                     }
+                # M3: a leaf that is itself an expression metric has blessed_spec=None;
+                # calling _execute_scalar_query on it would crash (TypeError) when it
+                # tries to dereference dmatch.blessed_spec["query"]. Author-time rejects
+                # NEW nested-expression metrics, but a seeded/pre-existing/edited row can
+                # still reach compute. Return a number-free structured error instead of
+                # crashing — do NOT execute, do NOT mutate.
+                if dmatch.source_kind == "expression":
+                    return {
+                        "error": "nested_expression_unsupported",
+                        "key": dep,
+                        "message": (
+                            f"expression leaf '{dep}' is itself an expression; only query-backed leaves are supported"
+                        ),
+                    }
                 try:
                     leaf_coerced = coerce_params(dmatch.params_schema or {}, params, fiscal_year_start_month=fy)
                 except (ParamError, PeriodError) as ex:
@@ -402,6 +425,14 @@ async def compute_metric(db: AsyncSession, *, tenant_id, key: str, params: dict,
     # F4 (c): label the data_table with the metric KEY (a string), never the
     # blessed_spec/expression — keep the internal execution spec OUT of the SSE payload.
     # §10: pass definition_version so the payload cites which definition produced the number.
+    # M4: pass source_kind so the orchestrator's source-pin logic can distinguish BigQuery
+    # from SuiteQL/NetSuite without re-querying the catalog.
     return metric_data_table(
-        metric.display_name, value, metric.unit, period_label, metric.key, definition_version=metric.version
+        metric.display_name,
+        value,
+        metric.unit,
+        period_label,
+        metric.key,
+        definition_version=metric.version,
+        source_kind=metric.source_kind,
     )
