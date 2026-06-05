@@ -59,6 +59,7 @@ import { apiClient } from "@/lib/api-client";
 import { useFeature } from "@/hooks/use-features";
 import { TeamSection } from "@/components/settings/team-section";
 import { JobsSection } from "@/components/settings/jobs-section";
+import { LearnedRulesSection } from "@/components/settings/learned-rules-section";
 import { NetSuiteConnectionsSection } from "@/components/settings/netsuite-connections-section";
 import { BigQueryConnectionSection } from "@/components/settings/bigquery-connection-section";
 import { DataSourceConnectorsSection } from "@/components/settings/data-source-connectors-section";
@@ -2871,6 +2872,11 @@ export default function SettingsPage() {
 
           {/* AI Personality & Core Logic (Soul) Section */}
           <SoulSection />
+
+          {/* Learned Rules — tenant semantic memory injected into every chat turn */}
+          <SectionErrorBoundary name="Learned Rules">
+            <LearnedRulesSection />
+          </SectionErrorBoundary>
 
           {/* Team Section */}
           <SectionErrorBoundary name="Team">
