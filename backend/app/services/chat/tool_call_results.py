@@ -215,7 +215,7 @@ def extract_result_payload(tool_name: str, params: dict[str, Any], result_str: s
             if not isinstance(limit, int):
                 limit_param = params.get("limit")
                 limit = limit_param if isinstance(limit_param, int) else len(rows)
-            return {
+            entry: dict[str, Any] = {
                 "kind": "table",
                 "columns": columns,
                 "rows": rows,
@@ -224,6 +224,13 @@ def extract_result_payload(tool_name: str, params: dict[str, Any], result_str: s
                 "query": query,
                 "limit": limit,
             }
+            # M4: For metric payloads, pass through source_kind so
+            # _compute_source_pin_update can distinguish BigQuery vs SuiteQL
+            # metrics without mis-pinning NetSuite for a BigQuery metric.
+            # Only set when the payload carries the flag (metric trust boundary).
+            if parsed.get("suppress_llm_value") is True and "source_kind" in parsed:
+                entry["source_kind"] = parsed["source_kind"]
+            return entry
 
     # --- Path 2: reportData (ns_runReport) ---
     if isinstance(parsed, dict):
