@@ -735,6 +735,75 @@ async def test_seam_january_default_yields_calendar_window(db, tenant_a, monkeyp
 # Pre-fix this FAILS — the resolver runs January-default and lands Jan 1 -> Dec 31 2026.
 
 
+# --- F3 injection-hardening: the FILLED query reaching the executor is un-alterable ---
+#
+# Spec acceptance #9: "A crafted param value cannot alter SQL structure." Author-time
+# rejects injecty enum values (test_metric_authoring), but compute is the LAST line of
+# defense: we seed a metric whose enum carries the classic `x' OR '1'='1` payload
+# DIRECTLY (bypassing the author-time guard, which is exactly the defense-in-depth case)
+# and capture the EXACT query string compute_metric hands to netsuite_suiteql.execute.
+# Pre-fix, fill_query did `f"'{v}'"` with no escaping, so the captured query was
+# `...region='x' OR '1'='1'` — a structural break-out (param data became boolean SQL).
+# Post-fix the embedded quotes are doubled, so the value is one inert literal and the
+# query's structure is identical to a benign value.
+
+
+async def test_filled_query_handed_to_executor_cannot_break_out_of_literal(db, tenant_a, monkeypatch):
+    await _ensure_system_tenant(db)
+    db.add(
+        MetricDefinition(
+            tenant_id=SYSTEM_TENANT_ID,
+            key="rev_by_region",
+            display_name="Rev By Region",
+            definition="x",
+            unit="currency",
+            source_kind="suiteql",
+            # NOTE: this blessed enum value would be REJECTED at author-time (F3 leg b).
+            # We seed it directly to prove the compute-path quote-escape (F3 leg a) is an
+            # independent second line of defense even if a poison value ever lands in a row.
+            blessed_spec={
+                "query": "SELECT SUM(amount) FROM transactionline WHERE region=:region",
+                "dialect": "suiteql",
+            },
+            params_schema={"region": {"type": "enum", "values": ["us", "x' OR '1'='1"]}},
+            status="active",
+            version=1,
+        )
+    )
+    await db.flush()
+
+    captured: list[str] = []
+
+    async def _capture_execute(params, context=None, **kwargs):
+        captured.append(params.get("query", ""))
+        return {"columns": ["s"], "rows": [[5.0]]}
+
+    monkeypatch.setattr("app.mcp.tools.netsuite_suiteql.execute", _capture_execute)
+
+    out = await compute_metric(
+        db,
+        tenant_id=tenant_a.id,
+        key="rev_by_region",
+        params={"region": "x' OR '1'='1"},
+        context={"fiscal_year_start_month": 1},
+    )
+
+    assert "error" not in out, out
+    assert captured, "executor was never reached"
+    q = captured[0]
+    # (a) the injected value lands as a SINGLE inert literal: embedded quotes doubled.
+    assert q == "SELECT SUM(amount) FROM transactionline WHERE region='x'' OR ''1''=''1'", q
+    # (b) structurally un-alterable: no un-doubled quote closes the literal early. The
+    #     literal's own delimiters are the ONLY single quotes once the '' pairs are removed.
+    assert q.replace("''", "").count("'") == 2, q
+    # (c) the param data did NOT become SQL control: " OR " never appears OUTSIDE a literal.
+    #     (After collapsing the literal to a placeholder, no boolean OR remains.)
+    import re as _re
+
+    collapsed = _re.sub(r"'(?:[^']|'')*'", "?", q)
+    assert " OR " not in collapsed.upper(), collapsed
+
+
 async def test_governed_execute_seam_threads_tenant_fiscal_month(db, tenant_a, monkeypatch):
     """REAL PRODUCTION-seam F2 invariant. Drive mcp.governance.governed_execute (the
     exact path the agent's tool call flows through) for metric.compute, with a tenant

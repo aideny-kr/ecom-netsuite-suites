@@ -151,3 +151,43 @@ def test_accepts_int_and_enum_params_bound_in_query():
             },
         }
     )
+
+
+# ── F3 injection-hardening: reject injecty blessed enum values at author-time ───
+
+
+def test_rejects_enum_value_with_sql_injection_payload():
+    """REAL injection invariant (F3). An enum's `values` list is the catalog's set of
+    BLESSED, author-trusted values that flow into the filled SQL at compute time
+    (coerce_params accepts them verbatim; fill_query renders them inside a string
+    literal). A blessed value that itself carries a single quote — the classic
+    `x' OR '1'='1` payload — would, even after the fill_query quote-escape, smuggle
+    SQL-control characters into the metric layer's trust surface. validate_definition
+    MUST reject any enum value containing a single quote, ';', or '--' at author-time
+    so such a value is NEVER persisted into the catalog. The prior code accepted any
+    string in `values`, so this payload sailed through to a blessed metric row."""
+    with pytest.raises(AuthoringError):
+        validate_definition(
+            {
+                "key": "rev_by_region",
+                "source_kind": "suiteql",
+                "blessed_spec": {"query": "SELECT 1 WHERE region=:region", "dialect": "suiteql"},
+                "params_schema": {"region": {"type": "enum", "values": ["us", "x' OR '1'='1"]}},
+            }
+        )
+
+
+def test_rejects_enum_value_with_sql_comment_or_semicolon():
+    """Defense-in-depth: a blessed enum value carrying a statement terminator (';') or
+    a SQL line-comment ('--') is equally an injection vector and must be rejected at
+    author-time, even though neither is a quote."""
+    for poison in ["us; DROP TABLE transactionline", "us-- comment"]:
+        with pytest.raises(AuthoringError):
+            validate_definition(
+                {
+                    "key": "rev_by_region",
+                    "source_kind": "suiteql",
+                    "blessed_spec": {"query": "SELECT 1 WHERE region=:region", "dialect": "suiteql"},
+                    "params_schema": {"region": {"type": "enum", "values": ["eu", poison]}},
+                }
+            )

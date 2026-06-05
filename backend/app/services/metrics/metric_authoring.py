@@ -49,8 +49,22 @@ def _validate_params_schema(d: dict) -> None:
         ptype = spec.get("type")
         if ptype not in _ALLOWED_PARAM_TYPES:
             raise AuthoringError(f"param '{name}' has type '{ptype}'; allowed types are {sorted(_ALLOWED_PARAM_TYPES)}")
-        if ptype == "enum" and not spec.get("values"):
-            raise AuthoringError(f"enum param '{name}' must carry a non-empty values list")
+        if ptype == "enum":
+            values = spec.get("values")
+            if not values:
+                raise AuthoringError(f"enum param '{name}' must carry a non-empty values list")
+            # F3 injection-hardening: enum `values` are the catalog's BLESSED set that flow
+            # verbatim into the filled SQL at compute time. Reject any value carrying a
+            # single quote, statement terminator (';'), or line-comment ('--') so an injecty
+            # value (e.g. `x' OR '1'='1`) can NEVER be persisted into a blessed metric row.
+            # (fill_query's quote-escape is the runtime second line of defense.)
+            for v in values:
+                sv = str(v)
+                if "'" in sv or ";" in sv or "--" in sv:
+                    raise AuthoringError(
+                        f"enum param '{name}' has an unsafe value {v!r}: "
+                        "values may not contain a single quote, ';', or '--'"
+                    )
 
     # The :name binding check only applies to query-backed metrics (expression
     # metrics carry no blessed query).

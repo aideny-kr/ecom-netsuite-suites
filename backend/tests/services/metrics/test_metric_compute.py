@@ -30,3 +30,20 @@ def test_fill_query_uses_coerced_literals():
 def test_fill_query_rejects_residual_placeholder():
     with pytest.raises(ParamError):
         fill_query("SELECT x WHERE sub=:sub", {})
+
+
+def test_fill_query_escapes_embedded_single_quote():
+    """REAL injection invariant (F3, leg a). fill_query renders a string-typed coerced
+    value inside a SQL string literal (`'<v>'`). If `v` itself contains a single quote,
+    the naive `f"'{v}'"` breaks OUT of the literal, turning param data into SQL control.
+    The classic payload `x' OR '1'='1` must be rendered as a SINGLE, structurally-inert
+    string literal — every embedded quote doubled (`''`) per SQL escaping. The prior
+    code did `f"'{v}'"` with no escaping, so the rendered SQL was
+    `'x' OR '1'='1'` — three literals + boolean logic, an injection break-out."""
+    payload = "x' OR '1'='1"
+    out = fill_query("SELECT x WHERE region=:region", {"region": payload})
+    # The whole value is one inert literal: every embedded ' is doubled to ''.
+    assert out == "SELECT x WHERE region='x'' OR ''1''=''1'"
+    # And there is no un-doubled quote that could close the literal early: stripping
+    # the doubled-quote pairs leaves exactly the two outer delimiters.
+    assert out.replace("''", "").count("'") == 2

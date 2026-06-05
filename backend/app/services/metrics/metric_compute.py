@@ -76,7 +76,14 @@ def coerce_params(
 
 def fill_query(query: str, coerced: dict) -> str:
     def _render(v) -> str:
-        return str(v) if isinstance(v, int) else f"'{v}'"
+        if isinstance(v, int):
+            return str(v)
+        # F3 injection-hardening: a string literal value (enum/date) is rendered INSIDE
+        # single quotes. Double every embedded single quote (SQL-standard escaping) so a
+        # value like `x' OR '1'='1` stays one inert literal instead of breaking out into
+        # SQL control. This is the compute-path second line of defense behind the
+        # author-time enum-value rejection in metric_authoring._validate_params_schema.
+        return "'" + str(v).replace("'", "''") + "'"
 
     filled = query
     for name, val in coerced.items():
