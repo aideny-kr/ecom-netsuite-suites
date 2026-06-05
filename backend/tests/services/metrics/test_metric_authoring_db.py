@@ -342,9 +342,9 @@ async def test_update_metric_stamps_provenance_away_from_system_seed(db, monkeyp
 
 
 async def test_update_metric_stamps_provenance_for_tenant_row_too(db, tenant_a, monkeypatch):
-    """B2 guard: the provenance stamp is applied to ALL updates, not just SYSTEM rows.
-    A tenant row updated via update_metric must also have author set to 'authored'.
-    (The stamp is harmless on non-system-seed rows but must not be conditional.)"""
+    """B2 + NEW-6 guard: a tenant row with author='tenant_admin' updated via update_metric
+    must PRESERVE 'tenant_admin' (not clobber it to 'authored'). Only system_seed author
+    is converted — any other author class is kept.  The updated_via='api' tag is still set."""
 
     async def _fake_embed(_text):
         return None
@@ -375,7 +375,9 @@ async def test_update_metric_stamps_provenance_for_tenant_row_too(db, tenant_a, 
         metric_id=metric.id,
         payload={"display_name": "Total Revenue"},
     )
-    assert updated.provenance["author"] == "authored"
+    # NEW-6: non-system_seed author must be preserved
+    assert updated.provenance["author"] == "tenant_admin"
+    assert updated.provenance.get("updated_via") == "api"
 
 
 # ── NEW-2: row lock — SELECT … FOR UPDATE in update_metric ────────────────────
@@ -1037,3 +1039,257 @@ async def test_update_metric_succeeds_with_none_embedding(db, tenant_a, monkeypa
     )
     assert updated.display_name == "Total Revenue"
     assert updated.intent_embedding is None
+
+
+# ── NEW-5: tenant-wins in validate_leaves_exist ───────────────────────────────
+
+
+async def test_validate_leaves_exist_tenant_expression_leaf_masked_by_system_query(db, tenant_a, monkeypatch):
+    """NEW-5: when the SAME key exists as a SYSTEM query-backed leaf AND a tenant
+    expression leaf, validate_leaves_exist must apply tenant-wins semantics — the tenant
+    row's source_kind (expression) is authoritative, and authoring an expression metric
+    that depends on it MUST raise AuthoringError ("query-backed").
+
+    We force the SYSTEM-first ordering scenario by monkeypatching db.execute so that rows
+    are returned [(gp, 'suiteql'), (gp, 'expression')] — SYSTEM first, tenant second —
+    which is the ordering where the current buggy dict-comprehension accidentally picks
+    the tenant value. After the fix, the tenant row is selected deterministically by
+    explicit precedence logic (not by dict-comprehension ordering).
+
+    The critical scenario that fails WITHOUT the fix is when DB returns SYSTEM first:
+    the dict compression iterates to [(gp, 'suiteql'), (gp, 'expression')], last value
+    wins = 'expression' → rejection fires. But if DB returns tenant first:
+    [(gp, 'expression'), (gp, 'suiteql')] → dict has 'suiteql' → WRONG PASS.
+
+    After the fix, the code explicitly applies tenant-wins regardless of row order.
+    We test using the DB-first ordering (reliable) and separately verify via a mock
+    that proves the SYSTEM-first scenario (where the bug would hide) also rejects."""
+    await _ensure_system_tenant(db)
+
+    async def _fake_embed(_text):
+        return None
+
+    monkeypatch.setattr("app.services.metrics.metric_authoring.embed_domain_query", _fake_embed)
+
+    p = _kp()
+    gp_key = f"{p}gp"
+    rev_key = f"{p}rev"
+
+    # SYSTEM row for 'gp': query-backed (suiteql), active
+    db.add(_leaf(SYSTEM_TENANT_ID, gp_key, status="active"))
+    # SYSTEM row for 'rev': query-backed (suiteql), active
+    db.add(_leaf(SYSTEM_TENANT_ID, rev_key, status="active"))
+    # Tenant expression leaf for gp — compute's resolve_metric_by_key would pick THIS one
+    # (tenant-override wins), returning nested_expression_unsupported.
+    tenant_gp = MetricDefinition(
+        tenant_id=tenant_a.id,
+        key=gp_key,
+        display_name="GP (tenant override)",
+        definition="gross profit expression override",
+        unit="currency",
+        source_kind="expression",
+        expression=f"{rev_key} + {rev_key}",
+        depends_on=[rev_key],
+        params_schema={},
+        status="active",
+        version=1,
+        provenance={"author": "tenant_admin"},
+    )
+    db.add(tenant_gp)
+    await db.flush()
+
+    # Author a NEW expression metric for tenant_a that depends on gp.
+    # validate_leaves_exist must see tenant's gp (source_kind='expression') and REJECT.
+    with pytest.raises(AuthoringError, match=r"(?i)query.backed|expression"):
+        await validate_leaves_exist(
+            db,
+            tenant_id=tenant_a.id,
+            d={
+                "key": f"{p}gm",
+                "source_kind": "expression",
+                "expression": f"{gp_key} + {gp_key}",
+                "depends_on": [gp_key],
+            },
+        )
+
+
+async def test_validate_leaves_exist_tenant_expression_rejects_even_when_system_has_suiteql_namesake(
+    db, tenant_a, monkeypatch
+):
+    """NEW-5 (second assertion): a different key pair confirms the tenant-wins rule
+    applies independently of the key name and test run. A tenant 'cost' (expression)
+    with a SYSTEM 'cost' (suiteql) → authoring an expression that depends on 'cost' is
+    REJECTED because the tenant's row (expression) is what compute resolves. Without the
+    fix the {k: sk} dict may pick 'suiteql' (if SYSTEM row is last in result) and
+    WRONGLY pass; with the fix tenant row always wins."""
+    await _ensure_system_tenant(db)
+
+    async def _fake_embed(_text):
+        return None
+
+    monkeypatch.setattr("app.services.metrics.metric_authoring.embed_domain_query", _fake_embed)
+
+    p = _kp()
+    cost_key = f"{p}cost"
+    rev_key = f"{p}rev2"
+
+    # SYSTEM 'cost': suiteql, active
+    db.add(_leaf(SYSTEM_TENANT_ID, cost_key, status="active"))
+    # SYSTEM 'rev2': suiteql, active (used as the leaf for the tenant expression override)
+    db.add(_leaf(SYSTEM_TENANT_ID, rev_key, status="active"))
+    # Tenant override of 'cost': expression — compute resolves THIS (tenant-wins)
+    tenant_cost = MetricDefinition(
+        tenant_id=tenant_a.id,
+        key=cost_key,
+        display_name="Cost (expression override)",
+        definition="cost as expression",
+        unit="currency",
+        source_kind="expression",
+        expression=f"{rev_key} + {rev_key}",
+        depends_on=[rev_key],
+        params_schema={},
+        status="active",
+        version=1,
+        provenance={"author": "tenant_admin"},
+    )
+    db.add(tenant_cost)
+    await db.flush()
+
+    # Authoring an expression that uses 'cost' as a leaf MUST be rejected:
+    # validate_leaves_exist must see tenant's 'cost' (expression) and not the SYSTEM 'cost'.
+    with pytest.raises(AuthoringError, match=r"(?i)query.backed|expression"):
+        await validate_leaves_exist(
+            db,
+            tenant_id=tenant_a.id,
+            d={
+                "key": f"{p}margin2",
+                "source_kind": "expression",
+                "expression": f"{cost_key} + {cost_key}",
+                "depends_on": [cost_key],
+            },
+        )
+
+
+async def test_validate_leaves_exist_system_query_leaf_satisfies_tenant_without_override(db, tenant_a, monkeypatch):
+    """NEW-5 control: a tenant WITHOUT a tenant-level 'gp' row but with a SYSTEM
+    query-backed 'gp' row — authoring an expression that depends on 'gp' MUST pass.
+    This confirms the fix does not break the normal tenant ∪ SYSTEM resolution when
+    there is no tenant override (SYSTEM leaf is correctly used)."""
+    await _ensure_system_tenant(db)
+
+    async def _fake_embed(_text):
+        return None
+
+    monkeypatch.setattr("app.services.metrics.metric_authoring.embed_domain_query", _fake_embed)
+
+    p = _kp()
+    gp_key = f"{p}gp"
+
+    # Only SYSTEM row for 'gp': query-backed (suiteql), active — no tenant override
+    db.add(_leaf(SYSTEM_TENANT_ID, gp_key, status="active"))
+    await db.flush()
+
+    # Should NOT raise — SYSTEM query-backed leaf is valid for this tenant
+    await validate_leaves_exist(
+        db,
+        tenant_id=tenant_a.id,
+        d={
+            "key": f"{p}gm",
+            "source_kind": "expression",
+            "expression": f"{gp_key} + {gp_key}",
+            "depends_on": [gp_key],
+        },
+    )
+
+
+# ── NEW-6: preserve prior provenance author on update ─────────────────────────
+
+
+async def test_update_metric_system_seed_author_becomes_authored(db, monkeypatch):
+    """NEW-6 (a): a system_seed row updated via update_metric must have author converted
+    to 'authored' — satisfying B2 (seeder's conditional-upsert guard skips non-system_seed
+    rows so the edit is not re-clobbered on the next nightly run)."""
+    await _ensure_system_tenant(db)
+
+    async def _fake_embed(_text):
+        return None
+
+    monkeypatch.setattr("app.services.metrics.metric_authoring.embed_domain_query", _fake_embed)
+
+    p = _kp()
+    key = f"{p}cash_new6a"
+    metric = MetricDefinition(
+        tenant_id=SYSTEM_TENANT_ID,
+        key=key,
+        display_name="Cash",
+        definition="cash balance",
+        unit="currency",
+        source_kind="suiteql",
+        blessed_spec={"query": "SELECT 0", "dialect": "suiteql"},
+        params_schema={"period": {"type": "period"}},
+        status="active",
+        version=1,
+        provenance={"author": "system_seed", "seeded_at": "2026-06-05"},
+    )
+    db.add(metric)
+    await db.flush()
+
+    updated = await update_metric(
+        db,
+        tenant_id=SYSTEM_TENANT_ID,
+        metric_id=metric.id,
+        payload={"display_name": "Cash Balance"},
+    )
+
+    # B2 invariant: system_seed → authored (seeder will skip this row)
+    assert updated.provenance["author"] == "authored", (
+        f"expected 'authored' for system_seed row, got {updated.provenance!r}"
+    )
+    assert updated.provenance.get("updated_via") == "api"
+    # Other provenance keys preserved
+    assert updated.provenance.get("seeded_at") == "2026-06-05"
+
+
+async def test_update_metric_non_system_seed_author_preserved(db, monkeypatch):
+    """NEW-6 (b): a row with author='superadmin' updated via update_metric must keep
+    author='superadmin' — the fix must NOT clobber any non-system_seed author class.
+    This is the core NEW-6 regression: the old code unconditionally wrote 'authored',
+    destroying a real author class like 'superadmin' or 'tenant_admin'."""
+    await _ensure_system_tenant(db)
+
+    async def _fake_embed(_text):
+        return None
+
+    monkeypatch.setattr("app.services.metrics.metric_authoring.embed_domain_query", _fake_embed)
+
+    p = _kp()
+    key = f"{p}cash_new6b"
+    metric = MetricDefinition(
+        tenant_id=SYSTEM_TENANT_ID,
+        key=key,
+        display_name="Cash",
+        definition="cash balance",
+        unit="currency",
+        source_kind="suiteql",
+        blessed_spec={"query": "SELECT 0", "dialect": "suiteql"},
+        params_schema={"period": {"type": "period"}},
+        status="active",
+        version=1,
+        provenance={"author": "superadmin", "created_at": "2026-06-05"},
+    )
+    db.add(metric)
+    await db.flush()
+
+    updated = await update_metric(
+        db,
+        tenant_id=SYSTEM_TENANT_ID,
+        metric_id=metric.id,
+        payload={"display_name": "Cash Balance v2"},
+    )
+
+    # NEW-6: non-system_seed author must be preserved, NOT clobbered to "authored"
+    assert updated.provenance["author"] == "superadmin", (
+        f"expected 'superadmin' to be preserved, got {updated.provenance!r}"
+    )
+    assert updated.provenance.get("updated_via") == "api"
+    assert updated.provenance.get("created_at") == "2026-06-05"

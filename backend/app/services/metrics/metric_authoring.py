@@ -168,7 +168,7 @@ async def validate_leaves_exist(db: AsyncSession, *, tenant_id: uuid.UUID, d: di
     deps = list(d.get("depends_on") or [])
     if not deps:
         return
-    stmt = select(MetricDefinition.key, MetricDefinition.source_kind).where(
+    stmt = select(MetricDefinition.key, MetricDefinition.source_kind, MetricDefinition.tenant_id).where(
         or_(
             MetricDefinition.tenant_id == tenant_id,
             MetricDefinition.tenant_id == SYSTEM_TENANT_ID,
@@ -176,7 +176,16 @@ async def validate_leaves_exist(db: AsyncSession, *, tenant_id: uuid.UUID, d: di
         MetricDefinition.status == "active",
         MetricDefinition.key.in_(deps),
     )
-    found = {k: sk for k, sk in (await db.execute(stmt)).all()}
+    # NEW-5: apply tenant-wins-by-key so the source_kind seen here matches what
+    # resolve_metric_by_key (compute) would resolve. A tenant row always overrides a SYSTEM
+    # row for the same key — the same precedence as compute's `tenant_row or system_row`.
+    # Without this, a {k: sk for k, sk in rows} dict picks whichever row the DB returns
+    # last for a duplicate key (non-deterministic), potentially seeing the SYSTEM row's
+    # source_kind while compute resolves the tenant row — a blessed-but-uncomputable metric.
+    found: dict[str, str] = {}
+    for row_key, row_sk, row_tid in (await db.execute(stmt)).all():
+        if row_key not in found or row_tid == tenant_id:
+            found[row_key] = row_sk
     missing = [k for k in deps if k not in found]
     if missing:
         raise AuthoringError(
@@ -344,17 +353,17 @@ async def update_metric(
 
     metric.version += 1
 
-    # B2 (provenance stamp): clear the system_seed author stamp on EVERY update so the
+    # B2 + NEW-6 (provenance stamp): only convert 'system_seed' → 'authored' so the
     # nightly seeder's conditional-upsert guard (author=='system_seed' → overwrite) does
-    # NOT clobber a superadmin's edit to a canonical SYSTEM key on the next run. Applies
-    # unconditionally — harmless on non-SYSTEM rows, essential on SYSTEM rows that were
-    # seeded with author='system_seed'. Preserves all other provenance keys (non-
-    # destructive merge), and tags the update with updated_via='api' for audit context.
-    metric.provenance = {
-        **(metric.provenance or {}),
-        "author": "authored",
-        "updated_via": "api",
-    }
+    # NOT clobber a superadmin's/tenant_admin's edit on the next run. Any other author
+    # class (e.g. 'superadmin', 'tenant_admin', 'authored') is PRESERVED — unconditionally
+    # clobbering to 'authored' destroys the real author class carried by non-seeded rows.
+    # Always set updated_via='api' for audit context (NEW-6).
+    prov = {**(metric.provenance or {})}
+    if prov.get("author") == "system_seed":
+        prov["author"] = "authored"  # B2: mark non-seeder-owned so reseed skips it
+    prov["updated_via"] = "api"
+    metric.provenance = prov
 
     await db.flush()
     return metric
