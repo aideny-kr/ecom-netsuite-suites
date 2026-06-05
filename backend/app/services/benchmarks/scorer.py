@@ -277,6 +277,63 @@ async def llm_judge_score(
     return ScoreResult(score=round(score, 3), rationale=str(rationale)[:300], source="llm_judge")
 
 
+# ---------------------------------------------------------------------------
+# Value-absent scorer — anti-hallucination invariant for metric cases
+# ---------------------------------------------------------------------------
+
+
+def assert_computed_value_absent(
+    answer_text: str,
+    computed_values: list[str],
+) -> bool:
+    """Return True if none of the computed_values appear in answer_text.
+
+    This is the primary anti-hallucination invariant for metric benchmark
+    cases: the COMPUTED VALUE (e.g. a net margin percentage produced by
+    metric_compute) must NOT appear verbatim in the model's text answer.
+    Numeric values belong exclusively in the data_table SSE event — the
+    LLM's prose must NEVER re-state them (that would be the model reading
+    the number back from its context window, bypassing the interception).
+
+    Args:
+        answer_text: The model's final text answer.
+        computed_values: Numeric or string values extracted from the
+            data_table / tool result (e.g. ["12.5", "12.5%"]).
+
+    Returns:
+        True  — no value leaked into the answer (invariant holds).
+        False — at least one value appears as a substring in the answer
+                (invariant violated; scorer should cap the case score at 0.0).
+
+    How it is wired into the benchmark runner:
+        Cases that declare `computed_value_absent: true` in their YAML opt
+        into this check. The runner extracts numeric strings from the
+        data_table SSE payload returned by metric_compute, then calls this
+        function. A False result hard-fails the case (score = 0.0) regardless
+        of any keyword hits — it means the anti-hallucination SSE interception
+        was bypassed.
+
+    Usage::
+
+        from app.services.benchmarks.scorer import assert_computed_value_absent
+
+        ok = assert_computed_value_absent(
+            answer_text=agent_result.answer_text,
+            computed_values=["12.5", "12.5%"],
+        )
+        if not ok:
+            # Metric value leaked into model answer — hard fail
+            case_score = 0.0
+    """
+    if not computed_values or not answer_text:
+        return True
+    lower_answer = answer_text.lower()
+    for value in computed_values:
+        if value.lower() in lower_answer:
+            return False
+    return True
+
+
 def _parse_judge_json(raw: str) -> dict | None:
     """Best-effort JSON parse of judge output."""
     if not raw:

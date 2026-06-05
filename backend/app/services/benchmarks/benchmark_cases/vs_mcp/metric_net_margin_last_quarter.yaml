@@ -1,6 +1,6 @@
 # Named-metric ask: net margin last quarter.
 #
-# D2 "measured" benchmark case — grill R2#19.
+# D2 "measured" benchmark case — grill R2#19, NEW-4.
 #
 # Tests that a named-metric ask routes through metric_compute (the metric
 # catalog) rather than falling back to ad-hoc SuiteQL. This is the key
@@ -12,11 +12,22 @@
 #   1. Agent recognises "net margin" as a catalog-defined metric by name.
 #   2. Agent calls metric_compute(metric_key="net_margin", period="last_quarter").
 #   3. Response surfaces the computed value with period label.
+#   4. The computed numeric value does NOT appear in the model's text answer
+#      (it is delivered exclusively via the data_table SSE event).
 #
-# NOTE: The benchmark runner executes --skip-baseline --no-llm-judge in CI
-# (grill R2#19 TODO: metric-touching PRs should run with --baseline + judge
-# to prove vs-MCP >= baseline; deferred until live LLM key is available in
-# branch CI). This case will fail gracefully when ANTHROPIC_API_KEY is absent
+# NEW-4 CI fix: this case is now run as a dedicated CI step via
+#   --case metric_net_margin_last_quarter
+# (the --suite sales step excludes it because the case_id starts with
+# 'metric_', not 'sales_').
+#
+# Anti-hallucination invariant (computed_value_absent: true):
+#   The benchmark runner must extract numeric values from the data_table
+#   tool result returned by metric_compute and verify none appear verbatim
+#   in the model's answer text, using scorer.assert_computed_value_absent().
+#   A leak means the SSE interception was bypassed — hard fail (score = 0.0).
+#   See backend/app/services/benchmarks/scorer.py for the helper.
+#
+# NOTE: This case will fail gracefully when ANTHROPIC_API_KEY is absent
 # (benchmark step is skipped); the unit test in test_metric_benchmark_case.py
 # guards the case's declared intent independently of a live run.
 
@@ -36,6 +47,12 @@ expected_tools:
 expected_accuracy: 0.7
 max_cost: 0.50
 max_latency_ms: 120000
+# Anti-hallucination invariant (NEW-4): the computed metric value must NOT
+# appear in the model's text answer — it belongs in the data_table SSE event.
+# The benchmark runner extracts numeric strings from the metric_compute tool
+# result and calls scorer.assert_computed_value_absent(). Hard fail (0.0) if
+# any value leaks verbatim into the LLM prose.
+computed_value_absent: true
 # Baseline: Claude+MCP has no metric_compute tool; it would compute net
 # margin via ad-hoc SuiteQL (income / revenue). baseline_expected_tools
 # is empty because the Oracle MCP suite has no catalog compute tool.

@@ -103,20 +103,29 @@ jobs:
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Run vs-MCP agent benchmark
+      - name: Run vs-MCP agent benchmark (sales suite)
         if: steps.check_secret.outputs.skip != 'true'
-        # TODO(metrics/grill-R2#19): metric-touching PRs should run WITHOUT
-        # --skip-baseline and WITHOUT --no-llm-judge so the gate can prove
-        # "our agent >= Claude+MCP baseline" end-to-end. Currently deferred
-        # because: (a) a live ANTHROPIC_API_KEY in branch CI is required, and
-        # (b) flipping these flags without a warm baseline cache risks
-        # spurious failures on infra-only PRs. Resolve by: adding a
-        # path-conditional job that runs full baseline+judge only when
-        # backend/app/services/metrics/** is in the diff (needs GitHub
-        # Actions path-filter expression support or a separate job).
         run: |
           cd backend && python -m app.services.benchmarks.run_vs_mcp \
             --suite sales \
+            --tenant-id ce3dfaad-626f-4992-84e9-500c8291ca0a \
+            --skip-baseline \
+            --no-llm-judge
+
+      - name: Run vs-MCP agent benchmark (metric case)
+        if: steps.check_secret.outputs.skip != 'true'
+        # NEW-4 fix: the metric_net_margin_last_quarter case is NOT in the
+        # 'sales' suite (its case_id starts with 'metric_', not 'sales_'),
+        # so --suite sales excluded it entirely. This dedicated step ensures
+        # the metric routing gate is actually exercised in CI.
+        #
+        # TODO(metrics/grill-R2#19): run WITHOUT --skip-baseline and WITHOUT
+        # --no-llm-judge so the gate proves "our agent >= Claude+MCP baseline"
+        # end-to-end. Deferred until a live ANTHROPIC_API_KEY is reliably
+        # available in branch CI without flap risk on infra-only PRs.
+        run: |
+          cd backend && python -m app.services.benchmarks.run_vs_mcp \
+            --case metric_net_margin_last_quarter \
             --tenant-id ce3dfaad-626f-4992-84e9-500c8291ca0a \
             --skip-baseline \
             --no-llm-judge
