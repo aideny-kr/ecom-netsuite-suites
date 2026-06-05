@@ -56,3 +56,22 @@ async def test_metric_definitions_rls_policy_exists_with_system_clause(db):
         await db.execute(text("SELECT relrowsecurity FROM pg_class WHERE relname = 'metric_definitions'"))
     ).scalar_one()
     assert rls_enabled, "ROW LEVEL SECURITY is not enabled on metric_definitions"
+
+
+async def test_metric_definitions_rls_is_forced(db):
+    """Migration 081 asserts FORCE ROW LEVEL SECURITY so the policy applies to the
+    table owner (superuser bypass is suppressed). This test pins that invariant:
+    relforcerowsecurity must be TRUE in pg_class after 081 is applied.
+
+    WHY: without FORCE RLS the policy is vacuous for the DB role that owns the
+    table — the owner sees all rows regardless of tenant context. That breaks
+    the defense-in-depth guarantee that a mis-configured SET LOCAL still leaks
+    zero cross-tenant rows. FORCE RLS makes the policy apply even to the owner.
+    """
+    force_rls = (
+        await db.execute(text("SELECT relforcerowsecurity FROM pg_class WHERE relname = 'metric_definitions'"))
+    ).scalar_one()
+    assert force_rls, (
+        "FORCE ROW LEVEL SECURITY is not enabled on metric_definitions. "
+        "Migration 081 must apply ALTER TABLE metric_definitions FORCE ROW LEVEL SECURITY."
+    )

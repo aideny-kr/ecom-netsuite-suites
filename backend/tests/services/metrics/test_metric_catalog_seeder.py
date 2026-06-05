@@ -62,6 +62,45 @@ async def test_seeder_is_self_sufficient_when_system_tenant_absent(db):
     assert total == 9
 
 
+async def test_concurrent_reseed_uses_upsert_not_unique_violation(db):
+    """R3#25 — two concurrent seeders must converge via upsert, not race into a
+    UNIQUE(tenant_id, key) violation.
+
+    Within a single session (shared uncommitted state) the second seed() call
+    must not raise IntegrityError / UniqueViolationError. With the old
+    delete-then-insert approach the second DELETE removes what the first inserted
+    and the second INSERT re-adds — that's safe within a transaction but breaks
+    if two sessions race at the COMMIT boundary.  The ON CONFLICT DO UPDATE
+    upsert fixes that by making the second call a no-op update, never a new row.
+
+    This test simulates the within-transaction half of that invariant:
+    seed → flush → seed again → flush → no exception + stable count.
+    The across-commit half is already covered by
+    test_metric_seed_commit_idempotency.py (F5).
+    """
+    from sqlalchemy.exc import IntegrityError
+
+    await _ensure_system_tenant(db)
+
+    n1 = await seed_system_metrics(db)
+    await db.flush()
+
+    # A second seed in the same uncommitted session must NOT raise.
+    try:
+        n2 = await seed_system_metrics(db)
+        await db.flush()
+    except IntegrityError as exc:
+        pytest.fail(f"seeder raised IntegrityError on second call — ON CONFLICT upsert is required (R3#25): {exc}")
+
+    assert n1 == n2, "seeder must return the same count on every call"
+    total = (
+        await db.execute(
+            select(func.count()).select_from(MetricDefinition).where(MetricDefinition.tenant_id == SYSTEM_TENANT_ID)
+        )
+    ).scalar_one()
+    assert total == n1, f"upsert must not double rows: expected {n1}, got {total}"
+
+
 async def test_placeholder_defaults_are_draft_not_active(db):
     """D3: SELECT 0 placeholder rows must seed as draft, not active.
     §12.2: all seeded rows must carry a non-null 1536-d embedding."""

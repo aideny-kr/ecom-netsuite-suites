@@ -1,6 +1,6 @@
 """Seed system-default finance metrics (SYSTEM_TENANT_ID) with 1536-d embeddings. Idempotent."""
 
-from sqlalchemy import delete
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.metric_definition import SYSTEM_TENANT_ID, MetricDefinition
@@ -97,10 +97,11 @@ async def seed_system_metrics(db: AsyncSession) -> int:
     # so the seeder is self-sufficient even on a fresh DB (mig 080 also seeds it).
     await ensure_system_tenant(db)
     await db.flush()
-    await db.execute(delete(MetricDefinition).where(MetricDefinition.tenant_id == SYSTEM_TENANT_ID))
+
     embeddings = await embed_domain_texts([_embed_text(m) for m in _SYSTEM_METRICS])
     if embeddings is None:
         raise RuntimeError("seeder requires the 1536-d embedder; refusing to seed rows without embeddings (§12.2)")
+
     for idx, m in enumerate(_SYSTEM_METRICS):
         vec = embeddings[idx]
         assert len(vec) == 1536, "embedding must be 1536-d (use embed_domain_*)"
@@ -108,23 +109,49 @@ async def seed_system_metrics(db: AsyncSession) -> int:
         # discoverable for authoring but never returned as a computed (zero) answer.
         # Expression metrics whose leaves are draft yield missing_dependency — also safe.
         is_placeholder = m["source_kind"] in ("suiteql", "bigquery")
-        db.add(
-            MetricDefinition(
-                tenant_id=SYSTEM_TENANT_ID,
-                key=m["key"],
-                display_name=m["display_name"],
-                definition=m["definition"],
-                unit=m["unit"],
-                source_kind=m["source_kind"],
-                blessed_spec=({"query": "SELECT 0", "dialect": "suiteql"} if m["source_kind"] == "suiteql" else None),
-                expression=m.get("expression"),
-                depends_on=m.get("depends_on"),
-                params_schema={"period": {"type": "period"}},
-                synonyms=m.get("synonyms", []),
-                intent_embedding=vec,
-                status="draft" if is_placeholder else "active",
-                version=1,
-                provenance={"author": "system_seed"},
+        values = {
+            "tenant_id": SYSTEM_TENANT_ID,
+            "key": m["key"],
+            "display_name": m["display_name"],
+            "definition": m["definition"],
+            "unit": m["unit"],
+            "source_kind": m["source_kind"],
+            "blessed_spec": ({"query": "SELECT 0", "dialect": "suiteql"} if m["source_kind"] == "suiteql" else None),
+            "expression": m.get("expression"),
+            "depends_on": m.get("depends_on"),
+            "params_schema": {"period": {"type": "period"}},
+            "synonyms": m.get("synonyms", []),
+            "intent_embedding": vec,
+            "status": "draft" if is_placeholder else "active",
+            "version": 1,
+            "provenance": {"author": "system_seed"},
+        }
+        # R3#25: use ON CONFLICT DO UPDATE so two concurrent seeders converge
+        # rather than racing into a UNIQUE(tenant_id, key) violation.
+        # All mutable seed columns are refreshed on conflict so re-seeding after
+        # a definition update propagates correctly.
+        stmt = (
+            pg_insert(MetricDefinition)
+            .values(**values)
+            .on_conflict_do_update(
+                index_elements=["tenant_id", "key"],
+                set_={
+                    "display_name": values["display_name"],
+                    "definition": values["definition"],
+                    "unit": values["unit"],
+                    "source_kind": values["source_kind"],
+                    "blessed_spec": values["blessed_spec"],
+                    "expression": values["expression"],
+                    "depends_on": values["depends_on"],
+                    "params_schema": values["params_schema"],
+                    "synonyms": values["synonyms"],
+                    "intent_embedding": values["intent_embedding"],
+                    "status": values["status"],
+                    "version": values["version"],
+                    "provenance": values["provenance"],
+                },
             )
         )
+        await db.execute(stmt)
+
     return len(_SYSTEM_METRICS)
