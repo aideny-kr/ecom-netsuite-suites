@@ -394,3 +394,87 @@ async def test_expression_leaf_must_be_query_backed(db):
             tenant_id=uuid.uuid4(),
             d={"source_kind": "expression", "depends_on": ["leaf_expr"], "key": "top"},
         )
+
+
+# ── R1#9: 1536-d embedding guard on create + update authoring paths ──────────
+
+
+@pytest.mark.asyncio
+async def test_create_metric_rejects_non_1536_embedding(db, monkeypatch):
+    """REAL dimension invariant (R1#9). The system seeder asserts len(vec)==1536 before
+    persisting an intent embedding, but create_metric inserts whatever embed_domain_query
+    returns with no guard. A wrong-dimension vector (e.g. 10-element list from a
+    mis-configured provider) silently persists and corrupts cosine-similarity resolution.
+    create_metric MUST raise AuthoringError mentioning '1536' when embed_domain_query
+    returns a non-1536 non-None vector.
+
+    Pre-fix this PASSES (no guard); post-fix raises AuthoringError matching '1536'."""
+    from app.services.metrics import metric_authoring
+    from app.services.metrics.metric_authoring import AuthoringError, create_metric
+    import uuid
+
+    async def _bad_embed(_text):
+        return [0.0] * 10
+
+    monkeypatch.setattr(metric_authoring, "embed_domain_query", _bad_embed)
+    with pytest.raises(AuthoringError, match="1536"):
+        await create_metric(
+            db,
+            tenant_id=uuid.uuid4(),
+            payload={
+                "key": "k1536",
+                "display_name": "X",
+                "definition": "x",
+                "unit": "currency",
+                "source_kind": "suiteql",
+                "blessed_spec": {"query": "SELECT 0", "dialect": "suiteql"},
+                "params_schema": {"period": {"type": "period"}},
+            },
+        )
+
+
+@pytest.mark.asyncio
+async def test_update_metric_rejects_non_1536_embedding(db, monkeypatch):
+    """REAL dimension invariant (R1#9) — update path. update_metric recomputes the
+    intent embedding when text fields change; if embed_domain_query returns a
+    wrong-dimension vector, update_metric must raise AuthoringError mentioning '1536'
+    rather than silently persisting a corrupted vector.
+
+    Pre-fix this PASSES (no guard on update); post-fix raises AuthoringError '1536'."""
+    from app.services.metrics import metric_authoring
+    from app.services.metrics.metric_authoring import AuthoringError, create_metric, update_metric
+    from app.models.metric_definition import MetricDefinition
+    import uuid
+
+    # Seed a valid metric under SYSTEM_TENANT_ID so the FK constraint is satisfied
+    # (create_metric calls ensure_system_tenant for SYSTEM rows). embed returns None
+    # in the test env — that is explicitly allowed; only a non-None wrong-dim is rejected.
+    from app.models.metric_definition import SYSTEM_TENANT_ID
+
+    metric = await create_metric(
+        db,
+        tenant_id=SYSTEM_TENANT_ID,
+        payload={
+            "key": f"upd_1536_{uuid.uuid4().hex[:8]}",
+            "display_name": "Original Name",
+            "definition": "original definition",
+            "unit": "currency",
+            "source_kind": "suiteql",
+            "blessed_spec": {"query": "SELECT 0", "dialect": "suiteql"},
+            "params_schema": {"period": {"type": "period"}},
+        },
+    )
+    await db.flush()
+
+    # Now monkeypatch to a bad-dimension embed and attempt a text-field update
+    async def _bad_embed(_text):
+        return [0.0] * 10
+
+    monkeypatch.setattr(metric_authoring, "embed_domain_query", _bad_embed)
+    with pytest.raises(AuthoringError, match="1536"):
+        await update_metric(
+            db,
+            tenant_id=SYSTEM_TENANT_ID,
+            metric_id=metric.id,
+            payload={"display_name": "New Name"},
+        )

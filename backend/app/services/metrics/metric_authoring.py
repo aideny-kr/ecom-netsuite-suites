@@ -258,7 +258,10 @@ async def update_metric(
     # out-of-date text, so recompute it from the MERGED definition. Tolerate a None
     # embedding exactly as create_metric does (embed_domain_query may return None).
     if any(payload.get(f) is not None for f in ("display_name", "definition", "synonyms")):
-        metric.intent_embedding = await embed_domain_query(_embed_text(merged))
+        _new_embedding = await embed_domain_query(_embed_text(merged))
+        if _new_embedding is not None and len(_new_embedding) != 1536:
+            raise AuthoringError("intent embedding must be 1536-d (use embed_domain_*)")
+        metric.intent_embedding = _new_embedding
 
     metric.version += 1
     await db.flush()
@@ -284,6 +287,8 @@ async def create_metric(db: AsyncSession, *, tenant_id: uuid.UUID, payload: dict
         await ensure_system_tenant(db)
         await db.flush()
     embedding = await embed_domain_query(_embed_text(payload))
+    if embedding is not None and len(embedding) != 1536:
+        raise AuthoringError("intent embedding must be 1536-d (use embed_domain_*)")
     metric = MetricDefinition(
         tenant_id=tenant_id,
         key=payload["key"],
