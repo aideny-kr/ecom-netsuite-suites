@@ -1,5 +1,5 @@
 ---
-description: e2e UAT + review depth required per change, decided by risk tier. The canonical tiering checklist is always-on in CLAUDE.md; this rule is the how-to-run detail.
+description: e2e UAT + review depth — how to RUN each gate. The canonical tiering CHECKLIST is in CLAUDE.md ("## UAT + Review"), always-on; this rule is loaded when editing code/policy and covers execution detail.
 paths:
   - backend/app/**
   - backend/tests/**
@@ -8,29 +8,14 @@ paths:
   - suiteapp/**
   - .github/workflows/**
   - .claude/workflows/**
+  - .claude/rules/**
   - scripts/**
+  - CLAUDE.md
 ---
 
-# UAT + Review — risk-tier policy (how-to-run)
+# UAT + Review — how to run each gate
 
-> The TIERING CHECKLIST is also in CLAUDE.md ("## UAT + Review") so it loads on EVERY PR — including ones that don't touch the paths above. This rule is the detail for running each gate.
-
-## Trigger checklist — ANY one makes a PR **T2 (high-risk)**
-- Mutates customer data (create / update / delete / approve / lock / post)
-- HITL invariant (per-line audit, no-auto-post, approval gating, period freeze)
-- Financial period close / lock / unlock, money movement, variance / materiality
-- Auth / permissions / RLS / tenant-scoping
-- Alembic migration or schema change
-- Secrets / encryption / API keys / credential handling
-- Scheduled / cron / Beat jobs (InstrumentedTask)
-- Deploy / runtime infra (compose, Dockerfile, CI/CD, nginx)
-- Prompt-pollution surface: chat/agent prompts, knowledge profiles, golden datasets, SSE number interception
-- Soul config (`/tmp/workspace_storage/{tenant_id}/soul.md`)
-- File-cabinet I/O or MCP mutation writes
-- Key-billed chat/agent path
-- **Changes to the review/UAT process tooling or policy itself** — a buggy gate gives false confidence on everything it gates (this is why this very file is T2).
-
-**T1 (standard)** = a code change hitting NONE of the above. **T0 (trivial)** = docs / comments / formatting / lint-config / rename ONLY. Dependency upgrades and auth/deploy/feature-flag/scheduler config are NOT T0 — tier them by the triggers above.
+> **The canonical tiering CHECKLIST (which PRs are T2 / T1 / T0) is in `CLAUDE.md` → "## UAT + Review"** — single source of truth, always loaded on every PR. Do NOT duplicate the checklist here; it drifts. This rule is the execution detail.
 
 ## Gates per tier
 | Tier | CI | Live smoke (post-deploy) | Review |
@@ -40,7 +25,11 @@ paths:
 | T2 | existing CI + **mandatory seeded-tenant e2e** | **PM-autonomous safe-envelope live smoke** | **mandatory multi-angle review, pre-merge, blocking** |
 
 ## How to run each gate
-- **Multi-angle review (T2):** `Workflow({name: "code-review-multiangle", args: {target: "<PR# or branch>"}})`. It fails CLOSED — check `failed_angles` (NON-EMPTY ⇒ NOT a clean pass; re-run the review) and treat every `UNVERIFIED` finding as needing human review (a verifier failed, the candidate was preserved). Resolve every CONFIRMED + PLAUSIBLE-major finding (fix, or defer with written rationale) before merge.
+- **Multi-angle review (T2):** `Workflow({name: "code-review-multiangle", args: {target: "<PR# or branch>"}})`. It **fails CLOSED** — read the result's `status` FIRST:
+  - `status: "INCOMPLETE"` (a finder angle failed) or `PREP_FAILED` / `EMPTY_DIFF` / `INVALID_ARGS` ⇒ NOT a valid pass; re-run. Never read a failed run as "0 findings".
+  - sanity-check the reported `base` matches the real PR base (prep resolves it).
+  - every `UNVERIFIED` finding (a verifier failed) is preserved at `major` and needs human review.
+  - resolve every CONFIRMED + PLAUSIBLE-major finding (fix, or defer with written rationale) before merge.
 - **Live smoke (T2):** safe-envelope harness — mint an env-scoped token on the target backend → create a FRESH DISPOSABLE run → exercise → verify by `correlation_id`/audit → DELETE (verify zero residue). Default target: the staging UAT test-tenant; real-tenant disposable run only as fallback. NEVER auto-mutate a real close-bound run; NEVER `close_period` a real period. (Executable harness = Phase 3.)
 - **Seeded-tenant CI e2e (T2):** `backend/tests/e2e/` against the CI Postgres. (= Phase 2.)
 
