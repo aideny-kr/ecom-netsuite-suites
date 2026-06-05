@@ -1,0 +1,43 @@
+# Named-metric ask: net margin last quarter.
+#
+# D2 "measured" benchmark case — grill R2#19.
+#
+# Tests that a named-metric ask routes through metric_compute (the metric
+# catalog) rather than falling back to ad-hoc SuiteQL. This is the key
+# routing regression: if metric_compute is NOT used, the agent has bypassed
+# the catalog and is computing net margin ad-hoc, which diverges from the
+# tenant-declared metric definition (formula, period semantics, filter set).
+#
+# Expected behavior:
+#   1. Agent recognises "net margin" as a catalog-defined metric by name.
+#   2. Agent calls metric_compute(metric_key="net_margin", period="last_quarter").
+#   3. Response surfaces the computed value with period label.
+#
+# NOTE: The benchmark runner executes --skip-baseline --no-llm-judge in CI
+# (grill R2#19 TODO: metric-touching PRs should run with --baseline + judge
+# to prove vs-MCP >= baseline; deferred until live LLM key is available in
+# branch CI). This case will fail gracefully when ANTHROPIC_API_KEY is absent
+# (benchmark step is skipped); the unit test in test_metric_benchmark_case.py
+# guards the case's declared intent independently of a live run.
+
+case_id: metric_net_margin_last_quarter
+query: "what's our net margin last quarter?"
+tags: ["metric", "named-metric", "catalog", "net-margin", "fiscal-period"]
+notes: |
+  Named-metric routing test. The agent must call metric_compute for a
+  catalog-defined metric ask rather than constructing ad-hoc SuiteQL.
+  Acceptable period interpretation: "last quarter" = the most recently
+  completed fiscal quarter per tenant fiscal calendar.
+  Expected tool: metric_compute (NOT netsuite_suiteql directly).
+expected_answer_contains:
+  - "net margin"
+expected_tools:
+  - "metric_compute"
+expected_accuracy: 0.7
+max_cost: 0.50
+max_latency_ms: 120000
+# Baseline: Claude+MCP has no metric_compute tool; it would compute net
+# margin via ad-hoc SuiteQL (income / revenue). baseline_expected_tools
+# is empty because the Oracle MCP suite has no catalog compute tool.
+baseline_expected_accuracy: 0.5
+baseline_expected_tools: []
