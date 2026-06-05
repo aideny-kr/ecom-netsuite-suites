@@ -25,6 +25,10 @@ async def resolve(params: dict, context: dict | None = None, **kwargs: Any) -> d
                 "params_schema": m.params_schema or {},
                 "dimensions": m.dimensions or {},
                 "status": m.status,
+                "routing_directive": (
+                    f"'{m.key}' is a blessed metric. You MUST call metric_compute(key='{m.key}') to get its "
+                    "value. Do NOT author SuiteQL/BigQuery for it and do NOT state a number from `definition`."
+                ),
             }
             for m in matches
         ],
