@@ -47,3 +47,46 @@ def test_fill_query_escapes_embedded_single_quote():
     # And there is no un-doubled quote that could close the literal early: stripping
     # the doubled-quote pairs leaves exactly the two outer delimiters.
     assert out.replace("''", "").count("'") == 2
+
+
+def test_fill_query_backslash_group_ref_does_not_inject_placeholder_text():
+    """REAL injection invariant (F3, leg a — backslash gap). fill_query substitutes
+    each `:name` via `re.sub(pattern, _render(val), query)`. The SECOND argument of
+    re.sub is a REPLACEMENT TEMPLATE: re.sub interprets `\\g<0>`, `\\1`, `\\g<name>`
+    in it. _render doubles single quotes but does NOT escape backslashes, and the
+    author-time guard rejects `'`/`;`/`--` but NOT backslash — so a blessed enum value
+    like `us\\g<0>` smuggles a group-reference into the template. `\\g<0>` re-expands to
+    the WHOLE match (`:region`), injecting the placeholder text back into the SQL.
+
+    Concretely: with the buggy template substitution the rendered query is
+    `region='us:region'` — the value `us\\g<0>` did NOT land verbatim; `\\g<0>` was
+    interpreted and replaced with the matched `:region` text INSIDE the literal. The
+    value MUST land exactly as written (one inert literal): `region='us\\g<0>'`."""
+    out = fill_query("SELECT x WHERE region=:region", {"region": "us\\g<0>"})
+    # The value lands VERBATIM — the backslash group-ref was NOT interpreted by re.sub.
+    assert out == "SELECT x WHERE region='us\\g<0>'", out
+    # And the placeholder text `:region` was NOT re-injected into the SQL.
+    assert ":region" not in out, out
+
+
+def test_fill_query_backslash_numbered_group_ref_does_not_raise():
+    """REAL fail-closed invariant (F3, leg a — backslash gap). A blessed enum value
+    like `a\\1b` becomes the re.sub replacement template `'a\\1b'`. re.sub reads `\\1`
+    as a reference to capture group 1 — which the placeholder pattern does NOT have —
+    and raises `re.error: invalid group reference 1`. fill_query catches only nothing
+    here, so the bare re.error propagates out; compute_metric catches only
+    ExpressionError/ComputeError, so the request 500s instead of failing closed.
+
+    fill_query MUST treat the value as data: render it verbatim as one inert literal,
+    NEVER raise (and never inject substituted text). Pre-fix this raises re.error."""
+    out = fill_query("SELECT x WHERE region=:region", {"region": "a\\1b"})
+    assert out == "SELECT x WHERE region='a\\1b'", out
+    # group-ref text never leaked: the value is the literal three chars a \ 1 b.
+    assert out.endswith("'a\\1b'"), out
+
+
+def test_fill_query_lone_backslash_renders_verbatim():
+    """A trailing/lone backslash in a blessed value must also land verbatim inside the
+    literal — not be consumed or escaped by the substitution machinery."""
+    out = fill_query("SELECT x WHERE region=:region", {"region": "eu\\"})
+    assert out == "SELECT x WHERE region='eu\\'", out

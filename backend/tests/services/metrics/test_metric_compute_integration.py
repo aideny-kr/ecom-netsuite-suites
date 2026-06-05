@@ -804,6 +804,67 @@ async def test_filled_query_handed_to_executor_cannot_break_out_of_literal(db, t
     assert " OR " not in collapsed.upper(), collapsed
 
 
+async def test_filled_query_with_backslash_value_does_not_inject_or_500(db, tenant_a, monkeypatch):
+    """REAL injection + fail-closed invariant (F3, leg a — backslash gap), at the FULL
+    compute seam. A blessed enum value carrying a backslash group-ref (`us\\g<0>`) is
+    seeded directly (defense-in-depth case: a poison value that bypassed author-time).
+    fill_query substitutes :name via re.sub; the SECOND arg is a replacement TEMPLATE
+    that interprets `\\g<0>` (re-injects the matched `:region` text) / `\\1` (raises an
+    uncaught re.error). compute_metric catches only ExpressionError/ComputeError, so the
+    bare re.error would 500 instead of failing closed — and `\\g<0>` would smuggle
+    placeholder text into the literal under the catalog's authority.
+
+    Post-fix (callable re.sub replacement) the value lands VERBATIM as one inert literal:
+    the executor IS reached, the captured query is exactly `region='us\\g<0>'`, no
+    `:region` text was re-injected, and there is NO 500 (no error key)."""
+    await _ensure_system_tenant(db)
+    db.add(
+        MetricDefinition(
+            tenant_id=SYSTEM_TENANT_ID,
+            key="rev_by_region",
+            display_name="Rev By Region",
+            definition="x",
+            unit="currency",
+            source_kind="suiteql",
+            blessed_spec={
+                "query": "SELECT SUM(amount) FROM transactionline WHERE region=:region",
+                "dialect": "suiteql",
+            },
+            # poison value seeded directly (would be rejected at author-time post-fix);
+            # this proves the compute-path substitution is backslash-inert on its own.
+            params_schema={"region": {"type": "enum", "values": ["us", "us\\g<0>"]}},
+            status="active",
+            version=1,
+        )
+    )
+    await db.flush()
+
+    captured: list[str] = []
+
+    async def _capture_execute(params, context=None, **kwargs):
+        captured.append(params.get("query", ""))
+        return {"columns": ["s"], "rows": [[5.0]]}
+
+    monkeypatch.setattr("app.mcp.tools.netsuite_suiteql.execute", _capture_execute)
+
+    # No 500: the backslash group-ref must NOT raise an uncaught re.error out of compute.
+    out = await compute_metric(
+        db,
+        tenant_id=tenant_a.id,
+        key="rev_by_region",
+        params={"region": "us\\g<0>"},
+        context={"fiscal_year_start_month": 1},
+    )
+
+    assert "error" not in out, out
+    assert captured, "executor was never reached"
+    q = captured[0]
+    # (a) the value landed VERBATIM as one inert literal — `\g<0>` was NOT interpreted.
+    assert q == "SELECT SUM(amount) FROM transactionline WHERE region='us\\g<0>'", q
+    # (b) the placeholder text `:region` was NOT re-injected back into the SQL.
+    assert ":region" not in q, q
+
+
 async def test_governed_execute_seam_threads_tenant_fiscal_month(db, tenant_a, monkeypatch):
     """REAL PRODUCTION-seam F2 invariant. Drive mcp.governance.governed_execute (the
     exact path the agent's tool call flows through) for metric.compute, with a tenant

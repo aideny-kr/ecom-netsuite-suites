@@ -191,3 +191,26 @@ def test_rejects_enum_value_with_sql_comment_or_semicolon():
                     "params_schema": {"region": {"type": "enum", "values": ["eu", poison]}},
                 }
             )
+
+
+def test_rejects_enum_value_with_backslash():
+    """REAL injection invariant (F3, leg b — backslash gap). fill_query substitutes
+    :name via re.sub, whose REPLACEMENT TEMPLATE interprets backslash sequences
+    (`\\g<0>`, `\\1`, `\\g<name>`). A blessed enum value carrying a backslash —
+    e.g. `us\\g<0>` (re-injects the matched placeholder text) or `a\\1b` (raises an
+    uncaught re.error → request 500s instead of failing closed) — is therefore an
+    injection / fail-closed-breaking vector, on top of `'`/`;`/`--`. The compute-path
+    callable-replacement fix makes the substitution backslash-inert at runtime, but the
+    author-time guard MUST ALSO reject a backslash so such a value can NEVER be persisted
+    into a blessed metric row (the commit's stated un-alterability invariant). The prior
+    guard rejected `'`/`;`/`--` but NOT backslash, so these payloads sailed through."""
+    for poison in ["us\\g<0>", "a\\1b", "eu\\"]:
+        with pytest.raises(AuthoringError):
+            validate_definition(
+                {
+                    "key": "rev_by_region",
+                    "source_kind": "suiteql",
+                    "blessed_spec": {"query": "SELECT 1 WHERE region=:region", "dialect": "suiteql"},
+                    "params_schema": {"region": {"type": "enum", "values": ["eu", poison]}},
+                }
+            )

@@ -87,7 +87,15 @@ def fill_query(query: str, coerced: dict) -> str:
 
     filled = query
     for name, val in coerced.items():
-        filled = re.sub(rf":{re.escape(name)}\b", _render(val), filled)
+        # F3 injection-hardening: pass _render(val) via a CALLABLE replacement, not as a
+        # replacement-string template. re.sub interprets backslash sequences (`\1`,
+        # `\g<0>`, `\g<name>`, `\\`) in a STRING replacement — so a value like `us\g<0>`
+        # would re-inject the matched placeholder text into the SQL, and `a\1b` would
+        # raise an uncaught re.error (escaping the backslash, fail-closed). A callable
+        # replacement is inserted VERBATIM, with no template interpretation, so the
+        # rendered (quote-escaped) literal lands exactly as data regardless of backslashes.
+        rendered = _render(val)
+        filled = re.sub(rf":{re.escape(name)}\b", lambda _m, _r=rendered: _r, filled)
     if re.search(r":[a-zA-Z_]\w*", filled):
         raise ParamError("unfilled placeholder remains")
     return filled
