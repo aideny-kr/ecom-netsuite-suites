@@ -52,7 +52,9 @@ async def test_resolve_returns_system_and_tenant_excludes_other(db, tenant_a, te
 
     keys = {m.key for m in await resolve_metrics(db, tenant_id=tenant_a.id, query="bottom line margin", top_k=10)}
     assert "net_margin" in keys  # tenant synonym match
-    assert "gross_revenue" in keys  # SYSTEM default visible
+    # gross_revenue is a SYSTEM metric but is NOT matched by "bottom line margin" —
+    # resolution is now relevance-bounded (R1#2): unmatched SYSTEM rows are not dumped.
+    assert "gross_revenue" not in keys
     assert "secret_metric" not in keys  # other tenant excluded
 
 
@@ -63,3 +65,72 @@ async def test_tenant_override_wins_by_key(db, tenant_a):
     matches = await resolve_metrics(db, tenant_id=tenant_a.id, query="net_margin", top_k=10)
     nm = [m for m in matches if m.key == "net_margin"]
     assert len(nm) == 1 and nm[0].tenant_id == tenant_a.id
+
+
+async def test_unknown_query_does_not_dump_all_system_metrics(db):
+    await _clear_catalog(db)
+    await _ensure_system_tenant(db)
+    import uuid as _uuid
+
+    for k in ("cash", "ar", "ap"):
+        db.add(
+            MetricDefinition(
+                tenant_id=SYSTEM_TENANT_ID,
+                key=k,
+                display_name=k,
+                definition=k,
+                unit="currency",
+                source_kind="suiteql",
+                blessed_spec={"query": "SELECT 0", "dialect": "suiteql"},
+                params_schema={"period": {"type": "period"}},
+                status="active",
+                version=1,
+                provenance={"author": "t"},
+            )
+        )
+    await db.flush()
+    rows = await resolve_metrics(db, tenant_id=_uuid.uuid4(), query="airspeed velocity of a swallow")
+    assert rows == [], "an unrelated ask must NOT return the full blessed SYSTEM set (R1#2)"
+
+
+async def test_exact_key_survives_topk(db):
+    await _clear_catalog(db)
+    await _ensure_system_tenant(db)
+    import uuid as _uuid
+
+    for i in range(8):
+        db.add(
+            MetricDefinition(
+                tenant_id=SYSTEM_TENANT_ID,
+                key=f"m{i}",
+                display_name=f"m{i}",
+                definition="x",
+                unit="count",
+                source_kind="suiteql",
+                blessed_spec={"query": "SELECT 0", "dialect": "suiteql"},
+                params_schema={"period": {"type": "period"}},
+                status="active",
+                version=1,
+                provenance={"author": "t"},
+            )
+        )
+    db.add(
+        MetricDefinition(
+            tenant_id=SYSTEM_TENANT_ID,
+            key="net_margin",
+            display_name="Net Margin",
+            definition="x",
+            unit="percent",
+            source_kind="expression",
+            expression="a/b",
+            depends_on=["a", "b"],
+            status="active",
+            version=1,
+            provenance={"author": "t"},
+        )
+    )
+    await db.flush()
+    rows = await resolve_metrics(db, tenant_id=_uuid.uuid4(), query="net_margin", top_k=5)
+    assert any(r.key == "net_margin" for r in rows), (
+        "exact key match must never be truncated behind vector noise (R1#3)"
+    )

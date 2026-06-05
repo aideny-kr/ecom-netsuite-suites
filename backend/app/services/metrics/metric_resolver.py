@@ -32,7 +32,8 @@ async def resolve_metrics(
     else:
         rows = []
 
-    # Always union exact key + synonym matches (covers unembedded rows and exact asks).
+    # Exact + synonym matches are authoritative — collect them FIRST so the top_k cap
+    # never drops the intended metric behind nearer-but-irrelevant vector neighbours (R1#3).
     q_lower = query.strip().lower()
     kw_stmt = select(MetricDefinition).where(
         visible,
@@ -43,24 +44,19 @@ async def resolve_metrics(
             MetricDefinition.display_name.ilike(f"%{query.strip()}%"),
         ),
     )
-    for r in (await db.execute(kw_stmt)).scalars().all():
-        if r.id not in {x.id for x in rows}:
-            rows.append(r)
+    keyword_rows = list((await db.execute(kw_stmt)).scalars().all())
+    ordered: list[MetricDefinition] = []
+    seen: set = set()
+    for r in keyword_rows + rows:  # rows = vector hits from above ([] when no embedding)
+        if r.id not in seen:
+            seen.add(r.id)
+            ordered.append(r)
 
-    # SYSTEM-default metrics are visible to every tenant regardless of query match
-    # (mirrors the RLS policy). Always include them as a baseline so a tenant can
-    # discover the blessed defaults even when the NL phrase only hit a tenant row.
-    sys_stmt = select(MetricDefinition).where(
-        MetricDefinition.tenant_id == SYSTEM_TENANT_ID,
-        MetricDefinition.status == "active",
-    )
-    for r in (await db.execute(sys_stmt)).scalars().all():
-        if r.id not in {x.id for x in rows}:
-            rows.append(r)
-
-    # Tenant override wins by key; cap at top_k.
+    # Tenant override wins by key; cap at top_k. No unconditional SYSTEM dump:
+    # an unrelated ask returns only genuine matches (R1#2) — discovery of the full
+    # catalog is a separate concern, not resolution.
     by_key: dict[str, MetricDefinition] = {}
-    for r in rows:
+    for r in ordered:
         existing = by_key.get(r.key)
         if existing is None or (r.tenant_id == tenant_id and existing.tenant_id == SYSTEM_TENANT_ID):
             by_key[r.key] = r
