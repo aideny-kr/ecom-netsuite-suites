@@ -173,15 +173,26 @@ async def _validate_and_execute_by_source(db, tenant_id, source_kind: str, query
             # caller param error. Raise ComputeError so compute_metric's uniform handler
             # audit-logs the failure and returns a number-free dict (compute is read-only).
             raise ComputeError(f"filled bigquery query failed read-only validation: {ex}") from ex
-        # R1#7: symmetric dataset-allowlist enforcement (mirrors SuiteQL table-allowlist).
-        # Empty setting = no restriction (backward compatible). When set, extract every
-        # dataset reference from FROM/JOIN clauses and reject any that are off-allowlist.
+        # R1#7: symmetric dataset-allowlist enforcement (mirrors SuiteQL table-allowlist
+        # in netsuite_suiteql.parse_tables — same (?:FROM|JOIN) + re.IGNORECASE shape,
+        # adapted for BigQuery's dotted namespace). Empty setting = no restriction
+        # (backward compatible).
         allowed = {
             d.strip().lower() for d in getattr(settings, "BIGQUERY_ALLOWED_DATASETS", "").split(",") if d.strip()
         }
         if allowed:
-            refs = {m.group(1).lower() for m in re.finditer(r"\bFROM\s+`?([a-zA-Z0-9_]+)\.", query)}
-            illegal = refs - allowed
+            # Match FROM and JOIN (case-insensitive). A BigQuery ref is `dataset.table` or
+            # `project.dataset.table` (project ids may contain hyphens; any part may be
+            # backtick-quoted). The DATASET is the SECOND-to-last dotted component — for a
+            # 2-part ref that is the first part, for a 3-part ref the middle part (NOT the
+            # project). Extracting the wrong part both over-blocks legit cross-project
+            # queries and under-blocks `allowed.secret.t` style attacks.
+            used: set[str] = set()
+            for ref in re.findall(r"(?:FROM|JOIN)\s+([`A-Za-z0-9_.\-]+)", query, re.IGNORECASE):
+                parts = [p.strip("`") for p in ref.strip("`").split(".") if p.strip("`")]
+                if len(parts) >= 2:
+                    used.add(parts[-2].lower())
+            illegal = used - allowed
             if illegal:
                 raise ComputeError(f"filled bigquery query selects off-allowlist datasets: {sorted(illegal)}")
         return await bigquery_tools.bigquery_sql_execute({"query": query}, {"tenant_id": str(tenant_id), "db": db})
