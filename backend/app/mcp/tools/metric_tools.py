@@ -32,7 +32,7 @@ async def resolve(params: dict, context: dict | None = None, **kwargs: Any) -> d
             }
             for m in matches
         ],
-        "note": "Definitions are DISPLAY-ONLY. Do not compute a number from them; call metric.compute.",
+        "note": "Definitions are DISPLAY-ONLY. Do not compute a number from them; call metric_compute.",
     }
 
 

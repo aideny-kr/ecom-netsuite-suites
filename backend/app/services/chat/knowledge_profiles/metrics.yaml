@@ -1,3 +1,8 @@
+# Always-on activation is intentional: this profile activates whenever the metric tools
+# (metric_resolve / metric_compute) are present in the tool list, injecting the prompt_fragment
+# into every non-onboarding turn. This is acceptable because the fragment is short behavioral
+# routing guidance with NO hardcoded column names or SQL schema — it does not violate the
+# no-prompt-pollution rule, which specifically targets hardcoded columns/schema in prompts.
 profile_id: metrics
 display_name: "Metric Catalog"
 trigger_tools:
