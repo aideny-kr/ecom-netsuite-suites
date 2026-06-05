@@ -154,11 +154,12 @@ def score_efficiency(
         score -= 0.3
 
     # Anti-pattern: an address-table join (transactionShippingAddress / billing) with
-    # NO scope (no trandate range, ROWNUM, or FETCH FIRST) — these joins are heavy and
-    # time out unbounded on large accounts.
-    if ("TRANSACTIONSHIPPINGADDRESS" in sql_upper or "TRANSACTIONBILLINGADDRESS" in sql_upper) and not (
-        "TRANDATE" in sql_upper or "ROWNUM" in sql_upper or re.search(r"\bFETCH\s+FIRST\b", sql_upper)
-    ):
+    # NO scope — these joins are heavy and time out unbounded on large accounts. A bound
+    # requires an actual trandate *predicate* (a comparison), ROWNUM, or FETCH FIRST —
+    # merely SELECTing or ORDER BY'ing trandate is NOT a scope.
+    _date_predicate = re.search(r"\bTRANDATE\b\s*(?:>=|<=|>|<|=|\bBETWEEN\b)", sql_upper)
+    _bounded = bool(_date_predicate) or "ROWNUM" in sql_upper or bool(re.search(r"\bFETCH\s+FIRST\b", sql_upper))
+    if ("TRANSACTIONSHIPPINGADDRESS" in sql_upper or "TRANSACTIONBILLINGADDRESS" in sql_upper) and not _bounded:
         score -= 0.2
 
     return max(0.0, round(score, 4))

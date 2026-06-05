@@ -58,7 +58,7 @@ prompt_fragment: |
   - The join key is `sa.nKey = t.shippingAddress`. NEVER `sa.recordOwner = t.id`, NEVER `sa.transaction = t.id`, NEVER `sa.id = t.shippingAddress`.
   - FILTER on the RAW code, NEVER `BUILTIN.DF(...)` in a WHERE clause. Use `WHERE sa.country = 'SG'`, NOT `WHERE BUILTIN.DF(sa.country) = 'Singapore'` — `BUILTIN.DF` is a per-row function that defeats the index and forces a full scan → timeout. Use `BUILTIN.DF(sa.country)` ONLY in the SELECT list to display the country name.
   - `sa.country` is the ISO-2 code ('SG','CH','NZ','NO','US'). Translate user country NAMES to ISO-2 before filtering: Singapore→'SG', Switzerland→'CH', New Zealand→'NZ', Norway→'NO', United States→'US'.
-  - Address-table joins are HEAVY — ALWAYS scope with a `t.trandate` range and `FETCH FIRST N ROWS ONLY`; an all-time address join TIMES OUT (60s) on large accounts. To skip the join entirely, the transaction header also carries `t.shipcountry` (ISO-2, denormalized).
+  - Address-table joins are HEAVY — ALWAYS scope with a `t.trandate` predicate (e.g. `WHERE t.trandate >= TO_DATE(...)`) and `FETCH FIRST N ROWS ONLY`; an all-time address join TIMES OUT (60s) on large accounts. Do NOT substitute `t.shipcountry` — it is NOT_EXPOSED in SuiteQL on this account; the address join above is the only reliable path.
   - Do NOT use custom body fields (`custbody*_ship_country*`, `custbody*_country*`) for country queries unless the user explicitly asks for the custom field. The standard address join is the source of truth.
 
   TRANSACTION NUMBER CONVENTIONS:

@@ -26,5 +26,11 @@ def test_requires_date_scope_on_address_joins():
     text = _netsuite_yaml()
     assert "Address-table joins are HEAVY" in text
     assert "t.trandate" in text
-    # the denormalized escape hatch is documented
+
+
+def test_warns_shipcountry_is_not_exposed():
+    # transaction.shipcountry is NOT_EXPOSED on this account — the rules must flag it,
+    # not recommend it as an escape hatch (codex review, 2026-06-05).
+    text = _netsuite_yaml()
     assert "t.shipcountry" in text
+    assert "NOT_EXPOSED" in text

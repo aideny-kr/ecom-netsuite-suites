@@ -105,6 +105,16 @@ class TestScoreEfficiency:
         )
         assert bounded >= 0.9
 
+    def test_address_join_with_trandate_in_select_only_still_penalized(self):
+        # trandate is SELECTed / ORDER BY'd but is NOT a filter predicate — still unbounded.
+        s = score_efficiency(
+            "SELECT t.trandate, i.itemid FROM transactionShippingAddress sa "
+            "JOIN transaction t ON t.shippingaddress = sa.nkey "
+            "JOIN transactionline tl ON tl.transaction = t.id "
+            "JOIN item i ON i.id = tl.item WHERE sa.country IN ('SG') ORDER BY t.trandate"
+        )
+        assert s < 1.0
+
 
 class TestCompositeScore:
     def test_weighted_composite(self):
