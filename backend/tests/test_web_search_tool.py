@@ -37,6 +37,24 @@ def _mock_ddgs():
             yield mock_ddgs_instance
 
 
+@pytest.fixture(autouse=True)
+def _no_brave_key():
+    """Force the DuckDuckGo fallback path in unit tests.
+
+    ``execute()`` tries Brave Search first whenever ``BRAVE_SEARCH_API_KEY`` is
+    configured (it is, via ``.env``). Without disabling it, these tests make a
+    REAL network call to api.search.brave.com — bypassing the mocked
+    ``_sync_ddg_search`` path they were written to exercise — which makes
+    ``test_network_error_handled_gracefully`` (and the other DDG-path tests)
+    non-deterministic. Pin the key empty so the fallback is exercised
+    deterministically and no live network is hit.
+    """
+    from app.mcp.tools import web_search
+
+    with patch.object(web_search.settings, "BRAVE_SEARCH_API_KEY", ""):
+        yield
+
+
 class TestWebSearchExecute:
     """Unit tests for web_search.execute()."""
 
