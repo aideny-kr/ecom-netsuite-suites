@@ -230,7 +230,8 @@ async def test_failed_blessed_query_does_not_fabricate_zero(db, tenant_a, monkey
     {"error": True, "message": ...} — it carries NO 'rows'. The prior code did
     `result.get("rows") or [[0]]` and silently returned a fabricated 0.0 as the
     metric value. compute_metric MUST instead fail closed: a NUMBER-FREE error
-    dict, never a value/rows, AND the metric row is flipped to needs_review."""
+    dict, never a value/rows. D1: compute is READ-ONLY — status is NOT flipped;
+    the failure is audit-logged instead."""
     await _ensure_system_tenant(db)
     db.add(
         MetricDefinition(
@@ -264,15 +265,15 @@ async def test_failed_blessed_query_does_not_fabricate_zero(db, tenant_a, monkey
 
     # (a) it is a number-free structured error — NOT a data_table with a value
     assert out.get("error") == "blessed_query_failed", out
-    assert out.get("status") == "needs_review"
     assert out.get("key") == "gross_revenue"
     assert "rows" not in out
     assert "value" not in out
+    assert "status" not in out  # D1: compute never returns status in error dict
     # the fabricated zero must appear NOWHERE in the payload
     assert 0 not in out.values()
     assert 0.0 not in out.values()
 
-    # (b) the metric row is flipped to needs_review and persisted (flush visible in-session)
+    # (b) D1: the metric row status is NOT mutated — compute is read-only
     row = (
         await db.execute(
             select(MetricDefinition).where(
@@ -281,7 +282,7 @@ async def test_failed_blessed_query_does_not_fabricate_zero(db, tenant_a, monkey
             )
         )
     ).scalar_one()
-    assert row.status == "needs_review"
+    assert row.status == "active"
 
     # (c) the failure is audit-logged
     audit = (await db.execute(select(AuditEvent).where(AuditEvent.action == "metric.compute.failed"))).scalars().all()
@@ -321,15 +322,15 @@ async def test_empty_rows_does_not_fabricate_zero(db, tenant_a, monkeypatch):
         context={"fiscal_year_start_month": 1},
     )
     assert out.get("error") == "blessed_query_failed", out
-    assert out.get("status") == "needs_review"
+    assert "status" not in out  # D1: compute never returns status in error dict
     assert "rows" not in out
     assert "value" not in out
 
 
-async def test_division_by_zero_yields_needs_review_no_number(db, tenant_a, monkeypatch):
+async def test_division_by_zero_yields_no_number(db, tenant_a, monkeypatch):
     """A division-by-zero in an expression metric (e.g. denominator leaf = 0) must
-    NOT throw or fabricate; it returns a number-free error dict and marks the
-    expression metric needs_review."""
+    NOT throw or fabricate; it returns a number-free error dict. D1: compute is
+    READ-ONLY — status is NOT flipped, the failure is audit-logged instead."""
     await _ensure_system_tenant(db)
     for key in ("net_income", "gross_revenue"):
         db.add(
@@ -377,11 +378,12 @@ async def test_division_by_zero_yields_needs_review_no_number(db, tenant_a, monk
         context={"fiscal_year_start_month": 1},
     )
     assert out.get("error") == "division_by_zero", out
-    assert out.get("status") == "needs_review"
     assert out.get("key") == "net_margin"
     assert "rows" not in out
     assert "value" not in out
+    assert "status" not in out  # D1: compute never returns status in error dict
 
+    # D1: the metric row status is NOT mutated — compute is read-only
     row = (
         await db.execute(
             select(MetricDefinition).where(
@@ -390,7 +392,11 @@ async def test_division_by_zero_yields_needs_review_no_number(db, tenant_a, monk
             )
         )
     ).scalar_one()
-    assert row.status == "needs_review"
+    assert row.status == "active"
+
+    # the failure is audit-logged
+    audit = (await db.execute(select(AuditEvent).where(AuditEvent.action == "metric.compute.failed"))).scalars().all()
+    assert len(audit) >= 1
 
 
 # --- R4 source-kind routing: a bigquery metric must NOT execute against NetSuite ---
@@ -505,9 +511,10 @@ async def test_filled_suiteql_query_to_disallowed_table_blocked_before_execute(d
         context={"fiscal_year_start_month": 1},
     )
 
-    # (a) blocked at the metric layer → number-free needs_review, no fabricated value
+    # (a) blocked at the metric layer → number-free error, no fabricated value
+    # D1: compute is read-only — no status flip, audit-logged instead
     assert out.get("error") == "blessed_query_failed", out
-    assert out.get("status") == "needs_review"
+    assert "status" not in out  # D1: compute never returns status in error dict
     assert "rows" not in out
     assert "value" not in out
     assert -9999.0 not in out.values()
@@ -519,18 +526,17 @@ async def test_filled_suiteql_query_to_disallowed_table_blocked_before_execute(d
 async def test_filled_bigquery_query_failing_validation_fails_closed_symmetric_to_suiteql(db, tenant_a, monkeypatch):
     """REAL error-symmetry invariant (F4 (d)). The suiteql branch of
     _validate_and_execute_by_source raises ComputeError when the FILLED query fails its
-    read-only/allowlist re-validation, so compute_metric flips the metric to
-    needs_review and returns a NUMBER-FREE error dict. The bigquery branch must behave
-    IDENTICALLY: a filled bigquery query that fails _validate_read_only must surface as
-    needs_review, not a ParamError that escapes compute_metric's catch
-    (ExpressionError/ComputeError only).
+    read-only/allowlist re-validation, so compute_metric returns a NUMBER-FREE error dict.
+    The bigquery branch must behave IDENTICALLY: a filled bigquery query that fails
+    _validate_read_only must surface as a number-free error, not a ParamError that
+    escapes compute_metric's catch (ExpressionError/ComputeError only).
 
-    The prior bigquery branch raised ParamError on filled-query validation failure;
-    compute_metric does NOT catch ParamError, so the request 500s instead of failing
-    closed + auditing. We force the bigquery read-only validator to reject the filled
-    query; the metric must end up needs_review with a number-free dict and an audit
-    entry, and the bigquery executor must NEVER be reached (validation precedes
-    execute). Pre-fix: ParamError propagates uncaught (no needs_review, no audit)."""
+    D1: compute is READ-ONLY — no status flip. The prior bigquery branch raised ParamError
+    on filled-query validation failure; compute_metric does NOT catch ParamError, so the
+    request 500s instead of failing closed + auditing. We force the bigquery read-only
+    validator to reject the filled query; the metric status must REMAIN active and the
+    failure must be audit-logged. The bigquery executor must NEVER be reached (validation
+    precedes execute). Pre-fix: ParamError propagates uncaught (no audit)."""
     await _ensure_system_tenant(db)
     db.add(
         MetricDefinition(
@@ -571,17 +577,18 @@ async def test_filled_bigquery_query_failing_validation_fails_closed_symmetric_t
         context={"fiscal_year_start_month": 1},
     )
 
-    # (a) number-free needs_review — symmetric with the suiteql allowlist-fail path
+    # (a) number-free error — symmetric with the suiteql allowlist-fail path
+    # D1: compute is read-only — no status flip, audit-logged instead
     assert out.get("error") == "blessed_query_failed", out
-    assert out.get("status") == "needs_review"
     assert out.get("key") == "warehouse_gmv"
     assert "rows" not in out
     assert "value" not in out
+    assert "status" not in out  # D1: compute never returns status in error dict
 
     # (b) the bigquery executor was NEVER reached (validation precedes execute)
     assert bq_calls == [], f"failed-validation bigquery query reached the executor: {bq_calls}"
 
-    # (c) the metric row is flipped to needs_review and the failure is audited
+    # (c) D1: the metric row status is NOT mutated — compute is read-only
     row = (
         await db.execute(
             select(MetricDefinition).where(
@@ -590,7 +597,7 @@ async def test_filled_bigquery_query_failing_validation_fails_closed_symmetric_t
             )
         )
     ).scalar_one()
-    assert row.status == "needs_review"
+    assert row.status == "active"
     audit = (await db.execute(select(AuditEvent).where(AuditEvent.action == "metric.compute.failed"))).scalars().all()
     assert len(audit) >= 1
 
@@ -635,8 +642,9 @@ async def test_filled_suiteql_query_to_allowed_table_still_executes(db, tenant_a
 
 
 async def test_bigquery_metric_failure_fails_closed_no_fabricated_number(db, tenant_a, monkeypatch):
-    """A bigquery metric whose executor errors must fail closed (number-free
-    needs_review), same as the suiteql path — never coerce to a fabricated value."""
+    """A bigquery metric whose executor errors must fail closed (number-free error dict),
+    same as the suiteql path — never coerce to a fabricated value. D1: compute is
+    READ-ONLY — status is NOT flipped, the failure is audit-logged instead."""
     await _ensure_system_tenant(db)
     db.add(
         MetricDefinition(
@@ -667,7 +675,7 @@ async def test_bigquery_metric_failure_fails_closed_no_fabricated_number(db, ten
         context={"fiscal_year_start_month": 1},
     )
     assert out.get("error") == "blessed_query_failed", out
-    assert out.get("status") == "needs_review"
+    assert "status" not in out  # D1: compute never returns status in error dict
     assert "rows" not in out
     assert "value" not in out
     assert 0 not in out.values()
@@ -942,6 +950,186 @@ async def test_filled_query_with_backslash_value_does_not_inject_or_500(db, tena
     assert q == "SELECT SUM(amount) FROM transactionline WHERE region='us\\g<0>'", q
     # (b) the placeholder text `:region` was NOT re-injected back into the SQL.
     assert ":region" not in q, q
+
+
+# --- G1 param-refusal: a bad param must return the §9 number-free structured refusal,
+#     NOT bare-raise out of compute_metric ---
+#
+# Spec §9 ("Param value fails type/safety check" → "Refuse; no execution") and the §3/§6
+# contract that EVERY refusal path returns a number-free {'error': ...} dict. But
+# coerce_params runs OUTSIDE compute_metric's try/except (which catches only
+# ExpressionError/ComputeError), and the per-leaf coerce_params inside the expression
+# path is also uncaught. So a ParamError (unknown/missing param, bad date/enum) or a
+# PeriodError (a fabricated period token not in period_resolver.SUPPORTED_TOKENS)
+# bare-raises out of compute_metric and 500s the request instead of returning the
+# structured refusal. These tests drive a fabricated period token and an unknown param
+# key through the real compute seam and assert a number-free {'error':'invalid_params'}
+# dict with NO raise. Pre-fix they FAIL (the bare raise escapes compute_metric).
+
+
+async def test_unsupported_period_token_refuses_no_raise(db, tenant_a, monkeypatch):
+    """A fabricated period token ('next_decade' — NOT in period_resolver.SUPPORTED_TOKENS)
+    makes resolve_period raise PeriodError INSIDE coerce_params, which runs OUTSIDE
+    compute_metric's try/except. Pre-fix this PeriodError bare-raises out of
+    compute_metric (500). Post-fix compute_metric wraps the top-level coerce in
+    try/except (ParamError, PeriodError) and returns the §9 number-free structured
+    refusal {'error': 'invalid_params', 'key': ...} — and does NOT raise."""
+    await _ensure_system_tenant(db)
+    db.add(
+        MetricDefinition(
+            tenant_id=SYSTEM_TENANT_ID,
+            key="gross_revenue",
+            display_name="Gross Revenue",
+            definition="x",
+            unit="currency",
+            source_kind="suiteql",
+            blessed_spec={"query": "SELECT 1", "dialect": "suiteql"},
+            params_schema={"period": {"type": "period"}},
+            status="active",
+            version=1,
+        )
+    )
+    await db.flush()
+
+    # Guard: the executor must NEVER be reached — refusal precedes any execution.
+    async def _ns_poison(params, context=None, **kwargs):
+        raise AssertionError("executor reached despite invalid period token")
+
+    monkeypatch.setattr("app.mcp.tools.netsuite_suiteql.execute", _ns_poison)
+
+    # MUST NOT raise: compute_metric must catch PeriodError and fail closed.
+    out = await compute_metric(
+        db,
+        tenant_id=tenant_a.id,
+        key="gross_revenue",
+        params={"period": "next_decade"},
+        context={"fiscal_year_start_month": 1},
+    )
+
+    # (a) structured number-free refusal, NOT a data_table with a value
+    assert out.get("error") == "invalid_params", out
+    assert out.get("key") == "gross_revenue", out
+    assert "rows" not in out
+    assert "value" not in out
+    # (b) no fabricated number anywhere in the payload
+    assert 0 not in out.values()
+    assert 0.0 not in out.values()
+
+
+async def test_unknown_param_key_refuses_no_raise(db, tenant_a, monkeypatch):
+    """An unknown param key makes coerce_params raise ParamError at the top level
+    (OUTSIDE compute_metric's ExpressionError/ComputeError catch). Pre-fix this
+    bare-raises (500). Post-fix compute_metric returns the §9 number-free
+    {'error': 'invalid_params'} refusal and does NOT raise."""
+    await _ensure_system_tenant(db)
+    db.add(
+        MetricDefinition(
+            tenant_id=SYSTEM_TENANT_ID,
+            key="gross_revenue",
+            display_name="Gross Revenue",
+            definition="x",
+            unit="currency",
+            source_kind="suiteql",
+            blessed_spec={"query": "SELECT 1", "dialect": "suiteql"},
+            params_schema={"period": {"type": "period"}},
+            status="active",
+            version=1,
+        )
+    )
+    await db.flush()
+
+    async def _ns_poison(params, context=None, **kwargs):
+        raise AssertionError("executor reached despite unknown param key")
+
+    monkeypatch.setattr("app.mcp.tools.netsuite_suiteql.execute", _ns_poison)
+
+    out = await compute_metric(
+        db,
+        tenant_id=tenant_a.id,
+        key="gross_revenue",
+        params={"period": "this_month", "evil": "1 OR 1=1"},
+        context={"fiscal_year_start_month": 1},
+    )
+
+    assert out.get("error") == "invalid_params", out
+    assert out.get("key") == "gross_revenue", out
+    assert "rows" not in out
+    assert "value" not in out
+
+
+async def test_leaf_param_error_in_expression_path_refuses_no_raise(db, tenant_a, monkeypatch):
+    """The per-leaf coerce_params (inside the expression path) is ALSO uncaught by
+    compute_metric's ExpressionError/ComputeError handler. If a leaf metric's
+    params_schema requires a param that the resolved params can't satisfy (here a
+    'date'-typed leaf param with no value), the leaf coerce raises ParamError mid-loop
+    and bare-raises out of compute_metric. Post-fix the per-leaf coerce is wrapped too,
+    so the structured number-free refusal is returned without raising."""
+    await _ensure_system_tenant(db)
+    # Leaf with a required 'date' param that the request does NOT supply → ParamError
+    # ("missing param") at the per-leaf coerce_params (compute_metric ~line 303).
+    db.add(
+        MetricDefinition(
+            tenant_id=SYSTEM_TENANT_ID,
+            key="net_income",
+            display_name="net_income",
+            definition="x",
+            unit="currency",
+            source_kind="suiteql",
+            blessed_spec={"query": "SELECT 1 WHERE d=:as_of", "dialect": "suiteql"},
+            params_schema={"as_of": {"type": "date"}},
+            status="active",
+            version=1,
+        )
+    )
+    db.add(
+        MetricDefinition(
+            tenant_id=SYSTEM_TENANT_ID,
+            key="gross_revenue",
+            display_name="gross_revenue",
+            definition="x",
+            unit="currency",
+            source_kind="suiteql",
+            blessed_spec={"query": "SELECT 1", "dialect": "suiteql"},
+            params_schema={"period": {"type": "period"}},
+            status="active",
+            version=1,
+        )
+    )
+    db.add(
+        MetricDefinition(
+            tenant_id=SYSTEM_TENANT_ID,
+            key="net_margin",
+            display_name="Net Margin",
+            definition="x",
+            unit="percent",
+            source_kind="expression",
+            expression="net_income / gross_revenue",
+            depends_on=["net_income", "gross_revenue"],
+            # The top-level metric only declares a period param; the leaf demands 'as_of'.
+            params_schema={"period": {"type": "period"}},
+            status="active",
+            version=1,
+        )
+    )
+    await db.flush()
+
+    async def _ns_poison(params, context=None, **kwargs):
+        raise AssertionError("executor reached despite missing leaf param")
+
+    monkeypatch.setattr("app.mcp.tools.netsuite_suiteql.execute", _ns_poison)
+
+    out = await compute_metric(
+        db,
+        tenant_id=tenant_a.id,
+        key="net_margin",
+        params={"period": "this_month"},
+        context={"fiscal_year_start_month": 1},
+    )
+
+    assert out.get("error") == "invalid_params", out
+    assert out.get("key") == "net_margin", out
+    assert "rows" not in out
+    assert "value" not in out
 
 
 async def test_governed_execute_seam_threads_tenant_fiscal_month(db, tenant_a, monkeypatch):

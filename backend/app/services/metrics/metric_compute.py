@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.metric_definition import SYSTEM_TENANT_ID, MetricDefinition
 from app.services.metrics.expression_evaluator import ExpressionError, evaluate_expression
-from app.services.metrics.period_resolver import resolve_period
+from app.services.metrics.period_resolver import PeriodError, resolve_period
 
 
 class ParamError(ValueError):
@@ -243,16 +243,17 @@ async def resolve_metric_by_key(db: AsyncSession, *, tenant_id, key: str) -> Met
     return tenant_row or next((r for r in rows), None)
 
 
-async def _mark_needs_review(
+async def _log_compute_failure(
     db: AsyncSession, *, tenant_id, metric: MetricDefinition, error_code: str, message: str
 ) -> dict:
-    """Flip the (mis)behaving metric to needs_review, audit-log, and return a
-    NUMBER-FREE structured error dict. Never returns a value/rows — a failed
-    metric must not surface a number under the catalog's authority."""
+    """D1: compute is READ-ONLY. A failed/unusable blessed query is recorded to the
+    audit log for observability but NEVER mutates the definition (no status flip — a
+    SYSTEM row is shared across tenants and a tenant's schema-drift must not disable it
+    for everyone, and a flush riding the chat turn is non-durable anyway). Returns a
+    NUMBER-FREE structured error dict. Quarantine/reactivation is an admin/author action
+    (Task 9), not a side effect of a read."""
     from app.services import audit_service
 
-    metric.status = "needs_review"
-    await db.flush()
     await audit_service.log_event(
         db=db,
         tenant_id=tenant_id,
@@ -265,12 +266,7 @@ async def _mark_needs_review(
         error_message=message,
         payload={"key": metric.key, "error": error_code},
     )
-    return {
-        "error": error_code,
-        "key": metric.key,
-        "message": message,
-        "status": "needs_review",
-    }
+    return {"error": error_code, "key": metric.key, "message": message}
 
 
 async def compute_metric(db: AsyncSession, *, tenant_id, key: str, params: dict, context: dict) -> dict:
@@ -282,7 +278,19 @@ async def compute_metric(db: AsyncSession, *, tenant_id, key: str, params: dict,
             "message": f"No blessed definition for '{key}'.",
         }
     fy = int(context.get("fiscal_year_start_month", 1) or 1)
-    coerced = coerce_params(metric.params_schema or {}, params, fiscal_year_start_month=fy)
+    # G1: param coercion is a CALLER-input gate, not a metric/schema-drift failure, so it
+    # is handled separately from the ExpressionError/ComputeError path below. A bad param
+    # (unknown/missing key, malformed date/enum) raises ParamError; a fabricated period
+    # token not in period_resolver.SUPPORTED_TOKENS raises PeriodError. Both must yield the
+    # §9 number-free structured refusal — NOT bare-raise out of compute_metric and 500 the
+    # request (every other refusal path returns an {'error': ...} dict). This wraps BOTH the
+    # top-level coerce and the per-leaf coerce in the expression path; refusal precedes any
+    # execution (the executor is never reached) and does NOT flip the metric to needs_review
+    # (the metric is fine — the caller's params were not).
+    try:
+        coerced = coerce_params(metric.params_schema or {}, params, fiscal_year_start_month=fy)
+    except (ParamError, PeriodError) as ex:
+        return {"error": "invalid_params", "key": key, "message": str(ex)}
     period_label = params.get("period", "")
 
     try:
@@ -296,11 +304,15 @@ async def compute_metric(db: AsyncSession, *, tenant_id, key: str, params: dict,
                         "key": dep,
                         "message": f"Missing leaf metric '{dep}'.",
                     }
+                try:
+                    leaf_coerced = coerce_params(dmatch.params_schema or {}, params, fiscal_year_start_month=fy)
+                except (ParamError, PeriodError) as ex:
+                    return {"error": "invalid_params", "key": key, "message": str(ex)}
                 leaves[dep] = await _execute_scalar_query(
                     db,
                     tenant_id,
                     dmatch,
-                    coerce_params(dmatch.params_schema or {}, params, fiscal_year_start_month=fy),
+                    leaf_coerced,
                     context,
                 )
             value = evaluate_expression(metric.expression, leaves)
@@ -310,10 +322,10 @@ async def compute_metric(db: AsyncSession, *, tenant_id, key: str, params: dict,
         # Runtime evaluator failure → no number. Div-by-zero is the canonical case
         # (missing-dep/cycle are author-time rejections); label it precisely.
         code = "division_by_zero" if "division by zero" in str(ex).lower() else "expression_failed"
-        return await _mark_needs_review(db, tenant_id=tenant_id, metric=metric, error_code=code, message=str(ex))
+        return await _log_compute_failure(db, tenant_id=tenant_id, metric=metric, error_code=code, message=str(ex))
     except ComputeError as ex:
         # Blessed query failed / returned an unusable result → no number.
-        return await _mark_needs_review(
+        return await _log_compute_failure(
             db, tenant_id=tenant_id, metric=metric, error_code="blessed_query_failed", message=str(ex)
         )
 
