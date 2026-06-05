@@ -99,10 +99,15 @@ async def seed_system_metrics(db: AsyncSession) -> int:
     await db.flush()
     await db.execute(delete(MetricDefinition).where(MetricDefinition.tenant_id == SYSTEM_TENANT_ID))
     embeddings = await embed_domain_texts([_embed_text(m) for m in _SYSTEM_METRICS])
+    if embeddings is None:
+        raise RuntimeError("seeder requires the 1536-d embedder; refusing to seed rows without embeddings (§12.2)")
     for idx, m in enumerate(_SYSTEM_METRICS):
-        vec = embeddings[idx] if embeddings is not None else None
-        if vec is not None:
-            assert len(vec) == 1536, "embedding must be 1536-d (use embed_domain_*)"
+        vec = embeddings[idx]
+        assert len(vec) == 1536, "embedding must be 1536-d (use embed_domain_*)"
+        # D3: query-backed placeholders (SELECT 0 stubs) seed as "draft" so they are
+        # discoverable for authoring but never returned as a computed (zero) answer.
+        # Expression metrics whose leaves are draft yield missing_dependency — also safe.
+        is_placeholder = m["source_kind"] in ("suiteql", "bigquery")
         db.add(
             MetricDefinition(
                 tenant_id=SYSTEM_TENANT_ID,
@@ -117,7 +122,7 @@ async def seed_system_metrics(db: AsyncSession) -> int:
                 params_schema={"period": {"type": "period"}},
                 synonyms=m.get("synonyms", []),
                 intent_embedding=vec,
-                status="active",
+                status="draft" if is_placeholder else "active",
                 version=1,
                 provenance={"author": "system_seed"},
             )

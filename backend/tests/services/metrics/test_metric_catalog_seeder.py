@@ -60,3 +60,22 @@ async def test_seeder_is_self_sufficient_when_system_tenant_absent(db):
         )
     ).scalar_one()
     assert total == 9
+
+
+async def test_placeholder_defaults_are_draft_not_active(db):
+    """D3: SELECT 0 placeholder rows must seed as draft, not active.
+    §12.2: all seeded rows must carry a non-null 1536-d embedding."""
+    from app.services.metrics.metric_catalog_seeder import seed_system_metrics
+    from app.models.metric_definition import SYSTEM_TENANT_ID, MetricDefinition
+    from sqlalchemy import select
+
+    await seed_system_metrics(db)
+    rows = (
+        (await db.execute(select(MetricDefinition).where(MetricDefinition.tenant_id == SYSTEM_TENANT_ID)))
+        .scalars()
+        .all()
+    )
+    placeholders = [r for r in rows if r.source_kind in ("suiteql", "bigquery")]
+    assert placeholders, "expected seeded query-backed defaults"
+    assert all(r.status == "draft" for r in placeholders), "D3: SELECT 0 placeholders must seed draft, never active"
+    assert all(r.intent_embedding is not None for r in placeholders), "§12.2: seeded rows need non-null embeddings"
