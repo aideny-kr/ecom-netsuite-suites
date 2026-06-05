@@ -1,4 +1,5 @@
 # backend/tests/services/metrics/test_metric_catalog_seeder.py
+import pytest
 from sqlalchemy import delete, func, select
 
 from app.models.metric_definition import SYSTEM_TENANT_ID, MetricDefinition

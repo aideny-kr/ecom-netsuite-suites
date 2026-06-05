@@ -15,13 +15,13 @@ This test asserts the *policy definition* is present and references BOTH
 intent so a future migration that downgrades the policy to the plain form (which
 would silently hide every seeded default) fails CI.
 
-We deliberately do NOT assert owner-side row filtering by opening a tenant
-context and reading rows: this codebase does NOT ``FORCE`` RLS, so the test
-DB role (table owner) bypasses the policy entirely and such a test would be
-VACUOUS (it passes regardless of the policy clause). The *runtime* isolation
-guarantee is the application-level ``OR tenant_id == SYSTEM_TENANT_ID`` filter
-in ``metric_resolver.resolve_metrics`` — which is exercised by
-``test_metric_resolver.py``. This test pins the DB-side defense-in-depth policy.
+As of migration 081 this table IS ``FORCE``'d (see ``test_metric_definitions_rls_is_forced``
+below, which pins ``relforcerowsecurity``). Before 081 the owner role bypassed RLS, which
+is why this policy-clause test does not itself open a tenant context to assert row
+filtering — that path is covered by the application-level ``OR tenant_id == SYSTEM_TENANT_ID``
+filter in ``metric_resolver.resolve_metrics``, exercised by ``test_metric_resolver.py``.
+This test pins the DB-side defense-in-depth policy clause; the FORCE test pins that the
+policy actually applies to the owner.
 """
 
 from sqlalchemy import text
