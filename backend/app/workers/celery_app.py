@@ -36,6 +36,7 @@ celery_app.conf.include = [
     "app.workers.tasks.example_sync",
     "app.workers.tasks.knowledge_crawler",
     "app.workers.tasks.metadata_discovery",
+    "app.workers.tasks.metric_catalog_reseed",
     "app.workers.tasks.onboarding_discovery",
     "app.workers.tasks.oracle_skill_reseed",
     "app.workers.tasks.proactive_token_refresh",
@@ -103,5 +104,12 @@ celery_app.conf.beat_schedule = {
     "oracle-skill-reseed": {
         "task": "tasks.oracle_skill_reseed",
         "schedule": 6 * 60 * 60,  # every 6 hours; re-seeds when skills-lock.json hashes change
+    },
+    # Keeps the SYSTEM metric catalog populated on fresh/staging DBs (no empty
+    # catalog on deploy). Idempotent DELETE-then-INSERT; daily is enough for
+    # static system metrics.
+    "metric-catalog-reseed": {
+        "task": "tasks.metric_catalog_reseed",
+        "schedule": crontab(hour=5, minute=30),  # 05:30 UTC daily
     },
 }
