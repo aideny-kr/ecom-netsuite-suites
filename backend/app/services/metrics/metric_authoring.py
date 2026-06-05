@@ -36,9 +36,13 @@ def _validate_params_schema(d: dict) -> None:
     - Every declared param type must be in {date,int,enum,period}; enum carries a
       non-empty `values` list.
     - Every :name placeholder in the blessed query is declared in params_schema.
-    - Every declared param actually binds a placeholder in the query (no dead config).
-      A `period` param is special-cased: coerce_params expands it into
-      :period_start / :period_end, so it satisfies the binding via either of those.
+    - Every declared NON-period param actually binds a placeholder in the query (no
+      dead config). A `period` param is OPTIONALLY-binding (F4 (b)): it is server-
+      resolved into :period_start / :period_end and carries no untrusted text, so a
+      blessed query that declares `period` but does not (yet) slice by date — e.g. the
+      seeded `SELECT 0` stubs — is valid. coerce_params still expands it when present.
+      The strict bind-or-reject rule remains for date/int/enum params, where a declared
+      param that never binds is genuinely dead config.
     """
     schema = d.get("params_schema") or {}
 
@@ -92,14 +96,13 @@ def _validate_params_schema(d: dict) -> None:
             f"blessed query references undeclared params: {sorted(undeclared)} (declare them in params_schema)"
         )
 
-    # 3) every declared param actually binds a placeholder (no dead config).
+    # 3) every declared NON-period param actually binds a placeholder (no dead config).
+    #    period is OPTIONALLY-binding (F4 (b)): server-resolved + benign, so a declared
+    #    period need not reference :period_start/:period_end (the seeded SELECT-0 stubs).
     for name in schema:
         if name in period_names:
-            if not ({"period_start", "period_end"} & placeholders):
-                raise AuthoringError(
-                    f"period param '{name}' is declared but the query binds neither :period_start nor :period_end"
-                )
-        elif name not in placeholders:
+            continue
+        if name not in placeholders:
             raise AuthoringError(f"param '{name}' is declared but never referenced as :{name} in the query")
 
 
@@ -145,6 +148,12 @@ async def validate_leaves_exist(db: AsyncSession, *, tenant_id: uuid.UUID, d: di
     Query the depends_on keys over tenant ∪ SYSTEM (tenant-override-by-key already
     means presence in either scope satisfies the leaf) and reject (→ 422) if ANY leaf
     key is absent. Query-backed metrics have no leaves and are a no-op here.
+
+    (F4 (a)) Filter status == 'active' so author-time leaf presence matches compute's
+    active-only resolution (resolve_metric_by_key also filters status == 'active'). A
+    leaf that exists but is needs_review/draft/deprecated resolves to None at compute
+    and yields missing_dependency — so it must NOT count as present at author-time, else
+    the catalog blesses an expression that can never compute.
     """
     if d.get("source_kind") != "expression":
         return
@@ -156,6 +165,7 @@ async def validate_leaves_exist(db: AsyncSession, *, tenant_id: uuid.UUID, d: di
             MetricDefinition.tenant_id == tenant_id,
             MetricDefinition.tenant_id == SYSTEM_TENANT_ID,
         ),
+        MetricDefinition.status == "active",
         MetricDefinition.key.in_(deps),
     )
     present = set((await db.execute(stmt)).scalars().all())

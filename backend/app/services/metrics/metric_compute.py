@@ -101,12 +101,18 @@ def fill_query(query: str, coerced: dict) -> str:
     return filled
 
 
-def metric_data_table(display_name: str, value, unit: str, period_label: str, spec) -> dict:
+def metric_data_table(display_name: str, value, unit: str, period_label: str, query_label) -> dict:
+    # F4 (c): the `query` field is copied verbatim into the data_table SSE payload that
+    # reaches the FRONTEND. It MUST be a plain string label (the metric key), NOT the
+    # internal blessed_spec dict — exposing blessed_spec would ship the raw blessed
+    # SuiteQL/BigQuery text (table names, dialect) to the client. Coerce defensively so a
+    # dict can never land here even if a caller regresses.
+    label = query_label if isinstance(query_label, str) else ""
     return {
         "columns": ["Metric", "Value", "Unit", "Period"],
         "rows": [[display_name, value, unit, period_label]],
         "row_count": 1,
-        "query": spec,
+        "query": label,
         "truncated": False,
         # Trust boundary: the whole table is ONE computed number. The orchestrator's
         # data_table interception must render it on the frontend but withhold the
@@ -160,7 +166,12 @@ async def _validate_and_execute_by_source(db, tenant_id, source_kind: str, query
         try:
             _validate_read_only(query)
         except ValueError as ex:
-            raise ParamError("filled query failed read-only validation") from ex
+            # F4 (d): symmetric with the suiteql branch below — a FILLED blessed query
+            # that fails read-only re-validation is a spec/schema-drift condition, NOT a
+            # caller param error. Raise ComputeError so compute_metric's uniform handler
+            # flips the metric to needs_review + audit-logs + returns a number-free dict.
+            # (ParamError here would escape compute_metric's catch and 500 the request.)
+            raise ComputeError(f"filled bigquery query failed read-only validation: {ex}") from ex
         return await bigquery_tools.bigquery_sql_execute({"query": query}, {"tenant_id": str(tenant_id), "db": db})
 
     # Default / "suiteql": NetSuite SuiteTalk REST. Expression-leaf metrics are
@@ -306,6 +317,6 @@ async def compute_metric(db: AsyncSession, *, tenant_id, key: str, params: dict,
             db, tenant_id=tenant_id, metric=metric, error_code="blessed_query_failed", message=str(ex)
         )
 
-    return metric_data_table(
-        metric.display_name, value, metric.unit, period_label, metric.blessed_spec or metric.expression
-    )
+    # F4 (c): label the data_table with the metric KEY (a string), never the
+    # blessed_spec/expression — keep the internal execution spec OUT of the SSE payload.
+    return metric_data_table(metric.display_name, value, metric.unit, period_label, metric.key)

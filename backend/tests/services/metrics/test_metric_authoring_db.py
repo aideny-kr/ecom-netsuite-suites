@@ -112,6 +112,78 @@ async def test_create_expression_metric_accepts_existing_leaves(db, tenant_a, mo
     assert metric.tenant_id == tenant_a.id
 
 
+async def test_create_expression_metric_rejects_non_active_leaf(db, tenant_a, monkeypatch):
+    """REAL author/compute-consistency invariant (F4 (a)). compute's leaf resolver
+    (resolve_metric_by_key) filters status == 'active' — a leaf that exists but sits
+    in needs_review/draft/deprecated resolves to None at compute and yields
+    missing_dependency. validate_leaves_exist must use the SAME active-only lens so
+    author-time leaf presence matches compute-time resolution.
+
+    Here both leaves EXIST but one (net_income) is needs_review. The prior
+    validate_leaves_exist SELECT had no status filter, so it counted the non-active
+    leaf as present and AUTHORED the expression — a blessed metric that can only ever
+    resolve to missing_dependency at compute. With the active-only filter, author-time
+    rejects it (→ 422), matching compute. Pre-fix this PASSES authoring (the bug);
+    post-fix it raises AuthoringError."""
+    await _ensure_system_tenant(db)
+
+    async def _fake_embed(_text):
+        return None
+
+    monkeypatch.setattr("app.services.metrics.metric_authoring.embed_domain_query", _fake_embed)
+
+    # Both leaves are present in the catalog, but net_income is NOT active — exactly
+    # what compute's resolver would skip over.
+    db.add(
+        MetricDefinition(
+            tenant_id=SYSTEM_TENANT_ID,
+            key="net_income",
+            display_name="Net Income",
+            definition="x",
+            unit="currency",
+            source_kind="suiteql",
+            blessed_spec={"query": "SELECT 1", "dialect": "suiteql"},
+            params_schema={},
+            status="needs_review",  # exists, but not resolvable at compute
+            version=1,
+        )
+    )
+    db.add(
+        MetricDefinition(
+            tenant_id=SYSTEM_TENANT_ID,
+            key="gross_revenue",
+            display_name="Gross Revenue",
+            definition="x",
+            unit="currency",
+            source_kind="suiteql",
+            blessed_spec={"query": "SELECT 1", "dialect": "suiteql"},
+            params_schema={},
+            status="active",
+            version=1,
+        )
+    )
+    await db.flush()
+
+    with pytest.raises(AuthoringError):
+        await create_metric(
+            db,
+            tenant_id=tenant_a.id,
+            payload={
+                "key": "net_margin",
+                "display_name": "Net Margin",
+                "definition": "x",
+                "unit": "percent",
+                "source_kind": "expression",
+                "expression": "net_income / gross_revenue",
+                "depends_on": ["net_income", "gross_revenue"],
+            },
+        )
+
+    # And nothing was persisted (fail-loud, not fail-then-row).
+    rows = (await db.execute(select(MetricDefinition).where(MetricDefinition.key == "net_margin"))).scalars().all()
+    assert rows == []
+
+
 async def test_validate_leaves_exist_is_noop_for_query_backed(db, tenant_a):
     """A query-backed metric has no leaves; the DB-aware check must be a no-op
     (never spuriously reject a single-source metric)."""

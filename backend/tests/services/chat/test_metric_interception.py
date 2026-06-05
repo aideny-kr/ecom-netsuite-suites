@@ -13,6 +13,8 @@ the SSE rows but absent from the condensed LLM string.
 
 import json
 
+from sqlalchemy import select
+
 from app.services.chat.orchestrator import ContextNeed, _intercept_tool_result
 from app.services.metrics.metric_compute import metric_data_table
 
@@ -58,14 +60,14 @@ def test_metric_value_not_leaked_in_full_context():
 
 
 def test_query_backed_metric_shape_also_suppressed():
-    # A query-backed metric carries blessed_spec (a dict) as the query field and
-    # still suppresses its single computed value from the LLM string.
+    # A query-backed metric is labeled by its key (a STRING, not the blessed_spec dict —
+    # F4 (c)) and still suppresses its single computed value from the LLM string.
     payload = metric_data_table(
         "Gross Revenue",
         1234567.89,
         "currency",
         "last_quarter",
-        {"query": "SELECT SUM(amount) FROM ...", "dialect": "suiteql"},
+        "gross_revenue",
     )
 
     event_type, sse_event_data, condensed = _intercept_tool_result("metric_compute", json.dumps(payload))
@@ -80,6 +82,89 @@ def test_query_backed_metric_shape_also_suppressed():
 def test_suppress_flag_set_on_metric_data_table():
     payload = metric_data_table("Net Margin", 0.2531, "percent", "last_quarter", "expr")
     assert payload.get("suppress_llm_value") is True
+
+
+async def test_compute_metric_query_field_is_string_not_blessed_spec(db, tenant_a, monkeypatch):
+    """REAL trust-boundary invariant (F4 (c)), driven through the PRODUCTION call site.
+    compute_metric builds the data_table via metric_data_table(...); the prior call site
+    passed `metric.blessed_spec` (the internal execution spec dict, e.g.
+    {'query': 'SELECT SUM(amount) FROM transactionline ...', 'dialect': 'suiteql'}) as the
+    `query` field. The orchestrator copies parsed['query'] verbatim into the SSE
+    event_data['query'] that reaches the frontend — so the raw blessed SuiteQL text
+    (table names, dialect) shipped to the client.
+
+    The `query` field must instead be a STRING label (the metric key); the blessed_spec /
+    its raw SQL must NEVER appear in the payload. We compute a real query-backed metric
+    end-to-end (stubbed executor) and assert the resulting payload's `query` is a string,
+    equals the metric key, and contains none of the blessed SQL. Pre-fix this FAILS:
+    compute_metric handed the blessed_spec dict, so `query` was a dict carrying the SQL."""
+    import json as _json
+
+    from sqlalchemy import delete
+
+    from app.models.metric_definition import SYSTEM_TENANT_ID, MetricDefinition
+    from app.models.tenant import Tenant
+    from app.services.metrics.metric_compute import compute_metric
+
+    # Ensure the SYSTEM tenant parent exists (rolled back per test) for the FK.
+    exists = (await db.execute(select(Tenant.id).where(Tenant.id == SYSTEM_TENANT_ID))).scalar_one_or_none()
+    if exists is None:
+        db.add(Tenant(id=SYSTEM_TENANT_ID, name="System", slug="system", plan="free", is_active=True))
+        await db.flush()
+    # The shared local DB may already be seeded; clear metric rows (rolled back per test)
+    # so our UNIQUE(tenant_id, key) insert below does not collide with a seeded row.
+    await db.execute(delete(MetricDefinition))
+    await db.flush()
+
+    blessed_sql = "SELECT SUM(amount) FROM transactionline WHERE trandate>=:period_start"
+    db.add(
+        MetricDefinition(
+            tenant_id=SYSTEM_TENANT_ID,
+            key="gross_revenue",
+            display_name="Gross Revenue",
+            definition="x",
+            unit="currency",
+            source_kind="suiteql",
+            blessed_spec={"query": blessed_sql, "dialect": "suiteql"},
+            params_schema={"period": {"type": "period"}},
+            status="active",
+            version=1,
+        )
+    )
+    await db.flush()
+
+    async def _ns_ok(params, context=None, **kwargs):
+        return {"columns": ["s"], "rows": [[1234567.89]]}
+
+    monkeypatch.setattr("app.mcp.tools.netsuite_suiteql.execute", _ns_ok)
+
+    out = await compute_metric(
+        db,
+        tenant_id=tenant_a.id,
+        key="gross_revenue",
+        params={"period": "this_month"},
+        context={"fiscal_year_start_month": 1},
+    )
+
+    assert "error" not in out, out
+    # (a) the query field is a STRING label, never the blessed_spec dict.
+    assert isinstance(out["query"], str), out["query"]
+    assert out["query"] == "gross_revenue"
+    # (b) the blessed SQL / dialect / table names are NOWHERE in the payload.
+    serialized = _json.dumps(out, default=str)
+    assert blessed_sql not in serialized
+    assert "transactionline" not in serialized
+    assert "dialect" not in serialized
+
+    # (c) it still round-trips through the interceptor as a suppressed data_table; the
+    #     SSE query field stays a plain string, the number reaches the FE not the LLM.
+    event_type, sse_event_data, condensed = _intercept_tool_result("metric_compute", _json.dumps(out))
+    assert event_type == "data_table"
+    assert isinstance(sse_event_data["query"], str)
+    assert sse_event_data["query"] == "gross_revenue"
+    flat = [cell for row in sse_event_data["rows"] for cell in row]
+    assert 1234567.89 in flat
+    assert "1234567.89" not in condensed
 
 
 def test_non_metric_data_table_is_unaffected():

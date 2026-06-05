@@ -516,6 +516,85 @@ async def test_filled_suiteql_query_to_disallowed_table_blocked_before_execute(d
     assert ns_calls == [], f"disallowed-table query reached netsuite_suiteql.execute: {ns_calls}"
 
 
+async def test_filled_bigquery_query_failing_validation_fails_closed_symmetric_to_suiteql(db, tenant_a, monkeypatch):
+    """REAL error-symmetry invariant (F4 (d)). The suiteql branch of
+    _validate_and_execute_by_source raises ComputeError when the FILLED query fails its
+    read-only/allowlist re-validation, so compute_metric flips the metric to
+    needs_review and returns a NUMBER-FREE error dict. The bigquery branch must behave
+    IDENTICALLY: a filled bigquery query that fails _validate_read_only must surface as
+    needs_review, not a ParamError that escapes compute_metric's catch
+    (ExpressionError/ComputeError only).
+
+    The prior bigquery branch raised ParamError on filled-query validation failure;
+    compute_metric does NOT catch ParamError, so the request 500s instead of failing
+    closed + auditing. We force the bigquery read-only validator to reject the filled
+    query; the metric must end up needs_review with a number-free dict and an audit
+    entry, and the bigquery executor must NEVER be reached (validation precedes
+    execute). Pre-fix: ParamError propagates uncaught (no needs_review, no audit)."""
+    await _ensure_system_tenant(db)
+    db.add(
+        MetricDefinition(
+            tenant_id=SYSTEM_TENANT_ID,
+            key="warehouse_gmv",
+            display_name="Warehouse GMV",
+            definition="x",
+            unit="currency",
+            source_kind="bigquery",
+            blessed_spec={"query": "SELECT SUM(gmv) FROM analytics.orders", "dialect": "bigquery"},
+            params_schema={"period": {"type": "period"}},
+            status="active",
+            version=1,
+        )
+    )
+    await db.flush()
+
+    # Force the FILLED-query read-only validation to fail (schema-drift / non-read-only).
+    def _reject(_query):
+        raise ValueError("not read-only")
+
+    monkeypatch.setattr("app.services.bigquery_service._validate_read_only", _reject)
+
+    bq_calls: list[str] = []
+
+    async def _bq_poison(params, context=None, **kwargs):
+        bq_calls.append(params.get("query", ""))
+        return {"columns": ["gmv"], "rows": [[4242.0]]}  # must NEVER be reached
+
+    monkeypatch.setattr("app.mcp.tools.bigquery_tools.bigquery_sql_execute", _bq_poison)
+
+    # MUST NOT raise (no 500): compute_metric must catch the failure and fail closed.
+    out = await compute_metric(
+        db,
+        tenant_id=tenant_a.id,
+        key="warehouse_gmv",
+        params={"period": "this_month"},
+        context={"fiscal_year_start_month": 1},
+    )
+
+    # (a) number-free needs_review — symmetric with the suiteql allowlist-fail path
+    assert out.get("error") == "blessed_query_failed", out
+    assert out.get("status") == "needs_review"
+    assert out.get("key") == "warehouse_gmv"
+    assert "rows" not in out
+    assert "value" not in out
+
+    # (b) the bigquery executor was NEVER reached (validation precedes execute)
+    assert bq_calls == [], f"failed-validation bigquery query reached the executor: {bq_calls}"
+
+    # (c) the metric row is flipped to needs_review and the failure is audited
+    row = (
+        await db.execute(
+            select(MetricDefinition).where(
+                MetricDefinition.tenant_id == SYSTEM_TENANT_ID,
+                MetricDefinition.key == "warehouse_gmv",
+            )
+        )
+    ).scalar_one()
+    assert row.status == "needs_review"
+    audit = (await db.execute(select(AuditEvent).where(AuditEvent.action == "metric.compute.failed"))).scalars().all()
+    assert len(audit) >= 1
+
+
 async def test_filled_suiteql_query_to_allowed_table_still_executes(db, tenant_a, monkeypatch):
     """Guard against the allowlist re-validation being too strict: a filled query over
     an ALLOWED table (transactionline) must still execute and return its number."""

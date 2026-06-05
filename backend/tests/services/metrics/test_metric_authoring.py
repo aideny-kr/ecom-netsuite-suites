@@ -153,6 +153,71 @@ def test_accepts_int_and_enum_params_bound_in_query():
     )
 
 
+# ── (b) seeder ↔ validate_definition consistency ───────────────────────────────
+
+
+def test_period_param_is_optionally_binding():
+    """REAL seeder-consistency invariant (F4 (b)). A `period` param is server-resolved
+    into :period_start/:period_end; it is benign — no untrusted text flows into SQL.
+    A blessed query that declares `period` but does NOT yet reference either bound
+    (e.g. a stub `SELECT 0`, or a query that does not slice by date) must be ACCEPTED:
+    period is OPTIONALLY-binding, unlike date/int/enum params (which must bind a
+    placeholder). The prior strict rule rejected this as 'declared but the query binds
+    neither :period_start nor :period_end', which is exactly what the seeded defaults
+    trip on. Pre-fix this RAISES AuthoringError; post-fix it passes."""
+    validate_definition(
+        {
+            "key": "cash",
+            "source_kind": "suiteql",
+            "blessed_spec": {"query": "SELECT 0", "dialect": "suiteql"},
+            "params_schema": {"period": {"type": "period"}},
+        }
+    )
+
+
+def test_non_period_param_still_must_bind():
+    """Guard: relaxing period to optionally-binding must NOT relax the binding rule for
+    date/int/enum. A declared `int` param that the query never references is still dead
+    config and must be rejected — proving the relaxation is period-specific."""
+    with pytest.raises(AuthoringError):
+        validate_definition(
+            {
+                "key": "x",
+                "source_kind": "suiteql",
+                "blessed_spec": {"query": "SELECT 0", "dialect": "suiteql"},
+                "params_schema": {"sub": {"type": "int"}},  # declared, never bound → reject
+            }
+        )
+
+
+def test_validate_definition_accepts_every_seeded_metric_payload():
+    """REAL seeder-consistency invariant (F4 (b)). The system seeder ships
+    params_schema={'period': {'type': 'period'}} for every metric, while the suiteql
+    stubs carry `SELECT 0` (no :period_* placeholder). validate_definition MUST accept
+    the EXACT payload the seeder persists for EVERY seeded metric — author-time
+    validation and the seeder cannot disagree, else the blessed defaults are
+    un-authorable. We reconstruct each seeded row's validation-relevant payload verbatim
+    from _SYSTEM_METRICS and assert validate_definition accepts all 9.
+
+    Pre-fix the 6 suiteql metrics RAISE (period declared, neither bound); post-fix all 9
+    pass."""
+    from app.services.metrics.metric_catalog_seeder import _SYSTEM_METRICS
+
+    for m in _SYSTEM_METRICS:
+        sk = m["source_kind"]
+        payload = {
+            "key": m["key"],
+            "source_kind": sk,
+            # Exactly what metric_catalog_seeder.seed_system_metrics writes.
+            "blessed_spec": ({"query": "SELECT 0", "dialect": "suiteql"} if sk == "suiteql" else None),
+            "expression": m.get("expression"),
+            "depends_on": m.get("depends_on"),
+            "params_schema": {"period": {"type": "period"}},
+        }
+        # Must not raise for ANY seeded metric.
+        validate_definition(payload)
+
+
 # ── F3 injection-hardening: reject injecty blessed enum values at author-time ───
 
 
