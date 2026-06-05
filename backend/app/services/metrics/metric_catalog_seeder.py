@@ -3,6 +3,7 @@
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.database import set_tenant_context
 from app.models.metric_definition import SYSTEM_TENANT_ID, MetricDefinition
 from app.services.chat.domain_knowledge import embed_domain_texts
 from app.services.metrics.system_tenant import ensure_system_tenant
@@ -93,6 +94,11 @@ def _embed_text(m: dict) -> str:
 
 
 async def seed_system_metrics(db: AsyncSession) -> int:
+    # FORCE RLS (mig 081) applies to metric_definitions for non-superuser roles
+    # (Supabase); set SYSTEM context so the policy's OR-SYSTEM clause permits the
+    # seed writes and get_current_tenant_id() doesn't throw on an unset GUC.
+    await set_tenant_context(db, str(SYSTEM_TENANT_ID))
+
     # Defense-in-depth: SYSTEM metric rows FK to tenants.id; provision the parent
     # so the seeder is self-sufficient even on a fresh DB (mig 080 also seeds it).
     await ensure_system_tenant(db)
