@@ -200,12 +200,18 @@ async def update_metric(
     """Edit a definition: re-validate, bump version, allow status transitions (incl.
     reactivating a draft/needs_review row). Tenant-scoped: a tenant may only update its
     own rows; SYSTEM rows update under SYSTEM_TENANT_ID via the superadmin route."""
+    # NEW-2 (lost-update race): SELECT … FOR UPDATE serialises concurrent PUTs on the
+    # same row. Without the lock two concurrent requests both read version N, both write
+    # N+1 — one update is silently lost. WITH FOR UPDATE the second transaction blocks
+    # until the first commits, then reads the post-commit version (N+1) and writes N+2.
     metric = (
         await db.execute(
-            select(MetricDefinition).where(
+            select(MetricDefinition)
+            .where(
                 MetricDefinition.id == metric_id,
                 MetricDefinition.tenant_id == tenant_id,
             )
+            .with_for_update()
         )
     ).scalar_one_or_none()
     if metric is None:
@@ -254,6 +260,15 @@ async def update_metric(
         if payload.get(field) is not None:
             setattr(metric, field, payload[field])
 
+    # NEW-3 (reactivation smoke): when the resulting status is 'active' AND the metric
+    # is query-backed (suiteql or bigquery), validate the blessed query is read-only AND
+    # on the allowlist BEFORE allowing activation. This prevents a broken/unsafe query
+    # from sitting in the catalog as 'active' (where a subsequent compute call would
+    # attempt to execute it). We validate the TEMPLATE as-is — do NOT execute it.
+    resulting_status = payload.get("status") or metric.status
+    if resulting_status == "active" and metric.source_kind in ("suiteql", "bigquery"):
+        _validate_blessed_query_for_activation(metric.source_kind, metric.blessed_spec)
+
     # Keep the intent embedding in sync with the embedded text. create_metric derives
     # it from display_name | definition | synonyms via _embed_text; if any of those
     # changed on this PUT the stored vector is now stale and resolve would match on
@@ -266,8 +281,73 @@ async def update_metric(
         metric.intent_embedding = _new_embedding
 
     metric.version += 1
+
+    # B2 (provenance stamp): clear the system_seed author stamp on EVERY update so the
+    # nightly seeder's conditional-upsert guard (author=='system_seed' → overwrite) does
+    # NOT clobber a superadmin's edit to a canonical SYSTEM key on the next run. Applies
+    # unconditionally — harmless on non-SYSTEM rows, essential on SYSTEM rows that were
+    # seeded with author='system_seed'. Preserves all other provenance keys (non-
+    # destructive merge), and tags the update with updated_via='api' for audit context.
+    metric.provenance = {
+        **(metric.provenance or {}),
+        "author": "authored",
+        "updated_via": "api",
+    }
+
     await db.flush()
     return metric
+
+
+def _validate_blessed_query_for_activation(source_kind: str, blessed_spec: dict | None) -> None:
+    """NEW-3: read-only + allowlist smoke check run BEFORE activating a query-backed
+    metric. Validates the TEMPLATE query (with :param placeholders intact — do NOT
+    execute). Raises AuthoringError if the query is DML/DDL or references off-allowlist
+    tables. Reuses the same validators as metric_compute._validate_and_execute_by_source
+    so the author-time gate and the compute gate agree on what is permitted.
+
+    Called only when source_kind in ('suiteql', 'bigquery') and resulting_status == 'active'.
+    """
+    if not isinstance(blessed_spec, dict):
+        raise AuthoringError("cannot activate: metric has no blessed_spec")
+    query = blessed_spec.get("query", "")
+    if not query:
+        raise AuthoringError("cannot activate: blessed_spec has no query")
+
+    if source_kind == "bigquery":
+        from app.services.bigquery_service import _validate_read_only
+
+        try:
+            _validate_read_only(query)
+        except ValueError as ex:
+            raise AuthoringError(f"cannot activate: blessed query failed read-only validation: {ex}") from ex
+        # Dataset allowlist (mirrors metric_compute._validate_and_execute_by_source).
+        from app.core.config import settings
+        import re as _re
+
+        allowed = {
+            d.strip().lower() for d in getattr(settings, "BIGQUERY_ALLOWED_DATASETS", "").split(",") if d.strip()
+        }
+        if allowed:
+            used: set[str] = set()
+            for ref in _re.findall(r"(?:FROM|JOIN)\s+([`A-Za-z0-9_.\-]+)", query, _re.IGNORECASE):
+                parts = [p.strip("`") for p in ref.strip("`").split(".") if p.strip("`")]
+                if len(parts) >= 2:
+                    used.add(parts[-2].lower())
+            illegal = used - allowed
+            if illegal:
+                raise AuthoringError(
+                    f"cannot activate: blessed query selects off-allowlist datasets: {sorted(illegal)}"
+                )
+    else:
+        # suiteql (default)
+        from app.core.config import settings
+        from app.mcp.tools import netsuite_suiteql
+
+        allowed_tables = {t.strip().lower() for t in settings.NETSUITE_SUITEQL_ALLOWED_TABLES.split(",")}
+        try:
+            netsuite_suiteql.validate_query(query, allowed_tables)
+        except ValueError as ex:
+            raise AuthoringError(f"cannot activate: blessed query failed read-only/allowlist validation: {ex}") from ex
 
 
 def _embed_text(payload: dict) -> str:
