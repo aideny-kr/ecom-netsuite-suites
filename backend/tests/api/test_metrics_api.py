@@ -16,8 +16,34 @@ async def test_non_admin_forbidden(client, member_user):
     assert resp.status_code == 403
 
 
-async def test_admin_can_author_tenant_metric(client, admin_user):
-    _, headers = admin_user
+async def _seed_leaves(db, tenant_id):
+    """Seed the two leaf metrics (net_income, gross_revenue) an expression metric
+    depends on, so author-time leaf-existence passes. Authoring an expression metric
+    over phantom leaves now 422s (anti-hallucination: no blessed-but-un-computable
+    metric)."""
+    from app.models.metric_definition import MetricDefinition
+
+    for key in ("net_income", "gross_revenue"):
+        db.add(
+            MetricDefinition(
+                tenant_id=tenant_id,
+                key=key,
+                display_name=key,
+                definition="x",
+                unit="currency",
+                source_kind="suiteql",
+                blessed_spec={"query": "SELECT 1", "dialect": "suiteql"},
+                params_schema={},
+                status="active",
+                version=1,
+            )
+        )
+    await db.flush()
+
+
+async def test_admin_can_author_tenant_metric(client, admin_user, db):
+    user, headers = admin_user
+    await _seed_leaves(db, user.tenant_id)
     resp = await client.post(
         "/api/v1/metrics",
         json={
@@ -33,6 +59,28 @@ async def test_admin_can_author_tenant_metric(client, admin_user):
     )
     assert resp.status_code == 201
     assert resp.json()["key"] == "net_margin"
+
+
+async def test_author_expression_metric_over_phantom_leaves_422(client, admin_user):
+    """REAL invariant at the API boundary (major #8): authoring an expression metric
+    whose depends_on leaves do NOT exist in the catalog must 422, not 201. A 201 here
+    would persist a blessed metric that can only ever resolve to missing_dependency —
+    the catalog advertising an un-computable named metric."""
+    _, headers = admin_user
+    resp = await client.post(
+        "/api/v1/metrics",
+        json={
+            "key": "net_margin",
+            "display_name": "Net Margin",
+            "definition": "x",
+            "unit": "percent",
+            "source_kind": "expression",
+            "expression": "ghost_income / ghost_revenue",
+            "depends_on": ["ghost_income", "ghost_revenue"],
+        },
+        headers=headers,
+    )
+    assert resp.status_code == 422, resp.text
 
 
 _SYSTEM_METRIC_PAYLOAD = {
@@ -75,6 +123,8 @@ async def test_superadmin_can_author_system_metric(client, superadmin_user, db):
     # seeded. Clear the catalog first (rolled back per the db fixture).
     await db.execute(delete(MetricDefinition))
     await db.flush()
+    # Author-time leaf-existence: net_margin's leaves must exist (as SYSTEM rows here).
+    await _seed_leaves(db, SYSTEM_TENANT_ID)
 
     _, headers = superadmin_user
     resp = await client.post(
@@ -123,14 +173,25 @@ async def test_create_metric_is_self_sufficient_when_system_tenant_absent(db, mo
     ).scalar_one_or_none() is None  # genuinely absent — create_metric is on its own
 
     # No pre-seed of the SYSTEM tenant here — create_metric itself must provision it.
-    metric = await create_metric(db, tenant_id=SYSTEM_TENANT_ID, payload=_SYSTEM_METRIC_PAYLOAD)
+    # Use a query-backed (leafless) payload to isolate the FK-provisioning invariant
+    # from author-time leaf-existence: an expression metric's leaves can't exist while
+    # the SYSTEM tenant is deleted, which would conflate two checks.
+    leafless_payload = {
+        "key": "gross_revenue",
+        "display_name": "Gross Revenue",
+        "definition": "x",
+        "unit": "currency",
+        "source_kind": "suiteql",
+        "blessed_spec": {"query": "SELECT 1", "dialect": "suiteql"},
+    }
+    metric = await create_metric(db, tenant_id=SYSTEM_TENANT_ID, payload=leafless_payload)
     await db.flush()
 
     assert metric.tenant_id == SYSTEM_TENANT_ID
-    assert metric.key == "net_margin"
+    assert metric.key == "gross_revenue"
     # create_metric created the SYSTEM tenant parent row (defense-in-depth upsert).
     assert (
         await db.execute(select(Tenant.id).where(Tenant.id == SYSTEM_TENANT_ID))
     ).scalar_one_or_none() == SYSTEM_TENANT_ID
-    persisted = (await db.execute(select(MetricDefinition).where(MetricDefinition.key == "net_margin"))).scalar_one()
+    persisted = (await db.execute(select(MetricDefinition).where(MetricDefinition.key == "gross_revenue"))).scalar_one()
     assert persisted.tenant_id == SYSTEM_TENANT_ID

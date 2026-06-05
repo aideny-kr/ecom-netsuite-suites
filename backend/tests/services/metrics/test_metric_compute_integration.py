@@ -457,6 +457,102 @@ async def test_bigquery_metric_routes_to_bigquery_executor_not_netsuite(db, tena
     assert bq_calls and "analytics.orders" in bq_calls[0]
 
 
+async def test_filled_suiteql_query_to_disallowed_table_blocked_before_execute(db, tenant_a, monkeypatch):
+    """REAL anti-hallucination invariant (major #8, leg c). The metric layer must
+    re-run the FULL netsuite_suiteql.validate_query (read-only AND table-allowlist)
+    on the FILLED blessed query BEFORE execution — not just is_read_only_sql.
+
+    A blessed metric whose query selects from a table NOT in
+    NETSUITE_SUITEQL_ALLOWED_TABLES (here `bank_account`) is read-only-clean but
+    table-illegal. The prior _execute_scalar_query only checked is_read_only_sql, so
+    such a query sailed past the metric layer's own guard and reached
+    netsuite_suiteql.execute — the metric catalog exfiltrating an off-allowlist table
+    under its own authority. We poison netsuite_suiteql.execute: if it is EVER called,
+    the table-allowlist re-validation did not happen at the metric layer."""
+    await _ensure_system_tenant(db)
+    db.add(
+        MetricDefinition(
+            tenant_id=SYSTEM_TENANT_ID,
+            key="rogue_balance",
+            display_name="Rogue Balance",
+            definition="x",
+            unit="currency",
+            source_kind="suiteql",
+            # read-only SELECT, but `bank_account` is NOT in the allowed-tables list
+            blessed_spec={"query": "SELECT SUM(balance) FROM bank_account", "dialect": "suiteql"},
+            params_schema={"period": {"type": "period"}},
+            status="active",
+            version=1,
+        )
+    )
+    await db.flush()
+
+    ns_calls: list[str] = []
+
+    async def _ns_poison(params, context=None, **kwargs):
+        ns_calls.append(params.get("query", ""))
+        return {"columns": ["x"], "rows": [[-9999.0]]}  # must NEVER be reached
+
+    monkeypatch.setattr("app.mcp.tools.netsuite_suiteql.execute", _ns_poison)
+
+    out = await compute_metric(
+        db,
+        tenant_id=tenant_a.id,
+        key="rogue_balance",
+        params={"period": "this_month"},
+        context={"fiscal_year_start_month": 1},
+    )
+
+    # (a) blocked at the metric layer → number-free needs_review, no fabricated value
+    assert out.get("error") == "blessed_query_failed", out
+    assert out.get("status") == "needs_review"
+    assert "rows" not in out
+    assert "value" not in out
+    assert -9999.0 not in out.values()
+    # (b) the NetSuite execute boundary was NEVER reached — the allowlist re-validation
+    #     happened in the metric layer, before execute.
+    assert ns_calls == [], f"disallowed-table query reached netsuite_suiteql.execute: {ns_calls}"
+
+
+async def test_filled_suiteql_query_to_allowed_table_still_executes(db, tenant_a, monkeypatch):
+    """Guard against the allowlist re-validation being too strict: a filled query over
+    an ALLOWED table (transactionline) must still execute and return its number."""
+    await _ensure_system_tenant(db)
+    db.add(
+        MetricDefinition(
+            tenant_id=SYSTEM_TENANT_ID,
+            key="gross_revenue",
+            display_name="Gross Revenue",
+            definition="x",
+            unit="currency",
+            source_kind="suiteql",
+            blessed_spec={
+                "query": "SELECT SUM(amount) FROM transactionline WHERE trandate>=:period_start",
+                "dialect": "suiteql",
+            },
+            params_schema={"period": {"type": "period"}},
+            status="active",
+            version=1,
+        )
+    )
+    await db.flush()
+
+    async def _ns_ok(params, context=None, **kwargs):
+        return {"columns": ["s"], "rows": [[777.0]]}
+
+    monkeypatch.setattr("app.mcp.tools.netsuite_suiteql.execute", _ns_ok)
+
+    out = await compute_metric(
+        db,
+        tenant_id=tenant_a.id,
+        key="gross_revenue",
+        params={"period": "this_month"},
+        context={"fiscal_year_start_month": 1},
+    )
+    assert "error" not in out, out
+    assert out["rows"][0][1] == 777.0
+
+
 async def test_bigquery_metric_failure_fails_closed_no_fabricated_number(db, tenant_a, monkeypatch):
     """A bigquery metric whose executor errors must fail closed (number-free
     needs_review), same as the suiteql path — never coerce to a fabricated value."""

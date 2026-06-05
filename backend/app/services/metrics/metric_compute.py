@@ -119,10 +119,25 @@ async def _validate_and_execute_by_source(db, tenant_id, source_kind: str, query
 
     # Default / "suiteql": NetSuite SuiteTalk REST. Expression-leaf metrics are
     # themselves single-source rows (suiteql) and route here.
+    from app.core.config import settings
     from app.mcp.tools import netsuite_suiteql
 
-    if not netsuite_suiteql.is_read_only_sql(query):
-        raise ParamError("filled query failed read-only validation")
+    # Re-validate the FILLED query with the FULL allowlist check (read-only AND
+    # table-allowlist), not just is_read_only_sql. Params have already been
+    # type-coerced + filled, so this is the last gate before the number leaves the
+    # metric layer: a blessed query that selects from an off-allowlist table is
+    # read-only-clean yet table-illegal, and must NOT reach execute under the
+    # catalog's authority. Build allowed_tables from settings (same source the tool
+    # itself uses) so the metric layer and the tool agree on what is permitted.
+    allowed_tables = {t.strip().lower() for t in settings.NETSUITE_SUITEQL_ALLOWED_TABLES.split(",")}
+    try:
+        netsuite_suiteql.validate_query(query, allowed_tables)
+    except ValueError as ex:
+        # A blessed query that fails the table-allowlist (or read-only) re-validation is
+        # a spec/schema-drift condition: raise ComputeError so compute_metric flips the
+        # metric to needs_review and returns a NUMBER-FREE error — never a wrong number,
+        # never the off-allowlist result.
+        raise ComputeError(f"filled query failed allowlist validation: {ex}") from ex
     return await netsuite_suiteql.execute({"query": query}, {"tenant_id": str(tenant_id), "db": db})
 
 

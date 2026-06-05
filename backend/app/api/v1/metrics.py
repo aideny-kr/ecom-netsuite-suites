@@ -38,9 +38,10 @@ async def create_tenant_metric(
 ):
     try:
         validate_definition(payload.model_dump())
+        # DB-aware leaf-existence runs inside create_metric (also AuthoringError → 422).
+        metric = await create_metric(db, tenant_id=user.tenant_id, payload=payload.model_dump())
     except AuthoringError as ex:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(ex)) from ex
-    metric = await create_metric(db, tenant_id=user.tenant_id, payload=payload.model_dump())
     await audit_service.log_event(
         db=db,
         tenant_id=user.tenant_id,
@@ -63,9 +64,10 @@ async def create_system_metric(
     """Author a SYSTEM-default (cross-tenant) metric. Superadmin-only by row grain."""
     try:
         validate_definition(payload.model_dump())
+        # DB-aware leaf-existence runs inside create_metric (also AuthoringError → 422).
+        metric = await create_metric(db, tenant_id=SYSTEM_TENANT_ID, payload=payload.model_dump())
     except AuthoringError as ex:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(ex)) from ex
-    metric = await create_metric(db, tenant_id=SYSTEM_TENANT_ID, payload=payload.model_dump())
     await audit_service.log_event(
         db=db,
         tenant_id=SYSTEM_TENANT_ID,
