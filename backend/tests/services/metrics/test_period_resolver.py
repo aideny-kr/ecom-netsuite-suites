@@ -39,3 +39,23 @@ def test_last_quarter_fiscal_start_april_trailing_months():
 def test_unknown_token_raises():
     with pytest.raises(PeriodError):
         resolve_period("since_the_dawn_of_time", fiscal_year_start_month=1, today=date(2026, 3, 15))
+
+
+def test_fy_alias_equals_this_year():
+    a = resolve_period("fy", fiscal_year_start_month=2, today=date(2026, 6, 1))
+    b = resolve_period("this_year", fiscal_year_start_month=2, today=date(2026, 6, 1))
+    assert a == b
+
+
+def test_fy_absolute_year():
+    # FY2024 with fiscal year starting February → 2024-02-01 .. 2025-01-31
+    s, e = resolve_period("fy2024", fiscal_year_start_month=2, today=date(2026, 6, 1))
+    assert s == date(2024, 2, 1)
+    assert e == date(2025, 1, 31)
+
+
+def test_fy_absolute_year_calendar_fiscal():
+    # FY2024 with January fiscal start → full calendar 2024
+    s, e = resolve_period("fy2024", fiscal_year_start_month=1, today=date(2026, 6, 1))
+    assert s == date(2024, 1, 1)
+    assert e == date(2024, 12, 31)
