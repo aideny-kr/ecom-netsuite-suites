@@ -20,6 +20,7 @@ Isolation contract (why per-test-unique leaf keys, not a global DELETE):
     the catalog each test sees is deterministic regardless of sibling timing.
 """
 
+import re
 import uuid
 
 import pytest
@@ -852,7 +853,13 @@ async def test_update_metric_leaf_to_expression_rejected_when_expression_depends
     at CREATE time, but the same hazard arises at UPDATE when a leaf becomes an expression.
 
     Pre-fix: update_metric validates only the EDITED row; the reverse-dep scan is absent.
-    Post-fix: AuthoringError naming the dependent expression metric."""
+    Post-fix (M3): AuthoringError naming the dependent expression metric.
+
+    NOTE (R4 interaction): after the R4 source_kind-immutability guard landed, flipping
+    source_kind from 'suiteql' to 'expression' is now rejected by R4 BEFORE the M3
+    reverse-dep scan runs.  Both guards protect the same invariant (the operation is
+    rejected); only the error message differs.  The match pattern accepts either so
+    the test remains a valid regression guard for "the flip is always blocked"."""
     await _ensure_system_tenant(db)
 
     async def _fake_embed(_text):
@@ -895,8 +902,9 @@ async def test_update_metric_leaf_to_expression_rejected_when_expression_depends
         )
     ).scalar_one()
 
-    # Trying to flip gp to an expression — should fail because gm actively depends on it
-    with pytest.raises(AuthoringError, match=gm_key):
+    # Trying to flip gp to an expression — must be rejected (R4 immutability guard fires
+    # first; M3 reverse-dep scan would also reject it if R4 were absent).
+    with pytest.raises(AuthoringError, match=rf"(?i)immutable|{re.escape(gm_key)}"):
         await update_metric(
             db,
             tenant_id=tenant_a.id,
@@ -1293,3 +1301,144 @@ async def test_update_metric_non_system_seed_author_preserved(db, monkeypatch):
     )
     assert updated.provenance.get("updated_via") == "api"
     assert updated.provenance.get("created_at") == "2026-06-05"
+
+
+# ── R4: source_kind is immutable on update ────────────────────────────────────
+
+
+async def test_update_metric_differing_source_kind_raises(db, tenant_a, monkeypatch):
+    """R4 (negative): calling update_metric with a payload source_kind that DIFFERS from
+    the existing metric.source_kind MUST raise AuthoringError mentioning 'immutable'.
+
+    The real footgun: supplying source_kind='bigquery' WITH a bigquery-consistent
+    blessed_spec (dialect='bigquery') so validate_definition PASSES — the merged dict is
+    internally consistent. Without the immutability guard update_metric silently returns
+    success, the row's source_kind stays 'suiteql', and the metric has been validated as
+    bigquery but will execute as suiteql — a pure validate-as-X persist-as-Y drift.
+
+    After the fix, update_metric rejects BEFORE validate_definition so the inconsistency
+    can never be silently accepted.
+
+    NOTE: the guard fires before validate_definition, so it must match 'immutable' in
+    the error message (the validate_definition dialect-mismatch message would not fire
+    for a self-consistent bigquery payload)."""
+
+    async def _fake_embed(_text):
+        return None
+
+    monkeypatch.setattr("app.services.metrics.metric_authoring.embed_domain_query", _fake_embed)
+
+    p = _kp()
+    key = f"{p}rev_r4_neg"
+    metric = MetricDefinition(
+        tenant_id=tenant_a.id,
+        key=key,
+        display_name="Revenue",
+        definition="total revenue",
+        unit="currency",
+        source_kind="suiteql",
+        blessed_spec={"query": "SELECT 0", "dialect": "suiteql"},
+        params_schema={"period": {"type": "period"}},
+        status="active",
+        version=1,
+        provenance={"author": "tenant_admin"},
+    )
+    db.add(metric)
+    await db.flush()
+
+    # Supply a bigquery-consistent payload (query+dialect both 'bigquery') so
+    # validate_definition would PASS without the new guard — exposing the true footgun.
+    with pytest.raises(AuthoringError, match=r"(?i)immutable"):
+        await update_metric(
+            db,
+            tenant_id=tenant_a.id,
+            metric_id=metric.id,
+            payload={
+                "source_kind": "bigquery",
+                "blessed_spec": {"query": "SELECT 1", "dialect": "bigquery"},
+                "display_name": "Revenue BQ",
+            },
+        )
+
+    # The row must be unchanged — source_kind still 'suiteql'.
+    refreshed = (await db.execute(select(MetricDefinition).where(MetricDefinition.id == metric.id))).scalar_one()
+    assert refreshed.source_kind == "suiteql", (
+        f"source_kind must stay 'suiteql' after rejected update, got {refreshed.source_kind!r}"
+    )
+
+
+async def test_update_metric_same_source_kind_in_payload_succeeds(db, tenant_a, monkeypatch):
+    """R4 (positive / control): a payload that includes source_kind EQUAL to the existing
+    value must succeed — only a DIFFERING value is immutable.  This guards against
+    over-blocking payloads that round-trip the current value."""
+
+    async def _fake_embed(_text):
+        return None
+
+    monkeypatch.setattr("app.services.metrics.metric_authoring.embed_domain_query", _fake_embed)
+
+    p = _kp()
+    key = f"{p}rev_r4_pos"
+    metric = MetricDefinition(
+        tenant_id=tenant_a.id,
+        key=key,
+        display_name="Revenue",
+        definition="total revenue",
+        unit="currency",
+        source_kind="suiteql",
+        blessed_spec={"query": "SELECT 0", "dialect": "suiteql"},
+        params_schema={"period": {"type": "period"}},
+        status="active",
+        version=1,
+        provenance={"author": "tenant_admin"},
+    )
+    db.add(metric)
+    await db.flush()
+
+    # source_kind matches existing — update succeeds, display_name is changed.
+    updated = await update_metric(
+        db,
+        tenant_id=tenant_a.id,
+        metric_id=metric.id,
+        payload={"source_kind": "suiteql", "display_name": "Revenue Updated"},
+    )
+    assert updated.display_name == "Revenue Updated"
+    assert updated.source_kind == "suiteql"
+    assert updated.version == 2
+
+
+async def test_update_metric_absent_source_kind_in_payload_succeeds(db, tenant_a, monkeypatch):
+    """R4 (positive / control): omitting source_kind from the payload entirely (the normal
+    API path since MetricUpdate has no source_kind field) must succeed unchanged."""
+
+    async def _fake_embed(_text):
+        return None
+
+    monkeypatch.setattr("app.services.metrics.metric_authoring.embed_domain_query", _fake_embed)
+
+    p = _kp()
+    key = f"{p}rev_r4_absent"
+    metric = MetricDefinition(
+        tenant_id=tenant_a.id,
+        key=key,
+        display_name="Revenue",
+        definition="total revenue",
+        unit="currency",
+        source_kind="suiteql",
+        blessed_spec={"query": "SELECT 0", "dialect": "suiteql"},
+        params_schema={"period": {"type": "period"}},
+        status="active",
+        version=1,
+        provenance={"author": "tenant_admin"},
+    )
+    db.add(metric)
+    await db.flush()
+
+    updated = await update_metric(
+        db,
+        tenant_id=tenant_a.id,
+        metric_id=metric.id,
+        payload={"display_name": "Revenue No SK"},
+    )
+    assert updated.display_name == "Revenue No SK"
+    assert updated.source_kind == "suiteql"

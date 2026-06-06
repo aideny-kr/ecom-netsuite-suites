@@ -265,6 +265,20 @@ async def update_metric(
     if metric is None:
         raise AuthoringError("metric not found for this tenant")
 
+    # R4: source_kind is immutable. A raw-dict caller can include source_kind in the
+    # payload; the _MERGE_FIELDS merge would feed it into validate_definition (so the
+    # merge is validated as the NEW engine), but the apply loop below deliberately omits
+    # source_kind — so the row would stay persisted as the OLD engine. That is a silent
+    # validate-as-X persist-as-Y drift. Reject the moment a differing value is seen,
+    # BEFORE any validation runs, so the inconsistency can never be silently accepted.
+    # A payload with no source_kind OR one equal to the existing value is harmless.
+    _payload_source_kind = payload.get("source_kind")
+    if _payload_source_kind is not None and _payload_source_kind != metric.source_kind:
+        raise AuthoringError(
+            f"source_kind is immutable; cannot change after creation "
+            f"(existing: '{metric.source_kind}', requested: '{_payload_source_kind}')"
+        )
+
     # M3: reverse-dependency guard. If the edit changes source_kind to 'expression'
     # (making it no longer a valid query-backed leaf) OR changes status away from
     # 'active' (making it invisible to compute's active-only leaf resolver), any active
@@ -298,6 +312,16 @@ async def update_metric(
     )
     merged = {c: getattr(metric, c) for c in _MERGE_FIELDS}
     merged.update({k: v for k, v in payload.items() if v is not None and k != "status"})
+
+    # Defensive invariant (R4): after the immutability guard above, the merged
+    # source_kind must equal the existing metric.source_kind — validate_definition must
+    # always see the engine that will actually execute the query. Assert explicitly so
+    # a future refactor that touches _MERGE_FIELDS or the merge logic cannot silently
+    # reintroduce validate-as-X persist-as-Y drift.
+    assert merged["source_kind"] == metric.source_kind, (
+        f"BUG: merged source_kind '{merged['source_kind']}' != metric.source_kind "
+        f"'{metric.source_kind}' after immutability guard — this is a programming error"
+    )
 
     validate_definition(merged)
     await validate_leaves_exist(db, tenant_id=tenant_id, d=merged)
