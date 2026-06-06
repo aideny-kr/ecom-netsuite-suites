@@ -89,6 +89,8 @@ def _build_html_body(*, run_date: date, stats: dict, regression_detected: bool) 
     total = stats.get("cases_total", 0) or stats.get("cases_run", 0)
     avg_delta = stats.get("avg_delta_accuracy", 0.0)
     yesterday_delta = stats.get("yesterday_delta")
+    latency_breaches = stats.get("latency_breaches", 0)
+    latency_cases = stats.get("latency_breach_cases", [])
 
     # Colors
     delta_color = "#22c55e" if avg_delta >= 0 else "#ef4444"
@@ -115,10 +117,19 @@ def _build_html_body(*, run_date: date, stats: dict, regression_detected: bool) 
             Investigate immediately.
         </div>"""
 
+    latency_banner = ""
+    if latency_breaches:
+        latency_banner = f"""
+        <div style="background:#b45309;color:white;padding:16px;border-radius:8px;margin-bottom:16px;font-size:15px;">
+            ⚠️ Latency budget breach — {latency_breaches} case(s) over their time budget:
+            {", ".join(latency_cases)}
+        </div>"""
+
     return f"""
     <html>
     <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
         {regression_banner}
+        {latency_banner}
         <div style="background: {bg_color}; border-radius: 12px; padding: 24px; margin-bottom: 16px;">
             <h2 style="color: {header_color}; margin: 0 0 16px 0;">
                 Agent vs MCP Benchmark — {run_date}

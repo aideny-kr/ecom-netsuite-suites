@@ -203,3 +203,33 @@ class TestApplyLatencyStats:
         assert stats["latency_breaches"] == 0
         assert stats["latency_regression_detected"] is False
         mock_alert.assert_not_called()
+
+
+class TestDigestRender:
+    def test_html_renders_latency_breaches(self):
+        from datetime import date
+
+        from app.services.benchmark_email_service import _build_html_body
+
+        stats = {
+            "ours_wins": 5,
+            "mcp_wins": 0,
+            "ties": 0,
+            "failures": 0,
+            "cases_run": 5,
+            "avg_delta_accuracy": 0.1,
+            "latency_breaches": 1,
+            "latency_breach_cases": ["sales_country_canonical"],
+        }
+        html = _build_html_body(run_date=date(2026, 6, 5), stats=stats, regression_detected=False)
+        assert "Latency budget breach" in html
+        assert "sales_country_canonical" in html
+
+    def test_html_no_latency_block_when_clean(self):
+        from datetime import date
+
+        from app.services.benchmark_email_service import _build_html_body
+
+        stats = {"ours_wins": 5, "mcp_wins": 0, "ties": 0, "cases_run": 5, "avg_delta_accuracy": 0.1}
+        html = _build_html_body(run_date=date(2026, 6, 5), stats=stats, regression_detected=False)
+        assert "Latency budget breach" not in html
