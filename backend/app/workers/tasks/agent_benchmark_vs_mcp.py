@@ -246,9 +246,7 @@ async def _run_nightly_benchmark(
     else:
         stats["regression_detected"] = False
 
-    stats["yesterday_delta"] = (
-        round(yesterday_delta, 4) if yesterday_delta is not None else None
-    )
+    stats["yesterday_delta"] = round(yesterday_delta, 4) if yesterday_delta is not None else None
 
     # Per-case latency-budget breach pass (independent of the accuracy regression).
     _apply_latency_stats(stats=stats, results=results, tenant_id=tenant_id)

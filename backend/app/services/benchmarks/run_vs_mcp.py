@@ -449,6 +449,7 @@ def _print_results_table(results: list[CaseResult], skip_baseline: bool) -> None
 
     rows: list[list[str]] = []
     for r in results:
+        mark = " ⚠" if latency_breach(r.ours, r.case.max_latency_ms) else ""
         if skip_baseline:
             rows.append(
                 [
@@ -456,7 +457,7 @@ def _print_results_table(results: list[CaseResult], skip_baseline: bool) -> None
                     f"{r.ours.answer_acc:.2f}",
                     f"{r.ours.tool_acc:.2f}",
                     _format_cost(r.ours.cost_usd),
-                    _format_ms(r.ours.latency_ms) + (" ⚠" if latency_breach(r.ours, r.case.max_latency_ms) else ""),
+                    _format_ms(r.ours.latency_ms) + mark,
                     r.verdict,
                 ]
             )
@@ -469,7 +470,7 @@ def _print_results_table(results: list[CaseResult], skip_baseline: bool) -> None
                     f"{r.mcp.answer_acc:.2f}",
                     f"{r.delta_accuracy():+.2f}",
                     f"{_format_cost(r.ours.cost_usd)}/{_format_cost(r.mcp.cost_usd)}",
-                    f"{_format_ms(r.ours.latency_ms)}{' ⚠' if latency_breach(r.ours, r.case.max_latency_ms) else ''}/{_format_ms(r.mcp.latency_ms)}",
+                    f"{_format_ms(r.ours.latency_ms)}{mark}/{_format_ms(r.mcp.latency_ms)}",
                     r.verdict,
                 ]
             )
@@ -510,10 +511,7 @@ def _print_summary(results: list[CaseResult], skip_baseline: bool) -> None:
         print(f"  Latency budget breaches: {len(_breaches)}/{total}")
         for b in _breaches:
             ratio = f", {b.ours_over_mcp_ratio}x mcp" if b.ours_over_mcp_ratio is not None else ""
-            print(
-                f"    ⚠ {b.case_id}: {_format_ms(b.ours_latency_ms)} "
-                f"> {_format_ms(b.budget_ms)} budget{ratio}"
-            )
+            print(f"    ⚠ {b.case_id}: {_format_ms(b.ours_latency_ms)} > {_format_ms(b.budget_ms)} budget{ratio}")
 
     if skip_baseline:
         errors = [r for r in results if not r.ours.success]
