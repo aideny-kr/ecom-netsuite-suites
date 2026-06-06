@@ -215,6 +215,54 @@ async def create_test_payout(
     return payout
 
 
+async def create_test_payout_line(
+    db: AsyncSession,
+    tenant_id,
+    *,
+    payout=None,
+    source_id: str = "ch_test",
+    line_type: str = "charge",
+    amount: Decimal = Decimal("100.00"),
+    fee: Decimal = Decimal("3.00"),
+    net: Decimal | None = None,
+    currency: str = "USD",
+    description: str | None = None,
+    arrival_date: date | None = None,
+    subsidiary_id: str | None = None,
+) -> "PayoutLine":  # noqa: F821
+    """Seed a canonical ``payout_lines`` row (a Stripe charge line) for the
+    order-level recon engine.
+
+    ``OrderReconJob._fetch_charges`` JOINs ``payout_lines`` -> ``payouts`` for
+    ``arrival_date`` and extracts the order reference from ``description``. Pass an
+    existing ``payout=`` to share an arrival_date, else one is created carrying
+    ``arrival_date``. ``net`` defaults to ``amount`` (unused by order matching, but
+    NOT NULL). Flushes for its id.
+    """
+    from app.models.canonical import PayoutLine
+
+    if payout is None:
+        payout = await create_test_payout(db, tenant_id, arrival_date=arrival_date)
+    line = PayoutLine(
+        id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        dedupe_key=f"pl-{uuid.uuid4().hex}",
+        source="stripe",
+        source_id=source_id,
+        subsidiary_id=subsidiary_id,
+        payout_id=payout.id,
+        line_type=line_type,
+        amount=amount,
+        fee=fee,
+        net=net if net is not None else amount,
+        currency=currency,
+        description=description,
+    )
+    db.add(line)
+    await db.flush()
+    return line
+
+
 async def create_test_netsuite_posting(
     db: AsyncSession,
     tenant_id,
@@ -263,12 +311,19 @@ async def create_test_recon_run(
     *,
     status: str = "completed",
     parameters: dict | None = None,
+    date_from: date = date(2026, 4, 20),
+    date_to: date = date(2026, 4, 24),
 ) -> ReconciliationRun:
-    """Create a ReconciliationRun for tests. Flushes so its id is available for results."""
+    """Create a ReconciliationRun for tests. Flushes so its id is available for results.
+
+    ``date_from``/``date_to`` default to a single-month (April 2026) window so
+    ``close_period('2026-04')`` selects the run; pass an explicit window to close a
+    different period.
+    """
     run = ReconciliationRun(
         tenant_id=tenant_id,
-        date_from=date(2026, 4, 20),
-        date_to=date(2026, 4, 24),
+        date_from=date_from,
+        date_to=date_to,
         status=status,
         total_payouts=0,
         total_deposits=0,
