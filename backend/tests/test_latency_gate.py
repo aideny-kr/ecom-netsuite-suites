@@ -111,3 +111,34 @@ class TestCollectLatencyBreaches:
         from app.services.benchmarks.run_vs_mcp import collect_latency_breaches
 
         assert collect_latency_breaches([]) == []
+
+
+class TestCliReport:
+    def test_print_summary_reports_latency_breaches(self):
+        import io
+        from contextlib import redirect_stdout
+
+        from app.services.benchmarks.run_vs_mcp import _print_summary
+
+        results = [
+            _Result(_Case("slow", 60_000), _FullSide(latency_ms=92_000)),
+            _Result(_Case("ok", 60_000), _FullSide(latency_ms=10_000)),
+        ]
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            _print_summary(results, skip_baseline=True)
+        out = buf.getvalue()
+        assert "Latency budget breaches: 1" in out
+        assert "slow" in out
+
+    def test_print_summary_no_breaches_silent(self):
+        import io
+        from contextlib import redirect_stdout
+
+        from app.services.benchmarks.run_vs_mcp import _print_summary
+
+        results = [_Result(_Case("ok", 60_000), _FullSide(latency_ms=10_000))]
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            _print_summary(results, skip_baseline=True)
+        assert "Latency budget breaches" not in buf.getvalue()

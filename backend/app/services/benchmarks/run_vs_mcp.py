@@ -456,7 +456,7 @@ def _print_results_table(results: list[CaseResult], skip_baseline: bool) -> None
                     f"{r.ours.answer_acc:.2f}",
                     f"{r.ours.tool_acc:.2f}",
                     _format_cost(r.ours.cost_usd),
-                    _format_ms(r.ours.latency_ms),
+                    _format_ms(r.ours.latency_ms) + (" ⚠" if latency_breach(r.ours, r.case.max_latency_ms) else ""),
                     r.verdict,
                 ]
             )
@@ -469,7 +469,7 @@ def _print_results_table(results: list[CaseResult], skip_baseline: bool) -> None
                     f"{r.mcp.answer_acc:.2f}",
                     f"{r.delta_accuracy():+.2f}",
                     f"{_format_cost(r.ours.cost_usd)}/{_format_cost(r.mcp.cost_usd)}",
-                    f"{_format_ms(r.ours.latency_ms)}/{_format_ms(r.mcp.latency_ms)}",
+                    f"{_format_ms(r.ours.latency_ms)}{' ⚠' if latency_breach(r.ours, r.case.max_latency_ms) else ''}/{_format_ms(r.mcp.latency_ms)}",
                     r.verdict,
                 ]
             )
@@ -504,6 +504,16 @@ def _print_summary(results: list[CaseResult], skip_baseline: bool) -> None:
         f"  Ours avg accuracy: {ours_acc:.2f}  |  avg cost: {_format_cost(ours_cost)}"
         f"  |  avg latency: {_format_ms(int(ours_latency))}"
     )
+
+    _breaches = collect_latency_breaches(results)
+    if _breaches:
+        print(f"  Latency budget breaches: {len(_breaches)}/{total}")
+        for b in _breaches:
+            ratio = f", {b.ours_over_mcp_ratio}x mcp" if b.ours_over_mcp_ratio is not None else ""
+            print(
+                f"    ⚠ {b.case_id}: {_format_ms(b.ours_latency_ms)} "
+                f"> {_format_ms(b.budget_ms)} budget{ratio}"
+            )
 
     if skip_baseline:
         errors = [r for r in results if not r.ours.success]
