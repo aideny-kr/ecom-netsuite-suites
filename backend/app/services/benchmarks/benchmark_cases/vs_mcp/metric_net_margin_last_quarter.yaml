@@ -53,6 +53,10 @@ max_latency_ms: 120000
 # result and calls scorer.assert_computed_value_absent(). Hard fail (0.0) if
 # any value leaks verbatim into the LLM prose.
 computed_value_absent: true
+# NEW-4a routing-identity: the agent must compute the SPECIFIC net_margin metric
+# (not just any metric). The key is matched against the data_table's `query` field
+# which metric_compute sets to the metric key.
+expected_metric_key: net_margin
 # Baseline: Claude+MCP has no metric_compute tool; it would compute net
 # margin via ad-hoc SuiteQL (income / revenue). baseline_expected_tools
 # is empty because the Oracle MCP suite has no catalog compute tool.

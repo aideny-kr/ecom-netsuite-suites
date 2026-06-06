@@ -106,6 +106,12 @@ class Case:
     # does NOT appear verbatim in the model's text answer (anti-hallucination
     # invariant). Hard-fails the case (score = 0.0) on violation.
     computed_value_absent: bool = False
+    # NEW-4a: when set, the runner enforces routing IDENTITY — the specific
+    # named metric (identified by its key in the data_table's `query` field)
+    # must appear in the metric_data_tables. If only unrelated metrics were
+    # computed, the gate hard-fails with a routing-identity reason.
+    # When None (default), the existing "any metric table" behavior is kept.
+    expected_metric_key: str | None = None
 
 
 def _load_case_file(path: Path) -> Case:
@@ -123,6 +129,7 @@ def _load_case_file(path: Path) -> Case:
         baseline_expected_tools=data.get("baseline_expected_tools", []),
         baseline_expected_accuracy=float(data.get("baseline_expected_accuracy", 0.7)),
         computed_value_absent=bool(data.get("computed_value_absent", False)),
+        expected_metric_key=data.get("expected_metric_key") or None,
     )
 
 
@@ -405,24 +412,68 @@ async def _run_single_case(
                     answer_preview=ours_side.answer_preview,
                 )
             else:
-                value_absent_ok = assert_computed_value_absent(agent_result.answer_text, computed_values)
-                if not value_absent_ok:
-                    # NEW-4b: a numeric variant of the computed value leaked into
-                    # the answer — SSE interception was bypassed. Hard-fail.
-                    violation_reason = (
-                        f"computed_value_absent violated: a numeric variant of "
-                        f"'{computed_values[0]}' appeared in the answer"
-                    )
-                    print(f"    [NEW-4b] HARD FAIL: {violation_reason}")
-                    ours_side = SideScore(
-                        answer_acc=0.0,
-                        tool_acc=ours_side.tool_acc,
-                        cost_usd=ours_side.cost_usd,
-                        latency_ms=ours_side.latency_ms,
-                        success=False,
-                        error=violation_reason,
-                        answer_preview=ours_side.answer_preview,
-                    )
+                # NEW-4a routing-identity check: when expected_metric_key is set,
+                # enforce that the SPECIFIC blessed metric was computed — not just
+                # "any metric table". The key is read from each data_table's `query`
+                # field (metric_compute sets query = the metric key). If no table
+                # matches, hard-fail: the agent may have answered via an unrelated
+                # metric then used ad-hoc SuiteQL for the actual answer.
+                if case.expected_metric_key:
+                    computed_keys = {str(t.get("query", "")).strip() for t in (agent_result.metric_data_tables or [])}
+                    if case.expected_metric_key not in computed_keys:
+                        identity_reason = (
+                            f"expected metric '{case.expected_metric_key}' was not computed "
+                            f"(routing identity not satisfied); "
+                            f"computed metric keys: {sorted(computed_keys) or '(none)'}"
+                        )
+                        print(f"    [NEW-4a] HARD FAIL: {identity_reason}")
+                        ours_side = SideScore(
+                            answer_acc=0.0,
+                            tool_acc=ours_side.tool_acc,
+                            cost_usd=ours_side.cost_usd,
+                            latency_ms=ours_side.latency_ms,
+                            success=False,
+                            error=identity_reason,
+                            answer_preview=ours_side.answer_preview,
+                        )
+                    else:
+                        value_absent_ok = assert_computed_value_absent(agent_result.answer_text, computed_values)
+                        if not value_absent_ok:
+                            # NEW-4b: a numeric variant of the computed value leaked into
+                            # the answer — SSE interception was bypassed. Hard-fail.
+                            violation_reason = (
+                                f"computed_value_absent violated: a numeric variant of "
+                                f"'{computed_values[0]}' appeared in the answer"
+                            )
+                            print(f"    [NEW-4b] HARD FAIL: {violation_reason}")
+                            ours_side = SideScore(
+                                answer_acc=0.0,
+                                tool_acc=ours_side.tool_acc,
+                                cost_usd=ours_side.cost_usd,
+                                latency_ms=ours_side.latency_ms,
+                                success=False,
+                                error=violation_reason,
+                                answer_preview=ours_side.answer_preview,
+                            )
+                else:
+                    value_absent_ok = assert_computed_value_absent(agent_result.answer_text, computed_values)
+                    if not value_absent_ok:
+                        # NEW-4b: a numeric variant of the computed value leaked into
+                        # the answer — SSE interception was bypassed. Hard-fail.
+                        violation_reason = (
+                            f"computed_value_absent violated: a numeric variant of "
+                            f"'{computed_values[0]}' appeared in the answer"
+                        )
+                        print(f"    [NEW-4b] HARD FAIL: {violation_reason}")
+                        ours_side = SideScore(
+                            answer_acc=0.0,
+                            tool_acc=ours_side.tool_acc,
+                            cost_usd=ours_side.cost_usd,
+                            latency_ms=ours_side.latency_ms,
+                            success=False,
+                            error=violation_reason,
+                            answer_preview=ours_side.answer_preview,
+                        )
 
     # Run baseline
     if skip_baseline:

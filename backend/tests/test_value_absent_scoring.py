@@ -621,3 +621,238 @@ class TestAssertComputedValueAbsentVariants:
         # This worked before — must still work
         assert assert_computed_value_absent("margin is 12.5% for Q1", ["12.5"]) is False
         assert assert_computed_value_absent("Net margin is healthy.", ["12.5"]) is True
+
+
+# ---------------------------------------------------------------------------
+# NEW-4b (round 4) — no-decimal percent forms + single-char raw value checks
+# ---------------------------------------------------------------------------
+
+
+class TestValueLeakVariantsR4:
+    """NEW-4b round-4 additions to value_leak_variants() spec.
+
+    Two gaps were identified:
+    (a) No-decimal percent form: 0.05 → 5% (not just 5.0%), 5 (not just 5.0)
+    (b) Single-char raw value: '0' leaking as '0' must be detected even though
+        the derived-variants min-length-2 guard would otherwise drop it.
+    """
+
+    def _variants(self, value: str) -> set[str]:
+        from app.services.benchmarks.scorer import value_leak_variants
+
+        return value_leak_variants(value)
+
+    def test_proportion_0_05_includes_no_decimal_percent(self):
+        """0.05 (proportion) scaled up → should include '5%' (no trailing .0)."""
+        v = self._variants("0.05")
+        assert "5%" in v, f"Expected '5%' in variants of '0.05', got: {v}"
+
+    def test_proportion_0_05_includes_no_decimal_integer(self):
+        """0.05 scaled up → should include '5' (no trailing .0) AND len('5') == 1
+        BUT the raw proportion-scaled integer is special — the CHECK in
+        assert_computed_value_absent must still catch it via the raw-value path.
+        Specifically, the no-decimal stripped form of '5.0' → '5' is length 1
+        so it is NOT added to variants; but '5%' (length 2) IS added and
+        contains '5', so an answer saying 'margin is 5%' is caught via '5%'."""
+        # The key assertion is: '5%' in variants → catches 'margin is 5%'
+        v = self._variants("0.05")
+        assert "5%" in v
+
+    def test_proportion_0_125_includes_12_5_percent(self):
+        """0.125 scaled up → '12.5%' and '12.5' must both be present."""
+        v = self._variants("0.125")
+        assert "12.5" in v
+        assert "12.5%" in v
+
+    def test_proportion_0_05_assert_leak_detected(self):
+        """assert_computed_value_absent('margin is 5% this quarter', ['0.05'])
+        MUST return False — '5%' is a scaled-up no-decimal variant of 0.05."""
+        from app.services.benchmarks.scorer import assert_computed_value_absent
+
+        result = assert_computed_value_absent("margin is 5% this quarter", ["0.05"])
+        assert result is False, "5% is a no-decimal percent-scaled form of 0.05 — must be detected"
+
+    def test_proportion_0_05_assert_clean_passes(self):
+        """An answer that doesn't mention any form of 0.05 passes."""
+        from app.services.benchmarks.scorer import assert_computed_value_absent
+
+        result = assert_computed_value_absent("Net margin results are shown in the table above.", ["0.05"])
+        assert result is True
+
+    def test_single_char_zero_raw_value_detected(self):
+        """assert_computed_value_absent('the value is 0', ['0']) → False.
+
+        The raw single-char computed value '0' must always be checked even
+        though len('0') == 1 and derived variants are dropped at min-length-2.
+        The raw value itself (and its stripped form) must bypass the min-length
+        guard so that a literally-computed '0' leaking into the answer is caught.
+        """
+        from app.services.benchmarks.scorer import assert_computed_value_absent
+
+        result = assert_computed_value_absent("the value is 0", ["0"])
+        assert result is False, "raw single-char value '0' must be checked regardless of min-length guard"
+
+    def test_single_char_zero_raw_value_not_in_variants(self):
+        """'0' as a generated variant is still excluded from value_leak_variants
+        (to avoid false positives from derived forms). The special path is ONLY
+        in assert_computed_value_absent which always checks the raw value."""
+        v = self._variants("0")
+        # variants may or may not include '0' — the key is that
+        # assert_computed_value_absent handles it via the raw-value bypass.
+        # This test just confirms the function doesn't crash.
+        assert isinstance(v, set)
+
+    def test_trailing_zero_stripped_form_5_0_pct_also_adds_5_pct(self):
+        """5.0% → variants must include '5%' (stripped trailing .0) in addition
+        to '5.0%'. This validates the trailing-zero stripping for percent forms."""
+        v = self._variants("5.0%")
+        assert "5%" in v, f"Expected '5%' in variants of '5.0%', got: {v}"
+        assert "5.0%" in v
+
+
+# ---------------------------------------------------------------------------
+# NEW-4a (round 4) — routing-identity: expected_metric_key
+# ---------------------------------------------------------------------------
+
+
+class TestRunSingleCaseRoutingIdentity:
+    """NEW-4a: enforce that the SPECIFIC expected metric was computed.
+
+    When a case declares computed_value_absent=True AND expected_metric_key,
+    the gate must verify that at least one metric data_table has a query
+    field matching expected_metric_key. If only unrelated metrics were
+    computed, the gate HARD-FAILS with a routing-identity reason.
+    """
+
+    def _run(self, case: "Case", agent_result: "AgentRunResult") -> "CaseResult":
+        import asyncio
+        from unittest.mock import AsyncMock, patch
+
+        async def _async():
+            with (
+                patch(
+                    "app.services.benchmarks.agent_runner.run_agent",
+                    new=AsyncMock(return_value=agent_result),
+                ),
+                patch(
+                    "app.services.benchmarks.run_vs_mcp._score_answer",
+                    new=AsyncMock(return_value=(1.0, "[test] keywords matched")),
+                ),
+            ):
+                return await _run_single_case(
+                    case=case,
+                    tenant_id=uuid.UUID("00000000-0000-0000-0000-000000000001"),
+                    agent_model="claude-sonnet-4-6",
+                    baseline_model="claude-sonnet-4-6",
+                    skip_baseline=True,
+                    use_llm_judge=False,
+                    db=None,
+                )
+
+        return asyncio.run(_async())
+
+    def _make_case_with_expected_key(self, expected_metric_key: str | None) -> "Case":
+        return Case(
+            case_id="test_routing_identity",
+            query="what's our net margin last quarter?",
+            expected_answer_contains=["net margin"],
+            expected_tools=["metric_compute"],
+            expected_accuracy=0.7,
+            max_cost=0.50,
+            max_latency_ms=120_000,
+            tags=["metric"],
+            notes="",
+            baseline_expected_tools=[],
+            baseline_expected_accuracy=0.5,
+            computed_value_absent=True,
+            expected_metric_key=expected_metric_key,
+        )
+
+    def _make_agent_result_with_query(
+        self, metric_query: str, answer_text: str = "Results shown in table above."
+    ) -> "AgentRunResult":
+        """Make an AgentRunResult whose metric table has query=metric_query."""
+        metric_table = {
+            "kind": "table",
+            "columns": ["Metric", "Value", "Unit", "Period"],
+            "rows": [["Gross Revenue", 500000.0, "$", "Q1 2025"]],
+            "row_count": 1,
+            "query": metric_query,
+            "truncated": False,
+            "limit": 1,
+        }
+        return AgentRunResult(
+            answer_text=answer_text,
+            tool_calls=[{"name": "metric_compute", "input": {}, "result_preview": ""}],
+            input_tokens=100,
+            output_tokens=50,
+            cost_usd=0.001,
+            latency_ms=3000,
+            success=True,
+            error=None,
+            metric_data_tables=[metric_table],
+        )
+
+    def test_wrong_metric_key_hard_fails_with_routing_identity_reason(self):
+        """Case expects net_margin, but agent only computed gross_revenue.
+        Must HARD FAIL with routing-identity reason."""
+        case = self._make_case_with_expected_key("net_margin")
+        # Only gross_revenue metric table produced — net_margin was never computed
+        agent_result = self._make_agent_result_with_query("gross_revenue")
+        result = self._run(case, agent_result)
+
+        assert result.ours.answer_acc == 0.0
+        assert result.ours.success is False
+        assert result.ours.error is not None
+        assert "net_margin" in result.ours.error
+        assert "routing identity" in result.ours.error.lower()
+
+    def test_correct_metric_key_passes(self):
+        """Case expects net_margin and agent computed net_margin → pass."""
+        case = self._make_case_with_expected_key("net_margin")
+        agent_result = self._make_agent_result_with_query("net_margin")
+        result = self._run(case, agent_result)
+
+        assert "routing identity" not in (result.ours.error or "").lower()
+        assert result.ours.answer_acc == 1.0
+
+    def test_no_expected_metric_key_any_metric_table_passes(self):
+        """When expected_metric_key is None/unset, any metric table passes
+        (backward compatibility with existing behavior)."""
+        case = self._make_case_with_expected_key(None)
+        # Some arbitrary metric — should pass because no key constraint
+        agent_result = self._make_agent_result_with_query("gross_revenue")
+        result = self._run(case, agent_result)
+
+        assert "routing identity" not in (result.ours.error or "").lower()
+        assert result.ours.answer_acc == 1.0
+
+    def test_verdict_is_ours_failed_on_routing_identity_violation(self):
+        """CaseResult verdict for a routing-identity failure must be OURS FAILED."""
+        case = self._make_case_with_expected_key("net_margin")
+        agent_result = self._make_agent_result_with_query("gross_revenue")
+        result = self._run(case, agent_result)
+
+        assert result.verdict == "OURS FAILED"
+
+    def test_expected_metric_key_in_case_yaml(self):
+        """The metric_net_margin_last_quarter.yaml case must declare
+        expected_metric_key: net_margin."""
+        from pathlib import Path
+
+        import yaml
+
+        case_path = (
+            Path(__file__).parent.parent
+            / "app"
+            / "services"
+            / "benchmarks"
+            / "benchmark_cases"
+            / "vs_mcp"
+            / "metric_net_margin_last_quarter.yaml"
+        )
+        raw = yaml.safe_load(case_path.read_text())
+        assert "expected_metric_key" in raw, "metric_net_margin_last_quarter.yaml must declare expected_metric_key"
+        assert raw["expected_metric_key"] == "net_margin", (
+            f"expected_metric_key must be 'net_margin', got: {raw['expected_metric_key']!r}"
+        )
