@@ -142,3 +142,64 @@ class TestCliReport:
         with redirect_stdout(buf):
             _print_summary(results, skip_baseline=True)
         assert "Latency budget breaches" not in buf.getvalue()
+
+
+class TestEmitLatencyAlert:
+    def test_logs_and_captures_sentry(self):
+        import sys
+        import uuid
+        from unittest.mock import MagicMock, patch
+
+        import app.workers.tasks.agent_benchmark_vs_mcp as task_mod
+        from app.services.benchmarks.run_vs_mcp import LatencyBreach
+
+        breaching = [LatencyBreach("slow", 92_000, 60_000, 45_000, 2.04)]
+        fake_sentry = MagicMock()
+        with (
+            patch.object(task_mod, "logger") as mock_logger,
+            patch.dict(sys.modules, {"sentry_sdk": fake_sentry}),
+        ):
+            task_mod._emit_latency_alert(
+                tenant_id=uuid.UUID("ce3dfaad-626f-4992-84e9-500c8291ca0a"),
+                breaching=breaching,
+            )
+        # structured ERROR log on the latency channel
+        mock_logger.error.assert_called_once()
+        assert mock_logger.error.call_args.args[0] == "agent_benchmark.latency_regression_detected"
+        # Sentry best-effort capture fired
+        fake_sentry.capture_message.assert_called_once()
+        assert fake_sentry.capture_message.call_args.kwargs.get("level") == "error"
+
+
+class TestApplyLatencyStats:
+    def test_sets_flags_and_alerts_on_breach(self):
+        import uuid
+        from unittest.mock import patch
+
+        from app.workers.tasks.agent_benchmark_vs_mcp import _apply_latency_stats
+
+        results = [
+            _Result(_Case("slow", 60_000), _FullSide(latency_ms=92_000)),
+            _Result(_Case("ok", 60_000), _FullSide(latency_ms=10_000)),
+        ]
+        stats: dict = {}
+        with patch("app.workers.tasks.agent_benchmark_vs_mcp._emit_latency_alert") as mock_alert:
+            _apply_latency_stats(stats=stats, results=results, tenant_id=uuid.uuid4())
+        assert stats["latency_breaches"] == 1
+        assert stats["latency_regression_detected"] is True
+        assert stats["latency_breach_cases"] == ["slow"]
+        mock_alert.assert_called_once()
+
+    def test_no_breach_no_alert(self):
+        import uuid
+        from unittest.mock import patch
+
+        from app.workers.tasks.agent_benchmark_vs_mcp import _apply_latency_stats
+
+        results = [_Result(_Case("ok", 60_000), _FullSide(latency_ms=10_000))]
+        stats: dict = {}
+        with patch("app.workers.tasks.agent_benchmark_vs_mcp._emit_latency_alert") as mock_alert:
+            _apply_latency_stats(stats=stats, results=results, tenant_id=uuid.uuid4())
+        assert stats["latency_breaches"] == 0
+        assert stats["latency_regression_detected"] is False
+        mock_alert.assert_not_called()

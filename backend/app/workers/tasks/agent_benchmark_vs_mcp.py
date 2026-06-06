@@ -136,6 +136,7 @@ async def _run_nightly_benchmark(
     }
 
     deltas: list[float] = []
+    results: list = []  # accumulate CaseResults for the latency-breach pass
 
     async with async_session_factory() as db:
         await set_tenant_context(db, str(tenant_id))
@@ -161,6 +162,7 @@ async def _run_nightly_benchmark(
                 continue
 
             stats["cases_run"] += 1
+            results.append(result)
 
             if result.verdict == "OURS WINS":
                 stats["ours_wins"] += 1
@@ -248,6 +250,9 @@ async def _run_nightly_benchmark(
         round(yesterday_delta, 4) if yesterday_delta is not None else None
     )
 
+    # Per-case latency-budget breach pass (independent of the accuracy regression).
+    _apply_latency_stats(stats=stats, results=results, tenant_id=tenant_id)
+
     # Send email digest (daily summary + regression alert)
     try:
         from app.services.benchmark_email_service import send_benchmark_digest
@@ -328,6 +333,80 @@ def _emit_regression_alert(
             scope.set_tag("regression", "agent_vs_mcp")
             scope.set_tag("tenant_id", str(tenant_id))
             scope.set_extra("stats", stats)
+            sentry_sdk.capture_message(msg, level="error")
+    except Exception:
+        # Sentry is best-effort — never crash the task over it
+        pass
+
+    # stderr so beat/worker docker logs also surface it loudly
+    print(f"[AGENT_BENCHMARK] !!! {msg}", file=sys.stderr, flush=True)
+
+
+def _apply_latency_stats(*, stats: dict, results: list, tenant_id: uuid.UUID) -> None:
+    """Detect per-case latency breaches, record them in stats, and alert if any.
+
+    Independent of the accuracy regression — both can fire. The stats keys are read by
+    the email digest; the alert is best-effort (mirrors _emit_regression_alert).
+    """
+    from app.services.benchmarks.run_vs_mcp import collect_latency_breaches
+
+    breaches = collect_latency_breaches(results)
+    stats["latency_breaches"] = len(breaches)
+    stats["latency_breach_cases"] = [b.case_id for b in breaches]
+    stats["latency_breach_detail"] = [
+        {
+            "case_id": b.case_id,
+            "ours_latency_ms": b.ours_latency_ms,
+            "budget_ms": b.budget_ms,
+            "mcp_latency_ms": b.mcp_latency_ms,
+            "ratio": b.ours_over_mcp_ratio,
+        }
+        for b in breaches
+    ]
+    stats["latency_regression_detected"] = bool(breaches)
+    if breaches:
+        _emit_latency_alert(tenant_id=tenant_id, breaching=breaches)
+
+
+def _emit_latency_alert(*, tenant_id: uuid.UUID, breaching: list) -> None:
+    """Loud-fail a per-case latency-budget breach: structured log + Sentry + stderr.
+
+    Mirrors _emit_regression_alert. Payload hygiene: case_ids + latencies + budgets +
+    ratio ONLY — never queries, answer previews, tool calls, or raw stats.
+    """
+    detail = [
+        {
+            "case_id": b.case_id,
+            "ours_latency_ms": b.ours_latency_ms,
+            "budget_ms": b.budget_ms,
+            "mcp_latency_ms": b.mcp_latency_ms,
+            "ratio": b.ours_over_mcp_ratio,
+        }
+        for b in breaching
+    ]
+    summary = ", ".join(
+        f"{b.case_id} {b.ours_latency_ms}ms>{b.budget_ms}ms"
+        f"{f' ({b.ours_over_mcp_ratio}x mcp)' if b.ours_over_mcp_ratio is not None else ''}"
+        for b in breaching
+    )
+    msg = f"AGENT VS MCP LATENCY BREACH: {len(breaching)} case(s) over budget — {summary}"
+
+    # Structured log at ERROR — surfaces in GCP Cloud Logging + log-based alerts
+    logger.error(
+        "agent_benchmark.latency_regression_detected",
+        tenant_id=str(tenant_id),
+        breach_count=len(breaching),
+        breaches=detail,
+    )
+
+    # Sentry capture (best-effort)
+    try:
+        import sentry_sdk
+
+        with sentry_sdk.push_scope() as scope:
+            scope.set_tag("regression", "agent_vs_mcp_latency")
+            scope.set_tag("tenant_id", str(tenant_id))
+            scope.set_extra("breaches", detail)
             sentry_sdk.capture_message(msg, level="error")
     except Exception:
         # Sentry is best-effort — never crash the task over it
