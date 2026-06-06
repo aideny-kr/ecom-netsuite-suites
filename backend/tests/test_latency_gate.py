@@ -204,6 +204,40 @@ class TestApplyLatencyStats:
         assert stats["latency_regression_detected"] is False
         mock_alert.assert_not_called()
 
+    def test_extra_breaches_from_crashed_slow_cases_counted(self):
+        # A case that ran slow then CRASHED has no CaseResult, so it's passed as an
+        # extra synthetic breach (grill diff Finding 1).
+        import uuid
+        from unittest.mock import patch
+
+        from app.services.benchmarks.run_vs_mcp import LatencyBreach
+        from app.workers.tasks.agent_benchmark_vs_mcp import _apply_latency_stats
+
+        extra = [LatencyBreach("crashed_slow", 95_000, 60_000, None, None)]
+        stats: dict = {}
+        with patch("app.workers.tasks.agent_benchmark_vs_mcp._emit_latency_alert") as mock_alert:
+            _apply_latency_stats(stats=stats, results=[], tenant_id=uuid.uuid4(), extra_breaches=extra)
+        assert stats["latency_breaches"] == 1
+        assert stats["latency_breach_cases"] == ["crashed_slow"]
+        mock_alert.assert_called_once()
+
+    def test_alert_failure_is_swallowed(self):
+        # An alert/Sentry failure must never sink the nightly run after its work is done
+        # (grill diff Finding 2). stats are recorded regardless.
+        import uuid
+        from unittest.mock import patch
+
+        from app.workers.tasks.agent_benchmark_vs_mcp import _apply_latency_stats
+
+        results = [_Result(_Case("slow", 60_000), _FullSide(latency_ms=92_000))]
+        stats: dict = {}
+        with patch(
+            "app.workers.tasks.agent_benchmark_vs_mcp._emit_latency_alert",
+            side_effect=RuntimeError("sentry down"),
+        ):
+            _apply_latency_stats(stats=stats, results=results, tenant_id=uuid.uuid4())  # must not raise
+        assert stats["latency_breaches"] == 1
+
 
 class TestDigestRender:
     def test_html_renders_latency_breaches(self):
