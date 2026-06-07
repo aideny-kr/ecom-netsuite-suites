@@ -215,6 +215,60 @@ async def create_test_payout(
     return payout
 
 
+async def create_test_payout_line(
+    db: AsyncSession,
+    tenant_id,
+    *,
+    payout=None,
+    source_id: str = "ch_test",
+    line_type: str = "charge",
+    amount: Decimal = Decimal("100.00"),
+    fee: Decimal = Decimal("3.00"),
+    net: Decimal | None = None,
+    currency: str = "USD",
+    description: str | None = None,
+    arrival_date: date | None = None,
+    subsidiary_id: str | None = None,
+) -> "PayoutLine":  # noqa: F821
+    """Seed a canonical ``payout_lines`` row (a Stripe charge line) for the
+    order-level recon engine.
+
+    ``OrderReconJob._fetch_charges`` JOINs ``payout_lines`` -> ``payouts`` for
+    ``arrival_date`` and extracts the order reference from ``description``. Pass an
+    existing ``payout=`` to share an arrival_date, else one is created carrying
+    ``arrival_date``. ``net`` defaults to ``amount - fee`` (a faithful canonical
+    charge line; the order engine matches on ``amount``, but the row is left
+    arithmetically correct for any future fee/net reuse). Flushes for its id.
+    """
+    from app.models.canonical import PayoutLine
+
+    if payout is not None and arrival_date is not None:
+        raise ValueError(
+            "create_test_payout_line: pass arrival_date only when payout is None "
+            "(it sets the newly-created payout's date; an existing payout keeps its own)."
+        )
+    if payout is None:
+        payout = await create_test_payout(db, tenant_id, arrival_date=arrival_date)
+    line = PayoutLine(
+        id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        dedupe_key=f"pl-{uuid.uuid4().hex}",
+        source="stripe",
+        source_id=source_id,
+        subsidiary_id=subsidiary_id,
+        payout_id=payout.id,
+        line_type=line_type,
+        amount=amount,
+        fee=fee,
+        net=net if net is not None else amount - fee,
+        currency=currency,
+        description=description,
+    )
+    db.add(line)
+    await db.flush()
+    return line
+
+
 async def create_test_netsuite_posting(
     db: AsyncSession,
     tenant_id,

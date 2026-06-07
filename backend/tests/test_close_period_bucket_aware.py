@@ -40,12 +40,19 @@ async def test_close_period_does_not_lock_needs_review_auto_matched(db, tenant_a
     r_d = await create_test_recon_result(db, tenant_a.id, run.id, status="approved", bucket=BUCKET_NEEDS_REVIEW)
     # (e) pending + needs_review → stays pending (never lockable)
     r_e = await create_test_recon_result(db, tenant_a.id, run.id, status="pending", bucket=BUCKET_NEEDS_REVIEW)
+    # (f) suggested + needs_review → stays suggested (not approved, not auto_matched).
+    #     Guards against a predicate "simplification" to `status != 'pending'` that would
+    #     silently lock a confident-but-unreviewed material discrepancy.
+    r_f = await create_test_recon_result(db, tenant_a.id, run.id, status="suggested", bucket=BUCKET_NEEDS_REVIEW)
+    # (g) pending + non-needs_review (auto_classifications) → stays pending. Guards against
+    #     a lock branch keyed on bucket!='needs_review' that would lock an unreviewed pending line.
+    r_g = await create_test_recon_result(db, tenant_a.id, run.id, status="pending", bucket="auto_classifications")
     await db.flush()
 
     resp = await close_period("2026-04", user=user, db=db)
 
     # Refresh each row from the DB to read the persisted status.
-    for r in (r_a, r_b, r_c, r_d, r_e):
+    for r in (r_a, r_b, r_c, r_d, r_e, r_f, r_g):
         await db.refresh(r)
 
     assert r_a.status == "locked"  # approved + matches
@@ -53,6 +60,8 @@ async def test_close_period_does_not_lock_needs_review_auto_matched(db, tenant_a
     assert r_c.status == "auto_matched"  # auto_matched + needs_review — NOT locked
     assert r_d.status == "locked"  # approved + needs_review (human-approved)
     assert r_e.status == "pending"  # pending + needs_review — untouched
+    assert r_f.status == "suggested"  # suggested + needs_review — never lockable
+    assert r_g.status == "pending"  # pending + non-needs_review — never lockable
 
     # Transparency: exactly one line (c) was left for review.
     assert resp["results_left_for_review"] == 1
