@@ -236,8 +236,9 @@ async def create_test_payout_line(
     ``OrderReconJob._fetch_charges`` JOINs ``payout_lines`` -> ``payouts`` for
     ``arrival_date`` and extracts the order reference from ``description``. Pass an
     existing ``payout=`` to share an arrival_date, else one is created carrying
-    ``arrival_date``. ``net`` defaults to ``amount`` (unused by order matching, but
-    NOT NULL). Flushes for its id.
+    ``arrival_date``. ``net`` defaults to ``amount - fee`` (a faithful canonical
+    charge line; the order engine matches on ``amount``, but the row is left
+    arithmetically correct for any future fee/net reuse). Flushes for its id.
     """
     from app.models.canonical import PayoutLine
 
@@ -254,7 +255,7 @@ async def create_test_payout_line(
         line_type=line_type,
         amount=amount,
         fee=fee,
-        net=net if net is not None else amount,
+        net=net if net is not None else amount - fee,
         currency=currency,
         description=description,
     )
@@ -311,19 +312,12 @@ async def create_test_recon_run(
     *,
     status: str = "completed",
     parameters: dict | None = None,
-    date_from: date = date(2026, 4, 20),
-    date_to: date = date(2026, 4, 24),
 ) -> ReconciliationRun:
-    """Create a ReconciliationRun for tests. Flushes so its id is available for results.
-
-    ``date_from``/``date_to`` default to a single-month (April 2026) window so
-    ``close_period('2026-04')`` selects the run; pass an explicit window to close a
-    different period.
-    """
+    """Create a ReconciliationRun for tests. Flushes so its id is available for results."""
     run = ReconciliationRun(
         tenant_id=tenant_id,
-        date_from=date_from,
-        date_to=date_to,
+        date_from=date(2026, 4, 20),
+        date_to=date(2026, 4, 24),
         status=status,
         total_payouts=0,
         total_deposits=0,
