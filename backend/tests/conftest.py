@@ -242,6 +242,11 @@ async def create_test_payout_line(
     """
     from app.models.canonical import PayoutLine
 
+    if payout is not None and arrival_date is not None:
+        raise ValueError(
+            "create_test_payout_line: pass arrival_date only when payout is None "
+            "(it sets the newly-created payout's date; an existing payout keeps its own)."
+        )
     if payout is None:
         payout = await create_test_payout(db, tenant_id, arrival_date=arrival_date)
     line = PayoutLine(

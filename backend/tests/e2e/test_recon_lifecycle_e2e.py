@@ -19,7 +19,8 @@ is material. (The factory lock-matrix across all (status,bucket) combos is alrea
 covered by the unit test ``tests/test_close_period_bucket_aware.py``; this e2e adds
 engine provenance + the HTTP path + the both-routes post-close freeze.)
 
-Invariants (see docs/superpowers/plans/2026-06-05-recon-e2e-phase2.md):
+Invariants (authoritative list is inline below; design rationale lives in the
+gitignored plan docs/superpowers/plans/2026-06-05-recon-e2e-phase2.md):
   I1 engine persists correct buckets + run rollup counts
   I2 per-line audit exactly once (single + bulk, sharing correlation_id)
   I3 no NetSuite auto-post on approve/close
