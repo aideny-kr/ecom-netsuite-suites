@@ -144,6 +144,7 @@ JOIN transactionline tl ON tl.transaction = t.id
 WHERE t.type = 'SalesOrd'
   AND t.status NOT IN ('C', 'H')
   AND sa.country IN ('NO', 'CH', 'NZ', 'SG')
+  AND t.trandate >= TRUNC(SYSDATE) - 365  -- bound the heavy address join (all-time → 60s timeout)
   AND tl.mainline = 'F'
   AND tl.taxline = 'F'
   AND (tl.iscogs = 'F' OR tl.iscogs IS NULL)
@@ -156,7 +157,8 @@ FETCH FIRST 100 ROWS ONLY
 ### Critical details
 
 - **Join key is `sa.nKey = t.shippingAddress`** — NOT `sa.recordOwner = t.id`, NOT `sa.transaction = t.id`, NOT `sa.id = t.shippingAddress`. These three wrong keys cause silent 0-row results.
-- Use `BUILTIN.DF(sa.country)` for display name ("Switzerland"), `sa.country` for 2-letter ISO code ("CH"). Both work; prefer `BUILTIN.DF` for the output label and raw code for the filter predicate.
+- Use `BUILTIN.DF(sa.country)` ONLY for the display label ("Switzerland") and the raw `sa.country` ISO code ("CH") for the FILTER predicate. NEVER filter with `BUILTIN.DF(sa.country)` in a WHERE — it is a per-row function that defeats the index and forces a full scan → 60s timeout on large accounts (2026-06).
+- **Date-scope the address join** — these joins are HEAVY; an all-time scan TIMES OUT (60s) on large accounts. Always add a `t.trandate >= ...` predicate (and `FETCH FIRST N ROWS ONLY`) unless the user explicitly needs all-time history.
 - Do NOT use custom body fields (`custbody*_ship_country*`, `custbody*_country*`) for country queries. The standard address join is the source of truth — custbody fields are stale or tenant-specific.
 - Single-letter status codes (`'C'`, `'H'`) — never compound codes (`'SalesOrd:C'`), which silently match nothing.
 - Standard transactionline revenue filters apply (`mainline='F'`, `taxline='F'`, `iscogs='F' OR NULL`, `assemblycomponent='F'`) to avoid double-counting and exclude tax/COGS/kit-component lines.
