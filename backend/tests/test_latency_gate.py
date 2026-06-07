@@ -1,9 +1,11 @@
-"""Tests for the vs-MCP per-case latency gate (#2).
+"""Tests for the vs-MCP per-case latency monitor (#2).
 
-The gate flags any case whose live latency exceeds its per-case budget
-(Case.max_latency_ms). NOT success-gated, so it catches timeouts — the founding
-2026-06 ship-to-country incident was a timeout (a failure), which a success-gated
-check would have missed.
+ADVISORY by design: this is a nightly monitor (Sentry/log/email alert + CLI report),
+NOT a CI gate — it never fails CI or changes a verdict. Latency is noisy, and a true
+timeout already fails CI independently (success=False → OURS FAILED). It flags any case
+whose live latency exceeds its per-case budget (Case.max_latency_ms), NOT success-gated
+so it catches timeouts — the founding 2026-06 ship-to-country incident was a timeout
+(a failure), which a success-gated check would have missed.
 """
 
 from dataclasses import dataclass
@@ -128,7 +130,7 @@ class TestCliReport:
         with redirect_stdout(buf):
             _print_summary(results, skip_baseline=True)
         out = buf.getvalue()
-        assert "Latency budget breaches: 1" in out
+        assert "Latency budget breaches (advisory): 1" in out
         assert "slow" in out
 
     def test_print_summary_no_breaches_silent(self):
@@ -204,23 +206,6 @@ class TestApplyLatencyStats:
         assert stats["latency_regression_detected"] is False
         mock_alert.assert_not_called()
 
-    def test_extra_breaches_from_crashed_slow_cases_counted(self):
-        # A case that ran slow then CRASHED has no CaseResult, so it's passed as an
-        # extra synthetic breach (grill diff Finding 1).
-        import uuid
-        from unittest.mock import patch
-
-        from app.services.benchmarks.run_vs_mcp import LatencyBreach
-        from app.workers.tasks.agent_benchmark_vs_mcp import _apply_latency_stats
-
-        extra = [LatencyBreach("crashed_slow", 95_000, 60_000, None, None)]
-        stats: dict = {}
-        with patch("app.workers.tasks.agent_benchmark_vs_mcp._emit_latency_alert") as mock_alert:
-            _apply_latency_stats(stats=stats, results=[], tenant_id=uuid.uuid4(), extra_breaches=extra)
-        assert stats["latency_breaches"] == 1
-        assert stats["latency_breach_cases"] == ["crashed_slow"]
-        mock_alert.assert_called_once()
-
     def test_alert_failure_is_swallowed(self):
         # An alert/Sentry failure must never sink the nightly run after its work is done
         # (grill diff Finding 2). stats are recorded regardless.
@@ -267,3 +252,31 @@ class TestDigestRender:
         stats = {"ours_wins": 5, "mcp_wins": 0, "ties": 0, "cases_run": 5, "avg_delta_accuracy": 0.1}
         html = _build_html_body(run_date=date(2026, 6, 5), stats=stats, regression_detected=False)
         assert "Latency budget breach" not in html
+
+    def test_subject_flags_latency_breach(self):
+        # A latency-only breach (accuracy fine) must be visible in the subject, or it's
+        # buried in the body and missed (multi-angle review Finding 7).
+        from datetime import date
+
+        from app.services.benchmark_email_service import _build_subject
+
+        stats = {
+            "ours_wins": 5,
+            "mcp_wins": 0,
+            "ties": 0,
+            "cases_run": 5,
+            "avg_delta_accuracy": 0.1,
+            "latency_breaches": 2,
+        }
+        subj = _build_subject(run_date=date(2026, 6, 7), stats=stats, regression_detected=False)
+        assert "latency" in subj.lower()
+        assert "2" in subj
+
+    def test_subject_clean_when_no_latency_breach(self):
+        from datetime import date
+
+        from app.services.benchmark_email_service import _build_subject
+
+        stats = {"ours_wins": 5, "mcp_wins": 0, "ties": 0, "cases_run": 5, "avg_delta_accuracy": 0.1}
+        subj = _build_subject(run_date=date(2026, 6, 7), stats=stats, regression_detected=False)
+        assert "latency" not in subj.lower()

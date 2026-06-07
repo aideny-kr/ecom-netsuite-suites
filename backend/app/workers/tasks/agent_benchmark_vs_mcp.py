@@ -24,7 +24,6 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
-import time
 import uuid
 from datetime import date, timedelta
 
@@ -99,7 +98,6 @@ async def _run_nightly_benchmark(
     from app.services.benchmarks.baseline_runner import run_baseline
     from app.services.benchmarks.persistence import persist_case_result
     from app.services.benchmarks.run_vs_mcp import (
-        LatencyBreach,
         _run_single_case,
         load_cases,
     )
@@ -139,7 +137,6 @@ async def _run_nightly_benchmark(
 
     deltas: list[float] = []
     results: list = []  # accumulate CaseResults for the latency-breach pass
-    crashed_slow: list = []  # synthetic breaches for cases that ran slow then crashed
 
     async with async_session_factory() as db:
         await set_tenant_context(db, str(tenant_id))
@@ -149,7 +146,6 @@ async def _run_nightly_benchmark(
                 f"[AGENT_BENCHMARK] [{i}/{len(cases)}] {case.case_id}",
                 flush=True,
             )
-            _t0 = time.monotonic()
             try:
                 result = await _run_single_case(
                     case=case,
@@ -161,21 +157,14 @@ async def _run_nightly_benchmark(
                     db=db,
                 )
             except Exception as exc:
-                # A case that ran slow then crashed has no CaseResult to inspect; record
-                # its wall-clock as a synthetic latency breach so slowness isn't lost.
-                _elapsed_ms = int((time.monotonic() - _t0) * 1000)
-                print(f"[AGENT_BENCHMARK] case crashed after {_elapsed_ms}ms: {exc}", flush=True)
+                # No synthetic latency breach here: _run_single_case catches agent runs
+                # internally and always returns a CaseResult (incl. the 180s timeout path),
+                # so this outer except only fires AFTER the agent run (ours-scoring /
+                # baseline / verdict). The elapsed wall-clock would span ours+baseline+
+                # scoring, not the agent — attributing it as an ours-only latency breach
+                # misreports a slow baseline as our regression (multi-angle review).
+                print(f"[AGENT_BENCHMARK] case crashed: {exc}", flush=True)
                 stats["failures"] += 1
-                if _elapsed_ms > case.max_latency_ms > 0:
-                    crashed_slow.append(
-                        LatencyBreach(
-                            case_id=case.case_id,
-                            ours_latency_ms=_elapsed_ms,
-                            budget_ms=case.max_latency_ms,
-                            mcp_latency_ms=None,
-                            ours_over_mcp_ratio=None,
-                        )
-                    )
                 continue
 
             stats["cases_run"] += 1
@@ -265,8 +254,8 @@ async def _run_nightly_benchmark(
 
     stats["yesterday_delta"] = round(yesterday_delta, 4) if yesterday_delta is not None else None
 
-    # Per-case latency-budget breach pass (independent of the accuracy regression).
-    _apply_latency_stats(stats=stats, results=results, tenant_id=tenant_id, extra_breaches=crashed_slow)
+    # Per-case latency-budget breach pass (advisory monitor; independent of accuracy).
+    _apply_latency_stats(stats=stats, results=results, tenant_id=tenant_id)
 
     # Send email digest (daily summary + regression alert)
     try:
@@ -357,31 +346,20 @@ def _emit_regression_alert(
     print(f"[AGENT_BENCHMARK] !!! {msg}", file=sys.stderr, flush=True)
 
 
-def _apply_latency_stats(
-    *, stats: dict, results: list, tenant_id: uuid.UUID, extra_breaches: list | None = None
-) -> None:
+def _apply_latency_stats(*, stats: dict, results: list, tenant_id: uuid.UUID) -> None:
     """Detect per-case latency breaches, record them in stats, and alert if any.
 
-    ``extra_breaches`` carries synthetic breaches for cases that ran slow then CRASHED
-    inside _run_single_case (no CaseResult to inspect) — so a slow case is caught whether
-    it succeeded, timed out, OR crashed (the "not success-gated" contract). Independent of
-    the accuracy regression — both can fire. stats keys are read by the email digest.
+    ADVISORY by design: this is a nightly *monitor*, not a CI gate. A breach raises a
+    Sentry/log/email alert but does NOT fail CI or change any verdict — latency is a
+    noisy signal, and a true timeout already fails CI independently (success=False →
+    OURS FAILED). Independent of the accuracy regression — both can fire. stats keys are
+    read by the email digest.
     """
     from app.services.benchmarks.run_vs_mcp import collect_latency_breaches
 
-    breaches = collect_latency_breaches(results) + list(extra_breaches or [])
+    breaches = collect_latency_breaches(results)
     stats["latency_breaches"] = len(breaches)
     stats["latency_breach_cases"] = [b.case_id for b in breaches]
-    stats["latency_breach_detail"] = [
-        {
-            "case_id": b.case_id,
-            "ours_latency_ms": b.ours_latency_ms,
-            "budget_ms": b.budget_ms,
-            "mcp_latency_ms": b.mcp_latency_ms,
-            "ratio": b.ours_over_mcp_ratio,
-        }
-        for b in breaches
-    ]
     stats["latency_regression_detected"] = bool(breaches)
     if breaches:
         # Best-effort: an alert failure must never sink the nightly run after its work.

@@ -57,7 +57,19 @@ def send_benchmark_digest(
         logger.warning("benchmark_email.not_configured", reason="BENCHMARK_ALERT_EMAIL_TO not set")
         return False
 
-    # Build subject
+    subject = _build_subject(run_date=run_date, stats=stats, regression_detected=regression_detected)
+
+    # Build HTML body
+    body = _build_html_body(
+        run_date=run_date,
+        stats=stats,
+        regression_detected=regression_detected,
+    )
+
+    return _send_email(config, subject, body)
+
+
+def _build_subject(*, run_date: date, stats: dict, regression_detected: bool) -> str:
     ours_wins = stats.get("ours_wins", 0)
     mcp_wins = stats.get("mcp_wins", 0)
     ties = stats.get("ties", 0)
@@ -71,14 +83,12 @@ def send_benchmark_digest(
     else:
         subject = f"✅ Agent Benchmark {run_date}: {ours_wins} wins, {ties} ties — beating MCP (Δ {avg_delta:+.2f})"
 
-    # Build HTML body
-    body = _build_html_body(
-        run_date=run_date,
-        stats=stats,
-        regression_detected=regression_detected,
-    )
-
-    return _send_email(config, subject, body)
+    # A latency breach can occur even when accuracy is green — surface it in the subject
+    # so the advisory signal isn't buried in the body.
+    latency_breaches = stats.get("latency_breaches", 0)
+    if latency_breaches:
+        subject += f" · ⚠ {latency_breaches} latency breach{'es' if latency_breaches != 1 else ''}"
+    return subject
 
 
 def _build_html_body(*, run_date: date, stats: dict, regression_detected: bool) -> str:

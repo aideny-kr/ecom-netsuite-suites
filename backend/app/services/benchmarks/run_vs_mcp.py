@@ -508,7 +508,9 @@ def _print_summary(results: list[CaseResult], skip_baseline: bool) -> None:
 
     _breaches = collect_latency_breaches(results)
     if _breaches:
-        print(f"  Latency budget breaches: {len(_breaches)}/{total}")
+        # Advisory only — does NOT affect the exit code (latency is noisy; a true timeout
+        # already fails via the OURS FAILED verdict).
+        print(f"  Latency budget breaches (advisory): {len(_breaches)}/{total}")
         for b in _breaches:
             ratio = f", {b.ours_over_mcp_ratio}x mcp" if b.ours_over_mcp_ratio is not None else ""
             print(f"    ⚠ {b.case_id}: {_format_ms(b.ours_latency_ms)} > {_format_ms(b.budget_ms)} budget{ratio}")
