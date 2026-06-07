@@ -38,7 +38,10 @@ expected_tools:
   - "netsuite_suiteql"
 expected_accuracy: 0.8
 max_cost: 0.50
-max_latency_ms: 120000
+# Budget: 90s — generous margin over the measured ~32s/772-row 12-month address-join
+# scan (2026-06). Conservative on purpose; tighten to p95 once nightly latency data
+# accumulates (calibration deferred — see spec). Hard agent timeout is 180s.
+max_latency_ms: 90000
 # Baseline fields for vs-MCP comparison
 baseline_expected_accuracy: 0.8
 baseline_expected_tools:

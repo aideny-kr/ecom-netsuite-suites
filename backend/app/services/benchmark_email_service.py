@@ -57,7 +57,19 @@ def send_benchmark_digest(
         logger.warning("benchmark_email.not_configured", reason="BENCHMARK_ALERT_EMAIL_TO not set")
         return False
 
-    # Build subject
+    subject = _build_subject(run_date=run_date, stats=stats, regression_detected=regression_detected)
+
+    # Build HTML body
+    body = _build_html_body(
+        run_date=run_date,
+        stats=stats,
+        regression_detected=regression_detected,
+    )
+
+    return _send_email(config, subject, body)
+
+
+def _build_subject(*, run_date: date, stats: dict, regression_detected: bool) -> str:
     ours_wins = stats.get("ours_wins", 0)
     mcp_wins = stats.get("mcp_wins", 0)
     ties = stats.get("ties", 0)
@@ -71,14 +83,12 @@ def send_benchmark_digest(
     else:
         subject = f"✅ Agent Benchmark {run_date}: {ours_wins} wins, {ties} ties — beating MCP (Δ {avg_delta:+.2f})"
 
-    # Build HTML body
-    body = _build_html_body(
-        run_date=run_date,
-        stats=stats,
-        regression_detected=regression_detected,
-    )
-
-    return _send_email(config, subject, body)
+    # A latency breach can occur even when accuracy is green — surface it in the subject
+    # so the advisory signal isn't buried in the body.
+    latency_breaches = stats.get("latency_breaches", 0)
+    if latency_breaches:
+        subject += f" · ⚠ {latency_breaches} latency breach{'es' if latency_breaches != 1 else ''}"
+    return subject
 
 
 def _build_html_body(*, run_date: date, stats: dict, regression_detected: bool) -> str:
@@ -89,6 +99,8 @@ def _build_html_body(*, run_date: date, stats: dict, regression_detected: bool) 
     total = stats.get("cases_total", 0) or stats.get("cases_run", 0)
     avg_delta = stats.get("avg_delta_accuracy", 0.0)
     yesterday_delta = stats.get("yesterday_delta")
+    latency_breaches = stats.get("latency_breaches", 0)
+    latency_cases = stats.get("latency_breach_cases", [])
 
     # Colors
     delta_color = "#22c55e" if avg_delta >= 0 else "#ef4444"
@@ -115,10 +127,19 @@ def _build_html_body(*, run_date: date, stats: dict, regression_detected: bool) 
             Investigate immediately.
         </div>"""
 
+    latency_banner = ""
+    if latency_breaches:
+        latency_banner = f"""
+        <div style="background:#b45309;color:white;padding:16px;border-radius:8px;margin-bottom:16px;font-size:15px;">
+            ⚠️ Latency budget breach — {latency_breaches} case(s) over their time budget:
+            {", ".join(latency_cases)}
+        </div>"""
+
     return f"""
     <html>
     <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
         {regression_banner}
+        {latency_banner}
         <div style="background: {bg_color}; border-radius: 12px; padding: 24px; margin-bottom: 16px;">
             <h2 style="color: {header_color}; margin: 0 0 16px 0;">
                 Agent vs MCP Benchmark — {run_date}

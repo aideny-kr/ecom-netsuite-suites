@@ -136,6 +136,7 @@ async def _run_nightly_benchmark(
     }
 
     deltas: list[float] = []
+    results: list = []  # accumulate CaseResults for the latency-breach pass
 
     async with async_session_factory() as db:
         await set_tenant_context(db, str(tenant_id))
@@ -156,11 +157,18 @@ async def _run_nightly_benchmark(
                     db=db,
                 )
             except Exception as exc:
+                # No synthetic latency breach here: _run_single_case catches agent runs
+                # internally and always returns a CaseResult (incl. the 180s timeout path),
+                # so this outer except only fires AFTER the agent run (ours-scoring /
+                # baseline / verdict). The elapsed wall-clock would span ours+baseline+
+                # scoring, not the agent — attributing it as an ours-only latency breach
+                # misreports a slow baseline as our regression (multi-angle review).
                 print(f"[AGENT_BENCHMARK] case crashed: {exc}", flush=True)
                 stats["failures"] += 1
                 continue
 
             stats["cases_run"] += 1
+            results.append(result)
 
             if result.verdict == "OURS WINS":
                 stats["ours_wins"] += 1
@@ -244,9 +252,10 @@ async def _run_nightly_benchmark(
     else:
         stats["regression_detected"] = False
 
-    stats["yesterday_delta"] = (
-        round(yesterday_delta, 4) if yesterday_delta is not None else None
-    )
+    stats["yesterday_delta"] = round(yesterday_delta, 4) if yesterday_delta is not None else None
+
+    # Per-case latency-budget breach pass (advisory monitor; independent of accuracy).
+    _apply_latency_stats(stats=stats, results=results, tenant_id=tenant_id)
 
     # Send email digest (daily summary + regression alert)
     try:
@@ -328,6 +337,77 @@ def _emit_regression_alert(
             scope.set_tag("regression", "agent_vs_mcp")
             scope.set_tag("tenant_id", str(tenant_id))
             scope.set_extra("stats", stats)
+            sentry_sdk.capture_message(msg, level="error")
+    except Exception:
+        # Sentry is best-effort — never crash the task over it
+        pass
+
+    # stderr so beat/worker docker logs also surface it loudly
+    print(f"[AGENT_BENCHMARK] !!! {msg}", file=sys.stderr, flush=True)
+
+
+def _apply_latency_stats(*, stats: dict, results: list, tenant_id: uuid.UUID) -> None:
+    """Detect per-case latency breaches, record them in stats, and alert if any.
+
+    ADVISORY by design: this is a nightly *monitor*, not a CI gate. A breach raises a
+    Sentry/log/email alert but does NOT fail CI or change any verdict — latency is a
+    noisy signal, and a true timeout already fails CI independently (success=False →
+    OURS FAILED). Independent of the accuracy regression — both can fire. stats keys are
+    read by the email digest.
+    """
+    from app.services.benchmarks.run_vs_mcp import collect_latency_breaches
+
+    breaches = collect_latency_breaches(results)
+    stats["latency_breaches"] = len(breaches)
+    stats["latency_breach_cases"] = [b.case_id for b in breaches]
+    stats["latency_regression_detected"] = bool(breaches)
+    if breaches:
+        # Best-effort: an alert failure must never sink the nightly run after its work.
+        try:
+            _emit_latency_alert(tenant_id=tenant_id, breaching=breaches)
+        except Exception as exc:  # pragma: no cover - defensive
+            print(f"[AGENT_BENCHMARK] latency alert failed (non-fatal): {exc}", file=sys.stderr, flush=True)
+
+
+def _emit_latency_alert(*, tenant_id: uuid.UUID, breaching: list) -> None:
+    """Loud-fail a per-case latency-budget breach: structured log + Sentry + stderr.
+
+    Mirrors _emit_regression_alert. Payload hygiene: case_ids + latencies + budgets +
+    ratio ONLY — never queries, answer previews, tool calls, or raw stats.
+    """
+    detail = [
+        {
+            "case_id": b.case_id,
+            "ours_latency_ms": b.ours_latency_ms,
+            "budget_ms": b.budget_ms,
+            "mcp_latency_ms": b.mcp_latency_ms,
+            "ratio": b.ours_over_mcp_ratio,
+        }
+        for b in breaching
+    ]
+    summary = ", ".join(
+        f"{b.case_id} {b.ours_latency_ms}ms>{b.budget_ms}ms"
+        f"{f' ({b.ours_over_mcp_ratio}x mcp)' if b.ours_over_mcp_ratio is not None else ''}"
+        for b in breaching
+    )
+    msg = f"AGENT VS MCP LATENCY BREACH: {len(breaching)} case(s) over budget — {summary}"
+
+    # Structured log at ERROR — surfaces in GCP Cloud Logging + log-based alerts
+    logger.error(
+        "agent_benchmark.latency_regression_detected",
+        tenant_id=str(tenant_id),
+        breach_count=len(breaching),
+        breaches=detail,
+    )
+
+    # Sentry capture (best-effort)
+    try:
+        import sentry_sdk
+
+        with sentry_sdk.push_scope() as scope:
+            scope.set_tag("regression", "agent_vs_mcp_latency")
+            scope.set_tag("tenant_id", str(tenant_id))
+            scope.set_extra("breaches", detail)
             sentry_sdk.capture_message(msg, level="error")
     except Exception:
         # Sentry is best-effort — never crash the task over it
