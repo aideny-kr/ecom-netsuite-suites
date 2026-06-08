@@ -11,7 +11,11 @@ from app.core.database import set_tenant_context
 from app.models.metric_definition import SYSTEM_TENANT_ID, MetricDefinition
 from app.services.chat.domain_knowledge import embed_domain_query
 from app.services.metrics._embedding import embed_text as _embed_text
-from app.services.metrics.expression_evaluator import ExpressionError, extract_dependencies
+from app.services.metrics.expression_evaluator import (
+    ExpressionError,
+    extract_dependencies,
+    validate_expression_operators,
+)
 from app.services.metrics.system_tenant import ensure_system_tenant
 
 _SINGLE_SOURCE_KEYS = {"query", "dialect"}
@@ -120,6 +124,10 @@ def validate_definition(d: dict, *, allowed_cross_source_keys: set[str] | None =
             raise AuthoringError("expression metrics need expression + depends_on")
         try:
             deps = set(extract_dependencies(expr))
+            # Reject operators/nodes compute can't evaluate (** % // comparisons, etc.):
+            # without this an expression metric persists 'active' yet raises on every
+            # compute — a blessed-but-uncomputable metric (T2 gate, MAJOR).
+            validate_expression_operators(expr)
         except ExpressionError as ex:
             raise AuthoringError(str(ex)) from ex
         if d["key"] in deps:

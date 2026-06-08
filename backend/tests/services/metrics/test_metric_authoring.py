@@ -50,6 +50,48 @@ def test_accepts_valid_expression():
     )
 
 
+def test_rejects_expression_with_disallowed_operator():
+    """REAL author-time invariant (T2 multi-angle gate, MAJOR). validate_definition for
+    expression metrics checked the dependency NAMES (extract_dependencies) but never the
+    OPERATOR allowlist that evaluate_expression enforces at compute time (+ - * / plus
+    unary minus / numeric constants / names). So an expression using **, %, //, or a
+    comparison passed validation and persisted status='active', then raised
+    ExpressionError('disallowed token: ...') on EVERY compute — a blessed, 'active' metric
+    that can never produce a number, defeating the catalog's author-time computability
+    guarantee. validate_definition MUST reject any expression whose nodes/operators
+    evaluate_expression cannot evaluate.
+
+    Pre-fix this PASSES (only deps were checked); post-fix it raises AuthoringError."""
+    for bad_expr in [
+        "net_income ** gross_revenue",  # power
+        "net_income % gross_revenue",  # modulo
+        "net_income // gross_revenue",  # floor-div
+    ]:
+        with pytest.raises(AuthoringError):
+            validate_definition(
+                {
+                    "key": "net_margin_v2",
+                    "source_kind": "expression",
+                    "expression": bad_expr,
+                    "depends_on": ["net_income", "gross_revenue"],
+                }
+            )
+
+
+def test_accepts_expression_with_allowed_operators_only():
+    """Guard against over-rejection: the operator allowlist must still accept the four
+    blessed arithmetic ops (+ - * /), grouping parens, unary minus, and numeric constants
+    — so a legitimate expression like '(a - b) / 2' is not falsely rejected."""
+    validate_definition(
+        {
+            "key": "delta_per_half",
+            "source_kind": "expression",
+            "expression": "(net_income - gross_revenue) / 2",
+            "depends_on": ["net_income", "gross_revenue"],
+        }
+    )
+
+
 # ── (b) params_schema type allowlist + :param binding ──────────────────────────
 
 
