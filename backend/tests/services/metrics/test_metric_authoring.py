@@ -368,9 +368,10 @@ async def test_expression_leaf_must_be_query_backed(db):
 
     Pre-fix this PASSES (currently any active key satisfies the check); post-fix it
     raises AuthoringError with 'query-backed' in the message."""
-    from app.services.metrics.metric_authoring import AuthoringError, validate_leaves_exist
-    from app.models.metric_definition import SYSTEM_TENANT_ID, MetricDefinition
     import uuid
+
+    from app.models.metric_definition import SYSTEM_TENANT_ID, MetricDefinition
+    from app.services.metrics.metric_authoring import AuthoringError, validate_leaves_exist
 
     db.add(
         MetricDefinition(
@@ -409,9 +410,10 @@ async def test_create_metric_rejects_non_1536_embedding(db, monkeypatch):
     returns a non-1536 non-None vector.
 
     Pre-fix this PASSES (no guard); post-fix raises AuthoringError matching '1536'."""
+    import uuid
+
     from app.services.metrics import metric_authoring
     from app.services.metrics.metric_authoring import AuthoringError, create_metric
-    import uuid
 
     async def _bad_embed(_text):
         return [0.0] * 10
@@ -441,15 +443,14 @@ async def test_update_metric_rejects_non_1536_embedding(db, monkeypatch):
     rather than silently persisting a corrupted vector.
 
     Pre-fix this PASSES (no guard on update); post-fix raises AuthoringError '1536'."""
-    from app.services.metrics import metric_authoring
-    from app.services.metrics.metric_authoring import AuthoringError, create_metric, update_metric
-    from app.models.metric_definition import MetricDefinition
     import uuid
 
     # Seed a valid metric under SYSTEM_TENANT_ID so the FK constraint is satisfied
     # (create_metric calls ensure_system_tenant for SYSTEM rows). embed returns None
     # in the test env — that is explicitly allowed; only a non-None wrong-dim is rejected.
     from app.models.metric_definition import SYSTEM_TENANT_ID
+    from app.services.metrics import metric_authoring
+    from app.services.metrics.metric_authoring import AuthoringError, create_metric, update_metric
 
     metric = await create_metric(
         db,

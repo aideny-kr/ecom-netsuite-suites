@@ -8,7 +8,6 @@ from app.models.metric_definition import SYSTEM_TENANT_ID, MetricDefinition
 from app.models.tenant import Tenant
 from app.services.metrics.metric_resolver import resolve_metrics
 
-
 # ---------------------------------------------------------------------------
 # Deterministic vector helpers for M2 threshold tests
 #

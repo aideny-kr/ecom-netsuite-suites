@@ -16,8 +16,8 @@ import uuid
 
 import pytest
 
-from app.models.metric_definition import SYSTEM_TENANT_ID, MetricDefinition
 from app.mcp.tools import metric_tools
+from app.models.metric_definition import SYSTEM_TENANT_ID, MetricDefinition
 
 pytestmark = pytest.mark.asyncio
 

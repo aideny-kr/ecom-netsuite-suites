@@ -15,7 +15,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
 import yaml
 
 from app.services.benchmarks.benchmark_runner import BenchmarkCase

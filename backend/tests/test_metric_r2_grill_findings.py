@@ -12,14 +12,11 @@ from __future__ import annotations
 
 import json
 
-import pytest
-
 from app.services.chat.orchestrator import (
     _compute_source_pin_update,
     _intercept_tool_result,
 )
 from app.services.metrics.metric_compute import metric_data_table
-
 
 # ---------------------------------------------------------------------------
 # Helpers
