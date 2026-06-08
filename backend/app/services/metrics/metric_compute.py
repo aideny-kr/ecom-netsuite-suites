@@ -374,7 +374,15 @@ async def compute_metric(db: AsyncSession, *, tenant_id, key: str, params: dict,
         coerced = coerce_params(metric.params_schema or {}, params, fiscal_year_start_month=fy)
     except (ParamError, PeriodError) as ex:
         return {"error": "invalid_params", "key": key, "message": str(ex)}
-    period_label = params.get("period", "")
+    # The Period column label is the period token the caller passed. coerce_params resolves
+    # a period-type param by its SCHEMA-DECLARED name (which need not be literally "period"),
+    # so derive that name instead of hardcoding "period" — otherwise a metric that declares
+    # its period under another name (e.g. "window") renders a blank Period column.
+    _period_name = next(
+        (n for n, s in (metric.params_schema or {}).items() if isinstance(s, dict) and s.get("type") == "period"),
+        None,
+    )
+    period_label = params.get(_period_name, "") if _period_name else ""
 
     try:
         if metric.source_kind == "expression":

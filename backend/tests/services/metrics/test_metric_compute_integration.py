@@ -109,6 +109,52 @@ async def test_expression_metric_computes_as_one_row_data_table(db, tenant_a, mo
     assert round(out["rows"][0][1], 4) == 0.25
 
 
+async def test_period_label_reads_period_param_under_nonstandard_name(db, tenant_a, monkeypatch):
+    """REAL correctness invariant (T2 multi-angle gate, minor). compute_metric hardcoded
+    period_label = params.get('period', ''), but coerce_params resolves a period-type param
+    by its SCHEMA-DECLARED name (which need not be literally 'period'). A metric that
+    declares its period param under another name (e.g. 'window') computed correctly but
+    rendered a BLANK Period column — confusing the user about which period the figure
+    covers. period_label MUST be derived from the period param's declared name.
+
+    Pre-fix the Period cell is '' for the passed 'last_quarter'; post-fix it reads it."""
+    await _ensure_system_tenant(db)
+    db.add(
+        MetricDefinition(
+            tenant_id=SYSTEM_TENANT_ID,
+            key="rev_window",
+            display_name="Revenue",
+            definition="x",
+            unit="currency",
+            source_kind="suiteql",
+            blessed_spec={
+                "query": "SELECT 1 WHERE d>=:period_start AND d<=:period_end",
+                "dialect": "suiteql",
+            },
+            params_schema={"window": {"type": "period"}},  # period declared under a non-'period' name
+            status="active",
+            version=1,
+        )
+    )
+    await db.flush()
+
+    async def _fake_scalar(db, tenant_id, metric, coerced, context):
+        return 42.0
+
+    monkeypatch.setattr("app.services.metrics.metric_compute._execute_scalar_query", _fake_scalar)
+
+    out = await compute_metric(
+        db,
+        tenant_id=tenant_a.id,
+        key="rev_window",
+        params={"window": "last_quarter"},
+        context={"fiscal_year_start_month": 1},
+    )
+    assert out["columns"] == ["Metric", "Value", "Unit", "Period"]
+    # The Period cell must reflect the period value passed under its declared name 'window'.
+    assert out["rows"][0][3] == "last_quarter"
+
+
 async def test_exact_key_survives_embedding_decoy_eviction(db, tenant_a, monkeypatch):
     """Production repro: with seeded 1536-d intent_embeddings, an exact-key compute
     request must NOT be evicted by a sibling metric whose embedding ranks nearer to
