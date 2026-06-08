@@ -55,6 +55,25 @@ async def test_bigquery_join_clause_is_enforced(db, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_bigquery_comment_between_from_and_dataset_is_enforced(db, monkeypatch):
+    """R1#7 hole 4 (comment-strip bypass): the dataset-allowlist regex ran on the RAW
+    query. A SQL comment between FROM/JOIN and the table name
+    (`FROM /*x*/ secret.t`) makes the `(?:FROM|JOIN)\\s+(<id>)` regex capture the
+    comment text (or nothing), so NO dataset is extracted and an off-allowlist dataset
+    slips straight past the gate. Comments must be stripped BEFORE the dataset regex —
+    the commented form must be REJECTED exactly like the comment-free
+    `FROM secret.t`."""
+    from app.core.config import settings
+    from app.services.metrics import metric_compute
+
+    monkeypatch.setattr(settings, "BIGQUERY_ALLOWED_DATASETS", "analytics", raising=False)
+    with pytest.raises(metric_compute.ComputeError, match="secret"):
+        await metric_compute._validate_and_execute_by_source(
+            db, uuid.uuid4(), "bigquery", "SELECT x FROM /*x*/ secret.t"
+        )
+
+
+@pytest.mark.asyncio
 async def test_bigquery_allowlist_is_case_insensitive(db, monkeypatch):
     """R1#7 hole 3: lowercase `from`/`join` extracted nothing, so the allowlist was
     bypassed by simply lowercasing the keyword. Extraction must be case-insensitive

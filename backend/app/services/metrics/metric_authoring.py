@@ -424,7 +424,7 @@ def _validate_blessed_query_for_activation(source_kind: str, blessed_spec: dict 
         raise AuthoringError("cannot activate: blessed_spec has no query")
 
     if source_kind == "bigquery":
-        from app.services.bigquery_service import _validate_read_only
+        from app.services.bigquery_service import _strip_sql_comments, _validate_read_only
 
         try:
             _validate_read_only(query)
@@ -439,8 +439,12 @@ def _validate_blessed_query_for_activation(source_kind: str, blessed_spec: dict 
             d.strip().lower() for d in getattr(settings, "BIGQUERY_ALLOWED_DATASETS", "").split(",") if d.strip()
         }
         if allowed:
+            # Strip SQL comments BEFORE the dataset regex: a comment between FROM/JOIN and
+            # the table name (`FROM /*x*/ secret.t`) otherwise hides the dataset, letting
+            # an off-allowlist dataset slip past activation (mirrors metric_compute).
+            decommented = _strip_sql_comments(query)
             used: set[str] = set()
-            for ref in _re.findall(r"(?:FROM|JOIN)\s+([`A-Za-z0-9_.\-]+)", query, _re.IGNORECASE):
+            for ref in _re.findall(r"(?:FROM|JOIN)\s+([`A-Za-z0-9_.\-]+)", decommented, _re.IGNORECASE):
                 parts = [p.strip("`") for p in ref.strip("`").split(".") if p.strip("`")]
                 if len(parts) >= 2:
                     used.add(parts[-2].lower())
@@ -516,7 +520,11 @@ async def create_metric(db: AsyncSession, *, tenant_id: uuid.UUID, payload: dict
         intent_embedding=embedding,
         status="active",
         version=1,
-        provenance={"author": "tenant_admin"},
+        # Stamp provenance by grain: a SYSTEM-tenant row is authored via the superadmin
+        # POST /metrics/system path, a tenant row via the tenant-admin path. Both stay
+        # != 'system_seed' so the nightly seeder still skips superadmin-authored SYSTEM
+        # rows (it only overwrites/owns rows whose author == 'system_seed').
+        provenance={"author": "superadmin" if tenant_id == SYSTEM_TENANT_ID else "tenant_admin"},
     )
     db.add(metric)
     await db.flush()

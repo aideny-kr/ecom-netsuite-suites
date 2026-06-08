@@ -689,6 +689,104 @@ async def test_update_metric_reactivation_rejects_unsafe_bigquery_query(db, tena
         )
 
 
+async def test_update_metric_reactivation_rejects_commented_off_allowlist_bigquery_dataset(db, tenant_a, monkeypatch):
+    """MINOR #2 (comment-strip bypass at activation): the activation dataset-allowlist
+    regex ran on the RAW blessed query, so a SQL comment between FROM and the table
+    (`FROM /*x*/ secret.t`) hid the dataset and an off-allowlist dataset slipped past
+    activation. With a non-empty BIGQUERY_ALLOWED_DATASETS, activating a bigquery
+    metric whose query is `SELECT x FROM /*x*/ secret.t` must raise AuthoringError
+    (off-allowlist) — exactly like the comment-free form."""
+
+    async def _fake_embed(_text):
+        return None
+
+    monkeypatch.setattr("app.services.metrics.metric_authoring.embed_domain_query", _fake_embed)
+    from app.core.config import settings
+
+    monkeypatch.setattr(settings, "BIGQUERY_ALLOWED_DATASETS", "analytics", raising=False)
+
+    p = _kp()
+    key = f"{p}bq_commented"
+    metric = MetricDefinition(
+        tenant_id=tenant_a.id,
+        key=key,
+        display_name="BQ Commented",
+        definition="bq data",
+        unit="count",
+        source_kind="bigquery",
+        blessed_spec={"query": "SELECT x FROM /*x*/ secret.t", "dialect": "bigquery"},
+        params_schema={"period": {"type": "period"}},
+        status="draft",
+        version=1,
+        provenance={"author": "tenant_admin"},
+    )
+    db.add(metric)
+    await db.flush()
+
+    with pytest.raises(AuthoringError, match=r"(?i)off-allowlist|secret"):
+        await update_metric(
+            db,
+            tenant_id=tenant_a.id,
+            metric_id=metric.id,
+            payload={"status": "active"},
+        )
+
+
+# ── MINOR #5: create_metric provenance author stamped by grain ────────────────
+async def test_create_metric_system_grain_stamps_superadmin_author(db, monkeypatch):
+    """MINOR #5: create_metric(tenant_id=SYSTEM) is the superadmin POST /metrics/system
+    path; its provenance.author must be 'superadmin' (NOT 'tenant_admin'). It must stay
+    != 'system_seed' so the nightly seeder still skips superadmin-authored SYSTEM rows."""
+
+    async def _fake_embed(_text):
+        return None
+
+    monkeypatch.setattr("app.services.metrics.metric_authoring.embed_domain_query", _fake_embed)
+    await _ensure_system_tenant(db)
+
+    p = _kp()
+    metric = await create_metric(
+        db,
+        tenant_id=SYSTEM_TENANT_ID,
+        payload={
+            "key": f"{p}sys_metric",
+            "display_name": "Sys Metric",
+            "definition": "x",
+            "unit": "currency",
+            "source_kind": "suiteql",
+            "blessed_spec": {"query": "SELECT 1", "dialect": "suiteql"},
+            "params_schema": {},
+        },
+    )
+    assert metric.provenance["author"] == "superadmin", metric.provenance
+    assert metric.provenance["author"] != "system_seed"
+
+
+async def test_create_metric_tenant_grain_stamps_tenant_admin_author(db, tenant_a, monkeypatch):
+    """MINOR #5 (counterpart): a tenant-grain create still stamps 'tenant_admin'."""
+
+    async def _fake_embed(_text):
+        return None
+
+    monkeypatch.setattr("app.services.metrics.metric_authoring.embed_domain_query", _fake_embed)
+
+    p = _kp()
+    metric = await create_metric(
+        db,
+        tenant_id=tenant_a.id,
+        payload={
+            "key": f"{p}tenant_metric",
+            "display_name": "Tenant Metric",
+            "definition": "x",
+            "unit": "currency",
+            "source_kind": "suiteql",
+            "blessed_spec": {"query": "SELECT 1", "dialect": "suiteql"},
+            "params_schema": {},
+        },
+    )
+    assert metric.provenance["author"] == "tenant_admin", metric.provenance
+
+
 async def test_update_metric_reactivation_skipped_for_non_active_status(db, tenant_a, monkeypatch):
     """NEW-3 guard: the smoke gate only fires when the RESULTING status is 'active'.
     Updating a draft metric to 'needs_review' (or keeping it draft) must NOT trigger

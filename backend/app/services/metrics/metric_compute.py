@@ -184,7 +184,7 @@ async def _validate_and_execute_by_source(db, tenant_id, source_kind: str, query
     if source_kind == "bigquery":
         from app.core.config import settings
         from app.mcp.tools import bigquery_tools
-        from app.services.bigquery_service import _validate_read_only
+        from app.services.bigquery_service import _strip_sql_comments, _validate_read_only
 
         try:
             _validate_read_only(query)
@@ -208,8 +208,12 @@ async def _validate_and_execute_by_source(db, tenant_id, source_kind: str, query
             # 2-part ref that is the first part, for a 3-part ref the middle part (NOT the
             # project). Extracting the wrong part both over-blocks legit cross-project
             # queries and under-blocks `allowed.secret.t` style attacks.
+            # Strip SQL comments BEFORE the dataset regex: a comment between FROM/JOIN
+            # and the table name (`FROM /*x*/ secret.t`) otherwise makes the regex
+            # capture nothing, so an off-allowlist dataset slips past the gate.
+            decommented = _strip_sql_comments(query)
             used: set[str] = set()
-            for ref in re.findall(r"(?:FROM|JOIN)\s+([`A-Za-z0-9_.\-]+)", query, re.IGNORECASE):
+            for ref in re.findall(r"(?:FROM|JOIN)\s+([`A-Za-z0-9_.\-]+)", decommented, re.IGNORECASE):
                 parts = [p.strip("`") for p in ref.strip("`").split(".") if p.strip("`")]
                 if len(parts) >= 2:
                     used.add(parts[-2].lower())
