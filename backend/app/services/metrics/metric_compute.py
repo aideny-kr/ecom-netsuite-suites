@@ -361,6 +361,12 @@ async def compute_metric(db: AsyncSession, *, tenant_id, key: str, params: dict,
             }
 
     fy = int(context.get("fiscal_year_start_month", 1) or 1)
+    # Resolve "today" ONCE and thread it through every coerce_params call below (top-level +
+    # per expression leaf). coerce_params defaults today to date.today() per call, so without
+    # a shared value each leaf re-derives it — leaves executing sequentially across midnight
+    # could resolve different period windows for one ratio's numerator and denominator. Also
+    # removes the redundant per-leaf period re-resolution.
+    _today = date.today()
     # G1: param coercion is a CALLER-input gate, not a metric/schema-drift failure, so it
     # is handled separately from the ExpressionError/ComputeError path below. A bad param
     # (unknown/missing key, malformed date/enum) raises ParamError; a fabricated period
@@ -371,7 +377,7 @@ async def compute_metric(db: AsyncSession, *, tenant_id, key: str, params: dict,
     # execution (the executor is never reached) and does NOT flip the metric to needs_review
     # (the metric is fine — the caller's params were not).
     try:
-        coerced = coerce_params(metric.params_schema or {}, params, fiscal_year_start_month=fy)
+        coerced = coerce_params(metric.params_schema or {}, params, fiscal_year_start_month=fy, today=_today)
     except (ParamError, PeriodError) as ex:
         return {"error": "invalid_params", "key": key, "message": str(ex)}
     # The Period column label is the period token the caller passed. coerce_params resolves
@@ -410,7 +416,9 @@ async def compute_metric(db: AsyncSession, *, tenant_id, key: str, params: dict,
                         ),
                     }
                 try:
-                    leaf_coerced = coerce_params(dmatch.params_schema or {}, params, fiscal_year_start_month=fy)
+                    leaf_coerced = coerce_params(
+                        dmatch.params_schema or {}, params, fiscal_year_start_month=fy, today=_today
+                    )
                 except (ParamError, PeriodError) as ex:
                     return {"error": "invalid_params", "key": key, "message": str(ex)}
                 leaves[dep] = await _execute_scalar_query(

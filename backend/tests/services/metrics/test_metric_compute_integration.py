@@ -201,6 +201,81 @@ async def test_out_of_range_fiscal_year_start_month_returns_invalid_params_not_5
     assert "rows" not in out
 
 
+async def test_expression_leaves_share_one_resolved_today(db, tenant_a, monkeypatch):
+    """REAL correctness invariant (T2 multi-angle gate, minor). The expression path called
+    coerce_params per leaf, and coerce_params defaults `today` to date.today() when not
+    passed — so each leaf independently resolved 'today'. Leaves executing sequentially
+    across midnight (each gated behind the prior leaf's network round-trip) could resolve
+    the numerator and denominator over DIFFERENT period windows — a subtly inconsistent
+    ratio. compute_metric must resolve `today` ONCE and thread it through every coerce_params
+    call (also eliminating the redundant per-leaf period re-resolution).
+
+    Pre-fix: coerce_params is called with today=None (each re-derives date.today());
+    post-fix: every call receives the same resolved `today`."""
+    import app.services.metrics.metric_compute as mc
+
+    await _ensure_system_tenant(db)
+    for key in ("net_income", "gross_revenue"):
+        db.add(
+            MetricDefinition(
+                tenant_id=SYSTEM_TENANT_ID,
+                key=key,
+                display_name=key,
+                definition="x",
+                unit="currency",
+                source_kind="suiteql",
+                blessed_spec={"query": "SELECT 1", "dialect": "suiteql"},
+                params_schema={"period": {"type": "period"}},
+                status="active",
+                version=1,
+            )
+        )
+    db.add(
+        MetricDefinition(
+            tenant_id=SYSTEM_TENANT_ID,
+            key="net_margin",
+            display_name="Net Margin",
+            definition="x",
+            unit="percent",
+            source_kind="expression",
+            expression="net_income / gross_revenue",
+            depends_on=["net_income", "gross_revenue"],
+            params_schema={"period": {"type": "period"}},
+            status="active",
+            version=1,
+        )
+    )
+    await db.flush()
+
+    async def _fake_scalar(db, tenant_id, metric, coerced, context):
+        return {"net_income": 30.0, "gross_revenue": 120.0}[metric.key]
+
+    monkeypatch.setattr("app.services.metrics.metric_compute._execute_scalar_query", _fake_scalar)
+
+    # Spy: record the `today` threaded into every coerce_params call.
+    real_coerce = mc.coerce_params
+    seen_today: list = []
+
+    def _spy_coerce(params_schema, params, *, fiscal_year_start_month=1, today=None):
+        seen_today.append(today)
+        return real_coerce(params_schema, params, fiscal_year_start_month=fiscal_year_start_month, today=today)
+
+    monkeypatch.setattr(mc, "coerce_params", _spy_coerce)
+
+    out = await compute_metric(
+        db,
+        tenant_id=tenant_a.id,
+        key="net_margin",
+        params={"period": "this_month"},
+        context={"fiscal_year_start_month": 1},
+    )
+    assert round(out["rows"][0][1], 4) == 0.25
+    # Top-level coerce + one per leaf: every call must share ONE non-None resolved today.
+    assert len(seen_today) >= 2
+    assert all(t is not None for t in seen_today)
+    assert len(set(seen_today)) == 1
+
+
 async def test_exact_key_survives_embedding_decoy_eviction(db, tenant_a, monkeypatch):
     """Production repro: with seeded 1536-d intent_embeddings, an exact-key compute
     request must NOT be evicted by a sibling metric whose embedding ranks nearer to
