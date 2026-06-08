@@ -64,6 +64,12 @@ RUN_DATE_FROM = date(2099, 1, 10)
 RUN_DATE_TO = date(2099, 1, 20)
 CLOSE_PERIOD = "2099-01"  # NEVER sent — referenced only to document what we skip
 
+# SINGLE SOURCE OF TRUTH for the standard disposable UAT fixture's identity. Used
+# for the --uat-slug default, the non-standard-slug ack comparison (FIX #3), and
+# the dedupe-prefix tag on every seeded row (_dedupe_prefix). One literal so the
+# three can never drift apart.
+STANDARD_UAT_SLUG = "uat-smoke"
+
 MATCH_ORDER_REF = "R900000001"  # exact-match charge<->deposit
 UNMATCHED_ORDER_REF = "R900000002"  # charge with no deposit -> needs_review
 
@@ -76,16 +82,20 @@ UNMATCHED_AMOUNT = Decimal("77.00")
 PIN_MATERIALITY_ABS = Decimal("50.00")
 PIN_MATERIALITY_PCT = Decimal("0.0100")
 
-# SINGLE SOURCE OF TRUTH for every recon audit action the backend writes. The
-# cleanup backstop DELETE and the absolute-zero re-count both sweep EXACTLY this
-# set, so the zero-residue guarantee covers ALL recon.* audit. Confirmed by
-# grepping every ``action=...`` literal passed to ``audit_service.log_event`` in
-# ``backend/app/api/v1/reconciliation.py`` (recon.sync_trigger, recon.run,
-# recon.pipeline_run, recon.approve, recon.bulk_approve, recon.close_period) plus
-# the chat MCP route ``backend/app/mcp/tools/recon_approve.py`` (recon.approve,
-# already in the set). 'recon.close_period' is never EMITTED by this harness (we
-# never close), but we sweep it so a stray close on the disposable tenant can
-# never survive as residue.
+# The recon audit actions the backend writes — used ONLY for the PRECISE targeted
+# sweeps: the correlation_id DELETE + its recount (scoped to this approve batch).
+# Confirmed by grepping every ``action=...`` literal passed to
+# ``audit_service.log_event`` in ``backend/app/api/v1/reconciliation.py``
+# (recon.sync_trigger, recon.run, recon.pipeline_run, recon.approve,
+# recon.bulk_approve, recon.close_period) plus the chat MCP route
+# ``backend/app/mcp/tools/recon_approve.py`` (recon.approve, already in the set).
+# 'recon.close_period' is never EMITTED by this harness (we never close) but is
+# kept here so the targeted recount can never bless a stray close as zero residue.
+# NOTE: the ABSOLUTE backstop DELETE + its tenant-wide recount do NOT use this
+# tuple — they key on ``category = 'reconciliation'`` (every recon log_event call
+# passes that category, verified) so a FUTURE recon.* action not added here is
+# still swept + counted. The catch-all is category; this list stays the precise,
+# batch-scoped set and is allowed to lag new actions without leaking residue.
 RECON_AUDIT_ACTIONS: tuple[str, ...] = (
     "recon.approve",
     "recon.bulk_approve",
@@ -136,6 +146,13 @@ class SmokeResult:
     correlation_id: str | None = None
     approved_count: int | None = None
     run_stamp: str = ""
+    # Set True the instant the backend<->DB cross-check (assert_backend_db_same_env)
+    # detects the just-created run is NOT visible in --database-url — i.e. the
+    # backend and --database-url are DIFFERENT environments (cloned DB / URL mix).
+    # When True, cleanup_and_verify MUST NOT run the tenant-wide recon backstop:
+    # on a cross-environment DB the backstop could sweep a real tenant's recon
+    # data, so we clean ONLY the prefix-scoped seed rows this harness inserted.
+    backend_db_mismatch: bool = False
     checks: dict[str, Any] = field(default_factory=dict)
     residue: dict[str, int] = field(default_factory=dict)
     orphans: dict[str, Any] = field(default_factory=dict)
@@ -153,6 +170,7 @@ class SmokeResult:
                 "correlation_id": self.correlation_id,
                 "approved_count": self.approved_count,
                 "run_stamp": self.run_stamp,
+                "backend_db_mismatch": self.backend_db_mismatch,
                 "checks": self.checks,
                 "residue": self.residue,
                 "orphans": self.orphans,
@@ -526,7 +544,7 @@ async def seed_canonical(
 
 
 def _dedupe_prefix(run_stamp: str) -> str:
-    return f"uat-smoke-{run_stamp}"
+    return f"{STANDARD_UAT_SLUG}-{run_stamp}"
 
 
 # --------------------------------------------------------------------------- #
@@ -579,8 +597,9 @@ async def assert_backend_db_same_env(
     *,
     tenant_id: str,
     run_id: str,
+    result: SmokeResult,
 ) -> None:
-    """Prove the BACKEND and the harness --database-url are the SAME environment.
+    """Assert the just-created run is VISIBLE in --database-url (catch split-env).
 
     The hard safety guard reads ``tenants.slug`` from ``--database-url``, but the
     create-run / approve writes go to ``--backend-url``. If those two point at
@@ -588,11 +607,20 @@ async def assert_backend_db_same_env(
     validates one DB while the writes hit another — so the harness could verify
     and "clean" a DB that is NOT where the run actually lives.
 
-    The run we just created via the BACKEND must therefore be visible in the
-    harness DB. If it is not, the two are different environments and we refuse to
-    proceed: we can neither safely verify nor safely clean. (Cleanup still runs in
-    the finally as today: the prefix-scoped seed rows in THIS DB are removed, and
-    the run lives in the backend's OWN DB which we correctly never touch.)
+    This check is necessary but NOT a cryptographic proof of identical
+    environments: a non-zero count proves only that *a row with this run id is
+    VISIBLE in --database-url* (a clone that also happens to hold this id would
+    pass too). What it reliably catches is the common operator misconfig — a
+    split-env / cloned-DB / prod-staging URL mix where the run is simply absent —
+    which is exactly the failure that would let the harness verify/clean the wrong
+    DB.
+
+    If the run is NOT visible, we set ``result.backend_db_mismatch`` and refuse to
+    proceed: we can neither safely verify nor safely clean. Cleanup still runs in
+    the finally, but in mismatch mode it cleans ONLY the prefix-scoped seed rows
+    this harness inserted (``recon_sweep=False``) — it does NOT run the tenant-wide
+    recon backstop, which on a cross-environment DB could sweep a real tenant's
+    recon data.
     """
     found = await conn.fetchval(
         "SELECT count(*) FROM reconciliation_runs WHERE id = $1 AND tenant_id = $2",
@@ -600,14 +628,18 @@ async def assert_backend_db_same_env(
         uuid.UUID(tenant_id),
     )
     if found == 0:
+        # Flag the mismatch BEFORE raising so the finally suppresses the
+        # tenant-wide backstop (recon_sweep = not result.backend_db_mismatch).
+        result.backend_db_mismatch = True
         raise SmokeFailure(
             f"SAFETY ABORT: run {run_id} was created via the backend "
             "(--backend-url) but is NOT visible in the harness DB "
             "(--database-url) — the backend and --database-url point at DIFFERENT "
             "environments. The harness cannot safely verify or clean a run it "
             "cannot see, so it refuses to proceed. (Prefix-scoped seed rows in "
-            "this DB are still cleaned in the finally; the run lives in the "
-            "backend's own DB, which this harness correctly does not touch.)"
+            "this DB are still cleaned in the finally; the recon backstop is "
+            "SUPPRESSED in mismatch mode so a real tenant's recon data on a "
+            "cross-environment DB can never be swept.)"
         )
     _eprint(
         f"[xcheck] OK run {run_id} visible in --database-url "
@@ -822,6 +854,7 @@ async def cleanup_and_verify(
     correlation_id: str | None,
     run_stamp: str,
     result: SmokeResult,
+    recon_sweep: bool = True,
 ) -> None:
     """Delete everything this run created, then assert ABSOLUTE zero residue.
 
@@ -829,17 +862,27 @@ async def cleanup_and_verify(
       1. DELETE the run -> CASCADE drops reconciliation_results (ondelete=CASCADE).
       2. DELETE audit_events by correlation_id (bulk_approve summary + per-line
          recon.approve rows all share the batch correlation_id).
-      3. ABSOLUTE-backstop sweep: DELETE any recon run + recon-action audit left
+      3. ABSOLUTE-backstop sweep: DELETE any recon run + recon-category audit left
          on this disposable UAT tenant (covers the case where run_id /
          correlation_id were never captured because a response didn't parse).
       4. DELETE the seeded canonical rows by dedupe_key prefix (payout_lines,
          netsuite_postings, then payouts last because of the FK).
 
     Then re-count BOTH the targeted ids AND absolute tenant-wide invariants
-    (reconciliation_runs / reconciliation_results / recon-action audit_events all
+    (reconciliation_runs / reconciliation_results / recon-category audit_events all
     == 0 for the tenant; seed rows == 0). The re-count ALWAYS runs even if a
     DELETE raised, and residue is ALWAYS populated (never {}) so the JSON output
     stays diagnosable. The tenant's own 'auth' provisioning trail is OUT of scope.
+
+    ``recon_sweep`` (default True == the normal byte-identical path): when False —
+    set ONLY on the backend<->DB env-mismatch abort path — EVERY recon DELETE and
+    recount is SKIPPED (the targeted run + audit deletes, the resource_id audit
+    delete, AND the tenant-wide backstop run + audit deletes). On a cross-env /
+    cloned DB the run + its audit live in the BACKEND's own DB, and a row visible
+    in THIS DB could belong to a real tenant — so we must touch NEITHER the
+    targeted ids NOR the tenant-wide backstop here. In that mode this function
+    cleans, and counts as residue, EXACTLY the prefix-scoped seed rows this harness
+    inserted: that is precisely what the env-mismatch docstring promises.
     """
     tid = uuid.UUID(tenant_id)
     prefix = _dedupe_prefix(run_stamp)
@@ -847,57 +890,66 @@ async def cleanup_and_verify(
 
     cleanup_error: str | None = None
     try:
-        # 1. run (CASCADE -> results)
-        if run_id is not None:
-            await conn.execute(
-                "DELETE FROM reconciliation_runs WHERE id = $1 AND tenant_id = $2",
-                uuid.UUID(run_id),
-                tid,
-            )
+        if recon_sweep:
+            # 1. run (CASCADE -> results)
+            if run_id is not None:
+                await conn.execute(
+                    "DELETE FROM reconciliation_runs WHERE id = $1 AND tenant_id = $2",
+                    uuid.UUID(run_id),
+                    tid,
+                )
 
-        # 2. audit by correlation_id (covers both the per-line recon.approve rows
-        #    — written via resource_id but sharing this batch's correlation_id —
-        #    and the recon.bulk_approve summary). Belt-and-suspenders: also clear
-        #    any audit row referencing the run as resource_id (the create_run
-        #    'recon.run' event).
-        if correlation_id is not None:
-            # FIX #5 — action-scope the correlation_id DELETE. Bind the recon
-            # action set so that even if (hypothetically) a non-recon audit row
-            # shared this batch's correlation_id, it would NOT be deleted. The
-            # absolute-backstop sweep below is unchanged.
+            # 2. audit by correlation_id (covers both the per-line recon.approve
+            #    rows — written via resource_id but sharing this batch's
+            #    correlation_id — and the recon.bulk_approve summary).
+            #    Belt-and-suspenders: also clear any audit row referencing the run
+            #    as resource_id (the create_run 'recon.run' event).
+            if correlation_id is not None:
+                # FIX #5 — action-scope the targeted correlation_id DELETE. Bind
+                # the recon action set so that even if (hypothetically) a non-recon
+                # audit row shared this batch's correlation_id, it would NOT be
+                # deleted. Kept action-scoped (precise for this batch); the
+                # absolute backstop below uses category as the catch-all.
+                await conn.execute(
+                    "DELETE FROM audit_events "
+                    "WHERE tenant_id = $1 AND correlation_id = $2 "
+                    "AND action = ANY($3::text[])",
+                    tid,
+                    correlation_id,
+                    list(RECON_AUDIT_ACTIONS),
+                )
+            if run_id is not None:
+                await conn.execute(
+                    """
+                    DELETE FROM audit_events
+                    WHERE tenant_id = $1 AND resource_id = $2
+                      AND category = 'reconciliation'
+                    """,
+                    tid,
+                    run_id,
+                )
+
+            # ABSOLUTE-backstop DELETE: even if run_id/correlation_id were NEVER
+            # captured (e.g. create_run succeeded server-side but its response
+            # didn't parse), sweep any recon run + recon-CATEGORY audit left on
+            # this disposable UAT tenant so the absolute invariants below can
+            # actually reach zero. Keyed on category='reconciliation' (NOT the
+            # hardcoded action list) so a future recon.* action that isn't in
+            # RECON_AUDIT_ACTIONS still gets swept — no list drift can leave
+            # silent residue. In-scope ONLY: recon runs (results CASCADE) + recon
+            # audit. The tenant's own 'auth' provisioning trail is NOT touched.
+            await conn.execute(
+                "DELETE FROM reconciliation_runs WHERE tenant_id = $1", tid
+            )
             await conn.execute(
                 "DELETE FROM audit_events "
-                "WHERE tenant_id = $1 AND correlation_id = $2 "
-                "AND action = ANY($3::text[])",
+                "WHERE tenant_id = $1 AND category = 'reconciliation'",
                 tid,
-                correlation_id,
-                list(RECON_AUDIT_ACTIONS),
-            )
-        if run_id is not None:
-            await conn.execute(
-                """
-                DELETE FROM audit_events
-                WHERE tenant_id = $1 AND resource_id = $2
-                  AND category = 'reconciliation'
-                """,
-                tid,
-                run_id,
             )
 
-        # ABSOLUTE-backstop DELETE: even if run_id/correlation_id were NEVER
-        # captured (e.g. create_run succeeded server-side but its response didn't
-        # parse), sweep any recon run + recon-action audit left on this disposable
-        # UAT tenant so the absolute invariants below can actually reach zero.
-        # In-scope ONLY: recon runs (results CASCADE) + recon-action audit. The
-        # tenant's own 'auth' provisioning trail is explicitly NOT touched.
-        await conn.execute("DELETE FROM reconciliation_runs WHERE tenant_id = $1", tid)
-        await conn.execute(
-            "DELETE FROM audit_events WHERE tenant_id = $1 AND action = ANY($2::text[])",
-            tid,
-            list(RECON_AUDIT_ACTIONS),
-        )
-
-        # 3. seeded canonical rows by dedupe_key prefix (payouts last: FK target)
+        # 3. seeded canonical rows by dedupe_key prefix (payouts last: FK target).
+        #    ALWAYS run — these are the only rows the env-mismatch path may touch,
+        #    and they are exactly what its docstring promises to clean.
         await conn.execute(
             "DELETE FROM payout_lines WHERE tenant_id = $1 AND dedupe_key LIKE $2",
             tid,
@@ -924,36 +976,42 @@ async def cleanup_and_verify(
     # gathered + the error instead of emitting zero_residue=False with residue={}.
     residue: dict[str, int] = {}
     try:
-        # Targeted counts (by the ids/prefix THIS run created).
-        if run_id is not None:
-            residue["run"] = await conn.fetchval(
-                "SELECT count(*) FROM reconciliation_runs WHERE id = $1 AND tenant_id = $2",
-                uuid.UUID(run_id),
-                tid,
+        if recon_sweep:
+            # Targeted counts (by the ids/prefix THIS run created).
+            if run_id is not None:
+                residue["run"] = await conn.fetchval(
+                    "SELECT count(*) FROM reconciliation_runs WHERE id = $1 AND tenant_id = $2",
+                    uuid.UUID(run_id),
+                    tid,
+                )
+                residue["results"] = await conn.fetchval(
+                    "SELECT count(*) FROM reconciliation_results WHERE run_id = $1 AND tenant_id = $2",
+                    uuid.UUID(run_id),
+                    tid,
+                )
+            else:
+                residue["run"] = 0
+                residue["results"] = 0
+            residue["audit_by_corr"] = (
+                await conn.fetchval(
+                    # Scope the recount to the SAME recon-action set the targeted
+                    # DELETE above uses, so a (hypothetical) non-recon row sharing
+                    # this batch's correlation_id — which the DELETE deliberately
+                    # preserves — is not counted as residue and cannot produce a
+                    # false zero_residue=False.
+                    "SELECT count(*) FROM audit_events WHERE tenant_id = $1 AND correlation_id = $2 "
+                    "AND action = ANY($3::text[])",
+                    tid,
+                    correlation_id,
+                    list(RECON_AUDIT_ACTIONS),
+                )
+                if correlation_id is not None
+                else 0
             )
-            residue["results"] = await conn.fetchval(
-                "SELECT count(*) FROM reconciliation_results WHERE run_id = $1 AND tenant_id = $2",
-                uuid.UUID(run_id),
-                tid,
-            )
-        else:
-            residue["run"] = 0
-            residue["results"] = 0
-        residue["audit_by_corr"] = (
-            await conn.fetchval(
-                # Scope the recount to the SAME recon-action set the DELETE above
-                # uses, so a (hypothetical) non-recon row sharing this batch's
-                # correlation_id — which the DELETE deliberately preserves — is not
-                # counted as residue and cannot produce a false zero_residue=False.
-                "SELECT count(*) FROM audit_events WHERE tenant_id = $1 AND correlation_id = $2 "
-                "AND action = ANY($3::text[])",
-                tid,
-                correlation_id,
-                list(RECON_AUDIT_ACTIONS),
-            )
-            if correlation_id is not None
-            else 0
-        )
+
+        # Seed-row counts — ALWAYS recounted (the only rows the env-mismatch path
+        # cleans, and what its docstring promises). On the recon_sweep=False path
+        # residue is EXACTLY these three keys.
         residue["seed_payout_lines"] = await conn.fetchval(
             "SELECT count(*) FROM payout_lines WHERE tenant_id = $1 AND dedupe_key LIKE $2",
             tid,
@@ -970,31 +1028,33 @@ async def cleanup_and_verify(
             like,
         )
 
-        # ABSOLUTE backstop: invariants on the WHOLE UAT tenant, independent of
-        # the ids we captured. Catches an orphaned run/results/audit even if
-        # run_id or correlation_id was NEVER captured (e.g. create_run succeeded
-        # server-side but the response didn't parse, so result.run_id is None).
-        # The UAT tenant is disposable + recon-empty at baseline, so ANY recon
-        # row is residue.
-        #
-        # SCOPE: recon runs/results + recon-action audit (the full
-        # RECON_AUDIT_ACTIONS set) + seed rows must hit absolute zero. The
-        # PERSISTENT tenant's OWN provisioning/auth trail (category 'auth':
-        # tenant.register / user.login / user.login_failed / ...) is intentionally
-        # OUT of scope — it belongs to the tenant, not this run, so we neither
-        # delete it nor count it as residue.
-        residue["abs_runs_for_tenant"] = await conn.fetchval(
-            "SELECT count(*) FROM reconciliation_runs WHERE tenant_id = $1", tid
-        )
-        residue["abs_results_for_tenant"] = await conn.fetchval(
-            "SELECT count(*) FROM reconciliation_results WHERE tenant_id = $1", tid
-        )
-        residue["abs_recon_audit_for_tenant"] = await conn.fetchval(
-            "SELECT count(*) FROM audit_events "
-            "WHERE tenant_id = $1 AND action = ANY($2::text[])",
-            tid,
-            list(RECON_AUDIT_ACTIONS),
-        )
+        if recon_sweep:
+            # ABSOLUTE backstop: invariants on the WHOLE UAT tenant, independent of
+            # the ids we captured. Catches an orphaned run/results/audit even if
+            # run_id or correlation_id was NEVER captured (e.g. create_run
+            # succeeded server-side but the response didn't parse, so
+            # result.run_id is None). The UAT tenant is disposable + recon-empty at
+            # baseline, so ANY recon row is residue.
+            #
+            # SCOPE: recon runs/results + recon-CATEGORY audit
+            # (category='reconciliation', matching the backstop DELETE — robust to
+            # new recon.* actions) + seed rows must hit absolute zero. The
+            # PERSISTENT tenant's OWN provisioning/auth trail (category 'auth':
+            # tenant.register / user.login / user.login_failed / ...) is
+            # intentionally OUT of scope — it belongs to the tenant, not this run,
+            # so we neither delete it nor count it as residue.
+            residue["abs_runs_for_tenant"] = await conn.fetchval(
+                "SELECT count(*) FROM reconciliation_runs WHERE tenant_id = $1", tid
+            )
+            residue["abs_results_for_tenant"] = await conn.fetchval(
+                "SELECT count(*) FROM reconciliation_results WHERE tenant_id = $1",
+                tid,
+            )
+            residue["abs_recon_audit_for_tenant"] = await conn.fetchval(
+                "SELECT count(*) FROM audit_events "
+                "WHERE tenant_id = $1 AND category = 'reconciliation'",
+                tid,
+            )
     except Exception as exc:  # noqa: BLE001
         # The re-count itself failed. Populate residue with whatever we got + a
         # sentinel so the operator sees a non-empty, diagnosable residue dict and
@@ -1041,7 +1101,7 @@ async def run_smoke(args: argparse.Namespace) -> SmokeResult:
     # reachable. Require an explicit ack for any slug other than the standard
     # disposable fixture. This runs BEFORE any backend/DB call (nothing seeded,
     # no connection opened), so the default 'uat-smoke' path is UNCHANGED.
-    if args.uat_slug != "uat-smoke" and not args.allow_nonstandard_slug:
+    if args.uat_slug != STANDARD_UAT_SLUG and not args.allow_nonstandard_slug:
         result.error = (
             f"--uat-slug {args.uat_slug!r} is not the default 'uat-smoke'; pass "
             "--allow-nonstandard-slug (or UAT_ALLOW_NONSTANDARD_SLUG=1) to confirm "
@@ -1097,7 +1157,9 @@ async def run_smoke(args: argparse.Namespace) -> SmokeResult:
             # environments and we refuse to verify/clean. Runs BEFORE verify and
             # before any cleanup; on abort, the finally cleans the prefix-scoped
             # seed rows in THIS DB and correctly leaves the run in the backend DB.
-            await assert_backend_db_same_env(conn, tenant_id=tenant_id, run_id=run_id)
+            await assert_backend_db_same_env(
+                conn, tenant_id=tenant_id, run_id=run_id, result=result
+            )
 
             # 5. exercise + verify. verify stamps result.correlation_id the
             # instant approve-bucket returns, BEFORE any audit assertion runs.
@@ -1134,6 +1196,12 @@ async def run_smoke(args: argparse.Namespace) -> SmokeResult:
                     correlation_id=result.correlation_id,
                     run_stamp=run_stamp,
                     result=result,
+                    # On the backend<->DB env-mismatch abort, SUPPRESS the
+                    # tenant-wide recon backstop: the run lives in the backend's
+                    # OWN DB, and a recon row visible in THIS DB could belong to a
+                    # real tenant. Clean ONLY the prefix-scoped seed rows we
+                    # inserted (exactly what the mismatch docstring promises).
+                    recon_sweep=not result.backend_db_mismatch,
                 )
             except Exception as exc:  # noqa: BLE001
                 result.zero_residue = False
@@ -1173,7 +1241,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     p.add_argument(
         "--uat-slug",
-        default=os.environ.get("UAT_SLUG", "uat-smoke"),
+        default=os.environ.get("UAT_SLUG", STANDARD_UAT_SLUG),
         help="UAT tenant slug marker — the hard safety guard (default: uat-smoke).",
     )
     p.add_argument(
