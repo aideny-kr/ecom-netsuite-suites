@@ -119,7 +119,7 @@ export function DataFrameTable({ data, queryText }: DataFrameTableProps) {
     a.download = `query-results-${new Date().toISOString().slice(0, 10)}.csv`;
     a.click();
     URL.revokeObjectURL(url);
-  }, [columns, rows, truncated, queryText, exportFromQuery]);
+  }, [columns, rows, queryText, exportFromQuery, isMetric, isBigQuery]);
 
   if (columns.length === 0) return null;
 
