@@ -76,6 +76,25 @@ UNMATCHED_AMOUNT = Decimal("77.00")
 PIN_MATERIALITY_ABS = Decimal("50.00")
 PIN_MATERIALITY_PCT = Decimal("0.0100")
 
+# SINGLE SOURCE OF TRUTH for every recon audit action the backend writes. The
+# cleanup backstop DELETE and the absolute-zero re-count both sweep EXACTLY this
+# set, so the zero-residue guarantee covers ALL recon.* audit. Confirmed by
+# grepping every ``action=...`` literal passed to ``audit_service.log_event`` in
+# ``backend/app/api/v1/reconciliation.py`` (recon.sync_trigger, recon.run,
+# recon.pipeline_run, recon.approve, recon.bulk_approve, recon.close_period) plus
+# the chat MCP route ``backend/app/mcp/tools/recon_approve.py`` (recon.approve,
+# already in the set). 'recon.close_period' is never EMITTED by this harness (we
+# never close), but we sweep it so a stray close on the disposable tenant can
+# never survive as residue.
+RECON_AUDIT_ACTIONS: tuple[str, ...] = (
+    "recon.approve",
+    "recon.bulk_approve",
+    "recon.run",
+    "recon.pipeline_run",
+    "recon.sync_trigger",
+    "recon.close_period",
+)
+
 
 # Local-only default password. NEVER used against a non-local backend (see the
 # secret-hardening gate in run_smoke): a non-local target with no
@@ -111,7 +130,6 @@ class SmokeResult:
     run_id: str | None = None
     correlation_id: str | None = None
     approved_count: int | None = None
-    approved_result_ids: list[str] = field(default_factory=list)
     run_stamp: str = ""
     checks: dict[str, Any] = field(default_factory=dict)
     residue: dict[str, int] = field(default_factory=dict)
@@ -129,7 +147,6 @@ class SmokeResult:
                 "run_id": self.run_id,
                 "correlation_id": self.correlation_id,
                 "approved_count": self.approved_count,
-                "approved_result_ids": self.approved_result_ids,
                 "run_stamp": self.run_stamp,
                 "checks": self.checks,
                 "residue": self.residue,
@@ -296,22 +313,6 @@ def _nested_int(body: dict[str, Any], path: tuple[str, ...], where: str) -> int:
     return node
 
 
-def _extract_result_ids(abody: dict[str, Any]) -> list[str]:
-    """Best-effort capture of the approved result ids from the approve response.
-
-    Pure diagnostics for the cleanup-context object — cleanup deletes by run_id +
-    correlation_id, not by these ids, so a shape we don't recognise is non-fatal.
-    """
-    candidates = (
-        abody.get("approved_result_ids")
-        or abody.get("result_ids")
-        or abody.get("approved_ids")
-    )
-    if isinstance(candidates, list):
-        return [str(x) for x in candidates]
-    return []
-
-
 async def resolve_tenant(client: httpx.AsyncClient, token: str) -> str:
     """Resolve tenant_id from /auth/me (authoritative, server-side)."""
     resp = await client.get(
@@ -374,33 +375,40 @@ async def ensure_reconciliation_flag(conn: asyncpg.Connection, tenant_id: str) -
 async def pin_materiality(conn: asyncpg.Connection, tenant_id: str) -> None:
     """Pin the tenant's recon materiality so bucketing is hermetic.
 
-    register_tenant() always creates a TenantConfig row, so in practice this is
-    an UPDATE. We use INSERT ... ON CONFLICT (tenant_id) DO UPDATE anyway as a
-    belt-and-suspenders: if the config row is ever missing (manual tenant, or a
-    register variant that skips it), bucketing stays hermetic instead of silently
-    using the column defaults. ``tenant_id`` is the unique key on tenant_configs
-    (confirmed in app/models/tenant.py — TenantConfig.tenant_id unique=True).
+    ``register_tenant()`` ALWAYS creates a TenantConfig row, so this is a plain
+    UPDATE — not an upsert. We deliberately do NOT INSERT: the NOT-NULL columns
+    ``posting_mode`` / ``posting_batch_size`` / ``posting_attach_evidence`` have
+    only a Python-side default (no server_default — confirmed in
+    app/models/tenant.py), so an INSERT that omits them would raise a NOT-NULL
+    violation. Instead we UPDATE and ASSERT exactly one row changed: a missing
+    config row means provisioning is incomplete, which must fail loudly (better
+    diagnostic) rather than silently no-op into using the column defaults.
+    ``tenant_id`` is unique on tenant_configs (TenantConfig.tenant_id unique=True).
     """
-    await conn.execute(
+    status = await conn.execute(
         """
-        INSERT INTO tenant_configs
-          (id, tenant_id, recon_materiality_abs, recon_materiality_pct,
-           created_at, updated_at)
-        VALUES (gen_random_uuid(), $1, $2, $3, now(), now())
-        ON CONFLICT (tenant_id)
-        DO UPDATE SET recon_materiality_abs = EXCLUDED.recon_materiality_abs,
-                      recon_materiality_pct = EXCLUDED.recon_materiality_pct,
-                      updated_at = now()
+        UPDATE tenant_configs
+        SET recon_materiality_abs = $2,
+            recon_materiality_pct = $3,
+            updated_at = now()
+        WHERE tenant_id = $1
         """,
         uuid.UUID(tenant_id),
         PIN_MATERIALITY_ABS,
         PIN_MATERIALITY_PCT,
     )
+    # asyncpg returns a command tag like 'UPDATE 1'; parse the affected-row count.
+    n = int(status.split()[-1]) if status else 0
+    if n != 1:
+        raise SmokeFailure(
+            "UAT tenant has no tenant_configs row — provisioning incomplete "
+            f"(UPDATE tenant_configs affected {n} rows, expected 1)"
+        )
 
 
 async def seed_canonical(
     conn: asyncpg.Connection, tenant_id: str, run_stamp: str
-) -> dict[str, str]:
+) -> None:
     """Insert a tiny deterministic canonical set tagged with the run-stamp prefix.
 
     Produces:
@@ -503,12 +511,6 @@ async def seed_canonical(
         f"[seed] payout=1 charges=2 (1 match $100 / 1 unmatched $77) deposit=1 "
         f"prefix={prefix!r}"
     )
-    return {
-        "payout_id": str(payout_id),
-        "charge_match_id": str(charge1_id),
-        "deposit_id": str(deposit_id),
-        "charge_unmatched_id": str(charge2_id),
-    }
 
 
 def _dedupe_prefix(run_stamp: str) -> str:
@@ -528,6 +530,13 @@ async def create_run(client: httpx.AsyncClient, token: str, result: SmokeResult)
             "match_level": "order",
         },
     )
+    if resp.status_code == 403:
+        raise SmokeFailure(
+            "create_run returned HTTP 403 — the registered admin user lacks the "
+            "'recon.run' permission. The admin role / role_permissions data-seed "
+            "(alembic migration 001) is likely missing or not fully applied on the "
+            f"target. Body: {resp.text[:300]}"
+        )
     if resp.status_code != 201:
         raise SmokeFailure(
             f"create_run failed: HTTP {resp.status_code} {resp.text[:300]}"
@@ -567,7 +576,11 @@ async def verify(
     tid = uuid.UUID(tenant_id)
     run_uuid = uuid.UUID(run_id)
 
-    # --- buckets summary: expect >=1 'matches' and >=1 'needs_review' ---
+    # --- buckets summary: assert EXACT seeded counts (hermetic) ---
+    # This summary is run_id-scoped, and seed_canonical inserts EXACTLY 1 exact
+    # match + 1 unmatched charge, so the buckets must be exactly 1 'matches' and
+    # exactly 1 'needs_review'. A != 1 count means contamination (a stray seed,
+    # a non-disposable tenant, or a matcher regression) — fail loudly, not >=1.
     bresp = await client.get(
         f"/api/v1/reconciliation/runs/{run_id}/buckets", headers=auth
     )
@@ -580,10 +593,16 @@ async def verify(
     needs_n = _nested_int(buckets, ("needs_review", "count"), "buckets summary")
     result.checks["buckets_matches_count"] = matches_n
     result.checks["buckets_needs_review_count"] = needs_n
-    if matches_n < 1:
-        raise SmokeFailure(f"expected >=1 'matches' bucket row, got {matches_n}")
-    if needs_n < 1:
-        raise SmokeFailure(f"expected >=1 'needs_review' bucket row, got {needs_n}")
+    if matches_n != 1:
+        raise SmokeFailure(
+            f"expected EXACTLY 1 'matches' bucket row (seed = 1 exact match), "
+            f"got {matches_n}"
+        )
+    if needs_n != 1:
+        raise SmokeFailure(
+            f"expected EXACTLY 1 'needs_review' bucket row (seed = 1 unmatched), "
+            f"got {needs_n}"
+        )
 
     # --- baseline: run total_variance + canonical row counts BEFORE approve ---
     variance_before = await conn.fetchval(
@@ -605,6 +624,13 @@ async def verify(
         headers=auth,
         json={"bucket": "matches", "notes": "uat-smoke"},
     )
+    if aresp.status_code == 403:
+        raise SmokeFailure(
+            "approve-bucket(matches) returned HTTP 403 — the registered admin user "
+            "lacks the 'recon.run' permission. The admin role / role_permissions "
+            "data-seed (alembic migration 001) is likely missing or not fully "
+            f"applied on the target. Body: {aresp.text[:300]}"
+        )
     if aresp.status_code != 200:
         raise SmokeFailure(
             f"approve-bucket(matches) failed: HTTP {aresp.status_code} {aresp.text[:300]}"
@@ -622,17 +648,20 @@ async def verify(
             f"approve-bucket(matches) missing/invalid 'approved_count': "
             f"{_truncate_body(abody)}"
         )
-    # CLEANUP-CONTEXT CAPTURE: store the correlation_id + approved_count + the
-    # approved result ids the instant the server returned them, BEFORE any audit
-    # assertion can raise. So a later verify failure still leaves cleanup with the
-    # correlation_id to DELETE the approve-audit by (no orphaned audit trail).
+    # CLEANUP-CONTEXT CAPTURE: store the correlation_id + approved_count the
+    # instant the server returned them, BEFORE any audit assertion can raise. So
+    # a later verify failure still leaves cleanup with the correlation_id to
+    # DELETE the approve-audit by (no orphaned audit trail).
     result.correlation_id = correlation_id
     result.approved_count = approved_count
-    result.approved_result_ids = _extract_result_ids(abody)
     result.checks["approved_count"] = approved_count
-    if approved_count < 1:
+    # Hermetic: the seed has EXACTLY 1 exact-match line in the 'matches' bucket,
+    # so approving that bucket must approve exactly that one line. != 1 means a
+    # contaminated bucket — fail loudly, not >=1.
+    if approved_count != 1:
         raise SmokeFailure(
-            f"approve-bucket approved_count={approved_count}, expected >=1"
+            f"approve-bucket approved_count={approved_count}, expected EXACTLY 1 "
+            f"(seed = 1 exact match in the 'matches' bucket)"
         )
 
     # --- audit invariant: N x recon.approve + 1 x recon.bulk_approve, same corr id ---
@@ -800,13 +829,9 @@ async def cleanup_and_verify(
         # tenant's own 'auth' provisioning trail is explicitly NOT touched.
         await conn.execute("DELETE FROM reconciliation_runs WHERE tenant_id = $1", tid)
         await conn.execute(
-            """
-            DELETE FROM audit_events
-            WHERE tenant_id = $1
-              AND action IN ('recon.approve', 'recon.bulk_approve',
-                             'recon.run', 'recon.close_period')
-            """,
+            "DELETE FROM audit_events WHERE tenant_id = $1 AND action = ANY($2::text[])",
             tid,
+            list(RECON_AUDIT_ACTIONS),
         )
 
         # 3. seeded canonical rows by dedupe_key prefix (payouts last: FK target)
@@ -883,12 +908,12 @@ async def cleanup_and_verify(
         # The UAT tenant is disposable + recon-empty at baseline, so ANY recon
         # row is residue.
         #
-        # SCOPE: recon runs/results + recon-action audit (recon.approve /
-        # recon.bulk_approve / recon.run / recon.close_period) + seed rows must
-        # hit absolute zero. The PERSISTENT tenant's OWN provisioning/auth trail
-        # (category 'auth': tenant.register / user.login / user.login_failed /
-        # ...) is intentionally OUT of scope — it belongs to the tenant, not this
-        # run, so we neither delete it nor count it as residue.
+        # SCOPE: recon runs/results + recon-action audit (the full
+        # RECON_AUDIT_ACTIONS set) + seed rows must hit absolute zero. The
+        # PERSISTENT tenant's OWN provisioning/auth trail (category 'auth':
+        # tenant.register / user.login / user.login_failed / ...) is intentionally
+        # OUT of scope — it belongs to the tenant, not this run, so we neither
+        # delete it nor count it as residue.
         residue["abs_runs_for_tenant"] = await conn.fetchval(
             "SELECT count(*) FROM reconciliation_runs WHERE tenant_id = $1", tid
         )
@@ -896,13 +921,10 @@ async def cleanup_and_verify(
             "SELECT count(*) FROM reconciliation_results WHERE tenant_id = $1", tid
         )
         residue["abs_recon_audit_for_tenant"] = await conn.fetchval(
-            """
-            SELECT count(*) FROM audit_events
-            WHERE tenant_id = $1
-              AND action IN ('recon.approve', 'recon.bulk_approve',
-                             'recon.run', 'recon.close_period')
-            """,
+            "SELECT count(*) FROM audit_events "
+            "WHERE tenant_id = $1 AND action = ANY($2::text[])",
             tid,
+            list(RECON_AUDIT_ACTIONS),
         )
     except Exception as exc:  # noqa: BLE001
         # The re-count itself failed. Populate residue with whatever we got + a

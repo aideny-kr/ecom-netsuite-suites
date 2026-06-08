@@ -100,8 +100,9 @@ tenant-wide):
 
 - `reconciliation_runs` for the tenant (`reconciliation_results` cascade-delete
   with the run; the harness also asserts `0` results for the tenant directly);
-- recon-action `audit_events` for the tenant — `action IN ('recon.approve',
-  'recon.bulk_approve', 'recon.run', 'recon.close_period')`;
+- recon-action `audit_events` for the tenant — **every** recon audit action the
+  backend writes (`RECON_AUDIT_ACTIONS`: `recon.approve`, `recon.bulk_approve`,
+  `recon.run`, `recon.pipeline_run`, `recon.sync_trigger`, `recon.close_period`);
 - the seeded canonical rows (`payouts` / `payout_lines` / `netsuite_postings`)
   under this run's `uat-smoke-<run-stamp>-…` dedupe prefix.
 
@@ -173,6 +174,18 @@ Negative tests verified: wrong `--uat-slug` → SAFETY ABORT before any write
 
 ## Notes / portability
 
+- **Feature-flag cache (direct-SQL enable bypasses the in-process cache).** The
+  harness enables the `reconciliation` feature flag via **direct SQL** (an UPDATE
+  on `tenant_feature_flags`), which does **not** go through
+  `feature_flag_service.set_flag()` — so it bypasses the backend's in-process flag
+  cache (`feature_flag_service._FLAG_CACHE`, 60s TTL, invalidated only by
+  `set_flag` / `clear_cache` *in-process*). This is a non-issue for the post-deploy
+  gate: after a deploy the backend process is fresh (cold cache), so the first
+  `require_feature('reconciliation')` check reads the just-written DB value. The
+  only window where a stale value could bite is **back-to-back runs within 60s on a
+  long-lived process that had already cached the flag as `disabled`** (e.g. a prior
+  call hit the feature before the harness enabled it) — in that case restart the
+  backend or wait out the 60s TTL. Routine deploy-gated runs never hit this.
 - Self-contained: imports nothing from `app` or `tests/conftest`; only stdlib +
   `httpx` + `asyncpg` (both already in `backend/.venv`). A thin pytest can wrap a
   local run for CI.
