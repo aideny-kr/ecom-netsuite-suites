@@ -155,6 +155,52 @@ async def test_period_label_reads_period_param_under_nonstandard_name(db, tenant
     assert out["rows"][0][3] == "last_quarter"
 
 
+async def test_out_of_range_fiscal_year_start_month_returns_invalid_params_not_500(db, tenant_a, monkeypatch):
+    """REAL config-drift invariant (T2 multi-angle gate, MAJOR). An out-of-range
+    fiscal_year_start_month (tenant_configs has no DB CHECK; e.g. 13 from an import bug)
+    must NOT bubble a bare ValueError out of compute_metric and 500 the chat turn — it must
+    return the §9 number-free invalid_params refusal, like every other param/period failure.
+
+    Pre-fix: resolve_period('this_year', fy=13) bare-raises ValueError which escapes
+    compute_metric's (ParamError, PeriodError) handler → the await here RAISES. Post-fix:
+    PeriodError is raised and caught → a number-free invalid_params dict is returned."""
+    await _ensure_system_tenant(db)
+    db.add(
+        MetricDefinition(
+            tenant_id=SYSTEM_TENANT_ID,
+            key="rev_fy",
+            display_name="Revenue",
+            definition="x",
+            unit="currency",
+            source_kind="suiteql",
+            blessed_spec={
+                "query": "SELECT 1 WHERE d>=:period_start AND d<=:period_end",
+                "dialect": "suiteql",
+            },
+            params_schema={"period": {"type": "period"}},
+            status="active",
+            version=1,
+        )
+    )
+    await db.flush()
+
+    async def _fake_scalar(db, tenant_id, metric, coerced, context):
+        return 42.0
+
+    monkeypatch.setattr("app.services.metrics.metric_compute._execute_scalar_query", _fake_scalar)
+
+    out = await compute_metric(
+        db,
+        tenant_id=tenant_a.id,
+        key="rev_fy",
+        params={"period": "this_year"},
+        context={"fiscal_year_start_month": 13},  # config drift: out of 1..12
+    )
+    assert out.get("error") == "invalid_params"
+    # Number-free refusal: no computed value leaks via the error dict.
+    assert "rows" not in out
+
+
 async def test_exact_key_survives_embedding_decoy_eviction(db, tenant_a, monkeypatch):
     """Production repro: with seeded 1536-d intent_embeddings, an exact-key compute
     request must NOT be evicted by a sibling metric whose embedding ranks nearer to

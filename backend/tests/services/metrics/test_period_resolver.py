@@ -91,3 +91,21 @@ def test_fy_bad_fiscal_month_raises_period_error():
     with pytest.raises(PeriodError) as ei:
         resolve_period("fy2024", fiscal_year_start_month=13, today=date(2026, 3, 15))
     assert ei.type is PeriodError
+
+
+@pytest.mark.parametrize("token", ["this_year", "last_year", "ytd", "this_month", "this_quarter"])
+@pytest.mark.parametrize("bad_fy", [13, 0, -1])
+def test_out_of_range_fiscal_year_start_month_raises_period_error(token, bad_fy):
+    """REAL config-drift invariant (T2 multi-angle gate, MAJOR). fiscal_year_start_month
+    flows from tenant_configs, which has no DB CHECK constraint, and compute_metric's
+    `int(... or 1)` coercion only rescues falsy 0/None — an out-of-range value (e.g. 13 from
+    a data-entry/import bug) reaches resolve_period. The this_year/last_year/ytd branches
+    build date(year, fiscal_year_start_month, 1) directly, so a bare ValueError would escape
+    compute_metric's `except (ParamError, PeriodError)` and 500 the chat turn instead of the
+    number-free invalid_params refusal the fy_abs branch is hardened to produce. resolve_period
+    MUST reject an out-of-range fiscal_year_start_month as PeriodError for every token.
+
+    Pre-fix: this_year/last_year/ytd raise a bare ValueError (not caught); this_month/
+    this_quarter silently succeed. Post-fix: all raise PeriodError."""
+    with pytest.raises(PeriodError):
+        resolve_period(token, fiscal_year_start_month=bad_fy, today=date(2026, 6, 8))

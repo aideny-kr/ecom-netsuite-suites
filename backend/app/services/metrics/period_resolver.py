@@ -46,6 +46,17 @@ def _fiscal_quarter_start_month(today: date, fy_start: int, quarters_back: int) 
 
 def resolve_period(token: str, *, fiscal_year_start_month: int, today: date) -> tuple[date, date]:
     t = token.strip().lower()
+    # Config-drift guard: fiscal_year_start_month flows from tenant_configs, which has NO DB
+    # CHECK constraint (models/tenant.py), and compute_metric coerces it via
+    # `int(... or 1)` — which only rescues falsy 0/None, not an out-of-range value like 13 or
+    # -1 from a data-entry/import bug. The this_year/last_year/ytd branches build
+    # date(year, fiscal_year_start_month, 1) DIRECTLY (the month/quarter branches normalize via
+    # _add_months' modulo), so an out-of-range month would bare-raise ValueError and ESCAPE
+    # compute_metric's `except (ParamError, PeriodError)` handler — 500ing the chat turn
+    # instead of the §9 number-free invalid_params refusal. Reject uniformly as PeriodError so
+    # every period token degrades gracefully when a tenant's fiscal config is invalid.
+    if not 1 <= fiscal_year_start_month <= 12:
+        raise PeriodError(f"fiscal_year_start_month must be in 1..12, got {fiscal_year_start_month}")
     fy_abs = _FY_ABS.fullmatch(t)
     if t not in SUPPORTED_TOKENS and fy_abs is None:
         raise PeriodError(f"unsupported period token: {token}")
