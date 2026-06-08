@@ -86,6 +86,16 @@ def fill_query(query: str, coerced: dict) -> str:
         # author-time enum-value rejection in metric_authoring._validate_params_schema.
         return "'" + str(v).replace("'", "''") + "'"
 
+    # Validate against the TEMPLATE, not the filled output. The old guard scanned the
+    # FILLED string for a residual `:word`, which a legitimately-rendered string value
+    # containing a colon (e.g. an enum value 'EU:Q1') falsely tripped — making a blessed
+    # metric + a valid enum value silently un-computable. Instead require every :name
+    # placeholder in the ORIGINAL query to be provided by `coerced` (the only safe
+    # substitution source); rendered values can never introduce a phantom placeholder.
+    template_placeholders = set(re.findall(r":([a-zA-Z_]\w*)\b", query))
+    if template_placeholders - set(coerced):
+        raise ParamError("unfilled placeholder remains")
+
     filled = query
     for name, val in coerced.items():
         # F3 injection-hardening: pass _render(val) via a CALLABLE replacement, not as a
@@ -97,8 +107,6 @@ def fill_query(query: str, coerced: dict) -> str:
         # rendered (quote-escaped) literal lands exactly as data regardless of backslashes.
         rendered = _render(val)
         filled = re.sub(rf":{re.escape(name)}\b", lambda _m, _r=rendered: _r, filled)
-    if re.search(r":[a-zA-Z_]\w*", filled):
-        raise ParamError("unfilled placeholder remains")
     return filled
 
 

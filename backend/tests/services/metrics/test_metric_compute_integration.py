@@ -1,12 +1,37 @@
 # backend/tests/services/metrics/test_metric_compute_integration.py
 from datetime import date
 
+import pytest
 from sqlalchemy import delete, select
 
 from app.models.audit import AuditEvent
 from app.models.metric_definition import SYSTEM_TENANT_ID, MetricDefinition
 from app.models.tenant import Tenant
-from app.services.metrics.metric_compute import compute_metric
+from app.services.metrics.metric_compute import ParamError, compute_metric, fill_query
+
+
+def test_fill_query_allows_colon_inside_a_rendered_string_value():
+    """REAL correctness invariant (T2 multi-angle gate, minor). fill_query's
+    'unfilled placeholder remains' guard scanned the FILLED string for ':word', so a
+    legitimately-rendered value containing a colon — e.g. a blessed enum value 'EU:Q1'
+    (author-time validation rejects quotes/';'/'--'/backslash but NOT a colon) — tripped
+    the guard, making a blessed metric + a valid enum value silently un-computable
+    (compute returns invalid_params). The guard must validate the TEMPLATE's placeholders,
+    not the rendered output: a fully-and-correctly-filled query whose substituted literal
+    contains ':word' must NOT raise.
+
+    Pre-fix this RAISES ParamError; post-fix it returns the filled query verbatim."""
+    out = fill_query("SELECT 1 WHERE region = :region", {"region": "EU:Q1"})
+    assert out == "SELECT 1 WHERE region = 'EU:Q1'"
+
+
+def test_fill_query_still_rejects_a_genuinely_unfilled_placeholder():
+    """Guard against over-relaxation: the template-based check must STILL raise when a
+    real placeholder is not provided by coerced (e.g. a :token the schema never bound) —
+    preserving the safety the original post-substitution guard provided."""
+    with pytest.raises(ParamError):
+        fill_query("SELECT 1 WHERE region = :region AND sub = :subsidiary", {"region": "eu"})
+
 
 # A fixed 1536-d query embedding (the seeder uses 1536-d intent_embedding).
 _DIM = 1536
