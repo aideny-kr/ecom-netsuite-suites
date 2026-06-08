@@ -6,6 +6,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiClient } from "@/lib/api-client";
 import { consumeChatStream } from "@/lib/chat-stream";
 import type { FinancialReportData, DataTableData, TaskOutputData, SheetsLinkData, DocsLinkData, StreamBlock } from "@/lib/chat-stream";
+import { coerceDataTableData } from "@/lib/chat-stream";
 import type { ChartData } from "@/lib/types";
 import type { ChatSession, ChatSessionDetail, ChatMessage, StreamingToolCall } from "@/lib/types";
 import { SessionSidebar } from "@/components/chat/session-sidebar";
@@ -154,7 +155,12 @@ export default function ChatPage() {
         financialReportsRef.current.set(msg.id, data as unknown as FinancialReportData);
         hydrated = true;
       } else if (type === "data_table" && data) {
-        dataTablesRef.current.set(msg.id, data as unknown as DataTableData);
+        // Re-derive isMetric from the persisted payload — the raw persisted dict carries
+        // snake_case suppress_llm_value but NOT the FE-only camelCase isMetric, so a plain
+        // cast would drop the metric flag and re-expose SuiteQL affordances on reload /
+        // session-switch (both re-run this [sessionDetail]-keyed effect). coerceDataTableData
+        // is the same helper the live-stream path uses, so the two paths cannot drift.
+        dataTablesRef.current.set(msg.id, coerceDataTableData(data as Record<string, unknown>));
         hydrated = true;
       } else if (type === "chart" && data) {
         if (!chartsRef.current.has(msg.id)) {
@@ -308,7 +314,12 @@ export default function ChatPage() {
               return null;
             });
             setDataTable((current) => {
-              if (current) dataTablesRef.current.set(message.id, current);
+              // Route through the SAME helper as hydration for defense-in-depth/idempotency:
+              // `current` is already a normalized DataTableData (isMetric set by normalizeStreamEvent),
+              // so coerceDataTableData is a no-op for isMetric here — but it provably keeps the
+              // in-flight and hydration paths in lock-step and recovers isMetric from
+              // suppress_llm_value if it were ever dropped.
+              if (current) dataTablesRef.current.set(message.id, coerceDataTableData(current as unknown as Record<string, unknown>));
               return null;
             });
             setCharts((current) => {

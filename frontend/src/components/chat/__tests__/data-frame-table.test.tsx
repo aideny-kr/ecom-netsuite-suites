@@ -54,6 +54,7 @@ vi.mock("@/hooks/use-saved-queries", () => ({
 
 // Import AFTER mocks
 import { DataFrameTable } from "../data-frame-table";
+import { coerceDataTableData } from "@/lib/chat-stream";
 import type { DataTableData } from "@/lib/chat-stream";
 
 function makeMetricData(overrides: Partial<DataTableData> = {}): DataTableData {
@@ -136,6 +137,43 @@ describe("DataFrameTable — regular SuiteQL table (isMetric: false / absent)", 
         queryText="SELECT tranid, amount FROM transaction FETCH FIRST 1 ROWS ONLY"
       />,
     );
+    expect(screen.getByRole("button", { name: /save to analytics/i })).toBeInTheDocument();
+  });
+});
+
+describe("DataFrameTable — REHYDRATION via coerceDataTableData (persisted payload, not hand-set isMetric)", () => {
+  // The EXACT persisted metric payload from metric_compute.py (carries snake_case suppress_llm_value).
+  const persistedMetricPayload = {
+    columns: ["Metric", "Value", "Unit", "Period"],
+    rows: [["Net Margin", "12.3", "percent", "Q1 FY2026"]],
+    row_count: 1,
+    query: "net_margin",
+    truncated: false,
+    suppress_llm_value: true,
+  };
+
+  // A persisted plain-SuiteQL payload — no metric flag.
+  const persistedSuiteqlPayload = {
+    columns: ["tranid", "amount"],
+    rows: [["T-001", 500]],
+    row_count: 1,
+    query: "SELECT tranid, amount FROM transaction FETCH FIRST 1 ROWS ONLY",
+    truncated: false,
+  };
+
+  it("hides ALL SuiteQL affordances when the table is built from the persisted metric payload (the real hydration path)", () => {
+    // Build the table the way hydration now does — through coerceDataTableData, NOT by hand-setting isMetric.
+    const hydrated = coerceDataTableData(persistedMetricPayload);
+    render(<DataFrameTable data={hydrated} queryText={hydrated.query} />);
+    expect(screen.queryByText(/SuiteQL Query/i)).toBeNull();
+    expect(screen.queryByText(/BigQuery SQL/i)).toBeNull();
+    expect(screen.queryByRole("button", { name: /save to analytics/i })).toBeNull();
+  });
+
+  it("counter-test: SHOWS SuiteQL affordances when built from a persisted plain-SuiteQL payload (no over-suppression)", () => {
+    const hydrated = coerceDataTableData(persistedSuiteqlPayload);
+    render(<DataFrameTable data={hydrated} queryText={hydrated.query} />);
+    expect(screen.getByText(/SuiteQL Query/i)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /save to analytics/i })).toBeInTheDocument();
   });
 });
