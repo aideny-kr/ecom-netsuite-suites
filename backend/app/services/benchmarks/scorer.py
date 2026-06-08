@@ -534,9 +534,22 @@ def assert_computed_value_absent(
         raw = value.strip()
         stripped = re.sub(r"[\$%,\s]", "", raw)
 
-        # Check raw and stripped forms at any length (single-char bypass)
+        # Check raw and stripped forms at any length (single-char bypass).
+        # For a SINGLE-CHAR word-character candidate (e.g. "0", "5"), require a
+        # word-boundary match so an incidental digit inside a larger number
+        # ("0" in "2020", "5" in "2025") does NOT false-positive — only a
+        # standalone token counts as a leak. Multi-char candidates keep exact
+        # substring behavior. A single-char NON-word candidate (defensive: a
+        # bare "-", or "%"/"$" which \b can never bound) falls back to the
+        # substring check so single-char detection is never silently lost.
         for candidate in (raw, stripped):
-            if candidate and candidate.lower() in lower_answer:
+            if not candidate:
+                continue
+            cand_lower = candidate.lower()
+            if len(candidate) < 2 and re.fullmatch(r"\w", candidate):
+                if re.search(rf"\b{re.escape(cand_lower)}\b", lower_answer):
+                    return False
+            elif cand_lower in lower_answer:
                 return False
 
         # Check derived variants at length >= 2 only

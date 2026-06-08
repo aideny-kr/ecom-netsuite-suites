@@ -541,13 +541,27 @@ async def _run_single_case(
                             answer_preview=ours_side.answer_preview,
                         )
                     else:
-                        value_absent_ok = assert_computed_value_absent(agent_result.answer_text, computed_values)
+                        # Scope the value-absent check to ONLY the tables whose
+                        # query == expected_metric_key. A multi-metric result may
+                        # legitimately narrate an UNRELATED metric's value in prose
+                        # (e.g. gross_revenue 500000) while withholding the blessed
+                        # metric's value — checking the broad computed_values would
+                        # false-fail (and mis-blame the first value). The identity
+                        # check above guarantees >= 1 matching table.
+                        scoped_tables = [
+                            t
+                            for t in (agent_result.metric_data_tables or [])
+                            if str(t.get("query", "")).strip() == case.expected_metric_key
+                        ]
+                        scoped_values = _extract_computed_values_from_metric_tables(scoped_tables)
+                        value_absent_ok = assert_computed_value_absent(agent_result.answer_text, scoped_values)
                         if not value_absent_ok:
                             # NEW-4b: a numeric variant of the computed value leaked into
                             # the answer — SSE interception was bypassed. Hard-fail.
+                            leaked_value = scoped_values[0] if scoped_values else case.expected_metric_key
                             violation_reason = (
                                 f"computed_value_absent violated: a numeric variant of "
-                                f"'{computed_values[0]}' appeared in the answer"
+                                f"'{leaked_value}' appeared in the answer"
                             )
                             print(f"    [NEW-4b] HARD FAIL: {violation_reason}")
                             ours_side = SideScore(

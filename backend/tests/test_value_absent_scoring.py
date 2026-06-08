@@ -13,17 +13,13 @@ These tests use fabricated case-result objects — no live agent run needed.
 from __future__ import annotations
 
 import asyncio
-import dataclasses
 import uuid
 from unittest.mock import AsyncMock, patch
-
-import pytest
 
 from app.services.benchmarks.agent_runner import AgentRunResult, _extract_metric_data_tables
 from app.services.benchmarks.run_vs_mcp import (
     Case,
     CaseResult,
-    SideScore,
     _extract_computed_values_from_metric_tables,
     _run_single_case,
 )
@@ -712,6 +708,34 @@ class TestValueLeakVariantsR4:
         assert "5%" in v, f"Expected '5%' in variants of '5.0%', got: {v}"
         assert "5.0%" in v
 
+    # ----- Finding #4: word-boundary the single-char raw/stripped match -----
+
+    def test_single_char_zero_no_fp_inside_year_2020(self):
+        """assert_computed_value_absent('In fiscal 2020 the refund count is shown
+        above.', ['0']) → True. The bare substring '0' appears inside '2020' but
+        no STANDALONE metric value leaked — the single-char raw match must be
+        word-boundary-scoped to avoid this incidental-digit false positive."""
+        from app.services.benchmarks.scorer import assert_computed_value_absent
+
+        result = assert_computed_value_absent("In fiscal 2020 the refund count is shown above.", ["0"])
+        assert result is True, "'0' inside '2020' is incidental — must NOT false-fail"
+
+    def test_single_char_five_no_fp_inside_year_2025(self):
+        """assert_computed_value_absent('Revenue for fiscal 2025 is in the table.',
+        ['5']) → True. '5' is a substring of '2025' but not a standalone leak."""
+        from app.services.benchmarks.scorer import assert_computed_value_absent
+
+        result = assert_computed_value_absent("Revenue for fiscal 2025 is in the table.", ["5"])
+        assert result is True, "'5' inside '2025' is incidental — must NOT false-fail"
+
+    def test_single_char_five_standalone_leak_still_detected(self):
+        """A genuine standalone single-char leak still hard-fails:
+        assert_computed_value_absent('the refund count is 5.', ['5']) → False."""
+        from app.services.benchmarks.scorer import assert_computed_value_absent
+
+        result = assert_computed_value_absent("the refund count is 5.", ["5"])
+        assert result is False, "standalone single-char value '5' must still be caught"
+
 
 # ---------------------------------------------------------------------------
 # NEW-4a (round 4) — routing-identity: expected_metric_key
@@ -837,6 +861,72 @@ class TestRunSingleCaseRoutingIdentity:
         result = self._run(case, agent_result)
 
         assert result.verdict == "OURS FAILED"
+
+    # ----- Finding #3: scope the value-absent check to expected_metric_key -----
+
+    def _make_two_table_agent_result(self, answer_text: str) -> "AgentRunResult":
+        """A 2-table result: net_margin (value 12.5) + unrelated gross_revenue
+        (value 500000). The net_margin value is withheld; only gross_revenue's
+        value may appear in the answer text per the caller."""
+        net_margin_table = {
+            "kind": "table",
+            "columns": ["Metric", "Value", "Unit", "Period"],
+            "rows": [["Net Margin", 12.5, "%", "Q1 2025"]],
+            "row_count": 1,
+            "query": "net_margin",
+            "truncated": False,
+            "limit": 1,
+        }
+        gross_revenue_table = {
+            "kind": "table",
+            "columns": ["Metric", "Value", "Unit", "Period"],
+            "rows": [["Gross Revenue", 500000.0, "$", "Q1 2025"]],
+            "row_count": 1,
+            "query": "gross_revenue",
+            "truncated": False,
+            "limit": 1,
+        }
+        return AgentRunResult(
+            answer_text=answer_text,
+            tool_calls=[{"name": "metric_compute", "input": {"key": "net_margin"}}],
+            input_tokens=100,
+            output_tokens=50,
+            cost_usd=0.001,
+            latency_ms=3000,
+            success=True,
+            error=None,
+            metric_data_tables=[net_margin_table, gross_revenue_table],
+        )
+
+    def test_unrelated_table_value_narrated_does_not_false_fail(self):
+        """2 tables: net_margin (12.5, WITHHELD) + gross_revenue (500000,
+        narrated in prose). expected_metric_key='net_margin'. The value-absent
+        check must be SCOPED to the net_margin table only — the gross_revenue
+        500000 in the prose is from an unrelated metric and must NOT hard-fail."""
+        case = self._make_case_with_expected_key("net_margin")
+        agent_result = self._make_two_table_agent_result(
+            "Gross revenue was 500000 last quarter; net margin is in the table above."
+        )
+        result = self._run(case, agent_result)
+
+        assert "computed_value_absent violated" not in (result.ours.error or "")
+        assert result.ours.answer_acc == 1.0
+        assert result.ours.success is True
+        assert result.verdict == "OURS ONLY"
+
+    def test_expected_metric_value_leak_with_unrelated_table_still_fails(self):
+        """Companion: the EXPECTED net_margin value (12.5) DOES leak, with an
+        unrelated gross_revenue table also present. Scoping must NOT disable
+        detection — still hard-fails AND the error names the net_margin value."""
+        case = self._make_case_with_expected_key("net_margin")
+        agent_result = self._make_two_table_agent_result("Net margin is 12.5% and gross revenue is in the table above.")
+        result = self._run(case, agent_result)
+
+        assert result.ours.answer_acc == 0.0
+        assert result.ours.success is False
+        assert result.ours.error is not None
+        assert "computed_value_absent violated" in result.ours.error
+        assert "12.5" in result.ours.error
 
     def test_expected_metric_key_in_case_yaml(self):
         """The metric_net_margin_last_quarter.yaml case must declare
