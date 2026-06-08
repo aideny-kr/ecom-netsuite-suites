@@ -3158,13 +3158,14 @@ async def run_chat_turn(
                 # through _intercept_with_cache so pricing follow-up tools
                 # (pricing_revise / pricing_to_sheets) can read the cached
                 # pricing_state in this single-agent / legacy path too.
-                # LATENT (grill R3 / M4): this legacy single-agent path (reached only
-                # when UNIFIED_AGENT_ENABLED / tenant.unified_agent_enabled is false)
-                # builds the persisted tool log from the condensed string, which omits
-                # the metric `source_kind`. So _compute_source_pin_update can't read a
-                # BigQuery metric's real source on this path and may mis-pin NetSuite.
-                # Closed on the production UnifiedAgent path (raw tool log preserves
-                # source_kind); fix here only if the legacy path is put back into use.
+                # M4 (grill R3): capture the RAW tool result BEFORE interception condenses
+                # it. The persisted tool log is built from this raw value (below) so a
+                # metric's `source_kind` survives for _compute_source_pin_update —
+                # interception reassigns result_str to the LLM-facing condensed string,
+                # which drops source_kind, and building the log from THAT would mis-pin
+                # NetSuite for a BigQuery metric. Mirrors the production UnifiedAgent path
+                # (base_agent logs the raw result_str + condenses a separate llm_result_str).
+                _raw_result_str = result_str
                 intercept_type, intercept_data, result_str = _intercept_with_cache(
                     block.name,
                     result_str,
@@ -3210,7 +3211,10 @@ async def run_chat_turn(
                         step=step,
                         tool_name=block.name,
                         params=block.input,
-                        result_str=result_str,
+                        # Raw (pre-condense) result so a metric's source_kind survives in
+                        # the log for _compute_source_pin_update (the LLM got the condensed
+                        # copy via tool_results_content above).
+                        result_str=_raw_result_str,
                         duration_ms=elapsed_ms,
                     )
                 )
