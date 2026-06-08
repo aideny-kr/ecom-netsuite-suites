@@ -416,15 +416,17 @@ class TestRunSingleCaseValueAbsent:
 
     # NEW-4a: vacuous-pass bug — no metric data_table → must now HARD FAIL
     def test_no_metric_tables_hard_fails_metric_case(self):
-        """NEW-4a: When a computed_value_absent case runs successfully but
-        produces NO metric data_table (metric_compute was never called), the
-        gate must HARD FAIL — not skip the check.
+        """NEW-4a: genuine bypass = metric_compute never invoked (tool_calls
+        empty). When a computed_value_absent case runs successfully but produces
+        NO metric data_table AND metric_compute was never called, the gate must
+        HARD FAIL — not skip the check.
 
         This closes the vacuous-pass gap: an agent that answers a metric
         question via ad-hoc SuiteQL (bypassing metric_compute entirely) would
         produce no metric data_table, previously causing the check to be
         silently skipped and the case to pass as 'OURS ONLY'.  Now the gate
-        enforces that the blessed routing was used.
+        enforces that the blessed routing was used. (Under the NEW-4a tristate
+        classifier, tool_calls=[] → 'not_invoked' → still hard-fails.)
         """
         case = _make_metric_case(computed_value_absent=True)
         # No metric tables — metric_compute was NOT called; agent bypassed it
@@ -443,8 +445,9 @@ class TestRunSingleCaseValueAbsent:
         assert "metric_compute" in result.ours.error.lower() or "metric data_table" in result.ours.error.lower()
 
     def test_no_metric_tables_bypass_verdict_is_failed(self):
-        """NEW-4a: The CaseResult verdict for a bypassed metric case must
-        reflect failure (OURS FAILED), not OURS ONLY."""
+        """NEW-4a: genuine bypass = metric_compute never invoked (tool_calls
+        empty). The CaseResult verdict for a bypassed metric case must reflect
+        failure (OURS FAILED), not OURS ONLY."""
         case = _make_metric_case(computed_value_absent=True)
         agent_result = AgentRunResult(
             answer_text="Margin looks fine.",
@@ -856,3 +859,305 @@ class TestRunSingleCaseRoutingIdentity:
         assert raw["expected_metric_key"] == "net_margin", (
             f"expected_metric_key must be 'net_margin', got: {raw['expected_metric_key']!r}"
         )
+
+
+# ---------------------------------------------------------------------------
+# NEW-4a — tristate metric_compute routing classifier (pure function)
+# ---------------------------------------------------------------------------
+
+
+class TestClassifyMetricComputeRouting:
+    """Unit tests for run_vs_mcp._classify_metric_compute_routing.
+
+    Tristate: 'not_invoked' | 'invoked_correct' | 'invoked_wrong'. This is the
+    de-conflation lever for NEW-4a — distinguishing a genuine metric_compute
+    BYPASS (never called) from a correctly-routed call that simply produced no
+    value (errored/empty) from a call against the WRONG metric key. No DB/mocks.
+    """
+
+    def _classify(self, tool_calls, expected_metric_key):
+        from app.services.benchmarks.run_vs_mcp import _classify_metric_compute_routing
+
+        return _classify_metric_compute_routing(tool_calls, expected_metric_key)
+
+    def test_empty_tool_calls_not_invoked(self):
+        assert self._classify([], "net_margin") == "not_invoked"
+
+    def test_no_metric_compute_in_tool_calls_not_invoked(self):
+        tool_calls = [{"name": "netsuite_suiteql", "input": {"sql": "SELECT 1"}}]
+        assert self._classify(tool_calls, "net_margin") == "not_invoked"
+
+    def test_correct_key_invoked_correct(self):
+        tool_calls = [{"name": "metric_compute", "input": {"key": "net_margin"}}]
+        assert self._classify(tool_calls, "net_margin") == "invoked_correct"
+
+    def test_correct_key_expected_none_invoked_correct(self):
+        """expected_metric_key falsy → any metric_compute call satisfies routing."""
+        tool_calls = [{"name": "metric_compute", "input": {"key": "net_margin"}}]
+        assert self._classify(tool_calls, None) == "invoked_correct"
+
+    def test_wrong_key_invoked_wrong(self):
+        tool_calls = [{"name": "metric_compute", "input": {"key": "gross_revenue"}}]
+        assert self._classify(tool_calls, "net_margin") == "invoked_wrong"
+
+    def test_no_key_logged_graceful_fallback_invoked_correct(self):
+        """metric_compute invoked but NO key in the input dict → graceful
+        fallback to invoked_correct (a logging gap must not flip a real routing
+        into a false bypass)."""
+        tool_calls = [{"name": "metric_compute", "input": {}}]
+        assert self._classify(tool_calls, "net_margin") == "invoked_correct"
+
+    def test_called_twice_wrong_then_right_invoked_correct(self):
+        """A later correct call rescues an earlier wrong one."""
+        tool_calls = [
+            {"name": "metric_compute", "input": {"key": "gross_revenue"}},
+            {"name": "metric_compute", "input": {"key": "net_margin"}},
+        ]
+        assert self._classify(tool_calls, "net_margin") == "invoked_correct"
+
+    def test_ext_prefixed_name_counts_as_invoked(self):
+        """Substring match: an ext-prefixed/sanitized name containing
+        'metric_compute' still counts as invoked (consistent with _score_tools)."""
+        tool_calls = [{"name": "ext__deadbeef__metric_compute", "input": {"key": "net_margin"}}]
+        assert self._classify(tool_calls, "net_margin") == "invoked_correct"
+
+    def test_input_non_dict_does_not_raise(self):
+        """Malformed entry (input not a dict / None) must not raise — treated as
+        no-key → graceful fallback when no key is logged anywhere."""
+        tool_calls = [{"name": "metric_compute", "input": None}]
+        assert self._classify(tool_calls, "net_margin") == "invoked_correct"
+
+    def test_tool_key_alias_counts_as_invoked(self):
+        """Entries keyed under 'tool' (not 'name') still substring-match."""
+        tool_calls = [{"tool": "metric_compute", "input": {"key": "net_margin"}}]
+        assert self._classify(tool_calls, "net_margin") == "invoked_correct"
+
+
+# ---------------------------------------------------------------------------
+# NEW-4a — metric_compute invoked but no value produced (errored/empty)
+# ---------------------------------------------------------------------------
+
+
+class TestRunSingleCaseMetricComputeErrored:
+    """NEW-4a: de-conflate bypass / wrong-key / correct-key-but-errored.
+
+    A correctly-routed metric (e.g. net_margin over draft leaves →
+    missing_dependency) produces NO metric data_table — same empty-table
+    signature as a genuine bypass. Before this fix the empty-table branch
+    UNCONDITIONALLY hard-failed as a bypass, false-failing a correctly-routing
+    agent. The tristate classifier (driven by tool_calls) de-conflates them.
+
+    Uses fabricated AgentRunResult objects — no live agent run, no DB.
+    """
+
+    def _run(self, case: Case, agent_result: AgentRunResult) -> CaseResult:
+        async def _async():
+            with (
+                patch(
+                    "app.services.benchmarks.agent_runner.run_agent",
+                    new=AsyncMock(return_value=agent_result),
+                ),
+                patch(
+                    "app.services.benchmarks.run_vs_mcp._score_answer",
+                    new=AsyncMock(return_value=(1.0, "[test] keywords matched")),
+                ),
+            ):
+                return await _run_single_case(
+                    case=case,
+                    tenant_id=uuid.UUID("00000000-0000-0000-0000-000000000001"),
+                    agent_model="claude-sonnet-4-6",
+                    baseline_model="claude-sonnet-4-6",
+                    skip_baseline=True,
+                    use_llm_judge=False,
+                    db=None,
+                )
+
+        return asyncio.run(_async())
+
+    def _make_case_with_expected_key(self, expected_metric_key: str | None) -> Case:
+        return Case(
+            case_id="test_metric_errored",
+            query="what's our net margin last quarter?",
+            expected_answer_contains=["net margin"],
+            expected_tools=["metric_compute"],
+            expected_accuracy=0.7,
+            max_cost=0.50,
+            max_latency_ms=120_000,
+            tags=["metric"],
+            notes="",
+            baseline_expected_tools=[],
+            baseline_expected_accuracy=0.5,
+            computed_value_absent=True,
+            expected_metric_key=expected_metric_key,
+        )
+
+    def test_metric_compute_invoked_correct_key_errored_routing_only_passes(self):
+        """Core fix: metric_compute(net_margin) was called and correctly errored
+        (missing_dependency over draft leaves) → NO data_table. Must NOT bypass-
+        fail; routing is satisfied and value-absent is vacuous."""
+        case = self._make_case_with_expected_key("net_margin")
+        agent_result = AgentRunResult(
+            answer_text="Net margin is shown in the table above.",
+            tool_calls=[
+                {
+                    "name": "metric_compute",
+                    "input": {"key": "net_margin", "params": {"period": "last_quarter"}},
+                    "result_preview": "",
+                }
+            ],
+            success=True,
+            metric_data_tables=[],
+        )
+        result = self._run(case, agent_result)
+
+        assert result.ours.success is True
+        assert result.ours.answer_acc == 1.0
+        assert "bypass" not in (result.ours.error or "").lower()
+        assert "routing identity" not in (result.ours.error or "").lower()
+        assert result.verdict == "OURS ONLY"
+
+    def test_metric_compute_invoked_wrong_key_no_table_routing_identity_fails(self):
+        """The tristate guard: metric_compute was called but for the WRONG metric
+        (gross_revenue), produced NO table. Must HARD FAIL with a routing-identity
+        reason — NOT mislabeled as a bypass. A naive single-bool helper would say
+        'bypass' here; this test forces the tristate."""
+        case = self._make_case_with_expected_key("net_margin")
+        agent_result = AgentRunResult(
+            answer_text="Here is the figure.",
+            tool_calls=[
+                {"name": "metric_compute", "input": {"key": "gross_revenue", "params": {}}, "result_preview": ""}
+            ],
+            success=True,
+            metric_data_tables=[],
+        )
+        result = self._run(case, agent_result)
+
+        assert result.ours.answer_acc == 0.0
+        assert result.ours.success is False
+        assert result.ours.error is not None
+        assert "net_margin" in result.ours.error
+        assert "routing identity" in result.ours.error.lower()
+        assert "bypass" not in result.ours.error.lower()
+        assert result.verdict == "OURS FAILED"
+
+    def test_metric_compute_not_invoked_still_hard_fails(self):
+        """Genuine bypass (tool_calls empty) still hard-fails as a bypass."""
+        case = self._make_case_with_expected_key("net_margin")
+        agent_result = AgentRunResult(
+            answer_text="Net margin is great this quarter.",
+            tool_calls=[],
+            success=True,
+            metric_data_tables=[],
+        )
+        result = self._run(case, agent_result)
+
+        assert result.ours.answer_acc == 0.0
+        assert result.ours.success is False
+        assert result.ours.error is not None
+        assert "bypass" in result.ours.error.lower()
+        assert result.verdict == "OURS FAILED"
+
+    def test_metric_compute_not_invoked_other_tool_still_hard_fails(self):
+        """Genuine bypass variant: ad-hoc SuiteQL only, metric_compute absent."""
+        case = self._make_case_with_expected_key("net_margin")
+        agent_result = AgentRunResult(
+            answer_text="Net margin is great this quarter.",
+            tool_calls=[{"name": "netsuite_suiteql", "input": {"sql": "SELECT 1"}}],
+            success=True,
+            metric_data_tables=[],
+        )
+        result = self._run(case, agent_result)
+
+        assert result.ours.answer_acc == 0.0
+        assert result.ours.success is False
+        assert "bypass" in (result.ours.error or "").lower()
+        assert result.verdict == "OURS FAILED"
+
+    def test_metric_compute_invoked_twice_one_correct_passes(self):
+        """Called twice, wrong then right, no table → routing-only PASS."""
+        case = self._make_case_with_expected_key("net_margin")
+        agent_result = AgentRunResult(
+            answer_text="Net margin is shown in the table above.",
+            tool_calls=[
+                {"name": "metric_compute", "input": {"key": "gross_revenue"}},
+                {"name": "metric_compute", "input": {"key": "net_margin"}},
+            ],
+            success=True,
+            metric_data_tables=[],
+        )
+        result = self._run(case, agent_result)
+
+        assert result.ours.answer_acc == 1.0
+        assert "bypass" not in (result.ours.error or "").lower()
+        assert "routing identity" not in (result.ours.error or "").lower()
+
+    def test_metric_compute_invoked_no_key_logged_passes(self):
+        """metric_compute invoked but NO key logged (fixture/log quirk) →
+        graceful fallback to routing-only PASS, not a false bypass."""
+        case = self._make_case_with_expected_key("net_margin")
+        agent_result = AgentRunResult(
+            answer_text="Net margin is shown in the table above.",
+            tool_calls=[{"name": "metric_compute", "input": {}}],
+            success=True,
+            metric_data_tables=[],
+        )
+        result = self._run(case, agent_result)
+
+        assert result.ours.answer_acc == 1.0
+        assert "bypass" not in (result.ours.error or "").lower()
+        assert "routing identity" not in (result.ours.error or "").lower()
+
+    def test_real_value_leak_with_expected_key_fails(self):
+        """REAL value-absent through the identity branch: a populated metric
+        table for net_margin (value 12.5) whose value LEAKS into the answer must
+        hard-fail on the UNCHANGED non-empty branch — proving the identity +
+        value-absent combination fires on a REAL value with expected_metric_key
+        set (currently uncovered in the leak direction)."""
+        case = self._make_case_with_expected_key("net_margin")
+        metric_table = {
+            "kind": "table",
+            "columns": ["Metric", "Value", "Unit", "Period"],
+            "rows": [["Net Margin", 12.5, "%", "Q1 2025"]],
+            "row_count": 1,
+            "query": "net_margin",
+            "truncated": False,
+            "limit": 1,
+        }
+        agent_result = AgentRunResult(
+            answer_text="Your net margin is 12.5% for Q1 2025.",
+            tool_calls=[{"name": "metric_compute", "input": {"key": "net_margin"}}],
+            success=True,
+            metric_data_tables=[metric_table],
+        )
+        result = self._run(case, agent_result)
+
+        assert result.ours.answer_acc == 0.0
+        assert result.ours.success is False
+        assert result.ours.error is not None
+        assert "computed_value_absent violated" in result.ours.error
+        assert "12.5" in result.ours.error
+
+    def test_real_value_no_leak_with_expected_key_passes(self):
+        """REAL value correctly withheld + expected_metric_key set → PASS
+        through the UNCHANGED non-empty branch identity sub-path."""
+        case = self._make_case_with_expected_key("net_margin")
+        metric_table = {
+            "kind": "table",
+            "columns": ["Metric", "Value", "Unit", "Period"],
+            "rows": [["Net Margin", 12.5, "%", "Q1 2025"]],
+            "row_count": 1,
+            "query": "net_margin",
+            "truncated": False,
+            "limit": 1,
+        }
+        agent_result = AgentRunResult(
+            answer_text="Net margin is shown in the table above.",
+            tool_calls=[{"name": "metric_compute", "input": {"key": "net_margin"}}],
+            success=True,
+            metric_data_tables=[metric_table],
+        )
+        result = self._run(case, agent_result)
+
+        assert "computed_value_absent violated" not in (result.ours.error or "")
+        assert result.ours.answer_acc == 1.0
+        assert result.verdict == "OURS ONLY"

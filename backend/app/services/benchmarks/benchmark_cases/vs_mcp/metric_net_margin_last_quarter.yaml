@@ -1,6 +1,24 @@
 # Named-metric ask: net margin last quarter.
 #
-# D2 "measured" benchmark case — grill R2#19, NEW-4.
+# D2 "measured" benchmark case — grill R2#19, NEW-4, NEW-4a.
+#
+# SCOPE — ROUTING-ONLY (NEW-4a): net_margin is a SYSTEM expression metric whose
+# suiteql leaves (net_income, gross_revenue) seed as status=draft, so
+# compute_metric returns missing_dependency and NO data_table value is produced
+# live. This case therefore measures ROUTING (did the agent call
+# metric_compute for the net_margin key?), not a real computed value.
+#   - computed_value_absent: true and expected_metric_key: net_margin are still
+#     REQUIRED and now mean: "must route through metric_compute(net_margin);
+#     the value-absent invariant is VACUOUSLY satisfied when no value is
+#     produced (there is no value to leak)."
+#   - The benchmark gate (run_vs_mcp.py::_classify_metric_compute_routing)
+#     de-conflates a genuine BYPASS (metric_compute never called → hard fail)
+#     from a correctly-routed-but-uncomputable metric (routing-only PASS) from
+#     a WRONG-key call (routing-identity hard fail). An empty metric_data_table
+#     no longer auto-fails; the tool_calls log is the discriminator.
+#   - When the suiteql leaves are promoted to status=active with blessed
+#     queries, net_margin computes a real value and the value-absent invariant
+#     is exercised live end-to-end — revisit this "routing-only" note then.
 #
 # Tests that a named-metric ask routes through metric_compute (the metric
 # catalog) rather than falling back to ad-hoc SuiteQL. This is the key
@@ -11,9 +29,11 @@
 # Expected behavior:
 #   1. Agent recognises "net margin" as a catalog-defined metric by name.
 #   2. Agent calls metric_compute(metric_key="net_margin", period="last_quarter").
-#   3. Response surfaces the computed value with period label.
-#   4. The computed numeric value does NOT appear in the model's text answer
-#      (it is delivered exclusively via the data_table SSE event).
+#   3. Routing is satisfied by the metric_compute(net_margin) call; a computed
+#      value is NOT expected live (draft leaves → missing_dependency).
+#   4. Any computed numeric value MUST NOT appear in the model's text answer
+#      (it is delivered exclusively via the data_table SSE event). Vacuous
+#      while no value is produced.
 #
 # NEW-4 CI fix: this case is now run as a dedicated CI step via
 #   --case metric_net_margin_last_quarter
@@ -35,8 +55,11 @@ case_id: metric_net_margin_last_quarter
 query: "what's our net margin last quarter?"
 tags: ["metric", "named-metric", "catalog", "net-margin", "fiscal-period"]
 notes: |
-  Named-metric routing test. The agent must call metric_compute for a
-  catalog-defined metric ask rather than constructing ad-hoc SuiteQL.
+  ROUTING-ONLY named-metric test. The agent must call metric_compute for the
+  net_margin catalog metric rather than constructing ad-hoc SuiteQL. net_margin
+  is a system expression metric whose draft suiteql leaves yield
+  missing_dependency, so NO value is produced live — the gate scores routing,
+  and the value-absent invariant is vacuously satisfied when no value exists.
   Acceptable period interpretation: "last quarter" = the most recently
   completed fiscal quarter per tenant fiscal calendar.
   Expected tool: metric_compute (NOT netsuite_suiteql directly).

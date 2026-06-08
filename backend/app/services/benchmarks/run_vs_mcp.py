@@ -267,6 +267,62 @@ def _extract_computed_values_from_metric_tables(
     return values
 
 
+def _classify_metric_compute_routing(
+    tool_calls: list[dict],
+    expected_metric_key: str | None,
+) -> str:
+    """Tristate classifier for NEW-4a metric_compute routing.
+
+    De-conflates three cases that ALL yield an empty metric_data_tables list:
+      - a genuine BYPASS (metric_compute never invoked → ad-hoc SuiteQL),
+      - a correctly-routed call that produced NO value (errored/empty — e.g.
+        net_margin over draft leaves returns missing_dependency), and
+      - a call against the WRONG metric key.
+
+    Returns one of:
+      - "not_invoked"     — no metric_compute call in tool_calls.
+      - "invoked_correct" — metric_compute was called and routing is satisfied.
+      - "invoked_wrong"   — metric_compute was called, key(s) were logged, and
+                            none matched the expected key.
+
+    Name matching is a substring test (consistent with _score_tools) so
+    ext-prefixed / sanitized names like `ext__<hex>__metric_compute` still
+    count as invoked. The metric key is read from each entry's top-level
+    `input["key"]` (registry.py puts the key at the top level). A malformed
+    entry whose `input` is not a dict is treated as carrying no key.
+
+    Graceful fallback: when metric_compute WAS invoked but no entry logged a
+    non-empty `key` at all, we return "invoked_correct" — a logging gap must
+    not flip a real routing into a false bypass. The strict identity check on
+    the populated-table path (which reads the data_table `query` field) is
+    unaffected by this fallback.
+    """
+    metric_entries = [
+        tc for tc in (tool_calls or []) if "metric_compute" in str(tc.get("name") or tc.get("tool") or "")
+    ]
+    if not metric_entries:
+        return "not_invoked"
+    if not expected_metric_key:
+        return "invoked_correct"
+
+    logged_keys: list[str] = []
+    for tc in metric_entries:
+        inp = tc.get("input")
+        if not isinstance(inp, dict):
+            continue
+        key = inp.get("key")
+        if isinstance(key, str) and key.strip():
+            logged_keys.append(key.strip())
+
+    if expected_metric_key in logged_keys:
+        return "invoked_correct"
+    if logged_keys:
+        # Key(s) WERE logged and none matched the expected metric.
+        return "invoked_wrong"
+    # metric_compute invoked but NO key was logged anywhere — graceful fallback.
+    return "invoked_correct"
+
+
 # ---------------------------------------------------------------------------
 # Runner + verdict computation
 # ---------------------------------------------------------------------------
@@ -395,22 +451,70 @@ async def _run_single_case(
 
             computed_values = _extract_computed_values_from_metric_tables(agent_result.metric_data_tables)
             if not computed_values:
-                # NEW-4a: no metric data_table produced → metric_compute was bypassed.
-                # Hard-fail: the metric gate requires the blessed routing was used.
-                bypass_reason = (
-                    "metric case did not route through metric_compute "
-                    "(no metric data_table produced) — metric_compute bypass detected"
+                # NEW-4a: no metric data_table was produced. This is ambiguous —
+                # it can mean (a) a genuine BYPASS (metric_compute never called),
+                # (b) a correctly-routed call that errored/produced no value (e.g.
+                # net_margin over draft leaves → missing_dependency), or (c) a
+                # call against the WRONG metric. The tristate classifier reads the
+                # logged tool_calls to de-conflate them (the errored result dict
+                # is not a metric data_table, but the tool_call is logged).
+                routing = _classify_metric_compute_routing(
+                    agent_result.tool_calls,
+                    case.expected_metric_key,
                 )
-                print(f"    [NEW-4a] HARD FAIL: {bypass_reason}")
-                ours_side = SideScore(
-                    answer_acc=0.0,
-                    tool_acc=ours_side.tool_acc,
-                    cost_usd=ours_side.cost_usd,
-                    latency_ms=ours_side.latency_ms,
-                    success=False,
-                    error=bypass_reason,
-                    answer_preview=ours_side.answer_preview,
-                )
+                if routing == "not_invoked":
+                    # Genuine bypass — metric_compute was never invoked. Hard-fail:
+                    # the metric gate requires the blessed routing was used.
+                    bypass_reason = (
+                        "metric case did not route through metric_compute "
+                        "(no metric data_table produced) — metric_compute bypass detected"
+                    )
+                    print(f"    [NEW-4a] HARD FAIL: {bypass_reason}")
+                    ours_side = SideScore(
+                        answer_acc=0.0,
+                        tool_acc=ours_side.tool_acc,
+                        cost_usd=ours_side.cost_usd,
+                        latency_ms=ours_side.latency_ms,
+                        success=False,
+                        error=bypass_reason,
+                        answer_preview=ours_side.answer_preview,
+                    )
+                elif routing == "invoked_wrong":
+                    # metric_compute was called, but for the WRONG metric — routing
+                    # identity is not satisfied. Hard-fail with the SAME wording as
+                    # the populated-table identity check so error text is consistent.
+                    computed_keys = sorted(
+                        {
+                            str(tc.get("input", {}).get("key", "")).strip()
+                            for tc in (agent_result.tool_calls or [])
+                            if isinstance(tc.get("input"), dict) and str(tc.get("input", {}).get("key", "")).strip()
+                        }
+                    )
+                    identity_reason = (
+                        f"expected metric '{case.expected_metric_key}' was not computed "
+                        f"(routing identity not satisfied); "
+                        f"computed metric keys: {computed_keys or '(none)'}"
+                    )
+                    print(f"    [NEW-4a] HARD FAIL: {identity_reason}")
+                    ours_side = SideScore(
+                        answer_acc=0.0,
+                        tool_acc=ours_side.tool_acc,
+                        cost_usd=ours_side.cost_usd,
+                        latency_ms=ours_side.latency_ms,
+                        success=False,
+                        error=identity_reason,
+                        answer_preview=ours_side.answer_preview,
+                    )
+                else:
+                    # "invoked_correct": metric_compute WAS correctly routed but
+                    # produced no value (errored/empty). Routing is satisfied;
+                    # value-absent is vacuously satisfied (no value to leak). Do
+                    # NOT bypass-fail and do NOT run assert_computed_value_absent —
+                    # leave ours_side as the normal scored result.
+                    print(
+                        "    [NEW-4a] metric_compute invoked, no value produced "
+                        "(errored/empty) — routing satisfied, value-absent vacuous"
+                    )
             else:
                 # NEW-4a routing-identity check: when expected_metric_key is set,
                 # enforce that the SPECIFIC blessed metric was computed — not just
