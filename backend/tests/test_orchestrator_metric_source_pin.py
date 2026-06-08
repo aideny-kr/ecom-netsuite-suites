@@ -53,6 +53,10 @@ def test_legacy_intercept_site_logs_raw_result_not_condensed():
     source = inspect.getsource(orchestrator)
     # Anchor on the stable lead comment of the legacy single-agent intercept site.
     idx = source.index("single-agent / legacy path")
-    window = source[idx : idx + 3000]
+    window = source[idx : idx + 4200]
     assert "_raw_result_str = result_str" in window, "legacy path must capture the raw result before interception"
     assert "result_str=_raw_result_str" in window, "legacy path must log the raw result, not the condensed string"
+    # The tool_end summary (_result_dict) must also derive from the raw result, not the
+    # condensed copy — else a financial_report's condensed shape (no row_count) mis-reports
+    # "Done" instead of "N rows returned" on the legacy path.
+    assert '"result_summary": _raw_result_str' in window, "tool_end summary must derive from the raw result"

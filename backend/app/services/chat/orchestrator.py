@@ -3189,7 +3189,11 @@ async def run_chat_turn(
                 # Log for audit
                 elapsed_ms = int((time.monotonic() - t0) * 1000)
 
-                _result_dict = {"result_summary": result_str}
+                # Derive the tool_end summary from the RAW result (not the LLM-facing
+                # condensed copy): a condensed financial_report carries total_rows, not
+                # row_count, so tool_call_row_count would read 0 and mis-report "Done"
+                # instead of "N rows returned". Mirrors base_agent (summary from raw).
+                _result_dict = {"result_summary": _raw_result_str}
                 _row_count = tool_call_row_count(_result_dict)
                 _had_error = tool_call_had_error(_result_dict)
                 _summary = (
