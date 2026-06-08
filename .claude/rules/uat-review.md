@@ -30,7 +30,14 @@ paths:
   - sanity-check the reported `base` matches the real PR base (prep resolves it).
   - every `UNVERIFIED` finding (a verifier failed) is preserved at `major` and needs human review.
   - resolve every CONFIRMED + PLAUSIBLE-major finding (fix, or defer with written rationale) before merge.
-- **Live smoke (T2):** safe-envelope harness — mint an env-scoped token on the target backend → create a FRESH DISPOSABLE run → exercise → verify by `correlation_id`/audit → DELETE (verify zero residue). Default target: the staging UAT test-tenant; real-tenant disposable run only as fallback. NEVER auto-mutate a real close-bound run; NEVER `close_period` a real period. (Executable harness = Phase 3.)
-- **Seeded-tenant CI e2e (T2):** `backend/tests/e2e/` against the CI Postgres. (= Phase 2.)
+- **Live smoke (T2):** executable harness `scripts/uat/recon_live_smoke.py` (zero-residue, UAT-tenant-guarded). It logs in to the dedicated `uat-smoke` staging tenant, seeds a tiny canonical set, drives create-run → approve-bucket over the **live HTTP API**, asserts the HITL invariants (per-line + bulk audit by `correlation_id`, no NetSuite post, variance unchanged, `needs_review`→400), then deletes everything (run CASCADE + audit by `correlation_id` + an absolute tenant-wide backstop + seed rows) and asserts **zero residue**. Run it post-deploy:
+  ```bash
+  export UAT_SMOKE_EMAIL=... UAT_SMOKE_PASSWORD=...    # dedicated uat-smoke tenant, from ~/.hermes/.env
+  backend/.venv/bin/python scripts/uat/recon_live_smoke.py \
+    --backend-url https://api-staging.suitestudio.ai \
+    --database-url "$DATABASE_URL_DIRECT"             # the target's DIRECT url (not the pooler)
+  ```
+  Exit `0` == full pass + verified zero residue. The hard slug-guard refuses any tenant whose `slug != uat-smoke` and it NEVER `close_period`s. **NEVER point it at a real tenant** — the absolute backstop deletes ALL of a tenant's recon runs/audit, which is safe ONLY on the recon-empty `uat-smoke` fixture. Runbook + safety details: `scripts/uat/README.md`.
+- **Seeded-tenant CI e2e (T2):** `backend/tests/e2e/test_recon_lifecycle_e2e.py` against the CI Postgres (the recon write-path regression backbone; = Phase 2).
 
 > Self-review does NOT substitute for the T2 multi-angle review: a self-review once mis-framed a real period-close-integrity bug as intended; the independent multi-angle pass caught it. Spec: `docs/superpowers/specs/2026-06-04-uat-review-process-design.md`.
