@@ -1,6 +1,7 @@
 # backend/tests/services/metrics/test_metric_catalog_seeder.py
+from unittest.mock import patch
+
 import pytest
-from unittest.mock import AsyncMock, call, patch
 from sqlalchemy import delete, func, select
 
 from app.models.metric_definition import SYSTEM_TENANT_ID, MetricDefinition
@@ -129,8 +130,11 @@ async def test_seeder_sets_system_tenant_context_before_writes(db):
     applies. Without an active tenant context, get_current_tenant_id() throws
     "unrecognized configuration parameter 'app.current_tenant_id'" on any INSERT.
 
-    This test uses a spy to assert that set_tenant_context is called with the
-    SYSTEM tenant id BEFORE any db.execute() (the metric INSERT/upserts).
+    This test records a SHARED, chronologically-ordered event log: the
+    set_tenant_context spy appends a ("set_context", tenant_id) marker and the
+    db.execute spy appends an ("execute", stmt) marker into the SAME list. It then
+    asserts the set_context marker physically precedes the FIRST execute marker —
+    a genuine ordering assertion, not just "set_tenant_context was called".
 
     NOTE: Local docker runs postgres as a BYPASSRLS superuser, so the RLS
     enforcement path itself cannot be exercised here. This spy test validates
@@ -138,17 +142,18 @@ async def test_seeder_sets_system_tenant_context_before_writes(db):
     """
     import app.services.metrics.metric_catalog_seeder as seeder_mod
 
-    set_context_calls: list = []
-    execute_calls: list = []
+    # Single shared call-order log so we can prove set_context happens BEFORE
+    # the first write, not merely that both happened.
+    events: list[tuple[str, object]] = []
 
     original_execute = db.execute
 
     async def spy_execute(stmt, *args, **kwargs):
-        execute_calls.append(stmt)
+        events.append(("execute", stmt))
         return await original_execute(stmt, *args, **kwargs)
 
     async def spy_set_tenant_context(session, tenant_id):
-        set_context_calls.append(tenant_id)
+        events.append(("set_context", tenant_id))
 
     db.execute = spy_execute
 
@@ -158,20 +163,31 @@ async def test_seeder_sets_system_tenant_context_before_writes(db):
     # Restore db.execute so the db fixture rollback still works.
     db.execute = original_execute
 
+    set_context_idxs = [i for i, (kind, _) in enumerate(events) if kind == "set_context"]
+    execute_idxs = [i for i, (kind, _) in enumerate(events) if kind == "execute"]
+
     # set_tenant_context must have been called at least once with SYSTEM_TENANT_ID.
-    assert set_context_calls, "set_tenant_context was never called — FORCE RLS will throw on Supabase"
-    assert str(SYSTEM_TENANT_ID) in [str(t) for t in set_context_calls], (
-        f"set_tenant_context must be called with SYSTEM_TENANT_ID ({SYSTEM_TENANT_ID}), got calls: {set_context_calls}"
+    assert set_context_idxs, "set_tenant_context was never called — FORCE RLS will throw on Supabase"
+    set_context_tenants = [events[i][1] for i in set_context_idxs]
+    assert str(SYSTEM_TENANT_ID) in [str(t) for t in set_context_tenants], (
+        f"set_tenant_context must be called with SYSTEM_TENANT_ID ({SYSTEM_TENANT_ID}), "
+        f"got calls: {set_context_tenants}"
     )
 
-    # Context must be set BEFORE any db.execute (the metric upserts).
-    # Because set_tenant_context itself calls db.execute internally (SET LOCAL),
-    # when it is patched as a spy the execute spy should have fired zero times
-    # before set_tenant_context was called.  We verify the ordering by asserting
-    # that set_tenant_context was called at all — since the patch intercepts it
-    # before the INSERT loop begins, the ordering invariant is structurally
-    # guaranteed by the implementation if the call is at the top of seed_system_metrics.
-    assert execute_calls, "seeder must execute at least one statement (the metric upserts)"
+    # The seeder must run at least one write (ensure_system_tenant INSERT + the
+    # metric upserts) — otherwise there is nothing for the ordering to guard.
+    assert execute_idxs, "seeder must execute at least one statement (the metric upserts)"
+
+    # ORDERING INVARIANT (the actual contract): set_tenant_context fires BEFORE the
+    # first db.execute. On a fresh GUC, any write before SET LOCAL app.current_tenant_id
+    # throws "unrecognized configuration parameter" under FORCE RLS on Supabase.
+    first_set_context = set_context_idxs[0]
+    first_execute = execute_idxs[0]
+    assert first_set_context < first_execute, (
+        "set_tenant_context must be called BEFORE the first db.execute write — "
+        f"got set_context at index {first_set_context}, first execute at index {first_execute}. "
+        f"Event order: {[kind for kind, _ in events]}"
+    )
 
 
 async def test_reseed_preserves_superadmin_edited_canonical_metric(db):
