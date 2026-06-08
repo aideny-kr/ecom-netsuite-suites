@@ -447,7 +447,8 @@ async def seed_canonical(
         (related_payout_id=R900000001, $100) -> exact deterministic match -> 'matches'
       * PayoutLine charge #2 (R900000002, $77) with NO deposit -> 'needs_review'
 
-    Every dedupe_key is prefixed 'uat-smoke-<run-stamp>' for exact cleanup. The
+    Every dedupe_key carries the per-run dedupe prefix (``STANDARD_UAT_SLUG`` +
+    run-stamp, via ``_dedupe_prefix``) for exact cleanup. The
     run-stamp makes each run's seed unique so repeated/concurrent runs never
     collide on the (tenant_id, dedupe_key) unique constraint.
     """
@@ -1074,8 +1075,14 @@ async def cleanup_and_verify(
     # zero_residue requires a clean cleanup AND zero counts. A non-empty residue
     # dict is guaranteed here (targeted + absolute counts, or the recount_failed
     # sentinel), so we never emit zero_residue=False with residue={}.
+    # On the backend<->DB mismatch path (recon_sweep=False) we cleaned ONLY the
+    # prefix-scoped seed rows; one reconciliation run provably remains orphaned in
+    # the BACKEND's own DB, which we cannot reach. So zero_residue is NEVER True on a
+    # mismatch even though the seed counts are 0 — that orphan is real residue, just
+    # not in THIS DB. (passed is already False here; this keeps the JSON
+    # self-consistent for any automation that reads zero_residue directly.)
     total = sum(residue.values())
-    result.zero_residue = total == 0 and cleanup_error is None
+    result.zero_residue = total == 0 and cleanup_error is None and recon_sweep
     if total != 0:
         result.orphans = {k: v for k, v in residue.items() if v}
         _eprint(f"[cleanup] NON-ZERO RESIDUE: {result.orphans}")
