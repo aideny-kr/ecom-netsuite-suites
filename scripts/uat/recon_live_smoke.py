@@ -115,6 +115,11 @@ def _is_local_backend(backend_url: str) -> bool:
     return host in ("localhost", "127.0.0.1", "::1")
 
 
+def _env_truthy(value: str | None) -> bool:
+    """Interpret an env-var string as a boolean flag (default False)."""
+    return (value or "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def _eprint(*args: Any) -> None:
     """Diagnostics go to stderr so stdout stays a clean JSON summary."""
     print(*args, file=sys.stderr, flush=True)
@@ -567,6 +572,50 @@ async def create_run(client: httpx.AsyncClient, token: str, result: SmokeResult)
 
 
 # --------------------------------------------------------------------------- #
+# Step 4b — backend<->DB same-environment cross-check (FIX #2)
+# --------------------------------------------------------------------------- #
+async def assert_backend_db_same_env(
+    conn: asyncpg.Connection,
+    *,
+    tenant_id: str,
+    run_id: str,
+) -> None:
+    """Prove the BACKEND and the harness --database-url are the SAME environment.
+
+    The hard safety guard reads ``tenants.slug`` from ``--database-url``, but the
+    create-run / approve writes go to ``--backend-url``. If those two point at
+    DIFFERENT environments/DBs (a cloned DB, or a prod/staging URL mix), the guard
+    validates one DB while the writes hit another — so the harness could verify
+    and "clean" a DB that is NOT where the run actually lives.
+
+    The run we just created via the BACKEND must therefore be visible in the
+    harness DB. If it is not, the two are different environments and we refuse to
+    proceed: we can neither safely verify nor safely clean. (Cleanup still runs in
+    the finally as today: the prefix-scoped seed rows in THIS DB are removed, and
+    the run lives in the backend's OWN DB which we correctly never touch.)
+    """
+    found = await conn.fetchval(
+        "SELECT count(*) FROM reconciliation_runs WHERE id = $1 AND tenant_id = $2",
+        uuid.UUID(run_id),
+        uuid.UUID(tenant_id),
+    )
+    if found == 0:
+        raise SmokeFailure(
+            f"SAFETY ABORT: run {run_id} was created via the backend "
+            "(--backend-url) but is NOT visible in the harness DB "
+            "(--database-url) — the backend and --database-url point at DIFFERENT "
+            "environments. The harness cannot safely verify or clean a run it "
+            "cannot see, so it refuses to proceed. (Prefix-scoped seed rows in "
+            "this DB are still cleaned in the finally; the run lives in the "
+            "backend's own DB, which this harness correctly does not touch.)"
+        )
+    _eprint(
+        f"[xcheck] OK run {run_id} visible in --database-url "
+        "(backend and DB are the same environment)"
+    )
+
+
+# --------------------------------------------------------------------------- #
 # Step 5 — exercise + verify (live API + DB)
 # --------------------------------------------------------------------------- #
 async def verify(
@@ -812,10 +861,17 @@ async def cleanup_and_verify(
         #    any audit row referencing the run as resource_id (the create_run
         #    'recon.run' event).
         if correlation_id is not None:
+            # FIX #5 — action-scope the correlation_id DELETE. Bind the recon
+            # action set so that even if (hypothetically) a non-recon audit row
+            # shared this batch's correlation_id, it would NOT be deleted. The
+            # absolute-backstop sweep below is unchanged.
             await conn.execute(
-                "DELETE FROM audit_events WHERE tenant_id = $1 AND correlation_id = $2",
+                "DELETE FROM audit_events "
+                "WHERE tenant_id = $1 AND correlation_id = $2 "
+                "AND action = ANY($3::text[])",
                 tid,
                 correlation_id,
+                list(RECON_AUDIT_ACTIONS),
             )
         if run_id is not None:
             await conn.execute(
@@ -973,6 +1029,23 @@ async def run_smoke(args: argparse.Namespace) -> SmokeResult:
     run_stamp = uuid.uuid4().hex
     result.run_stamp = run_stamp
 
+    # FIX #3 — non-standard-slug acknowledgment (defense-in-depth vs operator
+    # error). --uat-slug is operator-controlled; pointing it at a REAL tenant's
+    # slug would let the hard DB-slug guard pass and make the destructive backstop
+    # reachable. Require an explicit ack for any slug other than the standard
+    # disposable fixture. This runs BEFORE any backend/DB call (nothing seeded,
+    # no connection opened), so the default 'uat-smoke' path is UNCHANGED.
+    if args.uat_slug != "uat-smoke" and not args.allow_nonstandard_slug:
+        result.error = (
+            f"--uat-slug {args.uat_slug!r} is not the default 'uat-smoke'; pass "
+            "--allow-nonstandard-slug (or UAT_ALLOW_NONSTANDARD_SLUG=1) to confirm "
+            "you are intentionally NOT targeting the standard disposable UAT "
+            "fixture and accept that this runs DESTRUCTIVE cleanup on the resolved "
+            "tenant"
+        )
+        _eprint(f"[FAIL] {result.error}")
+        return result
+
     email = os.environ.get("UAT_SMOKE_EMAIL", "uat-smoke@example.com")
     # Secret hardening: a default password is ONLY permitted against a localhost
     # backend. For any non-local --backend-url, UAT_SMOKE_PASSWORD MUST be set
@@ -1011,6 +1084,14 @@ async def run_smoke(args: argparse.Namespace) -> SmokeResult:
             # 4. create run (live API). create_run stamps result.run_id the
             # instant the server returns it, BEFORE any verify assertion runs.
             run_id = await create_run(client, token, result)
+
+            # 4b. backend<->DB same-environment cross-check (FIX #2). The run was
+            # just created via the BACKEND (in the backend's DB); it MUST be
+            # visible in the harness DB (--database-url) or the two are different
+            # environments and we refuse to verify/clean. Runs BEFORE verify and
+            # before any cleanup; on abort, the finally cleans the prefix-scoped
+            # seed rows in THIS DB and correctly leaves the run in the backend DB.
+            await assert_backend_db_same_env(conn, tenant_id=tenant_id, run_id=run_id)
 
             # 5. exercise + verify. verify stamps result.correlation_id the
             # instant approve-bucket returns, BEFORE any audit assertion runs.
@@ -1088,6 +1169,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--uat-slug",
         default=os.environ.get("UAT_SLUG", "uat-smoke"),
         help="UAT tenant slug marker — the hard safety guard (default: uat-smoke).",
+    )
+    p.add_argument(
+        "--allow-nonstandard-slug",
+        action="store_true",
+        default=_env_truthy(os.environ.get("UAT_ALLOW_NONSTANDARD_SLUG")),
+        help="Acknowledge a non-default --uat-slug (not 'uat-smoke'). Required to "
+        "run against any slug other than the standard disposable UAT fixture, "
+        "since this harness runs DESTRUCTIVE cleanup on the resolved tenant. "
+        "Env: UAT_ALLOW_NONSTANDARD_SLUG.",
     )
     return p.parse_args(argv)
 
