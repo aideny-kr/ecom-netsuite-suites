@@ -7,6 +7,7 @@ import uuid
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.database import set_tenant_context
 from app.models.metric_definition import SYSTEM_TENANT_ID, MetricDefinition
 from app.services.chat.domain_knowledge import embed_domain_query
 from app.services.metrics.expression_evaluator import ExpressionError, extract_dependencies
@@ -248,6 +249,19 @@ async def update_metric(
     """Edit a definition: re-validate, bump version, allow status transitions (incl.
     reactivating a draft/needs_review row). Tenant-scoped: a tenant may only update its
     own rows; SYSTEM rows update under SYSTEM_TENANT_ID via the superadmin route."""
+    # Set SYSTEM tenant context for a SYSTEM-row edit BEFORE the tenant-scoped SELECT
+    # (mirrors metric_catalog_seeder.py:100 + create_metric). The superadmin /system
+    # route reaches here under the superadmin's OWN tenant context (dependencies.py never
+    # sets SYSTEM). On Supabase (FORCE-RLS, non-bypass app role) the SELECT...FOR UPDATE
+    # WHERE tenant_id=SYSTEM would not see the SYSTEM row under a tenant context, and the
+    # subsequent UPDATE (082 WITH CHECK) + audit_service.log_event(tenant_id=SYSTEM)
+    # (audit_events WITH CHECK, 021) would be rejected. Under SYSTEM context
+    # get_current_tenant_id() == SYSTEM, so the SELECT finds the row and the UPDATE +
+    # audit write pass. Gated strictly on tenant_id == SYSTEM so the tenant_a path keeps
+    # its own context (and the FOR-UPDATE structural test's captured_stmts[0] stays the
+    # SELECT).
+    if tenant_id == SYSTEM_TENANT_ID:
+        await set_tenant_context(db, str(SYSTEM_TENANT_ID))
     # NEW-2 (lost-update race): SELECT … FOR UPDATE serialises concurrent PUTs on the
     # same row. Without the lock two concurrent requests both read version N, both write
     # N+1 — one update is silently lost. WITH FOR UPDATE the second transaction blocks
@@ -462,6 +476,17 @@ async def create_metric(db: AsyncSession, *, tenant_id: uuid.UUID, payload: dict
     # Defense-in-depth so the authoring CLI is self-sufficient: a SYSTEM-default row
     # FKs to the synthetic SYSTEM tenant, which may not exist yet on a fresh DB.
     if tenant_id == SYSTEM_TENANT_ID:
+        # Set SYSTEM tenant context FIRST (mirrors metric_catalog_seeder.py:100). The
+        # superadmin /system route reaches here under the requesting superadmin's OWN
+        # tenant context (dependencies.py sets the user's tenant, never SYSTEM). On
+        # Supabase (FORCE-RLS, non-bypass app role) migration 082's
+        # WITH CHECK (tenant_id = get_current_tenant_id()) would then REJECT the metric
+        # INSERT, and audit_events' WITH CHECK (021) would reject the subsequent
+        # audit_service.log_event(tenant_id=SYSTEM). Setting SYSTEM context makes
+        # get_current_tenant_id() == SYSTEM == the row's tenant_id, so the FK
+        # provisioning, the INSERT, and the audit write all pass. Gated strictly on
+        # tenant_id == SYSTEM so tenant authoring keeps its own dependencies.py context.
+        await set_tenant_context(db, str(SYSTEM_TENANT_ID))
         await ensure_system_tenant(db)
         await db.flush()
     embedding = await embed_domain_query(_embed_text(payload))

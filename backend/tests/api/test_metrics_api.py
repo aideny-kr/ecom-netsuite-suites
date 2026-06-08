@@ -647,3 +647,126 @@ async def test_put_accepts_normal_format(client, admin_user, db):
     row = (await db.execute(select(MetricDefinition).where(MetricDefinition.id == mid))).scalar_one()
     await db.refresh(row)
     assert row.format == "#,##0.00%"
+
+
+# ── 082: SYSTEM /system POST + PUT write the metric AND a SYSTEM audit row ──────
+#
+# create_metric/update_metric now set SYSTEM tenant context for SYSTEM writes, so on
+# Supabase (FORCE-RLS / non-bypass app role) BOTH the metric write (metric_definitions
+# WITH CHECK, 082) and the following audit_service.log_event(tenant_id=SYSTEM) write
+# (audit_events WITH CHECK, 021) pass. These route-level tests prove the full chain
+# (route -> create/update_metric under SYSTEM ctx -> audit log_event(SYSTEM)) succeeds.
+#
+# NOTE (Correction C — SET LOCAL leak in the shared db fixture): we do NOT assert on the
+# inter-request GUC value. Under local BYPASSRLS the WITH CHECK is not enforced, so this
+# proves functional success only; enforcement is proven by the non-bypass-role test in
+# tests/services/metrics/test_metric_rls_policy.py.
+
+
+async def test_post_system_metric_writes_system_audit_event(client, superadmin_user, db):
+    """082: POST /metrics/system as superadmin returns 201 AND writes an audit_events row
+    with tenant_id == SYSTEM_TENANT_ID. The audit write only passes audit_events' WITH
+    CHECK on Supabase because create_metric set SYSTEM context first."""
+    from sqlalchemy import delete, select
+
+    from app.models.audit import AuditEvent
+    from app.models.metric_definition import SYSTEM_TENANT_ID, MetricDefinition
+    from app.models.tenant import Tenant
+
+    exists = (await db.execute(select(Tenant.id).where(Tenant.id == SYSTEM_TENANT_ID))).scalar_one_or_none()
+    if exists is None:
+        db.add(Tenant(id=SYSTEM_TENANT_ID, name="System", slug="system", plan="free", is_active=True))
+        await db.flush()
+    await db.execute(delete(MetricDefinition))
+    await db.flush()
+
+    _, su_headers = superadmin_user
+    resp = await client.post(
+        "/api/v1/metrics/system",
+        headers=su_headers,
+        json={
+            "key": "sys_audit_rev",
+            "display_name": "System Revenue",
+            "definition": "revenue",
+            "unit": "currency",
+            "source_kind": "suiteql",
+            "blessed_spec": {"query": "SELECT 0", "dialect": "suiteql"},
+        },
+    )
+    assert resp.status_code == 201, resp.text
+    metric_id = resp.json()["id"]
+
+    row = (await db.execute(select(MetricDefinition).where(MetricDefinition.id == metric_id))).scalar_one()
+    assert row.tenant_id == SYSTEM_TENANT_ID
+
+    audit = (
+        await db.execute(
+            select(AuditEvent).where(
+                AuditEvent.resource_id == metric_id,
+                AuditEvent.action == "metric.create",
+            )
+        )
+    ).scalar_one()
+    assert audit.tenant_id == SYSTEM_TENANT_ID, (
+        f"audit_events row for a SYSTEM metric create must carry tenant_id=SYSTEM, got {audit.tenant_id}"
+    )
+
+
+async def test_put_system_metric_writes_system_audit_event(client, superadmin_user, db):
+    """082: PUT /metrics/system/{id} as superadmin returns 200 AND writes an audit_events
+    row with tenant_id == SYSTEM_TENANT_ID. update_metric sets SYSTEM context before the
+    SELECT...FOR UPDATE so it finds the SYSTEM row and the UPDATE + audit write pass the
+    WITH CHECK on Supabase."""
+    from sqlalchemy import delete, select
+
+    from app.models.audit import AuditEvent
+    from app.models.metric_definition import SYSTEM_TENANT_ID, MetricDefinition
+    from app.models.tenant import Tenant
+
+    exists = (await db.execute(select(Tenant.id).where(Tenant.id == SYSTEM_TENANT_ID))).scalar_one_or_none()
+    if exists is None:
+        db.add(Tenant(id=SYSTEM_TENANT_ID, name="System", slug="system", plan="free", is_active=True))
+        await db.flush()
+    await db.execute(delete(MetricDefinition))
+    await db.flush()
+
+    _, su_headers = superadmin_user
+    created = await client.post(
+        "/api/v1/metrics/system",
+        headers=su_headers,
+        json={
+            "key": "sys_audit_cash",
+            "display_name": "System Cash",
+            "definition": "cash",
+            "unit": "currency",
+            "source_kind": "suiteql",
+            "blessed_spec": {"query": "SELECT 0", "dialect": "suiteql"},
+        },
+    )
+    assert created.status_code == 201, created.text
+    metric_id = created.json()["id"]
+
+    resp = await client.put(
+        f"/api/v1/metrics/system/{metric_id}",
+        headers=su_headers,
+        json={"display_name": "System Cash Balance"},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["version"] == 2
+
+    row = (await db.execute(select(MetricDefinition).where(MetricDefinition.id == metric_id))).scalar_one()
+    assert row.tenant_id == SYSTEM_TENANT_ID
+    assert row.display_name == "System Cash Balance"
+
+    audit = (
+        await db.execute(
+            select(AuditEvent).where(
+                AuditEvent.resource_id == metric_id,
+                AuditEvent.action == "metric.update",
+            )
+        )
+    ).scalar_one()
+    assert audit.tenant_id == SYSTEM_TENANT_ID, (
+        f"audit_events row for a SYSTEM metric update must carry tenant_id=SYSTEM, got {audit.tenant_id}"
+    )

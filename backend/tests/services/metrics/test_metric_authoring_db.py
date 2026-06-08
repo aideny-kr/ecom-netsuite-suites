@@ -1442,3 +1442,200 @@ async def test_update_metric_absent_source_kind_in_payload_succeeds(db, tenant_a
     )
     assert updated.display_name == "Revenue No SK"
     assert updated.source_kind == "suiteql"
+
+
+# ── 082: create/update set SYSTEM tenant context for SYSTEM_TENANT_ID writes ──────
+#
+# Migration 082 adds WITH CHECK (tenant_id = get_current_tenant_id()) to
+# metric_definitions, and audit_events already has WITH CHECK
+# (tenant_id = get_current_tenant_id()) (021). The superadmin /system routes call
+# create_metric/update_metric(tenant_id=SYSTEM) under the superadmin's OWN-tenant
+# context (dependencies.py sets the requesting user's tenant, never SYSTEM). On
+# Supabase (FORCE-RLS, non-bypass app role) the SYSTEM metric INSERT/UPDATE and the
+# following audit_service.log_event(tenant_id=SYSTEM) would then be rejected.
+#
+# Fix: create_metric/update_metric set SYSTEM context (mirrors
+# metric_catalog_seeder.py:100) WHEN tenant_id == SYSTEM_TENANT_ID — gated strictly so
+# tenant authoring keeps its own dependencies.py context. These spy tests pin that
+# source contract. Local postgres is BYPASSRLS so the enforcement itself is not
+# exercised here (see test_metric_rls_policy for the non-bypass-role rejection) — these
+# assert the call is made (and ONLY for SYSTEM).
+
+
+async def test_create_metric_sets_system_context_for_system_tenant(db, monkeypatch):
+    """082: create_metric MUST call set_tenant_context(SYSTEM_TENANT_ID) when authoring a
+    SYSTEM metric, so the metric INSERT and the subsequent audit write pass the WITH CHECK
+    on Supabase. RED pre-fix: create_metric only calls ensure_system_tenant, never
+    set_tenant_context."""
+    import app.services.metrics.metric_authoring as authoring_mod
+
+    await _ensure_system_tenant(db)
+
+    async def _fake_embed(_text):
+        return None
+
+    monkeypatch.setattr(authoring_mod, "embed_domain_query", _fake_embed)
+
+    set_ctx_calls: list = []
+
+    async def _spy_set_ctx(session, tenant_id):
+        set_ctx_calls.append(str(tenant_id))
+
+    monkeypatch.setattr(authoring_mod, "set_tenant_context", _spy_set_ctx)
+
+    p = _kp()
+    await create_metric(
+        db,
+        tenant_id=SYSTEM_TENANT_ID,
+        payload={
+            "key": f"{p}sys_rev",
+            "display_name": "System Revenue",
+            "definition": "revenue",
+            "unit": "currency",
+            "source_kind": "suiteql",
+            "blessed_spec": {"query": "SELECT 0", "dialect": "suiteql"},
+        },
+    )
+
+    assert str(SYSTEM_TENANT_ID) in set_ctx_calls, (
+        f"create_metric must set SYSTEM context for a SYSTEM metric so the WITH CHECK "
+        f"(082) + audit_events WITH CHECK pass on Supabase; got calls: {set_ctx_calls}"
+    )
+
+
+async def test_create_metric_does_not_set_system_context_for_tenant(db, tenant_a, monkeypatch):
+    """082 (negative control): create_metric must NOT set SYSTEM context for a normal
+    tenant metric — tenant authoring keeps the requesting user's own dependencies.py
+    context. The gate is strictly tenant_id == SYSTEM_TENANT_ID."""
+    import app.services.metrics.metric_authoring as authoring_mod
+
+    async def _fake_embed(_text):
+        return None
+
+    monkeypatch.setattr(authoring_mod, "embed_domain_query", _fake_embed)
+
+    set_ctx_calls: list = []
+
+    async def _spy_set_ctx(session, tenant_id):
+        set_ctx_calls.append(str(tenant_id))
+
+    monkeypatch.setattr(authoring_mod, "set_tenant_context", _spy_set_ctx)
+
+    p = _kp()
+    await create_metric(
+        db,
+        tenant_id=tenant_a.id,
+        payload={
+            "key": f"{p}tenant_rev",
+            "display_name": "Tenant Revenue",
+            "definition": "revenue",
+            "unit": "currency",
+            "source_kind": "suiteql",
+            "blessed_spec": {"query": "SELECT 0", "dialect": "suiteql"},
+        },
+    )
+
+    assert str(SYSTEM_TENANT_ID) not in set_ctx_calls, (
+        f"create_metric must NOT set SYSTEM context for a tenant metric; got calls: {set_ctx_calls}"
+    )
+
+
+async def test_update_metric_sets_system_context_for_system_tenant(db, monkeypatch):
+    """082: update_metric MUST call set_tenant_context(SYSTEM_TENANT_ID) when editing a
+    SYSTEM metric, BEFORE the SELECT...FOR UPDATE — so the tenant-scoped SELECT finds the
+    SYSTEM row and the UPDATE + the following audit write pass the WITH CHECK on Supabase.
+    RED pre-fix: update_metric never sets context."""
+    import app.services.metrics.metric_authoring as authoring_mod
+
+    await _ensure_system_tenant(db)
+
+    async def _fake_embed(_text):
+        return None
+
+    monkeypatch.setattr(authoring_mod, "embed_domain_query", _fake_embed)
+
+    p = _kp()
+    key = f"{p}sys_cash"
+    metric = MetricDefinition(
+        tenant_id=SYSTEM_TENANT_ID,
+        key=key,
+        display_name="Cash",
+        definition="cash balance",
+        unit="currency",
+        source_kind="suiteql",
+        blessed_spec={"query": "SELECT 0", "dialect": "suiteql"},
+        params_schema={"period": {"type": "period"}},
+        status="active",
+        version=1,
+        provenance={"author": "system_seed"},
+    )
+    db.add(metric)
+    await db.flush()
+
+    set_ctx_calls: list = []
+
+    async def _spy_set_ctx(session, tenant_id):
+        set_ctx_calls.append(str(tenant_id))
+
+    monkeypatch.setattr(authoring_mod, "set_tenant_context", _spy_set_ctx)
+
+    await update_metric(
+        db,
+        tenant_id=SYSTEM_TENANT_ID,
+        metric_id=metric.id,
+        payload={"display_name": "Cash Balance"},
+    )
+
+    assert str(SYSTEM_TENANT_ID) in set_ctx_calls, (
+        f"update_metric must set SYSTEM context for a SYSTEM metric edit so the WITH CHECK "
+        f"(082) + audit_events WITH CHECK pass on Supabase; got calls: {set_ctx_calls}"
+    )
+
+
+async def test_update_metric_does_not_set_system_context_for_tenant(db, tenant_a, monkeypatch):
+    """082 (negative control): update_metric must NOT set SYSTEM context for a tenant
+    metric edit. Also pins that the SYSTEM-context call is inside the SYSTEM branch only,
+    so the existing test_update_metric_select_carries_for_update_lock (tenant_a) keeps
+    captured_stmts[0] == the SELECT FOR UPDATE."""
+    import app.services.metrics.metric_authoring as authoring_mod
+
+    async def _fake_embed(_text):
+        return None
+
+    monkeypatch.setattr(authoring_mod, "embed_domain_query", _fake_embed)
+
+    p = _kp()
+    key = f"{p}tenant_cash"
+    metric = MetricDefinition(
+        tenant_id=tenant_a.id,
+        key=key,
+        display_name="Cash",
+        definition="cash balance",
+        unit="currency",
+        source_kind="suiteql",
+        blessed_spec={"query": "SELECT 0", "dialect": "suiteql"},
+        params_schema={"period": {"type": "period"}},
+        status="active",
+        version=1,
+        provenance={"author": "tenant_admin"},
+    )
+    db.add(metric)
+    await db.flush()
+
+    set_ctx_calls: list = []
+
+    async def _spy_set_ctx(session, tenant_id):
+        set_ctx_calls.append(str(tenant_id))
+
+    monkeypatch.setattr(authoring_mod, "set_tenant_context", _spy_set_ctx)
+
+    await update_metric(
+        db,
+        tenant_id=tenant_a.id,
+        metric_id=metric.id,
+        payload={"display_name": "Cash Balance"},
+    )
+
+    assert str(SYSTEM_TENANT_ID) not in set_ctx_calls, (
+        f"update_metric must NOT set SYSTEM context for a tenant metric edit; got calls: {set_ctx_calls}"
+    )
