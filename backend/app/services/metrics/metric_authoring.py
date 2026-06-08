@@ -35,6 +35,25 @@ class AuthoringError(ValueError):
     pass
 
 
+def _normalize_synonyms(synonyms) -> list[str] | None:
+    """Lowercase + strip author-supplied synonyms so they match the resolver's
+    lowercased-query keyword branch (metric_resolver: `synonyms.any(query.lower())`,
+    exact full-phrase equality). The seeder already stores lowercase synonyms; without
+    this an author-typed mixed-case synonym ('AOV', 'Net Sales') never hits the
+    authoritative exact/synonym branch and silently degrades to vector-only resolution.
+    None stays None; blanks are dropped and duplicates removed, order-preserving."""
+    if synonyms is None:
+        return None
+    out: list[str] = []
+    seen: set[str] = set()
+    for s in synonyms:
+        norm = str(s).strip().lower()
+        if norm and norm not in seen:
+            seen.add(norm)
+            out.append(norm)
+    return out
+
+
 def _validate_params_schema(d: dict) -> None:
     """(b) Enforce the param-type allowlist and the two-way :name ↔ params_schema
     binding for query-backed metrics.
@@ -366,7 +385,11 @@ async def update_metric(
         "status",
     ):
         if payload.get(field) is not None:
-            setattr(metric, field, payload[field])
+            # Normalize synonyms to lowercase on the update path too (parity with
+            # create_metric), so a mixed-case synonym patched via PUT still matches the
+            # resolver's lowercased-query keyword branch.
+            value = _normalize_synonyms(payload[field]) if field == "synonyms" else payload[field]
+            setattr(metric, field, value)
 
     # NEW-3 (reactivation smoke): when the resulting status is 'active' AND the metric
     # is query-backed (suiteql or bigquery), validate the blessed query is read-only AND
@@ -524,7 +547,7 @@ async def create_metric(db: AsyncSession, *, tenant_id: uuid.UUID, payload: dict
         depends_on=payload.get("depends_on"),
         params_schema=payload.get("params_schema"),
         dimensions=payload.get("dimensions"),
-        synonyms=payload.get("synonyms"),
+        synonyms=_normalize_synonyms(payload.get("synonyms")),
         intent_embedding=embedding,
         status="active",
         version=1,

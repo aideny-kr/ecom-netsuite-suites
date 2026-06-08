@@ -521,3 +521,70 @@ async def test_update_metric_rejects_non_1536_embedding(db, monkeypatch):
             metric_id=metric.id,
             payload={"display_name": "New Name"},
         )
+
+
+# ── T2 gate (minor): normalize author synonyms to lowercase on write ──────────
+
+
+@pytest.mark.asyncio
+async def test_create_metric_normalizes_synonyms_to_lowercase(db, tenant_a):
+    """REAL resolution invariant (T2 multi-angle gate, minor). The resolver's authoritative
+    keyword branch matches synonyms via `synonyms.any(query.lower())` — exact, lowercased,
+    full-phrase equality. create_metric persisted synonyms VERBATIM, so an author-typed
+    mixed-case synonym ('AOV', 'Net Sales') could never match the lowercased query and
+    silently degraded to vector-only resolution (the seeder already stores lowercase
+    synonyms). create_metric MUST normalize synonyms to lowercase on write (also stripping
+    blanks and deduping, order-preserving).
+
+    Pre-fix synonyms persist verbatim; post-fix they are lowercased/stripped/deduped."""
+    import uuid as _uuid
+
+    from app.services.metrics.metric_authoring import create_metric
+
+    metric = await create_metric(
+        db,
+        tenant_id=tenant_a.id,
+        payload={
+            "key": f"aov_{_uuid.uuid4().hex[:8]}",
+            "display_name": "Average Order Value",
+            "definition": "x",
+            "unit": "currency",
+            "source_kind": "suiteql",
+            "blessed_spec": {"query": "SELECT 0", "dialect": "suiteql"},
+            "params_schema": {"period": {"type": "period"}},
+            "synonyms": ["AOV", "Net Sales", "  aov  "],  # mixed case + whitespace duplicate
+        },
+    )
+    assert metric.synonyms == ["aov", "net sales"]
+
+
+@pytest.mark.asyncio
+async def test_update_metric_normalizes_synonyms_to_lowercase(db, tenant_a):
+    """Update-path mirror: an edit that sets synonyms must normalize to lowercase too,
+    else a mixed-case synonym patched via PUT silently never matches the lowercased query."""
+    import uuid as _uuid
+
+    from app.services.metrics.metric_authoring import create_metric, update_metric
+
+    metric = await create_metric(
+        db,
+        tenant_id=tenant_a.id,
+        payload={
+            "key": f"upd_syn_{_uuid.uuid4().hex[:8]}",
+            "display_name": "X",
+            "definition": "x",
+            "unit": "currency",
+            "source_kind": "suiteql",
+            "blessed_spec": {"query": "SELECT 0", "dialect": "suiteql"},
+            "params_schema": {"period": {"type": "period"}},
+            "synonyms": ["foo"],
+        },
+    )
+    await db.flush()
+    updated = await update_metric(
+        db,
+        tenant_id=tenant_a.id,
+        metric_id=metric.id,
+        payload={"synonyms": ["AOV", "Gross Profit"]},
+    )
+    assert updated.synonyms == ["aov", "gross profit"]
