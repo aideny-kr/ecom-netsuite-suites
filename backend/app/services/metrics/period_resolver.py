@@ -55,9 +55,18 @@ def resolve_period(token: str, *, fiscal_year_start_month: int, today: date) -> 
 
     if fy_abs:
         sy = int(fy_abs.group(1))
-        start = date(sy, fiscal_year_start_month, 1)
-        end_y, end_m = _add_months(sy, fiscal_year_start_month, 11)
-        return start, _month_end(end_y, end_m)
+        # Catch the BASE ValueError (not a narrower type): date() bare-raises both
+        # 'year N is out of range' (sy 0, or an end date that overflows to year 10000
+        # for a non-Jan fiscal start at sy 9999) AND 'month must be in 1..12'
+        # (config-drift fiscal_year_start_month). Narrowing this catch would silently
+        # reintroduce a caller-controllable bare ValueError that 500s compute_metric
+        # instead of returning the structured invalid_params refusal.
+        try:
+            start = date(sy, fiscal_year_start_month, 1)
+            end_y, end_m = _add_months(sy, fiscal_year_start_month, 11)
+            return start, _month_end(end_y, end_m)
+        except ValueError as ex:
+            raise PeriodError(f"year-out-of-range period token: {token}") from ex
 
     if t in ("this_month", "last_month"):
         y, m = _add_months(today.year, today.month, 0 if t == "this_month" else -1)

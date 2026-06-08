@@ -1016,6 +1016,58 @@ async def test_unsupported_period_token_refuses_no_raise(db, tenant_a, monkeypat
     assert 0.0 not in out.values()
 
 
+async def test_out_of_range_fy_token_refuses_no_raise(db, tenant_a, monkeypatch):
+    """An out-of-range absolute fy token ('fy0000') PASSES the SUPPORTED_TOKENS guard
+    (the \\d{4} regex matches) but bare-raises a plain ValueError deeper in the fy_abs
+    branch (date(0, ...) → 'year 0 is out of range'). That bare ValueError is NOT a
+    PeriodError, so pre-fix it escapes compute_metric's except (ParamError, PeriodError)
+    and 500s. Post-fix the resolver wraps the date construction and raises PeriodError,
+    which compute_metric catches → number-free {'error': 'invalid_params'} refusal,
+    with NO raise and the executor never reached."""
+    await _ensure_system_tenant(db)
+    db.add(
+        MetricDefinition(
+            tenant_id=SYSTEM_TENANT_ID,
+            key="gross_revenue",
+            display_name="Gross Revenue",
+            definition="x",
+            unit="currency",
+            source_kind="suiteql",
+            blessed_spec={"query": "SELECT 1", "dialect": "suiteql"},
+            params_schema={"period": {"type": "period"}},
+            status="active",
+            version=1,
+        )
+    )
+    await db.flush()
+
+    # Guard: the executor must NEVER be reached — refusal precedes any execution.
+    async def _ns_poison(params, context=None, **kwargs):
+        raise AssertionError("executor reached despite out-of-range fy token")
+
+    monkeypatch.setattr("app.mcp.tools.netsuite_suiteql.execute", _ns_poison)
+
+    # MUST NOT raise: compute_metric must catch PeriodError and fail closed.
+    # Omitting `today` is safe — coerce_params defaults `today or date.today()`, and
+    # date.today() is an in-range year, so the fy0000 token drives the overflow.
+    out = await compute_metric(
+        db,
+        tenant_id=tenant_a.id,
+        key="gross_revenue",
+        params={"period": "fy0000"},
+        context={"fiscal_year_start_month": 1},
+    )
+
+    # (a) structured number-free refusal, NOT a data_table with a value
+    assert out.get("error") == "invalid_params", out
+    assert out.get("key") == "gross_revenue", out
+    assert "rows" not in out
+    assert "value" not in out
+    # (b) no fabricated number anywhere in the payload
+    assert 0 not in out.values()
+    assert 0.0 not in out.values()
+
+
 async def test_unknown_param_key_refuses_no_raise(db, tenant_a, monkeypatch):
     """An unknown param key (in neither params_schema nor dimensions) must return the §9
     number-free structured refusal and must NOT raise. Task 13 adds a guard BEFORE

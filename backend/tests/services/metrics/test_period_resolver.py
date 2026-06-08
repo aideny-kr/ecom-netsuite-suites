@@ -59,3 +59,35 @@ def test_fy_absolute_year_calendar_fiscal():
     s, e = resolve_period("fy2024", fiscal_year_start_month=1, today=date(2026, 6, 1))
     assert s == date(2024, 1, 1)
     assert e == date(2024, 12, 31)
+
+
+def test_fy_year_zero_raises_period_error():
+    # fy0000 → start = date(0, ...) which bare-raises 'year 0 is out of range'.
+    # Must surface as PeriodError (a ValueError subclass), not a plain ValueError.
+    with pytest.raises(PeriodError) as ei:
+        resolve_period("fy0000", fiscal_year_start_month=1, today=date(2026, 3, 15))
+    assert ei.type is PeriodError
+
+
+def test_fy_max_year_end_overflow_raises_period_error():
+    # fy9999 with a non-Jan fiscal start: the END date rolls into year 10000
+    # (_add_months(9999, 4, 11)), which bare-raises 'year 10000 is out of range'.
+    # A parsed-year range check would MISS this; the try/except catches it.
+    with pytest.raises(PeriodError) as ei:
+        resolve_period("fy9999", fiscal_year_start_month=4, today=date(2026, 3, 15))
+    assert ei.type is PeriodError
+
+
+def test_fy9999_calendar_fiscal_still_resolves():
+    # fy9999 with January fiscal start stays entirely within year 9999 — must NOT regress.
+    s, e = resolve_period("fy9999", fiscal_year_start_month=1, today=date(2026, 3, 15))
+    assert (s, e) == (date(9999, 1, 1), date(9999, 12, 31))
+
+
+def test_fy_bad_fiscal_month_raises_period_error():
+    # Config drift: a malformed fiscal_year_start_month (13) makes date() bare-raise
+    # 'month must be in 1..12'. The except clause must stay `except ValueError` (base)
+    # so this is converted to PeriodError too — pins the catch breadth.
+    with pytest.raises(PeriodError) as ei:
+        resolve_period("fy2024", fiscal_year_start_month=13, today=date(2026, 3, 15))
+    assert ei.type is PeriodError
