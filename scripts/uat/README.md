@@ -130,6 +130,21 @@ is re-used across runs, not re-created):
   slug to `--uat-slug`; if a stale email collision resolves login to a different
   tenant, the guard refuses (verified by the negative test:
   `--uat-slug not-the-uat-tenant` aborts before any seed).
+- **A non-default `--uat-slug` requires explicit acknowledgment.** Any slug other
+  than `uat-smoke` is refused **before any backend/DB call** unless
+  `--allow-nonstandard-slug` (or `UAT_ALLOW_NONSTANDARD_SLUG=1`) is passed. This
+  makes deliberately pointing the destructive harness at a non-standard tenant a
+  conscious, loud choice — not a silent CLI typo.
+- **Backend and `--database-url` must be the same environment.** The slug guard
+  reads `tenants.slug` from `--database-url`, but the create-run/approve writes go
+  to `--backend-url`. Right after the run is created, the harness asserts that run
+  is visible in `--database-url` (`[xcheck]`) — if not, the two point at different
+  environments and it aborts before approve + before the destructive cleanup.
+  *Residual:* on a mismatch, exactly one reconciliation run was already created in
+  the **backend's** DB before detection; the abort message prints its `run_id` —
+  the harness cannot reach the backend's DB to clean it, so verify/remove it there
+  manually. (The guard already catches the common "tenant absent from the DB" case
+  earlier; this `run_id` readback additionally catches a cloned-DB / URL-mix.)
 - **The smoke email MUST be globally unique.** The backend's `authenticate()`
   resolves an email **globally**, not tenant-scoped (one `User` per email across
   the whole DB at registration time). So a reused email could in principle log in

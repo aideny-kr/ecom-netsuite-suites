@@ -941,9 +941,15 @@ async def cleanup_and_verify(
             residue["results"] = 0
         residue["audit_by_corr"] = (
             await conn.fetchval(
-                "SELECT count(*) FROM audit_events WHERE tenant_id = $1 AND correlation_id = $2",
+                # Scope the recount to the SAME recon-action set the DELETE above
+                # uses, so a (hypothetical) non-recon row sharing this batch's
+                # correlation_id — which the DELETE deliberately preserves — is not
+                # counted as residue and cannot produce a false zero_residue=False.
+                "SELECT count(*) FROM audit_events WHERE tenant_id = $1 AND correlation_id = $2 "
+                "AND action = ANY($3::text[])",
                 tid,
                 correlation_id,
+                list(RECON_AUDIT_ACTIONS),
             )
             if correlation_id is not None
             else 0
