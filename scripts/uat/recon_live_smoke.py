@@ -190,11 +190,18 @@ def _build_ssl(database_url: str) -> ssl.SSLContext | bool:
 
 
 async def _connect(database_url: str) -> asyncpg.Connection:
+    # asyncpg accepts only postgres:// or postgresql:// — strip any SQLAlchemy
+    # dialect suffix, since DATABASE_URL_DIRECT commonly carries
+    # postgresql+asyncpg:// (the harness's own --database-url default is that env).
+    dsn = database_url
+    if "://" in dsn:
+        scheme, rest = dsn.split("://", 1)
+        dsn = scheme.split("+", 1)[0] + "://" + rest
     # statement_cache_size=0 is required for Supabase's transaction pooler; it is
     # harmless against direct/local Postgres. Use it unconditionally for portability.
     return await asyncpg.connect(
-        database_url,
-        ssl=_build_ssl(database_url),
+        dsn,
+        ssl=_build_ssl(dsn),
         statement_cache_size=0,
     )
 
