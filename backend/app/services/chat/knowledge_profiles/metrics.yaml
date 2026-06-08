@@ -1,3 +1,8 @@
+# Always-on activation is intentional: this profile activates whenever the metric tools
+# (metric_resolve / metric_compute) are present in the tool list, injecting the prompt_fragment
+# into every non-onboarding turn. This is acceptable because the fragment is short behavioral
+# routing guidance with NO hardcoded column names or SQL schema — it does not violate the
+# no-prompt-pollution rule, which specifically targets hardcoded columns/schema in prompts.
 profile_id: metrics
 display_name: "Metric Catalog"
 trigger_tools:
@@ -14,4 +19,8 @@ prompt_fragment: |
      yourself, and never author your own SQL for a named metric.
   4. If `metric_resolve` returns no match, say "there is no blessed definition for X" and offer to
      define it — do NOT fabricate a number or a definition.
+  5. PRECEDENCE: a named-metric match takes precedence over any <proven_patterns> hint or ad-hoc
+     SuiteQL for that concept. If `metric_resolve` matched the concept, the ONLY sanctioned number
+     source is `metric_compute`'s table — ad-hoc SQL for that concept is unblessed and must not be
+     presented as the metric's value.
 rag_partitions: []

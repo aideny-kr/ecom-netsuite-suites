@@ -682,6 +682,9 @@ def _is_saved_search_tool(tool_name: str) -> bool:
     return False
 
 
+_METRIC_COMPUTE_TOOLS = frozenset({"metric_compute", "metric.compute"})
+
+
 def _compute_source_pin_update(tool_calls_log: list[dict]) -> str | None:
     """Decide whether a turn's tool calls should update session.source_pin.
 
@@ -700,6 +703,20 @@ def _compute_source_pin_update(tool_calls_log: list[dict]) -> str | None:
         # Support both "tool_name" (test fixtures) and "tool" (build_tool_call_log_entry)
         name = call.get("tool_name") or call.get("tool", "")
         cat = categorize(name)
+
+        # M4: metric_compute is categorized as "data_table" but its actual source
+        # depends on which backend executed the query (BigQuery vs SuiteQL vs expression).
+        # Read source_kind from the result_payload (set by extract_result_payload for
+        # metric payloads) rather than blindly treating "data_table" as NetSuite.
+        if name in _METRIC_COMPUTE_TOOLS:
+            source_kind = (call.get("result_payload") or {}).get("source_kind")
+            if source_kind == "bigquery":
+                used_bq = True
+            elif source_kind == "suiteql":
+                used_ns = True
+            # expression or missing source_kind → source-agnostic; contribute nothing
+            continue
+
         if cat == "bigquery":
             used_bq = True
         elif cat in {"data_table", "financial"}:
@@ -815,6 +832,14 @@ def _intercept_tool_result(
         # invariant). Opt-in via the flag — every other data_table tool is byte-
         # identical because the flag is absent.
         if is_suppressed_metric_payload(parsed):
+            # NEW-1: stamp suppress_llm_value onto the SSE event so the frontend
+            # can derive isMetric and hide re-run/export/save-query affordances.
+            # Also pass source_kind (harmless + useful for FE analytics).
+            # These fields are ONLY added for metric payloads — all other
+            # data_table SSE events remain byte-identical (flag absent).
+            sse_event_data["suppress_llm_value"] = True
+            if "source_kind" in parsed:
+                sse_event_data["source_kind"] = parsed["source_kind"]
             condensed = condense_metric_for_llm(parsed)
             return "data_table", sse_event_data, condensed
 
@@ -3133,6 +3158,13 @@ async def run_chat_turn(
                 # through _intercept_with_cache so pricing follow-up tools
                 # (pricing_revise / pricing_to_sheets) can read the cached
                 # pricing_state in this single-agent / legacy path too.
+                # LATENT (grill R3 / M4): this legacy single-agent path (reached only
+                # when UNIFIED_AGENT_ENABLED / tenant.unified_agent_enabled is false)
+                # builds the persisted tool log from the condensed string, which omits
+                # the metric `source_kind`. So _compute_source_pin_update can't read a
+                # BigQuery metric's real source on this path and may mis-pin NetSuite.
+                # Closed on the production UnifiedAgent path (raw tool log preserves
+                # source_kind); fix here only if the legacy path is put back into use.
                 intercept_type, intercept_data, result_str = _intercept_with_cache(
                     block.name,
                     result_str,

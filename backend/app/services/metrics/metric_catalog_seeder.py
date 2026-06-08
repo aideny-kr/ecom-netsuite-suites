@@ -1,10 +1,12 @@
 """Seed system-default finance metrics (SYSTEM_TENANT_ID) with 1536-d embeddings. Idempotent."""
 
-from sqlalchemy import delete
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.database import set_tenant_context
 from app.models.metric_definition import SYSTEM_TENANT_ID, MetricDefinition
 from app.services.chat.domain_knowledge import embed_domain_texts
+from app.services.metrics._embedding import embed_text as _embed_text
 from app.services.metrics.system_tenant import ensure_system_tenant
 
 # Small generic core + a couple DTC-flavored extras (spec §13 Q1). Expression leaves reference other keys.
@@ -88,38 +90,79 @@ _SYSTEM_METRICS: list[dict] = [
 ]
 
 
-def _embed_text(m: dict) -> str:
-    return " | ".join([m["display_name"], m["definition"], *m.get("synonyms", [])])
-
-
 async def seed_system_metrics(db: AsyncSession) -> int:
+    # FORCE RLS (mig 081) applies to metric_definitions for non-superuser roles
+    # (Supabase); set SYSTEM context so the policy's OR-SYSTEM clause permits the
+    # seed writes and get_current_tenant_id() doesn't throw on an unset GUC.
+    await set_tenant_context(db, str(SYSTEM_TENANT_ID))
+
     # Defense-in-depth: SYSTEM metric rows FK to tenants.id; provision the parent
     # so the seeder is self-sufficient even on a fresh DB (mig 080 also seeds it).
     await ensure_system_tenant(db)
     await db.flush()
-    await db.execute(delete(MetricDefinition).where(MetricDefinition.tenant_id == SYSTEM_TENANT_ID))
+
     embeddings = await embed_domain_texts([_embed_text(m) for m in _SYSTEM_METRICS])
+    if embeddings is None:
+        raise RuntimeError("seeder requires the 1536-d embedder; refusing to seed rows without embeddings (§12.2)")
+
     for idx, m in enumerate(_SYSTEM_METRICS):
-        vec = embeddings[idx] if embeddings is not None else None
-        if vec is not None:
-            assert len(vec) == 1536, "embedding must be 1536-d (use embed_domain_*)"
-        db.add(
-            MetricDefinition(
-                tenant_id=SYSTEM_TENANT_ID,
-                key=m["key"],
-                display_name=m["display_name"],
-                definition=m["definition"],
-                unit=m["unit"],
-                source_kind=m["source_kind"],
-                blessed_spec=({"query": "SELECT 0", "dialect": "suiteql"} if m["source_kind"] == "suiteql" else None),
-                expression=m.get("expression"),
-                depends_on=m.get("depends_on"),
-                params_schema={"period": {"type": "period"}},
-                synonyms=m.get("synonyms", []),
-                intent_embedding=vec,
-                status="active",
-                version=1,
-                provenance={"author": "system_seed"},
+        vec = embeddings[idx]
+        assert len(vec) == 1536, "embedding must be 1536-d (use embed_domain_*)"
+        # D3: query-backed placeholders (SELECT 0 stubs) seed as "draft" so they are
+        # discoverable for authoring but never returned as a computed (zero) answer.
+        # Expression metrics whose leaves are draft yield missing_dependency — also safe.
+        is_placeholder = m["source_kind"] in ("suiteql", "bigquery")
+        values = {
+            "tenant_id": SYSTEM_TENANT_ID,
+            "key": m["key"],
+            "display_name": m["display_name"],
+            "definition": m["definition"],
+            "unit": m["unit"],
+            "source_kind": m["source_kind"],
+            "blessed_spec": ({"query": "SELECT 0", "dialect": "suiteql"} if m["source_kind"] == "suiteql" else None),
+            "expression": m.get("expression"),
+            "depends_on": m.get("depends_on"),
+            "params_schema": {"period": {"type": "period"}},
+            "synonyms": m.get("synonyms", []),
+            "intent_embedding": vec,
+            "status": "draft" if is_placeholder else "active",
+            "version": 1,
+            "provenance": {"author": "system_seed"},
+        }
+        # R3#25: use ON CONFLICT DO UPDATE so two concurrent seeders converge
+        # rather than racing into a UNIQUE(tenant_id, key) violation.
+        # All mutable seed columns are refreshed on conflict so re-seeding after
+        # a definition update propagates correctly.
+        # B2: only refresh rows that the seeder still owns (provenance.author ==
+        # 'system_seed').  When a superadmin has edited a SYSTEM metric on a
+        # canonical key the existing row's provenance.author will be something
+        # other than 'system_seed'; the WHERE predicate evaluates to FALSE on the
+        # *existing target row*, so PostgreSQL leaves it untouched (the
+        # conflicting INSERT is silently dropped).  Seeder-owned rows are still
+        # refreshed normally — the predicate is TRUE → same behaviour as before.
+        stmt = (
+            pg_insert(MetricDefinition)
+            .values(**values)
+            .on_conflict_do_update(
+                index_elements=["tenant_id", "key"],
+                set_={
+                    "display_name": values["display_name"],
+                    "definition": values["definition"],
+                    "unit": values["unit"],
+                    "source_kind": values["source_kind"],
+                    "blessed_spec": values["blessed_spec"],
+                    "expression": values["expression"],
+                    "depends_on": values["depends_on"],
+                    "params_schema": values["params_schema"],
+                    "synonyms": values["synonyms"],
+                    "intent_embedding": values["intent_embedding"],
+                    "status": values["status"],
+                    "version": values["version"],
+                    "provenance": values["provenance"],
+                },
+                where=(MetricDefinition.provenance["author"].astext == "system_seed"),
             )
         )
+        await db.execute(stmt)
+
     return len(_SYSTEM_METRICS)

@@ -279,3 +279,203 @@ def test_rejects_enum_value_with_backslash():
                     "params_schema": {"region": {"type": "enum", "values": ["eu", poison]}},
                 }
             )
+
+
+# ── (d) dialect vs source_kind cross-check ────────────────────────────────────
+
+
+def test_dialect_must_match_source_kind():
+    """REAL invariant (R1#12). The blessed_spec `dialect` field is author-supplied but
+    compute routes entirely by source_kind — dialect is effectively a doc annotation.
+    However, a contradictory dialect (e.g. source_kind=bigquery + dialect=suiteql)
+    signals a copy-paste error and would silently compute via BigQuery while the metric
+    claims to be SuiteQL. validate_definition MUST reject this mismatch at author-time
+    so a blessed definition is internally consistent. A missing dialect (None) is
+    allowed (authors need not always set it), and a matching dialect passes."""
+    with pytest.raises(AuthoringError, match="dialect"):
+        validate_definition(
+            {
+                "key": "k",
+                "source_kind": "bigquery",
+                "params_schema": {},
+                "blessed_spec": {"query": "SELECT 0", "dialect": "suiteql"},
+            }
+        )
+
+
+def test_dialect_mismatch_suiteql_bigquery_also_rejected():
+    """Mirror case: source_kind=suiteql with dialect=bigquery is equally contradictory
+    and must be rejected. Proves the guard is symmetric."""
+    with pytest.raises(AuthoringError, match="dialect"):
+        validate_definition(
+            {
+                "key": "k",
+                "source_kind": "suiteql",
+                "params_schema": {},
+                "blessed_spec": {"query": "SELECT 0", "dialect": "bigquery"},
+            }
+        )
+
+
+def test_dialect_absent_is_allowed():
+    """A missing dialect (key absent) is valid — authors need not always set it.
+    Ensures the guard does not force a dialect declaration."""
+    validate_definition(
+        {
+            "key": "cash",
+            "source_kind": "suiteql",
+            "params_schema": {"period": {"type": "period"}},
+            "blessed_spec": {"query": "SELECT 0"},
+        }
+    )
+
+
+def test_matching_dialect_passes():
+    """source_kind=suiteql + dialect=suiteql is consistent and must pass."""
+    validate_definition(
+        {
+            "key": "cash",
+            "source_kind": "suiteql",
+            "params_schema": {"period": {"type": "period"}},
+            "blessed_spec": {"query": "SELECT 0", "dialect": "suiteql"},
+        }
+    )
+
+
+def test_bigquery_matching_dialect_passes():
+    """source_kind=bigquery + dialect=bigquery is consistent and must pass."""
+    validate_definition(
+        {
+            "key": "bq_metric",
+            "source_kind": "bigquery",
+            "params_schema": {"period": {"type": "period"}},
+            "blessed_spec": {"query": "SELECT 0", "dialect": "bigquery"},
+        }
+    )
+
+
+# ── (c) expression-over-expression DB check ────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_expression_leaf_must_be_query_backed(db):
+    """REAL compute-safety invariant (R1#4). validate_leaves_exist currently only checks
+    that the leaf keys EXIST and are active — it does not check that those leaves are
+    query-backed. An expression whose leaf is also an expression is accepted at author
+    time, then crashes at compute: _execute_scalar_query does
+    `metric.blessed_spec["query"]`, and an expression leaf has `blessed_spec=None` →
+    TypeError → 500. validate_leaves_exist MUST reject expression leaves at author time.
+
+    Pre-fix this PASSES (currently any active key satisfies the check); post-fix it
+    raises AuthoringError with 'query-backed' in the message."""
+    import uuid
+
+    from app.models.metric_definition import SYSTEM_TENANT_ID, MetricDefinition
+    from app.services.metrics.metric_authoring import AuthoringError, validate_leaves_exist
+
+    db.add(
+        MetricDefinition(
+            tenant_id=SYSTEM_TENANT_ID,
+            key="leaf_expr",
+            display_name="x",
+            definition="x",
+            unit="ratio",
+            source_kind="expression",
+            expression="a/b",
+            depends_on=["a", "b"],
+            status="active",
+            version=1,
+            provenance={"author": "t"},
+        )
+    )
+    await db.flush()
+    with pytest.raises(AuthoringError, match="query-backed"):
+        await validate_leaves_exist(
+            db,
+            tenant_id=uuid.uuid4(),
+            d={"source_kind": "expression", "depends_on": ["leaf_expr"], "key": "top"},
+        )
+
+
+# ── R1#9: 1536-d embedding guard on create + update authoring paths ──────────
+
+
+@pytest.mark.asyncio
+async def test_create_metric_rejects_non_1536_embedding(db, monkeypatch):
+    """REAL dimension invariant (R1#9). The system seeder asserts len(vec)==1536 before
+    persisting an intent embedding, but create_metric inserts whatever embed_domain_query
+    returns with no guard. A wrong-dimension vector (e.g. 10-element list from a
+    mis-configured provider) silently persists and corrupts cosine-similarity resolution.
+    create_metric MUST raise AuthoringError mentioning '1536' when embed_domain_query
+    returns a non-1536 non-None vector.
+
+    Pre-fix this PASSES (no guard); post-fix raises AuthoringError matching '1536'."""
+    import uuid
+
+    from app.services.metrics import metric_authoring
+    from app.services.metrics.metric_authoring import AuthoringError, create_metric
+
+    async def _bad_embed(_text):
+        return [0.0] * 10
+
+    monkeypatch.setattr(metric_authoring, "embed_domain_query", _bad_embed)
+    with pytest.raises(AuthoringError, match="1536"):
+        await create_metric(
+            db,
+            tenant_id=uuid.uuid4(),
+            payload={
+                "key": "k1536",
+                "display_name": "X",
+                "definition": "x",
+                "unit": "currency",
+                "source_kind": "suiteql",
+                "blessed_spec": {"query": "SELECT 0", "dialect": "suiteql"},
+                "params_schema": {"period": {"type": "period"}},
+            },
+        )
+
+
+@pytest.mark.asyncio
+async def test_update_metric_rejects_non_1536_embedding(db, monkeypatch):
+    """REAL dimension invariant (R1#9) — update path. update_metric recomputes the
+    intent embedding when text fields change; if embed_domain_query returns a
+    wrong-dimension vector, update_metric must raise AuthoringError mentioning '1536'
+    rather than silently persisting a corrupted vector.
+
+    Pre-fix this PASSES (no guard on update); post-fix raises AuthoringError '1536'."""
+    import uuid
+
+    # Seed a valid metric under SYSTEM_TENANT_ID so the FK constraint is satisfied
+    # (create_metric calls ensure_system_tenant for SYSTEM rows). embed returns None
+    # in the test env — that is explicitly allowed; only a non-None wrong-dim is rejected.
+    from app.models.metric_definition import SYSTEM_TENANT_ID
+    from app.services.metrics import metric_authoring
+    from app.services.metrics.metric_authoring import AuthoringError, create_metric, update_metric
+
+    metric = await create_metric(
+        db,
+        tenant_id=SYSTEM_TENANT_ID,
+        payload={
+            "key": f"upd_1536_{uuid.uuid4().hex[:8]}",
+            "display_name": "Original Name",
+            "definition": "original definition",
+            "unit": "currency",
+            "source_kind": "suiteql",
+            "blessed_spec": {"query": "SELECT 0", "dialect": "suiteql"},
+            "params_schema": {"period": {"type": "period"}},
+        },
+    )
+    await db.flush()
+
+    # Now monkeypatch to a bad-dimension embed and attempt a text-field update
+    async def _bad_embed(_text):
+        return [0.0] * 10
+
+    monkeypatch.setattr(metric_authoring, "embed_domain_query", _bad_embed)
+    with pytest.raises(AuthoringError, match="1536"):
+        await update_metric(
+            db,
+            tenant_id=SYSTEM_TENANT_ID,
+            metric_id=metric.id,
+            payload={"display_name": "New Name"},
+        )

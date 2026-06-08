@@ -28,4 +28,3 @@ prompt_fragment: |
 rag_partitions:
   - bi/schema-docs
   - bi/common-queries
-  - bi/metric-definitions

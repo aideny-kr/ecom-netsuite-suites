@@ -779,7 +779,7 @@ TOOL_REGISTRY = {
         "description": (
             "Resolve a named business metric from natural language or a key. Returns the blessed "
             "definition, params_schema, and dimensions. Definitions are DISPLAY-ONLY — never compute "
-            "a number from them; call metric.compute to get a value."
+            "a number from them; call metric_compute to get a value."
         ),
         "execute": metric_tools.resolve,
         "params_schema": {

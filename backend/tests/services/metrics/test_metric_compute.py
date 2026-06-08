@@ -1,7 +1,127 @@
 # backend/tests/services/metrics/test_metric_compute.py
+import uuid
+
 import pytest
 
 from app.services.metrics.metric_compute import ParamError, coerce_params, fill_query
+
+
+@pytest.mark.asyncio
+async def test_bigquery_metric_offallowlist_dataset_refuses(db, monkeypatch):
+    from app.core.config import settings
+    from app.services.metrics import metric_compute
+
+    monkeypatch.setattr(settings, "BIGQUERY_ALLOWED_DATASETS", "analytics", raising=False)
+    with pytest.raises(metric_compute.ComputeError, match="allowlist"):
+        await metric_compute._validate_and_execute_by_source(
+            db, uuid.uuid4(), "bigquery", "SELECT x FROM secret_dataset.t"
+        )
+
+
+@pytest.mark.asyncio
+async def test_bigquery_3part_ref_extracts_dataset_not_project(db, monkeypatch):
+    """R1#7 hole 1 (CRITICAL): a fully-qualified `project.dataset.table` ref. The DATASET
+    is the SECOND-to-last dotted component (`secret_dataset`), NOT the project (`proj`).
+    The naive `FROM <id>\\.` regex captured the FIRST component (the project), so it
+    over-blocked legit cross-project queries AND, worse, under-blocked the attack
+    `FROM allowed.secret_dataset.events` (it captured `allowed` and never checked
+    `secret_dataset`). The allowlist error must name `secret_dataset`, never `proj`."""
+    from app.core.config import settings
+    from app.services.metrics import metric_compute
+
+    monkeypatch.setattr(settings, "BIGQUERY_ALLOWED_DATASETS", "analytics", raising=False)
+    with pytest.raises(metric_compute.ComputeError, match="secret_dataset") as ei:
+        await metric_compute._validate_and_execute_by_source(
+            db, uuid.uuid4(), "bigquery", "SELECT x FROM proj.secret_dataset.t"
+        )
+    # The PROJECT id must NOT be reported as a dataset.
+    assert "proj" not in str(ei.value), str(ei.value)
+
+
+@pytest.mark.asyncio
+async def test_bigquery_join_clause_is_enforced(db, monkeypatch):
+    """R1#7 hole 2: JOIN clauses bypassed the check entirely (the regex only matched
+    FROM). `FROM analytics.a JOIN secret.b` let `secret` straight through. JOIN-ed
+    datasets must be enforced exactly like FROM-ed ones (mirror of SuiteQL parse_tables,
+    which already does `(?:FROM|JOIN)`)."""
+    from app.core.config import settings
+    from app.services.metrics import metric_compute
+
+    monkeypatch.setattr(settings, "BIGQUERY_ALLOWED_DATASETS", "analytics", raising=False)
+    with pytest.raises(metric_compute.ComputeError, match="secret"):
+        await metric_compute._validate_and_execute_by_source(
+            db, uuid.uuid4(), "bigquery", "SELECT x FROM analytics.a JOIN secret.b ON a.id = b.id"
+        )
+
+
+@pytest.mark.asyncio
+async def test_bigquery_comment_between_from_and_dataset_is_enforced(db, monkeypatch):
+    """R1#7 hole 4 (comment-strip bypass): the dataset-allowlist regex ran on the RAW
+    query. A SQL comment between FROM/JOIN and the table name
+    (`FROM /*x*/ secret.t`) makes the `(?:FROM|JOIN)\\s+(<id>)` regex capture the
+    comment text (or nothing), so NO dataset is extracted and an off-allowlist dataset
+    slips straight past the gate. Comments must be stripped BEFORE the dataset regex —
+    the commented form must be REJECTED exactly like the comment-free
+    `FROM secret.t`."""
+    from app.core.config import settings
+    from app.services.metrics import metric_compute
+
+    monkeypatch.setattr(settings, "BIGQUERY_ALLOWED_DATASETS", "analytics", raising=False)
+    with pytest.raises(metric_compute.ComputeError, match="secret"):
+        await metric_compute._validate_and_execute_by_source(
+            db, uuid.uuid4(), "bigquery", "SELECT x FROM /*x*/ secret.t"
+        )
+
+
+@pytest.mark.asyncio
+async def test_bigquery_allowlist_is_case_insensitive(db, monkeypatch):
+    """R1#7 hole 3: lowercase `from`/`join` extracted nothing, so the allowlist was
+    bypassed by simply lowercasing the keyword. Extraction must be case-insensitive
+    (mirror of SuiteQL parse_tables' re.IGNORECASE)."""
+    from app.core.config import settings
+    from app.services.metrics import metric_compute
+
+    monkeypatch.setattr(settings, "BIGQUERY_ALLOWED_DATASETS", "analytics", raising=False)
+    with pytest.raises(metric_compute.ComputeError, match="secret"):
+        await metric_compute._validate_and_execute_by_source(db, uuid.uuid4(), "bigquery", "select x from secret.t")
+
+
+@pytest.mark.asyncio
+async def test_bigquery_onallowlist_3part_passes_dataset_gate(db, monkeypatch):
+    """A 3-part ref whose DATASET is on the allowlist (`proj.analytics.t`) must pass the
+    dataset gate — the off-allowlist ComputeError must NOT be raised. Execution may still
+    fail downstream (no real BQ connection in the test DB), so we only assert the SPECIFIC
+    'off-allowlist' refusal is absent; any other failure is acceptable here."""
+    from app.core.config import settings
+    from app.services.metrics import metric_compute
+
+    monkeypatch.setattr(settings, "BIGQUERY_ALLOWED_DATASETS", "analytics", raising=False)
+    try:
+        await metric_compute._validate_and_execute_by_source(
+            db, uuid.uuid4(), "bigquery", "SELECT x FROM proj.analytics.t"
+        )
+    except metric_compute.ComputeError as ex:
+        assert "off-allowlist" not in str(ex), str(ex)
+    except Exception:
+        # Any non-allowlist failure (e.g. no BQ connection) is fine — the gate let it through.
+        pass
+
+
+@pytest.mark.asyncio
+async def test_bigquery_empty_allowlist_is_noop(db, monkeypatch):
+    """Backward-compat: an EMPTY BIGQUERY_ALLOWED_DATASETS disables the check entirely.
+    `FROM secret.t` must NOT raise the off-allowlist ComputeError (it may fail later for
+    other reasons — no BQ connection — but never on the allowlist gate)."""
+    from app.core.config import settings
+    from app.services.metrics import metric_compute
+
+    monkeypatch.setattr(settings, "BIGQUERY_ALLOWED_DATASETS", "", raising=False)
+    try:
+        await metric_compute._validate_and_execute_by_source(db, uuid.uuid4(), "bigquery", "SELECT x FROM secret.t")
+    except metric_compute.ComputeError as ex:
+        assert "off-allowlist" not in str(ex), str(ex)
+    except Exception:
+        pass
 
 
 def test_coerce_rejects_unknown_param():

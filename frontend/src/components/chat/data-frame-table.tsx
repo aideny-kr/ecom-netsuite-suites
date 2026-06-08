@@ -37,7 +37,7 @@ interface DataFrameTableProps {
 type SortDirection = "asc" | "desc" | null;
 
 export function DataFrameTable({ data, queryText }: DataFrameTableProps) {
-  const { columns, rows, row_count, truncated } = data;
+  const { columns, rows, row_count, truncated, isMetric } = data;
   const { exportToExcel, exportFromQuery, isExporting } = useExcelExport();
   const [sortCol, setSortCol] = useState<number | null>(null);
   const [sortDir, setSortDir] = useState<SortDirection>(null);
@@ -91,9 +91,9 @@ export function DataFrameTable({ data, queryText }: DataFrameTableProps) {
   }, [columns, sortedRows]);
 
   const handleDownloadCSV = useCallback(() => {
-    // If we have a SuiteQL query (not saved search, not BigQuery),
+    // If we have a SuiteQL query (not a metric key, not saved search, not BigQuery),
     // re-execute server-side for full results (up to 50K rows)
-    if (queryText && !queryText.startsWith("Saved Search:") && !isBigQuery) {
+    if (!isMetric && queryText && !queryText.startsWith("Saved Search:") && !isBigQuery) {
       exportFromQuery({
         queryText,
         title: `query-results-${new Date().toISOString().slice(0, 10)}`,
@@ -119,7 +119,7 @@ export function DataFrameTable({ data, queryText }: DataFrameTableProps) {
     a.download = `query-results-${new Date().toISOString().slice(0, 10)}.csv`;
     a.click();
     URL.revokeObjectURL(url);
-  }, [columns, rows, truncated, queryText, exportFromQuery]);
+  }, [columns, rows, queryText, exportFromQuery, isMetric, isBigQuery]);
 
   if (columns.length === 0) return null;
 
@@ -178,7 +178,7 @@ export function DataFrameTable({ data, queryText }: DataFrameTableProps) {
           <button
             onClick={() => {
               const title = `query-results-${new Date().toISOString().slice(0, 10)}`;
-              if (queryText && !isBigQuery) {
+              if (!isMetric && queryText && !isBigQuery) {
                 exportFromQuery({
                   queryText,
                   title,
@@ -206,8 +206,8 @@ export function DataFrameTable({ data, queryText }: DataFrameTableProps) {
         </div>
       </div>
 
-      {/* Query */}
-      {queryText && (
+      {/* Query — hidden for metric tables (query is a metric key, not SQL) */}
+      {!isMetric && queryText && (
         <div className="border-b">
           <button
             onClick={() => setShowQuery((v) => !v)}
@@ -298,7 +298,7 @@ export function DataFrameTable({ data, queryText }: DataFrameTableProps) {
             ? `Showing ${rows.length} of ${row_count} rows`
             : `${row_count} row${row_count === 1 ? "" : "s"} returned`}
         </p>
-        {queryText && <SaveQueryButton queryText={queryText} columns={columns} rows={rows} rowCount={row_count} />}
+        {!isMetric && queryText && <SaveQueryButton queryText={queryText} columns={columns} rows={rows} rowCount={row_count} />}
       </div>
     </div>
   );

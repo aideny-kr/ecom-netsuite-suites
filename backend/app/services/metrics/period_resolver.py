@@ -2,6 +2,7 @@
 """Deterministic NL-period-token -> (start, end) date bounds. Honors fiscal_year_start_month."""
 
 import calendar
+import re
 from datetime import date
 
 SUPPORTED_TOKENS = {
@@ -12,7 +13,10 @@ SUPPORTED_TOKENS = {
     "this_year",
     "last_year",
     "ytd",
+    "fy",
 }
+
+_FY_ABS = re.compile(r"fy(\d{4})$")
 
 
 class PeriodError(ValueError):
@@ -42,8 +46,27 @@ def _fiscal_quarter_start_month(today: date, fy_start: int, quarters_back: int) 
 
 def resolve_period(token: str, *, fiscal_year_start_month: int, today: date) -> tuple[date, date]:
     t = token.strip().lower()
-    if t not in SUPPORTED_TOKENS:
+    fy_abs = _FY_ABS.fullmatch(t)
+    if t not in SUPPORTED_TOKENS and fy_abs is None:
         raise PeriodError(f"unsupported period token: {token}")
+
+    if t == "fy":
+        return resolve_period("this_year", fiscal_year_start_month=fiscal_year_start_month, today=today)
+
+    if fy_abs:
+        sy = int(fy_abs.group(1))
+        # Catch the BASE ValueError (not a narrower type): date() bare-raises both
+        # 'year N is out of range' (sy 0, or an end date that overflows to year 10000
+        # for a non-Jan fiscal start at sy 9999) AND 'month must be in 1..12'
+        # (config-drift fiscal_year_start_month). Narrowing this catch would silently
+        # reintroduce a caller-controllable bare ValueError that 500s compute_metric
+        # instead of returning the structured invalid_params refusal.
+        try:
+            start = date(sy, fiscal_year_start_month, 1)
+            end_y, end_m = _add_months(sy, fiscal_year_start_month, 11)
+            return start, _month_end(end_y, end_m)
+        except ValueError as ex:
+            raise PeriodError(f"year-out-of-range period token: {token}") from ex
 
     if t in ("this_month", "last_month"):
         y, m = _add_months(today.year, today.month, 0 if t == "this_month" else -1)

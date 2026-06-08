@@ -102,14 +102,23 @@ def fill_query(query: str, coerced: dict) -> str:
     return filled
 
 
-def metric_data_table(display_name: str, value, unit: str, period_label: str, query_label) -> dict:
+def metric_data_table(
+    display_name: str,
+    value,
+    unit: str,
+    period_label: str,
+    query_label,
+    *,
+    definition_version: int | None = None,
+    source_kind: str | None = None,
+) -> dict:
     # F4 (c): the `query` field is copied verbatim into the data_table SSE payload that
     # reaches the FRONTEND. It MUST be a plain string label (the metric key), NOT the
     # internal blessed_spec dict — exposing blessed_spec would ship the raw blessed
     # SuiteQL/BigQuery text (table names, dialect) to the client. Coerce defensively so a
     # dict can never land here even if a caller regresses.
     label = query_label if isinstance(query_label, str) else ""
-    return {
+    payload: dict = {
         "columns": ["Metric", "Value", "Unit", "Period"],
         "rows": [[display_name, value, unit, period_label]],
         "row_count": 1,
@@ -120,6 +129,18 @@ def metric_data_table(display_name: str, value, unit: str, period_label: str, qu
         # value from the LLM-facing condensed string (anti-hallucination invariant).
         "suppress_llm_value": True,
     }
+    # §10 audit-citation: include the definition version that produced this number so
+    # downstream consumers (SSE renderer, audit trail) can attribute the number to the
+    # exact definition version. Only set when the caller supplies the version (the
+    # production call site always does; test helpers that don't care may omit it).
+    if definition_version is not None:
+        payload["definition_version"] = definition_version
+    # M4: expose source_kind so the orchestrator's source-pin logic can distinguish a
+    # BigQuery metric from a SuiteQL/NetSuite one (without it the orchestrator wrongly
+    # pins NetSuite for every metric). Only set when the caller supplies it.
+    if source_kind is not None:
+        payload["source_kind"] = source_kind
+    return payload
 
 
 def is_suppressed_metric_payload(parsed: object) -> bool:
@@ -161,8 +182,9 @@ async def _validate_and_execute_by_source(db, tenant_id, source_kind: str, query
     with the dialect-correct read-only check (SuiteQL vs BigQuery SQL differ).
     """
     if source_kind == "bigquery":
+        from app.core.config import settings
         from app.mcp.tools import bigquery_tools
-        from app.services.bigquery_service import _validate_read_only
+        from app.services.bigquery_service import _strip_sql_comments, _validate_read_only
 
         try:
             _validate_read_only(query)
@@ -172,6 +194,32 @@ async def _validate_and_execute_by_source(db, tenant_id, source_kind: str, query
             # caller param error. Raise ComputeError so compute_metric's uniform handler
             # audit-logs the failure and returns a number-free dict (compute is read-only).
             raise ComputeError(f"filled bigquery query failed read-only validation: {ex}") from ex
+        # R1#7: symmetric dataset-allowlist enforcement (mirrors SuiteQL table-allowlist
+        # in netsuite_suiteql.parse_tables — same (?:FROM|JOIN) + re.IGNORECASE shape,
+        # adapted for BigQuery's dotted namespace). Empty setting = no restriction
+        # (backward compatible).
+        allowed = {
+            d.strip().lower() for d in getattr(settings, "BIGQUERY_ALLOWED_DATASETS", "").split(",") if d.strip()
+        }
+        if allowed:
+            # Match FROM and JOIN (case-insensitive). A BigQuery ref is `dataset.table` or
+            # `project.dataset.table` (project ids may contain hyphens; any part may be
+            # backtick-quoted). The DATASET is the SECOND-to-last dotted component — for a
+            # 2-part ref that is the first part, for a 3-part ref the middle part (NOT the
+            # project). Extracting the wrong part both over-blocks legit cross-project
+            # queries and under-blocks `allowed.secret.t` style attacks.
+            # Strip SQL comments BEFORE the dataset regex: a comment between FROM/JOIN
+            # and the table name (`FROM /*x*/ secret.t`) otherwise makes the regex
+            # capture nothing, so an off-allowlist dataset slips past the gate.
+            decommented = _strip_sql_comments(query)
+            used: set[str] = set()
+            for ref in re.findall(r"(?:FROM|JOIN)\s+([`A-Za-z0-9_.\-]+)", decommented, re.IGNORECASE):
+                parts = [p.strip("`") for p in ref.strip("`").split(".") if p.strip("`")]
+                if len(parts) >= 2:
+                    used.add(parts[-2].lower())
+            illegal = used - allowed
+            if illegal:
+                raise ComputeError(f"filled bigquery query selects off-allowlist datasets: {sorted(illegal)}")
         return await bigquery_tools.bigquery_sql_execute({"query": query}, {"tenant_id": str(tenant_id), "db": db})
 
     # Default / "suiteql": NetSuite SuiteTalk REST. Expression-leaf metrics are
@@ -217,7 +265,10 @@ async def _execute_scalar_query(db, tenant_id, metric: MetricDefinition, coerced
     try:
         return float(cell)
     except (TypeError, ValueError) as ex:
-        raise ComputeError(f"blessed query value is not numeric: {cell!r}") from ex
+        # M1: never embed the cell value in the error message — it is a computed number
+        # (e.g. "$1,234.00") that would leak through the error dict's 'message' key to
+        # the LLM (error dicts are NOT suppressed metric payloads). Static message only.
+        raise ComputeError("blessed query returned a non-numeric value") from ex
 
 
 async def resolve_metric_by_key(db: AsyncSession, *, tenant_id, key: str) -> MetricDefinition | None:
@@ -264,7 +315,9 @@ async def _log_compute_failure(
         resource_id=str(metric.id),
         status="failed",
         error_message=message,
-        payload={"key": metric.key, "error": error_code},
+        # §10 audit-citation: include the definition version that was active when the
+        # failure occurred, so the audit trail cites which version failed.
+        payload={"key": metric.key, "error": error_code, "version": metric.version},
     )
     return {"error": error_code, "key": metric.key, "message": message}
 
@@ -277,6 +330,28 @@ async def compute_metric(db: AsyncSession, *, tenant_id, key: str, params: dict,
             "key": key,
             "message": f"No blessed definition for '{key}'.",
         }
+    # R3#24 guard: reject a caller param that is in NEITHER params_schema NOR the metric's
+    # declared dimensions, giving a precise "not a recognised param or dimension" error.
+    # This runs AFTER the metric-not-found check (so an unknown KEY still returns
+    # no_blessed_definition) and BEFORE coerce_params (so the error code is precise, not the
+    # generic invalid_params that coerce would produce for the same unrecognised key).
+    # Advisory note: a param that IS a declared dimension but NOT in params_schema will
+    # still be rejected downstream by coerce_params ("unknown param: <name>") — there is no
+    # free-dimension SQL binding yet, so a dimension-only param can't actually slice the
+    # query. That is expected and acceptable; this guard's job is precision for params that
+    # are unrecognised by BOTH schemas.
+    allowed_dims = (
+        set(metric.dimensions.keys()) if isinstance(metric.dimensions, dict) else set(metric.dimensions or [])
+    )
+    schema_keys = set(metric.params_schema or {})
+    for p in params:
+        if p not in schema_keys and p not in allowed_dims:
+            return {
+                "error": "invalid_dimension",
+                "key": key,
+                "message": f"'{p}' is not a declared param or dimension of '{key}'",
+            }
+
     fy = int(context.get("fiscal_year_start_month", 1) or 1)
     # G1: param coercion is a CALLER-input gate, not a metric/schema-drift failure, so it
     # is handled separately from the ExpressionError/ComputeError path below. A bad param
@@ -303,6 +378,20 @@ async def compute_metric(db: AsyncSession, *, tenant_id, key: str, params: dict,
                         "error": "missing_dependency",
                         "key": dep,
                         "message": f"Missing leaf metric '{dep}'.",
+                    }
+                # M3: a leaf that is itself an expression metric has blessed_spec=None;
+                # calling _execute_scalar_query on it would crash (TypeError) when it
+                # tries to dereference dmatch.blessed_spec["query"]. Author-time rejects
+                # NEW nested-expression metrics, but a seeded/pre-existing/edited row can
+                # still reach compute. Return a number-free structured error instead of
+                # crashing — do NOT execute, do NOT mutate.
+                if dmatch.source_kind == "expression":
+                    return {
+                        "error": "nested_expression_unsupported",
+                        "key": dep,
+                        "message": (
+                            f"expression leaf '{dep}' is itself an expression; only query-backed leaves are supported"
+                        ),
                     }
                 try:
                     leaf_coerced = coerce_params(dmatch.params_schema or {}, params, fiscal_year_start_month=fy)
@@ -339,4 +428,15 @@ async def compute_metric(db: AsyncSession, *, tenant_id, key: str, params: dict,
 
     # F4 (c): label the data_table with the metric KEY (a string), never the
     # blessed_spec/expression — keep the internal execution spec OUT of the SSE payload.
-    return metric_data_table(metric.display_name, value, metric.unit, period_label, metric.key)
+    # §10: pass definition_version so the payload cites which definition produced the number.
+    # M4: pass source_kind so the orchestrator's source-pin logic can distinguish BigQuery
+    # from SuiteQL/NetSuite without re-querying the catalog.
+    return metric_data_table(
+        metric.display_name,
+        value,
+        metric.unit,
+        period_label,
+        metric.key,
+        definition_version=metric.version,
+        source_kind=metric.source_kind,
+    )
