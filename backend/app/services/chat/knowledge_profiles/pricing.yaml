@@ -29,6 +29,19 @@ prompt_fragment: |
   Results from pricing_convert / pricing_export / pricing_revise render automatically in the frontend table.
   Do NOT list individual prices in your response.
 
+  ## Cost / margin / demand-aware base pricing (cross-source)
+  To decide BASE prices from cost, margin, tariff, or demand data, use `cross_source_query`
+  to join NetSuite (item cost, current list price, inventory) with BigQuery (cost adders,
+  tariff/freight models, sales velocity, competitor/market prices) on SKU. The joined table
+  renders automatically for the USER to review — treat this as DECISION SUPPORT, not an
+  automatic price feed:
+  - Do NOT transcribe the joined numbers into pricing_export yourself; the table is shown to
+    the user, not for you to retype (same rule as "do not list individual prices" above).
+  - After the user reviews the table, ask for the target base prices (or a margin/uplift
+    rule), then run pricing_export / pricing_convert to do the FX/VAT/rounding conversion.
+  - This needs BOTH NetSuite and BigQuery connected; if a source is missing, cross_source_query
+    returns an error — fall back to the base prices the user provides.
+
   ## Follow-up edits
   For follow-up requests like "change/update/regenerate pricing":
   - Call `pricing_revise` with structured `overrides`. Do NOT re-ask for the upload

@@ -112,20 +112,88 @@ def score_accuracy(result_text: str, expected_keywords: list[str]) -> float:
     return round(hits / len(expected_keywords), 4)
 
 
-def score_efficiency(
-    sql: str,
-    rows_returned: int | None = None,
-    bytes_processed: int | None = None,
-) -> float:
+# BUILTIN.DF(<addr>.country) used as a FILTER predicate — a per-row function in a filter
+# defeats the index → full scan → 60s timeout (2026-06 ship-to-country incident). The
+# country arg is anchored on the '(' of the DF call (with optional `<alias>.`) so COUNTRY
+# cannot match as a suffix of another identifier (e.g. shipcountry). A comparison /
+# (NOT) IN / (NOT) LIKE adjacent on EITHER side marks a filter — matched in ANY clause
+# (WHERE / JOIN-ON / HAVING) and for reversed forms (`'SG' = BUILTIN.DF(sa.country)`).
+# Display use — BUILTIN.DF(sa.country) AS country, GROUP BY BUILTIN.DF(sa.country) — has
+# no adjacent operator and is NOT matched. Scoped to .country on purpose:
+# BUILTIN.DF(field) = 'Value' on small static custom lists is a blessed readability
+# pattern (netsuite.yaml CUSTOM LIST FIELDS) and must not be flagged. `BUILTIN\s*\.\s*DF`
+# also catches a spaced-out `BUILTIN . DF` evasion.
+_DF_COUNTRY = r"BUILTIN\s*\.\s*DF\s*\(\s*(?:\w+\.)?COUNTRY\s*\)"
+_CMP = r"(?:>=|<=|<>|!=|>|<|=|(?:NOT\s+)?IN\b|(?:NOT\s+)?LIKE\b)"
+# Tolerate single-level wrappers around the country DF: a closing wrapper paren before
+# the operator (`LOWER(BUILTIN.DF(sa.country)) = ...`) and a wrapper function-open after
+# the operator (`... = LOWER(BUILTIN.DF(sa.country))`). Documented residual: multi-arg
+# wrappers (`NVL(BUILTIN.DF(sa.country), '')`) still evade this static check — the live
+# latency gate (follow-up #2) is the backstop for arbitrarily-shaped slow SQL.
+_BUILTIN_DF_COUNTRY_FILTER = re.compile(rf"{_DF_COUNTRY}\s*\)*\s*{_CMP}|{_CMP}\s*(?:[A-Z_]+\s*\(\s*)*{_DF_COUNTRY}")
+
+# A real trandate predicate bounds the scan to a date RANGE (uses the trandate index).
+# Allow an optional ')' so both `t.trandate >= ...` and `TRUNC(t.trandate) >= ...` count;
+# a SELECT/ORDER BY mention (trandate followed by ',' or end) does NOT (no operator), and
+# `<>` / `!=` (not-equal) are NOT range bounds. FETCH FIRST / ROWNUM are deliberately NOT
+# bounds — they cap returned rows, not the scan.
+# Known residual: this is alias-blind, so a stray `<other>.trandate >=` predicate in the
+# same query would also satisfy the bound — acceptable, since an address-country query
+# scans the transaction it joins and an unrelated trandate predicate is implausible.
+_TRANDATE_PREDICATE = re.compile(r"\bTRANDATE\s*\)?\s*(?:>=|<=|<(?!>)|>|=|\bBETWEEN\b)")
+
+_ADDRESS_TABLES = ("TRANSACTIONSHIPPINGADDRESS", "TRANSACTIONBILLINGADDRESS")
+
+# Penalty weight for each perf anti-pattern (subtracted from the efficiency score).
+_PERF_PENALTY = {
+    "builtin_df_country_filter": 0.3,
+    "unbounded_address_join": 0.2,
+}
+
+
+def detect_perf_anti_patterns(sql: str) -> list[str]:
+    """Return the proven perf anti-patterns present in *sql* (empty == clean).
+
+    Both patterns are confirmed to time out (60s) on large NetSuite accounts
+    (2026-06 ship-to-country incident):
+
+      - ``builtin_df_country_filter`` — ``BUILTIN.DF(<addr>.country)`` used as a
+        filter predicate (per-row function → defeats the index → full scan).
+      - ``unbounded_address_join`` — a ``transactionShippingAddress`` /
+        ``transactionBillingAddress`` join with no ``t.trandate`` predicate to
+        bound the scan.
+
+    Intentionally narrow: a generic ``BUILTIN.DF(field) = 'Value'`` filter on a
+    small static custom list is a blessed readability pattern and is NOT flagged.
+    """
+    if not sql or not sql.strip():
+        return []
+    # Strip SQL comments first so a commented-out predicate can't satisfy a scan bound
+    # and a commented BUILTIN.DF can't trip the filter check.
+    cleaned = re.sub(r"--[^\n]*", " ", sql)
+    cleaned = re.sub(r"/\*.*?\*/", " ", cleaned, flags=re.DOTALL)
+    sql_upper = cleaned.upper()
+    reasons: list[str] = []
+    if _BUILTIN_DF_COUNTRY_FILTER.search(sql_upper):
+        reasons.append("builtin_df_country_filter")
+    if any(tbl in sql_upper for tbl in _ADDRESS_TABLES) and not _TRANDATE_PREDICATE.search(sql_upper):
+        reasons.append("unbounded_address_join")
+    return reasons
+
+
+def score_efficiency(sql: str) -> float:
     """Return [0, 1] efficiency score for *sql*.
 
     Heuristics (all applied to the SQL text):
-      - SELECT *       → −0.2  (fetches unnecessary columns)
-      - GROUP BY       → +0.05 bonus (aggregation pattern, usually intentional)
-      - WITH (CTE)     → +0.05 bonus (structured, reusable sub-query)
+      - SELECT *           → −0.2  (fetches unnecessary columns)
+      - GROUP BY           → +0.05 bonus (aggregation pattern, usually intentional)
+      - WITH (CTE)         → +0.05 bonus (structured, reusable sub-query)
+      - perf anti-patterns → −0.3 / −0.2  (see ``detect_perf_anti_patterns``)
 
-    Future: rows_returned and bytes_processed can gate additional penalties
-    when runtime data is available.
+    The perf-anti-pattern penalties guard the 2026-06 ship-to-country timeout
+    (BUILTIN.DF country filters and unbounded address joins). The same detector
+    backs a hard promotion veto in ``query_experiment_service`` so a timeout-prone
+    pattern can never be promoted even when its answer beats the baseline.
     """
     if not sql or not sql.strip():
         return 0.0
@@ -145,6 +213,10 @@ def score_efficiency(
     # CTE bonus.
     if re.search(r"\bWITH\s+\w", sql_upper):
         score = min(1.0, score + 0.05)
+
+    # Proven perf anti-patterns (BUILTIN.DF country filter / unbounded address join).
+    for reason in detect_perf_anti_patterns(sql):
+        score -= _PERF_PENALTY[reason]
 
     return max(0.0, round(score, 4))
 

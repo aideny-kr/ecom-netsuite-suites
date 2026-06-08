@@ -13,6 +13,7 @@ import logging
 import re
 import uuid
 from typing import TYPE_CHECKING, Any, Callable
+from xml.sax.saxutils import escape as _xml_escape
 
 from app.services.chat.agents.base_agent import BaseSpecialistAgent
 from app.services.chat.tools import build_local_tool_definitions
@@ -163,6 +164,7 @@ FINANCIAL STATEMENTS → netsuite_financial_report (local) or ns_runReport (MCP,
 SAVED SEARCHES → ns_runSavedSearch (call ns_listSavedSearches to discover).
 AD-HOC DATA → ns_runCustomSuiteQL (MCP, preferred) or netsuite_suiteql (local, fallback). Check <tenant_schema>, <tenant_vernacular>, <proven_patterns>, <learned_rules> before querying. Follow ALL <suiteql_dialect_rules>.
 PIVOT/CROSSTAB → pivot_query_result tool (NOT manual CASE WHEN SQL). Run flat GROUP BY first, then pivot.
+CROSS-SOURCE (NetSuite × BigQuery in ONE answer) → cross_source_query tool (pass both queries + join key). Joins server-side into one table — never eyeball two separate tables.
 SCHEMA DISCOVERY → check <tenant_schema> and <standard_table_schemas> first. If missing, use netsuite_get_metadata (local) or ns_getSuiteQLMetadata (MCP). NEVER guess column names.
   CUSTOM RECORDS (customrecord_*): first query MUST be `SELECT * FROM customrecord_xxx FETCH FIRST 1 ROWS ONLY` with no custom field filters. Only use columns from the result. System date fields: `created` and `lastmodified`.
 DOCS/ERRORS → rag_search first, web_search as fallback.
@@ -523,7 +525,9 @@ class UnifiedAgent(BaseSpecialistAgent):
         if _learned_rules:
             lr_block = "\n<learned_rules>\nTenant-specific business rules — FOLLOW THESE STRICTLY:\n"
             for rule in _learned_rules:
-                lr_block += f"  [{rule['category']}] {rule['description']}\n"
+                # Escape tenant-controlled text so a rule containing markup can't
+                # break out of <learned_rules> or inject prompt instructions.
+                lr_block += f"  [{_xml_escape(str(rule['category']))}] {_xml_escape(str(rule['description']))}\n"
             lr_block += "</learned_rules>"
             parts.append(lr_block)
 
@@ -531,10 +535,11 @@ class UnifiedAgent(BaseSpecialistAgent):
         if self._tenant_vernacular:
             parts.append("\n## EXPLICIT TENANT ENTITY RESOLUTION — MANDATORY")
             parts.append(
-                "**CRITICAL**: The entities below have been pre-resolved to their exact NetSuite script IDs. "
+                "**CRITICAL**: The entities in the <resolved_entities> block below have been pre-resolved to their exact NetSuite script IDs. "
                 "You MUST use these script IDs — they OVERRIDE any column names used in prior conversation messages. "
                 "If earlier queries in this conversation used a different column for the same concept, IGNORE the earlier column and use the resolved script ID instead. "
-                "Example: if 'platform' resolves to custitem_fw_platform (item field), use `BUILTIN.DF(i.custitem_fw_platform)` — NOT tl.class or any other field from prior queries."
+                "Example: if 'platform' resolves to custitem_fw_platform (item field), use `BUILTIN.DF(i.custitem_fw_platform)` — NOT tl.class or any other field from prior queries. "
+                "Entities in any <ambiguous_entities> block are ADVISORY ONLY — they matched a list value or non-column reference; do NOT filter on them directly. Identify the correct field and confirm the value matches the user's intent first."
             )
             parts.append(self._tenant_vernacular)
             parts.append(

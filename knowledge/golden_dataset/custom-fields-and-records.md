@@ -53,7 +53,8 @@ SELECT BUILTIN.DF(t.custbody_channel) as channel_name FROM transaction t
 -- Filter by ID (faster)
 WHERE t.custbody_channel = 3
 
--- Filter by display name (readable)
+-- Filter by display name (readable; small static lists only — on a JOIN-backed or large
+-- table filter the raw ID, BUILTIN.DF is a per-row function that forces a full scan)
 WHERE BUILTIN.DF(t.custbody_channel) = 'Wholesale'
 ```
 

@@ -8,7 +8,8 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.reconciliation import ReconciliationResult
+from app.models.reconciliation import ReconciliationResult, ReconciliationRun
+from app.services import audit_service
 
 
 async def execute(params: dict, **kwargs) -> dict:
@@ -41,6 +42,14 @@ async def execute(params: dict, **kwargs) -> dict:
     if not recon_result:
         return {"success": False, "error": "Result not found"}
 
+    # Close = hard freeze. Guard the run before any status change / audit write so a
+    # line left unlocked in a now-closed run cannot be approved post-close.
+    run = (
+        await db.execute(select(ReconciliationRun).where(ReconciliationRun.id == recon_result.run_id))
+    ).scalar_one_or_none()
+    if run is not None and run.status in ("closed", "locked"):
+        return {"success": False, "error": "Period is closed — cannot modify"}
+
     if recon_result.status == "approved":
         return {"success": False, "error": "Already approved"}
 
@@ -51,6 +60,16 @@ async def execute(params: dict, **kwargs) -> dict:
     recon_result.approved_by = uuid.UUID(str(user_id)) if user_id else None
     recon_result.approved_at = datetime.now(timezone.utc)
 
+    await audit_service.log_event(
+        db=db,
+        tenant_id=uuid.UUID(str(tenant_id)),
+        category="reconciliation",
+        action="recon.approve",
+        actor_id=uuid.UUID(str(user_id)) if user_id else None,
+        actor_type="user",
+        resource_type="reconciliation_result",
+        resource_id=result_id,
+    )
     await db.commit()
 
     return {

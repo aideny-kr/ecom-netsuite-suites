@@ -18,10 +18,15 @@ case_id: sales_country_canonical
 query: "give me the sales data of Norway, Switzerland, New Zealand and Singapore as of today, sales data includes total sales order amount and system sales qty"
 tags: ["country", "shipping", "regression", "olivia-2026-04-09"]
 notes: |
-  Canonical regression case. Verified solvable by Claude + MCP on
-  2026-04-09 using:
+  Canonical regression case. Verified solvable by Claude + MCP on 2026-04-09.
+  CANONICAL (fast) form — filter the RAW ISO code and date-scope the address join:
     JOIN transactionShippingAddress sa ON sa.nKey = t.shippingAddress
-    WHERE BUILTIN.DF(sa.country) IN ('Norway', 'Switzerland', 'New Zealand', 'Singapore')
+    WHERE sa.country IN ('NO', 'CH', 'NZ', 'SG')
+      AND t.trandate >= TO_DATE(...)   -- bound the heavy address join
+    GROUP BY BUILTIN.DF(sa.country)     -- BUILTIN.DF for the display label only
+  The 2026-04-09 baseline used `WHERE BUILTIN.DF(sa.country) IN (...names...)`; that
+  form is a per-row function on an unbounded join → 60s timeout on large accounts
+  (2026-06) and is SUPERSEDED — do not teach it.
   Our agent failed this question multiple times in the same session due
   to pattern pollution + tool description truncation + context bloat.
 expected_answer_contains:
@@ -33,7 +38,10 @@ expected_tools:
   - "netsuite_suiteql"
 expected_accuracy: 0.8
 max_cost: 0.50
-max_latency_ms: 120000
+# Budget: 90s — generous margin over the measured ~32s/772-row 12-month address-join
+# scan (2026-06). Conservative on purpose; tighten to p95 once nightly latency data
+# accumulates (calibration deferred — see spec). Hard agent timeout is 180s.
+max_latency_ms: 90000
 # Baseline fields for vs-MCP comparison
 baseline_expected_accuracy: 0.8
 baseline_expected_tools:

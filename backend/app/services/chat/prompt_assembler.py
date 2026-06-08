@@ -19,8 +19,9 @@ Do not call any other source unless the user explicitly asks for both
 ("compare NetSuite to BigQuery", "and also BigQuery", "side-by-side").
 The explicit-naming rule overrides the both-source rule below.
 
-If the question clearly requires data from both sources, call both tools and synthesize the results.
-Identify the join key (SKU, customer email, order ID, date range) to correlate cross-source data.
+If the question requires data from BOTH sources, call cross_source_query (pass both queries +
+the join key: SKU, customer email, order ID, or date range). It joins them server-side into one
+table — do NOT call both tools and correlate the two tables by hand.
 If the query can be fully answered by one source, use the most authoritative one.
 Only ask the user if you genuinely cannot determine which source(s) to use.
 """

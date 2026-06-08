@@ -340,6 +340,15 @@ class SideScore:
 
 
 @dataclass
+class LatencyBreach:
+    case_id: str
+    ours_latency_ms: int
+    budget_ms: int
+    mcp_latency_ms: int | None
+    ours_over_mcp_ratio: float | None
+
+
+@dataclass
 class CaseResult:
     case: Case
     ours: SideScore
@@ -373,6 +382,42 @@ def _compute_verdict(ours: SideScore, mcp: SideScore | None) -> str:
     if delta < -0.05:
         return "MCP WINS"
     return "TIE"
+
+
+def latency_breach(side: "SideScore | None", budget_ms: int) -> bool:
+    """True when a run exceeded its per-case latency budget.
+
+    NOT success-gated: ``side.latency_ms`` is the agent-run wall-clock (set on every
+    return path incl. timeout ~= 180_000ms), so ``latency_ms > budget`` catches both
+    succeeded-but-slow AND timed-out / slow failures, while excluding fast failures
+    (connection errors fail quickly, below budget). The founding 2026-06 ship-to-country
+    incident was a TIMEOUT (a failure) — a success-gated check would have missed it.
+    """
+    return side is not None and budget_ms > 0 and side.latency_ms > budget_ms
+
+
+def collect_latency_breaches(results: "list[CaseResult]") -> list[LatencyBreach]:
+    """Return a triage record per case whose ``ours`` run breached its latency budget.
+
+    ``mcp_latency_ms`` / ratio are included for triage: they let a reader tell *our*
+    regression (ours slow, mcp normal) from external NetSuite/network drift (both slow).
+    """
+    breaches: list[LatencyBreach] = []
+    for r in results:
+        if not latency_breach(r.ours, r.case.max_latency_ms):
+            continue
+        mcp_ms = r.mcp.latency_ms if r.mcp is not None else None
+        ratio = round(r.ours.latency_ms / mcp_ms, 2) if mcp_ms else None
+        breaches.append(
+            LatencyBreach(
+                case_id=r.case.case_id,
+                ours_latency_ms=r.ours.latency_ms,
+                budget_ms=r.case.max_latency_ms,
+                mcp_latency_ms=mcp_ms,
+                ours_over_mcp_ratio=ratio,
+            )
+        )
+    return breaches
 
 
 async def _run_single_case(
@@ -680,6 +725,7 @@ def _print_results_table(results: list[CaseResult], skip_baseline: bool) -> None
 
     rows: list[list[str]] = []
     for r in results:
+        mark = " ⚠" if latency_breach(r.ours, r.case.max_latency_ms) else ""
         if skip_baseline:
             rows.append(
                 [
@@ -687,7 +733,7 @@ def _print_results_table(results: list[CaseResult], skip_baseline: bool) -> None
                     f"{r.ours.answer_acc:.2f}",
                     f"{r.ours.tool_acc:.2f}",
                     _format_cost(r.ours.cost_usd),
-                    _format_ms(r.ours.latency_ms),
+                    _format_ms(r.ours.latency_ms) + mark,
                     r.verdict,
                 ]
             )
@@ -700,7 +746,7 @@ def _print_results_table(results: list[CaseResult], skip_baseline: bool) -> None
                     f"{r.mcp.answer_acc:.2f}",
                     f"{r.delta_accuracy():+.2f}",
                     f"{_format_cost(r.ours.cost_usd)}/{_format_cost(r.mcp.cost_usd)}",
-                    f"{_format_ms(r.ours.latency_ms)}/{_format_ms(r.mcp.latency_ms)}",
+                    f"{_format_ms(r.ours.latency_ms)}{mark}/{_format_ms(r.mcp.latency_ms)}",
                     r.verdict,
                 ]
             )
@@ -735,6 +781,15 @@ def _print_summary(results: list[CaseResult], skip_baseline: bool) -> None:
         f"  Ours avg accuracy: {ours_acc:.2f}  |  avg cost: {_format_cost(ours_cost)}"
         f"  |  avg latency: {_format_ms(int(ours_latency))}"
     )
+
+    _breaches = collect_latency_breaches(results)
+    if _breaches:
+        # Advisory only — does NOT affect the exit code (latency is noisy; a true timeout
+        # already fails via the OURS FAILED verdict).
+        print(f"  Latency budget breaches (advisory): {len(_breaches)}/{total}")
+        for b in _breaches:
+            ratio = f", {b.ours_over_mcp_ratio}x mcp" if b.ours_over_mcp_ratio is not None else ""
+            print(f"    ⚠ {b.case_id}: {_format_ms(b.ours_latency_ms)} > {_format_ms(b.budget_ms)} budget{ratio}")
 
     if skip_baseline:
         errors = [r for r in results if not r.ours.success]

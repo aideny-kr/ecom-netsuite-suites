@@ -16,6 +16,19 @@ from tests.fixtures.golden_queries import load_golden_queries, validate_schema
 GOLDEN_QUERIES = load_golden_queries()
 
 
+def test_gq031_forbids_country_filter_not_display():
+    # gq-031 must forbid the BUILTIN.DF(sa.country) FILTER form (the 2026-06 timeout),
+    # but NOT the bare substring — that would also reject a legit display use
+    # (SELECT BUILTIN.DF(sa.country) AS country), contradicting "DF for display only"
+    # (grill round 2).
+    gq031 = next(q for q in GOLDEN_QUERIES if q["id"] == "gq-031")
+    nc = gq031["expected_sql_not_contains"]
+    assert "BUILTIN.DF(sa.country)" not in nc, "bare DF substring over-forbids display use"
+    assert any("BUILTIN.DF(sa.country)" in tok and ("IN" in tok or "=" in tok) for tok in nc), (
+        "the country FILTER form must still be forbidden"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Cycle 2+3 — Schema validation + Importance tier
 # ---------------------------------------------------------------------------
@@ -24,8 +37,8 @@ GOLDEN_QUERIES = load_golden_queries()
 class TestGoldenQuerySchema:
     """Validate the fixture file itself."""
 
-    def test_fixture_has_30_queries(self):
-        assert len(GOLDEN_QUERIES) == 30
+    def test_fixture_has_31_queries(self):
+        assert len(GOLDEN_QUERIES) == 31
 
     @pytest.mark.parametrize("spec", GOLDEN_QUERIES, ids=lambda s: s["id"])
     def test_schema_valid(self, spec):

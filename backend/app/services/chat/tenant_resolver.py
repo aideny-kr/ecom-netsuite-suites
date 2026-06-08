@@ -1,6 +1,8 @@
 import json
 import time
 import uuid
+from xml.sax.saxutils import escape as _xml_escape
+from xml.sax.saxutils import quoteattr as _xml_quoteattr
 
 import structlog
 from sqlalchemy import func, select
@@ -11,6 +13,26 @@ from app.models.tenant_learned_rule import TenantLearnedRule
 from app.services.chat.llm_adapter import BaseLLMAdapter
 
 logger = structlog.get_logger(__name__)
+
+# Entity types that are NOT safe to inject as authoritative WHERE-clause filters.
+# A match here is a list *value* (customlistvalue → "list_name.internal_id"), a
+# list *definition* (customlist — queryable as a FROM target, but not a WHERE
+# filter), or an operational reference (saved search / script / workflow). A list
+# value especially can't be filtered on without knowing which field references it
+# — injecting these as authoritative "use this script_id" filters caused confident-
+# wrong answers (e.g. "Laptop 13" resolved to customlist_fw_cpu_platform.14, a value
+# carried only by 12 spare-part SKUs). They are surfaced as advisory hints instead.
+_NON_QUERYABLE_ENTITY_TYPES = frozenset(
+    {"customlistvalue", "customlist", "savedsearch", "script", "scriptdeployment", "workflow"}
+)
+
+
+def _esc(value: object) -> str:
+    """XML-escape a tenant/LLM-controlled value before interpolating it into the
+    vernacular XML that is injected into the system prompt (prevents element
+    break-out / prompt injection via a rule description or extracted entity)."""
+    return _xml_escape(str(value))
+
 
 EXTRACTOR_SYSTEM_PROMPT = """\
 You are a fast named entity extractor for NetSuite business context.
@@ -85,6 +107,7 @@ class TenantEntityResolver:
             return ""
 
         resolved = []
+        advisory = []  # non-queryable matches (list values, scripts) — surfaced as caution, not filters
         for entity in extracted_entities:
             # High-speed pg_trgm lookup — search BOTH natural_name and script_id,
             # take the best match. This allows users to reference fields by either
@@ -141,15 +164,19 @@ class TenantEntityResolver:
                         flush=True,
                     )
                     continue
-                resolved.append(
-                    {
-                        "user_term": entity,
-                        "internal_script_id": match.script_id,
-                        "entity_type": match.entity_type,
-                        "metadata": match.description or "",
-                        "confidence_score": round(score, 2),
-                    }
-                )
+                entry = {
+                    "user_term": entity,
+                    "internal_script_id": match.script_id,
+                    "entity_type": match.entity_type,
+                    "metadata": match.description or "",
+                    "confidence_score": round(score, 2),
+                }
+                # A list value / non-column reference can't be a WHERE-clause filter on
+                # its own — route it to the advisory block instead of resolved_entities.
+                if match.entity_type in _NON_QUERYABLE_ENTITY_TYPES:
+                    advisory.append(entry)
+                else:
+                    resolved.append(entry)
             else:
                 logger.info(
                     "tenant_resolver.no_match",
@@ -169,7 +196,7 @@ class TenantEntityResolver:
         except Exception as e:
             logger.warning("tenant_resolver.learned_rules_extraction_failed", exc_info=e)
 
-        if not resolved and not learned_rules:
+        if not resolved and not advisory and not learned_rules:
             logger.info("tenant_resolver.no_resolved_entities_or_rules")
             return ""
 
@@ -177,8 +204,9 @@ class TenantEntityResolver:
         xml_parts = [
             "<tenant_vernacular>",
             "    <instruction_context>",
-            "        The following entities and rules have been mapped to their specific internal NetSuite constraints for this particular tenant. ",
-            "        Prefer these internal script IDs and rules when constructing your SuiteQL FROM and WHERE clauses.",
+            "        The following have been mapped to this tenant's internal NetSuite constraints. ",
+            "        Prefer the resolved entity script IDs and learned rules when constructing SuiteQL FROM and WHERE clauses. ",
+            "        Any ambiguous entries below are ADVISORY ONLY — verify the field and value before using; never filter on them blindly.",
             "    </instruction_context>",
         ]
 
@@ -186,13 +214,32 @@ class TenantEntityResolver:
             xml_parts.append("    <resolved_entities>")
             for r in resolved:
                 xml_parts.append("        <entity>")
-                xml_parts.append(f"            <user_term>{r['user_term']}</user_term>")
-                xml_parts.append(f"            <internal_script_id>{r['internal_script_id']}</internal_script_id>")
-                xml_parts.append(f"            <entity_type>{r['entity_type']}</entity_type>")
-                xml_parts.append(f"            <metadata>{r['metadata']}</metadata>")
+                xml_parts.append(f"            <user_term>{_esc(r['user_term'])}</user_term>")
+                xml_parts.append(
+                    f"            <internal_script_id>{_esc(r['internal_script_id'])}</internal_script_id>"
+                )
+                xml_parts.append(f"            <entity_type>{_esc(r['entity_type'])}</entity_type>")
+                xml_parts.append(f"            <metadata>{_esc(r['metadata'])}</metadata>")
                 xml_parts.append(f"            <confidence_score>{r['confidence_score']}</confidence_score>")
                 xml_parts.append("        </entity>")
             xml_parts.append("    </resolved_entities>")
+
+        if advisory:
+            xml_parts.append("    <ambiguous_entities>")
+            xml_parts.append(
+                "        <!-- ADVISORY ONLY. Each term below matched a list VALUE or a "
+                "non-column reference (script / saved-search / workflow), NOT a queryable column. "
+                "Do NOT filter on matched_value directly. Identify the item/transaction field whose "
+                "source list matches, confirm the value reflects the user's intent (it may tag only "
+                "parts/variants, not the product), and prefer the tenant's documented class/category rules. -->"
+            )
+            for a in advisory:
+                xml_parts.append("        <ambiguous_term>")
+                xml_parts.append(f"            <user_term>{_esc(a['user_term'])}</user_term>")
+                xml_parts.append(f"            <matched_value>{_esc(a['internal_script_id'])}</matched_value>")
+                xml_parts.append(f"            <entity_type>{_esc(a['entity_type'])}</entity_type>")
+                xml_parts.append("        </ambiguous_term>")
+            xml_parts.append("    </ambiguous_entities>")
 
         if learned_rules:
             xml_parts.append("    <learned_rules>")
@@ -200,8 +247,8 @@ class TenantEntityResolver:
                 "        <!-- Explicit business logic / schema rules learned for this tenant. FOLLOW THESE STRICTLY. -->"
             )
             for rule in learned_rules:
-                xml_parts.append(f'        <rule category="{rule.rule_category or "general"}">')
-                xml_parts.append(f"            {rule.rule_description}")
+                xml_parts.append(f"        <rule category={_xml_quoteattr(rule.rule_category or 'general')}>")
+                xml_parts.append(f"            {_esc(rule.rule_description)}")
                 xml_parts.append("        </rule>")
             xml_parts.append("    </learned_rules>")
 
@@ -211,8 +258,12 @@ class TenantEntityResolver:
         logger.info(
             "tenant_resolver.xml_output",
             resolved_count=len(resolved),
+            advisory_count=len(advisory),
             xml_preview=xml_output[:1000],
         )
         # Also print to stdout for docker log visibility
-        print(f"[TENANT_RESOLVER] Resolved {len(resolved)} entities. XML:\n{xml_output[:1500]}", flush=True)
+        print(
+            f"[TENANT_RESOLVER] Resolved {len(resolved)} entities, {len(advisory)} advisory. XML:\n{xml_output[:1500]}",
+            flush=True,
+        )
         return xml_output

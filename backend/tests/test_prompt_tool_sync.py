@@ -132,6 +132,7 @@ def _all_known_tool_names_for_tenant_with_every_connector() -> set[str]:
         "bigquery_schema",
         "bigquery_cost_estimate",
         "pivot_query_result",
+        "cross_source_query",
         "tenant_save_learned_rule",
         "pricing_config_read",
         "pricing_convert",
