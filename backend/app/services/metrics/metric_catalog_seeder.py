@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import set_tenant_context
 from app.models.metric_definition import SYSTEM_TENANT_ID, MetricDefinition
 from app.services.chat.domain_knowledge import embed_domain_texts
+from app.services.metrics._embedding import embed_text as _embed_text
 from app.services.metrics.system_tenant import ensure_system_tenant
 
 # Small generic core + a couple DTC-flavored extras (spec §13 Q1). Expression leaves reference other keys.
@@ -87,10 +88,6 @@ _SYSTEM_METRICS: list[dict] = [
         "synonyms": ["cash balance"],
     },
 ]
-
-
-def _embed_text(m: dict) -> str:
-    return " | ".join([m["display_name"], m["definition"], *m.get("synonyms", [])])
 
 
 async def seed_system_metrics(db: AsyncSession) -> int:

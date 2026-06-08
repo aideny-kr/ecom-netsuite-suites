@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import set_tenant_context
 from app.models.metric_definition import SYSTEM_TENANT_ID, MetricDefinition
 from app.services.chat.domain_knowledge import embed_domain_query
+from app.services.metrics._embedding import embed_text as _embed_text
 from app.services.metrics.expression_evaluator import ExpressionError, extract_dependencies
 from app.services.metrics.system_tenant import ensure_system_tenant
 
@@ -458,12 +459,6 @@ def _validate_blessed_query_for_activation(source_kind: str, blessed_spec: dict 
             netsuite_suiteql.validate_query(query, allowed_tables)
         except ValueError as ex:
             raise AuthoringError(f"cannot activate: blessed query failed read-only/allowlist validation: {ex}") from ex
-
-
-def _embed_text(payload: dict) -> str:
-    parts = [payload.get("display_name", ""), payload.get("definition", "")]
-    parts.extend(payload.get("synonyms") or [])
-    return " | ".join(p for p in parts if p)
 
 
 async def create_metric(db: AsyncSession, *, tenant_id: uuid.UUID, payload: dict) -> MetricDefinition:
