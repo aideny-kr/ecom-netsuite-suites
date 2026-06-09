@@ -3,7 +3,7 @@
 Produces Excel workbooks with:
 - Summary sheet: run metadata + match/exception/unmatched counts
 - All Results sheet: full detail table
-- Exceptions sheet: only unmatched/low-confidence items
+- Exceptions sheet: only needs_review items (bucket-authoritative)
 """
 
 from __future__ import annotations
@@ -54,11 +54,12 @@ class EvidencePackGenerator:
         self._write_results(wb, results, "All Results")
 
         # --- Exceptions sheet ---
+        # Categorize on the authoritative four-bucket value, NOT advisory confidence.
+        # needs_review already covers unmatched + material-variance auto_matched rows.
         exceptions = [
             r
             for r in results
-            if r.get("match_type") == "unmatched"
-            or (r.get("confidence") is not None and Decimal(str(r["confidence"])) < Decimal("0.95"))
+            if r.get("bucket") == "needs_review"
         ]
         self._write_results(wb, exceptions, "Exceptions")
 
@@ -80,21 +81,10 @@ class EvidencePackGenerator:
         ws = wb.active
         ws.title = "Summary"
 
-        matched = len(
-            [
-                r
-                for r in results
-                if r.get("match_type") in ("deterministic", "fuzzy")
-                and Decimal(str(r.get("confidence", 0))) >= Decimal("0.95")
-            ]
-        )
+        # Count by authoritative bucket, NOT advisory confidence thresholds.
+        matched = len([r for r in results if r.get("bucket") == "matches"])
         suggested = len(
-            [
-                r
-                for r in results
-                if r.get("match_type") in ("deterministic", "fuzzy")
-                and Decimal("0.75") <= Decimal(str(r.get("confidence", 0))) < Decimal("0.95")
-            ]
+            [r for r in results if r.get("bucket") in ("auto_classifications", "rules")]
         )
         unmatched = len([r for r in results if r.get("match_type") == "unmatched"])
         total_variance = sum(Decimal(str(r.get("variance_amount", 0))) for r in results)
@@ -176,13 +166,12 @@ class EvidencePackGenerator:
                 ", ".join(evidence.get("deposit_ids", [])),
             ]
 
-            # Row fill based on match type
+            # Row fill based on authoritative bucket, NOT advisory confidence.
             match_type = result.get("match_type", "")
+            bucket = result.get("bucket", "")
             if match_type == "unmatched":
                 fill = _UNMATCHED_FILL
-            elif match_type in ("deterministic", "fuzzy") and Decimal(str(result.get("confidence", 0))) >= Decimal(
-                "0.95"
-            ):
+            elif bucket == "matches":
                 fill = _MATCHED_FILL
             else:
                 fill = _EXCEPTION_FILL

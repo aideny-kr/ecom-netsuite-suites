@@ -720,6 +720,7 @@ async def download_evidence(
             "match_type": r.match_type,
             "confidence": r.confidence,
             "status": r.status,
+            "bucket": r.bucket,
             "stripe_amount": r.stripe_amount,
             "netsuite_amount": r.netsuite_amount,
             "variance_amount": r.variance_amount,

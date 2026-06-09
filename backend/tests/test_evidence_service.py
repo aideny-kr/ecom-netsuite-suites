@@ -13,13 +13,20 @@ from app.services.reconciliation.evidence_service import EvidencePackGenerator
 
 @pytest.fixture
 def sample_results() -> list[dict]:
-    """Sample reconciliation results for evidence generation."""
+    """Sample reconciliation results for evidence generation.
+
+    Fixtures carry bucket + status consistent with the four-bucket taxonomy:
+      - deterministic clean match  → bucket="matches"
+      - fuzzy timing gap           → bucket="rules"   (fuzzy/rule-based)
+      - unmatched                  → bucket="needs_review"
+    """
     return [
         {
             "id": str(uuid.uuid4()),
             "match_type": "deterministic",
             "confidence": Decimal("1.0"),
             "status": "auto_matched",
+            "bucket": "matches",
             "stripe_amount": Decimal("1455.00"),
             "netsuite_amount": Decimal("1455.00"),
             "variance_amount": Decimal("0.00"),
@@ -37,6 +44,7 @@ def sample_results() -> list[dict]:
             "match_type": "fuzzy",
             "confidence": Decimal("0.85"),
             "status": "suggested",
+            "bucket": "rules",
             "stripe_amount": Decimal("3104.00"),
             "netsuite_amount": Decimal("3104.00"),
             "variance_amount": Decimal("0.00"),
@@ -54,6 +62,7 @@ def sample_results() -> list[dict]:
             "match_type": "unmatched",
             "confidence": Decimal("0.0"),
             "status": "pending",
+            "bucket": "needs_review",
             "stripe_amount": Decimal("863.30"),
             "netsuite_amount": None,
             "variance_amount": Decimal("863.30"),
@@ -105,7 +114,7 @@ class TestEvidencePackGenerator:
         assert "Exception" in text or "exception" in text or "Unmatched" in text
 
     def test_exceptions_sheet_exists(self, sample_results):
-        """Should have an Exceptions sheet with unmatched/low-confidence items."""
+        """Should have an Exceptions sheet with needs_review items."""
         generator = EvidencePackGenerator()
         excel_bytes = generator.generate_excel(
             results=sample_results,
@@ -130,3 +139,249 @@ class TestEvidencePackGenerator:
         assert isinstance(excel_bytes, io.BytesIO)
         wb = load_workbook(excel_bytes)
         assert "Summary" in wb.sheetnames
+
+    # ---------------------------------------------------------------------------
+    # Bucket-based categorization tests (the core regression suite)
+    # ---------------------------------------------------------------------------
+
+    def test_summary_counts_by_bucket(self, sample_results):
+        """Summary auto-matched count is driven by bucket='matches', not confidence."""
+        generator = EvidencePackGenerator()
+        excel_bytes = generator.generate_excel(
+            results=sample_results,
+            run_id="test-run-counts",
+            date_from=date(2026, 3, 1),
+            date_to=date(2026, 3, 31),
+        )
+
+        wb = load_workbook(excel_bytes)
+        summary_ws = wb["Summary"]
+
+        # Collect label→value pairs from the summary sheet (col A = label, col B = value)
+        summary = {}
+        for row in summary_ws.iter_rows(min_col=1, max_col=2):
+            label_cell, value_cell = row
+            if label_cell.value:
+                summary[str(label_cell.value)] = value_cell.value
+
+        # sample_results has 1 matches, 1 rules, 1 needs_review (unmatched)
+        assert summary.get("Auto-Matched") == "1", (
+            "Auto-Matched should count bucket='matches' rows only (got: %r)" % summary
+        )
+        assert summary.get("Suggested (Review Required)") == "1", (
+            "Suggested should count bucket in (auto_classifications, rules) (got: %r)" % summary
+        )
+        assert summary.get("Unmatched") == "1", (
+            "Unmatched should still count match_type='unmatched' rows (got: %r)" % summary
+        )
+
+    def test_exceptions_sheet_contains_needs_review_rows(self, sample_results):
+        """Exceptions sheet must contain the needs_review (unmatched) row."""
+        generator = EvidencePackGenerator()
+        excel_bytes = generator.generate_excel(
+            results=sample_results,
+            run_id="test-run-exc-content",
+            date_from=date(2026, 3, 1),
+            date_to=date(2026, 3, 31),
+        )
+
+        wb = load_workbook(excel_bytes)
+        exc_ws = wb["Exceptions"]
+
+        # Row 1 is headers; data rows start at 2.
+        data_rows = list(exc_ws.iter_rows(min_row=2, values_only=True))
+        non_empty = [r for r in data_rows if any(v is not None for v in r)]
+
+        # Only the unmatched/needs_review row should appear.
+        assert len(non_empty) == 1, (
+            "Exceptions sheet should contain exactly 1 needs_review row (got %d)" % len(non_empty)
+        )
+        # First column is match_type; should be "unmatched"
+        assert non_empty[0][0] == "unmatched"
+
+    def test_exceptions_sheet_excludes_matches_bucket(self, sample_results):
+        """bucket='matches' rows must NOT appear in Exceptions regardless of confidence."""
+        # Find the deterministic/matches row payout id
+        matches_row = next(r for r in sample_results if r["bucket"] == "matches")
+        payout_id = matches_row["evidence"]["payout_source_id"]
+
+        generator = EvidencePackGenerator()
+        excel_bytes = generator.generate_excel(
+            results=sample_results,
+            run_id="test-run-exc-excl",
+            date_from=date(2026, 3, 1),
+            date_to=date(2026, 3, 31),
+        )
+
+        wb = load_workbook(excel_bytes)
+        exc_ws = wb["Exceptions"]
+
+        # Gather all payout IDs in the exceptions sheet (col 11 = Payout ID)
+        payout_ids_in_exc = [
+            row[10]  # 0-indexed col 10 = 11th column = Payout ID
+            for row in exc_ws.iter_rows(min_row=2, values_only=True)
+            if row[10] is not None
+        ]
+        assert payout_id not in payout_ids_in_exc, (
+            "bucket='matches' row should not appear in Exceptions sheet"
+        )
+
+    # ---------------------------------------------------------------------------
+    # Regression test: low-confidence match stays in auto-matched, not exceptions
+    # ---------------------------------------------------------------------------
+
+    def test_low_confidence_matches_bucket_not_exception(self):
+        """A row with bucket='matches' and low advisory confidence (0.60) must be
+        counted as Auto-Matched and must NOT appear in the Exceptions sheet.
+
+        This is the core regression: the old code keyed on confidence >= 0.95
+        and would have mis-filed this row into Exceptions.
+        """
+        low_conf_match = {
+            "id": str(uuid.uuid4()),
+            "match_type": "deterministic",
+            "confidence": Decimal("0.6000"),  # low advisory composite (date-gap)
+            "status": "auto_matched",
+            "bucket": "matches",
+            "stripe_amount": Decimal("2500.00"),
+            "netsuite_amount": Decimal("2500.00"),
+            "variance_amount": Decimal("0.00"),
+            "variance_type": None,
+            "variance_explanation": None,
+            "currency": "USD",
+            "match_rule": "exact_payout_id",
+            "evidence": {
+                "payout_source_id": "po_lowconf",
+                "deposit_ids": ["99001"],
+            },
+        }
+        results = [low_conf_match]
+
+        generator = EvidencePackGenerator()
+        excel_bytes = generator.generate_excel(
+            results=results,
+            run_id="test-run-lowconf",
+            date_from=date(2026, 3, 1),
+            date_to=date(2026, 3, 31),
+        )
+
+        wb = load_workbook(excel_bytes)
+
+        # (a) Counted in Auto-Matched
+        summary_ws = wb["Summary"]
+        summary = {}
+        for row in summary_ws.iter_rows(min_col=1, max_col=2):
+            label_cell, value_cell = row
+            if label_cell.value:
+                summary[str(label_cell.value)] = value_cell.value
+        assert summary.get("Auto-Matched") == "1", (
+            "Low-confidence bucket='matches' row must be counted as Auto-Matched; got %r" % summary
+        )
+
+        # (b) NOT present in Exceptions sheet
+        exc_ws = wb["Exceptions"]
+        data_rows = list(exc_ws.iter_rows(min_row=2, values_only=True))
+        non_empty = [r for r in data_rows if any(v is not None for v in r)]
+        assert len(non_empty) == 0, (
+            "Low-confidence bucket='matches' row must NOT appear in Exceptions sheet; got %d rows" % len(non_empty)
+        )
+
+        # (c) Row fill: green (_MATCHED_FILL) in All Results sheet
+        all_ws = wb["All Results"]
+        data_cell_fill = all_ws.cell(row=2, column=1).fill.fgColor.rgb
+        # _MATCHED_FILL is start_color="d4edda"
+        assert data_cell_fill.upper().endswith("D4EDDA"), (
+            "Low-confidence bucket='matches' row should have green (matched) fill; got %r" % data_cell_fill
+        )
+
+    def test_high_confidence_needs_review_is_exception(self):
+        """A row with bucket='needs_review' and HIGH advisory confidence (0.99) —
+        i.e. a confident-but-material-variance auto_matched row — must appear in
+        Exceptions and must NOT be counted as Auto-Matched.
+
+        Proves that bucket, not confidence/status, drives categorization.
+        """
+        high_conf_needs_review = {
+            "id": str(uuid.uuid4()),
+            "match_type": "deterministic",
+            "confidence": Decimal("0.9900"),  # high confidence, but material variance
+            "status": "auto_matched",
+            "bucket": "needs_review",
+            "stripe_amount": Decimal("5000.00"),
+            "netsuite_amount": Decimal("4900.00"),
+            "variance_amount": Decimal("100.00"),
+            "variance_type": "amount",
+            "variance_explanation": "Material variance: $100",
+            "currency": "USD",
+            "match_rule": "amount_approx",
+            "evidence": {
+                "payout_source_id": "po_highconf_material",
+                "deposit_ids": ["99002"],
+            },
+        }
+        results = [high_conf_needs_review]
+
+        generator = EvidencePackGenerator()
+        excel_bytes = generator.generate_excel(
+            results=results,
+            run_id="test-run-highconf-needs-review",
+            date_from=date(2026, 3, 1),
+            date_to=date(2026, 3, 31),
+        )
+
+        wb = load_workbook(excel_bytes)
+
+        # Auto-Matched count must be 0 (not counted despite high confidence)
+        summary_ws = wb["Summary"]
+        summary = {}
+        for row in summary_ws.iter_rows(min_col=1, max_col=2):
+            label_cell, value_cell = row
+            if label_cell.value:
+                summary[str(label_cell.value)] = value_cell.value
+        # When count=0, the summary sheet writes "" (falsy guard in _write_summary),
+        # so the cell value is None/empty — both None and "0" mean zero here.
+        auto_matched_val = summary.get("Auto-Matched")
+        assert auto_matched_val in (None, "", "0", 0), (
+            "bucket='needs_review' row must NOT be counted as Auto-Matched; got %r" % summary
+        )
+
+        # Must appear in Exceptions sheet
+        exc_ws = wb["Exceptions"]
+        data_rows = list(exc_ws.iter_rows(min_row=2, values_only=True))
+        non_empty = [r for r in data_rows if any(v is not None for v in r)]
+        assert len(non_empty) == 1, (
+            "bucket='needs_review' row must appear in Exceptions sheet; got %d rows" % len(non_empty)
+        )
+
+        # Row fill in All Results: yellow (_EXCEPTION_FILL = "fff3cd")
+        all_ws = wb["All Results"]
+        data_cell_fill = all_ws.cell(row=2, column=1).fill.fgColor.rgb
+        assert data_cell_fill.upper().endswith("FFF3CD"), (
+            "bucket='needs_review' row should have yellow (exception) fill; got %r" % data_cell_fill
+        )
+
+    def test_confidence_column_still_present(self, sample_results):
+        """The Confidence data column must still be present (advisory display only)."""
+        generator = EvidencePackGenerator()
+        excel_bytes = generator.generate_excel(
+            results=sample_results,
+            run_id="test-run-conf-col",
+            date_from=date(2026, 3, 1),
+            date_to=date(2026, 3, 31),
+        )
+
+        wb = load_workbook(excel_bytes)
+        all_ws = wb["All Results"]
+
+        # Check headers row for "Confidence"
+        header_values = [cell.value for cell in all_ws[1]]
+        assert "Confidence" in header_values, (
+            "Confidence column must remain in All Results sheet headers"
+        )
+
+        # And the actual value for the first row should be the float confidence
+        conf_col_idx = header_values.index("Confidence") + 1  # 1-based
+        conf_value = all_ws.cell(row=2, column=conf_col_idx).value
+        assert conf_value is not None and isinstance(conf_value, (int, float)), (
+            "Confidence cell should contain a numeric advisory value; got %r" % conf_value
+        )
