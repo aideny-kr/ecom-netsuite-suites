@@ -9,7 +9,13 @@ from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from alembic import op
 
 revision = "080_metric_definitions"
-down_revision = "079_order_ref_pattern"
+# Chained AFTER 080_learned_rules_rls (re-parented from 079) so the metric line and main's
+# learned-rules-RLS line form ONE linear history instead of two parallel heads off 079.
+# This replaces the former 083 merge migration: a merge head makes `alembic downgrade -1`
+# (the deploy migration-safety reversibility test) fail with "Ambiguous walk". The two
+# lineages touch disjoint tables (metric_definitions vs tenant_learned_rules), so ordering
+# one after the other is behaviourally identical to merging them.
+down_revision = "080_learned_rules_rls"
 branch_labels = None
 depends_on = None
 
