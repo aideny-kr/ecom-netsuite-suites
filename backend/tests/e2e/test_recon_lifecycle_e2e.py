@@ -523,9 +523,7 @@ async def test_engine_persists_calibrated_confidence_and_signals(db, tenant_a):
 
     run_uuid = uuid.UUID(summary.run_id)
     rows = (
-        (await db.execute(select(ReconciliationResult).where(ReconciliationResult.run_id == run_uuid)))
-        .scalars()
-        .all()
+        (await db.execute(select(ReconciliationResult).where(ReconciliationResult.run_id == run_uuid))).scalars().all()
     )
     assert len(rows) == 2
 

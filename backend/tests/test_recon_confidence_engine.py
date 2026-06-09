@@ -27,7 +27,6 @@ from app.services.reconciliation.confidence_engine import (
     temporal_score,
 )
 
-
 # ---------------------------------------------------------------------------
 # Module-level constants
 # ---------------------------------------------------------------------------
@@ -218,29 +217,37 @@ class TestComposite:
 class TestComputeSignals:
     def test_returns_confidence_signals_instance(self):
         sig = compute_signals(
-            Decimal("100.00"), Decimal("100.00"),
-            date(2024, 1, 1), date(2024, 1, 1),
+            Decimal("100.00"),
+            Decimal("100.00"),
+            date(2024, 1, 1),
+            date(2024, 1, 1),
         )
         assert isinstance(sig, ConfidenceSignals)
 
     def test_scorer_version_is_v1(self):
         sig = compute_signals(
-            Decimal("100.00"), Decimal("100.00"),
-            date(2024, 1, 1), date(2024, 1, 1),
+            Decimal("100.00"),
+            Decimal("100.00"),
+            date(2024, 1, 1),
+            date(2024, 1, 1),
         )
         assert sig.scorer_version == "v1"
 
     def test_weights_field(self):
         sig = compute_signals(
-            Decimal("100.00"), Decimal("100.00"),
-            date(2024, 1, 1), date(2024, 1, 1),
+            Decimal("100.00"),
+            Decimal("100.00"),
+            date(2024, 1, 1),
+            date(2024, 1, 1),
         )
         assert sig.weights == {"amount": Decimal("0.6"), "temporal": Decimal("0.4")}
 
     def test_all_fields_populated(self):
         sig = compute_signals(
-            Decimal("100.00"), Decimal("100.00"),
-            date(2024, 1, 1), date(2024, 1, 1),
+            Decimal("100.00"),
+            Decimal("100.00"),
+            date(2024, 1, 1),
+            date(2024, 1, 1),
         )
         assert sig.amount_score is not None
         assert sig.temporal_score is not None
@@ -250,22 +257,28 @@ class TestComputeSignals:
 
     def test_missing_date_yields_none_temporal(self):
         sig = compute_signals(
-            Decimal("100.00"), Decimal("100.00"),
-            None, None,
+            Decimal("100.00"),
+            Decimal("100.00"),
+            None,
+            None,
         )
         assert sig.temporal_score is None
 
     def test_missing_date_composite_equals_amount_score(self):
         sig = compute_signals(
-            Decimal("100.00"), Decimal("100.00"),
-            None, None,
+            Decimal("100.00"),
+            Decimal("100.00"),
+            None,
+            None,
         )
         assert sig.composite == sig.amount_score
 
     def test_exact_match_exact_date(self):
         sig = compute_signals(
-            Decimal("250.00"), Decimal("250.00"),
-            date(2024, 3, 10), date(2024, 3, 10),
+            Decimal("250.00"),
+            Decimal("250.00"),
+            date(2024, 3, 10),
+            date(2024, 3, 10),
         )
         assert sig.amount_score == Decimal("1.0000")
         assert sig.temporal_score == Decimal("1.0000")
@@ -273,8 +286,10 @@ class TestComputeSignals:
 
     def test_frozen_dataclass_immutable(self):
         sig = compute_signals(
-            Decimal("100.00"), Decimal("100.00"),
-            date(2024, 1, 1), date(2024, 1, 1),
+            Decimal("100.00"),
+            Decimal("100.00"),
+            date(2024, 1, 1),
+            date(2024, 1, 1),
         )
         with pytest.raises((AttributeError, TypeError)):
             sig.composite = Decimal("0.5")  # type: ignore[misc]
@@ -283,8 +298,10 @@ class TestComputeSignals:
         # frozen=True does NOT protect a mutable dict value — weights must be a
         # read-only mapping so persisted evidence can't be corrupted downstream.
         sig = compute_signals(
-            Decimal("100.00"), Decimal("100.00"),
-            date(2024, 1, 1), date(2024, 1, 1),
+            Decimal("100.00"),
+            Decimal("100.00"),
+            date(2024, 1, 1),
+            date(2024, 1, 1),
         )
         with pytest.raises(TypeError):
             sig.weights["amount"] = Decimal("0.99")  # type: ignore[index]
@@ -298,14 +315,18 @@ class TestComputeSignals:
 class TestSignalsToEvidence:
     def _make_signals_full(self) -> ConfidenceSignals:
         return compute_signals(
-            Decimal("100.00"), Decimal("100.00"),
-            date(2024, 1, 1), date(2024, 1, 5),
+            Decimal("100.00"),
+            Decimal("100.00"),
+            date(2024, 1, 1),
+            date(2024, 1, 5),
         )
 
     def _make_signals_no_dates(self) -> ConfidenceSignals:
         return compute_signals(
-            Decimal("100.00"), Decimal("100.00"),
-            None, None,
+            Decimal("100.00"),
+            Decimal("100.00"),
+            None,
+            None,
         )
 
     def test_json_serializable(self):

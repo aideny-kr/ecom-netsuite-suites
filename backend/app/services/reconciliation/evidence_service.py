@@ -56,11 +56,7 @@ class EvidencePackGenerator:
         # --- Exceptions sheet ---
         # Categorize on the authoritative four-bucket value, NOT advisory confidence.
         # needs_review already covers unmatched + material-variance auto_matched rows.
-        exceptions = [
-            r
-            for r in results
-            if r.get("bucket") == "needs_review"
-        ]
+        exceptions = [r for r in results if r.get("bucket") == "needs_review"]
         self._write_results(wb, exceptions, "Exceptions")
 
         buf = io.BytesIO()
@@ -85,9 +81,7 @@ class EvidencePackGenerator:
         # The buckets PARTITION the run: matches + suggested + needs_review == total_results.
         # "Unmatched" is a sub-detail of needs_review (Unmatched ⊆ Needs Review).
         matched = len([r for r in results if r.get("bucket") == "matches"])
-        suggested = len(
-            [r for r in results if r.get("bucket") in ("auto_classifications", "rules")]
-        )
+        suggested = len([r for r in results if r.get("bucket") in ("auto_classifications", "rules")])
         needs_review = len([r for r in results if r.get("bucket") == "needs_review"])
         unmatched = len([r for r in results if r.get("match_type") == "unmatched"])
         total_variance = sum(Decimal(str(r.get("variance_amount", 0))) for r in results)

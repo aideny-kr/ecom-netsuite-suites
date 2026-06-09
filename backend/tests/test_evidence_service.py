@@ -184,8 +184,7 @@ class TestEvidencePackGenerator:
         needs_review = int(summary["Needs Review (Exceptions)"])
         total = int(summary["Total Results"])
         assert matched + suggested + needs_review == total, (
-            "Summary buckets must partition the run (matched+suggested+needs_review==total); got %r"
-            % summary
+            "Summary buckets must partition the run (matched+suggested+needs_review==total); got %r" % summary
         )
 
     def test_exceptions_sheet_contains_needs_review_rows(self, sample_results):
@@ -206,8 +205,8 @@ class TestEvidencePackGenerator:
         non_empty = [r for r in data_rows if any(v is not None for v in r)]
 
         # Only the unmatched/needs_review row should appear.
-        assert len(non_empty) == 1, (
-            "Exceptions sheet should contain exactly 1 needs_review row (got %d)" % len(non_empty)
+        assert len(non_empty) == 1, "Exceptions sheet should contain exactly 1 needs_review row (got %d)" % len(
+            non_empty
         )
         # First column is match_type; should be "unmatched"
         assert non_empty[0][0] == "unmatched"
@@ -233,13 +232,9 @@ class TestEvidencePackGenerator:
         header_values = [cell.value for cell in exc_ws[1]]
         payout_idx = header_values.index("Payout ID")  # 0-based for values_only rows
         payout_ids_in_exc = [
-            row[payout_idx]
-            for row in exc_ws.iter_rows(min_row=2, values_only=True)
-            if row[payout_idx] is not None
+            row[payout_idx] for row in exc_ws.iter_rows(min_row=2, values_only=True) if row[payout_idx] is not None
         ]
-        assert payout_id not in payout_ids_in_exc, (
-            "bucket='matches' row should not appear in Exceptions sheet"
-        )
+        assert payout_id not in payout_ids_in_exc, "bucket='matches' row should not appear in Exceptions sheet"
 
     # ---------------------------------------------------------------------------
     # Regression test: low-confidence match stays in auto-matched, not exceptions
@@ -362,8 +357,8 @@ class TestEvidencePackGenerator:
         exc_ws = wb["Exceptions"]
         data_rows = list(exc_ws.iter_rows(min_row=2, values_only=True))
         non_empty = [r for r in data_rows if any(v is not None for v in r)]
-        assert len(non_empty) == 1, (
-            "bucket='needs_review' row must appear in Exceptions sheet; got %d rows" % len(non_empty)
+        assert len(non_empty) == 1, "bucket='needs_review' row must appear in Exceptions sheet; got %d rows" % len(
+            non_empty
         )
 
         # Row fill in All Results: yellow (_EXCEPTION_FILL = "fff3cd")
@@ -434,9 +429,7 @@ class TestEvidencePackGenerator:
         assert summary.get("Needs Review (Exceptions)") == "1", (
             "Material needs_review row must count in Needs Review; got %r" % summary
         )
-        assert summary.get("Unmatched") == "0", (
-            "Material needs_review row is a match, not unmatched; got %r" % summary
-        )
+        assert summary.get("Unmatched") == "0", "Material needs_review row is a match, not unmatched; got %r" % summary
         assert summary.get("Auto-Matched") == "1", summary
         assert summary.get("Suggested (Review Required)") == "0", summary
 
@@ -445,9 +438,7 @@ class TestEvidencePackGenerator:
         suggested = int(summary["Suggested (Review Required)"])
         needs_review = int(summary["Needs Review (Exceptions)"])
         total = int(summary["Total Results"])
-        assert matched + suggested + needs_review == total, (
-            "Buckets must partition the run; got %r" % summary
-        )
+        assert matched + suggested + needs_review == total, "Buckets must partition the run; got %r" % summary
 
     def test_confidence_column_still_present(self, sample_results):
         """The Confidence data column must still be present (advisory display only)."""
@@ -464,9 +455,7 @@ class TestEvidencePackGenerator:
 
         # Check headers row for "Confidence"
         header_values = [cell.value for cell in all_ws[1]]
-        assert "Confidence" in header_values, (
-            "Confidence column must remain in All Results sheet headers"
-        )
+        assert "Confidence" in header_values, "Confidence column must remain in All Results sheet headers"
 
         # And the actual value for the first row should be the float confidence
         conf_col_idx = header_values.index("Confidence") + 1  # 1-based

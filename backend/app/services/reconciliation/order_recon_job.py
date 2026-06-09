@@ -19,6 +19,7 @@ from app.schemas.order_reconciliation import (
     OrderMatchCandidate,
 )
 from app.schemas.reconciliation import ReconRunSummary
+from app.services.reconciliation.confidence_engine import compute_signals, signals_to_evidence
 from app.services.reconciliation.four_bucket_classifier import (
     BUCKET_AUTO_CLASSIFICATIONS,
     BUCKET_MATCHES,
@@ -26,7 +27,6 @@ from app.services.reconciliation.four_bucket_classifier import (
     BUCKET_RULES,
     classify,
 )
-from app.services.reconciliation.confidence_engine import compute_signals, signals_to_evidence
 from app.services.reconciliation.materiality import load_materiality
 from app.services.reconciliation.order_matching_engine import OrderMatchingEngine
 from app.services.reconciliation.order_ref import (
