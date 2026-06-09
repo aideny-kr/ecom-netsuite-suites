@@ -27,8 +27,11 @@ export function ReconExceptionCard({ result, onInvestigate }: ReconExceptionCard
           )}
         </div>
         {!isUnmatched && (
-          <span className="rounded-full bg-orange-500/10 px-2 py-0.5 text-[11px] font-medium text-orange-600">
-            {(Number(result.confidence) * 100).toFixed(0)}% match
+          <span
+            className="rounded-full bg-orange-500/10 px-2 py-0.5 text-[11px] font-medium text-orange-600"
+            title="Advisory match score (amount + timing agreement)."
+          >
+            {(Number(result.confidence) * 100).toFixed(0)}% confidence
           </span>
         )}
       </div>

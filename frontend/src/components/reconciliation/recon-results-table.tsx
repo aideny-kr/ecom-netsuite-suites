@@ -76,11 +76,10 @@ export function ReconResultsTable({ results, onInvestigate }: ReconResultsTableP
                 )}
               </td>
               <td className="px-4 py-3 text-center">
-                <span className={cn(
-                  "font-mono text-xs",
-                  Number(result.confidence) >= 0.95 ? "text-green-600" :
-                  Number(result.confidence) >= 0.75 ? "text-orange-600" : "text-red-600"
-                )}>
+                <span
+                  className="font-mono text-xs text-muted-foreground"
+                  title="Advisory match score (amount + timing agreement). The Status badge reflects the authoritative disposition."
+                >
                   {(Number(result.confidence) * 100).toFixed(0)}%
                 </span>
               </td>
