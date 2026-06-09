@@ -310,6 +310,9 @@ class OrderReconJob:
             confidence_signals = None
             persisted_confidence = candidate.confidence  # unmatched keeps engine value (0)
             if candidate.deposit is not None:
+                # candidate.charge.charge_date is the payout arrival/settlement date
+                # (set from payouts.arrival_date in _fetch_charges), so temporal_score
+                # measures arrival→deposit proximity (advisory).
                 signals = compute_signals(
                     charge_amount=candidate.charge.amount,
                     deposit_amount=candidate.deposit.amount,

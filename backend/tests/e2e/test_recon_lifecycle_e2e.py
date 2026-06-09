@@ -29,6 +29,9 @@ gitignored plan docs/superpowers/plans/2026-06-05-recon-e2e-phase2.md):
   I6 close = hard freeze on BOTH routes (REST + chat), no new audit on rejection
   I7 bucket-aware close (#112): lock approved + auto_matched-non-needs_review; leave
      ENGINE-PRODUCED material auto_matched+needs_review unlocked (results_left_for_review)
+  I8 R2 advisory confidence: calibrated score + signals persisted; status/bucket
+     decoupled bidirectionally — LOW composite does NOT demote deterministic match,
+     HIGH composite does NOT promote fuzzy match.
 """
 
 from __future__ import annotations
@@ -581,3 +584,95 @@ async def test_engine_persists_calibrated_confidence_and_signals(db, tenant_a):
         assert "charge_source_id" in ev, f"{label}: charge_source_id missing"
         assert "order_reference" in ev, f"{label}: order_reference missing"
         assert "charge_payout_line_id" in ev, f"{label}: charge_payout_line_id missing"
+
+
+# ---------------------------------------------------------------------------
+# I8 (converse) — HIGH R2 composite must NOT promote a fuzzy match to
+#   auto_matched / bucket='matches'. The advisory scorer is decoupled from
+#   the engine match-tier ladder, which alone drives status/bucket/close-lock.
+# ---------------------------------------------------------------------------
+
+
+async def test_high_composite_does_not_promote_fuzzy_status(db, tenant_a):
+    """I8 converse — a fuzzy match with a perfect R2 composite (1.0000) must
+    remain status='suggested' and bucket='rules', NOT be promoted to
+    status='auto_matched' / bucket='matches'.
+
+    Seed strategy (forces fuzzy tier, not deterministic):
+      - Charge: description carries order_ref R400000001 → charge.order_reference = R400000001
+      - Deposit: related_payout_id = 'NOMATCH' → deposit.order_reference = 'NOMATCH'
+      The deterministic tier indexes deposits by order_reference and only matches when
+      charge.order_reference == deposit.order_reference — so this pair survives to fuzzy.
+
+      Same amount + same-day dates → fuzzy scores 1.0 (capped to _MAX_FUZZY_CONFIDENCE=0.89).
+      R2 composite: amount_score=1.0, temporal_score=1.0 (0-day gap) → composite=1.0000.
+
+    Asserts:
+      - match_type == 'fuzzy'       (engine tier, not deterministic)
+      - status == 'suggested'       (engine confidence 0.89 → suggested; NOT promoted)
+      - bucket == 'rules'           (fuzzy + no variance → rules; NOT promoted to matches)
+      - confidence == 1.0000        (R2 composite reflects the advisory score)
+    """
+    await _set_materiality(db, tenant_a.id, abs_=_DEFAULT_MATERIALITY_ABS, pct=_DEFAULT_MATERIALITY_PCT)
+
+    # Charge: has order_reference R400000001 (from description via extract_order_ref).
+    # Deposit: related_payout_id='NOMATCH' → no deterministic match, falls through to fuzzy.
+    # Same amount, same arrival/txn date → fuzzy fires (amount proximity = 1.0, date = 1.0).
+    await create_test_payout_line(
+        db,
+        tenant_a.id,
+        source_id="ch_fuzz",
+        amount=Decimal("750.00"),
+        description="Framework Marketplace Order ID: R400000001-XU9EPZPD",
+        arrival_date=date(2026, 5, 20),
+    )
+    await create_test_netsuite_posting(
+        db,
+        tenant_a.id,
+        netsuite_internal_id="ns-fuzz",
+        record_type="custdep",
+        amount=Decimal("750.00"),
+        transaction_date=date(2026, 5, 20),  # same day → temporal proximity = 1.0
+        related_payout_id="NOMATCH",  # different from R400000001 → deterministic skips
+    )
+
+    summary = await OrderReconJob(db, str(tenant_a.id)).run(RUN_FROM, RUN_TO)
+    assert summary.status == "completed"
+
+    run_uuid = uuid.UUID(summary.run_id)
+    rows = (
+        (await db.execute(select(ReconciliationResult).where(ReconciliationResult.run_id == run_uuid))).scalars().all()
+    )
+    assert len(rows) == 1, f"Expected exactly 1 result row; got {len(rows)}"
+
+    row = rows[0]
+
+    # Engine tier: must be fuzzy, not deterministic.
+    assert row.match_type == "fuzzy", (
+        f"Expected match_type='fuzzy' (order_refs differ so deterministic skips); got {row.match_type!r}"
+    )
+
+    # Status: 'suggested' — the engine confidence for fuzzy is ≤ 0.89, which maps to 'suggested'
+    # in the status ladder (0.75 ≤ conf < 0.95 → 'suggested'). A high R2 composite must NOT
+    # promote this to 'auto_matched'.
+    assert row.status == "suggested", (
+        f"HIGH R2 composite must NOT promote fuzzy to auto_matched; got status={row.status!r}"
+    )
+
+    # Bucket: fuzzy + no variance → 'rules'. Must NOT be promoted to 'matches'.
+    assert row.bucket == "rules", (
+        f"HIGH R2 composite must NOT promote fuzzy bucket to 'matches'; got bucket={row.bucket!r}"
+    )
+
+    # R2 advisory composite: amount=1.0, temporal=1.0 (same day) → 1.0000.
+    # (W_AMOUNT * 1.0 + W_TEMPORAL * 1.0 = 1.0000)
+    assert row.confidence == Decimal("1.0000"), (
+        f"Perfect amount + same-day temporal → R2 composite should be 1.0000; got {row.confidence}"
+    )
+
+    # confidence_signals sub-dict must be present and reflect the perfect scores.
+    sigs = row.evidence.get("confidence_signals")
+    assert sigs is not None, "confidence_signals missing from evidence"
+    assert sigs["amount_score"] == "1.0000", f"amount_score mismatch: {sigs['amount_score']!r}"
+    assert sigs["temporal_score"] == "1.0000", f"temporal_score mismatch: {sigs['temporal_score']!r}"
+    assert sigs["composite"] == "1.0000", f"composite mismatch: {sigs['composite']!r}"

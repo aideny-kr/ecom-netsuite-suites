@@ -32,6 +32,10 @@ WINDOW_DAYS = 14
 # 4-dp quantum — matches the DB column Numeric(5,4)
 _Q = Decimal("0.0001")
 
+# Immutable weights mapping — defined once at module level so it is not
+# re-allocated on every compute_signals call (Fix 5: hoist from per-call).
+_WEIGHTS: Mapping[str, Decimal] = MappingProxyType({"amount": W_AMOUNT, "temporal": W_TEMPORAL})
+
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -79,6 +83,13 @@ def temporal_score(
     deposit_date: date | None,
 ) -> Decimal | None:
     """Score based on gap between *charge_date* and *deposit_date*.
+
+    *charge_date* is the Stripe-side date for the matched charge — the order
+    recon job passes the payout arrival/settlement date (``payouts.arrival_date``
+    via ``_fetch_charges``), not the raw charge creation date.  The signal
+    therefore measures the gap between that settlement date and the NetSuite
+    deposit date — an advisory proximity signal whose informativeness is to be
+    assessed at calibration (no threshold labels yet).
 
     Returns a ``Decimal`` in ``[0, 1]`` quantized to 4 dp, or ``None`` when
     either date is unavailable (signal unavailable).
@@ -150,7 +161,10 @@ def compute_signals(
     Args:
         charge_amount:  Stripe charge gross amount (``Decimal``).
         deposit_amount: NetSuite deposit/payment amount (``Decimal``).
-        charge_date:    Date of the Stripe charge, or ``None``.
+        charge_date:    Stripe-side date for the matched charge.  The order recon
+                        job passes the payout arrival/settlement date here (per
+                        ``_fetch_charges``), so ``temporal_score`` measures
+                        arrival→deposit proximity (advisory).
         deposit_date:   Date of the NS payment/deposit, or ``None``.
 
     Returns:
@@ -160,12 +174,13 @@ def compute_signals(
     t_score = temporal_score(charge_date, deposit_date)
     c_score = composite(a_score, t_score)
 
+    # _WEIGHTS is the module-level immutable MappingProxyType — shared, not re-created.
     return ConfidenceSignals(
         amount_score=a_score,
         temporal_score=t_score,
         composite=c_score,
         scorer_version=SCORER_VERSION,
-        weights=MappingProxyType({"amount": W_AMOUNT, "temporal": W_TEMPORAL}),
+        weights=_WEIGHTS,
     )
 
 
