@@ -540,7 +540,16 @@ async def test_engine_persists_calibrated_confidence_and_signals(db, tenant_a):
     assert far.bucket == "matches"
 
     # ---- R2 advisory composite persisted (calibrated by amount + temporal signals) ----
+    # The Decimal(...) literals below are deliberate regression tripwires — pinned, NOT
+    # computed from the engine constants. The amount-only fallback (temporal_score is None)
+    # is NOT reachable through OrderReconJob (deposits are fetched with a non-null
+    # transaction_date filter), so it's covered only by the confidence_engine unit tests
+    # (Task A), never here.
+    # gap 0 → temporal 1.0 → composite 1.0000
     assert same_day.confidence == Decimal("1.0000"), f"same-day confidence: {same_day.confidence}"
+    # 0.6*amount_score(1.0) + 0.4*temporal_score(gap 14 == WINDOW_DAYS → 0.0) = 0.6000
+    # (W_AMOUNT/W_TEMPORAL/WINDOW_DAYS live in confidence_engine.py — if those change,
+    # update this literal deliberately)
     assert far.confidence == Decimal("0.6000"), f"far confidence: {far.confidence}"
 
     # ---- confidence_signals sub-dict present with correct keys + values ----

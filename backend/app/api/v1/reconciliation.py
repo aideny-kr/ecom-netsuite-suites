@@ -434,6 +434,10 @@ async def get_run_results(
             ReconciliationResult.tenant_id == user.tenant_id,
             ReconciliationResult.run_id == _parse_uuid(run_id),
         )
+        # R2: `confidence` is now the advisory amount+temporal composite (matched rows
+        # ~0.6–1.0), NOT the engine match-tier ladder. asc() intentionally surfaces
+        # lower-advisory-confidence first (e.g. temporally-implausible "exact" matches).
+        # Do NOT re-couple this to ladder values.
         .order_by(ReconciliationResult.confidence.asc())
         .limit(limit)
         .offset(offset)
