@@ -26,6 +26,7 @@ from app.services.reconciliation.four_bucket_classifier import (
     BUCKET_RULES,
     classify,
 )
+from app.services.reconciliation.confidence_engine import compute_signals, signals_to_evidence
 from app.services.reconciliation.materiality import load_materiality
 from app.services.reconciliation.order_matching_engine import OrderMatchingEngine
 from app.services.reconciliation.order_ref import (
@@ -298,6 +299,35 @@ class OrderReconJob:
             )
             buckets.append(bucket)
 
+            # R2 advisory confidence — intentionally decoupled from status/close-lock.
+            # ``status`` (and the auto-lock-on-close gate) continues to read the engine
+            # match-tier ladder value (deterministic 1.0/0.95/0.90, fuzzy ≤0.89,
+            # unmatched 0) held in ``candidate.confidence`` — we never mutate it.
+            # The persisted ``confidence`` column instead carries the R2 amount+temporal
+            # composite score, so recalibrating the scorer cannot shift auto-lock decisions.
+            # Unmatched candidates (no deposit) keep the engine value (0); matched
+            # candidates get the R2 composite.
+            confidence_signals = None
+            persisted_confidence = candidate.confidence  # unmatched keeps engine value (0)
+            if candidate.deposit is not None:
+                signals = compute_signals(
+                    charge_amount=candidate.charge.amount,
+                    deposit_amount=candidate.deposit.amount,
+                    charge_date=candidate.charge.charge_date,
+                    deposit_date=candidate.deposit.transaction_date,
+                )
+                persisted_confidence = signals.composite
+                confidence_signals = signals_to_evidence(signals)
+
+            # Build evidence dict; attach R2 sub-scores when available.
+            evidence = {
+                "charge_source_id": candidate.charge.source_id,
+                "order_reference": candidate.charge.order_reference,
+                "charge_payout_line_id": candidate.charge.payout_line_id,
+            }
+            if confidence_signals is not None:
+                evidence["confidence_signals"] = confidence_signals
+
             result = ReconciliationResult(
                 id=uuid.uuid4(),
                 tenant_id=self.tenant_id,
@@ -305,7 +335,7 @@ class OrderReconJob:
                 payout_id=None,  # Always NULL for order-level
                 deposit_id=deposit_id,
                 match_type=candidate.match_type,
-                confidence=candidate.confidence,
+                confidence=persisted_confidence,
                 status=status,
                 bucket=bucket,
                 stripe_amount=candidate.charge.amount,
@@ -315,11 +345,7 @@ class OrderReconJob:
                 variance_explanation=candidate.variance_explanation,
                 currency=candidate.charge.currency,
                 match_rule=candidate.match_rule,
-                evidence={
-                    "charge_source_id": candidate.charge.source_id,
-                    "order_reference": candidate.charge.order_reference,
-                    "charge_payout_line_id": candidate.charge.payout_line_id,
-                },
+                evidence=evidence,
             )
             self.db.add(result)
 

@@ -85,15 +85,21 @@ async def _seed_match_pair(
     source_id: str,
     charge_amount: Decimal,
     deposit_amount: Decimal,
+    arrival: date = ARRIVAL,
+    txn: date = TXN,
 ) -> None:
-    """Seed a charge (PayoutLine) + a matching NetSuite deposit sharing ``order_ref``."""
+    """Seed a charge (PayoutLine) + a matching NetSuite deposit sharing ``order_ref``.
+
+    ``arrival`` / ``txn`` default to the module-level ARRIVAL / TXN constants so all
+    existing callers are unaffected; I8 passes explicit dates to drive the temporal signal.
+    """
     await create_test_payout_line(
         db,
         tenant_id,
         source_id=source_id,
         amount=charge_amount,
         description=f"Framework Marketplace Order ID: {order_ref}-XU9EPZPD",
-        arrival_date=ARRIVAL,
+        arrival_date=arrival,
     )
     await create_test_netsuite_posting(
         db,
@@ -101,7 +107,7 @@ async def _seed_match_pair(
         netsuite_internal_id=f"ns-{source_id}",
         record_type="custdep",
         amount=deposit_amount,
-        transaction_date=TXN,
+        transaction_date=txn,
         related_payout_id=order_ref,
     )
 
@@ -465,3 +471,106 @@ async def test_approve_rejected_after_close_on_both_routes_no_new_audit(db, admi
     # Neither rejected attempt wrote an audit row, and the line never flipped.
     assert await _approve_audit_count(db, rid) == 0
     assert await _status_of(db, material.id) == "auto_matched"
+
+
+# ---------------------------------------------------------------------------
+# I8 — R2 advisory confidence: calibrated score + signals persisted; status/bucket
+#       decoupled (both pairs are auto_matched+matches despite different confidence)
+# ---------------------------------------------------------------------------
+
+
+async def test_engine_persists_calibrated_confidence_and_signals(db, tenant_a):
+    """I8 — The R2 scorer wires into the write-path with decoupled status/bucket.
+
+    Two exact-amount pairs differ ONLY in date gap (0 days vs 14 days). Both are
+    deterministic matches (conf ladder 1.0/0.95) so status=auto_matched, bucket=matches
+    for both — the engine match-tier value still drives status/close-lock as before.
+
+    The persisted ``confidence`` column now carries the R2 advisory composite score:
+      - Same-day  (gap 0 ):  amount_score=1.0, temporal_score=1.0 → composite=1.0
+      - Far pair  (gap 14):  amount_score=1.0, temporal_score=0.0 → composite=0.6
+
+    This proves the two-value decoupling: status/bucket identical; confidence diverges.
+    The ``evidence["confidence_signals"]`` sub-dict makes the signals observable/auditable.
+    """
+    await _set_materiality(db, tenant_a.id, abs_=_DEFAULT_MATERIALITY_ABS, pct=_DEFAULT_MATERIALITY_PCT)
+
+    # Same-day pair: charge arrival == NS transaction date  (gap = 0)
+    await _seed_match_pair(
+        db,
+        tenant_a.id,
+        order_ref="R300000001",
+        source_id="ch_s",
+        charge_amount=Decimal("100.00"),
+        deposit_amount=Decimal("100.00"),
+        arrival=date(2026, 5, 16),
+        txn=date(2026, 5, 16),
+    )
+    # Far pair: 14-day gap between arrival and NS transaction date
+    await _seed_match_pair(
+        db,
+        tenant_a.id,
+        order_ref="R300000002",
+        source_id="ch_f",
+        charge_amount=Decimal("100.00"),
+        deposit_amount=Decimal("100.00"),
+        arrival=date(2026, 5, 2),
+        txn=date(2026, 5, 16),
+    )
+
+    summary = await OrderReconJob(db, str(tenant_a.id)).run(RUN_FROM, RUN_TO)
+    assert summary.status == "completed"
+
+    run_uuid = uuid.UUID(summary.run_id)
+    rows = (
+        (await db.execute(select(ReconciliationResult).where(ReconciliationResult.run_id == run_uuid)))
+        .scalars()
+        .all()
+    )
+    assert len(rows) == 2
+
+    by_ref = {r.evidence["order_reference"]: r for r in rows}
+    same_day = by_ref["R300000001"]
+    far = by_ref["R300000002"]
+
+    # ---- Decoupling: status + bucket are IDENTICAL despite different confidence ----
+    assert same_day.status == "auto_matched"
+    assert same_day.bucket == "matches"
+    assert far.status == "auto_matched"
+    assert far.bucket == "matches"
+
+    # ---- R2 advisory composite persisted (calibrated by amount + temporal signals) ----
+    assert same_day.confidence == Decimal("1.0000"), f"same-day confidence: {same_day.confidence}"
+    assert far.confidence == Decimal("0.6000"), f"far confidence: {far.confidence}"
+
+    # ---- confidence_signals sub-dict present with correct keys + values ----
+    for row, label in ((same_day, "same-day"), (far, "far")):
+        sigs = row.evidence.get("confidence_signals")
+        assert sigs is not None, f"{label}: confidence_signals missing from evidence"
+        for key in ("amount_score", "temporal_score", "composite", "scorer_version", "weights"):
+            assert key in sigs, f"{label}: missing key {key!r} in confidence_signals"
+        assert sigs["scorer_version"] == "v1", f"{label}: scorer_version mismatch"
+        assert sigs["weights"] == {"amount": "0.6", "temporal": "0.4"}, f"{label}: weights mismatch"
+
+    # Same-day: temporal=1.0, composite=1.0
+    assert same_day.evidence["confidence_signals"]["temporal_score"] == "1.0000", (
+        f"same-day temporal_score: {same_day.evidence['confidence_signals']['temporal_score']}"
+    )
+    assert same_day.evidence["confidence_signals"]["composite"] == "1.0000", (
+        f"same-day composite: {same_day.evidence['confidence_signals']['composite']}"
+    )
+
+    # Far pair: temporal=0.0, composite=0.6
+    assert far.evidence["confidence_signals"]["temporal_score"] == "0.0000", (
+        f"far temporal_score: {far.evidence['confidence_signals']['temporal_score']}"
+    )
+    assert far.evidence["confidence_signals"]["composite"] == "0.6000", (
+        f"far composite: {far.evidence['confidence_signals']['composite']}"
+    )
+
+    # ---- Original evidence keys still present ----
+    for row, label in ((same_day, "same-day"), (far, "far")):
+        ev = row.evidence
+        assert "charge_source_id" in ev, f"{label}: charge_source_id missing"
+        assert "order_reference" in ev, f"{label}: order_reference missing"
+        assert "charge_payout_line_id" in ev, f"{label}: charge_payout_line_id missing"
