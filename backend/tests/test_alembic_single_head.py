@@ -7,7 +7,10 @@ head without reconciling it via a merge migration.
 
 Added during the metric-catalog feat->main promotion, where feat's
 ``080_metric_definitions`` collided with main's ``080_learned_rules_rls`` (both
-branching off ``079_order_ref_pattern``) and needed a merge migration.
+branching off ``079_order_ref_pattern``). Resolved by re-parenting the metric line onto
+``080_learned_rules_rls`` (one linear history) — NOT a merge migration, because a merge
+head makes ``alembic downgrade -1`` (the deploy migration-safety reversibility test) fail
+with "Ambiguous walk".
 """
 
 from pathlib import Path
@@ -30,6 +33,7 @@ def test_single_alembic_head() -> None:
     heads = _script_directory().get_heads()
     assert len(heads) == 1, (
         f"Expected exactly one Alembic head, found {len(heads)}: {sorted(heads)}. "
-        "Reconcile parallel branches with a merge migration whose down_revision "
-        "is a tuple of both heads."
+        "Reconcile parallel branches — prefer re-parenting one lineage's base revision onto "
+        "the other (keeps `alembic downgrade -1` working); a merge migration also unifies the "
+        "heads but breaks the deploy reversibility test with 'Ambiguous walk'."
     )
