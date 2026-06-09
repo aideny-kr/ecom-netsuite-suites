@@ -231,11 +231,17 @@ role holding INSERT on the table).
 
 ## What it does
 
-1. **Pre-flights the probe role** — must exist, be non-bypass, and be assumable
-   (directly, or via a transient GRANT executed *inside the rolled-back
-   transaction*). Otherwise INCONCLUSIVE (exit 2), never a silent false-pass.
+1. **Pre-flights the probe role** — must exist, must not bypass RLS (BYPASSRLS
+   attribute OR superuser — superusers bypass unconditionally, even under
+   FORCE), and must be assumable (directly, or via a transient GRANT executed
+   *inside the rolled-back transaction*). Otherwise INCONCLUSIVE (exit 2),
+   never a silent false-pass — and a bypassing effective role aborts rather
+   than producing a false FAIL.
 2. **Cross-tenant write** — context = tenant A, INSERT with `tenant_id` = B.
-   PASS requires rejection with SQLSTATE `42501` (row-level security).
+   PASS requires rejection with SQLSTATE `42501` carrying the
+   row-level-security message (plain privilege denial shares the SQLSTATE and
+   is classified INCONCLUSIVE, not FAIL). An ACCEPTED cross-tenant write is
+   FAIL regardless of every other outcome.
 3. **Positive control** — same context, INSERT with `tenant_id` = A. Must
    succeed, proving the INSERT is well-formed so (2)'s rejection can only be
    the WITH CHECK.
@@ -250,13 +256,17 @@ is **no deletion and no backstop** anywhere in this script.
 
 ```bash
 # DSN = staging DIRECT url (port 5432, not the pooler); the backend's own
-# DATABASE_URL works — the probe role does the enforcing, not the connection role.
+# connection string works — the probe role does the enforcing, not the
+# connection role. DATABASE_URL_DIRECT is REQUIRED (deliberately no
+# DATABASE_URL fallback, so a local/CI DSN can never be inherited by accident).
 DATABASE_URL_DIRECT="$DATABASE_URL_DIRECT" \
   backend/.venv/bin/python scripts/uat/metric_rls_smoke.py
 ```
 
 Exit `0` = PASS · `1` = FAIL (cross-tenant accepted → 082 not enforced, or
-same-tenant rejected → policy too strict) · `2` = INCONCLUSIVE.
+same-tenant RLS-rejected → policy too strict) · `2` = INCONCLUSIVE (bad config,
+privilege-denial 42501, bypassing role, or ANY unexpected error — misconfig is
+never reported as FAIL).
 
 **Status:** PASS on staging 2026-06-09 under both Framework and `uat-smoke`
 caller contexts — effective role `authenticated` (bypassrls=False),
