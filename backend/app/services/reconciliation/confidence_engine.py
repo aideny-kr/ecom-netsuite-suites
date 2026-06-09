@@ -15,6 +15,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
+from types import MappingProxyType
+from typing import Mapping
 
 # ---------------------------------------------------------------------------
 # Module constants
@@ -95,13 +97,14 @@ def temporal_score(
 def composite(amount: Decimal, temporal: Decimal | None) -> Decimal:
     """Weighted composite of amount and temporal signals.
 
-    If *temporal* is ``None`` (signal unavailable), falls back to *amount* alone
-    (already quantized — returned as-is after ensuring 4-dp quantization).
+    If *temporal* is ``None`` (signal unavailable), falls back to
+    ``_clamp01(amount)`` — a no-op when *amount* is already in [0, 1] at 4 dp,
+    but guards against upstream precision/range drift.
 
     Otherwise: ``W_AMOUNT * amount + W_TEMPORAL * temporal``
     """
     if temporal is None:
-        # Amount-only fallback; ensure 4-dp quantization
+        # Amount-only fallback; re-clamp/quantize to guard upstream precision
         return _clamp01(amount)
 
     return _clamp01(W_AMOUNT * amount + W_TEMPORAL * temporal)
@@ -121,14 +124,14 @@ class ConfidenceSignals:
         temporal_score:  Temporal signal in [0, 1], 4 dp, or None if unavailable.
         composite:       Weighted composite in [0, 1], 4 dp.
         scorer_version:  Version tag (e.g. ``"v1"``).
-        weights:         Mapping of signal name → Decimal weight.
+        weights:         Immutable mapping of signal name → Decimal weight.
     """
 
     amount_score: Decimal
     temporal_score: Decimal | None
     composite: Decimal
     scorer_version: str
-    weights: dict
+    weights: Mapping[str, Decimal]
 
 
 # ---------------------------------------------------------------------------
@@ -162,7 +165,7 @@ def compute_signals(
         temporal_score=t_score,
         composite=c_score,
         scorer_version=SCORER_VERSION,
-        weights={"amount": W_AMOUNT, "temporal": W_TEMPORAL},
+        weights=MappingProxyType({"amount": W_AMOUNT, "temporal": W_TEMPORAL}),
     )
 
 
@@ -179,8 +182,5 @@ def signals_to_evidence(signals: ConfidenceSignals) -> dict:
         "temporal_score": str(signals.temporal_score) if signals.temporal_score is not None else None,
         "composite": str(signals.composite),
         "scorer_version": signals.scorer_version,
-        "weights": {
-            "amount": str(signals.weights["amount"]),
-            "temporal": str(signals.weights["temporal"]),
-        },
+        "weights": {k: str(v) for k, v in signals.weights.items()},
     }

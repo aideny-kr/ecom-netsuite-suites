@@ -9,7 +9,7 @@ Pure module — no DB, no network, no sockets.
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 import pytest
@@ -159,7 +159,6 @@ class TestTemporalScore:
         # never negative, never > 1
         for gap in [0, 1, 7, 14, 30, 100]:
             d1 = date(2024, 1, 1)
-            from datetime import timedelta
             d2 = d1 + timedelta(days=gap)
             score = temporal_score(d1, d2)
             assert Decimal("0") <= score <= Decimal("1")
@@ -280,6 +279,16 @@ class TestComputeSignals:
         with pytest.raises((AttributeError, TypeError)):
             sig.composite = Decimal("0.5")  # type: ignore[misc]
 
+    def test_weights_mapping_is_immutable(self):
+        # frozen=True does NOT protect a mutable dict value — weights must be a
+        # read-only mapping so persisted evidence can't be corrupted downstream.
+        sig = compute_signals(
+            Decimal("100.00"), Decimal("100.00"),
+            date(2024, 1, 1), date(2024, 1, 1),
+        )
+        with pytest.raises(TypeError):
+            sig.weights["amount"] = Decimal("0.99")  # type: ignore[index]
+
 
 # ---------------------------------------------------------------------------
 # signals_to_evidence
@@ -308,12 +317,17 @@ class TestSignalsToEvidence:
         ev = signals_to_evidence(self._make_signals_full())
         for v in ev.values():
             assert not isinstance(v, Decimal), f"Decimal found: {v!r}"
+        # nested weights sub-dict must also be Decimal-free
+        for v in ev["weights"].values():
+            assert not isinstance(v, Decimal), f"Decimal found in weights: {v!r}"
 
     def test_no_date_values(self):
-        from datetime import date as date_type
         ev = signals_to_evidence(self._make_signals_full())
         for v in ev.values():
-            assert not isinstance(v, date_type), f"date found: {v!r}"
+            assert not isinstance(v, date), f"date found: {v!r}"
+        # nested weights sub-dict must also be date-free
+        for v in ev["weights"].values():
+            assert not isinstance(v, date), f"date found in weights: {v!r}"
 
     def test_scores_serialized_as_strings(self):
         ev = signals_to_evidence(self._make_signals_full())
