@@ -82,10 +82,13 @@ class EvidencePackGenerator:
         ws.title = "Summary"
 
         # Count by authoritative bucket, NOT advisory confidence thresholds.
+        # The buckets PARTITION the run: matches + suggested + needs_review == total_results.
+        # "Unmatched" is a sub-detail of needs_review (Unmatched ⊆ Needs Review).
         matched = len([r for r in results if r.get("bucket") == "matches"])
         suggested = len(
             [r for r in results if r.get("bucket") in ("auto_classifications", "rules")]
         )
+        needs_review = len([r for r in results if r.get("bucket") == "needs_review"])
         unmatched = len([r for r in results if r.get("match_type") == "unmatched"])
         total_variance = sum(Decimal(str(r.get("variance_amount", 0))) for r in results)
 
@@ -108,6 +111,7 @@ class EvidencePackGenerator:
             ("", ""),
             ("Auto-Matched", matched),
             ("Suggested (Review Required)", suggested),
+            ("Needs Review (Exceptions)", needs_review),
             ("Unmatched", unmatched),
             ("Total Results", len(results)),
             ("Total Variance", f"${total_variance:,.2f}"),
@@ -115,7 +119,8 @@ class EvidencePackGenerator:
 
         for label, value in summary_data:
             ws.cell(row=row, column=1, value=label).font = label_font
-            ws.cell(row=row, column=2, value=str(value) if value else "").font = value_font
+            # Render integer 0 counts as "0" (not blank); spacer "" rows stay blank.
+            ws.cell(row=row, column=2, value=str(value) if value is not None else "").font = value_font
             row += 1
 
         ws.column_dimensions["A"].width = 30

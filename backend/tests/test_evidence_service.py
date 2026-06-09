@@ -171,8 +171,21 @@ class TestEvidencePackGenerator:
         assert summary.get("Suggested (Review Required)") == "1", (
             "Suggested should count bucket in (auto_classifications, rules) (got: %r)" % summary
         )
+        assert summary.get("Needs Review (Exceptions)") == "1", (
+            "Needs Review should count bucket='needs_review' rows (got: %r)" % summary
+        )
         assert summary.get("Unmatched") == "1", (
             "Unmatched should still count match_type='unmatched' rows (got: %r)" % summary
+        )
+
+        # The three primary buckets PARTITION the run: matched + suggested + needs_review == total.
+        matched = int(summary["Auto-Matched"])
+        suggested = int(summary["Suggested (Review Required)"])
+        needs_review = int(summary["Needs Review (Exceptions)"])
+        total = int(summary["Total Results"])
+        assert matched + suggested + needs_review == total, (
+            "Summary buckets must partition the run (matched+suggested+needs_review==total); got %r"
+            % summary
         )
 
     def test_exceptions_sheet_contains_needs_review_rows(self, sample_results):
@@ -216,11 +229,13 @@ class TestEvidencePackGenerator:
         wb = load_workbook(excel_bytes)
         exc_ws = wb["Exceptions"]
 
-        # Gather all payout IDs in the exceptions sheet (col 11 = Payout ID)
+        # Look up the Payout ID column by header name (don't hard-code the index).
+        header_values = [cell.value for cell in exc_ws[1]]
+        payout_idx = header_values.index("Payout ID")  # 0-based for values_only rows
         payout_ids_in_exc = [
-            row[10]  # 0-indexed col 10 = 11th column = Payout ID
+            row[payout_idx]
             for row in exc_ws.iter_rows(min_row=2, values_only=True)
-            if row[10] is not None
+            if row[payout_idx] is not None
         ]
         assert payout_id not in payout_ids_in_exc, (
             "bucket='matches' row should not appear in Exceptions sheet"
@@ -338,10 +353,8 @@ class TestEvidencePackGenerator:
             label_cell, value_cell = row
             if label_cell.value:
                 summary[str(label_cell.value)] = value_cell.value
-        # When count=0, the summary sheet writes "" (falsy guard in _write_summary),
-        # so the cell value is None/empty — both None and "0" mean zero here.
-        auto_matched_val = summary.get("Auto-Matched")
-        assert auto_matched_val in (None, "", "0", 0), (
+        # A 0 count now renders "0" exactly (no longer blank).
+        assert summary.get("Auto-Matched") == "0", (
             "bucket='needs_review' row must NOT be counted as Auto-Matched; got %r" % summary
         )
 
@@ -358,6 +371,82 @@ class TestEvidencePackGenerator:
         data_cell_fill = all_ws.cell(row=2, column=1).fill.fgColor.rgb
         assert data_cell_fill.upper().endswith("FFF3CD"), (
             "bucket='needs_review' row should have yellow (exception) fill; got %r" % data_cell_fill
+        )
+
+    def test_summary_needs_review_count_includes_material_match(self):
+        """A material needs_review row (deterministic match_type, NOT unmatched) must be
+        counted in 'Needs Review (Exceptions)' but NOT in 'Unmatched' — proving the
+        Needs Review count is the authoritative exception total, and the buckets
+        still partition the run.
+        """
+        results = [
+            # bucket='matches'
+            {
+                "id": str(uuid.uuid4()),
+                "match_type": "deterministic",
+                "confidence": Decimal("1.0"),
+                "status": "auto_matched",
+                "bucket": "matches",
+                "stripe_amount": Decimal("1000.00"),
+                "netsuite_amount": Decimal("1000.00"),
+                "variance_amount": Decimal("0.00"),
+                "variance_type": None,
+                "variance_explanation": None,
+                "currency": "USD",
+                "match_rule": "exact_payout_id",
+                "evidence": {"payout_source_id": "po_m1", "deposit_ids": ["1"]},
+            },
+            # bucket='needs_review' but match_type='deterministic' (material variance, NOT unmatched)
+            {
+                "id": str(uuid.uuid4()),
+                "match_type": "deterministic",
+                "confidence": Decimal("0.99"),
+                "status": "auto_matched",
+                "bucket": "needs_review",
+                "stripe_amount": Decimal("5000.00"),
+                "netsuite_amount": Decimal("4800.00"),
+                "variance_amount": Decimal("200.00"),
+                "variance_type": "amount",
+                "variance_explanation": "Material variance: $200",
+                "currency": "USD",
+                "match_rule": "amount_approx",
+                "evidence": {"payout_source_id": "po_material", "deposit_ids": ["2"]},
+            },
+        ]
+
+        generator = EvidencePackGenerator()
+        excel_bytes = generator.generate_excel(
+            results=results,
+            run_id="test-run-material-needs-review",
+            date_from=date(2026, 3, 1),
+            date_to=date(2026, 3, 31),
+        )
+
+        wb = load_workbook(excel_bytes)
+        summary_ws = wb["Summary"]
+        summary = {}
+        for row in summary_ws.iter_rows(min_col=1, max_col=2):
+            label_cell, value_cell = row
+            if label_cell.value:
+                summary[str(label_cell.value)] = value_cell.value
+
+        # Needs Review captures the material match; Unmatched does NOT (it's a real match).
+        assert summary.get("Needs Review (Exceptions)") == "1", (
+            "Material needs_review row must count in Needs Review; got %r" % summary
+        )
+        assert summary.get("Unmatched") == "0", (
+            "Material needs_review row is a match, not unmatched; got %r" % summary
+        )
+        assert summary.get("Auto-Matched") == "1", summary
+        assert summary.get("Suggested (Review Required)") == "0", summary
+
+        # Partition still holds.
+        matched = int(summary["Auto-Matched"])
+        suggested = int(summary["Suggested (Review Required)"])
+        needs_review = int(summary["Needs Review (Exceptions)"])
+        total = int(summary["Total Results"])
+        assert matched + suggested + needs_review == total, (
+            "Buckets must partition the run; got %r" % summary
         )
 
     def test_confidence_column_still_present(self, sample_results):
