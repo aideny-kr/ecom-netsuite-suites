@@ -125,7 +125,7 @@ class EvidencePackGenerator:
             ("Rules (Fuzzy)", rules_count),
             ("Needs Review (Exceptions)", needs_review),
             # Unmatched ⊆ Needs Review — sub-detail kept for drill-down clarity.
-            ("Unmatched", unmatched),
+            ("Unmatched (within Needs Review)", unmatched),
             ("Total Results", len(results)),
             ("Total Variance", f"${total_variance:,.2f}"),
         ]

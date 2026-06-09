@@ -666,6 +666,9 @@ async def test_high_composite_does_not_promote_fuzzy_status(db, tenant_a):
 
     # R2 advisory composite: amount=1.0, temporal=1.0 (same day) → 1.0000.
     # (W_AMOUNT * 1.0 + W_TEMPORAL * 1.0 = 1.0000)
+    # NB: the fuzzy engine value is capped at 0.89 (that's what drives status=suggested),
+    # but R2 OVERWRITES the persisted ``confidence`` column with the advisory composite
+    # (1.0000) — the two values diverge here, which is exactly the decoupling this test proves.
     assert row.confidence == Decimal("1.0000"), (
         f"Perfect amount + same-day temporal → R2 composite should be 1.0000; got {row.confidence}"
     )

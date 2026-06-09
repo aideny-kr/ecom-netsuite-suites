@@ -180,11 +180,11 @@ class TestEvidencePackGenerator:
         assert summary.get("Auto-Classified") == "0", (
             "Auto-Classified should count bucket='auto_classifications' rows (got: %r)" % summary
         )
-        assert summary.get("Rules (Fuzzy)") == "1", "Rules (Fuzzy) should count bucket='rules' rows (got: %r)" % summary
+        assert summary.get("Rules (Fuzzy)") == "1", f"Rules (Fuzzy) should count bucket='rules' rows (got: {summary!r})"
         assert summary.get("Needs Review (Exceptions)") == "1", (
             "Needs Review should count bucket='needs_review' rows (got: %r)" % summary
         )
-        assert summary.get("Unmatched") == "1", (
+        assert summary.get("Unmatched (within Needs Review)") == "1", (
             "Unmatched should still count match_type='unmatched' rows (got: %r)" % summary
         )
 
@@ -443,7 +443,9 @@ class TestEvidencePackGenerator:
         assert summary.get("Needs Review (Exceptions)") == "1", (
             "Material needs_review row must count in Needs Review; got %r" % summary
         )
-        assert summary.get("Unmatched") == "0", "Material needs_review row is a match, not unmatched; got %r" % summary
+        assert summary.get("Unmatched (within Needs Review)") == "0", (
+            "Material needs_review row is a match, not unmatched; got %r" % summary
+        )
         assert summary.get("Auto-Matched") == "1", summary
         assert summary.get("Auto-Classified") == "0", summary
         assert summary.get("Rules (Fuzzy)") == "0", summary
