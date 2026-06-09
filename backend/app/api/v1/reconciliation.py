@@ -434,6 +434,10 @@ async def get_run_results(
             ReconciliationResult.tenant_id == user.tenant_id,
             ReconciliationResult.run_id == _parse_uuid(run_id),
         )
+        # R2: `confidence` is now the advisory amount+temporal composite (matched rows
+        # ~0.6–1.0), NOT the engine match-tier ladder. asc() intentionally surfaces
+        # lower-advisory-confidence first (e.g. temporally-implausible "exact" matches).
+        # Do NOT re-couple this to ladder values.
         .order_by(ReconciliationResult.confidence.asc())
         .limit(limit)
         .offset(offset)
@@ -706,7 +710,10 @@ async def download_evidence(
     if not run:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
 
-    stmt = select(ReconciliationResult).where(ReconciliationResult.run_id == uuid.UUID(run_id))
+    stmt = select(ReconciliationResult).where(
+        ReconciliationResult.run_id == uuid.UUID(run_id),
+        ReconciliationResult.tenant_id == user.tenant_id,
+    )
     result = await db.execute(stmt)
     results = result.scalars().all()
 
@@ -716,6 +723,7 @@ async def download_evidence(
             "match_type": r.match_type,
             "confidence": r.confidence,
             "status": r.status,
+            "bucket": r.bucket,
             "stripe_amount": r.stripe_amount,
             "netsuite_amount": r.netsuite_amount,
             "variance_amount": r.variance_amount,

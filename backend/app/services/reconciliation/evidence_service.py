@@ -3,11 +3,12 @@
 Produces Excel workbooks with:
 - Summary sheet: run metadata + match/exception/unmatched counts
 - All Results sheet: full detail table
-- Exceptions sheet: only unmatched/low-confidence items
+- Exceptions sheet: only needs_review items (bucket-authoritative)
 """
 
 from __future__ import annotations
 
+import collections
 import io
 from datetime import date, datetime, timezone
 from decimal import Decimal
@@ -18,6 +19,13 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
+from app.services.reconciliation.four_bucket_classifier import (
+    BUCKET_AUTO_CLASSIFICATIONS,
+    BUCKET_MATCHES,
+    BUCKET_NEEDS_REVIEW,
+    BUCKET_RULES,
+)
+
 logger = structlog.get_logger()
 
 _HEADER_FILL = PatternFill(start_color="1a73e8", end_color="1a73e8", fill_type="solid")
@@ -25,6 +33,9 @@ _HEADER_FONT = Font(name="Arial", size=10, bold=True, color="FFFFFF")
 _MATCHED_FILL = PatternFill(start_color="d4edda", end_color="d4edda", fill_type="solid")
 _EXCEPTION_FILL = PatternFill(start_color="fff3cd", end_color="fff3cd", fill_type="solid")
 _UNMATCHED_FILL = PatternFill(start_color="f8d7da", end_color="f8d7da", fill_type="solid")
+# Light blue: deterministic/rule-based suggested rows (auto_classifications + rules).
+# Distinct from green (matches), yellow (needs_review/exceptions), red (unmatched).
+_SUGGESTED_FILL = PatternFill(start_color="d1ecf1", end_color="d1ecf1", fill_type="solid")
 _THIN_BORDER = Border(
     left=Side(style="thin"),
     right=Side(style="thin"),
@@ -48,19 +59,22 @@ class EvidencePackGenerator:
         wb = Workbook()
 
         # --- Summary sheet ---
-        self._write_summary(wb, results, run_id, date_from, date_to, tenant_name)
+        # needs_review = anything NOT in the three auto-approvable buckets:
+        #   matches / auto_classifications / rules.
+        # This folds None + unknown bucket values into needs_review, consistent
+        # with the yellow row-fill else-branch and keeping the partition valid.
+        needs_review_results = [
+            r for r in results if r.get("bucket") not in (BUCKET_MATCHES, BUCKET_AUTO_CLASSIFICATIONS, BUCKET_RULES)
+        ]
+        self._write_summary(wb, results, needs_review_results, run_id, date_from, date_to, tenant_name)
 
         # --- All Results sheet ---
         self._write_results(wb, results, "All Results")
 
         # --- Exceptions sheet ---
-        exceptions = [
-            r
-            for r in results
-            if r.get("match_type") == "unmatched"
-            or (r.get("confidence") is not None and Decimal(str(r["confidence"])) < Decimal("0.95"))
-        ]
-        self._write_results(wb, exceptions, "Exceptions")
+        # Categorize on the authoritative four-bucket value, NOT advisory confidence.
+        # needs_review already covers unmatched + material-variance auto_matched rows.
+        self._write_results(wb, needs_review_results, "Exceptions")
 
         buf = io.BytesIO()
         wb.save(buf)
@@ -71,31 +85,29 @@ class EvidencePackGenerator:
         self,
         wb: Workbook,
         results: list[dict],
+        needs_review_results: list[dict],
         run_id: str,
         date_from: date,
         date_to: date,
         tenant_name: str | None,
     ) -> None:
-        """Write the summary sheet with run metadata and counts."""
+        """Write the summary sheet with run metadata and counts.
+
+        Count by authoritative bucket — the four buckets PARTITION the run:
+          matches + auto_classifications + rules + needs_review == total_results.
+        "Unmatched" is a sub-detail of needs_review (Unmatched ⊆ Needs Review).
+        """
         ws = wb.active
         ws.title = "Summary"
 
-        matched = len(
-            [
-                r
-                for r in results
-                if r.get("match_type") in ("deterministic", "fuzzy")
-                and Decimal(str(r.get("confidence", 0))) >= Decimal("0.95")
-            ]
-        )
-        suggested = len(
-            [
-                r
-                for r in results
-                if r.get("match_type") in ("deterministic", "fuzzy")
-                and Decimal("0.75") <= Decimal(str(r.get("confidence", 0))) < Decimal("0.95")
-            ]
-        )
+        # Count by authoritative bucket in a single pass over results.
+        # needs_review is already pre-computed (any bucket not in the three
+        # auto-approvable buckets — folds None/unknown into needs_review).
+        bucket_counts = collections.Counter(r.get("bucket") for r in results)
+        matched = bucket_counts[BUCKET_MATCHES]
+        auto_classified = bucket_counts[BUCKET_AUTO_CLASSIFICATIONS]
+        rules_count = bucket_counts[BUCKET_RULES]
+        needs_review = len(needs_review_results)
         unmatched = len([r for r in results if r.get("match_type") == "unmatched"])
         total_variance = sum(Decimal(str(r.get("variance_amount", 0))) for r in results)
 
@@ -117,15 +129,19 @@ class EvidencePackGenerator:
             ("Generated", datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")),
             ("", ""),
             ("Auto-Matched", matched),
-            ("Suggested (Review Required)", suggested),
-            ("Unmatched", unmatched),
+            ("Auto-Classified", auto_classified),
+            ("Rules (Fuzzy)", rules_count),
+            ("Needs Review (Exceptions)", needs_review),
+            # Unmatched ⊆ Needs Review — sub-detail kept for drill-down clarity.
+            ("Unmatched (within Needs Review)", unmatched),
             ("Total Results", len(results)),
             ("Total Variance", f"${total_variance:,.2f}"),
         ]
 
         for label, value in summary_data:
             ws.cell(row=row, column=1, value=label).font = label_font
-            ws.cell(row=row, column=2, value=str(value) if value else "").font = value_font
+            # Render integer 0 counts as "0" (not blank); spacer "" rows stay blank.
+            ws.cell(row=row, column=2, value=str(value) if value is not None else "").font = value_font
             row += 1
 
         ws.column_dimensions["A"].width = 30
@@ -176,15 +192,21 @@ class EvidencePackGenerator:
                 ", ".join(evidence.get("deposit_ids", [])),
             ]
 
-            # Row fill based on match type
+            # Row fill: clean 1:1 mapping from the authoritative four buckets.
+            # "Unmatched" is treated as a special case on match_type (before bucket check)
+            # because it may sit inside needs_review and we want the red visual signal.
             match_type = result.get("match_type", "")
+            bucket = result.get("bucket", "")
             if match_type == "unmatched":
-                fill = _UNMATCHED_FILL
-            elif match_type in ("deterministic", "fuzzy") and Decimal(str(result.get("confidence", 0))) >= Decimal(
-                "0.95"
-            ):
-                fill = _MATCHED_FILL
+                fill = _UNMATCHED_FILL  # red
+            elif bucket == BUCKET_MATCHES:
+                fill = _MATCHED_FILL  # green
+            elif bucket == BUCKET_NEEDS_REVIEW:
+                fill = _EXCEPTION_FILL  # yellow
+            elif bucket in (BUCKET_AUTO_CLASSIFICATIONS, BUCKET_RULES):
+                fill = _SUGGESTED_FILL  # light blue — matched, not review-required
             else:
+                # None/unknown bucket — conservative fallback to yellow
                 fill = _EXCEPTION_FILL
 
             for col_idx, value in enumerate(row_data, 1):

@@ -29,6 +29,9 @@ gitignored plan docs/superpowers/plans/2026-06-05-recon-e2e-phase2.md):
   I6 close = hard freeze on BOTH routes (REST + chat), no new audit on rejection
   I7 bucket-aware close (#112): lock approved + auto_matched-non-needs_review; leave
      ENGINE-PRODUCED material auto_matched+needs_review unlocked (results_left_for_review)
+  I8 R2 advisory confidence: calibrated score + signals persisted; status/bucket
+     decoupled bidirectionally — LOW composite does NOT demote deterministic match,
+     HIGH composite does NOT promote fuzzy match.
 """
 
 from __future__ import annotations
@@ -85,15 +88,21 @@ async def _seed_match_pair(
     source_id: str,
     charge_amount: Decimal,
     deposit_amount: Decimal,
+    arrival: date = ARRIVAL,
+    txn: date = TXN,
 ) -> None:
-    """Seed a charge (PayoutLine) + a matching NetSuite deposit sharing ``order_ref``."""
+    """Seed a charge (PayoutLine) + a matching NetSuite deposit sharing ``order_ref``.
+
+    ``arrival`` / ``txn`` default to the module-level ARRIVAL / TXN constants so all
+    existing callers are unaffected; I8 passes explicit dates to drive the temporal signal.
+    """
     await create_test_payout_line(
         db,
         tenant_id,
         source_id=source_id,
         amount=charge_amount,
         description=f"Framework Marketplace Order ID: {order_ref}-XU9EPZPD",
-        arrival_date=ARRIVAL,
+        arrival_date=arrival,
     )
     await create_test_netsuite_posting(
         db,
@@ -101,7 +110,7 @@ async def _seed_match_pair(
         netsuite_internal_id=f"ns-{source_id}",
         record_type="custdep",
         amount=deposit_amount,
-        transaction_date=TXN,
+        transaction_date=txn,
         related_payout_id=order_ref,
     )
 
@@ -465,3 +474,208 @@ async def test_approve_rejected_after_close_on_both_routes_no_new_audit(db, admi
     # Neither rejected attempt wrote an audit row, and the line never flipped.
     assert await _approve_audit_count(db, rid) == 0
     assert await _status_of(db, material.id) == "auto_matched"
+
+
+# ---------------------------------------------------------------------------
+# I8 — R2 advisory confidence: calibrated score + signals persisted; status/bucket
+#       decoupled (both pairs are auto_matched+matches despite different confidence)
+# ---------------------------------------------------------------------------
+
+
+async def test_engine_persists_calibrated_confidence_and_signals(db, tenant_a):
+    """I8 — The R2 scorer wires into the write-path with decoupled status/bucket.
+
+    Two exact-amount pairs differ ONLY in date gap (0 days vs 14 days). Both are
+    deterministic matches (conf ladder 1.0/0.95) so status=auto_matched, bucket=matches
+    for both — the engine match-tier value still drives status/close-lock as before.
+
+    The persisted ``confidence`` column now carries the R2 advisory composite score:
+      - Same-day  (gap 0 ):  amount_score=1.0, temporal_score=1.0 → composite=1.0
+      - Far pair  (gap 14):  amount_score=1.0, temporal_score=0.0 → composite=0.6
+
+    This proves the two-value decoupling: status/bucket identical; confidence diverges.
+    The ``evidence["confidence_signals"]`` sub-dict makes the signals observable/auditable.
+    """
+    await _set_materiality(db, tenant_a.id, abs_=_DEFAULT_MATERIALITY_ABS, pct=_DEFAULT_MATERIALITY_PCT)
+
+    # Same-day pair: charge arrival == NS transaction date  (gap = 0)
+    await _seed_match_pair(
+        db,
+        tenant_a.id,
+        order_ref="R300000001",
+        source_id="ch_s",
+        charge_amount=Decimal("100.00"),
+        deposit_amount=Decimal("100.00"),
+        arrival=date(2026, 5, 16),
+        txn=date(2026, 5, 16),
+    )
+    # Far pair: 14-day gap between arrival and NS transaction date
+    await _seed_match_pair(
+        db,
+        tenant_a.id,
+        order_ref="R300000002",
+        source_id="ch_f",
+        charge_amount=Decimal("100.00"),
+        deposit_amount=Decimal("100.00"),
+        arrival=date(2026, 5, 2),
+        txn=date(2026, 5, 16),
+    )
+
+    summary = await OrderReconJob(db, str(tenant_a.id)).run(RUN_FROM, RUN_TO)
+    assert summary.status == "completed"
+
+    run_uuid = uuid.UUID(summary.run_id)
+    rows = (
+        (await db.execute(select(ReconciliationResult).where(ReconciliationResult.run_id == run_uuid))).scalars().all()
+    )
+    assert len(rows) == 2
+
+    by_ref = {r.evidence["order_reference"]: r for r in rows}
+    same_day = by_ref["R300000001"]
+    far = by_ref["R300000002"]
+
+    # ---- Decoupling: status + bucket are IDENTICAL despite different confidence ----
+    assert same_day.status == "auto_matched"
+    assert same_day.bucket == "matches"
+    assert far.status == "auto_matched"
+    assert far.bucket == "matches"
+
+    # ---- R2 advisory composite persisted (calibrated by amount + temporal signals) ----
+    # The Decimal(...) literals below are deliberate regression tripwires — pinned, NOT
+    # computed from the engine constants. The amount-only fallback (temporal_score is None)
+    # is NOT reachable through OrderReconJob (deposits are fetched with a non-null
+    # transaction_date filter), so it's covered only by the confidence_engine unit tests
+    # (Task A), never here.
+    # gap 0 → temporal 1.0 → composite 1.0000
+    assert same_day.confidence == Decimal("1.0000"), f"same-day confidence: {same_day.confidence}"
+    # 0.6*amount_score(1.0) + 0.4*temporal_score(gap 14 == WINDOW_DAYS → 0.0) = 0.6000
+    # (W_AMOUNT/W_TEMPORAL/WINDOW_DAYS live in confidence_engine.py — if those change,
+    # update this literal deliberately)
+    assert far.confidence == Decimal("0.6000"), f"far confidence: {far.confidence}"
+
+    # ---- confidence_signals sub-dict present with correct keys + values ----
+    for row, label in ((same_day, "same-day"), (far, "far")):
+        sigs = row.evidence.get("confidence_signals")
+        assert sigs is not None, f"{label}: confidence_signals missing from evidence"
+        for key in ("amount_score", "temporal_score", "composite", "scorer_version", "weights"):
+            assert key in sigs, f"{label}: missing key {key!r} in confidence_signals"
+        assert sigs["scorer_version"] == "v1", f"{label}: scorer_version mismatch"
+        assert sigs["weights"] == {"amount": "0.6", "temporal": "0.4"}, f"{label}: weights mismatch"
+
+    # Same-day: temporal=1.0, composite=1.0
+    assert same_day.evidence["confidence_signals"]["temporal_score"] == "1.0000", (
+        f"same-day temporal_score: {same_day.evidence['confidence_signals']['temporal_score']}"
+    )
+    assert same_day.evidence["confidence_signals"]["composite"] == "1.0000", (
+        f"same-day composite: {same_day.evidence['confidence_signals']['composite']}"
+    )
+
+    # Far pair: temporal=0.0, composite=0.6
+    assert far.evidence["confidence_signals"]["temporal_score"] == "0.0000", (
+        f"far temporal_score: {far.evidence['confidence_signals']['temporal_score']}"
+    )
+    assert far.evidence["confidence_signals"]["composite"] == "0.6000", (
+        f"far composite: {far.evidence['confidence_signals']['composite']}"
+    )
+
+    # ---- Original evidence keys still present ----
+    for row, label in ((same_day, "same-day"), (far, "far")):
+        ev = row.evidence
+        assert "charge_source_id" in ev, f"{label}: charge_source_id missing"
+        assert "order_reference" in ev, f"{label}: order_reference missing"
+        assert "charge_payout_line_id" in ev, f"{label}: charge_payout_line_id missing"
+
+
+# ---------------------------------------------------------------------------
+# I8 (converse) — HIGH R2 composite must NOT promote a fuzzy match to
+#   auto_matched / bucket='matches'. The advisory scorer is decoupled from
+#   the engine match-tier ladder, which alone drives status/bucket/close-lock.
+# ---------------------------------------------------------------------------
+
+
+async def test_high_composite_does_not_promote_fuzzy_status(db, tenant_a):
+    """I8 converse — a fuzzy match with a perfect R2 composite (1.0000) must
+    remain status='suggested' and bucket='rules', NOT be promoted to
+    status='auto_matched' / bucket='matches'.
+
+    Seed strategy (forces fuzzy tier, not deterministic):
+      - Charge: description carries order_ref R400000001 → charge.order_reference = R400000001
+      - Deposit: related_payout_id = 'NOMATCH' → deposit.order_reference = 'NOMATCH'
+      The deterministic tier indexes deposits by order_reference and only matches when
+      charge.order_reference == deposit.order_reference — so this pair survives to fuzzy.
+
+      Same amount + same-day dates → fuzzy scores 1.0 (capped to _MAX_FUZZY_CONFIDENCE=0.89).
+      R2 composite: amount_score=1.0, temporal_score=1.0 (0-day gap) → composite=1.0000.
+
+    Asserts:
+      - match_type == 'fuzzy'       (engine tier, not deterministic)
+      - status == 'suggested'       (engine confidence 0.89 → suggested; NOT promoted)
+      - bucket == 'rules'           (fuzzy + no variance → rules; NOT promoted to matches)
+      - confidence == 1.0000        (R2 composite reflects the advisory score)
+    """
+    await _set_materiality(db, tenant_a.id, abs_=_DEFAULT_MATERIALITY_ABS, pct=_DEFAULT_MATERIALITY_PCT)
+
+    # Charge: has order_reference R400000001 (from description via extract_order_ref).
+    # Deposit: related_payout_id='NOMATCH' → no deterministic match, falls through to fuzzy.
+    # Same amount, same arrival/txn date → fuzzy fires (amount proximity = 1.0, date = 1.0).
+    await create_test_payout_line(
+        db,
+        tenant_a.id,
+        source_id="ch_fuzz",
+        amount=Decimal("750.00"),
+        description="Framework Marketplace Order ID: R400000001-XU9EPZPD",
+        arrival_date=date(2026, 5, 20),
+    )
+    await create_test_netsuite_posting(
+        db,
+        tenant_a.id,
+        netsuite_internal_id="ns-fuzz",
+        record_type="custdep",
+        amount=Decimal("750.00"),
+        transaction_date=date(2026, 5, 20),  # same day → temporal proximity = 1.0
+        related_payout_id="NOMATCH",  # different from R400000001 → deterministic skips
+    )
+
+    summary = await OrderReconJob(db, str(tenant_a.id)).run(RUN_FROM, RUN_TO)
+    assert summary.status == "completed"
+
+    run_uuid = uuid.UUID(summary.run_id)
+    rows = (
+        (await db.execute(select(ReconciliationResult).where(ReconciliationResult.run_id == run_uuid))).scalars().all()
+    )
+    assert len(rows) == 1, f"Expected exactly 1 result row; got {len(rows)}"
+
+    row = rows[0]
+
+    # Engine tier: must be fuzzy, not deterministic.
+    assert row.match_type == "fuzzy", (
+        f"Expected match_type='fuzzy' (order_refs differ so deterministic skips); got {row.match_type!r}"
+    )
+
+    # Status: 'suggested' — the engine confidence for fuzzy is ≤ 0.89, which maps to 'suggested'
+    # in the status ladder (0.75 ≤ conf < 0.95 → 'suggested'). A high R2 composite must NOT
+    # promote this to 'auto_matched'.
+    assert row.status == "suggested", (
+        f"HIGH R2 composite must NOT promote fuzzy to auto_matched; got status={row.status!r}"
+    )
+
+    # Bucket: fuzzy + no variance → 'rules'. Must NOT be promoted to 'matches'.
+    assert row.bucket == "rules", (
+        f"HIGH R2 composite must NOT promote fuzzy bucket to 'matches'; got bucket={row.bucket!r}"
+    )
+
+    # R2 advisory composite: amount=1.0, temporal=1.0 (same day) → 1.0000.
+    # (W_AMOUNT * 1.0 + W_TEMPORAL * 1.0 = 1.0000)
+    # NB: the fuzzy engine value is capped at 0.89 (that's what drives status=suggested),
+    # but R2 OVERWRITES the persisted ``confidence`` column with the advisory composite
+    # (1.0000) — the two values diverge here, which is exactly the decoupling this test proves.
+    assert row.confidence == Decimal("1.0000"), (
+        f"Perfect amount + same-day temporal → R2 composite should be 1.0000; got {row.confidence}"
+    )
+
+    # confidence_signals sub-dict must be present and reflect the perfect scores.
+    sigs = row.evidence.get("confidence_signals")
+    assert sigs is not None, "confidence_signals missing from evidence"
+    assert sigs["amount_score"] == "1.0000", f"amount_score mismatch: {sigs['amount_score']!r}"
+    assert sigs["temporal_score"] == "1.0000", f"temporal_score mismatch: {sigs['temporal_score']!r}"
+    assert sigs["composite"] == "1.0000", f"composite mismatch: {sigs['composite']!r}"
