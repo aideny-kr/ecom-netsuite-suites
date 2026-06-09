@@ -710,7 +710,10 @@ async def download_evidence(
     if not run:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
 
-    stmt = select(ReconciliationResult).where(ReconciliationResult.run_id == uuid.UUID(run_id))
+    stmt = select(ReconciliationResult).where(
+        ReconciliationResult.run_id == uuid.UUID(run_id),
+        ReconciliationResult.tenant_id == user.tenant_id,
+    )
     result = await db.execute(stmt)
     results = result.scalars().all()
 

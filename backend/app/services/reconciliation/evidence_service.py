@@ -8,6 +8,7 @@ Produces Excel workbooks with:
 
 from __future__ import annotations
 
+import collections
 import io
 from datetime import date, datetime, timezone
 from decimal import Decimal
@@ -58,8 +59,13 @@ class EvidencePackGenerator:
         wb = Workbook()
 
         # --- Summary sheet ---
-        # Pre-compute the needs_review list/count once and reuse (Fix 3: deduplication).
-        needs_review_results = [r for r in results if r.get("bucket") == BUCKET_NEEDS_REVIEW]
+        # needs_review = anything NOT in the three auto-approvable buckets:
+        #   matches / auto_classifications / rules.
+        # This folds None + unknown bucket values into needs_review, consistent
+        # with the yellow row-fill else-branch and keeping the partition valid.
+        needs_review_results = [
+            r for r in results if r.get("bucket") not in (BUCKET_MATCHES, BUCKET_AUTO_CLASSIFICATIONS, BUCKET_RULES)
+        ]
         self._write_summary(wb, results, needs_review_results, run_id, date_from, date_to, tenant_name)
 
         # --- All Results sheet ---
@@ -94,11 +100,13 @@ class EvidencePackGenerator:
         ws = wb.active
         ws.title = "Summary"
 
-        # Count by authoritative bucket, NOT advisory confidence thresholds.
-        matched = len([r for r in results if r.get("bucket") == BUCKET_MATCHES])
-        auto_classified = len([r for r in results if r.get("bucket") == BUCKET_AUTO_CLASSIFICATIONS])
-        rules_count = len([r for r in results if r.get("bucket") == BUCKET_RULES])
-        # Reuse the pre-computed needs_review list (Fix 3: no duplicate filter).
+        # Count by authoritative bucket in a single pass over results.
+        # needs_review is already pre-computed (any bucket not in the three
+        # auto-approvable buckets — folds None/unknown into needs_review).
+        bucket_counts = collections.Counter(r.get("bucket") for r in results)
+        matched = bucket_counts[BUCKET_MATCHES]
+        auto_classified = bucket_counts[BUCKET_AUTO_CLASSIFICATIONS]
+        rules_count = bucket_counts[BUCKET_RULES]
         needs_review = len(needs_review_results)
         unmatched = len([r for r in results if r.get("match_type") == "unmatched"])
         total_variance = sum(Decimal(str(r.get("variance_amount", 0))) for r in results)

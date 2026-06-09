@@ -573,3 +573,115 @@ class TestEvidencePackGenerator:
         assert summary.get("Needs Review (Exceptions)") == "0", (
             "Neither auto_classifications nor rules should count as Needs Review; got %r" % summary
         )
+
+    # ---------------------------------------------------------------------------
+    # Fix 2 — unknown / None bucket is treated as needs_review for counts + Exceptions
+    # ---------------------------------------------------------------------------
+
+    def test_unknown_bucket_counted_as_needs_review(self):
+        """A row with bucket=None or an unrecognised bucket string must be:
+        (a) counted under 'Needs Review (Exceptions)' in the summary,
+        (b) present on the Exceptions sheet,
+        (c) painted yellow (_EXCEPTION_FILL) in All Results,
+        (d) the four bucket counts still sum to total_results (partition holds).
+        """
+        none_bucket_row = {
+            "id": str(uuid.uuid4()),
+            "match_type": "deterministic",
+            "confidence": Decimal("0.80"),
+            "status": "auto_matched",
+            "bucket": None,  # missing bucket
+            "stripe_amount": Decimal("100.00"),
+            "netsuite_amount": Decimal("100.00"),
+            "variance_amount": Decimal("0.00"),
+            "variance_type": None,
+            "variance_explanation": None,
+            "currency": "USD",
+            "match_rule": "exact_payout_id",
+            "evidence": {"payout_source_id": "po_none_bucket", "deposit_ids": ["nb001"]},
+        }
+        weird_bucket_row = {
+            "id": str(uuid.uuid4()),
+            "match_type": "fuzzy",
+            "confidence": Decimal("0.70"),
+            "status": "suggested",
+            "bucket": "weird",  # unknown bucket string
+            "stripe_amount": Decimal("200.00"),
+            "netsuite_amount": Decimal("200.00"),
+            "variance_amount": Decimal("0.00"),
+            "variance_type": None,
+            "variance_explanation": None,
+            "currency": "USD",
+            "match_rule": "amount+date",
+            "evidence": {"payout_source_id": "po_weird_bucket", "deposit_ids": ["wb001"]},
+        }
+        known_matches_row = {
+            "id": str(uuid.uuid4()),
+            "match_type": "deterministic",
+            "confidence": Decimal("1.00"),
+            "status": "auto_matched",
+            "bucket": "matches",
+            "stripe_amount": Decimal("300.00"),
+            "netsuite_amount": Decimal("300.00"),
+            "variance_amount": Decimal("0.00"),
+            "variance_type": None,
+            "variance_explanation": None,
+            "currency": "USD",
+            "match_rule": "exact_payout_id",
+            "evidence": {"payout_source_id": "po_known", "deposit_ids": ["k001"]},
+        }
+        results = [none_bucket_row, weird_bucket_row, known_matches_row]
+
+        generator = EvidencePackGenerator()
+        excel_bytes = generator.generate_excel(
+            results=results,
+            run_id="test-run-unknown-bucket",
+            date_from=date(2026, 3, 1),
+            date_to=date(2026, 3, 31),
+        )
+
+        wb = load_workbook(excel_bytes)
+
+        # (a) Both unknown-bucket rows counted under Needs Review
+        summary_ws = wb["Summary"]
+        summary = {}
+        for row in summary_ws.iter_rows(min_col=1, max_col=2):
+            label_cell, value_cell = row
+            if label_cell.value:
+                summary[str(label_cell.value)] = value_cell.value
+
+        assert summary.get("Needs Review (Exceptions)") == "2", (
+            "Both None and unknown-string bucket rows must be counted as Needs Review; got %r" % summary
+        )
+        assert summary.get("Auto-Matched") == "1", (
+            "Only the known 'matches' row should be Auto-Matched; got %r" % summary
+        )
+
+        # (d) Partition holds: matches + auto_classified + rules + needs_review == total
+        matched = int(summary["Auto-Matched"])
+        auto_classified = int(summary["Auto-Classified"])
+        rules = int(summary["Rules (Fuzzy)"])
+        needs_review = int(summary["Needs Review (Exceptions)"])
+        total = int(summary["Total Results"])
+        assert matched + auto_classified + rules + needs_review == total, (
+            "Buckets must partition the run (including unknown bucket rows); got %r" % summary
+        )
+
+        # (b) Both unknown-bucket rows present on Exceptions sheet
+        exc_ws = wb["Exceptions"]
+        data_rows = list(exc_ws.iter_rows(min_row=2, values_only=True))
+        non_empty = [r for r in data_rows if any(v is not None for v in r)]
+        assert len(non_empty) == 2, (
+            "Both None and unknown-string bucket rows must appear on Exceptions sheet; got %d rows" % len(non_empty)
+        )
+
+        # (c) Both unknown-bucket rows get yellow (_EXCEPTION_FILL) in All Results
+        all_ws = wb["All Results"]
+        yellow_rgb = _EXCEPTION_FILL.fgColor.rgb.upper()
+        # rows 2 and 3 are none_bucket_row and weird_bucket_row
+        for row_idx in (2, 3):
+            cell_rgb = all_ws.cell(row=row_idx, column=1).fill.fgColor.rgb.upper()
+            assert cell_rgb == yellow_rgb, "Unknown-bucket row %d should have yellow (_EXCEPTION_FILL) fill; got %r" % (
+                row_idx,
+                cell_rgb,
+            )
