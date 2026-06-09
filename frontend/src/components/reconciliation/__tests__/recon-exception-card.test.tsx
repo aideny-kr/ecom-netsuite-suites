@@ -66,6 +66,14 @@ describe("ReconExceptionCard — confidence is advisory, not a match verdict", (
     expect(badge.getAttribute("title")).toMatch(/advisory/i);
   });
 
+  it("confidence badge is neutral (muted), NOT verdict-colored", () => {
+    render(<ReconExceptionCard result={exceptionResult} />);
+    const badge = screen.getByText(/95% confidence/i);
+    // Mirror the table's regression: the confidence number must not be color-coded
+    expect(badge).toHaveClass("text-muted-foreground");
+    expect(badge).not.toHaveClass("text-orange-600");
+  });
+
   it("does not render a confidence badge for unmatched results", () => {
     render(<ReconExceptionCard result={unmatchedResult} />);
     // The badge is only shown for !isUnmatched
