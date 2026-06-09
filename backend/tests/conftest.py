@@ -410,7 +410,23 @@ async def admin_user(db: AsyncSession, tenant_a: Tenant) -> tuple[User, dict]:
 
 
 @pytest_asyncio.fixture
+async def superadmin_user(db: AsyncSession, tenant_a: Tenant) -> tuple[User, dict]:
+    # A superadmin (global_role) — the only actor allowed to author SYSTEM-default rows.
+    user, _ = await create_test_user(db, tenant_a, role_name="admin")
+    user.global_role = "superadmin"
+    await db.flush()
+    return user, make_auth_headers(user)
+
+
+@pytest_asyncio.fixture
 async def readonly_user(db: AsyncSession, tenant_a: Tenant) -> tuple[User, dict]:
+    user, _ = await create_test_user(db, tenant_a, role_name="readonly")
+    return user, make_auth_headers(user)
+
+
+@pytest_asyncio.fixture
+async def member_user(db: AsyncSession, tenant_a: Tenant) -> tuple[User, dict]:
+    # A non-admin user with no metrics.manage permission (role: readonly).
     user, _ = await create_test_user(db, tenant_a, role_name="readonly")
     return user, make_auth_headers(user)
 

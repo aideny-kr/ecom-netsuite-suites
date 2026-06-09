@@ -65,6 +65,8 @@ EXPECTED_TOOLS = {
     "sheets.read_range",
     "drive.read_doc",
     "docs.create",
+    "metric.resolve",
+    "metric.compute",
 }
 
 

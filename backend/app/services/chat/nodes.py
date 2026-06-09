@@ -60,6 +60,8 @@ ALLOWED_CHAT_TOOLS: frozenset[str] = frozenset(
         "sheets.create",
         "sheets.write_range",
         "sheets.read_range",
+        "metric.resolve",
+        "metric.compute",
     }
 )
 

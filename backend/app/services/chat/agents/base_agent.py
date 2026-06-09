@@ -190,6 +190,36 @@ _DATA_SUCCESS_NUDGE = (
 )
 
 
+def _suppress_metric_value_for_llm(result_str: str) -> str:
+    """Withhold a metric's computed number from the LLM-facing tool_result string.
+
+    The metric trust boundary (render the number on the FE, never let the LLM
+    state/recompute it) is wired into the STREAMING interceptor via
+    ``_intercept_tool_result``. The non-streaming ``run()`` path has no
+    interceptor, so without this a ``metric_compute`` result would hand its
+    ``rows`` (the literal number) straight to the model — the exact
+    anti-hallucination breach the catalog exists to prevent.
+
+    This applies ONLY to payloads that opted in via ``suppress_llm_value`` (the
+    metric data_table). Every other tool result passes through byte-identical, so
+    normal SuiteQL/data tables keep their rows on this path exactly as before.
+    Uses the SAME condenser the streaming interceptor uses, so the two paths
+    cannot drift on what the LLM sees for a metric.
+    """
+    from app.services.metrics.metric_compute import (
+        condense_metric_for_llm,
+        is_suppressed_metric_payload,
+    )
+
+    try:
+        parsed = json.loads(result_str)
+    except (json.JSONDecodeError, TypeError):
+        return result_str
+    if is_suppressed_metric_payload(parsed):
+        return condense_metric_for_llm(parsed)
+    return result_str
+
+
 def _truncate_tool_result(result_str: str) -> str:
     """Truncate tool results to prevent token bloat.
 
@@ -664,6 +694,12 @@ class BaseSpecialistAgent(abc.ABC):
                     # Truncate error payloads to prevent token bloat on retries
                     result_str = _truncate_error_payload(result_str)
 
+                    # Metric trust boundary on the non-streaming path: the streaming
+                    # interceptor is absent here, so suppress a metric's computed number
+                    # from the LLM-facing content directly (anti-hallucination invariant).
+                    # The full result_str is still recorded in the audit log below.
+                    llm_result_str = _suppress_metric_value_for_llm(result_str)
+
                     elapsed_ms = int((time.monotonic() - t0) * 1000)
                     tool_calls_log.append(
                         build_tool_call_log_entry(
@@ -680,7 +716,7 @@ class BaseSpecialistAgent(abc.ABC):
                         {
                             "type": "tool_result",
                             "tool_use_id": block.id,
-                            "content": result_str,
+                            "content": llm_result_str,
                         }
                     )
 
@@ -1237,6 +1273,19 @@ class BaseSpecialistAgent(abc.ABC):
                         intercept_data, llm_result_str = tool_result_interceptor(block.name, result_str)
                         if intercept_data is not None:
                             yield "tool_intercept", intercept_data
+
+                    # Metric trust boundary — TOOL-enforced, not interceptor-dependent.
+                    # When no interceptor is wired (e.g. the vs-MCP benchmark runner in
+                    # benchmarks/agent_runner.py), llm_result_str is the raw result above
+                    # and a metric_compute payload would hand its computed number straight
+                    # to the LLM — the exact anti-hallucination breach the catalog exists to
+                    # prevent, leaking into the north-star CI gate. Mirror the non-streaming
+                    # run() guard: pass llm_result_str through the SAME suppressor so a
+                    # metric's number can never reach the model on EITHER path. This is a
+                    # no-op for non-metric results (opt-in via suppress_llm_value) and
+                    # idempotent over an interceptor that already condensed a metric (the
+                    # condensed string carries no suppress_llm_value flag).
+                    llm_result_str = _suppress_metric_value_for_llm(llm_result_str)
 
                     tool_calls_log.append(
                         build_tool_call_log_entry(

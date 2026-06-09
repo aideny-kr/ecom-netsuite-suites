@@ -1,0 +1,26 @@
+# Always-on activation is intentional: this profile activates whenever the metric tools
+# (metric_resolve / metric_compute) are present in the tool list, injecting the prompt_fragment
+# into every non-onboarding turn. This is acceptable because the fragment is short behavioral
+# routing guidance with NO hardcoded column names or SQL schema — it does not violate the
+# no-prompt-pollution rule, which specifically targets hardcoded columns/schema in prompts.
+profile_id: metrics
+display_name: "Metric Catalog"
+trigger_tools:
+  - metric_resolve
+  - metric_compute
+prompt_fragment: |
+  ## Named Metrics (Catalog)
+
+  When the user asks for a named business metric (revenue, net margin, CAC, AR, etc.):
+  1. Call `metric_resolve` with the user's phrase to find the blessed metric and its params_schema.
+  2. Call `metric_compute` with the metric `key` and typed params (e.g. {"period": "last_quarter"}).
+     The result renders as a table automatically — do NOT restate the numbers.
+  3. The `definition` returned by `metric_resolve` is DISPLAY-ONLY: never compute a number from it
+     yourself, and never author your own SQL for a named metric.
+  4. If `metric_resolve` returns no match, say "there is no blessed definition for X" and offer to
+     define it — do NOT fabricate a number or a definition.
+  5. PRECEDENCE: a named-metric match takes precedence over any <proven_patterns> hint or ad-hoc
+     SuiteQL for that concept. If `metric_resolve` matched the concept, the ONLY sanctioned number
+     source is `metric_compute`'s table — ad-hoc SQL for that concept is unblessed and must not be
+     presented as the metric's value.
+rag_partitions: []

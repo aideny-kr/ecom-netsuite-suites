@@ -142,6 +142,8 @@ def _all_known_tool_names_for_tenant_with_every_connector() -> set[str]:
         "sheets_create",
         "sheets_write_range",
         "sheets_read_range",
+        "metric_resolve",
+        "metric_compute",
         # Added by build_all_tool_definitions (result_reference_tool)
         "reference_previous_result",
     }

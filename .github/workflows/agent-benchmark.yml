@@ -10,6 +10,11 @@ on:
       - 'backend/app/services/benchmarks/**'
       - 'backend/tests/agent_benchmarks/**'
       - '.github/workflows/agent-benchmark.yml'
+      # Metric catalog paths (grill R2#19): changes to metric definitions,
+      # compute logic, or the seeding migration should trigger the benchmark
+      # so that named-metric routing regressions are caught automatically.
+      - 'backend/app/services/metrics/**'
+      - 'backend/alembic/versions/080_metric_definitions.py'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -98,11 +103,42 @@ jobs:
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Run vs-MCP agent benchmark
+      - name: Run vs-MCP agent benchmark (sales suite)
         if: steps.check_secret.outputs.skip != 'true'
         run: |
           cd backend && python -m app.services.benchmarks.run_vs_mcp \
             --suite sales \
+            --tenant-id ce3dfaad-626f-4992-84e9-500c8291ca0a \
+            --skip-baseline \
+            --no-llm-judge
+
+      - name: Run vs-MCP agent benchmark (metric case)
+        if: steps.check_secret.outputs.skip != 'true'
+        # Non-blocking (report-only) — see continue-on-error below.
+        # NEW-4 fix: the metric_net_margin_last_quarter case is NOT in the
+        # 'sales' suite (its case_id starts with 'metric_', not 'sales_'),
+        # so --suite sales excluded it entirely. This dedicated step ensures
+        # the metric routing gate is actually exercised + reported in CI.
+        #
+        # Why report-only (not a hard gate yet): in branch CI there is no live
+        # NetSuite connection AND net_margin's leaves seed as DRAFT placeholders
+        # (uncomputable by design, §D3), so even a perfectly-routed
+        # metric_compute call returns missing_dependency — the agent then
+        # reasonably falls back to direct NetSuite tools, tripping the
+        # "metric_compute bypass" gate. Routing for named metrics is currently
+        # prompt-guided (§D2), not enforced, so this assertion is aspirational
+        # and non-deterministic in a degraded env. The sales-suite step above
+        # stays a hard gate; this one tracks the routing target without blocking.
+        #
+        # TODO(metrics/grill-R2#19): flip back to a HARD gate (drop
+        # continue-on-error) once (a) routing for named metrics is enforced
+        # (§D2) and (b) a computable metric fixture + live ANTHROPIC_API_KEY are
+        # reliably available in branch CI — then also run WITHOUT --skip-baseline
+        # / --no-llm-judge so it proves "our agent >= Claude+MCP baseline".
+        continue-on-error: true
+        run: |
+          cd backend && python -m app.services.benchmarks.run_vs_mcp \
+            --case metric_net_margin_last_quarter \
             --tenant-id ce3dfaad-626f-4992-84e9-500c8291ca0a \
             --skip-baseline \
             --no-llm-judge

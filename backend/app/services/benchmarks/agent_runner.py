@@ -120,6 +120,13 @@ class AgentRunResult:
     num_steps: int = 0
     context_chars: int = 0
 
+    # Metric data_table payloads — extracted from tool_calls_log for the
+    # value-absent invariant check (NEW-4). Each entry is the result_payload
+    # dict from a metric_compute tool call: {"kind": "table",
+    # "columns": ["Metric","Value","Unit","Period"], "rows": [[...]], ...}.
+    # Populated only when metric_compute is called; empty list otherwise.
+    metric_data_tables: list[dict] = field(default_factory=list)
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -212,6 +219,34 @@ def _count_steps(tool_calls_log: list[dict]) -> int:
         return 0
     steps = {entry.get("step", 0) for entry in tool_calls_log}
     return len(steps)
+
+
+def _extract_metric_data_tables(tool_calls_log: list[dict]) -> list[dict]:
+    """Extract result_payload dicts for metric_compute tool calls (NEW-4).
+
+    The value-absent invariant check needs the raw data_table rows from
+    metric_compute results so it can verify the computed number did NOT leak
+    into the model's text answer. This helper scans tool_calls_log for any
+    entry whose result_payload looks like a metric data_table (columns list
+    starts with ["Metric","Value","Unit","Period"]) and returns those payloads.
+
+    Only entries where result_payload carries the expected metric shape are
+    collected — unrelated tool results are ignored so non-metric benchmarks
+    are unaffected.
+    """
+    _METRIC_COLUMNS_PREFIX = ["Metric", "Value", "Unit", "Period"]
+    result: list[dict] = []
+    for entry in tool_calls_log or []:
+        payload = entry.get("result_payload")
+        if not isinstance(payload, dict):
+            continue
+        cols = payload.get("columns")
+        if not isinstance(cols, list):
+            continue
+        # Match on the first 4 column names — must be exactly the metric shape.
+        if cols[:4] == _METRIC_COLUMNS_PREFIX:
+            result.append(payload)
+    return result
 
 
 def _build_adapter(*, provider: str, api_key: str):
@@ -504,6 +539,10 @@ async def run_agent(
     result.tool_calls = _tool_log_to_baseline_shape(agent_result.tool_calls_log)
     result.num_steps = _count_steps(agent_result.tool_calls_log)
     result.confidence_score = agent_result.confidence_score
+    # NEW-4: capture metric data_table payloads for the value-absent invariant
+    # check. Populated from the original tool_calls_log (before normalization)
+    # so the columns/rows structure is preserved for value extraction.
+    result.metric_data_tables = _extract_metric_data_tables(agent_result.tool_calls_log)
     result.success = True
     result.latency_ms = int((time.monotonic() - start) * 1000)
     return result

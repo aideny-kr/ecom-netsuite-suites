@@ -102,6 +102,16 @@ class Case:
     notes: str
     baseline_expected_tools: list[str]
     baseline_expected_accuracy: float
+    # NEW-4: if True, the runner verifies that the computed metric value
+    # does NOT appear verbatim in the model's text answer (anti-hallucination
+    # invariant). Hard-fails the case (score = 0.0) on violation.
+    computed_value_absent: bool = False
+    # NEW-4a: when set, the runner enforces routing IDENTITY — the specific
+    # named metric (identified by its key in the data_table's `query` field)
+    # must appear in the metric_data_tables. If only unrelated metrics were
+    # computed, the gate hard-fails with a routing-identity reason.
+    # When None (default), the existing "any metric table" behavior is kept.
+    expected_metric_key: str | None = None
 
 
 def _load_case_file(path: Path) -> Case:
@@ -118,6 +128,8 @@ def _load_case_file(path: Path) -> Case:
         notes=str(data.get("notes", "")),
         baseline_expected_tools=data.get("baseline_expected_tools", []),
         baseline_expected_accuracy=float(data.get("baseline_expected_accuracy", 0.7)),
+        computed_value_absent=bool(data.get("computed_value_absent", False)),
+        expected_metric_key=data.get("expected_metric_key") or None,
     )
 
 
@@ -207,6 +219,108 @@ def _score_tools(
         if any(expected in used for used in used_names):
             hits += 1
     return hits / len(expected_tools)
+
+
+# ---------------------------------------------------------------------------
+# Metric value extraction — NEW-4 value-absent invariant
+# ---------------------------------------------------------------------------
+
+
+def _extract_computed_values_from_metric_tables(
+    metric_data_tables: list[dict],
+) -> list[str]:
+    """Extract the computed Value cell(s) from metric data_table payloads.
+
+    Metric data_tables produced by metric_compute have the shape:
+        columns: ["Metric", "Value", "Unit", "Period"]
+        rows:    [[display_name, value, unit, period], ...]
+
+    The Value cell is at index 1 in each row. We collect the raw value and
+    its str() form so downstream matching is forgiving of type differences
+    (e.g. float 12.5 vs string "12.5").
+
+    Returns a deduplicated list of string representations of the value.
+    Empty list if no metric payloads or no rows.
+    """
+    _METRIC_COLUMNS_PREFIX = ["Metric", "Value", "Unit", "Period"]
+    values: list[str] = []
+    seen: set[str] = set()
+
+    for payload in metric_data_tables or []:
+        cols = payload.get("columns")
+        rows = payload.get("rows")
+        if not isinstance(cols, list) or cols[:4] != _METRIC_COLUMNS_PREFIX:
+            continue
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, (list, tuple)) or len(row) < 2:
+                continue
+            raw_value = row[1]
+            # Collect the raw form and str() form
+            for candidate in (raw_value, str(raw_value)):
+                s = str(candidate).strip()
+                if s and s not in seen:
+                    seen.add(s)
+                    values.append(s)
+
+    return values
+
+
+def _classify_metric_compute_routing(
+    tool_calls: list[dict],
+    expected_metric_key: str | None,
+) -> str:
+    """Tristate classifier for NEW-4a metric_compute routing.
+
+    De-conflates three cases that ALL yield an empty metric_data_tables list:
+      - a genuine BYPASS (metric_compute never invoked → ad-hoc SuiteQL),
+      - a correctly-routed call that produced NO value (errored/empty — e.g.
+        net_margin over draft leaves returns missing_dependency), and
+      - a call against the WRONG metric key.
+
+    Returns one of:
+      - "not_invoked"     — no metric_compute call in tool_calls.
+      - "invoked_correct" — metric_compute was called and routing is satisfied.
+      - "invoked_wrong"   — metric_compute was called, key(s) were logged, and
+                            none matched the expected key.
+
+    Name matching is a substring test (consistent with _score_tools) so
+    ext-prefixed / sanitized names like `ext__<hex>__metric_compute` still
+    count as invoked. The metric key is read from each entry's top-level
+    `input["key"]` (registry.py puts the key at the top level). A malformed
+    entry whose `input` is not a dict is treated as carrying no key.
+
+    Graceful fallback: when metric_compute WAS invoked but no entry logged a
+    non-empty `key` at all, we return "invoked_correct" — a logging gap must
+    not flip a real routing into a false bypass. The strict identity check on
+    the populated-table path (which reads the data_table `query` field) is
+    unaffected by this fallback.
+    """
+    metric_entries = [
+        tc for tc in (tool_calls or []) if "metric_compute" in str(tc.get("name") or tc.get("tool") or "")
+    ]
+    if not metric_entries:
+        return "not_invoked"
+    if not expected_metric_key:
+        return "invoked_correct"
+
+    logged_keys: list[str] = []
+    for tc in metric_entries:
+        inp = tc.get("input")
+        if not isinstance(inp, dict):
+            continue
+        key = inp.get("key")
+        if isinstance(key, str) and key.strip():
+            logged_keys.append(key.strip())
+
+    if expected_metric_key in logged_keys:
+        return "invoked_correct"
+    if logged_keys:
+        # Key(s) WERE logged and none matched the expected metric.
+        return "invoked_wrong"
+    # metric_compute invoked but NO key was logged anywhere — graceful fallback.
+    return "invoked_correct"
 
 
 # ---------------------------------------------------------------------------
@@ -361,6 +475,168 @@ async def _run_single_case(
             answer_preview=(agent_result.answer_text or "")[:240],
         )
         print(f"    ours score rationale: {ours_rationale}")
+
+        # NEW-4: value-absent invariant check for metric cases.
+        # When the case declares computed_value_absent: true, the agent MUST
+        # have routed through metric_compute (evidenced by metric_data_tables
+        # being non-empty), AND the computed numeric value from the data_table
+        # must NOT appear in the model's text answer (anti-hallucination).
+        #
+        # NEW-4a: if no metric data_table was produced, metric_compute was
+        # bypassed entirely — hard-fail regardless of answer content. The gate
+        # enforces that a named-metric ask uses the blessed catalog path.
+        # Without this, an agent that answers via ad-hoc SuiteQL would pass
+        # vacuously (no values to check → check skipped → OURS ONLY).
+        #
+        # NEW-4b: value leak detection uses value_leak_variants() to catch
+        # common alternate numeric renderings (0.125 for 12.5%, 12,500 for
+        # 12500, etc.) — not just exact-substring matching.
+        if case.computed_value_absent and agent_result.success:
+            from app.services.benchmarks.scorer import assert_computed_value_absent
+
+            computed_values = _extract_computed_values_from_metric_tables(agent_result.metric_data_tables)
+            if not computed_values:
+                # NEW-4a: no metric data_table was produced. This is ambiguous —
+                # it can mean (a) a genuine BYPASS (metric_compute never called),
+                # (b) a correctly-routed call that errored/produced no value (e.g.
+                # net_margin over draft leaves → missing_dependency), or (c) a
+                # call against the WRONG metric. The tristate classifier reads the
+                # logged tool_calls to de-conflate them (the errored result dict
+                # is not a metric data_table, but the tool_call is logged).
+                routing = _classify_metric_compute_routing(
+                    agent_result.tool_calls,
+                    case.expected_metric_key,
+                )
+                if routing == "not_invoked":
+                    # Genuine bypass — metric_compute was never invoked. Hard-fail:
+                    # the metric gate requires the blessed routing was used.
+                    bypass_reason = (
+                        "metric case did not route through metric_compute "
+                        "(no metric data_table produced) — metric_compute bypass detected"
+                    )
+                    print(f"    [NEW-4a] HARD FAIL: {bypass_reason}")
+                    ours_side = SideScore(
+                        answer_acc=0.0,
+                        tool_acc=ours_side.tool_acc,
+                        cost_usd=ours_side.cost_usd,
+                        latency_ms=ours_side.latency_ms,
+                        success=False,
+                        error=bypass_reason,
+                        answer_preview=ours_side.answer_preview,
+                    )
+                elif routing == "invoked_wrong":
+                    # metric_compute was called, but for the WRONG metric — routing
+                    # identity is not satisfied. Hard-fail with the SAME wording as
+                    # the populated-table identity check so error text is consistent.
+                    computed_keys = sorted(
+                        {
+                            str(tc.get("input", {}).get("key", "")).strip()
+                            for tc in (agent_result.tool_calls or [])
+                            if isinstance(tc.get("input"), dict) and str(tc.get("input", {}).get("key", "")).strip()
+                        }
+                    )
+                    identity_reason = (
+                        f"expected metric '{case.expected_metric_key}' was not computed "
+                        f"(routing identity not satisfied); "
+                        f"computed metric keys: {computed_keys or '(none)'}"
+                    )
+                    print(f"    [NEW-4a] HARD FAIL: {identity_reason}")
+                    ours_side = SideScore(
+                        answer_acc=0.0,
+                        tool_acc=ours_side.tool_acc,
+                        cost_usd=ours_side.cost_usd,
+                        latency_ms=ours_side.latency_ms,
+                        success=False,
+                        error=identity_reason,
+                        answer_preview=ours_side.answer_preview,
+                    )
+                else:
+                    # "invoked_correct": metric_compute WAS correctly routed but
+                    # produced no value (errored/empty). Routing is satisfied;
+                    # value-absent is vacuously satisfied (no value to leak). Do
+                    # NOT bypass-fail and do NOT run assert_computed_value_absent —
+                    # leave ours_side as the normal scored result.
+                    print(
+                        "    [NEW-4a] metric_compute invoked, no value produced "
+                        "(errored/empty) — routing satisfied, value-absent vacuous"
+                    )
+            else:
+                # NEW-4a routing-identity check: when expected_metric_key is set,
+                # enforce that the SPECIFIC blessed metric was computed — not just
+                # "any metric table". The key is read from each data_table's `query`
+                # field (metric_compute sets query = the metric key). If no table
+                # matches, hard-fail: the agent may have answered via an unrelated
+                # metric then used ad-hoc SuiteQL for the actual answer.
+                if case.expected_metric_key:
+                    computed_keys = {str(t.get("query", "")).strip() for t in (agent_result.metric_data_tables or [])}
+                    if case.expected_metric_key not in computed_keys:
+                        identity_reason = (
+                            f"expected metric '{case.expected_metric_key}' was not computed "
+                            f"(routing identity not satisfied); "
+                            f"computed metric keys: {sorted(computed_keys) or '(none)'}"
+                        )
+                        print(f"    [NEW-4a] HARD FAIL: {identity_reason}")
+                        ours_side = SideScore(
+                            answer_acc=0.0,
+                            tool_acc=ours_side.tool_acc,
+                            cost_usd=ours_side.cost_usd,
+                            latency_ms=ours_side.latency_ms,
+                            success=False,
+                            error=identity_reason,
+                            answer_preview=ours_side.answer_preview,
+                        )
+                    else:
+                        # Scope the value-absent check to ONLY the tables whose
+                        # query == expected_metric_key. A multi-metric result may
+                        # legitimately narrate an UNRELATED metric's value in prose
+                        # (e.g. gross_revenue 500000) while withholding the blessed
+                        # metric's value — checking the broad computed_values would
+                        # false-fail (and mis-blame the first value). The identity
+                        # check above guarantees >= 1 matching table.
+                        scoped_tables = [
+                            t
+                            for t in (agent_result.metric_data_tables or [])
+                            if str(t.get("query", "")).strip() == case.expected_metric_key
+                        ]
+                        scoped_values = _extract_computed_values_from_metric_tables(scoped_tables)
+                        value_absent_ok = assert_computed_value_absent(agent_result.answer_text, scoped_values)
+                        if not value_absent_ok:
+                            # NEW-4b: a numeric variant of the computed value leaked into
+                            # the answer — SSE interception was bypassed. Hard-fail.
+                            leaked_value = scoped_values[0] if scoped_values else case.expected_metric_key
+                            violation_reason = (
+                                f"computed_value_absent violated: a numeric variant of "
+                                f"'{leaked_value}' appeared in the answer"
+                            )
+                            print(f"    [NEW-4b] HARD FAIL: {violation_reason}")
+                            ours_side = SideScore(
+                                answer_acc=0.0,
+                                tool_acc=ours_side.tool_acc,
+                                cost_usd=ours_side.cost_usd,
+                                latency_ms=ours_side.latency_ms,
+                                success=False,
+                                error=violation_reason,
+                                answer_preview=ours_side.answer_preview,
+                            )
+                else:
+                    value_absent_ok = assert_computed_value_absent(agent_result.answer_text, computed_values)
+                    if not value_absent_ok:
+                        # NEW-4b: a numeric variant of the computed value leaked into
+                        # the answer — SSE interception was bypassed. Hard-fail.
+                        violation_reason = (
+                            f"computed_value_absent violated: a numeric variant of "
+                            f"'{computed_values[0]}' appeared in the answer"
+                        )
+                        print(f"    [NEW-4b] HARD FAIL: {violation_reason}")
+                        ours_side = SideScore(
+                            answer_acc=0.0,
+                            tool_acc=ours_side.tool_acc,
+                            cost_usd=ours_side.cost_usd,
+                            latency_ms=ours_side.latency_ms,
+                            success=False,
+                            error=violation_reason,
+                            answer_preview=ours_side.answer_preview,
+                        )
 
     # Run baseline
     if skip_baseline:

@@ -16,6 +16,46 @@ export interface DataTableData {
   row_count: number;
   query: string;
   truncated: boolean;
+  /** True when this table came from metric_compute (suppress_llm_value=true in the SSE payload).
+   *  When set, the component must hide SuiteQL-specific affordances (query expander,
+   *  re-run/export-as-query, save-query) because `query` is a metric key, not SQL. */
+  isMetric?: boolean;
+}
+
+/**
+ * Single source of truth for deciding whether a data_table is a metric table.
+ *
+ * Metric tables (from metric_compute) carry `suppress_llm_value: true` on the raw/persisted
+ * SSE payload; the FE-only derived `isMetric` flag is set from it. This helper is idempotent
+ * over BOTH shapes that reach it:
+ *   (a) the raw persisted/SSE shape carrying snake_case `suppress_llm_value`, and
+ *   (b) an already-normalized DataTableData that already has a boolean `isMetric`.
+ *
+ * It MUST be the one place that decides metric-ness so the live-stream path and the
+ * hydration path cannot drift. Uses strict `=== true` (no truthy-string coercion) and
+ * relies SOLELY on the authoritative flag(s) — never a columns/query heuristic, which
+ * would risk locking down a legitimate SuiteQL query whose columns happen to be
+ * Metric/Value/Unit/Period.
+ */
+export function deriveDataTableIsMetric(d: Record<string, unknown>): boolean {
+  return d.isMetric === true || d.suppress_llm_value === true;
+}
+
+/**
+ * Coerce a raw persisted/SSE data_table payload into a fully-typed DataTableData, deriving
+ * `isMetric` via deriveDataTableIsMetric. Mirrors the field coercions in normalizeStreamEvent's
+ * data_table branch. Idempotent: feeding an already-normalized object back through it preserves
+ * `isMetric` (recovered from `suppress_llm_value` if the camelCase flag was somehow dropped).
+ */
+export function coerceDataTableData(d: Record<string, unknown>): DataTableData {
+  return {
+    columns: Array.isArray(d.columns) ? (d.columns as string[]) : [],
+    rows: Array.isArray(d.rows) ? (d.rows as unknown[][]) : [],
+    row_count: typeof d.row_count === "number" ? d.row_count : 0,
+    query: typeof d.query === "string" ? d.query : "",
+    truncated: Boolean(d.truncated),
+    isMetric: deriveDataTableIsMetric(d),
+  };
 }
 
 export interface TaskOutputData {
@@ -276,6 +316,11 @@ export function normalizeStreamEvent(data: Record<string, unknown>): ChatStreamE
         row_count: typeof d.row_count === "number" ? d.row_count : 0,
         query: typeof d.query === "string" ? d.query : "",
         truncated: Boolean(d.truncated),
+        // Derive isMetric via the shared helper so the live-stream path and the
+        // hydration path (page.tsx) cannot drift. metric_compute sets suppress_llm_value
+        // to signal that `query` is a metric key (not SQL) and the LLM should not narrate
+        // the value. The FE uses isMetric to hide SQL-specific affordances.
+        isMetric: deriveDataTableIsMetric(d),
       },
     };
   }

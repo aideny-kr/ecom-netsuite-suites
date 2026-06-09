@@ -21,6 +21,7 @@ from app.api.v1 import (
     jobs,
     learned_rules,
     mcp_connectors,
+    metrics,
     netsuite_api_logs,
     netsuite_auth,
     netsuite_metadata,
@@ -81,3 +82,4 @@ api_router.include_router(agent_instructions.router)
 api_router.include_router(connector_status.router)
 api_router.include_router(drive_folders.router)
 api_router.include_router(reconciliation.router)
+api_router.include_router(metrics.router)

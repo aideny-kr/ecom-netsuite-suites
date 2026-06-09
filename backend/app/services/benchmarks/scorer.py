@@ -277,6 +277,289 @@ async def llm_judge_score(
     return ScoreResult(score=round(score, 3), rationale=str(rationale)[:300], source="llm_judge")
 
 
+# ---------------------------------------------------------------------------
+# Value-absent scorer — anti-hallucination invariant for metric cases
+# ---------------------------------------------------------------------------
+
+
+def value_leak_variants(value: str) -> set[str]:
+    """Generate a set of numeric rendering variants for a computed value.
+
+    NEW-4b: The original check only caught exact-substring matches (e.g.
+    "12.5" in "Your margin is 12.5%"). This helper broadens the check to
+    catch common alternate renderings of the *same* number so that an agent
+    writing "~12%", "0.125", "12,500", or "12500" (instead of "12.5%") is
+    still detected as a leak.
+
+    Variants generated (all DERIVED variants length >= 2, deterministic):
+      - raw value and stripped forms (remove $, %, ,, whitespace)
+      - if parseable as float:
+          - integer form (e.g. 12.0 → "12")
+          - 1-decimal rounded form (e.g. 12.567 → "12.6")
+          - 2-decimal rounded form (e.g. 12.567 → "12.57")
+          - thousands-separated form (e.g. 12500 → "12,500")
+          - thousands-unseparated form (e.g. "12,500" → "12500")
+          - percent-scaled variants (both directions):
+              • if value looks like a percent (N or N%), divide by 100
+                (e.g. 12.5 → "0.125", "0.13")
+              • if value looks like a 0–1 proportion, multiply by 100
+                (e.g. 0.125 → "12.5", "12.5%") — includes both the
+                decimal form ("5.0%") AND the trailing-zero-stripped
+                form ("5%") so that "5%" is caught even when the
+                scaled-up value happens to be a whole number.
+
+    The min-length-2 guard applies to DERIVED variants only (to avoid
+    trivial false positives from single-digit tokens like "5" matching
+    "in 5 years"). The raw value and its stripped form are returned as-is
+    — the caller (assert_computed_value_absent) is responsible for
+    deciding whether to check length-1 raw values.
+
+    HEURISTIC LIMITS (this is a CI safety-net, not an authoritative guard):
+      - Word-form numbers ("twelve point five", "five percent") are NOT
+        generated — pure substring matching cannot identify them without NLP.
+      - Arbitrary rounding (e.g. agent writes "~13%" for 12.8%) may evade
+        detection if the rounding lands outside the generated variant set.
+      - Novel renderings (scientific notation, fractions, locale-specific
+        separators) are not covered.
+      The authoritative anti-hallucination guarantee is the runtime
+      ``suppress_llm_value`` SSE interception in the agent pipeline, not
+      this benchmark gate. This heuristic exists only to catch accidental
+      bypasses during CI; treat a passing gate as "probably OK", not
+      "guaranteed clean".
+
+    Args:
+        value: A raw string value cell from a metric data_table row.
+
+    Returns:
+        A set of string variants (all lowercase-safe — callers lowercase
+        both sides for case-insensitive matching). The raw value itself
+        is included even if length < 2; all DERIVED variants are filtered
+        to length >= 2 to avoid trivial false positives.
+    """
+    _MIN_LEN = 2
+    variants: set[str] = set()
+
+    # --- Always include raw and progressively stripped forms (length >= 2) ---
+    # NOTE: single-char raw values (e.g. "0", "5") are intentionally excluded
+    # from the returned set — value_leak_variants generates variants for DERIVED
+    # forms; the raw single-char bypass lives in assert_computed_value_absent
+    # which always checks the raw value separately. This keeps the variant set
+    # free of length-1 tokens that would generate false positives in other contexts.
+    raw = value.strip()
+    if len(raw) >= 2:
+        variants.add(raw)
+
+    # Strip currency/percent/comma/space to get a "clean" string
+    stripped = re.sub(r"[\$%,\s]", "", raw)
+    if len(stripped) >= 2:
+        variants.add(stripped)
+
+    # Also strip just $ or % individually to catch "$12.5" → "12.5"
+    for ch in ("$", "%", ","):
+        s = raw.replace(ch, "").strip()
+        if len(s) >= 2:
+            variants.add(s)
+
+    # For raw values that look like percent strings (e.g. "5.0%", "12.5%"),
+    # also add the trailing-zero-stripped form with % suffix:
+    #   "5.0%" → "5%", "12.0%" → "12%"
+    # This ensures "5%" is caught when the stored value is "5.0%".
+    if raw.endswith("%"):
+        numeric_part = raw[:-1].strip()
+        # Strip trailing zeros from the numeric part, then re-add "%"
+        stripped_num = numeric_part.rstrip("0").rstrip(".")
+        if stripped_num:
+            pct_no_trailing_zero = stripped_num + "%"
+            variants.add(pct_no_trailing_zero)
+
+    # --- Numeric forms (derived variants — apply min-length-2 guard) ---
+    # Try to parse as float (handles "12.5", "12.5%", "$12,500", etc.)
+    try:
+        numeric_str = re.sub(r"[\$%,\s]", "", raw)
+        num = float(numeric_str)
+    except (ValueError, TypeError):
+        # Non-numeric: return what we have so far (raw + stripped forms, all >= 2)
+        variants.discard("")
+        return variants
+
+    # Integer form
+    int_form = str(int(round(num)))
+    if len(int_form) >= _MIN_LEN:
+        variants.add(int_form)
+
+    # 1-decimal and 2-decimal rounded forms
+    for dp in (1, 2):
+        f = f"{num:.{dp}f}"
+        if len(f) >= _MIN_LEN:
+            variants.add(f)
+
+    # Thousands-separated (only meaningful for |num| >= 1000)
+    abs_num = abs(num)
+    if abs_num >= 1000:
+        # Use Python's locale-independent thousands grouping
+        sep_form = f"{num:,.0f}"  # e.g. "12,500"
+        if len(sep_form) >= _MIN_LEN:
+            variants.add(sep_form)
+        # Also add 2-dp thousands form for fractional thousands
+        sep_form2 = f"{num:,.2f}"
+        if len(sep_form2) >= _MIN_LEN:
+            variants.add(sep_form2)
+
+    # Unseparated form — strip commas from the raw value
+    unsep = re.sub(r",", "", raw.replace("$", "").replace("%", "").strip())
+    if len(unsep) >= _MIN_LEN:
+        variants.add(unsep)
+
+    # --- Percent-scaling (both directions) ---
+    # If num is in a typical percent range (0.1 .. 1000), also include /100 form
+    if 0.1 <= abs_num <= 1000:
+        scaled_down = num / 100.0
+        # 2-decimal and 3-decimal forms of the scaled-down value
+        for dp in (2, 3, 4):
+            f = f"{scaled_down:.{dp}f}"
+            # Strip trailing zeros after decimal but keep at least 2 chars
+            f_stripped = f.rstrip("0").rstrip(".")
+            for candidate in (f, f_stripped):
+                if len(candidate) >= _MIN_LEN:
+                    variants.add(candidate)
+
+    # If num is in a 0–1 range (looks like a proportion), also include *100 form.
+    # Generate both the decimal form ("5.0%") AND the trailing-zero-stripped form
+    # ("5%") so that an answer writing "5%" instead of "5.0%" is still caught.
+    if 0.001 <= abs_num <= 1.0:
+        scaled_up = num * 100.0
+        for dp in (0, 1, 2):
+            f = f"{scaled_up:.{dp}f}"
+            if len(f) >= _MIN_LEN:
+                variants.add(f)
+        # Decimal form with % suffix (e.g. "5.0%")
+        pct_decimal = f"{scaled_up:.1f}%"
+        if len(pct_decimal) >= _MIN_LEN:
+            variants.add(pct_decimal)
+        # Trailing-zero-stripped form with % suffix (e.g. "5%" from "5.0%")
+        pct_stripped = f"{scaled_up:.1f}".rstrip("0").rstrip(".") + "%"
+        if len(pct_stripped) >= _MIN_LEN:
+            variants.add(pct_stripped)
+        # Also add stripped form without % (e.g. "5" from "5.0") — length >= 2 guard
+        pct_no_pct = f"{scaled_up:.1f}".rstrip("0").rstrip(".")
+        if len(pct_no_pct) >= _MIN_LEN:
+            variants.add(pct_no_pct)
+
+    # Remove empty strings; keep short raw forms (handled by caller).
+    # For DERIVED numeric variants, enforce min-length-2 to avoid false positives.
+    # We preserve the raw + stripped forms (added before numeric parsing) at any
+    # length — the caller decides whether to apply a length gate on those.
+    variants.discard("")
+    return variants
+
+
+def assert_computed_value_absent(
+    answer_text: str,
+    computed_values: list[str],
+) -> bool:
+    """Return True if none of the computed_values (or their numeric variants)
+    appear in answer_text.
+
+    NEW-4b strengthening: instead of exact-substring matching only, this
+    function expands each computed value to a set of numeric rendering
+    variants via value_leak_variants() and checks all of them. This catches
+    common alternate renderings of the same number:
+      - "0.125" when the value is "12.5%" (percent → 0-1 scaled)
+      - "12,500" when the value is "12500" (thousands separator)
+      - "12500" when the value is "12,500" (unseparated)
+      - "12" when the value is "12.5%" (integer form)
+      - "$12.5" → "12.5" (currency stripped)
+      - "5%" when the value is "0.05" (proportion scaled up, no trailing .0)
+      - "0" when the computed value is literally "0" (single-char raw bypass)
+
+    Min-length-2 guard strategy (NEW-4b round 4):
+      The raw value and its stripped form are ALWAYS checked regardless of
+      length — a computed value of "0" that leaks into the answer must be
+      detected. The min-length-2 guard is applied only to DERIVED variants
+      (integer-of-decimal, percent-scaled forms, etc.) to prevent trivial
+      false positives from short tokens matching common words.
+
+    HEURISTIC LIMITS (this is a CI safety-net, not an authoritative guard):
+      - Word-form numbers ("twelve point five", "five percent") are NOT
+        detected — pure substring heuristics cannot identify them without NLP.
+      - Arbitrary rounding or novel renderings (scientific notation,
+        locale-specific separators, fractions) may evade detection.
+      The authoritative anti-hallucination guarantee is the runtime
+      ``suppress_llm_value`` SSE interception in the agent pipeline, not
+      this benchmark gate. Treat a passing gate as "probably OK", not
+      "guaranteed clean".
+
+    Args:
+        answer_text: The model's final text answer.
+        computed_values: Numeric or string values extracted from the
+            data_table / tool result (e.g. ["12.5", "12.5%"]).
+
+    Returns:
+        True  — no value (or numeric variant) leaked into the answer
+                (invariant holds).
+        False — at least one variant appears as a substring in the answer
+                (invariant violated; scorer should cap the case score at 0.0).
+
+    How it is wired into the benchmark runner:
+        Cases that declare `computed_value_absent: true` in their YAML opt
+        into this check. The runner extracts numeric strings from the
+        data_table SSE payload returned by metric_compute, then calls this
+        function. A False result hard-fails the case (score = 0.0) regardless
+        of any keyword hits — it means the anti-hallucination SSE interception
+        was bypassed.
+
+    Usage::
+
+        from app.services.benchmarks.scorer import assert_computed_value_absent
+
+        ok = assert_computed_value_absent(
+            answer_text=agent_result.answer_text,
+            computed_values=["12.5", "12.5%"],
+        )
+        if not ok:
+            # Metric value leaked into model answer — hard fail
+            case_score = 0.0
+    """
+    if not computed_values or not answer_text:
+        return True
+    lower_answer = answer_text.lower()
+    for value in computed_values:
+        # Build the full set of derived variants for this value.
+        variants = value_leak_variants(value)
+
+        # The raw value and its stripped form must ALWAYS be checked,
+        # even if length < 2 (e.g. a computed value of "0" must not leak).
+        # The min-length-2 guard applies only to the DERIVED variants inside
+        # value_leak_variants() — not to the original raw value itself.
+        raw = value.strip()
+        stripped = re.sub(r"[\$%,\s]", "", raw)
+
+        # Check raw and stripped forms at any length (single-char bypass).
+        # For a SINGLE-CHAR word-character candidate (e.g. "0", "5"), require a
+        # word-boundary match so an incidental digit inside a larger number
+        # ("0" in "2020", "5" in "2025") does NOT false-positive — only a
+        # standalone token counts as a leak. Multi-char candidates keep exact
+        # substring behavior. A single-char NON-word candidate (defensive: a
+        # bare "-", or "%"/"$" which \b can never bound) falls back to the
+        # substring check so single-char detection is never silently lost.
+        for candidate in (raw, stripped):
+            if not candidate:
+                continue
+            cand_lower = candidate.lower()
+            if len(candidate) < 2 and re.fullmatch(r"\w", candidate):
+                if re.search(rf"\b{re.escape(cand_lower)}\b", lower_answer):
+                    return False
+            elif cand_lower in lower_answer:
+                return False
+
+        # Check derived variants at length >= 2 only
+        for candidate in variants:
+            if len(candidate) >= 2 and candidate.lower() in lower_answer:
+                return False
+
+    return True
+
+
 def _parse_judge_json(raw: str) -> dict | None:
     """Best-effort JSON parse of judge output."""
     if not raw:

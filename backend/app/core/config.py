@@ -58,6 +58,10 @@ class Settings(BaseSettings):
     CHAT_RAG_TOP_K: int = 5
     CHAT_MAX_INPUT_CHARS: int = 32000
 
+    BIGQUERY_ALLOWED_DATASETS: str = (
+        ""  # comma-separated dataset allowlist for metric BigQuery exec; empty = no restriction
+    )
+
     NETSUITE_SUITEQL_MAX_ROWS: int = 50000
     NETSUITE_SUITEQL_TIMEOUT: int = 60
     NETSUITE_SUITEQL_ALLOWED_TABLES: str = (

@@ -21,6 +21,7 @@ from app.models.domain_knowledge import DomainKnowledgeChunk
 from app.models.experiment_log import ExperimentLog
 from app.models.job import Job
 from app.models.mcp_connector import McpConnector
+from app.models.metric_definition import SYSTEM_TENANT_ID, MetricDefinition  # noqa: F401
 from app.models.netsuite_api_log import NetSuiteApiLog
 from app.models.netsuite_metadata import NetSuiteMetadata
 from app.models.onboarding_checklist import OnboardingChecklistItem
@@ -72,6 +73,7 @@ __all__ = [
     "ChatMessage",
     "DocChunk",
     "McpConnector",
+    "MetricDefinition",
     "NetSuiteMetadata",
     "Workspace",
     "WorkspaceFile",

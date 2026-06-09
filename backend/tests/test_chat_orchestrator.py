@@ -58,5 +58,7 @@ class TestAllowedChatToolsFromOld:
             "sheets.create",
             "sheets.write_range",
             "sheets.read_range",
+            "metric.resolve",
+            "metric.compute",
         }
         assert ALLOWED_CHAT_TOOLS == expected

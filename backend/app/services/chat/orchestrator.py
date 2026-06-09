@@ -21,6 +21,7 @@ from app.core.config import settings
 from app.services.chat.prompt_cache import split_system_prompt
 from app.services.chat.tool_categories import categorize
 from app.services.drive_rag.retriever import retrieve_drive_chunks
+from app.services.metrics.metric_compute import condense_metric_for_llm, is_suppressed_metric_payload
 
 # Regex to strip leaked Anthropic tool-call XML from assistant text
 _TOOL_XML_RE = re.compile(r"</?(?:invoke|parameter|tool_use)[^>]*>", re.DOTALL)
@@ -681,6 +682,9 @@ def _is_saved_search_tool(tool_name: str) -> bool:
     return False
 
 
+_METRIC_COMPUTE_TOOLS = frozenset({"metric_compute", "metric.compute"})
+
+
 def _compute_source_pin_update(tool_calls_log: list[dict]) -> str | None:
     """Decide whether a turn's tool calls should update session.source_pin.
 
@@ -699,6 +703,20 @@ def _compute_source_pin_update(tool_calls_log: list[dict]) -> str | None:
         # Support both "tool_name" (test fixtures) and "tool" (build_tool_call_log_entry)
         name = call.get("tool_name") or call.get("tool", "")
         cat = categorize(name)
+
+        # M4: metric_compute is categorized as "data_table" but its actual source
+        # depends on which backend executed the query (BigQuery vs SuiteQL vs expression).
+        # Read source_kind from the result_payload (set by extract_result_payload for
+        # metric payloads) rather than blindly treating "data_table" as NetSuite.
+        if name in _METRIC_COMPUTE_TOOLS:
+            source_kind = (call.get("result_payload") or {}).get("source_kind")
+            if source_kind == "bigquery":
+                used_bq = True
+            elif source_kind == "suiteql":
+                used_ns = True
+            # expression or missing source_kind → source-agnostic; contribute nothing
+            continue
+
         if cat == "bigquery":
             used_bq = True
         elif cat in {"data_table", "financial"}:
@@ -807,6 +825,24 @@ def _intercept_tool_result(
             "query": query,
             "truncated": truncated,
         }
+        # Metric trust boundary: a metric_data_table is a single computed number.
+        # The SSE event_data above STILL carries the full rows (the FE renders the
+        # value), but the LLM-facing condensed string must withhold every row value
+        # so the model cannot state or recompute the number (anti-hallucination
+        # invariant). Opt-in via the flag — every other data_table tool is byte-
+        # identical because the flag is absent.
+        if is_suppressed_metric_payload(parsed):
+            # NEW-1: stamp suppress_llm_value onto the SSE event so the frontend
+            # can derive isMetric and hide re-run/export/save-query affordances.
+            # Also pass source_kind (harmless + useful for FE analytics).
+            # These fields are ONLY added for metric payloads — all other
+            # data_table SSE events remain byte-identical (flag absent).
+            sse_event_data["suppress_llm_value"] = True
+            if "source_kind" in parsed:
+                sse_event_data["source_kind"] = parsed["source_kind"]
+            condensed = condense_metric_for_llm(parsed)
+            return "data_table", sse_event_data, condensed
+
         # Investigation queries (FULL context): send all rows so LLM can reason
         # over system notes, field changes, timelines, etc.
         # Standard queries: 5-row preview to save tokens.
@@ -3122,6 +3158,14 @@ async def run_chat_turn(
                 # through _intercept_with_cache so pricing follow-up tools
                 # (pricing_revise / pricing_to_sheets) can read the cached
                 # pricing_state in this single-agent / legacy path too.
+                # M4 (grill R3): capture the RAW tool result BEFORE interception condenses
+                # it. The persisted tool log is built from this raw value (below) so a
+                # metric's `source_kind` survives for _compute_source_pin_update —
+                # interception reassigns result_str to the LLM-facing condensed string,
+                # which drops source_kind, and building the log from THAT would mis-pin
+                # NetSuite for a BigQuery metric. Mirrors the production UnifiedAgent path
+                # (base_agent logs the raw result_str + condenses a separate llm_result_str).
+                _raw_result_str = result_str
                 intercept_type, intercept_data, result_str = _intercept_with_cache(
                     block.name,
                     result_str,
@@ -3145,7 +3189,11 @@ async def run_chat_turn(
                 # Log for audit
                 elapsed_ms = int((time.monotonic() - t0) * 1000)
 
-                _result_dict = {"result_summary": result_str}
+                # Derive the tool_end summary from the RAW result (not the LLM-facing
+                # condensed copy): a condensed financial_report carries total_rows, not
+                # row_count, so tool_call_row_count would read 0 and mis-report "Done"
+                # instead of "N rows returned". Mirrors base_agent (summary from raw).
+                _result_dict = {"result_summary": _raw_result_str}
                 _row_count = tool_call_row_count(_result_dict)
                 _had_error = tool_call_had_error(_result_dict)
                 _summary = (
@@ -3167,7 +3215,10 @@ async def run_chat_turn(
                         step=step,
                         tool_name=block.name,
                         params=block.input,
-                        result_str=result_str,
+                        # Raw (pre-condense) result so a metric's source_kind survives in
+                        # the log for _compute_source_pin_update (the LLM got the condensed
+                        # copy via tool_results_content above).
+                        result_str=_raw_result_str,
                         duration_ms=elapsed_ms,
                     )
                 )
