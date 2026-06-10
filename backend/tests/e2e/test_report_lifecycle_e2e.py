@@ -280,6 +280,152 @@ async def test_compose_resolves_from_inturn_cache_sidecar(db, client, monkeypatc
 
 
 # ---------------------------------------------------------------------------
+# I1c (re-gate r2 — findings #5/#9/#13): conversation-ordinal id space. Seed 2
+#   persisted turns (3 payload-bearing calls → r1,r2,r3), then stamp a NEW in-turn
+#   result via the interceptor — it gets r4 (start_count=K=3). compose resolving
+#   r2 via the PERSISTED fallback returns turn 1's SECOND payload; r4 via the
+#   in-turn sidecar returns the just-computed result. One id space, no collision.
+# ---------------------------------------------------------------------------
+
+
+async def test_conversation_ordinal_ids_span_persisted_and_inturn(db, client):
+    from unittest.mock import patch
+
+    from app.services.chat.orchestrator import _make_tool_interceptor
+    from app.services.chat.tool_call_results import count_payload_bearing_tool_calls
+
+    tenant = await create_test_tenant(db, name="Report Corp Ordinal")
+    user, _ = await create_test_user(db, tenant)
+    await set_tenant_context(db, str(tenant.id))
+
+    session = ChatSession(tenant_id=tenant.id, user_id=user.id, title="Multi-turn report")
+    db.add(session)
+    await db.flush()
+    conversation_id = session.id
+
+    def _payload(marker: str) -> dict:
+        return {
+            "kind": "table",
+            "columns": ["Period", "Value"],
+            "rows": [["P001", marker]],
+            "row_count": 1,
+            "truncated": False,
+            "query": f"SELECT period, value FROM {marker}",
+            "limit": 1,
+        }
+
+    # Explicit, increasing created_at so the two turns order deterministically.
+    # Within ONE transaction the server-side ``func.now()`` default returns the SAME
+    # timestamp for both rows, and ``order_by(created_at, id)`` would then tiebreak on
+    # the RANDOM uuid primary key — so two same-flush turns can come back reversed.
+    # Real turns occur seconds apart; mirror that here so the conversation order is
+    # stable (turn 1 before turn 2).
+    from datetime import datetime, timedelta, timezone
+
+    t0 = datetime(2026, 6, 9, 12, 0, 0, tzinfo=timezone.utc)
+
+    # Turn 1 (assistant msg) produced TWO payload-bearing results → conversation r1, r2.
+    msg1 = ChatMessage(
+        tenant_id=tenant.id,
+        session_id=conversation_id,
+        role="assistant",
+        content="turn 1",
+        created_at=t0,
+        tool_calls=[
+            {
+                "step": 0,
+                "tool": "netsuite_suiteql",
+                "params": {},
+                "result_summary": "1",
+                "result_payload": _payload("T1A"),
+            },
+            {
+                "step": 1,
+                "tool": "netsuite_suiteql",
+                "params": {},
+                "result_summary": "1",
+                "result_payload": _payload("T1B"),
+            },
+        ],
+    )
+    db.add(msg1)
+    await db.flush()
+    # Turn 2 produced ONE payload-bearing result → conversation r3.
+    msg2 = ChatMessage(
+        tenant_id=tenant.id,
+        session_id=conversation_id,
+        role="assistant",
+        content="turn 2",
+        created_at=t0 + timedelta(seconds=30),
+        tool_calls=[
+            {
+                "step": 0,
+                "tool": "netsuite_suiteql",
+                "params": {},
+                "result_summary": "1",
+                "result_payload": _payload("T2A"),
+            },
+        ],
+    )
+    db.add(msg2)
+    await db.flush()
+
+    # The orchestrator seeds the in-turn counter from the prior-conversation count.
+    messages = await load_conversation_tool_messages(db, conversation_id, tenant.id)
+    k = count_payload_bearing_tool_calls(messages)
+    assert k == 3, "3 payload-bearing results already in this conversation"
+
+    # The persisted FALLBACK resolves r2 to turn 1's SECOND payload (conversation order).
+    assert resolve_payload_from_messages(messages, "r2")["rows"] == [["P001", "T1B"]]
+    assert resolve_payload_from_messages(messages, "r1")["rows"] == [["P001", "T1A"]]
+    assert resolve_payload_from_messages(messages, "r3")["rows"] == [["P001", "T2A"]]
+
+    # Now turn 3 computes a NEW result. The interceptor, seeded start_count=K=3,
+    # stamps r4 and writes the in-turn sidecar under r4 — the SAME id space.
+    store: dict = {}
+
+    class FakeRedis:
+        def hset(self, key, field, value):
+            store.setdefault(key, {})[field] = value
+
+        def hget(self, key, field):
+            return store.get(key, {}).get(field)
+
+        def hgetall(self, key):
+            return store.get(key, {})
+
+        def hdel(self, key, field):
+            store.get(key, {}).pop(field, None)
+
+        def expire(self, key, ttl):
+            pass
+
+    with patch("app.services.chat.result_cache._get_redis", return_value=FakeRedis()):
+        from app.services.chat.result_cache import cache_full_payload, get_full_payload
+
+        captured: dict = {}
+
+        def _cb(tool_name, ev_type, ev_data, result_id=None, params=None, result_str=None, full_payload=None):
+            captured["result_id"] = result_id
+            if result_id and full_payload is not None:
+                cache_full_payload(str(conversation_id), result_id, full_payload)
+
+        interceptor = _make_tool_interceptor(cache_callback=_cb, start_count=k)
+        new_payload = _payload("T3-INTURN")
+        _, llm_str = interceptor("netsuite_suiteql", json.dumps(new_payload, default=str))
+
+        # The new in-turn result is r4 — never colliding with r1/r2/r3.
+        assert json.loads(llm_str)["result_id"] == "r4"
+        assert captured["result_id"] == "r4"
+
+        # A same-turn compose resolving r4 reads the in-turn sidecar; r1..r3 still
+        # resolve via the persisted fallback — one id space, end to end.
+        assert get_full_payload(str(conversation_id), "r4")["rows"] == [["P001", "T3-INTURN"]]
+        # And the sidecar write did NOT clobber any earlier id (none were in the sidecar).
+        assert get_full_payload(str(conversation_id), "r2") is None  # r2 lives only in persisted history
+
+
+# ---------------------------------------------------------------------------
 # I3 — cross-tenant GET /view -> 404 (RLS-invisible; no existence disclosure)
 # ---------------------------------------------------------------------------
 

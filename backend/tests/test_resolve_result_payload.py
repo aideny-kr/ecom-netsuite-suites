@@ -8,6 +8,7 @@ import inspect
 import pytest
 
 from app.services.chat.tool_call_results import (
+    count_payload_bearing_tool_calls,
     extract_result_payload,
     load_conversation_tool_messages,
     resolve_payload_from_messages,
@@ -116,6 +117,84 @@ def test_resolve_matches_synthetic_index_id():
         )
     ]
     assert resolve_payload_from_messages(messages, "r2")["rows"] == [["y"]]
+
+
+# --- re-gate r2 (findings #5/#9/#13): conversation-ordinal id space ---
+
+
+class TestConversationOrdinalCount:
+    """``count_payload_bearing_tool_calls`` is the counter-seed for the in-turn
+    interceptor: it counts persisted tool_calls carrying a ``result_payload`` dict
+    using the EXACT same criterion the fallback resolver numbers them by (1..K). The
+    next in-turn result therefore gets r(K+1) — one id space across turns."""
+
+    def test_counts_only_payload_bearing_calls(self):
+        messages = [
+            _msg(
+                [
+                    {"tool": "rag_search"},  # no result_payload — not counted
+                    {"tool": "a", "result_payload": {"rows": [["x"]], "row_count": 1}},
+                ]
+            ),
+            _msg(
+                [
+                    {"tool": "b", "result_payload": {"rows": [["y"]], "row_count": 1}},
+                    {"tool": "workspace.list", "result_payload": "not-a-dict"},  # not a dict
+                ]
+            ),
+        ]
+        assert count_payload_bearing_tool_calls(messages) == 2
+
+    def test_empty_history_is_zero(self):
+        assert count_payload_bearing_tool_calls([]) == 0
+        assert count_payload_bearing_tool_calls([_msg([])]) == 0
+
+
+def test_inturn_result_aligns_with_fallback_across_turns():
+    """The core invariant the fix establishes: an in-turn id (r4) and the persisted
+    fallback id (r2 from turn 1) live in ONE conversation-ordinal id space.
+
+    Seed 2 persisted turns producing 3 payload-bearing calls (r1, r2, r3). The next
+    in-turn result, seeded with start_count = K (= 3 here), gets r4. The fallback
+    resolves r2 to turn 1's SECOND payload, and r4 to the new in-turn result — same
+    id space, no collision/overwrite.
+    """
+    from app.services.chat.orchestrator import _make_tool_interceptor
+
+    # 2 persisted turns: turn 1 has two payload-bearing calls (r1, r2), turn 2 one (r3).
+    messages = [
+        _msg(
+            [
+                {"tool": "t1a", "result_payload": {"rows": [["t1a"]], "row_count": 1}},
+                {"tool": "t1b", "result_payload": {"rows": [["t1b"]], "row_count": 1}},
+            ]
+        ),
+        _msg([{"tool": "t2a", "result_payload": {"rows": [["t2a"]], "row_count": 1}}]),
+    ]
+
+    # K = number of payload-bearing results already in history.
+    k = count_payload_bearing_tool_calls(messages)
+    assert k == 3
+
+    # Fallback resolves the persisted ids in conversation order.
+    assert resolve_payload_from_messages(messages, "r1")["rows"] == [["t1a"]]
+    assert resolve_payload_from_messages(messages, "r2")["rows"] == [["t1b"]]
+    assert resolve_payload_from_messages(messages, "r3")["rows"] == [["t2a"]]
+
+    # A NEW in-turn result, seeded with start_count=K, is r(K+1) = r4 — the SAME
+    # id space, distinct from every persisted id.
+    captured: dict = {}
+
+    def _cb(tool_name, event_type_str, event_data, result_id=None, params=None, result_str=None, full_payload=None):
+        captured["result_id"] = result_id
+
+    interceptor = _make_tool_interceptor(cache_callback=_cb, start_count=k)
+    new_payload = {"columns": ["c"], "rows": [["inturn"]], "row_count": 1, "query": "q"}
+    import json
+
+    _, llm_str = interceptor("netsuite_suiteql", json.dumps(new_payload))
+    assert json.loads(llm_str)["result_id"] == "r4"
+    assert captured["result_id"] == "r4"
 
 
 # --- Gate D (finding #18): defense-in-depth tenant filter on the resolver query ---

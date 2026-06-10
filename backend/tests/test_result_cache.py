@@ -444,3 +444,18 @@ class TestFullPayloadSidecar:
         cache_full_payload("conv-B", "r1", {"rows": [["b"]], "row_count": 1})
         assert get_full_payload("conv-A", "r1")["rows"] == [["a"]]
         assert get_full_payload("conv-B", "r1")["rows"] == [["b"]]
+
+    def test_conversation_ordinal_ids_do_not_overwrite_across_turns(self, mock_redis):
+        """re-gate r2 (findings #5/#9/#13): the sidecar is conversation-scoped (no
+        turn component in the key), so with PER-TURN ids turn B's r1 would overwrite
+        turn A's r1. Conversation-ORDINAL ids (turn A → r1, turn B → r2) keep BOTH
+        turns' payloads resolvable — the cross-turn collision the fix eliminates."""
+        # Turn A's single result is r1.
+        cache_full_payload("conv-1", "r1", {"rows": [["turnA"]], "row_count": 1})
+        # Turn B's first result is r2 (conversation-ordinal), NOT r1 — so it does
+        # not clobber turn A's payload.
+        cache_full_payload("conv-1", "r2", {"rows": [["turnB"]], "row_count": 1})
+        assert get_full_payload("conv-1", "r1")["rows"] == [["turnA"]], (
+            "turn A's r1 payload must survive turn B (no overwrite)"
+        )
+        assert get_full_payload("conv-1", "r2")["rows"] == [["turnB"]]

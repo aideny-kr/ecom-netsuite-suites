@@ -1208,7 +1208,7 @@ def _intercept_with_cache(
     return event_type, _strip_cache_only_fields_from_sse(event_data), new_result_str
 
 
-def _make_tool_interceptor(context_need: str = ContextNeed.DATA, cache_callback=None):
+def _make_tool_interceptor(context_need: str = ContextNeed.DATA, cache_callback=None, start_count: int = 0):
     """Create a tool interceptor closure that captures context_need.
 
     The unified-agent path passes a ``cache_callback`` so it can also
@@ -1216,31 +1216,41 @@ def _make_tool_interceptor(context_need: str = ContextNeed.DATA, cache_callback=
     after the agent loop. The shared cache write lives in
     ``_build_intercept_cache_entry`` so the legacy path stays in sync.
 
-    The closure maintains a per-TURN counter so each data-producing result THIS
-    turn gets a stable id (r1, r2, ...). That id is stamped into the condensed LLM
-    string + SSE event by ``_intercept_tool_result`` and is the SAME id the
-    full-payload sidecar is keyed by — so a same-turn ``report.compose`` can
-    resolve it (gate cluster A). The counter resets per turn because a fresh
-    interceptor is built for each ``run_streaming`` call.
+    CONVERSATION-ORDINAL ids (re-gate r2 — findings #5/#9/#13): the closure
+    maintains a counter seeded at ``start_count`` (= K, the number of
+    payload-bearing data results ALREADY produced earlier in THIS conversation,
+    counted from the in-memory history via ``count_payload_bearing_tool_calls``).
+    This turn's first data result is therefore r(K+1), the second r(K+2), and so on
+    — ids are stable across the WHOLE conversation in production order, NOT reset
+    per turn. This is the ONE id space everywhere:
+      * The id is stamped into the condensed LLM string + SSE event by
+        ``_intercept_tool_result`` (the surface the model reads the id from).
+      * The full-payload sidecar is keyed by the SAME id — and because the sidecar
+        is conversation-scoped (no turn component), conversation-ordinal ids never
+        overwrite an earlier turn's entry (a per-turn r1 in turn B would have
+        clobbered turn A's r1 — the bug this fix eliminates).
+      * The cross-turn FALLBACK resolver (``resolve_payload_from_messages``) numbers
+        the SAME persisted population 1..K positionally, so r2 means turn 1's second
+        result whether resolved via the sidecar OR the fallback.
 
     SINGLE id-assignment invariant (re-gate r2 — findings #3/#6/#11/#15):
     "does this result get an r<n> id" is decided in EXACTLY ONE place — whether
     ``extract_result_payload`` returns a non-None payload — and the payload is
     computed ONCE here and threaded to the sidecar write. This is the SAME
-    predicate the cross-turn FALLBACK resolver (``resolve_payload_from_messages``)
-    uses to number persisted calls positionally, so the in-turn ids and the
-    persisted-fallback ids share one denominator and can never drift. (The old
-    design assigned ids off the peeked SSE event type {data_table, financial_report}
-    — a population that diverges from the payload extractor, leaving the LLM an id
-    that resolves to nothing, or shifting the numbering.) Computing the payload once
-    also kills the previous double ``_intercept_tool_result`` parse (finding #15).
+    predicate the cross-turn FALLBACK resolver uses to number persisted calls, so
+    the in-turn ids and the persisted-fallback ids share one denominator and can
+    never drift. (The old design assigned ids off the peeked SSE event type
+    {data_table, financial_report} — a population that diverges from the payload
+    extractor, leaving the LLM an id that resolves to nothing, or shifting the
+    numbering.) Computing the payload once also kills the previous double
+    ``_intercept_tool_result`` parse (finding #15).
 
     ``full_result_str`` (when supplied by the agent loop) is the ORIGINAL,
     pre-truncation result string; the sidecar payload is extracted from it so the
     frozen report payload is FULL/uncapped even when the LLM-facing ``result_str``
     is row-capped (finding #10). When absent it falls back to ``result_str``.
     """
-    counter = {"n": 0}
+    counter = {"n": start_count}
 
     def interceptor(
         tool_name: str,
@@ -1316,6 +1326,7 @@ from app.services.chat.onboarding_tools import (
 from app.services.chat.prompts import INPUT_SANITIZATION_PREFIX, ONBOARDING_SYSTEM_PROMPT
 from app.services.chat.tool_call_results import (
     build_tool_call_log_entry,
+    count_payload_bearing_tool_calls,
     extract_result_payload,
     tool_call_had_error,
     tool_call_row_count,
@@ -2814,7 +2825,18 @@ async def run_chat_turn(
                         plan_mode_clarify_only=_plan_mode_active,
                         plan_mode_resume_source=plan_mode_resume_source,
                         tool_result_interceptor=_make_tool_interceptor(
-                            context_need, cache_callback=_on_tool_intercepted
+                            context_need,
+                            cache_callback=_on_tool_intercepted,
+                            # CONVERSATION-ORDINAL ids (findings #5/#9/#13): seed the
+                            # in-turn counter from the count of payload-bearing results
+                            # ALREADY in this conversation's persisted history, so THIS
+                            # turn's first data result is r(K+1) — one id space across
+                            # turns, aligned with the persisted FALLBACK resolver (which
+                            # numbers the same population 1..K). session.messages is the
+                            # in-memory ORM history ordered by (created_at, id) — the
+                            # SAME order load_conversation_tool_messages uses — so no new
+                            # DB query is needed.
+                            start_count=count_payload_bearing_tool_calls(session.messages),
                         ),
                         session_id=str(session.id),
                         run_id=run_id,

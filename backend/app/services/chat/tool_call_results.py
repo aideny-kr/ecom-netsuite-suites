@@ -300,6 +300,27 @@ def _tool_calls_of(message: Any) -> list[dict[str, Any]]:
     return [c for c in calls if isinstance(c, dict)]
 
 
+def count_payload_bearing_tool_calls(messages: list[Any]) -> int:
+    """Count persisted tool_calls carrying a ``result_payload`` dict across the
+    given (already-loaded) conversation messages.
+
+    This is the CONVERSATION-ORDINAL counter seed (findings #5/#9/#13): the in-turn
+    interceptor numbers THIS turn's data results r(K+1), r(K+2), ... where K is this
+    count over the prior conversation history — so the in-turn ids and the persisted
+    FALLBACK ids (``resolve_payload_from_messages``, which numbers the SAME population
+    1..K) live in ONE id space, never colliding/overwriting across turns.
+
+    Uses the EXACT same criterion as the fallback resolver — a tool_call whose
+    ``result_payload`` is a dict — so the two numbering schemes can never drift.
+    """
+    count = 0
+    for message in messages:
+        for call in _tool_calls_of(message):
+            if isinstance(call.get("result_payload"), dict):
+                count += 1
+    return count
+
+
 def resolve_payload_from_messages(messages: list[Any], result_id: str) -> dict[str, Any]:
     """Resolve a result_id to its FULL, uncapped frozen payload — the CROSS-TURN /
     REGENERATION FALLBACK path (§16.1 fix).

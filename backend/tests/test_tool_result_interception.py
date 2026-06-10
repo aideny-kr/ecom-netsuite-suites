@@ -383,6 +383,59 @@ class TestSingleIdAssignmentInvariant:
         assert seen_ids == [("netsuite_suiteql", "r1")]
 
 
+class TestConversationOrdinalIds:
+    """re-gate r2 (findings #5/#9/#13): result ids are CONVERSATION-ORDINAL, not
+    per-turn. ``_make_tool_interceptor`` accepts a ``start_count`` (K) = the number
+    of payload-bearing results ALREADY produced in this conversation's history;
+    this turn's first data result is r(K+1), so turn B's first result never reuses
+    turn A's r1. One id space across the whole conversation, shared with the
+    persisted-fallback resolver (which numbers the same population 1..K)."""
+
+    def test_counter_starts_after_prior_conversation_results(self):
+        from app.services.chat.orchestrator import _make_tool_interceptor
+
+        seen_ids: list = []
+
+        def _cb(tool_name, event_type_str, event_data, result_id=None, params=None, result_str=None, full_payload=None):
+            seen_ids.append(result_id)
+
+        # 3 payload-bearing results already produced earlier in this conversation.
+        interceptor = _make_tool_interceptor(cache_callback=_cb, start_count=3)
+        _, llm_str = interceptor("netsuite_suiteql", _result_str(SAMPLE_SUITEQL_RESULT))
+        # This turn's first data result is r4, NOT r1.
+        assert json.loads(llm_str)["result_id"] == "r4"
+        # A second result this turn → r5.
+        _, llm_str2 = interceptor("netsuite_suiteql", _result_str(SAMPLE_SUITEQL_RESULT))
+        assert json.loads(llm_str2)["result_id"] == "r5"
+        assert seen_ids == ["r4", "r5"]
+
+    def test_default_start_count_is_zero_backward_compatible(self):
+        """With no prior history (start_count omitted / 0), the first result is r1 —
+        unchanged from the per-turn behavior for a first-turn conversation."""
+        from app.services.chat.orchestrator import _make_tool_interceptor
+
+        interceptor = _make_tool_interceptor()
+        _, llm_str = interceptor("netsuite_suiteql", _result_str(SAMPLE_SUITEQL_RESULT))
+        assert json.loads(llm_str)["result_id"] == "r1"
+
+    def test_two_turns_do_not_collide_on_r1(self):
+        """The cross-turn collision the fix targets: turn A produces r1; turn B,
+        seeded with start_count=1 (turn A's one result is now in history), produces
+        r2 — turn B's first result does NOT overwrite turn A's r1."""
+        from app.services.chat.orchestrator import _make_tool_interceptor
+
+        turn_a = _make_tool_interceptor()  # start_count=0
+        _, a_str = turn_a("netsuite_suiteql", _result_str(SAMPLE_SUITEQL_RESULT))
+        assert json.loads(a_str)["result_id"] == "r1"
+
+        # Turn B: turn A's single payload-bearing result is now persisted history → K=1.
+        turn_b = _make_tool_interceptor(start_count=1)
+        _, b_str = turn_b("netsuite_suiteql", _result_str(SAMPLE_SUITEQL_RESULT))
+        assert json.loads(b_str)["result_id"] == "r2", (
+            "turn B's first result must be r2 (conversation-ordinal), never reusing turn A's r1"
+        )
+
+
 class TestPreTruncationSidecarPayload:
     """Re-gate r2 (finding #10): the LLM-facing string may be row-capped, but the
     sidecar/persisted payload the report composer resolves must be the FULL,

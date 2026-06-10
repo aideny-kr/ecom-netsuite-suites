@@ -270,11 +270,11 @@ TOOL_REGISTRY = {
     },
     "report.compose": {
         "description": (
-            "Compose a publishable report from results already produced THIS turn. "
+            "Compose a publishable report from results already produced in this conversation. "
             "Pass title + ordered sections; data sections reference a prior result by result_id. "
-            "Each data result's summary includes its result_id (r1, r2, ... in the order you "
-            "produced them this turn) — pass those EXACT ids (never inline numbers). "
-            "Returns a report card; the report renders in the browser."
+            "Each data result's summary includes its result_id (r1, r2, ... — stable per "
+            "conversation, in the order the results were produced) — pass those EXACT ids "
+            "(never inline numbers). Returns a report card; the report renders in the browser."
         ),
         "execute": report_export.execute,
         "params_schema": {
