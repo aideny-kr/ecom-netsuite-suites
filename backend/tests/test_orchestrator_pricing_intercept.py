@@ -314,7 +314,11 @@ class TestSameTurnPricingStateRead:
 
         source = inspect.getsource(orchestrator)
         idx = source.index("_on_tool_intercepted")
-        body_window = source[idx : idx + 2500]
+        # Bound the window on the NEXT def (the next sibling closure) instead of a
+        # fixed char count — a longer doc-comment inside the callback must not push
+        # the cache-write marker out of a magic-number window (it did once).
+        next_def = source.find("def ", idx + 1)
+        body_window = source[idx : next_def if next_def != -1 else len(source)]
         # The callback must reference a sync cache write — either
         # _cache_result_sync or an immediate call to cache_result via
         # asyncio.create_task.
