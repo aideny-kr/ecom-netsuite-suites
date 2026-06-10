@@ -142,10 +142,11 @@ STEP 1 — preflight codex (do NOT hard-fail; just branch):
   If CODEX_BIN is empty OR CODEX_AUTH=no -> skip to STEP 4 (Claude-only fallback).
 
 STEP 2 — run codex read-only against the diff:
-  Save the DIFF UNDER REVIEW block below EXACTLY to "$TMPDIR/cr_diff.txt" (use your file-writing tool; verify with \`wc -l\`). Then write the codex prompt (the CODEX PROMPT block below, with the literal text \`<PASTE $TMPDIR/cr_diff.txt HERE>\` replaced by the diff file's contents) to "$TMPDIR/cr_prompt.txt", and run — OPTIONS BEFORE the positional prompt (codex 0.134.0 rejects flags after positionals); always \`codex exec\` (never resume) so -s read-only holds:
+  Save the DIFF UNDER REVIEW block below EXACTLY to "$TMPDIR/cr_diff.txt" (use your file-writing tool). TRUNCATION TRIPWIRE: the diff is ${diffLines} lines — run \`wc -l < "$TMPDIR/cr_diff.txt"\`; if the result is materially smaller (your copy got truncated), do NOT claim a real codex run: go to STEP 4 and set codex_used=false. Then write the codex prompt (the CODEX PROMPT block below, with the literal text \`<PASTE $TMPDIR/cr_diff.txt HERE>\` replaced by the diff file's contents) to "$TMPDIR/cr_prompt.txt", and run — OPTIONS BEFORE the positional prompt (codex 0.134.0 rejects flags after positionals); always \`codex exec\` (never resume) so -s read-only holds. Use a 600s timeout only if \`timeout\` exists (macOS/minimal runners may lack it):
     REPO_ROOT=$(git rev-parse --show-toplevel)
-    timeout 600 codex exec -C "$REPO_ROOT" -s read-only -c 'model_reasoning_effort="high"' "$(cat "$TMPDIR/cr_prompt.txt")" < /dev/null
-  Capture stdout — codex's final message holds its findings. Exit 124 = timed out, or stderr shows a genuine auth/login/unauthorized error (IGNORE codex's own MCP transport noise like rmcp::transport / suitetalk / AuthRequired — that is NOT a codex-CLI auth failure) -> treat codex as unavailable and go to STEP 4.
+    TO=""; command -v timeout >/dev/null 2>&1 && TO="timeout 600"; command -v gtimeout >/dev/null 2>&1 && TO="gtimeout 600"
+    $TO codex exec -C "$REPO_ROOT" -s read-only -c 'model_reasoning_effort="high"' "$(cat "$TMPDIR/cr_prompt.txt")" < /dev/null
+  Capture stdout — codex's final message holds its findings. If the command exits non-zero (124 = timed out; 127 = binary/timeout missing), or stderr shows a genuine auth/login/unauthorized error (IGNORE codex's own MCP transport noise like rmcp::transport / suitetalk / AuthRequired — that is NOT a codex-CLI auth failure) -> treat codex as unavailable and go to STEP 4.
 
 STEP 3 — structure codex's findings (codex_used=true): turn each finding codex reported into a candidate {file,line,summary,failure_scenario,category}. Do NOT invent findings codex did not raise; if codex genuinely found nothing, return candidates=[] with codex_used=true. Read the cited code to set a precise line and a concrete failure_scenario.
 
@@ -171,22 +172,21 @@ ${diff}`
 
 // -------------------------------------------------------------------- Find
 phase('Find')
-let codexUsed = false
-let codexAngleOk = false
 const claudeFinders = ANGLES.map(a => () =>
   agent(FINDER_CTX + '\n\nTASK: ' + a.prompt, { label: `find:${a.key}`, phase: 'Find', schema: CAND_SCHEMA })
     .then(r => ({ key: a.key, ok: !!r, candidates: (r && r.candidates) || [] }))
     .catch(() => ({ key: a.key, ok: false, candidates: [] }))
 )
+// Carry codex_used out on the RETURNED result (not a closure side-effect) so the top-level
+// metadata derives from data, never from parallel()'s execution order/retry semantics.
 const codexFinder = () =>
   agent(codexAnglePrompt, { label: 'find:Codex(independent)', phase: 'Find', schema: CODEX_SCHEMA })
-    .then(r => {
-      if (r) { codexUsed = !!r.codex_used; codexAngleOk = true }
-      return { key: 'Codex', ok: !!r, candidates: (r && r.candidates) || [] }
-    })
-    .catch(() => ({ key: 'Codex', ok: false, candidates: [] }))
+    .then(r => ({ key: 'Codex', ok: !!r, candidates: (r && r.candidates) || [], codex_used: !!(r && r.codex_used) }))
+    .catch(() => ({ key: 'Codex', ok: false, candidates: [], codex_used: false }))
 const finderRaw = await parallel([...claudeFinders, codexFinder])
-log(`independent-model angle: ${codexAngleOk ? (codexUsed ? 'codex (real second model)' : 'FALLBACK claude-only — codex unavailable, weaker guarantee') : 'ANGLE FAILED -> INCOMPLETE'}`)
+const codexRes = finderRaw.find(x => x.key === 'Codex') || { ok: false, codex_used: false }
+const codexUsed = codexRes.codex_used
+log(`independent-model angle: ${codexRes.ok ? (codexUsed ? 'codex (real second model)' : 'FALLBACK claude-only — codex unavailable, weaker guarantee') : 'ANGLE FAILED -> INCOMPLETE'}`)
 const failedAngles = finderRaw.filter(x => !x.ok).map(x => x.key)
 if (failedAngles.length) log(`WARNING: ${failedAngles.length} finder angle(s) FAILED -> result.status will be INCOMPLETE: ${failedAngles.join(', ')}`)
 const all = finderRaw.flatMap(x => x.candidates)
