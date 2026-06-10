@@ -118,6 +118,52 @@ async function request<T>(
 }
 
 /**
+ * Make a GET request that returns the response body as raw text (not JSON).
+ * Same bearer/refresh/401 logic as `request`. Used for endpoints that return
+ * non-JSON content (e.g. the report `/view` endpoint returns `text/html`).
+ */
+async function requestText(path: string): Promise<string> {
+  const headers: Record<string, string> = {};
+
+  if (typeof window !== "undefined") {
+    const token = localStorage.getItem("access_token");
+    if (token) {
+      headers["Authorization"] = `Bearer ${token}`;
+    }
+  }
+
+  const res = await fetch(`${BASE_URL}${path}`, {
+    method: "GET",
+    headers,
+    credentials: "include",
+  });
+
+  // On 401, attempt silent token refresh before redirecting to login
+  if (res.status === 401 && typeof window !== "undefined") {
+    const refreshed = await tryRefreshToken();
+    if (refreshed) {
+      headers["Authorization"] = `Bearer ${localStorage.getItem("access_token")}`;
+      const retry = await fetch(`${BASE_URL}${path}`, {
+        method: "GET",
+        headers,
+        credentials: "include",
+      });
+      if (retry.ok) return retry.text();
+    }
+    localStorage.removeItem("access_token");
+    localStorage.removeItem("refresh_token");
+    window.location.href = "/login";
+    throw new Error("Unauthorized");
+  }
+
+  if (!res.ok) {
+    throw new Error(`Request failed: ${res.status}`);
+  }
+
+  return res.text();
+}
+
+/**
  * Make a POST request that returns a raw Response for SSE streaming.
  * Uses the same auth/base URL logic as the standard request function.
  */
@@ -247,6 +293,7 @@ async function downloadRequest(path: string, body?: unknown): Promise<Response> 
 
 export const apiClient = {
   get: <T>(path: string) => request<T>("GET", path),
+  getText: (path: string) => requestText(path),
   post: <T>(path: string, body?: unknown) => request<T>("POST", path, body),
   put: <T>(path: string, body?: unknown) => request<T>("PUT", path, body),
   patch: <T>(path: string, body?: unknown) => request<T>("PATCH", path, body),

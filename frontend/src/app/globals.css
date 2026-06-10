@@ -43,6 +43,14 @@
 
     --success: 142 71% 45%;
     --warning: 38 92% 50%;
+
+    /* Neubrutalist tokens for the report app-chrome wrapper (the rendered
+       report artifact carries its own inline CSS; brand_color_hsl is inlined
+       server-side into the artifact, not here). */
+    --report-bg: 0 0% 98%;
+    --report-border: 0 0% 0%;
+    --report-shadow: 4px 4px 0 0 hsl(0 0% 0%);
+    --report-accent: 142 70% 45%;
   }
 
   .dark {
