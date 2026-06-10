@@ -16,3 +16,15 @@ it("fetches report HTML via apiClient and renders an iframe", async () => {
   await waitFor(() => expect(getHtml).toHaveBeenCalledWith("/api/v1/reports/abc/view"));
   expect(document.querySelector("iframe")).toBeTruthy();
 });
+
+it("renders the report iframe fully sandboxed (no scripts/forms/popups/same-origin)", async () => {
+  // Gate D (finding #11): a blob: iframe inherits the embedding page's origin, so any
+  // HTML/SVG injection in rendered_html would execute with full same-origin privileges.
+  // The artifact is static HTML+CSS+inline SVG and needs NO scripts/forms/popups, so the
+  // iframe must carry an EMPTY sandbox attribute (most restrictive: null origin, no script).
+  render(<ReportViewPage />);
+  await waitFor(() => expect(document.querySelector("iframe")).toBeTruthy());
+  const iframe = document.querySelector("iframe")!;
+  expect(iframe.hasAttribute("sandbox")).toBe(true);
+  expect(iframe.getAttribute("sandbox")).toBe("");
+});

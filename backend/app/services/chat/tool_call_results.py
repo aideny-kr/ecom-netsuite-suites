@@ -332,9 +332,16 @@ def resolve_payload_from_messages(messages: list[Any], result_id: str) -> dict[s
     raise KeyError(result_id)
 
 
-async def load_conversation_tool_messages(db: Any, conversation_id: Any) -> list[Any]:
+async def load_conversation_tool_messages(db: Any, conversation_id: Any, tenant_id: Any) -> list[Any]:
     """Load the assistant messages (with their full ``tool_calls``) for a session,
-    newest turns last. RLS is assumed already set by the caller's tenant context."""
+    newest turns last.
+
+    ``tenant_id`` is REQUIRED (no default) — this is a defense-in-depth tenant filter.
+    The chat tool-execution path does not call ``set_tenant_context``, so RLS may not be
+    enforced on this session; we therefore add an explicit
+    ``ChatMessage.tenant_id == tenant_id`` predicate rather than relying on RLS alone.
+    Keeping the parameter required ensures a future caller cannot silently forget it.
+    """
     from sqlalchemy import select
 
     from app.models.chat import ChatMessage
@@ -346,6 +353,7 @@ async def load_conversation_tool_messages(db: Any, conversation_id: Any) -> list
             await db.execute(
                 select(ChatMessage)
                 .where(ChatMessage.session_id == conversation_id)
+                .where(ChatMessage.tenant_id == tenant_id)
                 .where(ChatMessage.role == "assistant")
                 .order_by(ChatMessage.created_at, ChatMessage.id)
             )

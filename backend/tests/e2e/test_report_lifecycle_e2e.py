@@ -123,7 +123,7 @@ async def test_compose_resolves_full_rows_views_html_and_audits(db, client):
     conversation_id = await _seed_assistant_message_with_payload(db, tenant, user, payload)
 
     # --- Drive the REAL resolver path that report.compose uses (NOT a stub) ---
-    messages = await load_conversation_tool_messages(db, conversation_id)
+    messages = await load_conversation_tool_messages(db, conversation_id, tenant.id)
 
     def resolver(rid: str) -> dict:
         return resolve_payload_from_messages(messages, rid)
@@ -304,7 +304,7 @@ async def test_view_cross_tenant_is_404(db, client):
     await set_tenant_context(db, str(tenant_a.id))
     payload = _full_table_payload()
     conversation_id = await _seed_assistant_message_with_payload(db, tenant_a, user_a, payload)
-    messages = await load_conversation_tool_messages(db, conversation_id)
+    messages = await load_conversation_tool_messages(db, conversation_id, tenant_a.id)
 
     result = await compose_report(
         db,

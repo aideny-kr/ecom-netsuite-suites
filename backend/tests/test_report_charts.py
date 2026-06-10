@@ -80,3 +80,55 @@ def test_chart_on_all_nonnumeric_table_returns_error_section():
     out = _resolve_data_section({"type": "chart", "result_id": "r1"}, lambda rid: payload)
     assert out["type"] == "error"
     assert "numeric" in out["reason"].lower()
+
+
+def _injected_bar(malicious_color: str) -> ChartData:
+    return ChartData(
+        chart_type="bar",
+        title="Rev",
+        x_axis=ChartAxis(label="P", key="period"),
+        y_axes=[ChartAxis(label="Revenue", key="revenue", color=malicious_color)],
+        data=[{"period": "Q1", "revenue": 100}, {"period": "Q2", "revenue": 150}],
+    )
+
+
+def test_bar_malicious_color_falls_back_to_palette_no_script():
+    """Gate D (finding #20): ChartAxis.color is interpolated raw into SVG fill="...".
+    A crafted color must NOT break out of the attribute — it must be rejected and the
+    palette default substituted, and the rendered SVG must contain NO '<script'."""
+    svg = render_chart_svg(_injected_bar('"/><script>alert(1)</script>'))
+    assert "<script" not in svg
+    assert "alert(1)" not in svg
+    # The injection is rejected -> series 0 falls back to palette[0].
+    assert 'fill="#6366f1"' in svg
+
+
+def test_line_malicious_color_falls_back_to_palette_no_script():
+    """Gate D: lines/areas/points interpolate color too -> same validation must apply."""
+    c = _injected_bar('#fff"/><script>x</script>')
+    c.chart_type = "line"
+    svg = render_chart_svg(c)
+    assert "<script" not in svg
+    assert 'stroke="#6366f1"' in svg
+
+
+def test_area_malicious_color_falls_back_to_palette_no_script():
+    c = _injected_bar("red onload=alert(1)")
+    c.chart_type = "area"
+    svg = render_chart_svg(c)
+    assert "<script" not in svg
+    assert "onload" not in svg
+    # The fill-opacity polygon + polyline + point rects all use the palette default.
+    assert 'fill="#6366f1"' in svg
+
+
+def test_valid_hex_and_hsl_colors_are_preserved():
+    """Gate D: legitimate colors (#rgb / #rrggbb / #rrggbbaa / hsl()/hsla()) pass through."""
+    svg = render_chart_svg(_injected_bar("#abc"))
+    assert 'fill="#abc"' in svg
+    svg = render_chart_svg(_injected_bar("#12ab34cd"))
+    assert 'fill="#12ab34cd"' in svg
+    svg = render_chart_svg(_injected_bar("hsl(210, 50%, 40%)"))
+    assert 'fill="hsl(210, 50%, 40%)"' in svg
+    svg = render_chart_svg(_injected_bar("hsla(210, 50%, 40%, 0.5)"))
+    assert 'fill="hsla(210, 50%, 40%, 0.5)"' in svg

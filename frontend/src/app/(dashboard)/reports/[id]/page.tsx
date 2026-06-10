@@ -40,7 +40,15 @@ export default function ReportViewPage() {
       {error ? (
         <div className="p-8 text-muted-foreground">{error}</div>
       ) : blobUrl ? (
-        <iframe src={blobUrl} title="Report" className="flex-1 w-full border-0" />
+        // sandbox="" is the most restrictive (null origin, no script/forms/popups): the
+        // report is static HTML+CSS+inline SVG, and a blob: URL otherwise inherits this
+        // page's origin, so any HTML/SVG injection in rendered_html would run same-origin.
+        <iframe
+          src={blobUrl}
+          title="Report"
+          sandbox=""
+          className="flex-1 w-full border-0"
+        />
       ) : (
         <div className="p-8 text-muted-foreground">Loading…</div>
       )}

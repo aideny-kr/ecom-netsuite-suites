@@ -36,7 +36,7 @@ async def execute(params: dict, context: dict | None = None, **kwargs) -> dict:
     # the resolver itself can stay synchronous — report_service's Resolver contract
     # (fill_placeholders / _resolve_data_section) calls it sync. The sidecar still
     # wins per-result_id; this is only consulted on a sidecar miss.
-    fallback_messages = await load_conversation_tool_messages(db, conversation_id)
+    fallback_messages = await load_conversation_tool_messages(db, conversation_id, tenant_id)
 
     def resolver(rid: str) -> dict:
         # 1) PRIMARY: the in-turn full-payload sidecar (this turn or a recent turn

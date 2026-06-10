@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from html import escape
 
 from app.schemas.chart import ChartData
@@ -7,6 +8,21 @@ from app.schemas.chart import ChartData
 _W, _H = 720, 380
 _PAD_L, _PAD_B, _PAD_T, _PAD_R = 64, 56, 48, 24
 _PALETTE = ["#6366f1", "#ef4444", "#f59e0b", "#10b981", "#0ea5e9", "#a855f7"]
+
+# ChartAxis.color is a free-form string that can originate from upstream tool output
+# the LLM/data influences. The SVG is injected into the published report HTML RAW
+# (report_html.py treats it as trusted), so an unvalidated color interpolated into
+# fill="{color}" would let a crafted value break out of the attribute into executable
+# SVG/HTML. Only accept well-formed hex (#rgb/#rrggbb/#rrggbbaa) or hsl()/hsla();
+# anything else falls back to the palette default at the call site.
+_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{3,8}$|^hsla?\([0-9R, .%]*\)$")
+
+
+def _safe_color(color: str | None, default: str) -> str:
+    """Return ``color`` only if it is a well-formed hex/hsl color; else ``default``."""
+    if isinstance(color, str) and _COLOR_RE.match(color):
+        return color
+    return default
 
 
 def _fmt(v: float) -> str:
@@ -55,7 +71,7 @@ def _bars(c: ChartData) -> str:
             h = (_num(row, s.key) / vmax) * plot_h
             x = gx + bar_w * (j + 0.5)
             y = y0 - h
-            color = s.color or _PALETTE[j % len(_PALETTE)]
+            color = _safe_color(s.color, _PALETTE[j % len(_PALETTE)])
             # hard offset shadow (no blur) then the bar
             out.append(f'<rect x="{x + 4:.1f}" y="{y + 4:.1f}" width="{bar_w:.1f}" height="{h:.1f}" fill="#000"/>')
             out.append(
@@ -84,7 +100,7 @@ def _lines(c: ChartData, area: bool) -> str:
     step = plot_w / max(len(rows) - 1, 1)
     out = [f'<line x1="{_PAD_L}" y1="{y0}" x2="{_W - _PAD_R}" y2="{y0}" stroke="#000" stroke-width="2"/>']
     for j, s in enumerate(series):
-        color = s.color or _PALETTE[j % len(_PALETTE)]
+        color = _safe_color(s.color, _PALETTE[j % len(_PALETTE)])
         pts = [(_PAD_L + i * step, y0 - (_num(r, s.key) / vmax) * plot_h) for i, r in enumerate(rows)]
         path = " ".join(f"{x:.1f},{y:.1f}" for x, y in pts)
         if area:
