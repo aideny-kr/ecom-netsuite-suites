@@ -14,6 +14,13 @@ from app.services.report.report_html import render_report_html
 
 _PLACEHOLDER = re.compile(r"\{\{(result|metric):([^}]+)\}\}")
 _METRIC_COLUMNS = ["Metric", "Value", "Unit", "Period"]
+# Cap rendered table rows: report.compose resolves the FULL uncapped payload (a SuiteQL
+# result can be up to NETSUITE_SUITEQL_MAX_ROWS = 50k), and every row lands verbatim in
+# the JSONB spec + the HTML <table> the viewer iframe must render. Without a cap a single
+# large result bakes multi-MB JSONB + HTML into one row (risking the Supabase 2-min INSERT
+# timeout) and freezes the browser. We keep the TRUE row_count + mark truncated so
+# render_report_html shows the "Showing first rows of N" note.
+_MAX_REPORT_TABLE_ROWS = 2000
 Resolver = Callable[[str], dict]
 
 
@@ -97,12 +104,20 @@ def _resolve_data_section(s: dict, resolver: Resolver) -> dict:
             idx = [cols.index(c) for c in s["select"] if c in cols]
             cols = [cols[i] for i in idx]
             rows = [[r[i] for i in idx] for r in rows]
+        # The TRUE pre-cap count drives the "Showing first rows of N" note: prefer the
+        # upstream tool's reported row_count, else the resolved row length.
+        true_row_count = payload.get("row_count", len(rows))
+        upstream_truncated = bool(payload.get("truncated", False))
+        # Cap rows so a huge result doesn't bloat the JSONB spec / freeze the viewer.
+        capped = len(rows) > _MAX_REPORT_TABLE_ROWS
+        if capped:
+            rows = rows[:_MAX_REPORT_TABLE_ROWS]
         return {
             "type": "table",
             "columns": cols,
             "rows": rows,
-            "row_count": payload.get("row_count", len(rows)),
-            "truncated": payload.get("truncated", False),
+            "row_count": true_row_count,
+            "truncated": upstream_truncated or capped,
         }
     if s["type"] == "metric_headline":
         # Prefer the real blessed-metric row shape; fall back to top-level reads so the

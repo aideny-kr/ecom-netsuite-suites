@@ -247,6 +247,7 @@ class TestToolConfigs:
             "sheets.create",
             "sheets.write_range",
             "sheets.read_range",
+            "report.compose",
         }
         assert set(TOOL_CONFIGS.keys()) == expected
 

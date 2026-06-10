@@ -146,6 +146,58 @@ def test_metric_placeholder_fills_real_metric_payload_value():
     assert "[unresolved" not in out
 
 
+def test_table_section_caps_rows_at_max():
+    """Gate E (finding #14): report.compose resolves the FULL uncapped payload, so a
+    50k-row SuiteQL result would bake a multi-MB JSONB spec + HTML into one row and
+    freeze the viewer. Cap the rendered table at _MAX_REPORT_TABLE_ROWS, mark the
+    section truncated, and keep the TRUE row_count so the HTML renders the
+    'Showing first rows of N' note."""
+    from app.services.report import report_service
+
+    cap = report_service._MAX_REPORT_TABLE_ROWS
+    big = {
+        "columns": ["Period", "Revenue"],
+        "rows": [[str(i), str(i * 10)] for i in range(2500)],
+        "row_count": 2500,
+    }
+
+    def resolver(rid):
+        return big
+
+    sections = [{"type": "table", "result_id": "r1"}]
+    spec = assemble_spec(title="Big", sections=sections, resolver=resolver)
+    tbl = next(s for s in spec["sections"] if s["type"] == "table")
+
+    assert len(tbl["rows"]) == cap
+    assert cap == 2000
+    assert tbl["truncated"] is True
+    assert tbl["row_count"] == 2500  # the TRUE pre-cap count is preserved
+    # the rendered HTML surfaces the truncation note with the true count
+    html = render_report_html(spec, accent_hsl="0 0% 0%")
+    assert "Showing first rows of 2500" in html
+
+
+def test_table_section_under_cap_not_truncated():
+    """A small table must NOT be marked truncated (no false 'showing first rows' note)."""
+    from app.services.report import report_service
+
+    small = {
+        "columns": ["Period", "Revenue"],
+        "rows": [["Q1", "100"], ["Q2", "150"]],
+        "row_count": 2,
+    }
+    spec = assemble_spec(
+        title="Small",
+        sections=[{"type": "table", "result_id": "r1"}],
+        resolver=lambda rid: small,
+    )
+    tbl = next(s for s in spec["sections"] if s["type"] == "table")
+    assert len(tbl["rows"]) == 2
+    assert tbl["truncated"] is False
+    assert tbl["row_count"] == 2
+    assert report_service._MAX_REPORT_TABLE_ROWS == 2000
+
+
 async def test_compose_report_is_turn_atomic_no_mid_turn_commit(monkeypatch):
     """Gate cluster A — turn atomicity: compose_report runs on the chat
     orchestrator's SHARED session and must NOT commit mid-turn (the orchestrator

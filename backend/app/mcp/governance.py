@@ -253,6 +253,21 @@ TOOL_CONFIGS = {
         "requires_entitlement": "mcp_tools",
         "allowlisted_params": ["spreadsheet_id", "range"],
     },
+    "report.compose": {
+        # Renamed from the deleted report.export entry. This is an LLM-callable
+        # write+commit tool (full-conversation SELECT + JSONB/HTML render + audit),
+        # so it MUST carry a governance config — without it the tool falls through to
+        # the relaxed 60/min default with an empty allowlist (params pass UNFILTERED).
+        "default_limit": None,
+        "max_limit": None,
+        "timeout_seconds": 60,
+        "rate_limit_per_minute": 10,
+        "requires_entitlement": "mcp_tools",
+        # CRITICAL: report_export.execute consumes ONLY params["title"]/["sections"].
+        # _filter_params strips anything else, so this list must be exactly these two —
+        # a wrong list silently empties the compose payload.
+        "allowlisted_params": ["title", "sections"],
+    },
 }
 
 
