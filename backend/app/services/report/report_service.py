@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import set_tenant_context
 from app.schemas.chart import ChartData
 from app.schemas.report import parse_sections
+from app.services import audit_service
 from app.services.report.report_charts import render_chart_svg
 from app.services.report.report_html import render_report_html
 
@@ -121,5 +122,14 @@ async def compose_report(
     )
     db.add(report)
     await db.flush()
+    await audit_service.log_event(
+        db=db,
+        tenant_id=tenant_id,
+        category="report",
+        action="report.compose",
+        actor_id=created_by,
+        resource_type="report",
+        resource_id=str(report.id),
+    )
     await db.commit()
     return {"report_id": str(report.id), "title": title, "section_count": len(spec["sections"])}

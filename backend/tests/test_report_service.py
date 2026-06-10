@@ -58,3 +58,36 @@ def test_compose_assembles_frozen_spec():
     # trust boundary: condensed LLM payload has NO computed numbers
     assert "1.2M" not in condensed and "150" not in condensed
     assert "report_id" in condensed or "section_count" in condensed
+
+
+async def test_compose_report_audit_logs_the_mutation(monkeypatch):
+    """Repo rule (sqlalchemy-fastapi): always audit-log mutations. compose_report INSERTs a report."""
+    import uuid
+    from unittest.mock import AsyncMock
+
+    from app.services.report import report_service
+
+    audit_spy = AsyncMock()
+    monkeypatch.setattr(report_service.audit_service, "log_event", audit_spy)
+    monkeypatch.setattr(report_service, "set_tenant_context", AsyncMock())
+
+    db = AsyncMock()
+    db.add = lambda obj: setattr(obj, "id", uuid.uuid4())  # simulate PK assignment
+
+    tenant_id = uuid.uuid4()
+    actor = uuid.uuid4()
+    await report_service.compose_report(
+        db,
+        tenant_id=tenant_id,
+        title="Q2",
+        sections=[{"type": "heading", "level": 1, "text": "Q2"}],
+        resolver=lambda rid: {},
+        created_by=actor,
+    )
+    audit_spy.assert_awaited_once()
+    kwargs = audit_spy.await_args.kwargs
+    assert kwargs["tenant_id"] == tenant_id
+    assert kwargs["category"] == "report"
+    assert kwargs["action"] == "report.compose"
+    assert kwargs["actor_id"] == actor
+    assert kwargs["resource_type"] == "report"
