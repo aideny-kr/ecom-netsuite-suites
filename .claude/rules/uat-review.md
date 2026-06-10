@@ -41,4 +41,16 @@ paths:
   Exit `0` == full pass + verified zero residue. The hard slug-guard refuses any tenant whose `slug != uat-smoke` and it NEVER `close_period`s. **NEVER point it at a real tenant** — the absolute backstop deletes ALL of a tenant's recon runs/audit, which is safe ONLY on the recon-empty `uat-smoke` fixture. Runbook + safety details: `scripts/uat/README.md`.
 - **Seeded-tenant CI e2e (T2):** `backend/tests/e2e/test_recon_lifecycle_e2e.py` against the CI Postgres (the recon write-path regression backbone; = Phase 2).
 
+## Self-review INSIDE a build-workflow (fires automatically as part of the build)
+When a build is orchestrated as a `Workflow` (the agents build via a workflow script), make the gate a **final phase** instead of a separate manual run — then the review fires automatically as part of the build. The `workflow()` hook runs another workflow inline (nests one level: a build-workflow → the gate is fine; the gate is a leaf). Canonical template: **`.claude/workflows/build-with-review.template.js`**. The shape:
+```js
+phase('Diff')                                                  // an agent computes the diff the build produced
+const { diff: builtDiff } = await agent('return `git --no-pager diff HEAD` (or merge-base..HEAD if committed)…', { schema: { /* {diff} */ } })
+phase('Review')                                                // run the T2 gate inline on that diff
+const review = await workflow('code-review-multiangle', { diff: builtDiff })   // args.diff is TRUSTED → bypasses the gate's own prep
+log(`review: ${review.status} codex_used=${review.codex_used} findings=${(review.findings||[]).length}`)
+return { review }                                              // ADVISORY: attach findings, do NOT throw — build completes; a human triages
+```
+**Advisory by policy** (chosen): the phase attaches `review.findings` and never blocks the build. To make it **blocking** instead, `throw` when `review.status === 'INCOMPLETE'` (a finder/codex angle died) or when a finding is `blocker`/`major`. Note `codex_used`: `false` means the independent codex angle fell back to Claude-only on that host (weaker pass). This in-loop self-review is advisory and does **not** replace the **blocking pre-merge T2 gate** below.
+
 > Self-review does NOT substitute for the T2 multi-angle review: a self-review once mis-framed a real period-close-integrity bug as intended; the independent multi-angle pass caught it. Spec: `docs/superpowers/specs/2026-06-04-uat-review-process-design.md`.
