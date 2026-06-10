@@ -2771,14 +2771,16 @@ async def run_chat_turn(
                         full_payload: dict | None = None,
                     ):
                         # FULL-PAYLOAD SIDECAR (gate cluster A): eagerly write the
-                        # FULL, uncapped result payload under the turn-scoped
-                        # result_id so a SAME-TURN report.compose can resolve the
-                        # results just computed THIS turn (the current turn's
-                        # assistant ChatMessage isn't persisted until AFTER this
-                        # loop). The payload is computed ONCE by the interceptor
-                        # (the SINGLE id-assignment criterion) and threaded here —
-                        # the sidecar never re-extracts (finding #15), and it is
-                        # the FULL pre-truncation payload (finding #10).
+                        # pre-truncation result payload (capped only at
+                        # MAX_STORED_PAYLOAD_ROWS=2000, r3 finding #6 — NOT the
+                        # 500-row LLM cap nor the 50-row Redis preview cap) under
+                        # the conversation-ordinal result_id so a SAME-TURN
+                        # report.compose can resolve the results just computed
+                        # THIS turn (the current turn's assistant ChatMessage
+                        # isn't persisted until AFTER this loop). The payload is
+                        # computed ONCE by the interceptor (the SINGLE
+                        # id-assignment criterion) and threaded here — the
+                        # sidecar never re-extracts (finding #15).
                         if result_id and full_payload is not None:
                             try:
                                 cache_full_payload(str(session.id), result_id, full_payload)
