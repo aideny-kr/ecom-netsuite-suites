@@ -166,7 +166,15 @@ async def test_compose_resolves_full_rows_views_html_and_audits(db, client):
     # A known cell value (row 60) must be absent from the LLM-facing condensed payload.
     assert _row_marker(_ROW_COUNT) not in condensed
     assert _row_marker(1) not in condensed
-    assert "60" not in condensed  # the row_count figure must not leak to the LLM either
+    # The row_count figure must not leak either. The condensed payload legitimately
+    # carries the report_id UUID, whose hex can contain "60" by chance (observed flake)
+    # — so assert against the condensed string with the id removed, and assert no
+    # numeric data fields survived into the parsed payload.
+    condensed_parsed = json.loads(condensed)
+    condensed_sans_id = condensed.replace(condensed_parsed["report_id"], "")
+    assert "60" not in condensed_sans_id  # row_count figure absent outside the opaque id
+    assert "row_count" not in condensed_parsed
+    assert "rows" not in condensed_parsed
 
     # --- I5: an audit_events row with action='report.compose' exists for the report ---
     audit_count = (
