@@ -1119,6 +1119,16 @@ def _intercept_tool_result(
 
 _NON_DATA_EVENTS = frozenset({"sheets_link", "docs_link", "report_ready"})
 
+# The SSE event types for which _intercept_tool_result STAMPS the result_id into
+# the LLM-facing condensed string (so the model actually SEES the id). The unified
+# slot criterion (re-gate r3) grants an r-id slot IFF the result is extractable AND
+# the intercept emits one of THESE stamped data events. A payload-bearing but
+# hidden/'other'-category tool (e.g. ns_listAllReports → no stamp, no SSE) gets NO
+# slot, NO sidecar, NO persisted result_payload — keeping the visible id sequence
+# dense and aligned with the persisted fallback. (The saved-search path also
+# returns "data_table", so it is covered.)
+_STAMPED_DATA_EVENTS = frozenset({"data_table", "financial_report"})
+
 
 def _build_intercept_cache_entry(
     *,
@@ -1258,28 +1268,43 @@ def _make_tool_interceptor(context_need: str = ContextNeed.DATA, cache_callback=
         params: dict | None = None,
         full_result_str: str | None = None,
     ) -> tuple[tuple[str, dict] | None, str]:
-        # SINGLE CRITERION: a result earns a turn-scoped id IFF it yields an
-        # extractable payload. Extract ONCE, from the FULL (pre-truncation) string
-        # so the sidecar is uncapped. This same payload is threaded to the cache
-        # callback — the sidecar never re-extracts.
+        # UNIFIED SLOT CRITERION (re-gate r3, findings #1/#2/#5): a result earns a
+        # turn-scoped id IFF (a) extract_result_payload returns a non-None payload
+        # AND (b) the intercept STAMPS the id into the LLM-facing string (event_type
+        # is a stamped data event — data_table / financial_report — so the model
+        # will SEE the id). Both conditions are required: a payload-bearing but
+        # hidden/'other'-category tool (ns_listAllReports — a top-level list the
+        # extractor reads but the intercept never stamps/SSE's) gets NO slot, NO
+        # sidecar, NO persisted result_payload. This keeps the visible id sequence
+        # dense and aligned with the persisted-fallback numbering (which counts
+        # result_payload-bearing calls — and persistence is gated on the SAME
+        # criterion via is_stamped_data_tool, used by build_tool_call_log_entry).
+        #
+        # Extract ONCE, from the FULL (pre-truncation) string so the sidecar is
+        # uncapped (finding #10). Peek the event_type by running the intercept with
+        # result_id=None FIRST (no stamp), then — only if BOTH conditions hold —
+        # advance the counter and re-stamp the id into the condensed string + SSE.
         payload_source = full_result_str if full_result_str is not None else result_str
         full_payload = extract_result_payload(tool_name, params or {}, payload_source)
-        result_id: str | None = None
-        if full_payload is not None:
-            counter["n"] += 1
-            result_id = f"r{counter['n']}"
 
-        # Run the LLM-facing intercept ONCE with the decided id (it stamps the id
-        # into the condensed string + SSE event for the data/financial/metric paths).
         event_type, event_data, new_result_str = _intercept_tool_result(
-            tool_name, result_str, context_need=context_need, result_id=result_id
+            tool_name, result_str, context_need=context_need, result_id=None
         )
 
+        result_id: str | None = None
+        if full_payload is not None and event_type in _STAMPED_DATA_EVENTS:
+            counter["n"] += 1
+            result_id = f"r{counter['n']}"
+            # Re-stamp the decided id into the (already-condensed) LLM string + SSE
+            # event data (idempotent — _stamp_result_id mutates event_data in place
+            # and rewrites the condensed JSON's result_id field).
+            new_result_str = _stamp_result_id(new_result_str, event_data, result_id)
+
         # Thread the id + precomputed payload to the callback whenever EITHER a
-        # result_id was assigned (so the sidecar is written even for a
-        # payload-bearing tool with no SSE event, e.g. ns_listAllReports — keeps
-        # the in-turn numbering dense + aligned with the persisted fallback) OR an
-        # SSE event fired (pricing/result-cache wiring).
+        # result_id was assigned (writes the sidecar for a stamped data result) OR
+        # an SSE event fired (pricing/result-cache wiring). A stamped data event
+        # ALWAYS carries a slot now (both conditions hold together), so the sidecar
+        # and the result-cache stay consistent.
         if cache_callback and (result_id is not None or event_type is not None):
             cache_callback(
                 tool_name,

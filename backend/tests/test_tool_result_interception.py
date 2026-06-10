@@ -2,6 +2,8 @@
 
 import json
 
+import pytest
+
 from app.services.chat.orchestrator import _intercept_tool_result
 
 # -- Fixtures --
@@ -523,3 +525,154 @@ class TestPreTruncationSidecarPayload:
         out = _call_tool_result_interceptor(two_arg, "x", "capped", {}, "full")
         assert calls == [("x", "capped")]
         assert out == (None, "capped")
+
+
+# -- Re-gate r3 (final): UNIFIED slot criterion = extractable AND stamped --
+
+
+SAMPLE_LIST_ALL_REPORTS = [
+    {"id": "1", "name": "Income Statement", "type": "FINANCIAL"},
+    {"id": "2", "name": "Balance Sheet", "type": "FINANCIAL"},
+]
+
+
+class TestUnifiedSlotCriterion:
+    """Re-gate r3 (findings #1/#2/#5): a result earns an r-id slot IFF
+    ``extract_result_payload`` returns non-None AND the intercept STAMPS the id
+    into the LLM-facing string (event_type is a stamped data event — data_table
+    or financial_report — so the model actually SEES the id). A payload-bearing
+    but hidden/'other'-category tool (``ns_listAllReports`` — a top-level list the
+    extractor happily reads but the intercept classifies as 'other' and never
+    stamps/SSE's) gets NO counter slot, NO sidecar, NO persisted result_payload —
+    keeping the visible id sequence dense and aligned with the persisted fallback
+    (which counts result_payload-bearing calls)."""
+
+    def test_list_all_reports_gets_no_slot_no_sidecar(self):
+        """ns_listAllReports-shaped result (top-level list, category 'other'):
+        extract_result_payload returns non-None, but the intercept emits NO
+        stamped data event, so it must NOT advance the counter NOR write a sidecar
+        entry. A FOLLOWING suiteql result gets the NEXT dense id r1 (not r2)."""
+        from app.services.chat.orchestrator import _make_tool_interceptor
+
+        seen: list = []
+
+        def _cb(tool_name, event_type_str, event_data, result_id=None, params=None, result_str=None, full_payload=None):
+            seen.append((tool_name, event_type_str, result_id))
+
+        interceptor = _make_tool_interceptor(cache_callback=_cb)
+        # 1) ns_listAllReports: top-level list, category 'other' → no stamp.
+        sse_tuple, _ = interceptor("ext__abc__ns_listallreports", json.dumps(SAMPLE_LIST_ALL_REPORTS))
+        assert sse_tuple is None, "ns_listAllReports must not produce an SSE data event"
+        # No counter slot, no sidecar callback for the hidden tool.
+        assert seen == [], "a payload-bearing but unstamped 'other' tool must get NO sidecar/slot"
+
+        # 2) A real suiteql result must be the FIRST dense id r1, not r2.
+        sse2, llm_str = interceptor("netsuite_suiteql", _result_str(SAMPLE_SUITEQL_RESULT))
+        assert sse2 is not None
+        assert json.loads(llm_str)["result_id"] == "r1", (
+            "the next stamped result must take the next dense id (r1) — the hidden "
+            "ns_listAllReports must not have consumed r1"
+        )
+        assert seen == [("netsuite_suiteql", "data_table", "r1")]
+
+    def test_financial_report_stamped_id_is_resolvable(self):
+        """Finding #5 (financial direction): a financial_report result IS stamped,
+        so the SAME criterion must grant it a slot — extract_result_payload must
+        return a non-None payload for the financial shape so the stamped id never
+        dangles. Resolves via the sidecar (full_payload) here."""
+        from app.services.chat.orchestrator import _make_tool_interceptor
+
+        captured: dict = {}
+
+        def _cb(tool_name, event_type_str, event_data, result_id=None, params=None, result_str=None, full_payload=None):
+            captured["event_type"] = event_type_str
+            captured["result_id"] = result_id
+            captured["payload"] = full_payload
+
+        interceptor = _make_tool_interceptor(cache_callback=_cb)
+        sse_tuple, llm_str = interceptor("netsuite_financial_report", _result_str(SAMPLE_FINANCIAL_RESULT))
+        assert sse_tuple is not None
+        event_type, _ = sse_tuple
+        assert event_type == "financial_report"
+        # The stamped id the LLM sees ...
+        assert json.loads(llm_str)["result_id"] == "r1"
+        # ... must resolve to a non-None sidecar payload (no dangling id).
+        assert captured["event_type"] == "financial_report"
+        assert captured["result_id"] == "r1"
+        assert captured["payload"] is not None, "financial stamped id must carry a resolvable payload"
+        assert captured["payload"]["kind"] == "table"
+
+    def test_empty_financial_report_stamped_id_resolves(self):
+        """A successful-but-EMPTY financial report (zero-activity period) still
+        fires the financial_report SSE event (stamped), so it MUST get a slot AND
+        a resolvable (empty-rows) payload — pre-fix the empty shape produced None
+        from extract_result_payload, dangling the stamped id."""
+        from app.services.chat.orchestrator import _make_tool_interceptor
+
+        captured: dict = {}
+
+        def _cb(tool_name, event_type_str, event_data, result_id=None, params=None, result_str=None, full_payload=None):
+            captured["result_id"] = result_id
+            captured["payload"] = full_payload
+
+        interceptor = _make_tool_interceptor(cache_callback=_cb)
+        empty_financial = {
+            "success": True,
+            "report_type": "income_statement",
+            "period": "Jun 2026",
+            "columns": ["Account", "Amount"],
+            "items": [],
+            "total_rows": 0,
+            "summary": {"total_revenue": 0, "net_income": 0},
+        }
+        sse_tuple, llm_str = interceptor("netsuite_financial_report", _result_str(empty_financial))
+        assert sse_tuple is not None
+        assert json.loads(llm_str)["result_id"] == "r1"
+        assert captured["result_id"] == "r1"
+        assert captured["payload"] is not None, (
+            "an empty-but-successful financial report's stamped id must resolve, not dangle"
+        )
+        assert captured["payload"]["row_count"] == 0
+
+
+class TestInterceptorArityDispatch:
+    """Finding #3: ``_call_tool_result_interceptor`` must decide arity ONCE via
+    ``inspect.signature`` and call with the right shape — a REAL TypeError raised
+    INSIDE the interceptor body must PROPAGATE, not be silently swallowed and
+    retried with fewer args (which would mask bugs and double-run side effects)."""
+
+    def test_internal_typeerror_propagates(self):
+        from app.services.chat.agents.base_agent import _call_tool_result_interceptor
+
+        calls: list = []
+
+        def four_arg(tool_name, result_str, params=None, full_result_str=None):
+            calls.append(tool_name)
+            raise TypeError("boom inside the interceptor body")
+
+        with pytest.raises(TypeError, match="boom inside"):
+            _call_tool_result_interceptor(four_arg, "netsuite_suiteql", "capped", {}, "full")
+        # The interceptor must have been invoked EXACTLY once (no arity retry).
+        assert calls == ["netsuite_suiteql"]
+
+    def test_three_arg_interceptor_dispatched_correctly(self):
+        from app.services.chat.agents.base_agent import _call_tool_result_interceptor
+
+        seen: dict = {}
+
+        def three_arg(tool_name, result_str, params=None):
+            seen["params"] = params
+            return None, result_str
+
+        out = _call_tool_result_interceptor(three_arg, "x", "capped", {"q": 1}, "full")
+        assert seen["params"] == {"q": 1}
+        assert out == (None, "capped")
+
+    def test_three_arg_internal_typeerror_propagates(self):
+        from app.services.chat.agents.base_agent import _call_tool_result_interceptor
+
+        def three_arg(tool_name, result_str, params=None):
+            raise TypeError("boom inside 3-arg body")
+
+        with pytest.raises(TypeError, match="boom inside 3-arg"):
+            _call_tool_result_interceptor(three_arg, "x", "capped", {}, "full")

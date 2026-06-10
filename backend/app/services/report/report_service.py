@@ -9,6 +9,7 @@ from app.core.database import set_tenant_context
 from app.schemas.chart import ChartData
 from app.schemas.report import parse_sections
 from app.services import audit_service
+from app.services.chat.tool_call_results import MAX_STORED_PAYLOAD_ROWS
 from app.services.report.report_charts import render_chart_svg
 from app.services.report.report_html import render_report_html
 
@@ -20,7 +21,12 @@ _METRIC_COLUMNS = ["Metric", "Value", "Unit", "Period"]
 # large result bakes multi-MB JSONB + HTML into one row (risking the Supabase 2-min INSERT
 # timeout) and freezes the browser. We keep the TRUE row_count + mark truncated so
 # render_report_html shows the "Showing first rows of N" note.
-_MAX_REPORT_TABLE_ROWS = 2000
+#
+# This is the SAME constant the persistence boundary uses (MAX_STORED_PAYLOAD_ROWS in
+# tool_call_results) — imported, NOT redefined, so the stored-payload cap and the render
+# cap can never drift (re-gate r3, finding #6). The stored payload is already capped at
+# this value, so this render-time cap is now a defense-in-depth backstop.
+_MAX_REPORT_TABLE_ROWS = MAX_STORED_PAYLOAD_ROWS
 # Cap chart points: unlike the table branch, the chart branch emits 2+ SVG nodes per row
 # per series, so a 50k-row payload bakes a multi-MB SVG into the JSONB spec + rendered_html
 # (the DoS-shape the table cap guards against). A chart is also illegible past a few dozen

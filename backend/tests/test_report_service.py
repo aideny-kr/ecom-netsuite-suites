@@ -146,6 +146,17 @@ def test_metric_placeholder_fills_real_metric_payload_value():
     assert "[unresolved" not in out
 
 
+def test_stored_payload_cap_shares_one_constant():
+    """Re-gate r3 (finding #6): the persisted/sidecar row cap and the report-table
+    render cap MUST be ONE shared constant so they cannot drift. report_service
+    imports MAX_STORED_PAYLOAD_ROWS from tool_call_results and uses it as the table
+    cap — the two are the same object value (2000)."""
+    from app.services.chat.tool_call_results import MAX_STORED_PAYLOAD_ROWS
+    from app.services.report import report_service
+
+    assert report_service._MAX_REPORT_TABLE_ROWS == MAX_STORED_PAYLOAD_ROWS == 2000
+
+
 def test_table_section_caps_rows_at_max():
     """Gate E (finding #14): report.compose resolves the FULL uncapped payload, so a
     50k-row SuiteQL result would bake a multi-MB JSONB spec + HTML into one row and

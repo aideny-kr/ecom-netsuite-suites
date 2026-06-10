@@ -69,6 +69,112 @@ class TestExtractDataKeyShape:
         assert extract_result_payload("ext__x__ns_runcustomsuiteql", {}, json.dumps({"data": []})) is None
 
 
+class TestExtractFinancialReportShape:
+    """Re-gate r3 (finding #5): the financial_report intercept branch STAMPS an id
+    on every successful result (even empty-period), so extract_result_payload MUST
+    return a non-None payload for the financial shape — otherwise the stamped id
+    dangles (resolves to nothing in report.compose)."""
+
+    def test_financial_report_with_items_extracts_table(self):
+        import json
+
+        financial = {
+            "success": True,
+            "report_type": "income_statement",
+            "period": "Feb 2026",
+            "columns": ["account", "amount"],
+            "items": [
+                {"account": "Revenue", "amount": 100000},
+                {"account": "Net Income", "amount": 60000},
+            ],
+            "total_rows": 2,
+            "summary": {"total_revenue": 100000, "net_income": 60000},
+        }
+        payload = extract_result_payload("netsuite_financial_report", {}, json.dumps(financial))
+        assert payload is not None, "a successful financial report must extract a payload"
+        assert payload["kind"] == "table"
+        assert payload["row_count"] == 2
+        assert payload["rows"] == [["Revenue", 100000], ["Net Income", 60000]]
+
+    def test_empty_financial_report_extracts_empty_table(self):
+        """A zero-activity-period financial report (success, items=[]) must STILL
+        extract a non-None (empty-rows) payload — the stamped id must resolve."""
+        import json
+
+        empty = {
+            "success": True,
+            "report_type": "income_statement",
+            "period": "Jun 2026",
+            "columns": ["account", "amount"],
+            "items": [],
+            "total_rows": 0,
+            "summary": {"total_revenue": 0, "net_income": 0},
+        }
+        payload = extract_result_payload("netsuite_financial_report", {}, json.dumps(empty))
+        assert payload is not None, "an empty-but-successful financial report must NOT extract None"
+        assert payload["kind"] == "table"
+        assert payload["row_count"] == 0
+        assert payload["rows"] == []
+
+    def test_failed_financial_report_is_none(self):
+        import json
+
+        failed = {"success": False, "error": "Query failed", "report_type": "x", "period": "y"}
+        assert extract_result_payload("netsuite_financial_report", {}, json.dumps(failed)) is None
+
+
+class TestStoredPayloadRowCap:
+    """Re-gate r3 (finding #6, CONFIRMED): the persisted ChatMessage.tool_calls[]
+    .result_payload (and the in-turn sidecar) must be capped at MAX_STORED_PAYLOAD_ROWS
+    (= report_service._MAX_REPORT_TABLE_ROWS = 2000) so an ordinary broad SuiteQL
+    turn (up to 50k rows) doesn't bake multi-MB JSONB into Postgres. The TRUE
+    row_count is preserved and truncated=True is set; nothing downstream consumes
+    >2000 rows (report tables cap at 2000, charts at 100)."""
+
+    def test_extract_caps_rows_at_2000_preserves_true_count(self):
+        import json
+
+        from app.services.chat.tool_call_results import MAX_STORED_PAYLOAD_ROWS
+
+        assert MAX_STORED_PAYLOAD_ROWS == 2000
+        rows = [[f"SO-{i:05d}", i * 1.5] for i in range(2500)]
+        result = {
+            "columns": ["tranid", "amount"],
+            "rows": rows,
+            "row_count": 2500,
+            "query": "SELECT tranid, amount FROM transaction",
+        }
+        payload = extract_result_payload("netsuite_suiteql", {}, json.dumps(result, default=str))
+        assert payload is not None
+        assert len(payload["rows"]) == MAX_STORED_PAYLOAD_ROWS, "stored rows must be capped at 2000"
+        assert payload["row_count"] == 2500, "the TRUE pre-cap row_count must be preserved"
+        assert payload["truncated"] is True, "a capped payload must be marked truncated"
+
+    def test_extract_under_cap_is_unchanged(self):
+        import json
+
+        rows = [[f"SO-{i:04d}", i] for i in range(600)]
+        result = {"columns": ["tranid", "amount"], "rows": rows, "row_count": 600, "query": "q"}
+        payload = extract_result_payload("netsuite_suiteql", {}, json.dumps(result, default=str))
+        assert payload is not None
+        assert len(payload["rows"]) == 600
+        assert payload["row_count"] == 600
+        assert payload["truncated"] is False
+
+    def test_items_shape_caps_at_2000(self):
+        """The list-of-dicts (external-MCP 'data'/'items') path must cap too."""
+        import json
+
+        from app.services.chat.tool_call_results import MAX_STORED_PAYLOAD_ROWS
+
+        items = [{"tranid": f"SO-{i:05d}", "total": i} for i in range(2500)]
+        payload = extract_result_payload("ext__x__ns_runcustomsuiteql", {}, json.dumps({"data": items}))
+        assert payload is not None
+        assert len(payload["rows"]) == MAX_STORED_PAYLOAD_ROWS
+        assert payload["row_count"] == 2500
+        assert payload["truncated"] is True
+
+
 def _msg(tool_calls):
     return {"role": "assistant", "tool_calls": tool_calls}
 
@@ -148,6 +254,44 @@ class TestConversationOrdinalCount:
     def test_empty_history_is_zero(self):
         assert count_payload_bearing_tool_calls([]) == 0
         assert count_payload_bearing_tool_calls([_msg([])]) == 0
+
+    def test_counts_only_assistant_role_messages(self):
+        """Re-gate r3 (finding #4): the seed-K count must apply the SAME role filter
+        as the cross-turn fallback feeder (load_conversation_tool_messages, which
+        queries role == 'assistant'). A non-assistant message carrying a
+        result_payload-bearing tool_calls entry must NOT be counted — otherwise the
+        in-turn r(K+1) and the persisted-fallback 1..K numbering drift by one."""
+        messages = [
+            {
+                "role": "assistant",
+                "tool_calls": [{"tool": "a", "result_payload": {"rows": [["x"]], "row_count": 1}}],
+            },
+            {
+                # A non-assistant row carrying a payload-bearing tool_call: the
+                # fallback (assistant-only query) never sees it, so the seed must not either.
+                "role": "tool",
+                "tool_calls": [{"tool": "b", "result_payload": {"rows": [["y"]], "row_count": 1}}],
+            },
+            {
+                "role": "user",
+                "tool_calls": [{"tool": "c", "result_payload": {"rows": [["z"]], "row_count": 1}}],
+            },
+        ]
+        assert count_payload_bearing_tool_calls(messages) == 1, (
+            "only assistant-role messages may be counted (mirror the fallback resolver)"
+        )
+
+    def test_message_without_role_attr_still_counts(self):
+        """Dict messages with no 'role' key (legacy in-memory turn payloads) and ORM
+        rows missing the attr must default to counting — only an EXPLICIT non-assistant
+        role excludes a message, so today's assistant-only write-path is unaffected."""
+
+        class _OrmRowNoRole:
+            tool_calls = [{"tool": "a", "result_payload": {"rows": [["x"]], "row_count": 1}}]
+
+        # dict with no role key
+        no_role_dict = {"tool_calls": [{"tool": "b", "result_payload": {"rows": [["y"]], "row_count": 1}}]}
+        assert count_payload_bearing_tool_calls([no_role_dict, _OrmRowNoRole()]) == 2
 
 
 def test_inturn_result_aligns_with_fallback_across_turns():
