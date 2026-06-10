@@ -25,8 +25,9 @@ paths:
 | T2 | existing CI + **mandatory seeded-tenant e2e** | **PM-autonomous safe-envelope live smoke** | **mandatory multi-angle review, pre-merge, blocking** |
 
 ## How to run each gate
-- **Multi-angle review (T2):** `Workflow({name: "code-review-multiangle", args: {target: "<PR# or branch>"}})`. It **fails CLOSED** — read the result's `status` FIRST:
+- **Multi-angle review (T2):** `Workflow({name: "code-review-multiangle", args: {target: "<PR# or branch>"}})`. 8 angles: 7 Claude + 1 **independent-model (codex) angle** (the `grill-me` adversary, run read-only inside the gate) so the review is not Claude-on-Claude (which shares blind spots — see `memory/feedback_independent_model_review_gate`). It **fails CLOSED** — read the result's `status` FIRST:
   - `status: "INCOMPLETE"` (a finder angle failed) or `PREP_FAILED` / `EMPTY_DIFF` / `INVALID_ARGS` ⇒ NOT a valid pass; re-run. Never read a failed run as "0 findings".
+  - check `codex_used`: `true` = a real second model attacked the diff; `false` = the codex angle fell back to Claude-only (codex missing/unauthed on the host) ⇒ weaker pass, no independent model actually ran — re-run where codex is available (`codex login`) before treating a clean T2 result as final.
   - sanity-check the reported `base` matches the real PR base (prep resolves it).
   - every `UNVERIFIED` finding (a verifier failed) is preserved at `major` and needs human review.
   - resolve every CONFIRMED + PLAUSIBLE-major finding (fix, or defer with written rationale) before merge.
@@ -39,5 +40,17 @@ paths:
   ```
   Exit `0` == full pass + verified zero residue. The hard slug-guard refuses any tenant whose `slug != uat-smoke` and it NEVER `close_period`s. **NEVER point it at a real tenant** — the absolute backstop deletes ALL of a tenant's recon runs/audit, which is safe ONLY on the recon-empty `uat-smoke` fixture. Runbook + safety details: `scripts/uat/README.md`.
 - **Seeded-tenant CI e2e (T2):** `backend/tests/e2e/test_recon_lifecycle_e2e.py` against the CI Postgres (the recon write-path regression backbone; = Phase 2).
+
+## Self-review INSIDE a build-workflow (fires automatically as part of the build)
+When a build is orchestrated as a `Workflow` (the agents build via a workflow script), make the gate a **final phase** instead of a separate manual run — then the review fires automatically as part of the build. The `workflow()` hook runs another workflow inline (nests one level: a build-workflow → the gate is fine; the gate is a leaf). Canonical template: **`.claude/workflows/build-with-review.template.js`**. The shape:
+```js
+phase('Diff')                                                  // an agent computes the diff the build produced
+const { diff: builtDiff } = await agent('return `git --no-pager diff HEAD` (or merge-base..HEAD if committed)…', { schema: { /* {diff} */ } })
+phase('Review')                                                // run the T2 gate inline on that diff
+const review = await workflow('code-review-multiangle', { diff: builtDiff })   // args.diff is TRUSTED → bypasses the gate's own prep
+log(`review: ${review.status} codex_used=${review.codex_used} findings=${(review.findings||[]).length}`)
+return { review }                                              // ADVISORY: attach findings, do NOT throw — build completes; a human triages
+```
+**Advisory by policy** (chosen): the phase attaches `review.findings` and never blocks the build. To make it **blocking** instead, `throw` when `review.status === 'INCOMPLETE'` (a finder/codex angle died) or when a finding is `blocker`/`major`. Note `codex_used`: `false` means the independent codex angle fell back to Claude-only on that host (weaker pass). This in-loop self-review is advisory and does **not** replace the **blocking pre-merge T2 gate** below.
 
 > Self-review does NOT substitute for the T2 multi-angle review: a self-review once mis-framed a real period-close-integrity bug as intended; the independent multi-angle pass caught it. Spec: `docs/superpowers/specs/2026-06-04-uat-review-process-design.md`.
