@@ -747,6 +747,35 @@ def _intercept_tool_result(
     row data so it can reason over system notes, field changes, etc.
     """
 
+    # --- Report card path ---
+    if tool_name in ("report_compose", "report.compose"):
+        try:
+            parsed = json.loads(result_str)
+        except (json.JSONDecodeError, TypeError):
+            return None, None, result_str
+        if not isinstance(parsed, dict) or parsed.get("error") is True or not parsed.get("report_id"):
+            return None, None, result_str
+        rid = parsed["report_id"]
+        sse_event_data = {
+            "report_id": rid,
+            "title": parsed.get("title", "Report"),
+            "url": f"/reports/{rid}",
+            "section_count": parsed.get("section_count"),
+        }
+        condensed = json.dumps(
+            {
+                "success": True,
+                "report_id": rid,
+                "title": parsed.get("title", ""),
+                "note": (
+                    "The report card is shown to the user as a clickable card. "
+                    "Confirm what the report covers in one short line — do NOT restate figures or the URL."
+                ),
+            },
+            default=str,
+        )
+        return "report_ready", sse_event_data, condensed
+
     # --- Financial report path ---
     if _is_financial_tool(tool_name):
         try:
@@ -1054,7 +1083,7 @@ def _intercept_tool_result(
     return None, None, result_str
 
 
-_NON_DATA_EVENTS = frozenset({"sheets_link", "docs_link"})
+_NON_DATA_EVENTS = frozenset({"sheets_link", "docs_link", "report_ready"})
 
 
 def _build_intercept_cache_entry(
