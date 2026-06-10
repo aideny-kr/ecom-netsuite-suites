@@ -25,8 +25,9 @@ paths:
 | T2 | existing CI + **mandatory seeded-tenant e2e** | **PM-autonomous safe-envelope live smoke** | **mandatory multi-angle review, pre-merge, blocking** |
 
 ## How to run each gate
-- **Multi-angle review (T2):** `Workflow({name: "code-review-multiangle", args: {target: "<PR# or branch>"}})`. It **fails CLOSED** — read the result's `status` FIRST:
+- **Multi-angle review (T2):** `Workflow({name: "code-review-multiangle", args: {target: "<PR# or branch>"}})`. 8 angles: 7 Claude + 1 **independent-model (codex) angle** (the `grill-me` adversary, run read-only inside the gate) so the review is not Claude-on-Claude (which shares blind spots — see `memory/feedback_independent_model_review_gate`). It **fails CLOSED** — read the result's `status` FIRST:
   - `status: "INCOMPLETE"` (a finder angle failed) or `PREP_FAILED` / `EMPTY_DIFF` / `INVALID_ARGS` ⇒ NOT a valid pass; re-run. Never read a failed run as "0 findings".
+  - check `codex_used`: `true` = a real second model attacked the diff; `false` = the codex angle fell back to Claude-only (codex missing/unauthed on the host) ⇒ weaker pass, no independent model actually ran — re-run where codex is available (`codex login`) before treating a clean T2 result as final.
   - sanity-check the reported `base` matches the real PR base (prep resolves it).
   - every `UNVERIFIED` finding (a verifier failed) is preserved at `major` and needs human review.
   - resolve every CONFIRMED + PLAUSIBLE-major finding (fix, or defer with written rationale) before merge.

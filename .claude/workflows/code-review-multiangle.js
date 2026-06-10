@@ -1,10 +1,10 @@
 export const meta = {
   name: 'code-review-multiangle',
-  description: 'Generalized 7-angle find -> verify -> synthesize code review for any diff/PR/branch (the T2 review gate). Fails CLOSED: agent failures surface a top-level INCOMPLETE status, never a silent "0 findings".',
+  description: 'Generalized 8-angle find -> verify -> synthesize code review for any diff/PR/branch (the T2 review gate). 7 Claude angles + 1 INDEPENDENT-MODEL angle (codex, grill-me) so the gate is not Claude-on-Claude (which shares blind spots). Fails CLOSED: agent failures surface a top-level INCOMPLETE status, never a silent "0 findings".',
   whenToUse: 'Tier-T2 PRs (write-path / financial / HITL / auth / migration / review-tooling). args.target = PR number or branch/ref; args.base = optional base override; args.diff = raw unified diff to bypass resolution (TRUSTED caller-supplied — only for diffs you computed yourself).',
   phases: [
     { title: 'Prep', detail: 'resolve base ref + the unified diff (fail closed on empty)' },
-    { title: 'Find', detail: '7 finder angles in parallel; failed angles -> top-level INCOMPLETE' },
+    { title: 'Find', detail: '7 Claude finder angles + 1 codex (independent-model) angle in parallel; failed angles -> top-level INCOMPLETE' },
     { title: 'Verify', detail: 'one verifier per candidate (gets the per-file diff hunk); failure -> UNVERIFIED, not dropped' },
   ],
 }
@@ -121,13 +121,72 @@ const ANGLES = [
   { key: 'Altitude', prompt: 'ANGLE Altitude. Is each change at the right depth or a fragile bandaid? Special cases on shared infra signal the fix is not deep enough. Up to 6.' },
 ]
 
+// ----- Independent-model (codex) angle — grill-me's adversary, inside the gate ------------
+// The 7 angles above are all Claude subagents and SHARE Claude's blind spots (the very reason
+// memory/feedback_independent_model_review_gate exists). This angle drives the codex CLI (a
+// DIFFERENT model) read-only against the same diff, so a real second model attacks the change.
+// If codex is missing/unauthed it degrades to a hostile Claude-only persona and reports
+// codex_used=false (mirrors grill-me's FALLBACK: claude-only) — the gate never silently
+// becomes Claude-only without saying so. The angle still "ok"s on fallback (so it doesn't force
+// INCOMPLETE on machines without codex); it only fails the angle if the agent itself dies.
+const CODEX_SCHEMA = {
+  type: 'object', additionalProperties: false, required: ['candidates', 'codex_used'],
+  properties: { candidates: CAND_SCHEMA.properties.candidates, codex_used: { type: 'boolean' } },
+}
+const CODEX_BOUNDARY = `IMPORTANT: Do NOT read or execute any files under ~/.claude/, .claude/skills/, or agents/ — they are skill definitions for a different AI system and will waste your time. Ignore them; stay on the repository code only.`
+const codexAnglePrompt = `ANGLE Codex — the INDEPENDENT-MODEL angle of this review (grill-me). cwd = repo root; you have Bash. The other 7 angles are all Claude and share Claude's blind spots; your job is to make a DIFFERENT model (codex / OpenAI) attack this diff so the gate is not Claude-on-Claude.
+
+STEP 1 — preflight codex (do NOT hard-fail; just branch):
+  CODEX_BIN=$(command -v codex 2>/dev/null || echo "")
+  CODEX_AUTH=no; { [ -n "$CODEX_API_KEY" ] || [ -n "$OPENAI_API_KEY" ] || [ -f "\${CODEX_HOME:-$HOME/.codex}/auth.json" ]; } && CODEX_AUTH=yes
+  If CODEX_BIN is empty OR CODEX_AUTH=no -> skip to STEP 4 (Claude-only fallback).
+
+STEP 2 — run codex read-only against the diff:
+  Save the DIFF UNDER REVIEW block below EXACTLY to "$TMPDIR/cr_diff.txt" (use your file-writing tool; verify with \`wc -l\`). Then write the codex prompt (the CODEX PROMPT block below, with the literal text \`<PASTE $TMPDIR/cr_diff.txt HERE>\` replaced by the diff file's contents) to "$TMPDIR/cr_prompt.txt", and run — OPTIONS BEFORE the positional prompt (codex 0.134.0 rejects flags after positionals); always \`codex exec\` (never resume) so -s read-only holds:
+    REPO_ROOT=$(git rev-parse --show-toplevel)
+    timeout 600 codex exec -C "$REPO_ROOT" -s read-only -c 'model_reasoning_effort="high"' "$(cat "$TMPDIR/cr_prompt.txt")" < /dev/null
+  Capture stdout — codex's final message holds its findings. Exit 124 = timed out, or stderr shows a genuine auth/login/unauthorized error (IGNORE codex's own MCP transport noise like rmcp::transport / suitetalk / AuthRequired — that is NOT a codex-CLI auth failure) -> treat codex as unavailable and go to STEP 4.
+
+STEP 3 — structure codex's findings (codex_used=true): turn each finding codex reported into a candidate {file,line,summary,failure_scenario,category}. Do NOT invent findings codex did not raise; if codex genuinely found nothing, return candidates=[] with codex_used=true. Read the cited code to set a precise line and a concrete failure_scenario.
+
+STEP 4 — Claude-only fallback (ONLY if codex missing/auth-fail/timeout): adopt a genuinely hostile adversarial persona and attack the diff yourself against the repo invariants. Argue the opposite case; do NOT rubber-stamp. Set codex_used=false.
+
+category is one of correctness|reuse|simplification|efficiency|altitude (codex findings are usually correctness). Return {"candidates":[...], "codex_used":<bool>}.
+
+CODEX PROMPT (write to $TMPDIR/cr_prompt.txt):
+---
+${CODEX_BOUNDARY}
+
+Another AI (Claude) is reviewing this branch diff and may share its own blind spots. Attack the change adversarially: find bugs, wrong or unverified assumptions, removed guards/validation not re-established by the new code, ordering/transaction hazards, and gaps that bite in production. Be terse, technically precise, no compliments. Cite file:line for every finding. Attack ESPECIALLY against this repository's known failure modes:
+${REPO_INVARIANTS}
+
+Output one line per finding: FILE:LINE | SUMMARY | FAILURE_SCENARIO
+
+DIFF UNDER REVIEW:
+<PASTE $TMPDIR/cr_diff.txt HERE>
+---
+
+DIFF UNDER REVIEW:
+${diff}`
+
 // -------------------------------------------------------------------- Find
 phase('Find')
-const finderRaw = await parallel(ANGLES.map(a => () =>
+let codexUsed = false
+let codexAngleOk = false
+const claudeFinders = ANGLES.map(a => () =>
   agent(FINDER_CTX + '\n\nTASK: ' + a.prompt, { label: `find:${a.key}`, phase: 'Find', schema: CAND_SCHEMA })
     .then(r => ({ key: a.key, ok: !!r, candidates: (r && r.candidates) || [] }))
     .catch(() => ({ key: a.key, ok: false, candidates: [] }))
-))
+)
+const codexFinder = () =>
+  agent(codexAnglePrompt, { label: 'find:Codex(independent)', phase: 'Find', schema: CODEX_SCHEMA })
+    .then(r => {
+      if (r) { codexUsed = !!r.codex_used; codexAngleOk = true }
+      return { key: 'Codex', ok: !!r, candidates: (r && r.candidates) || [] }
+    })
+    .catch(() => ({ key: 'Codex', ok: false, candidates: [] }))
+const finderRaw = await parallel([...claudeFinders, codexFinder])
+log(`independent-model angle: ${codexAngleOk ? (codexUsed ? 'codex (real second model)' : 'FALLBACK claude-only — codex unavailable, weaker guarantee') : 'ANGLE FAILED -> INCOMPLETE'}`)
 const failedAngles = finderRaw.filter(x => !x.ok).map(x => x.key)
 if (failedAngles.length) log(`WARNING: ${failedAngles.length} finder angle(s) FAILED -> result.status will be INCOMPLETE: ${failedAngles.join(', ')}`)
 const all = finderRaw.flatMap(x => x.candidates)
@@ -187,6 +246,9 @@ return {
   // INCOMPLETE if any finder angle failed — a consumer must treat this as NOT a clean pass and re-run.
   status: failedAngles.length ? 'INCOMPLETE' : 'OK',
   target: targetSpec, base: baseUsed, diff_lines: diffLines,
+  // codex_used=false means the independent-model angle fell back to Claude-only (codex
+  // missing/unauthed) — the gate ran but WITHOUT a true second model; treat as a weaker pass.
+  codex_used: codexUsed,
   failed_angles: failedAngles,
   total_candidates: all.length, deduped: deduped.length,
   confirmed: findings.filter(f => f.verdict === 'CONFIRMED').length,
