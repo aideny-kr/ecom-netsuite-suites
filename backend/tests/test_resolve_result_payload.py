@@ -8,9 +8,64 @@ import inspect
 import pytest
 
 from app.services.chat.tool_call_results import (
+    extract_result_payload,
     load_conversation_tool_messages,
     resolve_payload_from_messages,
 )
+
+# --- Re-gate r2 (finding #3): external-MCP top-level "data" key must extract ---
+
+
+class TestExtractDataKeyShape:
+    """The interceptor's data_table path treats ``{"data": [{...}]}`` (the
+    documented external-MCP ``ns_runCustomSuiteQL`` shape, chat-orchestration
+    rule #3) as a data result and stamps a result_id. ``extract_result_payload``
+    MUST recognize the same shape so the sidecar/persisted payload is non-None
+    and report.compose can resolve that id — otherwise the single id-assignment
+    criterion (payload non-None) would never fire for the most common NetSuite
+    data source.
+    """
+
+    def test_top_level_data_key_extracts_table(self):
+        import json
+
+        mcp_result = {
+            "method": "custom_suiteql",
+            "queryExecuted": "SELECT t.tranid, t.total FROM transaction t",
+            "resultCount": 2,
+            "data": [
+                {"tranid": "SO-1001", "total": 5000.00},
+                {"tranid": "SO-1002", "total": 3200.50},
+            ],
+        }
+        payload = extract_result_payload("ext__abc123def__ns_runcustomsuiteql", {}, json.dumps(mcp_result))
+        assert payload is not None, "a top-level 'data' list must extract a payload"
+        assert payload["kind"] == "table"
+        # Same union-of-keys column derivation as "items".
+        assert payload["columns"] == ["tranid", "total"]
+        assert payload["rows"] == [["SO-1001", 5000.00], ["SO-1002", 3200.50]]
+        assert payload["row_count"] == 2
+
+    def test_data_key_column_union_across_rows(self):
+        """Like 'items', columns are the union of keys across all rows (first-seen
+        order), so a row missing a later key still aligns."""
+        import json
+
+        mcp_result = {
+            "data": [
+                {"a": 1},
+                {"a": 2, "b": 3},
+            ]
+        }
+        payload = extract_result_payload("ext__x__ns_runcustomsuiteql", {}, json.dumps(mcp_result))
+        assert payload is not None
+        assert payload["columns"] == ["a", "b"]
+        assert payload["rows"] == [[1, None], [2, 3]]
+
+    def test_empty_data_key_is_none(self):
+        import json
+
+        assert extract_result_payload("ext__x__ns_runcustomsuiteql", {}, json.dumps({"data": []})) is None
 
 
 def _msg(tool_calls):

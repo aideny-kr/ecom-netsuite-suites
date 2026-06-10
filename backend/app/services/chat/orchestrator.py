@@ -1208,9 +1208,6 @@ def _intercept_with_cache(
     return event_type, _strip_cache_only_fields_from_sse(event_data), new_result_str
 
 
-_DATA_RESULT_EVENTS = frozenset({"data_table", "financial_report"})
-
-
 def _make_tool_interceptor(context_need: str = ContextNeed.DATA, cache_callback=None):
     """Create a tool interceptor closure that captures context_need.
 
@@ -1219,30 +1216,72 @@ def _make_tool_interceptor(context_need: str = ContextNeed.DATA, cache_callback=
     after the agent loop. The shared cache write lives in
     ``_build_intercept_cache_entry`` so the legacy path stays in sync.
 
-    The closure maintains a per-TURN counter so each data-producing intercept
-    THIS turn gets a stable id (r1, r2, ...). That id is stamped into the
-    condensed LLM string + SSE event by ``_intercept_tool_result`` and is the SAME
-    id the full-payload sidecar is keyed by — so a same-turn ``report.compose``
-    can resolve it (gate cluster A). The counter resets per turn because a fresh
+    The closure maintains a per-TURN counter so each data-producing result THIS
+    turn gets a stable id (r1, r2, ...). That id is stamped into the condensed LLM
+    string + SSE event by ``_intercept_tool_result`` and is the SAME id the
+    full-payload sidecar is keyed by — so a same-turn ``report.compose`` can
+    resolve it (gate cluster A). The counter resets per turn because a fresh
     interceptor is built for each ``run_streaming`` call.
+
+    SINGLE id-assignment invariant (re-gate r2 — findings #3/#6/#11/#15):
+    "does this result get an r<n> id" is decided in EXACTLY ONE place — whether
+    ``extract_result_payload`` returns a non-None payload — and the payload is
+    computed ONCE here and threaded to the sidecar write. This is the SAME
+    predicate the cross-turn FALLBACK resolver (``resolve_payload_from_messages``)
+    uses to number persisted calls positionally, so the in-turn ids and the
+    persisted-fallback ids share one denominator and can never drift. (The old
+    design assigned ids off the peeked SSE event type {data_table, financial_report}
+    — a population that diverges from the payload extractor, leaving the LLM an id
+    that resolves to nothing, or shifting the numbering.) Computing the payload once
+    also kills the previous double ``_intercept_tool_result`` parse (finding #15).
+
+    ``full_result_str`` (when supplied by the agent loop) is the ORIGINAL,
+    pre-truncation result string; the sidecar payload is extracted from it so the
+    frozen report payload is FULL/uncapped even when the LLM-facing ``result_str``
+    is row-capped (finding #10). When absent it falls back to ``result_str``.
     """
     counter = {"n": 0}
 
-    def interceptor(tool_name: str, result_str: str, params: dict | None = None) -> tuple[tuple[str, dict] | None, str]:
-        # Peek at the event type with no id first so we only consume a counter
-        # slot for genuine data-producing results (the ids must be dense r1,r2…).
-        peek_type, _peek_data, _peek_str = _intercept_tool_result(tool_name, result_str, context_need=context_need)
+    def interceptor(
+        tool_name: str,
+        result_str: str,
+        params: dict | None = None,
+        full_result_str: str | None = None,
+    ) -> tuple[tuple[str, dict] | None, str]:
+        # SINGLE CRITERION: a result earns a turn-scoped id IFF it yields an
+        # extractable payload. Extract ONCE, from the FULL (pre-truncation) string
+        # so the sidecar is uncapped. This same payload is threaded to the cache
+        # callback — the sidecar never re-extracts.
+        payload_source = full_result_str if full_result_str is not None else result_str
+        full_payload = extract_result_payload(tool_name, params or {}, payload_source)
         result_id: str | None = None
-        if peek_type in _DATA_RESULT_EVENTS:
+        if full_payload is not None:
             counter["n"] += 1
             result_id = f"r{counter['n']}"
 
+        # Run the LLM-facing intercept ONCE with the decided id (it stamps the id
+        # into the condensed string + SSE event for the data/financial/metric paths).
         event_type, event_data, new_result_str = _intercept_tool_result(
             tool_name, result_str, context_need=context_need, result_id=result_id
         )
+
+        # Thread the id + precomputed payload to the callback whenever EITHER a
+        # result_id was assigned (so the sidecar is written even for a
+        # payload-bearing tool with no SSE event, e.g. ns_listAllReports — keeps
+        # the in-turn numbering dense + aligned with the persisted fallback) OR an
+        # SSE event fired (pricing/result-cache wiring).
+        if cache_callback and (result_id is not None or event_type is not None):
+            cache_callback(
+                tool_name,
+                event_type,
+                event_data,
+                result_id,
+                params or {},
+                payload_source,
+                full_payload,
+            )
+
         if event_type is not None and event_data is not None:
-            if cache_callback:
-                cache_callback(tool_name, event_type, event_data, result_id, params or {}, result_str)
             return (event_type, _strip_cache_only_fields_from_sse(event_data)), new_result_str
         return None, new_result_str
 
@@ -2688,28 +2727,35 @@ async def run_chat_turn(
 
                     def _on_tool_intercepted(
                         tool_name: str,
-                        event_type_str: str,
-                        event_data: dict,
+                        event_type_str: str | None,
+                        event_data: dict | None,
                         result_id: str | None = None,
                         params: dict | None = None,
                         result_str: str | None = None,
+                        full_payload: dict | None = None,
                     ):
                         # FULL-PAYLOAD SIDECAR (gate cluster A): eagerly write the
                         # FULL, uncapped result payload under the turn-scoped
                         # result_id so a SAME-TURN report.compose can resolve the
                         # results just computed THIS turn (the current turn's
                         # assistant ChatMessage isn't persisted until AFTER this
-                        # loop). Built via the SAME extract_result_payload builder
-                        # the persisted path uses, so shapes match.
-                        if result_id and result_str is not None:
+                        # loop). The payload is computed ONCE by the interceptor
+                        # (the SINGLE id-assignment criterion) and threaded here —
+                        # the sidecar never re-extracts (finding #15), and it is
+                        # the FULL pre-truncation payload (finding #10).
+                        if result_id and full_payload is not None:
                             try:
-                                full = extract_result_payload(tool_name, params or {}, result_str)
-                                if full is not None:
-                                    cache_full_payload(str(session.id), result_id, full)
+                                cache_full_payload(str(session.id), result_id, full_payload)
                             except Exception:
                                 # The sidecar is best-effort; never break the turn.
                                 pass
 
+                        # The result-cache / pricing-state entry only exists for an
+                        # SSE-producing event (a payload-bearing tool with no event —
+                        # e.g. ns_listAllReports — gets a sidecar write above but no
+                        # result-cache row).
+                        if event_type_str is None or event_data is None:
+                            return
                         cr = _build_intercept_cache_entry(
                             tool_name=tool_name,
                             event_type_str=event_type_str,

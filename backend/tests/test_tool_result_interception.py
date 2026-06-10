@@ -317,3 +317,156 @@ class TestResultIdContract:
         _, sse_event, condensed = _intercept_tool_result("netsuite_suiteql", result_str)
         assert "result_id" not in json.loads(condensed)
         assert "result_id" not in sse_event
+
+
+# -- Re-gate r2: the SINGLE id-assignment invariant (_make_tool_interceptor) --
+
+
+class TestSingleIdAssignmentInvariant:
+    """Re-gate r2 (findings #3/#6/#11/#15): ``_make_tool_interceptor`` must assign
+    a turn-scoped result_id IFF ``extract_result_payload`` returns non-None — the
+    SAME criterion that decides whether the sidecar (and the persisted fallback)
+    can resolve that id. The previous criterion (``peek_type in _DATA_RESULT_EVENTS``)
+    could disagree with the payload extractor, leaving an id that resolves to
+    nothing (or shifting the dense r1,r2… numbering)."""
+
+    def test_data_key_result_gets_id_and_payload(self):
+        """An external-MCP ``{"data": [...]}`` result both gets stamped a result_id
+        AND yields a non-None payload to the sidecar callback — they must agree."""
+        from app.services.chat.orchestrator import _make_tool_interceptor
+
+        captured: dict = {}
+
+        def _cb(tool_name, event_type_str, event_data, result_id=None, params=None, result_str=None, full_payload=None):
+            captured["result_id"] = result_id
+            captured["payload"] = full_payload
+
+        interceptor = _make_tool_interceptor(cache_callback=_cb)
+        mcp_result = {
+            "data": [
+                {"tranid": "SO-1001", "total": 5000.00},
+                {"tranid": "SO-1002", "total": 3200.50},
+            ]
+        }
+        sse_tuple, llm_str = interceptor("ext__abc__ns_runcustomsuiteql", json.dumps(mcp_result))
+        assert sse_tuple is not None
+        event_type, sse_event = sse_tuple
+        assert event_type == "data_table"
+        # The LLM is shown r1 ...
+        assert json.loads(llm_str)["result_id"] == "r1"
+        assert sse_event["result_id"] == "r1"
+        # ... AND the sidecar callback got a non-None payload keyed by the same id.
+        assert captured["result_id"] == "r1"
+        assert captured["payload"] is not None
+        assert captured["payload"]["columns"] == ["tranid", "total"]
+
+    def test_non_data_tool_consumes_no_counter_slot(self):
+        """A non-data tool (no extractable payload) must NOT advance the counter —
+        the ids stay dense (r1, r2, ...) so the model's positional reference is
+        unambiguous."""
+        from app.services.chat.orchestrator import _make_tool_interceptor
+
+        seen_ids: list = []
+
+        def _cb(tool_name, event_type_str, event_data, result_id=None, params=None, result_str=None, full_payload=None):
+            seen_ids.append((tool_name, result_id))
+
+        interceptor = _make_tool_interceptor(cache_callback=_cb)
+        # A rag_search result has no extractable payload — it must not be intercepted
+        # NOR consume a counter slot.
+        interceptor("rag_search", json.dumps({"chunks": [{"text": "hi"}]}))
+        # Then a real data_table → must be r1 (not r2).
+        sse_tuple, llm_str = interceptor("netsuite_suiteql", _result_str(SAMPLE_SUITEQL_RESULT))
+        assert sse_tuple is not None
+        assert json.loads(llm_str)["result_id"] == "r1"
+        # The callback only fired for the data tool, with r1.
+        assert seen_ids == [("netsuite_suiteql", "r1")]
+
+
+class TestPreTruncationSidecarPayload:
+    """Re-gate r2 (finding #10): the LLM-facing string may be row-capped, but the
+    sidecar/persisted payload the report composer resolves must be the FULL,
+    UNCAPPED result. The interceptor must extract the payload from the ORIGINAL
+    (pre-truncation) result string passed as ``full_result_str``, not the 500-row
+    LLM-facing one."""
+
+    def test_sidecar_uses_full_string_while_llm_stays_capped(self):
+        """The interceptor receives BOTH the (truncated) LLM string AND the original
+        full string. The sidecar payload carries ALL 600 rows; the LLM-facing
+        condensed string only reflects the capped one."""
+        from app.services.chat.orchestrator import _make_tool_interceptor
+
+        captured: dict = {}
+
+        def _cb(tool_name, event_type_str, event_data, result_id=None, params=None, result_str=None, full_payload=None):
+            captured["payload"] = full_payload
+            captured["result_id"] = result_id
+
+        interceptor = _make_tool_interceptor(cache_callback=_cb)
+
+        # 600 rows in the FULL string; the LLM string is a 30-row "capped" copy
+        # (mirroring _truncate_tool_result + the 30-row preview the LLM condense uses).
+        full_rows = [[f"SO-{i:04d}", i * 1.5] for i in range(600)]
+        full_result = {
+            "columns": ["tranid", "amount"],
+            "rows": full_rows,
+            "row_count": 600,
+            "query": "SELECT tranid, amount FROM transaction",
+        }
+        capped_rows = full_rows[:30]
+        capped_result = {**full_result, "rows": capped_rows, "rows_truncated": True}
+
+        sse_tuple, _llm_str = interceptor(
+            "netsuite_suiteql",
+            json.dumps(capped_result, default=str),  # LLM-facing (truncated)
+            None,
+            json.dumps(full_result, default=str),  # ORIGINAL full string
+        )
+        assert sse_tuple is not None
+        # The sidecar payload must carry ALL 600 rows (extracted from the full string).
+        assert captured["result_id"] == "r1"
+        assert captured["payload"] is not None
+        assert captured["payload"]["row_count"] == 600
+        assert len(captured["payload"]["rows"]) == 600
+
+    def test_falls_back_to_result_str_when_no_full_provided(self):
+        """When no full_result_str is supplied (older/test callers), the payload is
+        extracted from result_str — backward compatible."""
+        from app.services.chat.orchestrator import _make_tool_interceptor
+
+        captured: dict = {}
+
+        def _cb(tool_name, event_type_str, event_data, result_id=None, params=None, result_str=None, full_payload=None):
+            captured["payload"] = full_payload
+
+        interceptor = _make_tool_interceptor(cache_callback=_cb)
+        interceptor("netsuite_suiteql", _result_str(SAMPLE_SUITEQL_RESULT))
+        assert captured["payload"] is not None
+        assert captured["payload"]["row_count"] == 3
+
+    def test_base_agent_passes_original_string_to_interceptor(self):
+        """The base_agent helper forwards (tool, llm_str, params, full_str) and tolerates
+        narrower-arity interceptors (the seam that feeds finding #10's fix)."""
+        from app.services.chat.agents.base_agent import _call_tool_result_interceptor
+
+        seen: dict = {}
+
+        # 4-arg interceptor (the production _make_tool_interceptor shape).
+        def four_arg(tool_name, result_str, params=None, full_result_str=None):
+            seen["full"] = full_result_str
+            seen["llm"] = result_str
+            return None, result_str
+
+        _call_tool_result_interceptor(four_arg, "netsuite_suiteql", '{"capped":1}', {"q": 1}, '{"full":600}')
+        assert seen == {"full": '{"full":600}', "llm": '{"capped":1}'}
+
+        # 2-arg legacy interceptor still works (TypeError fallback).
+        calls: list = []
+
+        def two_arg(tool_name, result_str):
+            calls.append((tool_name, result_str))
+            return None, result_str
+
+        out = _call_tool_result_interceptor(two_arg, "x", "capped", {}, "full")
+        assert calls == [("x", "capped")]
+        assert out == (None, "capped")

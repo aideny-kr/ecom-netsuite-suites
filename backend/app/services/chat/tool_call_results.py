@@ -119,6 +119,13 @@ def _extract_items_as_table(parsed: dict[str, Any] | list) -> tuple[list[str], l
 
     Handles:
       - {"items": [{...}, ...]} — ns_runCustomSuiteQL, ns_runSavedSearch
+      - {"data": [{...}, ...]} — external MCP ns_runCustomSuiteQL (chat-orchestration
+        rule #3: external MCP returns ``{"data": [{col: val}], ...}``, NOT columns/rows).
+        The interceptor's data_table branch (orchestrator._intercept_tool_result) treats
+        this top-level ``data`` key as a data result and stamps a result_id, so the
+        payload extractor MUST recognize the same shape — otherwise the SINGLE
+        id-assignment criterion (payload non-None) never fires for this (most common
+        NetSuite) data source and report.compose can't resolve the stamped id.
       - [{...}, ...] — ns_listAllReports, ns_listSavedSearches (top-level list)
       - {"reportData": {...}} — ns_runReport (hierarchical, handled separately)
     """
@@ -127,7 +134,10 @@ def _extract_items_as_table(parsed: dict[str, Any] | list) -> tuple[list[str], l
     if isinstance(parsed, list):
         items = parsed
     elif isinstance(parsed, dict):
+        # Prefer "items"; fall back to the external-MCP "data" key (same shape).
         items_val = parsed.get("items")
+        if not isinstance(items_val, list):
+            items_val = parsed.get("data")
         if isinstance(items_val, list):
             items = items_val
 

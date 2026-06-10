@@ -125,10 +125,13 @@ class TestPricingStateStrippedFromSSE:
 
         captured: dict = {}
 
-        def _cache_cb(tool_name, event_type_str, event_data, result_id=None, params=None, result_str=None):
+        def _cache_cb(
+            tool_name, event_type_str, event_data, result_id=None, params=None, result_str=None, full_payload=None
+        ):
             # Cache callback must see the FULL payload (pricing_state included).
-            # The interceptor also forwards result_id/params/result_str (used by the
-            # in-turn full-payload sidecar); this test only asserts pricing_state.
+            # The interceptor also forwards result_id/params/result_str/full_payload
+            # (used by the in-turn full-payload sidecar); this test only asserts
+            # pricing_state.
             captured["cache_event_data"] = dict(event_data)
 
         interceptor = _make_tool_interceptor(cache_callback=_cache_cb)

@@ -281,6 +281,27 @@ def _truncate_tool_result(result_str: str) -> str:
 # Backward-compatible alias
 _truncate_error_payload = _truncate_tool_result
 
+
+def _call_tool_result_interceptor(interceptor, tool_name, llm_result_str, params, full_result_str):
+    """Invoke a tool-result interceptor, tolerating older arities.
+
+    The production interceptor (``orchestrator._make_tool_interceptor``) accepts
+    ``(tool_name, result_str, params, full_result_str)`` — the LLM-facing string
+    AND the ORIGINAL pre-truncation string (so the in-turn full-payload sidecar is
+    uncapped, finding #10). Older/test interceptors may only take
+    ``(tool_name, result_str)`` or ``(tool_name, result_str, params)``; fall back
+    progressively so they keep working.
+    """
+    try:
+        return interceptor(tool_name, llm_result_str, params, full_result_str)
+    except TypeError:
+        pass
+    try:
+        return interceptor(tool_name, llm_result_str, params)
+    except TypeError:
+        return interceptor(tool_name, llm_result_str)
+
+
 _CONFIDENCE_RE = re.compile(r"<confidence>(\d)</confidence>")
 _LOW_CONFIDENCE_DISCLAIMER = (
     "\n\n*Note: I'm not fully confident in this result. Please verify the data before acting on it.*"
@@ -801,7 +822,7 @@ class BaseSpecialistAgent(abc.ABC):
         model: str,
         conversation_history: list[dict] | None = None,
         tool_choice: dict | str | None = None,
-        tool_result_interceptor: Callable[[str, str], tuple[tuple[str, dict] | None, str]] | None = None,
+        tool_result_interceptor: Callable[..., tuple[tuple[str, dict] | None, str]] | None = None,
         session_id: str | None = None,
         run_id: str | None = None,
     ):
@@ -1242,6 +1263,14 @@ class BaseSpecialistAgent(abc.ABC):
                             except (json.JSONDecodeError, TypeError):
                                 pass
 
+                    # Capture the ORIGINAL, untruncated result BEFORE row-capping.
+                    # The LLM-facing string is truncated below (token budget), but the
+                    # in-turn full-payload sidecar AND the persisted
+                    # ChatMessage.tool_calls[].result_payload — both of which
+                    # report.compose resolves to render the FULL, "uncapped frozen
+                    # payload" — must see all rows. Without this, a >500-row result
+                    # silently composes a report missing rows 501..N (finding #10).
+                    full_result_str = result_str
                     result_str = _truncate_tool_result(result_str)
 
                     raw_result_strings.append(result_str)
@@ -1270,11 +1299,14 @@ class BaseSpecialistAgent(abc.ABC):
                     # (e.g. financial reports → SSE event + condensed LLM context)
                     llm_result_str = result_str
                     if tool_result_interceptor is not None:
-                        # Pass the tool params too — the orchestrator's interceptor
-                        # builds the in-turn full-payload sidecar via
-                        # extract_result_payload(tool_name, params, result_str) so a
-                        # same-turn report.compose can resolve this result.
-                        intercept_data, llm_result_str = tool_result_interceptor(block.name, result_str, block.input)
+                        # Pass the tool params AND the original (pre-truncation) result.
+                        # The orchestrator's interceptor extracts the in-turn full-payload
+                        # sidecar from the FULL string (extract_result_payload) so a
+                        # same-turn report.compose resolves all rows uncapped, while the
+                        # LLM-facing string (result_str) stays row-capped.
+                        intercept_data, llm_result_str = _call_tool_result_interceptor(
+                            tool_result_interceptor, block.name, result_str, block.input, full_result_str
+                        )
                         if intercept_data is not None:
                             yield "tool_intercept", intercept_data
 
@@ -1297,7 +1329,10 @@ class BaseSpecialistAgent(abc.ABC):
                             agent_name=self.agent_name,
                             tool_name=block.name,
                             params=block.input,
-                            result_str=result_str,
+                            # Use the ORIGINAL pre-truncation result so the persisted
+                            # result_payload (the CROSS-TURN report.compose fallback)
+                            # is FULL/uncapped — matching the in-turn sidecar (#10).
+                            result_str=full_result_str,
                             duration_ms=elapsed_ms,
                         )
                     )
