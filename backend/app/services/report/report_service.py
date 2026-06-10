@@ -131,5 +131,10 @@ async def compose_report(
         resource_type="report",
         resource_id=str(report.id),
     )
-    await db.commit()
+    # TURN ATOMICITY (gate cluster A): do NOT commit here. compose_report runs as a
+    # chat tool on the orchestrator's SHARED in-turn session; the orchestrator
+    # commits exactly ONCE at end of turn, so the report row + its audit persist
+    # atomically with the turn. A mid-turn commit would survive even if a later
+    # step rolls back, orphaning a committed report under a failed turn. We flush
+    # (above) so report.id is assigned for the audit row + the returned id.
     return {"report_id": str(report.id), "title": title, "section_count": len(spec["sections"])}

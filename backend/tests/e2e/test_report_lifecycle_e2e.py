@@ -100,9 +100,17 @@ async def _seed_assistant_message_with_payload(db, tenant, user, payload: dict) 
 
 
 # ---------------------------------------------------------------------------
-# I1 + I2 + I4 + I5 — compose via the REAL resolver path, then assert
-#   full rows survive into the persisted HTML, the view endpoint serves it,
-#   the LLM-condensed string has no figures, and a compose audit row exists.
+# I1 + I2 + I4 + I5 — compose via the REAL (PERSISTED-MESSAGE FALLBACK) resolver
+#   path, then assert full rows survive into the persisted HTML, the view
+#   endpoint serves it, the LLM-condensed string has no figures, and a compose
+#   audit row exists.
+#
+# NOTE (gate cluster A): the persisted-ChatMessage resolver is the CROSS-TURN /
+# regeneration FALLBACK path — a prior turn's results are in the DB by the time a
+# later turn (or a report regeneration) composes. The PRIMARY same-turn path is
+# the eager full-payload Redis sidecar, exercised by
+# ``test_compose_resolves_from_inturn_cache_sidecar`` below (the current turn's
+# assistant ChatMessage is NOT yet persisted when report.compose runs mid-loop).
 # ---------------------------------------------------------------------------
 
 
@@ -187,6 +195,88 @@ async def test_compose_resolves_full_rows_views_html_and_audits(db, client):
         )
     ).scalar_one()
     assert audit_count == 1
+
+
+# ---------------------------------------------------------------------------
+# I1b (gate cluster A) — PRIMARY same-turn path: compose resolves from the eager
+#   full-payload Redis sidecar when NO assistant ChatMessage is persisted yet
+#   (the real mid-turn ordering). Drives the REAL report.compose tool
+#   (report_export.execute), which is cache-first, then asserts the full rows
+#   survive into the persisted report — proving in-turn resolution.
+# ---------------------------------------------------------------------------
+
+
+async def test_compose_resolves_from_inturn_cache_sidecar(db, client, monkeypatch):
+    from unittest.mock import patch
+
+    from app.mcp.tools import report_export
+
+    tenant = await create_test_tenant(db, name="Report Corp Cache")
+    user, _ = await create_test_user(db, tenant)
+    await set_tenant_context(db, str(tenant.id))
+
+    # A bare ChatSession with NO assistant ChatMessage — i.e. the current turn's
+    # results are NOT yet persisted (the real same-turn ordering). conversation_id
+    # is the session id the compose tool resolves against.
+    session = ChatSession(tenant_id=tenant.id, user_id=user.id, title="Same-turn report")
+    db.add(session)
+    await db.flush()
+    conversation_id = str(session.id)
+
+    payload = _full_table_payload()
+
+    # In-memory FakeRedis for the sidecar (mirrors test_result_cache.py).
+    store: dict = {}
+
+    class FakeRedis:
+        def hset(self, key, field, value):
+            store.setdefault(key, {})[field] = value
+
+        def hget(self, key, field):
+            return store.get(key, {}).get(field)
+
+        def hgetall(self, key):
+            return store.get(key, {})
+
+        def hdel(self, key, field):
+            store.get(key, {}).pop(field, None)
+
+        def expire(self, key, ttl):
+            pass
+
+    with patch("app.services.chat.result_cache._get_redis", return_value=FakeRedis()):
+        # Eagerly write the FULL, uncapped payload under the turn-scoped result_id —
+        # exactly what the orchestrator's intercept callback does mid-turn.
+        from app.services.chat.result_cache import cache_full_payload
+
+        cache_full_payload(conversation_id, "r1", payload)
+
+        # Drive the REAL report.compose tool — its resolver must be cache-first and
+        # find r1 in the sidecar even though no ChatMessage carries it.
+        result = await report_export.execute(
+            {
+                "title": "Same-turn Report",
+                "sections": [
+                    {"type": "heading", "level": 1, "text": "Same-turn Report"},
+                    {"type": "table", "result_id": "r1"},
+                ],
+            },
+            context={
+                "db": db,
+                "tenant_id": tenant.id,
+                "conversation_id": conversation_id,
+                "actor_id": user.id,
+            },
+        )
+
+    report_id = result["report_id"]
+    # report.compose no longer commits mid-turn; flush makes the row visible within
+    # this shared session/transaction.
+    report = (await db.execute(select(Report).where(Report.id == uuid.UUID(report_id)))).scalar_one()
+    # The full uncapped rows resolved FROM THE SIDECAR survive into the report.
+    assert _row_marker(_ROW_COUNT) in report.rendered_html, "row 60 from the sidecar must survive (no 50-cap, in-turn)"
+    table_section = next(s for s in report.spec_json["sections"] if s["type"] == "table")
+    assert len(table_section["rows"]) == _ROW_COUNT
 
 
 # ---------------------------------------------------------------------------

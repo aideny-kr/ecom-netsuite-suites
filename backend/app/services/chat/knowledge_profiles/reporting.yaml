@@ -7,8 +7,11 @@ prompt_fragment: |
   When the user asks for a "report" that tells a story over data you have ALREADY computed
   this turn, call `report_compose` with a title and an ordered `sections` list.
   - Data sections (`table`, `chart`, `metric_headline`) reference a prior result by `result_id`.
-    NEVER inline numbers — the backend injects the real frozen values.
-  - `narrative` sections may embed `{{result:<id>.<field>}}` or `{{metric:<id>}}`; you write the
-    sentence, the backend fills the figure. Do not write raw numbers in prose.
+    Each data result's summary includes its `result_id` (`r1`, `r2`, ... numbered in the order
+    you produced them THIS turn) — pass those EXACT ids. NEVER inline numbers; the backend
+    injects the real frozen values.
+  - `narrative` sections may embed `{{result:<id>.<field>}}` or `{{metric:<id>}}` using those same
+    `r1`/`r2` ids; you write the sentence, the backend fills the figure. Do not write raw numbers
+    in prose.
   - The tool returns a report card the user clicks to view; do NOT restate the figures or URL.
 rag_partitions: []

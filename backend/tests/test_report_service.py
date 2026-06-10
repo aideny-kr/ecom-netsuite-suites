@@ -91,3 +91,36 @@ async def test_compose_report_audit_logs_the_mutation(monkeypatch):
     assert kwargs["action"] == "report.compose"
     assert kwargs["actor_id"] == actor
     assert kwargs["resource_type"] == "report"
+
+
+async def test_compose_report_is_turn_atomic_no_mid_turn_commit(monkeypatch):
+    """Gate cluster A — turn atomicity: compose_report runs on the chat
+    orchestrator's SHARED session and must NOT commit mid-turn (the orchestrator
+    commits exactly ONCE at end of turn). It still flushes so the report PK is
+    assigned for the audit row + the returned report_id."""
+    import uuid
+    from unittest.mock import AsyncMock
+
+    from app.services.report import report_service
+
+    monkeypatch.setattr(report_service.audit_service, "log_event", AsyncMock())
+    monkeypatch.setattr(report_service, "set_tenant_context", AsyncMock())
+
+    db = AsyncMock()
+    db.add = lambda obj: setattr(obj, "id", uuid.uuid4())  # simulate PK assignment
+
+    out = await report_service.compose_report(
+        db,
+        tenant_id=uuid.uuid4(),
+        title="Q2",
+        sections=[{"type": "heading", "level": 1, "text": "Q2"}],
+        resolver=lambda rid: {},
+        created_by=uuid.uuid4(),
+    )
+
+    # Turn atomicity: the shared-session commit is the orchestrator's job.
+    db.commit.assert_not_awaited()
+    db.commit.assert_not_called()
+    # Flush is still required so report.id is populated before the audit + return.
+    db.flush.assert_awaited()
+    assert out["report_id"]

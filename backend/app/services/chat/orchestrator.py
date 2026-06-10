@@ -733,8 +733,33 @@ def _compute_source_pin_update(tool_calls_log: list[dict]) -> str | None:
     return "leave_pin"
 
 
+def _stamp_result_id(condensed: str, sse_event_data: dict, result_id: str | None) -> str:
+    """Stamp the turn-scoped ``result_id`` (r1, r2, ...) into BOTH the condensed
+    LLM string and the SSE event data for a data-producing intercept.
+
+    This is the RESULT-ID CONTRACT: ``report.compose`` resolves each data
+    section's ``result_id`` against the in-turn full-payload sidecar, but the LLM
+    can only reference the id it was shown. The condensed JSON is the exact string
+    the model reads, so the id must live inside it (a JSON field — no tool names,
+    safe for test_prompt_tool_sync). Returns the (possibly rewritten) condensed
+    string; mutates ``sse_event_data`` in place. No-op when ``result_id`` is None
+    (the 2-arg call form stays byte-identical — e.g. the report-lifecycle e2e).
+    """
+    if not result_id:
+        return condensed
+    sse_event_data["result_id"] = result_id
+    try:
+        obj = json.loads(condensed)
+    except (json.JSONDecodeError, TypeError):
+        return condensed
+    if isinstance(obj, dict):
+        obj["result_id"] = result_id
+        return json.dumps(obj, default=str)
+    return condensed
+
+
 def _intercept_tool_result(
-    tool_name: str, result_str: str, context_need: str = ContextNeed.DATA
+    tool_name: str, result_str: str, context_need: str = ContextNeed.DATA, result_id: str | None = None
 ) -> tuple[str | None, dict | None, str]:
     """Intercept data-producing tool results for frontend DataFrame rendering.
 
@@ -745,6 +770,11 @@ def _intercept_tool_result(
 
     When context_need == FULL (investigation queries), the LLM receives full
     row data so it can reason over system notes, field changes, etc.
+
+    ``result_id`` (when supplied) is the turn-scoped id (r1, r2, ...) stamped into
+    the condensed LLM string + SSE event for the data_table / financial_report /
+    metric paths so the model can reference the result in ``report.compose`` and
+    the id keys the in-turn full-payload sidecar (gate cluster A).
     """
 
     # --- Report card path ---
@@ -808,6 +838,7 @@ def _intercept_tool_result(
             },
             default=str,
         )
+        condensed = _stamp_result_id(condensed, sse_event_data, result_id)
         return "financial_report", sse_event_data, condensed
 
     # --- SuiteQL query path ---
@@ -870,6 +901,7 @@ def _intercept_tool_result(
             if "source_kind" in parsed:
                 sse_event_data["source_kind"] = parsed["source_kind"]
             condensed = condense_metric_for_llm(parsed)
+            condensed = _stamp_result_id(condensed, sse_event_data, result_id)
             return "data_table", sse_event_data, condensed
 
         # Investigation queries (FULL context): send all rows so LLM can reason
@@ -906,6 +938,7 @@ def _intercept_tool_result(
                 },
                 default=str,
             )
+        condensed = _stamp_result_id(condensed, sse_event_data, result_id)
         return "data_table", sse_event_data, condensed
 
     # --- Saved search path ---
@@ -1174,6 +1207,9 @@ def _intercept_with_cache(
     return event_type, _strip_cache_only_fields_from_sse(event_data), new_result_str
 
 
+_DATA_RESULT_EVENTS = frozenset({"data_table", "financial_report"})
+
+
 def _make_tool_interceptor(context_need: str = ContextNeed.DATA, cache_callback=None):
     """Create a tool interceptor closure that captures context_need.
 
@@ -1181,15 +1217,31 @@ def _make_tool_interceptor(context_need: str = ContextNeed.DATA, cache_callback=
     accumulate ``_pending_caches`` for the assistant-message alias write
     after the agent loop. The shared cache write lives in
     ``_build_intercept_cache_entry`` so the legacy path stays in sync.
-    """
 
-    def interceptor(tool_name: str, result_str: str) -> tuple[tuple[str, dict] | None, str]:
+    The closure maintains a per-TURN counter so each data-producing intercept
+    THIS turn gets a stable id (r1, r2, ...). That id is stamped into the
+    condensed LLM string + SSE event by ``_intercept_tool_result`` and is the SAME
+    id the full-payload sidecar is keyed by — so a same-turn ``report.compose``
+    can resolve it (gate cluster A). The counter resets per turn because a fresh
+    interceptor is built for each ``run_streaming`` call.
+    """
+    counter = {"n": 0}
+
+    def interceptor(tool_name: str, result_str: str, params: dict | None = None) -> tuple[tuple[str, dict] | None, str]:
+        # Peek at the event type with no id first so we only consume a counter
+        # slot for genuine data-producing results (the ids must be dense r1,r2…).
+        peek_type, _peek_data, _peek_str = _intercept_tool_result(tool_name, result_str, context_need=context_need)
+        result_id: str | None = None
+        if peek_type in _DATA_RESULT_EVENTS:
+            counter["n"] += 1
+            result_id = f"r{counter['n']}"
+
         event_type, event_data, new_result_str = _intercept_tool_result(
-            tool_name, result_str, context_need=context_need
+            tool_name, result_str, context_need=context_need, result_id=result_id
         )
         if event_type is not None and event_data is not None:
             if cache_callback:
-                cache_callback(tool_name, event_type, event_data)
+                cache_callback(tool_name, event_type, event_data, result_id, params or {}, result_str)
             return (event_type, _strip_cache_only_fields_from_sse(event_data)), new_result_str
         return None, new_result_str
 
@@ -1222,7 +1274,12 @@ from app.services.chat.onboarding_tools import (
     execute_onboarding_tool,
 )
 from app.services.chat.prompts import INPUT_SANITIZATION_PREFIX, ONBOARDING_SYSTEM_PROMPT
-from app.services.chat.tool_call_results import build_tool_call_log_entry, tool_call_had_error, tool_call_row_count
+from app.services.chat.tool_call_results import (
+    build_tool_call_log_entry,
+    extract_result_payload,
+    tool_call_had_error,
+    tool_call_row_count,
+)
 from app.services.chat.tools import build_all_tool_definitions, execute_tool_call
 from app.services.prompt_template_service import get_active_template
 
@@ -2544,6 +2601,7 @@ async def run_chat_turn(
                     from app.services.chat.result_cache import (
                         CachedResult,
                         _cache_result_sync,
+                        cache_full_payload,
                         get_latest_result,
                     )
 
@@ -2627,7 +2685,30 @@ async def run_chat_turn(
                     # reference_previous_result(message_id=...) lookups.
                     _pending_caches: list[CachedResult] = []
 
-                    def _on_tool_intercepted(tool_name: str, event_type_str: str, event_data: dict):
+                    def _on_tool_intercepted(
+                        tool_name: str,
+                        event_type_str: str,
+                        event_data: dict,
+                        result_id: str | None = None,
+                        params: dict | None = None,
+                        result_str: str | None = None,
+                    ):
+                        # FULL-PAYLOAD SIDECAR (gate cluster A): eagerly write the
+                        # FULL, uncapped result payload under the turn-scoped
+                        # result_id so a SAME-TURN report.compose can resolve the
+                        # results just computed THIS turn (the current turn's
+                        # assistant ChatMessage isn't persisted until AFTER this
+                        # loop). Built via the SAME extract_result_payload builder
+                        # the persisted path uses, so shapes match.
+                        if result_id and result_str is not None:
+                            try:
+                                full = extract_result_payload(tool_name, params or {}, result_str)
+                                if full is not None:
+                                    cache_full_payload(str(session.id), result_id, full)
+                            except Exception:
+                                # The sidecar is best-effort; never break the turn.
+                                pass
+
                         cr = _build_intercept_cache_entry(
                             tool_name=tool_name,
                             event_type_str=event_type_str,

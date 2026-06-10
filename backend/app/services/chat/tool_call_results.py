@@ -282,7 +282,16 @@ def _tool_calls_of(message: Any) -> list[dict[str, Any]]:
 
 
 def resolve_payload_from_messages(messages: list[Any], result_id: str) -> dict[str, Any]:
-    """Resolve a result_id to its FULL, uncapped frozen payload (§16.1 fix).
+    """Resolve a result_id to its FULL, uncapped frozen payload — the CROSS-TURN /
+    REGENERATION FALLBACK path (§16.1 fix).
+
+    NOTE (gate cluster A): the PRIMARY same-turn resolution is the eager in-turn
+    full-payload sidecar (``result_cache.get_full_payload``), which ``report.compose``
+    consults FIRST. This persisted-message walk is only reached on a sidecar miss —
+    i.e. a LATER turn (or a report regeneration) composing over results that were
+    persisted by an EARLIER turn's assistant ChatMessage. The current turn's
+    assistant message is not persisted until AFTER the agent loop, so this path
+    cannot (and is not meant to) see THIS turn's just-computed results.
 
     Walks the assistant messages' ``tool_calls[].result_payload`` (built by
     ``extract_result_payload`` — uncapped, NOT the 50-row Redis result cache) and

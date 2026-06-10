@@ -1270,7 +1270,11 @@ class BaseSpecialistAgent(abc.ABC):
                     # (e.g. financial reports → SSE event + condensed LLM context)
                     llm_result_str = result_str
                     if tool_result_interceptor is not None:
-                        intercept_data, llm_result_str = tool_result_interceptor(block.name, result_str)
+                        # Pass the tool params too — the orchestrator's interceptor
+                        # builds the in-turn full-payload sidecar via
+                        # extract_result_payload(tool_name, params, result_str) so a
+                        # same-turn report.compose can resolve this result.
+                        intercept_data, llm_result_str = tool_result_interceptor(block.name, result_str, block.input)
                         if intercept_data is not None:
                             yield "tool_intercept", intercept_data
 

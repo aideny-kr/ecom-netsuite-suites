@@ -257,3 +257,63 @@ class TestInterceptNonMatchingTool:
         assert event_type is None
         assert sse_event is None
         assert returned == result_str
+
+
+class TestResultIdContract:
+    """Gate cluster A: the LLM must be SHOWN the result_id (r1, r2...) that the
+    same-turn report.compose resolver expects. _intercept_tool_result stamps a
+    caller-supplied result_id into BOTH the condensed LLM string AND the SSE
+    event data for the data_table / financial_report / metric paths."""
+
+    def test_data_table_condensed_carries_result_id(self):
+        result_str = _result_str(SAMPLE_SUITEQL_RESULT)
+        event_type, sse_event, condensed = _intercept_tool_result("netsuite_suiteql", result_str, result_id="r1")
+        assert event_type == "data_table"
+        # The model reads the condensed JSON string — it must contain the handle.
+        parsed = json.loads(condensed)
+        assert parsed["result_id"] == "r1"
+        # The SSE event the frontend gets carries it too.
+        assert sse_event["result_id"] == "r1"
+
+    def test_data_table_full_context_carries_result_id(self):
+        from app.services.chat.orchestrator import ContextNeed
+
+        result_str = _result_str(SAMPLE_SUITEQL_RESULT)
+        _, sse_event, condensed = _intercept_tool_result(
+            "netsuite_suiteql", result_str, context_need=ContextNeed.FULL, result_id="r2"
+        )
+        assert json.loads(condensed)["result_id"] == "r2"
+        assert sse_event["result_id"] == "r2"
+
+    def test_financial_report_condensed_carries_result_id(self):
+        result_str = _result_str(SAMPLE_FINANCIAL_RESULT)
+        event_type, sse_event, condensed = _intercept_tool_result(
+            "netsuite.financial_report", result_str, result_id="r1"
+        )
+        assert event_type == "financial_report"
+        assert json.loads(condensed)["result_id"] == "r1"
+        assert sse_event["result_id"] == "r1"
+
+    def test_metric_condensed_carries_result_id(self):
+        metric = {
+            "columns": ["Metric", "Value", "Unit", "Period"],
+            "rows": [["Revenue", 142800, "USD", "Q2 2026"]],
+            "row_count": 1,
+            "suppress_llm_value": True,
+            "source_kind": "suiteql",
+        }
+        event_type, sse_event, condensed = _intercept_tool_result("metric_compute", _result_str(metric), result_id="r3")
+        assert event_type == "data_table"
+        parsed = json.loads(condensed)
+        assert parsed["result_id"] == "r3"
+        # The metric trust boundary still holds — the number must NOT leak.
+        assert "142800" not in condensed
+        assert sse_event["result_id"] == "r3"
+
+    def test_no_result_id_keeps_string_clean(self):
+        """When no result_id is supplied (e.g. the e2e calls the 2-arg form),
+        the condensed string carries no result_id key — backward compatible."""
+        result_str = _result_str(SAMPLE_SUITEQL_RESULT)
+        _, sse_event, condensed = _intercept_tool_result("netsuite_suiteql", result_str)
+        assert "result_id" not in json.loads(condensed)
+        assert "result_id" not in sse_event
