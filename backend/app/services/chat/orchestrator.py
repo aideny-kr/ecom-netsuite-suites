@@ -997,6 +997,7 @@ def _intercept_tool_result(
             },
             default=str,
         )
+        condensed = _stamp_result_id(condensed, sse_event_data, result_id)
         return "data_table", sse_event_data, condensed
 
     # --- Task output path (pricing conversion + revise) ---

@@ -21,6 +21,15 @@ _METRIC_COLUMNS = ["Metric", "Value", "Unit", "Period"]
 # timeout) and freezes the browser. We keep the TRUE row_count + mark truncated so
 # render_report_html shows the "Showing first rows of N" note.
 _MAX_REPORT_TABLE_ROWS = 2000
+# Cap chart points: unlike the table branch, the chart branch emits 2+ SVG nodes per row
+# per series, so a 50k-row payload bakes a multi-MB SVG into the JSONB spec + rendered_html
+# (the DoS-shape the table cap guards against). A chart is also illegible past a few dozen
+# categories. Refuse deterministically and tell the model to aggregate first, rather than
+# silently truncating (a truncated chart misrepresents the data with no signal).
+_MAX_CHART_POINTS = 100
+# Probe at most this many rows when deciding which columns are chartable y-axes — a column
+# qualifies if ANY non-null cell in this window parses as a number (column-wide, not row[0]).
+_CHART_NUMERIC_PROBE_ROWS = 50
 Resolver = Callable[[str], dict]
 
 
@@ -150,14 +159,23 @@ def _resolve_data_section(s: dict, resolver: Resolver) -> dict:
                 return {"type": "error", "reason": "metric results are headline material, not charts"}
             cols = payload.get("columns", [])
             rows = payload.get("rows", [])
-            # Restrict y-axes to NUMERIC columns only: probe the first row so a
-            # non-numeric column (e.g. a label/status) is never charted as a
-            # float()->0.0 zero-height series. The first column is the x-axis.
-            first_row = rows[0] if rows else []
+            # Row cap: a chart over tens of thousands of rows bakes a multi-MB SVG into
+            # the report (DoS-shape). Refuse deterministically before building anything.
+            if len(rows) > _MAX_CHART_POINTS:
+                return {
+                    "type": "error",
+                    "reason": f"too many rows to chart ({len(rows)} > {_MAX_CHART_POINTS}) — aggregate first",
+                }
+            # Restrict y-axes to NUMERIC columns only, probing the WHOLE column (a window
+            # of the first rows), not just rows[0]: a column that is NULL/blank in the
+            # first row but numeric later (e.g. an opening period with no data yet) is a
+            # valid y-axis. A column qualifies if AT LEAST ONE non-null cell in the probe
+            # window parses as a number. The first column is the x-axis.
+            probe = rows[:_CHART_NUMERIC_PROBE_ROWS]
             numeric_cols = [
                 c
                 for i, c in enumerate(cols[1:], start=1)
-                if i < len(first_row) and _coerce_number(first_row[i]) is not None
+                if any(i < len(r) and _coerce_number(r[i]) is not None for r in probe)
             ]
             if not numeric_cols:
                 return {"type": "error", "reason": "no numeric columns to chart"}
@@ -165,12 +183,12 @@ def _resolve_data_section(s: dict, resolver: Resolver) -> dict:
 
             def _row_dict(r):
                 d = dict(zip(cols, r))
-                # Coerce charted columns to numbers (strip $,%,commas) so the renderer
-                # plots real bars instead of float('$1,000')->0.0 flat bars.
+                # The column already qualified as numeric. Coerce each charted cell
+                # (strip $,%,commas) so the renderer plots real bars instead of
+                # float('$1,000')->0.0 flat bars; a non-parsing cell (e.g. a NULL in an
+                # otherwise-numeric column) coerces to 0.0 — a real zero-height bar.
                 for c in numeric_set:
-                    n = _coerce_number(d.get(c))
-                    if n is not None:
-                        d[c] = n
+                    d[c] = _coerce_number(d.get(c)) or 0.0
                 return d
 
             chart = ChartData(

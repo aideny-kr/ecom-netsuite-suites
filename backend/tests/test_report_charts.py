@@ -82,6 +82,68 @@ def test_chart_on_all_nonnumeric_table_returns_error_section():
     assert "numeric" in out["reason"].lower()
 
 
+def test_chart_column_numeric_probe_is_column_wide_not_row0():
+    """Re-gate r2 (finding #1/#7): numeric-column detection must probe the WHOLE column,
+    not just rows[0]. A column that is NULL/blank in the first row but numeric in later
+    rows is a valid y-axis (e.g. an opening period with no revenue yet). Probing only
+    rows[0] drops it -> the real metric is silently omitted from the published chart."""
+    # 12-row table, Revenue is NULL in row 0 but numeric in rows 1-11.
+    rows = [["P0", None]] + [[f"P{i}", str(i * 100)] for i in range(1, 12)]
+    payload = {"columns": ["Period", "Revenue"], "rows": rows}
+    out = _resolve_data_section({"type": "chart", "result_id": "r1"}, lambda rid: payload)
+    # Revenue IS charted (column-wide probe finds the 11 non-null numeric cells).
+    assert out["type"] == "chart"
+    assert out["svg"].startswith("<svg")
+    # The Revenue series renders bars in the first palette color (row 0's NULL coerces to
+    # a zero-height bar, but the column still qualifies and the real values plot).
+    assert 'fill="#6366f1"' in out["svg"]
+    # vmax = 1100 (P11 = 11*100) -> '1.1K' axis label proves the real values were charted.
+    assert "1.1K" in out["svg"]
+
+
+def test_chart_column_numeric_probe_coerces_null_cells_to_zero():
+    """Re-gate r2: once a column qualifies as numeric, a non-parsing cell (NULL in row 0)
+    must coerce to 0.0 so the renderer plots a real (zero-height) bar, never crashes."""
+    rows = [["P0", None], ["P1", "500"]]
+    payload = {"columns": ["Period", "Revenue"], "rows": rows}
+    out = _resolve_data_section({"type": "chart", "result_id": "r1"}, lambda rid: payload)
+    assert out["type"] == "chart"
+    # 2 rows x 1 series -> 2 bars in palette[0]; the NULL row plots a 0-height bar.
+    assert out["svg"].count('fill="#6366f1"') == 2
+
+
+def test_chart_caps_rows_at_max_chart_points():
+    """Re-gate r2 (finding #12): charts have NO row cap, so a 50k-row payload bakes a
+    multi-MB SVG into the report. A payload with > _MAX_CHART_POINTS rows must return a
+    deterministic error section telling the model to aggregate first."""
+    from app.services.report import report_service
+
+    cap = report_service._MAX_CHART_POINTS
+    assert cap == 100
+    over = {
+        "columns": ["Period", "Revenue"],
+        "rows": [[str(i), str(i * 10)] for i in range(cap + 1)],
+    }
+    out = _resolve_data_section({"type": "chart", "result_id": "r1"}, lambda rid: over)
+    assert out["type"] == "error"
+    assert "too many rows" in out["reason"].lower()
+    assert str(cap + 1) in out["reason"]
+
+
+def test_chart_at_max_chart_points_still_charts():
+    """Re-gate r2: exactly _MAX_CHART_POINTS rows is fine -> a real chart, not an error."""
+    from app.services.report import report_service
+
+    cap = report_service._MAX_CHART_POINTS
+    at = {
+        "columns": ["Period", "Revenue"],
+        "rows": [[str(i), str(i * 10)] for i in range(cap)],
+    }
+    out = _resolve_data_section({"type": "chart", "result_id": "r1"}, lambda rid: at)
+    assert out["type"] == "chart"
+    assert out["svg"].startswith("<svg")
+
+
 def _injected_bar(malicious_color: str) -> ChartData:
     return ChartData(
         chart_type="bar",
