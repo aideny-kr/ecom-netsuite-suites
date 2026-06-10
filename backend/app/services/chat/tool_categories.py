@@ -20,6 +20,7 @@ Category = Literal[
     "mutation",
     "sheets",
     "pricing",
+    "report",
     "other",
 ]
 
@@ -66,6 +67,8 @@ _EXACT: dict[str, Category] = {
     "pricing.to_sheets": "pricing",
     "metric_compute": "data_table",
     "metric.compute": "data_table",
+    "report_compose": "report",
+    "report.compose": "report",
 }
 
 

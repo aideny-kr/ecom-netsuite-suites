@@ -31,7 +31,7 @@ class TestBuildLocalToolDefinitions:
         # Should include allowed tools
         assert "netsuite_suiteql" in names
         assert "data_sample_table_read" in names
-        assert "report_export" in names
+        assert "report_compose" in names
         assert "netsuite_connectivity" in names
         # Should NOT include disallowed tools
         assert "schedule_create" not in names
@@ -246,7 +246,7 @@ class TestLocalNameMap:
         """Map should convert underscore names back to dotted MCP names."""
         assert _LOCAL_NAME_MAP["netsuite_suiteql"] == "netsuite.suiteql"
         assert _LOCAL_NAME_MAP["data_sample_table_read"] == "data.sample_table_read"
-        assert _LOCAL_NAME_MAP["report_export"] == "report.export"
+        assert _LOCAL_NAME_MAP["report_compose"] == "report.compose"
 
     def test_no_disallowed_tools(self):
         """Map should not contain disallowed tools."""
@@ -262,11 +262,15 @@ class TestLocalNameMap:
 class TestCategoryStamping:
     def test_every_local_tool_is_categorizable(self):
         """Every tool name from build_local_tool_definitions must resolve to a valid category."""
-        from app.services.chat.tool_categories import categorize
+        from typing import get_args
+
+        from app.services.chat.tool_categories import Category, categorize
 
         tools = build_local_tool_definitions()
         assert tools, "build_local_tool_definitions returned no tools"
-        valid = {"financial", "data_table", "bigquery", "rag", "workspace", "mutation", "sheets", "pricing", "other"}
+        # Derive the valid set from the closed Category union so this stays in
+        # sync as new categories (e.g. "report") are added.
+        valid = set(get_args(Category))
         for t in tools:
             name = t.get("name", "")
             category = categorize(name)

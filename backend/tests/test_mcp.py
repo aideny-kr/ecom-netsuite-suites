@@ -225,7 +225,6 @@ class TestToolConfigs:
             "netsuite.report",
             "data.sample_table_read",
             "recon.run",
-            "report.export",
             "rag.search",
             "web.search",
             "schedule.create",

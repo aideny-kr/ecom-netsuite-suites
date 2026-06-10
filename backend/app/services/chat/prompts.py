@@ -107,7 +107,7 @@ ROUTER_PROMPT = (
     ' tool names: "data.sample_table_read",'
     ' "netsuite.suiteql", "netsuite.get_metadata",\n'
     '  "netsuite.connectivity", "netsuite.refresh_metadata",'
-    ' "report.export", "rag.search".\n'
+    ' "report.compose", "rag.search".\n'
     '- For external MCP server tools use source "external"'
     " with the connector_id from the list above.\n"
     "- IMPORTANT: When the user mentions NetSuite data or"

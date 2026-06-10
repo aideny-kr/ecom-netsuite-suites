@@ -122,7 +122,7 @@ def _all_known_tool_names_for_tenant_with_every_connector() -> set[str]:
         "data_sample_table_read",
         "rag_search",
         "web_search",
-        "report_export",
+        "report_compose",
         "workspace_list_files",
         "workspace_read_file",
         "workspace_search",

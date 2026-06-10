@@ -268,13 +268,20 @@ TOOL_REGISTRY = {
             "result_id": {"type": "string", "required": True, "description": "ReconciliationResult ID to approve"},
         },
     },
-    "report.export": {
-        "description": "Export a report",
+    "report.compose": {
+        "description": (
+            "Compose a publishable report from results already produced THIS turn. "
+            "Pass title + ordered sections; data sections reference a prior result by result_id "
+            "(never inline numbers). Returns a report card; the report renders in the browser."
+        ),
         "execute": report_export.execute,
         "params_schema": {
-            "report_type": {"type": "string", "required": True, "description": "Type of report"},
-            "format": {"type": "string", "required": False, "default": "csv", "description": "Export format"},
-            "filters": {"type": "object", "required": False, "description": "Report filters"},
+            "title": {"type": "string", "required": True, "description": "Report title"},
+            "sections": {
+                "type": "array",
+                "required": True,
+                "description": "Ordered report sections (see reporting profile)",
+            },
         },
     },
     "schedule.create": {

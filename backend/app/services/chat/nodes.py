@@ -41,7 +41,7 @@ ALLOWED_CHAT_TOOLS: frozenset[str] = frozenset(
         "rag.search",
         "web.search",
         "data.sample_table_read",
-        "report.export",
+        "report.compose",
         "workspace.list_files",
         "workspace.read_file",
         "workspace.search",

@@ -28,7 +28,7 @@ EXPECTED_TOOLS = {
     "netsuite.refresh_metadata",
     "data.sample_table_read",
     "recon.run",
-    "report.export",
+    "report.compose",
     "rag.search",
     "web.search",
     "schedule.create",

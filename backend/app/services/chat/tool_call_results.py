@@ -266,6 +266,78 @@ def extract_result_payload(tool_name: str, params: dict[str, Any], result_str: s
         }
 
 
+def _tool_calls_of(message: Any) -> list[dict[str, Any]]:
+    """Normalize a persisted assistant message's tool_calls into a list of dicts.
+
+    Accepts either a plain dict (in-memory turn payload) or a ChatMessage ORM row.
+    Tolerates None / non-list shapes.
+    """
+    if isinstance(message, dict):
+        calls = message.get("tool_calls")
+    else:
+        calls = getattr(message, "tool_calls", None)
+    if not isinstance(calls, list):
+        return []
+    return [c for c in calls if isinstance(c, dict)]
+
+
+def resolve_payload_from_messages(messages: list[Any], result_id: str) -> dict[str, Any]:
+    """Resolve a result_id to its FULL, uncapped frozen payload (§16.1 fix).
+
+    Walks the assistant messages' ``tool_calls[].result_payload`` (built by
+    ``extract_result_payload`` — uncapped, NOT the 50-row Redis result cache) and
+    returns the payload whose ``result_id`` matches, or whose positional id
+    (``r1``, ``r2``, ...) matches when the call carries no explicit ``result_id``.
+
+    Raises ``KeyError`` when no tool call with a usable ``result_payload`` matches.
+    """
+    positional = 0
+    fallback: dict[str, Any] | None = None
+    fallback_key: str | None = None
+    for message in messages:
+        for call in _tool_calls_of(message):
+            payload = call.get("result_payload")
+            if not isinstance(payload, dict):
+                continue
+            positional += 1
+            synthetic_id = f"r{positional}"
+            explicit_id = call.get("result_id")
+            if explicit_id == result_id:
+                return payload
+            if synthetic_id == result_id:
+                # Remember positional match but prefer an explicit-id match if one
+                # appears later in the turn (explicit ids win over positional).
+                if fallback is None:
+                    fallback, fallback_key = payload, synthetic_id
+    if fallback is not None and fallback_key == result_id:
+        return fallback
+    raise KeyError(result_id)
+
+
+async def load_conversation_tool_messages(db: Any, conversation_id: Any) -> list[Any]:
+    """Load the assistant messages (with their full ``tool_calls``) for a session,
+    newest turns last. RLS is assumed already set by the caller's tenant context."""
+    from sqlalchemy import select
+
+    from app.models.chat import ChatMessage
+
+    if conversation_id is None:
+        return []
+    rows = (
+        (
+            await db.execute(
+                select(ChatMessage)
+                .where(ChatMessage.session_id == conversation_id)
+                .where(ChatMessage.role == "assistant")
+                .order_by(ChatMessage.created_at, ChatMessage.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return list(rows)
+
+
 def build_tool_call_log_entry(
     *,
     step: int,

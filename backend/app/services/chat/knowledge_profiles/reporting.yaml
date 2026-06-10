@@ -1,0 +1,14 @@
+profile_id: reporting
+display_name: "Report Composer"
+trigger_tools:
+  - report_compose
+prompt_fragment: |
+  ## Composing Reports
+  When the user asks for a "report" that tells a story over data you have ALREADY computed
+  this turn, call `report_compose` with a title and an ordered `sections` list.
+  - Data sections (`table`, `chart`, `metric_headline`) reference a prior result by `result_id`.
+    NEVER inline numbers — the backend injects the real frozen values.
+  - `narrative` sections may embed `{{result:<id>.<field>}}` or `{{metric:<id>}}`; you write the
+    sentence, the backend fills the figure. Do not write raw numbers in prose.
+  - The tool returns a report card the user clicks to view; do NOT restate the figures or URL.
+rag_partitions: []

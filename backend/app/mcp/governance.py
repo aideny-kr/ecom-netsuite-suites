@@ -61,14 +61,6 @@ TOOL_CONFIGS = {
         "requires_entitlement": "mcp_tools",
         "allowlisted_params": ["date_from", "date_to", "payout_ids"],
     },
-    "report.export": {
-        "default_limit": None,
-        "max_limit": None,
-        "timeout_seconds": 60,
-        "rate_limit_per_minute": 20,
-        "requires_entitlement": "mcp_tools",
-        "allowlisted_params": ["report_type", "format", "filters"],
-    },
     "schedule.create": {
         "default_limit": None,
         "max_limit": None,
