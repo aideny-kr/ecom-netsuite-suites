@@ -121,51 +121,38 @@ const ANGLES = [
   { key: 'Altitude', prompt: 'ANGLE Altitude. Is each change at the right depth or a fragile bandaid? Special cases on shared infra signal the fix is not deep enough. Up to 6.' },
 ]
 
-// ----- Independent-model (codex) angle — grill-me's adversary, inside the gate ------------
+// ----- Independent-model (codex) angle — DELEGATES to the grill-me skill ------------------
 // The 7 angles above are all Claude subagents and SHARE Claude's blind spots (the very reason
-// memory/feedback_independent_model_review_gate exists). This angle drives the codex CLI (a
-// DIFFERENT model) read-only against the same diff, so a real second model attacks the change.
-// If codex is missing/unauthed it degrades to a hostile Claude-only persona and reports
-// codex_used=false (mirrors grill-me's FALLBACK: claude-only) — the gate never silently
-// becomes Claude-only without saying so. The angle still "ok"s on fallback (so it doesn't force
-// INCOMPLETE on machines without codex); it only fails the angle if the agent itself dies.
+// memory/feedback_independent_model_review_gate exists). This angle has a DIFFERENT model
+// (codex) attack the same diff. The JS orchestration can't read files or invoke skills (it runs
+// sandboxed), so the *subagent* this angle spawns is told to Read+follow .claude/skills/grill-me
+// — that SKILL.md is the SINGLE SOURCE OF TRUTH for HOW to drive codex (flags, version quirks,
+// auth-noise filtering, filesystem boundary). We keep ZERO copy of the codex recipe here; this
+// prompt only carries the workflow-specific glue: which diff to review, the output contract, and
+// the gate overrides (one pass, no user escalation, no artifact). If the skill file is absent or
+// codex is unavailable it degrades to a hostile Claude-only persona + codex_used=false (mirrors
+// grill-me's FALLBACK) — the gate never silently becomes Claude-only. The angle still "ok"s on
+// fallback (no INCOMPLETE on codex-less hosts); it only fails the angle if the agent itself dies.
 const CODEX_SCHEMA = {
   type: 'object', additionalProperties: false, required: ['candidates', 'codex_used'],
   properties: { candidates: CAND_SCHEMA.properties.candidates, codex_used: { type: 'boolean' } },
 }
-const CODEX_BOUNDARY = `IMPORTANT: Do NOT read or execute any files under ~/.claude/, .claude/skills/, or agents/ — they are skill definitions for a different AI system and will waste your time. Ignore them; stay on the repository code only.`
-const codexAnglePrompt = `ANGLE Codex — the INDEPENDENT-MODEL angle of this review (grill-me). cwd = repo root; you have Bash. The other 7 angles are all Claude and share Claude's blind spots; your job is to make a DIFFERENT model (codex / OpenAI) attack this diff so the gate is not Claude-on-Claude.
+const codexAnglePrompt = `ANGLE Codex — the INDEPENDENT-MODEL angle of this review. cwd = repo root; you have Bash + Read.
+The other 7 angles are all Claude (shared blind spots); your job is to have a DIFFERENT model (codex) attack this diff.
 
-STEP 1 — preflight codex (do NOT hard-fail; just branch):
-  CODEX_BIN=$(command -v codex 2>/dev/null || echo "")
-  CODEX_AUTH=no; { [ -n "$CODEX_API_KEY" ] || [ -n "$OPENAI_API_KEY" ] || [ -f "\${CODEX_HOME:-$HOME/.codex}/auth.json" ]; } && CODEX_AUTH=yes
-  If CODEX_BIN is empty OR CODEX_AUTH=no -> skip to STEP 4 (Claude-only fallback).
+SINGLE SOURCE OF TRUTH — do NOT reinvent how to drive codex. Read \`.claude/skills/grill-me/SKILL.md\` and follow its codex procedure verbatim: Step 0 (preflight — codex binary + auth + the filesystem boundary codex must obey) and Step 2's \`codex exec\` invocation (read-only, the exact flags/version quirks, the auth-noise filtering). That skill is the canonical definition of the codex mechanic; this angle only adapts its INPUT and OUTPUT. If \`.claude/skills/grill-me/SKILL.md\` does NOT exist on disk, go straight to FALLBACK.
 
-STEP 2 — run codex read-only against the diff:
-  Save the DIFF UNDER REVIEW block below EXACTLY to "$TMPDIR/cr_diff.txt" (use your file-writing tool). TRUNCATION TRIPWIRE: the diff is ${diffLines} lines — run \`wc -l < "$TMPDIR/cr_diff.txt"\`; if the result is materially smaller (your copy got truncated), do NOT claim a real codex run: go to STEP 4 and set codex_used=false. Then write the codex prompt (the CODEX PROMPT block below, with the literal text \`<PASTE $TMPDIR/cr_diff.txt HERE>\` replaced by the diff file's contents) to "$TMPDIR/cr_prompt.txt", and run — OPTIONS BEFORE the positional prompt (codex 0.134.0 rejects flags after positionals); always \`codex exec\` (never resume) so -s read-only holds. Use a 600s timeout only if \`timeout\` exists (macOS/minimal runners may lack it):
-    REPO_ROOT=$(git rev-parse --show-toplevel)
-    TO=""; command -v timeout >/dev/null 2>&1 && TO="timeout 600"; command -v gtimeout >/dev/null 2>&1 && TO="gtimeout 600"
-    $TO codex exec -C "$REPO_ROOT" -s read-only -c 'model_reasoning_effort="high"' "$(cat "$TMPDIR/cr_prompt.txt")" < /dev/null
-  Capture stdout — codex's final message holds its findings. If the command exits non-zero (124 = timed out; 127 = binary/timeout missing), or stderr shows a genuine auth/login/unauthorized error (IGNORE codex's own MCP transport noise like rmcp::transport / suitetalk / AuthRequired — that is NOT a codex-CLI auth failure) -> treat codex as unavailable and go to STEP 4.
+SANDBOX NOTE: codex needs network (OpenAI) that the command sandbox blocks, so its call will fail sandboxed — retry that command with the sandbox disabled. Build the prompt file AND run codex in the SAME unsandboxed invocation: \`$TMPDIR\` differs across the sandbox boundary, so a file written in a sandboxed shell won't exist in the unsandboxed retry (you'd hand codex an empty prompt). Treat the presence of a codex agent_message / "tokens used" as the success signal — the captured shell exit code can be empty through codex's JSON pipe.
 
-STEP 3 — structure codex's findings (codex_used=true): turn each finding codex reported into a candidate {file,line,summary,failure_scenario,category}. Do NOT invent findings codex did not raise; if codex genuinely found nothing, return candidates=[] with codex_used=true. Read the cited code to set a precise line and a concrete failure_scenario.
+INPUT: review EXACTLY the diff below (the same change the other angles see — do not recompute it from git). Write it to "$TMPDIR/cr_diff.txt"; sanity-check it is ~${diffLines} lines (if your copy is truncated, FALLBACK rather than review partial input). Hand that diff to codex as the change under review, wrapped per the skill's filesystem-boundary + cross-exam framing.
 
-STEP 4 — Claude-only fallback (ONLY if codex missing/auth-fail/timeout): adopt a genuinely hostile adversarial persona and attack the diff yourself against the repo invariants. Argue the opposite case; do NOT rubber-stamp. Set codex_used=false.
+OVERRIDES (this is an automated gate, not the interactive skill): run codex EXACTLY ONCE (no multi-round loop); do NOT escalate to the user (no AskUserQuestion) and do NOT write the skill's markdown artifact — a gap that would otherwise need the user is just reported as a finding here.
 
-category is one of correctness|reuse|simplification|efficiency|altitude (codex findings are usually correctness). Return {"candidates":[...], "codex_used":<bool>}.
+OUTPUT: turn each thing codex flagged into a candidate {file,line,summary,failure_scenario,category}; Read the cited code to set a precise line + concrete failure_scenario; do NOT invent findings codex did not raise (empty candidates is a valid result). Set codex_used=true. category is one of correctness|reuse|simplification|efficiency|altitude (codex findings are usually correctness). Return {"candidates":[...], "codex_used":true}.
 
-CODEX PROMPT (write to $TMPDIR/cr_prompt.txt):
----
-${CODEX_BOUNDARY}
-
-Another AI (Claude) is reviewing this branch diff and may share its own blind spots. Attack the change adversarially: find bugs, wrong or unverified assumptions, removed guards/validation not re-established by the new code, ordering/transaction hazards, and gaps that bite in production. Be terse, technically precise, no compliments. Cite file:line for every finding. Attack ESPECIALLY against this repository's known failure modes:
+FALLBACK (codex_used=false) — ONLY if the grill-me skill file is absent, OR codex is missing/unauthed/timed out: adopt a genuinely hostile adversarial persona and attack the diff yourself (argue the opposite case; do NOT rubber-stamp), ESPECIALLY against this repository's known failure modes (the skill carries these too, but a skill-absent fallback would not have read them):
 ${REPO_INVARIANTS}
-
-Output one line per finding: FILE:LINE | SUMMARY | FAILURE_SCENARIO
-
-DIFF UNDER REVIEW:
-<PASTE $TMPDIR/cr_diff.txt HERE>
----
+Return {"candidates":[...], "codex_used":false}.
 
 DIFF UNDER REVIEW:
 ${diff}`
