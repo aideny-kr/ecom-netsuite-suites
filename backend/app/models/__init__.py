@@ -28,6 +28,7 @@ from app.models.onboarding_checklist import OnboardingChecklistItem
 from app.models.pipeline import CursorState, EvidencePack, Schedule
 from app.models.policy_profile import PolicyProfile
 from app.models.prompt_template import SystemPromptTemplate
+from app.models.report import Report  # noqa: F401
 from app.models.saved_query import SavedSuiteQLQuery
 from app.models.script_sync import ScriptSyncState
 from app.models.tenant import Tenant, TenantConfig
@@ -96,4 +97,5 @@ __all__ = [
     "ConnectionAlert",
     "AgentConfig",
     "ExperimentLog",
+    "Report",
 ]
