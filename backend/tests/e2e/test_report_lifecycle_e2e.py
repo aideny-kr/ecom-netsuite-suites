@@ -141,9 +141,7 @@ async def test_compose_resolves_full_rows_views_html_and_audits(db, client):
     report_id = result["report_id"]
 
     # --- I1: persisted rendered_html carries row 60 (NOT capped at 50) ---
-    report = (
-        await db.execute(select(Report).where(Report.id == uuid.UUID(report_id)))
-    ).scalar_one()
+    report = (await db.execute(select(Report).where(Report.id == uuid.UUID(report_id)))).scalar_one()
     assert _row_marker(_ROW_COUNT) in report.rendered_html, "row 60 must survive into the HTML (no 50-cap)"
     assert _row_marker(50) in report.rendered_html  # sanity: a mid-table row is also present
     assert _row_marker(1) in report.rendered_html
