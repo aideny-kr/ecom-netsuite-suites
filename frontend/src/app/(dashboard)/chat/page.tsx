@@ -5,7 +5,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiClient } from "@/lib/api-client";
 import { consumeChatStream } from "@/lib/chat-stream";
-import type { FinancialReportData, DataTableData, TaskOutputData, SheetsLinkData, DocsLinkData, StreamBlock } from "@/lib/chat-stream";
+import type { FinancialReportData, DataTableData, TaskOutputData, SheetsLinkData, DocsLinkData, ReportReadyData, StreamBlock } from "@/lib/chat-stream";
 import { coerceDataTableData } from "@/lib/chat-stream";
 import type { ChartData } from "@/lib/types";
 import type { ChatSession, ChatSessionDetail, ChatMessage, StreamingToolCall } from "@/lib/types";
@@ -48,6 +48,8 @@ export default function ChatPage() {
   const sheetsLinksRef = useRef<Map<string, SheetsLinkData>>(new Map());
   const [docsLink, setDocsLink] = useState<DocsLinkData | null>(null);
   const docsLinksRef = useRef<Map<string, DocsLinkData>>(new Map());
+  const [reportReady, setReportReady] = useState<ReportReadyData | null>(null);
+  const reportReadyRef = useRef<Map<string, ReportReadyData>>(new Map());
   const queryClient = useQueryClient();
   const router = useRouter();
 
@@ -176,6 +178,9 @@ export default function ChatPage() {
       } else if (type === "docs_link" && data) {
         docsLinksRef.current.set(msg.id, data as unknown as DocsLinkData);
         hydrated = true;
+      } else if (type === "report_ready" && data) {
+        reportReadyRef.current.set(msg.id, data as unknown as ReportReadyData);
+        hydrated = true;
       }
       // Hydrate persisted charts array (from v1.1 chart persistence)
       // Skip if charts already exist for this message (came from streaming)
@@ -247,6 +252,10 @@ export default function ChatPage() {
           onDocsLink: (data) => {
             setDocsLink(data);
             setStreamBlocks(prev => [...prev, { type: "docs_link" as const, data, id: `dl-${Date.now()}` }]);
+          },
+          onReportReady: (data) => {
+            setReportReady(data);
+            setStreamBlocks(prev => [...prev, { type: "report_ready" as const, data, id: `rr-${Date.now()}` }]);
           },
           onClarificationRequired: (data) => {
             // Plan Mode mid-stream gate: render ClarificationCard immediately
@@ -336,6 +345,10 @@ export default function ChatPage() {
             });
             setDocsLink((current) => {
               if (current) docsLinksRef.current.set(message.id, current);
+              return null;
+            });
+            setReportReady((current) => {
+              if (current) reportReadyRef.current.set(message.id, current);
               return null;
             });
             setStreamingMessage(message);
@@ -656,6 +669,7 @@ export default function ChatPage() {
             taskOutputs={taskOutputsRef.current}
             sheetsLinks={sheetsLinksRef.current}
             docsLinks={docsLinksRef.current}
+            reportReady={reportReadyRef.current}
             pinnedAgentId={pinnedAgentId}
             agents={agents}
             agentTab={agentTab}
