@@ -230,6 +230,15 @@ def extract_result_payload(tool_name: str, params: dict[str, Any], result_str: s
             # Only set when the payload carries the flag (metric trust boundary).
             if parsed.get("suppress_llm_value") is True and "source_kind" in parsed:
                 entry["source_kind"] = parsed["source_kind"]
+            # Gate B (report provenance): a blessed-metric payload carries
+            # definition_version (and source_kind) at the top level — preserve them
+            # on the frozen entry so report.compose's metric_headline can attribute
+            # the number to its definition version (the §10 audit-citation source).
+            # Additive only: never remove keys; copy when present.
+            if isinstance(parsed.get("definition_version"), int):
+                entry["definition_version"] = parsed["definition_version"]
+            if "source_kind" not in entry and "source_kind" in parsed:
+                entry["source_kind"] = parsed["source_kind"]
             return entry
 
     # --- Path 2: reportData (ns_runReport) ---

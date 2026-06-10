@@ -13,7 +13,57 @@ from app.services.report.report_charts import render_chart_svg
 from app.services.report.report_html import render_report_html
 
 _PLACEHOLDER = re.compile(r"\{\{(result|metric):([^}]+)\}\}")
+_METRIC_COLUMNS = ["Metric", "Value", "Unit", "Period"]
 Resolver = Callable[[str], dict]
+
+
+def _metric_fields(payload: dict) -> dict | None:
+    """Detect the blessed-metric data_table shape and return its flattened fields.
+
+    A blessed metric (``metric_compute.metric_data_table`` → ``extract_result_payload``
+    Path 1) is a single-row table ``columns=['Metric','Value','Unit','Period']`` with
+    NO top-level value/unit/period — the number lives in ``rows[0]``. This lifts the
+    row back to the {label,value,unit,period,definition_version} the report headline +
+    ``{{metric:id}}`` placeholders expect. Returns None for any non-metric payload so
+    the caller can fall back to top-level reads (the hand-rolled unit-test stub shape).
+    """
+    if not isinstance(payload, dict):
+        return None
+    cols = payload.get("columns")
+    rows = payload.get("rows")
+    if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], (list, tuple)):
+        return None
+    is_metric_cols = cols == _METRIC_COLUMNS
+    # source_kind is the metric trust-boundary marker (set by extract_result_payload
+    # only for suppress_llm_value metric payloads) — accept it as a secondary signal.
+    if not is_metric_cols and "source_kind" not in payload:
+        return None
+    row = rows[0]
+    if len(row) < 4:
+        return None
+    return {
+        "label": row[0],
+        "value": row[1],
+        "unit": row[2],
+        "period": row[3],
+        "definition_version": payload.get("definition_version"),
+    }
+
+
+def _coerce_number(value) -> float | None:
+    """Return value as a float, stripping $, %, and thousands commas, or None if
+    non-numeric. Used to decide which table columns are chartable y-axes."""
+    if isinstance(value, (int, float)):
+        return float(value)
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip().replace("$", "").replace("%", "").replace(",", "")
+    if not cleaned:
+        return None
+    try:
+        return float(cleaned)
+    except ValueError:
+        return None
 
 
 def fill_placeholders(text: str, resolver: Resolver) -> str:
@@ -26,6 +76,10 @@ def fill_placeholders(text: str, resolver: Resolver) -> str:
             return f"[unresolved: {kind}:{ref}]"
         if kind == "metric":
             field = field or "value"
+            metric = _metric_fields(payload)
+            if metric is not None:
+                val = metric.get(field) if field in metric else metric.get("value")
+                return str(val) if val is not None else f"[unresolved: {kind}:{ref}]"
         val = payload.get(field) if field else payload.get("value")
         return str(val) if val is not None else f"[unresolved: {kind}:{ref}]"
 
@@ -51,6 +105,18 @@ def _resolve_data_section(s: dict, resolver: Resolver) -> dict:
             "truncated": payload.get("truncated", False),
         }
     if s["type"] == "metric_headline":
+        # Prefer the real blessed-metric row shape; fall back to top-level reads so the
+        # hand-rolled unit-test stub ({value,unit,period} keys) still resolves.
+        metric = _metric_fields(payload)
+        if metric is not None:
+            return {
+                "type": "metric_headline",
+                "label": s.get("label") or metric.get("label") or "",
+                "value": metric.get("value", ""),
+                "unit": metric.get("unit", ""),
+                "period": metric.get("period", ""),
+                "definition_version": metric.get("definition_version"),
+            }
         return {
             "type": "metric_headline",
             "label": s.get("label") or payload.get("display_name", ""),
@@ -62,13 +128,42 @@ def _resolve_data_section(s: dict, resolver: Resolver) -> dict:
     if s["type"] == "chart":
         cd = payload.get("chart_data")
         if cd is None:  # build a minimal ChartData from a tabular payload
+            # A single-number blessed-metric result is headline material, not a chart:
+            # its only numeric column is 'Value' (Unit/Period would float()->0.0 nonsense
+            # bars). Refuse deterministically rather than persist a misleading frozen chart.
+            if _metric_fields(payload) is not None:
+                return {"type": "error", "reason": "metric results are headline material, not charts"}
             cols = payload.get("columns", [])
+            rows = payload.get("rows", [])
+            # Restrict y-axes to NUMERIC columns only: probe the first row so a
+            # non-numeric column (e.g. a label/status) is never charted as a
+            # float()->0.0 zero-height series. The first column is the x-axis.
+            first_row = rows[0] if rows else []
+            numeric_cols = [
+                c
+                for i, c in enumerate(cols[1:], start=1)
+                if i < len(first_row) and _coerce_number(first_row[i]) is not None
+            ]
+            if not numeric_cols:
+                return {"type": "error", "reason": "no numeric columns to chart"}
+            numeric_set = set(numeric_cols)
+
+            def _row_dict(r):
+                d = dict(zip(cols, r))
+                # Coerce charted columns to numbers (strip $,%,commas) so the renderer
+                # plots real bars instead of float('$1,000')->0.0 flat bars.
+                for c in numeric_set:
+                    n = _coerce_number(d.get(c))
+                    if n is not None:
+                        d[c] = n
+                return d
+
             chart = ChartData(
                 chart_type=s.get("chart_type") or "bar",
                 title=s.get("label") or "Chart",
                 x_axis={"label": cols[0] if cols else "x", "key": cols[0] if cols else "x"},
-                y_axes=[{"label": c, "key": c} for c in cols[1:]] or [{"label": "value", "key": "value"}],
-                data=[dict(zip(cols, r)) for r in payload.get("rows", [])],
+                y_axes=[{"label": c, "key": c} for c in numeric_cols],
+                data=[_row_dict(r) for r in rows],
             )
         else:
             chart = ChartData.model_validate(cd)

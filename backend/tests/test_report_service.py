@@ -93,6 +93,59 @@ async def test_compose_report_audit_logs_the_mutation(monkeypatch):
     assert kwargs["resource_type"] == "report"
 
 
+def _real_metric_payload():
+    """Build the REAL blessed-metric payload via the REAL chain:
+    metric_data_table(...) -> JSON -> extract_result_payload Path 1.
+    This is what report.compose's resolver actually returns for a metric — NOT the
+    hand-rolled top-level {value,unit,period} stub above.
+    """
+    from app.services.chat.tool_call_results import extract_result_payload
+    from app.services.metrics.metric_compute import metric_data_table
+
+    table = metric_data_table(
+        "Net Revenue",
+        "142800",
+        "USD",
+        "Q2 2026",
+        "net_revenue",
+        definition_version=7,
+        source_kind="suiteql",
+    )
+    payload = extract_result_payload("metric_compute", {}, json.dumps(table))
+    assert payload is not None
+    return payload
+
+
+def test_metric_headline_resolves_real_metric_payload_shape():
+    """Gate B (finding #1/#11): the real metric payload has NO top-level value/unit/
+    period — they live in rows[0] under columns ['Metric','Value','Unit','Period'].
+    The headline must resolve them from the row, not return blanks."""
+    payload = _real_metric_payload()
+    # sanity: the real payload genuinely lacks the top-level keys the old code read
+    assert "value" not in payload and "unit" not in payload and "period" not in payload
+
+    def resolver(rid):
+        return payload
+
+    sections = [{"type": "metric_headline", "result_id": "r1", "label": "Net Revenue"}]
+    spec = assemble_spec(title="Q2", sections=sections, resolver=resolver)
+    head = next(s for s in spec["sections"] if s["type"] == "metric_headline")
+    assert head["value"] == "142800"
+    assert head["unit"] == "USD"
+    assert head["period"] == "Q2 2026"
+    assert head["definition_version"] == 7
+    # provenance source recorded (definition_version survived the resolve)
+    assert spec["provenance"]["sources"] == ["metric:r1@v7"]
+
+
+def test_metric_placeholder_fills_real_metric_payload_value():
+    """Gate B: {{metric:r1}} must fill the metric value from the real row-shaped payload."""
+    payload = _real_metric_payload()
+    out = fill_placeholders("Net revenue was {{metric:r1}} this quarter.", lambda rid: payload)
+    assert "142800" in out
+    assert "[unresolved" not in out
+
+
 async def test_compose_report_is_turn_atomic_no_mid_turn_commit(monkeypatch):
     """Gate cluster A — turn atomicity: compose_report runs on the chat
     orchestrator's SHARED session and must NOT commit mid-turn (the orchestrator
