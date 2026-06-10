@@ -29,6 +29,7 @@ th { background:var(--accent); font-weight:800; }
 def _md_inline(text: str) -> str:
     # Minimal: escape, then **bold**. (No raw HTML passthrough — trust boundary + XSS safety.)
     import re
+
     esc = escape(text)
     return re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", esc)
 
@@ -37,30 +38,41 @@ def _section_html(s: dict) -> str:
     t = s.get("type")
     if t == "heading":
         lvl = min(max(int(s.get("level", 2)), 1), 3)
-        return f"<h{lvl}>{escape(str(s.get('text','')))}</h{lvl}>"
+        return f"<h{lvl}>{escape(str(s.get('text', '')))}</h{lvl}>"
     if t == "narrative":
-        return f'<div class="nb-card">{_md_inline(str(s.get("markdown","")))}</div>'
+        return f'<div class="nb-card">{_md_inline(str(s.get("markdown", "")))}</div>'
     if t == "metric_headline":
         foot = ""
         if s.get("definition_version") is not None:
-            foot = f'<span class="foot">definition v{escape(str(s["definition_version"]))} · {escape(str(s.get("period","")))}</span>'
-        return (f'<div class="nb-card metric"><span class="label">{escape(str(s.get("label","")))}</span>'
-                f'<span class="value">{escape(str(s.get("value","")))} '
-                f'<small>{escape(str(s.get("unit","")))}</small></span>{foot}</div>')
+            version = escape(str(s["definition_version"]))
+            period = escape(str(s.get("period", "")))
+            foot = f'<span class="foot">definition v{version} · {period}</span>'
+        return (
+            f'<div class="nb-card metric"><span class="label">{escape(str(s.get("label", "")))}</span>'
+            f'<span class="value">{escape(str(s.get("value", "")))} '
+            f"<small>{escape(str(s.get('unit', '')))}</small></span>{foot}</div>"
+        )
     if t == "chart":
-        return f'<div class="nb-card svg-wrap">{s.get("svg","")}</div>'  # svg is server-generated, trusted
+        return f'<div class="nb-card svg-wrap">{s.get("svg", "")}</div>'  # svg is server-generated, trusted
     if t == "table":
         cols = "".join(f"<th>{escape(str(c))}</th>" for c in s.get("columns", []))
         body = "".join(
-            "<tr>" + "".join(f"<td>{escape(str(v))}</td>" for v in row) + "</tr>"
-            for row in s.get("rows", [])
+            "<tr>" + "".join(f"<td>{escape(str(v))}</td>" for v in row) + "</tr>" for row in s.get("rows", [])
         )
-        note = "" if not s.get("truncated") else f'<p class="foot">Showing first rows of {escape(str(s.get("row_count","")))}.</p>'
-        return f'<div class="nb-card svg-wrap"><table><thead><tr>{cols}</tr></thead><tbody>{body}</tbody></table>{note}</div>'
+        note = ""
+        if s.get("truncated"):
+            note = f'<p class="foot">Showing first rows of {escape(str(s.get("row_count", "")))}.</p>'
+        return (
+            f'<div class="nb-card svg-wrap"><table><thead><tr>{cols}</tr></thead>'
+            f"<tbody>{body}</tbody></table>{note}</div>"
+        )
     if t == "divider":
         return '<div class="divider"></div>'
     if t == "error":
-        return f'<div class="nb-card" style="border-color:#ef4444"><strong>Data unavailable:</strong> {escape(str(s.get("reason","")))}</div>'
+        return (
+            '<div class="nb-card" style="border-color:#ef4444">'
+            f"<strong>Data unavailable:</strong> {escape(str(s.get('reason', '')))}</div>"
+        )
     return ""
 
 
@@ -75,8 +87,8 @@ def render_report_html(spec: dict, accent_hsl: str = "240 6% 10%") -> str:
         prov_html = f'<div class="prov"><strong>Sources &amp; definitions</strong><ul>{items}</ul></div>'
     css = _CSS % {"accent": escape(accent_hsl)}
     return (
-        f"<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">"
-        f"<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
-        f"<title>{title}</title><style>{css}</style></head><body><div class=\"report\">"
+        f'<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
+        f'<meta name="viewport" content="width=device-width, initial-scale=1">'
+        f'<title>{title}</title><style>{css}</style></head><body><div class="report">'
         f'<div class="accent-bar"></div><h1>{title}</h1>{body}{prov_html}</div></body></html>'
     )
