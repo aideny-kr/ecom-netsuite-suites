@@ -38,9 +38,16 @@ async def execute(params: dict, **kwargs) -> dict:
     result_id = params.get("result_id")
     if not result_id:
         return {"success": False, "error": "result_id is required"}
+    try:
+        result_uuid = uuid.UUID(str(result_id))
+    except ValueError:
+        # Structured error (same shape as recon.get_exceptions' run_id guard)
+        # — an LLM-supplied malformed id must never surface as an uncaught
+        # ValueError through the dispatch boundary.
+        return {"success": False, "error": f"result_id must be a valid UUID, got: {result_id!r}"}
 
     stmt = select(ReconciliationResult).where(
-        ReconciliationResult.id == uuid.UUID(result_id),
+        ReconciliationResult.id == result_uuid,
         ReconciliationResult.tenant_id == str(tenant_id),
     )
     result = await db.execute(stmt)

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import uuid
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
@@ -578,3 +579,23 @@ async def test_missing_run_id_returns_error():
 async def test_missing_db_or_tenant_returns_error():
     out = await execute({"run_id": str(uuid.uuid4())}, db=None, tenant_id=None)
     assert out["success"] is False
+
+
+# ---------------------------------------------------------------------------
+# Malformed run_id — structured error, never an uncaught ValueError (R4-B #14)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("bad", ["not-a-uuid", "12345", "R123456789", 12345])
+async def test_malformed_run_id_returns_structured_error(bad):
+    """An LLM-supplied malformed run_id must come back as the same structured
+    ``{"success": False, "error": ...}`` shape as the bucket/min_variance
+    validation — never an uncaught ValueError through the dispatch boundary."""
+    db = _StubDB([])
+
+    out = await execute({"run_id": bad}, db=db, tenant_id=uuid.uuid4())
+
+    assert out["success"] is False
+    assert "run_id" in out["error"]
+    # Rejected up front — no query was ever issued.
+    assert db.stmts == []

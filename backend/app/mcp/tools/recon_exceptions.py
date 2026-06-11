@@ -92,6 +92,13 @@ async def execute(params: dict, **kwargs) -> dict:
     run_id = params.get("run_id")
     if not run_id:
         return {"success": False, "error": "run_id is required"}
+    try:
+        run_uuid = uuid.UUID(str(run_id))
+    except ValueError:
+        # Structured error (same shape as the bucket/min_variance validation)
+        # — an LLM-supplied malformed id must never surface as an uncaught
+        # ValueError through the dispatch boundary.
+        return {"success": False, "error": f"run_id must be a valid UUID, got: {run_id!r}"}
 
     bucket = params.get("bucket")
     if bucket is None:
@@ -104,7 +111,7 @@ async def execute(params: dict, **kwargs) -> dict:
 
     filters = [
         ReconciliationResult.tenant_id == str(tenant_id),
-        ReconciliationResult.run_id == uuid.UUID(run_id),
+        ReconciliationResult.run_id == run_uuid,
         # Authoritative selection — the canonical four-bucket SQL twin, never
         # the advisory confidence composite (decoupling pattern).
         bucket_conditions(bucket),
