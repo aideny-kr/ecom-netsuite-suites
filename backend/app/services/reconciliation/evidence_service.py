@@ -153,7 +153,10 @@ class EvidencePackGenerator:
 
         headers = [
             "Match Type",
-            "Confidence",
+            # Advisory amount+temporal composite (R2) — display only, never a verdict.
+            # Categorization (Exceptions sheet, summary counts, row fills) is keyed on
+            # the authoritative four-bucket `bucket`, NOT this value.
+            "Advisory Match Score",
             "Status",
             "Stripe Amount",
             "NetSuite Amount",

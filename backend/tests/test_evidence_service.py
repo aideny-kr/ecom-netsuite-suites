@@ -460,8 +460,13 @@ class TestEvidencePackGenerator:
             "Buckets must partition the run; got %r" % summary
         )
 
-    def test_confidence_column_still_present(self, sample_results):
-        """The Confidence data column must still be present (advisory display only)."""
+    def test_advisory_match_score_header_on_both_sheets(self, sample_results):
+        """The confidence data column must still be present, but labeled
+        "Advisory Match Score" — NOT a bare "Confidence" header that an auditor
+        could read as a verdict. The value is advisory display only; categorization
+        is bucket-keyed. Both detail sheets (All Results + Exceptions) share the
+        header row and must carry the advisory label.
+        """
         generator = EvidencePackGenerator()
         excel_bytes = generator.generate_excel(
             results=sample_results,
@@ -471,17 +476,25 @@ class TestEvidencePackGenerator:
         )
 
         wb = load_workbook(excel_bytes)
+
+        for sheet_name in ("All Results", "Exceptions"):
+            ws = wb[sheet_name]
+            header_values = [cell.value for cell in ws[1]]
+            assert "Advisory Match Score" in header_values, (
+                f"'Advisory Match Score' column must be in {sheet_name} sheet headers; got {header_values!r}"
+            )
+            assert "Confidence" not in header_values, (
+                f"Bare 'Confidence' header must NOT appear in {sheet_name} sheet (advisory, not a verdict); "
+                f"got {header_values!r}"
+            )
+
+        # And the actual value for the first row should be the float advisory score
         all_ws = wb["All Results"]
-
-        # Check headers row for "Confidence"
         header_values = [cell.value for cell in all_ws[1]]
-        assert "Confidence" in header_values, "Confidence column must remain in All Results sheet headers"
-
-        # And the actual value for the first row should be the float confidence
-        conf_col_idx = header_values.index("Confidence") + 1  # 1-based
+        conf_col_idx = header_values.index("Advisory Match Score") + 1  # 1-based
         conf_value = all_ws.cell(row=2, column=conf_col_idx).value
         assert conf_value is not None and isinstance(conf_value, (int, float)), (
-            "Confidence cell should contain a numeric advisory value; got %r" % conf_value
+            "Advisory Match Score cell should contain a numeric advisory value; got %r" % conf_value
         )
 
     # ---------------------------------------------------------------------------
