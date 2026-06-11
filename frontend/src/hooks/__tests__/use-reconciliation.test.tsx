@@ -14,7 +14,7 @@ vi.mock("@/lib/api-client", () => ({
   },
 }));
 
-import { useApproveBucket, useApproveResult } from "@/hooks/use-reconciliation";
+import { useApproveBucket, useApproveResult, useClosePeriod } from "@/hooks/use-reconciliation";
 
 function wrapper({ children }: { children: React.ReactNode }) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -55,6 +55,31 @@ describe("useApproveResult", () => {
     const invalidatedKeys = invalidateSpy.mock.calls.map(
       ([filters]) => filters?.queryKey,
     );
+    expect(invalidatedKeys).toContainEqual(["recon-results"]);
+    expect(invalidatedKeys).toContainEqual(["recon-bucket-summary"]);
+  });
+});
+
+describe("useClosePeriod", () => {
+  it("invalidates recon-runs, recon-results AND recon-bucket-summary on success", async () => {
+    // Close locks rows server-side (status -> locked); only invalidating
+    // recon-runs left the results table and the checklist's readiness counts
+    // showing pre-close state until an unrelated refetch.
+    post.mockResolvedValue({ period: "2026-05", runs_closed: 1 });
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const invalidateSpy = vi.spyOn(qc, "invalidateQueries");
+
+    const { result } = renderHook(() => useClosePeriod(), {
+      wrapper: makeWrapper(qc),
+    });
+    result.current.mutate("2026-05");
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    expect(post).toHaveBeenCalledWith("/api/v1/reconciliation/close/2026-05", {});
+    const invalidatedKeys = invalidateSpy.mock.calls.map(
+      ([filters]) => filters?.queryKey,
+    );
+    expect(invalidatedKeys).toContainEqual(["recon-runs"]);
     expect(invalidatedKeys).toContainEqual(["recon-results"]);
     expect(invalidatedKeys).toContainEqual(["recon-bucket-summary"]);
   });

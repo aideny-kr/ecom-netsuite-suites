@@ -71,6 +71,10 @@ export function useClosePeriod() {
       apiClient.post(`/api/v1/reconciliation/close/${period}`, {}),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["recon-runs"] });
+      // Close locks rows server-side (status -> locked): the results table and
+      // the checklist's close_readiness counts must refetch too.
+      queryClient.invalidateQueries({ queryKey: ["recon-results"] });
+      queryClient.invalidateQueries({ queryKey: ["recon-bucket-summary"] });
     },
   });
 }
