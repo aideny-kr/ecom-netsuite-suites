@@ -48,28 +48,32 @@ const unmatchedResult: ReconResult = {
 };
 
 describe("ReconExceptionCard — confidence is advisory, not a match verdict", () => {
-  it("renders the confidence badge with the word 'confidence' (not 'match')", () => {
+  it("renders the badge as an advisory score (neither 'confidence' nor a bare '% match')", () => {
     render(<ReconExceptionCard result={exceptionResult} />);
-    expect(screen.getByText(/95% confidence/i)).toBeInTheDocument();
+    // Visible copy must say what the number IS (advisory), not read as a
+    // verdict: "confidence" implies the engine's certainty; "% match"
+    // implies a match verdict. Both are wrong for the R2 composite.
+    expect(screen.getByText(/95% advisory score/i)).toBeInTheDocument();
+    expect(screen.queryByText(/% confidence/i)).not.toBeInTheDocument();
   });
 
   it("badge text does NOT contain '% match'", () => {
     render(<ReconExceptionCard result={exceptionResult} />);
     // Make sure the old "% match" label is gone
-    expect(screen.queryByText(/% match/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/% match\b/i)).not.toBeInTheDocument();
   });
 
-  it("confidence badge has an advisory tooltip", () => {
+  it("advisory badge has an advisory tooltip", () => {
     render(<ReconExceptionCard result={exceptionResult} />);
-    const badge = screen.getByText(/95% confidence/i);
+    const badge = screen.getByText(/95% advisory score/i);
     expect(badge).toHaveAttribute("title");
     expect(badge.getAttribute("title")).toMatch(/advisory/i);
   });
 
-  it("confidence badge is neutral (muted), NOT verdict-colored", () => {
+  it("advisory badge is neutral (muted), NOT verdict-colored", () => {
     render(<ReconExceptionCard result={exceptionResult} />);
-    const badge = screen.getByText(/95% confidence/i);
-    // Mirror the table's regression: the confidence number must not be color-coded
+    const badge = screen.getByText(/95% advisory score/i);
+    // Mirror the table's regression: the advisory number must not be color-coded
     expect(badge).toHaveClass("text-muted-foreground");
     expect(badge).not.toHaveClass("text-orange-600");
   });
