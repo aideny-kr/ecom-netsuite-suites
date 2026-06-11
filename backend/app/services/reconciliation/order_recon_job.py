@@ -19,7 +19,7 @@ from app.schemas.order_reconciliation import (
     OrderMatchCandidate,
 )
 from app.schemas.reconciliation import ReconRunSummary
-from app.services.reconciliation.confidence_engine import compute_signals, signals_to_evidence
+from app.services.reconciliation.confidence_engine import advisory_confidence
 from app.services.reconciliation.four_bucket_classifier import (
     BUCKET_AUTO_CLASSIFICATIONS,
     BUCKET_MATCHES,
@@ -299,28 +299,21 @@ class OrderReconJob:
             )
             buckets.append(bucket)
 
-            # R2 advisory confidence — intentionally decoupled from status/close-lock.
-            # ``status`` (and the auto-lock-on-close gate) continues to read the engine
-            # match-tier ladder value (deterministic 1.0/0.95/0.90, fuzzy ≤0.89,
-            # unmatched 0) held in ``candidate.confidence`` — we never mutate it.
-            # The persisted ``confidence`` column instead carries the R2 amount+temporal
-            # composite score, so recalibrating the scorer cannot shift auto-lock decisions.
-            # Unmatched candidates (no deposit) keep the engine value (0); matched
-            # candidates get the R2 composite.
-            confidence_signals = None
-            persisted_confidence = candidate.confidence  # unmatched keeps engine value (0)
-            if candidate.deposit is not None:
-                # candidate.charge.charge_date is the payout arrival/settlement date
-                # (set from payouts.arrival_date in _fetch_charges), so temporal_score
-                # measures arrival→deposit proximity (advisory).
-                signals = compute_signals(
-                    charge_amount=candidate.charge.amount,
-                    deposit_amount=candidate.deposit.amount,
-                    charge_date=candidate.charge.charge_date,
-                    deposit_date=candidate.deposit.transaction_date,
-                )
-                persisted_confidence = signals.composite
-                confidence_signals = signals_to_evidence(signals)
+            # R2 advisory composite for the ``confidence`` column — the decoupling
+            # contract lives in confidence_engine.advisory_confidence (``status``
+            # above reads the engine ladder, never this value). Unmatched (no
+            # deposit) keeps the engine value (0). candidate.charge.charge_date is
+            # the payout arrival/settlement date (set from payouts.arrival_date in
+            # _fetch_charges), so temporal_score measures arrival→deposit
+            # proximity (advisory).
+            persisted_confidence, confidence_signals = advisory_confidence(
+                candidate.confidence,
+                matched=candidate.deposit is not None,
+                charge_amount=candidate.charge.amount,
+                deposit_amount=candidate.deposit.amount if candidate.deposit else None,
+                charge_date=candidate.charge.charge_date,
+                deposit_date=candidate.deposit.transaction_date if candidate.deposit else None,
+            )
 
             # Build evidence dict; attach R2 sub-scores when available.
             evidence = {

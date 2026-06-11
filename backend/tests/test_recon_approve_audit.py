@@ -80,6 +80,23 @@ async def test_already_approved_writes_no_audit_event(db, tenant_a):
     assert await _count_audit(db, resource_id=str(result.id)) == 0
 
 
+async def test_malformed_result_id_returns_structured_error(db, tenant_a):
+    """R4-B #14 sibling: the same ``uuid.UUID(<llm-param>)`` one-liner as
+    recon.get_exceptions' run_id — a malformed id must return the structured
+    ``{"success": False, "error": ...}`` shape (never an uncaught ValueError
+    through the dispatch boundary) and write no audit row."""
+    out = await execute(
+        {"result_id": "not-a-uuid"},
+        db=db,
+        tenant_id=tenant_a.id,
+        user_id=uuid.uuid4(),
+    )
+
+    assert out["success"] is False
+    assert "result_id" in out["error"]
+    assert await _count_audit(db, resource_id="not-a-uuid") == 0
+
+
 async def test_locked_writes_no_audit_event(db, tenant_a):
     run = await create_test_recon_run(db, tenant_a.id)
     result = await create_test_recon_result(db, tenant_a.id, run.id, status="locked")

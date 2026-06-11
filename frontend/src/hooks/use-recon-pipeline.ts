@@ -157,8 +157,14 @@ export function useReconPipeline() {
           summary,
           progress: 100,
         }));
-        // Invalidate queries so the runs list + results refresh
+        // A completed run wrote new results AND changed the period close
+        // scope + readiness counts the CloseChecklist gates on (R4-A #3:
+        // only invalidating recon-runs left a green-STALE checklist that
+        // could gate a close freezing the new run's unreviewed rows).
         queryClient.invalidateQueries({ queryKey: ["recon-runs"] });
+        queryClient.invalidateQueries({ queryKey: ["recon-results"] });
+        queryClient.invalidateQueries({ queryKey: ["recon-bucket-summary"] });
+        queryClient.invalidateQueries({ queryKey: ["recon-close-readiness"] });
       } else if (type === "recon_error") {
         setState((prev) => ({
           ...prev,

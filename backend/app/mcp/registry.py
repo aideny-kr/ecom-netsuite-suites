@@ -245,10 +245,41 @@ TOOL_REGISTRY = {
         },
     },
     "recon.get_exceptions": {
-        "description": "Fetch unmatched and low-confidence reconciliation results (exceptions) for investigation",
+        "description": (
+            "Fetch open reconciliation rows for a run from ONE authoritative four-bucket population. "
+            'Default bucket="needs_review" (unmatched + material-variance rows — material-variance '
+            'suggested rows live HERE). bucket="rules" lists the rules bucket: fuzzy matches, mostly '
+            "status=suggested awaiting approval but also pending. The close gate's Approve-Suggested-"
+            "Matches count is STATUS-keyed (status=suggested across ALL buckets), so NEITHER bucket "
+            "listing equals that count — to investigate what blocks the close gate, list BOTH the "
+            'default needs_review bucket AND bucket="rules". Already-dispositioned (approved/locked) '
+            "rows are always excluded. "
+            "Returns at most 50 rows, largest absolute variance first; exception_count is the TRUE total "
+            "matching the filters and truncated tells you whether rows were cut off — never present a "
+            "truncated list as exhaustive. Transcribe every returned number VERBATIM into a table — never "
+            "recompute, round, sum, or paraphrase amounts in prose — and quote exception_count exactly. "
+            "Each row carries the authoritative status + bucket; advisory_match_score is advisory-only, "
+            "never a verdict — disposition derives from status/bucket."
+        ),
         "execute": recon_exceptions.execute,
         "params_schema": {
             "run_id": {"type": "string", "required": True, "description": "Reconciliation run ID"},
+            "bucket": {
+                "type": "string",
+                "required": False,
+                "description": (
+                    "Bucket to list (default: needs_review). One of: matches, rules, "
+                    "auto_classifications, needs_review. 'rules' = the fuzzy-match "
+                    "bucket (mostly suggested, also pending)."
+                ),
+            },
+            "min_variance": {
+                "type": "string",
+                "required": False,
+                "description": (
+                    "Optional minimum absolute variance amount to include (finite, non-negative number, e.g. '50.00')"
+                ),
+            },
         },
     },
     "recon.get_evidence": {

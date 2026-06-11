@@ -7,10 +7,8 @@ Mutation endpoints gated by require_permission("recon.run").
 from __future__ import annotations
 
 import asyncio
-import calendar
 import json
 import uuid
-from datetime import date as date_type
 from datetime import datetime, timezone
 from typing import Annotated
 
@@ -33,6 +31,7 @@ from app.schemas.reconciliation import (
     ReconBucketApproveResult,
     ReconBucketCount,
     ReconBucketSummary,
+    ReconCloseReadiness,
     ReconResultApprove,
     ReconResultResponse,
     ReconRunCreate,
@@ -40,10 +39,13 @@ from app.schemas.reconciliation import (
     ReconRunSummary,
 )
 from app.services import audit_service
+from app.services.reconciliation.close_scope import (
+    closeable_runs_conditions,
+    left_for_review_conditions,
+)
 from app.services.reconciliation.evidence_service import EvidencePackGenerator
 from app.services.reconciliation.four_bucket_classifier import (
     ALL_BUCKETS,
-    BUCKET_NEEDS_REVIEW,
     BULK_APPROVABLE_BUCKETS,
     TERMINAL_RESULT_STATUSES,
     bucket_conditions,
@@ -501,6 +503,11 @@ async def get_run_bucket_summary(
             )
         ).one()
         counts[bucket] = ReconBucketCount(count=row[0], total_variance=row[1])
+
+    # Close-readiness counts intentionally do NOT live here: the close is
+    # period-scoped (POST /close/{period} touches EVERY in-scope run), so a
+    # per-run readiness would gate a mutation it never inspected. Use
+    # GET /close-readiness/{period} (the single authoritative source, R3-A).
     return ReconBucketSummary(run_id=run_id, **counts)
 
 
@@ -755,8 +762,88 @@ async def download_evidence(
 
 
 # ---------------------------------------------------------------------------
-# Close period
+# Close readiness (period-scoped) + close period
 # ---------------------------------------------------------------------------
+@router.get("/close-readiness/{period}", response_model=ReconCloseReadiness)
+async def get_close_readiness(
+    period: str,
+    user: Annotated[User, Depends(require_feature("reconciliation"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Period-scoped readiness counts for the FE CloseChecklist (R3-A).
+
+    ``POST /close/{period}`` closes EVERY in-scope run in the month, so the
+    gate aggregates over the results of ALL of them — the exact same run
+    selection (``close_scope.closeable_runs_conditions``) the close will use.
+    Zero in-scope runs → all zeros (a read, not close_period's 404). Every
+    count keys on the authoritative status/bucket only, never the advisory
+    confidence composite.
+    """
+    try:
+        run_conditions = closeable_runs_conditions(user.tenant_id, period)
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Period must be YYYY-MM format",
+        )
+
+    in_scope_run_ids = select(ReconciliationRun.id).where(*run_conditions)
+
+    # ONE statement, single snapshot: count FILTER (WHERE ...) aggregates over
+    # the results of every in-scope run, plus the in-scope run ids as an
+    # uncorrelated array_agg scalar subquery — the gate's counts and run set
+    # can never disagree with each other. runs_in_scope is derived from that
+    # same array (R4-A: the FE needs the IDS, not just a count — with zero
+    # in-scope runs every count is vacuously zero and a count-only gate fails
+    # OPEN; the FE checks the selected run is a member).
+    # Results are tenant-scoped directly too (defense in depth alongside the
+    # tenant-scoped run selection: a cross-tenant row seeded on an in-scope run
+    # must not count).
+    row = (
+        await db.execute(
+            select(
+                select(func.array_agg(ReconciliationRun.id))
+                .where(*run_conditions)
+                .scalar_subquery()
+                .label("in_scope_run_ids"),
+                # Open exceptions: a pending row on a MATCHED line. Pending+
+                # unmatched rows are expected exceptions already surfaced in
+                # the needs_review bucket.
+                func.count()
+                .filter(
+                    and_(
+                        ReconciliationResult.status == "pending",
+                        ReconciliationResult.match_type != "unmatched",
+                    )
+                )
+                .label("open_exceptions"),
+                func.count().filter(ReconciliationResult.status == "suggested").label("suggested"),
+                # Rows close deliberately leaves UNLOCKED (HITL) — the shared
+                # predicate close_period() skips by.
+                func.count().filter(and_(*left_for_review_conditions())).label("left_for_review"),
+            )
+            .select_from(ReconciliationResult)
+            .where(
+                ReconciliationResult.tenant_id == user.tenant_id,
+                ReconciliationResult.run_id.in_(in_scope_run_ids),
+            )
+        )
+    ).one()
+
+    # array_agg over zero rows is NULL; sorted for determinism (the FE only
+    # does a membership check).
+    scope_ids = sorted(str(rid) for rid in (row.in_scope_run_ids or []))
+
+    return ReconCloseReadiness(
+        period=period,
+        runs_in_scope=len(scope_ids),
+        in_scope_run_ids=scope_ids,
+        open_exceptions=row.open_exceptions,
+        suggested=row.suggested,
+        left_for_review=row.left_for_review,
+    )
+
+
 @router.post("/close/{period}", status_code=status.HTTP_200_OK)
 async def close_period(
     period: str,
@@ -768,23 +855,16 @@ async def close_period(
     Prevents further modifications to matched transactions.
     """
     try:
-        year_str, month_str = period.split("-")
-        year, month = int(year_str), int(month_str)
+        # Shared with GET /close-readiness/{period} via close_scope — the FE
+        # gate and this mutation must select the SAME runs (R3-A).
+        run_conditions = closeable_runs_conditions(user.tenant_id, period)
     except ValueError:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Period must be YYYY-MM format",
         )
 
-    first_day = date_type(year, month, 1)
-    last_day = date_type(year, month, calendar.monthrange(year, month)[1])
-
-    stmt = select(ReconciliationRun).where(
-        ReconciliationRun.tenant_id == user.tenant_id,
-        ReconciliationRun.date_from >= first_day,
-        ReconciliationRun.date_to <= last_day,
-        ReconciliationRun.status == "completed",
-    )
+    stmt = select(ReconciliationRun).where(*run_conditions)
     result = await db.execute(stmt)
     runs = result.scalars().all()
 
@@ -794,47 +874,58 @@ async def close_period(
             detail=f"No completed reconciliation runs found for {period}",
         )
 
-    locked_count = 0
-    left_for_review_count = 0
-    for run in runs:
-        # Lock a result iff it was approved (a human reviewed it — even a
-        # needs_review line that was single-approved), OR it is an auto_matched
-        # line that is NOT routed to needs_review. A confident match with a
-        # MATERIAL variance (status='auto_matched', bucket='needs_review') is left
-        # unlocked so the discrepancy is not silently buried on close (HITL).
-        lock_predicate = or_(
-            ReconciliationResult.status == "approved",
-            and_(
-                ReconciliationResult.status == "auto_matched",
-                not_(bucket_conditions(BUCKET_NEEDS_REVIEW)),
-            ),
-        )
-        stmt = select(ReconciliationResult).where(
-            ReconciliationResult.run_id == run.id,
-            ReconciliationResult.tenant_id == user.tenant_id,
-            lock_predicate,
-        )
-        result = await db.execute(stmt)
-        period_results = result.scalars().all()
+    run_ids = [run.id for run in runs]
 
-        for r in period_results:
-            r.status = "locked"
-            locked_count += 1
+    # Lock a result iff it was approved (a human reviewed it — even a
+    # needs_review line that was single-approved), OR it is an auto_matched
+    # line that is NOT left for review. A confident match with a MATERIAL
+    # variance (status='auto_matched', bucket='needs_review') is left
+    # unlocked so the discrepancy is not silently buried on close (HITL).
+    # The left-for-review predicate is shared with the readiness endpoint
+    # via close_scope (single source of truth).
+    lock_predicate = or_(
+        ReconciliationResult.status == "approved",
+        and_(
+            ReconciliationResult.status == "auto_matched",
+            not_(and_(*left_for_review_conditions())),
+        ),
+    )
 
-        # Count the auto_matched + needs_review lines deliberately left unlocked,
-        # so the close response + audit trail make the skipped items visible.
-        skipped_stmt = (
+    # ONE set-based UPDATE over every in-scope run (R4-A): the previous
+    # per-row ORM flip loaded + flushed each result individually, which at
+    # production scale (62.5k-row runs) risks the Supabase 2-min statement
+    # timeout. rowcount = rows locked (pattern: approve_bucket's server-side
+    # UPDATE). synchronize_session=False is safe: this request reads no
+    # result ORM objects after the flip.
+    locked_count = (
+        await db.execute(
+            update(ReconciliationResult)
+            .where(
+                ReconciliationResult.run_id.in_(run_ids),
+                ReconciliationResult.tenant_id == user.tenant_id,
+                lock_predicate,
+            )
+            .values(status="locked")
+            .execution_options(synchronize_session=False)
+        )
+    ).rowcount
+
+    # Count the auto_matched + needs_review lines deliberately left unlocked,
+    # so the close response + audit trail make the skipped items visible.
+    # Same shared predicate the readiness endpoint counts by (close_scope).
+    left_for_review_count = (
+        await db.execute(
             select(func.count())
             .select_from(ReconciliationResult)
             .where(
-                ReconciliationResult.run_id == run.id,
+                ReconciliationResult.run_id.in_(run_ids),
                 ReconciliationResult.tenant_id == user.tenant_id,
-                ReconciliationResult.status == "auto_matched",
-                bucket_conditions(BUCKET_NEEDS_REVIEW),
+                *left_for_review_conditions(),
             )
         )
-        left_for_review_count += (await db.execute(skipped_stmt)).scalar_one()
+    ).scalar_one()
 
+    for run in runs:
         run.status = "closed"
 
     await audit_service.log_event(

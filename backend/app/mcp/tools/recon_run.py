@@ -19,8 +19,12 @@ async def execute(params: dict, **kwargs) -> dict:
         date_to: End date (YYYY-MM-DD)
         payout_ids: Optional list of specific payout IDs to reconcile
     """
-    db = kwargs.get("db")
-    tenant_id = kwargs.get("tenant_id")
+    # Dispatch boundary — accept BOTH conventions: governed_execute (the only
+    # production dispatch) passes everything inside a single ``context=``
+    # kwarg; direct callers/tests pass bare ``db=``/``tenant_id=`` kwargs.
+    context: dict = kwargs.get("context") or {}
+    db = kwargs.get("db") or context.get("db")
+    tenant_id = kwargs.get("tenant_id") or context.get("tenant_id")
 
     if not db or not tenant_id:
         return {"success": False, "error": "Missing database session or tenant context"}

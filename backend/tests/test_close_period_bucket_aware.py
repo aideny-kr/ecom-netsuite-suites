@@ -11,6 +11,8 @@ The skipped count must be surfaced (response + audit payload) as
 ``results_left_for_review`` for transparency.
 """
 
+from datetime import date
+
 from sqlalchemy import select
 
 from app.api.v1.reconciliation import close_period
@@ -93,3 +95,57 @@ async def test_close_period_does_not_lock_needs_review_auto_matched(db, tenant_a
     assert len(events) == 1
     assert events[0].payload is not None
     assert events[0].payload["results_left_for_review"] == 1
+
+
+async def test_close_period_locks_across_multiple_runs_in_period(db, tenant_a):
+    """The set-based lock UPDATE must span ALL in-scope runs, not just one.
+
+    close_period was refactored from a per-run ORM loop to ONE
+    ``update(...).where(run_id.in_(run_ids), ...)`` — every other close test
+    seeds exactly one in-scope run, so a scope-narrowing regression (e.g. a
+    leftover ``run.id`` instead of ``run_ids``) would slip through. Seed TWO
+    completed runs in the same month, each with a mix of lockable and
+    non-lockable rows, and assert counts + per-row statuses across BOTH.
+    """
+    user, _ = await create_test_user(db, tenant_a)
+
+    # Two completed runs, both date ranges fully inside 2026-04. The factory
+    # defaults run A to 2026-04-20..24; give run B a distinct earlier range so
+    # the two runs don't accidentally alias each other in the close scope.
+    run_a = await create_test_recon_run(db, tenant_a.id, status="completed")
+    run_b = await create_test_recon_run(db, tenant_a.id, status="completed")
+    run_b.date_from = date(2026, 4, 1)
+    run_b.date_to = date(2026, 4, 5)
+
+    # Run A: both rows lockable.
+    a_approved = await create_test_recon_result(db, tenant_a.id, run_a.id, status="approved", bucket="matches")
+    a_auto = await create_test_recon_result(db, tenant_a.id, run_a.id, status="auto_matched", bucket="matches")
+    # Run B: one lockable, one left-for-review (material, unreviewed), one pending.
+    b_auto = await create_test_recon_result(db, tenant_a.id, run_b.id, status="auto_matched", bucket="matches")
+    b_review = await create_test_recon_result(
+        db, tenant_a.id, run_b.id, status="auto_matched", bucket=BUCKET_NEEDS_REVIEW
+    )
+    b_pending = await create_test_recon_result(db, tenant_a.id, run_b.id, status="pending", bucket="matches")
+    await db.flush()
+
+    resp = await close_period("2026-04", user=user, db=db)
+
+    # Counts aggregate across BOTH runs.
+    assert resp["runs_closed"] == 2
+    assert resp["results_locked"] == 3  # a_approved, a_auto, b_auto
+    assert resp["results_left_for_review"] == 1  # b_review
+
+    # Per-row: lockable rows in BOTH runs flipped; the rest untouched.
+    for r in (a_approved, a_auto, b_auto, b_review, b_pending):
+        await db.refresh(r)
+    assert a_approved.status == "locked"
+    assert a_auto.status == "locked"
+    assert b_auto.status == "locked"  # would stay auto_matched if the UPDATE only scoped run A
+    assert b_review.status == "auto_matched"  # material + unreviewed — NOT locked
+    assert b_pending.status == "pending"  # never lockable
+
+    # Both runs are closed.
+    await db.refresh(run_a)
+    await db.refresh(run_b)
+    assert run_a.status == "closed"
+    assert run_b.status == "closed"

@@ -40,7 +40,9 @@ export function ReconResultsTable({ results, onInvestigate }: ReconResultsTableP
             <th className="px-4 py-3 text-right font-medium text-muted-foreground">Stripe</th>
             <th className="px-4 py-3 text-right font-medium text-muted-foreground">NetSuite</th>
             <th className="px-4 py-3 text-right font-medium text-muted-foreground">Variance</th>
-            <th className="px-4 py-3 text-center font-medium text-muted-foreground">Confidence</th>
+            {/* R2: the persisted value is the advisory composite — "Confidence" reads
+                as an engine verdict; the Status badge is the authoritative disposition. */}
+            <th className="px-4 py-3 text-center font-medium text-muted-foreground">Advisory Score</th>
             <th className="px-4 py-3 text-center font-medium text-muted-foreground">Actions</th>
           </tr>
         </thead>

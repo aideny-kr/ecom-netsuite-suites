@@ -184,6 +184,55 @@ def compute_signals(
     )
 
 
+def advisory_confidence(
+    engine_confidence: Decimal,
+    *,
+    matched: bool,
+    charge_amount: Decimal | None,
+    deposit_amount: Decimal | None,
+    charge_date: date | None,
+    deposit_date: date | None,
+) -> tuple[Decimal, dict | None]:
+    """R2 advisory confidence for one recon result row — the SHARED write-path
+    block consumed by BOTH jobs (``recon_job.py`` and ``order_recon_job.py``).
+
+    DECOUPLING (inviolable): the returned value feeds ONLY the persisted
+    ``confidence`` column — an advisory/display composite. ``status`` (and the
+    auto-lock-on-close gate) is derived from the engine match-tier ladder value
+    BEFORE this is called and never reads the composite, so recalibrating the
+    scorer cannot shift auto-lock decisions.
+
+    Args:
+        engine_confidence: the engine ladder value (``candidate.confidence``).
+            Passed through unchanged when not *matched* — unmatched rows keep 0,
+            payout duplicate-exception rows keep 0.60 (their deposits EACH claim
+            the same payout; a pair-score over the sum would double-count).
+        matched: ``True`` only for scored matches (deterministic/fuzzy with
+            deposit(s)). When ``True``, *charge_amount* and *deposit_amount*
+            must be real Decimals.
+        charge_amount: Stripe-side amount the match asserts settles.
+        deposit_amount: NS-side amount (a fuzzy split payout passes the SUM of
+            its deposits — that is what the match asserts).
+        charge_date: Stripe-side settlement date (payout arrival), or ``None``.
+        deposit_date: NS deposit date (a split passes the LATEST), or ``None``.
+
+    Returns:
+        ``(persisted_confidence, confidence_signals)`` where the second element
+        is the JSON-safe ``evidence["confidence_signals"]`` dict for scored
+        matches, or ``None`` when the row keeps the engine value.
+    """
+    if not matched:
+        return engine_confidence, None
+
+    signals = compute_signals(
+        charge_amount=charge_amount,
+        deposit_amount=deposit_amount,
+        charge_date=charge_date,
+        deposit_date=deposit_date,
+    )
+    return signals.composite, signals_to_evidence(signals)
+
+
 def signals_to_evidence(signals: ConfidenceSignals) -> dict:
     """Serialize *signals* to a JSON-safe dict for persisting into an evidence column.
 

@@ -53,6 +53,14 @@ const pendingLowConfidenceResult: ReconResult = {
 };
 
 describe("ReconResultsTable — confidence is advisory, not a verdict", () => {
+  it("labels the column 'Advisory Score', never 'Confidence'", () => {
+    render(<ReconResultsTable results={[autoMatchedResult]} />);
+    // The persisted value is the R2 advisory composite — a bare "Confidence"
+    // header reads as an engine verdict (the Status badge is the disposition).
+    expect(screen.getByText("Advisory Score")).toBeInTheDocument();
+    expect(screen.queryByText("Confidence")).not.toBeInTheDocument();
+  });
+
   it("renders the confidence value as a percentage", () => {
     render(<ReconResultsTable results={[autoMatchedResult]} />);
     expect(screen.getByText("60%")).toBeInTheDocument();

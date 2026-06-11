@@ -139,6 +139,10 @@ async def test_bucket_summary_counts(client, db, finance_user):
     assert body["needs_review"]["count"] == 2
     # auto-classifications total variance = 0.12 + 4.12 + 5.00
     assert Decimal(str(body["auto_classifications"]["total_variance"])) == Decimal("9.24")
+    # Close-readiness counts are NOT part of the per-run buckets payload: the
+    # close is PERIOD-scoped, so readiness lives on GET /close-readiness/{period}
+    # (R3-A) — tests in tests/test_close_readiness_period.py.
+    assert "close_readiness" not in body
 
 
 # ---------------------------------------------------------------------------

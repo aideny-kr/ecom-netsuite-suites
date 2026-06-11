@@ -31,7 +31,9 @@ export function ReconExceptionCard({ result, onInvestigate }: ReconExceptionCard
             className="rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground"
             title="Advisory match score (amount + timing agreement). The Status badge reflects the authoritative disposition."
           >
-            {(Number(result.confidence) * 100).toFixed(0)}% confidence
+            {/* "advisory score", not "confidence"/"% match" — the R2 composite is
+                informational only; the Status badge is the disposition. */}
+            {(Number(result.confidence) * 100).toFixed(0)}% advisory score
           </span>
         )}
       </div>

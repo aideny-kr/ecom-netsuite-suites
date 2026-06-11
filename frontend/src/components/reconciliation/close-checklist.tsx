@@ -3,12 +3,11 @@
 import { useState } from "react";
 import { CheckCircle2, Circle, Lock, AlertTriangle } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { useClosePeriod } from "@/hooks/use-reconciliation";
-import type { ReconRun, ReconResult } from "@/lib/types";
+import { useClosePeriod, useCloseReadiness } from "@/hooks/use-reconciliation";
+import type { ReconCloseReadiness, ReconRun } from "@/lib/types";
 
 interface CloseChecklistProps {
   run: ReconRun | null;
-  results: ReconResult[];
   period: string;
 }
 
@@ -16,9 +15,15 @@ interface ChecklistStep {
   id: string;
   label: string;
   description: string;
-  check: (run: ReconRun | null, results: ReconResult[]) => boolean;
+  check: (run: ReconRun | null, readiness: ReconCloseReadiness | undefined) => boolean;
 }
 
+// Auto-checks key on the PERIOD-scoped readiness (GET /close-readiness/{period}):
+// POST /close/{period} closes EVERY completed run in the month, so gating on the
+// selected run alone would authorize a close over runs nobody inspected (R3-A).
+// They compare against `=== 0` so missing readiness (loading, or deploy-skew
+// payload from an older backend) yields `undefined === 0` → false → incomplete.
+// Fail closed — never report "ready" on absent data.
 const STEPS: ChecklistStep[] = [
   {
     id: "run_recon",
@@ -27,22 +32,46 @@ const STEPS: ChecklistStep[] = [
     check: (run) => run?.status === "completed" || run?.status === "closed",
   },
   {
+    id: "run_in_scope",
+    label: "Run In Close Scope",
+    description:
+      "Close locks the whole period — a run spanning a month boundary is not closeable under this period",
+    // R4-A: the count checks alone fail OPEN when NOTHING is in scope (every
+    // count is vacuously zero) or when the selected run spans a month boundary
+    // (out of its own derived period's scope while other runs' counts are
+    // zero). Require a non-empty scope AND membership of the SELECTED run.
+    // Optional chaining fails closed on missing readiness or a deploy-skew
+    // payload from an older backend without in_scope_run_ids.
+    check: (run, readiness) =>
+      (readiness?.runs_in_scope ?? 0) > 0 &&
+      !!run &&
+      readiness?.in_scope_run_ids?.includes(run.id) === true,
+  },
+  {
     id: "review_exceptions",
     label: "Review Exceptions",
     description: "Investigate and resolve all exceptions",
-    check: (_, results) => {
-      const pending = results.filter((r) => r.status === "pending" && r.match_type !== "unmatched");
-      return pending.length === 0;
-    },
+    check: (_, readiness) => readiness?.open_exceptions === 0,
   },
   {
     id: "approve_matches",
     label: "Approve Suggested Matches",
     description: "Review and approve all suggested matches",
-    check: (_, results) => {
-      const suggested = results.filter((r) => r.status === "suggested");
-      return suggested.length === 0;
-    },
+    check: (_, readiness) => readiness?.suggested === 0,
+  },
+  {
+    id: "review_material_variances",
+    label: "Review Material Variances",
+    description:
+      "Approve or investigate confident matches with material variance — close will NOT lock these",
+    // left_for_review mirrors the backend close_period() left-for-review
+    // predicate (close_scope.left_for_review_conditions): rows with
+    // status="auto_matched" AND bucket="needs_review" are deliberately left
+    // unlocked on close (HITL — a material variance is never silently
+    // buried), so the checklist must not report "ready" while any remain.
+    // Counted server-side over every in-scope run, keyed on the authoritative
+    // status + bucket only — never the advisory confidence.
+    check: (_, readiness) => readiness?.left_for_review === 0,
   },
   {
     id: "export_evidence",
@@ -58,8 +87,11 @@ const STEPS: ChecklistStep[] = [
   },
 ];
 
-export function CloseChecklist({ run, results, period }: CloseChecklistProps) {
+export function CloseChecklist({ run, period }: CloseChecklistProps) {
   const closePeriod = useClosePeriod();
+  // undefined while loading — every auto-check FAILS CLOSED until it arrives
+  // (manual toggles still work: HITL checklist semantics unchanged).
+  const readiness = useCloseReadiness(period || null);
   const [manualChecks, setManualChecks] = useState<Set<string>>(new Set());
 
   const toggleManual = (stepId: string) => {
@@ -73,14 +105,28 @@ export function CloseChecklist({ run, results, period }: CloseChecklistProps) {
 
   const isComplete = (step: ChecklistStep) => {
     if (manualChecks.has(step.id)) return true;
-    return step.check(run, results);
+    return step.check(run, readiness.data);
   };
 
-  const allPrereqsMet = STEPS.slice(0, 4).every((s) => isComplete(s));
+  // Every step except the lock itself gates the lock (was a positional
+  // slice(0, 4); keyed by id so inserting steps cannot silently un-gate).
+  const allPrereqsMet = STEPS.filter((s) => s.id !== "lock_period").every((s) => isComplete(s));
 
   const handleLockPeriod = () => {
     if (!period) return;
-    if (!confirm(`Are you sure you want to lock period ${period}? This cannot be undone.`)) return;
+    // The close is period-wide: surface how many runs it will actually touch
+    // so a multi-run month is never locked under a single-run assumption.
+    const runsInScope = readiness.data?.runs_in_scope;
+    const multiRunNote =
+      runsInScope !== undefined && runsInScope > 1
+        ? ` This will close ${runsInScope} runs in ${period}.`
+        : "";
+    if (
+      !confirm(
+        `Are you sure you want to lock period ${period}?${multiRunNote} This cannot be undone.`,
+      )
+    )
+      return;
     closePeriod.mutate(period);
   };
 
@@ -98,6 +144,8 @@ export function CloseChecklist({ run, results, period }: CloseChecklistProps) {
           return (
             <div
               key={step.id}
+              data-testid={step.id}
+              data-complete={complete}
               className={cn(
                 "flex items-center gap-3 rounded-lg p-3 transition-colors",
                 complete ? "bg-green-50" : "bg-muted/30",
@@ -141,6 +189,19 @@ export function CloseChecklist({ run, results, period }: CloseChecklistProps) {
         <div className="mt-4 flex items-center gap-2 rounded-lg bg-orange-50 p-3 text-[13px] text-orange-800">
           <AlertTriangle className="h-4 w-4 shrink-0" />
           Complete all steps before locking the period.
+        </div>
+      )}
+
+      {/* R4-A #2: a failed close was silent — nothing consumed the mutation's
+          isError, so the checklist just stayed unlocked with no explanation.
+          Surface the API error detail (apiClient throws Error(detail)). */}
+      {closePeriod.isError && (
+        <div className="mt-4 flex items-center gap-2 rounded-lg bg-red-50 p-3 text-[13px] text-red-800">
+          <AlertTriangle className="h-4 w-4 shrink-0" />
+          Close failed:{" "}
+          {closePeriod.error instanceof Error
+            ? closePeriod.error.message
+            : "Request failed"}
         </div>
       )}
     </div>
