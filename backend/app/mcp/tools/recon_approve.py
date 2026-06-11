@@ -21,9 +21,16 @@ async def execute(params: dict, **kwargs) -> dict:
     Params:
         result_id: ReconciliationResult ID to approve
     """
-    db: AsyncSession | None = kwargs.get("db")
-    tenant_id = kwargs.get("tenant_id")
-    user_id = kwargs.get("user_id")
+    # Dispatch boundary — accept BOTH conventions: governed_execute (the only
+    # production dispatch) passes everything inside a single ``context=``
+    # kwarg; direct callers/tests pass bare ``db=``/``tenant_id=`` kwargs.
+    context: dict = kwargs.get("context") or {}
+    db: AsyncSession | None = kwargs.get("db") or context.get("db")
+    tenant_id = kwargs.get("tenant_id") or context.get("tenant_id")
+    # governed_execute carries the approving user as ``actor_id`` — map it to
+    # user_id so chat approvals stamp ``approved_by`` + the per-line audit
+    # actor (HITL invariant), never silently NULL.
+    user_id = kwargs.get("user_id") or context.get("actor_id")
 
     if not db or not tenant_id:
         return {"success": False, "error": "Missing database session or tenant context"}

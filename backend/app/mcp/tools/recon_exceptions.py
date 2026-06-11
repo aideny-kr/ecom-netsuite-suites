@@ -76,8 +76,15 @@ async def execute(params: dict, **kwargs) -> dict:
         min_variance: Optional minimum absolute variance amount to include
             (Decimal-safe, finite and non-negative; e.g. "50.00")
     """
-    db: AsyncSession | None = kwargs.get("db")
-    tenant_id = kwargs.get("tenant_id")
+    # Dispatch boundary — accept BOTH conventions (T2 gate finding): the ONLY
+    # production caller (chat → mcp_server.call_tool → governed_execute) passes
+    # everything inside a single ``context=`` kwarg, while direct callers and
+    # tests pass bare ``db=``/``tenant_id=`` kwargs. Reading only bare kwargs
+    # made this tool unreachable end-to-end through chat (every real dispatch
+    # returned the missing-context error below).
+    context: dict = kwargs.get("context") or {}
+    db: AsyncSession | None = kwargs.get("db") or context.get("db")
+    tenant_id = kwargs.get("tenant_id") or context.get("tenant_id")
 
     if not db or not tenant_id:
         return {"success": False, "error": "Missing database session or tenant context"}
