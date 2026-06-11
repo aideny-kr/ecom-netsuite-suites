@@ -294,16 +294,20 @@ class ReconJobRunner:
             # exception 0.60, unmatched 0) held in ``candidate.confidence`` — we never
             # mutate it. The persisted ``confidence`` column instead carries the R2
             # amount+temporal composite score, so recalibrating the scorer cannot
-            # shift auto-lock decisions. Unmatched candidates (no deposits) keep the
-            # engine value (0); matched candidates get the R2 composite.
+            # shift auto-lock decisions. The composite is scored only for
+            # deterministic/fuzzy matches; unmatched candidates (no deposits) keep the
+            # engine value (0), and ``exception`` candidates keep theirs (0.60): an
+            # exception is duplicate detection — ≥2 deposits EACH claiming the SAME
+            # payout, not a split — so summing them would double-count and collapse
+            # the amount score toward 0. No signals are captured for them.
             confidence_signals = None
-            persisted_confidence = candidate.confidence  # unmatched keeps engine value (0)
-            if candidate.deposits and candidate.match_type != "unmatched":
-                # Multi-deposit (split payout / duplicate exception): the match asserts
-                # the payout settles across ALL listed deposits, so the amount signal
-                # scores the SUMMED deposit amount against payout.net_amount; the
-                # temporal signal uses the LATEST deposit transaction_date (completion
-                # of the split), None-safe — a dateless deposit drops out of the max;
+            persisted_confidence = candidate.confidence  # unmatched/exception keep engine value
+            if candidate.deposits and candidate.match_type in ("deterministic", "fuzzy"):
+                # Multi-deposit (fuzzy split payout): the match asserts the payout
+                # settles across ALL listed deposits, so the amount signal scores
+                # the SUMMED deposit amount against payout.net_amount; the temporal
+                # signal uses the LATEST deposit transaction_date (completion of the
+                # split), None-safe — a dateless deposit drops out of the max;
                 # all dates missing → temporal unavailable (amount-only fallback).
                 deposit_total = sum((d.amount for d in candidate.deposits), Decimal("0"))
                 deposit_dates = [d.transaction_date for d in candidate.deposits if d.transaction_date is not None]

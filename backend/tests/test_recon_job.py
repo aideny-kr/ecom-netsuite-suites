@@ -267,6 +267,37 @@ class TestStoreResultsAdvisoryConfidence:
         assert result.bucket == BUCKET_RULES
 
     @pytest.mark.asyncio
+    async def test_exception_duplicate_keeps_ladder_value_no_signals(self):
+        """Duplicate exception (>=2 deposits EACH claiming the SAME payout) is
+        NOT a split — summing the deposits would double-count and collapse the
+        amount score. Exception rows keep the engine ladder value (0.60), like
+        unmatched, and capture NO confidence_signals."""
+        candidate = _candidate(
+            payout=_payout(arrival_date=date(2026, 3, 10)),
+            deposits=[
+                _deposit(transaction_date=date(2026, 3, 10)),
+                _deposit(transaction_date=date(2026, 3, 10)),  # duplicate of the same payout
+            ],
+            match_type="exception",
+            confidence=Decimal("0.60"),
+            variance_amount=Decimal("970.00"),
+            variance_type="duplicate",
+            match_rule="duplicate_detection",
+        )
+
+        result = await _store_one(candidate)
+
+        # Ladder 0.60 persisted — NOT a composite (summed duplicates would give
+        # amount 0.0 + same-day temporal 1.0 → composite 0.4000).
+        assert result.confidence == Decimal("0.60")
+        # status still ladder-derived (0.60 < 0.75 → pending)
+        assert result.status == "pending"
+        # exception → needs_review (classifier safe default) — bucket logic untouched
+        assert result.bucket == BUCKET_NEEDS_REVIEW
+        # no signals captured: the pair-score is meaningless for duplicates
+        assert "confidence_signals" not in result.evidence
+
+    @pytest.mark.asyncio
     async def test_unmatched_keeps_engine_zero(self):
         """Unmatched candidates keep the engine value (0); no signals captured."""
         candidate = _candidate(
