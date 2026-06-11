@@ -43,6 +43,12 @@ export function useCreateReconRun() {
       apiClient.post<ReconRunSummary>("/api/v1/reconciliation/runs", data),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["recon-runs"] });
+      // R4-A #3: a NEW run changes the period close scope + readiness counts
+      // the CloseChecklist gates on (its unreviewed rows count immediately).
+      // Without this, a green checklist goes green-STALE and could gate a
+      // close that freezes the new run's rows. Bucket summary for symmetry.
+      queryClient.invalidateQueries({ queryKey: ["recon-bucket-summary"] });
+      queryClient.invalidateQueries({ queryKey: ["recon-close-readiness"] });
     },
   });
 }

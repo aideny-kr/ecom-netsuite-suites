@@ -19,6 +19,7 @@ import {
   useApproveResult,
   useClosePeriod,
   useCloseReadiness,
+  useCreateReconRun,
 } from "@/hooks/use-reconciliation";
 
 function wrapper({ children }: { children: React.ReactNode }) {
@@ -61,6 +62,35 @@ describe("useApproveResult", () => {
       ([filters]) => filters?.queryKey,
     );
     expect(invalidatedKeys).toContainEqual(["recon-results"]);
+    expect(invalidatedKeys).toContainEqual(["recon-bucket-summary"]);
+    expect(invalidatedKeys).toContainEqual(["recon-close-readiness"]);
+  });
+});
+
+describe("useCreateReconRun", () => {
+  it("invalidates recon-runs, recon-bucket-summary AND recon-close-readiness on success", async () => {
+    // R4-A #3: a NEW run changes the period's close scope and its readiness
+    // counts (a fresh run's unreviewed rows). Without these invalidations a
+    // previously-green checklist stays green-stale and the new run's
+    // suggested/material rows could be frozen behind a close nobody gated.
+    post.mockResolvedValue({ run_id: "r9", status: "completed" });
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const invalidateSpy = vi.spyOn(qc, "invalidateQueries");
+
+    const { result } = renderHook(() => useCreateReconRun(), {
+      wrapper: makeWrapper(qc),
+    });
+    result.current.mutate({ date_from: "2026-05-01", date_to: "2026-05-31" });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    expect(post).toHaveBeenCalledWith("/api/v1/reconciliation/runs", {
+      date_from: "2026-05-01",
+      date_to: "2026-05-31",
+    });
+    const invalidatedKeys = invalidateSpy.mock.calls.map(
+      ([filters]) => filters?.queryKey,
+    );
+    expect(invalidatedKeys).toContainEqual(["recon-runs"]);
     expect(invalidatedKeys).toContainEqual(["recon-bucket-summary"]);
     expect(invalidatedKeys).toContainEqual(["recon-close-readiness"]);
   });
