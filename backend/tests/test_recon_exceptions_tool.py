@@ -1,11 +1,14 @@
-"""Unit tests for the chat MCP tool ``recon.get_exceptions`` (Task A, advisory-coherence).
+"""Unit tests for the chat MCP tool ``recon.get_exceptions`` (Task A + R3-B).
 
 These run WITHOUT a database: rows are in-memory ``ReconciliationResult``
 instances served through a stub session, so they cover the payload re-frame
 (``advisory_match_score`` + authoritative ``status``/``bucket``, stripped
 ``confidence_signals`` WITHOUT mutating the ORM evidence dict) and — via
-compiled-SQL inspection — the selection re-key (bucket == needs_review AND
-status NOT IN approved/locked) plus the Decimal-safe ``min_variance`` filter.
+compiled-SQL inspection — the bucket-keyed selection (validated optional
+``bucket`` param defaulting to needs_review, AND status NOT IN
+approved/locked), the Decimal-safe non-negative ``min_variance`` filter, and
+the SINGLE-statement count/select shape (``count(*) OVER ()`` window — count
+and rows can never disagree under READ COMMITTED).
 
 Row-level selection semantics against real Postgres live in
 ``test_recon_exceptions_tool_db.py`` (PM runs post-flight).
@@ -20,7 +23,11 @@ import pytest
 
 from app.mcp.tools.recon_exceptions import execute
 from app.models.reconciliation import ReconciliationResult
-from app.services.reconciliation.four_bucket_classifier import BUCKET_NEEDS_REVIEW
+from app.services.reconciliation.four_bucket_classifier import (
+    ALL_BUCKETS,
+    BUCKET_NEEDS_REVIEW,
+    BUCKET_RULES,
+)
 
 # ---------------------------------------------------------------------------
 # Stub session — records the statement, serves in-memory rows
@@ -28,27 +35,24 @@ from app.services.reconciliation.four_bucket_classifier import BUCKET_NEEDS_REVI
 
 
 class _StubResult:
-    """Serves BOTH statement shapes the tool issues: the count query
-    (``scalar_one``) and the row select (``scalars().all()``)."""
+    """Serves the tool's SINGLE statement shape: each result row is a
+    ``(ReconciliationResult, total_count)`` pair — the window count
+    (``count(*) OVER ()``) is carried on every row, exactly as real Postgres
+    returns it. There is deliberately NO ``scalar_one``/``scalars`` here: a
+    separate count query (the old two-statement shape) must fail loudly."""
 
     def __init__(self, rows, count):
         self._rows = rows
         self._count = count
 
-    def scalars(self):
-        return self
-
     def all(self):
-        return self._rows
-
-    def scalar_one(self):
-        return self._count
+        return [(r, self._count) for r in self._rows]
 
 
 class _StubDB:
     def __init__(self, rows=None, count=None):
         self.rows = rows or []
-        # TRUE filtered total the count query reports — defaults to len(rows)
+        # TRUE filtered total the window count reports — defaults to len(rows)
         # but can diverge to simulate the >50-row truncation case.
         self.count = count if count is not None else len(self.rows)
         self.stmts = []
@@ -243,17 +247,105 @@ async def test_min_variance_non_finite_returns_error(value):
     assert db.stmts == []
 
 
+@pytest.mark.parametrize("value", ["-0.01", "-50", -25])
+async def test_min_variance_negative_returns_error(value):
+    """The filter is on ABSOLUTE variance, so a negative threshold is
+    always-true — a silent no-op that LOOKS like it filtered. Reject it with
+    the same structured-error shape as non-finite values."""
+    db = _StubDB([])
+
+    out = await execute({"run_id": str(uuid.uuid4()), "min_variance": value}, db=db, tenant_id=uuid.uuid4())
+
+    assert out["success"] is False
+    assert "min_variance" in out["error"]
+    # Rejected up front — no query was ever issued.
+    assert db.stmts == []
+
+
 # ---------------------------------------------------------------------------
-# Count honesty — TRUE total vs returned vs truncated (no-LLM-numbers)
+# Optional bucket param — validated, defaults to needs_review (R3-B #1)
+# ---------------------------------------------------------------------------
+
+
+async def test_bucket_defaults_to_needs_review_and_is_echoed():
+    db = _StubDB([])
+
+    out = await execute({"run_id": str(uuid.uuid4())}, db=db, tenant_id=uuid.uuid4())
+
+    assert out["success"] is True
+    # The response says which bucket it actually queried (honest framing).
+    assert out["bucket"] == BUCKET_NEEDS_REVIEW
+    _sql, params = _compiled(db.last_stmt)
+    assert "needs_review" in params.values()
+
+
+async def test_bucket_rules_selects_the_suggested_fuzzy_population():
+    """bucket="rules" restores chat's discovery surface for suggested fuzzy
+    matches — the close gate's "Approve Suggested Matches" population that
+    the needs_review re-key made invisible (T2 gate finding #1)."""
+    row = _make_result(
+        status="suggested",
+        match_type="fuzzy",
+        bucket=BUCKET_RULES,
+        confidence=Decimal("0.8500"),
+        variance_type="fx_rounding",
+        variance_amount=Decimal("0.30"),
+    )
+    db = _StubDB([row])
+
+    out = await execute({"run_id": str(uuid.uuid4()), "bucket": "rules"}, db=db, tenant_id=uuid.uuid4())
+
+    assert out["success"] is True
+    assert out["bucket"] == BUCKET_RULES
+    exc = out["exceptions"][0]
+    assert exc["status"] == "suggested"
+    assert exc["bucket"] == BUCKET_RULES
+    sql, params = _compiled(db.last_stmt)
+    assert "reconciliation_results.bucket = " in sql
+    assert "rules" in params.values()
+    assert "needs_review" not in params.values()
+    # The dispositioned-status exclusion applies to EVERY bucket.
+    assert "reconciliation_results.status NOT IN " in sql
+    assert "approved" in params.values()
+    assert "locked" in params.values()
+
+
+@pytest.mark.parametrize("bucket", list(ALL_BUCKETS))
+async def test_bucket_accepts_every_canonical_bucket(bucket):
+    db = _StubDB([])
+
+    out = await execute({"run_id": str(uuid.uuid4()), "bucket": bucket}, db=db, tenant_id=uuid.uuid4())
+
+    assert out["success"] is True
+    assert out["bucket"] == bucket
+    _sql, params = _compiled(db.last_stmt)
+    assert bucket in params.values()
+
+
+@pytest.mark.parametrize("bad", ["bogus", "", "NEEDS_REVIEW", "exceptions"])
+async def test_bucket_invalid_returns_structured_error(bad):
+    """Invalid bucket → structured error (same shape as the other param
+    errors), validated against ALL_BUCKETS BEFORE any query is issued."""
+    db = _StubDB([])
+
+    out = await execute({"run_id": str(uuid.uuid4()), "bucket": bad}, db=db, tenant_id=uuid.uuid4())
+
+    assert out["success"] is False
+    assert "bucket" in out["error"]
+    assert db.stmts == []
+
+
+# ---------------------------------------------------------------------------
+# Count honesty — TRUE total via a SINGLE statement (window count)
 # ---------------------------------------------------------------------------
 
 
 async def test_exception_count_is_true_total_with_returned_and_truncated():
     """``exception_count`` must be the server-side total over the filters,
-    NOT len() after the 50-row cap — the no-LLM-numbers framing promises the
-    authoritative bucket size."""
+    NOT len() after the 50-row cap — the framing promises the authoritative
+    bucket size."""
     rows = [_make_result() for _ in range(50)]  # what the capped select returns
-    db = _StubDB(rows, count=120)  # the TRUE filtered total
+    db = _StubDB(rows, count=120)  # the TRUE filtered total (window value)
 
     out = await execute({"run_id": str(uuid.uuid4())}, db=db, tenant_id=uuid.uuid4())
 
@@ -274,30 +366,43 @@ async def test_not_truncated_when_total_fits_in_cap():
     assert out["truncated"] is False
 
 
-async def test_count_query_shares_filters_with_select_and_has_no_cap():
-    """The count stmt runs over the SAME filters as the row select (incl. the
-    optional min_variance abs filter) but without the 50-row cap."""
+async def test_count_and_rows_come_from_one_statement():
+    """Count + rows in ONE statement (single snapshot): two separate
+    statements can disagree under READ COMMITTED when a concurrent commit
+    lands between them. The row select carries ``count(*) OVER ()`` — the
+    window is computed over the FULL filtered set BEFORE LIMIT applies."""
+    db = _StubDB([_make_result()])
+
+    out = await execute({"run_id": str(uuid.uuid4()), "min_variance": "50.00"}, db=db, tenant_id=uuid.uuid4())
+
+    assert out["success"] is True
+    assert len(db.stmts) == 1  # the single snapshot — no separate count query
+    sql, params = _compiled(db.last_stmt)
+    assert "count(*) OVER ()" in sql
+    # The one statement carries ALL the filters + ordering + cap.
+    assert "reconciliation_results.tenant_id = " in sql
+    assert "reconciliation_results.run_id = " in sql
+    assert "reconciliation_results.bucket = " in sql
+    assert "reconciliation_results.status NOT IN " in sql
+    assert "abs(reconciliation_results.variance_amount) >= " in sql
+    assert Decimal("50.00") in params.values()
+    assert "ORDER BY abs(reconciliation_results.variance_amount) DESC" in sql
+    assert "LIMIT" in sql
+
+
+async def test_zero_rows_yield_zero_total_without_a_second_query():
+    """LIMIT-only (no OFFSET): zero rows returned PROVES the filtered set is
+    empty, so the true total is 0 — no fallback count query is needed (and
+    issuing one would reintroduce the two-snapshot disagreement window)."""
     db = _StubDB([])
 
-    await execute({"run_id": str(uuid.uuid4()), "min_variance": "50.00"}, db=db, tenant_id=uuid.uuid4())
+    out = await execute({"run_id": str(uuid.uuid4())}, db=db, tenant_id=uuid.uuid4())
 
-    assert len(db.stmts) == 2  # count first, then the capped row select
-    count_sql, count_params = _compiled(db.stmts[0])
-    select_sql, _ = _compiled(db.stmts[1])
-
-    assert "count(" in count_sql
-    assert "ORDER BY" in select_sql  # sanity: stmts[1] is the row select
-    # Same filters on the count: tenant + run + bucket + open-status + min_variance.
-    assert "reconciliation_results.tenant_id = " in count_sql
-    assert "reconciliation_results.run_id = " in count_sql
-    assert "reconciliation_results.bucket = " in count_sql
-    assert "needs_review" in count_params.values()
-    assert "reconciliation_results.status NOT IN " in count_sql
-    assert "abs(reconciliation_results.variance_amount) >= " in count_sql
-    assert Decimal("50.00") in count_params.values()
-    # The TRUE total is uncapped (no LIMIT clause; a params check would be
-    # ambiguous here — Decimal("50.00") == 50, the min_variance bind).
-    assert "LIMIT" not in count_sql
+    assert out["success"] is True
+    assert out["exception_count"] == 0
+    assert out["returned"] == 0
+    assert out["truncated"] is False
+    assert len(db.stmts) == 1
 
 
 def test_registry_description_mentions_row_cap_and_true_total():
@@ -311,6 +416,76 @@ def test_registry_description_mentions_row_cap_and_true_total():
     assert "absolute variance" in desc.lower()
     assert "exception_count" in desc
     assert "truncated" in desc
+
+
+# ---------------------------------------------------------------------------
+# Honest framing — bucket param documented + verbatim-numbers instruction
+# (R3-B #1 + #4: NOT an intercepted no-LLM-numbers surface today, so the
+# registry description and the knowledge profile carry the mitigation)
+# ---------------------------------------------------------------------------
+
+
+def test_registry_entry_documents_bucket_param_and_verbatim_numbers():
+    from app.mcp.registry import TOOL_REGISTRY
+
+    entry = TOOL_REGISTRY["recon.get_exceptions"]
+    desc = entry["description"]
+    # bucket="rules" is the discovery surface for suggested fuzzy matches
+    # awaiting approval (the close gate's "Approve Suggested Matches" population).
+    assert 'bucket="rules"' in desc
+    assert "suggested" in desc.lower()
+    assert "approv" in desc.lower()
+    # Verbatim-transcription instruction (raw numbers reach the LLM un-intercepted).
+    assert "verbatim" in desc.lower()
+    assert "never recompute" in desc.lower()
+    assert "exactly" in desc.lower()
+    # params_schema: optional bucket param listing the canonical bucket values.
+    bucket_schema = entry["params_schema"]["bucket"]
+    assert bucket_schema["required"] is False
+    for b in ALL_BUCKETS:
+        assert b in bucket_schema["description"]
+
+
+def test_module_docstring_states_interception_reality():
+    """The module must NOT claim to be a protected no-LLM-numbers surface:
+    recon tools have no tool_categories._EXACT entry, so there is no
+    data_table SSE interception — raw amounts flow to the LLM. The docstring
+    states reality + the verbatim-transcription mitigation + the logged
+    SSE-interception follow-up."""
+    import app.mcp.tools.recon_exceptions as mod
+
+    doc = mod.__doc__.lower()
+    assert "intercept" in doc
+    assert "not" in doc
+    assert "verbatim" in doc
+    assert "follow-up" in doc
+
+
+def test_reconciliation_profile_routes_rules_bucket_to_approve_workflow():
+    """The chat approve-workflow must be reachable again: the profile tells
+    the model to fetch bucket="rules" and approve via recon_approve_match —
+    and to transcribe numbers VERBATIM. Tool NAMES stay unchanged
+    (capability-sync invariant)."""
+    from app.services.chat.knowledge_profiles.loader import load_all_profiles
+
+    profile = next(p for p in load_all_profiles() if p.profile_id == "reconciliation")
+    # Collapse the YAML block-scalar line wrapping so phrase assertions are
+    # robust to where lines break.
+    frag = " ".join(profile.prompt_fragment.split())
+    assert 'bucket="rules"' in frag
+    assert "recon_approve_match" in frag
+    assert "verbatim" in frag.lower()
+    assert "exception_count" in frag
+    # Advisory framing retained: the score is never a verdict.
+    assert "advisory_match_score" in frag
+    assert "NEVER present it as a verdict" in frag
+    # Tool NAMES unchanged (test_prompt_tool_sync / capability-sync).
+    assert set(profile.trigger_tools) == {
+        "recon_run",
+        "recon_get_exceptions",
+        "recon_get_evidence",
+        "recon_approve_match",
+    }
 
 
 # ---------------------------------------------------------------------------

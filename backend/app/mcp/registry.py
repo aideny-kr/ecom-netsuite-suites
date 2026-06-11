@@ -246,20 +246,35 @@ TOOL_REGISTRY = {
     },
     "recon.get_exceptions": {
         "description": (
-            "Fetch open reconciliation exceptions for a run — the authoritative needs_review bucket "
-            "(unmatched + material-variance rows), excluding already-dispositioned (approved/locked) rows. "
+            "Fetch open reconciliation rows for a run from ONE authoritative four-bucket population. "
+            'Default bucket="needs_review" (unmatched + material-variance rows); to list suggested fuzzy '
+            "matches awaiting approval — the Approve-Suggested-Matches population the close gate counts — "
+            'call with bucket="rules". Already-dispositioned (approved/locked) rows are always excluded. '
             "Returns at most 50 rows, largest absolute variance first; exception_count is the TRUE total "
             "matching the filters and truncated tells you whether rows were cut off — never present a "
-            "truncated list as exhaustive. Each row carries the authoritative status + bucket; "
-            "advisory_match_score is advisory-only, never a verdict — disposition derives from status/bucket."
+            "truncated list as exhaustive. Transcribe every returned number VERBATIM into a table — never "
+            "recompute, round, sum, or paraphrase amounts in prose — and quote exception_count exactly. "
+            "Each row carries the authoritative status + bucket; advisory_match_score is advisory-only, "
+            "never a verdict — disposition derives from status/bucket."
         ),
         "execute": recon_exceptions.execute,
         "params_schema": {
             "run_id": {"type": "string", "required": True, "description": "Reconciliation run ID"},
+            "bucket": {
+                "type": "string",
+                "required": False,
+                "description": (
+                    "Bucket to list (default: needs_review). One of: matches, rules, "
+                    "auto_classifications, needs_review. Use 'rules' for suggested fuzzy "
+                    "matches awaiting approval."
+                ),
+            },
             "min_variance": {
                 "type": "string",
                 "required": False,
-                "description": "Optional minimum absolute variance amount to include (finite number, e.g. '50.00')",
+                "description": (
+                    "Optional minimum absolute variance amount to include (finite, non-negative number, e.g. '50.00')"
+                ),
             },
         },
     },

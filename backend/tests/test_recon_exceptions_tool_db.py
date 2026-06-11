@@ -1,13 +1,16 @@
-"""DB-backed selection tests for the chat MCP tool ``recon.get_exceptions`` (Task A).
+"""DB-backed selection tests for the chat MCP tool ``recon.get_exceptions`` (Task A + R3-B).
 
-Row-level proof of the bucket-keyed selection re-key against real Postgres via
-the conftest ``db`` fixture (each test rolled back): exceptions = the
-authoritative ``needs_review`` bucket, excluding already-dispositioned
-(approved/locked) rows; ``min_variance`` is a Decimal-safe abs filter;
-ordering is largest ABSOLUTE variance first; ``exception_count`` is the TRUE
-filtered total (with ``returned``/``truncated``); zero amounts serialize as
-"0.00", not null. The compiled-SQL/unit twin is
-``test_recon_exceptions_tool.py`` (the >50-row truncation case lives there).
+Row-level proof of the bucket-keyed selection against real Postgres via the
+conftest ``db`` fixture (each test rolled back): the validated optional
+``bucket`` param (default = the authoritative ``needs_review`` bucket;
+``bucket="rules"`` = suggested fuzzy matches awaiting approval), excluding
+already-dispositioned (approved/locked) rows; ``min_variance`` is a
+Decimal-safe non-negative abs filter; ordering is largest ABSOLUTE variance
+first; ``exception_count`` is the TRUE filtered total carried by the
+SINGLE-statement ``count(*) OVER ()`` window — computed over the full
+filtered set BEFORE LIMIT applies (the >50-row case here proves that on real
+Postgres); zero amounts serialize as "0.00", not null. The compiled-SQL/unit
+twin is ``test_recon_exceptions_tool.py``.
 
 Written rigorously following the existing recon DB-test patterns but NOT run in
 the implementer environment (no DB here); the PM runs them post-flight.
@@ -100,6 +103,96 @@ async def test_selection_is_bucket_keyed_excluding_dispositioned(db, tenant_a):
     assert str(approved_row.id) not in returned_ids
     assert str(locked_row.id) not in returned_ids
     assert out["exception_count"] == 2
+
+
+async def test_bucket_rules_returns_suggested_fuzzy_rows(db, tenant_a):
+    """R3-B #1: bucket="rules" lists the suggested fuzzy matches awaiting
+    approval — the close gate's "Approve Suggested Matches" population —
+    while needs_review rows stay out and dispositioned rules rows are
+    excluded."""
+    run = await create_test_recon_run(db, tenant_a.id)
+
+    suggested_fuzzy = await create_test_recon_result(
+        db,
+        tenant_a.id,
+        run.id,
+        status="suggested",
+        match_type="fuzzy",
+        variance_type="fx_rounding",
+        variance_amount=Decimal("0.30"),
+    )
+    assert suggested_fuzzy.bucket == BUCKET_RULES  # factory classify() sanity
+    # needs_review row: open, but NOT in the rules bucket.
+    unmatched = await create_test_recon_result(
+        db,
+        tenant_a.id,
+        run.id,
+        status="pending",
+        match_type="unmatched",
+        match_rule=None,
+        variance_type="missing",
+        variance_amount=Decimal("100.00"),
+    )
+    # Dispositioned rules row: approved fuzzy match is no longer awaiting approval.
+    approved_fuzzy = await create_test_recon_result(
+        db,
+        tenant_a.id,
+        run.id,
+        status="approved",
+        match_type="fuzzy",
+        variance_type="fx_rounding",
+        variance_amount=Decimal("0.10"),
+    )
+    assert approved_fuzzy.bucket == BUCKET_RULES
+    await db.flush()
+
+    out = await execute({"run_id": str(run.id), "bucket": "rules"}, db=db, tenant_id=tenant_a.id)
+
+    assert out["success"] is True
+    assert out["bucket"] == BUCKET_RULES
+    returned_ids = {e["result_id"] for e in out["exceptions"]}
+    assert returned_ids == {str(suggested_fuzzy.id)}
+    assert str(unmatched.id) not in returned_ids
+    assert str(approved_fuzzy.id) not in returned_ids
+    assert out["exception_count"] == 1
+
+
+async def test_window_count_is_true_total_before_limit_on_real_postgres(db, tenant_a):
+    """R3-B #3 row-level proof: ``count(*) OVER ()`` is computed over the FULL
+    filtered set BEFORE LIMIT applies, so a 55-row bucket reports
+    exception_count=55 while returning the 50 largest-|variance| rows — the
+    one semantics a stub cannot prove."""
+    run = await create_test_recon_run(db, tenant_a.id)
+
+    seeded = []
+    for i in range(1, 56):  # |variance| = 1..55, alternating sign
+        amount = Decimal(i) if i % 2 else Decimal(-i)
+        seeded.append(
+            await create_test_recon_result(
+                db,
+                tenant_a.id,
+                run.id,
+                status="pending",
+                match_type="unmatched",
+                variance_type="missing",
+                variance_amount=amount,
+            )
+        )
+    await db.flush()
+
+    out = await execute({"run_id": str(run.id)}, db=db, tenant_id=tenant_a.id)
+
+    assert out["success"] is True
+    assert out["exception_count"] == 55  # TRUE total, not the capped len()
+    assert out["returned"] == 50
+    assert out["truncated"] is True
+    # The 50 returned rows are the 50 largest |variance| (6..55); the 5
+    # smallest (1..5) fell below the cap.
+    returned_ids = {e["result_id"] for e in out["exceptions"]}
+    expected_ids = {str(r.id) for r in seeded[5:]}
+    assert returned_ids == expected_ids
+    # Largest |variance| first regardless of sign.
+    assert out["exceptions"][0]["result_id"] == str(seeded[-1].id)
 
 
 async def test_payload_reframe_and_orm_evidence_not_mutated(db, tenant_a):
