@@ -95,6 +95,25 @@ Bet 2 (publishable report) is P0 with Slice 1 merged (PR #128) and a due date. T
 
 ## Safeguards that apply at every rung
 
+### Cross-run carry-forward (HARD precondition for enforcement)
+
+Recon results are **per-run snapshots**: nightly scheduled runs over overlapping 7-day
+windows re-emit the same underlying line as a fresh non-terminal row in each new run, so a
+line a human approved in run N reappears "suggested" in run N+1. Two consequences (flagged
+by the T2 gate on PR #129, accepted for the report-only phase):
+
+1. **Dry-run reports over-count repeat candidates across nights.** Each report is honest
+   for its own run; aggregating across nights double-counts recurring lines. Acceptable
+   for report-only mileage; analysis must treat reports as per-run, not additive. (The
+   per-run `already_evaluated` guard prevents re-auditing the *same* run, not the same
+   *line* across runs.)
+2. **The ENFORCEMENT slice MUST dedupe candidates against lines already dispositioned in
+   prior runs** (or recon must carry disposition forward across runs) before any
+   system-actor approval. Without this, autonomy would re-approve lines a human already
+   reviewed — violating the "already acted on can never be acted on again" invariant at
+   the run boundary. This is a blocking design item for Rung 1 enforcement, alongside the
+   dollar caps.
+
 - Per-line audit with `actor_type="system"`, `actor_id=NULL`, batch correlation_id — same shape as bulk-approve, so the existing live-smoke assertions extend naturally.
 - Dry-run mode first: the job runs in "report-only" for N cycles per tenant, emitting what it *would* have approved/posted; operator compares against human decisions before enabling.
 - **Calibration-corpus hygiene:** system approvals must be excluded from (or labeled in) the R2 confidence-calibration corpus — otherwise the model trains on its own output. Persist `approved_by=NULL + actor_type=system` as the discriminator.
