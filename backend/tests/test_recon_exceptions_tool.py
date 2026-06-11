@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import uuid
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
@@ -648,3 +649,21 @@ def test_reconciliation_profile_states_gate_count_is_status_keyed():
     assert 'bucket="rules"' in frag
     # ...and an explicit never-equate instruction.
     assert "never claim" in frag.lower()
+
+
+# ---------------------------------------------------------------------------
+# Post-revert coherence — the profile is DORMANT for in-app chat (R4-B #3/#5/#9)
+# ---------------------------------------------------------------------------
+
+
+def test_reconciliation_yaml_carries_dormant_for_chat_header_note():
+    """Post-PR-#130-revert reality: recon_* is deliberately NOT in
+    ALLOWED_CHAT_TOOLS, so the workflow this profile instructs is unreachable
+    from in-app chat. The yaml must say so (header note), pointing at the MCP
+    server surface (governed dispatch) as the only current reachability."""
+    import app.services.chat.knowledge_profiles.loader as loader_mod
+
+    raw = (Path(loader_mod.__file__).parent / "reconciliation.yaml").read_text()
+    assert "DORMANT" in raw
+    assert "ALLOWED_CHAT_TOOLS" in raw
+    assert "governed dispatch" in raw

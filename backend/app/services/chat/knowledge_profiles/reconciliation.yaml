@@ -1,3 +1,8 @@
+# DORMANT for in-app chat (post-PR #130 revert): the recon_* tool family is deliberately NOT in
+# ALLOWED_CHAT_TOOLS (app/services/chat/nodes.py) — financial mutation without an enforced
+# confirmation card, and the chat path lacks the feature/permission gating the API routes enforce.
+# Until that gated chat-enablement follow-up lands, these tools are reachable via the MCP server
+# surface (governed dispatch) only, so the workflow below cannot trigger from in-app chat.
 profile_id: reconciliation
 display_name: "Reconciliation"
 trigger_tools:
