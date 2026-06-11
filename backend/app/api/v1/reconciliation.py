@@ -873,49 +873,58 @@ async def close_period(
             detail=f"No completed reconciliation runs found for {period}",
         )
 
-    locked_count = 0
-    left_for_review_count = 0
-    for run in runs:
-        # Lock a result iff it was approved (a human reviewed it — even a
-        # needs_review line that was single-approved), OR it is an auto_matched
-        # line that is NOT left for review. A confident match with a MATERIAL
-        # variance (status='auto_matched', bucket='needs_review') is left
-        # unlocked so the discrepancy is not silently buried on close (HITL).
-        # The left-for-review predicate is shared with the readiness endpoint
-        # via close_scope (single source of truth).
-        lock_predicate = or_(
-            ReconciliationResult.status == "approved",
-            and_(
-                ReconciliationResult.status == "auto_matched",
-                not_(and_(*left_for_review_conditions())),
-            ),
-        )
-        stmt = select(ReconciliationResult).where(
-            ReconciliationResult.run_id == run.id,
-            ReconciliationResult.tenant_id == user.tenant_id,
-            lock_predicate,
-        )
-        result = await db.execute(stmt)
-        period_results = result.scalars().all()
+    run_ids = [run.id for run in runs]
 
-        for r in period_results:
-            r.status = "locked"
-            locked_count += 1
+    # Lock a result iff it was approved (a human reviewed it — even a
+    # needs_review line that was single-approved), OR it is an auto_matched
+    # line that is NOT left for review. A confident match with a MATERIAL
+    # variance (status='auto_matched', bucket='needs_review') is left
+    # unlocked so the discrepancy is not silently buried on close (HITL).
+    # The left-for-review predicate is shared with the readiness endpoint
+    # via close_scope (single source of truth).
+    lock_predicate = or_(
+        ReconciliationResult.status == "approved",
+        and_(
+            ReconciliationResult.status == "auto_matched",
+            not_(and_(*left_for_review_conditions())),
+        ),
+    )
 
-        # Count the auto_matched + needs_review lines deliberately left unlocked,
-        # so the close response + audit trail make the skipped items visible.
-        # Same shared predicate the readiness endpoint counts by (close_scope).
-        skipped_stmt = (
+    # ONE set-based UPDATE over every in-scope run (R4-A): the previous
+    # per-row ORM flip loaded + flushed each result individually, which at
+    # production scale (62.5k-row runs) risks the Supabase 2-min statement
+    # timeout. rowcount = rows locked (pattern: approve_bucket's server-side
+    # UPDATE). synchronize_session=False is safe: this request reads no
+    # result ORM objects after the flip.
+    locked_count = (
+        await db.execute(
+            update(ReconciliationResult)
+            .where(
+                ReconciliationResult.run_id.in_(run_ids),
+                ReconciliationResult.tenant_id == user.tenant_id,
+                lock_predicate,
+            )
+            .values(status="locked")
+            .execution_options(synchronize_session=False)
+        )
+    ).rowcount
+
+    # Count the auto_matched + needs_review lines deliberately left unlocked,
+    # so the close response + audit trail make the skipped items visible.
+    # Same shared predicate the readiness endpoint counts by (close_scope).
+    left_for_review_count = (
+        await db.execute(
             select(func.count())
             .select_from(ReconciliationResult)
             .where(
-                ReconciliationResult.run_id == run.id,
+                ReconciliationResult.run_id.in_(run_ids),
                 ReconciliationResult.tenant_id == user.tenant_id,
                 *left_for_review_conditions(),
             )
         )
-        left_for_review_count += (await db.execute(skipped_stmt)).scalar_one()
+    ).scalar_one()
 
+    for run in runs:
         run.status = "closed"
 
     await audit_service.log_event(
