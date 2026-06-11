@@ -19,6 +19,11 @@ from app.services.reconciliation.four_bucket_classifier import BUCKET_MATCHES
 
 ENVELOPE_VERSION = "v1"
 
+# Audit payloads (and Job.result_summary, which InstrumentedTask copies the task
+# result into) must stay bounded — a Framework-scale run has tens of thousands of
+# qualifying rows. Counts/totals stay exact; ids are a capped sample.
+MAX_PAYLOAD_CANDIDATE_IDS = 200
+
 # Mirrors the bulk-approve guard (reconciliation.py approve_bucket): rows
 # already approved/rejected/locked can never be acted on again.
 _TERMINAL_STATUSES = ("approved", "rejected", "locked")
@@ -33,12 +38,13 @@ class EnvelopeReport:
     excluded: dict[str, int]
 
     def to_payload(self) -> dict:
-        """JSON-safe dict for audit payloads (Decimal → str)."""
+        """JSON-safe dict for audit payloads (Decimal → str, ids capped)."""
         return {
             "envelope_version": self.envelope_version,
             "candidate_count": self.candidate_count,
             "candidate_total_amount": str(self.candidate_total_amount),
-            "candidate_ids": list(self.candidate_ids),
+            "candidate_ids": list(self.candidate_ids[:MAX_PAYLOAD_CANDIDATE_IDS]),
+            "candidate_ids_truncated": len(self.candidate_ids) > MAX_PAYLOAD_CANDIDATE_IDS,
             "excluded": dict(self.excluded),
         }
 

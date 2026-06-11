@@ -80,3 +80,22 @@ def test_empty_input():
     assert report.candidate_count == 0
     assert report.candidate_ids == ()
     assert report.candidate_total_amount == Decimal("0")
+
+
+def test_payload_caps_candidate_ids_at_200():
+    """Framework-scale runs have tens of thousands of qualifying rows — the
+    audit payload (also copied into jobs.result_summary) must stay bounded.
+    Counts and totals remain exact; ids are a capped sample."""
+    rows = [_result() for _ in range(201)]
+    report = evaluate(rows)
+    payload = report.to_payload()
+    assert report.candidate_count == 201
+    assert payload["candidate_count"] == 201
+    assert len(payload["candidate_ids"]) == 200
+    assert payload["candidate_ids_truncated"] is True
+
+
+def test_payload_not_truncated_below_cap():
+    payload = evaluate([_result()]).to_payload()
+    assert payload["candidate_ids_truncated"] is False
+    assert len(payload["candidate_ids"]) == 1

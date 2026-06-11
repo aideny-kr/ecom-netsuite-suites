@@ -19,14 +19,22 @@ from app.workers.celery_app import celery_app
 logger = logging.getLogger(__name__)
 
 SCHEDULED_RUN_FLAG = "recon_scheduled_runs"
+MASTER_RECON_FLAG = "reconciliation"
 SCHEDULED_RUN_WINDOW_DAYS = 7
 
 
 async def collect_and_dispatch(db: AsyncSession) -> dict:
-    """Find flag-enabled tenants and enqueue one reconciliation run each."""
+    """Find flag-enabled tenants and enqueue one reconciliation run each.
+
+    Requires BOTH the scheduling flag AND the master ``reconciliation`` feature
+    gate — the user-facing trigger enforces require_feature("reconciliation"),
+    and the scheduled path must not bypass it.
+    """
     from app.services import feature_flag_service
 
-    tenant_ids = await feature_flag_service.list_enabled_tenants(db, SCHEDULED_RUN_FLAG)
+    scheduled = set(await feature_flag_service.list_enabled_tenants(db, SCHEDULED_RUN_FLAG))
+    master = set(await feature_flag_service.list_enabled_tenants(db, MASTER_RECON_FLAG))
+    tenant_ids = sorted(scheduled & master, key=str)
 
     today = date.today()
     date_from = (today - timedelta(days=SCHEDULED_RUN_WINDOW_DAYS)).isoformat()

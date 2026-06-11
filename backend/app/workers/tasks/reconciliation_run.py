@@ -51,9 +51,8 @@ async def _execute(
     return summary.model_dump(mode="json")
 
 
-@celery_app.task(base=InstrumentedTask, name="tasks.reconciliation_run", bind=True, max_retries=1)
+@celery_app.task(base=InstrumentedTask, name="tasks.reconciliation_run")
 def reconciliation_run_task(
-    self,
     tenant_id: str,
     date_from: str,
     date_to: str,
@@ -86,8 +85,7 @@ def reconciliation_run_task(
                 match_level=match_level,
             )
 
-    try:
-        return asyncio.run(_run())
-    except Exception as exc:
-        logger.error("reconciliation_run_task.failed", error=str(exc))
-        raise self.retry(exc=exc, countdown=30)
+    # No in-task retry: the runner commits a failed-run row before raising, so a
+    # retry would create a second ReconciliationRun. InstrumentedTask records the
+    # failure; the nightly Beat schedule is the retry.
+    return asyncio.run(_run())

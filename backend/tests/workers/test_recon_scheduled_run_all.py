@@ -36,6 +36,13 @@ class TestPreforkEventLoopSafety:
         src = _task_source("app/workers/tasks/reconciliation_run.py")
         assert "set_tenant_context" in src
 
+    def test_reconciliation_run_has_no_retry(self):
+        """ReconJobRunner commits a failed-run row before raising; self.retry
+        would re-execute and create a SECOND run row. Let the exception
+        propagate — InstrumentedTask records the failure, Beat retries nightly."""
+        src = _task_source("app/workers/tasks/reconciliation_run.py")
+        assert "self.retry" not in src
+
 
 def test_is_celery_task_on_recon_queue():
     from app.workers.tasks.recon_scheduled_run_all import recon_scheduled_run_all
@@ -49,6 +56,7 @@ async def test_dispatches_only_enabled_tenants(db, tenant_a, tenant_b, monkeypat
     from app.workers.tasks import recon_scheduled_run_all as mod
 
     await feature_flag_service.set_flag(db, tenant_a.id, "recon_scheduled_runs", True)
+    await feature_flag_service.set_flag(db, tenant_a.id, "reconciliation", True)
     await feature_flag_service.set_flag(db, tenant_b.id, "recon_scheduled_runs", False)
     await db.commit()
 
@@ -72,6 +80,28 @@ async def test_dispatches_only_enabled_tenants(db, tenant_a, tenant_b, monkeypat
     # Scheduled runs MUST use the product-default order-level engine (OrderReconJob),
     # which carries all the R1/R2 hardening — not the legacy payout-level runner.
     assert sent[0]["kwargs"]["match_level"] == "order"
+
+
+async def test_master_reconciliation_flag_required(db, tenant_a, monkeypatch):
+    """recon_scheduled_runs alone is not enough — the master `reconciliation`
+    feature gate (which the user-facing trigger enforces via require_feature)
+    must also be on, or the tenant is skipped."""
+    from app.workers.tasks import recon_scheduled_run_all as mod
+
+    await feature_flag_service.set_flag(db, tenant_a.id, "recon_scheduled_runs", True)
+    await feature_flag_service.set_flag(db, tenant_a.id, "reconciliation", False)
+    await db.commit()
+
+    sent: list[dict] = []
+    monkeypatch.setattr(
+        mod.celery_app,
+        "send_task",
+        lambda name, kwargs=None, queue=None, **_: sent.append({"name": name}),
+    )
+    stats = await mod.collect_and_dispatch(db)
+
+    assert stats == {"dispatched": 0, "failed": 0}
+    assert sent == []
 
 
 class _FakeSummary:

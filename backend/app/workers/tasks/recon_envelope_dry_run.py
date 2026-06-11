@@ -18,16 +18,20 @@ from app.workers.celery_app import celery_app
 logger = logging.getLogger(__name__)
 
 AUTONOMY_FLAG = "autonomous_recon"
+MASTER_RECON_FLAG = "reconciliation"
 DRY_RUN_ACTION = "recon.envelope.dry_run"
 
 
 async def dry_run_for_tenant(db: AsyncSession, tenant_id: str) -> dict:
     """Evaluate the envelope for one tenant. Report-only: one audit event, no mutations."""
+    from app.models.audit import AuditEvent
     from app.models.reconciliation import ReconciliationResult, ReconciliationRun
     from app.services import audit_service, feature_flag_service
     from app.services.reconciliation import autonomy_envelope
 
     tid = uuid.UUID(tenant_id)
+    if not await feature_flag_service.is_enabled(db, tid, MASTER_RECON_FLAG):
+        return {"tenant_id": tenant_id, "skipped": "reconciliation_disabled"}
     if not await feature_flag_service.is_enabled(db, tid, AUTONOMY_FLAG):
         return {"tenant_id": tenant_id, "skipped": "flag_disabled"}
 
@@ -44,6 +48,22 @@ async def dry_run_for_tenant(db: AsyncSession, tenant_id: str) -> dict:
     ).scalar_one_or_none()
     if run is None:
         return {"tenant_id": tenant_id, "skipped": "no_completed_run"}
+
+    # One dry-run audit per run, ever — a tenant with no new runs must not be
+    # re-audited nightly forever.
+    already = (
+        await db.execute(
+            select(AuditEvent.id)
+            .where(
+                AuditEvent.tenant_id == tid,
+                AuditEvent.action == DRY_RUN_ACTION,
+                AuditEvent.resource_id == str(run.id),
+            )
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if already is not None:
+        return {"tenant_id": tenant_id, "run_id": str(run.id), "skipped": "already_evaluated"}
 
     results = (
         (
@@ -100,7 +120,9 @@ def recon_envelope_dry_run_all():
 
     async def _tenants() -> list[str]:
         async with worker_async_session() as db:
-            return [str(t) for t in await feature_flag_service.list_enabled_tenants(db, AUTONOMY_FLAG)]
+            autonomy = set(await feature_flag_service.list_enabled_tenants(db, AUTONOMY_FLAG))
+            master = set(await feature_flag_service.list_enabled_tenants(db, MASTER_RECON_FLAG))
+            return [str(t) for t in sorted(autonomy & master, key=str)]
 
     stats = {"dispatched": 0, "failed": 0}
     for tenant_id in asyncio.run(_tenants()):

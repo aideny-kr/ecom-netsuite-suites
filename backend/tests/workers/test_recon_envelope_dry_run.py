@@ -29,6 +29,8 @@ async def _audit_rows(db, run_id):
 
 
 async def test_flag_off_skips_and_writes_nothing(db, tenant_a):
+    feature_flag_service.clear_cache()
+    await feature_flag_service.set_flag(db, tenant_a.id, "reconciliation", True)
     run = await create_test_recon_run(db, tenant_a.id, status="completed")
     await db.flush()
 
@@ -38,8 +40,43 @@ async def test_flag_off_skips_and_writes_nothing(db, tenant_a):
     assert await _audit_rows(db, run.id) == []
 
 
+async def test_master_reconciliation_flag_off_skips(db, tenant_a):
+    """autonomous_recon alone is not enough — the master `reconciliation`
+    feature gate must also be on (the user-facing recon surface enforces it
+    via require_feature; the scheduled path must not bypass it)."""
+    feature_flag_service.clear_cache()
+    await feature_flag_service.set_flag(db, tenant_a.id, "autonomous_recon", True)
+    run = await create_test_recon_run(db, tenant_a.id, status="completed")
+    await db.flush()
+
+    out = await dry_run_for_tenant(db, str(tenant_a.id))
+
+    assert out["skipped"] == "reconciliation_disabled"
+    assert await _audit_rows(db, run.id) == []
+
+
+async def test_already_evaluated_run_is_not_reaudited(db, tenant_a):
+    """A run gets ONE dry-run audit event ever — a tenant with no new runs must
+    not be re-audited nightly forever."""
+    feature_flag_service.clear_cache()
+    await feature_flag_service.set_flag(db, tenant_a.id, "reconciliation", True)
+    await feature_flag_service.set_flag(db, tenant_a.id, "autonomous_recon", True)
+    run = await create_test_recon_run(db, tenant_a.id, status="completed")
+    await create_test_recon_result(db, tenant_a.id, run.id, status="suggested")
+    await db.flush()
+
+    first = await dry_run_for_tenant(db, str(tenant_a.id))
+    second = await dry_run_for_tenant(db, str(tenant_a.id))
+
+    assert first["candidate_count"] == 1
+    assert second["skipped"] == "already_evaluated"
+    assert second["run_id"] == str(run.id)
+    assert len(await _audit_rows(db, run.id)) == 1
+
+
 async def test_writes_one_system_audit_and_mutates_nothing(db, tenant_a):
     feature_flag_service.clear_cache()
+    await feature_flag_service.set_flag(db, tenant_a.id, "reconciliation", True)
     await feature_flag_service.set_flag(db, tenant_a.id, "autonomous_recon", True)
     run = await create_test_recon_run(db, tenant_a.id, status="completed")
     candidate = await create_test_recon_result(db, tenant_a.id, run.id, status="suggested")
@@ -78,6 +115,7 @@ async def test_results_query_is_tenant_scoped(db, tenant_a, tenant_b):
     tenant's run) must never be counted as a candidate — the results query has
     to filter on tenant_id, not run_id alone."""
     feature_flag_service.clear_cache()
+    await feature_flag_service.set_flag(db, tenant_a.id, "reconciliation", True)
     await feature_flag_service.set_flag(db, tenant_a.id, "autonomous_recon", True)
     run = await create_test_recon_run(db, tenant_a.id, status="completed")
     # Foreign-tenant row pointing at tenant_a's run — would qualify if counted.
@@ -92,6 +130,7 @@ async def test_results_query_is_tenant_scoped(db, tenant_a, tenant_b):
 
 async def test_no_completed_run_skips(db, tenant_a):
     feature_flag_service.clear_cache()
+    await feature_flag_service.set_flag(db, tenant_a.id, "reconciliation", True)
     await feature_flag_service.set_flag(db, tenant_a.id, "autonomous_recon", True)
     await create_test_recon_run(db, tenant_a.id, status="running")
     await db.flush()
