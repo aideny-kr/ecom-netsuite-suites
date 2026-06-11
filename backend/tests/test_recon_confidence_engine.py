@@ -20,6 +20,7 @@ from app.services.reconciliation.confidence_engine import (
     W_TEMPORAL,
     WINDOW_DAYS,
     ConfidenceSignals,
+    advisory_confidence,
     amount_score,
     composite,
     compute_signals,
@@ -385,3 +386,73 @@ class TestSignalsToEvidence:
         serialized = json.dumps(ev)
         restored = json.loads(serialized)
         assert restored["temporal_score"] is None
+
+
+# ---------------------------------------------------------------------------
+# advisory_confidence — the SHARED write-path block consumed by BOTH recon
+# jobs (recon_job.py + order_recon_job.py). Returns what each job persists:
+# (confidence column value, evidence["confidence_signals"] dict or None).
+# ---------------------------------------------------------------------------
+
+
+class TestAdvisoryConfidence:
+    def test_matched_returns_composite_and_signals_evidence(self):
+        """Scored match → (composite, signals_to_evidence dict) — identical to
+        compute_signals + signals_to_evidence on the same inputs."""
+        conf, evidence = advisory_confidence(
+            Decimal("0.80"),  # engine ladder value — must NOT leak through when matched
+            matched=True,
+            charge_amount=Decimal("100.00"),
+            deposit_amount=Decimal("100.00"),
+            charge_date=date(2024, 1, 1),
+            deposit_date=date(2024, 1, 1),
+        )
+        expected = compute_signals(
+            Decimal("100.00"),
+            Decimal("100.00"),
+            date(2024, 1, 1),
+            date(2024, 1, 1),
+        )
+        assert conf == expected.composite == Decimal("1.0000")
+        assert evidence == signals_to_evidence(expected)
+
+    def test_matched_temporal_unavailable_amount_only(self):
+        """Matched with no deposit date → amount-only composite; evidence still captured."""
+        conf, evidence = advisory_confidence(
+            Decimal("1.0"),
+            matched=True,
+            charge_amount=Decimal("100.00"),
+            deposit_amount=Decimal("100.00"),
+            charge_date=date(2024, 1, 1),
+            deposit_date=None,
+        )
+        assert conf == Decimal("1.0000")
+        assert evidence is not None
+        assert evidence["temporal_score"] is None
+
+    def test_not_matched_passes_engine_value_through_no_signals(self):
+        """Unscored row (unmatched / payout duplicate-exception) → the engine
+        ladder value passes through UNCHANGED and no signals are captured."""
+        conf, evidence = advisory_confidence(
+            Decimal("0.60"),
+            matched=False,
+            charge_amount=Decimal("100.00"),
+            deposit_amount=Decimal("200.00"),
+            charge_date=date(2024, 1, 1),
+            deposit_date=date(2024, 1, 1),
+        )
+        assert conf == Decimal("0.60")
+        assert evidence is None
+
+    def test_not_matched_tolerates_missing_pair_inputs(self):
+        """Unmatched rows have no deposit — None amounts/dates must be accepted."""
+        conf, evidence = advisory_confidence(
+            Decimal("0"),
+            matched=False,
+            charge_amount=Decimal("50.00"),
+            deposit_amount=None,
+            charge_date=None,
+            deposit_date=None,
+        )
+        assert conf == Decimal("0")
+        assert evidence is None

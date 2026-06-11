@@ -18,7 +18,7 @@ from app.schemas.reconciliation import (
     PayoutRecord,
     ReconRunSummary,
 )
-from app.services.reconciliation.confidence_engine import compute_signals, signals_to_evidence
+from app.services.reconciliation.confidence_engine import advisory_confidence
 from app.services.reconciliation.four_bucket_classifier import (
     BUCKET_AUTO_CLASSIFICATIONS,
     BUCKET_MATCHES,
@@ -288,37 +288,26 @@ class ReconJobRunner:
             )
             buckets.append(bucket)
 
-            # R2 advisory confidence — intentionally decoupled from status/close-lock.
-            # ``status`` (and the auto-lock-on-close gate) continues to read the engine
-            # match-tier ladder value (deterministic 1.0/0.95, fuzzy ≤0.94,
-            # exception 0.60, unmatched 0) held in ``candidate.confidence`` — we never
-            # mutate it. The persisted ``confidence`` column instead carries the R2
-            # amount+temporal composite score, so recalibrating the scorer cannot
-            # shift auto-lock decisions. The composite is scored only for
-            # deterministic/fuzzy matches; unmatched candidates (no deposits) keep the
-            # engine value (0), and ``exception`` candidates keep theirs (0.60): an
-            # exception is duplicate detection — ≥2 deposits EACH claiming the SAME
-            # payout, not a split — so summing them would double-count and collapse
-            # the amount score toward 0. No signals are captured for them.
-            confidence_signals = None
-            persisted_confidence = candidate.confidence  # unmatched/exception keep engine value
-            if candidate.deposits and candidate.match_type in ("deterministic", "fuzzy"):
-                # Multi-deposit (fuzzy split payout): the match asserts the payout
-                # settles across ALL listed deposits, so the amount signal scores
-                # the SUMMED deposit amount against payout.net_amount; the temporal
-                # signal uses the LATEST deposit transaction_date (completion of the
-                # split), None-safe — a dateless deposit drops out of the max;
-                # all dates missing → temporal unavailable (amount-only fallback).
-                deposit_total = sum((d.amount for d in candidate.deposits), Decimal("0"))
-                deposit_dates = [d.transaction_date for d in candidate.deposits if d.transaction_date is not None]
-                signals = compute_signals(
-                    charge_amount=candidate.payout.net_amount,
-                    deposit_amount=deposit_total,
-                    charge_date=candidate.payout.arrival_date,
-                    deposit_date=max(deposit_dates) if deposit_dates else None,
-                )
-                persisted_confidence = signals.composite
-                confidence_signals = signals_to_evidence(signals)
+            # R2 advisory composite for the ``confidence`` column — the decoupling
+            # contract lives in confidence_engine.advisory_confidence (``status``
+            # above reads the engine ladder, never this value). Scored matches are
+            # deterministic/fuzzy only: ``exception`` rows are duplicates (≥2
+            # deposits EACH claiming the SAME payout — summing would double-count)
+            # and keep the ladder value (0.60), like unmatched (0). A fuzzy SPLIT
+            # payout IS a sum-assertion: the amount signal scores the SUMMED
+            # deposits against payout.net_amount; the temporal signal the LATEST
+            # deposit date (completion of the split), None-safe — a dateless
+            # deposit drops out of the max; all dates missing → amount-only.
+            is_scored = bool(candidate.deposits) and candidate.match_type in ("deterministic", "fuzzy")
+            deposit_dates = [d.transaction_date for d in candidate.deposits if d.transaction_date is not None]
+            persisted_confidence, confidence_signals = advisory_confidence(
+                candidate.confidence,
+                matched=is_scored,
+                charge_amount=candidate.payout.net_amount,
+                deposit_amount=sum((d.amount for d in candidate.deposits), Decimal("0")),
+                charge_date=candidate.payout.arrival_date,
+                deposit_date=max(deposit_dates) if deposit_dates else None,
+            )
 
             # Build evidence dict; attach R2 sub-scores when available.
             evidence = {
