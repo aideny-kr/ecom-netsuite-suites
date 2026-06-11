@@ -56,6 +56,10 @@ export function useApproveResult() {
       ),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["recon-results"] });
+      // The CloseChecklist keys on ["recon-bucket-summary", runId] — a
+      // single-row approve must refresh its counts too (prefix match
+      // invalidates every run's summary; mirrors useApproveBucket).
+      queryClient.invalidateQueries({ queryKey: ["recon-bucket-summary"] });
     },
   });
 }

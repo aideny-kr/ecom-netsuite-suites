@@ -14,17 +14,50 @@ vi.mock("@/lib/api-client", () => ({
   },
 }));
 
-import { useApproveBucket } from "@/hooks/use-reconciliation";
+import { useApproveBucket, useApproveResult } from "@/hooks/use-reconciliation";
 
 function wrapper({ children }: { children: React.ReactNode }) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return <QueryClientProvider client={qc}>{children}</QueryClientProvider>;
 }
 
+function makeWrapper(qc: QueryClient) {
+  return function qcWrapper({ children }: { children: React.ReactNode }) {
+    return <QueryClientProvider client={qc}>{children}</QueryClientProvider>;
+  };
+}
+
 beforeEach(() => {
   patch.mockReset();
   post.mockReset();
   get.mockReset();
+});
+
+describe("useApproveResult", () => {
+  it("invalidates recon-results AND recon-bucket-summary on success", async () => {
+    // Regression: the CloseChecklist keys on ["recon-bucket-summary", runId]
+    // (commit 5ae3b6d). A single-row approve from the results table must
+    // refresh those counts too, or the checklist stays stale until refocus.
+    patch.mockResolvedValue({ id: "res1", status: "approved" });
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const invalidateSpy = vi.spyOn(qc, "invalidateQueries");
+
+    const { result } = renderHook(() => useApproveResult(), {
+      wrapper: makeWrapper(qc),
+    });
+    result.current.mutate({ result_id: "res1", notes: "ok" });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    expect(patch).toHaveBeenCalledWith(
+      "/api/v1/reconciliation/results/res1/approve",
+      { result_id: "res1", notes: "ok" },
+    );
+    const invalidatedKeys = invalidateSpy.mock.calls.map(
+      ([filters]) => filters?.queryKey,
+    );
+    expect(invalidatedKeys).toContainEqual(["recon-results"]);
+    expect(invalidatedKeys).toContainEqual(["recon-bucket-summary"]);
+  });
 });
 
 describe("useApproveBucket", () => {
