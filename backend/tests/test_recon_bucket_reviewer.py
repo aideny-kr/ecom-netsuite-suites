@@ -237,19 +237,44 @@ async def test_bucket_summary_close_readiness_counts(client, db, finance_user):
 
 
 async def test_bucket_summary_close_readiness_tenant_scoped(client, db, finance_user, tenant_b):
-    """Another tenant's auto_matched+needs_review rows must not leak into the counts.
+    """Another tenant's rows must not leak into any close_readiness count.
 
     DB-backed — PM runs post-flight (see test_bucket_summary_close_readiness_counts).
     """
     user, headers = finance_user
     await _enable_recon(db, user.tenant_id)
     run = await create_test_recon_run(db, user.tenant_id)
-    # Foreign tenant seeds a left-for-review row on its OWN run.
+    # Foreign tenant seeds a left-for-review row on its OWN run — excluded by
+    # either the run_id or the tenant_id filter.
     foreign_run = await create_test_recon_run(db, tenant_b.id)
     await create_test_recon_result(
         db,
         tenant_b.id,
         foreign_run.id,
+        match_type="deterministic",
+        status="auto_matched",
+        variance_type="amount_mismatch",
+        variance_amount=Decimal("60.00"),
+        bucket="needs_review",
+    )
+    # Cross-tenant rows on tenant A's OWN run: only the tenant_id where-clause
+    # can exclude these (the run_id predicate matches), so they are what
+    # actually proves tenant scoping. ReconciliationResult.tenant_id is a plain
+    # column — seedable — and the conftest ``db`` session connects as table
+    # owner, so RLS does NOT backstop the in-query filter here (same pattern as
+    # test_recon_exceptions_tool_db; this regression class is live in this
+    # repo — commit 34b8f50 fixed exactly a missing tenant filter in the
+    # evidence-download query). One row per close_readiness count, since each
+    # count is its own query with its own tenant predicate.
+    # → open_exceptions (pending on a matched line)
+    await create_test_recon_result(db, tenant_b.id, run.id, match_type="fuzzy", status="pending")
+    # → suggested
+    await create_test_recon_result(db, tenant_b.id, run.id, match_type="deterministic", status="suggested")
+    # → left_for_review (auto_matched + stored needs_review)
+    await create_test_recon_result(
+        db,
+        tenant_b.id,
+        run.id,
         match_type="deterministic",
         status="auto_matched",
         variance_type="amount_mismatch",
