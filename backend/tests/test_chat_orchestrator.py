@@ -37,7 +37,7 @@ class TestAllowedChatToolsFromOld:
             "netsuite.get_metadata",
             "netsuite.refresh_metadata",
             "data.sample_table_read",
-            "report.export",
+            "report.compose",
             "rag.search",
             "web.search",
             "workspace.list_files",

@@ -125,8 +125,13 @@ class TestPricingStateStrippedFromSSE:
 
         captured: dict = {}
 
-        def _cache_cb(tool_name, event_type_str, event_data):
+        def _cache_cb(
+            tool_name, event_type_str, event_data, result_id=None, params=None, result_str=None, full_payload=None
+        ):
             # Cache callback must see the FULL payload (pricing_state included).
+            # The interceptor also forwards result_id/params/result_str/full_payload
+            # (used by the in-turn full-payload sidecar); this test only asserts
+            # pricing_state.
             captured["cache_event_data"] = dict(event_data)
 
         interceptor = _make_tool_interceptor(cache_callback=_cache_cb)
@@ -309,7 +314,11 @@ class TestSameTurnPricingStateRead:
 
         source = inspect.getsource(orchestrator)
         idx = source.index("_on_tool_intercepted")
-        body_window = source[idx : idx + 2500]
+        # Bound the window on the NEXT def (the next sibling closure) instead of a
+        # fixed char count — a longer doc-comment inside the callback must not push
+        # the cache-write marker out of a magic-number window (it did once).
+        next_def = source.find("def ", idx + 1)
+        body_window = source[idx : next_def if next_def != -1 else len(source)]
         # The callback must reference a sync cache write — either
         # _cache_result_sync or an immediate call to cache_result via
         # asyncio.create_task.

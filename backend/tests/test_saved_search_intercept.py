@@ -100,3 +100,23 @@ class TestSavedSearchIntercept:
         )
         _, event_data, _ = _intercept_tool_result("ns_runSavedSearch", result)
         assert event_data["truncated"] is True
+
+    def test_result_id_stamped_into_condensed_and_sse(self):
+        """Re-gate r2 (finding #2): the saved-search branch emits 'data_table' (a member
+        of _DATA_RESULT_EVENTS) so the interceptor consumes a result_id slot, but it
+        skipped _stamp_result_id — so the LLM never saw the id and could not reference
+        the saved-search result in report.compose. It must stamp like the suiteql path."""
+        result = json.dumps({"data": [{"x": 1, "y": 2}]})
+        event_type, event_data, condensed = _intercept_tool_result("ns_runSavedSearch", result, result_id="r1")
+        assert event_type == "data_table"
+        # The model reads the condensed JSON string — it must carry the handle.
+        assert json.loads(condensed)["result_id"] == "r1"
+        # The SSE event the frontend gets carries it too.
+        assert event_data["result_id"] == "r1"
+
+    def test_no_result_id_keeps_string_clean(self):
+        """Re-gate r2: the 2-arg form (no result_id) stays byte-compatible — no key added."""
+        result = json.dumps({"data": [{"x": 1}]})
+        _, event_data, condensed = _intercept_tool_result("ns_runSavedSearch", result)
+        assert "result_id" not in json.loads(condensed)
+        assert "result_id" not in event_data

@@ -3,6 +3,52 @@ from __future__ import annotations
 import json
 from typing import Any
 
+# Persistence-boundary row cap (re-gate r3, finding #6): the FULL pre-truncation
+# result is frozen into ChatMessage.tool_calls[].result_payload (JSONB) AND the
+# in-turn full-payload sidecar. A broad SuiteQL turn can return up to
+# NETSUITE_SUITEQL_MAX_ROWS (50k) rows, which would bake multi-MB JSONB into a
+# single Postgres row (risking the Supabase 2-min INSERT timeout) on an ORDINARY
+# turn. Nothing downstream consumes >2000 rows — report tables cap at 2000
+# (report_service._MAX_REPORT_TABLE_ROWS, which imports THIS constant so the two
+# can never drift) and charts at 100. We cap the STORED rows here while keeping
+# the TRUE row_count + truncated=True so render_report_html still shows the
+# "Showing first rows of N" note.
+MAX_STORED_PAYLOAD_ROWS = 2000
+
+
+def _cap_stored_rows(rows: list, row_count: int, truncated: bool) -> tuple[list, int, bool]:
+    """Cap a frozen payload's rows at ``MAX_STORED_PAYLOAD_ROWS``, preserving the
+    TRUE ``row_count`` and forcing ``truncated=True`` when a cap is applied."""
+    if len(rows) > MAX_STORED_PAYLOAD_ROWS:
+        return rows[:MAX_STORED_PAYLOAD_ROWS], row_count, True
+    return rows, row_count, truncated
+
+
+def is_stamped_data_tool(tool_name: str) -> bool:
+    """True for tools whose result the intercept STAMPS a result_id into (so the
+    LLM SEES the id): financial reports, data tables (SuiteQL/BigQuery/pivot/metric),
+    and saved searches.
+
+    This is condition (b) of the UNIFIED SLOT CRITERION (re-gate r3): a result gets
+    an r-id slot — and thus a persisted ``result_payload`` + a sidecar — IFF it is
+    extractable (condition a) AND the intercept stamps it (this predicate). It MUST
+    mirror ``orchestrator._is_financial_tool`` / ``_is_data_table_tool`` /
+    ``_is_saved_search_tool`` so a payload-bearing but hidden/'other'-category tool
+    (ns_listAllReports) is excluded from BOTH the in-turn numbering and the
+    persisted-fallback population — keeping the two id spaces dense + aligned.
+    Lives here (not orchestrator) so ``build_tool_call_log_entry`` can gate
+    persistence on the same predicate without a circular import.
+    """
+    from app.services.chat.tool_categories import categorize
+
+    category = categorize(tool_name)
+    if category in ("financial", "data_table", "bigquery"):
+        return True
+    lowered = tool_name.lower()
+    if "savedsearch" in lowered or "runsavedsearch" in lowered:
+        return True
+    return tool_name in ("netsuite.saved_search", "netsuite_saved_search")
+
 
 def parse_tool_result_value(result_value: Any) -> dict[str, Any]:
     """Best-effort parse of a tool result payload or summary string."""
@@ -119,6 +165,13 @@ def _extract_items_as_table(parsed: dict[str, Any] | list) -> tuple[list[str], l
 
     Handles:
       - {"items": [{...}, ...]} — ns_runCustomSuiteQL, ns_runSavedSearch
+      - {"data": [{...}, ...]} — external MCP ns_runCustomSuiteQL (chat-orchestration
+        rule #3: external MCP returns ``{"data": [{col: val}], ...}``, NOT columns/rows).
+        The interceptor's data_table branch (orchestrator._intercept_tool_result) treats
+        this top-level ``data`` key as a data result and stamps a result_id, so the
+        payload extractor MUST recognize the same shape — otherwise the SINGLE
+        id-assignment criterion (payload non-None) never fires for this (most common
+        NetSuite) data source and report.compose can't resolve the stamped id.
       - [{...}, ...] — ns_listAllReports, ns_listSavedSearches (top-level list)
       - {"reportData": {...}} — ns_runReport (hierarchical, handled separately)
     """
@@ -127,7 +180,10 @@ def _extract_items_as_table(parsed: dict[str, Any] | list) -> tuple[list[str], l
     if isinstance(parsed, list):
         items = parsed
     elif isinstance(parsed, dict):
+        # Prefer "items"; fall back to the external-MCP "data" key (same shape).
         items_val = parsed.get("items")
+        if not isinstance(items_val, list):
+            items_val = parsed.get("data")
         if isinstance(items_val, list):
             items = items_val
 
@@ -200,6 +256,50 @@ def extract_result_payload(tool_name: str, params: dict[str, Any], result_str: s
     if isinstance(parsed, dict) and _extract_error_message(parsed):
         return None
 
+    # --- Path 0: financial report (netsuite_financial_report / ext ns_runReport) ---
+    # The financial_report intercept branch STAMPS a result_id on EVERY successful
+    # result — including a zero-activity period (items=[]) — so the SAME unified
+    # criterion (extractable payload) MUST produce a non-None payload here, or the
+    # stamped id would dangle in report.compose (re-gate r3, finding #5). The
+    # financial shape carries ``items`` (list-of-dicts) + a ``summary`` dict, NOT a
+    # top-level ``rows`` key, so Path 1 misses it and Path 3 bails on empty items.
+    if (
+        isinstance(parsed, dict)
+        and parsed.get("success") is True
+        and isinstance(parsed.get("summary"), dict)
+        and "report_type" in parsed
+    ):
+        fin_cols = parsed.get("columns")
+        items = parsed.get("items")
+        if not isinstance(items, list):
+            items = []
+        # Build columns: prefer the declared columns; else union of item keys.
+        if isinstance(fin_cols, list) and fin_cols:
+            columns = list(fin_cols)
+        else:
+            seen: set[str] = set()
+            columns = []
+            for item in items:
+                if isinstance(item, dict):
+                    for key in item:
+                        if key not in seen:
+                            seen.add(key)
+                            columns.append(key)
+        rows = [[item.get(col) for col in columns] if isinstance(item, dict) else list(item) for item in items]
+        row_count = parsed.get("total_rows")
+        if not isinstance(row_count, int):
+            row_count = len(rows)
+        rows, row_count, truncated = _cap_stored_rows(rows, row_count, False)
+        return {
+            "kind": "table",
+            "columns": columns,
+            "rows": rows,
+            "row_count": row_count,
+            "truncated": truncated,
+            "query": f"{parsed.get('report_type', 'report')} ({parsed.get('period', '')})".strip(),
+            "limit": len(rows),
+        }
+
     # --- Path 1: Already has columns + rows (local netsuite_suiteql) ---
     if isinstance(parsed, dict):
         columns = parsed.get("columns")
@@ -215,12 +315,14 @@ def extract_result_payload(tool_name: str, params: dict[str, Any], result_str: s
             if not isinstance(limit, int):
                 limit_param = params.get("limit")
                 limit = limit_param if isinstance(limit_param, int) else len(rows)
+            truncated = bool(parsed.get("truncated") or parsed.get("rows_truncated"))
+            rows, row_count, truncated = _cap_stored_rows(rows, row_count, truncated)
             entry: dict[str, Any] = {
                 "kind": "table",
                 "columns": columns,
                 "rows": rows,
                 "row_count": row_count,
-                "truncated": bool(parsed.get("truncated") or parsed.get("rows_truncated")),
+                "truncated": truncated,
                 "query": query,
                 "limit": limit,
             }
@@ -229,6 +331,15 @@ def extract_result_payload(tool_name: str, params: dict[str, Any], result_str: s
             # metrics without mis-pinning NetSuite for a BigQuery metric.
             # Only set when the payload carries the flag (metric trust boundary).
             if parsed.get("suppress_llm_value") is True and "source_kind" in parsed:
+                entry["source_kind"] = parsed["source_kind"]
+            # Gate B (report provenance): a blessed-metric payload carries
+            # definition_version (and source_kind) at the top level — preserve them
+            # on the frozen entry so report.compose's metric_headline can attribute
+            # the number to its definition version (the §10 audit-citation source).
+            # Additive only: never remove keys; copy when present.
+            if isinstance(parsed.get("definition_version"), int):
+                entry["definition_version"] = parsed["definition_version"]
+            if "source_kind" not in entry and "source_kind" in parsed:
                 entry["source_kind"] = parsed["source_kind"]
             return entry
 
@@ -239,12 +350,14 @@ def extract_result_payload(tool_name: str, params: dict[str, Any], result_str: s
             result = _extract_report_data_as_table(report_data)
             if result:
                 columns, rows = result
+                row_count = len(rows)
+                rows, row_count, truncated = _cap_stored_rows(rows, row_count, False)
                 return {
                     "kind": "table",
                     "columns": columns,
                     "rows": rows,
-                    "row_count": len(rows),
-                    "truncated": False,
+                    "row_count": row_count,
+                    "truncated": truncated,
                     "query": f"ns_runReport(reportId={params.get('reportId', '?')})",
                     "limit": len(rows),
                 }
@@ -255,15 +368,144 @@ def extract_result_payload(tool_name: str, params: dict[str, Any], result_str: s
         columns, rows = result
         row_count = len(rows)
         query = params.get("sqlQuery", params.get("query", ""))
+        rows, row_count, truncated = _cap_stored_rows(rows, row_count, False)
         return {
             "kind": "table",
             "columns": columns,
             "rows": rows,
             "row_count": row_count,
-            "truncated": False,
+            "truncated": truncated,
             "query": query,
-            "limit": row_count,
+            "limit": len(rows),
         }
+
+
+def _tool_calls_of(message: Any) -> list[dict[str, Any]]:
+    """Normalize a persisted assistant message's tool_calls into a list of dicts.
+
+    Accepts either a plain dict (in-memory turn payload) or a ChatMessage ORM row.
+    Tolerates None / non-list shapes.
+    """
+    if isinstance(message, dict):
+        calls = message.get("tool_calls")
+    else:
+        calls = getattr(message, "tool_calls", None)
+    if not isinstance(calls, list):
+        return []
+    return [c for c in calls if isinstance(c, dict)]
+
+
+def _message_role(message: Any) -> str | None:
+    """Return the message's role (or None when absent). Tolerates dicts and ORM rows."""
+    if isinstance(message, dict):
+        return message.get("role")
+    return getattr(message, "role", None)
+
+
+def count_payload_bearing_tool_calls(messages: list[Any]) -> int:
+    """Count persisted tool_calls carrying a ``result_payload`` dict across the
+    given (already-loaded) conversation messages.
+
+    This is the CONVERSATION-ORDINAL counter seed (findings #5/#9/#13): the in-turn
+    interceptor numbers THIS turn's data results r(K+1), r(K+2), ... where K is this
+    count over the prior conversation history — so the in-turn ids and the persisted
+    FALLBACK ids (``resolve_payload_from_messages``, which numbers the SAME population
+    1..K) live in ONE id space, never colliding/overwriting across turns.
+
+    Uses the EXACT same criterion as the fallback resolver — a tool_call whose
+    ``result_payload`` is a dict — so the two numbering schemes can never drift.
+
+    ROLE FILTER (re-gate r3, finding #4): the cross-turn fallback feeder
+    ``load_conversation_tool_messages`` queries ``role == 'assistant'`` ONLY, so the
+    seed-K count MUST exclude any non-assistant message carrying a payload-bearing
+    tool_call — otherwise the in-turn r(K+1) and the fallback's 1..K numbering would
+    drift by one. Messages with NO role (legacy in-memory turn dicts / ORM rows
+    missing the attr) are still counted: only an EXPLICIT non-assistant role excludes
+    a message, so today's assistant-only write-path is byte-for-byte unaffected.
+    """
+    count = 0
+    for message in messages:
+        role = _message_role(message)
+        if role is not None and role != "assistant":
+            continue
+        for call in _tool_calls_of(message):
+            if isinstance(call.get("result_payload"), dict):
+                count += 1
+    return count
+
+
+def resolve_payload_from_messages(messages: list[Any], result_id: str) -> dict[str, Any]:
+    """Resolve a result_id to its FULL, uncapped frozen payload — the CROSS-TURN /
+    REGENERATION FALLBACK path (§16.1 fix).
+
+    NOTE (gate cluster A): the PRIMARY same-turn resolution is the eager in-turn
+    full-payload sidecar (``result_cache.get_full_payload``), which ``report.compose``
+    consults FIRST. This persisted-message walk is only reached on a sidecar miss —
+    i.e. a LATER turn (or a report regeneration) composing over results that were
+    persisted by an EARLIER turn's assistant ChatMessage. The current turn's
+    assistant message is not persisted until AFTER the agent loop, so this path
+    cannot (and is not meant to) see THIS turn's just-computed results.
+
+    Walks the assistant messages' ``tool_calls[].result_payload`` (built by
+    ``extract_result_payload`` — uncapped, NOT the 50-row Redis result cache) and
+    returns the payload whose ``result_id`` matches, or whose positional id
+    (``r1``, ``r2``, ...) matches when the call carries no explicit ``result_id``.
+
+    Raises ``KeyError`` when no tool call with a usable ``result_payload`` matches.
+    """
+    positional = 0
+    fallback: dict[str, Any] | None = None
+    fallback_key: str | None = None
+    for message in messages:
+        for call in _tool_calls_of(message):
+            payload = call.get("result_payload")
+            if not isinstance(payload, dict):
+                continue
+            positional += 1
+            synthetic_id = f"r{positional}"
+            explicit_id = call.get("result_id")
+            if explicit_id == result_id:
+                return payload
+            if synthetic_id == result_id:
+                # Remember positional match but prefer an explicit-id match if one
+                # appears later in the turn (explicit ids win over positional).
+                if fallback is None:
+                    fallback, fallback_key = payload, synthetic_id
+    if fallback is not None and fallback_key == result_id:
+        return fallback
+    raise KeyError(result_id)
+
+
+async def load_conversation_tool_messages(db: Any, conversation_id: Any, tenant_id: Any) -> list[Any]:
+    """Load the assistant messages (with their full ``tool_calls``) for a session,
+    newest turns last.
+
+    ``tenant_id`` is REQUIRED (no default) — this is a defense-in-depth tenant filter.
+    The chat tool-execution path does not call ``set_tenant_context``, so RLS may not be
+    enforced on this session; we therefore add an explicit
+    ``ChatMessage.tenant_id == tenant_id`` predicate rather than relying on RLS alone.
+    Keeping the parameter required ensures a future caller cannot silently forget it.
+    """
+    from sqlalchemy import select
+
+    from app.models.chat import ChatMessage
+
+    if conversation_id is None:
+        return []
+    rows = (
+        (
+            await db.execute(
+                select(ChatMessage)
+                .where(ChatMessage.session_id == conversation_id)
+                .where(ChatMessage.tenant_id == tenant_id)
+                .where(ChatMessage.role == "assistant")
+                .order_by(ChatMessage.created_at, ChatMessage.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return list(rows)
 
 
 def build_tool_call_log_entry(
@@ -285,9 +527,18 @@ def build_tool_call_log_entry(
     if agent_name:
         entry["agent"] = agent_name
 
-    result_payload = extract_result_payload(tool_name, params, result_str)
-    if result_payload is not None:
-        entry["result_payload"] = result_payload
+    # UNIFIED SLOT CRITERION (re-gate r3, findings #1/#2): persist result_payload
+    # IFF the result is extractable (condition a) AND it is a STAMPED data tool
+    # (condition b — is_stamped_data_tool). This is the SAME criterion the in-turn
+    # interceptor uses to grant an r-id slot + write the sidecar, so the persisted
+    # population (the fallback resolver's denominator) matches the stamped/sidecar
+    # population EXACTLY. A payload-bearing but hidden tool (ns_listAllReports →
+    # 'other' category, no stamp) is excluded from ALL THREE consumers, so the
+    # dense visible-id sequence and the persisted-fallback numbering never drift.
+    if is_stamped_data_tool(tool_name):
+        result_payload = extract_result_payload(tool_name, params, result_str)
+        if result_payload is not None:
+            entry["result_payload"] = result_payload
 
     return entry
 

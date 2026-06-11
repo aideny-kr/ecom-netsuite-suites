@@ -220,3 +220,80 @@ async def get_result_by_message(conversation_id: str, message_id: str) -> Cached
         return CachedResult.from_json(raw)
     except Exception:
         return None
+
+
+# ---------------------------------------------------------------------------
+# Full-payload sidecar — eager, in-turn, UNCAPPED.
+#
+# The 50-row-capped CachedResult above is for follow-up charting/pivoting. The
+# sidecar instead stores the FULL, uncapped ``result_payload`` (the same dict the
+# persisted ``ChatMessage.tool_calls[].result_payload`` carries) so that a
+# SAME-TURN ``report.compose`` can resolve the results just computed THIS turn —
+# the orchestrator only persists the current turn's assistant message AFTER the
+# agent loop, so the persisted-message resolver cannot see in-turn results.
+#
+# Keyed per (conversation_id, result_id). Conceptually the value lives at
+# ``result_full:{conversation_id}:{result_id}``; we store it in a single
+# conversation-scoped Redis HASH (field == result_id) so the per-conversation
+# LIST can be capped + FIFO-evicted with the same primitives the result cache
+# uses (hset/hget/hgetall/hdel/expire). Same TTL as the result cache.
+# ---------------------------------------------------------------------------
+
+MAX_FULL_PAYLOADS_PER_CONVERSATION = MAX_RESULTS_PER_CONVERSATION
+
+
+def _full_payload_key(conversation_id: str) -> str:
+    return f"result_full:{conversation_id}"
+
+
+def cache_full_payload(conversation_id: str, result_id: str, payload: dict[str, Any]) -> None:
+    """Write the FULL, uncapped result payload for ``result_id`` THIS turn.
+
+    Synchronous (Redis client is sync internally) so the orchestrator's intercept
+    callback can write it the instant a data tool is intercepted. No-op when Redis
+    is unavailable (dev fallback). Caps the per-conversation list at
+    ``MAX_FULL_PAYLOADS_PER_CONVERSATION``, evicting the oldest result_id first.
+    """
+    r = _get_redis()
+    if not r:
+        return
+
+    key = _full_payload_key(conversation_id)
+    envelope = json.dumps({"payload": payload, "seq": time.time()}, default=str)
+    r.hset(key, result_id, envelope)
+    r.expire(key, CACHE_TTL_SECONDS)
+
+    all_fields = r.hgetall(key)
+    if len(all_fields) <= MAX_FULL_PAYLOADS_PER_CONVERSATION:
+        return
+
+    # Evict oldest-by-seq first (FIFO). Undecodable entries sort oldest.
+    def _seq_of(raw: str) -> float:
+        try:
+            return float(json.loads(raw).get("seq", 0.0))
+        except Exception:
+            return 0.0
+
+    ordered = sorted(all_fields.items(), key=lambda kv: _seq_of(kv[1]))
+    over = len(all_fields) - MAX_FULL_PAYLOADS_PER_CONVERSATION
+    for rid, _raw in ordered[:over]:
+        r.hdel(key, rid)
+
+
+def get_full_payload(conversation_id: str, result_id: str) -> dict[str, Any] | None:
+    """Read the FULL uncapped payload for ``result_id`` written THIS turn (or a
+    recent turn within TTL). Returns None on miss / no Redis."""
+    r = _get_redis()
+    if not r:
+        return None
+
+    key = _full_payload_key(conversation_id)
+    raw = r.hget(key, result_id)
+    if not raw:
+        return None
+    try:
+        envelope = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        return None
+    payload = envelope.get("payload")
+    return payload if isinstance(payload, dict) else None

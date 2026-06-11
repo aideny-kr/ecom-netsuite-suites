@@ -733,8 +733,33 @@ def _compute_source_pin_update(tool_calls_log: list[dict]) -> str | None:
     return "leave_pin"
 
 
+def _stamp_result_id(condensed: str, sse_event_data: dict, result_id: str | None) -> str:
+    """Stamp the turn-scoped ``result_id`` (r1, r2, ...) into BOTH the condensed
+    LLM string and the SSE event data for a data-producing intercept.
+
+    This is the RESULT-ID CONTRACT: ``report.compose`` resolves each data
+    section's ``result_id`` against the in-turn full-payload sidecar, but the LLM
+    can only reference the id it was shown. The condensed JSON is the exact string
+    the model reads, so the id must live inside it (a JSON field — no tool names,
+    safe for test_prompt_tool_sync). Returns the (possibly rewritten) condensed
+    string; mutates ``sse_event_data`` in place. No-op when ``result_id`` is None
+    (the 2-arg call form stays byte-identical — e.g. the report-lifecycle e2e).
+    """
+    if not result_id:
+        return condensed
+    sse_event_data["result_id"] = result_id
+    try:
+        obj = json.loads(condensed)
+    except (json.JSONDecodeError, TypeError):
+        return condensed
+    if isinstance(obj, dict):
+        obj["result_id"] = result_id
+        return json.dumps(obj, default=str)
+    return condensed
+
+
 def _intercept_tool_result(
-    tool_name: str, result_str: str, context_need: str = ContextNeed.DATA
+    tool_name: str, result_str: str, context_need: str = ContextNeed.DATA, result_id: str | None = None
 ) -> tuple[str | None, dict | None, str]:
     """Intercept data-producing tool results for frontend DataFrame rendering.
 
@@ -745,7 +770,41 @@ def _intercept_tool_result(
 
     When context_need == FULL (investigation queries), the LLM receives full
     row data so it can reason over system notes, field changes, etc.
+
+    ``result_id`` (when supplied) is the turn-scoped id (r1, r2, ...) stamped into
+    the condensed LLM string + SSE event for the data_table / financial_report /
+    metric paths so the model can reference the result in ``report.compose`` and
+    the id keys the in-turn full-payload sidecar (gate cluster A).
     """
+
+    # --- Report card path ---
+    if tool_name in ("report_compose", "report.compose"):
+        try:
+            parsed = json.loads(result_str)
+        except (json.JSONDecodeError, TypeError):
+            return None, None, result_str
+        if not isinstance(parsed, dict) or parsed.get("error") is True or not parsed.get("report_id"):
+            return None, None, result_str
+        rid = parsed["report_id"]
+        sse_event_data = {
+            "report_id": rid,
+            "title": parsed.get("title", "Report"),
+            "url": f"/reports/{rid}",
+            "section_count": parsed.get("section_count"),
+        }
+        condensed = json.dumps(
+            {
+                "success": True,
+                "report_id": rid,
+                "title": parsed.get("title", ""),
+                "note": (
+                    "The report card is shown to the user as a clickable card. "
+                    "Confirm what the report covers in one short line — do NOT restate figures or the URL."
+                ),
+            },
+            default=str,
+        )
+        return "report_ready", sse_event_data, condensed
 
     # --- Financial report path ---
     if _is_financial_tool(tool_name):
@@ -779,6 +838,7 @@ def _intercept_tool_result(
             },
             default=str,
         )
+        condensed = _stamp_result_id(condensed, sse_event_data, result_id)
         return "financial_report", sse_event_data, condensed
 
     # --- SuiteQL query path ---
@@ -841,6 +901,7 @@ def _intercept_tool_result(
             if "source_kind" in parsed:
                 sse_event_data["source_kind"] = parsed["source_kind"]
             condensed = condense_metric_for_llm(parsed)
+            condensed = _stamp_result_id(condensed, sse_event_data, result_id)
             return "data_table", sse_event_data, condensed
 
         # Investigation queries (FULL context): send all rows so LLM can reason
@@ -877,6 +938,7 @@ def _intercept_tool_result(
                 },
                 default=str,
             )
+        condensed = _stamp_result_id(condensed, sse_event_data, result_id)
         return "data_table", sse_event_data, condensed
 
     # --- Saved search path ---
@@ -935,6 +997,7 @@ def _intercept_tool_result(
             },
             default=str,
         )
+        condensed = _stamp_result_id(condensed, sse_event_data, result_id)
         return "data_table", sse_event_data, condensed
 
     # --- Task output path (pricing conversion + revise) ---
@@ -1054,7 +1117,17 @@ def _intercept_tool_result(
     return None, None, result_str
 
 
-_NON_DATA_EVENTS = frozenset({"sheets_link", "docs_link"})
+_NON_DATA_EVENTS = frozenset({"sheets_link", "docs_link", "report_ready"})
+
+# The SSE event types for which _intercept_tool_result STAMPS the result_id into
+# the LLM-facing condensed string (so the model actually SEES the id). The unified
+# slot criterion (re-gate r3) grants an r-id slot IFF the result is extractable AND
+# the intercept emits one of THESE stamped data events. A payload-bearing but
+# hidden/'other'-category tool (e.g. ns_listAllReports → no stamp, no SSE) gets NO
+# slot, NO sidecar, NO persisted result_payload — keeping the visible id sequence
+# dense and aligned with the persisted fallback. (The saved-search path also
+# returns "data_table", so it is covered.)
+_STAMPED_DATA_EVENTS = frozenset({"data_table", "financial_report"})
 
 
 def _build_intercept_cache_entry(
@@ -1145,22 +1218,105 @@ def _intercept_with_cache(
     return event_type, _strip_cache_only_fields_from_sse(event_data), new_result_str
 
 
-def _make_tool_interceptor(context_need: str = ContextNeed.DATA, cache_callback=None):
+def _make_tool_interceptor(context_need: str = ContextNeed.DATA, cache_callback=None, start_count: int = 0):
     """Create a tool interceptor closure that captures context_need.
 
     The unified-agent path passes a ``cache_callback`` so it can also
     accumulate ``_pending_caches`` for the assistant-message alias write
     after the agent loop. The shared cache write lives in
     ``_build_intercept_cache_entry`` so the legacy path stays in sync.
-    """
 
-    def interceptor(tool_name: str, result_str: str) -> tuple[tuple[str, dict] | None, str]:
+    CONVERSATION-ORDINAL ids (re-gate r2 — findings #5/#9/#13): the closure
+    maintains a counter seeded at ``start_count`` (= K, the number of
+    payload-bearing data results ALREADY produced earlier in THIS conversation,
+    counted from the in-memory history via ``count_payload_bearing_tool_calls``).
+    This turn's first data result is therefore r(K+1), the second r(K+2), and so on
+    — ids are stable across the WHOLE conversation in production order, NOT reset
+    per turn. This is the ONE id space everywhere:
+      * The id is stamped into the condensed LLM string + SSE event by
+        ``_intercept_tool_result`` (the surface the model reads the id from).
+      * The full-payload sidecar is keyed by the SAME id — and because the sidecar
+        is conversation-scoped (no turn component), conversation-ordinal ids never
+        overwrite an earlier turn's entry (a per-turn r1 in turn B would have
+        clobbered turn A's r1 — the bug this fix eliminates).
+      * The cross-turn FALLBACK resolver (``resolve_payload_from_messages``) numbers
+        the SAME persisted population 1..K positionally, so r2 means turn 1's second
+        result whether resolved via the sidecar OR the fallback.
+
+    SINGLE id-assignment invariant (re-gate r2 — findings #3/#6/#11/#15):
+    "does this result get an r<n> id" is decided in EXACTLY ONE place — whether
+    ``extract_result_payload`` returns a non-None payload — and the payload is
+    computed ONCE here and threaded to the sidecar write. This is the SAME
+    predicate the cross-turn FALLBACK resolver uses to number persisted calls, so
+    the in-turn ids and the persisted-fallback ids share one denominator and can
+    never drift. (The old design assigned ids off the peeked SSE event type
+    {data_table, financial_report} — a population that diverges from the payload
+    extractor, leaving the LLM an id that resolves to nothing, or shifting the
+    numbering.) Computing the payload once also kills the previous double
+    ``_intercept_tool_result`` parse (finding #15).
+
+    ``full_result_str`` (when supplied by the agent loop) is the ORIGINAL,
+    pre-truncation result string; the sidecar payload is extracted from it so the
+    frozen report payload is FULL/uncapped even when the LLM-facing ``result_str``
+    is row-capped (finding #10). When absent it falls back to ``result_str``.
+    """
+    counter = {"n": start_count}
+
+    def interceptor(
+        tool_name: str,
+        result_str: str,
+        params: dict | None = None,
+        full_result_str: str | None = None,
+    ) -> tuple[tuple[str, dict] | None, str]:
+        # UNIFIED SLOT CRITERION (re-gate r3, findings #1/#2/#5): a result earns a
+        # turn-scoped id IFF (a) extract_result_payload returns a non-None payload
+        # AND (b) the intercept STAMPS the id into the LLM-facing string (event_type
+        # is a stamped data event — data_table / financial_report — so the model
+        # will SEE the id). Both conditions are required: a payload-bearing but
+        # hidden/'other'-category tool (ns_listAllReports — a top-level list the
+        # extractor reads but the intercept never stamps/SSE's) gets NO slot, NO
+        # sidecar, NO persisted result_payload. This keeps the visible id sequence
+        # dense and aligned with the persisted-fallback numbering (which counts
+        # result_payload-bearing calls — and persistence is gated on the SAME
+        # criterion via is_stamped_data_tool, used by build_tool_call_log_entry).
+        #
+        # Extract ONCE, from the FULL (pre-truncation) string so the sidecar is
+        # uncapped (finding #10). Peek the event_type by running the intercept with
+        # result_id=None FIRST (no stamp), then — only if BOTH conditions hold —
+        # advance the counter and re-stamp the id into the condensed string + SSE.
+        payload_source = full_result_str if full_result_str is not None else result_str
+        full_payload = extract_result_payload(tool_name, params or {}, payload_source)
+
         event_type, event_data, new_result_str = _intercept_tool_result(
-            tool_name, result_str, context_need=context_need
+            tool_name, result_str, context_need=context_need, result_id=None
         )
+
+        result_id: str | None = None
+        if full_payload is not None and event_type in _STAMPED_DATA_EVENTS:
+            counter["n"] += 1
+            result_id = f"r{counter['n']}"
+            # Re-stamp the decided id into the (already-condensed) LLM string + SSE
+            # event data (idempotent — _stamp_result_id mutates event_data in place
+            # and rewrites the condensed JSON's result_id field).
+            new_result_str = _stamp_result_id(new_result_str, event_data, result_id)
+
+        # Thread the id + precomputed payload to the callback whenever EITHER a
+        # result_id was assigned (writes the sidecar for a stamped data result) OR
+        # an SSE event fired (pricing/result-cache wiring). A stamped data event
+        # ALWAYS carries a slot now (both conditions hold together), so the sidecar
+        # and the result-cache stay consistent.
+        if cache_callback and (result_id is not None or event_type is not None):
+            cache_callback(
+                tool_name,
+                event_type,
+                event_data,
+                result_id,
+                params or {},
+                payload_source,
+                full_payload,
+            )
+
         if event_type is not None and event_data is not None:
-            if cache_callback:
-                cache_callback(tool_name, event_type, event_data)
             return (event_type, _strip_cache_only_fields_from_sse(event_data)), new_result_str
         return None, new_result_str
 
@@ -1193,7 +1349,13 @@ from app.services.chat.onboarding_tools import (
     execute_onboarding_tool,
 )
 from app.services.chat.prompts import INPUT_SANITIZATION_PREFIX, ONBOARDING_SYSTEM_PROMPT
-from app.services.chat.tool_call_results import build_tool_call_log_entry, tool_call_had_error, tool_call_row_count
+from app.services.chat.tool_call_results import (
+    build_tool_call_log_entry,
+    count_payload_bearing_tool_calls,
+    extract_result_payload,
+    tool_call_had_error,
+    tool_call_row_count,
+)
 from app.services.chat.tools import build_all_tool_definitions, execute_tool_call
 from app.services.prompt_template_service import get_active_template
 
@@ -2515,6 +2677,7 @@ async def run_chat_turn(
                     from app.services.chat.result_cache import (
                         CachedResult,
                         _cache_result_sync,
+                        cache_full_payload,
                         get_latest_result,
                     )
 
@@ -2598,7 +2761,39 @@ async def run_chat_turn(
                     # reference_previous_result(message_id=...) lookups.
                     _pending_caches: list[CachedResult] = []
 
-                    def _on_tool_intercepted(tool_name: str, event_type_str: str, event_data: dict):
+                    def _on_tool_intercepted(
+                        tool_name: str,
+                        event_type_str: str | None,
+                        event_data: dict | None,
+                        result_id: str | None = None,
+                        params: dict | None = None,
+                        result_str: str | None = None,
+                        full_payload: dict | None = None,
+                    ):
+                        # FULL-PAYLOAD SIDECAR (gate cluster A): eagerly write the
+                        # pre-truncation result payload (capped only at
+                        # MAX_STORED_PAYLOAD_ROWS=2000, r3 finding #6 — NOT the
+                        # 500-row LLM cap nor the 50-row Redis preview cap) under
+                        # the conversation-ordinal result_id so a SAME-TURN
+                        # report.compose can resolve the results just computed
+                        # THIS turn (the current turn's assistant ChatMessage
+                        # isn't persisted until AFTER this loop). The payload is
+                        # computed ONCE by the interceptor (the SINGLE
+                        # id-assignment criterion) and threaded here — the
+                        # sidecar never re-extracts (finding #15).
+                        if result_id and full_payload is not None:
+                            try:
+                                cache_full_payload(str(session.id), result_id, full_payload)
+                            except Exception:
+                                # The sidecar is best-effort; never break the turn.
+                                pass
+
+                        # The result-cache / pricing-state entry only exists for an
+                        # SSE-producing event (a payload-bearing tool with no event —
+                        # e.g. ns_listAllReports — gets a sidecar write above but no
+                        # result-cache row).
+                        if event_type_str is None or event_data is None:
+                            return
                         cr = _build_intercept_cache_entry(
                             tool_name=tool_name,
                             event_type_str=event_type_str,
@@ -2657,7 +2852,18 @@ async def run_chat_turn(
                         plan_mode_clarify_only=_plan_mode_active,
                         plan_mode_resume_source=plan_mode_resume_source,
                         tool_result_interceptor=_make_tool_interceptor(
-                            context_need, cache_callback=_on_tool_intercepted
+                            context_need,
+                            cache_callback=_on_tool_intercepted,
+                            # CONVERSATION-ORDINAL ids (findings #5/#9/#13): seed the
+                            # in-turn counter from the count of payload-bearing results
+                            # ALREADY in this conversation's persisted history, so THIS
+                            # turn's first data result is r(K+1) — one id space across
+                            # turns, aligned with the persisted FALLBACK resolver (which
+                            # numbers the same population 1..K). session.messages is the
+                            # in-memory ORM history ordered by (created_at, id) — the
+                            # SAME order load_conversation_tool_messages uses — so no new
+                            # DB query is needed.
+                            start_count=count_payload_bearing_tool_calls(session.messages),
                         ),
                         session_id=str(session.id),
                         run_id=run_id,

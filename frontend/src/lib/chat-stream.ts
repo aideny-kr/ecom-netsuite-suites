@@ -80,6 +80,13 @@ export interface DocsLinkData {
   shared_with?: string | null;
 }
 
+export interface ReportReadyData {
+  report_id: string;
+  title: string;
+  url: string;
+  section_count?: number;
+}
+
 export type StreamBlock =
   | { type: "text"; content: string; id: string }
   | { type: "tool"; tool: StreamingToolCall; id: string }
@@ -89,6 +96,7 @@ export type StreamBlock =
   | { type: "task_output"; data: TaskOutputData; id: string }
   | { type: "sheets_link"; data: SheetsLinkData; id: string }
   | { type: "docs_link"; data: DocsLinkData; id: string }
+  | { type: "report_ready"; data: ReportReadyData; id: string }
   | { type: "thinking"; content: string; isActive: boolean; id: string }
   | { type: "write_confirmation"; data: WriteConfirmationData; id: string };
 
@@ -102,6 +110,7 @@ export type ChatStreamEvent =
   | { type: "task_output"; data: TaskOutputData }
   | { type: "sheets_link"; data: SheetsLinkData }
   | { type: "docs_link"; data: DocsLinkData }
+  | { type: "report_ready"; data: ReportReadyData }
   | { type: "drive_sources"; sources: Record<string, string> }
   | { type: "chart"; data: ChartData }
   | { type: "clarification_required"; data: ClarificationData }
@@ -126,6 +135,7 @@ type StreamHandlers = {
   onTaskOutput?: (data: TaskOutputData) => void;
   onSheetsLink?: (data: SheetsLinkData) => void;
   onDocsLink?: (data: DocsLinkData) => void;
+  onReportReady?: (data: ReportReadyData) => void;
   onDriveSources?: (sources: Record<string, string>) => void;
   // Codex round 10 P2 Bug 2: Plan Mode mid-stream clarification gate.
   // Without this, the card only appears via the terminal `message` event's
@@ -246,6 +256,8 @@ export async function consumeChatStream(
           handlers.onSheetsLink?.(event.data);
         } else if (event.type === "docs_link") {
           handlers.onDocsLink?.(event.data);
+        } else if (event.type === "report_ready") {
+          handlers.onReportReady?.(event.data);
         } else if (event.type === "drive_sources") {
           handlers.onDriveSources?.(event.sources);
         } else if (event.type === "clarification_required") {
@@ -375,6 +387,15 @@ export function normalizeStreamEvent(data: Record<string, unknown>): ChatStreamE
         shared_with: typeof d.shared_with === "string" ? d.shared_with : null,
       },
     };
+  }
+  if (type === "report_ready" && data.data && typeof data.data === "object") {
+    const d = data.data as Record<string, unknown>;
+    return { type, data: {
+      report_id: String(d.report_id || ""),
+      title: String(d.title || "Report"),
+      url: String(d.url || ""),
+      section_count: typeof d.section_count === "number" ? d.section_count : undefined,
+    } };
   }
   if (type === "drive_sources" && data.sources && typeof data.sources === "object") {
     return { type, sources: data.sources as Record<string, string> };

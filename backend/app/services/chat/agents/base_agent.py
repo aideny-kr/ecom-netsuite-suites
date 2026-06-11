@@ -8,10 +8,12 @@ orchestrator, but scoped to a specific task and tool subset.
 from __future__ import annotations
 
 import abc
+import inspect
 import json
 import logging
 import re
 import time
+import weakref
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable
 from xml.sax.saxutils import escape as _xml_escape
@@ -280,6 +282,78 @@ def _truncate_tool_result(result_str: str) -> str:
 
 # Backward-compatible alias
 _truncate_error_payload = _truncate_tool_result
+
+
+# Cache the decided arity per interceptor OBJECT (a WeakKeyDictionary, NOT id()-keyed:
+# short-lived test closures can be GC'd and their id() reused, which would return a
+# stale arity for a different function at the same address). Falls back to no caching
+# for un-weakref-able callables.
+_INTERCEPTOR_ARITY_CACHE: "weakref.WeakKeyDictionary[Any, int]" = weakref.WeakKeyDictionary()
+
+
+def _interceptor_arity(interceptor) -> int:
+    """Decide how many positional args an interceptor accepts: 4, 3, or 2.
+
+    Computed ONCE per interceptor (cached by object) via ``inspect.signature`` — NOT
+    by catching TypeErrors at the call boundary (re-gate r3, finding #3). The old
+    try/except-TypeError ladder conflated an arity mismatch with a REAL TypeError
+    raised INSIDE the interceptor body, silently re-running side-effecting,
+    numbering-sensitive code (double-incrementing the result-id counter, re-writing
+    the sidecar). Deciding arity by signature lets genuine TypeErrors propagate.
+    """
+    try:
+        cached = _INTERCEPTOR_ARITY_CACHE.get(interceptor)
+    except TypeError:
+        cached = None  # un-hashable / un-weakref-able callable
+    if cached is not None:
+        return cached
+
+    arity = 4  # production shape: (tool_name, result_str, params, full_result_str)
+    try:
+        sig = inspect.signature(interceptor)
+        # If any parameter is VAR_POSITIONAL (*args), the callable accepts all 4.
+        if any(p.kind is inspect.Parameter.VAR_POSITIONAL for p in sig.parameters.values()):
+            arity = 4
+        else:
+            positional = [
+                p
+                for p in sig.parameters.values()
+                if p.kind in (inspect.Parameter.POSITIONAL_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+            ]
+            # Clamp into the supported {2, 3, 4} window: anything >=4 is the full shape;
+            # 3 takes params; 2 (or fewer) is the minimal legacy shape.
+            arity = min(max(len(positional), 2), 4)
+    except (TypeError, ValueError):
+        # Un-introspectable callable (builtin/C) — assume the full production shape.
+        arity = 4
+
+    try:
+        _INTERCEPTOR_ARITY_CACHE[interceptor] = arity
+    except TypeError:
+        pass  # un-weakref-able callable — skip caching, recompute next call
+    return arity
+
+
+def _call_tool_result_interceptor(interceptor, tool_name, llm_result_str, params, full_result_str):
+    """Invoke a tool-result interceptor, dispatching on its declared arity.
+
+    The production interceptor (``orchestrator._make_tool_interceptor``) accepts
+    ``(tool_name, result_str, params, full_result_str)`` — the LLM-facing string
+    AND the ORIGINAL pre-truncation string (so the in-turn full-payload sidecar is
+    uncapped, finding #10). Older/test interceptors may only take
+    ``(tool_name, result_str)`` or ``(tool_name, result_str, params)``.
+
+    Arity is decided ONCE via ``inspect.signature`` (cached) so a REAL TypeError
+    raised INSIDE the interceptor body PROPAGATES instead of being swallowed and
+    silently retried with fewer args (re-gate r3, finding #3).
+    """
+    arity = _interceptor_arity(interceptor)
+    if arity >= 4:
+        return interceptor(tool_name, llm_result_str, params, full_result_str)
+    if arity == 3:
+        return interceptor(tool_name, llm_result_str, params)
+    return interceptor(tool_name, llm_result_str)
+
 
 _CONFIDENCE_RE = re.compile(r"<confidence>(\d)</confidence>")
 _LOW_CONFIDENCE_DISCLAIMER = (
@@ -801,7 +875,7 @@ class BaseSpecialistAgent(abc.ABC):
         model: str,
         conversation_history: list[dict] | None = None,
         tool_choice: dict | str | None = None,
-        tool_result_interceptor: Callable[[str, str], tuple[tuple[str, dict] | None, str]] | None = None,
+        tool_result_interceptor: Callable[..., tuple[tuple[str, dict] | None, str]] | None = None,
         session_id: str | None = None,
         run_id: str | None = None,
     ):
@@ -1242,6 +1316,14 @@ class BaseSpecialistAgent(abc.ABC):
                             except (json.JSONDecodeError, TypeError):
                                 pass
 
+                    # Capture the ORIGINAL, untruncated result BEFORE row-capping.
+                    # The LLM-facing string is truncated below (token budget), but the
+                    # in-turn full-payload sidecar AND the persisted
+                    # ChatMessage.tool_calls[].result_payload — both of which
+                    # report.compose resolves to render the FULL, "uncapped frozen
+                    # payload" — must see all rows. Without this, a >500-row result
+                    # silently composes a report missing rows 501..N (finding #10).
+                    full_result_str = result_str
                     result_str = _truncate_tool_result(result_str)
 
                     raw_result_strings.append(result_str)
@@ -1270,7 +1352,14 @@ class BaseSpecialistAgent(abc.ABC):
                     # (e.g. financial reports → SSE event + condensed LLM context)
                     llm_result_str = result_str
                     if tool_result_interceptor is not None:
-                        intercept_data, llm_result_str = tool_result_interceptor(block.name, result_str)
+                        # Pass the tool params AND the original (pre-truncation) result.
+                        # The orchestrator's interceptor extracts the in-turn full-payload
+                        # sidecar from the FULL string (extract_result_payload) so a
+                        # same-turn report.compose resolves all rows uncapped, while the
+                        # LLM-facing string (result_str) stays row-capped.
+                        intercept_data, llm_result_str = _call_tool_result_interceptor(
+                            tool_result_interceptor, block.name, result_str, block.input, full_result_str
+                        )
                         if intercept_data is not None:
                             yield "tool_intercept", intercept_data
 
@@ -1293,7 +1382,10 @@ class BaseSpecialistAgent(abc.ABC):
                             agent_name=self.agent_name,
                             tool_name=block.name,
                             params=block.input,
-                            result_str=result_str,
+                            # Use the ORIGINAL pre-truncation result so the persisted
+                            # result_payload (the CROSS-TURN report.compose fallback)
+                            # is FULL/uncapped — matching the in-turn sidecar (#10).
+                            result_str=full_result_str,
                             duration_ms=elapsed_ms,
                         )
                     )
