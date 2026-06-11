@@ -4,11 +4,16 @@ import { useState } from "react";
 import { CheckCircle2, Circle, Lock, AlertTriangle } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useClosePeriod } from "@/hooks/use-reconciliation";
-import type { ReconRun, ReconResult } from "@/lib/types";
+import type { ReconBucketSummary, ReconRun } from "@/lib/types";
 
 interface CloseChecklistProps {
   run: ReconRun | null;
-  results: ReconResult[];
+  /** Server-computed bucket summary (useReconBucketSummary). The auto-checks
+   *  key on summary.close_readiness — live SQL counts over the FULL run (the
+   *  old results-prop scan only ever saw one page at production scale).
+   *  undefined while loading — every auto-check FAILS CLOSED until it arrives
+   *  (manual toggles still work: HITL checklist semantics unchanged). */
+  summary: ReconBucketSummary | undefined;
   period: string;
 }
 
@@ -16,9 +21,12 @@ interface ChecklistStep {
   id: string;
   label: string;
   description: string;
-  check: (run: ReconRun | null, results: ReconResult[]) => boolean;
+  check: (run: ReconRun | null, summary: ReconBucketSummary | undefined) => boolean;
 }
 
+// Auto-checks compare against `=== 0` so a missing summary/close_readiness
+// (loading, or deploy-skew payload from an older backend) yields `undefined
+// === 0` → false → incomplete. Fail closed — never report "ready" on absent data.
 const STEPS: ChecklistStep[] = [
   {
     id: "run_recon",
@@ -30,38 +38,27 @@ const STEPS: ChecklistStep[] = [
     id: "review_exceptions",
     label: "Review Exceptions",
     description: "Investigate and resolve all exceptions",
-    check: (_, results) => {
-      const pending = results.filter((r) => r.status === "pending" && r.match_type !== "unmatched");
-      return pending.length === 0;
-    },
+    check: (_, summary) => summary?.close_readiness?.open_exceptions === 0,
   },
   {
     id: "approve_matches",
     label: "Approve Suggested Matches",
     description: "Review and approve all suggested matches",
-    check: (_, results) => {
-      const suggested = results.filter((r) => r.status === "suggested");
-      return suggested.length === 0;
-    },
+    check: (_, summary) => summary?.close_readiness?.suggested === 0,
   },
   {
     id: "review_material_variances",
     label: "Review Material Variances",
     description:
       "Approve or investigate confident matches with material variance — close will NOT lock these",
-    // Mirrors the backend close_period() left-for-review predicate
-    // (api/v1/reconciliation.py lock_predicate/skipped_stmt): rows with
-    // status="auto_matched" AND bucket="needs_review" are deliberately left
-    // unlocked on close (HITL — a material variance is never silently buried),
-    // so the checklist must not report "ready" while any remain. Keys on the
-    // authoritative status + bucket only — never the advisory confidence.
-    // Strict equality is safe for rows missing bucket (undefined !== "needs_review").
-    check: (_, results) => {
-      const leftForReview = results.filter(
-        (r) => r.status === "auto_matched" && r.bucket === "needs_review",
-      );
-      return leftForReview.length === 0;
-    },
+    // left_for_review mirrors the backend close_period() left-for-review
+    // predicate (api/v1/reconciliation.py lock_predicate/skipped_stmt): rows
+    // with status="auto_matched" AND bucket="needs_review" are deliberately
+    // left unlocked on close (HITL — a material variance is never silently
+    // buried), so the checklist must not report "ready" while any remain.
+    // Counted server-side over the FULL run, keyed on the authoritative
+    // status + bucket only — never the advisory confidence.
+    check: (_, summary) => summary?.close_readiness?.left_for_review === 0,
   },
   {
     id: "export_evidence",
@@ -77,7 +74,7 @@ const STEPS: ChecklistStep[] = [
   },
 ];
 
-export function CloseChecklist({ run, results, period }: CloseChecklistProps) {
+export function CloseChecklist({ run, summary, period }: CloseChecklistProps) {
   const closePeriod = useClosePeriod();
   const [manualChecks, setManualChecks] = useState<Set<string>>(new Set());
 
@@ -92,7 +89,7 @@ export function CloseChecklist({ run, results, period }: CloseChecklistProps) {
 
   const isComplete = (step: ChecklistStep) => {
     if (manualChecks.has(step.id)) return true;
-    return step.check(run, results);
+    return step.check(run, summary);
   };
 
   // Every step except the lock itself gates the lock (was a positional
@@ -119,6 +116,8 @@ export function CloseChecklist({ run, results, period }: CloseChecklistProps) {
           return (
             <div
               key={step.id}
+              data-testid={step.id}
+              data-complete={complete}
               className={cn(
                 "flex items-center gap-3 rounded-lg p-3 transition-colors",
                 complete ? "bg-green-50" : "bg-muted/30",

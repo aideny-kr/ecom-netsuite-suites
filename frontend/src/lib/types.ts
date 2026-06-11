@@ -927,12 +927,29 @@ export interface ReconBucketCount {
   total_variance: number;
 }
 
+/** Live close-readiness counts over the FULL run, computed server-side
+ *  (the FE only fetches a page of results, so it must never count itself).
+ *  Each count keys on the authoritative status/bucket — never the advisory
+ *  confidence composite. */
+export interface ReconCloseReadiness {
+  /** status='pending' AND match_type != 'unmatched' (open exceptions on matched lines). */
+  open_exceptions: number;
+  /** status='suggested' (matches awaiting approval). */
+  suggested: number;
+  /** status='auto_matched' AND bucket='needs_review' — mirrors close_period()'s
+   *  left-for-review predicate; close deliberately leaves these UNLOCKED. */
+  left_for_review: number;
+}
+
 export interface ReconBucketSummary {
   run_id: string;
   matches: ReconBucketCount;
   rules: ReconBucketCount;
   auto_classifications: ReconBucketCount;
   needs_review: ReconBucketCount;
+  /** Optional only to tolerate deploy-skew (an older backend payload without
+   *  it) — consumers must FAIL CLOSED (treat checks as incomplete) when missing. */
+  close_readiness?: ReconCloseReadiness;
 }
 
 export type ReconBucketId =
