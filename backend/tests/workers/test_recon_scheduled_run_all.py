@@ -3,8 +3,33 @@ tasks.reconciliation_run per recon_scheduled_runs-enabled tenant.
 Read+match only — no approvals, no NetSuite writes."""
 
 from datetime import date, timedelta
+from pathlib import Path
 
 from app.services import feature_flag_service
+
+_BACKEND_ROOT = Path(__file__).resolve().parent.parent.parent
+
+
+def _task_source(path: str) -> str:
+    with open(_BACKEND_ROOT / path) as f:
+        return f.read()
+
+
+class TestPreforkEventLoopSafety:
+    """Prefork workers must NOT use the module-level async_session_factory —
+    it is bound to the parent process's event loop (see database.py's
+    worker_async_session docstring). Source-inspection, same style as
+    tests/test_worker_rls.py."""
+
+    def test_reconciliation_run_uses_worker_async_session(self):
+        src = _task_source("app/workers/tasks/reconciliation_run.py")
+        assert "worker_async_session" in src
+        assert "async_session_factory" not in src
+
+    def test_recon_scheduled_run_all_uses_worker_async_session(self):
+        src = _task_source("app/workers/tasks/recon_scheduled_run_all.py")
+        assert "worker_async_session" in src
+        assert "async_session_factory" not in src
 
 
 def test_is_celery_task_on_recon_queue():

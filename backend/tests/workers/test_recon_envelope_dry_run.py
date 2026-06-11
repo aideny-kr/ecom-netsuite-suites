@@ -3,6 +3,7 @@ COMPLETED run and writes exactly ONE system-actor audit event. It must NEVER
 mutate result rows (report-only) and must skip when the flag is off."""
 
 from decimal import Decimal
+from pathlib import Path
 
 from sqlalchemy import select
 
@@ -80,6 +81,18 @@ async def test_no_completed_run_skips(db, tenant_a):
 
     out = await dry_run_for_tenant(db, str(tenant_a.id))
     assert out["skipped"] == "no_completed_run"
+
+
+def test_uses_worker_async_session_not_module_factory():
+    """Both task wrappers must use worker_async_session (disposable per-task
+    engine) — never the module-level async_session_factory, which is bound to
+    the parent process's event loop (prefork-unsafe). Source-inspection, same
+    style as tests/test_worker_rls.py."""
+    backend_root = Path(__file__).resolve().parent.parent.parent
+    with open(backend_root / "app/workers/tasks/recon_envelope_dry_run.py") as f:
+        src = f.read()
+    assert "worker_async_session" in src
+    assert "async_session_factory" not in src
 
 
 def test_tasks_registered_on_recon_queue():

@@ -70,10 +70,10 @@ def reconciliation_run_task(
     """
     import asyncio
 
-    from app.core.database import async_session_factory
+    from app.core.database import worker_async_session
 
     async def _run() -> dict:
-        async with async_session_factory() as db:
+        async with worker_async_session() as db:
             return await _execute(
                 db,
                 tenant_id=tenant_id,
@@ -86,10 +86,7 @@ def reconciliation_run_task(
             )
 
     try:
-        loop = asyncio.new_event_loop()
-        result = loop.run_until_complete(_run())
-        loop.close()
-        return result
+        return asyncio.run(_run())
     except Exception as exc:
         logger.error("reconciliation_run_task.failed", error=str(exc))
         raise self.retry(exc=exc, countdown=30)

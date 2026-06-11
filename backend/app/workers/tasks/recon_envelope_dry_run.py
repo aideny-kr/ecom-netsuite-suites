@@ -73,10 +73,10 @@ def recon_envelope_dry_run(tenant_id: str, **kwargs):
     """Per-tenant dry run. Opens its own RLS-scoped session."""
     import asyncio
 
-    from app.core.database import async_session_factory, set_tenant_context
+    from app.core.database import set_tenant_context, worker_async_session
 
     async def _run() -> dict:
-        async with async_session_factory() as db:
+        async with worker_async_session() as db:
             await set_tenant_context(db, tenant_id)
             return await dry_run_for_tenant(db, tenant_id)
 
@@ -88,11 +88,11 @@ def recon_envelope_dry_run_all():
     """Beat fan-out: one dry-run task per autonomous_recon-enabled tenant."""
     import asyncio
 
-    from app.core.database import async_session_factory
+    from app.core.database import worker_async_session
     from app.services import feature_flag_service
 
     async def _tenants() -> list[str]:
-        async with async_session_factory() as db:
+        async with worker_async_session() as db:
             return [str(t) for t in await feature_flag_service.list_enabled_tenants(db, AUTONOMY_FLAG)]
 
     stats = {"dispatched": 0, "failed": 0}

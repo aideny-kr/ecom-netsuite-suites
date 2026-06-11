@@ -58,10 +58,10 @@ def recon_scheduled_run_all():
     """Beat entry point. Opens its own session; logic lives in collect_and_dispatch()."""
     import asyncio
 
-    from app.core.database import async_session_factory
+    from app.core.database import worker_async_session
 
     async def _run() -> dict:
-        async with async_session_factory() as db:
+        async with worker_async_session() as db:
             return await collect_and_dispatch(db)
 
     return asyncio.run(_run())
