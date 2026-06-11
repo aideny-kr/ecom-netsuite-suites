@@ -45,6 +45,25 @@ const STEPS: ChecklistStep[] = [
     },
   },
   {
+    id: "review_material_variances",
+    label: "Review Material Variances",
+    description:
+      "Approve or investigate confident matches with material variance — close will NOT lock these",
+    // Mirrors the backend close_period() left-for-review predicate
+    // (api/v1/reconciliation.py lock_predicate/skipped_stmt): rows with
+    // status="auto_matched" AND bucket="needs_review" are deliberately left
+    // unlocked on close (HITL — a material variance is never silently buried),
+    // so the checklist must not report "ready" while any remain. Keys on the
+    // authoritative status + bucket only — never the advisory confidence.
+    // Strict equality is safe for rows missing bucket (undefined !== "needs_review").
+    check: (_, results) => {
+      const leftForReview = results.filter(
+        (r) => r.status === "auto_matched" && r.bucket === "needs_review",
+      );
+      return leftForReview.length === 0;
+    },
+  },
+  {
     id: "export_evidence",
     label: "Export Evidence Pack",
     description: "Download evidence for audit trail",
@@ -76,7 +95,9 @@ export function CloseChecklist({ run, results, period }: CloseChecklistProps) {
     return step.check(run, results);
   };
 
-  const allPrereqsMet = STEPS.slice(0, 4).every((s) => isComplete(s));
+  // Every step except the lock itself gates the lock (was a positional
+  // slice(0, 4); keyed by id so inserting steps cannot silently un-gate).
+  const allPrereqsMet = STEPS.filter((s) => s.id !== "lock_period").every((s) => isComplete(s));
 
   const handleLockPeriod = () => {
     if (!period) return;
