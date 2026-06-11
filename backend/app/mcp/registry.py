@@ -245,10 +245,20 @@ TOOL_REGISTRY = {
         },
     },
     "recon.get_exceptions": {
-        "description": "Fetch unmatched and low-confidence reconciliation results (exceptions) for investigation",
+        "description": (
+            "Fetch open reconciliation exceptions for a run — the authoritative needs_review bucket "
+            "(unmatched + material-variance rows), excluding already-dispositioned (approved/locked) rows. "
+            "Each row carries the authoritative status + bucket; advisory_match_score is advisory-only, "
+            "never a verdict — disposition derives from status/bucket."
+        ),
         "execute": recon_exceptions.execute,
         "params_schema": {
             "run_id": {"type": "string", "required": True, "description": "Reconciliation run ID"},
+            "min_variance": {
+                "type": "string",
+                "required": False,
+                "description": "Optional minimum absolute variance amount to include (e.g. '50.00')",
+            },
         },
     },
     "recon.get_evidence": {

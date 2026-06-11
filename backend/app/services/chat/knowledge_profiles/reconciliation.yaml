@@ -12,7 +12,9 @@ prompt_fragment: |
 
   Workflow:
   1. recon_run: Run matching for a date range. Report: matched count, exception count, match rate, variance.
-  2. recon_get_exceptions: Fetch unmatched/low-confidence results. Present as table.
+  2. recon_get_exceptions: Fetch the needs-review bucket (unmatched + material-variance rows,
+     excluding approved/locked). Present as table. The advisory_match_score field is informational
+     only — NEVER present it as a verdict; a row's disposition derives from its status/bucket.
   3. Investigate: Use netsuite_suiteql to query related transactions near the date/amount.
   4. recon_approve_match: Approve a match (requires user confirmation via HITL).
   5. recon_get_evidence: Export evidence pack for a run.
