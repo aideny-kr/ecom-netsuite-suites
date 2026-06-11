@@ -22,6 +22,9 @@ DEFAULT_FLAGS: dict[str, bool] = {
     "analytics_export": True,
     "drive_rag": False,
     "plan_mode_enabled": False,
+    # Bet 3 Rung 1 (decision doc 2026-06-10): both default OFF for every tenant.
+    "recon_scheduled_runs": False,  # nightly scheduled matching (read+match only)
+    "autonomous_recon": False,  # autonomy envelope evaluation (dry-run in Rung 1)
 }
 
 # In-memory cache: (tenant_id, flag_key) → (enabled, timestamp)
@@ -69,6 +72,17 @@ async def get_all_flags(db: AsyncSession, tenant_id: uuid.UUID) -> dict[str, boo
     result = await db.execute(select(TenantFeatureFlag).where(TenantFeatureFlag.tenant_id == tenant_id))
     flags = result.scalars().all()
     return {f.flag_key: f.enabled for f in flags}
+
+
+async def list_enabled_tenants(db: AsyncSession, flag_key: str) -> list[uuid.UUID]:
+    """All tenant_ids with flag_key explicitly enabled. No cache — used by Beat fan-outs."""
+    result = await db.execute(
+        select(TenantFeatureFlag.tenant_id).where(
+            TenantFeatureFlag.flag_key == flag_key,
+            TenantFeatureFlag.enabled.is_(True),
+        )
+    )
+    return [row[0] for row in result.all()]
 
 
 async def set_flag(db: AsyncSession, tenant_id: uuid.UUID, flag_key: str, enabled: bool) -> TenantFeatureFlag:
