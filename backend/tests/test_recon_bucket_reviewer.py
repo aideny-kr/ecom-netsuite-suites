@@ -139,6 +139,132 @@ async def test_bucket_summary_counts(client, db, finance_user):
     assert body["needs_review"]["count"] == 2
     # auto-classifications total variance = 0.12 + 4.12 + 5.00
     assert Decimal(str(body["auto_classifications"]["total_variance"])) == Decimal("9.24")
+    # close_readiness over the same seed: the 2 unmatched rows are pending but
+    # match_type='unmatched' (not open exceptions); everything else is suggested
+    # (factory default); nothing is auto_matched.
+    assert body["close_readiness"] == {
+        "open_exceptions": 0,
+        "suggested": 6,
+        "left_for_review": 0,
+    }
+
+
+# ---------------------------------------------------------------------------
+# close_readiness — live SQL counts over the FULL run for the FE CloseChecklist
+# (the FE only fetches a page of results, so it cannot compute these itself).
+# ---------------------------------------------------------------------------
+
+
+def test_bucket_summary_schema_requires_close_readiness():
+    """close_readiness is a REQUIRED part of the buckets payload.
+
+    The FE CloseChecklist FAILS CLOSED (auto-checks incomplete) when the field
+    is missing, so the backend contract must always include it.
+    """
+    from pydantic import ValidationError
+
+    from app.schemas.reconciliation import (
+        ReconBucketCount,
+        ReconBucketSummary,
+        ReconCloseReadiness,
+    )
+
+    counts = {b: ReconBucketCount(count=0, total_variance=Decimal("0")) for b in ALL_BUCKETS}
+    summary = ReconBucketSummary(
+        run_id="run-1",
+        close_readiness=ReconCloseReadiness(open_exceptions=1, suggested=2, left_for_review=3),
+        **counts,
+    )
+    assert summary.model_dump()["close_readiness"] == {
+        "open_exceptions": 1,
+        "suggested": 2,
+        "left_for_review": 3,
+    }
+    with pytest.raises(ValidationError):
+        ReconBucketSummary(run_id="run-1", **counts)
+
+
+async def test_bucket_summary_close_readiness_counts(client, db, finance_user):
+    """Each close_readiness count keys on the authoritative status/bucket only.
+
+    - open_exceptions: status='pending' AND match_type != 'unmatched'
+    - suggested:       status='suggested'
+    - left_for_review: status='auto_matched' AND bucket='needs_review' — mirrors
+      close_period()'s skipped_stmt (rows close deliberately leaves unlocked).
+
+    DB-backed (conftest ``db`` fixture / local docker Postgres) — written but
+    NOT run in the implementer environment; the PM runs it post-flight.
+    """
+    user, headers = finance_user
+    await _enable_recon(db, user.tenant_id)
+    run = await create_test_recon_run(db, user.tenant_id)
+    # 1 open exception: pending on a MATCHED line
+    await create_test_recon_result(db, user.tenant_id, run.id, match_type="fuzzy", status="pending")
+    # NOT an open exception: pending + unmatched (an expected needs_review row)
+    await create_test_recon_result(
+        db, user.tenant_id, run.id, match_type="unmatched", variance_type="missing", status="pending"
+    )
+    # 1 suggested
+    await create_test_recon_result(db, user.tenant_id, run.id, match_type="deterministic", status="suggested")
+    # 1 left for review: auto_matched + stored needs_review (material matched row)
+    await create_test_recon_result(
+        db,
+        user.tenant_id,
+        run.id,
+        match_type="deterministic",
+        status="auto_matched",
+        variance_type="amount_mismatch",
+        variance_amount=Decimal("60.00"),
+        stripe_amount=Decimal("100000.00"),
+        netsuite_amount=Decimal("99940.00"),
+        bucket="needs_review",
+    )
+    # NOT left for review: auto_matched in the matches bucket
+    await create_test_recon_result(db, user.tenant_id, run.id, match_type="deterministic", status="auto_matched")
+    # NOT counted anywhere: an approved (dispositioned) needs_review row
+    await create_test_recon_result(
+        db, user.tenant_id, run.id, match_type="unmatched", variance_type="missing", status="approved"
+    )
+    await db.commit()
+
+    resp = await client.get(f"/api/v1/reconciliation/runs/{run.id}/buckets", headers=headers)
+    assert resp.status_code == 200
+    assert resp.json()["close_readiness"] == {
+        "open_exceptions": 1,
+        "suggested": 1,
+        "left_for_review": 1,
+    }
+
+
+async def test_bucket_summary_close_readiness_tenant_scoped(client, db, finance_user, tenant_b):
+    """Another tenant's auto_matched+needs_review rows must not leak into the counts.
+
+    DB-backed — PM runs post-flight (see test_bucket_summary_close_readiness_counts).
+    """
+    user, headers = finance_user
+    await _enable_recon(db, user.tenant_id)
+    run = await create_test_recon_run(db, user.tenant_id)
+    # Foreign tenant seeds a left-for-review row on its OWN run.
+    foreign_run = await create_test_recon_run(db, tenant_b.id)
+    await create_test_recon_result(
+        db,
+        tenant_b.id,
+        foreign_run.id,
+        match_type="deterministic",
+        status="auto_matched",
+        variance_type="amount_mismatch",
+        variance_amount=Decimal("60.00"),
+        bucket="needs_review",
+    )
+    await db.commit()
+
+    resp = await client.get(f"/api/v1/reconciliation/runs/{run.id}/buckets", headers=headers)
+    assert resp.status_code == 200
+    assert resp.json()["close_readiness"] == {
+        "open_exceptions": 0,
+        "suggested": 0,
+        "left_for_review": 0,
+    }
 
 
 # ---------------------------------------------------------------------------

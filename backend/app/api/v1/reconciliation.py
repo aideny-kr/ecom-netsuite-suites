@@ -33,6 +33,7 @@ from app.schemas.reconciliation import (
     ReconBucketApproveResult,
     ReconBucketCount,
     ReconBucketSummary,
+    ReconCloseReadiness,
     ReconResultApprove,
     ReconResultResponse,
     ReconRunCreate,
@@ -500,7 +501,66 @@ async def get_run_bucket_summary(
             )
         ).one()
         counts[bucket] = ReconBucketCount(count=row[0], total_variance=row[1])
-    return ReconBucketSummary(run_id=run_id, **counts)
+
+    # ------------------------------------------------------------------
+    # Close-readiness counts over the FULL run for the FE CloseChecklist.
+    # The checklist previously scanned ONE PAGE of results (default limit=100)
+    # — at production scale (62.5k-row runs) every auto-check was computed
+    # over a window. Each count keys on the authoritative status/bucket only,
+    # never the advisory confidence composite (the R2 decoupling pattern).
+    # ------------------------------------------------------------------
+    # Open exceptions: a pending row on a MATCHED line. Pending+unmatched rows
+    # are expected exceptions already surfaced in the needs_review bucket.
+    open_exceptions = (
+        await db.execute(
+            select(func.count())
+            .select_from(ReconciliationResult)
+            .where(
+                ReconciliationResult.run_id == run_uuid,
+                ReconciliationResult.tenant_id == user.tenant_id,
+                ReconciliationResult.status == "pending",
+                ReconciliationResult.match_type != "unmatched",
+            )
+        )
+    ).scalar_one()
+    suggested = (
+        await db.execute(
+            select(func.count())
+            .select_from(ReconciliationResult)
+            .where(
+                ReconciliationResult.run_id == run_uuid,
+                ReconciliationResult.tenant_id == user.tenant_id,
+                ReconciliationResult.status == "suggested",
+            )
+        )
+    ).scalar_one()
+    # Mirrors close_period()'s skipped_stmt VERBATIM (see close_period below —
+    # keep the two predicates in sync): status='auto_matched' AND
+    # bucket='needs_review' rows are deliberately left UNLOCKED on close (HITL
+    # — a material variance is never silently buried), so the checklist must
+    # not report "ready" while any remain.
+    left_for_review = (
+        await db.execute(
+            select(func.count())
+            .select_from(ReconciliationResult)
+            .where(
+                ReconciliationResult.run_id == run_uuid,
+                ReconciliationResult.tenant_id == user.tenant_id,
+                ReconciliationResult.status == "auto_matched",
+                bucket_conditions(BUCKET_NEEDS_REVIEW),
+            )
+        )
+    ).scalar_one()
+
+    return ReconBucketSummary(
+        run_id=run_id,
+        close_readiness=ReconCloseReadiness(
+            open_exceptions=open_exceptions,
+            suggested=suggested,
+            left_for_review=left_for_review,
+        ),
+        **counts,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -822,6 +882,8 @@ async def close_period(
 
         # Count the auto_matched + needs_review lines deliberately left unlocked,
         # so the close response + audit trail make the skipped items visible.
+        # Mirrored by get_run_bucket_summary's close_readiness.left_for_review
+        # (the FE CloseChecklist's pre-close gate) — keep the predicates in sync.
         skipped_stmt = (
             select(func.count())
             .select_from(ReconciliationResult)
