@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import uuid
 from decimal import Decimal
-from pathlib import Path
 
 import pytest
 
@@ -281,9 +280,10 @@ async def test_bucket_defaults_to_needs_review_and_is_echoed():
 
 
 async def test_bucket_rules_selects_the_suggested_fuzzy_population():
-    """bucket="rules" restores chat's discovery surface for suggested fuzzy
-    matches — the close gate's "Approve Suggested Matches" population that
-    the needs_review re-key made invisible (T2 gate finding #1)."""
+    """bucket="rules" restores chat's discovery surface for the fuzzy-match
+    rules bucket (mostly status=suggested awaiting approval) that the
+    needs_review re-key made invisible (T2 gate finding #1). NOT the close
+    gate's "suggested" count — that is status-keyed across all buckets."""
     row = _make_result(
         status="suggested",
         match_type="fuzzy",
@@ -599,3 +599,52 @@ async def test_malformed_run_id_returns_structured_error(bad):
     assert "run_id" in out["error"]
     # Rejected up front — no query was ever issued.
     assert db.stmts == []
+
+
+# ---------------------------------------------------------------------------
+# Wording coherence — bucket="rules" is NOT the close gate's suggested count
+# (R4-B #1: the gate's "suggested" is STATUS-keyed across ALL buckets;
+# bucket="rules" is BUCKET-keyed — mostly suggested but also pending — and
+# material-variance suggested rows live in the DEFAULT needs_review listing.
+# Default-config counterexample: a deterministic 0.90 match with a $10
+# material variance is status=suggested, bucket=auto_classifications.)
+# ---------------------------------------------------------------------------
+
+
+def test_registry_description_does_not_equate_rules_with_gate_suggested_count():
+    from app.mcp.registry import TOOL_REGISTRY
+
+    desc = TOOL_REGISTRY["recon.get_exceptions"]["description"]
+    # The false equivalence is gone...
+    assert "population the close gate counts" not in desc
+    # ...replaced by the accurate axes: the gate count is STATUS-keyed...
+    assert "status-keyed" in desc.lower()
+    # ...while bucket="rules" is mostly suggested but ALSO pending...
+    assert "pending" in desc.lower()
+    # ...so neither listing equals the gate count — list BOTH to investigate.
+    assert "neither" in desc.lower()
+    assert "both" in desc.lower()
+    assert "needs_review" in desc
+
+
+def test_tool_docstring_does_not_equate_rules_with_gate_suggested_count():
+    doc = execute.__doc__
+    assert 'the close gate\'s "Approve Suggested Matches" population' not in doc
+    assert "status-keyed" in doc.lower()
+    assert "pending" in doc.lower()
+    assert "neither" in doc.lower()
+    assert "both" in doc.lower()
+
+
+def test_reconciliation_profile_states_gate_count_is_status_keyed():
+    from app.services.chat.knowledge_profiles.loader import load_all_profiles
+
+    profile = next(p for p in load_all_profiles() if p.profile_id == "reconciliation")
+    frag = " ".join(profile.prompt_fragment.split())
+    # Accurate axes stated for the model...
+    assert "STATUS-keyed" in frag
+    # ...with the both-buckets investigation recommendation...
+    assert "BOTH" in frag
+    assert 'bucket="rules"' in frag
+    # ...and an explicit never-equate instruction.
+    assert "never claim" in frag.lower()

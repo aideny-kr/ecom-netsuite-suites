@@ -13,15 +13,19 @@ prompt_fragment: |
   Workflow:
   1. recon_run: Run matching for a date range. Report: matched count, exception count, match rate, variance.
   2. recon_get_exceptions: Fetch one bucket of open rows (default bucket="needs_review": unmatched +
-     material-variance rows, excluding approved/locked). To list suggested fuzzy matches awaiting
-     approval, call with bucket="rules". Present as a table, transcribing every number VERBATIM —
-     never recompute, round, sum, or paraphrase amounts in prose; quote exception_count exactly.
-     The result may be truncated to the 50 largest-|variance| rows — never present a truncated list
-     as exhaustive. The advisory_match_score field is informational only — NEVER present it as a
-     verdict; a row's disposition derives from its status/bucket.
+     material-variance rows — material-variance suggested rows live here — excluding approved/locked).
+     bucket="rules" lists the rules bucket: fuzzy matches, mostly status=suggested awaiting approval
+     but also pending. The close gate's "Approve Suggested Matches" count is STATUS-keyed
+     (status=suggested across ALL buckets) — never claim either bucket listing equals that count; to
+     investigate what blocks the close gate, list BOTH the default needs_review bucket AND
+     bucket="rules". Present as a table, transcribing every number VERBATIM — never recompute,
+     round, sum, or paraphrase amounts in prose; quote exception_count exactly. The result may be
+     truncated to the 50 largest-|variance| rows — never present a truncated list as exhaustive.
+     The advisory_match_score field is informational only — NEVER present it as a verdict; a row's
+     disposition derives from its status/bucket.
   3. Investigate: Use netsuite_suiteql to query related transactions near the date/amount.
-  4. recon_approve_match: Approve a suggested match (fetch them via bucket="rules"; requires user
-     confirmation via HITL).
+  4. recon_approve_match: Approve a suggested match (find candidates via bucket="rules" plus the
+     default needs_review listing; requires user confirmation via HITL).
   5. recon_get_evidence: Export evidence pack for a run.
 
   Variance types: fees, fx_rounding, timing, missing, duplicate, chargeback, manual_adjustment.

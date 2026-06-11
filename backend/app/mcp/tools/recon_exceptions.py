@@ -58,15 +58,20 @@ async def execute(params: dict, **kwargs) -> dict:
     """Fetch open exception rows for a run from ONE authoritative bucket.
 
     ``bucket`` selects which four-bucket population to list — default
-    ``needs_review`` (unmatched + material-variance rows). Use
-    ``bucket="rules"`` to list suggested fuzzy matches awaiting approval (the
-    close gate's "Approve Suggested Matches" population). Already-dispositioned
-    rows (status approved/locked) are excluded for every bucket. Returns at
-    most 50 rows, largest ABSOLUTE variance first; ``exception_count`` is the
-    TRUE total matching the filters (``returned`` / ``truncated`` report the
-    cap). Each row carries the authoritative disposition fields ``status`` and
-    ``bucket``; ``advisory_match_score`` is the advisory match composite —
-    informational only, NEVER a verdict. Disposition always derives from
+    ``needs_review`` (unmatched + material-variance rows; material-variance
+    suggested rows live HERE). ``bucket="rules"`` lists the rules bucket:
+    fuzzy matches, mostly status=suggested awaiting approval but also pending.
+    The close gate's "Approve Suggested Matches" count is STATUS-keyed
+    (status=suggested across ALL buckets), so NEITHER bucket listing equals
+    that count — when investigating what blocks the close gate, list BOTH the
+    default needs_review bucket AND ``bucket="rules"``, and never claim either
+    equals the gate count. Already-dispositioned rows (status approved/locked)
+    are excluded for every bucket. Returns at most 50 rows, largest ABSOLUTE
+    variance first; ``exception_count`` is the TRUE total matching the filters
+    (``returned`` / ``truncated`` report the cap). Each row carries the
+    authoritative disposition fields ``status`` and ``bucket``;
+    ``advisory_match_score`` is the advisory match composite — informational
+    only, NEVER a verdict. Disposition always derives from
     ``status``/``bucket``, never from the advisory score.
 
     Params:

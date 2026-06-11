@@ -3,7 +3,7 @@
 Row-level proof of the bucket-keyed selection against real Postgres via the
 conftest ``db`` fixture (each test rolled back): the validated optional
 ``bucket`` param (default = the authoritative ``needs_review`` bucket;
-``bucket="rules"`` = suggested fuzzy matches awaiting approval), excluding
+``bucket="rules"`` = the fuzzy-match rules bucket, mostly suggested), excluding
 already-dispositioned (approved/locked) rows; ``min_variance`` is a
 Decimal-safe non-negative abs filter; ordering is largest ABSOLUTE variance
 first; ``exception_count`` is the TRUE filtered total carried by the
@@ -106,10 +106,10 @@ async def test_selection_is_bucket_keyed_excluding_dispositioned(db, tenant_a):
 
 
 async def test_bucket_rules_returns_suggested_fuzzy_rows(db, tenant_a):
-    """R3-B #1: bucket="rules" lists the suggested fuzzy matches awaiting
-    approval — the close gate's "Approve Suggested Matches" population —
-    while needs_review rows stay out and dispositioned rules rows are
-    excluded."""
+    """R3-B #1: bucket="rules" lists the fuzzy-match rules bucket (mostly
+    status=suggested awaiting approval — NOT the close gate's status-keyed
+    "suggested" count, which spans all buckets) while needs_review rows stay
+    out and dispositioned rules rows are excluded."""
     run = await create_test_recon_run(db, tenant_a.id)
 
     suggested_fuzzy = await create_test_recon_result(
