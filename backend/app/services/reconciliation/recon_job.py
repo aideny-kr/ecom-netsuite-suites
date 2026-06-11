@@ -18,6 +18,7 @@ from app.schemas.reconciliation import (
     PayoutRecord,
     ReconRunSummary,
 )
+from app.services.reconciliation.confidence_engine import compute_signals, signals_to_evidence
 from app.services.reconciliation.four_bucket_classifier import (
     BUCKET_AUTO_CLASSIFICATIONS,
     BUCKET_MATCHES,
@@ -287,6 +288,43 @@ class ReconJobRunner:
             )
             buckets.append(bucket)
 
+            # R2 advisory confidence — intentionally decoupled from status/close-lock.
+            # ``status`` (and the auto-lock-on-close gate) continues to read the engine
+            # match-tier ladder value (deterministic 1.0/0.95, fuzzy ≤0.94,
+            # exception 0.60, unmatched 0) held in ``candidate.confidence`` — we never
+            # mutate it. The persisted ``confidence`` column instead carries the R2
+            # amount+temporal composite score, so recalibrating the scorer cannot
+            # shift auto-lock decisions. Unmatched candidates (no deposits) keep the
+            # engine value (0); matched candidates get the R2 composite.
+            confidence_signals = None
+            persisted_confidence = candidate.confidence  # unmatched keeps engine value (0)
+            if candidate.deposits and candidate.match_type != "unmatched":
+                # Multi-deposit (split payout / duplicate exception): the match asserts
+                # the payout settles across ALL listed deposits, so the amount signal
+                # scores the SUMMED deposit amount against payout.net_amount; the
+                # temporal signal uses the LATEST deposit transaction_date (completion
+                # of the split), None-safe — a dateless deposit drops out of the max;
+                # all dates missing → temporal unavailable (amount-only fallback).
+                deposit_total = sum((d.amount for d in candidate.deposits), Decimal("0"))
+                deposit_dates = [d.transaction_date for d in candidate.deposits if d.transaction_date is not None]
+                signals = compute_signals(
+                    charge_amount=candidate.payout.net_amount,
+                    deposit_amount=deposit_total,
+                    charge_date=candidate.payout.arrival_date,
+                    deposit_date=max(deposit_dates) if deposit_dates else None,
+                )
+                persisted_confidence = signals.composite
+                confidence_signals = signals_to_evidence(signals)
+
+            # Build evidence dict; attach R2 sub-scores when available.
+            evidence = {
+                "payout_source_id": candidate.payout.source_id,
+                "deposit_ids": [d.netsuite_internal_id for d in candidate.deposits],
+                "signals": candidate.match_rule,
+            }
+            if confidence_signals is not None:
+                evidence["confidence_signals"] = confidence_signals
+
             result = ReconciliationResult(
                 id=uuid.uuid4(),
                 tenant_id=self.tenant_id,
@@ -294,7 +332,7 @@ class ReconJobRunner:
                 payout_id=payout_uuid,
                 deposit_id=deposit_id,
                 match_type=candidate.match_type,
-                confidence=candidate.confidence,
+                confidence=persisted_confidence,
                 status=status,
                 bucket=bucket,
                 stripe_amount=candidate.payout.net_amount if candidate.payout.id else None,
@@ -304,11 +342,7 @@ class ReconJobRunner:
                 variance_explanation=candidate.variance_explanation,
                 currency=candidate.payout.currency,
                 match_rule=candidate.match_rule,
-                evidence={
-                    "payout_source_id": candidate.payout.source_id,
-                    "deposit_ids": [d.netsuite_internal_id for d in candidate.deposits],
-                    "signals": candidate.match_rule,
-                },
+                evidence=evidence,
             )
             self.db.add(result)
 
