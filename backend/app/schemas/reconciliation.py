@@ -174,20 +174,25 @@ class ReconBucketCount(BaseModel):
 
 
 class ReconCloseReadiness(BaseModel):
-    """Live close-readiness counts over the FULL run (never a page window).
+    """PERIOD-scoped close-readiness counts over ALL runs a close will touch.
 
-    The FE CloseChecklist keys its auto-checks on these — it only fetches a
-    page of results, so any client-side scan is a window at production scale.
-    Every count keys on the authoritative ``status``/``bucket`` only, never the
-    advisory confidence composite (the R2 decoupling pattern).
+    ``POST /close/{period}`` closes EVERY completed run whose date range falls
+    inside the month, so the FE CloseChecklist's gate must aggregate over that
+    same scope (``close_scope.closeable_runs_conditions``) — never a single
+    selected run (R3-A). Every count keys on the authoritative
+    ``status``/``bucket`` only, never the advisory confidence composite (the
+    R2 decoupling pattern).
 
+    - ``runs_in_scope``: how many runs ``close_period(period)`` would close
     - ``open_exceptions``: status='pending' AND match_type != 'unmatched'
     - ``suggested``: status='suggested'
     - ``left_for_review``: status='auto_matched' AND bucket='needs_review' —
-      mirrors ``close_period()``'s skipped_stmt (api/v1/reconciliation.py):
-      rows close deliberately leaves unlocked for human review (HITL).
+      ``close_scope.left_for_review_conditions``: rows close deliberately
+      leaves unlocked for human review (HITL).
     """
 
+    period: str
+    runs_in_scope: int
     open_exceptions: int
     suggested: int
     left_for_review: int
@@ -199,9 +204,6 @@ class ReconBucketSummary(BaseModel):
     rules: ReconBucketCount
     auto_classifications: ReconBucketCount
     needs_review: ReconBucketCount
-    # REQUIRED: the FE fails closed (auto-checks incomplete) when missing, so
-    # the contract must always carry it.
-    close_readiness: ReconCloseReadiness
 
 
 class ReconBucketApprove(BaseModel):
