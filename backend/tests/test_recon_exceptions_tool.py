@@ -154,6 +154,27 @@ async def test_selection_is_bucket_keyed_not_status_keyed():
     assert 50 in params.values()
 
 
+async def test_query_is_tenant_scoped():
+    """The stmt must carry the tenant_id predicate bound to the CALLER's tenant.
+
+    The run_id filter alone does NOT prove tenant scoping — a cross-tenant row
+    can share a run_id (``ReconciliationResult.tenant_id`` is a plain column),
+    and the conftest ``db`` fixture connects as table owner so RLS does not
+    backstop the in-query filter in tests. This regression class is live in
+    this repo: commit 34b8f50 fixed exactly a missing tenant filter in the
+    evidence-download query. Row-level proof: the _db twin seeds a
+    cross-tenant row on the SAME run and asserts it is excluded.
+    """
+    db = _StubDB([])
+    tenant_id = uuid.uuid4()
+
+    await execute({"run_id": str(uuid.uuid4())}, db=db, tenant_id=tenant_id)
+
+    sql, params = _compiled(db.last_stmt)
+    assert "reconciliation_results.tenant_id = " in sql
+    assert str(tenant_id) in params.values()
+
+
 # ---------------------------------------------------------------------------
 # min_variance — documented param, now implemented (Decimal-safe abs filter)
 # ---------------------------------------------------------------------------

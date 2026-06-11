@@ -187,10 +187,27 @@ async def test_other_tenant_and_other_run_rows_invisible(db, tenant_a, tenant_b)
         variance_type="missing",
         variance_amount=Decimal("10.00"),
     )
+    # Foreign row differing in BOTH tenant and run — excluded by either filter.
     await create_test_recon_result(
         db,
         tenant_b.id,
         run_b.id,
+        status="pending",
+        match_type="unmatched",
+        variance_type="missing",
+        variance_amount=Decimal("10.00"),
+    )
+    # Cross-tenant row on the SAME run_a: only the tenant_id where-clause can
+    # exclude it (the run_id predicate matches), so this row is what actually
+    # proves tenant scoping. ReconciliationResult.tenant_id is a plain column —
+    # seedable — and the conftest ``db`` session connects as table owner, so
+    # RLS does NOT backstop the in-query filter here. This regression class is
+    # live in this repo: commit 34b8f50 fixed exactly a missing tenant filter
+    # in the evidence-download query.
+    cross_tenant_same_run = await create_test_recon_result(
+        db,
+        tenant_b.id,
+        run_a.id,
         status="pending",
         match_type="unmatched",
         variance_type="missing",
@@ -201,7 +218,9 @@ async def test_other_tenant_and_other_run_rows_invisible(db, tenant_a, tenant_b)
     out = await execute({"run_id": str(run_a.id)}, db=db, tenant_id=tenant_a.id)
 
     assert out["success"] is True
-    assert {e["result_id"] for e in out["exceptions"]} == {str(mine.id)}
+    returned_ids = {e["result_id"] for e in out["exceptions"]}
+    assert str(cross_tenant_same_run.id) not in returned_ids  # tenant filter, not run filter
+    assert returned_ids == {str(mine.id)}
 
     out_wrong_run = await execute({"run_id": str(uuid.uuid4())}, db=db, tenant_id=tenant_a.id)
     assert out_wrong_run["success"] is True
