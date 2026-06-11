@@ -927,11 +927,14 @@ export interface ReconBucketCount {
   total_variance: number;
 }
 
-/** Live close-readiness counts over the FULL run, computed server-side
- *  (the FE only fetches a page of results, so it must never count itself).
- *  Each count keys on the authoritative status/bucket — never the advisory
- *  confidence composite. */
+/** PERIOD-scoped close-readiness counts (GET /close-readiness/{period}),
+ *  aggregated server-side over EVERY run POST /close/{period} will close —
+ *  never a single selected run (R3-A). Each count keys on the authoritative
+ *  status/bucket — never the advisory confidence composite. */
 export interface ReconCloseReadiness {
+  period: string;
+  /** How many completed runs close_period(period) would close. */
+  runs_in_scope: number;
   /** status='pending' AND match_type != 'unmatched' (open exceptions on matched lines). */
   open_exceptions: number;
   /** status='suggested' (matches awaiting approval). */
@@ -947,9 +950,6 @@ export interface ReconBucketSummary {
   rules: ReconBucketCount;
   auto_classifications: ReconBucketCount;
   needs_review: ReconBucketCount;
-  /** Optional only to tolerate deploy-skew (an older backend payload without
-   *  it) — consumers must FAIL CLOSED (treat checks as incomplete) when missing. */
-  close_readiness?: ReconCloseReadiness;
 }
 
 export type ReconBucketId =

@@ -3,17 +3,11 @@
 import { useState } from "react";
 import { CheckCircle2, Circle, Lock, AlertTriangle } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { useClosePeriod } from "@/hooks/use-reconciliation";
-import type { ReconBucketSummary, ReconRun } from "@/lib/types";
+import { useClosePeriod, useCloseReadiness } from "@/hooks/use-reconciliation";
+import type { ReconCloseReadiness, ReconRun } from "@/lib/types";
 
 interface CloseChecklistProps {
   run: ReconRun | null;
-  /** Server-computed bucket summary (useReconBucketSummary). The auto-checks
-   *  key on summary.close_readiness — live SQL counts over the FULL run (the
-   *  old results-prop scan only ever saw one page at production scale).
-   *  undefined while loading — every auto-check FAILS CLOSED until it arrives
-   *  (manual toggles still work: HITL checklist semantics unchanged). */
-  summary: ReconBucketSummary | undefined;
   period: string;
 }
 
@@ -21,12 +15,15 @@ interface ChecklistStep {
   id: string;
   label: string;
   description: string;
-  check: (run: ReconRun | null, summary: ReconBucketSummary | undefined) => boolean;
+  check: (run: ReconRun | null, readiness: ReconCloseReadiness | undefined) => boolean;
 }
 
-// Auto-checks compare against `=== 0` so a missing summary/close_readiness
-// (loading, or deploy-skew payload from an older backend) yields `undefined
-// === 0` → false → incomplete. Fail closed — never report "ready" on absent data.
+// Auto-checks key on the PERIOD-scoped readiness (GET /close-readiness/{period}):
+// POST /close/{period} closes EVERY completed run in the month, so gating on the
+// selected run alone would authorize a close over runs nobody inspected (R3-A).
+// They compare against `=== 0` so missing readiness (loading, or deploy-skew
+// payload from an older backend) yields `undefined === 0` → false → incomplete.
+// Fail closed — never report "ready" on absent data.
 const STEPS: ChecklistStep[] = [
   {
     id: "run_recon",
@@ -38,13 +35,13 @@ const STEPS: ChecklistStep[] = [
     id: "review_exceptions",
     label: "Review Exceptions",
     description: "Investigate and resolve all exceptions",
-    check: (_, summary) => summary?.close_readiness?.open_exceptions === 0,
+    check: (_, readiness) => readiness?.open_exceptions === 0,
   },
   {
     id: "approve_matches",
     label: "Approve Suggested Matches",
     description: "Review and approve all suggested matches",
-    check: (_, summary) => summary?.close_readiness?.suggested === 0,
+    check: (_, readiness) => readiness?.suggested === 0,
   },
   {
     id: "review_material_variances",
@@ -52,13 +49,13 @@ const STEPS: ChecklistStep[] = [
     description:
       "Approve or investigate confident matches with material variance — close will NOT lock these",
     // left_for_review mirrors the backend close_period() left-for-review
-    // predicate (api/v1/reconciliation.py lock_predicate/skipped_stmt): rows
-    // with status="auto_matched" AND bucket="needs_review" are deliberately
-    // left unlocked on close (HITL — a material variance is never silently
+    // predicate (close_scope.left_for_review_conditions): rows with
+    // status="auto_matched" AND bucket="needs_review" are deliberately left
+    // unlocked on close (HITL — a material variance is never silently
     // buried), so the checklist must not report "ready" while any remain.
-    // Counted server-side over the FULL run, keyed on the authoritative
+    // Counted server-side over every in-scope run, keyed on the authoritative
     // status + bucket only — never the advisory confidence.
-    check: (_, summary) => summary?.close_readiness?.left_for_review === 0,
+    check: (_, readiness) => readiness?.left_for_review === 0,
   },
   {
     id: "export_evidence",
@@ -74,8 +71,11 @@ const STEPS: ChecklistStep[] = [
   },
 ];
 
-export function CloseChecklist({ run, summary, period }: CloseChecklistProps) {
+export function CloseChecklist({ run, period }: CloseChecklistProps) {
   const closePeriod = useClosePeriod();
+  // undefined while loading — every auto-check FAILS CLOSED until it arrives
+  // (manual toggles still work: HITL checklist semantics unchanged).
+  const readiness = useCloseReadiness(period || null);
   const [manualChecks, setManualChecks] = useState<Set<string>>(new Set());
 
   const toggleManual = (stepId: string) => {
@@ -89,7 +89,7 @@ export function CloseChecklist({ run, summary, period }: CloseChecklistProps) {
 
   const isComplete = (step: ChecklistStep) => {
     if (manualChecks.has(step.id)) return true;
-    return step.check(run, summary);
+    return step.check(run, readiness.data);
   };
 
   // Every step except the lock itself gates the lock (was a positional
@@ -98,7 +98,19 @@ export function CloseChecklist({ run, summary, period }: CloseChecklistProps) {
 
   const handleLockPeriod = () => {
     if (!period) return;
-    if (!confirm(`Are you sure you want to lock period ${period}? This cannot be undone.`)) return;
+    // The close is period-wide: surface how many runs it will actually touch
+    // so a multi-run month is never locked under a single-run assumption.
+    const runsInScope = readiness.data?.runs_in_scope;
+    const multiRunNote =
+      runsInScope !== undefined && runsInScope > 1
+        ? ` This will close ${runsInScope} runs in ${period}.`
+        : "";
+    if (
+      !confirm(
+        `Are you sure you want to lock period ${period}?${multiRunNote} This cannot be undone.`,
+      )
+    )
+      return;
     closePeriod.mutate(period);
   };
 

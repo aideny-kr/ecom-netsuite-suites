@@ -7,6 +7,7 @@ import type {
   ReconResult,
   ReconRunSummary,
   ReconBucketSummary,
+  ReconCloseReadiness,
 } from "@/lib/types";
 
 export function useReconRuns() {
@@ -56,10 +57,11 @@ export function useApproveResult() {
       ),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["recon-results"] });
-      // The CloseChecklist keys on ["recon-bucket-summary", runId] — a
-      // single-row approve must refresh its counts too (prefix match
-      // invalidates every run's summary; mirrors useApproveBucket).
+      // A single-row approve changes the bucket counts AND the period
+      // close-readiness counts the CloseChecklist gates on (prefix match
+      // invalidates every run's summary / every period's readiness).
       queryClient.invalidateQueries({ queryKey: ["recon-bucket-summary"] });
+      queryClient.invalidateQueries({ queryKey: ["recon-close-readiness"] });
     },
   });
 }
@@ -71,10 +73,11 @@ export function useClosePeriod() {
       apiClient.post(`/api/v1/reconciliation/close/${period}`, {}),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["recon-runs"] });
-      // Close locks rows server-side (status -> locked): the results table and
-      // the checklist's close_readiness counts must refetch too.
+      // Close locks rows server-side (status -> locked): the results table,
+      // the bucket counts and the period readiness must refetch too.
       queryClient.invalidateQueries({ queryKey: ["recon-results"] });
       queryClient.invalidateQueries({ queryKey: ["recon-bucket-summary"] });
+      queryClient.invalidateQueries({ queryKey: ["recon-close-readiness"] });
     },
   });
 }
@@ -87,6 +90,20 @@ export function useReconBucketSummary(runId: string | null) {
         `/api/v1/reconciliation/runs/${runId}/buckets`
       ),
     enabled: !!runId,
+  });
+}
+
+/** PERIOD-scoped close readiness (R3-A): POST /close/{period} closes EVERY
+ *  completed run in the month, so the CloseChecklist gate must aggregate over
+ *  that same scope — never the selected run's bucket summary. */
+export function useCloseReadiness(period: string | null) {
+  return useQuery<ReconCloseReadiness>({
+    queryKey: ["recon-close-readiness", period],
+    queryFn: () =>
+      apiClient.get<ReconCloseReadiness>(
+        `/api/v1/reconciliation/close-readiness/${period}`
+      ),
+    enabled: !!period,
   });
 }
 
@@ -104,6 +121,9 @@ export function useApproveBucket(runId: string) {
         queryKey: ["recon-bucket-summary", runId],
       });
       queryClient.invalidateQueries({ queryKey: ["recon-runs"] });
+      // Bulk approve drains suggested/left_for_review — the period readiness
+      // the CloseChecklist gates on must refetch (prefix: every period).
+      queryClient.invalidateQueries({ queryKey: ["recon-close-readiness"] });
     },
   });
 }

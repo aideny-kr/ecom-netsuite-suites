@@ -24,8 +24,9 @@ let mockRun: { id: string; status: string; total_variance: number; date_from?: s
 let mockApproveData: { approved_count: number; skipped_count: number } | undefined;
 
 // CloseChecklist is mocked to expose the props it receives so we can assert
-// page.tsx hands it the server-computed bucket summary (close_readiness counts
-// over the FULL run), and no longer a paged results array.
+// page.tsx hands it the run + period only — readiness is PERIOD-scoped and the
+// component fetches it itself via useCloseReadiness (R3-A); it no longer
+// receives a per-run bucket summary or a paged results array.
 const closeChecklistSpy = vi.fn();
 
 vi.mock("@/hooks/use-reconciliation", () => ({
@@ -38,9 +39,9 @@ vi.mock("@/hooks/use-reconciliation", () => ({
       rules: { count: 54, total_variance: 12 },
       auto_classifications: { count: 1072, total_variance: 9.24 },
       needs_review: { count: 869, total_variance: 1203 },
-      close_readiness: { open_exceptions: 0, suggested: 0, left_for_review: 0 },
     },
   }),
+  useCloseReadiness: () => ({ data: undefined, isLoading: true }),
   useApproveBucket: () => ({ mutate, isPending: false, data: mockApproveData }),
   useApproveResult: () => ({ mutate: vi.fn() }),
   useClosePeriod: () => ({ mutate: vi.fn(), isPending: false }),
@@ -141,16 +142,16 @@ describe("ReconciliationPage four buckets", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("passes the server-computed bucket summary to the CloseChecklist", () => {
+  it("passes only run + period to the CloseChecklist (readiness is period-scoped)", () => {
     render(<ReconciliationPage />);
-    // CloseChecklist gates period close on summary.close_readiness — live SQL
-    // counts over the FULL run — and no longer receives a (paged) results array.
+    // R3-A: the checklist gates period close on GET /close-readiness/{period}
+    // (fetched inside the component via useCloseReadiness) — page.tsx no longer
+    // hands it a per-run bucket summary or a (paged) results array.
     expect(closeChecklistSpy).toHaveBeenCalled();
     const lastCall = closeChecklistSpy.mock.calls.at(-1)?.[0];
-    expect(lastCall.summary).toMatchObject({
-      run_id: "r1",
-      close_readiness: { open_exceptions: 0, suggested: 0, left_for_review: 0 },
-    });
+    expect(lastCall.run).toMatchObject({ id: "r1" });
+    expect(lastCall.period).toBe("2026-05");
+    expect(lastCall.summary).toBeUndefined();
     expect(lastCall.results).toBeUndefined();
   });
 
