@@ -14,7 +14,7 @@ import logging
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import String, cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.workers.base_task import InstrumentedTask
@@ -45,15 +45,25 @@ async def dry_run_for_tenant(db: AsyncSession, tenant_id: str) -> dict:
         return {"tenant_id": tenant_id, "skipped": "flag_disabled"}
 
     cutoff = datetime.now(timezone.utc) - timedelta(days=EVALUATION_WINDOW_DAYS)
+    run_window = (
+        ReconciliationRun.tenant_id == tid,
+        ReconciliationRun.status == "completed",
+        ReconciliationRun.created_at >= cutoff,
+    )
+    # One dry-run audit per run, ever. The audited filter applies BEFORE the
+    # per-pass cap — otherwise a busy tenant's newest N audited runs occupy the
+    # window forever and older unevaluated runs are never reached (codex P2).
+    # resource_id is NOT NULL for this action, but guard the NOT-IN-NULL trap.
+    audited_ids = select(AuditEvent.resource_id).where(
+        AuditEvent.tenant_id == tid,
+        AuditEvent.action == DRY_RUN_ACTION,
+        AuditEvent.resource_id.is_not(None),
+    )
     runs = (
         (
             await db.execute(
                 select(ReconciliationRun)
-                .where(
-                    ReconciliationRun.tenant_id == tid,
-                    ReconciliationRun.status == "completed",
-                    ReconciliationRun.created_at >= cutoff,
-                )
+                .where(*run_window, cast(ReconciliationRun.id, String).notin_(audited_ids))
                 .order_by(ReconciliationRun.created_at.desc())
                 .limit(MAX_RUNS_PER_EVALUATION)
             )
@@ -61,27 +71,18 @@ async def dry_run_for_tenant(db: AsyncSession, tenant_id: str) -> dict:
         .scalars()
         .all()
     )
-    if not runs:
+    already_evaluated_count = (
+        await db.execute(
+            select(func.count())
+            .select_from(ReconciliationRun)
+            .where(*run_window, cast(ReconciliationRun.id, String).in_(audited_ids))
+        )
+    ).scalar_one()
+    if not runs and already_evaluated_count == 0:
         return {"tenant_id": tenant_id, "skipped": "no_completed_run"}
-
-    # One dry-run audit per run, ever — already-evaluated runs are skipped.
-    audited = {
-        row[0]
-        for row in (
-            await db.execute(
-                select(AuditEvent.resource_id).where(
-                    AuditEvent.tenant_id == tid,
-                    AuditEvent.action == DRY_RUN_ACTION,
-                    AuditEvent.resource_id.in_([str(r.id) for r in runs]),
-                )
-            )
-        ).all()
-    }
 
     reports: list[dict] = []
     for run in runs:
-        if str(run.id) in audited:
-            continue
         # Column-only select: the evaluator reads six scalars; loading full ORM
         # entities (incl. evidence JSON) for tens of thousands of rows is waste.
         rows = (
@@ -119,7 +120,7 @@ async def dry_run_for_tenant(db: AsyncSession, tenant_id: str) -> dict:
     return {
         "tenant_id": tenant_id,
         "evaluated_count": len(reports),
-        "already_evaluated_count": len(runs) - len(reports),
+        "already_evaluated_count": already_evaluated_count,
         "reports": reports,
     }
 

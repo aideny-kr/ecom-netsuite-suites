@@ -74,6 +74,29 @@ async def test_already_evaluated_run_is_not_reaudited(db, tenant_a):
     assert len(await _audit_rows(db, run.id)) == 1
 
 
+async def test_catchup_cap_does_not_starve_older_unevaluated_runs(db, tenant_a, monkeypatch):
+    """Codex P2: the per-pass cap must apply AFTER filtering audited runs —
+    otherwise a busy tenant's newest N audited runs occupy the window forever
+    and older unevaluated runs are never reached."""
+    from app.workers.tasks import recon_envelope_dry_run as mod
+
+    monkeypatch.setattr(mod, "MAX_RUNS_PER_EVALUATION", 1)
+    feature_flag_service.clear_cache()
+    await feature_flag_service.set_flag(db, tenant_a.id, "reconciliation", True)
+    await feature_flag_service.set_flag(db, tenant_a.id, "autonomous_recon", True)
+    older = await create_test_recon_run(db, tenant_a.id, status="completed")
+    newer = await create_test_recon_run(db, tenant_a.id, status="completed")
+    await db.flush()
+
+    first = await dry_run_for_tenant(db, str(tenant_a.id))
+    second = await dry_run_for_tenant(db, str(tenant_a.id))
+
+    assert first["evaluated_count"] == 1
+    assert second["evaluated_count"] == 1  # the OLDER run, not a re-skip of the newer
+    assert len(await _audit_rows(db, newer.id)) == 1
+    assert len(await _audit_rows(db, older.id)) == 1
+
+
 async def test_catches_up_on_all_unevaluated_runs(db, tenant_a):
     """Coverage must not depend on Beat timing: a run superseded by a newer one
     before its first evaluation is still picked up (catch-up over the recent
