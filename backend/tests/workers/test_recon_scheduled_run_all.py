@@ -39,6 +39,67 @@ async def test_dispatches_only_enabled_tenants(db, tenant_a, tenant_b, monkeypat
     expected_from = (date.today() - timedelta(days=mod.SCHEDULED_RUN_WINDOW_DAYS)).isoformat()
     assert sent[0]["kwargs"]["date_from"] == expected_from
     assert sent[0]["kwargs"]["date_to"] == date.today().isoformat()
+    # Scheduled runs MUST use the product-default order-level engine (OrderReconJob),
+    # which carries all the R1/R2 hardening — not the legacy payout-level runner.
+    assert sent[0]["kwargs"]["match_level"] == "order"
+
+
+class _FakeSummary:
+    def model_dump(self, mode="json"):
+        return {"ok": True}
+
+
+async def test_reconciliation_run_routes_match_level(monkeypatch):
+    """The task's inner logic routes order→OrderReconJob, payout→ReconJobRunner."""
+    from app.workers.tasks import reconciliation_run as mod
+
+    instantiated: list[str] = []
+
+    class FakeOrderJob:
+        def __init__(self, db, tenant_id):
+            instantiated.append("order")
+
+        async def run(self, date_from, date_to, subsidiary_id=None, job_id=None):
+            assert date_from == date(2026, 6, 1)  # ISO string parsed to date
+            return _FakeSummary()
+
+    class FakeRunner:
+        def __init__(self, db, tenant_id):
+            instantiated.append("payout")
+
+        async def run(self, date_from, date_to, subsidiary_id=None, payout_ids=None, job_id=None):
+            assert payout_ids == ["po_1"]
+            return _FakeSummary()
+
+    monkeypatch.setattr("app.services.reconciliation.order_recon_job.OrderReconJob", FakeOrderJob)
+    monkeypatch.setattr("app.services.reconciliation.recon_job.ReconJobRunner", FakeRunner)
+
+    common = dict(
+        db=object(),
+        tenant_id="t1",
+        date_from="2026-06-01",
+        date_to="2026-06-07",
+        subsidiary_id=None,
+        job_id=None,
+    )
+    out = await mod._execute(payout_ids=None, match_level="order", **common)
+    assert out == {"ok": True}
+    assert instantiated == ["order"]
+
+    instantiated.clear()
+    out = await mod._execute(payout_ids=["po_1"], match_level="payout", **common)
+    assert out == {"ok": True}
+    assert instantiated == ["payout"]
+
+
+async def test_reconciliation_run_task_defaults_to_order_level():
+    """match_level defaults to 'order' (the product default) on the task itself."""
+    import inspect
+
+    from app.workers.tasks.reconciliation_run import reconciliation_run_task
+
+    sig = inspect.signature(reconciliation_run_task.run)
+    assert sig.parameters["match_level"].default == "order"
 
 
 def test_include_and_beat_wiring():

@@ -1,9 +1,11 @@
 """Scheduled Celery task: nightly reconciliation runs for opted-in tenants.
 
 Dispatches the existing ``tasks.reconciliation_run`` per tenant whose
-``recon_scheduled_runs`` feature flag is enabled. Read+match only — results
-land in reconciliation_runs/_results exactly like a user-triggered run; no
-NetSuite writes, no approvals (Bet 3 Rung 1 groundwork).
+``recon_scheduled_runs`` feature flag is enabled, always with
+``match_level="order"`` — the order-level OrderReconJob engine (the product
+default, same as a user-triggered run). Read+match only — results land in
+reconciliation_runs/_results; no NetSuite writes, no approvals (Bet 3 Rung 1
+groundwork).
 """
 
 import logging
@@ -35,7 +37,12 @@ async def collect_and_dispatch(db: AsyncSession) -> dict:
         try:
             celery_app.send_task(
                 "tasks.reconciliation_run",
-                kwargs={"tenant_id": str(tenant_id), "date_from": date_from, "date_to": date_to},
+                kwargs={
+                    "tenant_id": str(tenant_id),
+                    "date_from": date_from,
+                    "date_to": date_to,
+                    "match_level": "order",
+                },
                 queue="recon",
             )
             stats["dispatched"] += 1
