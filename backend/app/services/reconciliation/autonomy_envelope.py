@@ -10,23 +10,24 @@ confidence-gated — the advisory scorer is uncalibrated (0-approval corpus).
 
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Iterable
 from dataclasses import dataclass
 from decimal import Decimal
+from typing import Any
 
-from app.models.reconciliation import ReconciliationResult
-from app.services.reconciliation.four_bucket_classifier import BUCKET_MATCHES
+from app.services.reconciliation.four_bucket_classifier import (
+    BUCKET_MATCHES,
+    TERMINAL_RESULT_STATUSES,
+)
 
 ENVELOPE_VERSION = "v1"
 
 # Audit payloads (and Job.result_summary, which InstrumentedTask copies the task
 # result into) must stay bounded — a Framework-scale run has tens of thousands of
-# qualifying rows. Counts/totals stay exact; ids are a capped sample.
+# qualifying rows. Counts/totals stay exact; ids are a capped sample, capped at
+# construction so the report never holds tens of thousands of UUID strings.
 MAX_PAYLOAD_CANDIDATE_IDS = 200
-
-# Mirrors the bulk-approve guard (reconciliation.py approve_bucket): rows
-# already approved/rejected/locked can never be acted on again.
-_TERMINAL_STATUSES = ("approved", "rejected", "locked")
 
 
 @dataclass(frozen=True)
@@ -38,42 +39,51 @@ class EnvelopeReport:
     excluded: dict[str, int]
 
     def to_payload(self) -> dict:
-        """JSON-safe dict for audit payloads (Decimal → str, ids capped)."""
+        """JSON-safe dict for audit payloads (Decimal → str)."""
         return {
             "envelope_version": self.envelope_version,
             "candidate_count": self.candidate_count,
             "candidate_total_amount": str(self.candidate_total_amount),
-            "candidate_ids": list(self.candidate_ids[:MAX_PAYLOAD_CANDIDATE_IDS]),
-            "candidate_ids_truncated": len(self.candidate_ids) > MAX_PAYLOAD_CANDIDATE_IDS,
+            "candidate_ids": list(self.candidate_ids),
+            "candidate_ids_truncated": self.candidate_count > len(self.candidate_ids),
             "excluded": dict(self.excluded),
         }
 
 
-def evaluate(results: Iterable[ReconciliationResult]) -> EnvelopeReport:
-    """Classify rows into envelope candidates vs excluded-with-reason."""
-    candidates: list[ReconciliationResult] = []
-    excluded: dict[str, int] = {}
+def evaluate(results: Iterable[Any]) -> EnvelopeReport:
+    """Classify rows into envelope candidates vs excluded-with-reason.
 
-    def _exclude(reason: str) -> None:
-        excluded[reason] = excluded.get(reason, 0) + 1
+    Accepts any row exposing id/status/bucket/match_type/variance_amount/
+    stripe_amount (ORM objects or column-only Row tuples).
+    """
+    excluded: Counter[str] = Counter()
+    candidate_ids: list[str] = []
+    candidate_count = 0
+    total = Decimal("0")
 
     for row in results:
-        if row.status in _TERMINAL_STATUSES:
-            _exclude("terminal_status")
+        if row.status in TERMINAL_RESULT_STATUSES:
+            excluded["terminal_status"] += 1
         elif row.bucket != BUCKET_MATCHES:
-            _exclude("bucket_not_matches")
+            excluded["bucket_not_matches"] += 1
         elif row.match_type != "deterministic":
-            _exclude("not_deterministic")
+            excluded["not_deterministic"] += 1
         elif row.variance_amount is None or row.variance_amount != Decimal("0"):
-            _exclude("has_variance")
+            excluded["has_variance"] += 1
+        elif row.stripe_amount is None:
+            # Amount-unknown rows must not be "$0-blessed": the per-run dollar
+            # exposure would silently understate them. Out, with their own reason.
+            excluded["amount_unknown"] += 1
         else:
-            candidates.append(row)
+            candidate_count += 1
+            total += row.stripe_amount
+            if len(candidate_ids) < MAX_PAYLOAD_CANDIDATE_IDS:
+                candidate_ids.append(str(row.id))
 
-    total = sum((c.stripe_amount or Decimal("0") for c in candidates), Decimal("0"))
     return EnvelopeReport(
         envelope_version=ENVELOPE_VERSION,
-        candidate_ids=tuple(str(c.id) for c in candidates),
-        candidate_count=len(candidates),
+        candidate_ids=tuple(candidate_ids),
+        candidate_count=candidate_count,
         candidate_total_amount=total,
-        excluded=excluded,
+        excluded=dict(excluded),
     )

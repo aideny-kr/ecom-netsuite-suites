@@ -1,13 +1,18 @@
 """Rung-1 dry-run job (Bet 3): report-only autonomy-envelope evaluation.
 
-For each tenant with ``autonomous_recon`` enabled, evaluates the v1 envelope
-against the latest COMPLETED reconciliation run and writes ONE audit event
-(actor_type="system") with the report. NEVER mutates result rows; NEVER
-writes to NetSuite. This builds the evidence base for enforcement later.
+For each tenant with ``autonomous_recon`` (and the master ``reconciliation``
+flag) enabled, evaluates the v1 envelope against every not-yet-evaluated
+COMPLETED reconciliation run in the recent window — newest first, bounded —
+and writes ONE audit event (actor_type="system") per run with the report.
+Catch-up by design: coverage of the evidence base must not depend on Beat
+timing vs run duration (a run completing after the 04:30 slot, or superseded
+by a manual run, is picked up on the next pass). NEVER mutates result rows;
+NEVER writes to NetSuite.
 """
 
 import logging
 import uuid
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,10 +25,14 @@ logger = logging.getLogger(__name__)
 AUTONOMY_FLAG = "autonomous_recon"
 MASTER_RECON_FLAG = "reconciliation"
 DRY_RUN_ACTION = "recon.envelope.dry_run"
+# Catch-up bounds. The window also keeps the audit-event dedup horizon safely
+# inside AUDIT_RETENTION_DAYS (90) — retention can never resurrect an old run.
+MAX_RUNS_PER_EVALUATION = 10
+EVALUATION_WINDOW_DAYS = 30
 
 
 async def dry_run_for_tenant(db: AsyncSession, tenant_id: str) -> dict:
-    """Evaluate the envelope for one tenant. Report-only: one audit event, no mutations."""
+    """Evaluate the envelope for one tenant. Report-only: audit events only, no mutations."""
     from app.models.audit import AuditEvent
     from app.models.reconciliation import ReconciliationResult, ReconciliationRun
     from app.services import audit_service, feature_flag_service
@@ -35,64 +44,84 @@ async def dry_run_for_tenant(db: AsyncSession, tenant_id: str) -> dict:
     if not await feature_flag_service.is_enabled(db, tid, AUTONOMY_FLAG):
         return {"tenant_id": tenant_id, "skipped": "flag_disabled"}
 
-    run = (
-        await db.execute(
-            select(ReconciliationRun)
-            .where(
-                ReconciliationRun.tenant_id == tid,
-                ReconciliationRun.status == "completed",
-            )
-            .order_by(ReconciliationRun.created_at.desc())
-            .limit(1)
-        )
-    ).scalar_one_or_none()
-    if run is None:
-        return {"tenant_id": tenant_id, "skipped": "no_completed_run"}
-
-    # One dry-run audit per run, ever — a tenant with no new runs must not be
-    # re-audited nightly forever.
-    already = (
-        await db.execute(
-            select(AuditEvent.id)
-            .where(
-                AuditEvent.tenant_id == tid,
-                AuditEvent.action == DRY_RUN_ACTION,
-                AuditEvent.resource_id == str(run.id),
-            )
-            .limit(1)
-        )
-    ).scalar_one_or_none()
-    if already is not None:
-        return {"tenant_id": tenant_id, "run_id": str(run.id), "skipped": "already_evaluated"}
-
-    results = (
+    cutoff = datetime.now(timezone.utc) - timedelta(days=EVALUATION_WINDOW_DAYS)
+    runs = (
         (
             await db.execute(
-                select(ReconciliationResult).where(
-                    ReconciliationResult.tenant_id == tid,
-                    ReconciliationResult.run_id == run.id,
+                select(ReconciliationRun)
+                .where(
+                    ReconciliationRun.tenant_id == tid,
+                    ReconciliationRun.status == "completed",
+                    ReconciliationRun.created_at >= cutoff,
                 )
+                .order_by(ReconciliationRun.created_at.desc())
+                .limit(MAX_RUNS_PER_EVALUATION)
             )
         )
         .scalars()
         .all()
     )
-    report = autonomy_envelope.evaluate(results)
+    if not runs:
+        return {"tenant_id": tenant_id, "skipped": "no_completed_run"}
 
-    await audit_service.log_event(
-        db=db,
-        tenant_id=tid,
-        category="reconciliation",
-        action=DRY_RUN_ACTION,
-        actor_id=None,
-        actor_type="system",
-        resource_type="reconciliation_run",
-        resource_id=str(run.id),
-        correlation_id=f"envelope-dryrun-{uuid.uuid4().hex}",
-        payload=report.to_payload(),
-    )
+    # One dry-run audit per run, ever — already-evaluated runs are skipped.
+    audited = {
+        row[0]
+        for row in (
+            await db.execute(
+                select(AuditEvent.resource_id).where(
+                    AuditEvent.tenant_id == tid,
+                    AuditEvent.action == DRY_RUN_ACTION,
+                    AuditEvent.resource_id.in_([str(r.id) for r in runs]),
+                )
+            )
+        ).all()
+    }
+
+    reports: list[dict] = []
+    for run in runs:
+        if str(run.id) in audited:
+            continue
+        # Column-only select: the evaluator reads six scalars; loading full ORM
+        # entities (incl. evidence JSON) for tens of thousands of rows is waste.
+        rows = (
+            await db.execute(
+                select(
+                    ReconciliationResult.id,
+                    ReconciliationResult.status,
+                    ReconciliationResult.bucket,
+                    ReconciliationResult.match_type,
+                    ReconciliationResult.variance_amount,
+                    ReconciliationResult.stripe_amount,
+                ).where(
+                    ReconciliationResult.tenant_id == tid,
+                    ReconciliationResult.run_id == run.id,
+                )
+            )
+        ).all()
+        payload = autonomy_envelope.evaluate(rows).to_payload()
+
+        await audit_service.log_event(
+            db=db,
+            tenant_id=tid,
+            category="reconciliation",
+            action=DRY_RUN_ACTION,
+            actor_id=None,
+            actor_type="system",
+            resource_type="reconciliation_run",
+            resource_id=str(run.id),
+            correlation_id=f"envelope-dryrun-{uuid.uuid4().hex}",
+            payload=payload,
+        )
+        reports.append({"run_id": str(run.id), **payload})
+
     await db.commit()
-    return {"tenant_id": tenant_id, "run_id": str(run.id), **report.to_payload()}
+    return {
+        "tenant_id": tenant_id,
+        "evaluated_count": len(reports),
+        "already_evaluated_count": len(runs) - len(reports),
+        "reports": reports,
+    }
 
 
 @celery_app.task(base=InstrumentedTask, name="tasks.recon_envelope_dry_run", queue="recon")
@@ -120,9 +149,8 @@ def recon_envelope_dry_run_all():
 
     async def _tenants() -> list[str]:
         async with worker_async_session() as db:
-            autonomy = set(await feature_flag_service.list_enabled_tenants(db, AUTONOMY_FLAG))
-            master = set(await feature_flag_service.list_enabled_tenants(db, MASTER_RECON_FLAG))
-            return [str(t) for t in sorted(autonomy & master, key=str)]
+            tenants = await feature_flag_service.list_tenants_with_flags(db, (AUTONOMY_FLAG, MASTER_RECON_FLAG))
+            return [str(t) for t in tenants]
 
     stats = {"dispatched": 0, "failed": 0}
     for tenant_id in asyncio.run(_tenants()):

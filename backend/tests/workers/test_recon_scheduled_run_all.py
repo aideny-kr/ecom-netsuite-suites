@@ -31,10 +31,11 @@ class TestPreforkEventLoopSafety:
         assert "worker_async_session" in src
         assert "async_session_factory" not in src
 
-    def test_reconciliation_run_sets_rls_tenant_context(self):
-        """The activated run task must SET LOCAL the tenant before any query."""
+    def test_reconciliation_run_sets_session_scoped_tenant_context(self):
+        """The activated run task must set tenant context with the SESSION-scoped
+        variant — both engines commit mid-run, which clears SET LOCAL."""
         src = _task_source("app/workers/tasks/reconciliation_run.py")
-        assert "set_tenant_context" in src
+        assert "set_tenant_context_session" in src
 
     def test_reconciliation_run_has_no_retry(self):
         """ReconJobRunner commits a failed-run row before raising; self.retry
@@ -150,6 +151,26 @@ async def test_reconciliation_run_routes_match_level(monkeypatch):
     out = await mod._execute(payout_ids=["po_1"], match_level="payout", **common)
     assert out == {"ok": True}
     assert instantiated == ["payout"]
+
+
+async def test_payout_ids_with_order_level_is_rejected():
+    """payout_ids + match_level='order' must raise, never silently drop the
+    payout filter (the order engine has no payout parameter)."""
+    import pytest
+
+    from app.workers.tasks import reconciliation_run as mod
+
+    with pytest.raises(ValueError, match="payout_ids requires match_level='payout'"):
+        await mod._execute(
+            db=object(),
+            tenant_id="t1",
+            date_from="2026-06-01",
+            date_to="2026-06-07",
+            subsidiary_id=None,
+            payout_ids=["po_1"],
+            job_id=None,
+            match_level="order",
+        )
 
 
 async def test_reconciliation_run_task_defaults_to_order_level():

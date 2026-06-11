@@ -22,3 +22,22 @@ async def test_list_enabled_tenants_filters_by_flag_and_enabled(db, tenant_a, te
 
     assert enabled == [tenant_a.id]
     assert all(isinstance(t, uuid.UUID) for t in enabled)
+
+
+async def test_list_tenants_with_flags_requires_all_flags_and_active_tenant(db, tenant_a, tenant_b):
+    """Fan-out gating helper: ALL flags enabled AND tenant active, one query."""
+    await feature_flag_service.set_flag(db, tenant_a.id, "recon_scheduled_runs", True)
+    await feature_flag_service.set_flag(db, tenant_a.id, "reconciliation", True)
+    # tenant_b has both flags but is deactivated — must be excluded.
+    await feature_flag_service.set_flag(db, tenant_b.id, "recon_scheduled_runs", True)
+    await feature_flag_service.set_flag(db, tenant_b.id, "reconciliation", True)
+    tenant_b.is_active = False
+    await db.flush()
+
+    out = await feature_flag_service.list_tenants_with_flags(db, ("recon_scheduled_runs", "reconciliation"))
+    assert out == [tenant_a.id]
+
+    # Missing one of the required flags → excluded.
+    await feature_flag_service.set_flag(db, tenant_a.id, "reconciliation", False)
+    out = await feature_flag_service.list_tenants_with_flags(db, ("recon_scheduled_runs", "reconciliation"))
+    assert out == []

@@ -68,10 +68,31 @@ async def test_already_evaluated_run_is_not_reaudited(db, tenant_a):
     first = await dry_run_for_tenant(db, str(tenant_a.id))
     second = await dry_run_for_tenant(db, str(tenant_a.id))
 
-    assert first["candidate_count"] == 1
-    assert second["skipped"] == "already_evaluated"
-    assert second["run_id"] == str(run.id)
+    assert first["evaluated_count"] == 1
+    assert second["evaluated_count"] == 0
+    assert second["already_evaluated_count"] == 1
     assert len(await _audit_rows(db, run.id)) == 1
+
+
+async def test_catches_up_on_all_unevaluated_runs(db, tenant_a):
+    """Coverage must not depend on Beat timing: a run superseded by a newer one
+    before its first evaluation is still picked up (catch-up over the recent
+    window, newest first), each with its own audit event."""
+    feature_flag_service.clear_cache()
+    await feature_flag_service.set_flag(db, tenant_a.id, "reconciliation", True)
+    await feature_flag_service.set_flag(db, tenant_a.id, "autonomous_recon", True)
+    older = await create_test_recon_run(db, tenant_a.id, status="completed")
+    newer = await create_test_recon_run(db, tenant_a.id, status="completed")
+    await create_test_recon_result(db, tenant_a.id, older.id, status="suggested")
+    await create_test_recon_result(db, tenant_a.id, newer.id, status="suggested")
+    await db.flush()
+
+    out = await dry_run_for_tenant(db, str(tenant_a.id))
+
+    assert out["evaluated_count"] == 2
+    assert out["already_evaluated_count"] == 0
+    assert len(await _audit_rows(db, older.id)) == 1
+    assert len(await _audit_rows(db, newer.id)) == 1
 
 
 async def test_writes_one_system_audit_and_mutates_nothing(db, tenant_a):
@@ -93,8 +114,9 @@ async def test_writes_one_system_audit_and_mutates_nothing(db, tenant_a):
 
     out = await dry_run_for_tenant(db, str(tenant_a.id))
 
-    assert out["run_id"] == str(run.id)
-    assert out["candidate_count"] == 1
+    assert out["evaluated_count"] == 1
+    assert out["reports"][0]["run_id"] == str(run.id)
+    assert out["reports"][0]["candidate_count"] == 1
     events = await _audit_rows(db, run.id)
     assert len(events) == 1
     evt = events[0]
@@ -124,8 +146,8 @@ async def test_results_query_is_tenant_scoped(db, tenant_a, tenant_b):
 
     out = await dry_run_for_tenant(db, str(tenant_a.id))
 
-    assert out["run_id"] == str(run.id)
-    assert out["candidate_count"] == 0
+    assert out["reports"][0]["run_id"] == str(run.id)
+    assert out["reports"][0]["candidate_count"] == 0
 
 
 async def test_no_completed_run_skips(db, tenant_a):

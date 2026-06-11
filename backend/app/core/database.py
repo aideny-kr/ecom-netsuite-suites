@@ -62,6 +62,17 @@ async def set_tenant_context(session: AsyncSession, tenant_id: str) -> None:
     await session.execute(text(f"SET LOCAL app.current_tenant_id = '{validated}'"))
 
 
+async def set_tenant_context_session(session: AsyncSession, tenant_id: str) -> None:
+    """Session-scoped variant (plain SET, survives commits) for worker tasks whose
+    services commit mid-run — SET LOCAL is cleared at the first commit, silently
+    dropping RLS context for everything after it. Only safe on disposable
+    per-task engines (worker_async_session), never on pooled app sessions where
+    the connection would return to the pool still carrying the GUC.
+    """
+    validated = str(uuid.UUID(str(tenant_id)))  # Raises ValueError if not a valid UUID
+    await session.execute(text(f"SET app.current_tenant_id = '{validated}'"))
+
+
 def worker_async_session():
     """Create a fresh async engine + session for Celery worker tasks.
 

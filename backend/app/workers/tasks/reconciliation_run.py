@@ -27,6 +27,10 @@ async def _execute(
     match_level="order" (product default) → OrderReconJob, which carries all the
     R1/R2 hardening; match_level="payout" → legacy ReconJobRunner (payout_ids).
     """
+    if payout_ids and match_level != "payout":
+        # The order engine has no payout filter — silently dropping payout_ids
+        # would reconcile the whole window instead of the requested payouts.
+        raise ValueError("payout_ids requires match_level='payout'")
     if match_level == "order":
         from app.services.reconciliation.order_recon_job import OrderReconJob
 
@@ -51,8 +55,9 @@ async def _execute(
     return summary.model_dump(mode="json")
 
 
-@celery_app.task(base=InstrumentedTask, name="tasks.reconciliation_run")
+@celery_app.task(base=InstrumentedTask, name="tasks.reconciliation_run", bind=True)
 def reconciliation_run_task(
+    self,
     tenant_id: str,
     date_from: str,
     date_to: str,
@@ -69,11 +74,18 @@ def reconciliation_run_task(
     """
     import asyncio
 
-    from app.core.database import set_tenant_context, worker_async_session
+    from app.core.database import set_tenant_context_session, worker_async_session
+
+    # Attribute the run to the Job row InstrumentedTask created for this
+    # execution, so reconciliation_runs.job_id links back to the jobs table.
+    effective_job_id = job_id or (str(self._job_id) if self._job_id else None)
 
     async def _run() -> dict:
         async with worker_async_session() as db:
-            await set_tenant_context(db, tenant_id)
+            # Session-scoped SET (not SET LOCAL): both engines commit mid-run,
+            # which would clear a transaction-scoped GUC for everything after
+            # the first commit. Safe here because the engine is disposable.
+            await set_tenant_context_session(db, tenant_id)
             return await _execute(
                 db,
                 tenant_id=tenant_id,
@@ -81,7 +93,7 @@ def reconciliation_run_task(
                 date_to=date_to,
                 subsidiary_id=subsidiary_id,
                 payout_ids=payout_ids,
-                job_id=job_id,
+                job_id=effective_job_id,
                 match_level=match_level,
             )
 

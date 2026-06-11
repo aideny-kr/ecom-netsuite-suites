@@ -99,3 +99,12 @@ def test_payload_not_truncated_below_cap():
     payload = evaluate([_result()]).to_payload()
     assert payload["candidate_ids_truncated"] is False
     assert len(payload["candidate_ids"]) == 1
+
+
+def test_amount_unknown_rows_are_excluded_not_zero_blessed():
+    """A row with stripe_amount=None must not count as a $0 candidate — that
+    would silently understate the dollar exposure the envelope caps will be
+    calibrated against. It gets its own exclusion reason."""
+    report = evaluate([_result(stripe_amount=None)])
+    assert report.candidate_count == 0
+    assert report.excluded == {"amount_unknown": 1}

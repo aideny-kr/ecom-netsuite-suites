@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import time
 import uuid
+from collections.abc import Sequence
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.feature_flag import TenantFeatureFlag
@@ -83,6 +84,29 @@ async def list_enabled_tenants(db: AsyncSession, flag_key: str) -> list[uuid.UUI
         )
     )
     return [row[0] for row in result.all()]
+
+
+async def list_tenants_with_flags(db: AsyncSession, flag_keys: Sequence[str]) -> list[uuid.UUID]:
+    """ACTIVE tenants with ALL of flag_keys enabled, sorted, in one query.
+
+    No cache — used by Beat fan-outs, which must also exclude deactivated
+    tenants (mirrors the user-facing dependency that 403s inactive tenants).
+    """
+    from app.models.tenant import Tenant
+
+    keys = list(dict.fromkeys(flag_keys))
+    result = await db.execute(
+        select(TenantFeatureFlag.tenant_id)
+        .join(Tenant, Tenant.id == TenantFeatureFlag.tenant_id)
+        .where(
+            TenantFeatureFlag.flag_key.in_(keys),
+            TenantFeatureFlag.enabled.is_(True),
+            Tenant.is_active.is_(True),
+        )
+        .group_by(TenantFeatureFlag.tenant_id)
+        .having(func.count(TenantFeatureFlag.flag_key.distinct()) == len(keys))
+    )
+    return sorted((row[0] for row in result.all()), key=str)
 
 
 async def set_flag(db: AsyncSession, tenant_id: uuid.UUID, flag_key: str, enabled: bool) -> TenantFeatureFlag:
