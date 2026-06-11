@@ -15,6 +15,16 @@ These tests go through ``mcp_server.call_tool`` — the same registry-level
 dispatch shape chat uses — one per recon tool, so the context-convention
 contract can never silently regress again. They run WITHOUT a database
 (stub sessions), like ``test_recon_exceptions_tool.py``.
+
+Chat-boundary section (second R3-B review fix): chat has a gate ABOVE
+``mcp_server.call_tool`` — ``ALLOWED_CHAT_TOOLS`` filters both
+``build_local_tool_definitions()`` (what the LLM is advertised) and
+``execute_tool_call()``'s ``_LOCAL_NAME_MAP`` (what an emitted name can
+reach). The recon family used to be absent from that frozenset, so the
+dispatch-level fix above was still unreachable end-to-end from chat. The
+chat-boundary tests below enter at ``execute_tool_call`` with the
+LLM-facing underscore names — the REAL production boundary — so the
+exposure can never silently regress to "tests pass one layer below".
 """
 
 from __future__ import annotations
@@ -301,3 +311,96 @@ async def test_missing_context_still_returns_structured_error_through_dispatch()
 
     assert out["success"] is False
     assert "Missing database session or tenant context" in out["error"]
+
+
+# ---------------------------------------------------------------------------
+# Chat boundary — ALLOWED_CHAT_TOOLS + execute_tool_call (the LLM-name layer)
+# ---------------------------------------------------------------------------
+# build_local_tool_definitions() advertises ONLY ALLOWED_CHAT_TOOLS entries to
+# the LLM, and execute_tool_call() refuses any name outside _LOCAL_NAME_MAP
+# (also filtered by ALLOWED_CHAT_TOOLS). These tests pin the recon family's
+# chat exposure at that boundary — without them, the dispatch-level tests
+# above stay green while chat cannot reach any recon tool.
+
+
+def test_recon_family_advertised_to_chat():
+    """The LLM must be ADVERTISED the recon tools, or reconciliation.yaml's
+    trigger_tools / workflow reference names the model can never call."""
+    from app.services.chat.tools import build_local_tool_definitions
+
+    names = {d["name"] for d in build_local_tool_definitions()}
+    for llm_name in ("recon_run", "recon_get_exceptions", "recon_get_evidence", "recon_approve_match"):
+        assert llm_name in names, f"{llm_name} is not advertised to chat (ALLOWED_CHAT_TOOLS gate)"
+
+
+def test_local_name_map_round_trips_recon_names():
+    """execute_tool_call resolves LLM names via _LOCAL_NAME_MAP — every recon
+    LLM name must map back to its dotted registry name."""
+    from app.services.chat.tools import _LOCAL_NAME_MAP
+
+    assert _LOCAL_NAME_MAP.get("recon_run") == "recon.run"
+    assert _LOCAL_NAME_MAP.get("recon_get_exceptions") == "recon.get_exceptions"
+    assert _LOCAL_NAME_MAP.get("recon_get_evidence") == "recon.get_evidence"
+    assert _LOCAL_NAME_MAP.get("recon_approve_match") == "recon.approve_match"
+
+
+async def test_get_exceptions_reachable_through_execute_tool_call():
+    """R3-B acceptance, discovery half: the LLM emits ``recon_get_exceptions``
+    with bucket="rules" and the call must reach the real tool through
+    execute_tool_call → mcp_server.call_tool → governed_execute — NOT the
+    '"recon_get_exceptions" is not allowed in chat' rejection."""
+    import json
+
+    from app.services.chat.tools import execute_tool_call
+
+    row = _make_result(status="suggested", match_type="fuzzy", bucket=BUCKET_RULES)
+    db = _ExceptionsStubDB([row])
+
+    raw = await execute_tool_call(
+        tool_name="recon_get_exceptions",
+        tool_input={"run_id": str(uuid.uuid4()), "bucket": "rules"},
+        tenant_id=row.tenant_id,
+        actor_id=uuid.uuid4(),
+        correlation_id="test-corr",
+        db=db,
+    )
+
+    out = json.loads(raw)
+    assert out.get("error") is None, out
+    assert out["success"] is True, out
+    assert out["bucket"] == BUCKET_RULES
+    assert out["exception_count"] == 1
+    assert out["exceptions"][0]["status"] == "suggested"
+
+
+async def test_approve_match_reachable_through_execute_tool_call():
+    """R3-B acceptance, approve half: the LLM emits ``recon_approve_match``
+    and the chat boundary must execute it — stamping approved_by + the
+    per-line recon.approve audit actor from the chat actor (HITL invariant)."""
+    import json
+
+    from app.services.chat.tools import execute_tool_call
+
+    row = _make_result(status="suggested", match_type="fuzzy", bucket=BUCKET_RULES)
+    db = _ApproveStubDB(row, run=None)
+    actor = uuid.uuid4()
+
+    raw = await execute_tool_call(
+        tool_name="recon_approve_match",
+        tool_input={"result_id": str(row.id)},
+        tenant_id=row.tenant_id,
+        actor_id=actor,
+        correlation_id="test-corr",
+        db=db,
+    )
+
+    out = json.loads(raw)
+    assert out.get("error") is None, out
+    assert out["success"] is True, out
+    assert out["status"] == "approved"
+    assert row.status == "approved"
+    assert row.approved_by == actor
+    assert db.committed is True
+    approve_events = [e for e in db.added if isinstance(e, AuditEvent) and e.action == "recon.approve"]
+    assert len(approve_events) == 1
+    assert approve_events[0].actor_id == actor

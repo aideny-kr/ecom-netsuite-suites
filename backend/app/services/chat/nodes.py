@@ -62,6 +62,23 @@ ALLOWED_CHAT_TOOLS: frozenset[str] = frozenset(
         "sheets.read_range",
         "metric.resolve",
         "metric.compute",
+        # Recon tool family (R3-B): chat is the discovery + approve surface for
+        # the four-bucket reviewer (fetch bucket="rules" → recon.approve_match).
+        # These tools write ONLY to this app's recon tables (runs are
+        # disposable; approve flips a suggested row's status) — they can NEVER
+        # post to NetSuite, so the no-auto-post invariant is untouched.
+        # Explicit HITL decision for recon.approve_match: confirmation is
+        # prompt-level (registry description + reconciliation.yaml both require
+        # asking the user first) backed by hard in-tool guards — closed/locked
+        # run rejection, already-approved rejection, tenant scoping, and the
+        # per-line recon.approve audit stamped with the chat actor (PR #110).
+        # mutation_guard.classify_mutation() only intercepts ext__ NetSuite
+        # writes today; enforced (card-based) confirmation parity for local
+        # recon.approve_match is a logged follow-up, its own T2 PR.
+        "recon.run",
+        "recon.get_exceptions",
+        "recon.get_evidence",
+        "recon.approve_match",
     }
 )
 

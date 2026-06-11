@@ -56,6 +56,15 @@ class TestAllowedChatTools:
             "sheets.read_range",
             "metric.resolve",
             "metric.compute",
+            # Recon family (R3-B): chat discovery + approve surface. App-DB
+            # writes only (disposable runs / suggested-row approval), never a
+            # NetSuite post. recon.approve_match HITL = prompt-level
+            # confirmation + in-tool hard guards (closed/locked rejection,
+            # tenant scoping, per-line audit) — see nodes.py.
+            "recon.run",
+            "recon.get_exceptions",
+            "recon.get_evidence",
+            "recon.approve_match",
         }
         assert ALLOWED_CHAT_TOOLS == expected
 
@@ -64,11 +73,16 @@ class TestAllowedChatTools:
         assert "workspace.apply_patch" not in ALLOWED_CHAT_TOOLS
 
     def test_write_tools_blocked(self):
-        """Write/mutating tools are not in ALLOWED_CHAT_TOOLS."""
+        """Write/mutating tools are not in ALLOWED_CHAT_TOOLS.
+
+        recon.run / recon.approve_match are deliberately NOT in this list
+        (R3-B): they are chat's reviewer surface, write only to this app's
+        recon tables (disposable runs / suggested-row approval with per-line
+        audit + closed-run rejection), and can never post to NetSuite.
+        """
         write_tools = [
             "schedule.create",
             "schedule.run",
-            "recon.run",
             "connection.create",
             "connection.delete",
             "user.create",

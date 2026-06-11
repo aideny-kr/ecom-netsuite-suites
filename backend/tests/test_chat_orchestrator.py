@@ -60,5 +60,11 @@ class TestAllowedChatToolsFromOld:
             "sheets.read_range",
             "metric.resolve",
             "metric.compute",
+            # Recon family (R3-B) — chat discovery + approve surface; see
+            # nodes.py for the documented HITL decision.
+            "recon.run",
+            "recon.get_exceptions",
+            "recon.get_evidence",
+            "recon.approve_match",
         }
         assert ALLOWED_CHAT_TOOLS == expected

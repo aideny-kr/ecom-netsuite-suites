@@ -144,6 +144,11 @@ def _all_known_tool_names_for_tenant_with_every_connector() -> set[str]:
         "sheets_read_range",
         "metric_resolve",
         "metric_compute",
+        # Recon family (R3-B) — chat discovery + approve surface
+        "recon_run",
+        "recon_get_exceptions",
+        "recon_get_evidence",
+        "recon_approve_match",
         # Added by build_all_tool_definitions (result_reference_tool)
         "reference_previous_result",
     }
