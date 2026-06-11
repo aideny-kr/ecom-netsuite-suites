@@ -45,6 +45,7 @@ from app.services.reconciliation.four_bucket_classifier import (
     ALL_BUCKETS,
     BUCKET_NEEDS_REVIEW,
     BULK_APPROVABLE_BUCKETS,
+    TERMINAL_RESULT_STATUSES,
     bucket_conditions,
 )
 from app.services.reconciliation.pipeline import ReconPipeline
@@ -564,7 +565,7 @@ async def approve_result(
 # ---------------------------------------------------------------------------
 # Bulk-approve a whole bucket (set-based, per-line audit, no auto-post)
 # ---------------------------------------------------------------------------
-_SKIP_STATUSES = ("approved", "rejected", "locked")
+_SKIP_STATUSES = TERMINAL_RESULT_STATUSES
 
 
 @router.post("/runs/{run_id}/approve-bucket", response_model=ReconBucketApproveResult)

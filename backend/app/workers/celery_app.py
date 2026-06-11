@@ -46,6 +46,9 @@ celery_app.conf.include = [
     "app.workers.tasks.stripe_sync_all",
     "app.workers.tasks.netsuite_deposit_sync",
     "app.workers.tasks.netsuite_deposit_sync_all",
+    "app.workers.tasks.reconciliation_run",
+    "app.workers.tasks.recon_scheduled_run_all",
+    "app.workers.tasks.recon_envelope_dry_run",
     "app.workers.tasks.suitescript_sync",
     "app.workers.tasks.suiteql_export",
     "app.workers.tasks.workspace_run",
@@ -96,6 +99,17 @@ celery_app.conf.beat_schedule = {
     "netsuite-deposit-sync-nightly": {
         "task": "tasks.netsuite_deposit_sync_all",
         "schedule": crontab(hour=2, minute=0),  # 2 AM UTC nightly, 7-day delta
+    },
+    # Bet 3 Rung 1 — both flag-gated per tenant (default off → no-op fan-outs).
+    # 03:30 UTC: after deposit sync (02:00) has landed the night's data.
+    "recon-scheduled-run-nightly": {
+        "task": "tasks.recon_scheduled_run_all",
+        "schedule": crontab(hour=3, minute=30),
+    },
+    # 04:30 UTC: after scheduled runs complete; report-only envelope evaluation.
+    "recon-envelope-dry-run-nightly": {
+        "task": "tasks.recon_envelope_dry_run_all",
+        "schedule": crontab(hour=4, minute=30),
     },
     "drive-rag-sync-nightly": {
         "task": "tasks.drive_rag_sync_all",
