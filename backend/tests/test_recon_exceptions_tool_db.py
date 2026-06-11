@@ -3,8 +3,11 @@
 Row-level proof of the bucket-keyed selection re-key against real Postgres via
 the conftest ``db`` fixture (each test rolled back): exceptions = the
 authoritative ``needs_review`` bucket, excluding already-dispositioned
-(approved/locked) rows; ``min_variance`` is a Decimal-safe abs filter.
-The compiled-SQL/unit twin is ``test_recon_exceptions_tool.py``.
+(approved/locked) rows; ``min_variance`` is a Decimal-safe abs filter;
+ordering is largest ABSOLUTE variance first; ``exception_count`` is the TRUE
+filtered total (with ``returned``/``truncated``); zero amounts serialize as
+"0.00", not null. The compiled-SQL/unit twin is
+``test_recon_exceptions_tool.py`` (the >50-row truncation case lives there).
 
 Written rigorously following the existing recon DB-test patterns but NOT run in
 the implementer environment (no DB here); the PM runs them post-flight.
@@ -173,6 +176,78 @@ async def test_min_variance_filters_decimal_safe_abs(db, tenant_a):
     assert str(big.id) in returned_ids
     assert str(negative_big.id) in returned_ids
     assert str(small.id) not in returned_ids
+
+
+async def test_ordering_largest_absolute_variance_first_with_true_total(db, tenant_a):
+    """Signed desc would sort the -120.00 refund-heavy row dead-last (and at
+    scale truncate it below the 50-row cap); abs desc surfaces it FIRST.
+    Payload also carries the TRUE total + returned + truncated."""
+    run = await create_test_recon_run(db, tenant_a.id)
+    positive_mid = await create_test_recon_result(
+        db,
+        tenant_a.id,
+        run.id,
+        status="pending",
+        match_type="unmatched",
+        variance_type="missing",
+        variance_amount=Decimal("50.00"),
+    )
+    negative_biggest = await create_test_recon_result(
+        db,
+        tenant_a.id,
+        run.id,
+        status="pending",
+        match_type="unmatched",
+        variance_type="missing",
+        variance_amount=Decimal("-120.00"),
+    )
+    positive_small = await create_test_recon_result(
+        db,
+        tenant_a.id,
+        run.id,
+        status="pending",
+        match_type="unmatched",
+        variance_type="missing",
+        variance_amount=Decimal("30.00"),
+    )
+    await db.flush()
+
+    out = await execute({"run_id": str(run.id)}, db=db, tenant_id=tenant_a.id)
+
+    assert out["success"] is True
+    assert [e["result_id"] for e in out["exceptions"]] == [
+        str(negative_biggest.id),
+        str(positive_mid.id),
+        str(positive_small.id),
+    ]
+    # Count honesty fields (no truncation at 3 rows; >50 proof in the unit twin).
+    assert out["exception_count"] == 3
+    assert out["returned"] == 3
+    assert out["truncated"] is False
+
+
+async def test_zero_amounts_serialize_as_zero_not_null(db, tenant_a):
+    """A genuine Decimal("0.00") amount is falsy — it must come back as
+    "0.00", never null (the old truthiness check erased it)."""
+    run = await create_test_recon_run(db, tenant_a.id)
+    await create_test_recon_result(
+        db,
+        tenant_a.id,
+        run.id,
+        status="pending",
+        match_type="unmatched",
+        variance_type="missing",
+        variance_amount=Decimal("100.00"),
+        stripe_amount=Decimal("0.00"),
+        netsuite_amount=Decimal("0.00"),
+    )
+    await db.flush()
+
+    out = await execute({"run_id": str(run.id)}, db=db, tenant_id=tenant_a.id)
+
+    exc = out["exceptions"][0]
+    assert exc["stripe_amount"] == "0.00"
+    assert exc["netsuite_amount"] == "0.00"
 
 
 async def test_other_tenant_and_other_run_rows_invisible(db, tenant_a, tenant_b):

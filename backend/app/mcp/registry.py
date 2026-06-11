@@ -248,8 +248,10 @@ TOOL_REGISTRY = {
         "description": (
             "Fetch open reconciliation exceptions for a run — the authoritative needs_review bucket "
             "(unmatched + material-variance rows), excluding already-dispositioned (approved/locked) rows. "
-            "Each row carries the authoritative status + bucket; advisory_match_score is advisory-only, "
-            "never a verdict — disposition derives from status/bucket."
+            "Returns at most 50 rows, largest absolute variance first; exception_count is the TRUE total "
+            "matching the filters and truncated tells you whether rows were cut off — never present a "
+            "truncated list as exhaustive. Each row carries the authoritative status + bucket; "
+            "advisory_match_score is advisory-only, never a verdict — disposition derives from status/bucket."
         ),
         "execute": recon_exceptions.execute,
         "params_schema": {
@@ -257,7 +259,7 @@ TOOL_REGISTRY = {
             "min_variance": {
                 "type": "string",
                 "required": False,
-                "description": "Optional minimum absolute variance amount to include (e.g. '50.00')",
+                "description": "Optional minimum absolute variance amount to include (finite number, e.g. '50.00')",
             },
         },
     },
