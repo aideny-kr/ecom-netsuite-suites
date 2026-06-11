@@ -7,11 +7,19 @@ import type { ReconCloseReadiness, ReconRun } from "@/lib/types";
 // the checks key on GET /close-readiness/{period} — aggregated over EVERY run
 // the close will touch — never the selected run's bucket summary).
 let mockReadiness: ReconCloseReadiness | undefined;
+// Mutable close-mutation error so tests can drive the visible error line
+// (R4-A #2: a failed close was previously silent — nothing consumed isError).
+let mockClosePeriodError: Error | null = null;
 const closePeriodMutate = vi.fn();
 const useCloseReadinessSpy = vi.fn();
 
 vi.mock("@/hooks/use-reconciliation", () => ({
-  useClosePeriod: () => ({ mutate: closePeriodMutate, isPending: false }),
+  useClosePeriod: () => ({
+    mutate: closePeriodMutate,
+    isPending: false,
+    isError: mockClosePeriodError !== null,
+    error: mockClosePeriodError,
+  }),
   useCloseReadiness: (period: string | null) => {
     useCloseReadinessSpy(period);
     return { data: mockReadiness, isLoading: mockReadiness === undefined };
@@ -37,13 +45,14 @@ function makeRun(overrides: Partial<ReconRun> = {}): ReconRun {
   };
 }
 
-/** All-zero, single-run readiness unless overridden. */
+/** All-zero, single-run readiness (selected run in scope) unless overridden. */
 function makeReadiness(
   overrides: Partial<ReconCloseReadiness> = {},
 ): ReconCloseReadiness {
   return {
     period: "2026-05",
     runs_in_scope: 1,
+    in_scope_run_ids: ["run-1"],
     open_exceptions: 0,
     suggested: 0,
     left_for_review: 0,
@@ -53,6 +62,7 @@ function makeReadiness(
 
 const STEP_IDS = [
   "run_recon",
+  "run_in_scope",
   "review_exceptions",
   "approve_matches",
   "review_material_variances",
@@ -80,6 +90,7 @@ function toggleExportEvidence() {
 
 beforeEach(() => {
   mockReadiness = makeReadiness();
+  mockClosePeriodError = null;
   closePeriodMutate.mockReset();
   useCloseReadinessSpy.mockReset();
 });
@@ -89,7 +100,7 @@ afterEach(() => {
 });
 
 describe("CloseChecklist — period-readiness-driven auto-checks", () => {
-  it("renders the six steps in order (material variances between approve and export)", () => {
+  it("renders the seven steps in order (scope after run, material variances between approve and export)", () => {
     render(<CloseChecklist run={makeRun()} period="2026-05" />);
     const ids = STEP_IDS.map((id) => stepRow(id));
     // DOM order: each step row precedes the next.
@@ -180,10 +191,74 @@ describe("CloseChecklist — lock confirm dialog", () => {
   });
 });
 
+describe("CloseChecklist — run_in_scope gate (R4-A #1)", () => {
+  it("zero in-scope runs (all-zero payload) leaves Run In Close Scope incomplete and gates the lock", () => {
+    // THE vacuous-zero regression: with NOTHING in scope every count is 0,
+    // so the count-keyed `=== 0` checks all pass and the gate failed OPEN —
+    // a green checklist over a close that would 404 (or, worse, a checklist
+    // green for the WRONG period). The membership step must block.
+    mockReadiness = makeReadiness({ runs_in_scope: 0, in_scope_run_ids: [] });
+    render(<CloseChecklist run={makeRun()} period="2026-05" />);
+    expect(isStepComplete("run_in_scope")).toBe(false);
+    // The count-driven steps still read complete — only the scope step blocks.
+    expect(isStepComplete("review_exceptions")).toBe(true);
+    expect(isStepComplete("approve_matches")).toBe(true);
+    expect(isStepComplete("review_material_variances")).toBe(true);
+    toggleExportEvidence();
+    expect(lockButton()).toBeDisabled();
+  });
+
+  it("a month-spanning selected run (absent from in_scope_run_ids) leaves the step incomplete", () => {
+    // A run spanning a month boundary derives a period it is NOT closeable
+    // under (close requires date_from/date_to inside ONE month) — the other
+    // runs' counts can legitimately be zero while the selected run is out of
+    // scope, so membership of the selected run is required.
+    mockReadiness = makeReadiness({
+      runs_in_scope: 1,
+      in_scope_run_ids: ["some-other-run"],
+    });
+    render(<CloseChecklist run={makeRun()} period="2026-05" />);
+    expect(isStepComplete("run_in_scope")).toBe(false);
+    toggleExportEvidence();
+    expect(lockButton()).toBeDisabled();
+  });
+
+  it("selected run inside the close scope completes the step", () => {
+    render(<CloseChecklist run={makeRun()} period="2026-05" />);
+    expect(isStepComplete("run_in_scope")).toBe(true);
+  });
+
+  it("fails closed on a deploy-skew readiness payload without in_scope_run_ids", () => {
+    const skewed = makeReadiness() as unknown as Record<string, unknown>;
+    delete skewed.in_scope_run_ids;
+    mockReadiness = skewed as unknown as ReconCloseReadiness;
+    render(<CloseChecklist run={makeRun()} period="2026-05" />);
+    expect(isStepComplete("run_in_scope")).toBe(false);
+  });
+});
+
+describe("CloseChecklist — close errors are visible (R4-A #2)", () => {
+  it("renders the API error detail when the close mutation fails", () => {
+    mockClosePeriodError = new Error(
+      "No completed reconciliation runs found for 2026-05",
+    );
+    render(<CloseChecklist run={makeRun()} period="2026-05" />);
+    expect(
+      screen.getByText(/No completed reconciliation runs found for 2026-05/),
+    ).toBeInTheDocument();
+  });
+
+  it("renders no error line when the close has not errored", () => {
+    render(<CloseChecklist run={makeRun()} period="2026-05" />);
+    expect(screen.queryByText(/close failed/i)).not.toBeInTheDocument();
+  });
+});
+
 describe("CloseChecklist — fail closed while readiness is loading/missing", () => {
   it("undefined readiness leaves every auto-check incomplete and the lock gated", () => {
     mockReadiness = undefined;
     render(<CloseChecklist run={makeRun()} period="2026-05" />);
+    expect(isStepComplete("run_in_scope")).toBe(false);
     expect(isStepComplete("review_exceptions")).toBe(false);
     expect(isStepComplete("approve_matches")).toBe(false);
     expect(isStepComplete("review_material_variances")).toBe(false);
@@ -214,6 +289,16 @@ describe("CloseChecklist — manual toggles unchanged (HITL semantics)", () => {
     expect(isStepComplete("review_exceptions")).toBe(true);
     fireEvent.click(within(stepRow("review_exceptions")).getByRole("button"));
     expect(isStepComplete("review_exceptions")).toBe(false);
+  });
+
+  it("run_in_scope is manually overridable like every other step (advisory checklist)", () => {
+    // The checklist is advisory HITL — a human can override; if the close then
+    // fails server-side, the error line (R4-A #2) makes it visible.
+    mockReadiness = makeReadiness({ runs_in_scope: 0, in_scope_run_ids: [] });
+    render(<CloseChecklist run={makeRun()} period="2026-05" />);
+    expect(isStepComplete("run_in_scope")).toBe(false);
+    fireEvent.click(within(stepRow("run_in_scope")).getByRole("button"));
+    expect(isStepComplete("run_in_scope")).toBe(true);
   });
 });
 

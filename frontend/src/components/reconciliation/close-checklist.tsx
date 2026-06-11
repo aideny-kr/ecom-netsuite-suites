@@ -32,6 +32,22 @@ const STEPS: ChecklistStep[] = [
     check: (run) => run?.status === "completed" || run?.status === "closed",
   },
   {
+    id: "run_in_scope",
+    label: "Run In Close Scope",
+    description:
+      "Close locks the whole period — a run spanning a month boundary is not closeable under this period",
+    // R4-A: the count checks alone fail OPEN when NOTHING is in scope (every
+    // count is vacuously zero) or when the selected run spans a month boundary
+    // (out of its own derived period's scope while other runs' counts are
+    // zero). Require a non-empty scope AND membership of the SELECTED run.
+    // Optional chaining fails closed on missing readiness or a deploy-skew
+    // payload from an older backend without in_scope_run_ids.
+    check: (run, readiness) =>
+      (readiness?.runs_in_scope ?? 0) > 0 &&
+      !!run &&
+      readiness?.in_scope_run_ids?.includes(run.id) === true,
+  },
+  {
     id: "review_exceptions",
     label: "Review Exceptions",
     description: "Investigate and resolve all exceptions",
@@ -173,6 +189,19 @@ export function CloseChecklist({ run, period }: CloseChecklistProps) {
         <div className="mt-4 flex items-center gap-2 rounded-lg bg-orange-50 p-3 text-[13px] text-orange-800">
           <AlertTriangle className="h-4 w-4 shrink-0" />
           Complete all steps before locking the period.
+        </div>
+      )}
+
+      {/* R4-A #2: a failed close was silent — nothing consumed the mutation's
+          isError, so the checklist just stayed unlocked with no explanation.
+          Surface the API error detail (apiClient throws Error(detail)). */}
+      {closePeriod.isError && (
+        <div className="mt-4 flex items-center gap-2 rounded-lg bg-red-50 p-3 text-[13px] text-red-800">
+          <AlertTriangle className="h-4 w-4 shrink-0" />
+          Close failed:{" "}
+          {closePeriod.error instanceof Error
+            ? closePeriod.error.message
+            : "Request failed"}
         </div>
       )}
     </div>
