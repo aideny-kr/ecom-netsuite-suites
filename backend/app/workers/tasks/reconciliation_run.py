@@ -70,10 +70,11 @@ def reconciliation_run_task(
     """
     import asyncio
 
-    from app.core.database import worker_async_session
+    from app.core.database import set_tenant_context, worker_async_session
 
     async def _run() -> dict:
         async with worker_async_session() as db:
+            await set_tenant_context(db, tenant_id)
             return await _execute(
                 db,
                 tenant_id=tenant_id,

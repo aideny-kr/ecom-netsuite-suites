@@ -46,7 +46,14 @@ async def dry_run_for_tenant(db: AsyncSession, tenant_id: str) -> dict:
         return {"tenant_id": tenant_id, "skipped": "no_completed_run"}
 
     results = (
-        (await db.execute(select(ReconciliationResult).where(ReconciliationResult.run_id == run.id)))
+        (
+            await db.execute(
+                select(ReconciliationResult).where(
+                    ReconciliationResult.tenant_id == tid,
+                    ReconciliationResult.run_id == run.id,
+                )
+            )
+        )
         .scalars()
         .all()
     )

@@ -31,6 +31,11 @@ class TestPreforkEventLoopSafety:
         assert "worker_async_session" in src
         assert "async_session_factory" not in src
 
+    def test_reconciliation_run_sets_rls_tenant_context(self):
+        """The activated run task must SET LOCAL the tenant before any query."""
+        src = _task_source("app/workers/tasks/reconciliation_run.py")
+        assert "set_tenant_context" in src
+
 
 def test_is_celery_task_on_recon_queue():
     from app.workers.tasks.recon_scheduled_run_all import recon_scheduled_run_all
