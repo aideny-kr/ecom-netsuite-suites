@@ -92,3 +92,11 @@ def test_tasks_registered_on_recon_queue():
     assert recon_envelope_dry_run_all.name == "tasks.recon_envelope_dry_run_all"
     assert recon_envelope_dry_run.queue == "recon"
     assert recon_envelope_dry_run_all.queue == "recon"
+
+
+def test_include_and_beat_wiring():
+    from app.workers.celery_app import celery_app
+
+    assert "app.workers.tasks.recon_envelope_dry_run" in celery_app.conf.include
+    entry = celery_app.conf.beat_schedule["recon-envelope-dry-run-nightly"]
+    assert entry["task"] == "tasks.recon_envelope_dry_run_all"

@@ -39,3 +39,15 @@ async def test_dispatches_only_enabled_tenants(db, tenant_a, tenant_b, monkeypat
     expected_from = (date.today() - timedelta(days=mod.SCHEDULED_RUN_WINDOW_DAYS)).isoformat()
     assert sent[0]["kwargs"]["date_from"] == expected_from
     assert sent[0]["kwargs"]["date_to"] == date.today().isoformat()
+
+
+def test_include_and_beat_wiring():
+    from app.workers.celery_app import celery_app
+
+    # tasks.reconciliation_run was previously DEAD (defined but unregistered) —
+    # the fan-out dispatches it by name, so it MUST be in include.
+    assert "app.workers.tasks.reconciliation_run" in celery_app.conf.include
+    assert "app.workers.tasks.recon_scheduled_run_all" in celery_app.conf.include
+
+    entry = celery_app.conf.beat_schedule["recon-scheduled-run-nightly"]
+    assert entry["task"] == "tasks.recon_scheduled_run_all"
