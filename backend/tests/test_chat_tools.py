@@ -33,15 +33,9 @@ class TestBuildLocalToolDefinitions:
         assert "data_sample_table_read" in names
         assert "report_compose" in names
         assert "netsuite_connectivity" in names
-        # Recon family is chat-exposed as of R3-B (see nodes.py for the
-        # documented HITL decision on recon_approve_match).
-        assert "recon_run" in names
-        assert "recon_get_exceptions" in names
-        assert "recon_get_evidence" in names
-        assert "recon_approve_match" in names
         # Should NOT include disallowed tools
         assert "schedule_create" not in names
-        assert "schedule_run" not in names
+        assert "recon_run" not in names
         assert "health" not in names
 
     def test_anthropic_format(self):
@@ -257,7 +251,7 @@ class TestLocalNameMap:
     def test_no_disallowed_tools(self):
         """Map should not contain disallowed tools."""
         assert "schedule_create" not in _LOCAL_NAME_MAP
-        assert "schedule_run" not in _LOCAL_NAME_MAP
+        assert "recon_run" not in _LOCAL_NAME_MAP
 
 
 # ---------------------------------------------------------------------------

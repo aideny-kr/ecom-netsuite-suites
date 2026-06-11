@@ -33,16 +33,6 @@ _ALLOWED_OTHER_CHAT_TOOLS: frozenset[str] = frozenset(
         # report.compose is now categorized as "report" in tool_categories._EXACT
         # (its SSE result is intercepted as report_ready), so it is no longer an
         # allow-"other" tool — see test_report_tool_registration.py.
-        #
-        # Recon family (R3-B): DELIBERATE allow-"other" — full data_table SSE
-        # interception for recon results is a logged follow-up (own T2 PR).
-        # Until then the trust boundary is prompt-level: the registry
-        # description + reconciliation.yaml both require VERBATIM transcription
-        # (never recompute/round/sum/paraphrase; quote exception_count exactly).
-        "recon.run",  # run summary counts the LLM reports verbatim
-        "recon.get_exceptions",  # amounts flow raw pending the interception follow-up
-        "recon.get_evidence",  # returns a download link, no data rows
-        "recon.approve_match",  # write-side control action, no data rows
         "suitescript.sync",  # control action, no data rows
         "tenant.save_learned_rule",  # write-side control action, no data rows
         "workspace.run_validate",  # validator output the LLM reads
