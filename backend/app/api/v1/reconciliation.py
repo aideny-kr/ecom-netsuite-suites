@@ -789,19 +789,22 @@ async def get_close_readiness(
     in_scope_run_ids = select(ReconciliationRun.id).where(*run_conditions)
 
     # ONE statement, single snapshot: count FILTER (WHERE ...) aggregates over
-    # the results of every in-scope run, plus the runs count as an uncorrelated
-    # scalar subquery — the gate's counts can never disagree with each other.
+    # the results of every in-scope run, plus the in-scope run ids as an
+    # uncorrelated array_agg scalar subquery — the gate's counts and run set
+    # can never disagree with each other. runs_in_scope is derived from that
+    # same array (R4-A: the FE needs the IDS, not just a count — with zero
+    # in-scope runs every count is vacuously zero and a count-only gate fails
+    # OPEN; the FE checks the selected run is a member).
     # Results are tenant-scoped directly too (defense in depth alongside the
     # tenant-scoped run selection: a cross-tenant row seeded on an in-scope run
     # must not count).
     row = (
         await db.execute(
             select(
-                select(func.count())
-                .select_from(ReconciliationRun)
+                select(func.array_agg(ReconciliationRun.id))
                 .where(*run_conditions)
                 .scalar_subquery()
-                .label("runs_in_scope"),
+                .label("in_scope_run_ids"),
                 # Open exceptions: a pending row on a MATCHED line. Pending+
                 # unmatched rows are expected exceptions already surfaced in
                 # the needs_review bucket.
@@ -826,9 +829,14 @@ async def get_close_readiness(
         )
     ).one()
 
+    # array_agg over zero rows is NULL; sorted for determinism (the FE only
+    # does a membership check).
+    scope_ids = sorted(str(rid) for rid in (row.in_scope_run_ids or []))
+
     return ReconCloseReadiness(
         period=period,
-        runs_in_scope=row.runs_in_scope,
+        runs_in_scope=len(scope_ids),
+        in_scope_run_ids=scope_ids,
         open_exceptions=row.open_exceptions,
         suggested=row.suggested,
         left_for_review=row.left_for_review,

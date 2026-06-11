@@ -101,6 +101,7 @@ def test_close_readiness_schema_shape():
     r = ReconCloseReadiness(
         period="2026-04",
         runs_in_scope=2,
+        in_scope_run_ids=["a", "b"],
         open_exceptions=1,
         suggested=0,
         left_for_review=3,
@@ -108,6 +109,7 @@ def test_close_readiness_schema_shape():
     assert r.model_dump() == {
         "period": "2026-04",
         "runs_in_scope": 2,
+        "in_scope_run_ids": ["a", "b"],
         "open_exceptions": 1,
         "suggested": 0,
         "left_for_review": 3,
@@ -164,6 +166,7 @@ async def test_close_readiness_counts(client, db, finance_user):
     assert resp.json() == {
         "period": "2026-04",
         "runs_in_scope": 1,
+        "in_scope_run_ids": [str(run.id)],
         "open_exceptions": 1,
         "suggested": 1,
         "left_for_review": 1,
@@ -202,6 +205,8 @@ async def test_close_readiness_aggregates_over_all_runs_in_period(client, db, fi
     assert resp.json() == {
         "period": "2026-04",
         "runs_in_scope": 2,
+        # Sorted for determinism — the FE only does a membership check.
+        "in_scope_run_ids": sorted([str(run_a.id), str(run_b.id)]),
         "open_exceptions": 1,
         "suggested": 1,
         "left_for_review": 1,
@@ -258,6 +263,7 @@ async def test_close_readiness_tenant_scoped(client, db, finance_user, tenant_b)
     assert resp.json() == {
         "period": "2026-04",
         "runs_in_scope": 1,
+        "in_scope_run_ids": [str(run.id)],
         "open_exceptions": 0,
         "suggested": 0,
         "left_for_review": 0,
@@ -266,7 +272,10 @@ async def test_close_readiness_tenant_scoped(client, db, finance_user, tenant_b)
 
 async def test_close_readiness_excludes_out_of_scope_runs(client, db, finance_user):
     """Runs close_period would NOT close are invisible to readiness:
-    non-completed runs in the month, and completed runs outside the month."""
+    non-completed runs in the month, completed runs outside the month, and
+    completed runs SPANNING the month boundary (R4-A: a month-spanning run is
+    out of its own derived period's scope — its id must not appear in
+    in_scope_run_ids, or the FE run_in_scope gate would pass vacuously)."""
     user, headers = finance_user
     await _enable_recon(db, user.tenant_id)
     # In-period but still running — close_period only selects status='completed'.
@@ -277,6 +286,12 @@ async def test_close_readiness_excludes_out_of_scope_runs(client, db, finance_us
     other_month.date_from = date(2026, 5, 2)
     other_month.date_to = date(2026, 5, 6)
     await create_test_recon_result(db, user.tenant_id, other_month.id, match_type="deterministic", status="suggested")
+    # Completed but SPANNING the April/May boundary — close_period('2026-04')
+    # requires date_to <= last day of April, so this run is NOT closeable.
+    spanning = await create_test_recon_run(db, user.tenant_id)
+    spanning.date_from = date(2026, 4, 25)
+    spanning.date_to = date(2026, 5, 3)
+    await create_test_recon_result(db, user.tenant_id, spanning.id, match_type="deterministic", status="suggested")
     # One in-scope run with a single suggested row.
     in_scope = await create_test_recon_run(db, user.tenant_id)
     await create_test_recon_result(db, user.tenant_id, in_scope.id, match_type="deterministic", status="suggested")
@@ -287,6 +302,7 @@ async def test_close_readiness_excludes_out_of_scope_runs(client, db, finance_us
     assert resp.json() == {
         "period": "2026-04",
         "runs_in_scope": 1,
+        "in_scope_run_ids": [str(in_scope.id)],
         "open_exceptions": 0,
         "suggested": 1,
         "left_for_review": 0,
@@ -304,6 +320,7 @@ async def test_close_readiness_zero_runs_all_zeros(client, db, finance_user):
     assert resp.json() == {
         "period": "2026-01",
         "runs_in_scope": 0,
+        "in_scope_run_ids": [],
         "open_exceptions": 0,
         "suggested": 0,
         "left_for_review": 0,

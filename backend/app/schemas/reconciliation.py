@@ -184,6 +184,11 @@ class ReconCloseReadiness(BaseModel):
     R2 decoupling pattern).
 
     - ``runs_in_scope``: how many runs ``close_period(period)`` would close
+    - ``in_scope_run_ids``: the ids of exactly those runs (sorted). R4-A: lets
+      the FE verify the SELECTED run is actually inside the close scope — a
+      month-spanning run derives a period it is NOT closeable under, and with
+      zero in-scope runs every count is vacuously zero, so counts alone would
+      fail OPEN.
     - ``open_exceptions``: status='pending' AND match_type != 'unmatched'
     - ``suggested``: status='suggested'
     - ``left_for_review``: status='auto_matched' AND bucket='needs_review' —
@@ -193,6 +198,7 @@ class ReconCloseReadiness(BaseModel):
 
     period: str
     runs_in_scope: int
+    in_scope_run_ids: list[str]
     open_exceptions: int
     suggested: int
     left_for_review: int
