@@ -19,7 +19,11 @@ export default function DashboardLayout({
   const { user, isLoading, refreshUser } = useAuth();
   const router = useRouter();
   const pathname = usePathname();
-  const isFluid = pathname?.startsWith("/workspace") || pathname?.startsWith("/chat");
+  // /reports/<id> (the viewer) is fluid so the report iframe gets real height —
+  // the boxed container has no height chain and collapses iframes to ~150px.
+  // The /reports LIST page stays boxed ("/reports".startsWith("/reports/") is false).
+  const isFluid =
+    pathname?.startsWith("/workspace") || pathname?.startsWith("/chat") || pathname?.startsWith("/reports/");
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [connectionHealth, setConnectionHealth] = useState<
     | { state: "ok" }
