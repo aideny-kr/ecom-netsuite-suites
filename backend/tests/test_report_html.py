@@ -70,3 +70,38 @@ def test_narrative_splits_paragraphs_around_table():
     assert "<strong>note</strong>" in html
     # prose and the table are distinct blocks, not one run-on line.
     assert "Intro line. |" not in html
+
+
+def test_narrative_thematic_break_does_not_eat_piped_prose():
+    # A prose line containing a pipe, followed by a `---` horizontal rule, must
+    # NOT be mistaken for a one-row table (GFM delimiter rows contain pipes).
+    md = "See the A | B comparison.\n---\nMore prose."
+    spec = {"title": "T", "sections": [{"type": "narrative", "markdown": md}], "provenance": {}}
+    html = render_report_html(spec)
+    # The piped sentence survives as prose, not destroyed into an empty table.
+    assert "comparison" in html
+    assert "<tbody></tbody>" not in html
+    assert "<th>See the A</th>" not in html
+
+
+def test_narrative_ragged_rows_normalized_to_header_width():
+    # Short body rows are padded, over-long rows truncated, to the header width.
+    md = "| A | B | C |\n|---|---|---|\n| 1 | 2 |\n| x | y | z | w |\n"
+    spec = {"title": "T", "sections": [{"type": "narrative", "markdown": md}], "provenance": {}}
+    html = render_report_html(spec)
+    # Every body row has exactly 3 <td> (header width); the stray 'w' is dropped.
+    assert ">w<" not in html
+    first_row = html.split("</thead>")[1]
+    assert first_row.count("<tr>") == 2
+    for tr in first_row.split("<tr>")[1:]:
+        assert tr.count("<td>") == 3
+
+
+def test_narrative_single_newline_reflows_not_hard_break():
+    # Single newlines inside a paragraph reflow (join with space), matching the
+    # prior whitespace-collapsing behavior — no injected <br>.
+    md = "The quarter closed strong\nwith revenue up 12%."
+    spec = {"title": "T", "sections": [{"type": "narrative", "markdown": md}], "provenance": {}}
+    html = render_report_html(spec)
+    assert "<p>The quarter closed strong with revenue up 12%.</p>" in html
+    assert "<br>" not in html

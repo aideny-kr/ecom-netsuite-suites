@@ -44,6 +44,11 @@ def _split_row(line: str) -> list[str]:
 def _is_delimiter_row(line: str) -> bool:
     import re
 
+    # A GFM delimiter row always contains a pipe (outer `|---|` or inner `---|---`).
+    # Requiring one keeps a bare `---` thematic break / setext underline from being
+    # mistaken for a table delimiter and swallowing the preceding line.
+    if "|" not in line:
+        return False
     cells = _split_row(line)
     return bool(cells) and all(re.fullmatch(r":?-{1,}:?", c or "") for c in cells)
 
@@ -58,7 +63,9 @@ def _md_block(text: str) -> str:
 
     def flush_para() -> None:
         if para:
-            out.append("<p>" + "<br>".join(_md_inline(p) for p in para) + "</p>")
+            # Single newlines reflow (GFM treats them as a space), matching the
+            # prior whitespace-collapsing behavior — no injected hard breaks.
+            out.append("<p>" + _md_inline(" ".join(para)) + "</p>")
             para.clear()
 
     i = 0
@@ -69,10 +76,14 @@ def _md_block(text: str) -> str:
         if "|" in line and i + 1 < n and _is_delimiter_row(lines[i + 1]):
             flush_para()
             header = _split_row(line)
+            width = len(header)
             i += 2
             rows: list[list[str]] = []
             while i < n and lines[i].strip() and "|" in lines[i]:
-                rows.append(_split_row(lines[i]))
+                # Normalize each row to the header width (GFM: pad short, drop extra).
+                cells = _split_row(lines[i])
+                cells = (cells + [""] * width)[:width]
+                rows.append(cells)
                 i += 1
             head = "".join(f"<th>{_md_inline(c)}</th>" for c in header)
             body = "".join("<tr>" + "".join(f"<td>{_md_inline(c)}</td>" for c in r) + "</tr>" for r in rows)
