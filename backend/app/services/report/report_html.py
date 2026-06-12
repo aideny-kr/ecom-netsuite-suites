@@ -34,13 +34,77 @@ def _md_inline(text: str) -> str:
     return re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", esc)
 
 
+def _split_row(line: str) -> list[str]:
+    # "| a | b |" -> ["a", "b"]. Tolerates missing edge pipes; drops the empty
+    # cells produced by leading/trailing pipes.
+    cells = [c.strip() for c in line.strip().strip("|").split("|")]
+    return cells
+
+
+def _is_delimiter_row(line: str) -> bool:
+    import re
+
+    # A GFM delimiter row always contains a pipe (outer `|---|` or inner `---|---`).
+    # Requiring one keeps a bare `---` thematic break / setext underline from being
+    # mistaken for a table delimiter and swallowing the preceding line.
+    if "|" not in line:
+        return False
+    cells = _split_row(line)
+    return bool(cells) and all(re.fullmatch(r":?-{1,}:?", c or "") for c in cells)
+
+
+def _md_block(text: str) -> str:
+    # Block-level markdown for narrative content. Renders GFM tables as real
+    # <table>s and blank-line-separated prose as <p>. Everything is escaped via
+    # _md_inline — no raw HTML passthrough (trust boundary + XSS safety).
+    lines = text.split("\n")
+    out: list[str] = []
+    para: list[str] = []
+
+    def flush_para() -> None:
+        if para:
+            # Single newlines reflow (GFM treats them as a space), matching the
+            # prior whitespace-collapsing behavior — no injected hard breaks.
+            out.append("<p>" + _md_inline(" ".join(para)) + "</p>")
+            para.clear()
+
+    i = 0
+    n = len(lines)
+    while i < n:
+        line = lines[i]
+        # GFM table: a header row followed by a delimiter row.
+        if "|" in line and i + 1 < n and _is_delimiter_row(lines[i + 1]):
+            flush_para()
+            header = _split_row(line)
+            width = len(header)
+            i += 2
+            rows: list[list[str]] = []
+            while i < n and lines[i].strip() and "|" in lines[i]:
+                # Normalize each row to the header width (GFM: pad short, drop extra).
+                cells = _split_row(lines[i])
+                cells = (cells + [""] * width)[:width]
+                rows.append(cells)
+                i += 1
+            head = "".join(f"<th>{_md_inline(c)}</th>" for c in header)
+            body = "".join("<tr>" + "".join(f"<td>{_md_inline(c)}</td>" for c in r) + "</tr>" for r in rows)
+            out.append(f"<table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>")
+            continue
+        if line.strip() == "":
+            flush_para()
+        else:
+            para.append(line)
+        i += 1
+    flush_para()
+    return "".join(out)
+
+
 def _section_html(s: dict) -> str:
     t = s.get("type")
     if t == "heading":
         lvl = min(max(int(s.get("level", 2)), 1), 3)
         return f"<h{lvl}>{escape(str(s.get('text', '')))}</h{lvl}>"
     if t == "narrative":
-        return f'<div class="nb-card">{_md_inline(str(s.get("markdown", "")))}</div>'
+        return f'<div class="nb-card svg-wrap">{_md_block(str(s.get("markdown", "")))}</div>'
     if t == "metric_headline":
         foot = ""
         if s.get("definition_version") is not None:
