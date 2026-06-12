@@ -28,3 +28,9 @@ it("renders the report iframe fully sandboxed (no scripts/forms/popups/same-orig
   expect(iframe.hasAttribute("sandbox")).toBe(true);
   expect(iframe.getAttribute("sandbox")).toBe("");
 });
+
+it("offers a Download HTML action once the report is loaded (save-as-page)", async () => {
+  const { findByRole } = render(<ReportViewPage />);
+  const btn = await findByRole("button", { name: /download html/i });
+  expect(btn).toBeTruthy();
+});
