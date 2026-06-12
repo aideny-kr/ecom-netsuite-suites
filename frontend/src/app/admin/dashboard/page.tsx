@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { FLAG_LABELS } from "./flag-labels";
 import { useAuth } from "@/providers/auth-provider";
 import {
   useAdminTenants,
@@ -52,16 +53,6 @@ function StatCard({
   );
 }
 
-const FLAG_LABELS: Record<string, { label: string; description: string }> = {
-  chat: { label: "Chat", description: "AI chat assistant" },
-  mcp_tools: { label: "MCP Tools", description: "External MCP server connections" },
-  workspace: { label: "Workspace", description: "Dev workspace & file management" },
-  reconciliation: { label: "Reconciliation", description: "Payment reconciliation engine" },
-  byok_ai: { label: "BYOK AI", description: "Bring your own AI API key" },
-  custom_branding: { label: "Custom Branding", description: "White-label branding" },
-  custom_domain: { label: "Custom Domain", description: "Custom domain mapping" },
-  analytics_export: { label: "Analytics Export", description: "CSV/data export" },
-};
 
 function FeatureFlagPanel({
   tenantId,
