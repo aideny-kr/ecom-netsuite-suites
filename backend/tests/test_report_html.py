@@ -35,3 +35,38 @@ def test_html_escapes_user_text():
     spec = {"title": "<script>x</script>", "sections": [], "provenance": {}}
     html = render_report_html(spec, accent_hsl="0 0% 0%")
     assert "<script>x</script>" not in html  # escaped
+
+
+def test_narrative_renders_gfm_table_as_html_table():
+    # The composer emits GFM markdown tables inside narrative content. They must
+    # render as a real <table>, not a wall of literal pipes.
+    md = "| Currency | FX Rate | Rounding |\n|---|---|---|\n| AUD | 1.50 | nearest_9 |\n| BGN | 1.95583 | nearest_9 |\n"
+    spec = {"title": "Pricing", "sections": [{"type": "narrative", "markdown": md}], "provenance": {}}
+    html = render_report_html(spec)
+    assert "<table>" in html
+    assert "<th>Currency</th>" in html
+    assert "<td>nearest_9</td>" in html
+    # The delimiter row must NOT leak into output as literal text.
+    assert "|---|" not in html
+    # No raw pipe-delimited header row left dumped as text.
+    assert "| Currency | FX Rate |" not in html
+
+
+def test_narrative_table_cells_are_escaped():
+    # Trust boundary: cell content is LLM-authored — must be escaped, no raw HTML.
+    md = "| Col |\n|---|\n| <script>x</script> |\n"
+    spec = {"title": "T", "sections": [{"type": "narrative", "markdown": md}], "provenance": {}}
+    html = render_report_html(spec)
+    assert "<script>x</script>" not in html
+    assert "&lt;script&gt;" in html
+
+
+def test_narrative_splits_paragraphs_around_table():
+    md = "Intro line.\n\n| A |\n|---|\n| 1 |\n\nClosing **note**."
+    spec = {"title": "T", "sections": [{"type": "narrative", "markdown": md}], "provenance": {}}
+    html = render_report_html(spec)
+    assert "<p>Intro line.</p>" in html
+    assert "<table>" in html
+    assert "<strong>note</strong>" in html
+    # prose and the table are distinct blocks, not one run-on line.
+    assert "Intro line. |" not in html
