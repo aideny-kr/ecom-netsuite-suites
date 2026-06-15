@@ -38,13 +38,16 @@ The throughline: **ship read-only/advisory value now → per-tenant skills + saf
 - **MCP HITL generalization** — default-deny unknown external write tools (closes the bypass) before exposing untrusted servers.
 
 ### Phase 3 — Posting & bookkeeping automation (separate gated track)
-- **NS HITL posting (Rung 2)** — deposit application → variance JE → **reversal path** + dollar caps, through the existing HITL gate. *This* is where "posting ability" becomes real. **Blocked on the DRAFT operator trust decision.**
-- **Autonomous posting (Rung 3)** — flip the dry-run envelope to actually post, inside caps + kill-switch.
-- **QuickBooks** — its own greenfield Apideck-based track (read → write), gated on actually writing `ADR-010`. Largest single net-new lift; the team's own strategy doc warns against day-one QBO.
+
+> **🔒 INVARIANT (operator-locked 2026-06-15): posting is ALWAYS HITL.** Every NetSuite accounting write is human-approved (per-line audit, no auto-write). This *resolves* the previously-DRAFT trust decision: the answer is HITL. Consequently **Rung 3 "autonomous posting" (auto-write without a human) is OFF the table** — the end-state is HITL posting, optionally fed by *scheduled preparation* that stages posting candidates into a human approval queue. Aligns with the existing CLAUDE.md no-auto-post / per-line-audit invariant.
+
+- **NS HITL posting (Rung 2) — the end-state.** Deposit application → variance JE → **reversal path** + dollar caps, through the existing HITL gate (`mutation_guard` + HMAC + `WriteConfirmationCard`); a human approves every posting batch. *This* is where "posting ability" becomes real.
+- **Scheduled posting prep → HITL approval queue (was "Rung 3").** Optional: autonomously *match/stage* posting candidates on a schedule, but the NetSuite write itself stays human-approved. NOT auto-write. Preserves the "scheduled end-to-end" feel without breaking the HITL invariant.
+- **QuickBooks** — its own greenfield Apideck-based track (read → write), gated on actually writing `ADR-010`. Largest single net-new lift; the team's own strategy doc warns against day-one QBO. Posting into QBO follows the same HITL invariant.
 
 ## Sequencing decision (operator, 2026-06-15)
 
-**Finish ① spec → then advisory accountant skills (Phase 1).** Posting + QB remain separate gated tracks. Posting is a *strategy decision* (operator trust-model, still DRAFT) before it is an engineering task.
+**Finish ① spec → then advisory accountant skills (Phase 1).** Posting + QB remain separate gated tracks. **Posting trust-model RESOLVED (operator, 2026-06-15): always HITL** — no autonomous auto-write; Rung 3 is reframed to scheduled-prep + HITL approval. The remaining P3 gate is engineering (build the HITL posting service + reversal path + caps), not a trust decision.
 
 ## Relationship to the three north stars
 
