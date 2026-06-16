@@ -55,6 +55,11 @@ Rules:
 - confidence is a float 0.0-1.0 reflecting how clearly the rows support the
   concept.
 
+Each source row below carries a "source_id". For every concept, list the
+source_ids of the rows it was distilled from in a "source_ids" array, so the
+evidence trail points back to the rows that actually support the concept. Use
+only source_ids that appear in the rows; never invent one.
+
 Return ONLY a JSON object of this exact shape (use [] when nothing applies):
 {
   "concepts": [
@@ -63,6 +68,7 @@ Return ONLY a JSON object of this exact shape (use [] when nothing applies):
       "concept_type": "definition",
       "plain_english_summary": "1-2 sentence durable explanation, no numbers",
       "edges": [{"target": "other concept name", "relation": "depends_on"}],
+      "source_ids": ["<source_id of a row this concept came from>"],
       "confidence": 0.0
     }
   ]
@@ -109,6 +115,15 @@ async def extract_concepts(
         concepts = data.get("concepts")
         if not isinstance(concepts, list):
             return []
+
+        # Normalize source_ids to a list[str] on every concept so the backfill can
+        # attribute each evidence link to the deriving concept (a missing/garbage
+        # value becomes [] rather than a KeyError or a non-iterable).
+        for concept in concepts:
+            if not isinstance(concept, dict):
+                continue
+            raw_ids = concept.get("source_ids")
+            concept["source_ids"] = [str(sid) for sid in raw_ids] if isinstance(raw_ids, list) else []
         return concepts
 
     except Exception:

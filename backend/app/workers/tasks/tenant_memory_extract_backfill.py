@@ -270,16 +270,29 @@ async def _extract(db: AsyncSession, tenant_id: str, job_id: uuid.UUID) -> dict[
                 continue
             await _upsert_edge(db, tid, source_id, target_id, str(relation))
 
-    # Link every source row to its best-matching concept. v1 mapping: a source row
-    # links to the FIRST extracted concept (concepts are tenant-wide distillations,
-    # not 1:1 with rows); the link constraint guarantees each source row appears once.
+    # Attribute each source row to the concept that lists its source_id. Build a
+    # source_id -> concept_id map from the concepts' reported source_ids; a row the
+    # model didn't attribute falls back to the FIRST concept so every source row
+    # still gets exactly one link (uq_tenant_memory_link_source guarantees one per
+    # row). v1: concepts are tenant-wide distillations, not strictly 1:1 with rows.
     primary_concept_id = next(iter(concept_cache.values()), None)
+    source_to_concept: dict[str, uuid.UUID] = {}
+    for concept in concepts:
+        key = _normalize_name(concept.get("name", ""))
+        cid = concept_cache.get(key)
+        if cid is None:
+            continue
+        for sid in concept.get("source_ids") or []:
+            # First concept to claim a source_id wins (deterministic, stable order).
+            source_to_concept.setdefault(str(sid), cid)
+
     if primary_concept_id is not None:
         for src in source_rows:
+            concept_id = source_to_concept.get(src["source_id"], primary_concept_id)
             await _upsert_link(
                 db,
                 tid,
-                primary_concept_id,
+                concept_id,
                 src["source_table"],
                 uuid.UUID(src["source_id"]),
             )

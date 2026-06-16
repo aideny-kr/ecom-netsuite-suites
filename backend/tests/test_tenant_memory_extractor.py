@@ -35,6 +35,47 @@ class TestExtractConcepts:
         assert out[0]["confidence"] == 0.9
 
     @pytest.mark.asyncio
+    async def test_extract_parses_source_ids(self):
+        """Each concept reports the source rows it was distilled from, so the
+        backfill can attribute evidence links to the deriving concept."""
+        adapter = AsyncMock()
+        adapter.create_message.return_value = SimpleNamespace(
+            text_blocks=[
+                '{"concepts":[{"name":"Net Revenue","concept_type":"definition",'
+                '"plain_english_summary":"Revenue excluding refunds","edges":[],'
+                '"confidence":0.9,"source_ids":["src-1","src-2"]}]}'
+            ]
+        )
+        out = await ex.extract_concepts(
+            [{"kind": "learned_rule", "text": "net revenue excludes refunds", "source_id": "src-1"}],
+            adapter,
+            "m",
+        )
+        assert out[0]["source_ids"] == ["src-1", "src-2"]
+
+    @pytest.mark.asyncio
+    async def test_extract_source_ids_defaults_to_empty_list(self):
+        """A concept without source_ids gets an empty list (never a missing key)."""
+        adapter = AsyncMock()
+        adapter.create_message.return_value = SimpleNamespace(
+            text_blocks=[
+                '{"concepts":[{"name":"Net Revenue","concept_type":"definition",'
+                '"plain_english_summary":"x","edges":[],"confidence":0.9}]}'
+            ]
+        )
+        out = await ex.extract_concepts([{"x": 1}], adapter, "m")
+        assert out[0]["source_ids"] == []
+
+    @pytest.mark.asyncio
+    async def test_prompt_requests_source_ids(self):
+        """The output-shape instructions must ask the model for source_ids."""
+        adapter = AsyncMock()
+        adapter.create_message.return_value = SimpleNamespace(text_blocks=["{}"])
+        await ex.extract_concepts([{"kind": "x", "text": "y"}], adapter, "m")
+        sent_prompt = adapter.create_message.call_args.kwargs["messages"][0]["content"]
+        assert "source_ids" in sent_prompt
+
+    @pytest.mark.asyncio
     async def test_extract_returns_empty_on_garbage(self):
         adapter = AsyncMock()
         adapter.create_message.return_value = SimpleNamespace(text_blocks=["no json here"])

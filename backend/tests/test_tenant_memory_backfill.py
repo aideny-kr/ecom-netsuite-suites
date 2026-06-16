@@ -232,6 +232,59 @@ async def test_extract_persists_edges_idempotently(db, admin_user):
     assert len(edges2) == 1, "re-run must not create a duplicate edge"
 
 
+async def test_extract_attributes_links_to_deriving_concept(db, admin_user):
+    """Each source row's evidence link points at the concept that lists its
+    source_id (not blindly at the first concept)."""
+    from app.workers.tasks import tenant_memory_extract_backfill as bf
+
+    user, _ = admin_user
+    tenant_id = str(user.tenant_id)
+    rule, _inactive, pattern = await _seed_sources(db, user.tenant_id)
+    rule_sid = str(rule.id)  # tenant_learned_rules row
+    pattern_sid = str(pattern.id)  # tenant_query_patterns row
+
+    # Concept A derives from the rule; concept B derives from the pattern.
+    attributed_concepts = [
+        {
+            "name": "Net Revenue",
+            "concept_type": "definition",
+            "plain_english_summary": "Revenue excluding refunds.",
+            "edges": [],
+            "confidence": 0.9,
+            "source_ids": [rule_sid],
+        },
+        {
+            "name": "Failed Order",
+            "concept_type": "definition",
+            "plain_english_summary": "An order whose status is failed.",
+            "edges": [],
+            "confidence": 0.8,
+            "source_ids": [pattern_sid],
+        },
+    ]
+    with patch.object(bf, "extract_concepts", new=AsyncMock(return_value=attributed_concepts)):
+        await bf._extract(db, tenant_id, uuid.uuid4())
+        await db.flush()
+
+    concepts_by_name = {
+        c.name: c
+        for c in (
+            (await db.execute(select(TenantMemoryConcept).where(TenantMemoryConcept.tenant_id == user.tenant_id)))
+            .scalars()
+            .all()
+        )
+    }
+    links = (
+        (await db.execute(select(TenantMemoryLink).where(TenantMemoryLink.tenant_id == user.tenant_id))).scalars().all()
+    )
+    by_source = {str(link.source_id): link.concept_id for link in links}
+    # The rule row links to "Net Revenue"; the pattern row links to "Failed Order".
+    assert by_source[rule_sid] == concepts_by_name["Net Revenue"].id
+    assert by_source[pattern_sid] == concepts_by_name["Failed Order"].id
+    # Every source row still gets exactly one link.
+    assert len(links) == 2
+
+
 async def test_extract_clamps_out_of_range_confidence(db, admin_user):
     """A hallucinated confidence (50) must be clamped to [0,1], not overflow the
     Numeric(4,3) column and abort the whole backfill transaction."""
