@@ -203,6 +203,43 @@ async def test_extract_clamps_out_of_range_confidence(db, admin_user):
     assert float(row.confidence) == 1.0, "out-of-range confidence must clamp to 1.0"
 
 
+async def test_extract_truncates_overlong_name_and_type(db, admin_user):
+    """An over-length name (300 chars) / concept_type must be truncated to the
+    column limits (255 / 50), not overflow and abort the backfill."""
+    from app.workers.tasks import tenant_memory_extract_backfill as bf
+
+    user, _ = admin_user
+    tenant_id = str(user.tenant_id)
+    await _seed_sources(db, user.tenant_id)
+
+    long_name = "X" * 300
+    long_type = "definition" * 10  # 100 chars > String(50)
+    overlong_concepts = [
+        {
+            "name": long_name,
+            "concept_type": long_type,
+            "plain_english_summary": "Revenue excluding refunds.",
+            "edges": [],
+            "confidence": 0.9,
+        }
+    ]
+    with patch.object(bf, "extract_concepts", new=AsyncMock(return_value=overlong_concepts)):
+        # Must NOT raise.
+        await bf._extract(db, tenant_id, uuid.uuid4())
+        await db.flush()
+
+    row = (
+        await db.execute(
+            select(TenantMemoryConcept).where(
+                TenantMemoryConcept.tenant_id == user.tenant_id,
+                TenantMemoryConcept.name == long_name[:255],
+            )
+        )
+    ).scalar_one()
+    assert len(row.name) == 255
+    assert len(row.concept_type) == 50
+
+
 async def test_extract_skips_when_no_sources(db, admin_user):
     """With no source rows the extractor is a no-op (no concepts, no links)."""
     from app.workers.tasks import tenant_memory_extract_backfill as bf

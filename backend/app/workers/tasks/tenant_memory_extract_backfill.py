@@ -152,11 +152,17 @@ async def _get_or_create_concept(
     # a hallucinated 10.0+ overflows and aborts the whole backfill transaction.
     raw_confidence = concept.get("confidence")
     confidence = max(0.0, min(1.0, float(raw_confidence))) if isinstance(raw_confidence, (int, float)) else None
+    # Truncate to the column limits (name String(255), concept_type String(50)) —
+    # raw LLM output of any length would otherwise overflow and abort the backfill.
+    name = concept["name"]
+    name = name[:255] if name is not None else name
+    concept_type = concept.get("concept_type")
+    concept_type = concept_type[:50] if concept_type is not None else concept_type
     row = TenantMemoryConcept(
         tenant_id=tenant_id,
-        name=concept["name"],
+        name=name,
         summary=concept.get("plain_english_summary") or concept.get("summary") or "",
-        concept_type=concept.get("concept_type"),
+        concept_type=concept_type,
         review_state="pending",
         confidence=confidence,
     )
