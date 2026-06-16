@@ -148,14 +148,17 @@ async def _get_or_create_concept(
         cache[key] = existing.id
         return existing.id
 
-    confidence = concept.get("confidence")
+    # Clamp the LLM confidence to [0,1]. The column is Numeric(4,3) (abs < 10);
+    # a hallucinated 10.0+ overflows and aborts the whole backfill transaction.
+    raw_confidence = concept.get("confidence")
+    confidence = max(0.0, min(1.0, float(raw_confidence))) if isinstance(raw_confidence, (int, float)) else None
     row = TenantMemoryConcept(
         tenant_id=tenant_id,
         name=concept["name"],
         summary=concept.get("plain_english_summary") or concept.get("summary") or "",
         concept_type=concept.get("concept_type"),
         review_state="pending",
-        confidence=confidence if isinstance(confidence, (int, float)) else None,
+        confidence=confidence,
     )
     db.add(row)
     await db.flush()

@@ -169,6 +169,40 @@ async def test_extract_dedups_concept_across_casing(db, admin_user):
     assert count2 == count1, "casing/whitespace variant should reuse the existing concept, not mint a duplicate"
 
 
+async def test_extract_clamps_out_of_range_confidence(db, admin_user):
+    """A hallucinated confidence (50) must be clamped to [0,1], not overflow the
+    Numeric(4,3) column and abort the whole backfill transaction."""
+    from app.workers.tasks import tenant_memory_extract_backfill as bf
+
+    user, _ = admin_user
+    tenant_id = str(user.tenant_id)
+    await _seed_sources(db, user.tenant_id)
+
+    overflow_concepts = [
+        {
+            "name": "Net Revenue",
+            "concept_type": "definition",
+            "plain_english_summary": "Revenue excluding refunds.",
+            "edges": [],
+            "confidence": 50,  # hallucinated — would overflow Numeric(4,3)
+        }
+    ]
+    with patch.object(bf, "extract_concepts", new=AsyncMock(return_value=overflow_concepts)):
+        # Must NOT raise.
+        await bf._extract(db, tenant_id, uuid.uuid4())
+        await db.flush()
+
+    row = (
+        await db.execute(
+            select(TenantMemoryConcept).where(
+                TenantMemoryConcept.tenant_id == user.tenant_id,
+                TenantMemoryConcept.name == "Net Revenue",
+            )
+        )
+    ).scalar_one()
+    assert float(row.confidence) == 1.0, "out-of-range confidence must clamp to 1.0"
+
+
 async def test_extract_skips_when_no_sources(db, admin_user):
     """With no source rows the extractor is a no-op (no concepts, no links)."""
     from app.workers.tasks import tenant_memory_extract_backfill as bf
