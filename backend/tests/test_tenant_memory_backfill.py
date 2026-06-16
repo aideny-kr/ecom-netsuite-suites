@@ -19,6 +19,7 @@ from sqlalchemy import select
 
 from app.models.tenant_learned_rule import TenantLearnedRule
 from app.models.tenant_memory_concept import TenantMemoryConcept
+from app.models.tenant_memory_edge import TenantMemoryEdge
 from app.models.tenant_memory_link import TenantMemoryLink
 from app.models.tenant_query_pattern import TenantQueryPattern
 
@@ -167,6 +168,68 @@ async def test_extract_dedups_concept_across_casing(db, admin_user):
     )
 
     assert count2 == count1, "casing/whitespace variant should reuse the existing concept, not mint a duplicate"
+
+
+async def test_extract_persists_edges_idempotently(db, admin_user):
+    """An edge to a known concept is persisted as exactly one TenantMemoryEdge; a
+    re-run inserts no duplicate (idempotent on uq_tenant_memory_edge). An edge to
+    an unknown target is skipped."""
+    from app.workers.tasks import tenant_memory_extract_backfill as bf
+
+    user, _ = admin_user
+    tenant_id = str(user.tenant_id)
+    await _seed_sources(db, user.tenant_id)
+
+    edge_concepts = [
+        {
+            "name": "Net Revenue",
+            "concept_type": "definition",
+            "plain_english_summary": "Revenue excluding refunds.",
+            "edges": [
+                {"target": "Failed Order", "relation": "depends_on"},
+                {"target": "Nonexistent Concept", "relation": "relates_to"},  # skipped
+            ],
+            "confidence": 0.9,
+        },
+        {
+            "name": "Failed Order",
+            "concept_type": "definition",
+            "plain_english_summary": "An order whose status is failed.",
+            "edges": [],
+            "confidence": 0.8,
+        },
+    ]
+    with patch.object(bf, "extract_concepts", new=AsyncMock(return_value=edge_concepts)):
+        await bf._extract(db, tenant_id, uuid.uuid4())
+        await db.flush()
+
+    edges = (
+        (await db.execute(select(TenantMemoryEdge).where(TenantMemoryEdge.tenant_id == user.tenant_id))).scalars().all()
+    )
+    # Exactly one edge (the unknown-target one is skipped).
+    assert len(edges) == 1
+    assert edges[0].relation == "depends_on"
+    assert edges[0].review_state == "pending"
+
+    concepts_by_name = {
+        c.name: c
+        for c in (
+            (await db.execute(select(TenantMemoryConcept).where(TenantMemoryConcept.tenant_id == user.tenant_id)))
+            .scalars()
+            .all()
+        )
+    }
+    assert edges[0].source_concept_id == concepts_by_name["Net Revenue"].id
+    assert edges[0].target_concept_id == concepts_by_name["Failed Order"].id
+
+    # Second run — no duplicate edge.
+    with patch.object(bf, "extract_concepts", new=AsyncMock(return_value=edge_concepts)):
+        await bf._extract(db, tenant_id, uuid.uuid4())
+        await db.flush()
+    edges2 = (
+        (await db.execute(select(TenantMemoryEdge).where(TenantMemoryEdge.tenant_id == user.tenant_id))).scalars().all()
+    )
+    assert len(edges2) == 1, "re-run must not create a duplicate edge"
 
 
 async def test_extract_clamps_out_of_range_confidence(db, admin_user):

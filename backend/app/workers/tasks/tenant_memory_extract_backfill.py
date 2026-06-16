@@ -35,6 +35,7 @@ from app.core.config import settings
 from app.core.database import worker_async_session
 from app.models.tenant_learned_rule import TenantLearnedRule
 from app.models.tenant_memory_concept import TenantMemoryConcept
+from app.models.tenant_memory_edge import TenantMemoryEdge
 from app.models.tenant_memory_link import TenantMemoryLink
 from app.models.tenant_query_pattern import TenantQueryPattern
 from app.services.chat.tenant_memory_extractor import extract_concepts
@@ -197,6 +198,29 @@ async def _upsert_link(
     await db.execute(stmt)
 
 
+async def _upsert_edge(
+    db: AsyncSession,
+    tenant_id: uuid.UUID,
+    source_concept_id: uuid.UUID,
+    target_concept_id: uuid.UUID,
+    relation: str,
+) -> None:
+    """Idempotently insert a pending relationship edge between two concepts.
+
+    On conflict (same tenant/source/target/relation already present) do nothing,
+    so a re-run mints no duplicate edge.
+    """
+    stmt = pg_insert(TenantMemoryEdge).values(
+        tenant_id=tenant_id,
+        source_concept_id=source_concept_id,
+        target_concept_id=target_concept_id,
+        relation=relation[:100],
+        review_state="pending",
+    )
+    stmt = stmt.on_conflict_do_nothing(constraint="uq_tenant_memory_edge")
+    await db.execute(stmt)
+
+
 async def _extract(db: AsyncSession, tenant_id: str, job_id: uuid.UUID) -> dict[str, Any]:
     """Distill source rows into pending concepts + evidence links (idempotent).
 
@@ -227,6 +251,24 @@ async def _extract(db: AsyncSession, tenant_id: str, job_id: uuid.UUID) -> dict[
         if not name:
             continue
         await _get_or_create_concept(db, tid, concept, concept_cache)
+
+    # Persist the extracted relationships as pending edges. Resolve each edge's
+    # target name to a concept id via the same normalized-name cache; skip edges
+    # whose target isn't a known concept. Idempotent on uq_tenant_memory_edge.
+    for concept in concepts:
+        source_key = _normalize_name(concept.get("name", ""))
+        source_id = concept_cache.get(source_key)
+        if source_id is None:
+            continue
+        for edge in concept.get("edges") or []:
+            if not isinstance(edge, dict):
+                continue
+            target_key = _normalize_name(edge.get("target", ""))
+            relation = edge.get("relation")
+            target_id = concept_cache.get(target_key)
+            if not target_key or target_id is None or not relation:
+                continue
+            await _upsert_edge(db, tid, source_id, target_id, str(relation))
 
     # Link every source row to its best-matching concept. v1 mapping: a source row
     # links to the FIRST extracted concept (concepts are tenant-wide distillations,

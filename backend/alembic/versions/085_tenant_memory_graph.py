@@ -87,6 +87,13 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(["source_concept_id"], ["tenant_memory_concept.id"], ondelete="CASCADE"),
         sa.ForeignKeyConstraint(["target_concept_id"], ["tenant_memory_concept.id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint(
+            "tenant_id",
+            "source_concept_id",
+            "target_concept_id",
+            "relation",
+            name="uq_tenant_memory_edge",
+        ),
     )
     op.create_index("ix_tenant_memory_edge_tenant_id", "tenant_memory_edge", ["tenant_id"])
 
