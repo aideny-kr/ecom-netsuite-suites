@@ -39,6 +39,7 @@
     "react-markdown": "^9.1.0",
     "react-resizable-panels": "^4.6.4",
     "react-syntax-highlighter": "^16.1.1",
+    "reactflow": "^11.11.4",
     "recharts": "^3.8.0",
     "remark-gfm": "^4.0.1",
     "tailwind-merge": "^2.2.0",
