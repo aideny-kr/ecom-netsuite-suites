@@ -45,9 +45,9 @@ export default function ReconciliationPage() {
 
   const { data: runs } = useReconRuns();
   const { data: results } = useReconResults(selectedRunId, undefined, activeTab);
-  // Unbucketed fetch — the CloseChecklist gates period close by scanning the
-  // ENTIRE run for pending/suggested rows, so it must not be bucket-scoped.
-  const { data: allResults } = useReconResults(selectedRunId);
+  // Per-run bucket counts for the tabs + summary bar. The CloseChecklist does
+  // NOT key on this anymore: close is period-scoped, so it fetches
+  // GET /close-readiness/{period} itself (useCloseReadiness, R3-A).
   const summary = useReconBucketSummary(selectedRunId);
   const approveBucket = useApproveBucket(selectedRunId || "");
   const reconEnabled = useFeature("reconciliation");
@@ -263,11 +263,11 @@ export default function ReconciliationPage() {
             onInvestigate={handleInvestigate}
           />
 
-          {/* Close checklist — gated on the FULL run, not the active bucket */}
+          {/* Close checklist — gated on the PERIOD-scoped readiness it fetches
+              itself (every run the close will touch), not this run's buckets */}
           {selectedRun && selectedRun.date_from && selectedRun.status !== "closed" && (
             <CloseChecklist
               run={selectedRun}
-              results={allResults || []}
               period={selectedRun.date_from.substring(0, 7)}
             />
           )}

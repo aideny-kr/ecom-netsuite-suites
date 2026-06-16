@@ -28,6 +28,14 @@ from app.services.chat.llm_adapter import DEFAULT_MODELS
 
 logger = logging.getLogger(__name__)
 
+# recon.* tools are deliberately NOT in this allowlist (post-PR #130 revert):
+# recon.approve_match is a financial mutation, and the in-app chat path has no
+# enforced confirmation card for the recon family and none of the
+# feature/permission gating the API routes enforce. Until the logged, gated
+# chat-enablement follow-up lands (enforced confirmation card +
+# feature/permission gating on the chat path are its requirement #1), the
+# recon tool family is reachable via the MCP server surface (governed
+# dispatch) only — reconciliation.yaml's chat workflow is dormant.
 ALLOWED_CHAT_TOOLS: frozenset[str] = frozenset(
     {
         "netsuite.suiteql",
@@ -41,7 +49,7 @@ ALLOWED_CHAT_TOOLS: frozenset[str] = frozenset(
         "rag.search",
         "web.search",
         "data.sample_table_read",
-        "report.export",
+        "report.compose",
         "workspace.list_files",
         "workspace.read_file",
         "workspace.search",

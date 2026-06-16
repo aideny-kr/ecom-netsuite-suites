@@ -173,6 +173,37 @@ class ReconBucketCount(BaseModel):
     total_variance: Decimal
 
 
+class ReconCloseReadiness(BaseModel):
+    """PERIOD-scoped close-readiness counts over ALL runs a close will touch.
+
+    ``POST /close/{period}`` closes EVERY completed run whose date range falls
+    inside the month, so the FE CloseChecklist's gate must aggregate over that
+    same scope (``close_scope.closeable_runs_conditions``) — never a single
+    selected run (R3-A). Every count keys on the authoritative
+    ``status``/``bucket`` only, never the advisory confidence composite (the
+    R2 decoupling pattern).
+
+    - ``runs_in_scope``: how many runs ``close_period(period)`` would close
+    - ``in_scope_run_ids``: the ids of exactly those runs (sorted). R4-A: lets
+      the FE verify the SELECTED run is actually inside the close scope — a
+      month-spanning run derives a period it is NOT closeable under, and with
+      zero in-scope runs every count is vacuously zero, so counts alone would
+      fail OPEN.
+    - ``open_exceptions``: status='pending' AND match_type != 'unmatched'
+    - ``suggested``: status='suggested'
+    - ``left_for_review``: status='auto_matched' AND bucket='needs_review' —
+      ``close_scope.left_for_review_conditions``: rows close deliberately
+      leaves unlocked for human review (HITL).
+    """
+
+    period: str
+    runs_in_scope: int
+    in_scope_run_ids: list[str]
+    open_exceptions: int
+    suggested: int
+    left_for_review: int
+
+
 class ReconBucketSummary(BaseModel):
     run_id: str
     matches: ReconBucketCount

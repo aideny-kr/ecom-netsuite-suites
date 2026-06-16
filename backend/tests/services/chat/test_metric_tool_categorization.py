@@ -30,7 +30,9 @@ _ALLOWED_OTHER_CHAT_TOOLS: frozenset[str] = frozenset(
         "netsuite.get_metadata",  # schema metadata the LLM reads
         "netsuite.refresh_metadata",  # control action, no data rows
         "netsuite.report",  # report listing/dispatch, not a numeric result table
-        "report.export",  # file-export side effect, no numbers in the result
+        # report.compose is now categorized as "report" in tool_categories._EXACT
+        # (its SSE result is intercepted as report_ready), so it is no longer an
+        # allow-"other" tool — see test_report_tool_registration.py.
         "suitescript.sync",  # control action, no data rows
         "tenant.save_learned_rule",  # write-side control action, no data rows
         "workspace.run_validate",  # validator output the LLM reads

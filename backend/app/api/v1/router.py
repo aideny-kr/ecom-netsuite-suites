@@ -29,6 +29,7 @@ from app.api.v1 import (
     policies,
     pricing_config,
     reconciliation,
+    reports,
     schedules,
     settings,
     skills,
@@ -85,3 +86,4 @@ api_router.include_router(drive_folders.router)
 api_router.include_router(reconciliation.router)
 api_router.include_router(metrics.router)
 api_router.include_router(tenant_memory.router)
+api_router.include_router(reports.router)

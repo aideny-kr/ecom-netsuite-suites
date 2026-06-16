@@ -33,7 +33,7 @@ from sqlalchemy.dialects.postgresql import UUID
 from alembic import op
 
 revision = "085_tenant_memory_graph"
-down_revision = "082_metric_def_with_check"
+down_revision = "084_reports"
 branch_labels = None
 depends_on = None
 

@@ -1,10 +1,10 @@
 export const meta = {
   name: 'code-review-multiangle',
-  description: 'Generalized 7-angle find -> verify -> synthesize code review for any diff/PR/branch (the T2 review gate). Fails CLOSED: agent failures surface a top-level INCOMPLETE status, never a silent "0 findings".',
+  description: 'Generalized 8-angle find -> verify -> synthesize code review for any diff/PR/branch (the T2 review gate). 7 Claude angles + 1 INDEPENDENT-MODEL angle (codex, grill-me) so the gate is not Claude-on-Claude (which shares blind spots). Fails CLOSED: agent failures surface a top-level INCOMPLETE status, never a silent "0 findings".',
   whenToUse: 'Tier-T2 PRs (write-path / financial / HITL / auth / migration / review-tooling). args.target = PR number or branch/ref; args.base = optional base override; args.diff = raw unified diff to bypass resolution (TRUSTED caller-supplied — only for diffs you computed yourself).',
   phases: [
     { title: 'Prep', detail: 'resolve base ref + the unified diff (fail closed on empty)' },
-    { title: 'Find', detail: '7 finder angles in parallel; failed angles -> top-level INCOMPLETE' },
+    { title: 'Find', detail: '7 Claude finder angles + 1 codex (independent-model) angle in parallel; failed angles -> top-level INCOMPLETE' },
     { title: 'Verify', detail: 'one verifier per candidate (gets the per-file diff hunk); failure -> UNVERIFIED, not dropped' },
   ],
 }
@@ -121,13 +121,59 @@ const ANGLES = [
   { key: 'Altitude', prompt: 'ANGLE Altitude. Is each change at the right depth or a fragile bandaid? Special cases on shared infra signal the fix is not deep enough. Up to 6.' },
 ]
 
+// ----- Independent-model (codex) angle — DELEGATES to the grill-me skill ------------------
+// The 7 angles above are all Claude subagents and SHARE Claude's blind spots (the very reason
+// memory/feedback_independent_model_review_gate exists). This angle has a DIFFERENT model
+// (codex) attack the same diff. The JS orchestration can't read files or invoke skills (it runs
+// sandboxed), so the *subagent* this angle spawns is told to Read+follow .claude/skills/grill-me
+// — that SKILL.md is the SINGLE SOURCE OF TRUTH for HOW to drive codex (flags, version quirks,
+// auth-noise filtering, filesystem boundary). We keep ZERO copy of the codex recipe here; this
+// prompt only carries the workflow-specific glue: which diff to review, the output contract, and
+// the gate overrides (one pass, no user escalation, no artifact). If the skill file is absent or
+// codex is unavailable it degrades to a hostile Claude-only persona + codex_used=false (mirrors
+// grill-me's FALLBACK) — the gate never silently becomes Claude-only. The angle still "ok"s on
+// fallback (no INCOMPLETE on codex-less hosts); it only fails the angle if the agent itself dies.
+const CODEX_SCHEMA = {
+  type: 'object', additionalProperties: false, required: ['candidates', 'codex_used'],
+  properties: { candidates: CAND_SCHEMA.properties.candidates, codex_used: { type: 'boolean' } },
+}
+const codexAnglePrompt = `ANGLE Codex — the INDEPENDENT-MODEL angle of this review. cwd = repo root; you have Bash + Read.
+The other 7 angles are all Claude (shared blind spots); your job is to have a DIFFERENT model (codex) attack this diff.
+
+SINGLE SOURCE OF TRUTH — do NOT reinvent how to drive codex. Read \`.claude/skills/grill-me/SKILL.md\` and follow its codex procedure verbatim: Step 0 (preflight — codex binary + auth + the filesystem boundary codex must obey) and Step 2's \`codex exec\` invocation (read-only, the exact flags/version quirks, the auth-noise filtering). That skill is the canonical definition of the codex mechanic; this angle only adapts its INPUT and OUTPUT. If \`.claude/skills/grill-me/SKILL.md\` does NOT exist on disk, go straight to FALLBACK.
+
+SANDBOX NOTE: codex needs network (OpenAI) that the command sandbox blocks, so its call will fail sandboxed — retry that command with the sandbox disabled. Build the prompt file AND run codex in the SAME unsandboxed invocation: \`$TMPDIR\` differs across the sandbox boundary, so a file written in a sandboxed shell won't exist in the unsandboxed retry (you'd hand codex an empty prompt). Treat the presence of a codex agent_message / "tokens used" as the success signal — the captured shell exit code can be empty through codex's JSON pipe.
+
+INPUT: review EXACTLY the diff below (the same change the other angles see — do not recompute it from git). Write it to "$TMPDIR/cr_diff.txt"; sanity-check it is ~${diffLines} lines (if your copy is truncated, FALLBACK rather than review partial input). Hand that diff to codex as the change under review, wrapped per the skill's filesystem-boundary + cross-exam framing.
+
+OVERRIDES (this is an automated gate, not the interactive skill): run codex EXACTLY ONCE (no multi-round loop); do NOT escalate to the user (no AskUserQuestion) and do NOT write the skill's markdown artifact — a gap that would otherwise need the user is just reported as a finding here.
+
+OUTPUT: turn each thing codex flagged into a candidate {file,line,summary,failure_scenario,category}; Read the cited code to set a precise line + concrete failure_scenario; do NOT invent findings codex did not raise (empty candidates is a valid result). Set codex_used=true. category is one of correctness|reuse|simplification|efficiency|altitude (codex findings are usually correctness). Return {"candidates":[...], "codex_used":true}.
+
+FALLBACK (codex_used=false) — ONLY if the grill-me skill file is absent, OR codex is missing/unauthed/timed out: adopt a genuinely hostile adversarial persona and attack the diff yourself (argue the opposite case; do NOT rubber-stamp), ESPECIALLY against this repository's known failure modes (the skill carries these too, but a skill-absent fallback would not have read them):
+${REPO_INVARIANTS}
+Return {"candidates":[...], "codex_used":false}.
+
+DIFF UNDER REVIEW:
+${diff}`
+
 // -------------------------------------------------------------------- Find
 phase('Find')
-const finderRaw = await parallel(ANGLES.map(a => () =>
+const claudeFinders = ANGLES.map(a => () =>
   agent(FINDER_CTX + '\n\nTASK: ' + a.prompt, { label: `find:${a.key}`, phase: 'Find', schema: CAND_SCHEMA })
     .then(r => ({ key: a.key, ok: !!r, candidates: (r && r.candidates) || [] }))
     .catch(() => ({ key: a.key, ok: false, candidates: [] }))
-))
+)
+// Carry codex_used out on the RETURNED result (not a closure side-effect) so the top-level
+// metadata derives from data, never from parallel()'s execution order/retry semantics.
+const codexFinder = () =>
+  agent(codexAnglePrompt, { label: 'find:Codex(independent)', phase: 'Find', schema: CODEX_SCHEMA })
+    .then(r => ({ key: 'Codex', ok: !!r, candidates: (r && r.candidates) || [], codex_used: !!(r && r.codex_used) }))
+    .catch(() => ({ key: 'Codex', ok: false, candidates: [], codex_used: false }))
+const finderRaw = await parallel([...claudeFinders, codexFinder])
+const codexRes = finderRaw.find(x => x.key === 'Codex') || { ok: false, codex_used: false }
+const codexUsed = codexRes.codex_used
+log(`independent-model angle: ${codexRes.ok ? (codexUsed ? 'codex (real second model)' : 'FALLBACK claude-only — codex unavailable, weaker guarantee') : 'ANGLE FAILED -> INCOMPLETE'}`)
 const failedAngles = finderRaw.filter(x => !x.ok).map(x => x.key)
 if (failedAngles.length) log(`WARNING: ${failedAngles.length} finder angle(s) FAILED -> result.status will be INCOMPLETE: ${failedAngles.join(', ')}`)
 const all = finderRaw.flatMap(x => x.candidates)
@@ -187,6 +233,9 @@ return {
   // INCOMPLETE if any finder angle failed — a consumer must treat this as NOT a clean pass and re-run.
   status: failedAngles.length ? 'INCOMPLETE' : 'OK',
   target: targetSpec, base: baseUsed, diff_lines: diffLines,
+  // codex_used=false means the independent-model angle fell back to Claude-only (codex
+  // missing/unauthed) — the gate ran but WITHOUT a true second model; treat as a weaker pass.
+  codex_used: codexUsed,
   failed_angles: failedAngles,
   total_candidates: all.length, deduped: deduped.length,
   confirmed: findings.filter(f => f.verdict === 'CONFIRMED').length,

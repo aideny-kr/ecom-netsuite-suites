@@ -225,7 +225,6 @@ class TestToolConfigs:
             "netsuite.report",
             "data.sample_table_read",
             "recon.run",
-            "report.export",
             "rag.search",
             "web.search",
             "schedule.create",
@@ -248,6 +247,7 @@ class TestToolConfigs:
             "sheets.create",
             "sheets.write_range",
             "sheets.read_range",
+            "report.compose",
         }
         assert set(TOOL_CONFIGS.keys()) == expected
 

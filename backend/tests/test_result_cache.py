@@ -9,7 +9,9 @@ from app.services.chat.result_cache import (
     MAX_RESULTS_PER_CONVERSATION,
     CachedResult,
     _cache_result_sync,
+    cache_full_payload,
     cache_result,
+    get_full_payload,
     get_latest_result,
     get_latest_result_by_type,
     get_result_by_message,
@@ -388,3 +390,72 @@ class TestEvictionPinsLatestPerType:
         latest_pricing = await get_latest_result_by_type("conv-1", "pricing")
         assert latest_pricing is not None
         assert latest_pricing.payload == {"excel_file_id": "file-xyz"}
+
+
+class TestFullPayloadSidecar:
+    """The eager, in-turn FULL-PAYLOAD sidecar (gate cluster A).
+
+    ``report.compose`` must resolve the results just computed THIS turn — but the
+    current turn's assistant ChatMessage is not persisted until AFTER the agent
+    loop. The sidecar writes the FULL, uncapped result_payload to Redis under a
+    deterministic turn-scoped ``result_id`` (r1, r2, ...) the instant a data tool
+    is intercepted, so a same-turn compose can read it.
+    """
+
+    def test_full_payload_roundtrip_uncapped(self, mock_redis):
+        """A >50-row payload survives uncapped — the sidecar must NOT apply the
+        50-row preview truncation that CachedResult.to_json does."""
+        big_rows = [[f"P{i}", str(i)] for i in range(120)]
+        payload = {
+            "kind": "table",
+            "columns": ["Period", "N"],
+            "rows": big_rows,
+            "row_count": 120,
+        }
+        cache_full_payload("conv-1", "r1", payload)
+        got = get_full_payload("conv-1", "r1")
+        assert got is not None
+        assert got["row_count"] == 120
+        assert len(got["rows"]) == 120  # uncapped — not 50
+
+    def test_full_payload_miss_returns_none(self, mock_redis):
+        assert get_full_payload("conv-1", "r99") is None
+        assert get_full_payload("no-such-conv", "r1") is None
+
+    def test_full_payload_no_redis_is_safe(self):
+        with patch("app.services.chat.result_cache._get_redis", return_value=None):
+            cache_full_payload("conv-1", "r1", {"rows": []})  # no raise
+            assert get_full_payload("conv-1", "r1") is None
+
+    def test_full_payload_evicts_oldest_over_cap(self, mock_redis):
+        """The sidecar caps the LIST per conversation at MAX_RESULTS_PER_CONVERSATION,
+        evicting the OLDEST result_id first (FIFO by write order)."""
+        n = MAX_RESULTS_PER_CONVERSATION
+        for i in range(1, n + 2):  # write one past the cap
+            cache_full_payload("conv-1", f"r{i}", {"rows": [[i]], "row_count": 1})
+        # r1 (oldest) is evicted; r2..r{n+1} survive.
+        assert get_full_payload("conv-1", "r1") is None
+        for i in range(2, n + 2):
+            assert get_full_payload("conv-1", f"r{i}") is not None
+
+    def test_full_payload_is_conversation_scoped(self, mock_redis):
+        """The same result_id in two conversations is isolated."""
+        cache_full_payload("conv-A", "r1", {"rows": [["a"]], "row_count": 1})
+        cache_full_payload("conv-B", "r1", {"rows": [["b"]], "row_count": 1})
+        assert get_full_payload("conv-A", "r1")["rows"] == [["a"]]
+        assert get_full_payload("conv-B", "r1")["rows"] == [["b"]]
+
+    def test_conversation_ordinal_ids_do_not_overwrite_across_turns(self, mock_redis):
+        """re-gate r2 (findings #5/#9/#13): the sidecar is conversation-scoped (no
+        turn component in the key), so with PER-TURN ids turn B's r1 would overwrite
+        turn A's r1. Conversation-ORDINAL ids (turn A → r1, turn B → r2) keep BOTH
+        turns' payloads resolvable — the cross-turn collision the fix eliminates."""
+        # Turn A's single result is r1.
+        cache_full_payload("conv-1", "r1", {"rows": [["turnA"]], "row_count": 1})
+        # Turn B's first result is r2 (conversation-ordinal), NOT r1 — so it does
+        # not clobber turn A's payload.
+        cache_full_payload("conv-1", "r2", {"rows": [["turnB"]], "row_count": 1})
+        assert get_full_payload("conv-1", "r1")["rows"] == [["turnA"]], (
+            "turn A's r1 payload must survive turn B (no overwrite)"
+        )
+        assert get_full_payload("conv-1", "r2")["rows"] == [["turnB"]]

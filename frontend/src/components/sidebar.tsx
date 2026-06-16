@@ -25,6 +25,7 @@ import {
   BarChart3,
   Scale,
   Network,
+  FileBarChart,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { NAV_ITEMS, CANONICAL_TABLES } from "@/lib/constants";
@@ -49,6 +50,7 @@ const iconMap = {
   Settings,
   Scale,
   Network,
+  FileBarChart,
 } as const;
 
 const agentIconMap: Record<string, typeof Tag> = {

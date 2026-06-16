@@ -37,7 +37,9 @@ This block is the **canonical tiering checklist** (single source of truth; `.cla
 | T1 | existing (+e2e if covered) | — | `/code-review` light |
 | T2 | existing **+ seeded-tenant e2e** | **safe-envelope live smoke** | **blocking multi-angle review pre-merge** |
 
-T2 review = `Workflow({name:"code-review-multiangle", args:{target:"<PR#|branch>"}})` — it fails CLOSED (non-empty `failed_angles` ⇒ re-run; `UNVERIFIED` ⇒ needs human). How-to-run detail + the full checklist: `.claude/rules/uat-review.md`. Self-review does NOT substitute for the T2 gate.
+T2 review = `Workflow({name:"code-review-multiangle", args:{target:"<PR#|branch>"}})` — it fails CLOSED (non-empty `failed_angles` ⇒ re-run; `UNVERIFIED` ⇒ needs human). The gate runs 7 Claude angles **+ an independent-model codex angle** (the `grill-me` adversary, single-sourced from `.claude/skills/grill-me/SKILL.md`) so it is not Claude-on-Claude; check `codex_used` (false ⇒ codex fell back to Claude-only on that host). How-to-run detail + the full checklist: `.claude/rules/uat-review.md`. Self-review does NOT substitute for the T2 gate.
+
+**Build-workflows self-review:** when work is built via a `Workflow`, add a final advisory `Review` phase that calls `workflow('code-review-multiangle', {diff})` so the gate fires automatically as part of the build (attaches findings, does NOT block). Template: `.claude/workflows/build-with-review.template.js`; detail in `.claude/rules/uat-review.md`. This is in-loop advisory — it does NOT replace the blocking pre-merge T2 gate.
 
 ## Architecture Invariants
 

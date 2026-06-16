@@ -927,6 +927,28 @@ export interface ReconBucketCount {
   total_variance: number;
 }
 
+/** PERIOD-scoped close-readiness counts (GET /close-readiness/{period}),
+ *  aggregated server-side over EVERY run POST /close/{period} will close —
+ *  never a single selected run (R3-A). Each count keys on the authoritative
+ *  status/bucket — never the advisory confidence composite. */
+export interface ReconCloseReadiness {
+  period: string;
+  /** How many completed runs close_period(period) would close. */
+  runs_in_scope: number;
+  /** The ids of exactly those runs (R4-A): the checklist requires the SELECTED
+   *  run to be a member — with zero in-scope runs every count is vacuously
+   *  zero (a count-only gate fails OPEN), and a month-spanning run derives a
+   *  period it is not closeable under. */
+  in_scope_run_ids: string[];
+  /** status='pending' AND match_type != 'unmatched' (open exceptions on matched lines). */
+  open_exceptions: number;
+  /** status='suggested' (matches awaiting approval). */
+  suggested: number;
+  /** status='auto_matched' AND bucket='needs_review' — mirrors close_period()'s
+   *  left-for-review predicate; close deliberately leaves these UNLOCKED. */
+  left_for_review: number;
+}
+
 export interface ReconBucketSummary {
   run_id: string;
   matches: ReconBucketCount;

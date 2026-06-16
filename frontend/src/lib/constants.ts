@@ -95,6 +95,7 @@ export const NAV_ITEMS = [
   { label: "Dev Workspace", href: "/workspace", icon: "Code" as const, featureFlag: "workspace" },
   { label: "Reconciliation", href: "/reconciliation", icon: "Scale" as const, featureFlag: "reconciliation" },
   { label: "Memory", href: "/memory", icon: "Network" as const, featureFlag: null },
+  { label: "Reports", href: "/reports", icon: "FileBarChart" as const, featureFlag: null },
   { label: "Settings", href: "/settings", icon: "Settings" as const, featureFlag: null },
 ] as const;
 

@@ -22,6 +22,10 @@ BUCKET_NEEDS_REVIEW = "needs_review"
 ALL_BUCKETS = (BUCKET_MATCHES, BUCKET_RULES, BUCKET_AUTO_CLASSIFICATIONS, BUCKET_NEEDS_REVIEW)
 BULK_APPROVABLE_BUCKETS = (BUCKET_MATCHES, BUCKET_RULES, BUCKET_AUTO_CLASSIFICATIONS)
 
+# Rows already dispositioned can never be acted on again. Canonical home of the
+# invariant — shared by the bulk-approve guard (API) and the autonomy envelope.
+TERMINAL_RESULT_STATUSES = ("approved", "rejected", "locked")
+
 
 def _has_variance(variance_type: str | None, variance_amount: Decimal | None) -> bool:
     if variance_type is not None:
