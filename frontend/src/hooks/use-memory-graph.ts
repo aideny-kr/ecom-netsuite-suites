@@ -53,12 +53,6 @@ export interface UpdateConceptPayload {
   review_state?: "pending" | "confirmed" | "rejected";
 }
 
-// Mirrors backend `MemoryMergeRequest`.
-export interface MergeConceptsPayload {
-  survivor_id: string;
-  merged_ids: string[];
-}
-
 const QUERY_KEY = ["memory-graph"];
 
 export function useMemoryGraph(reviewState?: MemoryReviewState) {
@@ -80,21 +74,6 @@ export function useUpdateConceptReview() {
   });
 }
 
-export function useDeleteConcept() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    // DELETE soft-rejects (flips review_state to 'rejected'); backend returns 204.
-    mutationFn: (id: string) =>
-      apiClient.delete<void>(`/api/v1/tenant-memory/concepts/${id}`),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: QUERY_KEY }),
-  });
-}
-
-export function useMergeConcepts() {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (payload: MergeConceptsPayload) =>
-      apiClient.post<MemoryConcept>("/api/v1/tenant-memory/concepts/merge", payload),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: QUERY_KEY }),
-  });
-}
+// NOTE: delete/merge concept hooks are a deferred fast-follow (the UI doesn't
+// expose delete/merge yet). The backend DELETE + merge endpoints exist; wire the
+// hooks back in when that surface ships.

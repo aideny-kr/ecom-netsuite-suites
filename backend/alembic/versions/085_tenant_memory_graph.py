@@ -1,10 +1,10 @@
-"""tenant memory graph — concept/edge/link tables + HNSW + FORCE RLS + memory.manage perm
+"""tenant memory graph — concept/edge/link tables + FORCE RLS + memory.manage perm
 
 Three tenant-scoped, RLS-isolated tables overlaying the existing learning tables
 (tenant_learned_rules / tenant_query_patterns), never modifying them:
 
   * tenant_memory_concept — plain-English business concepts with a trust spine
-    (review_state / confidence / confirmed_by) + an embedding for future fuzzy dedup.
+    (review_state / confidence / confirmed_by). v1 dedups by exact normalized name.
   * tenant_memory_edge    — directed, named relationships between concepts.
   * tenant_memory_link    — evidence: which source learning row a concept came from;
     the (tenant_id, source_table, source_id) unique constraint is the backfill
@@ -28,7 +28,6 @@ Chains off 082_metric_def_with_check, the single live head in this branch (there
 import uuid
 
 import sqlalchemy as sa
-from pgvector.sqlalchemy import Vector
 from sqlalchemy.dialects.postgresql import UUID
 
 from alembic import op
@@ -51,7 +50,6 @@ def upgrade() -> None:
         sa.Column("name", sa.String(255), nullable=False),
         sa.Column("summary", sa.Text(), nullable=False),
         sa.Column("concept_type", sa.String(50), nullable=True),
-        sa.Column("embedding", Vector(1536), nullable=True),
         sa.Column("review_state", sa.String(20), server_default="pending", nullable=False),
         sa.Column("confidence", sa.Numeric(4, 3), nullable=True),
         sa.Column("origin_session_id", UUID(as_uuid=True), nullable=True),
@@ -68,10 +66,6 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("id"),
     )
     op.create_index("ix_tenant_memory_concept_tenant_id", "tenant_memory_concept", ["tenant_id"])
-    op.execute(
-        "CREATE INDEX IF NOT EXISTS ix_tmc_embedding ON tenant_memory_concept "
-        "USING hnsw (embedding vector_cosine_ops) WITH (m=16, ef_construction=64)"
-    )
 
     op.create_table(
         "tenant_memory_edge",

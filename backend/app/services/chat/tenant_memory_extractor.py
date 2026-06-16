@@ -129,31 +129,3 @@ async def extract_concepts(
     except Exception:
         logger.warning("tenant_memory_extractor.extraction_failed", exc_info=True)
         return []
-
-
-async def embed_concept(text: str) -> list[float] | None:
-    """Embed concept text using OpenAI text-embedding-3-small (1536-dim).
-
-    Returns ``None`` when no embedding key is configured or on any error.
-    Mirrors ``query_pattern_service._embed_text``.
-    """
-    try:
-        import openai
-
-        from app.core.config import settings
-
-        api_key = settings.OPENAI_EMBEDDING_API_KEY
-        if not api_key:
-            logger.warning("tenant_memory_extractor.no_embedding_key")
-            return None
-
-        client = openai.AsyncOpenAI(api_key=api_key)
-        response = await client.embeddings.create(
-            model="text-embedding-3-small",
-            input=text,
-            dimensions=1536,
-        )
-        return response.data[0].embedding
-    except Exception:
-        logger.warning("tenant_memory_extractor.embedding_failed", exc_info=True)
-        return None

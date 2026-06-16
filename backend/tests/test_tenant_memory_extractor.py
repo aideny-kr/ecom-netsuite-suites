@@ -154,34 +154,3 @@ class TestPromptHygiene:
         await ex.extract_concepts([{"kind": "x", "text": "y"}], adapter, "m")
         sent_prompt = adapter.create_message.call_args.kwargs["messages"][0]["content"]
         assert "number" in sent_prompt.lower()
-
-
-class TestEmbedConcept:
-    @pytest.mark.asyncio
-    async def test_embed_returns_none_without_key(self, monkeypatch):
-        from app.core.config import settings
-
-        monkeypatch.setattr(settings, "OPENAI_EMBEDDING_API_KEY", "")
-        assert await ex.embed_concept("some concept text") is None
-
-    @pytest.mark.asyncio
-    async def test_embed_returns_none_on_exception(self, monkeypatch):
-        from app.core.config import settings
-
-        monkeypatch.setattr(settings, "OPENAI_EMBEDDING_API_KEY", "sk-test")
-
-        class _BoomClient:
-            def __init__(self, *a, **k):
-                raise RuntimeError("boom")
-
-        import openai
-
-        monkeypatch.setattr(openai, "AsyncOpenAI", _BoomClient)
-        assert await ex.embed_concept("text") is None
-
-
-class TestConfig:
-    def test_min_similarity_default(self):
-        from app.core.config import settings
-
-        assert settings.MEMORY_CONCEPT_MIN_SIMILARITY == 0.85
