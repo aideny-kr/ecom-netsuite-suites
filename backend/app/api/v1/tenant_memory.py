@@ -33,11 +33,13 @@ from app.schemas.tenant_memory import (
     MemoryMergeRequest,
 )
 from app.services import audit_service, tenant_memory_service
+from app.workers.celery_app import celery_app
 
 router = APIRouter(prefix="/tenant-memory", tags=["tenant-memory"])
 
 _Reader = Annotated[User, Depends(get_current_user)]
 _Manager = Annotated[User, Depends(require_permission("memory.manage"))]
+_Backfiller = Annotated[User, Depends(require_permission("tenant.manage"))]
 _Db = Annotated[AsyncSession, Depends(get_db)]
 
 
@@ -184,3 +186,28 @@ async def merge_concepts(request: MemoryMergeRequest, user: _Manager, db: _Db):
     await db.commit()
     await db.refresh(survivor)
     return _concept_to_response(survivor)
+
+
+@router.post("/backfill", status_code=status.HTTP_202_ACCEPTED)
+async def trigger_backfill(user: _Backfiller, db: _Db):
+    """Dispatch the async backfill that distills existing learning rows into
+    pending memory concepts. Requires ``tenant.manage`` (it touches the tenant's
+    whole learning corpus). Returns immediately with the Celery task id.
+    """
+    result = celery_app.send_task(
+        "tasks.tenant_memory_extract_backfill",
+        kwargs={"tenant_id": str(user.tenant_id)},
+        queue="sync",
+    )
+    await audit_service.log_event(
+        db=db,
+        tenant_id=user.tenant_id,
+        category="tenant_memory",
+        action="tenant_memory.backfill.trigger",
+        actor_id=user.id,
+        resource_type="tenant_memory_backfill",
+        resource_id=str(result.id),
+        payload={"celery_task_id": str(result.id)},
+    )
+    await db.commit()
+    return {"celery_task_id": str(result.id), "status": "queued"}
