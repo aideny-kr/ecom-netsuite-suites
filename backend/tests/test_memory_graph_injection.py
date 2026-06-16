@@ -72,6 +72,7 @@ class TestRetrieveConfirmedConcepts:
         assert "review_state" in sql
         assert "'confirmed'" in sql
 
+
 class TestMemoryConceptsInUnifiedAgent:
     """Confirmed concepts must render in the system prompt under <tenant_memory>."""
 
