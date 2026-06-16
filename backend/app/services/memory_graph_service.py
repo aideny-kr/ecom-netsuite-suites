@@ -32,8 +32,8 @@ async def retrieve_confirmed_concepts(
     """Retrieve confirmed memory concepts for a tenant.
 
     Only concepts with ``review_state == 'confirmed'`` are returned — this is
-    the trust gate. ``pending``/``rejected``/``merged`` concepts are excluded by
-    the SQL filter and therefore never reach the prompt.
+    the trust gate. ``pending``/``rejected`` concepts are excluded by the SQL
+    filter and therefore never reach the prompt.
 
     ``query_text`` is accepted for interface parity with the learned-rules
     retriever (and for a future relevance ranking), but v1 simply returns the
@@ -46,10 +46,6 @@ async def retrieve_confirmed_concepts(
         .where(
             TenantMemoryConcept.tenant_id == tenant_id,
             TenantMemoryConcept.review_state == "confirmed",
-            # Belt-and-suspenders: a merge tombstone can NEVER be injected, even if
-            # its review_state somehow reads 'confirmed' (its evidence already moved
-            # to the survivor).
-            TenantMemoryConcept.merged_into_id.is_(None),
         )
         .order_by(TenantMemoryConcept.last_used_at.desc().nullslast(), TenantMemoryConcept.created_at.desc())
         .limit(max_concepts)

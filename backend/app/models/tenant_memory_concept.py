@@ -37,11 +37,6 @@ class TenantMemoryConcept(Base, UUIDPrimaryKeyMixin, TimestampMixin):
     confirmed_by: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
-    merged_into_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("tenant_memory_concept.id", ondelete="SET NULL"),
-        nullable=True,
-    )
     # Reserved for the ② usage-ranking path (deferred) — how often / when last a
     # confirmed concept was injected. Not yet incremented; do not remove.
     use_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")

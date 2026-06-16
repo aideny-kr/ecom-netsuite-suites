@@ -21,7 +21,6 @@ class MemoryConceptResponse(BaseModel):
     review_state: str
     confidence: float | None
     confirmed_by: str | None
-    merged_into_id: str | None
     use_count: int
     created_at: datetime
     updated_at: datetime
@@ -64,11 +63,6 @@ class MemoryConceptDetail(MemoryConceptResponse):
 
 class MemoryConceptUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=255)
-    summary: str | None = Field(default=None, min_length=1)
+    summary: str | None = Field(default=None, min_length=1, max_length=2000)
     concept_type: str | None = Field(default=None, max_length=50)
     review_state: Literal["pending", "confirmed", "rejected"] | None = None
-
-
-class MemoryMergeRequest(BaseModel):
-    survivor_id: str
-    merged_ids: list[str] = Field(min_length=1)

@@ -55,17 +55,21 @@ def upgrade() -> None:
         sa.Column("origin_session_id", UUID(as_uuid=True), nullable=True),
         sa.Column("origin_message_id", UUID(as_uuid=True), nullable=True),
         sa.Column("confirmed_by", UUID(as_uuid=True), nullable=True),
-        sa.Column("merged_into_id", UUID(as_uuid=True), nullable=True),
         sa.Column("use_count", sa.Integer(), server_default="0", nullable=False),
         sa.Column("last_used_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
         sa.ForeignKeyConstraint(["tenant_id"], ["tenants.id"], ondelete="CASCADE"),
         sa.ForeignKeyConstraint(["confirmed_by"], ["users.id"], ondelete="SET NULL"),
-        sa.ForeignKeyConstraint(["merged_into_id"], ["tenant_memory_concept.id"], ondelete="SET NULL"),
         sa.PrimaryKeyConstraint("id"),
     )
     op.create_index("ix_tenant_memory_concept_tenant_id", "tenant_memory_concept", ["tenant_id"])
+    # Concurrent-backfill dedup guard: one concept per (tenant, normalized name) —
+    # same normalization as _normalize_name (lower + collapse/trim whitespace).
+    op.execute(
+        "CREATE UNIQUE INDEX uq_tmc_tenant_norm_name ON tenant_memory_concept "
+        "(tenant_id, (btrim(regexp_replace(lower(name), '\\s+', ' ', 'g'))))"
+    )
 
     op.create_table(
         "tenant_memory_edge",

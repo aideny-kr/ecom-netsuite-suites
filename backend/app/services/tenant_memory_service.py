@@ -5,16 +5,14 @@ All operations are tenant-scoped — every query carries
 flush but do NOT commit; the caller (endpoint) commits and audit-logs, per the
 FastAPI/SQLAlchemy convention (mirrors learned_rule_service).
 
-Soft-reject flips `review_state` to 'rejected' (never `db.delete`). Merge repoints
-the loser concepts' links + edges to the survivor and marks losers
-`review_state='merged'` + `merged_into_id`.
+Soft-reject flips `review_state` to 'rejected' (never `db.delete`).
 """
 
 from __future__ import annotations
 
 import uuid
 
-from sqlalchemy import select, update
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.tenant_memory_concept import TenantMemoryConcept
@@ -87,11 +85,6 @@ async def update_concept(
     concept = await get_concept(db, tenant_id, concept_id)
     if concept is None:
         return None
-    # A merged concept is a tombstone — the merge already moved its evidence
-    # (links + edges) to the survivor. Any update would resurrect a dead node and
-    # corrupt the trust spine, so block it outright.
-    if concept.review_state == "merged":
-        raise ValueError("cannot modify a merged concept")
     if name is not None:
         concept.name = name
     if summary is not None:
@@ -114,69 +107,3 @@ async def soft_reject_concept(db: AsyncSession, tenant_id: uuid.UUID, concept_id
     concept.review_state = "rejected"
     await db.flush()
     return True
-
-
-async def merge_concepts(
-    db: AsyncSession,
-    tenant_id: uuid.UUID,
-    survivor_id: uuid.UUID,
-    merged_ids: list[uuid.UUID],
-) -> TenantMemoryConcept | None:
-    """Merge `merged_ids` into `survivor_id` (all tenant-scoped).
-
-    Repoints the losers' links + edges (both endpoints) to the survivor, then marks
-    each loser `review_state='merged'` + `merged_into_id=survivor_id`. Cross-tenant or
-    unknown loser ids are silently skipped (the survivor must belong to the tenant or
-    this returns None). Flushes; the endpoint commits.
-    """
-    survivor = await get_concept(db, tenant_id, survivor_id)
-    if survivor is None:
-        return None
-
-    # Only operate on losers that actually belong to this tenant (and aren't the survivor).
-    loser_rows = await db.execute(
-        select(TenantMemoryConcept).where(
-            TenantMemoryConcept.tenant_id == tenant_id,
-            TenantMemoryConcept.id.in_(merged_ids),
-            TenantMemoryConcept.id != survivor_id,
-        )
-    )
-    losers = list(loser_rows.scalars().all())
-    if not losers:
-        return survivor
-
-    loser_id_list = [c.id for c in losers]
-
-    # Repoint evidence links to the survivor.
-    await db.execute(
-        update(TenantMemoryLink)
-        .where(
-            TenantMemoryLink.tenant_id == tenant_id,
-            TenantMemoryLink.concept_id.in_(loser_id_list),
-        )
-        .values(concept_id=survivor_id)
-    )
-    # Repoint edge endpoints (source + target) to the survivor.
-    await db.execute(
-        update(TenantMemoryEdge)
-        .where(
-            TenantMemoryEdge.tenant_id == tenant_id,
-            TenantMemoryEdge.source_concept_id.in_(loser_id_list),
-        )
-        .values(source_concept_id=survivor_id)
-    )
-    await db.execute(
-        update(TenantMemoryEdge)
-        .where(
-            TenantMemoryEdge.tenant_id == tenant_id,
-            TenantMemoryEdge.target_concept_id.in_(loser_id_list),
-        )
-        .values(target_concept_id=survivor_id)
-    )
-    # Mark losers merged.
-    for loser in losers:
-        loser.review_state = "merged"
-        loser.merged_into_id = survivor_id
-
-    await db.flush()
-    return survivor

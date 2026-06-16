@@ -2,17 +2,14 @@
 
 Mirrors the learned_rule_service contract: every query carries
 `.where(tenant_id == ...)` (defense-in-depth on top of RLS), mutations flush
-(the endpoint commits), soft-delete flips review_state (never db.delete), and
-merge repoints links + edges to the survivor.
+(the endpoint commits), and soft-delete flips review_state (never db.delete).
 """
 
 import uuid
 
-import pytest
 import pytest_asyncio
 
 from app.models.tenant_memory_concept import TenantMemoryConcept
-from app.models.tenant_memory_edge import TenantMemoryEdge
 from app.models.tenant_memory_link import TenantMemoryLink
 from app.services import tenant_memory_service as svc
 from tests.conftest import create_test_tenant, create_test_user
@@ -90,19 +87,6 @@ async def test_update_concept_patches_fields(db, tenant_with_user):
     assert updated.summary == "new summary"
 
 
-async def test_update_merged_concept_raises(db, tenant_with_user):
-    """A merged (tombstoned) concept must reject ANY update — its evidence already
-    moved to the survivor, so resurrecting it would corrupt the trust spine."""
-    tenant, _ = tenant_with_user
-    survivor = await _seed_concept(db, tenant.id, name="Survivor")
-    loser = await _seed_concept(db, tenant.id, name="Loser")
-    await svc.merge_concepts(db, tenant.id, survivor.id, [loser.id])
-    await db.flush()
-
-    with pytest.raises(ValueError, match="merged"):
-        await svc.update_concept(db, tenant.id, loser.id, review_state="confirmed")
-
-
 async def test_soft_reject_is_not_delete(db, tenant_with_user):
     tenant, _ = tenant_with_user
     c = await _seed_concept(db, tenant.id, review_state="pending")
@@ -122,63 +106,6 @@ async def test_soft_reject_cross_tenant_returns_false(db, tenant_with_user):
     theirs = await _seed_concept(db, other.id)
     ok = await svc.soft_reject_concept(db, tenant.id, theirs.id)
     assert ok is False
-
-
-async def test_merge_repoints_links_and_edges(db, tenant_with_user):
-    tenant, _ = tenant_with_user
-    survivor = await _seed_concept(db, tenant.id, name="Survivor")
-    loser = await _seed_concept(db, tenant.id, name="Loser")
-    bystander = await _seed_concept(db, tenant.id, name="Bystander")
-
-    # A link on the loser must move to the survivor.
-    link = TenantMemoryLink(
-        tenant_id=tenant.id,
-        concept_id=loser.id,
-        source_table="tenant_learned_rules",
-        source_id=uuid.uuid4(),
-    )
-    db.add(link)
-    # An edge from the loser to the bystander must repoint to the survivor.
-    edge = TenantMemoryEdge(
-        tenant_id=tenant.id,
-        source_concept_id=loser.id,
-        target_concept_id=bystander.id,
-        relation="relates_to",
-    )
-    db.add(edge)
-    await db.flush()
-
-    survived = await svc.merge_concepts(db, tenant.id, survivor.id, [loser.id])
-    assert survived is not None
-
-    await db.refresh(link)
-    await db.refresh(edge)
-    await db.refresh(loser)
-    assert link.concept_id == survivor.id
-    assert edge.source_concept_id == survivor.id
-    assert loser.review_state == "merged"
-    assert loser.merged_into_id == survivor.id
-
-
-async def test_merge_cross_tenant_loser_ignored(db, tenant_with_user):
-    tenant, _ = tenant_with_user
-    other = await create_test_tenant(db, name="Other4", slug=f"oth4-{uuid.uuid4().hex[:6]}")
-    survivor = await _seed_concept(db, tenant.id, name="Survivor")
-    foreign_loser = await _seed_concept(db, other.id, name="Foreign")
-
-    survived = await svc.merge_concepts(db, tenant.id, survivor.id, [foreign_loser.id])
-    assert survived is not None
-
-    # The foreign loser is untouched (not merged across tenants).
-    await db.refresh(foreign_loser)
-    assert foreign_loser.review_state == "pending"
-    assert foreign_loser.merged_into_id is None
-
-
-async def test_merge_unknown_survivor_returns_none(db, tenant_with_user):
-    tenant, _ = tenant_with_user
-    survived = await svc.merge_concepts(db, tenant.id, uuid.uuid4(), [uuid.uuid4()])
-    assert survived is None
 
 
 async def test_get_concept_links(db, tenant_with_user):

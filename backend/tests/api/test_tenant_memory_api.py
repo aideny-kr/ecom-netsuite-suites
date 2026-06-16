@@ -3,7 +3,7 @@
 Mirrors tests/api/test_metrics_api.py fixtures (client/admin_user/member_user/
 admin_user_b/db). Covers: list graph; cross-tenant concept id -> 404; member
 (no memory.manage) PATCH -> 403; DELETE is soft (row remains, review_state
-flips to 'rejected'); merge repoints.
+flips to 'rejected').
 """
 
 import uuid
@@ -132,29 +132,6 @@ async def test_patch_confirm_sets_confirmed_by(client, admin_user, db, seeded_co
     assert row.confirmed_by == user.id
 
 
-async def test_patch_merged_concept_409(client, admin_user, db):
-    """PATCHing a merged (tombstoned) concept must 409, not resurrect it."""
-    from app.services import tenant_memory_service as svc
-
-    user, headers = admin_user
-    survivor = await _seed_concept(db, user.tenant_id, name="Survivor")
-    loser = await _seed_concept(db, user.tenant_id, name="Loser")
-    await svc.merge_concepts(db, user.tenant_id, survivor.id, [loser.id])
-    await db.commit()
-
-    resp = await client.patch(
-        f"/api/v1/tenant-memory/concepts/{loser.id}",
-        json={"review_state": "confirmed"},
-        headers=headers,
-    )
-    assert resp.status_code == 409, resp.text
-
-    # Still a tombstone — untouched.
-    row = (await db.execute(select(TenantMemoryConcept).where(TenantMemoryConcept.id == loser.id))).scalar_one()
-    await db.refresh(row)
-    assert row.review_state == "merged"
-
-
 async def test_patch_cross_tenant_404(client, admin_user, admin_user_b, db):
     _, headers_a = admin_user
     user_b, _ = admin_user_b
@@ -210,52 +187,4 @@ async def test_delete_cross_tenant_404(client, admin_user, admin_user_b, db):
     theirs = await _seed_concept(db, user_b.tenant_id, name="B Concept")
 
     resp = await client.delete(f"/api/v1/tenant-memory/concepts/{theirs.id}", headers=headers_a)
-    assert resp.status_code == 404, resp.text
-
-
-async def test_merge_repoints(client, admin_user, db):
-    user, headers = admin_user
-    survivor = await _seed_concept(db, user.tenant_id, name="Survivor")
-    loser = await _seed_concept(db, user.tenant_id, name="Loser")
-    link = TenantMemoryLink(
-        tenant_id=user.tenant_id,
-        concept_id=loser.id,
-        source_table="tenant_learned_rules",
-        source_id=uuid.uuid4(),
-    )
-    db.add(link)
-    await db.flush()
-
-    resp = await client.post(
-        "/api/v1/tenant-memory/concepts/merge",
-        json={"survivor_id": str(survivor.id), "merged_ids": [str(loser.id)]},
-        headers=headers,
-    )
-    assert resp.status_code == 200, resp.text
-    assert resp.json()["id"] == str(survivor.id)
-
-    await db.refresh(link)
-    await db.refresh(loser)
-    assert link.concept_id == survivor.id
-    assert loser.review_state == "merged"
-    assert loser.merged_into_id == survivor.id
-
-
-async def test_merge_member_forbidden(client, member_user):
-    _, headers = member_user
-    resp = await client.post(
-        "/api/v1/tenant-memory/concepts/merge",
-        json={"survivor_id": str(uuid.uuid4()), "merged_ids": [str(uuid.uuid4())]},
-        headers=headers,
-    )
-    assert resp.status_code == 403, resp.text
-
-
-async def test_merge_unknown_survivor_404(client, admin_user):
-    _, headers = admin_user
-    resp = await client.post(
-        "/api/v1/tenant-memory/concepts/merge",
-        json={"survivor_id": str(uuid.uuid4()), "merged_ids": [str(uuid.uuid4())]},
-        headers=headers,
-    )
     assert resp.status_code == 404, resp.text

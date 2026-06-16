@@ -1,9 +1,9 @@
-"""Tenant memory graph management API — view/confirm/edit/reject/merge concepts.
+"""Tenant memory graph management API — view/confirm/edit/reject concepts.
 
 The graph is a self-serve, plain-English overlay over the tenant's existing
 learning rows. Only `review_state='confirmed'` concepts reach the agent prompt
 (see the read-loop), so this surface is the trust gate: admins (`memory.manage`)
-confirm/edit/reject/merge; readers (any authed user) can view.
+confirm/edit/reject; readers (any authed user) can view.
 
 Reads use `get_current_user` (view-only); every mutation requires `memory.manage`,
 audit-logs BEFORE the commit, and is tenant-scoped (defense-in-depth on top of RLS).
@@ -30,7 +30,6 @@ from app.schemas.tenant_memory import (
     MemoryEdgeResponse,
     MemoryGraphResponse,
     MemoryLinkResponse,
-    MemoryMergeRequest,
 )
 from app.services import audit_service, tenant_memory_service
 from app.workers.celery_app import celery_app
@@ -61,7 +60,6 @@ def _concept_to_response(c: TenantMemoryConcept) -> MemoryConceptResponse:
         review_state=c.review_state,
         confidence=float(c.confidence) if c.confidence is not None else None,
         confirmed_by=str(c.confirmed_by) if c.confirmed_by else None,
-        merged_into_id=str(c.merged_into_id) if c.merged_into_id else None,
         use_count=c.use_count,
         created_at=c.created_at,
         updated_at=c.updated_at,
@@ -167,28 +165,6 @@ async def delete_concept(concept_id: str, user: _Manager, db: _Db):
     )
     await db.commit()
     return None
-
-
-@router.post("/concepts/merge", response_model=MemoryConceptResponse)
-async def merge_concepts(request: MemoryMergeRequest, user: _Manager, db: _Db):
-    survivor_id = _parse_uuid(request.survivor_id)
-    merged_ids = [_parse_uuid(m) for m in request.merged_ids]
-    survivor = await tenant_memory_service.merge_concepts(db, user.tenant_id, survivor_id, merged_ids)
-    if survivor is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Survivor concept not found")
-    await audit_service.log_event(
-        db=db,
-        tenant_id=user.tenant_id,
-        category="tenant_memory",
-        action="tenant_memory.concept.merge",
-        actor_id=user.id,
-        resource_type="tenant_memory_concept",
-        resource_id=str(survivor_id),
-        payload={"merged_ids": [str(m) for m in merged_ids]},
-    )
-    await db.commit()
-    await db.refresh(survivor)
-    return _concept_to_response(survivor)
 
 
 @router.post("/backfill", status_code=status.HTTP_202_ACCEPTED)

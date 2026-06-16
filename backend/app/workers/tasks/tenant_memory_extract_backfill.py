@@ -48,6 +48,9 @@ if TYPE_CHECKING:
 logger = structlog.get_logger()
 
 _COMMIT_EVERY = 10
+# Cap the single-prompt distillation input so a large tenant can't blow the LLM
+# context window (the rows are sent in one {{ROWS}} prompt). Excess is dropped + logged.
+_MAX_SOURCE_ROWS = 300
 
 
 def _normalize_name(name: str) -> str:
@@ -112,6 +115,15 @@ async def _collect_source_rows(db: AsyncSession, tenant_id: uuid.UUID) -> list[d
             }
         )
 
+    if len(rows) > _MAX_SOURCE_ROWS:
+        logger.warning(
+            "tenant_memory_backfill.source_rows_capped",
+            tenant_id=str(tenant_id),
+            total=len(rows),
+            cap=_MAX_SOURCE_ROWS,
+        )
+        rows = rows[:_MAX_SOURCE_ROWS]
+
     return rows
 
 
@@ -159,18 +171,37 @@ async def _get_or_create_concept(
     name = name[:255] if name is not None else name
     concept_type = concept.get("concept_type")
     concept_type = concept_type[:50] if concept_type is not None else concept_type
-    row = TenantMemoryConcept(
-        tenant_id=tenant_id,
-        name=name,
-        summary=concept.get("plain_english_summary") or concept.get("summary") or "",
-        concept_type=concept_type,
-        review_state="pending",
-        confidence=confidence,
+    # Insert with ON CONFLICT DO NOTHING on the (tenant, normalized-name) unique
+    # index (uq_tmc_tenant_norm_name) so two concurrent backfills converge to ONE
+    # row instead of both inserting (the loser would otherwise raise an
+    # IntegrityError and abort the run). If our insert lost the race, re-select the
+    # winner's id.
+    summary = concept.get("plain_english_summary") or concept.get("summary") or ""
+    insert_stmt = (
+        pg_insert(TenantMemoryConcept)
+        .values(
+            tenant_id=tenant_id,
+            name=name,
+            summary=summary,
+            concept_type=concept_type,
+            review_state="pending",
+            confidence=confidence,
+        )
+        .on_conflict_do_nothing()
+        .returning(TenantMemoryConcept.id)
     )
-    db.add(row)
-    await db.flush()
-    cache[key] = row.id
-    return row.id
+    new_id = (await db.execute(insert_stmt)).scalar_one_or_none()
+    if new_id is None:
+        new_id = (
+            await db.execute(
+                select(TenantMemoryConcept.id).where(
+                    TenantMemoryConcept.tenant_id == tenant_id,
+                    func.trim(func.regexp_replace(func.lower(TenantMemoryConcept.name), r"\s+", " ", "g")) == key,
+                )
+            )
+        ).scalar_one()
+    cache[key] = new_id
+    return new_id
 
 
 async def _upsert_link(
