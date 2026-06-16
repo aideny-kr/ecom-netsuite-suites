@@ -164,7 +164,12 @@ async def _get_or_create_concept(
     # Clamp the LLM confidence to [0,1]. The column is Numeric(4,3) (abs < 10);
     # a hallucinated 10.0+ overflows and aborts the whole backfill transaction.
     raw_confidence = concept.get("confidence")
-    confidence = max(0.0, min(1.0, float(raw_confidence))) if isinstance(raw_confidence, (int, float)) else None
+    # bool is a subclass of int — exclude it so a stray JSON `true` clamps to None, not 1.0.
+    confidence = (
+        max(0.0, min(1.0, float(raw_confidence)))
+        if isinstance(raw_confidence, (int, float)) and not isinstance(raw_confidence, bool)
+        else None
+    )
     # Truncate to the column limits (name String(255), concept_type String(50)) —
     # raw LLM output of any length would otherwise overflow and abort the backfill.
     name = concept["name"]

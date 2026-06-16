@@ -1,4 +1,4 @@
-"""tenant memory graph — concept/edge/link tables + FORCE RLS + memory.manage perm
+"""tenant memory graph — concept/edge/link tables + RLS + memory.manage perm
 
 Three tenant-scoped, RLS-isolated tables overlaying the existing learning tables
 (tenant_learned_rules / tenant_query_patterns), never modifying them:
@@ -10,10 +10,10 @@ Three tenant-scoped, RLS-isolated tables overlaying the existing learning tables
     the (tenant_id, source_table, source_id) unique constraint is the backfill
     idempotency key.
 
-RLS mirrors the metric_definitions WITH-CHECK idiom (082_metric_def_with_check) +
-FORCE (the app role is NOT BYPASSRLS on Supabase): ENABLE + FORCE + a policy whose
-USING and WITH CHECK both pin tenant_id to get_current_tenant_id(). No SYSTEM-default
-rows here, so there is no OR-SYSTEM read branch.
+RLS uses plain ENABLE (NOT FORCE), matching tenant_learned_rules (080): these tables
+are read in the chat orchestrator's read-loop on a GUC-less session (owner-bypass),
+so FORCE would make the policy raise there and silently kill the read-loop. Tenant
+isolation is enforced by the explicit `.where(tenant_id == ...)` on every query.
 
 Permission seeding copies 080_metric_definitions.py verbatim (real schema:
 permissions(id, codename); role_permissions(role_id, permission_id) joined to roles
@@ -111,16 +111,16 @@ def upgrade() -> None:
     )
     op.create_index("ix_tenant_memory_link_tenant_id", "tenant_memory_link", ["tenant_id"])
 
-    # RLS — FORCE + USING + WITH CHECK (app role is NOT BYPASSRLS on Supabase). Both
-    # clauses pin tenant_id to the caller's active tenant context (no OR-SYSTEM branch).
+    # RLS — plain ENABLE (NOT FORCE), matching tenant_learned_rules (080). These
+    # tables are read in the chat orchestrator's read-loop on a session that does
+    # NOT set the tenant GUC; learned_rules works there via owner-bypass. FORCE
+    # would make get_current_tenant_id() raise on that GUC-less connection, the
+    # orchestrator's fail-open catch would swallow it, and the read-loop would ship
+    # silently dead. Tenant isolation is enforced by the explicit
+    # `.where(tenant_id == ...)` on every service/retrieval query (defense-in-depth).
     for tbl in _RLS_TABLES:
         op.execute(f"ALTER TABLE {tbl} ENABLE ROW LEVEL SECURITY")
-        op.execute(f"ALTER TABLE {tbl} FORCE ROW LEVEL SECURITY")
-        op.execute(
-            f"CREATE POLICY {tbl}_tenant_isolation ON {tbl} "
-            f"USING (tenant_id = get_current_tenant_id()) "
-            f"WITH CHECK (tenant_id = get_current_tenant_id())"
-        )
+        op.execute(f"CREATE POLICY {tbl}_tenant_isolation ON {tbl} USING (tenant_id = get_current_tenant_id())")
 
     # Permission + grant to the tenant 'admin' role (idempotent) — verbatim from
     # 080_metric_definitions.py:74-86 (real schema, not a guessed one).

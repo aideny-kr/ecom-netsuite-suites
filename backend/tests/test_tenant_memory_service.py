@@ -87,6 +87,33 @@ async def test_update_concept_patches_fields(db, tenant_with_user):
     assert updated.summary == "new summary"
 
 
+async def test_editing_confirmed_text_deconfirms(db, tenant_with_user):
+    """Editing the name/summary of a confirmed concept (without re-confirming in the
+    same call) resets it to pending + clears confirmed_by — the edited authoritative
+    text must be re-vetted before the read-loop injects it again."""
+    tenant, user = tenant_with_user
+    c = await _seed_concept(db, tenant.id, review_state="confirmed")
+    c.confirmed_by = user.id
+    await db.flush()
+
+    updated = await svc.update_concept(db, tenant.id, c.id, summary="silently changed")
+    assert updated.review_state == "pending"
+    assert updated.confirmed_by is None
+
+
+async def test_reconfirming_with_edit_stays_confirmed(db, tenant_with_user):
+    """Passing review_state='confirmed' alongside an edit is a deliberate re-confirm
+    of the new text and is honored (stays confirmed, re-stamps confirmed_by)."""
+    tenant, user = tenant_with_user
+    c = await _seed_concept(db, tenant.id, review_state="confirmed")
+
+    updated = await svc.update_concept(
+        db, tenant.id, c.id, summary="new vetted text", review_state="confirmed", confirmed_by=user.id
+    )
+    assert updated.review_state == "confirmed"
+    assert updated.confirmed_by == user.id
+
+
 async def test_soft_reject_is_not_delete(db, tenant_with_user):
     tenant, _ = tenant_with_user
     c = await _seed_concept(db, tenant.id, review_state="pending")

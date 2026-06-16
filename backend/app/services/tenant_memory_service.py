@@ -81,10 +81,19 @@ async def update_concept(
 
     When `review_state` transitions to 'confirmed', stamp `confirmed_by` (the
     confirming actor) so the trust spine records who blessed the concept.
+
+    Trust gate: editing the name/summary of an already-'confirmed' concept WITHOUT
+    explicitly re-confirming in the same call de-confirms it (review_state ->
+    'pending', confirmed_by cleared). The read-loop injects confirmed concepts as
+    authoritative text, so the *edited* wording must be re-vetted before it is
+    injected again. (Passing review_state='confirmed' alongside the edit is a
+    deliberate re-confirm of the new text and is honored.)
     """
     concept = await get_concept(db, tenant_id, concept_id)
     if concept is None:
         return None
+    was_confirmed = concept.review_state == "confirmed"
+    text_changed = name is not None or summary is not None
     if name is not None:
         concept.name = name
     if summary is not None:
@@ -95,6 +104,9 @@ async def update_concept(
         concept.review_state = review_state
         if review_state == "confirmed" and confirmed_by is not None:
             concept.confirmed_by = confirmed_by
+    elif text_changed and was_confirmed:
+        concept.review_state = "pending"
+        concept.confirmed_by = None
     await db.flush()
     return concept
 
