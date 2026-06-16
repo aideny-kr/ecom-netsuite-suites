@@ -119,6 +119,56 @@ async def test_extract_is_idempotent(db, admin_user):
     assert len(concepts_after_second) == first_concept_count
 
 
+async def test_extract_dedups_concept_across_casing(db, admin_user):
+    """Cross-run dedup is normalized: a re-run that yields the same concept with
+    different casing/whitespace reuses the existing concept (no duplicate)."""
+    from app.workers.tasks import tenant_memory_extract_backfill as bf
+
+    user, _ = admin_user
+    tenant_id = str(user.tenant_id)
+    await _seed_sources(db, user.tenant_id)
+
+    run1 = [
+        {
+            "name": "Net Revenue",
+            "concept_type": "definition",
+            "plain_english_summary": "Revenue excluding refunds.",
+            "edges": [],
+            "confidence": 0.9,
+        }
+    ]
+    # Same concept, different casing + collapsible whitespace -> same normalized key.
+    run2 = [
+        {
+            "name": "  net   revenue ",
+            "concept_type": "definition",
+            "plain_english_summary": "Revenue excluding refunds.",
+            "edges": [],
+            "confidence": 0.9,
+        }
+    ]
+
+    with patch.object(bf, "extract_concepts", new=AsyncMock(return_value=run1)):
+        await bf._extract(db, tenant_id, uuid.uuid4())
+        await db.flush()
+    count1 = len(
+        (await db.execute(select(TenantMemoryConcept).where(TenantMemoryConcept.tenant_id == user.tenant_id)))
+        .scalars()
+        .all()
+    )
+
+    with patch.object(bf, "extract_concepts", new=AsyncMock(return_value=run2)):
+        await bf._extract(db, tenant_id, uuid.uuid4())
+        await db.flush()
+    count2 = len(
+        (await db.execute(select(TenantMemoryConcept).where(TenantMemoryConcept.tenant_id == user.tenant_id)))
+        .scalars()
+        .all()
+    )
+
+    assert count2 == count1, "casing/whitespace variant should reuse the existing concept, not mint a duplicate"
+
+
 async def test_extract_skips_when_no_sources(db, admin_user):
     """With no source rows the extractor is a no-op (no concepts, no links)."""
     from app.workers.tasks import tenant_memory_extract_backfill as bf

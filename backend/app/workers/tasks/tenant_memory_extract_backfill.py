@@ -28,7 +28,7 @@ import uuid
 from typing import TYPE_CHECKING, Any
 
 import structlog
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.core.config import settings
@@ -129,12 +129,15 @@ async def _get_or_create_concept(
     if key in cache:
         return cache[key]
 
+    # Match on the SAME normalization as the in-run cache key (_normalize_name:
+    # lower + collapse/trim whitespace) so a re-run with different casing/spacing
+    # reuses the existing concept instead of minting a duplicate.
     existing = (
         (
             await db.execute(
                 select(TenantMemoryConcept).where(
                     TenantMemoryConcept.tenant_id == tenant_id,
-                    TenantMemoryConcept.name == concept["name"],
+                    func.trim(func.regexp_replace(func.lower(TenantMemoryConcept.name), r"\s+", " ", "g")) == key,
                 )
             )
         )
