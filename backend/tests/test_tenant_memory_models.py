@@ -14,7 +14,6 @@ def test_models_importable_and_registered():
         "name",
         "summary",
         "concept_type",
-        "embedding",
         "review_state",
         "confidence",
         "confirmed_by",
