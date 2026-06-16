@@ -53,6 +53,10 @@ class Settings(BaseSettings):
     # (pure noise), patterns should be high-confidence matches only.
     DOMAIN_KNOWLEDGE_MIN_SIMILARITY: float = 0.50
     PATTERN_MIN_SIMILARITY: float = 0.45
+    # Tenant-memory-graph concept dedup: cosine similarity at/above which two
+    # concept embeddings are treated as the same concept (used by the backfill
+    # extractor when minting/deduping concepts).
+    MEMORY_CONCEPT_MIN_SIMILARITY: float = 0.85
     CHAT_MAX_HISTORY_TURNS: int = 20
     CHAT_MAX_TOOL_CALLS_PER_TURN: int = 40
     CHAT_RAG_TOP_K: int = 5
