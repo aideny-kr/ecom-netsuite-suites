@@ -87,6 +87,11 @@ async def update_concept(
     concept = await get_concept(db, tenant_id, concept_id)
     if concept is None:
         return None
+    # A merged concept is a tombstone — the merge already moved its evidence
+    # (links + edges) to the survivor. Any update would resurrect a dead node and
+    # corrupt the trust spine, so block it outright.
+    if concept.review_state == "merged":
+        raise ValueError("cannot modify a merged concept")
     if name is not None:
         concept.name = name
     if summary is not None:

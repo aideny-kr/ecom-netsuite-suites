@@ -119,16 +119,19 @@ async def get_concept_detail(concept_id: str, user: _Reader, db: _Db):
 @router.patch("/concepts/{concept_id}", response_model=MemoryConceptResponse)
 async def update_concept(concept_id: str, request: MemoryConceptUpdate, user: _Manager, db: _Db):
     cid = _parse_uuid(concept_id)
-    concept = await tenant_memory_service.update_concept(
-        db,
-        user.tenant_id,
-        cid,
-        name=request.name,
-        summary=request.summary,
-        concept_type=request.concept_type,
-        review_state=request.review_state,
-        confirmed_by=user.id,
-    )
+    try:
+        concept = await tenant_memory_service.update_concept(
+            db,
+            user.tenant_id,
+            cid,
+            name=request.name,
+            summary=request.summary,
+            concept_type=request.concept_type,
+            review_state=request.review_state,
+            confirmed_by=user.id,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(e))
     if concept is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Concept not found")
     await audit_service.log_event(

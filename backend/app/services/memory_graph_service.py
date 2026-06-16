@@ -46,6 +46,10 @@ async def retrieve_confirmed_concepts(
         .where(
             TenantMemoryConcept.tenant_id == tenant_id,
             TenantMemoryConcept.review_state == "confirmed",
+            # Belt-and-suspenders: a merge tombstone can NEVER be injected, even if
+            # its review_state somehow reads 'confirmed' (its evidence already moved
+            # to the survivor).
+            TenantMemoryConcept.merged_into_id.is_(None),
         )
         .order_by(TenantMemoryConcept.last_used_at.desc().nullslast(), TenantMemoryConcept.created_at.desc())
         .limit(max_concepts)

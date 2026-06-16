@@ -132,6 +132,29 @@ async def test_patch_confirm_sets_confirmed_by(client, admin_user, db, seeded_co
     assert row.confirmed_by == user.id
 
 
+async def test_patch_merged_concept_409(client, admin_user, db):
+    """PATCHing a merged (tombstoned) concept must 409, not resurrect it."""
+    from app.services import tenant_memory_service as svc
+
+    user, headers = admin_user
+    survivor = await _seed_concept(db, user.tenant_id, name="Survivor")
+    loser = await _seed_concept(db, user.tenant_id, name="Loser")
+    await svc.merge_concepts(db, user.tenant_id, survivor.id, [loser.id])
+    await db.commit()
+
+    resp = await client.patch(
+        f"/api/v1/tenant-memory/concepts/{loser.id}",
+        json={"review_state": "confirmed"},
+        headers=headers,
+    )
+    assert resp.status_code == 409, resp.text
+
+    # Still a tombstone — untouched.
+    row = (await db.execute(select(TenantMemoryConcept).where(TenantMemoryConcept.id == loser.id))).scalar_one()
+    await db.refresh(row)
+    assert row.review_state == "merged"
+
+
 async def test_patch_cross_tenant_404(client, admin_user, admin_user_b, db):
     _, headers_a = admin_user
     user_b, _ = admin_user_b

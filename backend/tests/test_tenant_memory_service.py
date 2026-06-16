@@ -8,6 +8,7 @@ merge repoints links + edges to the survivor.
 
 import uuid
 
+import pytest
 import pytest_asyncio
 
 from app.models.tenant_memory_concept import TenantMemoryConcept
@@ -87,6 +88,19 @@ async def test_update_concept_patches_fields(db, tenant_with_user):
     updated = await svc.update_concept(db, tenant.id, c.id, name="New", summary="new summary")
     assert updated.name == "New"
     assert updated.summary == "new summary"
+
+
+async def test_update_merged_concept_raises(db, tenant_with_user):
+    """A merged (tombstoned) concept must reject ANY update — its evidence already
+    moved to the survivor, so resurrecting it would corrupt the trust spine."""
+    tenant, _ = tenant_with_user
+    survivor = await _seed_concept(db, tenant.id, name="Survivor")
+    loser = await _seed_concept(db, tenant.id, name="Loser")
+    await svc.merge_concepts(db, tenant.id, survivor.id, [loser.id])
+    await db.flush()
+
+    with pytest.raises(ValueError, match="merged"):
+        await svc.update_concept(db, tenant.id, loser.id, review_state="confirmed")
 
 
 async def test_soft_reject_is_not_delete(db, tenant_with_user):

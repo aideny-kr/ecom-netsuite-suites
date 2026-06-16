@@ -72,6 +72,28 @@ class TestRetrieveConfirmedConcepts:
         assert "review_state" in sql
         assert "'confirmed'" in sql
 
+    @pytest.mark.asyncio
+    async def test_excludes_tombstoned_concept(self):
+        """Belt-and-suspenders: a concept whose merged_into_id is set (a merge
+        tombstone) must NEVER be injected, even if its review_state is somehow
+        'confirmed'. The SQL must constrain merged_into_id IS NULL."""
+        from app.services.memory_graph_service import retrieve_confirmed_concepts
+
+        captured = {}
+
+        async def _capture_execute(stmt):
+            captured["sql"] = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+            mock_result = MagicMock()
+            mock_result.scalars.return_value.all.return_value = []
+            return mock_result
+
+        mock_db = AsyncMock()
+        mock_db.execute = _capture_execute
+
+        await retrieve_confirmed_concepts(mock_db, uuid.uuid4())
+        sql = captured["sql"].lower()
+        assert "merged_into_id is null" in sql
+
 
 class TestMemoryConceptsInUnifiedAgent:
     """Confirmed concepts must render in the system prompt under <tenant_memory>."""
