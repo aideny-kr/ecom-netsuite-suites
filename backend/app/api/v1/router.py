@@ -37,6 +37,7 @@ from app.api.v1 import (
     sync,
     tables,
     task_files,
+    tenant_memory,
     tenants,
     users,
     workspaces,
@@ -84,4 +85,5 @@ api_router.include_router(connector_status.router)
 api_router.include_router(drive_folders.router)
 api_router.include_router(reconciliation.router)
 api_router.include_router(metrics.router)
+api_router.include_router(tenant_memory.router)
 api_router.include_router(reports.router)

@@ -53,6 +53,7 @@ celery_app.conf.include = [
     "app.workers.tasks.suiteql_export",
     "app.workers.tasks.workspace_run",
     "app.workers.tasks.drive_rag_sync",
+    "app.workers.tasks.tenant_memory_extract_backfill",
 ]
 
 celery_app.conf.beat_schedule = {

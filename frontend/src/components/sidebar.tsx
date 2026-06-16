@@ -24,6 +24,7 @@ import {
   Tag,
   BarChart3,
   Scale,
+  Network,
   FileBarChart,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -48,6 +49,7 @@ const iconMap = {
   Database,
   Settings,
   Scale,
+  Network,
   FileBarChart,
 } as const;
 

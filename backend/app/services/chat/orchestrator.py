@@ -2285,6 +2285,7 @@ async def run_chat_turn(
                         from app.services.chat.domain_knowledge import retrieve_domain_knowledge
                         from app.services.chat.tenant_resolver import TenantEntityResolver
                         from app.services.learned_rules_service import retrieve_learned_rules
+                        from app.services.memory_graph_service import retrieve_confirmed_concepts
                         from app.services.query_pattern_service import retrieve_similar_patterns
 
                         # Build the list of concurrent tasks dynamically
@@ -2333,6 +2334,13 @@ async def run_chat_turn(
                         )
                         _gather_keys.append("learned_rules")
 
+                        # Tenant memory graph — confirmed concepts (read-loop). Always
+                        # injected (no context_need gating), mirroring learned_rules.
+                        _gather_tasks.append(
+                            retrieve_confirmed_concepts(db=db, tenant_id=tenant_id, query_text=sanitized_input)
+                        )
+                        _gather_keys.append("memory_concepts")
+
                         _gather_t0 = time.time()
                         print(f"[ORCHESTRATOR] context_gather start | tasks={_gather_keys}", flush=True)
                         _gather_results = await asyncio.gather(*_gather_tasks, return_exceptions=True)
@@ -2346,6 +2354,7 @@ async def run_chat_turn(
                         dk_result = _results.get("dk")
                         patterns_result = _results.get("patterns")
                         learned_rules_result = _results.get("learned_rules")
+                        memory_concepts_result = _results.get("memory_concepts")
 
                         context: dict[str, Any] = {}
 
@@ -2442,6 +2451,19 @@ async def run_chat_turn(
                                 context["learned_rules"] = learned_rules_result
                                 print(
                                     f"[ORCHESTRATOR] Learned rules injected ({len(learned_rules_result)} rules)",
+                                    flush=True,
+                                )
+
+                        # memory_concepts (ALL context needs — always injected; the
+                        # retriever already gated on review_state='confirmed'). Fail
+                        # open: a memory-graph failure must never break the chat turn.
+                        if memory_concepts_result is not None:
+                            if isinstance(memory_concepts_result, Exception):
+                                logger.warning("unified_agent.memory_concepts_failed", exc_info=memory_concepts_result)
+                            elif memory_concepts_result:
+                                context["memory_concepts"] = memory_concepts_result
+                                print(
+                                    f"[ORCHESTRATOR] Memory concepts injected ({len(memory_concepts_result)} concepts)",
                                     flush=True,
                                 )
 

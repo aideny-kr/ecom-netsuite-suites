@@ -531,6 +531,27 @@ class UnifiedAgent(BaseSpecialistAgent):
             lr_block += "</learned_rules>"
             parts.append(lr_block)
 
+        # Tenant memory graph — confirmed, customer-vetted business concepts
+        # (the read-loop). Only review_state='confirmed' concepts reach here;
+        # the orchestrator's retrieve_confirmed_concepts gates on that.
+        _memory_concepts = self._context.get("memory_concepts", [])
+        if _memory_concepts:
+            tm_block = (
+                "\n<tenant_memory>\nConfirmed tenant business concepts — "
+                "treat these plain-English definitions as authoritative:\n"
+            )
+            for concept in _memory_concepts:
+                # Defensive: never KeyError on a malformed dict; skip empty concepts.
+                c_name = str(concept.get("name", "")).strip()
+                c_summary = str(concept.get("summary", "")).strip()
+                if not c_name and not c_summary:
+                    continue
+                # Escape tenant-controlled text so a concept containing markup
+                # can't break out of <tenant_memory> or inject prompt instructions.
+                tm_block += f"  [{_xml_escape(c_name)}] {_xml_escape(c_summary)}\n"
+            tm_block += "</tenant_memory>"
+            parts.append(tm_block)
+
         # Tenant vernacular (entity resolution)
         if self._tenant_vernacular:
             parts.append("\n## EXPLICIT TENANT ENTITY RESOLUTION — MANDATORY")

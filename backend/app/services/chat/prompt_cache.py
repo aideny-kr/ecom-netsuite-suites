@@ -20,13 +20,15 @@ from dataclasses import dataclass
 #   - proven_patterns: tenant query patterns matched for this turn
 #   - financial_context: financial intent classification
 #   - learned_rules: query-aware tenant business rules (rebuilt per-turn)
+#   - tenant_memory: confirmed tenant memory concepts (read-loop, per-turn)
 #   - current_datetime: today/now block — HH:MM changes every minute
 #
 # learned_rules and current_datetime were added after a cache audit found
 # they were silently bleeding into the static prefix and invalidating cache
-# up to once per minute. See test_prompt_cache.py.
+# up to once per minute. tenant_memory is per-turn for the same reason.
+# See test_prompt_cache.py.
 _DYNAMIC_BLOCK_RE = re.compile(
-    r"<(tenant_vernacular|domain_knowledge|proven_patterns|financial_context|learned_rules|current_datetime)>"
+    r"<(tenant_vernacular|domain_knowledge|proven_patterns|financial_context|learned_rules|tenant_memory|current_datetime)>"
     r".*?"
     r"</\1>",
     re.DOTALL,

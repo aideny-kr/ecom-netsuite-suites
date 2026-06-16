@@ -34,6 +34,9 @@ from app.models.script_sync import ScriptSyncState
 from app.models.tenant import Tenant, TenantConfig
 from app.models.tenant_entity_mapping import TenantEntityMapping
 from app.models.tenant_learned_rule import TenantLearnedRule
+from app.models.tenant_memory_concept import TenantMemoryConcept
+from app.models.tenant_memory_edge import TenantMemoryEdge
+from app.models.tenant_memory_link import TenantMemoryLink
 from app.models.tenant_profile import TenantProfile
 from app.models.tenant_wallet import TenantWallet
 from app.models.user import Permission, Role, RolePermission, User, UserRole
@@ -91,6 +94,9 @@ __all__ = [
     "NetSuiteApiLog",
     "TenantEntityMapping",
     "TenantLearnedRule",
+    "TenantMemoryConcept",
+    "TenantMemoryEdge",
+    "TenantMemoryLink",
     "TenantWallet",
     "DomainKnowledgeChunk",
     "SavedSuiteQLQuery",
