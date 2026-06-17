@@ -93,4 +93,27 @@ describe("LearnedRulesSection", () => {
     fireEvent.click(within(dialog).getByRole("button", { name: /delete|remove|confirm/i }));
     await waitFor(() => expect(deleteMutate).toHaveBeenCalledWith("r1"));
   });
+
+  it("paginates 10 rules per page with working prev/next", () => {
+    const many = Array.from({ length: 25 }, (_, i) => ({ ...RULE, id: `r${i}`, rule_description: `Rule number ${i}` }));
+    hookState.list = { data: many, isLoading: false, error: null };
+    render(wrap(<LearnedRulesSection />));
+
+    // Page 1 shows the first 10 only.
+    expect(screen.getByText("Rule number 0")).toBeInTheDocument();
+    expect(screen.getByText("Rule number 9")).toBeInTheDocument();
+    expect(screen.queryByText("Rule number 10")).not.toBeInTheDocument();
+    expect(screen.getByText(/page 1 of 3/i)).toBeInTheDocument();
+
+    // Next page shows the next 10.
+    fireEvent.click(screen.getByRole("button", { name: /next page/i }));
+    expect(screen.getByText("Rule number 10")).toBeInTheDocument();
+    expect(screen.queryByText("Rule number 0")).not.toBeInTheDocument();
+    expect(screen.getByText(/page 2 of 3/i)).toBeInTheDocument();
+  });
+
+  it("hides pagination controls when rules fit on one page", () => {
+    render(wrap(<LearnedRulesSection />)); // single rule from beforeEach
+    expect(screen.queryByText(/page 1 of/i)).not.toBeInTheDocument();
+  });
 });
