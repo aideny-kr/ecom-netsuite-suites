@@ -11,6 +11,14 @@ import ReactFlow, {
   type NodeProps,
 } from "reactflow";
 import "reactflow/dist/style.css";
+import {
+  forceCenter,
+  forceCollide,
+  forceLink,
+  forceManyBody,
+  forceSimulation,
+  type SimulationNodeDatum,
+} from "d3-force";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -79,20 +87,59 @@ function ConceptNode({ data }: NodeProps<ConceptNodeData>) {
 
 const nodeTypes = { concept: ConceptNode };
 
-// Lay concepts out in a simple grid — the backend does not (yet) emit layout
-// coordinates, so we derive deterministic positions from index. Edges connect
-// confirmed/pending relations between concepts that are present in the graph.
+type SimNode = SimulationNodeDatum & { id: string };
+type SimLink = { source: string; target: string };
+
+// Force-directed (Obsidian-style) layout: nodes repel, edges pull related concepts
+// together, so the graph settles into an organic cluster instead of a rigid grid.
+// Seeded on a circle (no Math.random) + run to completion synchronously, so the
+// layout is deterministic and stable across re-renders (confirming a concept won't
+// reshuffle the whole graph). reactflow renders the settled positions + fitView.
+function layoutPositions(
+  concepts: MemoryConcept[],
+  edges: MemoryGraph["edges"],
+): Map<string, { x: number; y: number }> {
+  const positions = new Map<string, { x: number; y: number }>();
+  const n = concepts.length;
+  if (n === 0) return positions;
+
+  const ring = 70 * Math.sqrt(n);
+  const simNodes: SimNode[] = concepts.map((c, i) => {
+    const a = (i / n) * 2 * Math.PI;
+    return { id: c.id, x: Math.cos(a) * ring, y: Math.sin(a) * ring };
+  });
+
+  const present = new Set(simNodes.map((s) => s.id));
+  const simLinks: SimLink[] = edges
+    .filter((e) => present.has(e.source_concept_id) && present.has(e.target_concept_id))
+    .map((e) => ({ source: e.source_concept_id, target: e.target_concept_id }));
+
+  forceSimulation(simNodes)
+    .force("charge", forceManyBody().strength(-1400))
+    .force(
+      "link",
+      forceLink<SimNode, SimLink>(simLinks)
+        .id((d) => d.id)
+        .distance(230)
+        .strength(0.35),
+    )
+    .force("center", forceCenter(0, 0))
+    .force("collide", forceCollide(150))
+    .stop()
+    .tick(300);
+
+  for (const s of simNodes) positions.set(s.id, { x: s.x ?? 0, y: s.y ?? 0 });
+  return positions;
+}
+
 function toFlow(graph: MemoryGraph): { nodes: Node<ConceptNodeData>[]; edges: Edge[] } {
-  const COLS = 3;
-  const X_GAP = 300;
-  const Y_GAP = 200;
-
   const presentIds = new Set(graph.concepts.map((c) => c.id));
+  const positions = layoutPositions(graph.concepts, graph.edges);
 
-  const nodes: Node<ConceptNodeData>[] = graph.concepts.map((concept, i) => ({
+  const nodes: Node<ConceptNodeData>[] = graph.concepts.map((concept) => ({
     id: concept.id,
     type: "concept",
-    position: { x: (i % COLS) * X_GAP, y: Math.floor(i / COLS) * Y_GAP },
+    position: positions.get(concept.id) ?? { x: 0, y: 0 },
     data: { concept },
   }));
 
