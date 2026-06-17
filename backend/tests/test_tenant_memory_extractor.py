@@ -35,6 +35,33 @@ class TestExtractConcepts:
         assert out[0]["confidence"] == 0.9
 
     @pytest.mark.asyncio
+    async def test_extract_chunks_large_input_into_multiple_calls(self):
+        """Many rows are batched (one LLM call each) so a large input can't truncate
+        into invalid JSON; concepts from all batches accumulate."""
+        adapter = AsyncMock()
+        adapter.create_message.return_value = SimpleNamespace(
+            text_blocks=['{"concepts":[{"name":"C","plain_english_summary":"y","edges":[],"confidence":0.5}]}']
+        )
+        rows = [{"kind": "learned_rule", "text": f"rule {i}"} for i in range(25)]
+        out = await ex.extract_concepts(rows, adapter, "m")
+        # 25 rows / batch 12 -> 3 batches -> 3 calls -> 3 concepts.
+        assert adapter.create_message.call_count == 3
+        assert len(out) == 3
+        first_prompt = adapter.create_message.call_args_list[0].kwargs["messages"][0]["content"]
+        assert first_prompt.count('"kind"') <= 12
+
+    @pytest.mark.asyncio
+    async def test_extract_one_bad_batch_does_not_lose_others(self):
+        """A batch returning garbage is skipped; other batches still yield concepts."""
+        good = SimpleNamespace(text_blocks=['{"concepts":[{"name":"Good","plain_english_summary":"y"}]}'])
+        bad = SimpleNamespace(text_blocks=["not json"])
+        adapter = AsyncMock()
+        adapter.create_message.side_effect = [good, bad, good]
+        rows = [{"kind": "learned_rule", "text": f"r{i}"} for i in range(25)]  # 3 batches
+        out = await ex.extract_concepts(rows, adapter, "m")
+        assert len(out) == 2  # batch 1 + 3; batch 2 (garbage) skipped
+
+    @pytest.mark.asyncio
     async def test_extract_parses_source_ids(self):
         """Each concept reports the source rows it was distilled from, so the
         backfill can attribute evidence links to the deriving concept."""

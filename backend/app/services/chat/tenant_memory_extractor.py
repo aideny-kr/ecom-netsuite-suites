@@ -79,29 +79,48 @@ Source rows:
 """
 
 
+# Rows per LLM call. Keep each batch small so its JSON response stays well under
+# max_tokens and can't truncate into invalid JSON (a large tenant has many rows).
+_EXTRACT_BATCH_SIZE = 12
+
+
 async def extract_concepts(
     rows: list[dict[str, Any]],
     adapter: BaseLLMAdapter,
     model: str,
 ) -> list[dict[str, Any]]:
-    """Distill source rows into concept dicts via a single LLM call.
+    """Distill source rows into concept dicts, batching the LLM calls.
 
-    Each returned dict carries ``name``, ``concept_type``,
-    ``plain_english_summary`` (mapped to the ``summary`` column at insert time),
-    ``edges``, and ``confidence``. Returns ``[]`` on no rows, no JSON, malformed
-    JSON, a missing ``concepts`` key, or any adapter error — failures are
-    swallowed, never raised.
+    Rows are processed in small batches (``_EXTRACT_BATCH_SIZE`` per call) so a
+    large tenant's output can't truncate into invalid JSON and lose the whole run.
+    Each returned dict carries ``name``, ``concept_type``, ``plain_english_summary``
+    (mapped to the ``summary`` column at insert time), ``edges``, ``confidence``,
+    and ``source_ids``. A batch that fails (no JSON, malformed JSON, adapter error)
+    is skipped — failures are swallowed, never raised, and never lose other batches.
     """
     if not rows:
         return []
 
+    out: list[dict[str, Any]] = []
+    for start in range(0, len(rows), _EXTRACT_BATCH_SIZE):
+        batch = rows[start : start + _EXTRACT_BATCH_SIZE]
+        out.extend(await _extract_one_batch(batch, adapter, model))
+    return out
+
+
+async def _extract_one_batch(
+    rows: list[dict[str, Any]],
+    adapter: BaseLLMAdapter,
+    model: str,
+) -> list[dict[str, Any]]:
+    """One LLM call over a single batch of rows. Returns ``[]`` on any failure."""
     rows_text = json.dumps(rows, default=str)
     prompt = _EXTRACTION_PROMPT.replace("{{ROWS}}", rows_text)
 
     try:
         response = await adapter.create_message(
             model=model,
-            max_tokens=1024,
+            max_tokens=2048,
             system="You distill tenant knowledge into reusable concepts. Return only JSON.",
             messages=[{"role": "user", "content": prompt}],
         )
@@ -116,15 +135,17 @@ async def extract_concepts(
         if not isinstance(concepts, list):
             return []
 
-        # Normalize source_ids to a list[str] on every concept so the backfill can
-        # attribute each evidence link to the deriving concept (a missing/garbage
-        # value becomes [] rather than a KeyError or a non-iterable).
+        # Drop non-dict items and normalize source_ids to a list[str] on every
+        # concept so the backfill can attribute each evidence link to the deriving
+        # concept (a missing/garbage value becomes [] rather than a non-iterable).
+        cleaned: list[dict[str, Any]] = []
         for concept in concepts:
             if not isinstance(concept, dict):
                 continue
             raw_ids = concept.get("source_ids")
             concept["source_ids"] = [str(sid) for sid in raw_ids] if isinstance(raw_ids, list) else []
-        return concepts
+            cleaned.append(concept)
+        return cleaned
 
     except Exception:
         logger.warning("tenant_memory_extractor.extraction_failed", exc_info=True)
