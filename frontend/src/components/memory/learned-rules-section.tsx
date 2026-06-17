@@ -1,8 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
-import { Plus, Trash2 } from "lucide-react";
+import { ChevronLeft, ChevronRight, Plus, Trash2 } from "lucide-react";
 
 import {
   AlertDialog,
@@ -28,6 +28,8 @@ import {
   type LearnedRule,
 } from "@/hooks/use-learned-rules";
 
+const PAGE_SIZE = 10;
+
 export function LearnedRulesSection() {
   const { data, isLoading, error } = useLearnedRules();
   const createRule = useCreateLearnedRule();
@@ -38,8 +40,15 @@ export function LearnedRulesSection() {
   const [adding, setAdding] = useState(false);
   const [newDescription, setNewDescription] = useState("");
   const [newCategory, setNewCategory] = useState("");
+  const [page, setPage] = useState(0);
 
   const rules = (data ?? []) as LearnedRule[];
+  const pageCount = Math.max(1, Math.ceil(rules.length / PAGE_SIZE));
+  // Clamp the page if the list shrank (e.g. after a delete) so we never strand on an empty page.
+  useEffect(() => {
+    if (page > pageCount - 1) setPage(pageCount - 1);
+  }, [page, pageCount]);
+  const pageRules = rules.slice(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE);
 
   async function handleToggle(rule: LearnedRule) {
     try {
@@ -62,6 +71,7 @@ export function LearnedRulesSection() {
       setNewDescription("");
       setNewCategory("");
       setAdding(false);
+      setPage(0);
     } catch {
       toast({ title: "Failed to add rule", variant: "destructive" });
     }
@@ -155,7 +165,7 @@ export function LearnedRulesSection() {
                   </td>
                 </tr>
               ) : (
-                rules.map((rule, idx) => (
+                pageRules.map((rule, idx) => (
                   <tr key={rule.id} className={idx % 2 ? "bg-muted/20" : ""}>
                     <td className="py-2 align-top">
                       <Badge variant="secondary">{rule.rule_category ?? "general"}</Badge>
@@ -205,6 +215,37 @@ export function LearnedRulesSection() {
               )}
             </tbody>
           </table>
+
+          {rules.length > PAGE_SIZE && (
+            <div className="flex items-center justify-between pt-1 text-[13px] text-muted-foreground">
+              <span>
+                {page * PAGE_SIZE + 1}&ndash;{Math.min((page + 1) * PAGE_SIZE, rules.length)} of {rules.length}
+              </span>
+              <div className="flex items-center gap-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => setPage((p) => Math.max(0, p - 1))}
+                  disabled={page === 0}
+                  aria-label="Previous page"
+                >
+                  <ChevronLeft className="h-3.5 w-3.5" />
+                </Button>
+                <span>
+                  Page {page + 1} of {pageCount}
+                </span>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => setPage((p) => Math.min(pageCount - 1, p + 1))}
+                  disabled={page >= pageCount - 1}
+                  aria-label="Next page"
+                >
+                  <ChevronRight className="h-3.5 w-3.5" />
+                </Button>
+              </div>
+            </div>
+          )}
         </>
       )}
     </div>
