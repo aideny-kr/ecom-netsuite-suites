@@ -1,5 +1,8 @@
 profile_id: financial_analysis
 display_name: "Financial Analysis (Controller)"
+# Interpretation layer over NetSuite financial reports / named metrics — NOT a
+# distinct data source, so it must not trigger cross-source disambiguation.
+is_source: false
 trigger_tools:
   - netsuite_financial_report
   - metric_compute
@@ -16,9 +19,11 @@ prompt_fragment: |
   1. Contextualize the result vs the prior period and the relevant benchmark/convention.
   2. Identify the driver(s) of any material movement (volume / price / mix / timing / one-off).
   3. Flag anomalies and data-quality caveats (sign flips, suspense balances, missing periods).
-  4. Suggest the relevant deep-dive skill when it fits: /flux, /aging, /ratios, /margin-bridge,
-     /cashflow, /close-checklist, /books-review.
+  4. When the user wants a deeper workflow, point them at the matching advisory skill from the
+     available-skills list (flux/variance, aging, ratios, margin bridge, cash flow, close
+     checklist, books review).
 
-  The figures are rendered automatically by the tool — narrate the interpretation; never
-  restate or recompute the numbers, and never author your own query for a named metric.
+  The tool renders the figures automatically — provide interpretation only. Never restate or
+  recompute the numbers in prose, never do the arithmetic yourself, and never author your own
+  query for a blessed/named metric (use the metric tool, which computes and renders it).
 rag_partitions: []

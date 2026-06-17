@@ -1,6 +1,6 @@
 ---
 Name: Gross-Margin Bridge
-Description: Decomposes the change in gross margin between two periods into price, volume, mix, and cost effects (PVM bridge) from line-level revenue, quantity, and cost.
+Description: Explains why gross margin changed between two periods — reads the tool-rendered per-product revenue/quantity/cost and attributes the move directionally to price, volume, mix, and cost.
 Triggers:
   - /margin-bridge
   - gross margin bridge
@@ -10,21 +10,20 @@ Triggers:
 
 # Gross-Margin Bridge
 
-You are executing the Gross-Margin Bridge skill. Read-only and advisory. Follow these steps:
+You are executing the Gross-Margin Bridge skill. Read-only and advisory — you never hand-derive a waterfall of numbers. Follow these steps:
 
 1. **Scope.**
    - Identify the two periods to bridge (current vs comparison). Default to the most recent closed month vs the prior month if unspecified; state your choice.
 
-2. **Confirm the data is available — never invent it.**
-   - A margin bridge needs line-level **revenue**, **quantity/units**, and **unit cost**. Discover the schema with `netsuite_suiteql` first to find those fields for this tenant — do not assume field names. Also pull the gross-margin totals for both periods via `netsuite_financial_report` so you can reconcile the bridge to the reported change.
-   - If line-level quantity or cost is not available, say so and fall back to a top-level gross-margin variance (revenue effect vs cost effect only); do not fabricate a full price-volume-mix split.
+2. **Get the data from tools — never invent the split.**
+   - Use `netsuite_suiteql` to return per-product revenue, quantity, and cost with the aggregation and per-product margin computed **in the query**, so the result is rendered as a table (discover the fields from the schema first; do not assume field names). Pull the gross-margin totals for both periods from `netsuite_financial_report` to anchor the discussion.
 
-3. **Build the bridge.**
-   - Decompose the margin change into: **price** (selling-price change at constant volume/mix), **volume** (units change at constant price/mix), **mix** (shift between higher- and lower-margin products), and **cost** (unit-cost change). Present it as an additive waterfall from prior-period margin to current-period margin.
-   - Reconcile: the four effects must sum to the reported margin change; flag any unexplained residual.
+3. **Attribute the change directionally.**
+   - From the rendered per-product data, explain which effects drove the margin change — **price** (selling price moved), **volume** (units moved), **mix** (shift toward higher/lower-margin products), **cost** (unit cost moved) — and which products dominated. Describe direction and relative magnitude from what the table shows.
+   - A precise additive price-volume-mix decomposition is a multi-step computation: do NOT produce the exact per-effect dollars by hand. If the user needs an exact bridge, offer to add it as a blessed metric so it is computed and rendered.
 
 4. **Narrate.**
    - Lead with which effect dominated and why, in business terms. End with the lever most worth acting on.
 
 ## Output discipline
-The figures are rendered automatically by the tool — lead with the insight and the "so what". Do NOT restate, re-list, or recompute the numbers in prose. For a multi-part narrative, call `report_compose` and reference each prior result by its `result_id`.
+The tool renders every figure automatically as a table/report — give COMMENTARY ONLY. Do NOT restate, reproduce, or recompute the numbers in prose, and never do the financial arithmetic yourself. If a figure is not returned by a tool, describe it qualitatively or offer to add it as a blessed metric — never present a self-computed number as authoritative. For multi-part output, call `report_compose` and reference each prior result by its `result_id`.

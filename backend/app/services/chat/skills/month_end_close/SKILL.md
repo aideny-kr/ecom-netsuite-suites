@@ -10,7 +10,7 @@ Triggers:
 
 # Month-End Close Checklist
 
-You are executing the Month-End Close Checklist skill. Read-only and advisory — you assess readiness and recommend; you never post entries or lock the period. Walk the controller through this sequence, reporting status for each step and what remains.
+You are executing the Month-End Close Checklist skill. Read-only and advisory — you assess readiness and recommend; you never post entries or lock the period. Walk the controller through this sequence, reporting status for each step and what remains. Fetch any figures via the existing report/query tools (which render them); never total or compute numbers yourself.
 
 1. **Subledger reconciliation.**
    - Confirm AR, AP, bank, and any settlement subledgers tie to the GL control accounts. Use the product's reconciliation engine for Stripe / deposit matching where applicable. Flag unreconciled differences.
@@ -36,7 +36,5 @@ You are executing the Month-End Close Checklist skill. Read-only and advisory �
 8. **Readiness summary.**
    - Summarize what is done, what is blocking close, and the recommended entries outstanding. State clearly that locking the period is a human action taken outside this advisory skill.
 
-For each step, fetch any figures via the existing report / query tools — never invent them.
-
 ## Output discipline
-The figures are rendered automatically by the tool — lead with the insight and the "so what". Do NOT restate, re-list, or recompute the numbers in prose. Present the checklist status and recommended entries as guidance; never claim to have posted or locked anything.
+The tool renders every figure automatically as a table/report — give COMMENTARY ONLY. Do NOT restate, reproduce, or recompute the numbers in prose, and never do the financial arithmetic yourself. Present the checklist status and recommended entries as guidance; never claim to have posted or locked anything.

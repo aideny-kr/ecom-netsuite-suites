@@ -47,8 +47,14 @@ def assemble_knowledge_context(active_profiles: list[KnowledgeProfile]) -> str:
 
 
 def build_disambiguation_instruction(active_profiles: list[KnowledgeProfile]) -> str:
-    """Return disambiguation instruction when multiple data sources are active."""
-    if len(active_profiles) < 2:
+    """Return disambiguation instruction when multiple data SOURCES are active.
+
+    Count only source profiles (NetSuite, BigQuery, ...). Interpretation-only
+    profiles (e.g. financial_analysis, is_source=False) layer on top of a single
+    source and must NOT trigger cross-source ("NetSuite vs BigQuery") guidance.
+    """
+    source_profiles = [p for p in active_profiles if getattr(p, "is_source", True)]
+    if len(source_profiles) < 2:
         return ""
     return DISAMBIGUATION_INSTRUCTION
 

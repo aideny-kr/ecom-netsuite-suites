@@ -1,6 +1,6 @@
 ---
 Name: AR / AP Aging Triage
-Description: Buckets open receivables or payables by age (0-30/31-60/61-90/90+), computes DSO or DPO, flags concentration risk, and produces a prioritized collections or payment action list.
+Description: Buckets open receivables or payables by age and computes DSO/DPO in the query (rendered as a table), then flags concentration risk and prioritizes a collections or payment action list.
 Triggers:
   - /aging
   - ar aging
@@ -10,23 +10,19 @@ Triggers:
 
 # AR / AP Aging Triage
 
-You are executing the AR / AP Aging Triage skill. Read-only and advisory — you never post, write off, or apply anything. Follow these steps:
+You are executing the AR / AP Aging Triage skill. Read-only and advisory — you never post, write off, or apply anything, and you never sum or divide in your head. Follow these steps:
 
 1. **Determine AR or AP.**
    - If the user said receivables / collections / "who owes us", do AR. If payables / "what we owe" / vendor bills, do AP. If ambiguous, ask once which one before proceeding.
 
-2. **Fetch the open items — never invent them.**
-   - Prefer the standard aging report via `netsuite_financial_report` (an AR or AP aging report) if available. Otherwise use `netsuite_suiteql` over open transactions: first discover the relevant columns from the schema (open balance, due date, counterparty), then query — do not assume column names.
+2. **Pull the aging — let the query do the math.**
+   - Aging is **not** an income-statement or balance-sheet report; if a financial-mode hint suggests those report types, ignore it here. Use `netsuite_suiteql` over the open AR/AP items and do the bucketing and the DSO/DPO **inside the query** — group by age band (0-30 / 31-60 / 61-90 / 90+), sum the balances, and compute DSO (AR) or DPO (AP) in SQL — so the result is rendered as a table. Discover the relevant fields from the schema first; do not assume field names. (If the tenant exposes a standard aging report through `netsuite_financial_report`, that rendered report is fine too.)
 
-3. **Bucket and measure.**
-   - Bucket each open item by days past due into 0-30, 31-60, 61-90, and 90+. Compute the total per bucket and each bucket's share of the total balance.
-   - Compute **DSO** for AR (or **DPO** for AP) for the period, and compare to the prior period if available.
-
-4. **Find risk and concentration.**
+3. **Read risk and concentration off the rendered table.**
    - Identify the counterparties holding the largest overdue balances and any single-name concentration. For AR, flag balances aging past terms and any credit-risk signals. For AP, flag bills approaching or past due and any early-payment discounts about to lapse.
 
-5. **Prioritize actions.**
+4. **Prioritize actions.**
    - For AR: a ranked collections sequence (largest / oldest first, with a suggested next step per account). For AP: a ranked payment plan that protects discounts and avoids late penalties while preserving cash.
 
 ## Output discipline
-The figures are rendered automatically by the tool — lead with the insight and the "so what". Do NOT restate, re-list, or recompute the numbers in prose. For a multi-part narrative, call `report_compose` and reference each prior result by its `result_id`.
+The tool renders every figure automatically as a table/report — give COMMENTARY ONLY. Do NOT restate, reproduce, or recompute the numbers in prose, and never do the financial arithmetic yourself. If a figure is not returned by a tool, describe it qualitatively or offer to add it as a blessed metric — never present a self-computed number as authoritative. For multi-part output, call `report_compose` and reference each prior result by its `result_id`.

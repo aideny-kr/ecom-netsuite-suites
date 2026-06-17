@@ -3,22 +3,22 @@ Name: Books Review / GL Hygiene
 Description: Read-only bookkeeping review — inspects the general ledger for hygiene issues (suspense/clearing balances, unreconciled accounts, miscoding, cutoff gaps) and recommends adjusting entries. Never posts.
 Triggers:
   - /books-review
-  - books review
   - gl hygiene
-  - clean up the books
+  - general ledger review
+  - books cleanup
 ---
 
 # Books Review / GL Hygiene
 
 You are executing the Books Review / GL Hygiene skill. This is **read-only and advisory**: you inspect the ledger and *recommend* corrections — you do NOT and cannot post, adjust, or modify any entry. Posting is a separate, human-approved step.
 
-This skill is source-agnostic: review whatever general ledger is reachable through your tools. Today that is the NetSuite ledger; the same method applies to any ledger (for example QuickBooks) once its tools are connected.
+This skill is source-agnostic: review whatever general ledger your connected tools expose. The same method applies to any ledger the product is connected to.
 
 1. **Scope.**
    - Confirm the period under review (default: the current open period). Ask if the user wants a full review or a specific area (e.g. just suspense accounts).
 
-2. **Inspect the ledger — never invent balances.**
-   - Use `netsuite_financial_report` and schema-discovered `netsuite_suiteql` (discover fields first; do not assume them) to examine:
+2. **Inspect the ledger — let the tools compute the balances.**
+   - Use `netsuite_financial_report` and schema-discovered `netsuite_suiteql` (discover the fields first; do the aggregation in the query so results render as tables — do not total balances by hand) to examine:
      - **Suspense / clearing / ask-my-accountant accounts** with non-zero balances that should net to zero.
      - **Unreconciled** bank and control accounts.
      - **Duplicate or likely-missing entries** and out-of-balance subledgers vs the GL control account.
@@ -33,4 +33,4 @@ This skill is source-agnostic: review whatever general ledger is reachable throu
    - Lead with the count and severity of issues and the books' overall readiness. End with the entries that must be cleared before close.
 
 ## Output discipline
-The figures are rendered automatically by the tool — lead with the insight and the "so what". Do NOT restate, re-list, or recompute the numbers in prose. Present recommended entries as guidance only; never claim to have posted anything.
+The tool renders every figure automatically as a table/report — give COMMENTARY ONLY. Do NOT restate, reproduce, or recompute the numbers in prose, and never do the financial arithmetic yourself. Present recommended entries as guidance only; never claim to have posted anything, and never present a self-computed balance as authoritative.

@@ -1,15 +1,21 @@
 """Advisory accountant + financial-analytics skills (Phase 1).
 
 Read-only methodology playbooks: NO embedded SuiteQL/tenant columns
-(no-prompt-pollution) and NO restated tool figures (no-LLM-numbers). Surfaced via
-the existing skill registry + a knowledge profile, and to the user via the
-data-driven /skills/catalog menu.
+(no-prompt-pollution) and NO model-computed figures in prose (no-LLM-numbers — the
+tool/query computes & renders; the model gives commentary only). Surfaced via the
+existing skill registry + a knowledge profile, and to the user via the data-driven
+/skills/catalog menu.
 """
+
 from __future__ import annotations
 
 import pytest
 
 from app.services.chat.knowledge_profiles.loader import load_all_profiles
+from app.services.chat.prompt_assembler import (
+    build_disambiguation_instruction,
+    get_active_profiles,
+)
 from app.services.chat.skills import (
     get_all_skills_metadata,
     get_skill_instructions,
@@ -17,15 +23,15 @@ from app.services.chat.skills import (
     reload_skills,
 )
 
-# slug -> (primary slash, representative routing phrase)
+# slug -> (primary slash, representative SINGLE-concept routing phrase)
 EXPECTED_SKILLS = {
-    "pl_flux_variance": ("/flux", "give me a flux analysis on the p&l"),
+    "pl_flux_variance": ("/flux", "give me a flux analysis on the income statement"),
     "ar_ap_aging_triage": ("/aging", "run an ar aging triage"),
-    "ratio_analysis": ("/ratios", "do a ratio analysis for last quarter"),
+    "ratio_analysis": ("/ratios", "do a financial ratio analysis for last quarter"),
     "month_end_close": ("/close-checklist", "walk me through the month-end close"),
     "gross_margin_bridge": ("/margin-bridge", "build a gross margin bridge vs last month"),
-    "cash_flow_runway": ("/cashflow", "cash flow analysis and runway please"),
-    "books_review": ("/books-review", "do a books review for gl hygiene"),
+    "cash_flow_runway": ("/cashflow", "show me the statement of cash flows"),
+    "books_review": ("/books-review", "do a gl hygiene review of the ledger"),
 }
 
 # Tenant-schema / SQL markers that must NOT appear in advisory prompts.
@@ -35,15 +41,56 @@ POLLUTION_MARKERS = (
     "inventoryitemlocations",
     "builtin.df",
     "iscogs",
+    "mainline",
+    "taxline",
     "```sql",
 )
 
-# Plain finance asks that must NOT hijack any new advisory skill.
+# Finance-specific tokens — every NEW semantic trigger must contain at least one,
+# so triggers can't be generic English phrases that hijack unrelated turns.
+FINANCE_TOKENS = (
+    "flux",
+    "variance",
+    "p&l",
+    "income",
+    "aging",
+    "receivable",
+    "payable",
+    "ratio",
+    "liquidity",
+    "margin",
+    "price volume mix",
+    "bridge",
+    "cash",
+    "runway",
+    "statement of cash",
+    "close",
+    "month-end",
+    "month end",
+    "ledger",
+    "gl ",
+    "books",
+    "financial",
+)
+
+# Plain / off-domain asks that must NOT hijack any new advisory skill — including
+# the substring-collision phrasings the review surfaced.
 NEGATIVE_PHRASES = (
     "show me revenue",
     "what were sales last month",
     "list our customers",
     "how much did we spend on marketing",
+    "can you do a ratio analysis of support tickets",
+    "summarize the books review notes from the team",
+    "give me a runway analysis for our fundraising plan",
+)
+
+# Multi-concept asks: match_skill must route to the LEADING concept (earliest
+# mentioned), not the alphabetically-first slug.
+MULTI_CONCEPT = (
+    ("give me a flux analysis and then a cash flow statement for May", "pl_flux_variance"),
+    ("show me the statement of cash flows and also a flux analysis", "cash_flow_runway"),
+    ("run an ar aging triage, then a financial ratio analysis", "ar_ap_aging_triage"),
 )
 
 
@@ -81,7 +128,10 @@ def test_skill_body_is_methodology_not_sql(slug):
 def test_skill_body_enforces_no_llm_numbers(slug):
     body = get_skill_instructions(slug)
     assert body
-    assert "do not restate" in body.lower(), f"{slug} missing no-LLM-numbers discipline"
+    low = body.lower()
+    # Commentary-only + explicit no-restate: the tool/query computes & renders.
+    assert "do not restate" in low, f"{slug} missing no-restate discipline"
+    assert "commentary only" in low, f"{slug} missing commentary-only discipline"
 
 
 @pytest.mark.parametrize("slug,expected", list(EXPECTED_SKILLS.items()))
@@ -99,13 +149,20 @@ def test_slash_command_routes_to_skill(slug, expected):
     assert matched is not None and matched["slug"] == slug
 
 
+@pytest.mark.parametrize("phrase,leading_slug", MULTI_CONCEPT)
+def test_multi_concept_routes_to_leading_concept(phrase, leading_slug):
+    matched = match_skill(phrase)
+    assert matched is not None, f"phrase {phrase!r} matched no skill"
+    assert matched["slug"] == leading_slug, (
+        f"multi-concept {phrase!r} routed to {matched['slug']} not leading {leading_slug}"
+    )
+
+
 @pytest.mark.parametrize("phrase", NEGATIVE_PHRASES)
-def test_plain_finance_asks_do_not_hijack_new_skills(phrase):
+def test_plain_or_offdomain_asks_do_not_hijack_new_skills(phrase):
     matched = match_skill(phrase)
     if matched is not None:
-        assert matched["slug"] not in EXPECTED_SKILLS, (
-            f"plain ask {phrase!r} hijacked {matched['slug']}"
-        )
+        assert matched["slug"] not in EXPECTED_SKILLS, f"ask {phrase!r} hijacked new skill {matched['slug']}"
 
 
 def test_all_slash_commands_globally_unique():
@@ -117,13 +174,17 @@ def test_all_slash_commands_globally_unique():
                 seen[t] = s["slug"]
 
 
-def test_new_semantic_triggers_are_specific_enough():
+def test_new_semantic_triggers_are_finance_specific():
     for slug in EXPECTED_SKILLS:
         meta = _slug_meta(slug)
         for t in meta["triggers"]:
             if t.startswith("/"):
                 continue
-            assert len(t.split()) >= 2, f"{slug} trigger {t!r} too generic (<2 words)"
+            tl = t.lower()
+            assert len(tl.split()) >= 2, f"{slug} trigger {t!r} too short (<2 words)"
+            assert any(tok in tl for tok in FINANCE_TOKENS), (
+                f"{slug} trigger {t!r} is not finance-specific (could hijack unrelated turns)"
+            )
 
 
 def test_catalog_exposes_new_skills_for_menu():
@@ -144,9 +205,27 @@ def test_financial_analysis_profile_loads_and_activates():
     assert not prof.matches_tools({"bigquery_sql"})
 
 
+def test_financial_analysis_profile_is_interpretation_not_source():
+    # Must NOT count toward the multi-data-source disambiguation guard.
+    prof = {p.profile_id: p for p in load_all_profiles()}["financial_analysis"]
+    assert prof.is_source is False
+
+
+def test_financial_analysis_does_not_trigger_cross_source_disambiguation():
+    # A pure single-source NetSuite financial-report turn (no BigQuery present):
+    # netsuite + financial_analysis both activate, but disambiguation must stay OFF
+    # because financial_analysis is interpretation-only (is_source=False).
+    profiles = load_all_profiles()
+    active = get_active_profiles(profiles, {"netsuite_financial_report"})
+    assert any(p.profile_id == "financial_analysis" for p in active)
+    assert build_disambiguation_instruction(active) == ""
+    # Same for a pure named-metric turn.
+    active2 = get_active_profiles(profiles, {"metric_compute"})
+    assert build_disambiguation_instruction(active2) == ""
+
+
 def test_financial_analysis_profile_is_pollution_free():
-    profiles = {p.profile_id: p for p in load_all_profiles()}
-    prof = profiles["financial_analysis"]
+    prof = {p.profile_id: p for p in load_all_profiles()}["financial_analysis"]
     assert prof.prompt_fragment.strip()
     low = prof.prompt_fragment.lower()
     for marker in POLLUTION_MARKERS:

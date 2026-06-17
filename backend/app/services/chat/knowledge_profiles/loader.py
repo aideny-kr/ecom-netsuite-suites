@@ -16,6 +16,10 @@ class KnowledgeProfile(BaseModel):
     trigger_tools: list[str] = Field(default_factory=list)
     prompt_fragment: str = ""
     rag_partitions: list[str] = Field(default_factory=list)
+    # Whether this profile represents a distinct DATA SOURCE (NetSuite, BigQuery,
+    # Sheets...). Interpretation-only profiles (e.g. financial_analysis) set this
+    # False so they do NOT inflate the multi-source disambiguation count.
+    is_source: bool = True
 
     def matches_tools(self, tool_names: set[str]) -> bool:
         for trigger in self.trigger_tools:
