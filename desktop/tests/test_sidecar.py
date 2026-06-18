@@ -169,25 +169,58 @@ def test_main_runs_off_keychain_when_env_key_missing(monkeypatch, tmp_path):
 # ---------------------------------------------------------------------------
 
 
+def _clear_anthropic_env(monkeypatch):
+    for var in ("ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"):
+        monkeypatch.delenv(var, raising=False)
+
+
 def test_has_resolvable_credential_true_when_env_key_present(monkeypatch):
+    _clear_anthropic_env(monkeypatch)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-dummy")
     assert sidecar._has_resolvable_anthropic_credential() is True
 
 
-def test_has_resolvable_credential_true_when_hermes_token_resolves(monkeypatch):
-    """No env key, but Hermes' resolve_anthropic_token() returns a token
-    (e.g. a Claude Code OAuth credential from the macOS Keychain)."""
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+def test_has_resolvable_credential_true_when_keychain_credential_present(monkeypatch):
+    """No env token, but a Claude Code OAuth credential is present in the
+    Keychain / credentials file (read_claude_code_credentials returns it)."""
+    _clear_anthropic_env(monkeypatch)
     import agent.anthropic_adapter as adapter
-    monkeypatch.setattr(adapter, "resolve_anthropic_token", lambda: "cc-oauth-token")
+    monkeypatch.setattr(adapter, "read_claude_code_credentials", lambda: {"accessToken": "x"})
     assert sidecar._has_resolvable_anthropic_credential() is True
 
 
-def test_has_resolvable_credential_false_when_nothing_resolves(monkeypatch):
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+def test_has_resolvable_credential_false_when_nothing_present(monkeypatch):
+    _clear_anthropic_env(monkeypatch)
     import agent.anthropic_adapter as adapter
-    monkeypatch.setattr(adapter, "resolve_anthropic_token", lambda: None)
+    monkeypatch.setattr(adapter, "read_claude_code_credentials", lambda: None)
     assert sidecar._has_resolvable_anthropic_credential() is False
+
+
+def test_has_resolvable_credential_strips_whitespace_env(monkeypatch):
+    """A whitespace-only env key must NOT count as a credential — it matches how
+    the real resolver strips it, avoiding a gate-pass that then fails at the
+    agent (review finding: gate/resolver whitespace divergence)."""
+    _clear_anthropic_env(monkeypatch)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "   ")
+    import agent.anthropic_adapter as adapter
+    monkeypatch.setattr(adapter, "read_claude_code_credentials", lambda: None)
+    assert sidecar._has_resolvable_anthropic_credential() is False
+
+
+def test_has_resolvable_credential_does_not_trigger_token_refresh(monkeypatch):
+    """REGRESSION (T2 major): the presence gate must NOT call the refreshing
+    resolve_anthropic_token() — that blocks on a network refresh and rewrites the
+    credentials file for an expired token. Detonate resolve_anthropic_token; the
+    gate must still resolve via the read-only read_claude_code_credentials()."""
+    _clear_anthropic_env(monkeypatch)
+    import agent.anthropic_adapter as adapter
+
+    def _boom():
+        raise AssertionError("resolve_anthropic_token() must not be called by the presence gate")
+
+    monkeypatch.setattr(adapter, "resolve_anthropic_token", _boom)
+    monkeypatch.setattr(adapter, "read_claude_code_credentials", lambda: {"accessToken": "x"})
+    assert sidecar._has_resolvable_anthropic_credential() is True
 
 
 # ---------------------------------------------------------------------------

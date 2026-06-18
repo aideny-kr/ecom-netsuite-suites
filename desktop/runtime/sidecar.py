@@ -303,6 +303,12 @@ def build_agent(role: str = "default") -> Any:
         provider="anthropic",
         base_url=_ANTHROPIC_BASE_URL,
         model=model,
+        # Suppress AIAgent's progress chatter — including the
+        # "🔑 Using token: sk-ant-o...XXXX" line, which would otherwise print a
+        # partial OAuth/Max-subscription token to stderr and into the Electron
+        # main-process logs (sidecar.ts forwards sidecar stderr). Typed events
+        # already flow via _emit; agent chatter is noise here.
+        quiet_mode=True,
     )
 
 
@@ -325,30 +331,39 @@ def build_agents() -> Dict[str, Any]:
 
 
 def _has_resolvable_anthropic_credential() -> bool:
-    """True when ANY Anthropic credential is resolvable for the agent to use.
+    """True when an Anthropic credential is *present* for the agent to use.
 
-    The desktop app authenticates through Hermes' own resolution chain
-    (``resolve_anthropic_token``), which prefers an OAuth/setup token env var,
-    then the Claude Code OAuth credentials in the macOS Keychain (or
-    ``~/.claude/.credentials.json``) — the Max-subscription path — and finally a
-    raw ``ANTHROPIC_API_KEY``. ``build_agent`` passes no ``api_key``, so the
-    agent already resolves through that chain; this gate exists only so the
-    sidecar refuses *up front* when NOTHING resolves, instead of forcing the
-    operator to set ``ANTHROPIC_API_KEY`` when a signed-in Claude Code session
-    already has usable credentials (ADR-008/009).
+    Deliberately a cheap, side-effect-free **presence** check — NOT a full
+    ``resolve_anthropic_token()`` call. The latter, for an *expired* Claude Code
+    OAuth credential, performs a blocking network refresh (two endpoints, up to
+    ~20s) and rewrites ``~/.claude/.credentials.json``. Running that here — purely
+    to get a bool, on the first-query hot path, with ``AIAgent`` construction then
+    resolving the same token *again* — would freeze the Electron renderer for up
+    to ~20s and risk double-rotating the refresh token. So this gate only
+    confirms a credential *exists*; the real (refreshing) resolution happens once,
+    inside agent construction.
 
-    The raw-key fast path is kept first so BYOK keeps working even if the
-    vendored adapter import ever drifts.
+    Sources, all read-only:
+      - a non-empty env token/key (``ANTHROPIC_API_KEY`` / ``ANTHROPIC_TOKEN`` /
+        ``CLAUDE_CODE_OAUTH_TOKEN``), ``.strip()``-ed to match how the real
+        resolver treats whitespace-only values (anthropic_adapter resolves them
+        as empty);
+      - a Claude Code OAuth credential present in the macOS Keychain or
+        ``~/.claude/.credentials.json`` — ``read_claude_code_credentials`` reads
+        but never refreshes/writes — the Max-subscription path (ADR-008/009).
+
+    Presence (even if expired) is enough: ``AIAgent`` refreshes on construction.
+    The sidecar refuses only when NOTHING is present.
     """
-    if os.environ.get("ANTHROPIC_API_KEY"):
-        return True
+    for var in ("ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"):
+        if os.environ.get(var, "").strip():
+            return True
     try:
-        from agent.anthropic_adapter import resolve_anthropic_token
-    except Exception:  # pragma: no cover - defensive import guard
-        return False
-    try:
-        return bool(resolve_anthropic_token())
-    except Exception:  # pragma: no cover - never let auth probing crash the sidecar
+        from agent.anthropic_adapter import read_claude_code_credentials
+
+        return bool(read_claude_code_credentials())
+    except Exception as exc:  # never let credential probing crash the sidecar
+        print(f"[sidecar] credential presence probe failed: {exc}", file=sys.stderr)
         return False
 
 

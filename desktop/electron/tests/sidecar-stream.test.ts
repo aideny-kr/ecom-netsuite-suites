@@ -130,10 +130,10 @@ describe("Sidecar.runAgentStream()", () => {
     const done = s.runAgentStream("q", (e) => events.push(e));
     await flush();
 
-    fake.stdout.write(JSON.stringify({ error: "ANTHROPIC_API_KEY not set" }) + "\n");
+    fake.stdout.write(JSON.stringify({ error: "No Anthropic credential resolved" }) + "\n");
     await done;
 
-    expect(events).toEqual([{ type: "error", error: "ANTHROPIC_API_KEY not set" }]);
+    expect(events).toEqual([{ type: "error", error: "No Anthropic credential resolved" }]);
   });
 
   it("rejects the stream promise if the child exits before done", async () => {

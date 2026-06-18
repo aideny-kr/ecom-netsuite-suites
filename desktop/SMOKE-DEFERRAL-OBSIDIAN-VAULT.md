@@ -5,13 +5,15 @@
 > The deferral's root cause (a forced `ANTHROPIC_API_KEY`) was removed by the
 > Keychain-auth slice (`feat(desktop): resolve Anthropic auth from Claude Code
 > Keychain, not just env`). The live smoke then ran headlessly off the
-> signed-in Claude Code **macOS Keychain** OAuth credential — **no env key, no
-> `~/.hermes/.env`, nothing in any transcript**:
+> signed-in Claude Code **macOS Keychain** OAuth credential — **no env key and
+> no `~/.hermes/.env`** (auth resolved from the Keychain, not from any env var
+> or file). The agent's partial-token banner is now suppressed by
+> `quiet_mode=True` (T2 review finding — it previously printed `sk-ant-o…` to
+> stderr/Electron logs):
 >
 > ```
 > $ .venv/bin/python runtime/sidecar.py \
 >     "create an entity called 'TestEntity' with observation 'first vault write 2026-06-18 keychain auth'"
-> 🔑 Using token: sk-ant-o...          # OAuth token from the Keychain, NOT an env key
 > 🔧 Tool 1: mcp_obsidian_memory_create_entities(['entities'])   # agent chose the tool autonomously
 > ✅ Tool 1 completed
 > 🤖 Assistant: Done. `TestEntity` created with that observation.
