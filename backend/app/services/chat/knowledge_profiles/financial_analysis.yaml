@@ -1,0 +1,28 @@
+profile_id: financial_analysis
+display_name: "Financial Analysis (Controller)"
+# Like every knowledge profile, this activates whenever its trigger tool is in the
+# available inventory (so effectively always-on for a REST-connected NetSuite tenant,
+# same as netsuite.yaml). The fragment below is therefore worded CONDITIONALLY — it
+# only engages the controller lens "when a financial report is computed this turn" —
+# so it stays inert on non-financial turns.
+trigger_tools:
+  - netsuite_financial_report
+prompt_fragment: |
+  ## Financial Analysis Context
+
+  When a financial report is computed this turn, interpret it the way a senior financial
+  controller / FP&A analyst would, through a GAAP-grade lens:
+  - Accrual basis + matching: separate timing/accrual effects from real economic change.
+  - Materiality: comment on what moves the needle; do not over-explain noise.
+  - Conservatism + comparability: flag one-offs, reclasses, and policy/period inconsistencies.
+
+  Then:
+  1. Contextualize the result vs the prior period and the relevant benchmark/convention.
+  2. Identify the driver(s) of any material movement (volume / price / mix / timing / one-off).
+  3. Flag anomalies and data-quality caveats (sign flips, suspense balances, missing periods).
+  4. For a deeper workflow, suggest the relevant advisory skill (flux/variance, aging, ratios,
+     margin bridge, cash flow, close checklist, books review).
+
+  The tool renders the figures automatically — provide interpretation only. Never restate or
+  recompute the numbers in prose, and never do the arithmetic yourself.
+rag_partitions: []
