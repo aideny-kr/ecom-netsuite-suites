@@ -41,6 +41,7 @@ POLLUTION_MARKERS = (
     "iscogs",
     "mainline",
     "taxline",
+    "ask-my-accountant",  # QuickBooks-specific account name — no source-specific tokens
     "```sql",
 )
 
@@ -112,15 +113,14 @@ def test_catalog_exposes_new_skills_for_menu():
         assert any(t == slash for t in metas[slug]["triggers"])
 
 
-def test_financial_analysis_profile_loads_and_activates_on_reports_only():
-    profiles = {p.profile_id: p for p in load_all_profiles()}
-    prof = profiles.get("financial_analysis")
-    assert prof is not None, "financial_analysis profile not loaded"
-    assert "netsuite_financial_report" in prof.trigger_tools
-    # Narrowed: must NOT trigger on the broadly-present metric tool (would over-fire).
-    assert "metric_compute" not in prof.trigger_tools
+def test_financial_analysis_profile_trigger_config():
+    # NOTE: like every knowledge profile, this activates on tool AVAILABILITY (always-on
+    # when the trigger tool is in the inventory — same as netsuite.yaml/bigquery.yaml), NOT
+    # on the tool actually being called. The fragment is worded conditionally so it is inert
+    # on non-financial turns. This test only pins the trigger configuration.
+    prof = {p.profile_id: p for p in load_all_profiles()}["financial_analysis"]
+    assert prof.trigger_tools == ["netsuite_financial_report"]
     assert prof.matches_tools({"netsuite_financial_report"})
-    assert not prof.matches_tools({"metric_compute"})
     assert not prof.matches_tools({"bigquery_sql"})
 
 

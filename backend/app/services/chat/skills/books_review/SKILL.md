@@ -16,7 +16,7 @@ This skill is source-agnostic: review whatever general ledger your connected too
 
 2. **Inspect the ledger — let the tools compute the balances.**
    - Use `netsuite_financial_report` and schema-discovered `netsuite_suiteql` (discover the fields first; do the aggregation in the query so results render as tables — do not total balances by hand) to examine:
-     - **Suspense / clearing / ask-my-accountant accounts** with non-zero balances that should net to zero.
+     - **Suspense and clearing accounts** with non-zero balances that should net to zero.
      - **Unreconciled** bank and control accounts.
      - **Duplicate or likely-missing entries** and out-of-balance subledgers vs the GL control account.
      - **Coding inconsistencies** — amounts posted to unexpected or inactive accounts, or miscategorized expense / revenue.
