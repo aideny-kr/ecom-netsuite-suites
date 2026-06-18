@@ -3,9 +3,6 @@ Name: Cash-Flow & Runway Analysis
 Description: Narrates the tool-rendered statement of cash flows (operating/investing/financing) and the cash-balance trend, and characterizes runway directionally or via a blessed metric.
 Triggers:
   - /cashflow
-  - cash flow statement
-  - statement of cash flows
-  - cash runway
 ---
 
 # Cash-Flow & Runway Analysis

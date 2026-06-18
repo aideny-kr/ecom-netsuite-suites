@@ -3,9 +3,6 @@ Name: Gross-Margin Bridge
 Description: Explains why gross margin changed between two periods — reads the tool-rendered per-product revenue/quantity/cost and attributes the move directionally to price, volume, mix, and cost.
 Triggers:
   - /margin-bridge
-  - gross margin bridge
-  - margin bridge
-  - price volume mix
 ---
 
 # Gross-Margin Bridge

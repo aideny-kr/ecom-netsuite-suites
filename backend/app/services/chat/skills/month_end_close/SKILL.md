@@ -3,9 +3,6 @@ Name: Month-End Close Checklist
 Description: Guides the controller through the standard month-end close sequence — subledger recon, GL hygiene, accruals/cutoff, flux review, balance-sheet recon, and a period-close readiness summary. Advisory only; never performs the lock.
 Triggers:
   - /close-checklist
-  - month-end close
-  - month end close
-  - close the books
 ---
 
 # Month-End Close Checklist

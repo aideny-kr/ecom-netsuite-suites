@@ -3,9 +3,6 @@ Name: Books Review / GL Hygiene
 Description: Read-only bookkeeping review — inspects the general ledger for hygiene issues (suspense/clearing balances, unreconciled accounts, miscoding, cutoff gaps) and recommends adjusting entries. Never posts.
 Triggers:
   - /books-review
-  - gl hygiene
-  - general ledger review
-  - books cleanup
 ---
 
 # Books Review / GL Hygiene

@@ -3,9 +3,6 @@ Name: AR / AP Aging Triage
 Description: Buckets open receivables or payables by age and computes DSO/DPO in the query (rendered as a table), then flags concentration risk and prioritizes a collections or payment action list.
 Triggers:
   - /aging
-  - ar aging
-  - ap aging
-  - aging triage
 ---
 
 # AR / AP Aging Triage

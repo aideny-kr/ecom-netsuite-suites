@@ -290,4 +290,46 @@ backend/tests/test_financial_skills.py                              (new)
   review) → each skill degrades gracefully and states the limitation; never fabricates.
 - **First-match ordering** (slug order changes which skill wins on overlapping triggers) →
   triggers are disjoint by design; routing test pins the expected matches.
+
+## 13. T2 gate outcome — design changes & deferred pre-existing issues
+
+The blocking T2 `code-review-multiangle` gate (independent codex angle) ran three rounds and
+materially improved the design. Two rounds drove real fixes; the third showed the remaining
+issues are **pre-existing architecture** broader than this feature. Final decisions:
+
+**Changed from the original §5/§6/§8 design (kept in the shipped feature):**
+- **no-LLM-numbers reframe.** Bodies were rewritten from "compute the delta/ratio/PVM/runway"
+  to **commentary-only over tool-rendered figures** — push the math into the tool/query
+  (financial-report trend/variance, `suiteql` GROUP BY/SUM, `metric_compute`); derived figures
+  with no tool are qualitative or "offer to bless a metric," never model arithmetic in prose.
+- **Slash-only triggers.** The semantic phrase triggers were **removed** — the new skills fire
+  only on their `/slash`. Rationale: `match_skill` is a *hard gate* ("do NOT deviate") layered
+  on brittle substring matching; adding semantic finance triggers expands a fragile surface and
+  conflicts with the repo's own "prefer model intelligence over routing" principle. Slash-only
+  keeps deterministic invocation, leaves the shared matcher byte-identical to `main` (no
+  existing-skill routing change), and lets the model self-route from the advertised
+  `<available_skills>` / `/skills/catalog` for free-text asks.
+- **Profile narrowed** to trigger on `netsuite_financial_report` only (dropped `metric_compute`,
+  which is broadly present and would inject the controller persona on nearly every turn).
+- **books_review** no longer names QuickBooks (no unbuilt-integration name in a shipped prompt).
+
+**Deferred — pre-existing issues, out of scope for this feature (separate infra work):**
+1. **Cross-source disambiguation over-fires.** `build_disambiguation_instruction` counts *all*
+   active profiles, and interpretation/aggregation profiles (`metrics`, `reporting`,
+   `cross_source`) default to counting as sources — so the "NetSuite vs BigQuery" block already
+   fires on realistic single-source NetSuite *and* BigQuery turns **today, before this feature**
+   (verified empirically). This feature neither causes nor worsens it (a half-fix via an
+   `is_source` flag was tried and reverted as ineffective — the count is already ≥2 via the
+   existing profiles). Proper fix = classify profiles by source family / a source allowlist in
+   one place; touches existing `test_cross_source_disambiguation` semantics → its own PR.
+2. **Knowledge profiles are not permission-gated.** The `chat.financial_reports` gate adds a
+   text instruction but does not strip the `netsuite_financial_report` tool, so any profile
+   keyed on that tool (the pre-existing `netsuite` profile, and now `financial_analysis`)
+   activates regardless of permission. `financial_analysis` inherits the *same* exposure as the
+   existing `netsuite` profile — no new leak class. A per-profile permission gate is a shared
+   follow-up.
+3. **Skill matching is a hard substring gate, not model self-routing.** The `match_skill` →
+   `_active_skill` → "do NOT deviate" pattern is pre-existing and used by all skills; redesigning
+   it toward catalog-advertised model self-routing is a separate architectural change. Slash-only
+   triggers keep this feature off that fragile path.
 ```

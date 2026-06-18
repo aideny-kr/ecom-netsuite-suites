@@ -3,9 +3,6 @@ Name: P&L Flux / Variance Analysis
 Description: Explains period-over-period income-statement movements — the tool renders the line-level variances; you flag the material movers and attribute each to a volume, price, mix, or timing/accrual driver.
 Triggers:
   - /flux
-  - flux analysis
-  - p&l variance
-  - income statement variance
 ---
 
 # P&L Flux / Variance Analysis

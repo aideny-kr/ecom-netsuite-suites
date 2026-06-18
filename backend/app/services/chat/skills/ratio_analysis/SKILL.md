@@ -3,9 +3,6 @@ Name: Financial Ratio Analysis
 Description: Reads the standard liquidity, leverage, profitability, and efficiency ratios — preferring blessed metrics for exact values — and interprets them against conventions and the prior period.
 Triggers:
   - /ratios
-  - financial ratios
-  - financial ratio analysis
-  - liquidity ratios
 ---
 
 # Financial Ratio Analysis

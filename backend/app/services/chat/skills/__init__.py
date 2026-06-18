@@ -91,45 +91,30 @@ def match_skill(user_input: str) -> dict[str, Any] | None:
     """Match user input against skill triggers.
 
     Checks:
-    1. Exact slash command match (first word) — deterministic.
-    2. Semantic trigger phrase contained in the input. When several triggers
-       match, pick the **leading concept**: the trigger appearing EARLIEST in the
-       text, breaking ties by the LONGEST (most specific) trigger, then by stable
-       registry (slug) order. A multi-concept ask therefore routes to the concept
-       the user mentioned first — not to whichever skill sorts first
-       alphabetically.
+    1. Exact slash command match (first word)
+    2. Semantic trigger phrase contained in user input
     """
     text = user_input.strip()
     text_lower = text.lower()
-    if not text_lower:
-        return None
 
-    # 1. Exact slash command on the first word.
-    first_word = text_lower.split()[0]
+    # Check slash commands first (first word)
+    first_word = text_lower.split()[0] if text_lower else ""
     if first_word.startswith("/"):
         for skill in get_all_skills_metadata():
             for trigger in skill["triggers"]:
                 if trigger.lower() == first_word:
                     return skill
 
-    # 2. Semantic triggers — leading-concept selection.
-    best_key: tuple[int, int, int] | None = None
-    best_skill: dict[str, Any] | None = None
-    for order_index, skill in enumerate(get_all_skills_metadata()):
+    # Check semantic triggers (phrase contained in input)
+    for skill in get_all_skills_metadata():
         for trigger in skill["triggers"]:
             trigger_lower = trigger.lower()
             if trigger_lower.startswith("/"):
-                continue  # slash commands handled above
-            idx = text_lower.find(trigger_lower)
-            if idx == -1:
-                continue
-            # earliest position, then longest trigger, then registry order
-            key = (idx, -len(trigger_lower), order_index)
-            if best_key is None or key < best_key:
-                best_key = key
-                best_skill = skill
+                continue  # Skip slash commands for semantic matching
+            if trigger_lower in text_lower:
+                return skill
 
-    return best_skill
+    return None
 
 
 def get_skill_instructions(slug: str) -> str | None:
