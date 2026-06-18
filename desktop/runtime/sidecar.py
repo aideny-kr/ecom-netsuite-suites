@@ -87,8 +87,11 @@ prefixed name and the SuiteQL dialect rules from the skill pack at
 
 Environment contract (ADR-008 + /goal #3)
 -----------------------------------------
-``ANTHROPIC_API_KEY``        — required for live runs; the sidecar refuses to
-                               run without it.
+``ANTHROPIC_API_KEY``        — optional BYOK key. Live runs need *some*
+                               credential: this env var, OR a signed-in Claude
+                               Code OAuth credential resolved from the macOS
+                               Keychain (ADR-008/009). The sidecar refuses only
+                               when none resolves.
 ``SUITE_STUDIO_MODEL_DEFAULT`` — default agent's model, defaults to
                                ``claude-sonnet-4-6``.
 ``SUITE_STUDIO_MODEL_PLAN``    — plan-mode agent's model, defaults to
@@ -321,6 +324,34 @@ def build_agents() -> Dict[str, Any]:
     }
 
 
+def _has_resolvable_anthropic_credential() -> bool:
+    """True when ANY Anthropic credential is resolvable for the agent to use.
+
+    The desktop app authenticates through Hermes' own resolution chain
+    (``resolve_anthropic_token``), which prefers an OAuth/setup token env var,
+    then the Claude Code OAuth credentials in the macOS Keychain (or
+    ``~/.claude/.credentials.json``) — the Max-subscription path — and finally a
+    raw ``ANTHROPIC_API_KEY``. ``build_agent`` passes no ``api_key``, so the
+    agent already resolves through that chain; this gate exists only so the
+    sidecar refuses *up front* when NOTHING resolves, instead of forcing the
+    operator to set ``ANTHROPIC_API_KEY`` when a signed-in Claude Code session
+    already has usable credentials (ADR-008/009).
+
+    The raw-key fast path is kept first so BYOK keeps working even if the
+    vendored adapter import ever drifts.
+    """
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        return True
+    try:
+        from agent.anthropic_adapter import resolve_anthropic_token
+    except Exception:  # pragma: no cover - defensive import guard
+        return False
+    try:
+        return bool(resolve_anthropic_token())
+    except Exception:  # pragma: no cover - never let auth probing crash the sidecar
+        return False
+
+
 def _extract_response_text(result: Any) -> str:
     """Pull the assistant text from a ``run_conversation`` result.
 
@@ -413,7 +444,8 @@ def serve_json_protocol(stdin: Any = None, stdout: Any = None) -> None:
       agent all surface as ``{"error": ...}`` on stdout and the loop
       keeps serving. The loop exits cleanly on EOF (parent closed
       stdin).
-    - Missing ``ANTHROPIC_API_KEY`` surfaces as an error JSON on the
+    - No resolvable credential (neither ``ANTHROPIC_API_KEY`` nor a Claude
+      Code Keychain credential) surfaces as an error JSON on the
       first ``run`` query rather than crashing the process — that way
       the Electron renderer can show the misconfiguration to the user
       without the parent process having to inspect exit codes.
@@ -443,10 +475,11 @@ def serve_json_protocol(stdin: Any = None, stdout: Any = None) -> None:
         nonlocal agent
         if agent is not None:
             return agent
-        if not os.environ.get("ANTHROPIC_API_KEY"):
+        if not _has_resolvable_anthropic_credential():
             raise RuntimeError(
-                "ANTHROPIC_API_KEY not set — refusing to construct agent. "
-                "Set the env var in the shell that launches Electron."
+                "No Anthropic credential resolved — refusing to construct agent. "
+                "Sign in to Claude Code (its macOS Keychain credential is used "
+                "automatically) or set ANTHROPIC_API_KEY."
             )
         org = os.environ.get("SUITE_STUDIO_ORG", "default")
         ensure_connection_template(org=org)
@@ -524,10 +557,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         serve_json_protocol()
         return 0
 
-    if not os.environ.get("ANTHROPIC_API_KEY"):
+    if not _has_resolvable_anthropic_credential():
         print(
-            "ANTHROPIC_API_KEY not set — refusing to run the smoke test.\n"
-            "Set the env var to your Anthropic BYOK key and re-run.",
+            "No Anthropic credential resolved — refusing to run the smoke test.\n"
+            "Sign in to Claude Code (its macOS Keychain credential is used "
+            "automatically) or set ANTHROPIC_API_KEY to a BYOK key, then re-run.",
             file=sys.stderr,
         )
         return 2
