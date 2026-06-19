@@ -1558,13 +1558,18 @@ async def _ensure_session_messages_loaded(db: AsyncSession, session: ChatSession
     """Eager-load ``session.messages`` when handed a freshly-created session.
 
     ``ChatSession.messages`` is ``lazy="selectin"``: populated when a session is
-    fetched via a query, but NOT on a constructed-then-flushed object. Callers that
-    build a fresh session (onboarding chat, integration chat) hand it straight to
-    ``run_chat_turn``, which reads ``session.messages`` — that read would emit an
-    async lazy-load (``sqlalchemy.exc.MissingGreenlet``) and 502 the turn. Loading
-    it here makes ``run_chat_turn`` self-sufficient so no caller has to know the
-    rule. No-op (no DB round-trip) when the relationship is already loaded — the
-    normal-chat path re-selects the session, which triggers selectin.
+    fetched via a query, but NOT on a constructed-then-flushed object. A caller that
+    builds a fresh session and then ITERATES ``run_chat_turn`` (e.g. onboarding
+    chat) would otherwise hit ``session.messages`` here as an async lazy-load
+    (``sqlalchemy.exc.MissingGreenlet``) and 502 the turn. Loading it here makes
+    ``run_chat_turn`` self-sufficient so no caller has to know the rule. No-op (no
+    DB round-trip) when the relationship is already loaded — the normal-chat path
+    re-selects the session, which triggers selectin.
+
+    NB: this only protects callers that actually iterate the async generator. The
+    integration-chat endpoint (api/v1/chat_integration.py) ``await``s it instead,
+    so its body never runs — that is a separate, pre-existing breakage tracked apart
+    from this fix.
     """
     from sqlalchemy import inspect as sa_inspect
 

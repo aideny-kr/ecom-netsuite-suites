@@ -15,6 +15,10 @@ from app.services.chat.orchestrator import run_chat_turn
 
 router = APIRouter(prefix="/integration/chat", tags=["chat-integration"])
 
+# Sentinel actor id for API-key (no end-user) chat: satisfies the NOT NULL
+# chat_sessions.user_id column and is the actor passed to run_chat_turn.
+_API_KEY_ACTOR_ID = uuid.UUID("00000000-0000-0000-0000-000000000000")
+
 
 class IntegrationChatRequest(BaseModel):
     message: str = Field(..., max_length=4000)
@@ -83,7 +87,7 @@ async def integration_chat(
     else:
         session = ChatSession(
             tenant_id=ctx.tenant_id,
-            user_id=None,
+            user_id=_API_KEY_ACTOR_ID,
             title=None,
         )
         db.add(session)
@@ -99,16 +103,30 @@ async def integration_chat(
     db.add(user_msg)
     await db.flush()
 
+    # run_chat_turn is an async GENERATOR — it must be iterated, not awaited
+    # (awaiting it returns the un-run generator and raises TypeError). Collect the
+    # final assistant `message` event; run_chat_turn persists the ChatMessage and
+    # the event carries its id/role/content.
     try:
-        assistant_msg = await run_chat_turn(
+        final_message: dict | None = None
+        async for event in run_chat_turn(
             db=db,
             session=session,
             user_message=body.message,
-            user_id=uuid.UUID("00000000-0000-0000-0000-000000000000"),  # system actor for API key auth
+            user_id=_API_KEY_ACTOR_ID,
             tenant_id=ctx.tenant_id,
             user_msg=user_msg,
-        )
+        ):
+            if event.get("type") == "message":
+                final_message = event["message"]
     except Exception:
+        await db.commit()  # persist user message
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="Chat service temporarily unavailable.",
+        )
+
+    if not final_message:
         await db.commit()  # persist user message
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -125,7 +143,15 @@ async def integration_chat(
         payload={"auth_method": "api_key"},
     )
 
-    return _serialize_message(assistant_msg)
+    return IntegrationMessageResponse(
+        id=final_message["id"],
+        session_id=str(session.id),
+        role=final_message["role"],
+        content=final_message["content"],
+        tool_calls=final_message.get("tool_calls"),
+        citations=final_message.get("citations"),
+        created_at=final_message.get("created_at", ""),
+    )
 
 
 @router.get("/sessions", response_model=list[IntegrationSessionResponse])
