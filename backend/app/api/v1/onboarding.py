@@ -277,11 +277,6 @@ async def start_onboarding_chat(
     )
     db.add(session)
     await db.flush()
-    # `ChatSession.messages` is lazy="selectin": auto-loaded when a session is
-    # fetched via a query, but NOT on a freshly-created one. run_chat_turn reads
-    # `session.messages`, which would emit an async lazy-load (MissingGreenlet) on
-    # this never-queried session and 502 the onboarding chat. Eager-load it now.
-    await db.refresh(session, attribute_names=["messages"])
 
     # Trigger the first AI greeting by consuming the async generator
     try:
