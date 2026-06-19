@@ -1554,6 +1554,29 @@ async def _dispatch_content_summary(
         logger.error(f"background.content_summary_failed: {e}")
 
 
+async def _ensure_session_messages_loaded(db: AsyncSession, session: ChatSession) -> None:
+    """Eager-load ``session.messages`` when handed a freshly-created session.
+
+    ``ChatSession.messages`` is ``lazy="selectin"``: populated when a session is
+    fetched via a query, but NOT on a constructed-then-flushed object. A caller that
+    builds a fresh session and then ITERATES ``run_chat_turn`` (e.g. onboarding
+    chat) would otherwise hit ``session.messages`` here as an async lazy-load
+    (``sqlalchemy.exc.MissingGreenlet``) and 502 the turn. Loading it here makes
+    ``run_chat_turn`` self-sufficient so no caller has to know the rule. No-op (no
+    DB round-trip) when the relationship is already loaded — the normal-chat path
+    re-selects the session, which triggers selectin.
+
+    NB: this only protects callers that actually iterate the async generator. The
+    integration-chat endpoint (api/v1/chat_integration.py) ``await``s it instead,
+    so its body never runs — that is a separate, pre-existing breakage tracked apart
+    from this fix.
+    """
+    from sqlalchemy import inspect as sa_inspect
+
+    if "messages" in sa_inspect(session).unloaded:
+        await db.refresh(session, attribute_names=["messages"])
+
+
 async def run_chat_turn(
     db: AsyncSession,
     session: ChatSession,
@@ -1918,6 +1941,11 @@ async def run_chat_turn(
         max_turns = settings.CHAT_MAX_HISTORY_TURNS
         all_messages: list[dict] = []
         summarised = 0
+        # Self-sufficient history load: a freshly-created session (onboarding /
+        # integration chat) never query-loaded its lazy="selectin" `messages`, so
+        # the reads below would emit an async lazy-load (MissingGreenlet). Load it
+        # once here; no-op when already loaded (normal chat).
+        await _ensure_session_messages_loaded(db, session)
         if session.messages:
             # Convert ORM → dicts so the history builder can be unit-tested.
             # We include `tool_calls` so build_history_dicts can replay a compact
