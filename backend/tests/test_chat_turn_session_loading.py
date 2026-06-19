@@ -2,10 +2,9 @@
 
 `ChatSession.messages` is `lazy="selectin"` — loaded when a session is fetched via a
 query, but NOT on a constructed-then-flushed one. A caller that builds a fresh session
-and ITERATES `run_chat_turn` (e.g. onboarding chat at api/v1/onboarding.py, integration
-chat at api/v1/chat_integration.py) hands it a never-queried session; `run_chat_turn`'s
-`session.messages` read would then emit an async lazy-load → `sqlalchemy.exc.MissingGreenlet`
-→ 502.
+and ITERATES `run_chat_turn` (e.g. onboarding chat at api/v1/onboarding.py) hands it a
+never-queried session; `run_chat_turn`'s `session.messages` read would then emit an async
+lazy-load → `sqlalchemy.exc.MissingGreenlet` → 502.
 
 `_ensure_session_messages_loaded` makes `run_chat_turn` self-sufficient (called before the
 history reads), so any iterating caller is safe regardless of how the session was obtained.
@@ -52,7 +51,7 @@ def _mock_llm_patches():
 
 @pytest.mark.asyncio
 async def test_ensure_messages_loaded_on_fresh_session(db, tenant_a):
-    # A freshly-created session — exactly how onboarding/integration chat build one.
+    # A freshly-created session — exactly how onboarding chat builds one.
     session = ChatSession(
         tenant_id=tenant_a.id,
         user_id=uuid.uuid4(),
@@ -95,8 +94,8 @@ async def test_ensure_messages_loaded_is_noop_when_already_loaded(db, tenant_a):
 async def test_run_chat_turn_does_not_greenlet_on_fresh_session(db, tenant_a):
     """Integration: real run_chat_turn must not MissingGreenlet on a freshly-created
     (never query-loaded) session — the helper loads `messages` before the read.
-    Reproduces the onboarding/integration 502 without the fix (the existing onboarding
-    tests dodge it by re-fetching with selectinload; this one deliberately does not).
+    Reproduces the onboarding 502 without the fix (the existing onboarding tests dodge it
+    by re-fetching with selectinload; this one deliberately does not).
     """
     user_id = uuid.uuid4()
     session = ChatSession(tenant_id=tenant_a.id, user_id=user_id, title="Onboarding", session_type="onboarding")
@@ -115,27 +114,3 @@ async def test_run_chat_turn_does_not_greenlet_on_fresh_session(db, tenant_a):
             events.append(ev)
 
     assert any(e.get("type") == "message" for e in events)
-
-
-@pytest.mark.asyncio
-async def test_integration_chat_returns_message_on_fresh_session(db, tenant_a):
-    """integration_chat must ITERATE run_chat_turn (not await it) and return the assistant
-    message on a fresh session — the endpoint 502'd on every request before this fix.
-    """
-    from app.api.v1.chat_integration import IntegrationChatRequest, integration_chat
-    from app.core.api_key_auth import ApiKeyContext
-
-    ctx = ApiKeyContext(tenant_id=tenant_a.id, scopes=["chat"])
-    body = IntegrationChatRequest(message="Hello", session_id=None)
-
-    with contextlib.ExitStack() as stack:
-        for p in _mock_llm_patches():
-            stack.enter_context(p)
-        resp = await integration_chat(body=body, ctx=ctx, db=db)
-
-    # The endpoint returns an assistant message instead of 502ing (await→iterate +
-    # user_id fix). Exact content isn't asserted — a "Hello" hits the canned chitchat
-    # path rather than the mocked LLM text.
-    assert resp.role == "assistant"
-    assert resp.content
-    assert resp.session_id
