@@ -821,38 +821,53 @@ def _intercept_tool_result(
         # KeyErrors on the id, rendering a 'Data unavailable' section instead of the
         # chart/table (the report-16625be0 bug). Flatten to columns/rows and emit
         # data_table (a _STAMPED_DATA_EVENTS member), keeping the persistence and
-        # intercept consumers of reportData in parity. Mutually exclusive with the
-        # success/items path below (the local tool never returns reportData).
-        if isinstance(parsed, dict) and isinstance(parsed.get("reportData"), dict):
+        # intercept consumers of reportData in PARITY:
+        #   - ERROR GUARD FIRST, identical to extract_result_payload (which bails on
+        #     _extract_error_message) and the sibling data_table path — so an error
+        #     payload carrying stale reportData is rejected by BOTH (never a bogus
+        #     table for a FAILED report, never a stamped-but-unpersisted id).
+        #   - CAP + truncated EXACTLY like the persisted payload (_cap_stored_rows) so
+        #     the live render and the report.compose-resolved table never disagree.
+        #   - blank query: reportData is NOT SuiteQL, so the FE must not offer a
+        #     SuiteQL CSV-export / re-run / "SuiteQL Query" disclosure for it.
+        #   - FALL THROUGH (not short-circuit) when reportData flattens to nothing, so
+        #     a co-present {success, items} shape is still handled by the path below
+        #     (parity with extract_result_payload's fall-through), never dangling a
+        #     persisted-but-unstamped id.
+        if (
+            isinstance(parsed, dict)
+            and isinstance(parsed.get("reportData"), dict)
+            and not _extract_error_message(parsed)
+        ):
             flattened = _extract_report_data_as_table(parsed["reportData"])
-            if flattened is None:
-                # Empty/unflattenable reportData → nothing to stamp or resolve.
-                return None, None, result_str
-            rd_columns, rd_rows = flattened
-            sse_event_data = {
-                "columns": rd_columns,
-                "rows": rd_rows,
-                "row_count": len(rd_rows),
-                "query": parsed.get("queryExecuted") or "ns_runReport",
-                "truncated": False,
-            }
-            condensed = json.dumps(
-                {
+            if flattened is not None:
+                rd_columns, rd_rows = flattened
+                rd_rows, rd_count, rd_truncated = _cap_stored_rows(rd_rows, len(rd_rows), False)
+                sse_event_data = {
                     "columns": rd_columns,
-                    "row_count": len(rd_rows),
-                    "rows_preview": rd_rows[:30],
-                    "truncated": False,
-                    "note": (
-                        "The full report table has been sent to the frontend for rendering. "
-                        "Do NOT rebuild or reproduce the table in your response. "
-                        "Provide commentary, insights, and analysis only. "
-                        "Use rows_preview for charting and follow-up analysis."
-                    ),
-                },
-                default=str,
-            )
-            condensed = _stamp_result_id(condensed, sse_event_data, result_id)
-            return "data_table", sse_event_data, condensed
+                    "rows": rd_rows,
+                    "row_count": rd_count,
+                    "query": "",
+                    "truncated": rd_truncated,
+                }
+                condensed = json.dumps(
+                    {
+                        "columns": rd_columns,
+                        "row_count": rd_count,
+                        "rows_preview": rd_rows[:30],
+                        "truncated": rd_truncated,
+                        "note": (
+                            "The full report table has been sent to the frontend for rendering. "
+                            "Do NOT rebuild or reproduce the table in your response. "
+                            "Provide commentary, insights, and analysis only. "
+                            "Use rows_preview for charting and follow-up analysis."
+                        ),
+                    },
+                    default=str,
+                )
+                condensed = _stamp_result_id(condensed, sse_event_data, result_id)
+                return "data_table", sse_event_data, condensed
+            # reportData flattened to nothing → fall through to the success/items path.
 
         if not parsed.get("success"):
             return None, None, result_str
@@ -1392,6 +1407,8 @@ from app.services.chat.onboarding_tools import (
 )
 from app.services.chat.prompts import INPUT_SANITIZATION_PREFIX, ONBOARDING_SYSTEM_PROMPT
 from app.services.chat.tool_call_results import (
+    _cap_stored_rows,
+    _extract_error_message,
     _extract_report_data_as_table,
     build_tool_call_log_entry,
     count_payload_bearing_tool_calls,

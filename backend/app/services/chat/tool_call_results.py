@@ -223,7 +223,11 @@ def _extract_report_data_as_table(report_data: dict) -> tuple[list[str], list[li
             if isinstance(vals, list) and vals:
                 first = vals[0]
                 if isinstance(first, dict):
-                    amount = first.get("Amount") or first.get("amount")
+                    # NOT `first.get("Amount") or first.get("amount")`: a legitimate
+                    # zero balance ({"Amount": 0}) is falsy, so `or` would drop a real
+                    # $0 line to None (common in P&L / balance sheets). Pick the first
+                    # key that is PRESENT so 0 is preserved.
+                    amount = first["Amount"] if "Amount" in first else first.get("amount")
                     break
         is_detail = entry.get("isDetailLine", False)
         row_type = "detail" if is_detail else "section"

@@ -709,6 +709,91 @@ class TestInterceptRunReportReportData:
         assert event_type == "financial_report"
         assert sse_event["rows"] == SAMPLE_FINANCIAL_RESULT["items"]
 
+    def test_error_reportdata_is_noop_and_keeps_parity(self):
+        """T2-gate #1/#2: an ERROR payload that still carries a reportData dict must
+        NOT be intercepted as a data_table — the persistence path
+        (extract_result_payload) bails on error, so the intercept MUST too, or it
+        emits a bogus table for a FAILED report and the persist/intercept parity this
+        PR exists to uphold breaks in the error direction."""
+        from app.services.chat.tool_call_results import extract_result_payload
+
+        err = {"error": True, "message": "Report failed", "reportData": SAMPLE_RUNREPORT_REPORTDATA["reportData"]}
+        result_str = _result_str(err)
+        event_type, sse_event, returned = _intercept_tool_result("ext__abc__ns_runReport", result_str)
+        assert event_type is None
+        assert sse_event is None
+        assert returned == result_str
+        # Parity: extract_result_payload also rejects it → both agree (no split).
+        assert extract_result_payload("ext__abc__ns_runReport", {}, result_str) is None
+
+    def test_string_error_reportdata_is_noop(self):
+        err = {"error": "permission denied", "reportData": SAMPLE_RUNREPORT_REPORTDATA["reportData"]}
+        result_str = _result_str(err)
+        event_type, sse_event, _ = _intercept_tool_result("ext__abc__ns_runReport", result_str)
+        assert event_type is None
+        assert sse_event is None
+
+    def test_reportdata_query_is_blank_to_suppress_suiteql_export(self):
+        """T2-gate #7: reportData is NOT a SuiteQL source. A non-empty ``query`` makes
+        the FE offer a 'Download CSV' that re-runs the string as SuiteQL (→ HTTP 400)
+        and mislabels the disclosure as a 'SuiteQL Query'. The query must be blank."""
+        _, sse_event, _ = _intercept_tool_result("ext__abc__ns_runReport", _result_str(SAMPLE_RUNREPORT_REPORTDATA))
+        assert sse_event["query"] == ""
+
+    def test_large_reportdata_caps_rows_and_marks_truncated(self):
+        """T2-gate #4/#6/#9: >2000 flattened rows must be capped to 2000 + truncated=True
+        in BOTH the SSE event and the condensed string, matching the persisted/sidecar
+        payload (extract_result_payload caps at MAX_STORED_PAYLOAD_ROWS). The TRUE
+        row_count is preserved so the FE shows 'first 2000 of N'."""
+        from app.services.chat.tool_call_results import MAX_STORED_PAYLOAD_ROWS
+
+        n = MAX_STORED_PAYLOAD_ROWS + 500
+        big = {
+            "reportData": {
+                str(i): {"label": f"Acct {i}", "isDetailLine": True, "summaryLineValues": [{"Amount": i}]}
+                for i in range(n)
+            }
+        }
+        event_type, sse_event, condensed = _intercept_tool_result("ext__abc__ns_runReport", _result_str(big))
+        assert event_type == "data_table"
+        assert sse_event["truncated"] is True
+        assert len(sse_event["rows"]) == MAX_STORED_PAYLOAD_ROWS
+        assert sse_event["row_count"] == n  # TRUE pre-cap count preserved
+        parsed = json.loads(condensed)
+        assert parsed["truncated"] is True
+        assert parsed["row_count"] == n
+
+    def test_empty_reportdata_with_financial_items_falls_through(self):
+        """T2-gate #12: when reportData flattens to None but the payload ALSO carries
+        the local {success, items} financial shape, the intercept must FALL THROUGH to
+        the items path (parity with extract_result_payload, which would persist the
+        items) — not short-circuit to a no-op and dangle a persisted-but-unstamped id."""
+        payload = {
+            "reportData": {},  # flattens to None
+            "success": True,
+            "report_type": "income_statement",
+            "period": "Jun 2026",
+            "columns": ["Account", "Amount"],
+            "items": [{"account": "Revenue", "amount": 100}],
+            "summary": {"net_income": 100},
+        }
+        event_type, sse_event, _ = _intercept_tool_result("netsuite.financial_report", _result_str(payload))
+        assert event_type == "financial_report"
+        assert sse_event["rows"] == payload["items"]
+
+    def test_zero_amount_balance_is_preserved_not_dropped(self):
+        """T2-gate #3/#8 (falsy-zero): a legitimate zero balance ({"Amount": 0}) must
+        flatten to 0, not None — the `x or y` idiom silently dropped real $0 lines
+        (common in P&L / balance sheets). Tests the shared flatten helper directly."""
+        from app.services.chat.tool_call_results import _extract_report_data_as_table
+
+        result = _extract_report_data_as_table(
+            {"0": {"label": "Cash", "isDetailLine": True, "summaryLineValues": [{"Amount": 0}]}}
+        )
+        assert result is not None
+        _cols, rows = result
+        assert rows == [["detail", "Cash", 0]]
+
 
 class TestRunReportSlotAndSidecar:
     """The single-id-assignment invariant for reportData: ``_make_tool_interceptor``
