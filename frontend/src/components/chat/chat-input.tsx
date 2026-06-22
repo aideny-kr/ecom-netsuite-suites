@@ -13,7 +13,8 @@ import {
 } from "@/components/chat/drive-mention-trigger";
 import { AnalyticsDashboard } from "@/components/analytics/AnalyticsDashboard";
 import { apiClient } from "@/lib/api-client";
-import type { AgentSkillMetadata } from "@/lib/types";
+import { useAgentSkills } from "@/hooks/use-agent-skills";
+import { primarySlash } from "@/lib/skills";
 
 const DEFAULT_CHAT_INPUT_MAX_CHARS = 32000;
 const CHAT_INPUT_WARNING_RATIO = 0.9;
@@ -49,12 +50,9 @@ export function ChatInput({ onSend, onStop, isLoading, isRunning, workspaceId, v
   const [selectedIndex, setSelectedIndex] = useState(0);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  // Fetch available agent skills
-  const { data: agentSkills = [] } = useQuery<AgentSkillMetadata[]>({
-    queryKey: ["agent-skills"],
-    queryFn: () => apiClient.get<AgentSkillMetadata[]>("/api/v1/skills/catalog"),
-    staleTime: 5 * 60 * 1000, // Cache for 5 minutes
-  });
+  // Fetch available agent skills (shared hook — same ["agent-skills"] cache the
+  // Skills page uses, so the two never refetch or drift).
+  const { data: agentSkills = [] } = useAgentSkills();
 
   const { data: chatHealth } = useQuery<ChatHealth>({
     queryKey: ["chat-health"],
@@ -80,7 +78,7 @@ export function ChatInput({ onSend, onStop, isLoading, isRunning, workspaceId, v
 
     // Agent skills
     for (const skill of agentSkills) {
-      const primaryTrigger = skill.triggers.find((t) => t.startsWith("/")) || skill.triggers[0];
+      const primaryTrigger = primarySlash(skill);
       items.push({
         trigger: primaryTrigger,
         name: skill.name,

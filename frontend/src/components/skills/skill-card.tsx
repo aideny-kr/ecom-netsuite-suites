@@ -4,14 +4,8 @@ import { useRouter } from "next/navigation";
 import { MessageSquare } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { primarySlash } from "@/lib/skills";
 import type { AgentSkillMetadata } from "@/lib/types";
-
-// Each skill's first `/`-prefixed trigger is its slash command; fall back to the
-// first trigger of any shape. Mirrors chat-input.tsx's selection so the page and
-// the composer's slash-menu can never disagree on a skill's primary command.
-export function primarySlash(skill: AgentSkillMetadata): string {
-  return skill.triggers.find((t) => t.startsWith("/")) ?? skill.triggers[0];
-}
 
 export function SkillCard({ skill }: { skill: AgentSkillMetadata }) {
   const router = useRouter();
