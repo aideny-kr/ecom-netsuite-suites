@@ -25,13 +25,17 @@ interface ChatInputProps {
   isRunning?: boolean;
   workspaceId?: string | null;
   variant?: "default" | "terminal";
+  // Populate the composer once on mount WITHOUT sending (the Skills page's
+  // "Use in chat" sets this via the `compose` query param). Distinct from the
+  // chat page's auto-send `prefill` param — this only seeds the textarea.
+  initialMessage?: string | null;
 }
 
 interface ChatHealth {
   max_input_chars?: number;
 }
 
-export function ChatInput({ onSend, onStop, isLoading, isRunning, workspaceId, variant }: ChatInputProps) {
+export function ChatInput({ onSend, onStop, isLoading, isRunning, workspaceId, variant, initialMessage }: ChatInputProps) {
   const isTerminal = variant === "terminal";
   const [value, setValue] = useState("");
   const [attachedFile, setAttachedFile] = useState<{ id: string; name: string } | null>(null);
@@ -112,6 +116,19 @@ export function ChatInput({ onSend, onStop, isLoading, isRunning, workspaceId, v
   useEffect(() => {
     setSelectedIndex(0);
   }, [filteredCommands.length]);
+
+  // Seed the composer ONCE from `initialMessage` (the Skills page's "Use in
+  // chat" compose param). Guarded by composeSeededRef — mirrors the chat page's
+  // prefillSentRef — so a re-render never clobbers what the user has typed.
+  // This only populates the textarea; it never calls onSend.
+  const composeSeededRef = useRef(false);
+  useEffect(() => {
+    if (composeSeededRef.current) return;
+    if (initialMessage) {
+      composeSeededRef.current = true;
+      setValue(initialMessage);
+    }
+  }, [initialMessage]);
 
   const mentions = useMemo(
     () => Array.from(value.matchAll(/@workspace:([^\s]+)/g)).map((m) => m[1]),
