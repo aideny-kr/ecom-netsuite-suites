@@ -42,11 +42,18 @@ async function seedAuth(page: Page) {
 
 /**
  * Intercept every backend call the dashboard shell + skills + chat pages make.
- * Returns a getter for whether a chat message was POSTed (the "did it send?"
- * probe for the populate-without-send assertion).
+ * `opts.sessions` seeds the chat session list (so we can prove "Use in chat"
+ * starts a NEW chat instead of resurrecting an existing one); `opts.sessionDetail`
+ * maps a session id to its detail payload (messages). Returns a probe for whether
+ * a chat message was POSTed (the "did it send?" check).
  */
-async function setupSkillsMocks(page: Page) {
+async function setupSkillsMocks(
+  page: Page,
+  opts: { sessions?: unknown[]; sessionDetail?: Record<string, unknown> } = {},
+) {
   const state = { messagePosted: false };
+  const sessions = opts.sessions ?? [];
+  const sessionDetail = opts.sessionDetail ?? {};
 
   await page.route(`${API}/**`, async (route) => {
     const url = new URL(route.request().url());
@@ -105,7 +112,25 @@ async function setupSkillsMocks(page: Page) {
       return route.fulfill({ status: 200, contentType: "application/json", body: "{}" });
     }
 
-    // Everything else (chat sessions list, workspaces, agents, branding, …)
+    if (path === "/api/v1/chat/sessions" && method === "GET") {
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(sessions),
+      });
+    }
+
+    const sessMatch = path.match(/^\/api\/v1\/chat\/sessions\/([^/]+)$/);
+    if (sessMatch && method === "GET") {
+      const detail = sessionDetail[sessMatch[1]] ?? { messages: [] };
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(detail),
+      });
+    }
+
+    // Everything else (workspaces, agents, branding, …)
     return route.fulfill({ status: 200, contentType: "application/json", body: "[]" });
   });
 
@@ -150,6 +175,59 @@ test.describe("Skills page", () => {
     // POSTs a message. Settle briefly so any (erroneous) auto-send effect would
     // have fired, then assert the message endpoint was never hit.
     await page.waitForTimeout(800);
+    expect(probe.messagePosted).toBe(false);
+  });
+
+  test("'Use in chat' starts a NEW chat, not the most recent existing session", async ({
+    page,
+  }) => {
+    await seedAuth(page);
+    // Seed an existing conversation so the chat page would otherwise auto-select
+    // it. The compose deep link carries new_session=true and must start fresh.
+    const probe = await setupSkillsMocks(page, {
+      sessions: [
+        {
+          id: "old-1",
+          title: "Old conversation",
+          workspace_id: null,
+          session_type: "chat",
+          is_archived: false,
+          status: "completed",
+          created_at: NOW,
+          updated_at: NOW,
+        },
+      ],
+      sessionDetail: {
+        "old-1": {
+          id: "old-1",
+          title: "Old conversation",
+          is_archived: false,
+          created_at: NOW,
+          updated_at: NOW,
+          messages: [
+            {
+              id: "m1",
+              role: "user",
+              content: "OLD CONVERSATION MESSAGE",
+              tool_calls: null,
+              citations: null,
+              created_at: NOW,
+            },
+          ],
+        },
+      },
+    });
+
+    await page.goto("/skills");
+    await page.getByRole("button", { name: /use in chat/i }).first().click();
+    await page.waitForURL("**/chat?compose=%2Fflux%20**");
+
+    // The composer is seeded…
+    await expect(page.getByPlaceholder(/Ask a question/i)).toHaveValue("/flux ");
+    // …into a FRESH chat: the existing conversation's message must NOT appear,
+    // and nothing was auto-sent.
+    await page.waitForTimeout(800);
+    await expect(page.getByText("OLD CONVERSATION MESSAGE")).toHaveCount(0);
     expect(probe.messagePosted).toBe(false);
   });
 
