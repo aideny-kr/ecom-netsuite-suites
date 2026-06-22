@@ -812,6 +812,48 @@ def _intercept_tool_result(
             parsed = json.loads(result_str)
         except (json.JSONDecodeError, TypeError):
             return None, None, result_str
+
+        # External Oracle NetSuite MCP ns_runReport returns a HIERARCHICAL
+        # {"reportData": {...}} payload — NOT the local financial tool's
+        # {success, items, summary} shape. extract_result_payload Path 2 flattens +
+        # PERSISTS it, so the intercept MUST emit a stamped data event here too — else
+        # no result_id / in-turn sidecar is written and a SAME-TURN report.compose
+        # KeyErrors on the id, rendering a 'Data unavailable' section instead of the
+        # chart/table (the report-16625be0 bug). Flatten to columns/rows and emit
+        # data_table (a _STAMPED_DATA_EVENTS member), keeping the persistence and
+        # intercept consumers of reportData in parity. Mutually exclusive with the
+        # success/items path below (the local tool never returns reportData).
+        if isinstance(parsed, dict) and isinstance(parsed.get("reportData"), dict):
+            flattened = _extract_report_data_as_table(parsed["reportData"])
+            if flattened is None:
+                # Empty/unflattenable reportData → nothing to stamp or resolve.
+                return None, None, result_str
+            rd_columns, rd_rows = flattened
+            sse_event_data = {
+                "columns": rd_columns,
+                "rows": rd_rows,
+                "row_count": len(rd_rows),
+                "query": parsed.get("queryExecuted") or "ns_runReport",
+                "truncated": False,
+            }
+            condensed = json.dumps(
+                {
+                    "columns": rd_columns,
+                    "row_count": len(rd_rows),
+                    "rows_preview": rd_rows[:30],
+                    "truncated": False,
+                    "note": (
+                        "The full report table has been sent to the frontend for rendering. "
+                        "Do NOT rebuild or reproduce the table in your response. "
+                        "Provide commentary, insights, and analysis only. "
+                        "Use rows_preview for charting and follow-up analysis."
+                    ),
+                },
+                default=str,
+            )
+            condensed = _stamp_result_id(condensed, sse_event_data, result_id)
+            return "data_table", sse_event_data, condensed
+
         if not parsed.get("success"):
             return None, None, result_str
 
@@ -1350,6 +1392,7 @@ from app.services.chat.onboarding_tools import (
 )
 from app.services.chat.prompts import INPUT_SANITIZATION_PREFIX, ONBOARDING_SYSTEM_PROMPT
 from app.services.chat.tool_call_results import (
+    _extract_report_data_as_table,
     build_tool_call_log_entry,
     count_payload_bearing_tool_calls,
     extract_result_payload,
