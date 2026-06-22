@@ -794,6 +794,35 @@ class TestInterceptRunReportReportData:
         _cols, rows = result
         assert rows == [["detail", "Cash", 0]]
 
+    def test_null_capital_amount_falls_through_to_lowercase(self):
+        """T2-gate re-review #4: the falsy-zero fix must still cross-fall to the
+        lowercase `amount` when capital `Amount` is present-but-NULL — preserve 0,
+        fall through on None ({"Amount": null, "amount": 5} → 5, not None)."""
+        from app.services.chat.tool_call_results import _extract_report_data_as_table
+
+        result = _extract_report_data_as_table(
+            {"0": {"label": "AR", "isDetailLine": True, "summaryLineValues": [{"Amount": None, "amount": 5}]}}
+        )
+        assert result is not None
+        _cols, rows = result
+        assert rows == [["detail", "AR", 5]]
+
+    def test_persist_and_intercept_derive_identical_table_via_shared_helper(self):
+        """T2-gate re-review #2: the persistence path (extract_result_payload Path 2)
+        and the in-turn intercept derive the reportData table through ONE shared helper
+        (report_data_to_capped_table), so columns/rows/row_count/truncated are
+        byte-identical — parity is STRUCTURAL, not hand-maintained in two places."""
+        from app.services.chat.tool_call_results import extract_result_payload, report_data_to_capped_table
+
+        rd = _result_str(SAMPLE_RUNREPORT_REPORTDATA)
+        columns, rows, row_count, truncated = report_data_to_capped_table(SAMPLE_RUNREPORT_REPORTDATA["reportData"])
+        persisted = extract_result_payload("ext__abc__ns_runReport", {}, rd)
+        _, sse_event, _ = _intercept_tool_result("ext__abc__ns_runReport", rd)
+        assert persisted["columns"] == sse_event["columns"] == columns
+        assert persisted["rows"] == sse_event["rows"] == rows
+        assert persisted["row_count"] == sse_event["row_count"] == row_count
+        assert persisted["truncated"] == sse_event["truncated"] == truncated
+
 
 class TestRunReportSlotAndSidecar:
     """The single-id-assignment invariant for reportData: ``_make_tool_interceptor``

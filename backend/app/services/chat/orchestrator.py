@@ -839,10 +839,9 @@ def _intercept_tool_result(
             and isinstance(parsed.get("reportData"), dict)
             and not _extract_error_message(parsed)
         ):
-            flattened = _extract_report_data_as_table(parsed["reportData"])
-            if flattened is not None:
-                rd_columns, rd_rows = flattened
-                rd_rows, rd_count, rd_truncated = _cap_stored_rows(rd_rows, len(rd_rows), False)
+            capped = report_data_to_capped_table(parsed["reportData"])
+            if capped is not None:
+                rd_columns, rd_rows, rd_count, rd_truncated = capped
                 sse_event_data = {
                     "columns": rd_columns,
                     "rows": rd_rows,
@@ -1407,12 +1406,11 @@ from app.services.chat.onboarding_tools import (
 )
 from app.services.chat.prompts import INPUT_SANITIZATION_PREFIX, ONBOARDING_SYSTEM_PROMPT
 from app.services.chat.tool_call_results import (
-    _cap_stored_rows,
     _extract_error_message,
-    _extract_report_data_as_table,
     build_tool_call_log_entry,
     count_payload_bearing_tool_calls,
     extract_result_payload,
+    report_data_to_capped_table,
     tool_call_had_error,
     tool_call_row_count,
 )

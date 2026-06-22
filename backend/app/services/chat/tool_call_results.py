@@ -225,9 +225,12 @@ def _extract_report_data_as_table(report_data: dict) -> tuple[list[str], list[li
                 if isinstance(first, dict):
                     # NOT `first.get("Amount") or first.get("amount")`: a legitimate
                     # zero balance ({"Amount": 0}) is falsy, so `or` would drop a real
-                    # $0 line to None (common in P&L / balance sheets). Pick the first
-                    # key that is PRESENT so 0 is preserved.
-                    amount = first["Amount"] if "Amount" in first else first.get("amount")
+                    # $0 line to None (common in P&L / balance sheets). Preserve 0 but
+                    # still cross-fall to the lowercase key when capital `Amount` is
+                    # absent OR present-but-None ({"Amount": null, "amount": 5} → 5).
+                    amount = first.get("Amount")
+                    if amount is None:
+                        amount = first.get("amount")
                     break
         is_detail = entry.get("isDetailLine", False)
         row_type = "detail" if is_detail else "section"
@@ -235,6 +238,25 @@ def _extract_report_data_as_table(report_data: dict) -> tuple[list[str], list[li
             rows.append([row_type, str(label), amount])
 
     return (columns, rows) if rows else None
+
+
+def report_data_to_capped_table(report_data: dict) -> tuple[list[str], list[list], int, bool] | None:
+    """Flatten a hierarchical ``reportData`` dict AND cap it at ``MAX_STORED_PAYLOAD_ROWS``.
+
+    Returns ``(columns, capped_rows, true_row_count, truncated)`` or None when the
+    reportData has nothing to flatten. The TRUE pre-cap ``row_count`` is preserved.
+
+    SINGLE SOURCE OF TRUTH for BOTH consumers of the reportData shape (re-review #2):
+    the persistence path ``extract_result_payload`` Path 2 AND the in-turn intercept
+    (orchestrator's ns_runReport branch). Routing both through this one helper makes
+    the persist/intercept PARITY structural — the persisted/sidecar table and the
+    live-rendered SSE table can never drift on flatten or cap policy."""
+    flattened = _extract_report_data_as_table(report_data)
+    if flattened is None:
+        return None
+    columns, rows = flattened
+    rows, row_count, truncated = _cap_stored_rows(rows, len(rows), False)
+    return columns, rows, row_count, truncated
 
 
 def extract_result_payload(tool_name: str, params: dict[str, Any], result_str: str) -> dict[str, Any] | None:
@@ -351,11 +373,11 @@ def extract_result_payload(tool_name: str, params: dict[str, Any], result_str: s
     if isinstance(parsed, dict):
         report_data = parsed.get("reportData")
         if isinstance(report_data, dict):
-            result = _extract_report_data_as_table(report_data)
-            if result:
-                columns, rows = result
-                row_count = len(rows)
-                rows, row_count, truncated = _cap_stored_rows(rows, row_count, False)
+            # Shared flatten+cap helper — the SAME one the in-turn intercept uses, so
+            # the persisted/sidecar table and the live SSE table can never drift.
+            capped = report_data_to_capped_table(report_data)
+            if capped is not None:
+                columns, rows, row_count, truncated = capped
                 return {
                     "kind": "table",
                     "columns": columns,
