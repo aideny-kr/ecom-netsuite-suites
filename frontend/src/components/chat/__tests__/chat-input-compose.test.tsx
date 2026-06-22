@@ -44,7 +44,7 @@ describe("ChatInput initialMessage (compose prefill)", () => {
     expect(onSend).not.toHaveBeenCalled();
   });
 
-  it("does not clobber user typing on re-render (seeds only once)", async () => {
+  it("seeds only once: a NEW initialMessage never clobbers the user's edits", async () => {
     const onSend = vi.fn();
     const { rerender } = render(
       <ChatInput onSend={onSend} isLoading={false} initialMessage="/flux " />,
@@ -58,9 +58,12 @@ describe("ChatInput initialMessage (compose prefill)", () => {
     fireEvent.change(textarea, { target: { value: "/flux Q2 vs Q1" } });
     expect(textarea).toHaveValue("/flux Q2 vs Q1");
 
-    // A re-render with the same initialMessage must NOT reset the user's edit
+    // A re-render with a DIFFERENT initialMessage re-runs the seed effect (deps
+    // = [initialMessage]); the composeSeededRef guard must still suppress it so
+    // the user's edit survives. Without the guard the value would become
+    // "/aging " — this is what actually exercises the one-shot ref.
     rerender(
-      <ChatInput onSend={onSend} isLoading={false} initialMessage="/flux " />,
+      <ChatInput onSend={onSend} isLoading={false} initialMessage="/aging " />,
     );
     expect(textarea).toHaveValue("/flux Q2 vs Q1");
     expect(onSend).not.toHaveBeenCalled();
