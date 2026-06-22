@@ -205,11 +205,18 @@ def _extract_items_as_table(parsed: dict[str, Any] | list) -> tuple[list[str], l
 
 
 def _extract_report_data_as_table(report_data: dict) -> tuple[list[str], list[list]] | None:
-    """Flatten ns_runReport hierarchical reportData into columns/rows."""
+    """Flatten ns_runReport hierarchical reportData into columns/rows.
+
+    Columns are ``["account", "amount"]`` — the human-readable line label and its
+    amount. The detail/section line-type marker is intentionally NOT emitted: it is a
+    degenerate two-value column that, as the first column, would become a chart's
+    x-axis (report.compose chart resolution keys the x-axis off the first column) and
+    bury the account names under repeated "detail"/"section" labels.
+    """
     if not isinstance(report_data, dict) or not report_data:
         return None
 
-    columns = ["row", "account", "amount"]
+    columns = ["account", "amount"]
     rows: list[list] = []
 
     for _key, entry in sorted(report_data.items(), key=lambda x: int(x[0]) if x[0].isdigit() else 0):
@@ -232,10 +239,8 @@ def _extract_report_data_as_table(report_data: dict) -> tuple[list[str], list[li
                     if amount is None:
                         amount = first.get("amount")
                     break
-        is_detail = entry.get("isDetailLine", False)
-        row_type = "detail" if is_detail else "section"
         if label or amount is not None:
-            rows.append([row_type, str(label), amount])
+            rows.append([str(label), amount])
 
     return (columns, rows) if rows else None
 

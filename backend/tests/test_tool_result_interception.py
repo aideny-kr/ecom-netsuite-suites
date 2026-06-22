@@ -670,7 +670,9 @@ class TestInterceptRunReportReportData:
         )
         assert event_type == "data_table"  # a stamped data event (in _STAMPED_DATA_EVENTS)
         assert sse_event is not None
-        assert sse_event["columns"] == ["row", "account", "amount"]
+        # ["account", "amount"] — the row-type marker column is dropped so a chart's
+        # x-axis (= first column) is the account name, not "detail"/"section".
+        assert sse_event["columns"] == ["account", "amount"]
         assert len(sse_event["rows"]) == 3
         # The model must SEE the id so report.compose can reference it.
         assert json.loads(condensed)["result_id"] == "r1"
@@ -792,7 +794,7 @@ class TestInterceptRunReportReportData:
         )
         assert result is not None
         _cols, rows = result
-        assert rows == [["detail", "Cash", 0]]
+        assert rows == [["Cash", 0]]
 
     def test_null_capital_amount_falls_through_to_lowercase(self):
         """T2-gate re-review #4: the falsy-zero fix must still cross-fall to the
@@ -805,7 +807,7 @@ class TestInterceptRunReportReportData:
         )
         assert result is not None
         _cols, rows = result
-        assert rows == [["detail", "AR", 5]]
+        assert rows == [["AR", 5]]
 
     def test_persist_and_intercept_derive_identical_table_via_shared_helper(self):
         """T2-gate re-review #2: the persistence path (extract_result_payload Path 2)
@@ -937,6 +939,11 @@ class TestSameTurnRunReportComposeIntegration:
         table, chart = spec["sections"]
         assert table["type"] == "table" and table["rows"], "reportData must resolve into a table, not an error"
         assert chart["type"] == "chart" and chart.get("svg"), "reportData must resolve into a chart, not an error"
+        # The chart x-axis must be the ACCOUNT name, not the dropped row-type marker:
+        # the SVG x-labels carry the account names and never "detail"/"section".
+        svg = chart["svg"]
+        assert "Cash" in svg and "Net Income" in svg, "chart x-axis must label bars by account name"
+        assert "detail" not in svg and "section" not in svg, "row-type marker must not be the chart x-axis"
 
 
 class TestInterceptorArityDispatch:
