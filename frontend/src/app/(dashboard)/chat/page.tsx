@@ -142,11 +142,20 @@ export default function ChatPage() {
   // Auto-select the most recent session on initial page load only
   const hasAutoSelected = useRef(false);
   useEffect(() => {
+    // Arrived via a "new chat" deep link — Skills "Use in chat" (compose) or
+    // recon "Investigate in Chat" both pass new_session=true. Start fresh
+    // instead of resurrecting the most recent session; the send path creates a
+    // new session when none is active (and recon's prefill effect creates one
+    // explicitly). Marking hasAutoSelected prevents a later flash of an old one.
+    if (newSessionParam === "true") {
+      hasAutoSelected.current = true;
+      return;
+    }
     if (!hasAutoSelected.current && !activeSessionId && sessions.length > 0) {
       setActiveSessionId(sessions[0].id);
       hasAutoSelected.current = true;
     }
-  }, [sessions, activeSessionId]);
+  }, [sessions, activeSessionId, newSessionParam]);
 
   // Hydrate structured output refs from persisted messages on session load
   const [, forceRender] = useState(0);
