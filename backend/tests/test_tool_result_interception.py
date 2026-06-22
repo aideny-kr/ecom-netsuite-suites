@@ -735,6 +735,49 @@ class TestInterceptRunReportReportData:
         assert event_type is None
         assert sse_event is None
 
+    def test_success_false_reportdata_is_noop_and_not_persisted(self):
+        """T2-gate re-review #1 (major): a FAILED report shaped {success: false,
+        reportData: {...}} with NO `error` key must be rejected by BOTH the intercept
+        and the persistence path — never a rendered/persisted table for a failed
+        report. Both guard on `success is not False` (parity preserved, both safe)."""
+        from app.services.chat.tool_call_results import extract_result_payload
+
+        payload = {
+            "success": False,
+            "message": "Report failed",
+            "reportData": SAMPLE_RUNREPORT_REPORTDATA["reportData"],
+        }
+        result_str = _result_str(payload)
+        event_type, sse_event, returned = _intercept_tool_result("ext__abc__ns_runReport", result_str)
+        assert event_type is None
+        assert sse_event is None
+        assert returned == result_str
+        assert extract_result_payload("ext__abc__ns_runReport", {}, result_str) is None
+
+    def test_financial_summary_shape_wins_over_reportdata_in_both_paths(self):
+        """T2-gate re-review #3 (branch-order parity): when a payload carries BOTH the
+        financial Path-0 shape (success+summary+report_type) AND a non-empty reportData,
+        BOTH the intercept and extract_result_payload must resolve the FINANCIAL shape
+        first — never a reportData data_table on one side and a financial table on the
+        other (extract checks Path 0 before Path 2; the intercept must match)."""
+        from app.services.chat.tool_call_results import extract_result_payload
+
+        payload = {
+            "success": True,
+            "report_type": "balance_sheet",
+            "period": "Jun 2026",
+            "columns": ["Account", "Amount"],
+            "items": [{"account": "Cash", "amount": 100}],
+            "summary": {"total": 100},
+            "reportData": SAMPLE_RUNREPORT_REPORTDATA["reportData"],  # non-empty, co-present
+        }
+        result_str = _result_str(payload)
+        event_type, sse_event, _ = _intercept_tool_result("ext__abc__ns_runReport", result_str)
+        assert event_type == "financial_report", "financial Path-0 shape must win over co-present reportData"
+        assert sse_event["rows"] == payload["items"]
+        persisted = extract_result_payload("ext__abc__ns_runReport", {}, result_str)
+        assert persisted["columns"] == ["Account", "Amount"], "extract must also resolve the financial table"
+
     def test_reportdata_query_is_blank_to_suppress_suiteql_export(self):
         """T2-gate #7: reportData is NOT a SuiteQL source. A non-empty ``query`` makes
         the FE offer a 'Download CSV' that re-runs the string as SuiteQL (→ HTTP 400)

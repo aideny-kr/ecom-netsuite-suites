@@ -838,6 +838,18 @@ def _intercept_tool_result(
             isinstance(parsed, dict)
             and isinstance(parsed.get("reportData"), dict)
             and not _extract_error_message(parsed)
+            # FAILED report: an explicit `success: false` (no `error` key) must NOT
+            # become a rendered/stamped table. Mirrors extract_result_payload's guard
+            # so persist + intercept reject it identically (T2 re-review #1).
+            and parsed.get("success") is not False
+            # BRANCH-ORDER PARITY (T2 re-review #3): extract_result_payload checks the
+            # financial Path-0 shape (success+summary+report_type) BEFORE its reportData
+            # Path 2. A payload carrying BOTH would otherwise persist a financial-summary
+            # table but live-render a reportData table. Defer to the financial branch
+            # below (which emits financial_report) so both paths resolve the same shape.
+            and not (
+                parsed.get("success") is True and isinstance(parsed.get("summary"), dict) and "report_type" in parsed
+            )
         ):
             capped = report_data_to_capped_table(parsed["reportData"])
             if capped is not None:

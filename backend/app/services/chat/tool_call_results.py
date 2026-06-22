@@ -284,7 +284,12 @@ def extract_result_payload(tool_name: str, params: dict[str, Any], result_str: s
     if not parsed:
         return None
 
-    if isinstance(parsed, dict) and _extract_error_message(parsed):
+    # Reject a FAILED result before extracting ANY table: an `error` key (true / non-empty
+    # string) OR an explicit `success: false`. A non-isError MCP body that self-declares
+    # `success: false` while still carrying a stale/partial `reportData` scaffold must NOT
+    # be persisted as a 'success' table (T2 re-review #1). The intercept guard mirrors this
+    # so persist + intercept stay in parity (both reject it).
+    if isinstance(parsed, dict) and (_extract_error_message(parsed) or parsed.get("success") is False):
         return None
 
     # --- Path 0: financial report (netsuite_financial_report / ext ns_runReport) ---
