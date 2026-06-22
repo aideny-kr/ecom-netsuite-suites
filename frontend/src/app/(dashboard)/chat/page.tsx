@@ -22,6 +22,9 @@ export default function ChatPage() {
   const searchParams = useSearchParams();
   const pinnedAgentId = searchParams?.get("agent") || null;
   const prefillMessage = searchParams?.get("prefill") || null;
+  // `compose` populates the composer WITHOUT sending (Skills page "Use in chat").
+  // Distinct from `prefill`, which auto-sends (recon "Investigate in Chat").
+  const composeMessage = searchParams?.get("compose") || null;
   const newSessionParam = searchParams?.get("new_session") || null;
   const prefillSentRef = useRef(false);
   const [agentTab, setAgentTab] = useState<"chat" | "config">("chat");
@@ -714,6 +717,7 @@ export default function ChatPage() {
           isLoading={isStreaming || createSession.isPending}
           isRunning={isStreaming}
           workspaceId={workspaces[0]?.id || null}
+          initialMessage={composeMessage}
         />
       </div>
     </div>

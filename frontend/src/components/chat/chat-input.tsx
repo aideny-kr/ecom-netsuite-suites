@@ -13,7 +13,8 @@ import {
 } from "@/components/chat/drive-mention-trigger";
 import { AnalyticsDashboard } from "@/components/analytics/AnalyticsDashboard";
 import { apiClient } from "@/lib/api-client";
-import type { AgentSkillMetadata } from "@/lib/types";
+import { useAgentSkills } from "@/hooks/use-agent-skills";
+import { primarySlash } from "@/lib/skills";
 
 const DEFAULT_CHAT_INPUT_MAX_CHARS = 32000;
 const CHAT_INPUT_WARNING_RATIO = 0.9;
@@ -25,13 +26,17 @@ interface ChatInputProps {
   isRunning?: boolean;
   workspaceId?: string | null;
   variant?: "default" | "terminal";
+  // Populate the composer once on mount WITHOUT sending (the Skills page's
+  // "Use in chat" sets this via the `compose` query param). Distinct from the
+  // chat page's auto-send `prefill` param — this only seeds the textarea.
+  initialMessage?: string | null;
 }
 
 interface ChatHealth {
   max_input_chars?: number;
 }
 
-export function ChatInput({ onSend, onStop, isLoading, isRunning, workspaceId, variant }: ChatInputProps) {
+export function ChatInput({ onSend, onStop, isLoading, isRunning, workspaceId, variant, initialMessage }: ChatInputProps) {
   const isTerminal = variant === "terminal";
   const [value, setValue] = useState("");
   const [attachedFile, setAttachedFile] = useState<{ id: string; name: string } | null>(null);
@@ -45,12 +50,9 @@ export function ChatInput({ onSend, onStop, isLoading, isRunning, workspaceId, v
   const [selectedIndex, setSelectedIndex] = useState(0);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-  // Fetch available agent skills
-  const { data: agentSkills = [] } = useQuery<AgentSkillMetadata[]>({
-    queryKey: ["agent-skills"],
-    queryFn: () => apiClient.get<AgentSkillMetadata[]>("/api/v1/skills/catalog"),
-    staleTime: 5 * 60 * 1000, // Cache for 5 minutes
-  });
+  // Fetch available agent skills (shared hook — same ["agent-skills"] cache the
+  // Skills page uses, so the two never refetch or drift).
+  const { data: agentSkills = [] } = useAgentSkills();
 
   const { data: chatHealth } = useQuery<ChatHealth>({
     queryKey: ["chat-health"],
@@ -76,7 +78,7 @@ export function ChatInput({ onSend, onStop, isLoading, isRunning, workspaceId, v
 
     // Agent skills
     for (const skill of agentSkills) {
-      const primaryTrigger = skill.triggers.find((t) => t.startsWith("/")) || skill.triggers[0];
+      const primaryTrigger = primarySlash(skill);
       items.push({
         trigger: primaryTrigger,
         name: skill.name,
@@ -112,6 +114,19 @@ export function ChatInput({ onSend, onStop, isLoading, isRunning, workspaceId, v
   useEffect(() => {
     setSelectedIndex(0);
   }, [filteredCommands.length]);
+
+  // Seed the composer ONCE from `initialMessage` (the Skills page's "Use in
+  // chat" compose param). Guarded by composeSeededRef — mirrors the chat page's
+  // prefillSentRef — so a re-render never clobbers what the user has typed.
+  // This only populates the textarea; it never calls onSend.
+  const composeSeededRef = useRef(false);
+  useEffect(() => {
+    if (composeSeededRef.current) return;
+    if (initialMessage) {
+      composeSeededRef.current = true;
+      setValue(initialMessage);
+    }
+  }, [initialMessage]);
 
   const mentions = useMemo(
     () => Array.from(value.matchAll(/@workspace:([^\s]+)/g)).map((m) => m[1]),
