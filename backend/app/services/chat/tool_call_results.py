@@ -397,6 +397,18 @@ def extract_result_payload(tool_name: str, params: dict[str, Any], result_str: s
                     "query": f"ns_runReport(reportId={params.get('reportId', '?')})",
                     "limit": len(rows),
                 }
+            # reportData present but EMPTY (no report lines). The in-turn intercept's
+            # reportData branch also flattens to None here and then yields NO stamped
+            # event UNLESS the payload declares success (the financial-items branch
+            # stamps a financial_report for success:true). Mirror that gate so the
+            # PERSISTED population stays byte-identical to the stamped/sidecar
+            # population: only continue to the items/data shapes (Path 3) when
+            # success is True; otherwise do NOT persist — a co-present bare items/data
+            # list on a failed/empty report would otherwise freeze a result_payload
+            # with no matching stamped id, drifting the cross-turn r-id numbering
+            # (T2 re-review #1).
+            if parsed.get("success") is not True:
+                return None
 
     # --- Path 3: items list-of-dicts (MCP SuiteQL, saved searches) ---
     result = _extract_items_as_table(parsed)

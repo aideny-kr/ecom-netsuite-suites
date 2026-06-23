@@ -754,6 +754,37 @@ class TestInterceptRunReportReportData:
         assert returned == result_str
         assert extract_result_payload("ext__abc__ns_runReport", {}, result_str) is None
 
+    def test_empty_reportdata_with_bare_items_no_success_is_noop_and_not_persisted(self):
+        """T2-gate re-review #1 (major) + #6 (test gap): empty reportData + a co-present
+        items/data list WITHOUT `success` must be a no-op on BOTH paths. The intercept
+        emits no stamped event (reportData flattens to None → success gate → None), so
+        persistence must NOT freeze a payload either — a persisted-but-unstamped id
+        drifts the cross-turn r-id numbering (count_payload_bearing_tool_calls counts a
+        phantom the visible stamped sequence never had)."""
+        from app.services.chat.tool_call_results import extract_result_payload
+
+        for key in ("items", "data"):  # local 'items' AND external-MCP 'data'
+            payload = {"reportData": {}, key: [{"acct": "Cash", "amt": 100}]}
+            result_str = _result_str(payload)
+            event_type, sse_event, _ = _intercept_tool_result("ext__abc__ns_runReport", result_str)
+            assert event_type is None, f"empty reportData + {key} must not stamp an event"
+            assert sse_event is None
+            assert extract_result_payload("ext__abc__ns_runReport", {}, result_str) is None, (
+                f"empty reportData + {key} must not persist a payload (no dangling id)"
+            )
+
+    def test_empty_reportdata_with_items_and_success_persists_and_stamps(self):
+        """The success-gated counterpart: empty reportData + items WITH success:true is
+        a real financial result — the intercept stamps a financial_report, so extract
+        MUST persist too (parity in the OTHER direction)."""
+        from app.services.chat.tool_call_results import extract_result_payload
+
+        payload = {"reportData": {}, "success": True, "items": [{"acct": "Cash", "amt": 100}]}
+        result_str = _result_str(payload)
+        event_type, _, _ = _intercept_tool_result("ext__abc__ns_runReport", result_str)
+        assert event_type == "financial_report"
+        assert extract_result_payload("ext__abc__ns_runReport", {}, result_str) is not None
+
     def test_financial_summary_shape_wins_over_reportdata_in_both_paths(self):
         """T2-gate re-review #3 (branch-order parity): when a payload carries BOTH the
         financial Path-0 shape (success+summary+report_type) AND a non-empty reportData,
