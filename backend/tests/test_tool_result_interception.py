@@ -1,6 +1,7 @@
 """Tests for _intercept_tool_result() in orchestrator.py."""
 
 import json
+from unittest.mock import patch
 
 import pytest
 
@@ -633,6 +634,390 @@ class TestUnifiedSlotCriterion:
             "an empty-but-successful financial report's stamped id must resolve, not dangle"
         )
         assert captured["payload"]["row_count"] == 0
+
+
+# -- ns_runReport hierarchical reportData (external Oracle NetSuite MCP) --
+
+
+# The external Oracle NetSuite MCP ``ns_runReport`` returns a hierarchical
+# ``{"reportData": {...}}`` payload — NOT the local financial tool's
+# {success, items, summary} shape. Entries are keyed by stringified ints, each a
+# dict carrying label/value + summary/detailLineValues. _extract_report_data_as_table
+# flattens it to columns ["row", "account", "amount"].
+SAMPLE_RUNREPORT_REPORTDATA = {
+    "reportData": {
+        "0": {"label": "Cash", "isDetailLine": True, "summaryLineValues": [{"Amount": 11500000}]},
+        "1": {"value": "Accounts Receivable", "isDetailLine": True, "detailLineValues": [{"amount": 23200000}]},
+        "2": {"label": "Net Income", "isDetailLine": False, "summaryLineValues": [{"Amount": 5200000}]},
+    }
+}
+
+
+class TestInterceptRunReportReportData:
+    """``ns_runReport`` (external Oracle NetSuite MCP financial reports) returns a
+    hierarchical ``{"reportData": {...}}`` payload. ``extract_result_payload`` Path 2
+    flattens it (so it gets PERSISTED to ``ChatMessage.tool_calls[].result_payload``),
+    but the intercept's financial branch used to bail on the missing ``success`` key,
+    emitting NO event → NO result_id → NO in-turn sidecar. A SAME-TURN
+    ``report.compose`` then KeyError'd r1/r2 and rendered 'Data unavailable' error
+    sections (no chart/table) — the prod failure (report 16625be0). The intercept MUST
+    flatten reportData and emit a stamped data event so the sidecar id is written."""
+
+    def test_reportdata_emits_stamped_data_event(self):
+        result_str = _result_str(SAMPLE_RUNREPORT_REPORTDATA)
+        event_type, sse_event, condensed = _intercept_tool_result(
+            "ext__abc123def__ns_runReport", result_str, result_id="r1"
+        )
+        assert event_type == "data_table"  # a stamped data event (in _STAMPED_DATA_EVENTS)
+        assert sse_event is not None
+        # ["account", "amount"] — the row-type marker column is dropped so a chart's
+        # x-axis (= first column) is the account name, not "detail"/"section".
+        assert sse_event["columns"] == ["account", "amount"]
+        assert len(sse_event["rows"]) == 3
+        # The model must SEE the id so report.compose can reference it.
+        assert json.loads(condensed)["result_id"] == "r1"
+        assert sse_event["result_id"] == "r1"
+
+    def test_reportdata_condensed_withholds_full_rows(self):
+        """No-LLM-numbers parity with the data_table path: the condensed string must
+        not dump the full flattened table — only a preview + a 'do not rebuild' note."""
+        result_str = _result_str(SAMPLE_RUNREPORT_REPORTDATA)
+        _, _, condensed = _intercept_tool_result("ext__abc__ns_runReport", result_str)
+        parsed = json.loads(condensed)
+        assert "rows" not in parsed
+        assert "note" in parsed
+        assert parsed["row_count"] == 3
+
+    def test_empty_reportdata_is_noop(self):
+        """An empty reportData has nothing to flatten → no stamped event (nothing to
+        resolve), mirroring the empty-suiteql / 'other'-tool no-op paths."""
+        empty = _result_str({"reportData": {}})
+        event_type, sse_event, returned = _intercept_tool_result("ext__abc__ns_runReport", empty)
+        assert event_type is None
+        assert sse_event is None
+        assert returned == empty
+
+    def test_reportdata_invalid_json_is_noop(self):
+        event_type, sse_event, returned = _intercept_tool_result("ext__abc__ns_runReport", "Not JSON")
+        assert event_type is None
+        assert sse_event is None
+        assert returned == "Not JSON"
+
+    def test_local_financial_items_shape_still_works(self):
+        """Regression guard: the local {success, items, summary} financial shape must
+        still emit financial_report (the reportData branch must not shadow it)."""
+        result_str = _result_str(SAMPLE_FINANCIAL_RESULT)
+        event_type, sse_event, _ = _intercept_tool_result("netsuite.financial_report", result_str)
+        assert event_type == "financial_report"
+        assert sse_event["rows"] == SAMPLE_FINANCIAL_RESULT["items"]
+
+    def test_error_reportdata_is_noop_and_keeps_parity(self):
+        """T2-gate #1/#2: an ERROR payload that still carries a reportData dict must
+        NOT be intercepted as a data_table — the persistence path
+        (extract_result_payload) bails on error, so the intercept MUST too, or it
+        emits a bogus table for a FAILED report and the persist/intercept parity this
+        PR exists to uphold breaks in the error direction."""
+        from app.services.chat.tool_call_results import extract_result_payload
+
+        err = {"error": True, "message": "Report failed", "reportData": SAMPLE_RUNREPORT_REPORTDATA["reportData"]}
+        result_str = _result_str(err)
+        event_type, sse_event, returned = _intercept_tool_result("ext__abc__ns_runReport", result_str)
+        assert event_type is None
+        assert sse_event is None
+        assert returned == result_str
+        # Parity: extract_result_payload also rejects it → both agree (no split).
+        assert extract_result_payload("ext__abc__ns_runReport", {}, result_str) is None
+
+    def test_string_error_reportdata_is_noop(self):
+        err = {"error": "permission denied", "reportData": SAMPLE_RUNREPORT_REPORTDATA["reportData"]}
+        result_str = _result_str(err)
+        event_type, sse_event, _ = _intercept_tool_result("ext__abc__ns_runReport", result_str)
+        assert event_type is None
+        assert sse_event is None
+
+    def test_success_false_reportdata_is_noop_and_not_persisted(self):
+        """T2-gate re-review #1 (major): a FAILED report shaped {success: false,
+        reportData: {...}} with NO `error` key must be rejected by BOTH the intercept
+        and the persistence path — never a rendered/persisted table for a failed
+        report. Both guard on `success is not False` (parity preserved, both safe)."""
+        from app.services.chat.tool_call_results import extract_result_payload
+
+        payload = {
+            "success": False,
+            "message": "Report failed",
+            "reportData": SAMPLE_RUNREPORT_REPORTDATA["reportData"],
+        }
+        result_str = _result_str(payload)
+        event_type, sse_event, returned = _intercept_tool_result("ext__abc__ns_runReport", result_str)
+        assert event_type is None
+        assert sse_event is None
+        assert returned == result_str
+        assert extract_result_payload("ext__abc__ns_runReport", {}, result_str) is None
+
+    def test_empty_reportdata_with_bare_items_no_success_is_noop_and_not_persisted(self):
+        """T2-gate re-review #1 (major) + #6 (test gap): empty reportData + a co-present
+        items/data list WITHOUT `success` must be a no-op on BOTH paths. The intercept
+        emits no stamped event (reportData flattens to None → success gate → None), so
+        persistence must NOT freeze a payload either — a persisted-but-unstamped id
+        drifts the cross-turn r-id numbering (count_payload_bearing_tool_calls counts a
+        phantom the visible stamped sequence never had)."""
+        from app.services.chat.tool_call_results import extract_result_payload
+
+        for key in ("items", "data"):  # local 'items' AND external-MCP 'data'
+            payload = {"reportData": {}, key: [{"acct": "Cash", "amt": 100}]}
+            result_str = _result_str(payload)
+            event_type, sse_event, _ = _intercept_tool_result("ext__abc__ns_runReport", result_str)
+            assert event_type is None, f"empty reportData + {key} must not stamp an event"
+            assert sse_event is None
+            assert extract_result_payload("ext__abc__ns_runReport", {}, result_str) is None, (
+                f"empty reportData + {key} must not persist a payload (no dangling id)"
+            )
+
+    def test_empty_reportdata_with_items_and_success_persists_and_stamps(self):
+        """The success-gated counterpart: empty reportData + items WITH success:true is
+        a real financial result — the intercept stamps a financial_report, so extract
+        MUST persist too (parity in the OTHER direction)."""
+        from app.services.chat.tool_call_results import extract_result_payload
+
+        payload = {"reportData": {}, "success": True, "items": [{"acct": "Cash", "amt": 100}]}
+        result_str = _result_str(payload)
+        event_type, _, _ = _intercept_tool_result("ext__abc__ns_runReport", result_str)
+        assert event_type == "financial_report"
+        assert extract_result_payload("ext__abc__ns_runReport", {}, result_str) is not None
+
+    def test_financial_summary_shape_wins_over_reportdata_in_both_paths(self):
+        """T2-gate re-review #3 (branch-order parity): when a payload carries BOTH the
+        financial Path-0 shape (success+summary+report_type) AND a non-empty reportData,
+        BOTH the intercept and extract_result_payload must resolve the FINANCIAL shape
+        first — never a reportData data_table on one side and a financial table on the
+        other (extract checks Path 0 before Path 2; the intercept must match)."""
+        from app.services.chat.tool_call_results import extract_result_payload
+
+        payload = {
+            "success": True,
+            "report_type": "balance_sheet",
+            "period": "Jun 2026",
+            "columns": ["Account", "Amount"],
+            "items": [{"account": "Cash", "amount": 100}],
+            "summary": {"total": 100},
+            "reportData": SAMPLE_RUNREPORT_REPORTDATA["reportData"],  # non-empty, co-present
+        }
+        result_str = _result_str(payload)
+        event_type, sse_event, _ = _intercept_tool_result("ext__abc__ns_runReport", result_str)
+        assert event_type == "financial_report", "financial Path-0 shape must win over co-present reportData"
+        assert sse_event["rows"] == payload["items"]
+        persisted = extract_result_payload("ext__abc__ns_runReport", {}, result_str)
+        assert persisted["columns"] == ["Account", "Amount"], "extract must also resolve the financial table"
+
+    def test_reportdata_query_is_blank_to_suppress_suiteql_export(self):
+        """T2-gate #7: reportData is NOT a SuiteQL source. A non-empty ``query`` makes
+        the FE offer a 'Download CSV' that re-runs the string as SuiteQL (→ HTTP 400)
+        and mislabels the disclosure as a 'SuiteQL Query'. The query must be blank."""
+        _, sse_event, _ = _intercept_tool_result("ext__abc__ns_runReport", _result_str(SAMPLE_RUNREPORT_REPORTDATA))
+        assert sse_event["query"] == ""
+
+    def test_large_reportdata_caps_rows_and_marks_truncated(self):
+        """T2-gate #4/#6/#9: >2000 flattened rows must be capped to 2000 + truncated=True
+        in BOTH the SSE event and the condensed string, matching the persisted/sidecar
+        payload (extract_result_payload caps at MAX_STORED_PAYLOAD_ROWS). The TRUE
+        row_count is preserved so the FE shows 'first 2000 of N'."""
+        from app.services.chat.tool_call_results import MAX_STORED_PAYLOAD_ROWS
+
+        n = MAX_STORED_PAYLOAD_ROWS + 500
+        big = {
+            "reportData": {
+                str(i): {"label": f"Acct {i}", "isDetailLine": True, "summaryLineValues": [{"Amount": i}]}
+                for i in range(n)
+            }
+        }
+        event_type, sse_event, condensed = _intercept_tool_result("ext__abc__ns_runReport", _result_str(big))
+        assert event_type == "data_table"
+        assert sse_event["truncated"] is True
+        assert len(sse_event["rows"]) == MAX_STORED_PAYLOAD_ROWS
+        assert sse_event["row_count"] == n  # TRUE pre-cap count preserved
+        parsed = json.loads(condensed)
+        assert parsed["truncated"] is True
+        assert parsed["row_count"] == n
+
+    def test_empty_reportdata_with_financial_items_falls_through(self):
+        """T2-gate #12: when reportData flattens to None but the payload ALSO carries
+        the local {success, items} financial shape, the intercept must FALL THROUGH to
+        the items path (parity with extract_result_payload, which would persist the
+        items) — not short-circuit to a no-op and dangle a persisted-but-unstamped id."""
+        payload = {
+            "reportData": {},  # flattens to None
+            "success": True,
+            "report_type": "income_statement",
+            "period": "Jun 2026",
+            "columns": ["Account", "Amount"],
+            "items": [{"account": "Revenue", "amount": 100}],
+            "summary": {"net_income": 100},
+        }
+        event_type, sse_event, _ = _intercept_tool_result("netsuite.financial_report", _result_str(payload))
+        assert event_type == "financial_report"
+        assert sse_event["rows"] == payload["items"]
+
+    def test_zero_amount_balance_is_preserved_not_dropped(self):
+        """T2-gate #3/#8 (falsy-zero): a legitimate zero balance ({"Amount": 0}) must
+        flatten to 0, not None — the `x or y` idiom silently dropped real $0 lines
+        (common in P&L / balance sheets). Tests the shared flatten helper directly."""
+        from app.services.chat.tool_call_results import _extract_report_data_as_table
+
+        result = _extract_report_data_as_table(
+            {"0": {"label": "Cash", "isDetailLine": True, "summaryLineValues": [{"Amount": 0}]}}
+        )
+        assert result is not None
+        _cols, rows = result
+        assert rows == [["Cash", 0]]
+
+    def test_null_capital_amount_falls_through_to_lowercase(self):
+        """T2-gate re-review #4: the falsy-zero fix must still cross-fall to the
+        lowercase `amount` when capital `Amount` is present-but-NULL — preserve 0,
+        fall through on None ({"Amount": null, "amount": 5} → 5, not None)."""
+        from app.services.chat.tool_call_results import _extract_report_data_as_table
+
+        result = _extract_report_data_as_table(
+            {"0": {"label": "AR", "isDetailLine": True, "summaryLineValues": [{"Amount": None, "amount": 5}]}}
+        )
+        assert result is not None
+        _cols, rows = result
+        assert rows == [["AR", 5]]
+
+    def test_persist_and_intercept_derive_identical_table_via_shared_helper(self):
+        """T2-gate re-review #2: the persistence path (extract_result_payload Path 2)
+        and the in-turn intercept derive the reportData table through ONE shared helper
+        (report_data_to_capped_table), so columns/rows/row_count/truncated are
+        byte-identical — parity is STRUCTURAL, not hand-maintained in two places."""
+        from app.services.chat.tool_call_results import extract_result_payload, report_data_to_capped_table
+
+        rd = _result_str(SAMPLE_RUNREPORT_REPORTDATA)
+        columns, rows, row_count, truncated = report_data_to_capped_table(SAMPLE_RUNREPORT_REPORTDATA["reportData"])
+        persisted = extract_result_payload("ext__abc__ns_runReport", {}, rd)
+        _, sse_event, _ = _intercept_tool_result("ext__abc__ns_runReport", rd)
+        assert persisted["columns"] == sse_event["columns"] == columns
+        assert persisted["rows"] == sse_event["rows"] == rows
+        assert persisted["row_count"] == sse_event["row_count"] == row_count
+        assert persisted["truncated"] == sse_event["truncated"] == truncated
+
+
+class TestRunReportSlotAndSidecar:
+    """The single-id-assignment invariant for reportData: ``_make_tool_interceptor``
+    must assign a result_id AND hand the sidecar callback a non-None payload — they
+    must agree, exactly as for the {data:[...]} and {success,items} shapes. This is
+    the precise reproduction of the prod bug: pre-fix, reportData got a PERSISTED
+    payload but NO result_id and NO sidecar, so a same-turn compose KeyError'd."""
+
+    def test_reportdata_gets_id_and_sidecar_payload(self):
+        from app.services.chat.orchestrator import _make_tool_interceptor
+
+        captured: dict = {}
+
+        def _cb(tool_name, event_type_str, event_data, result_id=None, params=None, result_str=None, full_payload=None):
+            captured["result_id"] = result_id
+            captured["payload"] = full_payload
+
+        interceptor = _make_tool_interceptor(cache_callback=_cb)
+        sse_tuple, llm_str = interceptor("ext__abc__ns_runReport", json.dumps(SAMPLE_RUNREPORT_REPORTDATA))
+        assert sse_tuple is not None
+        event_type, sse_event = sse_tuple
+        assert event_type == "data_table"
+        assert json.loads(llm_str)["result_id"] == "r1"
+        # ... AND the sidecar callback got a non-None payload keyed by the same id.
+        assert captured["result_id"] == "r1"
+        assert captured["payload"] is not None, "pre-fix this was None → no sidecar → same-turn KeyError"
+        assert captured["payload"]["kind"] == "table"
+        assert len(captured["payload"]["rows"]) == 3
+
+    def test_extract_and_intercept_agree_for_reportdata(self):
+        """Close the CLASS, not just the case: for any tool that PERSISTS a payload
+        (is_stamped_data_tool AND extract_result_payload non-None), the intercept MUST
+        emit a stamped data event so the in-turn sidecar id is written. reportData was
+        the shape that violated this parity — persisted but never stamped."""
+        from app.services.chat.orchestrator import _STAMPED_DATA_EVENTS
+        from app.services.chat.tool_call_results import extract_result_payload, is_stamped_data_tool
+
+        tool = "ext__abc__ns_runReport"
+        result_str = _result_str(SAMPLE_RUNREPORT_REPORTDATA)
+        persisted = is_stamped_data_tool(tool) and extract_result_payload(tool, {}, result_str) is not None
+        assert persisted, "precondition: reportData IS persisted by the stamped-data-tool path"
+        event_type, _, _ = _intercept_tool_result(tool, result_str)
+        assert event_type in _STAMPED_DATA_EVENTS, (
+            "a persisted payload MUST correspond to a stamped intercept event, else the "
+            "in-turn sidecar id is never written and a same-turn report.compose KeyErrors"
+        )
+
+
+class TestSameTurnRunReportComposeIntegration:
+    """END-TO-END reproduction of the prod failure (report 16625be0): an ns_runReport
+    (reportData) result intercepted THIS turn must be resolvable by a SAME-TURN
+    report.compose via the in-turn sidecar — producing a rendered table/chart, NOT a
+    'Data unavailable' error section. The persisted-message fallback cannot see the
+    un-committed current turn, so the sidecar is the only source."""
+
+    @pytest.fixture
+    def mock_redis(self):
+        store: dict = {}
+
+        class FakeRedis:
+            def hset(self, key, field, value):
+                store.setdefault(key, {})[field] = value
+
+            def hget(self, key, field):
+                return store.get(key, {}).get(field)
+
+            def hgetall(self, key):
+                return store.get(key, {})
+
+            def hdel(self, key, field):
+                store.get(key, {}).pop(field, None)
+
+            def expire(self, key, ttl):
+                pass
+
+        with patch("app.services.chat.result_cache._get_redis", return_value=FakeRedis()):
+            yield store
+
+    def test_same_turn_reportdata_renders_table_and_chart_not_error(self, mock_redis):
+        from app.services.chat.orchestrator import _make_tool_interceptor
+        from app.services.chat.result_cache import cache_full_payload, get_full_payload
+        from app.services.report.report_service import assemble_spec
+
+        conv_id = "conv-same-turn-runreport"
+
+        # Mirror the orchestrator's _on_tool_intercepted sidecar write exactly.
+        def _cb(tool_name, event_type_str, event_data, result_id=None, params=None, result_str=None, full_payload=None):
+            if result_id and full_payload is not None:
+                cache_full_payload(conv_id, result_id, full_payload)
+
+        interceptor = _make_tool_interceptor(cache_callback=_cb)
+        # The data tool runs THIS turn (its assistant ChatMessage is NOT persisted yet).
+        interceptor("ext__abc__ns_runReport", json.dumps(SAMPLE_RUNREPORT_REPORTDATA))
+
+        # report.compose's PRIMARY resolver: sidecar-first; the persisted fallback
+        # cannot see this un-committed turn, so a sidecar miss is a hard KeyError —
+        # the exact prod failure mode that produced the 'Data unavailable' sections.
+        def resolver(rid):
+            cached = get_full_payload(conv_id, rid)
+            if cached is None:
+                raise KeyError(rid)
+            return cached
+
+        spec = assemble_spec(
+            "Cash-Flow Report",
+            [
+                {"type": "table", "result_id": "r1"},
+                {"type": "chart", "result_id": "r1", "chart_type": "bar"},
+            ],
+            resolver,
+        )
+        table, chart = spec["sections"]
+        assert table["type"] == "table" and table["rows"], "reportData must resolve into a table, not an error"
+        assert chart["type"] == "chart" and chart.get("svg"), "reportData must resolve into a chart, not an error"
+        # The chart x-axis must be the ACCOUNT name, not the dropped row-type marker:
+        # the SVG x-labels carry the account names and never "detail"/"section".
+        svg = chart["svg"]
+        assert "Cash" in svg and "Net Income" in svg, "chart x-axis must label bars by account name"
+        assert "detail" not in svg and "section" not in svg, "row-type marker must not be the chart x-axis"
 
 
 class TestInterceptorArityDispatch:

@@ -205,11 +205,18 @@ def _extract_items_as_table(parsed: dict[str, Any] | list) -> tuple[list[str], l
 
 
 def _extract_report_data_as_table(report_data: dict) -> tuple[list[str], list[list]] | None:
-    """Flatten ns_runReport hierarchical reportData into columns/rows."""
+    """Flatten ns_runReport hierarchical reportData into columns/rows.
+
+    Columns are ``["account", "amount"]`` — the human-readable line label and its
+    amount. The detail/section line-type marker is intentionally NOT emitted: it is a
+    degenerate two-value column that, as the first column, would become a chart's
+    x-axis (report.compose chart resolution keys the x-axis off the first column) and
+    bury the account names under repeated "detail"/"section" labels.
+    """
     if not isinstance(report_data, dict) or not report_data:
         return None
 
-    columns = ["row", "account", "amount"]
+    columns = ["account", "amount"]
     rows: list[list] = []
 
     for _key, entry in sorted(report_data.items(), key=lambda x: int(x[0]) if x[0].isdigit() else 0):
@@ -223,14 +230,38 @@ def _extract_report_data_as_table(report_data: dict) -> tuple[list[str], list[li
             if isinstance(vals, list) and vals:
                 first = vals[0]
                 if isinstance(first, dict):
-                    amount = first.get("Amount") or first.get("amount")
+                    # NOT `first.get("Amount") or first.get("amount")`: a legitimate
+                    # zero balance ({"Amount": 0}) is falsy, so `or` would drop a real
+                    # $0 line to None (common in P&L / balance sheets). Preserve 0 but
+                    # still cross-fall to the lowercase key when capital `Amount` is
+                    # absent OR present-but-None ({"Amount": null, "amount": 5} → 5).
+                    amount = first.get("Amount")
+                    if amount is None:
+                        amount = first.get("amount")
                     break
-        is_detail = entry.get("isDetailLine", False)
-        row_type = "detail" if is_detail else "section"
         if label or amount is not None:
-            rows.append([row_type, str(label), amount])
+            rows.append([str(label), amount])
 
     return (columns, rows) if rows else None
+
+
+def report_data_to_capped_table(report_data: dict) -> tuple[list[str], list[list], int, bool] | None:
+    """Flatten a hierarchical ``reportData`` dict AND cap it at ``MAX_STORED_PAYLOAD_ROWS``.
+
+    Returns ``(columns, capped_rows, true_row_count, truncated)`` or None when the
+    reportData has nothing to flatten. The TRUE pre-cap ``row_count`` is preserved.
+
+    SINGLE SOURCE OF TRUTH for BOTH consumers of the reportData shape (re-review #2):
+    the persistence path ``extract_result_payload`` Path 2 AND the in-turn intercept
+    (orchestrator's ns_runReport branch). Routing both through this one helper makes
+    the persist/intercept PARITY structural — the persisted/sidecar table and the
+    live-rendered SSE table can never drift on flatten or cap policy."""
+    flattened = _extract_report_data_as_table(report_data)
+    if flattened is None:
+        return None
+    columns, rows = flattened
+    rows, row_count, truncated = _cap_stored_rows(rows, len(rows), False)
+    return columns, rows, row_count, truncated
 
 
 def extract_result_payload(tool_name: str, params: dict[str, Any], result_str: str) -> dict[str, Any] | None:
@@ -253,7 +284,12 @@ def extract_result_payload(tool_name: str, params: dict[str, Any], result_str: s
     if not parsed:
         return None
 
-    if isinstance(parsed, dict) and _extract_error_message(parsed):
+    # Reject a FAILED result before extracting ANY table: an `error` key (true / non-empty
+    # string) OR an explicit `success: false`. A non-isError MCP body that self-declares
+    # `success: false` while still carrying a stale/partial `reportData` scaffold must NOT
+    # be persisted as a 'success' table (T2 re-review #1). The intercept guard mirrors this
+    # so persist + intercept stay in parity (both reject it).
+    if isinstance(parsed, dict) and (_extract_error_message(parsed) or parsed.get("success") is False):
         return None
 
     # --- Path 0: financial report (netsuite_financial_report / ext ns_runReport) ---
@@ -347,11 +383,11 @@ def extract_result_payload(tool_name: str, params: dict[str, Any], result_str: s
     if isinstance(parsed, dict):
         report_data = parsed.get("reportData")
         if isinstance(report_data, dict):
-            result = _extract_report_data_as_table(report_data)
-            if result:
-                columns, rows = result
-                row_count = len(rows)
-                rows, row_count, truncated = _cap_stored_rows(rows, row_count, False)
+            # Shared flatten+cap helper — the SAME one the in-turn intercept uses, so
+            # the persisted/sidecar table and the live SSE table can never drift.
+            capped = report_data_to_capped_table(report_data)
+            if capped is not None:
+                columns, rows, row_count, truncated = capped
                 return {
                     "kind": "table",
                     "columns": columns,
@@ -361,6 +397,18 @@ def extract_result_payload(tool_name: str, params: dict[str, Any], result_str: s
                     "query": f"ns_runReport(reportId={params.get('reportId', '?')})",
                     "limit": len(rows),
                 }
+            # reportData present but EMPTY (no report lines). The in-turn intercept's
+            # reportData branch also flattens to None here and then yields NO stamped
+            # event UNLESS the payload declares success (the financial-items branch
+            # stamps a financial_report for success:true). Mirror that gate so the
+            # PERSISTED population stays byte-identical to the stamped/sidecar
+            # population: only continue to the items/data shapes (Path 3) when
+            # success is True; otherwise do NOT persist — a co-present bare items/data
+            # list on a failed/empty report would otherwise freeze a result_payload
+            # with no matching stamped id, drifting the cross-turn r-id numbering
+            # (T2 re-review #1).
+            if parsed.get("success") is not True:
+                return None
 
     # --- Path 3: items list-of-dicts (MCP SuiteQL, saved searches) ---
     result = _extract_items_as_table(parsed)
