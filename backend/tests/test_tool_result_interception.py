@@ -883,6 +883,36 @@ class TestInterceptRunReportReportData:
         _cols, rows = result
         assert rows == [["AR", 5]]
 
+    def test_flatten_keeps_every_amount_bearing_row_drops_only_truly_empty(self):
+        """A financial surface must NEVER silently drop a figure (T2-gate major): a
+        value-based 'duplicate' dedup would drop two genuinely distinct lines that
+        coincide in amount (e.g. two $0 balance-sheet lines, two equal expense lines),
+        so it is gone. Keep every row with a label OR a real amount (incl. $0 and a
+        blank-label line that repeats the prior amount); drop only a truly-empty row.
+        No hardcoded 'Financial Row' drop either (a tenant may name a real line that)."""
+        from app.services.chat.tool_call_results import _extract_report_data_as_table
+
+        rd = {
+            "0": {"label": "Rent", "isDetailLine": True, "detailLineValues": [{"amount": 50000}]},
+            "1": {"label": "", "isDetailLine": True, "detailLineValues": [{"amount": 50000}]},  # same amt → KEPT
+            "2": {"label": "", "isDetailLine": True, "detailLineValues": [{"amount": 0}]},  # $0 figure → KEPT
+            "3": {"label": "Financial Row", "isDetailLine": False, "summaryLineValues": [{"Amount": 100}]},  # KEPT
+            "4": {"label": "", "isDetailLine": True, "detailLineValues": [{}]},  # no label, no amount → drop
+        }
+        result = _extract_report_data_as_table(rd)
+        assert result is not None
+        cols, rows = result
+        assert cols == ["account", "amount"]
+        assert rows == [["Rent", 50000], ["", 50000], ["", 0], ["Financial Row", 100]]
+
+    def test_reportdata_payload_tags_amount_column_as_currency(self):
+        """The reportData payload tags its 'amount' column as currency so the report
+        renderer accounting-formats ONLY that column (not a generic numeric column)."""
+        from app.services.chat.tool_call_results import extract_result_payload
+
+        payload = extract_result_payload("ext__abc__ns_runReport", {}, _result_str(SAMPLE_RUNREPORT_REPORTDATA))
+        assert payload["currency_columns"] == ["amount"]
+
     def test_persist_and_intercept_derive_identical_table_via_shared_helper(self):
         """T2-gate re-review #2: the persistence path (extract_result_payload Path 2)
         and the in-turn intercept derive the reportData table through ONE shared helper

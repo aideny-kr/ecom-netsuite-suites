@@ -18,6 +18,34 @@ def _resolver(rid):
     return FROZEN[rid]
 
 
+def test_table_section_propagates_currency_columns_to_renderer():
+    """A resolved reportData payload carries currency_columns; assemble_spec must
+    propagate it onto the table section so render_report_html formats only that
+    column, and select narrows it to the surviving columns."""
+
+    def resolver(_rid):
+        return {
+            "kind": "table",
+            "columns": ["account", "year", "amount"],
+            "rows": [["Cash", 2026, 11500000.5]],
+            "row_count": 1,
+            "truncated": False,
+            "currency_columns": ["amount"],
+        }
+
+    spec = assemble_spec("R", [{"type": "table", "result_id": "r1"}], resolver)
+    table = spec["sections"][0]
+    assert table["type"] == "table"
+    assert table["currency_columns"] == ["amount"]
+    html = render_report_html(spec)
+    assert "11,500,000.50" in html  # amount accounting-formatted
+    assert "<td>2026</td>" in html  # year NOT formatted (raw, no comma)
+
+    # a select that drops the currency column → currency_columns narrows to []
+    spec2 = assemble_spec("R", [{"type": "table", "result_id": "r1", "select": ["account", "year"]}], resolver)
+    assert spec2["sections"][0]["currency_columns"] == []
+
+
 def test_fill_placeholders_injects_frozen_values():
     out = fill_placeholders("Revenue is {{result:m1.value}} for {{metric:m1}}", _resolver)
     assert "1.2M" in out and "{{" not in out

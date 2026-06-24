@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from html import escape
 
 _CSS = """
@@ -20,10 +21,40 @@ h1 { font-size:38px; } h2 { font-size:26px; } h3 { font-size:20px; }
 table { width:100%%; border-collapse:collapse; }
 th,td { border:2px solid var(--border); padding:8px 12px; text-align:left; font-size:14px; }
 th { background:var(--accent); font-weight:800; }
+td.num,th.num { text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; }
 .divider { height:0; border-top:3px solid var(--border); margin:32px 0; }
 .svg-wrap { overflow:auto; }
 .prov { font-size:12px; color:#666; border-top:2px dashed #999; margin-top:48px; padding-top:12px; }
 """
+
+
+def _fmt_amount(value) -> str:
+    """Accounting-style format for a CURRENCY cell: thousands separators, 2 decimals
+    (exact — the displayed lines foot to the total, no precision loss), negatives in
+    parentheses (``5583749.13`` → ``"5,583,749.13"``, ``-4595824.07`` →
+    ``"(4,595,824.07)"``). ``None`` and non-finite floats (NaN/Inf) → empty string;
+    non-numeric values (and bools) are returned via ``str()`` unchanged.
+
+    Applied ONLY to columns the producer tags as currency (``currency_columns``) — the
+    table renderer is shared infrastructure, so a generic numeric column (year, ratio,
+    count, id) must NOT be accounting-formatted ('is a number' ≠ 'is a dollar amount').
+    """
+    if value is None:
+        return ""
+    # bool is an int subclass — never format True/False as 1/0.
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return str(value)
+    try:
+        n = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return str(value)
+    if not math.isfinite(n):  # NaN / Inf → blank, like a missing figure
+        return ""
+    # Round to cents FIRST, then pick the sign — so a tiny residual like -0.004 renders
+    # a clean "0.00" rather than a misleading negative-signalling "(0.00)".
+    n = round(n, 2)
+    body = f"{abs(n):,.2f}"
+    return f"({body})" if n < 0 else body
 
 
 def _md_inline(text: str) -> str:
@@ -119,10 +150,35 @@ def _section_html(s: dict) -> str:
     if t == "chart":
         return f'<div class="nb-card svg-wrap">{s.get("svg", "")}</div>'  # svg is server-generated, trusted
     if t == "table":
-        cols = "".join(f"<th>{escape(str(c))}</th>" for c in s.get("columns", []))
-        body = "".join(
-            "<tr>" + "".join(f"<td>{escape(str(v))}</td>" for v in row) + "</tr>" for row in s.get("rows", [])
-        )
+        columns = s.get("columns", [])
+        rows = s.get("rows", [])
+        ncols = len(columns)
+        # Accounting formatting is scoped to columns the PRODUCER tags as currency
+        # (e.g. the reportData "amount" column) — NOT guessed from value type. The table
+        # renderer is shared by SuiteQL/BigQuery/recon/etc., so a generic numeric column
+        # (year, ratio, count, id) must render raw, never comma-grouped/rounded.
+        currency = set(s.get("currency_columns") or [])
+
+        def _num_cls(i: int) -> str:
+            return ' class="num"' if i < ncols and columns[i] in currency else ""
+
+        cols = "".join(f"<th{_num_cls(i)}>{escape(str(c))}</th>" for i, c in enumerate(columns))
+        body_rows = []
+        for row in rows:
+            # Render max(ncols, len(row)) cells: pad a short row, but NEVER silently drop
+            # the trailing values of an over-wide row (that would hide a real figure).
+            cells = []
+            for i in range(max(ncols, len(row))):
+                v = row[i] if i < len(row) else None
+                if i < ncols and columns[i] in currency:
+                    # _fmt_amount handles None/non-finite → "" and non-numeric → str().
+                    cells.append(f'<td class="num">{escape(_fmt_amount(v))}</td>')
+                elif v is None:
+                    cells.append("<td></td>")  # null → empty cell, never "None"
+                else:
+                    cells.append(f"<td>{escape(str(v))}</td>")
+            body_rows.append("<tr>" + "".join(cells) + "</tr>")
+        body = "".join(body_rows)
         note = ""
         if s.get("truncated"):
             note = f'<p class="foot">Showing first rows of {escape(str(s.get("row_count", "")))}.</p>'
