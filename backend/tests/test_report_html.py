@@ -2,55 +2,73 @@ from app.services.report.report_html import _fmt_amount, render_report_html
 
 
 def test_fmt_amount_accounting_style():
-    """Numbers render accounting-style: thousands separators, whole dollars,
-    negatives in parentheses. Non-numbers (and bools) pass through untouched."""
-    assert _fmt_amount(9740472.802484963) == "9,740,473"
-    assert _fmt_amount(-4595824.06766871) == "(4,595,824)"
-    assert _fmt_amount(0) == "0"
-    assert _fmt_amount(1234567) == "1,234,567"
+    """A currency cell renders accounting-style: thousands separators, 2 decimals
+    (exact — foots, no precision loss), negatives in parentheses. None / non-finite →
+    empty; non-numbers (and bools) pass through untouched."""
+    assert _fmt_amount(5583749.13) == "5,583,749.13"
+    assert _fmt_amount(-4595824.06766871) == "(4,595,824.07)"
+    assert _fmt_amount(0) == "0.00"
+    assert _fmt_amount(None) == ""
+    assert _fmt_amount(float("nan")) == ""
+    assert _fmt_amount(float("inf")) == ""
     assert _fmt_amount("Cash") == "Cash"  # non-numeric label untouched
     assert _fmt_amount(True) == "True"  # bool is not a financial amount
 
 
-def test_table_numeric_column_is_accounting_formatted_and_right_aligned():
+def test_only_tagged_currency_columns_are_accounting_formatted():
+    """The accounting format is scoped to producer-tagged currency columns. A
+    co-present non-currency numeric column (year, ratio, count) renders RAW — never
+    comma-grouped or rounded (the renderer is shared infra; 'is a number' ≠ 'is a
+    dollar amount')."""
     spec = {
         "title": "Cash Flow",
         "sections": [
             {
                 "type": "table",
-                "columns": ["account", "amount"],
-                "rows": [["Net Income", 5583749.13], ["Operating Activities", -4595824.07]],
+                "columns": ["account", "year", "ratio", "amount"],
+                "rows": [["Net Income", 2024, 0.4523, 5583749.13], ["Op Activities", 2025, 0.51, -4595824.07]],
+                "currency_columns": ["amount"],
                 "row_count": 2,
             }
         ],
         "provenance": {},
     }
     html = render_report_html(spec)
-    assert "5,583,749" in html  # thousands separators
-    assert "(4,595,824)" in html  # accounting negative
-    assert "5583749" not in html  # raw float is gone
-    assert 'class="num"' in html  # the numeric column is right-aligned
-    assert "<td>Net Income</td>" in html  # the string column is NOT reformatted
+    # currency column → accounting-formatted + right-aligned
+    assert "5,583,749.13" in html
+    assert "(4,595,824.07)" in html
+    assert 'class="num"' in html
+    # non-currency numerics are NOT mangled
+    assert "<td>2024</td>" in html  # year: no comma grouping
+    assert "2,024" not in html
+    assert "<td>0.4523</td>" in html  # ratio: full precision, not rounded to 0
+    assert "<td>Net Income</td>" in html  # string label untouched
 
 
-def test_table_string_number_cells_are_not_reformatted():
-    """Back-compat: a column of numeric STRINGS (not real numbers) is left as-is —
-    only real int/float cells are accounting-formatted."""
+def test_table_without_currency_tag_formats_nothing():
+    """Back-compat: an untagged table (SuiteQL/BigQuery/etc.) renders every cell raw —
+    no accounting format is guessed onto generic numeric columns."""
     spec = {
         "title": "T",
-        "sections": [
-            {"type": "table", "columns": ["Period", "Revenue"], "rows": [["Q1", "100"], ["Q2", "150"]], "row_count": 2}
-        ],
+        "sections": [{"type": "table", "columns": ["a", "b"], "rows": [["x", 1234567.5]], "row_count": 1}],
         "provenance": {},
     }
     html = render_report_html(spec)
-    assert "<td>150</td>" in html  # unchanged
+    assert "1234567.5" in html  # raw — not "1,234,567.50"
 
 
-def test_table_null_cell_renders_empty_not_none():
+def test_null_currency_cell_renders_empty_not_none():
     spec = {
         "title": "T",
-        "sections": [{"type": "table", "columns": ["account", "amount"], "rows": [["Header", None]], "row_count": 1}],
+        "sections": [
+            {
+                "type": "table",
+                "columns": ["account", "amount"],
+                "rows": [["Header", None]],
+                "currency_columns": ["amount"],
+                "row_count": 1,
+            }
+        ],
         "provenance": {},
     }
     html = render_report_html(spec)

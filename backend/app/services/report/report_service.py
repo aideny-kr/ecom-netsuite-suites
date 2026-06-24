@@ -127,12 +127,16 @@ def _resolve_data_section(s: dict, resolver: Resolver) -> dict:
         capped = len(rows) > _MAX_REPORT_TABLE_ROWS
         if capped:
             rows = rows[:_MAX_REPORT_TABLE_ROWS]
+        # Carry the producer's currency-column tags so the renderer accounting-formats
+        # only those columns; narrow to the columns that survived `select`.
+        currency_columns = [c for c in (payload.get("currency_columns") or []) if c in cols]
         return {
             "type": "table",
             "columns": cols,
             "rows": rows,
             "row_count": true_row_count,
             "truncated": upstream_truncated or capped,
+            "currency_columns": currency_columns,
         }
     if s["type"] == "metric_headline":
         # Prefer the real blessed-metric row shape; fall back to top-level reads so the

@@ -239,12 +239,14 @@ def _extract_report_data_as_table(report_data: dict) -> tuple[list[str], list[li
                     if amount is None:
                         amount = first.get("amount")
                     break
-        # Tier-1 readability: drop junk rows ns_runReport emits — blank-label rows
-        # (redundant duplicate lines it pairs with each labeled line) and the generic
-        # "Financial Row" root-group label NetSuite assigns to unlabeled report rows;
-        # neither is a readable account line.
         label_str = str(label).strip()
-        if not label_str or label_str == "Financial Row":
+        # Tier-1 readability WITHOUT data loss: drop a blank-label row ONLY when it is
+        # the redundant duplicate ns_runReport pairs with each labeled line — i.e. it
+        # repeats the previous kept row's amount — or carries no amount at all. A
+        # blank-label row with a DISTINCT real amount is KEPT (never silently drop a
+        # figure from a financial surface). Labeled rows always pass through (no
+        # hardcoded label filtering — a tenant may legitimately name a line anything).
+        if not label_str and (amount is None or (rows and amount == rows[-1][1])):
             continue
         rows.append([label_str, amount])
 
@@ -402,6 +404,10 @@ def extract_result_payload(tool_name: str, params: dict[str, Any], result_str: s
                     "truncated": truncated,
                     "query": f"ns_runReport(reportId={params.get('reportId', '?')})",
                     "limit": len(rows),
+                    # The flattened reportData "amount" column is currency — tag it so
+                    # the report renderer accounting-formats ONLY that column (not the
+                    # "account" label or any other numeric column).
+                    "currency_columns": [c for c in columns if c == "amount"],
                 }
             # reportData present but EMPTY (no report lines). The in-turn intercept's
             # reportData branch also flattens to None here and then yields NO stamped

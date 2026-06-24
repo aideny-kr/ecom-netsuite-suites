@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from html import escape
 
 _CSS = """
@@ -28,11 +29,18 @@ td.num,th.num { text-align:right; font-variant-numeric:tabular-nums; white-space
 
 
 def _fmt_amount(value) -> str:
-    """Accounting-style format for a numeric cell: thousands separators, whole
-    dollars, negatives in parentheses (``9740472.8`` → ``"9,740,473"``,
-    ``-4595824`` → ``"(4,595,824)"``). Non-numeric values (and bools) are returned
-    via ``str()`` unchanged, so account labels / pre-formatted strings pass through.
+    """Accounting-style format for a CURRENCY cell: thousands separators, 2 decimals
+    (exact — the displayed lines foot to the total, no precision loss), negatives in
+    parentheses (``5583749.13`` → ``"5,583,749.13"``, ``-4595824.07`` →
+    ``"(4,595,824.07)"``). ``None`` and non-finite floats (NaN/Inf) → empty string;
+    non-numeric values (and bools) are returned via ``str()`` unchanged.
+
+    Applied ONLY to columns the producer tags as currency (``currency_columns``) — the
+    table renderer is shared infrastructure, so a generic numeric column (year, ratio,
+    count, id) must NOT be accounting-formatted ('is a number' ≠ 'is a dollar amount').
     """
+    if value is None:
+        return ""
     # bool is an int subclass — never format True/False as 1/0.
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return str(value)
@@ -40,12 +48,10 @@ def _fmt_amount(value) -> str:
         n = float(value)
     except (TypeError, ValueError, OverflowError):
         return str(value)
-    body = f"{abs(n):,.0f}"
+    if not math.isfinite(n):  # NaN / Inf → blank, like a missing figure
+        return ""
+    body = f"{abs(n):,.2f}"
     return f"({body})" if n < 0 else body
-
-
-def _is_number(v) -> bool:
-    return isinstance(v, (int, float)) and not isinstance(v, bool)
 
 
 def _md_inline(text: str) -> str:
@@ -144,25 +150,24 @@ def _section_html(s: dict) -> str:
         columns = s.get("columns", [])
         rows = s.get("rows", [])
         ncols = len(columns)
-        # A column is numeric IFF it has at least one real number and no non-numeric
-        # non-null cell. Numeric columns get accounting formatting + right-alignment so
-        # amounts read like a financial statement (a column of account-code strings or
-        # numeric strings is left untouched).
-        numeric = []
-        for i in range(ncols):
-            cells_i = [row[i] for row in rows if i < len(row) and row[i] is not None]
-            numeric.append(bool(cells_i) and all(_is_number(v) for v in cells_i))
-        cls = [' class="num"' if n else "" for n in numeric]
+        # Accounting formatting is scoped to columns the PRODUCER tags as currency
+        # (e.g. the reportData "amount" column) — NOT guessed from value type. The table
+        # renderer is shared by SuiteQL/BigQuery/recon/etc., so a generic numeric column
+        # (year, ratio, count, id) must render raw, never comma-grouped/rounded.
+        currency = set(s.get("currency_columns") or [])
+        is_cur = [c in currency for c in columns]
+        cls = [' class="num"' if c else "" for c in is_cur]
         cols = "".join(f"<th{cls[i]}>{escape(str(c))}</th>" for i, c in enumerate(columns))
         body_rows = []
         for row in rows:
             cells = []
             for i in range(ncols):
                 v = row[i] if i < len(row) else None
-                if v is None:
-                    cells.append(f"<td{cls[i]}></td>")  # null → empty cell, never "None"
-                elif numeric[i]:
+                if is_cur[i]:
+                    # _fmt_amount handles None/non-finite → "" and non-numeric → str().
                     cells.append(f"<td{cls[i]}>{escape(_fmt_amount(v))}</td>")
+                elif v is None:
+                    cells.append("<td></td>")  # null → empty cell, never "None"
                 else:
                     cells.append(f"<td>{escape(str(v))}</td>")
             body_rows.append("<tr>" + "".join(cells) + "</tr>")
