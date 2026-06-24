@@ -239,8 +239,14 @@ def _extract_report_data_as_table(report_data: dict) -> tuple[list[str], list[li
                     if amount is None:
                         amount = first.get("amount")
                     break
-        if label or amount is not None:
-            rows.append([str(label), amount])
+        # Tier-1 readability: drop junk rows ns_runReport emits — blank-label rows
+        # (redundant duplicate lines it pairs with each labeled line) and the generic
+        # "Financial Row" root-group label NetSuite assigns to unlabeled report rows;
+        # neither is a readable account line.
+        label_str = str(label).strip()
+        if not label_str or label_str == "Financial Row":
+            continue
+        rows.append([label_str, amount])
 
     return (columns, rows) if rows else None
 

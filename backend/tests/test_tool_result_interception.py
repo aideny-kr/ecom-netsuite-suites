@@ -883,6 +883,23 @@ class TestInterceptRunReportReportData:
         _cols, rows = result
         assert rows == [["AR", 5]]
 
+    def test_flatten_drops_blank_label_and_generic_root_rows(self):
+        """Tier-1 readability: drop the junk rows ns_runReport emits — blank-label
+        rows (redundant duplicate lines) and the generic 'Financial Row' root-group
+        label NetSuite assigns to unlabeled rows — neither is a readable account."""
+        from app.services.chat.tool_call_results import _extract_report_data_as_table
+
+        rd = {
+            "0": {"label": "Financial Row", "isDetailLine": False, "summaryLineValues": [{"Amount": 100}]},
+            "1": {"label": "Net Income", "isDetailLine": False, "summaryLineValues": [{"Amount": 50}]},
+            "2": {"label": "", "isDetailLine": True, "detailLineValues": [{"amount": 999}]},
+        }
+        result = _extract_report_data_as_table(rd)
+        assert result is not None
+        cols, rows = result
+        assert cols == ["account", "amount"]
+        assert rows == [["Net Income", 50]]  # 'Financial Row' + blank-label rows dropped
+
     def test_persist_and_intercept_derive_identical_table_via_shared_helper(self):
         """T2-gate re-review #2: the persistence path (extract_result_payload Path 2)
         and the in-turn intercept derive the reportData table through ONE shared helper

@@ -1,4 +1,60 @@
-from app.services.report.report_html import render_report_html
+from app.services.report.report_html import _fmt_amount, render_report_html
+
+
+def test_fmt_amount_accounting_style():
+    """Numbers render accounting-style: thousands separators, whole dollars,
+    negatives in parentheses. Non-numbers (and bools) pass through untouched."""
+    assert _fmt_amount(9740472.802484963) == "9,740,473"
+    assert _fmt_amount(-4595824.06766871) == "(4,595,824)"
+    assert _fmt_amount(0) == "0"
+    assert _fmt_amount(1234567) == "1,234,567"
+    assert _fmt_amount("Cash") == "Cash"  # non-numeric label untouched
+    assert _fmt_amount(True) == "True"  # bool is not a financial amount
+
+
+def test_table_numeric_column_is_accounting_formatted_and_right_aligned():
+    spec = {
+        "title": "Cash Flow",
+        "sections": [
+            {
+                "type": "table",
+                "columns": ["account", "amount"],
+                "rows": [["Net Income", 5583749.13], ["Operating Activities", -4595824.07]],
+                "row_count": 2,
+            }
+        ],
+        "provenance": {},
+    }
+    html = render_report_html(spec)
+    assert "5,583,749" in html  # thousands separators
+    assert "(4,595,824)" in html  # accounting negative
+    assert "5583749" not in html  # raw float is gone
+    assert 'class="num"' in html  # the numeric column is right-aligned
+    assert "<td>Net Income</td>" in html  # the string column is NOT reformatted
+
+
+def test_table_string_number_cells_are_not_reformatted():
+    """Back-compat: a column of numeric STRINGS (not real numbers) is left as-is —
+    only real int/float cells are accounting-formatted."""
+    spec = {
+        "title": "T",
+        "sections": [
+            {"type": "table", "columns": ["Period", "Revenue"], "rows": [["Q1", "100"], ["Q2", "150"]], "row_count": 2}
+        ],
+        "provenance": {},
+    }
+    html = render_report_html(spec)
+    assert "<td>150</td>" in html  # unchanged
+
+
+def test_table_null_cell_renders_empty_not_none():
+    spec = {
+        "title": "T",
+        "sections": [{"type": "table", "columns": ["account", "amount"], "rows": [["Header", None]], "row_count": 1}],
+        "provenance": {},
+    }
+    html = render_report_html(spec)
+    assert "None" not in html  # a null amount renders as an empty cell, not "None"
 
 
 def test_render_self_contained_html():
