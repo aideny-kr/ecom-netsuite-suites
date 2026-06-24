@@ -240,13 +240,16 @@ def _extract_report_data_as_table(report_data: dict) -> tuple[list[str], list[li
                         amount = first.get("amount")
                     break
         label_str = str(label).strip()
-        # Tier-1 readability WITHOUT data loss: drop a blank-label row ONLY when it is
-        # the redundant duplicate ns_runReport pairs with each labeled line — i.e. it
-        # repeats the previous kept row's amount — or carries no amount at all. A
-        # blank-label row with a DISTINCT real amount is KEPT (never silently drop a
-        # figure from a financial surface). Labeled rows always pass through (no
-        # hardcoded label filtering — a tenant may legitimately name a line anything).
-        if not label_str and (amount is None or (rows and amount == rows[-1][1])):
+        # NEVER silently drop a figure from a financial surface. Keep every row that
+        # carries a label OR a real amount (including $0 and a blank-label line that
+        # happens to repeat the prior amount); drop ONLY a truly-empty row (no label
+        # AND no amount). A value-based "duplicate" dedup is unsafe — two genuinely
+        # distinct lines can coincide in amount (e.g. two $0 balance-sheet lines), so it
+        # would drop a real figure and the total would stop footing. Cosmetic
+        # blank-label continuation rows ns_runReport emits are left for the Tier-2
+        # curated-statement restructure, which has the structure to consolidate safely.
+        # No hardcoded label filtering either — a tenant may name a line anything.
+        if not label_str and amount is None:
             continue
         rows.append([label_str, amount])
 
@@ -404,10 +407,10 @@ def extract_result_payload(tool_name: str, params: dict[str, Any], result_str: s
                     "truncated": truncated,
                     "query": f"ns_runReport(reportId={params.get('reportId', '?')})",
                     "limit": len(rows),
-                    # The flattened reportData "amount" column is currency — tag it so
-                    # the report renderer accounting-formats ONLY that column (not the
-                    # "account" label or any other numeric column).
-                    "currency_columns": [c for c in columns if c == "amount"],
+                    # The flattened reportData columns are ["account", "amount"]; tag the
+                    # "amount" column as currency so the report renderer accounting-
+                    # formats ONLY it (not the "account" label or any other column).
+                    "currency_columns": ["amount"],
                 }
             # reportData present but EMPTY (no report lines). The in-turn intercept's
             # reportData branch also flattens to None here and then yields NO stamped

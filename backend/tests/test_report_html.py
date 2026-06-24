@@ -8,6 +8,7 @@ def test_fmt_amount_accounting_style():
     assert _fmt_amount(5583749.13) == "5,583,749.13"
     assert _fmt_amount(-4595824.06766871) == "(4,595,824.07)"
     assert _fmt_amount(0) == "0.00"
+    assert _fmt_amount(-0.004) == "0.00"  # tiny residual rounds to a clean zero, NOT "(0.00)"
     assert _fmt_amount(None) == ""
     assert _fmt_amount(float("nan")) == ""
     assert _fmt_amount(float("inf")) == ""
@@ -43,6 +44,18 @@ def test_only_tagged_currency_columns_are_accounting_formatted():
     assert "2,024" not in html
     assert "<td>0.4523</td>" in html  # ratio: full precision, not rounded to 0
     assert "<td>Net Income</td>" in html  # string label untouched
+
+
+def test_table_renders_overwide_row_cells_no_silent_drop():
+    """A row WIDER than the declared columns must not have its trailing values silently
+    dropped (that would hide a figure on a financial surface) — render every cell."""
+    spec = {
+        "title": "T",
+        "sections": [{"type": "table", "columns": ["Account", "Amount"], "rows": [["Revenue", 100, 99999.99]]}],
+        "provenance": {},
+    }
+    html = render_report_html(spec)
+    assert "99999.99" in html  # the extra trailing value is rendered, not dropped
 
 
 def test_table_without_currency_tag_formats_nothing():

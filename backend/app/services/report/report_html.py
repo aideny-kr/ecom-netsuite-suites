@@ -50,6 +50,9 @@ def _fmt_amount(value) -> str:
         return str(value)
     if not math.isfinite(n):  # NaN / Inf → blank, like a missing figure
         return ""
+    # Round to cents FIRST, then pick the sign — so a tiny residual like -0.004 renders
+    # a clean "0.00" rather than a misleading negative-signalling "(0.00)".
+    n = round(n, 2)
     body = f"{abs(n):,.2f}"
     return f"({body})" if n < 0 else body
 
@@ -155,17 +158,21 @@ def _section_html(s: dict) -> str:
         # renderer is shared by SuiteQL/BigQuery/recon/etc., so a generic numeric column
         # (year, ratio, count, id) must render raw, never comma-grouped/rounded.
         currency = set(s.get("currency_columns") or [])
-        is_cur = [c in currency for c in columns]
-        cls = [' class="num"' if c else "" for c in is_cur]
-        cols = "".join(f"<th{cls[i]}>{escape(str(c))}</th>" for i, c in enumerate(columns))
+
+        def _num_cls(i: int) -> str:
+            return ' class="num"' if i < ncols and columns[i] in currency else ""
+
+        cols = "".join(f"<th{_num_cls(i)}>{escape(str(c))}</th>" for i, c in enumerate(columns))
         body_rows = []
         for row in rows:
+            # Render max(ncols, len(row)) cells: pad a short row, but NEVER silently drop
+            # the trailing values of an over-wide row (that would hide a real figure).
             cells = []
-            for i in range(ncols):
+            for i in range(max(ncols, len(row))):
                 v = row[i] if i < len(row) else None
-                if is_cur[i]:
+                if i < ncols and columns[i] in currency:
                     # _fmt_amount handles None/non-finite → "" and non-numeric → str().
-                    cells.append(f"<td{cls[i]}>{escape(_fmt_amount(v))}</td>")
+                    cells.append(f'<td class="num">{escape(_fmt_amount(v))}</td>')
                 elif v is None:
                     cells.append("<td></td>")  # null → empty cell, never "None"
                 else:

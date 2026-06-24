@@ -883,26 +883,27 @@ class TestInterceptRunReportReportData:
         _cols, rows = result
         assert rows == [["AR", 5]]
 
-    def test_flatten_dedups_blank_label_rows_but_keeps_distinct_amounts(self):
-        """Tier-1 readability WITHOUT data loss (T2-gate major): drop a blank-label row
-        ONLY when it repeats the previous kept row's amount (the redundant duplicate
-        ns_runReport pairs with each labeled line) or carries no amount — but KEEP a
-        blank-label row with a DISTINCT real amount, never silently dropping a figure.
-        Also: NO hardcoded 'Financial Row' drop (a tenant may name a real line that)."""
+    def test_flatten_keeps_every_amount_bearing_row_drops_only_truly_empty(self):
+        """A financial surface must NEVER silently drop a figure (T2-gate major): a
+        value-based 'duplicate' dedup would drop two genuinely distinct lines that
+        coincide in amount (e.g. two $0 balance-sheet lines, two equal expense lines),
+        so it is gone. Keep every row with a label OR a real amount (incl. $0 and a
+        blank-label line that repeats the prior amount); drop only a truly-empty row.
+        No hardcoded 'Financial Row' drop either (a tenant may name a real line that)."""
         from app.services.chat.tool_call_results import _extract_report_data_as_table
 
         rd = {
-            "0": {"label": "Net Income", "isDetailLine": False, "summaryLineValues": [{"Amount": 50}]},
-            "1": {"label": "", "isDetailLine": True, "detailLineValues": [{"amount": 50}]},  # dup of prev → drop
-            "2": {"label": "11000 - AR", "isDetailLine": True, "detailLineValues": [{"amount": 999}]},
-            "3": {"label": "", "isDetailLine": True, "detailLineValues": [{"amount": 12345}]},  # distinct → KEEP
-            "4": {"label": "", "isDetailLine": True, "detailLineValues": [{}]},  # no amount → drop
+            "0": {"label": "Rent", "isDetailLine": True, "detailLineValues": [{"amount": 50000}]},
+            "1": {"label": "", "isDetailLine": True, "detailLineValues": [{"amount": 50000}]},  # same amt → KEPT
+            "2": {"label": "", "isDetailLine": True, "detailLineValues": [{"amount": 0}]},  # $0 figure → KEPT
+            "3": {"label": "Financial Row", "isDetailLine": False, "summaryLineValues": [{"Amount": 100}]},  # KEPT
+            "4": {"label": "", "isDetailLine": True, "detailLineValues": [{}]},  # no label, no amount → drop
         }
         result = _extract_report_data_as_table(rd)
         assert result is not None
         cols, rows = result
         assert cols == ["account", "amount"]
-        assert rows == [["Net Income", 50], ["11000 - AR", 999], ["", 12345]]
+        assert rows == [["Rent", 50000], ["", 50000], ["", 0], ["Financial Row", 100]]
 
     def test_reportdata_payload_tags_amount_column_as_currency(self):
         """The reportData payload tags its 'amount' column as currency so the report
