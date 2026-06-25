@@ -275,23 +275,34 @@ def report_data_to_capped_table(report_data: dict) -> tuple[list[str], list[list
     return columns, rows, row_count, truncated
 
 
-def _money_columns(columns: list, rows: list | None = None) -> list:
-    """Return the subset of ``columns`` that denote a monetary value, so the report
-    renderer accounting-formats ONLY those.
+# Normalized (alphanumeric-only, lowercased) column names that denote money.
+_MONEY_COLUMN_EXACT = frozenset({"debit", "credit", "subtotal", "totaldebit", "totalcredit"})
+# A column whose normalized name ENDS in "amount"/"balance" is money. This catches the
+# canonical NetSuite/SuiteQL line-amount names ("netamount", "foreignamount"), compound
+# names ("stripe_amount" → "stripeamount", "opening_balance"), and the bare words —
+# WITHOUT the substring false-positives that would tag a count ("total_count"),
+# a status ("creditstatus"), or a code as currency.
+_MONEY_COLUMN_SUFFIXES = ("amount", "balance")
 
-    Reuses ``excel_export_service._detect_column_types`` — the project's single,
-    battle-tested name+data column classifier — rather than a second hand-rolled
-    allowlist (which kept missing the canonical NetSuite/SuiteQL line-amount names like
-    ``netamount`` / ``foreignamount`` and recon ``*_amount`` columns, and would drift).
-    Its CURRENCY_PATTERNS catch those by substring while its ID_PATTERNS guard keeps an
-    ``acctnumber`` / ``*_number`` / account-code column out of the money set, so a
-    numeric code/year/count is never mis-formatted as dollars. Under-tagging (e.g. a
-    pivoted per-period column named "Jan 2026") is render-safe — see issue #146.
+
+def _money_columns(columns: list) -> list:
+    """Return the subset of ``columns`` whose name denotes a monetary value, so the
+    report renderer accounting-formats ONLY those.
+
+    Name-based (NOT value-type), deliberately precise: a column matches iff its
+    normalized name ends in "amount"/"balance" or is one of a few exact money words.
+    This catches netamount/foreignamount/*_amount/*_balance while NEVER tagging a numeric
+    account-code / year / count / id (a substring match or the broad export classifier
+    would mis-format "total_count" as "1,500.00"). Conservative under-tagging of an
+    ambiguous bare name (e.g. "total"/"revenue", a pivoted per-period column) is
+    render-safe — it renders raw, not wrong — see issue #146.
     """
-    from app.services.excel_export_service import _detect_column_types
-
-    types = _detect_column_types(list(columns), rows or [])
-    return [c for c in columns if types.get(c) == "currency"]
+    out = []
+    for c in columns:
+        name = "".join(ch for ch in str(c).lower() if ch.isalnum())
+        if name in _MONEY_COLUMN_EXACT or name.endswith(_MONEY_COLUMN_SUFFIXES):
+            out.append(c)
+    return out
 
 
 def extract_result_payload(tool_name: str, params: dict[str, Any], result_str: str) -> dict[str, Any] | None:
@@ -364,7 +375,7 @@ def extract_result_payload(tool_name: str, params: dict[str, Any], result_str: s
             "truncated": truncated,
             "query": f"{parsed.get('report_type', 'report')} ({parsed.get('period', '')})".strip(),
             "limit": len(rows),
-            "currency_columns": _money_columns(columns, rows),
+            "currency_columns": _money_columns(columns),
         }
 
     # --- Path 1: Already has columns + rows (local netsuite_suiteql) ---
@@ -392,7 +403,7 @@ def extract_result_payload(tool_name: str, params: dict[str, Any], result_str: s
                 "truncated": truncated,
                 "query": query,
                 "limit": limit,
-                "currency_columns": _money_columns(columns, rows),
+                "currency_columns": _money_columns(columns),
             }
             # M4: For metric payloads, pass through source_kind so
             # _compute_source_pin_update can distinguish BigQuery vs SuiteQL
@@ -430,7 +441,7 @@ def extract_result_payload(tool_name: str, params: dict[str, Any], result_str: s
                     "limit": len(rows),
                     # The flattened reportData columns are ["account", "amount"]; tag the
                     # money column(s) so the report renderer accounting-formats ONLY them.
-                    "currency_columns": _money_columns(columns, rows),
+                    "currency_columns": _money_columns(columns),
                 }
             # reportData present but EMPTY (no report lines). The in-turn intercept's
             # reportData branch also flattens to None here and then yields NO stamped
@@ -460,7 +471,7 @@ def extract_result_payload(tool_name: str, params: dict[str, Any], result_str: s
             "truncated": truncated,
             "query": query,
             "limit": len(rows),
-            "currency_columns": _money_columns(columns, rows),
+            "currency_columns": _money_columns(columns),
         }
 
 

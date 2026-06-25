@@ -27,20 +27,22 @@ class TestCurrencyColumnTagging:
         from app.services.chat.tool_call_results import _money_columns
 
         cols = ["periodname", "startdate", "acctnumber", "acctname", "accttype", "section", "amount"]
-        assert _money_columns(cols, []) == ["amount"]  # acctnumber (a code) is NOT money
-        assert _money_columns(["account", "balance"], []) == ["balance"]
-        assert _money_columns(["year", "order_count", "ratio"], []) == []  # not money-named
-        # the canonical NetSuite/SuiteQL line-amount names (the hand-rolled allowlist
-        # missed these — no "_amount" underscore) + compound + aliases all tag now:
-        assert _money_columns(["netamount", "foreignamount", "total", "revenue_usd", "stripe_amount"], []) == [
+        assert _money_columns(cols) == ["amount"]  # acctnumber (a code) is NOT money
+        assert _money_columns(["account", "balance"]) == ["balance"]
+        assert _money_columns(["year", "order_count", "ratio"]) == []  # not money-named
+        # canonical NetSuite/SuiteQL line-amount names — caught by the amount/balance
+        # suffix (what an exact allowlist missed), plus compound names:
+        assert _money_columns(["netamount", "foreignamount", "stripe_amount", "opening_balance"]) == [
             "netamount",
             "foreignamount",
-            "total",
-            "revenue_usd",
             "stripe_amount",
+            "opening_balance",
         ]
-        # ID-guard keeps codes/numbers out (a money word inside an id-name does NOT tag)
-        assert _money_columns(["credit_memo_number", "acctnumber"], []) == []
+        # OVER-FORMAT GUARD: a non-money column whose name merely CONTAINS a money word
+        # (a count/status/code) must NOT be tagged — never show a count as "1,500.00":
+        assert _money_columns(["total_count", "creditcount", "creditstatus", "credit_memo_number", "acctnumber"]) == []
+        # exact money words still tag (debit/credit/subtotal amounts in a trial balance)
+        assert _money_columns(["debit", "credit", "subtotal"]) == ["debit", "credit", "subtotal"]
 
     def test_suiteql_table_payload_tags_amount_as_currency(self):
         result = {
