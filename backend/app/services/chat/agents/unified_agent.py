@@ -138,6 +138,24 @@ _FINANCIAL_TOOL_NAMES = frozenset(
     }
 )
 
+# Pseudo-chain-of-thought instruction. Only needed when native extended thinking
+# is OFF — with thinking enabled the model reasons natively, so emitting it would
+# cause double-reasoning. Injected into _SYSTEM_PROMPT via the placeholder below.
+_REASONING_INSTRUCTION = "Output reasoning in a <reasoning> block (hidden from user)."
+
+
+def build_reasoning_instruction(*, thinking_enabled: bool) -> str:
+    """The pseudo-CoT instruction is only needed when native thinking is OFF.
+
+    With extended thinking enabled the model reasons natively, so we omit it to
+    avoid double-reasoning. The <reasoning>-stripping regex remains as a
+    belt-and-suspenders safeguard regardless.
+    """
+    if thinking_enabled:
+        return ""
+    return _REASONING_INSTRUCTION
+
+
 _SYSTEM_PROMPT = """\
 <role>
 {{INJECT_ROLE_PROMPT}}
@@ -237,8 +255,7 @@ BUDGET: Data queries = 1-2 tool calls. Investigation = more to follow evidence c
 </agentic_workflow>
 
 <output_instructions>
-Output reasoning in a <reasoning> block (hidden from user).
-
+{{INJECT_REASONING_INSTRUCTION}}
 1. SuiteQL success → ONE sentence summary. No markdown table, JSON, or SQL (UI renders separately).
 2. Financial report → markdown table grouped by section (Revenue, COGS, Expenses, etc.). Include every account row. Use ONLY the pre-computed summary totals — do NOT calculate yourself.
 3. workspace_propose_patch → ```diff block + one-sentence summary.
@@ -365,7 +382,17 @@ class UnifiedAgent(BaseSpecialistAgent):
 
     @property
     def system_prompt(self) -> str:
+        from app.core.config import settings
+
         base = _SYSTEM_PROMPT
+
+        # Pseudo-CoT instruction is redundant when native extended thinking is on
+        # (the model reasons natively → avoid double-reasoning). Resolve the
+        # placeholder before any block stripping so all paths are consistent.
+        base = base.replace(
+            "{{INJECT_REASONING_INSTRUCTION}}",
+            build_reasoning_instruction(thinking_enabled=settings.CHAT_THINKING_ENABLED),
+        )
 
         # Inject dynamic role prompt based on connected systems
         role_prompt = _build_role_prompt(
