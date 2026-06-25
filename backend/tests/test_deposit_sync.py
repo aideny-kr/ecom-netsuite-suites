@@ -10,13 +10,16 @@ the pattern load and the netsuite_postings upsert hit the real docker Postgres.
 
 from __future__ import annotations
 
-from datetime import date
-from types import SimpleNamespace
+import uuid
+from datetime import date, datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 
 from sqlalchemy import select
 
+from app.core.encryption import encrypt_credentials
 from app.models.canonical import NetsuitePosting
+from app.models.connection import Connection
+from app.models.pipeline import CursorState
 from app.models.tenant import TenantConfig
 from app.services.ingestion import netsuite_deposit_sync
 from app.services.ingestion.netsuite_deposit_sync import (
@@ -150,20 +153,37 @@ class TestExtractOrderRef:
 # ---------------------------------------------------------------------------
 
 
-def _patch_netsuite_boundary(*, suiteql_rows: list[dict]):
+async def _seed_netsuite_connection(db, tenant_id) -> Connection:
+    """Insert a real active NetSuite REST connection (satisfies the cursor FK)."""
+    connection = Connection(
+        id=uuid.uuid4(),
+        tenant_id=tenant_id,
+        provider="netsuite",
+        label="Test NetSuite",
+        status="active",
+        auth_type="oauth2",
+        encrypted_credentials=encrypt_credentials({"account_id": "ACME123"}),
+    )
+    db.add(connection)
+    await db.flush()
+    return connection
+
+
+def _patch_netsuite_boundary(*, connection: Connection, suiteql_rows: list[dict]):
     """Patch the NetSuite network boundary of sync_netsuite_deposits.
 
-    Returns a list of patch context managers. The DB (pattern load + posting
-    upsert) is intentionally NOT patched so the real Postgres path runs.
-    ``suiteql_rows`` are returned as dict rows (the sync handles both list-rows +
-    dict-rows; dicts keep the test column-order-independent).
+    Returns a list of patch context managers. The DB (pattern load, posting
+    upsert, freshness-cursor upsert) is intentionally NOT patched so the real
+    Postgres path runs. A REAL ``connection`` is returned by the patched
+    ``get_netsuite_rest_connection`` so ``connection.id`` satisfies the
+    cursor_states FK. ``suiteql_rows`` are returned as dict rows (the sync handles
+    both list-rows + dict-rows; dicts keep the test column-order-independent).
     """
-    fake_connection = SimpleNamespace(encrypted_credentials="enc::creds")
     return [
         patch.object(
             netsuite_deposit_sync,
             "get_netsuite_rest_connection",
-            new=AsyncMock(return_value=fake_connection),
+            new=AsyncMock(return_value=connection),
         ),
         patch.object(
             netsuite_deposit_sync,
@@ -185,7 +205,8 @@ def _patch_netsuite_boundary(*, suiteql_rows: list[dict]):
 
 async def _run_sync_and_read_back(db, tenant_id, *, internal_id: str, rows: list[dict]):
     """Run sync_netsuite_deposits with the network patched, return the stored row."""
-    patches = _patch_netsuite_boundary(suiteql_rows=rows)
+    connection = await _seed_netsuite_connection(db, tenant_id)
+    patches = _patch_netsuite_boundary(connection=connection, suiteql_rows=rows)
     for p in patches:
         p.start()
     try:
@@ -283,3 +304,100 @@ class TestSyncDepositsUsesTenantPattern:
         ]
         _result, posting = await _run_sync_and_read_back(db, tenant_a.id, internal_id="900003", rows=rows)
         assert posting.related_payout_id == "po_1abc2def3ghi4jkl5mno"
+
+
+# ---------------------------------------------------------------------------
+# DB-backed: freshness cursor maintained by sync_netsuite_deposits (cursor bug)
+#
+# The recon data-status banner reads CursorState.last_synced_at WHERE
+# object_type='netsuite_deposits' to show "NetSuite: N deposits · Xd ago". The
+# nightly Celery task calls sync_netsuite_deposits directly (NOT the manual
+# trigger endpoint), so the service ITSELF must bump the cursor on every
+# successful run — otherwise the banner freezes at the last manual sync even
+# though deposits land daily.
+#
+# Here we seed a REAL Connection row (the cursor_states.connection_id FK requires
+# it) and patch get_netsuite_rest_connection to return it, so connection.id is
+# FK-valid and the cursor upsert hits the real docker Postgres. The token /
+# decrypt / SuiteQL boundary is patched. Asserts a CursorState row for
+# (connection.id, 'netsuite_deposits') exists with a just-now last_synced_at and
+# cursor_value == date_to.isoformat().
+# ---------------------------------------------------------------------------
+
+
+class TestSyncDepositsMaintainsFreshnessCursor:
+    """sync_netsuite_deposits writes the netsuite_deposits freshness cursor on success."""
+
+    async def test_cursor_written_on_successful_sync(self, db, tenant_a):
+        connection = await _seed_netsuite_connection(db, tenant_a.id)
+
+        rows = [
+            {
+                "internal_id": "910001",
+                "document_number": "DEP-CUR-1",
+                "transaction_date": "2026-03-16",
+                "record_type": "Deposit",
+                "memo": "bank deposit",
+                "amount": "100.00",
+                "currency_name": "USD",
+                "account_id": "10",
+                "account_name": "Bank",
+                "subsidiary_id": "1",
+                "sales_order_ref": "",
+            }
+        ]
+
+        date_from = date(2026, 3, 1)
+        date_to = date(2026, 3, 31)
+
+        patches = [
+            patch.object(
+                netsuite_deposit_sync,
+                "get_netsuite_rest_connection",
+                new=AsyncMock(return_value=connection),
+            ),
+            patch.object(
+                netsuite_deposit_sync,
+                "get_valid_token",
+                new=AsyncMock(return_value="fake-token"),
+            ),
+            patch.object(
+                netsuite_deposit_sync,
+                "execute_suiteql_via_rest",
+                new=AsyncMock(return_value={"columns": [], "rows": rows}),
+            ),
+        ]
+        for p in patches:
+            p.start()
+        try:
+            before = datetime.now(timezone.utc)
+            result = await sync_netsuite_deposits(
+                db=db,
+                tenant_id=str(tenant_a.id),
+                date_from=date_from,
+                date_to=date_to,
+            )
+            after = datetime.now(timezone.utc)
+        finally:
+            for p in patches:
+                p.stop()
+
+        assert not result.errors, result.errors
+
+        cursor = (
+            await db.execute(
+                select(CursorState).where(
+                    CursorState.connection_id == connection.id,
+                    CursorState.object_type == "netsuite_deposits",
+                )
+            )
+        ).scalar_one_or_none()
+
+        assert cursor is not None, "sync_netsuite_deposits did not write a netsuite_deposits cursor"
+        assert cursor.cursor_value == date_to.isoformat()
+        assert cursor.last_synced_at is not None
+        # last_synced_at should be ~now (within the test window, with a little slack)
+        synced = cursor.last_synced_at
+        if synced.tzinfo is None:
+            synced = synced.replace(tzinfo=timezone.utc)
+        assert (before - timedelta(seconds=5)) <= synced <= (after + timedelta(seconds=5))

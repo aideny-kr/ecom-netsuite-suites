@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.encryption import decrypt_credentials
 from app.models.canonical import NetsuitePosting
 from app.models.connection import Connection
+from app.services.ingestion.base import save_cursor_async
 from app.services.netsuite_client import execute_suiteql_via_rest
 from app.services.netsuite_oauth_service import get_valid_token
 
@@ -273,6 +274,13 @@ async def sync_netsuite_deposits(
         if result.records_synced % 10 == 0:
             await db.commit()
 
+    await db.commit()
+
+    # Bump the freshness cursor so the recon data-status banner reflects this
+    # run. The nightly Celery task calls this service directly (not the manual
+    # trigger endpoint), so the cursor MUST be written here for ALL callers.
+    # cursor_value uses the 'YYYY-MM-DD' format the manual path established.
+    await save_cursor_async(db, connection.id, "netsuite_deposits", date_to.isoformat())
     await db.commit()
 
     logger.info(
