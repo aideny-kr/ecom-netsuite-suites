@@ -144,6 +144,8 @@ class OpenAIAdapter(BaseLLMAdapter):
         messages: list[dict],
         tools: list[dict] | None = None,
         tool_choice: dict | str | None = None,
+        thinking_level: str | None = None,
+        extra_body: dict | None = None,
     ) -> LLMResponse:
         full_system = f"{system}\n\n{system_dynamic}".strip() if system_dynamic else system
         openai_messages = self._convert_messages(messages, full_system)
@@ -159,6 +161,9 @@ class OpenAIAdapter(BaseLLMAdapter):
         converted_tc = self._convert_tool_choice(tool_choice)
         if converted_tc is not None:
             kwargs["tool_choice"] = converted_tc
+
+        if extra_body:
+            kwargs["extra_body"] = extra_body
 
         response = await self._client.chat.completions.create(**kwargs)
 
@@ -200,6 +205,8 @@ class OpenAIAdapter(BaseLLMAdapter):
         messages: list[dict],
         tools: list[dict] | None = None,
         tool_choice: dict | str | None = None,
+        thinking_level: str | None = None,
+        extra_body: dict | None = None,
     ):
         """Stream tokens from OpenAI and yield ('text', chunk) events."""
         full_system = f"{system}\n\n{system_dynamic}".strip() if system_dynamic else system
@@ -218,6 +225,9 @@ class OpenAIAdapter(BaseLLMAdapter):
         converted_tc = self._convert_tool_choice(tool_choice)
         if converted_tc is not None:
             kwargs["tool_choice"] = converted_tc
+
+        if extra_body:
+            kwargs["extra_body"] = extra_body
 
         text_blocks: list[str] = []
         tool_use_blocks: list[ToolUseBlock] = []
