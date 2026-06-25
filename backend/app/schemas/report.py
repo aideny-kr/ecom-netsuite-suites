@@ -44,23 +44,61 @@ ComposeSection = Annotated[
 
 _SECTIONS_ADAPTER = TypeAdapter(list[ComposeSection])
 
+# The composing LLM consistently emits common-sense `type` names — `text` for a
+# narrative, `data` for a table — and sometimes omits the required
+# `narrative.markdown`. Those fail the discriminated-union validation, the agent
+# retries 2-4x, and the turn times out. Tolerate the aliases at the validation
+# boundary (cheap, deterministic) so a good composition is not thrown away over a
+# naming nit. Canonical types pass through untouched; truly unknown types still raise.
+_TYPE_ALIASES = {"text": "narrative", "data": "table"}
+_NARRATIVE_BODY_ALIASES = ("text", "content", "body")
+
+
+def _normalize_section(raw: dict) -> dict:
+    if not isinstance(raw, dict):
+        return raw
+    out = dict(raw)
+    if out.get("type") in _TYPE_ALIASES:
+        out["type"] = _TYPE_ALIASES[out["type"]]
+    # narrative requires `markdown`; tolerate the body arriving under text/content/body
+    if out.get("type") == "narrative" and "markdown" not in out:
+        for alias in _NARRATIVE_BODY_ALIASES:
+            val = out.get(alias)
+            if isinstance(val, str):
+                out["markdown"] = val
+                break
+    return out
+
+
+def normalize_sections(raw: list[dict]) -> list[dict]:
+    """Map the LLM's common section-type aliases onto the canonical schema.
+
+    Returns a NEW list of normalized dicts; the input is not mutated. Callers
+    that persist/render the raw dicts (assemble_spec / compose_report) must use
+    the normalized form so downstream sees real `narrative`/`table` types.
+    """
+    return [_normalize_section(s) for s in raw]
+
 
 def parse_sections(raw: list[dict]) -> list:
-    return _SECTIONS_ADAPTER.validate_python(raw)
+    return _SECTIONS_ADAPTER.validate_python(normalize_sections(raw))
 
 
 class ComposeRequest(BaseModel):
     title: str = Field(min_length=1, max_length=300)
     # Kept as raw dicts so downstream (compose_report / assemble_spec) consumes them
-    # as plain dicts, but the validator enforces the discriminated union at construction
-    # so an unknown `type` is rejected with a 422 before any work happens.
+    # as plain dicts, but the validator normalizes aliases + enforces the discriminated
+    # union at construction so an unknown `type` is rejected with a 422 before any work
+    # happens. The normalized (canonical) dicts are stored back so downstream raw-dict
+    # consumers see real `narrative`/`table` types, not the LLM's `text`/`data` aliases.
     sections: list[dict] = Field(min_length=1)
 
     @field_validator("sections")
     @classmethod
     def _validate_section_union(cls, v: list[dict]) -> list[dict]:
-        parse_sections(v)  # raises ValidationError on unknown/invalid section type
-        return v
+        normalized = normalize_sections(v)
+        _SECTIONS_ADAPTER.validate_python(normalized)  # raises ValidationError on unknown/invalid type
+        return normalized
 
 
 class ReportResponse(BaseModel):
