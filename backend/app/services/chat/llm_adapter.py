@@ -95,9 +95,10 @@ DEFAULT_MODELS: dict[str, str] = {
     "anthropic": "claude-sonnet-4-5-20250929",
     "openai": "gpt-5.2",
     "gemini": "gemini-2.5-flash",
+    "openrouter": "z-ai/glm-5.2",
 }
 
-VALID_PROVIDERS = {"anthropic", "openai", "gemini"}
+VALID_PROVIDERS = {"anthropic", "openai", "gemini", "openrouter"}
 
 VALID_MODELS: dict[str, list[str]] = {
     "anthropic": [
@@ -131,6 +132,11 @@ VALID_MODELS: dict[str, list[str]] = {
         "gemini-3-pro-preview",
         "gemini-3-flash-preview",
     ],
+    "openrouter": [
+        "z-ai/glm-5.2",
+        "z-ai/glm-5",
+        "openai/gpt-4o-mini",
+    ],
 }
 
 
@@ -148,5 +154,9 @@ def get_adapter(provider: str, api_key: str) -> BaseLLMAdapter:
         from app.services.chat.adapters.gemini_adapter import GeminiAdapter
 
         return GeminiAdapter(api_key=api_key)
+    elif provider == "openrouter":
+        from app.services.chat.adapters.openrouter_adapter import OpenRouterAdapter
+
+        return OpenRouterAdapter(api_key=api_key)
     else:
         raise ValueError(f"Unsupported AI provider: {provider}")

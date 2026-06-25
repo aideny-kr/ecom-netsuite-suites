@@ -40,6 +40,8 @@ class Settings(BaseSettings):
 
     ANTHROPIC_API_KEY: str = ""
     ANTHROPIC_MODEL: str = "claude-sonnet-4-20250514"
+    # OpenRouter gateway — env only, never a shell export (key-billing leak risk).
+    OPENROUTER_API_KEY: str = ""
     DEFAULT_AI_PROVIDER: str = "anthropic"
     # ── Adaptive thinking (chat path) ───────────────────────────────────────
     # Native extended reasoning. Always-on with a generous default budget so the
