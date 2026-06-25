@@ -271,11 +271,14 @@ TOOL_REGISTRY = {
     },
     "report.compose": {
         "description": (
-            "Compose a publishable report from results already produced in this conversation. "
-            "Pass title + ordered sections; data sections reference a prior result by result_id. "
-            "Each data result's summary includes its result_id (r1, r2, ... — stable per "
-            "conversation, in the order the results were produced) — pass those EXACT ids "
-            "(never inline numbers). Returns a report card; the report renders in the browser."
+            "Compose a publishable report (a summary + charts, NOT a raw data dump) from "
+            "results already produced in this conversation. Pass title + ordered sections; "
+            "valid section types: heading, narrative, metric_headline, chart, table, divider. "
+            "Lead with narrative + metric_headline + a chart of the major drivers; include a "
+            "raw table only when the detail is genuinely informative. Data sections reference "
+            "a prior result by result_id (r1, r2, ... — stable per conversation, in the order "
+            "the results were produced) — pass those EXACT ids (never inline numbers). "
+            "Returns a report card; the report renders in the browser."
         ),
         "execute": report_export.execute,
         "params_schema": {

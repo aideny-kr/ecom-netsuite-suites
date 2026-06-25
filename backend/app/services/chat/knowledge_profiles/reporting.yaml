@@ -6,12 +6,39 @@ prompt_fragment: |
   ## Composing Reports
   When the user asks for a "report" that tells a story over data you have ALREADY computed
   this turn, call `report_compose` with a title and an ordered `sections` list.
-  - Data sections (`table`, `chart`, `metric_headline`) reference a prior result by `result_id`.
-    Each data result's summary includes its `result_id` (`r1`, `r2`, ... — stable per
-    conversation, numbered in the order the results were produced in this conversation) —
-    pass those EXACT ids. NEVER inline numbers; the backend injects the real frozen values.
-  - `narrative` sections may embed `{{result:<id>.<field>}}` or `{{metric:<id>}}` using those same
-    `r1`/`r2` ids; you write the sentence, the backend fills the figure. Do not write raw numbers
-    in prose.
-  - The tool returns a report card the user clicks to view; do NOT restate the figures or URL.
+
+  A report is a **summary + charts written for a reader — NOT a raw data dump.** Nobody
+  wants to scroll hundreds of detail rows. Lead with the story and a picture; surface raw
+  detail only when the rows are themselves informative.
+
+  Default shape, in order:
+    1. `heading`  — title / section headers: `{"type":"heading","level":1,"text":"..."}`.
+    2. `narrative` — your written analysis: `{"type":"narrative","markdown":"..."}`. Embed
+       figures with `{{result:<id>.<field>}}` / `{{metric:<id>}}`; never type raw numbers.
+    3. `metric_headline` — one key figure: `{"type":"metric_headline","result_id":"r1","label":"Net Income"}`.
+    4. `chart` — VISUALIZE the major drivers or the trend:
+       `{"type":"chart","result_id":"r1","chart_type":"bar|line|pie|area"}`. Prefer a chart
+       over a table to show a trend, a composition, or the top drivers.
+
+  Use a `table` (`{"type":"table","result_id":"r1","select":["col", ...]}`) ONLY when the
+  detailed rows are genuinely informative to the reader, and scope the columns with
+  `select`. Do NOT compose a table of a large raw result (tens or hundreds of rows) — that
+  flat dump is the exact anti-pattern this tool exists to replace. Summarize and visualize
+  instead.
+
+  A `chart` needs a COMPACT, aggregated result (≤100 points) shaped as a label + a value
+  (e.g. one row per period, or one row per category). If the data you have is large or
+  line-item detailed, first compute a small aggregated summary result, then point the chart
+  at THAT — never at a hundreds-of-rows raw result.
+
+  Valid section types — use EXACTLY these names: `heading`, `narrative`, `metric_headline`,
+  `chart`, `table`, `divider`. Use `narrative` for prose and `table` for tabular data — NOT
+  `text` or `data`. `narrative` requires a `markdown` field.
+
+  Data sections (`table`, `chart`, `metric_headline`) reference a prior result by `result_id`.
+  Each data result's summary includes its `result_id` (`r1`, `r2`, ... — stable per
+  conversation, numbered in the order the results were produced in this conversation) —
+  pass those EXACT ids. NEVER inline numbers; the backend injects the real frozen values.
+
+  The tool returns a report card the user clicks to view; do NOT restate the figures or URL.
 rag_partitions: []

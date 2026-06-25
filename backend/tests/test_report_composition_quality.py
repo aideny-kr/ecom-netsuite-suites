@@ -13,9 +13,22 @@ they run in CI without a model call. Composition behavior itself is exercised
 live + by the T2 multi-angle gate.
 """
 
+from pathlib import Path
+
+import yaml
+
 from app.mcp.governance import TOOL_CONFIGS
 from app.mcp.registry import TOOL_REGISTRY
+from app.services.chat import knowledge_profiles
 from app.services.chat.nodes import ALLOWED_CHAT_TOOLS
+
+_CANONICAL_SECTION_TYPES = ("heading", "narrative", "metric_headline", "chart", "table", "divider")
+
+
+def _reporting_fragment() -> str:
+    path = Path(knowledge_profiles.__file__).parent / "reporting.yaml"
+    data = yaml.safe_load(path.read_text())
+    return data["prompt_fragment"]
 
 
 # --- The broken netsuite.report stub is fully de-registered ----------------
@@ -44,3 +57,43 @@ def test_financial_report_description_does_not_steer_to_broken_stub():
     desc = TOOL_REGISTRY["netsuite.financial_report"]["description"].lower()
     assert "netsuite.report" not in desc
     assert "prefer netsuite.report" not in desc
+
+
+# --- Reporting profile steers toward summary + charts (not raw dumps) ------
+# A composed financial report dumped 600+ raw GL rows and zero charts. The
+# profile must (a) enumerate the valid section types the LLM kept guessing wrong,
+# (b) default to narrative + key figures + a chart of the major drivers, and
+# (c) tell the model a report is NOT a raw data dump. Generic guidance only — it
+# must never hardcode column names (prompt-pollution).
+
+
+def test_reporting_profile_enumerates_valid_section_types():
+    fragment = _reporting_fragment().lower()
+    for section_type in _CANONICAL_SECTION_TYPES:
+        assert section_type in fragment, f"reporting.yaml must name section type '{section_type}'"
+
+
+def test_reporting_profile_defaults_to_summary_and_charts():
+    fragment = _reporting_fragment().lower()
+    assert "chart" in fragment
+    assert "summar" in fragment  # summary / summarize
+
+
+def test_reporting_profile_warns_against_raw_data_dumps():
+    fragment = _reporting_fragment().lower()
+    assert "dump" in fragment  # the explicit "not a raw data dump" guidance
+
+
+def test_reporting_profile_has_no_hardcoded_financial_columns():
+    # Guard the no-prompt-pollution rule: the profile must stay schema-agnostic.
+    fragment = _reporting_fragment().lower()
+    for leaked in ("periodname", "acctname", "acctnumber", "accttype", "transactionaccountingline"):
+        assert leaked not in fragment
+
+
+def test_report_compose_description_mentions_section_types_and_charts():
+    desc = TOOL_REGISTRY["report.compose"]["description"].lower()
+    assert "chart" in desc
+    assert "result_id" in desc
+    for section_type in ("narrative", "chart", "table"):
+        assert section_type in desc
