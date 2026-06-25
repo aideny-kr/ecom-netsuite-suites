@@ -350,23 +350,7 @@ class TestSyncDepositsMaintainsFreshnessCursor:
         date_from = date(2026, 3, 1)
         date_to = date(2026, 3, 31)
 
-        patches = [
-            patch.object(
-                netsuite_deposit_sync,
-                "get_netsuite_rest_connection",
-                new=AsyncMock(return_value=connection),
-            ),
-            patch.object(
-                netsuite_deposit_sync,
-                "get_valid_token",
-                new=AsyncMock(return_value="fake-token"),
-            ),
-            patch.object(
-                netsuite_deposit_sync,
-                "execute_suiteql_via_rest",
-                new=AsyncMock(return_value={"columns": [], "rows": rows}),
-            ),
-        ]
+        patches = _patch_netsuite_boundary(connection=connection, suiteql_rows=rows)
         for p in patches:
             p.start()
         try:
@@ -401,3 +385,69 @@ class TestSyncDepositsMaintainsFreshnessCursor:
         if synced.tzinfo is None:
             synced = synced.replace(tzinfo=timezone.utc)
         assert (before - timedelta(seconds=5)) <= synced <= (after + timedelta(seconds=5))
+
+    async def test_cursor_write_failure_does_not_fail_sync(self, db, tenant_a):
+        """A cursor-write failure must NOT fail an otherwise-successful deposit sync.
+
+        The cursor is best-effort freshness metadata: a transient failure writing it
+        must neither propagate an exception (which would 500 the manual endpoint /
+        crash the nightly task) nor lose the already-committed deposits.
+        """
+        connection = await _seed_netsuite_connection(db, tenant_a.id)
+
+        rows = [
+            {
+                "internal_id": "910002",
+                "document_number": "DEP-CUR-2",
+                "transaction_date": "2026-03-16",
+                "record_type": "Deposit",
+                "memo": "bank deposit",
+                "amount": "100.00",
+                "currency_name": "USD",
+                "account_id": "10",
+                "account_name": "Bank",
+                "subsidiary_id": "1",
+                "sales_order_ref": "",
+            }
+        ]
+
+        date_from = date(2026, 3, 1)
+        date_to = date(2026, 3, 31)
+
+        patches = _patch_netsuite_boundary(connection=connection, suiteql_rows=rows)
+        # Patch save_cursor_async (as imported/used by the service) to blow up.
+        patches.append(
+            patch.object(
+                netsuite_deposit_sync,
+                "save_cursor_async",
+                new=AsyncMock(side_effect=RuntimeError("simulated cursor write failure")),
+            )
+        )
+        for p in patches:
+            p.start()
+        try:
+            # (a) NO exception must propagate.
+            result = await sync_netsuite_deposits(
+                db=db,
+                tenant_id=str(tenant_a.id),
+                date_from=date_from,
+                date_to=date_to,
+            )
+        finally:
+            for p in patches:
+                p.stop()
+
+        # (b) The result still reflects synced deposits.
+        assert not result.errors, result.errors
+        assert result.records_synced > 0
+
+        # (c) The deposits were persisted despite the cursor failure.
+        posting = (
+            await db.execute(
+                select(NetsuitePosting).where(
+                    NetsuitePosting.tenant_id == tenant_a.id,
+                    NetsuitePosting.netsuite_internal_id == "910002",
+                )
+            )
+        ).scalar_one()
+        assert posting is not None

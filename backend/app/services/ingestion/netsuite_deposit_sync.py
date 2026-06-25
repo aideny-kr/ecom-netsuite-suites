@@ -280,8 +280,16 @@ async def sync_netsuite_deposits(
     # run. The nightly Celery task calls this service directly (not the manual
     # trigger endpoint), so the cursor MUST be written here for ALL callers.
     # cursor_value uses the 'YYYY-MM-DD' format the manual path established.
-    await save_cursor_async(db, connection.id, "netsuite_deposits", date_to.isoformat())
-    await db.commit()
+    #
+    # Best-effort: the cursor is freshness metadata only, intentionally isolated
+    # from the deposit commit (deposits are already committed above + in-loop) so
+    # a transient cursor failure can't fail the sync or 500 the manual endpoint.
+    try:
+        await save_cursor_async(db, connection.id, "netsuite_deposits", date_to.isoformat())
+        await db.commit()
+    except Exception as e:
+        await db.rollback()  # clear the aborted txn so the session stays usable
+        logger.warning("netsuite_deposit_sync.cursor_write_failed", tenant_id=tenant_id, error=str(e))
 
     logger.info(
         "netsuite_deposit_sync.complete",

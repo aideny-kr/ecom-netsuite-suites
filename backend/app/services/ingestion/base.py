@@ -20,10 +20,16 @@ def load_cursor(db: Session, connection_id, object_type) -> str | None:
     return result
 
 
-def save_cursor(db: Session, connection_id, object_type, cursor_value) -> None:
-    """Upsert a cursor value (INSERT or UPDATE on conflict)."""
+def _build_cursor_upsert_stmt(connection_id, object_type, cursor_value):
+    """Build the cursor INSERT...ON CONFLICT DO UPDATE statement.
+
+    Shared by the sync (:func:`save_cursor`) and async (:func:`save_cursor_async`)
+    upsert paths so the two stay byte-identical. Stamps ``last_synced_at = now(UTC)``
+    explicitly (not via TimestampMixin), stringifies the cursor value, and keys on
+    the (connection_id, object_type) unique constraint.
+    """
     now = datetime.now(timezone.utc)
-    stmt = (
+    return (
         insert(CursorState)
         .values(
             connection_id=connection_id,
@@ -39,7 +45,11 @@ def save_cursor(db: Session, connection_id, object_type, cursor_value) -> None:
             },
         )
     )
-    db.execute(stmt)
+
+
+def save_cursor(db: Session, connection_id, object_type, cursor_value) -> None:
+    """Upsert a cursor value (INSERT or UPDATE on conflict)."""
+    db.execute(_build_cursor_upsert_stmt(connection_id, object_type, cursor_value))
 
 
 async def save_cursor_async(db: AsyncSession, connection_id, object_type, cursor_value) -> None:
@@ -47,29 +57,10 @@ async def save_cursor_async(db: AsyncSession, connection_id, object_type, cursor
 
     For ingestion services that run on an AsyncSession (e.g. the NetSuite deposit
     sync) and therefore cannot call the synchronous ``save_cursor``. Mirrors its
-    field semantics exactly: stamps ``last_synced_at = now(UTC)`` explicitly (not
-    via TimestampMixin) and stringifies the cursor value, keyed on the
-    (connection_id, object_type) unique constraint so the recon data-status banner
-    reflects every successful sync.
+    field semantics exactly via the shared :func:`_build_cursor_upsert_stmt`, so the
+    recon data-status banner reflects every successful sync.
     """
-    now = datetime.now(timezone.utc)
-    stmt = (
-        insert(CursorState)
-        .values(
-            connection_id=connection_id,
-            object_type=object_type,
-            cursor_value=str(cursor_value),
-            last_synced_at=now,
-        )
-        .on_conflict_do_update(
-            constraint="uq_cursor_states_conn_obj",
-            set_={
-                "cursor_value": str(cursor_value),
-                "last_synced_at": now,
-            },
-        )
-    )
-    await db.execute(stmt)
+    await db.execute(_build_cursor_upsert_stmt(connection_id, object_type, cursor_value))
 
 
 def upsert_canonical(db: Session, model_class, tenant_id, dedupe_key: str, data: dict) -> None:
