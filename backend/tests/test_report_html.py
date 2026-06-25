@@ -27,6 +27,10 @@ def test_fmt_amount_accounting_style():
     assert _fmt_amount("1,2,3") == "1,2,3"  # mis-grouped
     assert _fmt_amount("inf") == "inf"  # sentinel token, not blanked
     assert _fmt_amount("1e400") == "1e400"  # out-of-double-range → verbatim, NOT blank
+    assert _fmt_amount("0042") == "0042"  # zero-padded code, NOT a $42.00 amount
+    # EXACT cents via Decimal — binary float() would corrupt these:
+    assert _fmt_amount("999999999999999.99") == "999,999,999,999,999.99"  # float → ...000.00
+    assert _fmt_amount("2.675") == "2.68"  # half-cent rounds up; float("2.675") → 2.67
 
 
 def test_only_tagged_currency_columns_are_accounting_formatted():

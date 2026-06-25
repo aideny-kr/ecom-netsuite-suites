@@ -2,14 +2,16 @@ from __future__ import annotations
 
 import math
 import re
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from html import escape
 
 # A string we will coerce to a currency amount: optional sign, US thousands-grouping
-# (1,234,567) OR a plain integer part, optional decimals, optional scientific exponent.
-# Deliberately STRICT — it must NOT match locale-formatted ("1.234,56"), mis-grouped
-# ("1,2,3"), underscore-separated ("1_000"), or sentinel ("inf"/"nan") strings, which
-# float() would otherwise mangle into a wrong (or blank) dollar figure.
-_AMOUNT_STR_RE = re.compile(r"^[+-]?(\d{1,3}(,\d{3})+|\d+)(\.\d+)?([eE][+-]?\d+)?$")
+# (1,234,567) OR a plain integer part (no leading zeros — "0042" is a code, not $42),
+# optional decimals, optional scientific exponent. Deliberately STRICT — it must NOT
+# match locale-formatted ("1.234,56"), mis-grouped ("1,2,3"), underscore-separated
+# ("1_000"), zero-padded ("0042"), or sentinel ("inf"/"nan") strings, which would
+# otherwise be mangled into a wrong (or blank) dollar figure.
+_AMOUNT_STR_RE = re.compile(r"^[+-]?([1-9]\d{0,2}(,\d{3})+|0|[1-9]\d*)(\.\d+)?([eE][+-]?\d+)?$")
 
 _CSS = """
 :root { --bg:#FAF9F6; --ink:#111; --border:#000; --card:#FFF; --accent:hsl(%(accent)s); }
@@ -52,32 +54,38 @@ def _fmt_amount(value) -> str:
     # bool is an int subclass — never format True/False as 1/0.
     if isinstance(value, bool):
         return str(value)
-    # A currency column may carry amounts serialized as STRINGS (SuiteQL returns e.g.
-    # "1.6442836348665524E7" or "5,583,749.13"). Coerce ONLY a string that strictly
-    # matches a numeric amount; anything else (locale-formatted, mis-grouped,
-    # underscore/sentinel, or non-numeric like "N/A") passes through VERBATIM — never
-    # reformat a value we can't safely parse into a possibly-wrong dollar figure.
+    # Resolve the value to an EXACT Decimal. Currency cells may arrive as a number
+    # (reportData floats) OR a STRING (SuiteQL serializes amounts as text, often in
+    # scientific notation). Parse via Decimal — binary float() corrupts >15-significant-
+    # digit amounts and half-cents (e.g. "999999999999999.99" → off a dollar, "2.675" →
+    # 2.67). `overflow_fallback` is what we render if the value can't be quantized to
+    # cents: a string → verbatim (never blank a real figure), a number → blank.
     if isinstance(value, str):
         s = value.strip()
+        # Coerce ONLY a string that strictly matches a US-format amount; anything else
+        # (locale-formatted, mis-grouped, zero-padded code, underscore/sentinel, or
+        # non-numeric like "N/A") passes through VERBATIM — never reformat a value we
+        # can't safely parse into a possibly-wrong dollar figure.
         if not _AMOUNT_STR_RE.match(s):
             return value
         try:
-            num = float(s.replace(",", ""))
-        except (ValueError, OverflowError):
+            d = Decimal(s.replace(",", ""))
+        except InvalidOperation:
             return value
-        if not math.isfinite(num):
-            return value  # an out-of-double-range numeric string → show verbatim, never blank
-        value = num
-    if not isinstance(value, (int, float)):
+        overflow_fallback = value
+    elif isinstance(value, (int, float)):
+        if isinstance(value, float) and not math.isfinite(value):
+            return ""  # an actual float NaN/Inf (a computed/undefined value) → blank
+        d = Decimal(str(value))  # via str() to avoid binary-float repr noise
+        overflow_fallback = ""
+    else:
         return str(value)
-    n = float(value)
-    if not math.isfinite(n):  # an actual float NaN/Inf (a computed/undefined value) → blank
-        return ""
-    # Round to cents FIRST, then pick the sign — so a tiny residual like -0.004 renders
-    # a clean "0.00" rather than a misleading negative-signalling "(0.00)".
-    n = round(n, 2)
-    body = f"{abs(n):,.2f}"
-    return f"({body})" if n < 0 else body
+    try:
+        q = d.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    except InvalidOperation:
+        return overflow_fallback  # out-of-range (e.g. "1e400") → don't blank a figure
+    body = f"{abs(q):,.2f}"
+    return f"({body})" if q < 0 else body
 
 
 def _md_inline(text: str) -> str:
