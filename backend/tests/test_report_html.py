@@ -33,6 +33,9 @@ def test_fmt_amount_accounting_style():
     assert _fmt_amount("2.675") == "2.68"  # half-cent rounds up; float("2.675") → 2.67
     # a large-but-finite number must FORMAT, never blank (default Decimal prec would)
     assert _fmt_amount(1e26) == "100,000,000,000,000,000,000,000,000.00"
+    # an absurd >309-digit int must NOT crash (f"{int:,.2f}" raises OverflowError);
+    # it falls back to its exact raw repr, non-blank.
+    assert _fmt_amount(10**400) == str(10**400)
 
 
 def test_only_tagged_currency_columns_are_accounting_formatted():

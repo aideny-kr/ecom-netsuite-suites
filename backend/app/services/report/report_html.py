@@ -77,7 +77,10 @@ def _fmt_amount(value) -> str:
         if isinstance(value, float) and not math.isfinite(value):
             return ""  # an actual float NaN/Inf (a computed/undefined value) → blank
         d = Decimal(str(value))  # via str() to avoid binary-float repr noise
-        overflow_fallback = f"{value:,.2f}"  # absurdly-large finite number → non-blank
+        # An absurdly-large finite magnitude that won't quantize → its raw repr. Use
+        # str() NOT f"{value:,.2f}" — the latter raises OverflowError on a >309-digit
+        # int (int→float) and binary-float-corrupts a large int's digits.
+        overflow_fallback = str(value)
     else:
         return str(value)
     try:
