@@ -1,7 +1,17 @@
 from __future__ import annotations
 
 import math
+import re
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation, localcontext
 from html import escape
+
+# A string we will coerce to a currency amount: optional sign, US thousands-grouping
+# (1,234,567) OR a plain integer part (no leading zeros — "0042" is a code, not $42),
+# optional decimals, optional scientific exponent. Deliberately STRICT — it must NOT
+# match locale-formatted ("1.234,56"), mis-grouped ("1,2,3"), underscore-separated
+# ("1_000"), zero-padded ("0042"), or sentinel ("inf"/"nan") strings, which would
+# otherwise be mangled into a wrong (or blank) dollar figure.
+_AMOUNT_STR_RE = re.compile(r"^[+-]?([1-9]\d{0,2}(,\d{3})+|0|[1-9]\d*)(\.\d+)?([eE][+-]?\d+)?$")
 
 _CSS = """
 :root { --bg:#FAF9F6; --ink:#111; --border:#000; --card:#FFF; --accent:hsl(%(accent)s); }
@@ -42,19 +52,49 @@ def _fmt_amount(value) -> str:
     if value is None:
         return ""
     # bool is an int subclass — never format True/False as 1/0.
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if isinstance(value, bool):
+        return str(value)
+    # Resolve the value to an EXACT Decimal. Currency cells may arrive as a number
+    # (reportData floats) OR a STRING (SuiteQL serializes amounts as text, often in
+    # scientific notation). Parse via Decimal — binary float() corrupts >15-significant-
+    # digit amounts and half-cents (e.g. "999999999999999.99" → off a dollar, "2.675" →
+    # 2.67). `overflow_fallback` is what we render if the value can't be quantized to
+    # cents: a string → verbatim (never blank a real figure), a number → blank.
+    if isinstance(value, str):
+        s = value.strip()
+        # Coerce ONLY a string that strictly matches a US-format amount; anything else
+        # (locale-formatted, mis-grouped, zero-padded code, underscore/sentinel, or
+        # non-numeric like "N/A") passes through VERBATIM — never reformat a value we
+        # can't safely parse into a possibly-wrong dollar figure.
+        if not _AMOUNT_STR_RE.match(s):
+            return value
+        try:
+            d = Decimal(s.replace(",", ""))
+        except InvalidOperation:
+            return value
+        overflow_fallback = value  # a string we can't quantize → verbatim
+    elif isinstance(value, (int, float)):
+        if isinstance(value, float) and not math.isfinite(value):
+            return ""  # an actual float NaN/Inf (a computed/undefined value) → blank
+        d = Decimal(str(value))  # via str() to avoid binary-float repr noise
+        # An absurdly-large finite magnitude that won't quantize → its raw repr. Use
+        # str() NOT f"{value:,.2f}" — the latter raises OverflowError on a >309-digit
+        # int (int→float) and binary-float-corrupts a large int's digits.
+        overflow_fallback = str(value)
+    else:
         return str(value)
     try:
-        n = float(value)
-    except (TypeError, ValueError, OverflowError):
-        return str(value)
-    if not math.isfinite(n):  # NaN / Inf → blank, like a missing figure
-        return ""
-    # Round to cents FIRST, then pick the sign — so a tiny residual like -0.004 renders
-    # a clean "0.00" rather than a misleading negative-signalling "(0.00)".
-    n = round(n, 2)
-    body = f"{abs(n):,.2f}"
-    return f"({body})" if n < 0 else body
+        # Generous precision so any realistic amount (and large-but-finite cases like
+        # 1e26) quantizes — the default Decimal context (prec 28) would blank a finite
+        # value with ~26+ integer digits. A truly out-of-range value (e.g. "1e400")
+        # still raises and falls back, never silently dropping a figure.
+        with localcontext() as ctx:
+            ctx.prec = 38
+            q = d.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    except InvalidOperation:
+        return overflow_fallback
+    body = f"{abs(q):,.2f}"
+    return f"({body})" if q < 0 else body
 
 
 def _md_inline(text: str) -> str:

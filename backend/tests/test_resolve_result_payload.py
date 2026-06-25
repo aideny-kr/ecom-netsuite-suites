@@ -4,6 +4,7 @@ resolve the FULL, uncapped frozen payload from ChatMessage.tool_calls[].result_p
 NOT the 50-row-capped Redis result cache."""
 
 import inspect
+import json
 
 import pytest
 
@@ -13,6 +14,46 @@ from app.services.chat.tool_call_results import (
     load_conversation_tool_messages,
     resolve_payload_from_messages,
 )
+
+# --- Currency-column tagging for SuiteQL/financial tables (P&L Trend format fix) ---
+
+
+class TestCurrencyColumnTagging:
+    """A SuiteQL (Path 1) result with money + non-money numeric columns tags ONLY the
+    money columns by name, so the report renderer accounting-formats `amount` but leaves
+    an account-code / period column raw (no over-formatting)."""
+
+    def test_money_columns_helper_tags_by_name_only(self):
+        from app.services.chat.tool_call_results import _money_columns
+
+        cols = ["periodname", "startdate", "acctnumber", "acctname", "accttype", "section", "amount"]
+        assert _money_columns(cols) == ["amount"]  # acctnumber (a code) is NOT money
+        assert _money_columns(["account", "balance"]) == ["balance"]
+        assert _money_columns(["year", "order_count", "ratio"]) == []  # not money-named
+        # canonical NetSuite/SuiteQL line-amount names — caught by the amount/balance
+        # suffix (what an exact allowlist missed), plus compound names:
+        assert _money_columns(["netamount", "foreignamount", "stripe_amount", "opening_balance"]) == [
+            "netamount",
+            "foreignamount",
+            "stripe_amount",
+            "opening_balance",
+        ]
+        # OVER-FORMAT GUARD: a non-money column whose name merely CONTAINS a money word
+        # (a count/status/code) must NOT be tagged — never show a count as "1,500.00":
+        assert _money_columns(["total_count", "creditcount", "creditstatus", "credit_memo_number", "acctnumber"]) == []
+        # exact money words still tag (debit/credit/subtotal amounts in a trial balance)
+        assert _money_columns(["debit", "credit", "subtotal"]) == ["debit", "credit", "subtotal"]
+
+    def test_suiteql_table_payload_tags_amount_as_currency(self):
+        result = {
+            "columns": ["periodname", "acctnumber", "amount"],
+            "rows": [["Jan 2026", "40001", "1.6442836348665524E7"]],
+            "row_count": 1,
+            "query": "SELECT ...",
+        }
+        payload = extract_result_payload("netsuite_suiteql", {}, json.dumps(result))
+        assert payload["currency_columns"] == ["amount"]
+
 
 # --- Re-gate r2 (finding #3): external-MCP top-level "data" key must extract ---
 
