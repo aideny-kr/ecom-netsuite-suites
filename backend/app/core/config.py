@@ -41,6 +41,12 @@ class Settings(BaseSettings):
     ANTHROPIC_API_KEY: str = ""
     ANTHROPIC_MODEL: str = "claude-sonnet-4-20250514"
     DEFAULT_AI_PROVIDER: str = "anthropic"
+    # ── Adaptive thinking (chat path) ───────────────────────────────────────
+    # Native extended reasoning. Always-on with a generous default budget so the
+    # model self-paces depth per turn (Layer 1). CHAT_THINKING_ENABLED is the
+    # global kill-switch. Levels: none|low|med|high|xhigh (see chat/thinking.py).
+    CHAT_THINKING_ENABLED: bool = True
+    CHAT_THINKING_DEFAULT_LEVEL: str = "med"
     VOYAGE_API_KEY: str = ""
     VOYAGE_EMBED_MODEL: str = "voyage-3"
     OPENAI_EMBEDDING_API_KEY: str = ""
