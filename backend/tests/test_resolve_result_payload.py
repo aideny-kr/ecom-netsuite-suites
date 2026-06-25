@@ -27,16 +27,20 @@ class TestCurrencyColumnTagging:
         from app.services.chat.tool_call_results import _money_columns
 
         cols = ["periodname", "startdate", "acctnumber", "acctname", "accttype", "section", "amount"]
-        assert _money_columns(cols) == ["amount"]  # acctnumber (a code) is NOT money
-        assert _money_columns(["account", "balance"]) == ["balance"]
-        assert _money_columns(["year", "order_count", "ratio"]) == []  # numeric but not money-named
-        # compound money names via unambiguous suffix
-        assert _money_columns(["stripe_amount", "netsuite_amount", "opening_balance"]) == [
+        assert _money_columns(cols, []) == ["amount"]  # acctnumber (a code) is NOT money
+        assert _money_columns(["account", "balance"], []) == ["balance"]
+        assert _money_columns(["year", "order_count", "ratio"], []) == []  # not money-named
+        # the canonical NetSuite/SuiteQL line-amount names (the hand-rolled allowlist
+        # missed these — no "_amount" underscore) + compound + aliases all tag now:
+        assert _money_columns(["netamount", "foreignamount", "total", "revenue_usd", "stripe_amount"], []) == [
+            "netamount",
+            "foreignamount",
+            "total",
+            "revenue_usd",
             "stripe_amount",
-            "netsuite_amount",
-            "opening_balance",
         ]
-        assert _money_columns(["credit_memo_number"]) == []  # suffix guard: NOT money
+        # ID-guard keeps codes/numbers out (a money word inside an id-name does NOT tag)
+        assert _money_columns(["credit_memo_number", "acctnumber"], []) == []
 
     def test_suiteql_table_payload_tags_amount_as_currency(self):
         result = {

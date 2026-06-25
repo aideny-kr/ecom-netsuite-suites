@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 import re
-from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation, localcontext
 from html import escape
 
 # A string we will coerce to a currency amount: optional sign, US thousands-grouping
@@ -72,18 +72,24 @@ def _fmt_amount(value) -> str:
             d = Decimal(s.replace(",", ""))
         except InvalidOperation:
             return value
-        overflow_fallback = value
+        overflow_fallback = value  # a string we can't quantize → verbatim
     elif isinstance(value, (int, float)):
         if isinstance(value, float) and not math.isfinite(value):
             return ""  # an actual float NaN/Inf (a computed/undefined value) → blank
         d = Decimal(str(value))  # via str() to avoid binary-float repr noise
-        overflow_fallback = ""
+        overflow_fallback = f"{value:,.2f}"  # absurdly-large finite number → non-blank
     else:
         return str(value)
     try:
-        q = d.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        # Generous precision so any realistic amount (and large-but-finite cases like
+        # 1e26) quantizes — the default Decimal context (prec 28) would blank a finite
+        # value with ~26+ integer digits. A truly out-of-range value (e.g. "1e400")
+        # still raises and falls back, never silently dropping a figure.
+        with localcontext() as ctx:
+            ctx.prec = 38
+            q = d.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     except InvalidOperation:
-        return overflow_fallback  # out-of-range (e.g. "1e400") → don't blank a figure
+        return overflow_fallback
     body = f"{abs(q):,.2f}"
     return f"({body})" if q < 0 else body
 

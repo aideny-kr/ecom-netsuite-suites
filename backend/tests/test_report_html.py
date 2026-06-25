@@ -31,6 +31,8 @@ def test_fmt_amount_accounting_style():
     # EXACT cents via Decimal — binary float() would corrupt these:
     assert _fmt_amount("999999999999999.99") == "999,999,999,999,999.99"  # float → ...000.00
     assert _fmt_amount("2.675") == "2.68"  # half-cent rounds up; float("2.675") → 2.67
+    # a large-but-finite number must FORMAT, never blank (default Decimal prec would)
+    assert _fmt_amount(1e26) == "100,000,000,000,000,000,000,000,000.00"
 
 
 def test_only_tagged_currency_columns_are_accounting_formatted():
