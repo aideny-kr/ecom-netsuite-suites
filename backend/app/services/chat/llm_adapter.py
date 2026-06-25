@@ -28,6 +28,7 @@ class LLMResponse:
     text_blocks: list[str] = field(default_factory=list)
     tool_use_blocks: list[ToolUseBlock] = field(default_factory=list)
     usage: TokenUsage = field(default_factory=TokenUsage)
+    thinking_blocks: list[dict] = field(default_factory=list)
 
 
 class BaseLLMAdapter(abc.ABC):
@@ -44,6 +45,7 @@ class BaseLLMAdapter(abc.ABC):
         messages: list[dict],
         tools: list[dict] | None = None,
         tool_choice: dict | str | None = None,
+        thinking_level: str | None = None,
     ) -> LLMResponse:
         """Send a message to the LLM and return a normalized response."""
 
@@ -57,6 +59,7 @@ class BaseLLMAdapter(abc.ABC):
         messages: list[dict],
         tools: list[dict] | None = None,
         tool_choice: dict | str | None = None,
+        thinking_level: str | None = None,
     ):
         """Send a message to the LLM and yield streaming events, finishing with LLMResponse.
 
@@ -71,6 +74,7 @@ class BaseLLMAdapter(abc.ABC):
             messages=messages,
             tools=tools,
             tool_choice=tool_choice,
+            thinking_level=thinking_level,
         )
         # Emit all text as a single chunk then yield the full response
         for text in response.text_blocks:

@@ -8,9 +8,39 @@ import time
 import anthropic
 import httpx
 
+from app.services.chat import thinking as _thinking
 from app.services.chat.llm_adapter import BaseLLMAdapter, LLMResponse, TokenUsage, ToolUseBlock
 
 logger = logging.getLogger(__name__)
+
+
+def _apply_thinking(kwargs: dict, max_tokens: int, thinking_level: str | None) -> None:
+    """Mutate `kwargs` to enable Anthropic extended thinking for this level.
+
+    Anthropic requires: temperature=1 when thinking is enabled, and
+    max_tokens strictly greater than budget_tokens (the budget is part of the
+    max_tokens allowance). We reserve `max_tokens` on top of the budget so the
+    answer still has its full original room.
+    """
+    budget = _thinking.budget_for(thinking_level)
+    if budget <= 0:
+        return
+    kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
+    kwargs["temperature"] = 1
+    kwargs["max_tokens"] = budget + max_tokens
+
+
+def _extract_thinking_blocks(content) -> list[dict]:
+    """Pull thinking / redacted_thinking blocks out of a message's content,
+    preserving signatures — required to echo them back across tool-use turns."""
+    blocks: list[dict] = []
+    for block in content:
+        if block.type == "thinking":
+            blocks.append({"type": "thinking", "thinking": block.thinking, "signature": block.signature})
+        elif block.type == "redacted_thinking":
+            blocks.append({"type": "redacted_thinking", "data": block.data})
+    return blocks
+
 
 # Wall-clock deadline for a single stream_message call — PER LLM HOP, not per
 # turn. Each tool-use step in `base_agent.py` opens a fresh stream with its own
@@ -154,6 +184,7 @@ class AnthropicAdapter(BaseLLMAdapter):
         messages: list[dict],
         tools: list[dict] | None = None,
         tool_choice: dict | str | None = None,
+        thinking_level: str | None = None,
     ) -> LLMResponse:
         system_blocks = [
             {
@@ -180,6 +211,8 @@ class AnthropicAdapter(BaseLLMAdapter):
         if tool_choice is not None:
             kwargs["tool_choice"] = tool_choice
 
+        _apply_thinking(kwargs, max_tokens, thinking_level)
+
         response = await self._client.messages.create(**kwargs)
 
         text_blocks: list[str] = []
@@ -202,6 +235,7 @@ class AnthropicAdapter(BaseLLMAdapter):
             text_blocks=text_blocks,
             tool_use_blocks=tool_use_blocks,
             usage=usage,
+            thinking_blocks=_extract_thinking_blocks(response.content),
         )
 
     async def stream_message(
@@ -214,6 +248,7 @@ class AnthropicAdapter(BaseLLMAdapter):
         messages: list[dict],
         tools: list[dict] | None = None,
         tool_choice: dict | str | None = None,
+        thinking_level: str | None = None,
     ):
         system_blocks = [
             {
@@ -238,6 +273,8 @@ class AnthropicAdapter(BaseLLMAdapter):
             kwargs["tools"] = cached_tools
         if tool_choice is not None:
             kwargs["tool_choice"] = tool_choice
+
+        _apply_thinking(kwargs, max_tokens, thinking_level)
 
         # Retry the stream open (and the first chunk) on transient overloads.
         # Once any text has been yielded we do NOT retry — partial output
@@ -317,6 +354,7 @@ class AnthropicAdapter(BaseLLMAdapter):
             text_blocks=text_blocks,
             tool_use_blocks=tool_use_blocks,
             usage=usage,
+            thinking_blocks=_extract_thinking_blocks(final_message.content),
         )
         yield "response", response
 
@@ -325,6 +363,9 @@ class AnthropicAdapter(BaseLLMAdapter):
 
     def build_assistant_message(self, response: LLMResponse) -> dict:
         content: list[dict] = []
+        # Thinking blocks MUST come first when present (required for tool-use
+        # continuation in a thinking-enabled turn).
+        content.extend(response.thinking_blocks)
         for text in response.text_blocks:
             content.append({"type": "text", "text": text})
         for tool in response.tool_use_blocks:
