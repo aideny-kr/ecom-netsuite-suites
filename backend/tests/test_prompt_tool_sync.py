@@ -144,6 +144,8 @@ def _all_known_tool_names_for_tenant_with_every_connector() -> set[str]:
         "sheets_read_range",
         "metric_resolve",
         "metric_compute",
+        # Synthetic control tool (Layer-2 reasoning escalation signal)
+        "escalate_reasoning",
         # Added by build_all_tool_definitions (result_reference_tool)
         "reference_previous_result",
     }

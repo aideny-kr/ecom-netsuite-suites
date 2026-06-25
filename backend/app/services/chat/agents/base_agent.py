@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable
 from xml.sax.saxutils import escape as _xml_escape
 
+from app.services.chat import thinking
 from app.services.chat.llm_adapter import BaseLLMAdapter, LLMResponse, TokenUsage
 from app.services.chat.prompt_cache import split_system_prompt
 from app.services.chat.tool_call_results import (
@@ -710,6 +711,11 @@ class BaseSpecialistAgent(abc.ABC):
                     if block.name.startswith("workspace_"):
                         await _ensure_valid_workspace_id(block.input, db, self.tenant_id)
 
+                    # Layer-2 escalation: the model asked for deeper reasoning.
+                    # Bump the carried level so the remaining steps think harder.
+                    if block.name == "escalate_reasoning":
+                        current_thinking_level = thinking.next_level(current_thinking_level)
+
                     t0 = time.monotonic()
 
                     # Mutation intercept: block writes in non-streaming path too
@@ -1047,6 +1053,11 @@ class BaseSpecialistAgent(abc.ABC):
                 for i, block in enumerate(response.tool_use_blocks):
                     if block.name.startswith("workspace_"):
                         await _ensure_valid_workspace_id(block.input, db, self.tenant_id)
+
+                    # Layer-2 escalation: the model asked for deeper reasoning.
+                    # Bump the carried level so the remaining steps think harder.
+                    if block.name == "escalate_reasoning":
+                        current_thinking_level = thinking.next_level(current_thinking_level)
 
                     # Dedup: skip duplicate workspace_propose_patch for same file
                     if block.name == "workspace_propose_patch":

@@ -70,6 +70,32 @@ def build_local_tool_definitions() -> list[dict]:
                 },
             }
         )
+
+    # Synthetic control tool: a Layer-2 reasoning-depth escalation signal. Not a
+    # data tool and not routed to mcp_server — execute_tool_call special-cases it
+    # and the agent loop bumps current_thinking_level when the model calls it.
+    tools.append(
+        {
+            "name": "escalate_reasoning",
+            "description": (
+                "Call this when the current question needs deeper, more careful "
+                "reasoning than a quick answer — multi-step logic, ambiguous "
+                "requirements, reconciling conflicting data, or tricky SuiteQL. "
+                "Calling it increases your reasoning depth for the rest of this "
+                "turn. Use it sparingly, only when genuinely warranted."
+            ),
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "rationale": {
+                        "type": "string",
+                        "description": "One short phrase on why deeper reasoning is needed.",
+                    }
+                },
+                "required": [],
+            },
+        }
+    )
     return tools
 
 
@@ -228,6 +254,11 @@ async def execute_tool_call(
     Routes to local MCP server or external MCP client based on tool name prefix.
     """
     start = time.monotonic()
+
+    if tool_name == "escalate_reasoning":
+        # Control signal handled by the agent loop (it bumps thinking depth).
+        # Returning a terse ack keeps the tool-result contract intact.
+        return json.dumps({"ok": True, "message": "Reasoning depth increased for this turn."})
 
     if tool_name == "reference_previous_result":
         from app.mcp.tools.result_reference_tool import execute_reference_previous_result
