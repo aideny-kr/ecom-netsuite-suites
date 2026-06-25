@@ -42,7 +42,17 @@ def _fmt_amount(value) -> str:
     if value is None:
         return ""
     # bool is an int subclass — never format True/False as 1/0.
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if isinstance(value, bool):
+        return str(value)
+    # A currency column may carry amounts serialized as STRINGS (SuiteQL returns e.g.
+    # "1.6442836348665524E7" or "5,583,749.13") — coerce so they format; a non-numeric
+    # string (e.g. "N/A") passes through unchanged.
+    if isinstance(value, str):
+        try:
+            value = float(value.strip().replace(",", ""))
+        except ValueError:
+            return value
+    if not isinstance(value, (int, float)):
         return str(value)
     try:
         n = float(value)

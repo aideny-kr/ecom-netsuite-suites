@@ -275,6 +275,21 @@ def report_data_to_capped_table(report_data: dict) -> tuple[list[str], list[list
     return columns, rows, row_count, truncated
 
 
+# Column names (lowercased) whose values are monetary. The report renderer
+# accounting-formats ONLY columns tagged in a table's ``currency_columns``. We tag by
+# NAME (not value type) so a numeric account-code / year / count / id column is never
+# mis-formatted as dollars (a column named "amount"/"balance"/… is money; "acctnumber"
+# is not). Per-cell formatting still handles non-numeric cells gracefully.
+_MONEY_COLUMN_NAMES = frozenset(
+    {"amount", "balance", "debit", "credit", "net_amount", "total_debit", "total_credit", "subtotal", "variance"}
+)
+
+
+def _money_columns(columns: list) -> list:
+    """Return the subset of ``columns`` whose name denotes a monetary value."""
+    return [c for c in columns if str(c).strip().lower() in _MONEY_COLUMN_NAMES]
+
+
 def extract_result_payload(tool_name: str, params: dict[str, Any], result_str: str) -> dict[str, Any] | None:
     """Attach structured query results for UI rendering when available.
 
@@ -345,6 +360,7 @@ def extract_result_payload(tool_name: str, params: dict[str, Any], result_str: s
             "truncated": truncated,
             "query": f"{parsed.get('report_type', 'report')} ({parsed.get('period', '')})".strip(),
             "limit": len(rows),
+            "currency_columns": _money_columns(columns),
         }
 
     # --- Path 1: Already has columns + rows (local netsuite_suiteql) ---
@@ -372,6 +388,7 @@ def extract_result_payload(tool_name: str, params: dict[str, Any], result_str: s
                 "truncated": truncated,
                 "query": query,
                 "limit": limit,
+                "currency_columns": _money_columns(columns),
             }
             # M4: For metric payloads, pass through source_kind so
             # _compute_source_pin_update can distinguish BigQuery vs SuiteQL
@@ -408,9 +425,8 @@ def extract_result_payload(tool_name: str, params: dict[str, Any], result_str: s
                     "query": f"ns_runReport(reportId={params.get('reportId', '?')})",
                     "limit": len(rows),
                     # The flattened reportData columns are ["account", "amount"]; tag the
-                    # "amount" column as currency so the report renderer accounting-
-                    # formats ONLY it (not the "account" label or any other column).
-                    "currency_columns": ["amount"],
+                    # money column(s) so the report renderer accounting-formats ONLY them.
+                    "currency_columns": _money_columns(columns),
                 }
             # reportData present but EMPTY (no report lines). The in-turn intercept's
             # reportData branch also flattens to None here and then yields NO stamped
@@ -440,6 +456,7 @@ def extract_result_payload(tool_name: str, params: dict[str, Any], result_str: s
             "truncated": truncated,
             "query": query,
             "limit": len(rows),
+            "currency_columns": _money_columns(columns),
         }
 
 
