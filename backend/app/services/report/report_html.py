@@ -1,7 +1,15 @@
 from __future__ import annotations
 
 import math
+import re
 from html import escape
+
+# A string we will coerce to a currency amount: optional sign, US thousands-grouping
+# (1,234,567) OR a plain integer part, optional decimals, optional scientific exponent.
+# Deliberately STRICT — it must NOT match locale-formatted ("1.234,56"), mis-grouped
+# ("1,2,3"), underscore-separated ("1_000"), or sentinel ("inf"/"nan") strings, which
+# float() would otherwise mangle into a wrong (or blank) dollar figure.
+_AMOUNT_STR_RE = re.compile(r"^[+-]?(\d{1,3}(,\d{3})+|\d+)(\.\d+)?([eE][+-]?\d+)?$")
 
 _CSS = """
 :root { --bg:#FAF9F6; --ink:#111; --border:#000; --card:#FFF; --accent:hsl(%(accent)s); }
@@ -45,20 +53,25 @@ def _fmt_amount(value) -> str:
     if isinstance(value, bool):
         return str(value)
     # A currency column may carry amounts serialized as STRINGS (SuiteQL returns e.g.
-    # "1.6442836348665524E7" or "5,583,749.13") — coerce so they format; a non-numeric
-    # string (e.g. "N/A") passes through unchanged.
+    # "1.6442836348665524E7" or "5,583,749.13"). Coerce ONLY a string that strictly
+    # matches a numeric amount; anything else (locale-formatted, mis-grouped,
+    # underscore/sentinel, or non-numeric like "N/A") passes through VERBATIM — never
+    # reformat a value we can't safely parse into a possibly-wrong dollar figure.
     if isinstance(value, str):
-        try:
-            value = float(value.strip().replace(",", ""))
-        except ValueError:
+        s = value.strip()
+        if not _AMOUNT_STR_RE.match(s):
             return value
+        try:
+            num = float(s.replace(",", ""))
+        except (ValueError, OverflowError):
+            return value
+        if not math.isfinite(num):
+            return value  # an out-of-double-range numeric string → show verbatim, never blank
+        value = num
     if not isinstance(value, (int, float)):
         return str(value)
-    try:
-        n = float(value)
-    except (TypeError, ValueError, OverflowError):
-        return str(value)
-    if not math.isfinite(n):  # NaN / Inf → blank, like a missing figure
+    n = float(value)
+    if not math.isfinite(n):  # an actual float NaN/Inf (a computed/undefined value) → blank
         return ""
     # Round to cents FIRST, then pick the sign — so a tiny residual like -0.004 renders
     # a clean "0.00" rather than a misleading negative-signalling "(0.00)".

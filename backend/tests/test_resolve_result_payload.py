@@ -30,6 +30,13 @@ class TestCurrencyColumnTagging:
         assert _money_columns(cols) == ["amount"]  # acctnumber (a code) is NOT money
         assert _money_columns(["account", "balance"]) == ["balance"]
         assert _money_columns(["year", "order_count", "ratio"]) == []  # numeric but not money-named
+        # compound money names via unambiguous suffix
+        assert _money_columns(["stripe_amount", "netsuite_amount", "opening_balance"]) == [
+            "stripe_amount",
+            "netsuite_amount",
+            "opening_balance",
+        ]
+        assert _money_columns(["credit_memo_number"]) == []  # suffix guard: NOT money
 
     def test_suiteql_table_payload_tags_amount_as_currency(self):
         result = {

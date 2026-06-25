@@ -281,13 +281,28 @@ def report_data_to_capped_table(report_data: dict) -> tuple[list[str], list[list
 # mis-formatted as dollars (a column named "amount"/"balance"/… is money; "acctnumber"
 # is not). Per-cell formatting still handles non-numeric cells gracefully.
 _MONEY_COLUMN_NAMES = frozenset(
-    {"amount", "balance", "debit", "credit", "net_amount", "total_debit", "total_credit", "subtotal", "variance"}
+    {"amount", "balance", "debit", "credit", "net_amount", "total_debit", "total_credit", "subtotal"}
 )
+# Unambiguous money suffixes — catch compound names like "stripe_amount",
+# "netsuite_amount", "opening_balance" without the false-positives of bare-token
+# substring matching (e.g. "credit_memo_number" must NOT match).
+_MONEY_COLUMN_SUFFIXES = ("_amount", "_balance")
 
 
 def _money_columns(columns: list) -> list:
-    """Return the subset of ``columns`` whose name denotes a monetary value."""
-    return [c for c in columns if str(c).strip().lower() in _MONEY_COLUMN_NAMES]
+    """Return the subset of ``columns`` whose name denotes a monetary value.
+
+    Tagged by name (exact money word, or an unambiguous money suffix), NOT by value
+    type, so a numeric account-code / year / count / id column is never mis-formatted
+    as dollars. Under-tagging (e.g. a pivoted per-period column named "Jan 2026", or a
+    bespoke money column) is render-safe (it just renders raw) — see issue #146.
+    """
+    out = []
+    for c in columns:
+        name = str(c).strip().lower()
+        if name in _MONEY_COLUMN_NAMES or name.endswith(_MONEY_COLUMN_SUFFIXES):
+            out.append(c)
+    return out
 
 
 def extract_result_payload(tool_name: str, params: dict[str, Any], result_str: str) -> dict[str, Any] | None:

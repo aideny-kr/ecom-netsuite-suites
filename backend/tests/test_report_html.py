@@ -14,12 +14,19 @@ def test_fmt_amount_accounting_style():
     assert _fmt_amount(float("inf")) == ""
     assert _fmt_amount("Cash") == "Cash"  # non-numeric label untouched
     assert _fmt_amount(True) == "True"  # bool is not a financial amount
-    # numeric STRINGS (incl. scientific notation + comma-grouped) are coerced — SuiteQL
-    # results serialize amounts as strings like "1.64...E7"
+    # numeric STRINGS (scientific notation + US thousands-grouping) are coerced —
+    # SuiteQL serializes amounts as strings like "1.64...E7"
     assert _fmt_amount("1.6442836348665524E7") == "16,442,836.35"
     assert _fmt_amount("5,583,749.13") == "5,583,749.13"
     assert _fmt_amount("-100.5") == "(100.50)"
-    assert _fmt_amount("N/A") == "N/A"  # non-numeric string passes through
+    # STRICT coercion: a string we can't safely parse as a US-format amount passes
+    # through VERBATIM — never mangled into a wrong (or blank) dollar figure.
+    assert _fmt_amount("N/A") == "N/A"  # non-numeric
+    assert _fmt_amount("1_000") == "1_000"  # underscore (float() would read 1000)
+    assert _fmt_amount("1.234,56") == "1.234,56"  # European locale grouping
+    assert _fmt_amount("1,2,3") == "1,2,3"  # mis-grouped
+    assert _fmt_amount("inf") == "inf"  # sentinel token, not blanked
+    assert _fmt_amount("1e400") == "1e400"  # out-of-double-range → verbatim, NOT blank
 
 
 def test_only_tagged_currency_columns_are_accounting_formatted():
