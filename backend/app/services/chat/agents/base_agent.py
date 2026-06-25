@@ -563,6 +563,7 @@ class BaseSpecialistAgent(abc.ABC):
         model: str,
         tool_choice: dict | str | None = None,
         session_id: str | None = None,
+        thinking_level: str | None = None,
     ) -> AgentResult:
         """Execute the specialist's mini agentic loop.
 
@@ -590,6 +591,10 @@ class BaseSpecialistAgent(abc.ABC):
 
         # Capture timezone from context so system_prompt can inject today's date
         self._user_timezone = context.get("user_timezone")
+
+        # Carried thinking level: the loop reads this on every adapter call and
+        # Task A5 bumps it when the model calls escalate_reasoning.
+        current_thinking_level = thinking_level
 
         tool_calls_log: list[dict] = []
         total_input_tokens = 0
@@ -632,6 +637,7 @@ class BaseSpecialistAgent(abc.ABC):
                     messages=messages,
                     tools=tools,
                     tool_choice=step_tool_choice,
+                    thinking_level=current_thinking_level,
                 )
                 total_input_tokens += response.usage.input_tokens
                 total_output_tokens += response.usage.output_tokens
@@ -878,6 +884,7 @@ class BaseSpecialistAgent(abc.ABC):
         tool_result_interceptor: Callable[..., tuple[tuple[str, dict] | None, str]] | None = None,
         session_id: str | None = None,
         run_id: str | None = None,
+        thinking_level: str | None = None,
     ):
         """Execute the agentic loop with streaming text output.
 
@@ -898,6 +905,10 @@ class BaseSpecialistAgent(abc.ABC):
 
         # Capture timezone from context so system_prompt can inject today's date
         self._user_timezone = context.get("user_timezone")
+
+        # Carried thinking level: the loop reads this on every adapter call and
+        # Task A5 bumps it when the model calls escalate_reasoning.
+        current_thinking_level = thinking_level
 
         tool_calls_log: list[dict] = []
         total_input_tokens = 0
@@ -950,6 +961,7 @@ class BaseSpecialistAgent(abc.ABC):
                     messages=messages,
                     tools=tools,
                     tool_choice=step_tool_choice,
+                    thinking_level=current_thinking_level,
                 ):
                     if event_type == "text":
                         yield "text", payload

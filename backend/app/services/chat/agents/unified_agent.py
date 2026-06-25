@@ -802,6 +802,7 @@ class UnifiedAgent(BaseSpecialistAgent):
         financial_mode: bool = False,
         plan_mode_clarify_only: bool = False,
         plan_mode_resume_source: str | None = None,
+        thinking_level: str | None = None,
     ):
         """Override to inject context and discover external MCP tools.
 
@@ -837,7 +838,15 @@ class UnifiedAgent(BaseSpecialistAgent):
                 plan_mode_resume_source,
                 active_connectors=self._connectors,
             )
-        return await super().run(task, context, db, adapter, model, tool_choice=tool_choice)
+        return await super().run(
+            task,
+            context,
+            db,
+            adapter,
+            model,
+            tool_choice=tool_choice,
+            thinking_level=thinking_level,
+        )
 
     async def run_streaming(
         self,
@@ -854,6 +863,7 @@ class UnifiedAgent(BaseSpecialistAgent):
         tool_result_interceptor: Callable[[str, str], tuple[tuple[str, dict] | None, str]] | None = None,
         session_id: str | None = None,
         run_id: str | None = None,
+        thinking_level: str | None = None,
     ):
         """Override to inject context before streaming.
 
@@ -897,5 +907,6 @@ class UnifiedAgent(BaseSpecialistAgent):
             tool_result_interceptor=tool_result_interceptor,
             session_id=session_id,
             run_id=run_id,
+            thinking_level=thinking_level,
         ):
             yield event
