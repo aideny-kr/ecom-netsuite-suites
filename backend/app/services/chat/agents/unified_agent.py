@@ -130,10 +130,12 @@ _SCRIPT_KEYWORDS = re.compile(
     re.IGNORECASE,
 )
 
-# Financial-mode tools — only these are exposed when handling financial queries
+# Financial-mode tools — only these are exposed when handling financial queries.
+# (financial_mode is currently dormant — never passed True — but keep the
+# allowlist pointed at the WORKING local report tool, not the de-registered stub.)
 _FINANCIAL_TOOL_NAMES = frozenset(
     {
-        "netsuite_report",
+        "netsuite_financial_report",
         "rag_search",
     }
 )

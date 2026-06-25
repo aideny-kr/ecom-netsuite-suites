@@ -222,7 +222,6 @@ class TestToolConfigs:
             "netsuite.suiteql",
             "netsuite.suiteql_stub",
             "netsuite.connectivity",
-            "netsuite.report",
             "data.sample_table_read",
             "recon.run",
             "rag.search",
