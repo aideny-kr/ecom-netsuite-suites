@@ -50,3 +50,36 @@ def reasoning_effort(level: str | None) -> str | None:
 def next_level(level: str | None) -> str:
     """One escalation step up, capped at xhigh."""
     return _NEXT.get(level or "", "high")
+
+
+# Model id prefixes considered China-origin for residency purposes.
+_CHINA_ORIGIN_PREFIXES = ("z-ai/", "glm-", "deepseek", "qwen", "moonshot", "kimi")
+
+
+def _is_china_origin(model: str | None) -> bool:
+    m = (model or "").lower()
+    return any(m.startswith(p) or p in m for p in _CHINA_ORIGIN_PREFIXES)
+
+
+def resolve_escalation_target(
+    *,
+    tenant_model: str,
+    tenant_provider: str,
+    configured_model: str,
+    configured_provider: str,
+    flag_enabled: bool,
+    allow_china_origin: bool,
+    is_customer_data: bool,
+) -> tuple[str, str]:
+    """Pick (model, provider) for an escalated turn.
+
+    Returns the tenant's own model/provider (native fallback) UNLESS a thinking
+    model is configured, the flag is on, and — for China-origin models on a
+    customer-data turn — the hard residency guard is explicitly set.
+    """
+    native = (tenant_model, tenant_provider)
+    if not flag_enabled or not configured_model:
+        return native
+    if is_customer_data and _is_china_origin(configured_model) and not allow_china_origin:
+        return native  # PHYSICAL BLOCK
+    return (configured_model, configured_provider)
