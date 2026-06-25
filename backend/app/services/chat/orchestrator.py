@@ -134,6 +134,14 @@ def _is_simple_lookup(query: str) -> bool:
     return bool(_SIMPLE_LOOKUP_RE.match(query))
 
 
+def compute_thinking_level(*, is_simple_lookup: bool, enabled: bool, default: str) -> str:
+    """Layer-1 initial thinking level. Simple lookups (Haiku) never think;
+    the global kill-switch forces none; otherwise use the configured default."""
+    if not enabled or is_simple_lookup:
+        return "none"
+    return default
+
+
 # ---------------------------------------------------------------------------
 # Connection health check — prevent wasted tool calls on dead connections
 # ---------------------------------------------------------------------------
@@ -2866,6 +2874,16 @@ async def run_chat_turn(
                         unified_model = HAIKU_MODEL
                         print("[ORCHESTRATOR] Simple lookup detected — routing to Haiku", flush=True)
 
+                    # Layer-1 initial thinking level. Simple-lookup/Haiku turns
+                    # should not burn thinking tokens; the global kill-switch
+                    # forces none; otherwise use the configured default.
+                    _thinking_is_simple = unified_model == HAIKU_MODEL
+                    turn_thinking_level = compute_thinking_level(
+                        is_simple_lookup=_thinking_is_simple,
+                        enabled=settings.CHAT_THINKING_ENABLED,
+                        default=settings.CHAT_THINKING_DEFAULT_LEVEL,
+                    )
+
                     # Track whether we're inside a <chart> block during streaming
                     _in_chart_block = False
                     _chart_buffer = ""
@@ -2987,6 +3005,7 @@ async def run_chat_turn(
                         ),
                         session_id=str(session.id),
                         run_id=run_id,
+                        thinking_level=turn_thinking_level,
                     ):
                         if event_type == "text":
                             streamed_text_parts.append(payload)
