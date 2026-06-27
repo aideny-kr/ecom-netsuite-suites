@@ -14,16 +14,31 @@ from app.services.chat.llm_adapter import BaseLLMAdapter, LLMResponse, TokenUsag
 logger = logging.getLogger(__name__)
 
 
-def _apply_thinking(kwargs: dict, max_tokens: int, thinking_level: str | None) -> None:
+def _is_forced_tool_choice(tool_choice: dict | str | None) -> bool:
+    """True when tool_choice forces a tool. Extended thinking is INCOMPATIBLE
+    with a forced tool_choice of type 'tool' or 'any' (the API 400s), so the
+    caller must skip thinking on those turns (plan-mode clarify, step-0 guard)."""
+    if isinstance(tool_choice, dict):
+        return tool_choice.get("type") in ("tool", "any")
+    if isinstance(tool_choice, str):
+        return tool_choice in ("any", "required")
+    return False
+
+
+def _apply_thinking(kwargs: dict, max_tokens: int, thinking_level: str | None, tool_choice: dict | str | None) -> None:
     """Mutate `kwargs` to enable Anthropic extended thinking for this level.
 
     Anthropic requires: temperature=1 when thinking is enabled, and
     max_tokens strictly greater than budget_tokens (the budget is part of the
     max_tokens allowance). We reserve `max_tokens` on top of the budget so the
     answer still has its full original room.
+
+    Extended thinking is INCOMPATIBLE with a forced tool_choice (type tool/any)
+    — sending both returns HTTP 400 — so we suppress thinking whenever a tool is
+    forced, regardless of the requested level.
     """
     budget = _thinking.budget_for(thinking_level)
-    if budget <= 0:
+    if budget <= 0 or _is_forced_tool_choice(tool_choice):
         return
     kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
     kwargs["temperature"] = 1
@@ -211,7 +226,7 @@ class AnthropicAdapter(BaseLLMAdapter):
         if tool_choice is not None:
             kwargs["tool_choice"] = tool_choice
 
-        _apply_thinking(kwargs, max_tokens, thinking_level)
+        _apply_thinking(kwargs, max_tokens, thinking_level, tool_choice)
 
         response = await self._client.messages.create(**kwargs)
 
@@ -274,7 +289,7 @@ class AnthropicAdapter(BaseLLMAdapter):
         if tool_choice is not None:
             kwargs["tool_choice"] = tool_choice
 
-        _apply_thinking(kwargs, max_tokens, thinking_level)
+        _apply_thinking(kwargs, max_tokens, thinking_level, tool_choice)
 
         # Retry the stream open (and the first chunk) on transient overloads.
         # Once any text has been yielded we do NOT retry — partial output

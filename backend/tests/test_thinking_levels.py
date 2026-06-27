@@ -30,4 +30,6 @@ def test_reasoning_effort_mapping():
     assert thinking.reasoning_effort("low") == "low"
     assert thinking.reasoning_effort("med") == "medium"
     assert thinking.reasoning_effort("high") == "high"
-    assert thinking.reasoning_effort("xhigh") == "xhigh"
+    # OpenAI/OpenRouter reasoning_effort enum is only low|medium|high — there is
+    # no "xhigh", so our internal xhigh maps down to "high" (sending "xhigh" 400s).
+    assert thinking.reasoning_effort("xhigh") == "high"

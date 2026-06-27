@@ -49,14 +49,12 @@ class Settings(BaseSettings):
     # global kill-switch. Levels: none|low|med|high|xhigh (see chat/thinking.py).
     CHAT_THINKING_ENABLED: bool = True
     CHAT_THINKING_DEFAULT_LEVEL: str = "med"
-    # ── Escalated (Layer-2) thinking tier ───────────────────────────────────
-    # When set, escalate_reasoning routes the continuation to this model/provider
-    # instead of just raising the native thinking level on the tenant's model.
-    # Empty → escalate on the tenant's own model. GLM (z-ai/*) is China-origin:
-    # it CANNOT serve a customer-data turn unless the hard guard below is True.
-    CHAT_THINKING_MODEL: str = ""
-    CHAT_THINKING_PROVIDER: str = ""
-    ALLOW_CHINA_ORIGIN_ON_CUSTOMER_DATA: bool = False
+    # NOTE: the Layer-2 GLM-tier config (CHAT_THINKING_MODEL/PROVIDER +
+    # ALLOW_CHINA_ORIGIN_ON_CUSTOMER_DATA) was removed — the model/provider switch
+    # it gated was never wired into the escalation path, and shipping a dormant
+    # residency guard invites a future mis-wire. escalate_reasoning raises the
+    # native thinking level on the tenant's OWN model only. Re-introduce when the
+    # GLM tier is actually wired end-to-end (guard + benchmark + policy sign-off).
     VOYAGE_API_KEY: str = ""
     VOYAGE_EMBED_MODEL: str = "voyage-3"
     OPENAI_EMBEDDING_API_KEY: str = ""

@@ -95,7 +95,7 @@ DEFAULT_MODELS: dict[str, str] = {
     "anthropic": "claude-sonnet-4-5-20250929",
     "openai": "gpt-5.2",
     "gemini": "gemini-2.5-flash",
-    "openrouter": "z-ai/glm-5.2",
+    "openrouter": "openai/gpt-4o-mini",
 }
 
 VALID_PROVIDERS = {"anthropic", "openai", "gemini", "openrouter"}
@@ -132,9 +132,12 @@ VALID_MODELS: dict[str, list[str]] = {
         "gemini-3-pro-preview",
         "gemini-3-flash-preview",
     ],
+    # OpenRouter foundation is US-models-only for now. China-origin models
+    # (z-ai/glm-*, deepseek, qwen, …) are intentionally NOT exposed: the
+    # residency guard that would gate them on customer-data paths is not yet
+    # wired, so exposing them here would let a BYOK tenant route customer data
+    # to a China-origin model unguarded. Re-add behind a wired guard + benchmark.
     "openrouter": [
-        "z-ai/glm-5.2",
-        "z-ai/glm-5",
         "openai/gpt-4o-mini",
     ],
 }

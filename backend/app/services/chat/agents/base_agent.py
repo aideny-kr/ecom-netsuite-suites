@@ -712,8 +712,12 @@ class BaseSpecialistAgent(abc.ABC):
                         await _ensure_valid_workspace_id(block.input, db, self.tenant_id)
 
                     # Layer-2 escalation: the model asked for deeper reasoning.
-                    # Bump the carried level so the remaining steps think harder.
-                    if block.name == "escalate_reasoning":
+                    # Only RAISE depth on a turn that ALREADY has thinking on. Never
+                    # flip none->on mid-turn: prior assistant turns lack thinking
+                    # blocks + the temperature flip would 400, and a none level means
+                    # thinking is globally off (kill-switch) or this is a simple
+                    # lookup that shouldn't think.
+                    if block.name == "escalate_reasoning" and current_thinking_level not in (None, "none"):
                         current_thinking_level = thinking.next_level(current_thinking_level)
 
                     t0 = time.monotonic()
@@ -1055,8 +1059,12 @@ class BaseSpecialistAgent(abc.ABC):
                         await _ensure_valid_workspace_id(block.input, db, self.tenant_id)
 
                     # Layer-2 escalation: the model asked for deeper reasoning.
-                    # Bump the carried level so the remaining steps think harder.
-                    if block.name == "escalate_reasoning":
+                    # Only RAISE depth on a turn that ALREADY has thinking on. Never
+                    # flip none->on mid-turn: prior assistant turns lack thinking
+                    # blocks + the temperature flip would 400, and a none level means
+                    # thinking is globally off (kill-switch) or this is a simple
+                    # lookup that shouldn't think.
+                    if block.name == "escalate_reasoning" and current_thinking_level not in (None, "none"):
                         current_thinking_level = thinking.next_level(current_thinking_level)
 
                     # Dedup: skip duplicate workspace_propose_patch for same file

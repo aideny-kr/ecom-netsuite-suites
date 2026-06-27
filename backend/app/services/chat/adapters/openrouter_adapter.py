@@ -5,8 +5,10 @@ overrides only the base_url, key, attribution headers, provider-routing pins
 (US hosts + Zero-Data-Retention), and reasoning_effort threading.
 
 RESIDENCY: provider pins restrict routing to US-hosted endpoints with ZDR. China
--origin models (e.g. GLM) are still gated separately and MUST NOT reach customer
-data without ALLOW_CHINA_ORIGIN_ON_CUSTOMER_DATA (see config + glm guard).
+-origin models (GLM/DeepSeek/Qwen) are intentionally NOT exposed in
+VALID_MODELS["openrouter"] yet — only US models (e.g. openai/gpt-4o-mini). Do not
+re-add China-origin models here until a residency guard gates them on
+customer-data paths (and they clear the Claude+MCP benchmark).
 """
 
 import httpx

@@ -98,3 +98,56 @@ async def test_thinking_blocks_captured_and_round_tripped():
     assistant = adapter.build_assistant_message(resp)
     assert assistant["content"][0] == {"type": "thinking", "thinking": "let me reason", "signature": "sig123"}
     assert assistant["content"][1] == {"type": "text", "text": "the answer"}
+
+
+@pytest.mark.asyncio
+async def test_thinking_suppressed_when_tool_choice_is_forced():
+    """Extended thinking is incompatible with a forced tool_choice (type tool/any)
+    — Anthropic returns 400. The adapter must NOT enable thinking on those turns,
+    even when a thinking_level is requested (plan-mode clarify, step-0 guard)."""
+    adapter = AnthropicAdapter(api_key="sk-test")
+    captured = {}
+
+    async def fake_create(**kwargs):
+        captured.update(kwargs)
+        return _fake_message([_block("text", text="hi")])
+
+    adapter._client = MagicMock()
+    adapter._client.messages.create = AsyncMock(side_effect=fake_create)
+
+    await adapter.create_message(
+        model="claude-sonnet-4-6",
+        max_tokens=16384,
+        system="s",
+        messages=[{"role": "user", "content": "hi"}],
+        tool_choice={"type": "tool", "name": "clarify"},
+        thinking_level="med",
+    )
+
+    assert "thinking" not in captured  # suppressed — forced tool_choice present
+    assert captured["tool_choice"] == {"type": "tool", "name": "clarify"}
+
+
+@pytest.mark.asyncio
+async def test_thinking_applied_when_tool_choice_is_auto():
+    """Auto/none tool_choice is compatible with thinking — must still enable it."""
+    adapter = AnthropicAdapter(api_key="sk-test")
+    captured = {}
+
+    async def fake_create(**kwargs):
+        captured.update(kwargs)
+        return _fake_message([_block("text", text="hi")])
+
+    adapter._client = MagicMock()
+    adapter._client.messages.create = AsyncMock(side_effect=fake_create)
+
+    await adapter.create_message(
+        model="claude-sonnet-4-6",
+        max_tokens=16384,
+        system="s",
+        messages=[{"role": "user", "content": "hi"}],
+        tool_choice={"type": "auto"},
+        thinking_level="med",
+    )
+
+    assert captured["thinking"] == {"type": "enabled", "budget_tokens": 6144}
