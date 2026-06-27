@@ -720,7 +720,12 @@ class BaseSpecialistAgent(abc.ABC):
                     # blocks + the temperature flip would 400, and a none level means
                     # thinking is globally off (kill-switch) or this is a simple
                     # lookup that shouldn't think.
-                    if block.name == "escalate_reasoning" and current_thinking_level not in (None, "none"):
+                    if block.name == "escalate_reasoning" and thinking.budget_for(current_thinking_level) > 0:
+                        # Key on the ACTUAL budget, not the level string: a level whose
+                        # budget is 0 (none, or a misconfigured/unknown level) means
+                        # thinking is off this turn, so bumping would flip none->on
+                        # mid-turn against a blockless history → 400. Only raise when
+                        # thinking is genuinely active.
                         current_thinking_level = thinking.next_level(current_thinking_level)
 
                     t0 = time.monotonic()
@@ -1070,7 +1075,12 @@ class BaseSpecialistAgent(abc.ABC):
                     # blocks + the temperature flip would 400, and a none level means
                     # thinking is globally off (kill-switch) or this is a simple
                     # lookup that shouldn't think.
-                    if block.name == "escalate_reasoning" and current_thinking_level not in (None, "none"):
+                    if block.name == "escalate_reasoning" and thinking.budget_for(current_thinking_level) > 0:
+                        # Key on the ACTUAL budget, not the level string: a level whose
+                        # budget is 0 (none, or a misconfigured/unknown level) means
+                        # thinking is off this turn, so bumping would flip none->on
+                        # mid-turn against a blockless history → 400. Only raise when
+                        # thinking is genuinely active.
                         current_thinking_level = thinking.next_level(current_thinking_level)
 
                     # Dedup: skip duplicate workspace_propose_patch for same file

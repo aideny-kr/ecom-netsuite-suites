@@ -2876,14 +2876,19 @@ async def run_chat_turn(
                         unified_model = HAIKU_MODEL
                         print("[ORCHESTRATOR] Simple lookup detected — routing to Haiku", flush=True)
 
-                    # Layer-1 initial thinking level. Cheap turns (chitchat or simple
-                    # lookups) should not burn thinking tokens — keyed off the actual
-                    # query signal, NOT the Haiku-routing proxy, so BYOK turns (which
-                    # never route to Haiku but can still be simple) are also covered.
-                    # The global kill-switch forces none; else the configured default.
-                    _thinking_is_simple = _is_chitchat or _turn_is_simple_lookup
+                    # Layer-1 initial thinking level. Only TRIVIAL turns skip thinking:
+                    # chitchat, or a low-importance non-financial simple lookup. This
+                    # mirrors the Haiku-routing predicate above MINUS the BYOK exclusion
+                    # (so BYOK trivial turns also skip thinking — the original bug) and
+                    # PLUS chitchat. Critically it keeps the financial / high-importance
+                    # exclusions: a financial query like "what is gross profit" is
+                    # lookup-shaped but deliberately kept off Haiku because it needs
+                    # care, so it must KEEP thinking. The kill-switch forces none.
+                    _thinking_is_trivial = _is_chitchat or (
+                        not is_financial and importance_tier.value <= 2 and _turn_is_simple_lookup
+                    )
                     turn_thinking_level = compute_thinking_level(
-                        is_simple_lookup=_thinking_is_simple,
+                        is_simple_lookup=_thinking_is_trivial,
                         enabled=settings.CHAT_THINKING_ENABLED,
                         default=settings.CHAT_THINKING_DEFAULT_LEVEL,
                     )
