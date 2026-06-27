@@ -142,7 +142,13 @@ class GeminiAdapter(BaseLLMAdapter):
         messages: list[dict],
         tools: list[dict] | None = None,
         tool_choice: dict | str | None = None,
+        thinking_level: str | None = None,
     ) -> LLMResponse:
+        # thinking_level accepted for interface parity (BaseLLMAdapter declares it
+        # and the agent loop passes it to whatever adapter it holds). Gemini native
+        # extended thinking (thinking_config) is a follow-up; ignored here so a
+        # Gemini-BYOK tenant doesn't TypeError on the kwarg.
+        _ = thinking_level
         gemini_contents = self._convert_messages(messages)
         full_system = f"{system}\n\n{system_dynamic}".strip() if system_dynamic else system
 

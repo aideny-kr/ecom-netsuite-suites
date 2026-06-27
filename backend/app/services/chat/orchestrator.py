@@ -2862,6 +2862,8 @@ async def run_chat_turn(
 
                     unified_model = model if is_byok else settings.MULTI_AGENT_SQL_MODEL
 
+                    _turn_is_simple_lookup = _is_simple_lookup(sanitized_input)
+
                     # Route simple lookups to Haiku for 10x speed + cost savings
                     # Only for non-BYOK tenants (BYOK users chose their model)
                     if (
@@ -2869,15 +2871,17 @@ async def run_chat_turn(
                         and not _is_chitchat
                         and not is_financial
                         and importance_tier.value <= 2
-                        and _is_simple_lookup(sanitized_input)
+                        and _turn_is_simple_lookup
                     ):
                         unified_model = HAIKU_MODEL
                         print("[ORCHESTRATOR] Simple lookup detected — routing to Haiku", flush=True)
 
-                    # Layer-1 initial thinking level. Simple-lookup/Haiku turns
-                    # should not burn thinking tokens; the global kill-switch
-                    # forces none; otherwise use the configured default.
-                    _thinking_is_simple = unified_model == HAIKU_MODEL
+                    # Layer-1 initial thinking level. Cheap turns (chitchat or simple
+                    # lookups) should not burn thinking tokens — keyed off the actual
+                    # query signal, NOT the Haiku-routing proxy, so BYOK turns (which
+                    # never route to Haiku but can still be simple) are also covered.
+                    # The global kill-switch forces none; else the configured default.
+                    _thinking_is_simple = _is_chitchat or _turn_is_simple_lookup
                     turn_thinking_level = compute_thinking_level(
                         is_simple_lookup=_thinking_is_simple,
                         enabled=settings.CHAT_THINKING_ENABLED,
