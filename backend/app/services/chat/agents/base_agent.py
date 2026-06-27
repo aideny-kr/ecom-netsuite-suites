@@ -595,7 +595,10 @@ class BaseSpecialistAgent(abc.ABC):
 
         # Carried thinking level: the loop reads this on every adapter call and
         # Task A5 bumps it when the model calls escalate_reasoning.
-        current_thinking_level = thinking_level
+        # A forced tool_choice (only ever applied at step 0) suppresses thinking on
+        # the first hop — so the turn MUST run thinking-off throughout, else a later
+        # hop re-enabling thinking would 400 on the blockless step-0 history.
+        current_thinking_level = "none" if thinking.is_forced_tool_choice(tool_choice) else thinking_level
 
         tool_calls_log: list[dict] = []
         total_input_tokens = 0
@@ -918,7 +921,10 @@ class BaseSpecialistAgent(abc.ABC):
 
         # Carried thinking level: the loop reads this on every adapter call and
         # Task A5 bumps it when the model calls escalate_reasoning.
-        current_thinking_level = thinking_level
+        # A forced tool_choice (only ever applied at step 0) suppresses thinking on
+        # the first hop — so the turn MUST run thinking-off throughout, else a later
+        # hop re-enabling thinking would 400 on the blockless step-0 history.
+        current_thinking_level = "none" if thinking.is_forced_tool_choice(tool_choice) else thinking_level
 
         tool_calls_log: list[dict] = []
         total_input_tokens = 0

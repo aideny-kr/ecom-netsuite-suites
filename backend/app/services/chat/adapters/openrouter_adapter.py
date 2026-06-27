@@ -21,9 +21,6 @@ _CLIENT_TIMEOUT = httpx.Timeout(connect=5.0, read=60.0, write=60.0, pool=60.0)
 _CLIENT_MAX_RETRIES = 2
 _BASE_URL = "https://openrouter.ai/api/v1"
 
-# US-hosted providers we permit OpenRouter to route to. Tighten/loosen here.
-_US_PROVIDER_ALLOWLIST = ["DeepInfra", "Together", "Fireworks", "Baseten"]
-
 
 class OpenRouterAdapter(OpenAIAdapter):
     def __init__(self, api_key: str):
@@ -39,8 +36,16 @@ class OpenRouterAdapter(OpenAIAdapter):
         )
 
     def _provider_pins(self) -> dict:
-        """OpenRouter `provider` routing constraints: US hosts + ZDR + no logging."""
-        return {"only": list(_US_PROVIDER_ALLOWLIST), "data_collection": "deny", "zdr": True}
+        """OpenRouter `provider` routing constraints: ZDR + no logging.
+
+        We do NOT pin a provider allowlist: the only exposed model is a US-hosted
+        OpenAI model (gpt-4o-mini), and an open-weight-host allowlist would exclude
+        OpenAI and break routing. `zdr: true` already restricts routing to
+        Zero-Data-Retention endpoints; `data_collection: deny` blocks prompt logging.
+        Re-introduce an allowlist alongside any future China-origin model behind a
+        residency guard.
+        """
+        return {"data_collection": "deny", "zdr": True}
 
     def _extra_body(self, *, thinking_level: str | None) -> dict:
         body: dict = {"provider": self._provider_pins()}

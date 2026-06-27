@@ -13,12 +13,14 @@ def test_timeout_is_non_default():
     assert adapter._client.timeout.connect <= 10
 
 
-def test_provider_pins_are_us_and_zdr():
+def test_provider_pins_are_zdr_and_no_logging():
     adapter = OpenRouterAdapter(api_key="sk-or-test")
     pins = adapter._provider_pins()
     assert pins["data_collection"] == "deny"
     assert pins["zdr"] is True
-    assert isinstance(pins.get("only"), list) and pins["only"]  # US-host allowlist
+    # No provider allowlist: an open-weight-host allowlist would exclude OpenAI and
+    # break routing for the only exposed model (gpt-4o-mini). zdr already gates routing.
+    assert "only" not in pins
 
 
 def test_reasoning_effort_threaded_into_extra_body():

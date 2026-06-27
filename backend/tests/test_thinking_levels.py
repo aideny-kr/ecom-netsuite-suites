@@ -33,3 +33,16 @@ def test_reasoning_effort_mapping():
     # OpenAI/OpenRouter reasoning_effort enum is only low|medium|high — there is
     # no "xhigh", so our internal xhigh maps down to "high" (sending "xhigh" 400s).
     assert thinking.reasoning_effort("xhigh") == "high"
+
+
+def test_is_forced_tool_choice():
+    # Forced shapes — thinking must be suppressed (and the turn pinned off).
+    assert thinking.is_forced_tool_choice({"type": "tool", "name": "clarify"}) is True
+    assert thinking.is_forced_tool_choice({"type": "any"}) is True
+    assert thinking.is_forced_tool_choice("any") is True
+    assert thinking.is_forced_tool_choice("required") is True
+    # Non-forced — thinking is compatible.
+    assert thinking.is_forced_tool_choice({"type": "auto"}) is False
+    assert thinking.is_forced_tool_choice({"type": "none"}) is False
+    assert thinking.is_forced_tool_choice("auto") is False
+    assert thinking.is_forced_tool_choice(None) is False

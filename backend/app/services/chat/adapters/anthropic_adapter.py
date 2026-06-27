@@ -14,17 +14,6 @@ from app.services.chat.llm_adapter import BaseLLMAdapter, LLMResponse, TokenUsag
 logger = logging.getLogger(__name__)
 
 
-def _is_forced_tool_choice(tool_choice: dict | str | None) -> bool:
-    """True when tool_choice forces a tool. Extended thinking is INCOMPATIBLE
-    with a forced tool_choice of type 'tool' or 'any' (the API 400s), so the
-    caller must skip thinking on those turns (plan-mode clarify, step-0 guard)."""
-    if isinstance(tool_choice, dict):
-        return tool_choice.get("type") in ("tool", "any")
-    if isinstance(tool_choice, str):
-        return tool_choice in ("any", "required")
-    return False
-
-
 def _apply_thinking(kwargs: dict, max_tokens: int, thinking_level: str | None, tool_choice: dict | str | None) -> None:
     """Mutate `kwargs` to enable Anthropic extended thinking for this level.
 
@@ -38,7 +27,7 @@ def _apply_thinking(kwargs: dict, max_tokens: int, thinking_level: str | None, t
     forced, regardless of the requested level.
     """
     budget = _thinking.budget_for(thinking_level)
-    if budget <= 0 or _is_forced_tool_choice(tool_choice):
+    if budget <= 0 or _thinking.is_forced_tool_choice(tool_choice):
         return
     kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
     kwargs["temperature"] = 1
