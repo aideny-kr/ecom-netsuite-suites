@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
 from app.models.pipeline import CursorState
@@ -19,10 +20,16 @@ def load_cursor(db: Session, connection_id, object_type) -> str | None:
     return result
 
 
-def save_cursor(db: Session, connection_id, object_type, cursor_value) -> None:
-    """Upsert a cursor value (INSERT or UPDATE on conflict)."""
+def _build_cursor_upsert_stmt(connection_id, object_type, cursor_value):
+    """Build the cursor INSERT...ON CONFLICT DO UPDATE statement.
+
+    Shared by the sync (:func:`save_cursor`) and async (:func:`save_cursor_async`)
+    upsert paths so the two stay byte-identical. Stamps ``last_synced_at = now(UTC)``
+    explicitly (not via TimestampMixin), stringifies the cursor value, and keys on
+    the (connection_id, object_type) unique constraint.
+    """
     now = datetime.now(timezone.utc)
-    stmt = (
+    return (
         insert(CursorState)
         .values(
             connection_id=connection_id,
@@ -38,7 +45,22 @@ def save_cursor(db: Session, connection_id, object_type, cursor_value) -> None:
             },
         )
     )
-    db.execute(stmt)
+
+
+def save_cursor(db: Session, connection_id, object_type, cursor_value) -> None:
+    """Upsert a cursor value (INSERT or UPDATE on conflict)."""
+    db.execute(_build_cursor_upsert_stmt(connection_id, object_type, cursor_value))
+
+
+async def save_cursor_async(db: AsyncSession, connection_id, object_type, cursor_value) -> None:
+    """Async twin of ``save_cursor``: upsert a cursor value (INSERT or UPDATE on conflict).
+
+    For ingestion services that run on an AsyncSession (e.g. the NetSuite deposit
+    sync) and therefore cannot call the synchronous ``save_cursor``. Mirrors its
+    field semantics exactly via the shared :func:`_build_cursor_upsert_stmt`, so the
+    recon data-status banner reflects every successful sync.
+    """
+    await db.execute(_build_cursor_upsert_stmt(connection_id, object_type, cursor_value))
 
 
 def upsert_canonical(db: Session, model_class, tenant_id, dedupe_key: str, data: dict) -> None:

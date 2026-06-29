@@ -389,8 +389,6 @@ async def trigger_netsuite_deposit_sync(
     from datetime import date as date_type
     from datetime import timedelta
 
-    from sqlalchemy.dialects.postgresql import insert
-
     from app.models.job import Job
     from app.services.ingestion.netsuite_deposit_sync import (
         get_netsuite_rest_connection,
@@ -457,24 +455,10 @@ async def trigger_netsuite_deposit_sync(
         await db.commit()
         raise
 
-    # Save cursor for tracking
-    stmt = (
-        insert(CursorState)
-        .values(
-            connection_id=connection.id,
-            object_type="netsuite_deposits",
-            cursor_value=today.isoformat(),
-            last_synced_at=datetime.now(timezone.utc),
-        )
-        .on_conflict_do_update(
-            constraint="uq_cursor_states_conn_obj",
-            set_={
-                "cursor_value": today.isoformat(),
-                "last_synced_at": datetime.now(timezone.utc),
-            },
-        )
-    )
-    await db.execute(stmt)
+    # NOTE: the freshness cursor (object_type="netsuite_deposits") is now written
+    # by sync_netsuite_deposits itself for ALL callers (manual + nightly task),
+    # so no cursor write is needed here. date_to == today, so the service stamps
+    # an identical cursor_value/last_synced_at.
 
     await audit_service.log_event(
         db=db,
