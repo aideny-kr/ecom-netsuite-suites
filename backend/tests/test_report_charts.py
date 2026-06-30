@@ -91,6 +91,21 @@ def test_pie_handles_negative_values_without_nan():
     svg = render_chart_svg(chart)
     assert svg.startswith("<svg")
     assert "nan" not in svg.lower()  # negative fractions must not produce NaN arc coordinates
+    assert svg.count("<path") == 2  # two real magnitude slices (|100|, |50|), neither degenerate
+
+
+def test_pie_single_slice_renders_full_circle():
+    # A single slice (or one slice ~100%) is a degenerate arc (coincident endpoints) — it
+    # must render as a full <circle>, not a blank/empty path.
+    chart = ChartData(
+        chart_type="pie",
+        title="One",
+        x_axis=ChartAxis(label="k", key="k"),
+        y_axes=[ChartAxis(label="v", key="v")],
+        data=[{"k": "A", "v": 100.0}],
+    )
+    svg = render_chart_svg(chart)
+    assert "<circle" in svg
 
 
 def test_all_negative_bar_series_renders_valid_bars():

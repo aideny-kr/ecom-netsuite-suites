@@ -156,18 +156,46 @@ def test_assemble_spec_no_chart_for_non_numeric_table():
 
 def test_auto_chart_uses_only_currency_columns_not_dimension_columns():
     # A leading numeric DIMENSION (year) must NOT be auto-charted; only the tagged money
-    # column. Otherwise the year (~2026) plots as a giant misleading bar alongside amount.
-    payload = {
-        "columns": ["account", "year", "amount"],
-        "rows": [["A", 2026, 100.0], ["B", 2026, 200.0]],
-        "row_count": 2,
-        "currency_columns": ["amount"],
-    }
+    # column. Assert on the ChartData y_axes (the SVG never emits series labels, so a
+    # substring check would pass even if 'year' were plotted).
+    from app.services.report.report_service import _build_tabular_chart
+
+    cols = ["account", "year", "amount"]
+    rows = [["A", 2026, 100.0], ["B", 2026, 200.0]]
+    chart = _build_tabular_chart(cols, rows, chart_type="bar", title=None, value_columns=["amount"])
+    assert [a.key for a in chart.y_axes] == ["amount"]  # year excluded from the y-axis
+    # and end to end the table is auto-charted (currency tagged)
+    payload = {"columns": cols, "rows": rows, "row_count": 2, "currency_columns": ["amount"]}
     spec = assemble_spec("R", [{"type": "table", "result_id": "r1"}], lambda _rid: payload)
-    chart = next(s for s in spec["sections"] if s["type"] == "chart")
-    # the chart's y-axis is amount only — 'year' must not appear as a charted series label
-    assert "amount" in chart["svg"]
-    assert ">year<" not in chart["svg"]  # year is not a y-axis series label
+    assert any(s["type"] == "chart" for s in spec["sections"])
+
+
+def test_chart_numeric_probe_covers_back_loaded_column():
+    # A column null in the first rows but numeric later must still qualify (probe ALL rows,
+    # not just the first 50) — otherwise a valid chart errors with 'no numeric columns'.
+    from app.services.report.report_service import _build_tabular_chart
+
+    rows = [["P", None] for _ in range(50)] + [["P", float(i)] for i in range(1, 51)]
+    chart = _build_tabular_chart(["period", "revenue"], rows, chart_type="bar", title=None)
+    assert chart is not None
+    assert [a.key for a in chart.y_axes] == ["revenue"]
+
+
+def test_auto_chart_distinct_selects_each_get_their_own_chart():
+    # Two tables over the SAME result_id with DIFFERENT select projections must each be
+    # charted (dedupe is keyed by result_id + select, not result_id alone).
+    payload = {
+        "columns": ["product", "units", "revenue"],
+        "rows": [["A", 10.0, 100.0], ["B", 20.0, 200.0]],
+        "row_count": 2,
+        "currency_columns": ["revenue"],
+    }
+    sections = [
+        {"type": "table", "result_id": "r1", "select": ["product", "units"]},
+        {"type": "table", "result_id": "r1", "select": ["product", "revenue"]},
+    ]
+    spec = assemble_spec("R", sections, lambda _rid: payload)
+    assert [s["type"] for s in spec["sections"]].count("chart") == 2
 
 
 def test_auto_chart_skips_ambiguous_untagged_multi_numeric():
@@ -229,7 +257,8 @@ def test_render_shows_top_k_of_total_note():
     payload = {"columns": ["account", "amount"], "rows": rows, "row_count": 40, "currency_columns": ["amount"]}
     spec = assemble_spec("R", [{"type": "table", "result_id": "r1"}], lambda _rid: payload)
     html = render_report_html(spec)
-    assert "of 40" in html  # the note references the true total, not the shown count
+    # exact note shape: shown count (12) AND true total (40)
+    assert f"Showing first {_REPORT_TABLE_TOP_K} of 40 rows." in html
 
 
 def test_render_note_with_string_row_count_shows_total():

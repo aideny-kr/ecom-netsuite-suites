@@ -21,9 +21,6 @@ _METRIC_COLUMNS = ["Metric", "Value", "Unit", "Period"]
 # categories. Refuse deterministically and tell the model to aggregate first, rather than
 # silently truncating (a truncated chart misrepresents the data with no signal).
 _MAX_CHART_POINTS = 100
-# Probe at most this many rows when deciding which columns are chartable y-axes — a column
-# qualifies if ANY non-null cell in this window parses as a number (column-wide, not row[0]).
-_CHART_NUMERIC_PROBE_ROWS = 50
 # A report presents the first K rows ("top numbers only"), never the raw detail dump.
 # Product intent (2026-06-30): every report — financial AND data-analytics — is a summary
 # + chart, not a long table. Curation keeps SOURCE ORDER (a statement's line sequence /
@@ -92,12 +89,11 @@ def _coerce_number(value) -> float | None:
 
 def _numeric_value_columns(cols: list, rows: list) -> list:
     """The chartable y-axis columns: every column after col 0 (the x-axis) with at least
-    one finite-numeric cell in the probe window. Column-wide, not row[0]."""
-    probe = rows[:_CHART_NUMERIC_PROBE_ROWS]
+    one finite-numeric cell. Probes ALL rows (chart inputs are already bounded by
+    _MAX_CHART_POINTS / curation), so a column that is null in the first rows but numeric
+    later still qualifies. Column-wide, not row[0]."""
     return [
-        c
-        for i, c in enumerate(cols[1:], start=1)
-        if any(i < len(r) and _coerce_number(r[i]) is not None for r in probe)
+        c for i, c in enumerate(cols[1:], start=1) if any(i < len(r) and _coerce_number(r[i]) is not None for r in rows)
     ]
 
 
@@ -294,9 +290,19 @@ def assemble_spec(title: str, sections: list[dict], resolver: Resolver) -> dict:
             resolved_pairs.append((s, _resolve_data_section(s, resolver)))
         else:  # heading / divider
             resolved_pairs.append((s, s))
-    # result_ids that already have a SUCCESSFULLY-rendered chart — an explicit chart that
-    # resolved to an error must NOT suppress the table's auto-chart fallback.
-    charted_ids = {s.get("result_id") for s, r in resolved_pairs if s["type"] == "chart" and r.get("type") == "chart"}
+    # result_ids the model SUCCESSFULLY charted itself — an explicit chart that resolved to
+    # an error must NOT suppress the table's auto-chart fallback.
+    model_charted_ids = {
+        s.get("result_id") for s, r in resolved_pairs if s["type"] == "chart" and r.get("type") == "chart"
+    }
+    # Auto-chart dedupe is keyed by (result_id, select) so two tables over the SAME result
+    # with DIFFERENT projections each get their own chart, but an identical table doesn't
+    # double-chart.
+    auto_charted_keys: set = set()
+
+    def _table_key(sec: dict) -> tuple:
+        return (sec.get("result_id"), tuple(sec.get("select") or []))
+
     # Pass 2: emit, auto-appending a chart after any chartable table the model did not
     # successfully chart — a report visualizes its drivers; prompt guidance alone does not.
     provenance_sources: list[str] = []
@@ -305,11 +311,15 @@ def assemble_spec(title: str, sections: list[dict], resolver: Resolver) -> dict:
         out_sections.append(resolved)
         if resolved.get("type") == "metric_headline" and resolved.get("definition_version") is not None:
             provenance_sources.append(f"metric:{s['result_id']}@v{resolved['definition_version']}")
-        if s["type"] == "table" and s.get("result_id") not in charted_ids:
+        if (
+            s["type"] == "table"
+            and s.get("result_id") not in model_charted_ids
+            and _table_key(s) not in auto_charted_keys
+        ):
             auto = _auto_chart_section(resolved)
             if auto is not None:
                 out_sections.append(auto)
-                charted_ids.add(s.get("result_id"))
+                auto_charted_keys.add(_table_key(s))
     return {"title": title, "sections": out_sections, "provenance": {"sources": provenance_sources}}
 
 

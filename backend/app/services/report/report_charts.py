@@ -162,11 +162,20 @@ def _pie(c: ChartData) -> str:
     # A pie shows magnitude composition: use |value| so a negative datum is a real slice
     # (a signed fraction would draw an inverted/overlapping arc). Financial data has
     # negatives, and an explicit `pie` over it must still render sane slices.
-    total = sum(abs(_num(r, key)) for r in rows) or 1
+    magnitudes = [abs(_num(r, key)) for r in rows]
+    total = sum(magnitudes) or 1
     cx, cy, rad = _W / 2, _H / 2 + 10, 130
     out, ang = [], -math.pi / 2
-    for i, r in enumerate(rows):
-        frac = abs(_num(r, key)) / total
+    for i, mag in enumerate(magnitudes):
+        frac = mag / total
+        # A single slice at (or ~) 100% is a degenerate SVG arc — its start and end points
+        # coincide, so an <path> A-arc draws nothing. Render a full <circle> instead.
+        if frac >= 0.999:
+            out.append(
+                f'<circle cx="{cx}" cy="{cy}" r="{rad}" fill="{_PALETTE[i % len(_PALETTE)]}" '
+                f'stroke="#000" stroke-width="2"/>'
+            )
+            continue
         a2 = ang + frac * 2 * math.pi
         large = 1 if frac > 0.5 else 0
         x1, y1 = cx + rad * math.cos(ang), cy + rad * math.sin(ang)
