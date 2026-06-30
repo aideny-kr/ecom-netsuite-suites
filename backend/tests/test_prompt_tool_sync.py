@@ -118,7 +118,6 @@ def _all_known_tool_names_for_tenant_with_every_connector() -> set[str]:
         "netsuite_refresh_metadata",
         "netsuite_connectivity",
         "netsuite_financial_report",
-        "netsuite_report",
         "data_sample_table_read",
         "rag_search",
         "web_search",

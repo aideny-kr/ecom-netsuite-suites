@@ -28,7 +28,6 @@ class TestAllowedChatTools:
             "pivot.query_result",
             "cross_source.query",
             "netsuite.financial_report",
-            "netsuite.report",
             "netsuite.connectivity",
             "netsuite.get_metadata",
             "netsuite.refresh_metadata",

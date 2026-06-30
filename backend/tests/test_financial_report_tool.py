@@ -455,7 +455,9 @@ def test_financial_mode_prompt_references_tool():
     from app.services.chat.orchestrator import _build_financial_mode_task
 
     task = _build_financial_mode_task("Show me the income statement for February 2026")
-    assert "ns_runReport" in task or "netsuite_financial_report" in task or "netsuite.report" in task
+    # netsuite.report was de-registered (broken stub); the live financial path steers to
+    # the working local tool, with the external MCP ns_runReport as the fallback.
+    assert "ns_runReport" in task or "netsuite_financial_report" in task
     assert "report" in task.lower()
     # Should NOT contain raw SQL templates
     assert "transactionaccountingline" not in task

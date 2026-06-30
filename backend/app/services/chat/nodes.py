@@ -42,7 +42,6 @@ ALLOWED_CHAT_TOOLS: frozenset[str] = frozenset(
         "pivot.query_result",
         "cross_source.query",
         "netsuite.financial_report",
-        "netsuite.report",
         "netsuite.connectivity",
         "netsuite.refresh_metadata",
         "netsuite.get_metadata",

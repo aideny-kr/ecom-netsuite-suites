@@ -44,23 +44,79 @@ ComposeSection = Annotated[
 
 _SECTIONS_ADAPTER = TypeAdapter(list[ComposeSection])
 
+# The composing LLM consistently emits common-sense `type` names — `text` for a
+# narrative, `data` for a table — and sometimes omits the required
+# `narrative.markdown`. Those fail the discriminated-union validation, the agent
+# retries 2-4x, and the turn times out. Tolerate the aliases at the validation
+# boundary (cheap, deterministic) so a good composition is not thrown away over a
+# naming nit. Canonical types pass through untouched; truly unknown types still raise.
+_TYPE_ALIASES = {"text": "narrative", "data": "table"}
+_NARRATIVE_BODY_ALIASES = ("text", "content", "body")
+
+
+def _normalize_section(raw: dict) -> dict:
+    if not isinstance(raw, dict):
+        return raw
+    out = dict(raw)
+    # Guard the membership test: a malformed `type` (list/dict, unhashable) must flow
+    # to pydantic as a clean ValidationError, NOT raise TypeError here.
+    section_type = out.get("type")
+    if isinstance(section_type, str) and section_type in _TYPE_ALIASES:
+        out["type"] = _TYPE_ALIASES[section_type]
+    # narrative requires a STRING `markdown`; tolerate the body arriving under
+    # text/content/body, including when `markdown` is present but not a string (null).
+    if out.get("type") == "narrative" and not isinstance(out.get("markdown"), str):
+        for alias in _NARRATIVE_BODY_ALIASES:
+            val = out.get(alias)
+            if isinstance(val, str):
+                out["markdown"] = val
+                break
+    return out
+
+
+def normalize_sections(raw: list[dict]) -> list[dict]:
+    """Map the LLM's common section-type aliases onto the canonical schema.
+
+    Returns a NEW list of normalized dicts; the input is not mutated. Apply at every
+    boundary that reads section ``type`` from raw dicts — see
+    ``normalize_and_validate_sections``.
+    """
+    return [_normalize_section(s) for s in raw]
+
+
+def normalize_and_validate_sections(raw: list[dict]) -> list[dict]:
+    """Normalize aliases ONCE, validate the discriminated union, return normalized DICTS.
+
+    The single entry point for the two raw-dict boundaries — ``assemble_spec`` (the
+    production chat-tool render path, which never builds ComposeRequest) and
+    ``ComposeRequest`` validation (API/tests). Both need canonical dicts to iterate AND
+    a loud raise on a truly-unknown type; routing both through here avoids
+    re-implementing validation and double-normalizing.
+    """
+    normalized = normalize_sections(raw)
+    _SECTIONS_ADAPTER.validate_python(normalized)  # raises ValidationError on unknown/invalid type
+    return normalized
+
 
 def parse_sections(raw: list[dict]) -> list:
-    return _SECTIONS_ADAPTER.validate_python(raw)
+    """Validate raw sections and return the parsed pydantic model objects."""
+    return _SECTIONS_ADAPTER.validate_python(normalize_sections(raw))
 
 
 class ComposeRequest(BaseModel):
     title: str = Field(min_length=1, max_length=300)
-    # Kept as raw dicts so downstream (compose_report / assemble_spec) consumes them
-    # as plain dicts, but the validator enforces the discriminated union at construction
-    # so an unknown `type` is rejected with a 422 before any work happens.
+    # The API/validation boundary (NOT the chat-tool path — that goes
+    # report_export.execute -> compose_report -> assemble_spec on raw dicts and is
+    # canonicalized there via normalize_and_validate_sections). The validator
+    # canonicalizes aliases + enforces the discriminated union so an unknown `type` is
+    # rejected with a 422 before any work, and stores the normalized dicts back so any
+    # consumer of this model sees canonical `narrative`/`table` types, not `text`/`data`.
     sections: list[dict] = Field(min_length=1)
 
     @field_validator("sections")
     @classmethod
     def _validate_section_union(cls, v: list[dict]) -> list[dict]:
-        parse_sections(v)  # raises ValidationError on unknown/invalid section type
-        return v
+        return normalize_and_validate_sections(v)
 
 
 class ReportResponse(BaseModel):
