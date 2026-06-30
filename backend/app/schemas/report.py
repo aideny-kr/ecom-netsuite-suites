@@ -73,9 +73,12 @@ def _normalize_section(raw: dict) -> dict:
 def normalize_sections(raw: list[dict]) -> list[dict]:
     """Map the LLM's common section-type aliases onto the canonical schema.
 
-    Returns a NEW list of normalized dicts; the input is not mutated. Callers
-    that persist/render the raw dicts (assemble_spec / compose_report) must use
-    the normalized form so downstream sees real `narrative`/`table` types.
+    Returns a NEW list of normalized dicts; the input is not mutated. This must be
+    applied at every boundary that reads section ``type`` from raw dicts. There are
+    two: ``assemble_spec`` (the production chat-tool render path, which never builds
+    ComposeRequest) and ``ComposeRequest`` validation (API / tests). A boundary that
+    validates the normalized form but then reads the un-normalized input would let a
+    `text`/`data` section pass validation and be dropped silently by the renderer.
     """
     return [_normalize_section(s) for s in raw]
 
@@ -86,11 +89,12 @@ def parse_sections(raw: list[dict]) -> list:
 
 class ComposeRequest(BaseModel):
     title: str = Field(min_length=1, max_length=300)
-    # Kept as raw dicts so downstream (compose_report / assemble_spec) consumes them
-    # as plain dicts, but the validator normalizes aliases + enforces the discriminated
-    # union at construction so an unknown `type` is rejected with a 422 before any work
-    # happens. The normalized (canonical) dicts are stored back so downstream raw-dict
-    # consumers see real `narrative`/`table` types, not the LLM's `text`/`data` aliases.
+    # The API/validation boundary (NOT the chat-tool path — that goes
+    # report_export.execute -> compose_report -> assemble_spec on raw dicts and is
+    # canonicalized there). The validator normalizes aliases + enforces the
+    # discriminated union so an unknown `type` is rejected with a 422 before any work,
+    # and stores the normalized dicts back so any consumer of this model also sees
+    # canonical `narrative`/`table` types rather than the LLM's `text`/`data` aliases.
     sections: list[dict] = Field(min_length=1)
 
     @field_validator("sections")

@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import set_tenant_context
 from app.schemas.chart import ChartData
-from app.schemas.report import parse_sections
+from app.schemas.report import normalize_sections, parse_sections
 from app.services import audit_service
 from app.services.chat.tool_call_results import MAX_STORED_PAYLOAD_ROWS
 from app.services.report.report_charts import render_chart_svg
@@ -217,7 +217,15 @@ def _resolve_data_section(s: dict, resolver: Resolver) -> dict:
 
 
 def assemble_spec(title: str, sections: list[dict], resolver: Resolver) -> dict:
-    parse_sections(sections)  # validates shape; raises on unknown type
+    # Canonicalize the LLM's section-type aliases (text->narrative, data->table) HERE,
+    # before we read s["type"]. The chat tool path (report_export.execute ->
+    # compose_report -> assemble_spec) passes the raw LLM dicts and never constructs
+    # ComposeRequest, so this is the only boundary that reliably runs on the real
+    # path. Without it, a `text` section validates (parse_sections normalizes a copy
+    # internally) but then falls through to the heading/divider else-branch below and
+    # is dropped SILENTLY by the renderer — strictly worse than the old loud raise.
+    sections = normalize_sections(sections)
+    parse_sections(sections)  # validates shape; raises loudly on a truly-unknown type
     provenance_sources: list[str] = []
     out_sections: list[dict] = []
     for s in sections:

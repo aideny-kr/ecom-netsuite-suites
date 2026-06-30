@@ -1,5 +1,8 @@
 import json
 
+import pytest
+from pydantic import ValidationError
+
 from app.services.report.report_html import render_report_html
 from app.services.report.report_service import (
     assemble_spec,
@@ -44,6 +47,47 @@ def test_table_section_propagates_currency_columns_to_renderer():
     # a select that drops the currency column → currency_columns narrows to []
     spec2 = assemble_spec("R", [{"type": "table", "result_id": "r1", "select": ["account", "year"]}], resolver)
     assert spec2["sections"][0]["currency_columns"] == []
+
+
+# --- Production-path alias canonicalization -------------------------------
+# The chat tool path (report_export.execute -> compose_report -> assemble_spec)
+# receives the RAW LLM dicts and NEVER constructs ComposeRequest. So assemble_spec
+# itself must canonicalize the `text`/`data` aliases before it reads s["type"] —
+# otherwise a `text` section matches no branch, lands in the heading/divider else,
+# and the renderer (no case for `text`) drops it SILENTLY (worse than the old loud
+# ValidationError). Regression guard for the T2-gate finding.
+
+
+def test_assemble_spec_canonicalizes_text_alias_and_fills_placeholders():
+    spec = assemble_spec("R", [{"type": "text", "markdown": "Revenue is {{result:m1.value}}."}], _resolver)
+    assert [s["type"] for s in spec["sections"]] == ["narrative"]
+    # placeholder filled => it went through the narrative branch, not the else passthrough
+    assert spec["sections"][0]["markdown"] == "Revenue is 1.2M."
+    assert "{{" not in spec["sections"][0]["markdown"]
+
+
+def test_assemble_spec_text_alias_pulls_body_from_content_field():
+    spec = assemble_spec("R", [{"type": "text", "content": "Plain summary."}], _resolver)
+    assert spec["sections"][0]["type"] == "narrative"
+    assert spec["sections"][0]["markdown"] == "Plain summary."
+
+
+def test_assemble_spec_canonicalizes_data_alias_to_table():
+    spec = assemble_spec("R", [{"type": "data", "result_id": "r1"}], _resolver)
+    assert spec["sections"][0]["type"] == "table"
+
+
+def test_assemble_spec_narrative_alias_survives_render():
+    spec = assemble_spec("R", [{"type": "text", "markdown": "Hello reader."}], _resolver)
+    html = render_report_html(spec)
+    assert "Hello reader." in html  # section is NOT silently dropped
+
+
+def test_assemble_spec_still_raises_loudly_on_truly_unknown_type():
+    # Only the two empirically-common aliases are coerced; anything else still fails
+    # fast so the agent retries (we do not guess open-endedly).
+    with pytest.raises(ValidationError):
+        assemble_spec("R", [{"type": "paragraph", "markdown": "x"}], _resolver)
 
 
 def test_fill_placeholders_injects_frozen_values():
