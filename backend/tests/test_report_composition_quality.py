@@ -97,3 +97,23 @@ def test_report_compose_description_mentions_section_types_and_charts():
     assert "result_id" in desc
     for section_type in ("narrative", "chart", "table"):
         assert section_type in desc
+
+
+def test_reporting_profile_chart_types_match_schema_no_drift():
+    # The profile restates the chart_type enum as prose (the schema can't reach the LLM
+    # via the tool input_schema). Cross-check it against the pydantic source of truth so
+    # the two can't drift (the gate caught the profile advertising 4 of 7 valid types).
+    import re
+    from typing import get_args
+
+    from app.schemas.report import ChartSection
+
+    annotation = ChartSection.model_fields["chart_type"].annotation  # Literal[...] | None
+    schema_types: set[str] = set()
+    for arg in get_args(annotation):
+        schema_types |= set(get_args(arg))  # the Literal's members
+
+    match = re.search(r'chart_type"?\s*:\s*"([a-z|]+)"', _reporting_fragment())
+    assert match, "reporting.yaml must advertise a chart_type example"
+    advertised = set(match.group(1).split("|"))
+    assert advertised == schema_types, f"profile chart_types {advertised} != schema {schema_types}"

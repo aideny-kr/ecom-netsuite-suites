@@ -67,3 +67,19 @@ def test_canonical_types_unaffected_by_normalization():
 def test_bogus_type_still_rejected_after_alias_layer():
     with pytest.raises(ValidationError):
         ComposeRequest(title="x", sections=[{"type": "data_dump"}])
+
+
+def test_unhashable_type_raises_clean_validation_error_not_typeerror():
+    # A malformed section whose `type` is unhashable (list/dict) must NOT crash the
+    # alias layer with TypeError (uncatchable 500 / non-retryable); it must flow to
+    # pydantic as a clean ValidationError (422 the agent can retry on).
+    with pytest.raises(ValidationError):
+        ComposeRequest(title="x", sections=[{"type": ["table"], "result_id": "r1"}])
+
+
+def test_text_alias_with_null_markdown_falls_back_to_body_field():
+    # markdown present-but-not-a-string (e.g. null) must still trigger the body fallback.
+    req = ComposeRequest(title="x", sections=[{"type": "text", "markdown": None, "content": "Summary."}])
+    secs = parse_sections(req.sections)
+    assert secs[0].type == "narrative"
+    assert secs[0].markdown == "Summary."

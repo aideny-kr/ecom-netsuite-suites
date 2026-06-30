@@ -17,8 +17,8 @@ prompt_fragment: |
        figures with `{{result:<id>.<field>}}` / `{{metric:<id>}}`; never type raw numbers.
     3. `metric_headline` — one key figure: `{"type":"metric_headline","result_id":"r1","label":"Net Income"}`.
     4. `chart` — VISUALIZE the major drivers or the trend:
-       `{"type":"chart","result_id":"r1","chart_type":"bar|line|pie|area"}`. Prefer a chart
-       over a table to show a trend, a composition, or the top drivers.
+       `{"type":"chart","result_id":"r1","chart_type":"bar|line|pie|area|scatter|donut|histogram"}`.
+       Prefer a chart over a table to show a trend, a composition, or the top drivers.
 
   Use a `table` (`{"type":"table","result_id":"r1","select":["col", ...]}`) ONLY when the
   detailed rows are genuinely informative to the reader, and scope the columns with
