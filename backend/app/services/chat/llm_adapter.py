@@ -92,7 +92,7 @@ class BaseLLMAdapter(abc.ABC):
 
 # Provider-to-default-model mapping
 DEFAULT_MODELS: dict[str, str] = {
-    "anthropic": "claude-sonnet-4-5-20250929",
+    "anthropic": "claude-sonnet-5",
     "openai": "gpt-5.2",
     "gemini": "gemini-2.5-flash",
     "openrouter": "openai/gpt-4o-mini",
@@ -102,6 +102,8 @@ VALID_PROVIDERS = {"anthropic", "openai", "gemini", "openrouter"}
 
 VALID_MODELS: dict[str, list[str]] = {
     "anthropic": [
+        "claude-sonnet-5",
+        "claude-opus-4-8",
         "claude-opus-4-6",
         "claude-sonnet-4-6",
         "claude-sonnet-4-5-20250929",

@@ -14,24 +14,51 @@ from app.services.chat.llm_adapter import BaseLLMAdapter, LLMResponse, TokenUsag
 logger = logging.getLogger(__name__)
 
 
-def _apply_thinking(kwargs: dict, max_tokens: int, thinking_level: str | None, tool_choice: dict | str | None) -> None:
-    """Mutate `kwargs` to enable Anthropic extended thinking for this level.
+# Adaptive thinking tokens count toward max_tokens, so give the answer room on
+# adaptive-thinking turns (mirrors the headroom the legacy budget_tokens path adds).
+_ADAPTIVE_MIN_MAX_TOKENS = 32768
 
-    Anthropic requires: temperature=1 when thinking is enabled, and
-    max_tokens strictly greater than budget_tokens (the budget is part of the
-    max_tokens allowance). We reserve `max_tokens` on top of the budget so the
-    answer still has its full original room.
 
-    Extended thinking is INCOMPATIBLE with a forced tool_choice (type tool/any)
-    — sending both returns HTTP 400 — so we suppress thinking whenever a tool is
-    forced, regardless of the requested level.
+def _apply_thinking(
+    kwargs: dict,
+    model: str,
+    max_tokens: int,
+    thinking_level: str | None,
+    tool_choice: dict | str | None,
+) -> None:
+    """Mutate `kwargs` to enable Anthropic thinking for this turn, MODEL-GATED.
+
+    - none / forced tool_choice → no thinking. Thinking (either mode) is INCOMPATIBLE
+      with a forced tool_choice (type tool/any) — sending both returns HTTP 400 — so a
+      forced tool suppresses thinking regardless of the requested level.
+    - ADAPTIVE models (Sonnet 5, Sonnet 4.6, Opus 4.6+, Fable) → thinking={type:adaptive}
+      + output_config.effort (low..xhigh). budget_tokens/temperature would 400 here.
+    - LEGACY models (4.5 / 4.0 / 4.1) → thinking={type:enabled,budget_tokens} + temperature=1
+      + max_tokens reserved on top of the budget. (effort would error on these.)
+    - HAIKU → no thinking (unsupported).
     """
-    budget = _thinking.budget_for(thinking_level)
-    if budget <= 0 or _thinking.is_forced_tool_choice(tool_choice):
+    if thinking_level in (None, "none") or _thinking.is_forced_tool_choice(tool_choice):
         return
-    kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
-    kwargs["temperature"] = 1
-    kwargs["max_tokens"] = budget + max_tokens
+
+    mode = _thinking.thinking_mode(model)
+    if mode == "adaptive":
+        effort = _thinking.anthropic_effort(thinking_level)
+        if effort is None:
+            return
+        kwargs["thinking"] = {"type": "adaptive"}
+        output_config = dict(kwargs.get("output_config") or {})
+        output_config["effort"] = effort
+        kwargs["output_config"] = output_config
+        if max_tokens < _ADAPTIVE_MIN_MAX_TOKENS:
+            kwargs["max_tokens"] = _ADAPTIVE_MIN_MAX_TOKENS
+    elif mode == "legacy":
+        budget = _thinking.budget_for(thinking_level)
+        if budget <= 0:
+            return
+        kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
+        kwargs["temperature"] = 1
+        kwargs["max_tokens"] = budget + max_tokens
+    # mode == "none" (Haiku): leave kwargs untouched — no thinking.
 
 
 def _extract_thinking_blocks(content) -> list[dict]:
@@ -215,7 +242,7 @@ class AnthropicAdapter(BaseLLMAdapter):
         if tool_choice is not None:
             kwargs["tool_choice"] = tool_choice
 
-        _apply_thinking(kwargs, max_tokens, thinking_level, tool_choice)
+        _apply_thinking(kwargs, model, max_tokens, thinking_level, tool_choice)
 
         response = await self._client.messages.create(**kwargs)
 
@@ -278,7 +305,7 @@ class AnthropicAdapter(BaseLLMAdapter):
         if tool_choice is not None:
             kwargs["tool_choice"] = tool_choice
 
-        _apply_thinking(kwargs, max_tokens, thinking_level, tool_choice)
+        _apply_thinking(kwargs, model, max_tokens, thinking_level, tool_choice)
 
         # Retry the stream open (and the first chunk) on transient overloads.
         # Once any text has been yielded we do NOT retry — partial output

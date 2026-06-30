@@ -46,3 +46,43 @@ def test_is_forced_tool_choice():
     assert thinking.is_forced_tool_choice({"type": "none"}) is False
     assert thinking.is_forced_tool_choice("auto") is False
     assert thinking.is_forced_tool_choice(None) is False
+
+
+def test_anthropic_effort_mapping():
+    # Anthropic output_config.effort supports xhigh (unlike the OpenAI enum).
+    assert thinking.anthropic_effort("none") is None
+    assert thinking.anthropic_effort("low") == "low"
+    assert thinking.anthropic_effort("med") == "medium"
+    assert thinking.anthropic_effort("high") == "high"
+    assert thinking.anthropic_effort("xhigh") == "xhigh"
+
+
+def test_thinking_mode_classifies_models():
+    # Adaptive thinking + effort: Sonnet 5 / 4.6 / Opus 4.6+ / Fable.
+    for m in [
+        "claude-sonnet-5",
+        "claude-sonnet-4-6",
+        "claude-opus-4-6",
+        "claude-opus-4-8",
+        "claude-fable-5",
+    ]:
+        assert thinking.thinking_mode(m) == "adaptive", m
+    # Legacy extended thinking (budget_tokens): 4.5 / 4.0 / 4.1.
+    for m in [
+        "claude-sonnet-4-5-20250929",
+        "claude-opus-4-5-20251101",
+        "claude-sonnet-4-20250514",
+        "claude-opus-4-20250514",
+        "claude-opus-4-1-20250805",
+    ]:
+        assert thinking.thinking_mode(m) == "legacy", m
+    # Haiku does no thinking.
+    assert thinking.thinking_mode("claude-haiku-4-5-20251001") == "none"
+
+
+def test_sonnet_5_is_the_anthropic_default_and_adaptive():
+    from app.services.chat.llm_adapter import DEFAULT_MODELS, VALID_MODELS
+
+    assert DEFAULT_MODELS["anthropic"] == "claude-sonnet-5"
+    assert "claude-sonnet-5" in VALID_MODELS["anthropic"]
+    assert thinking.thinking_mode("claude-sonnet-5") == "adaptive"

@@ -26,7 +26,9 @@ def _fake_message(content, in_tok=10, out_tok=20):
 
 
 @pytest.mark.asyncio
-async def test_thinking_level_med_sets_budget_temperature_and_maxtokens():
+async def test_legacy_model_uses_budget_tokens_temperature_maxtokens():
+    """Sonnet 4.5 (and other pre-4.6 models) use LEGACY extended thinking:
+    thinking={type:enabled,budget_tokens} + temperature=1 + bumped max_tokens."""
     adapter = AnthropicAdapter(api_key="sk-test")
     captured = {}
 
@@ -38,7 +40,7 @@ async def test_thinking_level_med_sets_budget_temperature_and_maxtokens():
     adapter._client.messages.create = AsyncMock(side_effect=fake_create)
 
     await adapter.create_message(
-        model="claude-sonnet-4-6",
+        model="claude-sonnet-4-5-20250929",
         max_tokens=16384,
         system="s",
         messages=[{"role": "user", "content": "hi"}],
@@ -48,6 +50,84 @@ async def test_thinking_level_med_sets_budget_temperature_and_maxtokens():
     assert captured["thinking"] == {"type": "enabled", "budget_tokens": 6144}
     assert captured["temperature"] == 1
     assert captured["max_tokens"] > 6144  # must exceed budget
+    assert "output_config" not in captured  # legacy path uses no effort
+
+
+@pytest.mark.asyncio
+async def test_adaptive_thinking_for_sonnet5():
+    """Sonnet 5 (and 4.6 / Opus 4.6+) use ADAPTIVE thinking + output_config.effort —
+    NOT budget_tokens / temperature (those would 400 on these models)."""
+    adapter = AnthropicAdapter(api_key="sk-test")
+    captured = {}
+
+    async def fake_create(**kwargs):
+        captured.update(kwargs)
+        return _fake_message([_block("text", text="hi")])
+
+    adapter._client = MagicMock()
+    adapter._client.messages.create = AsyncMock(side_effect=fake_create)
+
+    await adapter.create_message(
+        model="claude-sonnet-5",
+        max_tokens=16384,
+        system="s",
+        messages=[{"role": "user", "content": "hi"}],
+        thinking_level="med",
+    )
+
+    assert captured["thinking"] == {"type": "adaptive"}
+    assert captured["output_config"] == {"effort": "medium"}
+    assert "temperature" not in captured
+    assert "budget_tokens" not in str(captured.get("thinking"))
+
+
+@pytest.mark.asyncio
+async def test_adaptive_thinking_maps_xhigh_effort():
+    adapter = AnthropicAdapter(api_key="sk-test")
+    captured = {}
+
+    async def fake_create(**kwargs):
+        captured.update(kwargs)
+        return _fake_message([_block("text", text="hi")])
+
+    adapter._client = MagicMock()
+    adapter._client.messages.create = AsyncMock(side_effect=fake_create)
+
+    await adapter.create_message(
+        model="claude-sonnet-5",
+        max_tokens=16384,
+        system="s",
+        messages=[{"role": "user", "content": "hi"}],
+        thinking_level="xhigh",
+    )
+
+    assert captured["output_config"]["effort"] == "xhigh"
+
+
+@pytest.mark.asyncio
+async def test_no_thinking_for_haiku():
+    """Haiku does not support thinking/effort — the adapter must send neither."""
+    adapter = AnthropicAdapter(api_key="sk-test")
+    captured = {}
+
+    async def fake_create(**kwargs):
+        captured.update(kwargs)
+        return _fake_message([_block("text", text="hi")])
+
+    adapter._client = MagicMock()
+    adapter._client.messages.create = AsyncMock(side_effect=fake_create)
+
+    await adapter.create_message(
+        model="claude-haiku-4-5-20251001",
+        max_tokens=16384,
+        system="s",
+        messages=[{"role": "user", "content": "hi"}],
+        thinking_level="med",
+    )
+
+    assert "thinking" not in captured
+    assert "output_config" not in captured
+    assert "temperature" not in captured
 
 
 @pytest.mark.asyncio
@@ -130,7 +210,8 @@ async def test_thinking_suppressed_when_tool_choice_is_forced():
 
 @pytest.mark.asyncio
 async def test_thinking_applied_when_tool_choice_is_auto():
-    """Auto/none tool_choice is compatible with thinking — must still enable it."""
+    """Auto/none tool_choice is compatible with thinking — must still enable it
+    (adaptive on Sonnet 4.6)."""
     adapter = AnthropicAdapter(api_key="sk-test")
     captured = {}
 
@@ -150,4 +231,5 @@ async def test_thinking_applied_when_tool_choice_is_auto():
         thinking_level="med",
     )
 
-    assert captured["thinking"] == {"type": "enabled", "budget_tokens": 6144}
+    assert captured["thinking"] == {"type": "adaptive"}
+    assert captured["output_config"] == {"effort": "medium"}
