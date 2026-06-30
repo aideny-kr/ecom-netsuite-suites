@@ -220,8 +220,11 @@ def _section_html(s: dict) -> str:
             body_rows.append("<tr>" + "".join(cells) + "</tr>")
         body = "".join(body_rows)
         note = ""
-        if s.get("truncated"):
-            note = f'<p class="foot">Showing top {len(rows)} of {escape(str(s.get("row_count", "")))} rows.</p>'
+        # Only annotate when the true total genuinely exceeds the shown rows — never
+        # print a contradictory "first 12 of 5" if an upstream row_count is unreliable.
+        total = s.get("row_count")
+        if s.get("truncated") and isinstance(total, int) and total > len(rows):
+            note = f'<p class="foot">Showing first {len(rows)} of {escape(str(total))} rows.</p>'
         return (
             f'<div class="nb-card svg-wrap"><table><thead><tr>{cols}</tr></thead>'
             f"<tbody>{body}</tbody></table>{note}</div>"

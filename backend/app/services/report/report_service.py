@@ -9,24 +9,11 @@ from app.core.database import set_tenant_context
 from app.schemas.chart import ChartData
 from app.schemas.report import normalize_and_validate_sections
 from app.services import audit_service
-from app.services.chat.tool_call_results import MAX_STORED_PAYLOAD_ROWS
 from app.services.report.report_charts import render_chart_svg
 from app.services.report.report_html import render_report_html
 
 _PLACEHOLDER = re.compile(r"\{\{(result|metric):([^}]+)\}\}")
 _METRIC_COLUMNS = ["Metric", "Value", "Unit", "Period"]
-# Cap rendered table rows: report.compose resolves the FULL uncapped payload (a SuiteQL
-# result can be up to NETSUITE_SUITEQL_MAX_ROWS = 50k), and every row lands verbatim in
-# the JSONB spec + the HTML <table> the viewer iframe must render. Without a cap a single
-# large result bakes multi-MB JSONB + HTML into one row (risking the Supabase 2-min INSERT
-# timeout) and freezes the browser. We keep the TRUE row_count + mark truncated so
-# render_report_html shows the "Showing first rows of N" note.
-#
-# This is the SAME constant the persistence boundary uses (MAX_STORED_PAYLOAD_ROWS in
-# tool_call_results) — imported, NOT redefined, so the stored-payload cap and the render
-# cap can never drift (re-gate r3, finding #6). The stored payload is already capped at
-# this value, so this render-time cap is now a defense-in-depth backstop.
-_MAX_REPORT_TABLE_ROWS = MAX_STORED_PAYLOAD_ROWS
 # Cap chart points: unlike the table branch, the chart branch emits 2+ SVG nodes per row
 # per series, so a 50k-row payload bakes a multi-MB SVG into the JSONB spec + rendered_html
 # (the DoS-shape the table cap guards against). A chart is also illegible past a few dozen
@@ -96,39 +83,18 @@ def _coerce_number(value) -> float | None:
         return None
 
 
-def _primary_value_index(cols: list, rows: list, currency_columns: list) -> int | None:
-    """The column to rank table rows by: the first currency-tagged column, else the
-    first column that probes numeric (skipping col 0, the label/x-axis), else col 0 if
-    it is itself numeric. None when nothing is numeric."""
-    for c in currency_columns:
-        if c in cols:
-            return cols.index(c)
-    probe = rows[:_CHART_NUMERIC_PROBE_ROWS]
-    for i in range(1, len(cols)):
-        if any(i < len(r) and _coerce_number(r[i]) is not None for r in probe):
-            return i
-    if cols and any(r and _coerce_number(r[0]) is not None for r in probe):
-        return 0
-    return None
+def _curate_table_rows(rows: list, k: int) -> tuple[list, bool]:
+    """Curate a report table to the first K rows, PRESERVING the result's own order.
 
-
-def _curate_table_rows(cols: list, rows: list, currency_columns: list, k: int) -> tuple[list, bool]:
-    """Keep the top-K most material rows by |primary value| magnitude ("top numbers").
-
-    Returns ``(rows, curated)``. A result at or under K is returned unchanged
-    (curated=False). With no numeric basis to rank by, falls back to the first K rows.
+    Returns ``(rows, curated)``; a result at or under K is returned unchanged. We keep
+    source order rather than re-rank by magnitude: a result is already meaningfully
+    ordered (a statement's line sequence, or a query's ORDER BY), and re-ranking would
+    both destroy that structure and mis-rank when the "value" column can't be identified.
+    The narrative + chart carry the analysis; this just bounds the table to top numbers.
     """
     if len(rows) <= k:
         return rows, False
-    vidx = _primary_value_index(cols, rows, currency_columns)
-    if vidx is None:
-        return rows[:k], True
-
-    def _mag(r):
-        n = _coerce_number(r[vidx]) if vidx < len(r) else None
-        return abs(n) if n is not None else float("-inf")
-
-    return sorted(rows, key=_mag, reverse=True)[:k], True
+    return rows[:k], True
 
 
 def _build_tabular_chart(cols: list, rows: list, *, chart_type: str | None, title: str | None) -> "ChartData | None":
@@ -170,7 +136,9 @@ def _auto_chart_section(resolved: dict) -> dict | None:
     if resolved.get("type") != "table":
         return None
     rows = resolved.get("rows", [])
-    if len(rows) < _MIN_AUTO_CHART_ROWS:
+    # Curation bounds this to K (<<100), but guard the DoS-shape independently so a future
+    # higher _REPORT_TABLE_TOP_K can't bake a multi-MB SVG (same cap the chart branch uses).
+    if not (_MIN_AUTO_CHART_ROWS <= len(rows) <= _MAX_CHART_POINTS):
         return None
     chart = _build_tabular_chart(resolved.get("columns", []), rows, chart_type="bar", title=None)
     if chart is None:
@@ -209,18 +177,16 @@ def _resolve_data_section(s: dict, resolver: Resolver) -> dict:
             idx = [cols.index(c) for c in s["select"] if c in cols]
             cols = [cols[i] for i in idx]
             rows = [[r[i] for i in idx] for r in rows]
-        # The TRUE pre-curation count drives the "top K of N" note: prefer the upstream
+        # The TRUE pre-curation count drives the "first K of N" note: prefer the upstream
         # tool's reported row_count, else the resolved row length.
         true_row_count = payload.get("row_count", len(rows))
         upstream_truncated = bool(payload.get("truncated", False))
-        # Storage anti-bloat hard cap (defense-in-depth; the payload is already capped).
-        if len(rows) > _MAX_REPORT_TABLE_ROWS:
-            rows = rows[:_MAX_REPORT_TABLE_ROWS]
         # Carry the producer's currency-column tags so the renderer accounting-formats
         # only those columns; narrow to the columns that survived `select`.
         currency_columns = [c for c in (payload.get("currency_columns") or []) if c in cols]
-        # Curate to the TOP-K most material rows — a report shows top numbers, not a dump.
-        rows, curated = _curate_table_rows(cols, rows, currency_columns, _REPORT_TABLE_TOP_K)
+        # Curate to the first K rows — a report shows top numbers, not a dump. This also
+        # bounds the rendered table (no separate anti-bloat cap needed: K << any payload).
+        rows, curated = _curate_table_rows(rows, _REPORT_TABLE_TOP_K)
         return {
             "type": "table",
             "columns": cols,

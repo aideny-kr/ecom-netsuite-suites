@@ -26,6 +26,46 @@ def test_deterministic():
     assert render_chart_svg(_bar()) == render_chart_svg(_bar())
 
 
+def test_bar_renders_negative_values_without_invalid_rects():
+    """Financial data (cash flow, P&L) is full of negatives, and the auto-chart now
+    plots it. A negative datum must render as a valid downward bar from a zero baseline,
+    NOT a negative-height <rect> (invalid SVG) or an inverted/mis-scaled bar."""
+    import re
+
+    chart = ChartData(
+        chart_type="bar",
+        title="Drivers",
+        x_axis=ChartAxis(label="account", key="account"),
+        y_axes=[ChartAxis(label="amount", key="amount", color="#6366f1")],
+        data=[
+            {"account": "Revenue", "amount": 100.0},
+            {"account": "Expenses", "amount": -250.0},
+            {"account": "Other", "amount": 50.0},
+        ],
+    )
+    svg = render_chart_svg(chart)
+    assert svg.startswith("<svg") and "</svg>" in svg
+    assert 'height="-' not in svg  # no negative-height rects
+    # every bar rect stays within the SVG viewport (valid, non-negative geometry)
+    for m in re.finditer(r'<rect [^>]*y="(-?[\d.]+)"[^>]*height="(-?[\d.]+)"', svg):
+        y, h = float(m.group(1)), float(m.group(2))
+        assert h >= 0
+        assert -1 <= y <= 381 and y + h <= 381  # _H == 380, small tolerance
+
+
+def test_all_negative_bar_series_renders_valid_bars():
+    chart = ChartData(
+        chart_type="bar",
+        title="AllNeg",
+        x_axis=ChartAxis(label="k", key="k"),
+        y_axes=[ChartAxis(label="v", key="v", color="#6366f1")],
+        data=[{"k": "A", "v": -10.0}, {"k": "B", "v": -40.0}],
+    )
+    svg = render_chart_svg(chart)
+    assert 'height="-' not in svg
+    assert svg.count('fill="#6366f1"') == 2  # both bars drawn
+
+
 def test_unsupported_type_is_placeholder_not_crash():
     c = _bar()
     c.chart_type = "histogram"

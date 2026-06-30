@@ -100,17 +100,17 @@ def test_assemble_spec_still_raises_loudly_on_truly_unknown_type():
 # a chart renders for any chartable table the model didn't already chart.
 
 
-def test_resolve_table_curates_large_result_to_top_k_by_magnitude():
-    # 30 rows, amounts 0..29; the curated table keeps the K LARGEST by |amount|.
+def test_resolve_table_curates_large_result_to_first_k_preserving_order():
+    # 30 rows; the curated table keeps the first K rows IN SOURCE ORDER (we do NOT
+    # re-rank: that would mis-rank an untagged value column and scramble an ordered
+    # statement — see the T2-gate findings).
     rows = [[f"acct{i}", float(i)] for i in range(30)]
     payload = {"columns": ["account", "amount"], "rows": rows, "row_count": 30, "currency_columns": ["amount"]}
     resolved = _resolve_data_section({"type": "table", "result_id": "r1"}, lambda _rid: payload)
     assert len(resolved["rows"]) == _REPORT_TABLE_TOP_K
     assert resolved["truncated"] is True
     assert resolved["row_count"] == 30  # true total preserved for the "of N" note
-    shown = sorted((r[1] for r in resolved["rows"]), reverse=True)
-    assert shown[0] == 29.0  # biggest kept
-    assert shown[-1] == float(30 - _REPORT_TABLE_TOP_K)  # smallest kept = the K-th largest
+    assert resolved["rows"] == rows[:_REPORT_TABLE_TOP_K]  # first K, original order
 
 
 def test_resolve_small_table_not_curated():
@@ -290,22 +290,11 @@ def test_metric_placeholder_fills_real_metric_payload_value():
     assert "[unresolved" not in out
 
 
-def test_stored_payload_cap_shares_one_constant():
-    """Re-gate r3 (finding #6): the persisted/sidecar row cap and the report-table
-    render cap MUST be ONE shared constant so they cannot drift. report_service
-    imports MAX_STORED_PAYLOAD_ROWS from tool_call_results and uses it as the table
-    cap — the two are the same object value (2000)."""
-    from app.services.chat.tool_call_results import MAX_STORED_PAYLOAD_ROWS
-    from app.services.report import report_service
-
-    assert report_service._MAX_REPORT_TABLE_ROWS == MAX_STORED_PAYLOAD_ROWS == 2000
-
-
 def test_table_section_curated_to_top_k_true_count_preserved():
-    """A large result is curated to the top-K most material rows (top numbers, not a
-    dump), marked truncated, with the TRUE row_count preserved so the HTML renders the
-    'top K of N' note. The _MAX_REPORT_TABLE_ROWS storage cap remains as a
-    defense-in-depth anti-bloat backstop applied BEFORE curation (finding #14)."""
+    """A large result is curated to the first-K rows (top numbers, not a dump), marked
+    truncated, with the TRUE row_count preserved so the HTML renders the 'first K of N'
+    note. Curation (first-K) is the bound; the persistence boundary caps payloads
+    independently in tool_call_results."""
     from app.services.report import report_service
 
     big = {
@@ -332,8 +321,6 @@ def test_table_section_curated_to_top_k_true_count_preserved():
 
 def test_table_section_under_cap_not_truncated():
     """A small table must NOT be marked truncated (no false 'showing first rows' note)."""
-    from app.services.report import report_service
-
     small = {
         "columns": ["Period", "Revenue"],
         "rows": [["Q1", "100"], ["Q2", "150"]],
@@ -348,7 +335,6 @@ def test_table_section_under_cap_not_truncated():
     assert len(tbl["rows"]) == 2
     assert tbl["truncated"] is False
     assert tbl["row_count"] == 2
-    assert report_service._MAX_REPORT_TABLE_ROWS == 2000
 
 
 async def test_compose_report_is_turn_atomic_no_mid_turn_commit(monkeypatch):
