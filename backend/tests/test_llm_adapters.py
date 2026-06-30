@@ -50,7 +50,7 @@ class TestGetAdapter:
 
 class TestConstants:
     def test_valid_providers(self):
-        assert VALID_PROVIDERS == {"anthropic", "openai", "gemini"}
+        assert VALID_PROVIDERS == {"anthropic", "openai", "gemini", "openrouter"}
 
     def test_all_providers_have_default_model(self):
         for provider in VALID_PROVIDERS:

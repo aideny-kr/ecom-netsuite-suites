@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable
 from xml.sax.saxutils import escape as _xml_escape
 
+from app.services.chat import thinking
 from app.services.chat.llm_adapter import BaseLLMAdapter, LLMResponse, TokenUsage
 from app.services.chat.prompt_cache import split_system_prompt
 from app.services.chat.tool_call_results import (
@@ -563,6 +564,7 @@ class BaseSpecialistAgent(abc.ABC):
         model: str,
         tool_choice: dict | str | None = None,
         session_id: str | None = None,
+        thinking_level: str | None = None,
     ) -> AgentResult:
         """Execute the specialist's mini agentic loop.
 
@@ -590,6 +592,13 @@ class BaseSpecialistAgent(abc.ABC):
 
         # Capture timezone from context so system_prompt can inject today's date
         self._user_timezone = context.get("user_timezone")
+
+        # Carried thinking level: the loop reads this on every adapter call and
+        # Task A5 bumps it when the model calls escalate_reasoning.
+        # A forced tool_choice (only ever applied at step 0) suppresses thinking on
+        # the first hop — so the turn MUST run thinking-off throughout, else a later
+        # hop re-enabling thinking would 400 on the blockless step-0 history.
+        current_thinking_level = "none" if thinking.is_forced_tool_choice(tool_choice) else thinking_level
 
         tool_calls_log: list[dict] = []
         total_input_tokens = 0
@@ -632,6 +641,7 @@ class BaseSpecialistAgent(abc.ABC):
                     messages=messages,
                     tools=tools,
                     tool_choice=step_tool_choice,
+                    thinking_level=current_thinking_level,
                 )
                 total_input_tokens += response.usage.input_tokens
                 total_output_tokens += response.usage.output_tokens
@@ -703,6 +713,20 @@ class BaseSpecialistAgent(abc.ABC):
                 for block in response.tool_use_blocks:
                     if block.name.startswith("workspace_"):
                         await _ensure_valid_workspace_id(block.input, db, self.tenant_id)
+
+                    # Layer-2 escalation: the model asked for deeper reasoning.
+                    # Only RAISE depth on a turn that ALREADY has thinking on. Never
+                    # flip none->on mid-turn: prior assistant turns lack thinking
+                    # blocks + the temperature flip would 400, and a none level means
+                    # thinking is globally off (kill-switch) or this is a simple
+                    # lookup that shouldn't think.
+                    if block.name == "escalate_reasoning" and thinking.budget_for(current_thinking_level) > 0:
+                        # Key on the ACTUAL budget, not the level string: a level whose
+                        # budget is 0 (none, or a misconfigured/unknown level) means
+                        # thinking is off this turn, so bumping would flip none->on
+                        # mid-turn against a blockless history → 400. Only raise when
+                        # thinking is genuinely active.
+                        current_thinking_level = thinking.next_level(current_thinking_level)
 
                     t0 = time.monotonic()
 
@@ -878,6 +902,7 @@ class BaseSpecialistAgent(abc.ABC):
         tool_result_interceptor: Callable[..., tuple[tuple[str, dict] | None, str]] | None = None,
         session_id: str | None = None,
         run_id: str | None = None,
+        thinking_level: str | None = None,
     ):
         """Execute the agentic loop with streaming text output.
 
@@ -898,6 +923,13 @@ class BaseSpecialistAgent(abc.ABC):
 
         # Capture timezone from context so system_prompt can inject today's date
         self._user_timezone = context.get("user_timezone")
+
+        # Carried thinking level: the loop reads this on every adapter call and
+        # Task A5 bumps it when the model calls escalate_reasoning.
+        # A forced tool_choice (only ever applied at step 0) suppresses thinking on
+        # the first hop — so the turn MUST run thinking-off throughout, else a later
+        # hop re-enabling thinking would 400 on the blockless step-0 history.
+        current_thinking_level = "none" if thinking.is_forced_tool_choice(tool_choice) else thinking_level
 
         tool_calls_log: list[dict] = []
         total_input_tokens = 0
@@ -950,6 +982,7 @@ class BaseSpecialistAgent(abc.ABC):
                     messages=messages,
                     tools=tools,
                     tool_choice=step_tool_choice,
+                    thinking_level=current_thinking_level,
                 ):
                     if event_type == "text":
                         yield "text", payload
@@ -1035,6 +1068,20 @@ class BaseSpecialistAgent(abc.ABC):
                 for i, block in enumerate(response.tool_use_blocks):
                     if block.name.startswith("workspace_"):
                         await _ensure_valid_workspace_id(block.input, db, self.tenant_id)
+
+                    # Layer-2 escalation: the model asked for deeper reasoning.
+                    # Only RAISE depth on a turn that ALREADY has thinking on. Never
+                    # flip none->on mid-turn: prior assistant turns lack thinking
+                    # blocks + the temperature flip would 400, and a none level means
+                    # thinking is globally off (kill-switch) or this is a simple
+                    # lookup that shouldn't think.
+                    if block.name == "escalate_reasoning" and thinking.budget_for(current_thinking_level) > 0:
+                        # Key on the ACTUAL budget, not the level string: a level whose
+                        # budget is 0 (none, or a misconfigured/unknown level) means
+                        # thinking is off this turn, so bumping would flip none->on
+                        # mid-turn against a blockless history → 400. Only raise when
+                        # thinking is genuinely active.
+                        current_thinking_level = thinking.next_level(current_thinking_level)
 
                     # Dedup: skip duplicate workspace_propose_patch for same file
                     if block.name == "workspace_propose_patch":

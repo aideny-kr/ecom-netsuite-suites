@@ -28,6 +28,7 @@ class LLMResponse:
     text_blocks: list[str] = field(default_factory=list)
     tool_use_blocks: list[ToolUseBlock] = field(default_factory=list)
     usage: TokenUsage = field(default_factory=TokenUsage)
+    thinking_blocks: list[dict] = field(default_factory=list)
 
 
 class BaseLLMAdapter(abc.ABC):
@@ -44,6 +45,7 @@ class BaseLLMAdapter(abc.ABC):
         messages: list[dict],
         tools: list[dict] | None = None,
         tool_choice: dict | str | None = None,
+        thinking_level: str | None = None,
     ) -> LLMResponse:
         """Send a message to the LLM and return a normalized response."""
 
@@ -57,6 +59,7 @@ class BaseLLMAdapter(abc.ABC):
         messages: list[dict],
         tools: list[dict] | None = None,
         tool_choice: dict | str | None = None,
+        thinking_level: str | None = None,
     ):
         """Send a message to the LLM and yield streaming events, finishing with LLMResponse.
 
@@ -71,6 +74,7 @@ class BaseLLMAdapter(abc.ABC):
             messages=messages,
             tools=tools,
             tool_choice=tool_choice,
+            thinking_level=thinking_level,
         )
         # Emit all text as a single chunk then yield the full response
         for text in response.text_blocks:
@@ -91,9 +95,10 @@ DEFAULT_MODELS: dict[str, str] = {
     "anthropic": "claude-sonnet-4-5-20250929",
     "openai": "gpt-5.2",
     "gemini": "gemini-2.5-flash",
+    "openrouter": "openai/gpt-4o-mini",
 }
 
-VALID_PROVIDERS = {"anthropic", "openai", "gemini"}
+VALID_PROVIDERS = {"anthropic", "openai", "gemini", "openrouter"}
 
 VALID_MODELS: dict[str, list[str]] = {
     "anthropic": [
@@ -127,6 +132,14 @@ VALID_MODELS: dict[str, list[str]] = {
         "gemini-3-pro-preview",
         "gemini-3-flash-preview",
     ],
+    # OpenRouter foundation is US-models-only for now. China-origin models
+    # (z-ai/glm-*, deepseek, qwen, …) are intentionally NOT exposed: the
+    # residency guard that would gate them on customer-data paths is not yet
+    # wired, so exposing them here would let a BYOK tenant route customer data
+    # to a China-origin model unguarded. Re-add behind a wired guard + benchmark.
+    "openrouter": [
+        "openai/gpt-4o-mini",
+    ],
 }
 
 
@@ -144,5 +157,9 @@ def get_adapter(provider: str, api_key: str) -> BaseLLMAdapter:
         from app.services.chat.adapters.gemini_adapter import GeminiAdapter
 
         return GeminiAdapter(api_key=api_key)
+    elif provider == "openrouter":
+        from app.services.chat.adapters.openrouter_adapter import OpenRouterAdapter
+
+        return OpenRouterAdapter(api_key=api_key)
     else:
         raise ValueError(f"Unsupported AI provider: {provider}")

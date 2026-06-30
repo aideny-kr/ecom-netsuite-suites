@@ -40,7 +40,21 @@ class Settings(BaseSettings):
 
     ANTHROPIC_API_KEY: str = ""
     ANTHROPIC_MODEL: str = "claude-sonnet-4-20250514"
+    # OpenRouter gateway — env only, never a shell export (key-billing leak risk).
+    OPENROUTER_API_KEY: str = ""
     DEFAULT_AI_PROVIDER: str = "anthropic"
+    # ── Adaptive thinking (chat path) ───────────────────────────────────────
+    # Native extended reasoning. Always-on with a generous default budget so the
+    # model self-paces depth per turn (Layer 1). CHAT_THINKING_ENABLED is the
+    # global kill-switch. Levels: none|low|med|high|xhigh (see chat/thinking.py).
+    CHAT_THINKING_ENABLED: bool = True
+    CHAT_THINKING_DEFAULT_LEVEL: str = "med"
+    # NOTE: the Layer-2 GLM-tier config (CHAT_THINKING_MODEL/PROVIDER +
+    # ALLOW_CHINA_ORIGIN_ON_CUSTOMER_DATA) was removed — the model/provider switch
+    # it gated was never wired into the escalation path, and shipping a dormant
+    # residency guard invites a future mis-wire. escalate_reasoning raises the
+    # native thinking level on the tenant's OWN model only. Re-introduce when the
+    # GLM tier is actually wired end-to-end (guard + benchmark + policy sign-off).
     VOYAGE_API_KEY: str = ""
     VOYAGE_EMBED_MODEL: str = "voyage-3"
     OPENAI_EMBEDDING_API_KEY: str = ""

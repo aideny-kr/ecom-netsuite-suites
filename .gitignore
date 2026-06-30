@@ -116,3 +116,7 @@ vibe-coding-strategy.md
 .vibe/
 .windsurf/
 .zencoder/
+.gstack/
+desktop/electron/test-results/
+/package.json
+/package-lock.json
