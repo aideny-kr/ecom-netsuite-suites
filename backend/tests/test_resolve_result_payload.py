@@ -167,10 +167,10 @@ class TestExtractFinancialReportShape:
 class TestStoredPayloadRowCap:
     """Re-gate r3 (finding #6, CONFIRMED): the persisted ChatMessage.tool_calls[]
     .result_payload (and the in-turn sidecar) must be capped at MAX_STORED_PAYLOAD_ROWS
-    (= report_service._MAX_REPORT_TABLE_ROWS = 2000) so an ordinary broad SuiteQL
-    turn (up to 50k rows) doesn't bake multi-MB JSONB into Postgres. The TRUE
-    row_count is preserved and truncated=True is set; nothing downstream consumes
-    >2000 rows (report tables cap at 2000, charts at 100)."""
+    (2000) so an ordinary broad SuiteQL turn (up to 50k rows) doesn't bake multi-MB JSONB
+    into Postgres. The TRUE row_count is preserved and truncated=True is set. This is the
+    STORAGE cap; report rendering curates much further (first _REPORT_TABLE_TOP_K rows per
+    table, charts at 100)."""
 
     def test_extract_caps_rows_at_2000_preserves_true_count(self):
         import json

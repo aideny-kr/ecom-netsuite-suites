@@ -220,8 +220,22 @@ def _section_html(s: dict) -> str:
             body_rows.append("<tr>" + "".join(cells) + "</tr>")
         body = "".join(body_rows)
         note = ""
+        # A truncated section MUST disclose it (never render a partial financial table as
+        # whole). When the true total is known and exceeds the shown rows, name it; when
+        # the upstream reported row_count == shown (e.g. NetSuite-side fetch truncation,
+        # true total unknown), still disclose without a contradictory "first N of N".
         if s.get("truncated"):
-            note = f'<p class="foot">Showing first rows of {escape(str(s.get("row_count", "")))}.</p>'
+            # row_count may arrive as an int or a numeric string (some MCP shapes); coerce
+            # so we still name the true total rather than dropping to the generic note.
+            raw_total = s.get("row_count")
+            try:
+                total = int(raw_total) if not isinstance(raw_total, bool) else None
+            except (TypeError, ValueError):
+                total = None
+            if total is not None and total > len(rows):
+                note = f'<p class="foot">Showing first {len(rows)} of {escape(str(total))} rows.</p>'
+            else:
+                note = f'<p class="foot">Showing first {len(rows)} rows (results truncated).</p>'
         return (
             f'<div class="nb-card svg-wrap"><table><thead><tr>{cols}</tr></thead>'
             f"<tbody>{body}</tbody></table>{note}</div>"

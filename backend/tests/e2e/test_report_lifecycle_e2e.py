@@ -148,20 +148,27 @@ async def test_compose_resolves_full_rows_views_html_and_audits(db, client):
     )
     report_id = result["report_id"]
 
-    # --- I1: persisted rendered_html carries row 60 (NOT capped at 50) ---
+    # --- I1: the table is CURATED to the first-K rows (top numbers, not a 60-row dump),
+    # with the TRUE count preserved. The resolver above still returns the full 60 (no
+    # stale 50-row Redis cap) — curation is a separate, intentional render-layer cap. ---
+    from app.services.report.report_service import _REPORT_TABLE_TOP_K
+
     report = (await db.execute(select(Report).where(Report.id == uuid.UUID(report_id)))).scalar_one()
-    assert _row_marker(_ROW_COUNT) in report.rendered_html, "row 60 must survive into the HTML (no 50-cap)"
-    assert _row_marker(50) in report.rendered_html  # sanity: a mid-table row is also present
-    assert _row_marker(1) in report.rendered_html
-    # The persisted spec's table section must itself carry all 60 rows (frozen, uncapped).
+    assert _row_marker(1) in report.rendered_html  # the first rows survive (top numbers)
+    assert _row_marker(_REPORT_TABLE_TOP_K) in report.rendered_html
+    assert _row_marker(_ROW_COUNT) not in report.rendered_html  # the 60th row is curated out
+    assert f"of {_ROW_COUNT}" in report.rendered_html  # "Showing first K of 60 rows" note
+    # The persisted spec's table section carries exactly the curated first-K rows, but
+    # keeps the TRUE row_count so the note (and any audit) can report the real total.
     table_section = next(s for s in report.spec_json["sections"] if s["type"] == "table")
-    assert len(table_section["rows"]) == _ROW_COUNT
+    assert len(table_section["rows"]) == _REPORT_TABLE_TOP_K
+    assert table_section["row_count"] == _ROW_COUNT
 
     # --- I2: GET /view returns the HTML to the owner (200, text/html) ---
     resp = await client.get(f"{API}/{report_id}/view", headers=make_auth_headers(user))
     assert resp.status_code == 200, resp.text
     assert "text/html" in resp.headers["content-type"]
-    assert _row_marker(_ROW_COUNT) in resp.text  # full rows served over HTTP too
+    assert _row_marker(1) in resp.text  # the curated rows are served over HTTP too
 
     # --- I4: trust boundary — the LLM-condensed string carries NO figures ---
     # Serialize the compose result exactly as it flows through the tool seam, then
@@ -273,10 +280,16 @@ async def test_compose_resolves_from_inturn_cache_sidecar(db, client, monkeypatc
     # report.compose no longer commits mid-turn; flush makes the row visible within
     # this shared session/transaction.
     report = (await db.execute(select(Report).where(Report.id == uuid.UUID(report_id)))).scalar_one()
-    # The full uncapped rows resolved FROM THE SIDECAR survive into the report.
-    assert _row_marker(_ROW_COUNT) in report.rendered_html, "row 60 from the sidecar must survive (no 50-cap, in-turn)"
+    # The rows resolved FROM THE SIDECAR are curated to the first-K (top numbers), with
+    # the true count preserved — the in-turn sidecar path resolved (no stale 50-cap), and
+    # curation then bounded the render.
+    from app.services.report.report_service import _REPORT_TABLE_TOP_K
+
+    assert _row_marker(1) in report.rendered_html, "first sidecar rows survive (in-turn resolution worked)"
+    assert _row_marker(_ROW_COUNT) not in report.rendered_html  # curated out
     table_section = next(s for s in report.spec_json["sections"] if s["type"] == "table")
-    assert len(table_section["rows"]) == _ROW_COUNT
+    assert len(table_section["rows"]) == _REPORT_TABLE_TOP_K
+    assert table_section["row_count"] == _ROW_COUNT
 
 
 # ---------------------------------------------------------------------------

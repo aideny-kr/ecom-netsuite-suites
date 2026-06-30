@@ -5,6 +5,8 @@ from pydantic import ValidationError
 
 from app.services.report.report_html import render_report_html
 from app.services.report.report_service import (
+    _REPORT_TABLE_TOP_K,
+    _resolve_data_section,
     assemble_spec,
     fill_placeholders,
 )
@@ -88,6 +90,198 @@ def test_assemble_spec_still_raises_loudly_on_truly_unknown_type():
     # fast so the agent retries (we do not guess open-endedly).
     with pytest.raises(ValidationError):
         assemble_spec("R", [{"type": "paragraph", "markdown": "x"}], _resolver)
+
+
+# --- Deterministic curation: top-numbers + guaranteed chart -----------------
+# Product intent (2026-06-30): EVERY report (financial + data-analytics) must be a
+# summary — top numbers only + a chart — NOT a raw data dump. Prompt-first guidance
+# proved insufficient live (an 866-row, 0-chart report shipped). So the resolver
+# curates large tables to the top-K most material rows, and assemble_spec guarantees
+# a chart renders for any chartable table the model didn't already chart.
+
+
+def test_resolve_table_curates_large_result_to_first_k_preserving_order():
+    # 30 rows; the curated table keeps the first K rows IN SOURCE ORDER (we do NOT
+    # re-rank: that would mis-rank an untagged value column and scramble an ordered
+    # statement — see the T2-gate findings).
+    rows = [[f"acct{i}", float(i)] for i in range(30)]
+    payload = {"columns": ["account", "amount"], "rows": rows, "row_count": 30, "currency_columns": ["amount"]}
+    resolved = _resolve_data_section({"type": "table", "result_id": "r1"}, lambda _rid: payload)
+    assert len(resolved["rows"]) == _REPORT_TABLE_TOP_K
+    assert resolved["truncated"] is True
+    assert resolved["row_count"] == 30  # true total preserved for the "of N" note
+    assert resolved["rows"] == rows[:_REPORT_TABLE_TOP_K]  # first K, original order
+
+
+def test_resolve_small_table_not_curated():
+    rows = [["A", 1.0], ["B", 2.0]]
+    payload = {"columns": ["account", "amount"], "rows": rows, "row_count": 2, "currency_columns": ["amount"]}
+    resolved = _resolve_data_section({"type": "table", "result_id": "r1"}, lambda _rid: payload)
+    assert len(resolved["rows"]) == 2
+    assert resolved["truncated"] is False
+
+
+def test_assemble_spec_auto_injects_chart_after_chartable_table():
+    payload = {
+        "columns": ["account", "amount"],
+        "rows": [["A", 10.0], ["B", 20.0], ["C", 30.0]],
+        "row_count": 3,
+        "currency_columns": ["amount"],
+    }
+    spec = assemble_spec("R", [{"type": "table", "result_id": "r1"}], lambda _rid: payload)
+    assert [s["type"] for s in spec["sections"]] == ["table", "chart"]
+    assert "<svg" in spec["sections"][1]["svg"]
+
+
+def test_assemble_spec_does_not_double_chart_when_model_already_charted():
+    payload = {
+        "columns": ["account", "amount"],
+        "rows": [["A", 10.0], ["B", 20.0]],
+        "row_count": 2,
+        "currency_columns": ["amount"],
+    }
+    sections = [
+        {"type": "table", "result_id": "r1"},
+        {"type": "chart", "result_id": "r1", "chart_type": "bar"},
+    ]
+    spec = assemble_spec("R", sections, lambda _rid: payload)
+    assert [s["type"] for s in spec["sections"]].count("chart") == 1  # no auto-inject
+
+
+def test_assemble_spec_no_chart_for_non_numeric_table():
+    payload = {"columns": ["name", "note"], "rows": [["A", "x"], ["B", "y"]], "row_count": 2}
+    spec = assemble_spec("R", [{"type": "table", "result_id": "r1"}], lambda _rid: payload)
+    assert [s["type"] for s in spec["sections"]] == ["table"]  # nothing numeric → no forced chart
+
+
+def test_auto_chart_uses_only_currency_columns_not_dimension_columns():
+    # A leading numeric DIMENSION (year) must NOT be auto-charted; only the tagged money
+    # column. Assert on the ChartData y_axes (the SVG never emits series labels, so a
+    # substring check would pass even if 'year' were plotted).
+    from app.services.report.report_service import _build_tabular_chart
+
+    cols = ["account", "year", "amount"]
+    rows = [["A", 2026, 100.0], ["B", 2026, 200.0]]
+    chart = _build_tabular_chart(cols, rows, chart_type="bar", title=None, value_columns=["amount"])
+    assert [a.key for a in chart.y_axes] == ["amount"]  # year excluded from the y-axis
+    # and end to end the table is auto-charted (currency tagged)
+    payload = {"columns": cols, "rows": rows, "row_count": 2, "currency_columns": ["amount"]}
+    spec = assemble_spec("R", [{"type": "table", "result_id": "r1"}], lambda _rid: payload)
+    assert any(s["type"] == "chart" for s in spec["sections"])
+
+
+def test_chart_numeric_probe_covers_back_loaded_column():
+    # A column null in the first rows but numeric later must still qualify (probe ALL rows,
+    # not just the first 50) — otherwise a valid chart errors with 'no numeric columns'.
+    from app.services.report.report_service import _build_tabular_chart
+
+    rows = [["P", None] for _ in range(50)] + [["P", float(i)] for i in range(1, 51)]
+    chart = _build_tabular_chart(["period", "revenue"], rows, chart_type="bar", title=None)
+    assert chart is not None
+    assert [a.key for a in chart.y_axes] == ["revenue"]
+
+
+def test_auto_chart_distinct_selects_each_get_their_own_chart():
+    # Two tables over the SAME result_id with DIFFERENT select projections must each be
+    # charted (dedupe is keyed by result_id + select, not result_id alone).
+    payload = {
+        "columns": ["product", "units", "revenue"],
+        "rows": [["A", 10.0, 100.0], ["B", 20.0, 200.0]],
+        "row_count": 2,
+        "currency_columns": ["revenue"],
+    }
+    sections = [
+        {"type": "table", "result_id": "r1", "select": ["product", "units"]},
+        {"type": "table", "result_id": "r1", "select": ["product", "revenue"]},
+    ]
+    spec = assemble_spec("R", sections, lambda _rid: payload)
+    assert [s["type"] for s in spec["sections"]].count("chart") == 2
+
+
+def test_auto_chart_skips_ambiguous_untagged_multi_numeric():
+    # Untagged result with TWO numeric columns (a dimension + a measure) is ambiguous —
+    # auto-chart must skip rather than guess and plot the wrong series.
+    payload = {
+        "columns": ["account", "year", "amount"],
+        "rows": [["A", 2026, 100.0], ["B", 2025, 200.0]],
+        "row_count": 2,
+    }
+    spec = assemble_spec("R", [{"type": "table", "result_id": "r1"}], lambda _rid: payload)
+    assert [s["type"] for s in spec["sections"]] == ["table"]  # no auto-chart
+
+
+def test_auto_chart_single_untagged_numeric_is_charted():
+    # One unambiguous numeric measure (units) — safe to auto-chart even without a tag.
+    payload = {
+        "columns": ["product", "units"],
+        "rows": [["A", 10.0], ["B", 20.0]],
+        "row_count": 2,
+    }
+    spec = assemble_spec("R", [{"type": "table", "result_id": "r1"}], lambda _rid: payload)
+    assert [s["type"] for s in spec["sections"]] == ["table", "chart"]
+
+
+def test_auto_chart_fills_in_when_explicit_chart_errored():
+    # Model composes a table + an explicit chart for the same result, but the chart
+    # resolves to an error (e.g. > _MAX_CHART_POINTS). The auto-chart of the curated
+    # rows must still fill in, not be suppressed by the errored chart's result_id.
+    big_rows = [[f"a{i}", float(i)] for i in range(200)]  # 200 > _MAX_CHART_POINTS
+    payload = {"columns": ["account", "amount"], "rows": big_rows, "row_count": 200, "currency_columns": ["amount"]}
+    sections = [
+        {"type": "table", "result_id": "r1"},
+        {"type": "chart", "result_id": "r1", "chart_type": "bar"},  # will error: too many rows
+    ]
+    spec = assemble_spec("R", sections, lambda _rid: payload)
+    types = [s["type"] for s in spec["sections"]]
+    assert "error" in types  # the model's explicit chart errored
+    assert "chart" in types  # but a real auto-chart (curated 12 rows) still rendered
+
+
+def test_render_note_shown_for_upstream_truncated_equal_count():
+    # NetSuite-side truncation sets truncated=True with row_count == returned rows. The
+    # note must still disclose truncation (never silently render a partial table as whole).
+    payload = {
+        "columns": ["account", "amount"],
+        "rows": [["A", 1.0], ["B", 2.0]],
+        "row_count": 2,  # == shown; the TRUE total upstream is unknown/larger
+        "truncated": True,
+        "currency_columns": ["amount"],
+    }
+    spec = assemble_spec("R", [{"type": "table", "result_id": "r1"}], lambda _rid: payload)
+    html = render_report_html(spec)
+    assert "truncated" in html.lower()  # disclosure present
+
+
+def test_render_shows_top_k_of_total_note():
+    rows = [[f"a{i}", float(i)] for i in range(40)]
+    payload = {"columns": ["account", "amount"], "rows": rows, "row_count": 40, "currency_columns": ["amount"]}
+    spec = assemble_spec("R", [{"type": "table", "result_id": "r1"}], lambda _rid: payload)
+    html = render_report_html(spec)
+    # exact note shape: shown count (12) AND true total (40)
+    assert f"Showing first {_REPORT_TABLE_TOP_K} of 40 rows." in html
+
+
+def test_render_note_with_string_row_count_shows_total():
+    # Some MCP shapes serialize row_count as a numeric STRING; the note must still name
+    # the true total ("of 50"), not fall back to the vague generic disclosure.
+    payload = {
+        "columns": ["account", "amount"],
+        "rows": [[f"a{i}", float(i)] for i in range(20)],
+        "row_count": "50",  # numeric string
+        "truncated": True,
+        "currency_columns": ["amount"],
+    }
+    spec = assemble_spec("R", [{"type": "table", "result_id": "r1"}], lambda _rid: payload)
+    html = render_report_html(spec)
+    assert "of 50" in html
+
+
+def test_coerce_number_rejects_non_finite_literals():
+    from app.services.report.report_service import _coerce_number
+
+    assert _coerce_number("100") == 100.0
+    for junk in ("NaN", "Infinity", "-Infinity", "inf", "nan"):
+        assert _coerce_number(junk) is None  # never a nan/inf bar
 
 
 def test_fill_placeholders_injects_frozen_values():
@@ -218,30 +412,18 @@ def test_metric_placeholder_fills_real_metric_payload_value():
     assert "[unresolved" not in out
 
 
-def test_stored_payload_cap_shares_one_constant():
-    """Re-gate r3 (finding #6): the persisted/sidecar row cap and the report-table
-    render cap MUST be ONE shared constant so they cannot drift. report_service
-    imports MAX_STORED_PAYLOAD_ROWS from tool_call_results and uses it as the table
-    cap — the two are the same object value (2000)."""
-    from app.services.chat.tool_call_results import MAX_STORED_PAYLOAD_ROWS
+def test_table_section_curated_to_top_k_true_count_preserved():
+    """A large result is curated to the first-K rows (top numbers, not a dump), marked
+    truncated, with the TRUE row_count preserved so the HTML renders the 'first K of N'
+    note. Curation (first-K) is the bound; the persistence boundary caps payloads
+    independently in tool_call_results."""
     from app.services.report import report_service
 
-    assert report_service._MAX_REPORT_TABLE_ROWS == MAX_STORED_PAYLOAD_ROWS == 2000
-
-
-def test_table_section_caps_rows_at_max():
-    """Gate E (finding #14): report.compose resolves the FULL uncapped payload, so a
-    50k-row SuiteQL result would bake a multi-MB JSONB spec + HTML into one row and
-    freeze the viewer. Cap the rendered table at _MAX_REPORT_TABLE_ROWS, mark the
-    section truncated, and keep the TRUE row_count so the HTML renders the
-    'Showing first rows of N' note."""
-    from app.services.report import report_service
-
-    cap = report_service._MAX_REPORT_TABLE_ROWS
     big = {
         "columns": ["Period", "Revenue"],
         "rows": [[str(i), str(i * 10)] for i in range(2500)],
         "row_count": 2500,
+        "currency_columns": ["Revenue"],
     }
 
     def resolver(rid):
@@ -251,19 +433,16 @@ def test_table_section_caps_rows_at_max():
     spec = assemble_spec(title="Big", sections=sections, resolver=resolver)
     tbl = next(s for s in spec["sections"] if s["type"] == "table")
 
-    assert len(tbl["rows"]) == cap
-    assert cap == 2000
+    assert len(tbl["rows"]) == report_service._REPORT_TABLE_TOP_K
     assert tbl["truncated"] is True
-    assert tbl["row_count"] == 2500  # the TRUE pre-cap count is preserved
+    assert tbl["row_count"] == 2500  # the TRUE pre-curation count is preserved
     # the rendered HTML surfaces the truncation note with the true count
     html = render_report_html(spec, accent_hsl="0 0% 0%")
-    assert "Showing first rows of 2500" in html
+    assert "of 2500" in html
 
 
 def test_table_section_under_cap_not_truncated():
     """A small table must NOT be marked truncated (no false 'showing first rows' note)."""
-    from app.services.report import report_service
-
     small = {
         "columns": ["Period", "Revenue"],
         "rows": [["Q1", "100"], ["Q2", "150"]],
@@ -278,7 +457,6 @@ def test_table_section_under_cap_not_truncated():
     assert len(tbl["rows"]) == 2
     assert tbl["truncated"] is False
     assert tbl["row_count"] == 2
-    assert report_service._MAX_REPORT_TABLE_ROWS == 2000
 
 
 async def test_compose_report_is_turn_atomic_no_mid_turn_commit(monkeypatch):

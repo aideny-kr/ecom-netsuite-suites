@@ -26,6 +26,101 @@ def test_deterministic():
     assert render_chart_svg(_bar()) == render_chart_svg(_bar())
 
 
+def test_bar_renders_negative_values_without_invalid_rects():
+    """Financial data (cash flow, P&L) is full of negatives, and the auto-chart now
+    plots it. A negative datum must render as a valid downward bar from a zero baseline,
+    NOT a negative-height <rect> (invalid SVG) or an inverted/mis-scaled bar."""
+    import re
+
+    chart = ChartData(
+        chart_type="bar",
+        title="Drivers",
+        x_axis=ChartAxis(label="account", key="account"),
+        y_axes=[ChartAxis(label="amount", key="amount", color="#6366f1")],
+        data=[
+            {"account": "Revenue", "amount": 100.0},
+            {"account": "Expenses", "amount": -250.0},
+            {"account": "Other", "amount": 50.0},
+        ],
+    )
+    svg = render_chart_svg(chart)
+    assert svg.startswith("<svg") and "</svg>" in svg
+    assert 'height="-' not in svg  # no negative-height rects
+    # every bar rect stays within the SVG viewport (valid, non-negative geometry)
+    for m in re.finditer(r'<rect [^>]*y="(-?[\d.]+)"[^>]*height="(-?[\d.]+)"', svg):
+        y, h = float(m.group(1)), float(m.group(2))
+        assert h >= 0
+        assert -1 <= y <= 381 and y + h <= 381  # _H == 380, small tolerance
+
+
+def test_all_zero_series_baseline_at_bottom_not_top():
+    # A zero-activity period (all amounts 0) must draw its baseline at the BOTTOM with
+    # zero-height bars, not collapse the baseline to the top of the plot.
+    import re
+
+    chart = ChartData(
+        chart_type="bar",
+        title="Zero",
+        x_axis=ChartAxis(label="k", key="k"),
+        y_axes=[ChartAxis(label="v", key="v", color="#6366f1")],
+        data=[{"k": "A", "v": 0.0}, {"k": "B", "v": 0.0}],
+    )
+    svg = render_chart_svg(chart)
+    m = re.search(r'<line x1="\d+" y1="([\d.]+)"', svg)  # the baseline axis line
+    assert m
+    assert float(m.group(1)) > 300  # near the bottom (plot bottom ~324), not _PAD_T (48)
+
+
+def test_num_coerces_non_finite_to_zero():
+    from app.services.report.report_charts import _num
+
+    assert _num({"v": float("nan")}, "v") == 0.0
+    assert _num({"v": float("inf")}, "v") == 0.0
+    assert _num({"v": float("-inf")}, "v") == 0.0
+    assert _num({"v": 42}, "v") == 42.0
+
+
+def test_pie_handles_negative_values_without_nan():
+    chart = ChartData(
+        chart_type="pie",
+        title="Pie",
+        x_axis=ChartAxis(label="k", key="k"),
+        y_axes=[ChartAxis(label="v", key="v")],
+        data=[{"k": "A", "v": 100.0}, {"k": "B", "v": -50.0}],
+    )
+    svg = render_chart_svg(chart)
+    assert svg.startswith("<svg")
+    assert "nan" not in svg.lower()  # negative fractions must not produce NaN arc coordinates
+    assert svg.count("<path") == 2  # two real magnitude slices (|100|, |50|), neither degenerate
+
+
+def test_pie_single_slice_renders_full_circle():
+    # A single slice (or one slice ~100%) is a degenerate arc (coincident endpoints) — it
+    # must render as a full <circle>, not a blank/empty path.
+    chart = ChartData(
+        chart_type="pie",
+        title="One",
+        x_axis=ChartAxis(label="k", key="k"),
+        y_axes=[ChartAxis(label="v", key="v")],
+        data=[{"k": "A", "v": 100.0}],
+    )
+    svg = render_chart_svg(chart)
+    assert "<circle" in svg
+
+
+def test_all_negative_bar_series_renders_valid_bars():
+    chart = ChartData(
+        chart_type="bar",
+        title="AllNeg",
+        x_axis=ChartAxis(label="k", key="k"),
+        y_axes=[ChartAxis(label="v", key="v", color="#6366f1")],
+        data=[{"k": "A", "v": -10.0}, {"k": "B", "v": -40.0}],
+    )
+    svg = render_chart_svg(chart)
+    assert 'height="-' not in svg
+    assert svg.count('fill="#6366f1"') == 2  # both bars drawn
+
+
 def test_unsupported_type_is_placeholder_not_crash():
     c = _bar()
     c.chart_type = "histogram"
