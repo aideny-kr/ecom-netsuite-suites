@@ -8,11 +8,10 @@ from typing import Any
 # in-turn full-payload sidecar. A broad SuiteQL turn can return up to
 # NETSUITE_SUITEQL_MAX_ROWS (50k) rows, which would bake multi-MB JSONB into a
 # single Postgres row (risking the Supabase 2-min INSERT timeout) on an ORDINARY
-# turn. Nothing downstream consumes >2000 rows — report tables cap at 2000
-# (report_service._MAX_REPORT_TABLE_ROWS, which imports THIS constant so the two
-# can never drift) and charts at 100. We cap the STORED rows here while keeping
-# the TRUE row_count + truncated=True so render_report_html still shows the
-# "Showing first rows of N" note.
+# turn. This is the STORAGE cap; report rendering curates much further (report_service
+# keeps only the first _REPORT_TABLE_TOP_K rows per table, charts at 100). We cap the
+# STORED rows here while keeping the TRUE row_count + truncated=True so render_report_html
+# still discloses the truncation.
 MAX_STORED_PAYLOAD_ROWS = 2000
 
 

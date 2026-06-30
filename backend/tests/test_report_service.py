@@ -154,12 +154,90 @@ def test_assemble_spec_no_chart_for_non_numeric_table():
     assert [s["type"] for s in spec["sections"]] == ["table"]  # nothing numeric → no forced chart
 
 
+def test_auto_chart_uses_only_currency_columns_not_dimension_columns():
+    # A leading numeric DIMENSION (year) must NOT be auto-charted; only the tagged money
+    # column. Otherwise the year (~2026) plots as a giant misleading bar alongside amount.
+    payload = {
+        "columns": ["account", "year", "amount"],
+        "rows": [["A", 2026, 100.0], ["B", 2026, 200.0]],
+        "row_count": 2,
+        "currency_columns": ["amount"],
+    }
+    spec = assemble_spec("R", [{"type": "table", "result_id": "r1"}], lambda _rid: payload)
+    chart = next(s for s in spec["sections"] if s["type"] == "chart")
+    # the chart's y-axis is amount only — 'year' must not appear as a charted series label
+    assert "amount" in chart["svg"]
+    assert ">year<" not in chart["svg"]  # year is not a y-axis series label
+
+
+def test_auto_chart_skips_ambiguous_untagged_multi_numeric():
+    # Untagged result with TWO numeric columns (a dimension + a measure) is ambiguous —
+    # auto-chart must skip rather than guess and plot the wrong series.
+    payload = {
+        "columns": ["account", "year", "amount"],
+        "rows": [["A", 2026, 100.0], ["B", 2025, 200.0]],
+        "row_count": 2,
+    }
+    spec = assemble_spec("R", [{"type": "table", "result_id": "r1"}], lambda _rid: payload)
+    assert [s["type"] for s in spec["sections"]] == ["table"]  # no auto-chart
+
+
+def test_auto_chart_single_untagged_numeric_is_charted():
+    # One unambiguous numeric measure (units) — safe to auto-chart even without a tag.
+    payload = {
+        "columns": ["product", "units"],
+        "rows": [["A", 10.0], ["B", 20.0]],
+        "row_count": 2,
+    }
+    spec = assemble_spec("R", [{"type": "table", "result_id": "r1"}], lambda _rid: payload)
+    assert [s["type"] for s in spec["sections"]] == ["table", "chart"]
+
+
+def test_auto_chart_fills_in_when_explicit_chart_errored():
+    # Model composes a table + an explicit chart for the same result, but the chart
+    # resolves to an error (e.g. > _MAX_CHART_POINTS). The auto-chart of the curated
+    # rows must still fill in, not be suppressed by the errored chart's result_id.
+    big_rows = [[f"a{i}", float(i)] for i in range(200)]  # 200 > _MAX_CHART_POINTS
+    payload = {"columns": ["account", "amount"], "rows": big_rows, "row_count": 200, "currency_columns": ["amount"]}
+    sections = [
+        {"type": "table", "result_id": "r1"},
+        {"type": "chart", "result_id": "r1", "chart_type": "bar"},  # will error: too many rows
+    ]
+    spec = assemble_spec("R", sections, lambda _rid: payload)
+    types = [s["type"] for s in spec["sections"]]
+    assert "error" in types  # the model's explicit chart errored
+    assert "chart" in types  # but a real auto-chart (curated 12 rows) still rendered
+
+
+def test_render_note_shown_for_upstream_truncated_equal_count():
+    # NetSuite-side truncation sets truncated=True with row_count == returned rows. The
+    # note must still disclose truncation (never silently render a partial table as whole).
+    payload = {
+        "columns": ["account", "amount"],
+        "rows": [["A", 1.0], ["B", 2.0]],
+        "row_count": 2,  # == shown; the TRUE total upstream is unknown/larger
+        "truncated": True,
+        "currency_columns": ["amount"],
+    }
+    spec = assemble_spec("R", [{"type": "table", "result_id": "r1"}], lambda _rid: payload)
+    html = render_report_html(spec)
+    assert "truncated" in html.lower()  # disclosure present
+
+
 def test_render_shows_top_k_of_total_note():
     rows = [[f"a{i}", float(i)] for i in range(40)]
     payload = {"columns": ["account", "amount"], "rows": rows, "row_count": 40, "currency_columns": ["amount"]}
     spec = assemble_spec("R", [{"type": "table", "result_id": "r1"}], lambda _rid: payload)
     html = render_report_html(spec)
     assert "of 40" in html  # the note references the true total, not the shown count
+
+
+def test_coerce_number_rejects_non_finite_literals():
+    from app.services.report.report_service import _coerce_number
+
+    assert _coerce_number("100") == 100.0
+    for junk in ("NaN", "Infinity", "-Infinity", "inf", "nan"):
+        assert _coerce_number(junk) is None  # never a nan/inf bar
 
 
 def test_fill_placeholders_injects_frozen_values():
