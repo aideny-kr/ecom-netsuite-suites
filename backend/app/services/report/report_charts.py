@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import re
 from html import escape
 
@@ -49,9 +50,12 @@ def _frame(body: str, title: str) -> str:
 
 def _num(row: dict, key: str) -> float:
     try:
-        return float(row.get(key, 0) or 0)
+        n = float(row.get(key, 0) or 0)
     except (TypeError, ValueError):
         return 0.0
+    # A non-finite value (NaN/Inf — possible via a prebuilt chart_data payload that skips
+    # the tabular coerce guard) must not bake a NaN/Inf coordinate into the SVG.
+    return n if math.isfinite(n) else 0.0
 
 
 def _value_range(rows: list, series: list) -> tuple[float, float, float]:
@@ -72,7 +76,9 @@ def _bars(c: ChartData) -> str:
     plot_h = _H - _PAD_T - _PAD_B
     bottom = _PAD_T + plot_h
     vmax, vmin, span = _value_range(rows, series)
-    base_y = _PAD_T + plot_h * (vmax / span)  # y of value 0 (the baseline)
+    # y of value 0 (the baseline). All-zero data (vmax==vmin==0) → baseline at the BOTTOM
+    # with zero-height bars, not collapsed to the top.
+    base_y = bottom if vmax == vmin else _PAD_T + plot_h * (vmax / span)
     group_w = plot_w / len(rows)
     bar_w = group_w / (len(series) + 1)
     out = [
@@ -115,10 +121,12 @@ def _lines(c: ChartData, area: bool) -> str:
     plot_w = _W - _PAD_L - _PAD_R
     plot_h = _H - _PAD_T - _PAD_B
     bottom = _PAD_T + plot_h
-    vmax, _vmin, span = _value_range(rows, series)
-    base_y = _PAD_T + plot_h * (vmax / span)  # y of value 0
+    vmax, vmin, span = _value_range(rows, series)
+    base_y = bottom if vmax == vmin else _PAD_T + plot_h * (vmax / span)  # y of value 0
 
     def _y(v: float) -> float:
+        if vmax == vmin:
+            return bottom
         return _PAD_T + plot_h * (vmax - v) / span
 
     step = plot_w / max(len(rows) - 1, 1)
@@ -147,17 +155,18 @@ def _lines(c: ChartData, area: bool) -> str:
 
 
 def _pie(c: ChartData) -> str:
-    import math
-
     rows = c.data
     key = c.y_axes[0].key if c.y_axes else None
     if not rows or not key:
         return ""
-    total = sum(_num(r, key) for r in rows) or 1
+    # A pie shows magnitude composition: use |value| so a negative datum is a real slice
+    # (a signed fraction would draw an inverted/overlapping arc). Financial data has
+    # negatives, and an explicit `pie` over it must still render sane slices.
+    total = sum(abs(_num(r, key)) for r in rows) or 1
     cx, cy, rad = _W / 2, _H / 2 + 10, 130
     out, ang = [], -math.pi / 2
     for i, r in enumerate(rows):
-        frac = _num(r, key) / total
+        frac = abs(_num(r, key)) / total
         a2 = ang + frac * 2 * math.pi
         large = 1 if frac > 0.5 else 0
         x1, y1 = cx + rad * math.cos(ang), cy + rad * math.sin(ang)

@@ -225,8 +225,14 @@ def _section_html(s: dict) -> str:
         # the upstream reported row_count == shown (e.g. NetSuite-side fetch truncation,
         # true total unknown), still disclose without a contradictory "first N of N".
         if s.get("truncated"):
-            total = s.get("row_count")
-            if isinstance(total, int) and total > len(rows):
+            # row_count may arrive as an int or a numeric string (some MCP shapes); coerce
+            # so we still name the true total rather than dropping to the generic note.
+            raw_total = s.get("row_count")
+            try:
+                total = int(raw_total) if not isinstance(raw_total, bool) else None
+            except (TypeError, ValueError):
+                total = None
+            if total is not None and total > len(rows):
                 note = f'<p class="foot">Showing first {len(rows)} of {escape(str(total))} rows.</p>'
             else:
                 note = f'<p class="foot">Showing first {len(rows)} rows (results truncated).</p>'

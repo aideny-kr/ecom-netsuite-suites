@@ -53,6 +53,46 @@ def test_bar_renders_negative_values_without_invalid_rects():
         assert -1 <= y <= 381 and y + h <= 381  # _H == 380, small tolerance
 
 
+def test_all_zero_series_baseline_at_bottom_not_top():
+    # A zero-activity period (all amounts 0) must draw its baseline at the BOTTOM with
+    # zero-height bars, not collapse the baseline to the top of the plot.
+    import re
+
+    chart = ChartData(
+        chart_type="bar",
+        title="Zero",
+        x_axis=ChartAxis(label="k", key="k"),
+        y_axes=[ChartAxis(label="v", key="v", color="#6366f1")],
+        data=[{"k": "A", "v": 0.0}, {"k": "B", "v": 0.0}],
+    )
+    svg = render_chart_svg(chart)
+    m = re.search(r'<line x1="\d+" y1="([\d.]+)"', svg)  # the baseline axis line
+    assert m
+    assert float(m.group(1)) > 300  # near the bottom (plot bottom ~324), not _PAD_T (48)
+
+
+def test_num_coerces_non_finite_to_zero():
+    from app.services.report.report_charts import _num
+
+    assert _num({"v": float("nan")}, "v") == 0.0
+    assert _num({"v": float("inf")}, "v") == 0.0
+    assert _num({"v": float("-inf")}, "v") == 0.0
+    assert _num({"v": 42}, "v") == 42.0
+
+
+def test_pie_handles_negative_values_without_nan():
+    chart = ChartData(
+        chart_type="pie",
+        title="Pie",
+        x_axis=ChartAxis(label="k", key="k"),
+        y_axes=[ChartAxis(label="v", key="v")],
+        data=[{"k": "A", "v": 100.0}, {"k": "B", "v": -50.0}],
+    )
+    svg = render_chart_svg(chart)
+    assert svg.startswith("<svg")
+    assert "nan" not in svg.lower()  # negative fractions must not produce NaN arc coordinates
+
+
 def test_all_negative_bar_series_renders_valid_bars():
     chart = ChartData(
         chart_type="bar",

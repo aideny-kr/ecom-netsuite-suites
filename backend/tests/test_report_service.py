@@ -232,6 +232,21 @@ def test_render_shows_top_k_of_total_note():
     assert "of 40" in html  # the note references the true total, not the shown count
 
 
+def test_render_note_with_string_row_count_shows_total():
+    # Some MCP shapes serialize row_count as a numeric STRING; the note must still name
+    # the true total ("of 50"), not fall back to the vague generic disclosure.
+    payload = {
+        "columns": ["account", "amount"],
+        "rows": [[f"a{i}", float(i)] for i in range(20)],
+        "row_count": "50",  # numeric string
+        "truncated": True,
+        "currency_columns": ["amount"],
+    }
+    spec = assemble_spec("R", [{"type": "table", "result_id": "r1"}], lambda _rid: payload)
+    html = render_report_html(spec)
+    assert "of 50" in html
+
+
 def test_coerce_number_rejects_non_finite_literals():
     from app.services.report.report_service import _coerce_number
 
