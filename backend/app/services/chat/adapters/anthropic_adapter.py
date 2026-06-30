@@ -28,22 +28,31 @@ def _apply_thinking(
 ) -> None:
     """Mutate `kwargs` to enable Anthropic thinking for this turn, MODEL-GATED.
 
-    - none / forced tool_choice → no thinking. Thinking (either mode) is INCOMPATIBLE
-      with a forced tool_choice (type tool/any) — sending both returns HTTP 400 — so a
-      forced tool suppresses thinking regardless of the requested level.
+    - SUPPRESS (level none / forced tool_choice): thinking off. Thinking (either mode)
+      is INCOMPATIBLE with a forced tool_choice (type tool/any) — both → HTTP 400. On
+      ADAPTIVE-DEFAULT models (Sonnet 5) thinking is ON unless explicitly disabled, so
+      omitting is NOT enough — we must send thinking={type:disabled}. (Legacy/Haiku
+      default to no thinking when omitted.) This is load-bearing for the kill-switch,
+      simple/chitchat turns, AND forced-tool turns (plan-mode clarify).
     - ADAPTIVE models (Sonnet 5, Sonnet 4.6, Opus 4.6+, Fable) → thinking={type:adaptive}
       + output_config.effort (low..xhigh). budget_tokens/temperature would 400 here.
     - LEGACY models (4.5 / 4.0 / 4.1) → thinking={type:enabled,budget_tokens} + temperature=1
       + max_tokens reserved on top of the budget. (effort would error on these.)
     - HAIKU → no thinking (unsupported).
     """
+    mode = _thinking.thinking_mode(model)
+
     if thinking_level in (None, "none") or _thinking.is_forced_tool_choice(tool_choice):
+        # Adaptive-default models (Sonnet 5) think unless explicitly disabled —
+        # omitting leaves thinking ON. Legacy/Haiku are off-by-default when omitted.
+        if mode == "adaptive":
+            kwargs["thinking"] = {"type": "disabled"}
         return
 
-    mode = _thinking.thinking_mode(model)
     if mode == "adaptive":
         effort = _thinking.anthropic_effort(thinking_level)
         if effort is None:
+            kwargs["thinking"] = {"type": "disabled"}
             return
         kwargs["thinking"] = {"type": "adaptive"}
         output_config = dict(kwargs.get("output_config") or {})

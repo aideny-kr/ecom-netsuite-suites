@@ -131,7 +131,9 @@ async def test_no_thinking_for_haiku():
 
 
 @pytest.mark.asyncio
-async def test_thinking_level_none_omits_thinking():
+async def test_none_level_disables_thinking_on_adaptive_model():
+    """Adaptive-default models (Sonnet 5 / 4.6) THINK unless explicitly disabled —
+    so a none-level turn must send thinking={type:disabled}, not omit it."""
     adapter = AnthropicAdapter(api_key="sk-test")
     captured = {}
 
@@ -150,8 +152,33 @@ async def test_thinking_level_none_omits_thinking():
         thinking_level="none",
     )
 
-    assert "thinking" not in captured
+    assert captured["thinking"] == {"type": "disabled"}
     assert "temperature" not in captured
+    assert "output_config" not in captured
+
+
+@pytest.mark.asyncio
+async def test_none_level_omits_thinking_on_legacy_model():
+    """Legacy models default to no thinking when omitted — so none-level sends nothing."""
+    adapter = AnthropicAdapter(api_key="sk-test")
+    captured = {}
+
+    async def fake_create(**kwargs):
+        captured.update(kwargs)
+        return _fake_message([_block("text", text="hi")])
+
+    adapter._client = MagicMock()
+    adapter._client.messages.create = AsyncMock(side_effect=fake_create)
+
+    await adapter.create_message(
+        model="claude-sonnet-4-5-20250929",
+        max_tokens=16384,
+        system="s",
+        messages=[{"role": "user", "content": "hi"}],
+        thinking_level="none",
+    )
+
+    assert "thinking" not in captured
 
 
 @pytest.mark.asyncio
@@ -183,7 +210,8 @@ async def test_thinking_blocks_captured_and_round_tripped():
 @pytest.mark.asyncio
 async def test_thinking_suppressed_when_tool_choice_is_forced():
     """Extended thinking is incompatible with a forced tool_choice (type tool/any)
-    — Anthropic returns 400. The adapter must NOT enable thinking on those turns,
+    — Anthropic returns 400. On adaptive-default models (Sonnet 5 / 4.6) the adapter
+    must explicitly DISABLE thinking on those turns (omitting leaves it ON → 400),
     even when a thinking_level is requested (plan-mode clarify, step-0 guard)."""
     adapter = AnthropicAdapter(api_key="sk-test")
     captured = {}
@@ -204,7 +232,8 @@ async def test_thinking_suppressed_when_tool_choice_is_forced():
         thinking_level="med",
     )
 
-    assert "thinking" not in captured  # suppressed — forced tool_choice present
+    assert captured["thinking"] == {"type": "disabled"}  # explicitly off — forced tool
+    assert "output_config" not in captured
     assert captured["tool_choice"] == {"type": "tool", "name": "clarify"}
 
 
