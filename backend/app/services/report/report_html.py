@@ -221,7 +221,7 @@ def _section_html(s: dict) -> str:
         body = "".join(body_rows)
         note = ""
         if s.get("truncated"):
-            note = f'<p class="foot">Showing first rows of {escape(str(s.get("row_count", "")))}.</p>'
+            note = f'<p class="foot">Showing top {len(rows)} of {escape(str(s.get("row_count", "")))} rows.</p>'
         return (
             f'<div class="nb-card svg-wrap"><table><thead><tr>{cols}</tr></thead>'
             f"<tbody>{body}</tbody></table>{note}</div>"

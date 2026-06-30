@@ -36,6 +36,14 @@ _MAX_CHART_POINTS = 100
 # Probe at most this many rows when deciding which columns are chartable y-axes — a column
 # qualifies if ANY non-null cell in this window parses as a number (column-wide, not row[0]).
 _CHART_NUMERIC_PROBE_ROWS = 50
+# A report presents the TOP-K most material rows ("top numbers only"), never the raw
+# detail dump. Product intent (2026-06-30): every report — financial AND data-analytics —
+# is a summary + chart, not a long table. Curation ranks by |primary value| magnitude so
+# the biggest drivers survive (generic; no statement-specific logic). The model will not
+# reliably curate from prompt guidance alone (proven live), so the resolver enforces it.
+_REPORT_TABLE_TOP_K = 12
+# A table needs at least this many rows to be worth auto-charting.
+_MIN_AUTO_CHART_ROWS = 2
 Resolver = Callable[[str], dict]
 
 
@@ -88,6 +96,88 @@ def _coerce_number(value) -> float | None:
         return None
 
 
+def _primary_value_index(cols: list, rows: list, currency_columns: list) -> int | None:
+    """The column to rank table rows by: the first currency-tagged column, else the
+    first column that probes numeric (skipping col 0, the label/x-axis), else col 0 if
+    it is itself numeric. None when nothing is numeric."""
+    for c in currency_columns:
+        if c in cols:
+            return cols.index(c)
+    probe = rows[:_CHART_NUMERIC_PROBE_ROWS]
+    for i in range(1, len(cols)):
+        if any(i < len(r) and _coerce_number(r[i]) is not None for r in probe):
+            return i
+    if cols and any(r and _coerce_number(r[0]) is not None for r in probe):
+        return 0
+    return None
+
+
+def _curate_table_rows(cols: list, rows: list, currency_columns: list, k: int) -> tuple[list, bool]:
+    """Keep the top-K most material rows by |primary value| magnitude ("top numbers").
+
+    Returns ``(rows, curated)``. A result at or under K is returned unchanged
+    (curated=False). With no numeric basis to rank by, falls back to the first K rows.
+    """
+    if len(rows) <= k:
+        return rows, False
+    vidx = _primary_value_index(cols, rows, currency_columns)
+    if vidx is None:
+        return rows[:k], True
+
+    def _mag(r):
+        n = _coerce_number(r[vidx]) if vidx < len(r) else None
+        return abs(n) if n is not None else float("-inf")
+
+    return sorted(rows, key=_mag, reverse=True)[:k], True
+
+
+def _build_tabular_chart(cols: list, rows: list, *, chart_type: str | None, title: str | None) -> "ChartData | None":
+    """Build ChartData from a tabular payload: first column = x-axis, every column that
+    probes numeric = a y-axis series. Coerces charted cells ($,%,commas → float; a
+    non-parsing cell → 0.0). Returns None when nothing is chartable. Shared by the
+    explicit `chart` section branch and the auto-chart injector."""
+    if not cols or not rows:
+        return None
+    probe = rows[:_CHART_NUMERIC_PROBE_ROWS]
+    numeric_cols = [
+        c
+        for i, c in enumerate(cols[1:], start=1)
+        if any(i < len(r) and _coerce_number(r[i]) is not None for r in probe)
+    ]
+    if not numeric_cols:
+        return None
+    numeric_set = set(numeric_cols)
+
+    def _row_dict(r):
+        d = dict(zip(cols, r))
+        for c in numeric_set:
+            d[c] = _coerce_number(d.get(c)) or 0.0
+        return d
+
+    return ChartData(
+        chart_type=chart_type or "bar",
+        title=title or f"{numeric_cols[0]} by {cols[0]}",
+        x_axis={"label": cols[0], "key": cols[0]},
+        y_axes=[{"label": c, "key": c} for c in numeric_cols],
+        data=[_row_dict(r) for r in rows],
+    )
+
+
+def _auto_chart_section(resolved: dict) -> dict | None:
+    """A bar chart of a resolved table's (already top-K-curated) rows, so every
+    data-heavy report visualizes its drivers even when the model composed no chart.
+    None when the table is too small or has nothing numeric to plot."""
+    if resolved.get("type") != "table":
+        return None
+    rows = resolved.get("rows", [])
+    if len(rows) < _MIN_AUTO_CHART_ROWS:
+        return None
+    chart = _build_tabular_chart(resolved.get("columns", []), rows, chart_type="bar", title=None)
+    if chart is None:
+        return None
+    return {"type": "chart", "svg": render_chart_svg(chart), "chart_type": chart.chart_type}
+
+
 def fill_placeholders(text: str, resolver: Resolver) -> str:
     def _sub(m: re.Match) -> str:
         kind, ref = m.group(1), m.group(2).strip()
@@ -119,23 +209,24 @@ def _resolve_data_section(s: dict, resolver: Resolver) -> dict:
             idx = [cols.index(c) for c in s["select"] if c in cols]
             cols = [cols[i] for i in idx]
             rows = [[r[i] for i in idx] for r in rows]
-        # The TRUE pre-cap count drives the "Showing first rows of N" note: prefer the
-        # upstream tool's reported row_count, else the resolved row length.
+        # The TRUE pre-curation count drives the "top K of N" note: prefer the upstream
+        # tool's reported row_count, else the resolved row length.
         true_row_count = payload.get("row_count", len(rows))
         upstream_truncated = bool(payload.get("truncated", False))
-        # Cap rows so a huge result doesn't bloat the JSONB spec / freeze the viewer.
-        capped = len(rows) > _MAX_REPORT_TABLE_ROWS
-        if capped:
+        # Storage anti-bloat hard cap (defense-in-depth; the payload is already capped).
+        if len(rows) > _MAX_REPORT_TABLE_ROWS:
             rows = rows[:_MAX_REPORT_TABLE_ROWS]
         # Carry the producer's currency-column tags so the renderer accounting-formats
         # only those columns; narrow to the columns that survived `select`.
         currency_columns = [c for c in (payload.get("currency_columns") or []) if c in cols]
+        # Curate to the TOP-K most material rows — a report shows top numbers, not a dump.
+        rows, curated = _curate_table_rows(cols, rows, currency_columns, _REPORT_TABLE_TOP_K)
         return {
             "type": "table",
             "columns": cols,
             "rows": rows,
             "row_count": true_row_count,
-            "truncated": upstream_truncated or capped,
+            "truncated": upstream_truncated or curated,
             "currency_columns": currency_columns,
         }
     if s["type"] == "metric_headline":
@@ -176,38 +267,9 @@ def _resolve_data_section(s: dict, resolver: Resolver) -> dict:
                     "type": "error",
                     "reason": f"too many rows to chart ({len(rows)} > {_MAX_CHART_POINTS}) — aggregate first",
                 }
-            # Restrict y-axes to NUMERIC columns only, probing the WHOLE column (a window
-            # of the first rows), not just rows[0]: a column that is NULL/blank in the
-            # first row but numeric later (e.g. an opening period with no data yet) is a
-            # valid y-axis. A column qualifies if AT LEAST ONE non-null cell in the probe
-            # window parses as a number. The first column is the x-axis.
-            probe = rows[:_CHART_NUMERIC_PROBE_ROWS]
-            numeric_cols = [
-                c
-                for i, c in enumerate(cols[1:], start=1)
-                if any(i < len(r) and _coerce_number(r[i]) is not None for r in probe)
-            ]
-            if not numeric_cols:
+            chart = _build_tabular_chart(cols, rows, chart_type=s.get("chart_type"), title=s.get("label") or "Chart")
+            if chart is None:
                 return {"type": "error", "reason": "no numeric columns to chart"}
-            numeric_set = set(numeric_cols)
-
-            def _row_dict(r):
-                d = dict(zip(cols, r))
-                # The column already qualified as numeric. Coerce each charted cell
-                # (strip $,%,commas) so the renderer plots real bars instead of
-                # float('$1,000')->0.0 flat bars; a non-parsing cell (e.g. a NULL in an
-                # otherwise-numeric column) coerces to 0.0 — a real zero-height bar.
-                for c in numeric_set:
-                    d[c] = _coerce_number(d.get(c)) or 0.0
-                return d
-
-            chart = ChartData(
-                chart_type=s.get("chart_type") or "bar",
-                title=s.get("label") or "Chart",
-                x_axis={"label": cols[0] if cols else "x", "key": cols[0] if cols else "x"},
-                y_axes=[{"label": c, "key": c} for c in numeric_cols],
-                data=[_row_dict(r) for r in rows],
-            )
         else:
             chart = ChartData.model_validate(cd)
             if s.get("chart_type"):
@@ -224,6 +286,8 @@ def assemble_spec(title: str, sections: list[dict], resolver: Resolver) -> dict:
     # reliably runs on the real path. Without it, a `text` section would fall through
     # to the heading/divider else-branch below and be dropped SILENTLY by the renderer.
     sections = normalize_and_validate_sections(sections)  # raises loudly on a truly-unknown type
+    # result_ids the model already charted — don't auto-add a redundant second chart.
+    charted_ids = {s.get("result_id") for s in sections if s.get("type") == "chart"}
     provenance_sources: list[str] = []
     out_sections: list[dict] = []
     for s in sections:
@@ -235,6 +299,14 @@ def assemble_spec(title: str, sections: list[dict], resolver: Resolver) -> dict:
             out_sections.append(resolved)
             if resolved.get("type") == "metric_headline" and resolved.get("definition_version") is not None:
                 provenance_sources.append(f"metric:{s['result_id']}@v{resolved['definition_version']}")
+            # Guarantee a chart: a report visualizes its drivers. If the model composed a
+            # `table` but no chart for the same result, auto-append a bar chart of the
+            # curated top-K rows — prompt guidance alone does not reliably produce one.
+            if t == "table" and s.get("result_id") not in charted_ids:
+                auto = _auto_chart_section(resolved)
+                if auto is not None:
+                    out_sections.append(auto)
+                    charted_ids.add(s.get("result_id"))
         else:  # heading / divider
             out_sections.append(s)
     return {"title": title, "sections": out_sections, "provenance": {"sources": provenance_sources}}

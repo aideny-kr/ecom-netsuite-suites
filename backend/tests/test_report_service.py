@@ -5,6 +5,8 @@ from pydantic import ValidationError
 
 from app.services.report.report_html import render_report_html
 from app.services.report.report_service import (
+    _REPORT_TABLE_TOP_K,
+    _resolve_data_section,
     assemble_spec,
     fill_placeholders,
 )
@@ -88,6 +90,76 @@ def test_assemble_spec_still_raises_loudly_on_truly_unknown_type():
     # fast so the agent retries (we do not guess open-endedly).
     with pytest.raises(ValidationError):
         assemble_spec("R", [{"type": "paragraph", "markdown": "x"}], _resolver)
+
+
+# --- Deterministic curation: top-numbers + guaranteed chart -----------------
+# Product intent (2026-06-30): EVERY report (financial + data-analytics) must be a
+# summary — top numbers only + a chart — NOT a raw data dump. Prompt-first guidance
+# proved insufficient live (an 866-row, 0-chart report shipped). So the resolver
+# curates large tables to the top-K most material rows, and assemble_spec guarantees
+# a chart renders for any chartable table the model didn't already chart.
+
+
+def test_resolve_table_curates_large_result_to_top_k_by_magnitude():
+    # 30 rows, amounts 0..29; the curated table keeps the K LARGEST by |amount|.
+    rows = [[f"acct{i}", float(i)] for i in range(30)]
+    payload = {"columns": ["account", "amount"], "rows": rows, "row_count": 30, "currency_columns": ["amount"]}
+    resolved = _resolve_data_section({"type": "table", "result_id": "r1"}, lambda _rid: payload)
+    assert len(resolved["rows"]) == _REPORT_TABLE_TOP_K
+    assert resolved["truncated"] is True
+    assert resolved["row_count"] == 30  # true total preserved for the "of N" note
+    shown = sorted((r[1] for r in resolved["rows"]), reverse=True)
+    assert shown[0] == 29.0  # biggest kept
+    assert shown[-1] == float(30 - _REPORT_TABLE_TOP_K)  # smallest kept = the K-th largest
+
+
+def test_resolve_small_table_not_curated():
+    rows = [["A", 1.0], ["B", 2.0]]
+    payload = {"columns": ["account", "amount"], "rows": rows, "row_count": 2, "currency_columns": ["amount"]}
+    resolved = _resolve_data_section({"type": "table", "result_id": "r1"}, lambda _rid: payload)
+    assert len(resolved["rows"]) == 2
+    assert resolved["truncated"] is False
+
+
+def test_assemble_spec_auto_injects_chart_after_chartable_table():
+    payload = {
+        "columns": ["account", "amount"],
+        "rows": [["A", 10.0], ["B", 20.0], ["C", 30.0]],
+        "row_count": 3,
+        "currency_columns": ["amount"],
+    }
+    spec = assemble_spec("R", [{"type": "table", "result_id": "r1"}], lambda _rid: payload)
+    assert [s["type"] for s in spec["sections"]] == ["table", "chart"]
+    assert "<svg" in spec["sections"][1]["svg"]
+
+
+def test_assemble_spec_does_not_double_chart_when_model_already_charted():
+    payload = {
+        "columns": ["account", "amount"],
+        "rows": [["A", 10.0], ["B", 20.0]],
+        "row_count": 2,
+        "currency_columns": ["amount"],
+    }
+    sections = [
+        {"type": "table", "result_id": "r1"},
+        {"type": "chart", "result_id": "r1", "chart_type": "bar"},
+    ]
+    spec = assemble_spec("R", sections, lambda _rid: payload)
+    assert [s["type"] for s in spec["sections"]].count("chart") == 1  # no auto-inject
+
+
+def test_assemble_spec_no_chart_for_non_numeric_table():
+    payload = {"columns": ["name", "note"], "rows": [["A", "x"], ["B", "y"]], "row_count": 2}
+    spec = assemble_spec("R", [{"type": "table", "result_id": "r1"}], lambda _rid: payload)
+    assert [s["type"] for s in spec["sections"]] == ["table"]  # nothing numeric → no forced chart
+
+
+def test_render_shows_top_k_of_total_note():
+    rows = [[f"a{i}", float(i)] for i in range(40)]
+    payload = {"columns": ["account", "amount"], "rows": rows, "row_count": 40, "currency_columns": ["amount"]}
+    spec = assemble_spec("R", [{"type": "table", "result_id": "r1"}], lambda _rid: payload)
+    html = render_report_html(spec)
+    assert "of 40" in html  # the note references the true total, not the shown count
 
 
 def test_fill_placeholders_injects_frozen_values():
@@ -229,19 +301,18 @@ def test_stored_payload_cap_shares_one_constant():
     assert report_service._MAX_REPORT_TABLE_ROWS == MAX_STORED_PAYLOAD_ROWS == 2000
 
 
-def test_table_section_caps_rows_at_max():
-    """Gate E (finding #14): report.compose resolves the FULL uncapped payload, so a
-    50k-row SuiteQL result would bake a multi-MB JSONB spec + HTML into one row and
-    freeze the viewer. Cap the rendered table at _MAX_REPORT_TABLE_ROWS, mark the
-    section truncated, and keep the TRUE row_count so the HTML renders the
-    'Showing first rows of N' note."""
+def test_table_section_curated_to_top_k_true_count_preserved():
+    """A large result is curated to the top-K most material rows (top numbers, not a
+    dump), marked truncated, with the TRUE row_count preserved so the HTML renders the
+    'top K of N' note. The _MAX_REPORT_TABLE_ROWS storage cap remains as a
+    defense-in-depth anti-bloat backstop applied BEFORE curation (finding #14)."""
     from app.services.report import report_service
 
-    cap = report_service._MAX_REPORT_TABLE_ROWS
     big = {
         "columns": ["Period", "Revenue"],
         "rows": [[str(i), str(i * 10)] for i in range(2500)],
         "row_count": 2500,
+        "currency_columns": ["Revenue"],
     }
 
     def resolver(rid):
@@ -251,13 +322,12 @@ def test_table_section_caps_rows_at_max():
     spec = assemble_spec(title="Big", sections=sections, resolver=resolver)
     tbl = next(s for s in spec["sections"] if s["type"] == "table")
 
-    assert len(tbl["rows"]) == cap
-    assert cap == 2000
+    assert len(tbl["rows"]) == report_service._REPORT_TABLE_TOP_K
     assert tbl["truncated"] is True
-    assert tbl["row_count"] == 2500  # the TRUE pre-cap count is preserved
+    assert tbl["row_count"] == 2500  # the TRUE pre-curation count is preserved
     # the rendered HTML surfaces the truncation note with the true count
     html = render_report_html(spec, accent_hsl="0 0% 0%")
-    assert "Showing first rows of 2500" in html
+    assert "of 2500" in html
 
 
 def test_table_section_under_cap_not_truncated():
