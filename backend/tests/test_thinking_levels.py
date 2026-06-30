@@ -49,12 +49,16 @@ def test_is_forced_tool_choice():
 
 
 def test_anthropic_effort_mapping():
-    # Anthropic output_config.effort supports xhigh (unlike the OpenAI enum).
     assert thinking.anthropic_effort("none") is None
     assert thinking.anthropic_effort("low") == "low"
     assert thinking.anthropic_effort("med") == "medium"
     assert thinking.anthropic_effort("high") == "high"
-    assert thinking.anthropic_effort("xhigh") == "xhigh"
+    # xhigh is MODEL-AWARE: valid on Sonnet 5 / Opus 4.7+ / Fable; on adaptive models
+    # that lack xhigh (Sonnet 4.6 / Opus 4.6) it maps to "max" (xhigh would 400 there).
+    assert thinking.anthropic_effort("xhigh", "claude-sonnet-5") == "xhigh"
+    assert thinking.anthropic_effort("xhigh", "claude-opus-4-8") == "xhigh"
+    assert thinking.anthropic_effort("xhigh", "claude-sonnet-4-6") == "max"
+    assert thinking.anthropic_effort("xhigh", "claude-opus-4-6") == "max"
 
 
 def test_thinking_mode_classifies_models():
@@ -67,17 +71,17 @@ def test_thinking_mode_classifies_models():
         "claude-fable-5",
     ]:
         assert thinking.thinking_mode(m) == "adaptive", m
-    # Legacy extended thinking (budget_tokens): 4.5 / 4.0 / 4.1.
+    # Legacy extended thinking (budget_tokens): 4.5 / 4.0 / 4.1 AND Haiku (Haiku
+    # supports extended thinking but not the effort param).
     for m in [
         "claude-sonnet-4-5-20250929",
         "claude-opus-4-5-20251101",
         "claude-sonnet-4-20250514",
         "claude-opus-4-20250514",
         "claude-opus-4-1-20250805",
+        "claude-haiku-4-5-20251001",
     ]:
         assert thinking.thinking_mode(m) == "legacy", m
-    # Haiku does no thinking.
-    assert thinking.thinking_mode("claude-haiku-4-5-20251001") == "none"
 
 
 def test_sonnet_5_is_the_anthropic_default_and_adaptive():

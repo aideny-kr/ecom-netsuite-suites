@@ -105,8 +105,9 @@ async def test_adaptive_thinking_maps_xhigh_effort():
 
 
 @pytest.mark.asyncio
-async def test_no_thinking_for_haiku():
-    """Haiku does not support thinking/effort — the adapter must send neither."""
+async def test_haiku_uses_legacy_budget_tokens():
+    """Haiku 4.5 supports extended thinking (budget_tokens) but NOT the effort param,
+    so it uses the LEGACY path — not adaptive, and not no-thinking."""
     adapter = AnthropicAdapter(api_key="sk-test")
     captured = {}
 
@@ -125,9 +126,35 @@ async def test_no_thinking_for_haiku():
         thinking_level="med",
     )
 
-    assert "thinking" not in captured
+    assert captured["thinking"] == {"type": "enabled", "budget_tokens": 6144}
+    assert captured["temperature"] == 1
     assert "output_config" not in captured
-    assert "temperature" not in captured
+
+
+@pytest.mark.asyncio
+async def test_xhigh_maps_to_max_on_sonnet_4_6():
+    """Sonnet 4.6 supports 'max' but NOT 'xhigh' effort — so a turn that escalates to
+    xhigh on a BYOK 4.6 tenant must send effort='max', not 'xhigh' (which would 400)."""
+    adapter = AnthropicAdapter(api_key="sk-test")
+    captured = {}
+
+    async def fake_create(**kwargs):
+        captured.update(kwargs)
+        return _fake_message([_block("text", text="hi")])
+
+    adapter._client = MagicMock()
+    adapter._client.messages.create = AsyncMock(side_effect=fake_create)
+
+    await adapter.create_message(
+        model="claude-sonnet-4-6",
+        max_tokens=16384,
+        system="s",
+        messages=[{"role": "user", "content": "hi"}],
+        thinking_level="xhigh",
+    )
+
+    assert captured["thinking"] == {"type": "adaptive"}
+    assert captured["output_config"] == {"effort": "max"}
 
 
 @pytest.mark.asyncio

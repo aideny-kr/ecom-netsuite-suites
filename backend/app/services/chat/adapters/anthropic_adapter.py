@@ -50,7 +50,7 @@ def _apply_thinking(
         return
 
     if mode == "adaptive":
-        effort = _thinking.anthropic_effort(thinking_level)
+        effort = _thinking.anthropic_effort(thinking_level, model)
         if effort is None:
             kwargs["thinking"] = {"type": "disabled"}
             return
@@ -67,7 +67,6 @@ def _apply_thinking(
         kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
         kwargs["temperature"] = 1
         kwargs["max_tokens"] = budget + max_tokens
-    # mode == "none" (Haiku): leave kwargs untouched — no thinking.
 
 
 def _extract_thinking_blocks(content) -> list[dict]:
