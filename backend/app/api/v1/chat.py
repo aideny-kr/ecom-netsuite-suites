@@ -394,7 +394,16 @@ async def send_message(
     return {"run_id": run_id, "session_id": str(session_id)}
 
 
-_BACKGROUND_TASK_TIMEOUT = 300  # 5 minutes total for any chat turn
+# 10 minutes total for any chat turn — deliberately generous so end-to-end work
+# (multi-statement reports: ~9 NetSuite calls at 5-21s each ≈ ~135s of tool time,
+# plus several thinking turns) completes WITHOUT being cut off mid-thought. The old
+# 300s cap gave up on legitimate report work. Let the model think through; this still
+# bounds a truly runaway turn. Pairs with the "low" default effort (fast but still
+# reasons) so reports land well inside this window.
+# Safe with the SSE proxy: the stream emits a `: heartbeat` every 15s (below), so the
+# connection never idles long enough to trip nginx proxy_read_timeout, regardless of
+# total task duration.
+_BACKGROUND_TASK_TIMEOUT = 600
 
 
 async def _run_chat_pipeline(

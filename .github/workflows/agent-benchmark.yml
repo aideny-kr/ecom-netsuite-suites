@@ -15,6 +15,12 @@ on:
       # so that named-metric routing regressions are caught automatically.
       - 'backend/app/services/metrics/**'
       - 'backend/alembic/versions/080_metric_definitions.py'
+      # Chat behavior is also driven from OUTSIDE services/chat: config.py holds the
+      # default model + thinking-effort default (CHAT_THINKING_DEFAULT_LEVEL), and
+      # chat.py holds the turn timeout + orchestration entry. Without these, a
+      # thinking-effort change (e.g. the /cashflow timeout fix) bypasses the benchmark.
+      - 'backend/app/core/config.py'
+      - 'backend/app/api/v1/chat.py'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
