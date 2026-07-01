@@ -10,6 +10,7 @@ weak SVG-substring assertions have bitten this surface before.
 
 from __future__ import annotations
 
+import math
 import re
 
 from app.schemas.chart import ChartAxis, ChartData
@@ -44,7 +45,7 @@ def _rotated_labels(svg: str) -> list[str]:
 
 def _baseline_y(svg: str) -> float:
     """y of the first <line> — the zero baseline / x-axis rule the renderer draws first."""
-    return float(re.search(r'<line x1="\d+" y1="([\d.]+)"', svg).group(1))
+    return float(re.search(r'<line x1="[\d.]+" y1="([\d.]+)"', svg).group(1))
 
 
 # ---------------------------------------------------------------------------
@@ -114,3 +115,38 @@ def test_line_keeps_all_points_but_thins_labels():
     # but the x labels are thinned to a legible budget (kept endpoints, ≤ the tick cap)
     labels = _rotated_labels(svg) if "rotate(" in svg else re.findall(r'text-anchor="middle"', svg)
     assert 2 <= len(labels) <= rc._MAX_AXIS_TICKS
+
+
+# ---------------------------------------------------------------------------
+# Left-edge clip: a rotated label is END-anchored and swings DOWN-LEFT of its tick, so
+# rotation must reserve HORIZONTAL room too — not just the vertical hang. The first
+# tick on a LINE chart sits exactly at the left pad (no half-group offset like bars),
+# so a long first label is the one that clips past x=0.
+# ---------------------------------------------------------------------------
+def _first_rotated_label_left_extent(svg: str) -> float:
+    """Leftmost x reached by the first rotated x-label (end-anchored + rotate(-deg))."""
+    m = re.search(
+        r'<text x="([\d.]+)" y="([\d.]+)"[^>]*text-anchor="end"[^>]*transform="rotate\(-(\d+)[^>]*>([^<]*)',
+        svg,
+    )
+    assert m, "expected a rotated end-anchored x label"
+    x, deg, display = float(m.group(1)), float(m.group(3)), m.group(4)
+    # end-anchored text occupies [x - w, x]; rotate(-deg) about x maps the far end to x - w*cos(deg)
+    return x - len(display) * rc._CHAR_PX * math.cos(math.radians(deg))
+
+
+def test_rotated_line_first_label_not_clipped_past_left_edge():
+    # A monthly line whose first label is long (triggers rotation). Line charts anchor
+    # the first tick at the left pad, so without horizontal compensation the end-anchored
+    # rotated label swings past x=0 and is clipped by the SVG viewport (viewBox starts at 0).
+    periods = ["September 2026"] + [f"M{i}" for i in range(2, 14)]  # 13 pts, long first label
+    left = _first_rotated_label_left_extent(render_chart_svg(_line_chart(periods)))
+    assert left >= 0, f"first line label clips past x=0 (leftmost={left:.1f})"
+
+
+def test_rotated_bar_first_label_not_clipped_past_left_edge():
+    # Bars are borderline-safe (half-group offset), but the leftmost angled label must
+    # still stay within the viewport for long labels — a regression guard.
+    cats = ["Intercompany Receivables"] + [f"Account {i}" for i in range(2, 10)]
+    left = _first_rotated_label_left_extent(render_chart_svg(_bar_chart(cats)))
+    assert left >= 0, f"first bar label clips past x=0 (leftmost={left:.1f})"

@@ -75,15 +75,19 @@ def _should_rotate(labels: list[str]) -> bool:
     return len(labels) > _ROTATE_CATEGORIES_OVER or any(len(label) > _ROTATE_LABEL_LEN_OVER for label in labels)
 
 
-def _bottom_pad(labels: list[str], rotate: bool) -> float:
-    """Bottom padding to reserve for the x labels. Horizontal labels need the base
-    ``_PAD_B``; rotated labels hang below their tick, so reserve their (ellipsis-capped)
-    vertical extent too — otherwise a long angled label overflows the SVG viewport."""
+def _label_pads(labels: list[str], rotate: bool) -> tuple[float, float]:
+    """``(left, bottom)`` padding to reserve for the x labels. Horizontal labels need only
+    the base ``_PAD_L`` / ``_PAD_B``. A rotated label is END-anchored and swings DOWN-LEFT
+    of its tick, so reserve BOTH its horizontal extent (else the leftmost long label clips
+    past ``x=0`` — line charts anchor the first tick exactly at the left pad) AND its
+    vertical extent (else a low label overflows the bottom of the SVG viewport)."""
     if not rotate:
-        return float(_PAD_B)
-    longest = max((len(_truncate_label(label)[0]) for label in labels), default=0)
-    extent = min(longest, _MAX_LABEL_CHARS) * _CHAR_PX * math.sin(math.radians(_ROTATE_DEG))
-    return _PAD_B + extent
+        return float(_PAD_L), float(_PAD_B)
+    # _truncate_label already bounds each display to ≤ _MAX_LABEL_CHARS, so no re-clamp.
+    reach = max((len(_truncate_label(label)[0]) for label in labels), default=0) * _CHAR_PX
+    rad = math.radians(_ROTATE_DEG)
+    left = max(float(_PAD_L), reach * math.cos(rad) + 6)  # +6px margin off the left edge
+    return left, _PAD_B + reach * math.sin(rad)
 
 
 def _tick_indices(n: int, k: int) -> list[int]:
@@ -96,20 +100,24 @@ def _tick_indices(n: int, k: int) -> list[int]:
     return sorted({round(i * stride) for i in range(k)})
 
 
-def _x_label(x: float, y: float, full: str, rotate: bool) -> str:
-    """One x-axis label at ``(x, y)``: ellipsized display + a ``<title>`` tooltip carrying
-    the full text when truncated; rotated ``-_ROTATE_DEG`` degrees (anchored at its tick
-    end) when the axis is rotated, else horizontal + centered."""
+def _x_values(x_key: str, rows: list[dict]) -> list[str]:
+    """The x-axis label string for each plotted row (missing key → '')."""
+    return [str(row.get(x_key, "")) for row in rows]
+
+
+def _x_label(x: float, bottom: float, full: str, rotate: bool) -> str:
+    """One x-axis label whose tick is at ``x`` on the axis line ``bottom``: ellipsized
+    display + a ``<title>`` tooltip carrying the full text when truncated; rotated
+    ``-_ROTATE_DEG`` degrees (end-anchored) when the axis is rotated, else horizontal +
+    centered. Rotated labels sit closer to the axis (they hang below it)."""
     display, truncated = _truncate_label(full)
     tip = f"<title>{escape(full)}</title>" if truncated else ""
-    if rotate:
-        return (
-            f'<text x="{x:.1f}" y="{y:.1f}" font-size="12" font-weight="600" text-anchor="end" '
-            f'fill="#111" transform="rotate(-{_ROTATE_DEG} {x:.1f} {y:.1f})">{escape(display)}{tip}</text>'
-        )
+    y = bottom + (16 if rotate else 20)
+    anchor = "end" if rotate else "middle"
+    transform = f' transform="rotate(-{_ROTATE_DEG} {x:.1f} {y:.1f})"' if rotate else ""
     return (
-        f'<text x="{x:.1f}" y="{y:.1f}" font-size="12" font-weight="600" text-anchor="middle" '
-        f'fill="#111">{escape(display)}{tip}</text>'
+        f'<text x="{x:.1f}" y="{y:.1f}" font-size="12" font-weight="600" '
+        f'text-anchor="{anchor}" fill="#111"{transform}>{escape(display)}{tip}</text>'
     )
 
 
@@ -154,10 +162,10 @@ def _bars(c: ChartData) -> str:
     capped = total_cats > _MAX_BAR_CATEGORIES
     if capped:
         rows = rows[:_MAX_BAR_CATEGORIES]
-    labels = [str(row.get(c.x_axis.key, "")) for row in rows]
+    labels = _x_values(c.x_axis.key, rows)
     rotate = _should_rotate(labels)
-    pad_b = _bottom_pad(labels, rotate)
-    plot_w = _W - _PAD_L - _PAD_R
+    pad_l, pad_b = _label_pads(labels, rotate)
+    plot_w = _W - pad_l - _PAD_R
     plot_h = _H - _PAD_T - pad_b
     bottom = _PAD_T + plot_h
     vmax, vmin, span = _value_range(rows, series)
@@ -167,10 +175,11 @@ def _bars(c: ChartData) -> str:
     group_w = plot_w / len(rows)
     bar_w = group_w / (len(series) + 1)
     out = [
-        f'<line x1="{_PAD_L}" y1="{base_y:.1f}" x2="{_W - _PAD_R}" y2="{base_y:.1f}" stroke="#000" stroke-width="2"/>'
+        f'<line x1="{pad_l:.1f}" y1="{base_y:.1f}" x2="{_W - _PAD_R}" y2="{base_y:.1f}" '
+        'stroke="#000" stroke-width="2"/>'
     ]
     for i, row in enumerate(rows):
-        gx = _PAD_L + i * group_w
+        gx = pad_l + i * group_w
         for j, s in enumerate(series):
             v = _num(row, s.key)
             h = abs(v) / span * plot_h
@@ -184,13 +193,13 @@ def _bars(c: ChartData) -> str:
                 f'<rect x="{x:.1f}" y="{y:.1f}" width="{bar_w:.1f}" height="{h:.1f}" '
                 f'fill="{color}" stroke="#000" stroke-width="2"/>'
             )
-        out.append(_x_label(gx + group_w / 2, bottom + (16 if rotate else 20), labels[i], rotate))
+        out.append(_x_label(gx + group_w / 2, bottom, labels[i], rotate))
     out.append(
-        f'<text x="{_PAD_L - 8}" y="{_PAD_T + 8}" font-size="11" text-anchor="end" fill="#444">{_fmt(vmax)}</text>'
+        f'<text x="{pad_l - 8:.1f}" y="{_PAD_T + 8}" font-size="11" text-anchor="end" fill="#444">{_fmt(vmax)}</text>'
     )
     if vmin < 0:
         out.append(
-            f'<text x="{_PAD_L - 8}" y="{bottom}" font-size="11" text-anchor="end" fill="#444">{_fmt(vmin)}</text>'
+            f'<text x="{pad_l - 8:.1f}" y="{bottom}" font-size="11" text-anchor="end" fill="#444">{_fmt(vmin)}</text>'
         )
     if capped:
         out.append(
@@ -204,13 +213,14 @@ def _lines(c: ChartData, area: bool) -> str:
     rows, series = c.data, c.y_axes
     if not rows or not series:
         return ""
-    labels = [str(r.get(c.x_axis.key, "")) for r in rows]
+    labels = _x_values(c.x_axis.key, rows)
     # Keep EVERY data point on the line, but thin the LABELS on a dense series so a long
     # monthly trend doesn't stamp an overlapping label under all 24+ points.
     ticks = _tick_indices(len(rows), _MAX_AXIS_TICKS)
-    rotate = _should_rotate([labels[i] for i in ticks])
-    pad_b = _bottom_pad([labels[i] for i in ticks], rotate)
-    plot_w = _W - _PAD_L - _PAD_R
+    shown = [labels[i] for i in ticks]
+    rotate = _should_rotate(shown)
+    pad_l, pad_b = _label_pads(shown, rotate)
+    plot_w = _W - pad_l - _PAD_R
     plot_h = _H - _PAD_T - pad_b
     bottom = _PAD_T + plot_h
     vmax, vmin, span = _value_range(rows, series)
@@ -223,14 +233,15 @@ def _lines(c: ChartData, area: bool) -> str:
 
     step = plot_w / max(len(rows) - 1, 1)
     out = [
-        f'<line x1="{_PAD_L}" y1="{base_y:.1f}" x2="{_W - _PAD_R}" y2="{base_y:.1f}" stroke="#000" stroke-width="2"/>'
+        f'<line x1="{pad_l:.1f}" y1="{base_y:.1f}" x2="{_W - _PAD_R}" y2="{base_y:.1f}" '
+        'stroke="#000" stroke-width="2"/>'
     ]
     for j, s in enumerate(series):
         color = _safe_color(s.color, _PALETTE[j % len(_PALETTE)])
-        pts = [(_PAD_L + i * step, _y(_num(r, s.key))) for i, r in enumerate(rows)]
+        pts = [(pad_l + i * step, _y(_num(r, s.key))) for i, r in enumerate(rows)]
         path = " ".join(f"{x:.1f},{y:.1f}" for x, y in pts)
         if area:
-            poly = f"{_PAD_L},{base_y:.1f} " + path + f" {_PAD_L + (len(rows) - 1) * step:.1f},{base_y:.1f}"
+            poly = f"{pad_l:.1f},{base_y:.1f} " + path + f" {pad_l + (len(rows) - 1) * step:.1f},{base_y:.1f}"
             out.append(f'<polygon points="{poly}" fill="{color}" fill-opacity="0.25"/>')
         out.append(f'<polyline points="{path}" fill="none" stroke="{color}" stroke-width="3"/>')
         for x, y in pts:
@@ -239,7 +250,7 @@ def _lines(c: ChartData, area: bool) -> str:
                 f'fill="{color}" stroke="#000" stroke-width="2"/>'
             )
     for i in ticks:
-        out.append(_x_label(_PAD_L + i * step, bottom + (16 if rotate else 20), labels[i], rotate))
+        out.append(_x_label(pad_l + i * step, bottom, labels[i], rotate))
     return "".join(out)
 
 

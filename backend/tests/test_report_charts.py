@@ -66,7 +66,7 @@ def test_all_zero_series_baseline_at_bottom_not_top():
         data=[{"k": "A", "v": 0.0}, {"k": "B", "v": 0.0}],
     )
     svg = render_chart_svg(chart)
-    m = re.search(r'<line x1="\d+" y1="([\d.]+)"', svg)  # the baseline axis line
+    m = re.search(r'<line x1="[\d.]+" y1="([\d.]+)"', svg)  # the baseline axis line (x1 now dynamic w/ left-pad)
     assert m
     assert float(m.group(1)) > 300  # near the bottom (plot bottom ~324), not _PAD_T (48)
 
