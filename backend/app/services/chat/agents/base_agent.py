@@ -842,6 +842,7 @@ class BaseSpecialistAgent(abc.ABC):
                 system=prompt_parts.static,
                 system_dynamic=prompt_parts.dynamic,
                 messages=messages,
+                thinking_level=current_thinking_level,
             )
             total_input_tokens += response.usage.input_tokens
             total_output_tokens += response.usage.output_tokens
@@ -1510,6 +1511,7 @@ class BaseSpecialistAgent(abc.ABC):
                 system=prompt_parts.static,
                 system_dynamic=prompt_parts.dynamic,
                 messages=messages,
+                thinking_level=current_thinking_level,
             ):
                 if event_type == "text":
                     yield "text", payload

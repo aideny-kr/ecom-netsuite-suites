@@ -39,7 +39,7 @@ class Settings(BaseSettings):
     MCP_RATE_LIMIT_PER_MINUTE: int = 60
 
     ANTHROPIC_API_KEY: str = ""
-    ANTHROPIC_MODEL: str = "claude-sonnet-4-20250514"
+    ANTHROPIC_MODEL: str = "claude-sonnet-5"
     # OpenRouter gateway — env only, never a shell export (key-billing leak risk).
     OPENROUTER_API_KEY: str = ""
     DEFAULT_AI_PROVIDER: str = "anthropic"
@@ -106,8 +106,10 @@ class Settings(BaseSettings):
     MULTI_AGENT_ENABLED: bool = True
     MULTI_AGENT_SPECIALIST_PROVIDER: str = "anthropic"
     MULTI_AGENT_SPECIALIST_MODEL: str = "claude-sonnet-4-5-20250929"
-    # SuiteQL agent uses a stronger model for SQL reasoning and huge NetSuite context
-    MULTI_AGENT_SQL_MODEL: str = "claude-sonnet-4-5-20250929"
+    # The unified chat model for NON-BYOK tenants (orchestrator: unified_model = model
+    # if is_byok else settings.MULTI_AGENT_SQL_MODEL). Moved to Sonnet 5 — adaptive
+    # thinking + effort, and 33% cheaper than Sonnet 4.6 under intro pricing (to 2026-08-31).
+    MULTI_AGENT_SQL_MODEL: str = "claude-sonnet-5"
     # Synthesis model — used to compose final user-facing answer from agent results
     MULTI_AGENT_SYNTHESIS_MODEL: str = "claude-sonnet-4-5-20250929"
     MULTI_AGENT_MAX_BUDGET_TOKENS: int = 50000

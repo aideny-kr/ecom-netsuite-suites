@@ -46,3 +46,47 @@ def test_is_forced_tool_choice():
     assert thinking.is_forced_tool_choice({"type": "none"}) is False
     assert thinking.is_forced_tool_choice("auto") is False
     assert thinking.is_forced_tool_choice(None) is False
+
+
+def test_anthropic_effort_mapping():
+    assert thinking.anthropic_effort("none") is None
+    assert thinking.anthropic_effort("low") == "low"
+    assert thinking.anthropic_effort("med") == "medium"
+    assert thinking.anthropic_effort("high") == "high"
+    # xhigh is MODEL-AWARE: valid on Sonnet 5 / Opus 4.7+ / Fable; on adaptive models
+    # that lack xhigh (Sonnet 4.6 / Opus 4.6) it maps to "max" (xhigh would 400 there).
+    assert thinking.anthropic_effort("xhigh", "claude-sonnet-5") == "xhigh"
+    assert thinking.anthropic_effort("xhigh", "claude-opus-4-8") == "xhigh"
+    assert thinking.anthropic_effort("xhigh", "claude-sonnet-4-6") == "max"
+    assert thinking.anthropic_effort("xhigh", "claude-opus-4-6") == "max"
+
+
+def test_thinking_mode_classifies_models():
+    # Adaptive thinking + effort: Sonnet 5 / 4.6 / Opus 4.6+ / Fable.
+    for m in [
+        "claude-sonnet-5",
+        "claude-sonnet-4-6",
+        "claude-opus-4-6",
+        "claude-opus-4-8",
+        "claude-fable-5",
+    ]:
+        assert thinking.thinking_mode(m) == "adaptive", m
+    # Legacy extended thinking (budget_tokens): 4.5 / 4.0 / 4.1 AND Haiku (Haiku
+    # supports extended thinking but not the effort param).
+    for m in [
+        "claude-sonnet-4-5-20250929",
+        "claude-opus-4-5-20251101",
+        "claude-sonnet-4-20250514",
+        "claude-opus-4-20250514",
+        "claude-opus-4-1-20250805",
+        "claude-haiku-4-5-20251001",
+    ]:
+        assert thinking.thinking_mode(m) == "legacy", m
+
+
+def test_sonnet_5_is_the_anthropic_default_and_adaptive():
+    from app.services.chat.llm_adapter import DEFAULT_MODELS, VALID_MODELS
+
+    assert DEFAULT_MODELS["anthropic"] == "claude-sonnet-5"
+    assert "claude-sonnet-5" in VALID_MODELS["anthropic"]
+    assert thinking.thinking_mode("claude-sonnet-5") == "adaptive"
