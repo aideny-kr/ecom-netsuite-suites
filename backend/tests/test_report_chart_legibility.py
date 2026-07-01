@@ -99,6 +99,17 @@ def test_bar_category_cap_keeps_top_by_magnitude_and_discloses():
     assert "of 20 categories" in svg  # true total disclosed
 
 
+def test_bar_cap_does_not_recap_a_pre_curated_auto_chart():
+    # The auto-chart charts a table already curated to _REPORT_TABLE_TOP_K rows; the
+    # renderer's bar cap must be >= that, so a pre-curated auto-chart never trips the cap
+    # (which would magnitude-reorder a chart meant to mirror its source-ordered table).
+    # Enforce the cross-file coupling the _bars comment documents but can't import
+    # (report_service already imports report_charts → reverse import is circular).
+    from app.services.report import report_service
+
+    assert rc._MAX_BAR_CATEGORIES >= report_service._REPORT_TABLE_TOP_K
+
+
 def test_bar_cap_keeps_largest_magnitude_and_scales_axis_to_it():
     # The T2-gate MAJOR reproduction: a huge value past the cut. Slicing the first 12 in
     # source order would drop "Cash" AND rescale the y-axis to the tiny visible subset
@@ -124,13 +135,7 @@ def test_rotated_line_cjk_first_label_not_clipped_past_left_edge():
     import unicodedata
 
     periods = ["東京都渋谷区の売上高合計金額"] + [f"M{i}" for i in range(2, 14)]  # 13 wide chars first
-    svg = render_chart_svg(_line_chart(periods))
-    m = re.search(
-        r'<text x="([\d.]+)" y="([\d.]+)"[^>]*text-anchor="end"[^>]*transform="rotate\(-(\d+)[^>]*>([^<]*)',
-        svg,
-    )
-    assert m, "expected a rotated end-anchored label"
-    x, deg, display = float(m.group(1)), float(m.group(3)), m.group(4)
+    x, deg, display = _first_rotated_label(render_chart_svg(_line_chart(periods)))
     reach = rc._CHAR_PX * sum(2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1 for ch in display)
     assert x - reach * math.cos(math.radians(deg)) >= 0, "wide-glyph first label clips past x=0"
 
@@ -164,14 +169,19 @@ def test_line_keeps_all_points_but_thins_labels():
 # tick on a LINE chart sits exactly at the left pad (no half-group offset like bars),
 # so a long first label is the one that clips past x=0.
 # ---------------------------------------------------------------------------
-def _first_rotated_label_left_extent(svg: str) -> float:
-    """Leftmost x reached by the first rotated x-label (end-anchored + rotate(-deg))."""
+def _first_rotated_label(svg: str) -> tuple[float, float, str]:
+    """``(x, deg, display)`` of the first rotated end-anchored x-label in ``svg``."""
     m = re.search(
         r'<text x="([\d.]+)" y="([\d.]+)"[^>]*text-anchor="end"[^>]*transform="rotate\(-(\d+)[^>]*>([^<]*)',
         svg,
     )
     assert m, "expected a rotated end-anchored x label"
-    x, deg, display = float(m.group(1)), float(m.group(3)), m.group(4)
+    return float(m.group(1)), float(m.group(3)), m.group(4)
+
+
+def _first_rotated_label_left_extent(svg: str) -> float:
+    """Leftmost x reached by the first rotated x-label (end-anchored + rotate(-deg))."""
+    x, deg, display = _first_rotated_label(svg)
     # end-anchored text occupies [x - w, x]; rotate(-deg) about x maps the far end to x - w*cos(deg)
     return x - len(display) * rc._CHAR_PX * math.cos(math.radians(deg))
 
