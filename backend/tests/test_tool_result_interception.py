@@ -1048,7 +1048,11 @@ class TestSameTurnRunReportComposeIntegration:
         # The chart x-axis must be the ACCOUNT name, not the dropped row-type marker:
         # the SVG x-labels carry the account names and never "detail"/"section".
         svg = chart["svg"]
-        assert "Cash" in svg and "Net Income" in svg, "chart x-axis must label bars by account name"
+        assert "Cash" in svg and "Accounts Receivable" in svg, "chart x-axis must label bars by account name"
+        # Phase 4: an explicit chart over a statement payload charts the LEAF drivers
+        # only — "Net Income" is a summary line (isDetailLine: False) and must NOT be a
+        # bar next to the detail lines (a subtotal bar double-counts its own details).
+        assert "Net Income" not in svg, "summary lines are excluded from driver charts"
         assert "detail" not in svg and "section" not in svg, "row-type marker must not be the chart x-axis"
 
 
