@@ -58,6 +58,34 @@ def test_trend_templates_include_periodname_column():
         assert "ap.startdate" in sql or "ap_period.startdate" in sql, f"{name} missing startdate for ordering"
 
 
+def test_balance_sheet_trend_period_filter_alias_resolves():
+    """Regression (/cashflow balance_sheet_trend 400 "Invalid or unsupported search"):
+    build_period_filter emits an `ap.`-qualified fragment, and in balance_sheet_trend
+    that fragment is injected INSIDE the CROSS JOIN subquery. So the subquery's
+    accountingperiod MUST be aliased `ap` (or the filter references an alias that isn't
+    in scope and NetSuite rejects the whole query), and the OUTER posting-period join
+    must use a different alias (txnp) so the two scopes don't collide. Verified live
+    against NetSuite: unaliased subquery -> rejected; `ap`-aliased subquery -> runs.
+    """
+    from app.mcp.tools.netsuite_financial_report import (
+        REPORT_TEMPLATES,
+        build_period_filter,
+    )
+
+    pf = build_period_filter("multi_period", "Jan 2026, Feb 2026")
+    assert pf.startswith("ap."), f"period_filter must be ap.-qualified, got: {pf!r}"
+
+    sql = REPORT_TEMPLATES["balance_sheet_trend"]["sql_template"].replace("{period_filter}", pf)
+    # The subquery that receives the ap.-qualified filter aliases accountingperiod ap.
+    assert "FROM accountingperiod ap" in sql
+    # The outer posting-period join uses txnp, never `ap` (which would shadow the subquery).
+    assert "JOIN accountingperiod txnp ON txnp.id = t.postingperiod" in sql
+    assert "JOIN accountingperiod ap ON" not in sql
+    # Consolidation period + inception-to-date cutoff reference the outer txnp alias.
+    assert "txnp.enddate <= ap_period.enddate" in sql
+    assert ", ap.id, " not in sql
+
+
 def test_trend_templates_use_multi_period_mode():
     from app.mcp.tools.netsuite_financial_report import REPORT_TEMPLATES
 
