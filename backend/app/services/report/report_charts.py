@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import re
+import unicodedata
 from html import escape
 
 from app.schemas.chart import ChartData
@@ -75,6 +76,14 @@ def _should_rotate(labels: list[str]) -> bool:
     return len(labels) > _ROTATE_CATEGORIES_OVER or any(len(label) > _ROTATE_LABEL_LEN_OVER for label in labels)
 
 
+def _text_reach_px(text: str) -> float:
+    """Approximate rendered px width of ``text``. Wide/fullwidth glyphs (CJK, kana) are
+    ~2x a Latin char at this font size, so count them double — measuring by char COUNT
+    would underestimate a CJK label's width and let it clip the viewport (the product
+    targets NetSuite OneWorld, so international account names are expected)."""
+    return _CHAR_PX * sum(2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1 for ch in text)
+
+
 def _label_pads(labels: list[str], rotate: bool) -> tuple[float, float]:
     """``(left, bottom)`` padding to reserve for the x labels. Horizontal labels need only
     the base ``_PAD_L`` / ``_PAD_B``. A rotated label is END-anchored and swings DOWN-LEFT
@@ -83,8 +92,9 @@ def _label_pads(labels: list[str], rotate: bool) -> tuple[float, float]:
     vertical extent (else a low label overflows the bottom of the SVG viewport)."""
     if not rotate:
         return float(_PAD_L), float(_PAD_B)
-    # _truncate_label already bounds each display to ≤ _MAX_LABEL_CHARS, so no re-clamp.
-    reach = max((len(_truncate_label(label)[0]) for label in labels), default=0) * _CHAR_PX
+    # Measure the PIXEL reach of each (already ellipsis-capped) display, not its char
+    # count — wide/CJK glyphs are ~2x, and undercounting them re-clips the viewport.
+    reach = max((_text_reach_px(_truncate_label(label)[0]) for label in labels), default=0.0)
     rad = math.radians(_ROTATE_DEG)
     left = max(float(_PAD_L), reach * math.cos(rad) + 6)  # +6px margin off the left edge
     return left, _PAD_B + reach * math.sin(rad)
@@ -161,7 +171,18 @@ def _bars(c: ChartData) -> str:
     total_cats = len(rows)
     capped = total_cats > _MAX_BAR_CATEGORIES
     if capped:
-        rows = rows[:_MAX_BAR_CATEGORIES]
+        # Keep the _MAX_BAR_CATEGORIES MOST MATERIAL rows (largest |value| across series),
+        # NOT the first N in source order: slicing source-order rows before _value_range
+        # would drop a large-magnitude driver past the cut AND rescale the y-axis to the
+        # smaller visible subset — a materially misleading financial chart (T2 gate: major).
+        # Kept rows render in their original relative order. (_MAX_BAR_CATEGORIES ==
+        # report_service._REPORT_TABLE_TOP_K, so a pre-curated auto-chart never caps here;
+        # this guards the explicit-chart path, which delivers up to 100 unranked rows.)
+        def _mag(row: dict) -> float:
+            return max((abs(_num(row, s.key)) for s in series), default=0.0)
+
+        keep = sorted(sorted(range(len(rows)), key=lambda i: _mag(rows[i]), reverse=True)[:_MAX_BAR_CATEGORIES])
+        rows = [rows[i] for i in keep]
     labels = _x_values(c.x_axis.key, rows)
     rotate = _should_rotate(labels)
     pad_l, pad_b = _label_pads(labels, rotate)
@@ -199,12 +220,13 @@ def _bars(c: ChartData) -> str:
     )
     if vmin < 0:
         out.append(
-            f'<text x="{pad_l - 8:.1f}" y="{bottom}" font-size="11" text-anchor="end" fill="#444">{_fmt(vmin)}</text>'
+            f'<text x="{pad_l - 8:.1f}" y="{bottom:.1f}" font-size="11" text-anchor="end" fill="#444">'
+            f"{_fmt(vmin)}</text>"
         )
     if capped:
         out.append(
             f'<text x="{_W - _PAD_R}" y="44" font-size="11" text-anchor="end" fill="#666">'
-            f"Showing {_MAX_BAR_CATEGORIES} of {total_cats} categories</text>"
+            f"Showing {_MAX_BAR_CATEGORIES} largest of {total_cats} categories</text>"
         )
     return "".join(out)
 

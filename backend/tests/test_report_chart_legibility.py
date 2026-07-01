@@ -86,12 +86,53 @@ def test_long_label_truncated_with_title_tooltip():
 # ---------------------------------------------------------------------------
 # Category cap: a bar chart never renders a smear of dozens of bars.
 # ---------------------------------------------------------------------------
-def test_bar_category_cap_renders_subset_with_disclosed_note():
-    cats = [f"Account {i:02d}" for i in range(20)]  # 20 > _MAX_BAR_CATEGORIES
+def test_bar_category_cap_keeps_top_by_magnitude_and_discloses():
+    # 20 categories with ASCENDING values → the cap keeps the 12 LARGEST by magnitude,
+    # never the first 12 in source order (which would drop the biggest drivers), and
+    # discloses the true total.
+    cats = [f"Account {i:02d}" for i in range(20)]  # _bar_chart values = (i+1)*100 ascending
     svg = render_chart_svg(_bar_chart(cats))
-    assert svg.count('fill="#6366f1"') == rc._MAX_BAR_CATEGORIES  # only the cap's bars drawn
+    assert svg.count('fill="#6366f1"') == rc._MAX_BAR_CATEGORIES  # capped to 12 bars
     assert len(_rotated_labels(svg)) == rc._MAX_BAR_CATEGORIES  # only the cap's labels drawn
-    assert "of 20 categories" in svg  # and the truncation discloses the TRUE total
+    assert "Account 19" in svg  # the largest (2000) is kept
+    assert "Account 00" not in svg  # a smallest (100) is dropped — not the largest
+    assert "of 20 categories" in svg  # true total disclosed
+
+
+def test_bar_cap_keeps_largest_magnitude_and_scales_axis_to_it():
+    # The T2-gate MAJOR reproduction: a huge value past the cut. Slicing the first 12 in
+    # source order would drop "Cash" AND rescale the y-axis to the tiny visible subset
+    # (twelve equal full-height bars, axis "1" not "1.0M") — a misleading financial chart.
+    cats = [f"Acct {i:02d}" for i in range(12)] + ["Cash"]  # 13 rows, huge value LAST
+    chart = ChartData(
+        chart_type="bar",
+        title="Balances",
+        x_axis=ChartAxis(label="a", key="a"),
+        y_axes=[ChartAxis(label="v", key="v", color="#6366f1")],
+        data=[{"a": c, "v": (1_000_000.0 if c == "Cash" else 1.0)} for c in cats],
+    )
+    svg = render_chart_svg(chart)
+    assert "Cash" in svg  # the largest driver is kept, not sliced off
+    assert "1.0M" in svg  # the y-axis reflects the TRUE max, not rescaled to ~1
+    assert svg.count('fill="#6366f1"') == rc._MAX_BAR_CATEGORIES  # still capped to 12 bars
+
+
+def test_rotated_line_cjk_first_label_not_clipped_past_left_edge():
+    # Wide/CJK glyphs render ~2x a Latin char; the left-pad must account for width, not
+    # char count — else a long CJK first label on a line chart clips past x=0 (NetSuite
+    # OneWorld → international account/subsidiary names).
+    import unicodedata
+
+    periods = ["東京都渋谷区の売上高合計金額"] + [f"M{i}" for i in range(2, 14)]  # 13 wide chars first
+    svg = render_chart_svg(_line_chart(periods))
+    m = re.search(
+        r'<text x="([\d.]+)" y="([\d.]+)"[^>]*text-anchor="end"[^>]*transform="rotate\(-(\d+)[^>]*>([^<]*)',
+        svg,
+    )
+    assert m, "expected a rotated end-anchored label"
+    x, deg, display = float(m.group(1)), float(m.group(3)), m.group(4)
+    reach = rc._CHAR_PX * sum(2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1 for ch in display)
+    assert x - reach * math.cos(math.radians(deg)) >= 0, "wide-glyph first label clips past x=0"
 
 
 # ---------------------------------------------------------------------------
