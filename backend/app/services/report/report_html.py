@@ -220,11 +220,18 @@ def _section_html(s: dict) -> str:
             body_rows.append("<tr>" + "".join(cells) + "</tr>")
         body = "".join(body_rows)
         note = ""
+        # A statement-curated table is not a positional "first N" slice — it shows the
+        # named section-summary lines. Disclose the curation (and the true source size)
+        # with wording that matches what was actually done.
+        if s.get("curation") == "statement":
+            total = s.get("row_count")
+            of_total = f" from {escape(str(total))} source rows" if isinstance(total, int) and total > len(rows) else ""
+            note = f'<p class="foot">Curated statement — {len(rows)} summary lines{of_total}.</p>'
         # A truncated section MUST disclose it (never render a partial financial table as
         # whole). When the true total is known and exceeds the shown rows, name it; when
         # the upstream reported row_count == shown (e.g. NetSuite-side fetch truncation,
         # true total unknown), still disclose without a contradictory "first N of N".
-        if s.get("truncated"):
+        elif s.get("truncated"):
             # row_count may arrive as an int or a numeric string (some MCP shapes); coerce
             # so we still name the true total rather than dropping to the generic note.
             raw_total = s.get("row_count")
