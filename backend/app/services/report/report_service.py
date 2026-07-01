@@ -41,7 +41,42 @@ _MIN_AUTO_CHART_ROWS = 2
 _STATEMENT_TABLE_MAX = 8
 _STATEMENT_CALLOUT_MAX = 4
 _MIN_STATEMENT_LINES = 2
+# Time-series detection (Phase 4): a chart whose x column is period/date-SHAPED renders
+# as a LINE (a trend), not account-style bars. Matched on the VALUES' shape only — never
+# on column names (no schema assumptions). Conservative: a miss just keeps the bar
+# default, which is always safe.
+_TIME_LIKE_RE = re.compile(
+    r"^("
+    r"\d{4}[-/.](0?[1-9]|1[0-2])([-/.]\d{1,2})?"  # 2026-06 / 2026-06-30
+    r"|(0?[1-9]|1[0-2])[-/.]\d{4}"  # 06/2026
+    r"|(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*[ .,'-]*\d{2,4}"  # Jun 2026
+    r"|q[1-4][ .'-]?\d{2,4}"  # Q2 2026
+    r"|\d{4}[ .'-]?q[1-4]"  # 2026 Q2
+    r"|fy[ .'-]?\d{2,4}"  # FY26
+    r")$",
+    re.IGNORECASE,
+)
+_TIME_SERIES_MIN_FRACTION = 0.8
 Resolver = Callable[[str], dict]
+
+
+def _looks_time_series(x_values: list) -> bool:
+    """True when the x column's VALUES are period/date-shaped (ISO dates, "Jun 2026",
+    "Q2 2026", "FY26") for at least ``_TIME_SERIES_MIN_FRACTION`` of the non-empty
+    cells — a trend axis, so the chart defaults to a line. Value-shape only, never
+    column names."""
+    vals = [str(v).strip() for v in x_values if v is not None and str(v).strip()]
+    if len(vals) < _MIN_AUTO_CHART_ROWS:
+        return False
+    hits = sum(1 for v in vals if _TIME_LIKE_RE.match(v))
+    return hits / len(vals) >= _TIME_SERIES_MIN_FRACTION
+
+
+def _amount_index(cols: list, currency_columns: list) -> int:
+    """Index of the amount column: the producer-tagged currency column, else col 1."""
+    if currency_columns and currency_columns[0] in cols:
+        return cols.index(currency_columns[0])
+    return 1
 
 
 def _metric_fields(payload: dict) -> dict | None:
@@ -141,10 +176,7 @@ def _curate_statement(cols: list, rows: list, line_meta, currency_columns: list)
     """
     if not isinstance(line_meta, list) or len(line_meta) != len(rows) or len(cols) < 2:
         return None
-    # The amount column: the producer-tagged currency column when present, else col 1.
-    amount_idx = 1
-    if currency_columns and currency_columns[0] in cols:
-        amount_idx = cols.index(currency_columns[0])
+    amount_idx = _amount_index(cols, currency_columns)
     picked: list[tuple[int, list]] = []
     for row, meta in zip(rows, line_meta):
         if not isinstance(meta, dict) or not meta.get("is_summary"):
@@ -189,6 +221,26 @@ def _curate_statement(cols: list, rows: list, line_meta, currency_columns: list)
     return statement_rows, callouts
 
 
+def _driver_rows(rows: list, line_meta: list, cols: list, currency_columns: list) -> list:
+    """The top-``_REPORT_TABLE_TOP_K`` DETAIL (leaf) rows by ``|amount|``, original
+    statement order preserved — the comparable drivers for a statement chart.
+    Summary/subtotal/grand-total lines are EXCLUDED: charting a subtotal next to its own
+    detail lines double-counts, and a grand-total bar dwarfs every real driver (the live
+    bar-soup symptom). Structural (line_meta + amounts), never by label."""
+    amount_idx = _amount_index(cols, currency_columns)
+    leaves: list[tuple[float, int, list]] = []
+    for i, (row, meta) in enumerate(zip(rows, line_meta)):
+        if not isinstance(meta, dict) or meta.get("is_summary"):
+            continue
+        label = str(row[0]).strip() if row and row[0] is not None else ""
+        amount = _coerce_number(row[amount_idx]) if amount_idx < len(row) else None
+        if not label or amount is None:
+            continue
+        leaves.append((abs(amount), i, row))
+    top = sorted(leaves, key=lambda t: t[0], reverse=True)[:_REPORT_TABLE_TOP_K]
+    return [row for _, _, row in sorted(top, key=lambda t: t[1])]
+
+
 def _build_tabular_chart(
     cols: list, rows: list, *, chart_type: str | None, title: str | None, value_columns: list | None = None
 ) -> "ChartData | None":
@@ -213,18 +265,30 @@ def _build_tabular_chart(
             d[c] = _coerce_number(d.get(c)) or 0.0
         return d
 
+    # Shape-driven defaults (Phase 4): a period/date-shaped x column is a TREND — default
+    # to a line and say "trend" in the derived title. An explicit chart_type always wins.
+    time_series = _looks_time_series([r[0] if r else None for r in rows])
+    if title is None:
+        title = f"{numeric_cols[0]} trend by {cols[0]}" if time_series else f"{numeric_cols[0]} by {cols[0]}"
     return ChartData(
-        chart_type=chart_type or "bar",
-        title=title or f"{numeric_cols[0]} by {cols[0]}",
+        chart_type=chart_type or ("line" if time_series else "bar"),
+        title=title,
         x_axis={"label": cols[0], "key": cols[0]},
         y_axes=[{"label": c, "key": c} for c in numeric_cols],
         data=[_row_dict(r) for r in rows],
     )
 
 
-def _auto_chart_section(resolved: dict) -> dict | None:
-    """A bar chart of a resolved table's (already top-K-curated) rows, so every
-    data-heavy report visualizes its drivers even when the model composed no chart.
+def _auto_chart_section(resolved: dict, *, drivers: list | None = None, label: str | None = None) -> dict | None:
+    """A chart of a resolved table's rows, so every data-heavy report visualizes its
+    drivers even when the model composed no chart.
+
+    ``drivers`` (statement tables): chart the top LEAF detail rows instead of the
+    curated summary lines — a bar of comparable drivers, never subtotal/grand-total
+    soup. Otherwise chart the table's own (already curated) rows, with the chart TYPE
+    picked by the x column's shape (period/date-like → line trend). ``label`` (the
+    model-supplied section title) titles the chart; without it a descriptive title is
+    derived deterministically.
 
     Charts ONLY the producer-tagged currency columns (the real measures). With no tag,
     charts a SINGLE numeric column (unambiguous), but skips a multi-numeric untagged
@@ -232,7 +296,7 @@ def _auto_chart_section(resolved: dict) -> dict | None:
     (year/id/count) as a misleading series. None when too small / nothing safe to plot."""
     if resolved.get("type") != "table":
         return None
-    rows = resolved.get("rows", [])
+    rows = drivers if drivers else resolved.get("rows", [])
     cols = resolved.get("columns", [])
     # Curation bounds this to K (<<100), but guard the DoS-shape independently so a future
     # higher _REPORT_TABLE_TOP_K can't bake a multi-MB SVG (same cap the chart branch uses).
@@ -246,7 +310,13 @@ def _auto_chart_section(resolved: dict) -> dict | None:
         value_columns = numeric_cols
     else:
         return None  # ambiguous (or no) numeric measure → don't auto-chart a wrong series
-    chart = _build_tabular_chart(cols, rows, chart_type="bar", title=None, value_columns=value_columns)
+    if drivers:
+        title = label or f"Top {len(rows)} drivers by {value_columns[0]}"
+        chart_type = "bar"  # leaf drivers are categorical by construction
+    else:
+        title = label  # None → _build_tabular_chart derives a trend-aware title
+        chart_type = None  # let the x column's shape decide (time-series → line)
+    chart = _build_tabular_chart(cols, rows, chart_type=chart_type, title=title, value_columns=value_columns)
     if chart is None:
         return None
     return {"type": "chart", "svg": render_chart_svg(chart), "chart_type": chart.chart_type}
@@ -307,9 +377,13 @@ def _resolve_data_section(s: dict, resolver: Resolver) -> dict:
                     "truncated": True,  # fewer lines shown than the source statement
                     "curation": "statement",
                     "currency_columns": currency_columns,
-                    # Internal hand-off to assemble_spec (emitted BEFORE this table,
-                    # then stripped) — never persisted into the frozen spec.
+                    # Internal hand-offs to assemble_spec (consumed there, then
+                    # stripped) — never persisted into the frozen spec. Callouts render
+                    # ABOVE the table; drivers feed the auto-chart with the top LEAF
+                    # detail rows (the statement table shows the summaries, the chart
+                    # shows the movers — never subtotal+detail double-count).
                     "statement_callouts": callouts,
+                    "statement_drivers": _driver_rows(rows, payload.get("line_meta"), cols, currency_columns),
                 }
         # Curate to the first K rows — a report shows top numbers, not a dump. This also
         # bounds the rendered table (no separate anti-bloat cap needed: K << any payload).
@@ -353,6 +427,18 @@ def _resolve_data_section(s: dict, resolver: Resolver) -> dict:
                 return {"type": "error", "reason": "metric results are headline material, not charts"}
             cols = payload.get("columns", [])
             rows = payload.get("rows", [])
+            # An explicit chart over a STATEMENT payload (line_meta aligned) charts the
+            # top LEAF detail drivers — a subtotal/grand-total bar next to its own
+            # details double-counts and dwarfs the real movers (the live bar-soup).
+            default_title = None
+            line_meta = payload.get("line_meta")
+            if isinstance(line_meta, list) and len(line_meta) == len(rows):
+                stmt_currency = [c for c in (payload.get("currency_columns") or []) if c in cols]
+                drivers = _driver_rows(rows, line_meta, cols, stmt_currency)
+                if len(drivers) >= _MIN_AUTO_CHART_ROWS:
+                    rows = drivers
+                    value_name = stmt_currency[0] if stmt_currency else (cols[1] if len(cols) > 1 else "value")
+                    default_title = f"Top {len(rows)} drivers by {value_name}"
             # Row cap: a chart over tens of thousands of rows bakes a multi-MB SVG into
             # the report (DoS-shape). Refuse deterministically before building anything.
             if len(rows) > _MAX_CHART_POINTS:
@@ -360,7 +446,11 @@ def _resolve_data_section(s: dict, resolver: Resolver) -> dict:
                     "type": "error",
                     "reason": f"too many rows to chart ({len(rows)} > {_MAX_CHART_POINTS}) — aggregate first",
                 }
-            chart = _build_tabular_chart(cols, rows, chart_type=s.get("chart_type"), title=s.get("label") or "Chart")
+            # Title: the model's label wins; else the driver title; else _build_tabular_chart
+            # derives a descriptive one from the data (never the junk "Chart" default).
+            chart = _build_tabular_chart(
+                cols, rows, chart_type=s.get("chart_type"), title=s.get("label") or default_title
+            )
             if chart is None:
                 return {"type": "error", "reason": "no numeric columns to chart"}
         else:
@@ -408,9 +498,10 @@ def assemble_spec(title: str, sections: list[dict], resolver: Resolver) -> dict:
     out_sections: list[dict] = []
     for s, resolved in resolved_pairs:
         # Statement treatment: marquee callout cards render ABOVE their curated
-        # statement table. Pop the internal hand-off key so it never persists into
-        # the frozen spec_json.
+        # statement table; leaf DRIVERS feed the auto-chart. Pop both internal
+        # hand-off keys so they never persist into the frozen spec_json.
         callouts = resolved.pop("statement_callouts", None) if isinstance(resolved, dict) else None
+        drivers = resolved.pop("statement_drivers", None) if isinstance(resolved, dict) else None
         if callouts:
             out_sections.extend(callouts)
         out_sections.append(resolved)
@@ -421,7 +512,7 @@ def assemble_spec(title: str, sections: list[dict], resolver: Resolver) -> dict:
             and s.get("result_id") not in model_charted_ids
             and _table_key(s) not in auto_charted_keys
         ):
-            auto = _auto_chart_section(resolved)
+            auto = _auto_chart_section(resolved, drivers=drivers, label=s.get("label"))
             if auto is not None:
                 out_sections.append(auto)
                 auto_charted_keys.add(_table_key(s))

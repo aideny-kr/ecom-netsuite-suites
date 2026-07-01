@@ -25,12 +25,17 @@ class ChartSection(BaseModel):
     type: Literal["chart"]
     result_id: str
     chart_type: Literal["bar", "line", "pie", "area", "scatter", "donut", "histogram"] | None = None
+    # Optional human title for the rendered chart ("Cash Balance Trend"). A TITLE only,
+    # never data — numbers still flow exclusively from the frozen payload.
+    label: str | None = None
 
 
 class TableSection(BaseModel):
     type: Literal["table"]
     result_id: str
     select: list[str] | None = None
+    # Optional human title; also titles the table's auto-injected chart.
+    label: str | None = None
 
 
 class DividerSection(BaseModel):
