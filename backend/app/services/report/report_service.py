@@ -11,7 +11,7 @@ from app.schemas.chart import ChartData
 from app.schemas.report import normalize_and_validate_sections
 from app.services import audit_service
 from app.services.report.report_charts import render_chart_svg
-from app.services.report.report_html import render_report_html
+from app.services.report.report_html import _fmt_amount, render_report_html
 
 _PLACEHOLDER = re.compile(r"\{\{(result|metric):([^}]+)\}\}")
 _METRIC_COLUMNS = ["Metric", "Value", "Unit", "Period"]
@@ -30,6 +30,17 @@ _MAX_CHART_POINTS = 100
 _REPORT_TABLE_TOP_K = 12
 # A table needs at least this many rows to be worth auto-charting.
 _MIN_AUTO_CHART_ROWS = 2
+# Statement treatment (product shape confirmed 2026-07-01: "callouts + statement"): a
+# statement-shaped result (line_meta present — flattened ns_runReport statements) renders
+# as up to _STATEMENT_CALLOUT_MAX marquee metric_headline cards + a curated table of at
+# most _STATEMENT_TABLE_MAX NAMED section-summary lines. Selection is purely STRUCTURAL
+# (line_meta.is_summary/level + a non-null amount) — never label matching, so blanks and
+# amount-less placeholder rows drop out without any hardcoded names (no prompt
+# pollution). Fewer than _MIN_STATEMENT_LINES qualifying lines ⇒ not a statement ⇒ the
+# general top-K floor applies (all non-statement reports keep today's behavior).
+_STATEMENT_TABLE_MAX = 8
+_STATEMENT_CALLOUT_MAX = 4
+_MIN_STATEMENT_LINES = 2
 Resolver = Callable[[str], dict]
 
 
@@ -109,6 +120,73 @@ def _curate_table_rows(rows: list, k: int) -> tuple[list, bool]:
     if len(rows) <= k:
         return rows, False
     return rows[:k], True
+
+
+def _curate_statement(cols: list, rows: list, line_meta, currency_columns: list) -> tuple[list, list] | None:
+    """Curate a statement-shaped table to its NAMED section-summary lines.
+
+    Returns ``(statement_rows, callout_sections)`` or None when the payload is not
+    statement-shaped (missing/misaligned ``line_meta``, or fewer than
+    ``_MIN_STATEMENT_LINES`` qualifying lines) — the caller then falls back to the
+    general top-K floor.
+
+    A line qualifies iff it is a summary (``line_meta.is_summary``) with a non-empty
+    label (col 0) AND a non-null amount — so detail GL lines, blank continuation rows,
+    and amount-less placeholder/header rows all drop out STRUCTURALLY (no label
+    matching). Over ``_STATEMENT_TABLE_MAX`` lines, the shallowest indent levels (the
+    most aggregate subtotals) are kept, statement order always preserved. Callouts are
+    the LAST ``_STATEMENT_CALLOUT_MAX`` curated lines — a statement builds to its
+    conclusions (Net Change, Ending Cash) — as metric_headline sections with the amount
+    accounting-formatted (exact Decimal semantics via the shared ``_fmt_amount``).
+    """
+    if not isinstance(line_meta, list) or len(line_meta) != len(rows) or len(cols) < 2:
+        return None
+    # The amount column: the producer-tagged currency column when present, else col 1.
+    amount_idx = 1
+    if currency_columns and currency_columns[0] in cols:
+        amount_idx = cols.index(currency_columns[0])
+    picked: list[tuple[int, list]] = []
+    for row, meta in zip(rows, line_meta):
+        if not isinstance(meta, dict) or not meta.get("is_summary"):
+            continue
+        label = str(row[0]).strip() if row and row[0] is not None else ""
+        amount = row[amount_idx] if amount_idx < len(row) else None
+        if not label or amount is None:
+            continue
+        try:
+            level = int(meta.get("level", 0))
+        except (TypeError, ValueError):
+            level = 0
+        picked.append((level, row))
+    if len(picked) < _MIN_STATEMENT_LINES:
+        return None
+    if len(picked) > _STATEMENT_TABLE_MAX:
+        # Keep the shallowest levels that fit the cap (largest threshold T with
+        # count(level <= T) <= cap); if even the shallowest level alone overflows,
+        # keep its first cap-many lines. Statement order is preserved throughout.
+        chosen = None
+        for threshold in sorted({lvl for lvl, _ in picked}, reverse=True):
+            subset = [p for p in picked if p[0] <= threshold]
+            if len(subset) <= _STATEMENT_TABLE_MAX:
+                chosen = subset
+                break
+        if chosen is None:
+            min_level = min(lvl for lvl, _ in picked)
+            chosen = [p for p in picked if p[0] == min_level][:_STATEMENT_TABLE_MAX]
+        picked = chosen
+    statement_rows = [row for _, row in picked]
+    callouts = [
+        {
+            "type": "metric_headline",
+            "label": str(row[0]),
+            "value": _fmt_amount(row[amount_idx] if amount_idx < len(row) else None),
+            "unit": "",
+            "period": "",
+            "definition_version": None,
+        }
+        for row in statement_rows[-_STATEMENT_CALLOUT_MAX:]
+    ]
+    return statement_rows, callouts
 
 
 def _build_tabular_chart(
@@ -212,6 +290,27 @@ def _resolve_data_section(s: dict, resolver: Resolver) -> dict:
         # Carry the producer's currency-column tags so the renderer accounting-formats
         # only those columns; narrow to the columns that survived `select`.
         currency_columns = [c for c in (payload.get("currency_columns") or []) if c in cols]
+        # STATEMENT treatment (Phase 3): a statement-shaped payload (line_meta present —
+        # flattened ns_runReport statements) curates to its named section-summary lines +
+        # marquee callouts instead of the positional top-K. Gated on no `select`: a
+        # model projection re-indexes columns, and the conservative rule there is the
+        # plain top-K floor rather than risking curation off the wrong column.
+        if not s.get("select"):
+            curated_stmt = _curate_statement(cols, rows, payload.get("line_meta"), currency_columns)
+            if curated_stmt is not None:
+                statement_rows, callouts = curated_stmt
+                return {
+                    "type": "table",
+                    "columns": cols,
+                    "rows": statement_rows,
+                    "row_count": true_row_count,
+                    "truncated": True,  # fewer lines shown than the source statement
+                    "curation": "statement",
+                    "currency_columns": currency_columns,
+                    # Internal hand-off to assemble_spec (emitted BEFORE this table,
+                    # then stripped) — never persisted into the frozen spec.
+                    "statement_callouts": callouts,
+                }
         # Curate to the first K rows — a report shows top numbers, not a dump. This also
         # bounds the rendered table (no separate anti-bloat cap needed: K << any payload).
         rows, curated = _curate_table_rows(rows, _REPORT_TABLE_TOP_K)
@@ -308,6 +407,12 @@ def assemble_spec(title: str, sections: list[dict], resolver: Resolver) -> dict:
     provenance_sources: list[str] = []
     out_sections: list[dict] = []
     for s, resolved in resolved_pairs:
+        # Statement treatment: marquee callout cards render ABOVE their curated
+        # statement table. Pop the internal hand-off key so it never persists into
+        # the frozen spec_json.
+        callouts = resolved.pop("statement_callouts", None) if isinstance(resolved, dict) else None
+        if callouts:
+            out_sections.extend(callouts)
         out_sections.append(resolved)
         if resolved.get("type") == "metric_headline" and resolved.get("definition_version") is not None:
             provenance_sources.append(f"metric:{s['result_id']}@v{resolved['definition_version']}")
