@@ -203,28 +203,51 @@ def _extract_items_as_table(parsed: dict[str, Any] | list) -> tuple[list[str], l
     return columns, rows
 
 
-def _line_hierarchy(entry: dict) -> dict:
+def _coerce_bool(value) -> bool | None:
+    """NetSuite serializes booleans as JSON true/false OR the string ``"T"``/``"F"`` (a
+    pervasive convention — cf. suiteql_validator / prompt_template_service). Coerce both;
+    return None for absent/unrecognized so the caller can fall back to inference. A bare
+    ``bool("F")`` is True (both strings are truthy), which would silently invert the
+    hierarchy signal."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        s = value.strip().lower()
+        if s in ("t", "true", "1", "yes"):
+            return True
+        if s in ("f", "false", "0", "no"):
+            return False
+    return None
+
+
+def _line_hierarchy(entry: dict, value_source: str | None) -> dict:
     """Per-row statement-hierarchy metadata carried ALONGSIDE the flattened
     ``[account, amount]`` row (never as a column), so a later curation step
     (``report.compose`` Phase 3) can build a curated statement / key-figure callouts
     from the section structure the flat table otherwise discards.
 
     ``is_summary``: a summary/section/total line vs an individual detail account.
-    NetSuite marks this authoritatively with ``isDetailLine``; when that key is absent,
-    infer from which value list the entry carries (``summaryLineValues`` → summary,
-    ``detailLineValues`` → detail). ``level``: indent depth (``indentLevel``/``indent``/
-    ``level``), 0 when unknown. Both are structural, keyed off reportData markers — no
-    hardcoded account/label names (no prompt pollution).
+    NetSuite marks this authoritatively with ``isDetailLine`` (coerced — it may arrive as
+    JSON false OR the string ``"F"``). When that key is absent, fall back to the SAME
+    non-empty value list the amount was read from (``value_source``: ``"summary"`` vs
+    ``"detail"``) — NOT mere key presence, which would mislabel a detail line that merely
+    carries an empty ``summaryLineValues`` key. ``level``: indent depth
+    (``indentLevel``/``indent``/``level``; via ``float`` so ``"2.0"`` parses), 0 when
+    unknown. All structural, keyed off reportData markers — no hardcoded account/label
+    names (no prompt pollution).
     """
-    is_detail = entry.get("isDetailLine")
+    is_detail = _coerce_bool(entry.get("isDetailLine"))
     if is_detail is None:
-        is_detail = "detailLineValues" in entry and "summaryLineValues" not in entry
-    raw_level = entry.get("indentLevel", entry.get("indent", entry.get("level", 0)))
-    try:
-        level = int(raw_level)
-    except (TypeError, ValueError):
-        level = 0
-    return {"is_summary": not bool(is_detail), "level": level}
+        is_detail = value_source == "detail"  # matches amount extraction's non-emptiness
+    level = 0
+    for key in ("indentLevel", "indent", "level"):
+        if key in entry:
+            try:
+                level = int(float(entry[key]))
+            except (TypeError, ValueError):
+                level = 0
+            break
+    return {"is_summary": not is_detail, "level": level}
 
 
 def _extract_report_data_as_table(report_data: dict) -> tuple[list[str], list[list], list[dict]] | None:
@@ -253,8 +276,11 @@ def _extract_report_data_as_table(report_data: dict) -> tuple[list[str], list[li
         if not isinstance(entry, dict):
             continue
         label = entry.get("value") or entry.get("label") or ""
-        # Get amount from summaryLineValues or detailLineValues
+        # Get amount from summaryLineValues or detailLineValues, remembering WHICH
+        # non-empty list supplied it (value_source) so the hierarchy classifier keys off
+        # the same signal — never mere key presence.
         amount = None
+        value_source = None
         for vals_key in ("summaryLineValues", "detailLineValues"):
             vals = entry.get(vals_key)
             if isinstance(vals, list) and vals:
@@ -268,6 +294,7 @@ def _extract_report_data_as_table(report_data: dict) -> tuple[list[str], list[li
                     amount = first.get("Amount")
                     if amount is None:
                         amount = first.get("amount")
+                    value_source = "summary" if vals_key == "summaryLineValues" else "detail"
                     break
         label_str = str(label).strip()
         # NEVER silently drop a figure from a financial surface. Keep every row that
@@ -282,7 +309,7 @@ def _extract_report_data_as_table(report_data: dict) -> tuple[list[str], list[li
         if not label_str and amount is None:
             continue
         rows.append([label_str, amount])
-        line_meta.append(_line_hierarchy(entry))  # parallel to rows (same keep/skip)
+        line_meta.append(_line_hierarchy(entry, value_source))  # parallel to rows (same keep/skip)
 
     return (columns, rows, line_meta) if rows else None
 
@@ -305,7 +332,8 @@ def report_data_to_capped_table(report_data: dict) -> tuple[list[str], list[list
         return None
     columns, rows, line_meta = flattened
     rows, row_count, truncated = _cap_stored_rows(rows, len(rows), False)
-    line_meta = line_meta[: len(rows)]  # lockstep with the row cap → stays aligned
+    if len(line_meta) > len(rows):  # only when the cap truncated — lockstep, stays aligned
+        line_meta = line_meta[: len(rows)]
     return columns, rows, line_meta, row_count, truncated
 
 

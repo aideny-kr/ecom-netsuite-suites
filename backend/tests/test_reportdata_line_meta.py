@@ -93,3 +93,34 @@ def test_persisted_payload_carries_line_meta_aligned_to_rows():
     assert "line_meta" in payload
     assert len(payload["line_meta"]) == len(payload["rows"])
     assert [m["is_summary"] for m in payload["line_meta"]] == [False, True]
+
+
+# --- robustness (T2 gate r1): NetSuite "T"/"F" booleans + non-empty-list inference ----
+def test_line_meta_isdetailline_boolean_string_t_f():
+    # NetSuite serializes booleans as "T"/"F" strings pervasively; BOTH are truthy, so a
+    # bare `not bool(isDetailLine)` mislabels every line. Coerce "T"/"F" to a real bool.
+    _c, _r, meta = _extract_report_data_as_table(
+        {
+            "0": {"label": "Cash", "isDetailLine": "T", "detailLineValues": [{"amount": 100}]},
+            "1": {"label": "Total", "isDetailLine": "F", "summaryLineValues": [{"Amount": 500}]},
+        }
+    )
+    assert [m["is_summary"] for m in meta] == [False, True]  # "T"→detail, "F"→summary
+
+
+def test_line_meta_inference_uses_nonempty_value_list_not_key_presence():
+    # isDetailLine absent + BOTH keys present but summaryLineValues EMPTY. The amount came
+    # from detailLineValues (non-empty) → this is a DETAIL line; inference must key off the
+    # same non-empty list amount extraction used, not mere key presence.
+    _c, _r, meta = _extract_report_data_as_table(
+        {"0": {"label": "Cash", "summaryLineValues": [], "detailLineValues": [{"amount": 100}]}}
+    )
+    assert meta[0]["is_summary"] is False
+
+
+def test_line_meta_level_handles_float_string_consistently():
+    # int("2.0") raises but int(2.0)==2 — coerce via float() so a stringified level parses.
+    _c, _r, meta = _extract_report_data_as_table(
+        {"0": {"label": "X", "isDetailLine": True, "indentLevel": "2.0", "detailLineValues": [{"amount": 1}]}}
+    )
+    assert meta[0]["level"] == 2
