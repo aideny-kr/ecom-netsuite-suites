@@ -44,11 +44,17 @@ class Settings(BaseSettings):
     OPENROUTER_API_KEY: str = ""
     DEFAULT_AI_PROVIDER: str = "anthropic"
     # ── Adaptive thinking (chat path) ───────────────────────────────────────
-    # Native extended reasoning. Always-on with a generous default budget so the
-    # model self-paces depth per turn (Layer 1). CHAT_THINKING_ENABLED is the
-    # global kill-switch. Levels: none|low|med|high|xhigh (see chat/thinking.py).
+    # Native extended reasoning. CHAT_THINKING_ENABLED is the global kill-switch.
+    # Levels: none|low|med|high|xhigh (see chat/thinking.py); the agent can
+    # escalate_reasoning per-turn for hard turns (Layer 2).
+    # Default is "low": on Sonnet 5, adaptive "medium" is "comparable to Sonnet 4.6
+    # at high effort" — that produced ~2-minute thinking turns that, across a
+    # multi-turn report, blew the 300s cap (see /cashflow timeout, 2026-07-01).
+    # Anthropic's effort docs recommend "low" for chat / latency-sensitive workloads;
+    # escalate_reasoning still lifts hard turns. (Legacy budget_tokens' hard cap used
+    # to bound this implicitly; adaptive effort has no token ceiling.)
     CHAT_THINKING_ENABLED: bool = True
-    CHAT_THINKING_DEFAULT_LEVEL: str = "med"
+    CHAT_THINKING_DEFAULT_LEVEL: str = "low"
     # NOTE: the Layer-2 GLM-tier config (CHAT_THINKING_MODEL/PROVIDER +
     # ALLOW_CHINA_ORIGIN_ON_CUSTOMER_DATA) was removed — the model/provider switch
     # it gated was never wired into the escalation path, and shipping a dormant
