@@ -225,28 +225,28 @@ FETCH FIRST 5000 ROWS ONLY""",
         WHEN a.accttype IN ('AcctPay','CreditCard','OthCurrLiab','LongTermLiab','DeferRevenue') THEN '2-Liabilities'
         WHEN a.accttype = 'Equity' THEN '3-Equity'
     END AS section,
-    SUM(BUILTIN.CONSOLIDATE(tal.amount, 'LEDGER', 'DEFAULT', 'DEFAULT', 1, ap.id, 'DEFAULT')
+    SUM(BUILTIN.CONSOLIDATE(tal.amount, 'LEDGER', 'DEFAULT', 'DEFAULT', 1, txnp.id, 'DEFAULT')
         * CASE WHEN a.accttype IN ('AcctPay','CreditCard','OthCurrLiab','LongTermLiab','DeferRevenue','Equity') THEN -1 ELSE 1 END
     ) AS balance
 FROM transactionaccountingline tal
     JOIN transaction t ON t.id = tal.transaction
     JOIN account a ON a.id = tal.account
-    JOIN accountingperiod ap ON ap.id = t.postingperiod
+    JOIN accountingperiod txnp ON txnp.id = t.postingperiod
     CROSS JOIN (
         SELECT id, periodname, startdate, enddate
-        FROM accountingperiod
-        WHERE isquarter = 'F' AND isyear = 'F'
+        FROM accountingperiod ap
+        WHERE ap.isquarter = 'F' AND ap.isyear = 'F'
         AND {period_filter}
     ) ap_period
 WHERE tal.posting = 'T'
     AND tal.accountingbook = (SELECT id FROM accountingbook WHERE isprimary = 'T')
-    AND ap.isquarter = 'F' AND ap.isyear = 'F'
-    AND ap.enddate <= ap_period.enddate
+    AND txnp.isquarter = 'F' AND txnp.isyear = 'F'
+    AND txnp.enddate <= ap_period.enddate
     AND a.accttype IN ('Bank','AcctRec','UnbilledRec','OthCurrAsset','FixedAsset','OthAsset','DeferExpense',
                         'AcctPay','CreditCard','OthCurrLiab','LongTermLiab','DeferRevenue','Equity')
     AND COALESCE(a.eliminate, 'F') = 'F'
 GROUP BY ap_period.periodname, ap_period.startdate, a.acctnumber, a.acctname, a.accttype
-HAVING SUM(BUILTIN.CONSOLIDATE(tal.amount, 'LEDGER', 'DEFAULT', 'DEFAULT', 1, ap.id, 'DEFAULT')) <> 0
+HAVING SUM(BUILTIN.CONSOLIDATE(tal.amount, 'LEDGER', 'DEFAULT', 'DEFAULT', 1, txnp.id, 'DEFAULT')) <> 0
 ORDER BY a.acctnumber, ap_period.startdate
 FETCH FIRST 5000 ROWS ONLY""",
     },
