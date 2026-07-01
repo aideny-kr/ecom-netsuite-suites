@@ -203,27 +203,84 @@ def _extract_items_as_table(parsed: dict[str, Any] | list) -> tuple[list[str], l
     return columns, rows
 
 
-def _extract_report_data_as_table(report_data: dict) -> tuple[list[str], list[list]] | None:
-    """Flatten ns_runReport hierarchical reportData into columns/rows.
+def _coerce_bool(value) -> bool | None:
+    """NetSuite serializes booleans as JSON true/false OR the string ``"T"``/``"F"`` (a
+    pervasive convention — cf. suiteql_validator / prompt_template_service). Coerce both;
+    return None for absent/unrecognized so the caller can fall back to inference. A bare
+    ``bool("F")`` is True (both strings are truthy), which would silently invert the
+    hierarchy signal."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        s = value.strip().lower()
+        if s in ("t", "true", "1", "yes"):
+            return True
+        if s in ("f", "false", "0", "no"):
+            return False
+    return None
+
+
+def _line_hierarchy(entry: dict, value_source: str | None) -> dict:
+    """Per-row statement-hierarchy metadata carried ALONGSIDE the flattened
+    ``[account, amount]`` row (never as a column), so a later curation step
+    (``report.compose`` Phase 3) can build a curated statement / key-figure callouts
+    from the section structure the flat table otherwise discards.
+
+    ``is_summary``: a summary/section/total line vs an individual detail account.
+    NetSuite marks this authoritatively with ``isDetailLine`` (coerced — it may arrive as
+    JSON false OR the string ``"F"``). When that key is absent, fall back to the SAME
+    non-empty value list the amount was read from (``value_source``: ``"summary"`` vs
+    ``"detail"``) — NOT mere key presence, which would mislabel a detail line that merely
+    carries an empty ``summaryLineValues`` key. ``level``: indent depth
+    (``indentLevel``/``indent``/``level``; via ``float`` so ``"2.0"`` parses), 0 when
+    unknown. All structural, keyed off reportData markers — no hardcoded account/label
+    names (no prompt pollution).
+    """
+    is_detail = _coerce_bool(entry.get("isDetailLine"))
+    if is_detail is None:
+        is_detail = value_source == "detail"  # matches amount extraction's non-emptiness
+    level = 0
+    for key in ("indentLevel", "indent", "level"):
+        if key in entry:
+            try:
+                level = int(float(entry[key]))
+            except (TypeError, ValueError):
+                level = 0
+            break
+    return {"is_summary": not is_detail, "level": level}
+
+
+def _extract_report_data_as_table(report_data: dict) -> tuple[list[str], list[list], list[dict]] | None:
+    """Flatten ns_runReport hierarchical reportData into ``(columns, rows, line_meta)``.
 
     Columns are ``["account", "amount"]`` — the human-readable line label and its
-    amount. The detail/section line-type marker is intentionally NOT emitted: it is a
-    degenerate two-value column that, as the first column, would become a chart's
-    x-axis (report.compose chart resolution keys the x-axis off the first column) and
-    bury the account names under repeated "detail"/"section" labels.
+    amount. The detail/section line-type marker is intentionally NOT emitted as a
+    COLUMN: as the first column it would become a chart's x-axis (report.compose keys
+    the x-axis off the first column) and bury the account names under repeated
+    "detail"/"section" labels. Instead the hierarchy travels as ``line_meta`` — a list
+    of ``{is_summary, level}`` dicts PARALLEL to ``rows`` — so report.compose (Phase 3)
+    can curate a statement / key-figure callouts without the marker polluting the table.
+
+    The ``rows`` themselves are UNCHANGED (faithful): every figure is preserved (the
+    "never drop a figure" invariant); curation of blanks/detail/placeholder is Phase 3's
+    job off ``line_meta``, not this faithful flatten's.
     """
     if not isinstance(report_data, dict) or not report_data:
         return None
 
     columns = ["account", "amount"]
     rows: list[list] = []
+    line_meta: list[dict] = []
 
     for _key, entry in sorted(report_data.items(), key=lambda x: int(x[0]) if x[0].isdigit() else 0):
         if not isinstance(entry, dict):
             continue
         label = entry.get("value") or entry.get("label") or ""
-        # Get amount from summaryLineValues or detailLineValues
+        # Get amount from summaryLineValues or detailLineValues, remembering WHICH
+        # non-empty list supplied it (value_source) so the hierarchy classifier keys off
+        # the same signal — never mere key presence.
         amount = None
+        value_source = None
         for vals_key in ("summaryLineValues", "detailLineValues"):
             vals = entry.get(vals_key)
             if isinstance(vals, list) and vals:
@@ -237,6 +294,7 @@ def _extract_report_data_as_table(report_data: dict) -> tuple[list[str], list[li
                     amount = first.get("Amount")
                     if amount is None:
                         amount = first.get("amount")
+                    value_source = "summary" if vals_key == "summaryLineValues" else "detail"
                     break
         label_str = str(label).strip()
         # NEVER silently drop a figure from a financial surface. Keep every row that
@@ -245,21 +303,24 @@ def _extract_report_data_as_table(report_data: dict) -> tuple[list[str], list[li
         # AND no amount). A value-based "duplicate" dedup is unsafe — two genuinely
         # distinct lines can coincide in amount (e.g. two $0 balance-sheet lines), so it
         # would drop a real figure and the total would stop footing. Cosmetic
-        # blank-label continuation rows ns_runReport emits are left for the Tier-2
-        # curated-statement restructure, which has the structure to consolidate safely.
+        # blank-label continuation rows are consolidated by the Phase 3 curated-statement
+        # restructure (off line_meta), which has the structure to do it safely.
         # No hardcoded label filtering either — a tenant may name a line anything.
         if not label_str and amount is None:
             continue
         rows.append([label_str, amount])
+        line_meta.append(_line_hierarchy(entry, value_source))  # parallel to rows (same keep/skip)
 
-    return (columns, rows) if rows else None
+    return (columns, rows, line_meta) if rows else None
 
 
-def report_data_to_capped_table(report_data: dict) -> tuple[list[str], list[list], int, bool] | None:
+def report_data_to_capped_table(report_data: dict) -> tuple[list[str], list[list], list[dict], int, bool] | None:
     """Flatten a hierarchical ``reportData`` dict AND cap it at ``MAX_STORED_PAYLOAD_ROWS``.
 
-    Returns ``(columns, capped_rows, true_row_count, truncated)`` or None when the
-    reportData has nothing to flatten. The TRUE pre-cap ``row_count`` is preserved.
+    Returns ``(columns, capped_rows, capped_line_meta, true_row_count, truncated)`` or
+    None when the reportData has nothing to flatten. The TRUE pre-cap ``row_count`` is
+    preserved, and ``line_meta`` is capped in LOCKSTEP with ``rows`` so the two stay
+    aligned (the cap only ever truncates the tail).
 
     SINGLE SOURCE OF TRUTH for BOTH consumers of the reportData shape (re-review #2):
     the persistence path ``extract_result_payload`` Path 2 AND the in-turn intercept
@@ -269,9 +330,11 @@ def report_data_to_capped_table(report_data: dict) -> tuple[list[str], list[list
     flattened = _extract_report_data_as_table(report_data)
     if flattened is None:
         return None
-    columns, rows = flattened
+    columns, rows, line_meta = flattened
     rows, row_count, truncated = _cap_stored_rows(rows, len(rows), False)
-    return columns, rows, row_count, truncated
+    if len(line_meta) > len(rows):  # only when the cap truncated — lockstep, stays aligned
+        line_meta = line_meta[: len(rows)]
+    return columns, rows, line_meta, row_count, truncated
 
 
 # Normalized (alphanumeric-only, lowercased) column names that denote money.
@@ -429,7 +492,7 @@ def extract_result_payload(tool_name: str, params: dict[str, Any], result_str: s
             # the persisted/sidecar table and the live SSE table can never drift.
             capped = report_data_to_capped_table(report_data)
             if capped is not None:
-                columns, rows, row_count, truncated = capped
+                columns, rows, line_meta, row_count, truncated = capped
                 return {
                     "kind": "table",
                     "columns": columns,
@@ -441,6 +504,10 @@ def extract_result_payload(tool_name: str, params: dict[str, Any], result_str: s
                     # The flattened reportData columns are ["account", "amount"]; tag the
                     # money column(s) so the report renderer accounting-formats ONLY them.
                     "currency_columns": _money_columns(columns),
+                    # Per-row statement hierarchy (parallel to rows) for report.compose
+                    # (Phase 3) to curate a statement / key-figure callouts. Reaches BOTH
+                    # the persisted payload AND the in-turn sidecar (this is that payload).
+                    "line_meta": line_meta,
                 }
             # reportData present but EMPTY (no report lines). The in-turn intercept's
             # reportData branch also flattens to None here and then yields NO stamped
