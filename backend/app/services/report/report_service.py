@@ -84,6 +84,25 @@ def _currency_in(payload: dict, cols: list) -> list:
     return [c for c in (payload.get("currency_columns") or []) if c in cols]
 
 
+def _has_summary_lines(line_meta, rows: list) -> bool:
+    """True when ``line_meta`` is row-aligned AND marks at least one summary line —
+    the single definition of "statement-shaped with hierarchy" every honesty/soup
+    gate keys off (table branch, explicit-chart branch). One rule, never re-derived."""
+    return (
+        isinstance(line_meta, list)
+        and len(line_meta) == len(rows)
+        and any(isinstance(m, dict) and m.get("is_summary") for m in line_meta)
+    )
+
+
+def _driver_title(n: int, cols: list, currency_columns: list) -> str:
+    """The driver chart's title, named after the SAME column the drivers were ranked
+    by (``_amount_index``) — one derivation for every driver-chart site."""
+    idx = _amount_index(cols, currency_columns)
+    value_name = cols[idx] if idx < len(cols) else "value"
+    return f"Top {n} drivers by {value_name}"
+
+
 def _amount_index(cols: list, currency_columns: list) -> int:
     """Index of the amount column: the producer-tagged currency column, else col 1."""
     if currency_columns and currency_columns[0] in cols:
@@ -291,8 +310,9 @@ def _build_tabular_chart(
         return d
 
     # Shape-driven defaults (Phase 4): a period/date-shaped x column is a TREND — default
-    # to a line and say "trend" in the derived title. An explicit chart_type always wins.
-    time_series = _looks_time_series([r[0] if r else None for r in rows])
+    # to a line and say "trend" in the derived title. An explicit chart_type always wins,
+    # so only probe the shape when a default is actually needed.
+    time_series = (chart_type is None or title is None) and _looks_time_series([r[0] if r else None for r in rows])
     if title is None:
         title = f"{numeric_cols[0]} trend by {cols[0]}" if time_series else f"{numeric_cols[0]} by {cols[0]}"
     return ChartData(
@@ -335,7 +355,7 @@ def _auto_chart_section(resolved: dict, *, drivers: list | None = None, label: s
     if not (_MIN_AUTO_CHART_ROWS <= len(rows) <= _MAX_CHART_POINTS):
         return None
     numeric_cols = _numeric_value_columns(cols, rows)
-    currency = [c for c in (resolved.get("currency_columns") or []) if c in numeric_cols]
+    currency = _currency_in(resolved, numeric_cols)
     if currency:
         value_columns = currency
     elif len(numeric_cols) == 1:
@@ -343,7 +363,7 @@ def _auto_chart_section(resolved: dict, *, drivers: list | None = None, label: s
     else:
         return None  # ambiguous (or no) numeric measure → don't auto-chart a wrong series
     if drivers:
-        title = label or f"Top {len(rows)} drivers by {value_columns[0]}"
+        title = label or _driver_title(len(rows), cols, currency)
         chart_type = "bar"  # leaf drivers are categorical by construction
     else:
         title = label or None  # falsy label ("" too) → _build_tabular_chart derives
@@ -394,8 +414,7 @@ def _resolve_data_section(s: dict, resolver: Resolver) -> dict:
         currency_columns = _currency_in(payload, cols)
         line_meta = payload.get("line_meta")
         # `select` projects columns, never rows, so row alignment is judged either way.
-        statement_shaped = isinstance(line_meta, list) and len(line_meta) == len(rows)
-        has_summary_lines = statement_shaped and any(isinstance(m, dict) and m.get("is_summary") for m in line_meta)
+        has_summary_lines = _has_summary_lines(line_meta, rows)
         # STATEMENT treatment (Phase 3): a statement-shaped payload (line_meta present —
         # flattened ns_runReport statements) curates to its named section-summary lines +
         # marquee callouts instead of the positional top-K. Gated on no `select` (a model
@@ -405,7 +424,7 @@ def _resolve_data_section(s: dict, resolver: Resolver) -> dict:
         # CONCLUDING lines, so claiming "curated statement" over it — and promoting
         # interior subtotals as marquee "conclusions" — would be dishonest (T2 gate:
         # major). The top-K floor's note discloses the truncation instead.
-        if not s.get("select") and not upstream_truncated:
+        if has_summary_lines and not s.get("select") and not upstream_truncated:
             curated_stmt = _curate_statement(cols, rows, line_meta, currency_columns)
             if curated_stmt is not None:
                 statement_rows, callouts = curated_stmt
@@ -491,11 +510,7 @@ def _resolve_data_section(s: dict, resolver: Resolver) -> dict:
             # chart-every-row behavior (the renderer's own cap + note handle
             # legibility); a silent magnitude top-12 substitution there would drop
             # rows the model explicitly asked to chart (T2 gate r3: major).
-            if (
-                isinstance(line_meta, list)
-                and len(line_meta) == len(rows)
-                and any(isinstance(m, dict) and m.get("is_summary") for m in line_meta)
-            ):
+            if _has_summary_lines(line_meta, rows):
                 # Honesty gate (mirrors the table branch): drivers ranked over the
                 # stored HEAD of a tail-cut statement are dishonest — the true top
                 # movers may live in the cut tail. Refuse deterministically.
@@ -521,11 +536,9 @@ def _resolve_data_section(s: dict, resolver: Resolver) -> dict:
                         ),
                     }
                 rows = drivers
-                # Same column the drivers were RANKED by (via _amount_index) — never a
-                # hand-rolled re-derivation that could drift from the ranking rule.
-                amount_idx = _amount_index(cols, stmt_currency)
-                value_name = cols[amount_idx] if amount_idx < len(cols) else "value"
-                default_title = f"Top {len(rows)} drivers by {value_name}"
+                # Titled after the SAME column the drivers were ranked by — one shared
+                # derivation (_driver_title) for every driver-chart site.
+                default_title = _driver_title(len(rows), cols, stmt_currency)
             # Row cap: a chart over tens of thousands of rows bakes a multi-MB SVG into
             # the report (DoS-shape). Refuse deterministically before building anything.
             if len(rows) > _MAX_CHART_POINTS:
