@@ -56,20 +56,20 @@ _TIME_LIKE_RE = re.compile(
     r")$",
     re.IGNORECASE,
 )
-_TIME_SERIES_MIN_FRACTION = 0.8
 Resolver = Callable[[str], dict]
 
 
 def _looks_time_series(x_values: list) -> bool:
-    """True when the x column's VALUES are period/date-shaped (ISO dates, "Jun 2026",
-    "Q2 2026", "FY26") for at least ``_TIME_SERIES_MIN_FRACTION`` of the non-empty
-    cells — a trend axis, so the chart defaults to a line. Value-shape only, never
-    column names."""
+    """True when EVERY non-empty x value is period/date-shaped (ISO dates, "Jun 2026",
+    "Q2 2026", "FY26") — a trend axis, so the chart defaults to a line. ALL values, not
+    a fraction: a per-period result with a trailing rollup row ("Total") would otherwise
+    plot the rollup as a final "period" spiking to the sum of all months — a cliff-edge
+    trend that doesn't exist (T2 gate). A miss keeps the always-safe bar default.
+    Value-shape only, never column names."""
     vals = [str(v).strip() for v in x_values if v is not None and str(v).strip()]
     if len(vals) < _MIN_AUTO_CHART_ROWS:
         return False
-    hits = sum(1 for v in vals if _TIME_LIKE_RE.match(v))
-    return hits / len(vals) >= _TIME_SERIES_MIN_FRACTION
+    return all(_TIME_LIKE_RE.match(v) for v in vals)
 
 
 def _amount_index(cols: list, currency_columns: list) -> int:
@@ -307,7 +307,14 @@ def _auto_chart_section(resolved: dict, *, drivers: list | None = None, label: s
     (year/id/count) as a misleading series. None when too small / nothing safe to plot."""
     if resolved.get("type") != "table":
         return None
-    rows = drivers if drivers else resolved.get("rows", [])
+    # A statement table ALWAYS arrives with a drivers list (possibly empty — a collapsed
+    # all-summary statement has no leaves). It must chart drivers or NOTHING: falling
+    # back to the summary rows would bar-chart Net Change beside the sections it sums
+    # and an Ending-Cash balance beside flows — the exact soup this exists to kill.
+    if drivers is not None:
+        rows = drivers
+    else:
+        rows = resolved.get("rows", [])
     cols = resolved.get("columns", [])
     # Curation bounds this to K (<<100), but guard the DoS-shape independently so a future
     # higher _REPORT_TABLE_TOP_K can't bake a multi-MB SVG (same cap the chart branch uses).
@@ -453,10 +460,24 @@ def _resolve_data_section(s: dict, resolver: Resolver) -> dict:
             if isinstance(line_meta, list) and len(line_meta) == len(rows):
                 stmt_currency = [c for c in (payload.get("currency_columns") or []) if c in cols]
                 drivers = _driver_rows(rows, line_meta, cols, stmt_currency)
-                if len(drivers) >= _MIN_AUTO_CHART_ROWS:
-                    rows = drivers
-                    value_name = stmt_currency[0] if stmt_currency else (cols[1] if len(cols) > 1 else "value")
-                    default_title = f"Top {len(rows)} drivers by {value_name}"
+                if len(drivers) < _MIN_AUTO_CHART_ROWS:
+                    # A collapsed (all-summary) statement has no comparable leaves —
+                    # charting its summary rows would double-count (Net Change beside
+                    # the sections it sums) and dwarf (an Ending-Cash balance beside
+                    # flows). Refuse deterministically rather than render soup.
+                    return {
+                        "type": "error",
+                        "reason": (
+                            "statement has no comparable detail lines to chart — "
+                            "chart a per-period or aggregated result instead"
+                        ),
+                    }
+                rows = drivers
+                # Same column the drivers were RANKED by (via _amount_index) — never a
+                # hand-rolled re-derivation that could drift from the ranking rule.
+                amount_idx = _amount_index(cols, stmt_currency)
+                value_name = cols[amount_idx] if amount_idx < len(cols) else "value"
+                default_title = f"Top {len(rows)} drivers by {value_name}"
             # Row cap: a chart over tens of thousands of rows bakes a multi-MB SVG into
             # the report (DoS-shape). Refuse deterministically before building anything.
             if len(rows) > _MAX_CHART_POINTS:
