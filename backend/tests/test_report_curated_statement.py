@@ -306,6 +306,48 @@ def test_truncated_payload_gets_top_k_floor_not_statement_claim():
 # no-indent-key reportData) must keep the statement's CONCLUSIONS — head + tail, never
 # just the first 8 (which cut Net Change / Ending Cash from table AND callouts).
 # ---------------------------------------------------------------------------
+def test_lone_shallow_summary_does_not_collapse_statement_to_one_line():
+    # 1 lone level-0 summary (a grand-total wrapper) + 10 level-1 subtotals ending in the
+    # marquee conclusions: the threshold trim used to pick the 1-row level-0 subset
+    # (≤8 fits!), rendering a one-line "curated statement" and losing Net Change /
+    # Ending Cash from BOTH table and callouts (T2 gate r3: major). A degenerately small
+    # threshold subset must fall through to head+tail over ALL qualifying lines.
+    rows = [["Cash Flow", 4_750_000]]
+    meta = [_meta(True, 0)]
+    for i in range(8):
+        rows.append([f"Subtotal {i}", (i + 1) * 1000])
+        meta.append(_meta(True, 1))
+    rows += [["Net Change in Cash", 4_750_000], ["Cash at End of Period", 11_500_000]]
+    meta += [_meta(True, 1), _meta(True, 1)]
+    payload = {
+        "columns": ["account", "amount"],
+        "rows": rows,
+        "row_count": len(rows),
+        "truncated": False,
+        "currency_columns": ["amount"],
+        "line_meta": meta,
+    }
+    out = _resolve(payload)
+    labels = [r[0] for r in out["rows"]]
+    assert len(labels) == _STATEMENT_TABLE_MAX  # never a degenerate 1-line statement
+    assert "Net Change in Cash" in labels and "Cash at End of Period" in labels
+    assert [c["label"] for c in out["statement_callouts"]][-1] == "Cash at End of Period"
+
+
+def test_duplicate_statement_table_renders_callouts_once():
+    # The auto-chart dedupes repeated tables via (result_id, select); the callout cards
+    # must dedupe the same way — a composition repeating the statement table must not
+    # stack two identical rows of marquee cards (T2 gate r3).
+    payload = _statement_payload()
+    spec = assemble_spec(
+        "CF",
+        [{"type": "table", "result_id": "r1"}, {"type": "table", "result_id": "r1"}],
+        lambda rid: payload,
+    )
+    headlines = [s for s in spec["sections"] if s["type"] == "metric_headline"]
+    assert len(headlines) == 4  # one set of callouts, not two
+
+
 def test_flat_statement_overflow_keeps_opening_and_conclusions():
     rows = [[f"Section {i}", (i + 1) * 1000] for i in range(8)]
     rows += [["Net Change in Cash", 4_750_000], ["Cash at End of Period", 11_500_000]]

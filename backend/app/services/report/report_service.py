@@ -166,24 +166,25 @@ def _curate_statement(cols: list, rows: list, line_meta, currency_columns: list)
     if len(picked) < _MIN_STATEMENT_LINES:
         return None
     if len(picked) > _STATEMENT_TABLE_MAX:
-        # Keep the shallowest levels that fit the cap (largest threshold T with
-        # count(level <= T) <= cap); if even the shallowest level alone overflows, keep
-        # its HEAD + TAIL (statement order preserved): a statement builds to its
-        # conclusions, so the trailing lines (Net Change / Ending Cash) must survive the
-        # trim — first-N-only cut the marquee figures from both table and callouts
-        # (T2 gate: major; realistic because reportData often carries no indent keys,
-        # flattening every summary to one level).
+        # Keep the shallowest levels that fit the cap — the largest threshold T whose
+        # subset size lands in [_MIN_STATEMENT_LINES, _STATEMENT_TABLE_MAX]. The lower
+        # bound matters: a lone shallow grand-total line is a "fitting" subset of ONE,
+        # which would collapse the whole curated statement to a single row and cut the
+        # marquee conclusions from both table and callouts (T2 gate r3: major).
+        # When no threshold yields a usable size (the shallowest level alone overflows,
+        # or is degenerately small), keep HEAD + TAIL over ALL qualifying lines in
+        # statement order — a statement builds to its conclusions, so the trailing
+        # lines (Net Change / Ending Cash) must survive the trim regardless of the
+        # indent-level distribution (reportData often carries no indent keys at all).
         chosen = None
         for threshold in sorted({lvl for lvl, _ in picked}, reverse=True):
             subset = [p for p in picked if p[0] <= threshold]
-            if len(subset) <= _STATEMENT_TABLE_MAX:
+            if _MIN_STATEMENT_LINES <= len(subset) <= _STATEMENT_TABLE_MAX:
                 chosen = subset
                 break
         if chosen is None:
-            min_level = min(lvl for lvl, _ in picked)
-            same = [p for p in picked if p[0] == min_level]
             head = _STATEMENT_TABLE_MAX - _STATEMENT_CALLOUT_MAX
-            chosen = same[:head] + same[-_STATEMENT_CALLOUT_MAX:]
+            chosen = picked[:head] + picked[-_STATEMENT_CALLOUT_MAX:]
         picked = chosen
     statement_rows = [row for _, row in picked]
     callouts = [
@@ -422,8 +423,9 @@ def assemble_spec(title: str, sections: list[dict], resolver: Resolver) -> dict:
     }
     # Auto-chart dedupe is keyed by (result_id, select) so two tables over the SAME result
     # with DIFFERENT projections each get their own chart, but an identical table doesn't
-    # double-chart.
+    # double-chart. Statement callouts dedupe by the same key.
     auto_charted_keys: set = set()
+    emitted_callout_keys: set = set()
 
     def _table_key(sec: dict) -> tuple:
         return (sec.get("result_id"), tuple(sec.get("select") or []))
@@ -442,8 +444,11 @@ def assemble_spec(title: str, sections: list[dict], resolver: Resolver) -> dict:
         callouts = None
         if s["type"] == "table" and isinstance(resolved, dict):
             callouts = resolved.pop("statement_callouts", None)
-        if callouts:
+        # Dedupe callouts exactly like auto-charts: a composition repeating the same
+        # statement table must not stack a second identical row of marquee cards.
+        if callouts and _table_key(s) not in emitted_callout_keys:
             out_sections.extend(callouts)
+            emitted_callout_keys.add(_table_key(s))
         out_sections.append(resolved)
         if resolved.get("type") == "metric_headline" and resolved.get("definition_version") is not None:
             provenance_sources.append(f"metric:{s['result_id']}@v{resolved['definition_version']}")
