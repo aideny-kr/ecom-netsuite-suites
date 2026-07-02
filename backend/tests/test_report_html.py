@@ -1,41 +1,41 @@
-from app.services.report.report_html import _fmt_amount, render_report_html
+from app.services.report.report_html import fmt_amount, render_report_html
 
 
-def test_fmt_amount_accounting_style():
+def testfmt_amount_accounting_style():
     """A currency cell renders accounting-style: thousands separators, 2 decimals
     (exact — foots, no precision loss), negatives in parentheses. None / non-finite →
     empty; non-numbers (and bools) pass through untouched."""
-    assert _fmt_amount(5583749.13) == "5,583,749.13"
-    assert _fmt_amount(-4595824.06766871) == "(4,595,824.07)"
-    assert _fmt_amount(0) == "0.00"
-    assert _fmt_amount(-0.004) == "0.00"  # tiny residual rounds to a clean zero, NOT "(0.00)"
-    assert _fmt_amount(None) == ""
-    assert _fmt_amount(float("nan")) == ""
-    assert _fmt_amount(float("inf")) == ""
-    assert _fmt_amount("Cash") == "Cash"  # non-numeric label untouched
-    assert _fmt_amount(True) == "True"  # bool is not a financial amount
+    assert fmt_amount(5583749.13) == "5,583,749.13"
+    assert fmt_amount(-4595824.06766871) == "(4,595,824.07)"
+    assert fmt_amount(0) == "0.00"
+    assert fmt_amount(-0.004) == "0.00"  # tiny residual rounds to a clean zero, NOT "(0.00)"
+    assert fmt_amount(None) == ""
+    assert fmt_amount(float("nan")) == ""
+    assert fmt_amount(float("inf")) == ""
+    assert fmt_amount("Cash") == "Cash"  # non-numeric label untouched
+    assert fmt_amount(True) == "True"  # bool is not a financial amount
     # numeric STRINGS (scientific notation + US thousands-grouping) are coerced —
     # SuiteQL serializes amounts as strings like "1.64...E7"
-    assert _fmt_amount("1.6442836348665524E7") == "16,442,836.35"
-    assert _fmt_amount("5,583,749.13") == "5,583,749.13"
-    assert _fmt_amount("-100.5") == "(100.50)"
+    assert fmt_amount("1.6442836348665524E7") == "16,442,836.35"
+    assert fmt_amount("5,583,749.13") == "5,583,749.13"
+    assert fmt_amount("-100.5") == "(100.50)"
     # STRICT coercion: a string we can't safely parse as a US-format amount passes
     # through VERBATIM — never mangled into a wrong (or blank) dollar figure.
-    assert _fmt_amount("N/A") == "N/A"  # non-numeric
-    assert _fmt_amount("1_000") == "1_000"  # underscore (float() would read 1000)
-    assert _fmt_amount("1.234,56") == "1.234,56"  # European locale grouping
-    assert _fmt_amount("1,2,3") == "1,2,3"  # mis-grouped
-    assert _fmt_amount("inf") == "inf"  # sentinel token, not blanked
-    assert _fmt_amount("1e400") == "1e400"  # out-of-double-range → verbatim, NOT blank
-    assert _fmt_amount("0042") == "0042"  # zero-padded code, NOT a $42.00 amount
+    assert fmt_amount("N/A") == "N/A"  # non-numeric
+    assert fmt_amount("1_000") == "1_000"  # underscore (float() would read 1000)
+    assert fmt_amount("1.234,56") == "1.234,56"  # European locale grouping
+    assert fmt_amount("1,2,3") == "1,2,3"  # mis-grouped
+    assert fmt_amount("inf") == "inf"  # sentinel token, not blanked
+    assert fmt_amount("1e400") == "1e400"  # out-of-double-range → verbatim, NOT blank
+    assert fmt_amount("0042") == "0042"  # zero-padded code, NOT a $42.00 amount
     # EXACT cents via Decimal — binary float() would corrupt these:
-    assert _fmt_amount("999999999999999.99") == "999,999,999,999,999.99"  # float → ...000.00
-    assert _fmt_amount("2.675") == "2.68"  # half-cent rounds up; float("2.675") → 2.67
+    assert fmt_amount("999999999999999.99") == "999,999,999,999,999.99"  # float → ...000.00
+    assert fmt_amount("2.675") == "2.68"  # half-cent rounds up; float("2.675") → 2.67
     # a large-but-finite number must FORMAT, never blank (default Decimal prec would)
-    assert _fmt_amount(1e26) == "100,000,000,000,000,000,000,000,000.00"
+    assert fmt_amount(1e26) == "100,000,000,000,000,000,000,000,000.00"
     # an absurd >309-digit int must NOT crash (f"{int:,.2f}" raises OverflowError);
     # it falls back to its exact raw repr, non-blank.
-    assert _fmt_amount(10**400) == str(10**400)
+    assert fmt_amount(10**400) == str(10**400)
 
 
 def test_only_tagged_currency_columns_are_accounting_formatted():

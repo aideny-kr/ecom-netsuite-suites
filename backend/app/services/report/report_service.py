@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import set_tenant_context
 from app.schemas.chart import ChartData
-from app.schemas.report import normalize_and_validate_sections
+from app.schemas.report import DividerSection, HeadingSection, normalize_and_validate_sections
 from app.services import audit_service
 from app.services.report.report_charts import render_chart_svg
 from app.services.report.report_html import fmt_amount, render_report_html
@@ -82,6 +82,25 @@ def _looks_time_series(x_values: list) -> bool:
 def _currency_in(payload: dict, cols: list) -> list:
     """The producer's currency-column tags narrowed to the columns present."""
     return [c for c in (payload.get("currency_columns") or []) if c in cols]
+
+
+def _has_summary_lines(line_meta, rows: list) -> bool:
+    """True when ``line_meta`` is row-aligned AND marks at least one summary line —
+    the single definition of "statement-shaped with hierarchy" every honesty/soup
+    gate keys off (table branch, explicit-chart branch). One rule, never re-derived."""
+    return (
+        isinstance(line_meta, list)
+        and len(line_meta) == len(rows)
+        and any(isinstance(m, dict) and m.get("is_summary") for m in line_meta)
+    )
+
+
+def _driver_title(n: int, cols: list, currency_columns: list) -> str:
+    """The driver chart's title, named after the SAME column the drivers were ranked
+    by (``_amount_index``) — one derivation for every driver-chart site."""
+    idx = _amount_index(cols, currency_columns)
+    value_name = cols[idx] if idx < len(cols) else "value"
+    return f"Top {n} drivers by {value_name}"
 
 
 def _amount_index(cols: list, currency_columns: list) -> int:
@@ -184,12 +203,12 @@ def _curate_statement(cols: list, rows: list, line_meta, currency_columns: list)
     most aggregate subtotals) are kept, statement order always preserved. Callouts are
     the LAST ``_STATEMENT_CALLOUT_MAX`` curated lines — a statement builds to its
     conclusions (Net Change, Ending Cash) — as metric_headline sections with the amount
-    accounting-formatted (exact Decimal semantics via the shared ``_fmt_amount``).
+    accounting-formatted (exact Decimal semantics via the shared ``fmt_amount``).
     """
     if not isinstance(line_meta, list) or len(line_meta) != len(rows) or len(cols) < 2:
         return None
     amount_idx = _amount_index(cols, currency_columns)
-    picked: list[tuple[int, list]] = []
+    picked: list[tuple[int, list, object]] = []  # (level, row, qualified amount)
     for row, meta in zip(rows, line_meta):
         if not isinstance(meta, dict) or not meta.get("is_summary"):
             continue
@@ -206,7 +225,7 @@ def _curate_statement(cols: list, rows: list, line_meta, currency_columns: list)
             level = int(float(meta.get("level", 0)))
         except (TypeError, ValueError):
             level = 0
-        picked.append((level, row))
+        picked.append((level, row, amount))
     if len(picked) < _MIN_STATEMENT_LINES:
         return None
     if len(picked) > _STATEMENT_TABLE_MAX:
@@ -221,7 +240,7 @@ def _curate_statement(cols: list, rows: list, line_meta, currency_columns: list)
         # lines (Net Change / Ending Cash) must survive the trim regardless of the
         # indent-level distribution (reportData often carries no indent keys at all).
         chosen = None
-        for threshold in sorted({lvl for lvl, _ in picked}, reverse=True):
+        for threshold in sorted({lvl for lvl, _, _ in picked}, reverse=True):
             subset = [p for p in picked if p[0] <= threshold]
             if _MIN_STATEMENT_LINES <= len(subset) <= _STATEMENT_TABLE_MAX:
                 chosen = subset
@@ -230,17 +249,18 @@ def _curate_statement(cols: list, rows: list, line_meta, currency_columns: list)
             head = _STATEMENT_TABLE_MAX - _STATEMENT_CALLOUT_MAX
             chosen = picked[:head] + picked[-_STATEMENT_CALLOUT_MAX:]
         picked = chosen
-    statement_rows = [row for _, row in picked]
+    statement_rows = [row for _, row, _ in picked]
     callouts = [
         {
             "type": "metric_headline",
             "label": str(row[0]),
-            "value": fmt_amount(row[amount_idx] if amount_idx < len(row) else None),
+            # the amount each line QUALIFIED on — no re-derivation to drift
+            "value": fmt_amount(amount),
             "unit": "",
             "period": "",
             "definition_version": None,
         }
-        for row in statement_rows[-_STATEMENT_CALLOUT_MAX:]
+        for _, row, amount in picked[-_STATEMENT_CALLOUT_MAX:]
     ]
     return statement_rows, callouts
 
@@ -290,8 +310,9 @@ def _build_tabular_chart(
         return d
 
     # Shape-driven defaults (Phase 4): a period/date-shaped x column is a TREND — default
-    # to a line and say "trend" in the derived title. An explicit chart_type always wins.
-    time_series = _looks_time_series([r[0] if r else None for r in rows])
+    # to a line and say "trend" in the derived title. An explicit chart_type always wins,
+    # so only probe the shape when a default is actually needed.
+    time_series = (chart_type is None or title is None) and _looks_time_series([r[0] if r else None for r in rows])
     if title is None:
         title = f"{numeric_cols[0]} trend by {cols[0]}" if time_series else f"{numeric_cols[0]} by {cols[0]}"
     return ChartData(
@@ -334,7 +355,7 @@ def _auto_chart_section(resolved: dict, *, drivers: list | None = None, label: s
     if not (_MIN_AUTO_CHART_ROWS <= len(rows) <= _MAX_CHART_POINTS):
         return None
     numeric_cols = _numeric_value_columns(cols, rows)
-    currency = [c for c in (resolved.get("currency_columns") or []) if c in numeric_cols]
+    currency = _currency_in(resolved, numeric_cols)
     if currency:
         value_columns = currency
     elif len(numeric_cols) == 1:
@@ -342,7 +363,7 @@ def _auto_chart_section(resolved: dict, *, drivers: list | None = None, label: s
     else:
         return None  # ambiguous (or no) numeric measure → don't auto-chart a wrong series
     if drivers:
-        title = label or f"Top {len(rows)} drivers by {value_columns[0]}"
+        title = label or _driver_title(len(rows), cols, currency)
         chart_type = "bar"  # leaf drivers are categorical by construction
     else:
         title = label or None  # falsy label ("" too) → _build_tabular_chart derives
@@ -393,8 +414,7 @@ def _resolve_data_section(s: dict, resolver: Resolver) -> dict:
         currency_columns = _currency_in(payload, cols)
         line_meta = payload.get("line_meta")
         # `select` projects columns, never rows, so row alignment is judged either way.
-        statement_shaped = isinstance(line_meta, list) and len(line_meta) == len(rows)
-        has_summary_lines = statement_shaped and any(isinstance(m, dict) and m.get("is_summary") for m in line_meta)
+        has_summary_lines = _has_summary_lines(line_meta, rows)
         # STATEMENT treatment (Phase 3): a statement-shaped payload (line_meta present —
         # flattened ns_runReport statements) curates to its named section-summary lines +
         # marquee callouts instead of the positional top-K. Gated on no `select` (a model
@@ -404,7 +424,7 @@ def _resolve_data_section(s: dict, resolver: Resolver) -> dict:
         # CONCLUDING lines, so claiming "curated statement" over it — and promoting
         # interior subtotals as marquee "conclusions" — would be dishonest (T2 gate:
         # major). The top-K floor's note discloses the truncation instead.
-        if not s.get("select") and not upstream_truncated:
+        if has_summary_lines and not s.get("select") and not upstream_truncated:
             curated_stmt = _curate_statement(cols, rows, line_meta, currency_columns)
             if curated_stmt is not None:
                 statement_rows, callouts = curated_stmt
@@ -490,11 +510,7 @@ def _resolve_data_section(s: dict, resolver: Resolver) -> dict:
             # chart-every-row behavior (the renderer's own cap + note handle
             # legibility); a silent magnitude top-12 substitution there would drop
             # rows the model explicitly asked to chart (T2 gate r3: major).
-            if (
-                isinstance(line_meta, list)
-                and len(line_meta) == len(rows)
-                and any(isinstance(m, dict) and m.get("is_summary") for m in line_meta)
-            ):
+            if _has_summary_lines(line_meta, rows):
                 # Honesty gate (mirrors the table branch): drivers ranked over the
                 # stored HEAD of a tail-cut statement are dishonest — the true top
                 # movers may live in the cut tail. Refuse deterministically.
@@ -520,11 +536,9 @@ def _resolve_data_section(s: dict, resolver: Resolver) -> dict:
                         ),
                     }
                 rows = drivers
-                # Same column the drivers were RANKED by (via _amount_index) — never a
-                # hand-rolled re-derivation that could drift from the ranking rule.
-                amount_idx = _amount_index(cols, stmt_currency)
-                value_name = cols[amount_idx] if amount_idx < len(cols) else "value"
-                default_title = f"Top {len(rows)} drivers by {value_name}"
+                # Titled after the SAME column the drivers were ranked by — one shared
+                # derivation (_driver_title) for every driver-chart site.
+                default_title = _driver_title(len(rows), cols, stmt_currency)
             # Row cap: a chart over tens of thousands of rows bakes a multi-MB SVG into
             # the report (DoS-shape). Refuse deterministically before building anything.
             if len(rows) > _MAX_CHART_POINTS:
@@ -564,15 +578,17 @@ def assemble_spec(title: str, sections: list[dict], resolver: Resolver) -> dict:
         elif s["type"] in ("table", "metric_headline", "chart"):
             resolved_pairs.append((s, _resolve_data_section(s, resolver)))
         elif s["type"] == "heading":
-            # TRUST BOUNDARY: rebuild passthrough sections from WHITELISTED keys only.
-            # The validated dicts still carry any extra keys the model authored (pydantic
-            # ignores extras), and pass 2 reads internal hand-off keys off resolved
-            # sections — a raw (s, s) passthrough would let a model-authored
-            # `statement_callouts` inject forged numbers / unescaped svg / a crashing
-            # value into the frozen report (T2 gate: blocker).
-            resolved_pairs.append((s, {"type": "heading", "level": s.get("level", 2), "text": s.get("text", "")}))
+            # TRUST BOUNDARY: rebuild passthrough sections through their SCHEMA so only
+            # declared fields (with schema defaults/clamps) survive. The validated dicts
+            # still carry any extra keys the model authored (pydantic ignores extras),
+            # and pass 2 reads internal hand-off keys off resolved sections — a raw
+            # (s, s) passthrough would let a model-authored `statement_callouts` inject
+            # forged numbers / unescaped svg / a crashing value into the frozen report
+            # (T2 gate: blocker). model_validate cannot fail here: the sections already
+            # passed normalize_and_validate_sections above.
+            resolved_pairs.append((s, HeadingSection.model_validate(s).model_dump()))
         else:  # divider
-            resolved_pairs.append((s, {"type": "divider"}))
+            resolved_pairs.append((s, DividerSection.model_validate(s).model_dump()))
     # result_ids the model SUCCESSFULLY charted itself — an explicit chart that resolved to
     # an error must NOT suppress the table's auto-chart fallback.
     model_charted_ids = {
