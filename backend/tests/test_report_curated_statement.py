@@ -54,12 +54,14 @@ def _statement_payload() -> dict:
         _meta(True, 0),  # Net Change in Cash
         _meta(True, 0),  # Cash at End of Period
     ]
+    # A REAL un-truncated payload carries ALL its flattened rows (row_count == len(rows),
+    # truncated False) — the statement CURATION is what trims, not the payload.
     return {
         "kind": "table",
         "columns": ["account", "amount"],
         "rows": rows,
-        "row_count": 180,  # the true source-statement size
-        "truncated": True,
+        "row_count": len(rows),
+        "truncated": False,
         "currency_columns": ["amount"],
         "line_meta": meta,
     }
@@ -89,8 +91,8 @@ def test_statement_curates_to_named_summary_lines_only():
     assert "Financial Row" not in labels  # amount-less placeholder gone (structural)
     assert "11000 - Accounts Receivable" not in labels  # detail lines gone
     assert out["curation"] == "statement"
-    assert out["row_count"] == 180  # true total preserved
-    assert out["truncated"] is True
+    assert out["row_count"] == 11  # true total preserved
+    assert out["truncated"] is True  # derived: 6 curated lines < 11 source rows
     assert out["currency_columns"] == ["amount"]  # formatting tag survives
 
 
@@ -235,6 +237,152 @@ def test_statement_table_html_shows_curated_note_and_no_blanks():
 # ---------------------------------------------------------------------------
 # End-to-end shape: raw reportData → extract → resolve → assemble → html.
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# TRUST BOUNDARY (T2 gate r2 — BLOCKER): heading/divider sections pass through as the
+# LLM's own dict, so a model-authored `statement_callouts` key must NEVER be honored —
+# forged numbers, unescaped svg, or a crash would otherwise reach the frozen report.
+# ---------------------------------------------------------------------------
+def test_forged_callouts_on_heading_never_reach_the_report():
+    from app.services.report.report_html import render_report_html
+
+    payload = {"columns": ["Period", "Revenue"], "rows": [["Q1", 100], ["Q2", 200]], "row_count": 2}
+    spec = assemble_spec(
+        "R",
+        [
+            {
+                "type": "heading",
+                "text": "Q2",
+                "statement_callouts": [
+                    {"type": "metric_headline", "label": "Net Income", "value": "5.3M approx"},
+                    {"type": "chart", "svg": "<script>alert(1)</script>", "chart_type": "bar"},
+                ],
+            },
+            {"type": "table", "result_id": "r1"},
+        ],
+        lambda rid: payload,
+    )
+    html = render_report_html(spec)
+    assert "5.3M approx" not in html  # an LLM-invented number never renders (no-LLM-numbers)
+    assert "<script>" not in html  # forged svg never reaches the trusted-chart sink
+    assert all(s["type"] != "metric_headline" for s in spec["sections"])
+    # the heading passthrough is SANITIZED — no LLM extra keys survive into the spec
+    heading = next(s for s in spec["sections"] if s["type"] == "heading")
+    assert set(heading) <= {"type", "level", "text"}
+
+
+def test_forged_callouts_string_on_divider_does_not_crash_render():
+    from app.services.report.report_html import render_report_html
+
+    payload = {"columns": ["Period", "Revenue"], "rows": [["Q1", 100], ["Q2", 200]], "row_count": 2}
+    spec = assemble_spec(
+        "R",
+        [{"type": "divider", "statement_callouts": "netincome"}, {"type": "table", "result_id": "r1"}],
+        lambda rid: payload,
+    )
+    html = render_report_html(spec)  # must not raise (extend("netincome") would iterate chars)
+    assert "netincome" not in html
+    divider = next(s for s in spec["sections"] if s["type"] == "divider")
+    assert set(divider) == {"type"}
+
+
+# ---------------------------------------------------------------------------
+# Tail-cut honesty (T2 gate r2 — MAJOR): a payload whose rows were truncated BEFORE
+# curation (storage cap / NetSuite-side cut) may be missing the statement's concluding
+# lines — claiming "curated statement" over a partial statement is dishonest. Fall back
+# to the top-K floor, whose note discloses the truncation.
+# ---------------------------------------------------------------------------
+def test_truncated_payload_gets_top_k_floor_not_statement_claim():
+    payload = _statement_payload()
+    payload["truncated"] = True  # rows were tail-cut upstream of curation
+    out = _resolve(payload)
+    assert "curation" not in out
+    assert "statement_callouts" not in out
+    assert len(out["rows"]) <= _REPORT_TABLE_TOP_K
+    assert out["truncated"] is True  # the floor's honest disclosure applies
+
+
+# ---------------------------------------------------------------------------
+# Flat-statement overflow (T2 gate r2 — MAJOR): 10+ same-level summaries (the realistic
+# no-indent-key reportData) must keep the statement's CONCLUSIONS — head + tail, never
+# just the first 8 (which cut Net Change / Ending Cash from table AND callouts).
+# ---------------------------------------------------------------------------
+def test_flat_statement_overflow_keeps_opening_and_conclusions():
+    rows = [[f"Section {i}", (i + 1) * 1000] for i in range(8)]
+    rows += [["Net Change in Cash", 4_750_000], ["Cash at End of Period", 11_500_000]]
+    meta = [_meta(True, 0)] * 10  # single level — the realistic no-indent case
+    payload = {
+        "columns": ["account", "amount"],
+        "rows": rows,
+        "row_count": 10,
+        "currency_columns": ["amount"],
+        "line_meta": meta,
+    }
+    out = _resolve(payload)
+    labels = [r[0] for r in out["rows"]]
+    assert len(labels) == _STATEMENT_TABLE_MAX
+    assert "Section 0" in labels  # the opening lines survive…
+    assert "Net Change in Cash" in labels and "Cash at End of Period" in labels  # …and the conclusions
+    assert [c["label"] for c in out["statement_callouts"]][-1] == "Cash at End of Period"
+
+
+# ---------------------------------------------------------------------------
+# Honest flags + junk guards (gate r2 minors).
+# ---------------------------------------------------------------------------
+def test_statement_truncated_flag_derived_not_hardcoded():
+    # ALL source rows qualify → nothing dropped → truncated must be False.
+    rows = [[f"S{i}", (i + 1) * 10] for i in range(4)]
+    payload = {
+        "columns": ["account", "amount"],
+        "rows": rows,
+        "row_count": 4,
+        "currency_columns": ["amount"],
+        "line_meta": [_meta(True, 0)] * 4,
+    }
+    out = _resolve(payload)
+    assert out["curation"] == "statement"
+    assert out["truncated"] is False
+
+
+def test_blank_string_amount_line_does_not_qualify():
+    payload = {
+        "columns": ["account", "amount"],
+        "rows": [["Real", 100], ["Junk", "  "], ["Also Real", 200]],
+        "row_count": 3,
+        "currency_columns": ["amount"],
+        "line_meta": [_meta(True, 0)] * 3,
+    }
+    out = _resolve(payload)
+    labels = [r[0] for r in out["rows"]]
+    assert labels == ["Real", "Also Real"]  # a whitespace amount is not a figure
+
+
+def test_statement_note_coerces_numeric_string_row_count():
+    from app.services.report.report_html import render_report_html
+
+    payload = _statement_payload()
+    payload["row_count"] = "11"  # some MCP shapes serialize counts as strings
+    spec = assemble_spec("CF", [{"type": "table", "result_id": "r1"}], lambda rid: payload)
+    html = render_report_html(spec)
+    assert "from 11 source rows" in html  # the true total still disclosed
+
+
+def test_curate_statement_level_parses_float_strings_like_producer():
+    # meta levels may round-trip as "0.0"/"1.0" strings; the threshold trim must parse
+    # them like the producer (int(float(...))), keeping the shallow lines.
+    rows = [[f"Top {i}", (i + 1) * 100] for i in range(6)] + [[f"Deep {i}", i + 1] for i in range(5)]
+    meta = [_meta(True, "0.0") for _ in range(6)] + [_meta(True, "1.0") for _ in range(5)]
+    payload = {
+        "columns": ["account", "amount"],
+        "rows": rows,
+        "row_count": 11,
+        "currency_columns": ["amount"],
+        "line_meta": meta,
+    }
+    out = _resolve(payload)
+    labels = [r[0] for r in out["rows"]]
+    assert labels == [f"Top {i}" for i in range(6)]
+
+
 def test_reportdata_end_to_end_produces_summary_not_dump():
     from app.services.chat.tool_call_results import extract_result_payload
     from app.services.report.report_html import render_report_html

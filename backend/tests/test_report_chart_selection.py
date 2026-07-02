@@ -82,6 +82,13 @@ def test_categorical_values_not_detected():
     assert not _looks_time_series(["11000", "12000", "14000"])
 
 
+def test_time_series_requires_every_value_time_like():
+    # A per-period result with a trailing rollup row ("Total") must NOT default to a
+    # line — the rollup would plot as a final "period" spiking to the sum of all months,
+    # visually asserting a cliff-edge trend that does not exist (T2 gate: major).
+    assert not _looks_time_series(["Jan 2026", "Feb 2026", "Mar 2026", "Apr 2026", "May 2026", "Total"])
+
+
 # ---------------------------------------------------------------------------
 # Auto-chart type by data shape: monthly trend → LINE; categorical → bar.
 # ---------------------------------------------------------------------------
@@ -163,6 +170,46 @@ def test_explicit_chart_over_statement_excludes_summaries():
     assert out["type"] == "chart"
     assert "Operating Activities" not in out["svg"]
     assert "Intercompany" in out["svg"]
+
+
+# ---------------------------------------------------------------------------
+# Collapsed (all-summary) statement: NEVER fall back to charting summary rows —
+# a Net Change bar double-counts the Operating/Investing/Financing bars beside it,
+# and an Ending-Cash balance bar dwarfs the flows (the exact bar-soup symptom).
+# ---------------------------------------------------------------------------
+def _collapsed_statement_payload() -> dict:
+    rows = [
+        ["Operating Activities", 8_100_000],
+        ["Investing Activities", -2_300_000],
+        ["Financing Activities", -1_050_000],
+        ["Net Change in Cash", 4_750_000],
+        ["Cash at End of Period", 11_500_000],
+    ]
+    return {
+        "columns": ["account", "amount"],
+        "rows": rows,
+        "row_count": len(rows),
+        "truncated": False,
+        "currency_columns": ["amount"],
+        "line_meta": [_meta(True, 0)] * len(rows),  # every line a summary — no leaves
+    }
+
+
+def test_all_summary_statement_gets_no_auto_chart():
+    payload = _collapsed_statement_payload()
+    spec = assemble_spec("CF", [{"type": "table", "result_id": "r1"}], lambda rid: payload)
+    # callouts + curated statement still render; the auto-chart SKIPS (no comparable
+    # leaf drivers) rather than charting the summary lines as bars.
+    types = [s["type"] for s in spec["sections"]]
+    assert "metric_headline" in types and "table" in types
+    assert "chart" not in types
+
+
+def test_explicit_chart_over_all_summary_statement_is_error_not_soup():
+    payload = _collapsed_statement_payload()
+    out = _resolve_data_section({"type": "chart", "result_id": "r1"}, lambda rid: payload)
+    assert out["type"] == "error"
+    assert "detail" in out["reason"].lower() or "driver" in out["reason"].lower()
 
 
 # ---------------------------------------------------------------------------

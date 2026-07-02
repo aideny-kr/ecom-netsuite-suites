@@ -97,6 +97,22 @@ def _fmt_amount(value) -> str:
     return f"({body})" if q < 0 else body
 
 
+# Public alias: report_service accounting-formats statement-callout values at compose
+# time with the SAME formatter the table cells use — one source of accounting format.
+fmt_amount = _fmt_amount
+
+
+def _coerce_total(raw) -> int | None:
+    """Coerce a table section's ``row_count`` to an int for the disclosure notes —
+    it may arrive as an int OR a numeric string (some MCP shapes); bools never count."""
+    if isinstance(raw, bool):
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 def _md_inline(text: str) -> str:
     # Minimal: escape, then **bold**. (No raw HTML passthrough — trust boundary + XSS safety.)
     import re
@@ -222,23 +238,18 @@ def _section_html(s: dict) -> str:
         note = ""
         # A statement-curated table is not a positional "first N" slice — it shows the
         # named section-summary lines. Disclose the curation (and the true source size)
-        # with wording that matches what was actually done.
+        # with wording that matches what was actually done. Same total coercion as the
+        # truncated branch (row_count may be a numeric STRING in some MCP shapes).
         if s.get("curation") == "statement":
-            total = s.get("row_count")
-            of_total = f" from {escape(str(total))} source rows" if isinstance(total, int) and total > len(rows) else ""
+            total = _coerce_total(s.get("row_count"))
+            of_total = f" from {escape(str(total))} source rows" if total is not None and total > len(rows) else ""
             note = f'<p class="foot">Curated statement — {len(rows)} summary lines{of_total}.</p>'
         # A truncated section MUST disclose it (never render a partial financial table as
         # whole). When the true total is known and exceeds the shown rows, name it; when
         # the upstream reported row_count == shown (e.g. NetSuite-side fetch truncation,
         # true total unknown), still disclose without a contradictory "first N of N".
         elif s.get("truncated"):
-            # row_count may arrive as an int or a numeric string (some MCP shapes); coerce
-            # so we still name the true total rather than dropping to the generic note.
-            raw_total = s.get("row_count")
-            try:
-                total = int(raw_total) if not isinstance(raw_total, bool) else None
-            except (TypeError, ValueError):
-                total = None
+            total = _coerce_total(s.get("row_count"))
             if total is not None and total > len(rows):
                 note = f'<p class="foot">Showing first {len(rows)} of {escape(str(total))} rows.</p>'
             else:
