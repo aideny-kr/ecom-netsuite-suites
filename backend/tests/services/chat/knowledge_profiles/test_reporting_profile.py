@@ -56,3 +56,13 @@ def test_reporting_profile_still_forbids_inline_numbers():
     """Regression: the no-LLM-numbers rule stays verbatim-strong in the fragment."""
     frag = _reporting_fragment()
     assert "NEVER inline numbers" in frag
+
+
+def test_reporting_profile_warns_against_select_on_statements():
+    """A `select` projection disables the deterministic statement curation (conservative
+    resolver gate) — the model must not scope a statement table's columns."""
+    frag = _reporting_fragment().lower()
+    assert "select" in frag
+    assert "statement" in frag
+    # the guidance explicitly ties the two: no select on a statement table
+    assert "do not use `select` on a statement" in frag or "never `select` a statement" in frag
