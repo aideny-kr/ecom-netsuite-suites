@@ -41,42 +41,78 @@ _MIN_AUTO_CHART_ROWS = 2
 _STATEMENT_TABLE_MAX = 8
 _STATEMENT_CALLOUT_MAX = 4
 _MIN_STATEMENT_LINES = 2
-# Time-series detection (Phase 4): a chart whose x column is period/date-SHAPED renders
-# as a LINE (a trend), not account-style bars. Matched on the VALUES' shape only — never
-# on column names (no schema assumptions). Conservative: a miss just keeps the bar
-# default, which is always safe.
-_TIME_LIKE_RE = re.compile(
-    r"^("
-    r"\d{4}[-/](0?[1-9]|1[0-2])([-/]\d{1,2})?"  # 2026-06 / 2026/06/30 (never "." — "2026.5" is a number)
-    r"|(0?[1-9]|1[0-2])/\d{4}"  # 06/2026 (slash only — "5-2028" is a code, "10.1250" a rate)
-    r"|(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*[ .,'-]*((19|20)\d{2}|'\d{2})"  # Jun 2026 / Jun '26
-    r"|q[1-4][ .'-]?((19|20)\d{2}|\d{2})"  # Q2 2026 / Q2 26
-    r"|(19|20)\d{2}[ .-]?q[1-4]"  # 2026 Q2
-    r"|fy[ .'-]?((19|20)\d{2}|\d{2})"  # FY26 / FY2026
-    r")$",
-    re.IGNORECASE,
-)
+# Time-series detection (Phase 4): a chart whose x column is a strictly ORDERED period
+# sequence renders as a LINE (a trend), not account-style bars. Matched on the VALUES'
+# shape only — never on column names (no schema assumptions). Conservative: any miss
+# keeps the bar default, which is always safe.
+_MONTHS = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+    "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+}  # fmt: skip
+_ISO_RE = re.compile(r"^((?:19|20)\d{2})[-/](0?[1-9]|1[0-2])(?:[-/](\d{1,2}))?$")  # 2026-06(-30)
+_MYYYY_RE = re.compile(r"^(0?[1-9]|1[0-2])/((?:19|20)\d{2})$")  # 06/2026
+_MONYYYY_RE = re.compile(r"^([a-z]{3,9})[ .,'-]*(?:((?:19|20)\d{2})|'(\d{2}))$")  # Jun 2026 / Jun '26
+_QY_RE = re.compile(r"^q([1-4])[ .'-]?(?:((?:19|20)\d{2})|(\d{2}))$")  # Q2 2026 / Q2 26
+_YQ_RE = re.compile(r"^((?:19|20)\d{2})[ .-]?q([1-4])$")  # 2026 Q2
+_FY_RE = re.compile(r"^fy[ .'-]?(?:((?:19|20)\d{2})|(\d{2}))$")  # FY26 / FY2026
 Resolver = Callable[[str], dict]
 
 
+def _period_key(value: str) -> tuple | None:
+    """Parse a period/date-shaped label to a sortable ``(year, sub, day)`` key, or None
+    when the value is not a plausible period. Plausible-year required everywhere (19xx/
+    20xx) so decimals ("2026.5", "1.2500"), codes ("5-2028"), implausible years
+    ("9999-01"), and month-word+count labels ("May 100") never register as periods."""
+    s = str(value).strip().lower()
+    m = _ISO_RE.match(s)
+    if m:
+        return (int(m.group(1)), int(m.group(2)), int(m.group(3) or 0))
+    m = _MYYYY_RE.match(s)
+    if m:
+        return (int(m.group(2)), int(m.group(1)), 0)
+    m = _MONYYYY_RE.match(s)
+    if m and m.group(1)[:3] in _MONTHS:
+        year = int(m.group(2)) if m.group(2) else 2000 + int(m.group(3))
+        return (year, _MONTHS[m.group(1)[:3]], 0)
+    m = _QY_RE.match(s)
+    if m:
+        year = int(m.group(2)) if m.group(2) else 2000 + int(m.group(3))
+        return (year, int(m.group(1)) * 3, 0)
+    m = _YQ_RE.match(s)
+    if m:
+        return (int(m.group(1)), int(m.group(2)) * 3, 0)
+    m = _FY_RE.match(s)
+    if m:
+        year = int(m.group(1)) if m.group(1) else 2000 + int(m.group(2))
+        return (year, 0, 0)
+    return None
+
+
 def _looks_time_series(x_values: list) -> bool:
-    """True when EVERY x value is period/date-shaped (ISO dates, "Jun 2026", "Q2 2026",
-    "FY26") — a trend axis, so the chart defaults to a line. ALL values, and a
-    None/blank x DISQUALIFIES outright: SQL rollup rows (GROUP BY ROLLUP / UNION ALL
-    totals) emit NULL/blank for the period column, and those rows are still PLOTTED —
-    filtering them out of the check would bake a fabricated final spike into the trend
-    (T2 gate: major, both the "Total"-labeled and the NULL-labeled variants). The year
-    alternations require a plausible year so decimals ("2026.5", "1.2500"), codes
-    ("5-2028"), and month-word+count labels ("May 100") stay bars. A miss always keeps
-    the safe bar default. Value-shape only, never column names."""
+    """True when EVERY x value parses as a period (``_period_key``) AND the sequence is
+    STRICTLY MONOTONIC (ascending or descending — "last 6 months DESC" is legitimately
+    ordered; every point is labeled). Everything else keeps the order-agnostic bar:
+
+    - A None/blank x DISQUALIFIES outright: SQL rollup rows (GROUP BY ROLLUP /
+      UNION ALL totals) emit NULL/blank for the period column and are still PLOTTED —
+      excluding them from the check would bake a fabricated final spike into the trend.
+    - An UNORDERED or duplicate-period sequence (GROUP BY without ORDER BY; UNION
+      across subsidiaries) DISQUALIFIES: a row-order polyline over it draws a zigzag
+      trajectory that does not exist (T2 gate: major). The old bar default was
+      order-agnostic; a line must EARN its ordering."""
     if len(x_values) < _MIN_AUTO_CHART_ROWS:
         return False
+    keys = []
     for v in x_values:
         if v is None or not str(v).strip():
             return False  # a NULL/blank x row is plotted too — never call this a trend
-        if not _TIME_LIKE_RE.match(str(v).strip()):
+        key = _period_key(v)
+        if key is None:
             return False
-    return True
+        keys.append(key)
+    ascending = all(a < b for a, b in zip(keys, keys[1:]))
+    descending = all(a > b for a, b in zip(keys, keys[1:]))
+    return ascending or descending
 
 
 def _currency_in(payload: dict, cols: list) -> list:
@@ -84,15 +120,28 @@ def _currency_in(payload: dict, cols: list) -> list:
     return [c for c in (payload.get("currency_columns") or []) if c in cols]
 
 
-def _has_summary_lines(line_meta, rows: list) -> bool:
-    """True when ``line_meta`` is row-aligned AND marks at least one summary line —
-    the single definition of "statement-shaped with hierarchy" every honesty/soup
-    gate keys off (table branch, explicit-chart branch). One rule, never re-derived."""
-    return (
-        isinstance(line_meta, list)
-        and len(line_meta) == len(rows)
-        and any(isinstance(m, dict) and m.get("is_summary") for m in line_meta)
-    )
+def _has_summary_lines(line_meta, rows: list, cols: list, currency_columns: list) -> bool:
+    """True when ``line_meta`` is row-aligned AND at least one summary line CARRIES AN
+    AMOUNT — the single definition of "statement-shaped with hierarchy" every
+    honesty/soup gate keys off (table branch, explicit-chart branch).
+
+    Amount-aware deliberately (T2 gate r5: major): the double-count hazard the
+    statement gates exist for is a summary BAR beside its own detail bars — an
+    amount-less summary (a bare header row like "Transaction Detail") can never become
+    a bar, so it must NOT flip an ordinary detail LISTING into statement treatment
+    (which would kill its guaranteed auto-chart and driver-substitute its explicit
+    charts)."""
+    if not (isinstance(line_meta, list) and len(line_meta) == len(rows)):
+        return False
+    amount_idx = _amount_index(cols, currency_columns)
+    for row, meta in zip(rows, line_meta):
+        if not isinstance(meta, dict) or not meta.get("is_summary"):
+            continue
+        amount = row[amount_idx] if amount_idx < len(row) else None
+        if amount is None or (isinstance(amount, str) and not amount.strip()):
+            continue
+        return True
+    return False
 
 
 def _driver_title(n: int, cols: list, currency_columns: list) -> str:
@@ -242,7 +291,12 @@ def _curate_statement(cols: list, rows: list, line_meta, currency_columns: list)
         chosen = None
         for threshold in sorted({lvl for lvl, _, _ in picked}, reverse=True):
             subset = [p for p in picked if p[0] <= threshold]
-            if _MIN_STATEMENT_LINES <= len(subset) <= _STATEMENT_TABLE_MAX:
+            # A subset qualifies only if it also CONTAINS the statement's LAST qualifying
+            # line — the positional conclusion (Net Change / Ending Cash). A shallow
+            # subset of mid-statement section lines that drops a deeper trailing
+            # conclusion would cut the marquee figures from both table and callouts
+            # (T2 gate r5: major).
+            if _MIN_STATEMENT_LINES <= len(subset) <= _STATEMENT_TABLE_MAX and subset[-1] is picked[-1]:
                 chosen = subset
                 break
         if chosen is None:
@@ -401,30 +455,23 @@ def _resolve_data_section(s: dict, resolver: Resolver) -> dict:
         return {"type": "error", "reason": f"{s.get('result_id')}: {exc}"}
     if s["type"] == "table":
         cols, rows = payload.get("columns", []), payload.get("rows", [])
-        if s.get("select"):
-            idx = [cols.index(c) for c in s["select"] if c in cols]
-            cols = [cols[i] for i in idx]
-            rows = [[r[i] for i in idx] for r in rows]
         # The TRUE pre-curation count drives the "first K of N" note: prefer the upstream
         # tool's reported row_count, else the resolved row length.
         true_row_count = payload.get("row_count", len(rows))
         upstream_truncated = bool(payload.get("truncated", False))
-        # Carry the producer's currency-column tags so the renderer accounting-formats
-        # only those columns; narrow to the columns that survived `select`.
-        currency_columns = _currency_in(payload, cols)
         line_meta = payload.get("line_meta")
-        # `select` projects columns, never rows, so row alignment is judged either way.
-        has_summary_lines = _has_summary_lines(line_meta, rows)
-        # STATEMENT treatment (Phase 3): a statement-shaped payload (line_meta present —
-        # flattened ns_runReport statements) curates to its named section-summary lines +
-        # marquee callouts instead of the positional top-K. Gated on no `select` (a model
-        # projection re-indexes columns; the conservative rule there is the plain top-K
-        # floor) AND on the payload NOT being upstream-truncated: a tail-cut payload
-        # (storage cap / NetSuite-side fetch cut) may be missing the statement's
-        # CONCLUDING lines, so claiming "curated statement" over it — and promoting
-        # interior subtotals as marquee "conclusions" — would be dishonest (T2 gate:
-        # major). The top-K floor's note discloses the truncation instead.
-        if has_summary_lines and not s.get("select") and not upstream_truncated:
+        currency_columns = _currency_in(payload, cols)
+        has_summary_lines = _has_summary_lines(line_meta, rows, cols, currency_columns)
+        # STATEMENT treatment (Phase 3): a statement-shaped payload (line_meta with
+        # amount-bearing summary lines) curates to its named section-summary lines +
+        # marquee callouts instead of the positional top-K — MECHANICALLY: a model
+        # `select` is IGNORED here (deterministic-first; honoring a projection could
+        # only lose the amount column or scramble the label, rendering mixed rows —
+        # T2 gate r5). Gated on the payload NOT being upstream-truncated: a tail-cut
+        # payload may be missing the statement's CONCLUDING lines, so claiming
+        # "curated statement" over it — and promoting interior subtotals as marquee
+        # "conclusions" — would be dishonest; the top-K floor's note discloses instead.
+        if has_summary_lines and not upstream_truncated:
             curated_stmt = _curate_statement(cols, rows, line_meta, currency_columns)
             if curated_stmt is not None:
                 statement_rows, callouts = curated_stmt
@@ -447,6 +494,13 @@ def _resolve_data_section(s: dict, resolver: Resolver) -> dict:
                     "statement_callouts": callouts,
                     "statement_drivers": _driver_rows(rows, line_meta, cols, currency_columns),
                 }
+        # The top-K floor. `select` is honored here (non-statement tables).
+        if s.get("select"):
+            idx = [cols.index(c) for c in s["select"] if c in cols]
+            cols = [cols[i] for i in idx]
+            rows = [[r[i] for i in idx] for r in rows]
+            currency_columns = _currency_in(payload, cols)
+        pre_curation_rows = rows
         # Curate to the first K rows — a report shows top numbers, not a dump. This also
         # bounds the rendered table (no separate anti-bloat cap needed: K << any payload).
         rows, curated = _curate_table_rows(rows, _REPORT_TABLE_TOP_K)
@@ -459,14 +513,17 @@ def _resolve_data_section(s: dict, resolver: Resolver) -> dict:
             "currency_columns": currency_columns,
         }
         if has_summary_lines:
-            # A statement-shaped result WITH summary lines that fell to the positional
-            # floor (upstream-truncated / select-projected / degenerate) must not
-            # auto-chart its first-K rows — they mix subtotals and details, the exact
-            # bar-soup the drivers mechanism exists to prevent. Empty drivers = the
-            # auto-chart skips (never falls back to mixed rows). Honest drivers cannot
-            # be computed here: over a tail-cut payload the true top movers may live in
-            # the cut tail (T2 gate r3: major).
-            out["statement_drivers"] = []
+            # A statement-shaped result that fell to the positional floor must not
+            # auto-chart its first-K rows (mixed subtotals + details — the bar-soup).
+            # Chart honest LEAF drivers instead when they are computable; ONLY a
+            # tail-cut payload gets an empty list (its true top movers may live in the
+            # cut tail — T2 gate r5: a blanket [] killed the PR #151 guaranteed chart
+            # on ordinary detail reports). `select` projects columns, never rows, so
+            # line_meta stays row-aligned; a projection that lost the amount column
+            # simply yields no qualifying leaves.
+            out["statement_drivers"] = (
+                [] if upstream_truncated else _driver_rows(pre_curation_rows, line_meta, cols, currency_columns)
+            )
         return out
     if s["type"] == "metric_headline":
         # Prefer the real blessed-metric row shape; fall back to top-level reads so the
@@ -504,13 +561,15 @@ def _resolve_data_section(s: dict, resolver: Resolver) -> dict:
             # details double-counts and dwarfs the real movers (the live bar-soup).
             default_title = None
             line_meta = payload.get("line_meta")
+            stmt_currency = _currency_in(payload, cols)
             # Driver substitution applies ONLY where the hierarchy demands it: a
-            # statement mixing summary AND detail lines (charting both double-counts).
-            # An all-DETAIL listing has no such hazard — it keeps the pre-existing
+            # statement mixing amount-bearing summary AND detail lines (charting both
+            # double-counts). An all-DETAIL listing — including one with a bare
+            # amount-less header row — has no such hazard and keeps the pre-existing
             # chart-every-row behavior (the renderer's own cap + note handle
             # legibility); a silent magnitude top-12 substitution there would drop
-            # rows the model explicitly asked to chart (T2 gate r3: major).
-            if _has_summary_lines(line_meta, rows):
+            # rows the model explicitly asked to chart (T2 gate r3/r5: major).
+            if _has_summary_lines(line_meta, rows, cols, stmt_currency):
                 # Honesty gate (mirrors the table branch): drivers ranked over the
                 # stored HEAD of a tail-cut statement are dishonest — the true top
                 # movers may live in the cut tail. Refuse deterministically.
@@ -521,7 +580,6 @@ def _resolve_data_section(s: dict, resolver: Resolver) -> dict:
                             "statement was truncated upstream — chart a smaller aggregated or per-period result instead"
                         ),
                     }
-                stmt_currency = _currency_in(payload, cols)
                 drivers = _driver_rows(rows, line_meta, cols, stmt_currency)
                 if len(drivers) < _MIN_AUTO_CHART_ROWS:
                     # A collapsed (all-summary) statement has no comparable leaves —
