@@ -42,7 +42,7 @@ prompt_fragment: |
   detail drivers. Include the statement as ONE `table` section (with a `label`) and write
   the narrative around it — do NOT hand-slice, re-aggregate, or re-query the statement to
   build your own summary of it, and do not use `select` on a statement table (a column
-  projection disables the automatic statement curation).
+  projection is ignored there — the statement is always curated whole).
 
   Use a `table` (`{"type":"table","result_id":"r1","select":["col", ...],"label":"..."}`)
   ONLY when the detailed rows are genuinely informative to the reader, and scope the
