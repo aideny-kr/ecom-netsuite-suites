@@ -276,9 +276,7 @@ def test_explicit_chart_over_all_detail_listing_charts_rows_not_drivers():
 
 def test_empty_label_gets_derived_title_not_blank():
     payload = _months_payload()
-    spec = assemble_spec(
-        "R", [{"type": "table", "result_id": "r1", "label": ""}], lambda rid: payload
-    )
+    spec = assemble_spec("R", [{"type": "table", "result_id": "r1", "label": ""}], lambda rid: payload)
     chart = next(s for s in spec["sections"] if s["type"] == "chart")
     assert "cash_balance" in chart["svg"]  # derived title, never an empty one
 
