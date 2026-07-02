@@ -1,7 +1,7 @@
 from app.services.report.report_html import fmt_amount, render_report_html
 
 
-def testfmt_amount_accounting_style():
+def test_fmt_amount_accounting_style():
     """A currency cell renders accounting-style: thousands separators, 2 decimals
     (exact — foots, no precision loss), negatives in parentheses. None / non-finite →
     empty; non-numbers (and bools) pass through untouched."""

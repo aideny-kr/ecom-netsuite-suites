@@ -114,15 +114,18 @@ def test_statement_callouts_are_trailing_marquee_figures_formatted():
 
 
 def test_statement_caps_at_max_preferring_shallow_levels():
-    # 6 top-level summaries + 5 deeper-level summaries (all labeled, with amounts) → the
-    # cap keeps the shallow (most aggregate) ones, statement order preserved.
+    # 5 top-level sections + 5 deeper subtotals in the middle + a top-level closing line
+    # (a realistic statement ENDS on a top-level conclusion). The cap keeps the shallow
+    # (most aggregate) lines — including the trailing conclusion — trimming the deep ones.
     rows, meta = [], []
-    for i in range(6):
+    for i in range(5):
         rows.append([f"Section {i}", (i + 1) * 1000])
         meta.append(_meta(True, 0))
     for i in range(5):
         rows.append([f"Subtotal {i}", (i + 1) * 10])
         meta.append(_meta(True, 1))
+    rows.append(["Grand Total", 99_000])
+    meta.append(_meta(True, 0))
     payload = {
         "columns": ["account", "amount"],
         "rows": rows,
@@ -133,7 +136,7 @@ def test_statement_caps_at_max_preferring_shallow_levels():
     out = _resolve(payload)
     labels = [r[0] for r in out["rows"]]
     assert len(labels) <= _STATEMENT_TABLE_MAX
-    assert labels == [f"Section {i}" for i in range(6)]  # shallow kept, deeper trimmed
+    assert labels == [f"Section {i}" for i in range(5)] + ["Grand Total"]  # shallow kept, deep trimmed
 
 
 # ---------------------------------------------------------------------------
@@ -334,6 +337,36 @@ def test_lone_shallow_summary_does_not_collapse_statement_to_one_line():
     assert [c["label"] for c in out["statement_callouts"]][-1] == "Cash at End of Period"
 
 
+def test_shallow_subset_never_cuts_the_statements_conclusions():
+    # 3 shallow (level-0) mid-statement lines + 9 deeper (level-1) lines whose TAIL holds
+    # the conclusions. The threshold trim used to pick the 3-line level-0 subset (fits
+    # 2..8) — cutting Net Change / Ending Cash from BOTH table and callouts (gate r5:
+    # major). A threshold subset only qualifies if it CONTAINS the statement's last
+    # qualifying line; otherwise head+tail over all qualifying lines.
+    rows, meta = [], []
+    for i in range(3):
+        rows.append([f"Section {i}", (i + 1) * 1000])
+        meta.append(_meta(True, 0))
+    for i in range(7):
+        rows.append([f"Subtotal {i}", (i + 1) * 10])
+        meta.append(_meta(True, 1))
+    rows += [["Net Change in Cash", 4_750_000], ["Cash at End of Period", 11_500_000]]
+    meta += [_meta(True, 1), _meta(True, 1)]
+    payload = {
+        "columns": ["account", "amount"],
+        "rows": rows,
+        "row_count": len(rows),
+        "truncated": False,
+        "currency_columns": ["amount"],
+        "line_meta": meta,
+    }
+    out = _resolve(payload)
+    labels = [r[0] for r in out["rows"]]
+    assert len(labels) <= _STATEMENT_TABLE_MAX
+    assert "Net Change in Cash" in labels and "Cash at End of Period" in labels
+    assert [c["label"] for c in out["statement_callouts"]][-1] == "Cash at End of Period"
+
+
 def test_duplicate_statement_table_renders_callouts_once():
     # The auto-chart dedupes repeated tables via (result_id, select); the callout cards
     # must dedupe the same way — a composition repeating the statement table must not
@@ -410,9 +443,13 @@ def test_statement_note_coerces_numeric_string_row_count():
 
 def test_curate_statement_level_parses_float_strings_like_producer():
     # meta levels may round-trip as "0.0"/"1.0" strings; the threshold trim must parse
-    # them like the producer (int(float(...))), keeping the shallow lines.
-    rows = [[f"Top {i}", (i + 1) * 100] for i in range(6)] + [[f"Deep {i}", i + 1] for i in range(5)]
-    meta = [_meta(True, "0.0") for _ in range(6)] + [_meta(True, "1.0") for _ in range(5)]
+    # them like the producer (int(float(...))), keeping the shallow lines (incl. the
+    # trailing top-level conclusion). Were "0.0"/"1.0" unparseable, every level would
+    # default to 0 and the 11-line set would head+tail instead — a different result.
+    rows = [[f"Top {i}", (i + 1) * 100] for i in range(5)] + [[f"Deep {i}", i + 1] for i in range(5)]
+    rows.append(["Ending Balance", 55_000])
+    meta = [_meta(True, "0.0") for _ in range(5)] + [_meta(True, "1.0") for _ in range(5)]
+    meta.append(_meta(True, "0.0"))
     payload = {
         "columns": ["account", "amount"],
         "rows": rows,
@@ -422,7 +459,7 @@ def test_curate_statement_level_parses_float_strings_like_producer():
     }
     out = _resolve(payload)
     labels = [r[0] for r in out["rows"]]
-    assert labels == [f"Top {i}" for i in range(6)]
+    assert labels == [f"Top {i}" for i in range(5)] + ["Ending Balance"]
 
 
 def test_reportdata_end_to_end_produces_summary_not_dump():
