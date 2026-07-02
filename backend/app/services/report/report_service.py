@@ -179,7 +179,12 @@ def _curate_statement(cols: list, rows: list, line_meta, currency_columns: list)
         chosen = None
         for threshold in sorted({lvl for lvl, _, _ in picked}, reverse=True):
             subset = [p for p in picked if p[0] <= threshold]
-            if _MIN_STATEMENT_LINES <= len(subset) <= _STATEMENT_TABLE_MAX:
+            # A subset qualifies only if it also CONTAINS the statement's LAST qualifying
+            # line — the positional conclusion (Net Change / Ending Cash). A shallow
+            # subset of mid-statement section lines that drops a deeper trailing
+            # conclusion would cut the marquee figures from both table and callouts
+            # (T2 gate r5: major).
+            if _MIN_STATEMENT_LINES <= len(subset) <= _STATEMENT_TABLE_MAX and subset[-1] is picked[-1]:
                 chosen = subset
                 break
         if chosen is None:

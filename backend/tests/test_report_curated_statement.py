@@ -334,6 +334,36 @@ def test_lone_shallow_summary_does_not_collapse_statement_to_one_line():
     assert [c["label"] for c in out["statement_callouts"]][-1] == "Cash at End of Period"
 
 
+def test_shallow_subset_never_cuts_the_statements_conclusions():
+    # 3 shallow (level-0) mid-statement lines + 9 deeper (level-1) lines whose TAIL holds
+    # the conclusions. The threshold trim used to pick the 3-line level-0 subset (fits
+    # 2..8) — cutting Net Change / Ending Cash from BOTH table and callouts (gate r5:
+    # major). A threshold subset only qualifies if it CONTAINS the statement's last
+    # qualifying line; otherwise head+tail over all qualifying lines.
+    rows, meta = [], []
+    for i in range(3):
+        rows.append([f"Section {i}", (i + 1) * 1000])
+        meta.append(_meta(True, 0))
+    for i in range(7):
+        rows.append([f"Subtotal {i}", (i + 1) * 10])
+        meta.append(_meta(True, 1))
+    rows += [["Net Change in Cash", 4_750_000], ["Cash at End of Period", 11_500_000]]
+    meta += [_meta(True, 1), _meta(True, 1)]
+    payload = {
+        "columns": ["account", "amount"],
+        "rows": rows,
+        "row_count": len(rows),
+        "truncated": False,
+        "currency_columns": ["amount"],
+        "line_meta": meta,
+    }
+    out = _resolve(payload)
+    labels = [r[0] for r in out["rows"]]
+    assert len(labels) <= _STATEMENT_TABLE_MAX
+    assert "Net Change in Cash" in labels and "Cash at End of Period" in labels
+    assert [c["label"] for c in out["statement_callouts"]][-1] == "Cash at End of Period"
+
+
 def test_duplicate_statement_table_renders_callouts_once():
     # The auto-chart dedupes repeated tables via (result_id, select); the callout cards
     # must dedupe the same way — a composition repeating the statement table must not
