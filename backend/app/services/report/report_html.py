@@ -38,7 +38,7 @@ td.num,th.num { text-align:right; font-variant-numeric:tabular-nums; white-space
 """
 
 
-def _fmt_amount(value) -> str:
+def fmt_amount(value) -> str:
     """Accounting-style format for a CURRENCY cell: thousands separators, 2 decimals
     (exact — the displayed lines foot to the total, no precision loss), negatives in
     parentheses (``5583749.13`` → ``"5,583,749.13"``, ``-4595824.07`` →
@@ -95,11 +95,6 @@ def _fmt_amount(value) -> str:
         return overflow_fallback
     body = f"{abs(q):,.2f}"
     return f"({body})" if q < 0 else body
-
-
-# Public alias: report_service accounting-formats statement-callout values at compose
-# time with the SAME formatter the table cells use — one source of accounting format.
-fmt_amount = _fmt_amount
 
 
 def _coerce_total(raw) -> int | None:
@@ -227,8 +222,8 @@ def _section_html(s: dict) -> str:
             for i in range(max(ncols, len(row))):
                 v = row[i] if i < len(row) else None
                 if i < ncols and columns[i] in currency:
-                    # _fmt_amount handles None/non-finite → "" and non-numeric → str().
-                    cells.append(f'<td class="num">{escape(_fmt_amount(v))}</td>')
+                    # fmt_amount handles None/non-finite → "" and non-numeric → str().
+                    cells.append(f'<td class="num">{escape(fmt_amount(v))}</td>')
                 elif v is None:
                     cells.append("<td></td>")  # null → empty cell, never "None"
                 else:
