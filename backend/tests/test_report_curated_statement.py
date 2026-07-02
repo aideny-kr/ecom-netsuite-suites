@@ -191,13 +191,9 @@ def test_misaligned_line_meta_falls_back_to_top_k():
     assert "statement_callouts" not in out
 
 
-def test_select_projection_disables_statement_treatment():
-    # A model-projected `select` re-indexes columns; the conservative rule is to keep the
-    # plain top-K floor there rather than risk curating off the wrong column.
-    payload = _statement_payload()
-    out = _resolve_data_section({"type": "table", "result_id": "r1", "select": ["account"]}, lambda rid: payload)
-    assert "statement_callouts" not in out
-    assert "curation" not in out
+# (r5) `select` on a statement-shaped result is now IGNORED — curation is mechanical,
+# never gated on prompt obedience. The affirmative test lives in
+# test_report_chart_selection.py::test_select_on_statement_is_ignored_and_still_curates.
 
 
 # ---------------------------------------------------------------------------

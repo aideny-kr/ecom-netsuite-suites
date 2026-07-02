@@ -105,6 +105,28 @@ def test_decimal_and_code_strings_are_not_periods():
     assert not _looks_time_series(["May 100", "June 250"])  # month word + non-year digits
 
 
+def test_unordered_or_duplicate_periods_are_not_a_trend():
+    # T2 gate r5 (major): GROUP BY period without ORDER BY returns arbitrary row order,
+    # and a UNION across subsidiaries can emit duplicate periods. A row-order polyline
+    # over those fabricates a zigzag trajectory — only a strictly MONOTONIC period
+    # sequence is a trend; anything else keeps the order-agnostic bar.
+    assert not _looks_time_series(["2026-03", "2026-01", "2026-02"])  # unordered
+    assert not _looks_time_series(["2026-01", "2026-01", "2026-02"])  # duplicates
+    assert not _looks_time_series(["Jan 2026", "Mar 2026", "Feb 2026"])
+
+
+def test_descending_periods_still_a_trend():
+    # ORDER BY period DESC ("last 6 months") is a legitimately ordered series — every
+    # point is correctly labeled; only ZIGZAG order fabricates a shape.
+    assert _looks_time_series(["2026-06", "2026-05", "2026-04", "2026-03"])
+
+
+def test_implausible_years_are_not_periods():
+    # The docstring promises plausible years everywhere, not just the word alternations.
+    assert not _looks_time_series(["9999-01", "9999-02"])
+    assert not _looks_time_series(["01/9999", "02/9999"])
+
+
 # ---------------------------------------------------------------------------
 # Auto-chart type by data shape: monthly trend → LINE; categorical → bar.
 # ---------------------------------------------------------------------------
@@ -272,6 +294,73 @@ def test_explicit_chart_over_all_detail_listing_charts_rows_not_drivers():
     out = _resolve_data_section({"type": "chart", "result_id": "r1"}, lambda rid: payload)
     assert out["type"] == "chart"
     assert "driver" not in out["svg"].lower()  # no substitution, no "Top N drivers" title
+
+
+def test_degenerate_statement_still_gets_its_driver_auto_chart():
+    # T2 gate r5 (major, executed repro): 10 detail leaves + ONE grand-total summary —
+    # _curate_statement finds <2 qualifying summaries and falls to the top-K floor, but
+    # honest leaf drivers ARE computable (nothing is truncated). The floor must ship
+    # them to the auto-chart, never a blanket [] that kills the PR #151 guaranteed
+    # chart on an ordinary detail report.
+    rows = [[f"4{i:04d} - Item {i}", (i + 1) * 100] for i in range(10)]
+    meta = [_meta(False, 1)] * 10
+    rows.append(["Grand Total", 5500])
+    meta.append(_meta(True, 0))
+    payload = {
+        "columns": ["account", "amount"],
+        "rows": rows,
+        "row_count": len(rows),
+        "truncated": False,
+        "currency_columns": ["amount"],
+        "line_meta": meta,
+    }
+    spec = assemble_spec("R", [{"type": "table", "result_id": "r1"}], lambda rid: payload)
+    chart = next((s for s in spec["sections"] if s["type"] == "chart"), None)
+    assert chart is not None, "the guaranteed auto-chart must survive the floor fallback"
+    assert "Grand Total" not in chart["svg"]  # drivers only — the total bar never dwarfs
+    assert "driver" in chart["svg"].lower()
+
+
+def test_bare_header_row_does_not_flip_a_listing_into_a_statement():
+    # T2 gate r5 (major, executed repro): ONE label-only header row (a summary with NO
+    # amount) must not reclassify an all-detail listing — an amount-less summary can
+    # never become a chart bar, so it poses no double-count hazard.
+    rows = [["Transaction Detail", None]]  # bare header — no amount
+    meta = [_meta(True, 0)]
+    for i in range(20):
+        rows.append([f"4{i:04d} - Item {i}", (i + 1) * 100])
+        meta.append(_meta(False, 1))
+    payload = {
+        "columns": ["account", "amount"],
+        "rows": rows,
+        "row_count": len(rows),
+        "truncated": False,
+        "currency_columns": ["amount"],
+        "line_meta": meta,
+    }
+    # (a) the guaranteed auto-chart survives (normal top-K floor behavior, no suppression)
+    spec = assemble_spec("R", [{"type": "table", "result_id": "r1"}], lambda rid: payload)
+    chart = next((s for s in spec["sections"] if s["type"] == "chart"), None)
+    assert chart is not None
+    assert "driver" not in chart["svg"].lower()  # it's a listing — not driver-substituted
+    # (b) an explicit chart keeps the chart-every-row listing behavior (no substitution)
+    out = _resolve_data_section({"type": "chart", "result_id": "r1"}, lambda rid: payload)
+    assert out["type"] == "chart"
+    assert "driver" not in out["svg"].lower()
+
+
+def test_select_on_statement_is_ignored_and_still_curates():
+    # T2 gate r5: statement curation is MECHANICAL — a model `select` is ignored for
+    # statement-shaped results (honoring it could only lose the amount column or
+    # scramble the label, rendering 12 mixed rows: the worst output). Replaces the
+    # r2-era "select disables statement treatment" rule, which gated a deterministic
+    # guarantee on prompt obedience.
+    payload = _statement_payload()
+    out = _resolve_data_section({"type": "table", "result_id": "r1", "select": ["account"]}, lambda rid: payload)
+    assert out.get("curation") == "statement"
+    labels = [r[0] for r in out["rows"]]
+    assert "Net Change in Cash" in labels and "Cash at End of Period" in labels
+    assert out["columns"] == ["account", "amount"]  # curated whole, projection ignored
 
 
 def test_empty_label_gets_derived_title_not_blank():
