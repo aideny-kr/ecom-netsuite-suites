@@ -124,3 +124,33 @@ def test_line_meta_level_handles_float_string_consistently():
         {"0": {"label": "X", "isDetailLine": True, "indentLevel": "2.0", "detailLineValues": [{"amount": 1}]}}
     )
     assert meta[0]["level"] == 2
+
+
+def test_line_meta_level_falls_through_unparseable_key_to_next(  # T2-gate r2
+):
+    # {"indentLevel": null, "level": 2}: the loop must not stop at the PRESENT-but-null
+    # first key — fall through to the next parseable one instead of defaulting to 0.
+    _c, _r, meta = _extract_report_data_as_table(
+        {
+            "0": {
+                "label": "X",
+                "isDetailLine": True,
+                "indentLevel": None,
+                "level": 2,
+                "detailLineValues": [{"amount": 1}],
+            }
+        }
+    )
+    assert meta[0]["level"] == 2
+
+
+def test_netsuite_bool_coercion_is_distinctly_named():
+    # pricing_tools has a SAME-NAMED _coerce_bool with OPPOSITE semantics for "T" (its
+    # truthy set is {"true","1","yes"}). The reportData coercer must carry a distinct,
+    # NetSuite-explicit name so a grep/copy-paste can't silently invert the hierarchy.
+    from app.services.chat import tool_call_results as m
+
+    assert hasattr(m, "_coerce_netsuite_bool")
+    assert not hasattr(m, "_coerce_bool")
+    assert m._coerce_netsuite_bool("T") is True
+    assert m._coerce_netsuite_bool("F") is False
