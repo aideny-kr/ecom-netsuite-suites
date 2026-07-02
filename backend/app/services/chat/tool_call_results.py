@@ -203,12 +203,15 @@ def _extract_items_as_table(parsed: dict[str, Any] | list) -> tuple[list[str], l
     return columns, rows
 
 
-def _coerce_bool(value) -> bool | None:
+def _coerce_netsuite_bool(value) -> bool | None:
     """NetSuite serializes booleans as JSON true/false OR the string ``"T"``/``"F"`` (a
     pervasive convention — cf. suiteql_validator / prompt_template_service). Coerce both;
     return None for absent/unrecognized so the caller can fall back to inference. A bare
     ``bool("F")`` is True (both strings are truthy), which would silently invert the
-    hierarchy signal."""
+    hierarchy signal. Named NetSuite-explicitly: ``pricing_tools._coerce_bool`` is a
+    SAME-NAMED coercer with the OPPOSITE result for ``"T"`` (its truthy set is
+    {"true","1","yes"}) — a generic name here invites a copy-paste that silently flips
+    every statement line's hierarchy."""
     if isinstance(value, bool):
         return value
     if isinstance(value, str):
@@ -236,17 +239,19 @@ def _line_hierarchy(entry: dict, value_source: str | None) -> dict:
     unknown. All structural, keyed off reportData markers — no hardcoded account/label
     names (no prompt pollution).
     """
-    is_detail = _coerce_bool(entry.get("isDetailLine"))
+    is_detail = _coerce_netsuite_bool(entry.get("isDetailLine"))
     if is_detail is None:
         is_detail = value_source == "detail"  # matches amount extraction's non-emptiness
     level = 0
     for key in ("indentLevel", "indent", "level"):
+        # Fall THROUGH a present-but-unparseable key ({"indentLevel": null, "level": 2}
+        # must yield 2, not stop at the null) — take the first key that parses.
         if key in entry:
             try:
                 level = int(float(entry[key]))
+                break
             except (TypeError, ValueError):
-                level = 0
-            break
+                continue
     return {"is_summary": not is_detail, "level": level}
 
 
