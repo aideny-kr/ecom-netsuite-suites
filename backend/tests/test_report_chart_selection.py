@@ -89,6 +89,22 @@ def test_time_series_requires_every_value_time_like():
     assert not _looks_time_series(["Jan 2026", "Feb 2026", "Mar 2026", "Apr 2026", "May 2026", "Total"])
 
 
+def test_blank_or_null_x_value_disqualifies_time_series():
+    # SQL rollups (GROUP BY ROLLUP / UNION ALL totals) emit NULL/blank for the period
+    # column. Those rows are still PLOTTED, so filtering them out of the check would
+    # bake the same fabricated cliff-edge spike (T2 gate r3: major, executed repro).
+    assert not _looks_time_series(["2026-01", "2026-02", "2026-03", None])
+    assert not _looks_time_series(["2026-01", "2026-02", "2026-03", "  "])
+
+
+def test_decimal_and_code_strings_are_not_periods():
+    # T2 gate r3: the dotted/dashed alternations false-positived plain numbers + codes.
+    assert not _looks_time_series(["2026.5", "1150.12"])  # decimals, not YYYY.MM
+    assert not _looks_time_series(["1.2500", "10.1250"])  # 4-dp rates, not MM.YYYY
+    assert not _looks_time_series(["5-2028", "3-2027"])  # code-like, not M-YYYY
+    assert not _looks_time_series(["May 100", "June 250"])  # month word + non-year digits
+
+
 # ---------------------------------------------------------------------------
 # Auto-chart type by data shape: monthly trend → LINE; categorical → bar.
 # ---------------------------------------------------------------------------
@@ -210,6 +226,61 @@ def test_explicit_chart_over_all_summary_statement_is_error_not_soup():
     out = _resolve_data_section({"type": "chart", "result_id": "r1"}, lambda rid: payload)
     assert out["type"] == "error"
     assert "detail" in out["reason"].lower() or "driver" in out["reason"].lower()
+
+
+# ---------------------------------------------------------------------------
+# Truncation honesty on chart paths (T2 gate r3 — majors).
+# ---------------------------------------------------------------------------
+def test_explicit_chart_over_truncated_statement_is_refused():
+    # Drivers ranked over the stored HEAD of a tail-cut statement are dishonest (the
+    # true top movers may live in the cut tail); charting the raw mixed rows is soup.
+    # Refuse deterministically, mirroring the table branch's honesty gate.
+    payload = _statement_payload()
+    payload["truncated"] = True
+    out = _resolve_data_section({"type": "chart", "result_id": "r1"}, lambda rid: payload)
+    assert out["type"] == "error"
+    assert "truncat" in out["reason"].lower()
+
+
+def test_truncated_statement_table_gets_no_auto_chart():
+    # A truncated statement falls to the top-K floor (honest note) — but its first-12
+    # positional rows mix subtotals + details, so the guaranteed auto-chart must SKIP
+    # rather than reintroduce the bar-soup for exactly the largest statements.
+    payload = _statement_payload()
+    payload["truncated"] = True
+    spec = assemble_spec("CF", [{"type": "table", "result_id": "r1"}], lambda rid: payload)
+    assert all(s["type"] != "chart" for s in spec["sections"])
+
+
+# ---------------------------------------------------------------------------
+# Driver substitution only where hierarchy demands it (T2 gate r3 — major).
+# ---------------------------------------------------------------------------
+def test_explicit_chart_over_all_detail_listing_charts_rows_not_drivers():
+    # An ns_runReport DETAIL LISTING (line_meta aligned, but no summary lines) has no
+    # double-count hazard — an explicit chart keeps the pre-existing chart-every-row
+    # behavior (the renderer's own cap+note handles legibility), never a silent
+    # magnitude top-12 substitution.
+    rows = [[f"4{i:04d} - Item {i}", (i + 1) * 100] for i in range(20)]
+    payload = {
+        "columns": ["account", "amount"],
+        "rows": rows,
+        "row_count": 20,
+        "truncated": False,
+        "currency_columns": ["amount"],
+        "line_meta": [_meta(False, 1)] * 20,  # all detail — a listing, not a statement
+    }
+    out = _resolve_data_section({"type": "chart", "result_id": "r1"}, lambda rid: payload)
+    assert out["type"] == "chart"
+    assert "driver" not in out["svg"].lower()  # no substitution, no "Top N drivers" title
+
+
+def test_empty_label_gets_derived_title_not_blank():
+    payload = _months_payload()
+    spec = assemble_spec(
+        "R", [{"type": "table", "result_id": "r1", "label": ""}], lambda rid: payload
+    )
+    chart = next(s for s in spec["sections"] if s["type"] == "chart")
+    assert "cash_balance" in chart["svg"]  # derived title, never an empty one
 
 
 # ---------------------------------------------------------------------------
