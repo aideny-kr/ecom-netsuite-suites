@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import set_tenant_context
 from app.schemas.chart import ChartData
-from app.schemas.report import normalize_and_validate_sections
+from app.schemas.report import DividerSection, HeadingSection, normalize_and_validate_sections
 from app.services import audit_service
 from app.services.report.report_charts import render_chart_svg
 from app.services.report.report_html import fmt_amount, render_report_html
@@ -184,12 +184,12 @@ def _curate_statement(cols: list, rows: list, line_meta, currency_columns: list)
     most aggregate subtotals) are kept, statement order always preserved. Callouts are
     the LAST ``_STATEMENT_CALLOUT_MAX`` curated lines — a statement builds to its
     conclusions (Net Change, Ending Cash) — as metric_headline sections with the amount
-    accounting-formatted (exact Decimal semantics via the shared ``_fmt_amount``).
+    accounting-formatted (exact Decimal semantics via the shared ``fmt_amount``).
     """
     if not isinstance(line_meta, list) or len(line_meta) != len(rows) or len(cols) < 2:
         return None
     amount_idx = _amount_index(cols, currency_columns)
-    picked: list[tuple[int, list]] = []
+    picked: list[tuple[int, list, object]] = []  # (level, row, qualified amount)
     for row, meta in zip(rows, line_meta):
         if not isinstance(meta, dict) or not meta.get("is_summary"):
             continue
@@ -206,7 +206,7 @@ def _curate_statement(cols: list, rows: list, line_meta, currency_columns: list)
             level = int(float(meta.get("level", 0)))
         except (TypeError, ValueError):
             level = 0
-        picked.append((level, row))
+        picked.append((level, row, amount))
     if len(picked) < _MIN_STATEMENT_LINES:
         return None
     if len(picked) > _STATEMENT_TABLE_MAX:
@@ -221,7 +221,7 @@ def _curate_statement(cols: list, rows: list, line_meta, currency_columns: list)
         # lines (Net Change / Ending Cash) must survive the trim regardless of the
         # indent-level distribution (reportData often carries no indent keys at all).
         chosen = None
-        for threshold in sorted({lvl for lvl, _ in picked}, reverse=True):
+        for threshold in sorted({lvl for lvl, _, _ in picked}, reverse=True):
             subset = [p for p in picked if p[0] <= threshold]
             if _MIN_STATEMENT_LINES <= len(subset) <= _STATEMENT_TABLE_MAX:
                 chosen = subset
@@ -230,17 +230,18 @@ def _curate_statement(cols: list, rows: list, line_meta, currency_columns: list)
             head = _STATEMENT_TABLE_MAX - _STATEMENT_CALLOUT_MAX
             chosen = picked[:head] + picked[-_STATEMENT_CALLOUT_MAX:]
         picked = chosen
-    statement_rows = [row for _, row in picked]
+    statement_rows = [row for _, row, _ in picked]
     callouts = [
         {
             "type": "metric_headline",
             "label": str(row[0]),
-            "value": fmt_amount(row[amount_idx] if amount_idx < len(row) else None),
+            # the amount each line QUALIFIED on — no re-derivation to drift
+            "value": fmt_amount(amount),
             "unit": "",
             "period": "",
             "definition_version": None,
         }
-        for row in statement_rows[-_STATEMENT_CALLOUT_MAX:]
+        for _, row, amount in picked[-_STATEMENT_CALLOUT_MAX:]
     ]
     return statement_rows, callouts
 
@@ -564,15 +565,17 @@ def assemble_spec(title: str, sections: list[dict], resolver: Resolver) -> dict:
         elif s["type"] in ("table", "metric_headline", "chart"):
             resolved_pairs.append((s, _resolve_data_section(s, resolver)))
         elif s["type"] == "heading":
-            # TRUST BOUNDARY: rebuild passthrough sections from WHITELISTED keys only.
-            # The validated dicts still carry any extra keys the model authored (pydantic
-            # ignores extras), and pass 2 reads internal hand-off keys off resolved
-            # sections — a raw (s, s) passthrough would let a model-authored
-            # `statement_callouts` inject forged numbers / unescaped svg / a crashing
-            # value into the frozen report (T2 gate: blocker).
-            resolved_pairs.append((s, {"type": "heading", "level": s.get("level", 2), "text": s.get("text", "")}))
+            # TRUST BOUNDARY: rebuild passthrough sections through their SCHEMA so only
+            # declared fields (with schema defaults/clamps) survive. The validated dicts
+            # still carry any extra keys the model authored (pydantic ignores extras),
+            # and pass 2 reads internal hand-off keys off resolved sections — a raw
+            # (s, s) passthrough would let a model-authored `statement_callouts` inject
+            # forged numbers / unescaped svg / a crashing value into the frozen report
+            # (T2 gate: blocker). model_validate cannot fail here: the sections already
+            # passed normalize_and_validate_sections above.
+            resolved_pairs.append((s, HeadingSection.model_validate(s).model_dump()))
         else:  # divider
-            resolved_pairs.append((s, {"type": "divider"}))
+            resolved_pairs.append((s, DividerSection.model_validate(s).model_dump()))
     # result_ids the model SUCCESSFULLY charted itself — an explicit chart that resolved to
     # an error must NOT suppress the table's auto-chart fallback.
     model_charted_ids = {
