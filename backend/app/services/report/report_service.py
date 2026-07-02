@@ -502,8 +502,7 @@ def _resolve_data_section(s: dict, resolver: Resolver) -> dict:
                     return {
                         "type": "error",
                         "reason": (
-                            "statement was truncated upstream — chart a smaller "
-                            "aggregated or per-period result instead"
+                            "statement was truncated upstream — chart a smaller aggregated or per-period result instead"
                         ),
                     }
                 stmt_currency = _currency_in(payload, cols)
