@@ -38,7 +38,7 @@ td.num,th.num { text-align:right; font-variant-numeric:tabular-nums; white-space
 """
 
 
-def _fmt_amount(value) -> str:
+def fmt_amount(value) -> str:
     """Accounting-style format for a CURRENCY cell: thousands separators, 2 decimals
     (exact — the displayed lines foot to the total, no precision loss), negatives in
     parentheses (``5583749.13`` → ``"5,583,749.13"``, ``-4595824.07`` →
@@ -95,6 +95,17 @@ def _fmt_amount(value) -> str:
         return overflow_fallback
     body = f"{abs(q):,.2f}"
     return f"({body})" if q < 0 else body
+
+
+def _coerce_total(raw) -> int | None:
+    """Coerce a table section's ``row_count`` to an int for the disclosure notes —
+    it may arrive as an int OR a numeric string (some MCP shapes); bools never count."""
+    if isinstance(raw, bool):
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
 
 
 def _md_inline(text: str) -> str:
@@ -211,8 +222,8 @@ def _section_html(s: dict) -> str:
             for i in range(max(ncols, len(row))):
                 v = row[i] if i < len(row) else None
                 if i < ncols and columns[i] in currency:
-                    # _fmt_amount handles None/non-finite → "" and non-numeric → str().
-                    cells.append(f'<td class="num">{escape(_fmt_amount(v))}</td>')
+                    # fmt_amount handles None/non-finite → "" and non-numeric → str().
+                    cells.append(f'<td class="num">{escape(fmt_amount(v))}</td>')
                 elif v is None:
                     cells.append("<td></td>")  # null → empty cell, never "None"
                 else:
@@ -220,18 +231,20 @@ def _section_html(s: dict) -> str:
             body_rows.append("<tr>" + "".join(cells) + "</tr>")
         body = "".join(body_rows)
         note = ""
+        # A statement-curated table is not a positional "first N" slice — it shows the
+        # named section-summary lines. Disclose the curation (and the true source size)
+        # with wording that matches what was actually done. Same total coercion as the
+        # truncated branch (row_count may be a numeric STRING in some MCP shapes).
+        if s.get("curation") == "statement":
+            total = _coerce_total(s.get("row_count"))
+            of_total = f" from {escape(str(total))} source rows" if total is not None and total > len(rows) else ""
+            note = f'<p class="foot">Curated statement — {len(rows)} summary lines{of_total}.</p>'
         # A truncated section MUST disclose it (never render a partial financial table as
         # whole). When the true total is known and exceeds the shown rows, name it; when
         # the upstream reported row_count == shown (e.g. NetSuite-side fetch truncation,
         # true total unknown), still disclose without a contradictory "first N of N".
-        if s.get("truncated"):
-            # row_count may arrive as an int or a numeric string (some MCP shapes); coerce
-            # so we still name the true total rather than dropping to the generic note.
-            raw_total = s.get("row_count")
-            try:
-                total = int(raw_total) if not isinstance(raw_total, bool) else None
-            except (TypeError, ValueError):
-                total = None
+        elif s.get("truncated"):
+            total = _coerce_total(s.get("row_count"))
             if total is not None and total > len(rows):
                 note = f'<p class="foot">Showing first {len(rows)} of {escape(str(total))} rows.</p>'
             else:

@@ -861,7 +861,10 @@ def _intercept_tool_result(
         ):
             capped = report_data_to_capped_table(parsed["reportData"])
             if capped is not None:
-                rd_columns, rd_rows, rd_count, rd_truncated = capped
+                # line_meta (per-row statement hierarchy) rides the PERSISTED payload +
+                # sidecar (via extract_result_payload) for report.compose curation; the
+                # live SSE data_table render does not need it, so it is unused here.
+                rd_columns, rd_rows, _rd_line_meta, rd_count, rd_truncated = capped
                 sse_event_data = {
                     "columns": rd_columns,
                     "rows": rd_rows,

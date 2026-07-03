@@ -11,20 +11,44 @@ prompt_fragment: |
   wants to scroll hundreds of detail rows. Lead with the story and a picture; surface raw
   detail only when the rows are themselves informative.
 
+  Recommended report recipe (a financial report especially), top to bottom:
+    1. Executive summary — a short `narrative` stating the headline story.
+    2. Key figures — a financial statement's own summary lines become callout cards
+       automatically; add a `metric_headline` only for a figure from a DIFFERENT result.
+    3. The trend — a compact per-period result as its own `table` or `chart` section.
+    4. The drivers — what moved; a statement's driver chart is added automatically.
+    5. Risks & watch items — a closing `narrative`.
+
   Default shape, in order:
     1. `heading`  — title / section headers: `{"type":"heading","level":1,"text":"..."}`.
     2. `narrative` — your written analysis: `{"type":"narrative","markdown":"..."}`. Embed
        figures with `{{result:<id>.<field>}}` / `{{metric:<id>}}`; never type raw numbers.
     3. `metric_headline` — one key figure: `{"type":"metric_headline","result_id":"r1","label":"Net Income"}`.
     4. `chart` — VISUALIZE the major drivers or the trend:
-       `{"type":"chart","result_id":"r1","chart_type":"bar|line|pie|area|scatter|donut|histogram"}`.
+       `{"type":"chart","result_id":"r1","chart_type":"bar|line|pie|area|scatter|donut|histogram","label":"..."}`.
        Prefer a chart over a table to show a trend, a composition, or the top drivers.
 
-  Use a `table` (`{"type":"table","result_id":"r1","select":["col", ...]}`) ONLY when the
-  detailed rows are genuinely informative to the reader, and scope the columns with
-  `select`. Do NOT compose a table of a large raw result (tens or hundreds of rows) — that
-  flat dump is the exact anti-pattern this tool exists to replace. Summarize and visualize
-  instead.
+  Give every `table` and `chart` section a short human `label` (e.g. "Cash Balance Trend",
+  "Top working-capital drivers") — the `label` becomes the rendered chart's TITLE. A label
+  is a title only; it must never carry figures.
+
+  Trends: compose a COMPACT result with one row per period (month/quarter) and reference it
+  as its own section — a period-shaped first column is rendered as a line automatically,
+  so you do not need to pick `chart_type` for a trend.
+
+  Financial statements (a cash-flow / P&L / balance-sheet report result) are curated
+  automatically: the renderer promotes the statement's key summary figures to callout
+  cards, shows a compact statement of the named section subtotals, and charts the top
+  detail drivers. Include the statement as ONE `table` section (with a `label`) and write
+  the narrative around it — do NOT hand-slice, re-aggregate, or re-query the statement to
+  build your own summary of it, and do not use `select` on a statement table (a column
+  projection is ignored there — the statement is always curated whole).
+
+  Use a `table` (`{"type":"table","result_id":"r1","select":["col", ...],"label":"..."}`)
+  ONLY when the detailed rows are genuinely informative to the reader, and scope the
+  columns with `select`. Do NOT compose a table of a large raw result (tens or hundreds of
+  rows) — that flat dump is the exact anti-pattern this tool exists to replace. Summarize
+  and visualize instead.
 
   A `chart` needs a COMPACT, aggregated result (≤100 points) shaped as a label + a value
   (e.g. one row per period, or one row per category). If the data you have is large or

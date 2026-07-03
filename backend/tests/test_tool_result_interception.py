@@ -867,7 +867,7 @@ class TestInterceptRunReportReportData:
             {"0": {"label": "Cash", "isDetailLine": True, "summaryLineValues": [{"Amount": 0}]}}
         )
         assert result is not None
-        _cols, rows = result
+        _cols, rows, _meta = result
         assert rows == [["Cash", 0]]
 
     def test_null_capital_amount_falls_through_to_lowercase(self):
@@ -880,7 +880,7 @@ class TestInterceptRunReportReportData:
             {"0": {"label": "AR", "isDetailLine": True, "summaryLineValues": [{"Amount": None, "amount": 5}]}}
         )
         assert result is not None
-        _cols, rows = result
+        _cols, rows, _meta = result
         assert rows == [["AR", 5]]
 
     def test_flatten_keeps_every_amount_bearing_row_drops_only_truly_empty(self):
@@ -901,7 +901,7 @@ class TestInterceptRunReportReportData:
         }
         result = _extract_report_data_as_table(rd)
         assert result is not None
-        cols, rows = result
+        cols, rows, _meta = result
         assert cols == ["account", "amount"]
         assert rows == [["Rent", 50000], ["", 50000], ["", 0], ["Financial Row", 100]]
 
@@ -921,7 +921,9 @@ class TestInterceptRunReportReportData:
         from app.services.chat.tool_call_results import extract_result_payload, report_data_to_capped_table
 
         rd = _result_str(SAMPLE_RUNREPORT_REPORTDATA)
-        columns, rows, row_count, truncated = report_data_to_capped_table(SAMPLE_RUNREPORT_REPORTDATA["reportData"])
+        columns, rows, _line_meta, row_count, truncated = report_data_to_capped_table(
+            SAMPLE_RUNREPORT_REPORTDATA["reportData"]
+        )
         persisted = extract_result_payload("ext__abc__ns_runReport", {}, rd)
         _, sse_event, _ = _intercept_tool_result("ext__abc__ns_runReport", rd)
         assert persisted["columns"] == sse_event["columns"] == columns
@@ -1046,7 +1048,11 @@ class TestSameTurnRunReportComposeIntegration:
         # The chart x-axis must be the ACCOUNT name, not the dropped row-type marker:
         # the SVG x-labels carry the account names and never "detail"/"section".
         svg = chart["svg"]
-        assert "Cash" in svg and "Net Income" in svg, "chart x-axis must label bars by account name"
+        assert "Cash" in svg and "Accounts Receivable" in svg, "chart x-axis must label bars by account name"
+        # Phase 4: an explicit chart over a statement payload charts the LEAF drivers
+        # only — "Net Income" is a summary line (isDetailLine: False) and must NOT be a
+        # bar next to the detail lines (a subtotal bar double-counts its own details).
+        assert "Net Income" not in svg, "summary lines are excluded from driver charts"
         assert "detail" not in svg and "section" not in svg, "row-type marker must not be the chart x-axis"
 
 
