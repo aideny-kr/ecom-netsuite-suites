@@ -11,7 +11,9 @@ selection off line_meta (never labels).
 from __future__ import annotations
 
 from app.services.report.report_service import (
+    _build_tabular_chart,
     _looks_time_series,
+    _period_key,
     _resolve_data_section,
     assemble_spec,
 )
@@ -409,3 +411,57 @@ def test_schema_accepts_label_on_table_and_chart_sections():
     )
     assert parsed[0].label == "Cash Balance Trend"
     assert parsed[1].label == "Trend"
+
+
+# ---------------------------------------------------------------------------
+# A month-PREFIX word is not a month (T2 gate: minor). "Marketing"[:3] == "mar",
+# but Marketing is not a period — a categorical column must not silently become a
+# trend line. Match the WHOLE captured word against real month words.
+# ---------------------------------------------------------------------------
+def test_month_prefix_words_are_not_periods():
+    assert _period_key("Marketing 2025") is None  # mar-prefix, not March
+    assert _period_key("Junior 2026") is None  # jun-prefix, not June
+    assert _period_key("Novelist 2026") is None  # nov-prefix, not November
+    assert _period_key("Decoy 2025") is None  # dec-prefix, not December
+    # genuine month words (abbrev + full name + "sept") still parse
+    assert _period_key("Jun 2025") is not None
+    assert _period_key("January 2025") is not None
+    assert _period_key("Sept 2025") is not None
+
+
+def test_month_prefix_category_column_is_not_a_trend():
+    assert not _looks_time_series(["Marketing 2024", "Marketing 2025", "Marketing 2026"])
+    # sanity: genuine month columns are still trends
+    assert _looks_time_series(["Jan 2025", "Feb 2025", "Mar 2025"])
+
+
+# ---------------------------------------------------------------------------
+# A LINE over a DESC ("last N months", newest-first) period series must flow
+# oldest→newest, or cash that ROSE renders as a downward slope (T2 gate: minor).
+# The chart data is reordered; the table keeps its own order.
+# ---------------------------------------------------------------------------
+def test_descending_period_line_flows_chronologically():
+    cols = ["period", "cash_balance"]
+    rows = [["2026-06", 12_000_000], ["2026-05", 11_000_000], ["2026-04", 10_000_000]]
+    chart = _build_tabular_chart(cols, rows, chart_type=None, title=None)
+    assert chart is not None
+    assert chart.chart_type == "line"
+    assert [d["period"] for d in chart.data] == ["2026-04", "2026-05", "2026-06"]
+    assert [d["cash_balance"] for d in chart.data] == [10_000_000, 11_000_000, 12_000_000]
+
+
+def test_ascending_period_line_keeps_its_order():
+    # an ASC series is already chronological — it must NOT be reversed.
+    cols = ["period", "cash_balance"]
+    rows = [["2026-04", 10_000_000], ["2026-05", 11_000_000], ["2026-06", 12_000_000]]
+    chart = _build_tabular_chart(cols, rows, chart_type=None, title=None)
+    assert [d["period"] for d in chart.data] == ["2026-04", "2026-05", "2026-06"]
+
+
+def test_descending_bar_is_not_reordered():
+    # a DESC series charted as an explicit BAR is order-agnostic — leave data as-is.
+    cols = ["period", "cash_balance"]
+    rows = [["2026-06", 12_000_000], ["2026-05", 11_000_000], ["2026-04", 10_000_000]]
+    chart = _build_tabular_chart(cols, rows, chart_type="bar", title=None)
+    assert chart.chart_type == "bar"
+    assert [d["period"] for d in chart.data] == ["2026-06", "2026-05", "2026-04"]

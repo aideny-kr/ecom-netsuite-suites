@@ -49,6 +49,14 @@ _MONTHS = {
     "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
     "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
 }  # fmt: skip
+# A period label's month token must be a real month WORD, not merely a 3-letter prefix of
+# some other word ("Marketing"->"mar", "Junior"->"jun", "Decoy"->"dec"). Match the whole
+# captured word against the recognized abbreviations + full names (T2 gate: minor — a
+# month-prefixed category would otherwise render as a false trend line).
+_MONTH_WORDS = set(_MONTHS) | {
+    "january", "february", "march", "april", "may", "june",
+    "july", "august", "september", "october", "november", "december", "sept",
+}  # fmt: skip
 _ISO_RE = re.compile(r"^((?:19|20)\d{2})[-/](0?[1-9]|1[0-2])(?:[-/](\d{1,2}))?$")  # 2026-06(-30)
 _MYYYY_RE = re.compile(r"^(0?[1-9]|1[0-2])/((?:19|20)\d{2})$")  # 06/2026
 _MONYYYY_RE = re.compile(r"^([a-z]{3,9})[ .,'-]*(?:((?:19|20)\d{2})|'(\d{2}))$")  # Jun 2026 / Jun '26
@@ -71,7 +79,7 @@ def _period_key(value: str) -> tuple | None:
     if m:
         return (int(m.group(2)), int(m.group(1)), 0)
     m = _MONYYYY_RE.match(s)
-    if m and m.group(1)[:3] in _MONTHS:
+    if m and m.group(1) in _MONTH_WORDS:
         year = int(m.group(2)) if m.group(2) else 2000 + int(m.group(3))
         return (year, _MONTHS[m.group(1)[:3]], 0)
     m = _QY_RE.match(s)
@@ -88,10 +96,11 @@ def _period_key(value: str) -> tuple | None:
     return None
 
 
-def _looks_time_series(x_values: list) -> bool:
-    """True when EVERY x value parses as a period (``_period_key``) AND the sequence is
-    STRICTLY MONOTONIC (ascending or descending — "last 6 months DESC" is legitimately
-    ordered; every point is labeled). Everything else keeps the order-agnostic bar:
+def _period_direction(x_values: list) -> str | None:
+    """``"asc"``/``"desc"`` when EVERY x value parses as a period (``_period_key``) AND the
+    sequence is STRICTLY MONOTONIC; else ``None``. Underlies ``_looks_time_series`` and lets
+    the chart layer orient a line chronologically — a DESC "last N months" series is
+    legitimately ordered newest-first but must still be PLOTTED oldest→newest.
 
     - A None/blank x DISQUALIFIES outright: SQL rollup rows (GROUP BY ROLLUP /
       UNION ALL totals) emit NULL/blank for the period column and are still PLOTTED —
@@ -101,18 +110,27 @@ def _looks_time_series(x_values: list) -> bool:
       trajectory that does not exist (T2 gate: major). The old bar default was
       order-agnostic; a line must EARN its ordering."""
     if len(x_values) < _MIN_AUTO_CHART_ROWS:
-        return False
+        return None
     keys = []
     for v in x_values:
         if v is None or not str(v).strip():
-            return False  # a NULL/blank x row is plotted too — never call this a trend
+            return None  # a NULL/blank x row is plotted too — never call this a trend
         key = _period_key(v)
         if key is None:
-            return False
+            return None
         keys.append(key)
-    ascending = all(a < b for a, b in zip(keys, keys[1:]))
-    descending = all(a > b for a, b in zip(keys, keys[1:]))
-    return ascending or descending
+    if all(a < b for a, b in zip(keys, keys[1:])):
+        return "asc"
+    if all(a > b for a, b in zip(keys, keys[1:])):
+        return "desc"
+    return None
+
+
+def _looks_time_series(x_values: list) -> bool:
+    """True when the x column is a strictly-monotonic period sequence (see
+    ``_period_direction``) — the shape that renders as a LINE trend, not order-agnostic
+    bars. A miss keeps the bar default, which is always safe."""
+    return _period_direction(x_values) is not None
 
 
 def _currency_in(payload: dict, cols: list) -> list:
@@ -364,17 +382,24 @@ def _build_tabular_chart(
         return d
 
     # Shape-driven defaults (Phase 4): a period/date-shaped x column is a TREND — default
-    # to a line and say "trend" in the derived title. An explicit chart_type always wins,
-    # so only probe the shape when a default is actually needed.
-    time_series = (chart_type is None or title is None) and _looks_time_series([r[0] if r else None for r in rows])
+    # to a line and say "trend" in the derived title. An explicit chart_type always wins
+    # the default; the same parse also orients the line chronologically below.
+    direction = _period_direction([r[0] if r else None for r in rows])
+    time_series = direction is not None
     if title is None:
         title = f"{numeric_cols[0]} trend by {cols[0]}" if time_series else f"{numeric_cols[0]} by {cols[0]}"
+    final_type = chart_type or ("line" if time_series else "bar")
+    # A LINE must flow oldest→newest. A DESC (newest-first, "last N months") period series
+    # would otherwise draw a mirror-image slope — cash that ROSE renders as a downward line
+    # (T2 gate: minor). Reorder the CHART data only; the table keeps its own order. Bars are
+    # order-agnostic, so only lines need it.
+    plot_rows = list(reversed(rows)) if (final_type == "line" and direction == "desc") else rows
     return ChartData(
-        chart_type=chart_type or ("line" if time_series else "bar"),
+        chart_type=final_type,
         title=title,
         x_axis={"label": cols[0], "key": cols[0]},
         y_axes=[{"label": c, "key": c} for c in numeric_cols],
-        data=[_row_dict(r) for r in rows],
+        data=[_row_dict(r) for r in plot_rows],
     )
 
 
