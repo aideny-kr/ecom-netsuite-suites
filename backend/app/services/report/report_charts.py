@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import re
+import unicodedata
 from html import escape
 
 from app.schemas.chart import ChartData
@@ -9,6 +10,28 @@ from app.schemas.chart import ChartData
 _W, _H = 720, 380
 _PAD_L, _PAD_B, _PAD_T, _PAD_R = 64, 56, 48, 24
 _PALETTE = ["#6366f1", "#ef4444", "#f59e0b", "#10b981", "#0ea5e9", "#a855f7"]
+
+# --- x-axis label legibility -------------------------------------------------------
+# The live report smeared its x-axis: long account names ("11010 - Intercompany
+# Receivables") stamped under every one of ~36 un-rotated bars collided into an
+# unreadable band. These bounds make the axis legible deterministically.
+#
+# Visible label cap: a longer label is ellipsized to _MAX_LABEL_CHARS chars ("…" is the
+# last one) with the FULL text preserved in a <title> tooltip — nothing is hidden.
+_MAX_LABEL_CHARS = 16
+# Rotate the x labels (so they stop overlapping) once EITHER there are more than this
+# many categories OR any label is longer than _ROTATE_LABEL_LEN_OVER characters.
+_ROTATE_CATEGORIES_OVER = 6
+_ROTATE_LABEL_LEN_OVER = 10
+_ROTATE_DEG = 35  # angle the x labels are drawn at when rotation kicks in
+# Bar charts refuse to render a smear: at most this many categories are drawn (in the
+# caller's curated order — aggregating to a handful of comparable drivers is upstream's
+# job, Phase 4), and the true total is disclosed in a note.
+_MAX_BAR_CATEGORIES = 12
+# Line/area charts keep EVERY data point (never drop a figure) but stamp at most this
+# many x labels — evenly spaced, endpoints kept — so a long monthly series stays legible.
+_MAX_AXIS_TICKS = 12
+_CHAR_PX = 7  # rough advance width of the 12px label font, for rotated-label padding math
 
 # ChartAxis.color is a free-form string that can originate from upstream tool output
 # the LLM/data influences. The SVG is injected into the published report HTML RAW
@@ -36,6 +59,76 @@ def _fmt(v: float) -> str:
     if abs(n) >= 1_000:
         return f"{n / 1_000:.1f}K"
     return f"{n:.0f}"
+
+
+def _truncate_label(text: str) -> tuple[str, bool]:
+    """``(display, truncated)``. Ellipsize a label longer than ``_MAX_LABEL_CHARS`` so it
+    fits its slot; the caller preserves the full text in a ``<title>`` tooltip when
+    ``truncated`` is True, so no figure is ever hidden."""
+    if len(text) <= _MAX_LABEL_CHARS:
+        return text, False
+    return text[: _MAX_LABEL_CHARS - 1].rstrip() + "…", True
+
+
+def _should_rotate(labels: list[str]) -> bool:
+    """Rotate the x axis when the labels would otherwise collide: many categories, or any
+    single label long enough to overrun its slot."""
+    return len(labels) > _ROTATE_CATEGORIES_OVER or any(len(label) > _ROTATE_LABEL_LEN_OVER for label in labels)
+
+
+def _text_reach_px(text: str) -> float:
+    """Approximate rendered px width of ``text``. Wide/fullwidth glyphs (CJK, kana) are
+    ~2x a Latin char at this font size, so count them double — measuring by char COUNT
+    would underestimate a CJK label's width and let it clip the viewport (the product
+    targets NetSuite OneWorld, so international account names are expected)."""
+    return _CHAR_PX * sum(2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1 for ch in text)
+
+
+def _label_pads(labels: list[str], rotate: bool) -> tuple[float, float]:
+    """``(left, bottom)`` padding to reserve for the x labels. Horizontal labels need only
+    the base ``_PAD_L`` / ``_PAD_B``. A rotated label is END-anchored and swings DOWN-LEFT
+    of its tick, so reserve BOTH its horizontal extent (else the leftmost long label clips
+    past ``x=0`` — line charts anchor the first tick exactly at the left pad) AND its
+    vertical extent (else a low label overflows the bottom of the SVG viewport)."""
+    if not rotate:
+        return float(_PAD_L), float(_PAD_B)
+    # Measure the PIXEL reach of each (already ellipsis-capped) display, not its char
+    # count — wide/CJK glyphs are ~2x, and undercounting them re-clips the viewport.
+    reach = max((_text_reach_px(_truncate_label(label)[0]) for label in labels), default=0.0)
+    rad = math.radians(_ROTATE_DEG)
+    left = max(float(_PAD_L), reach * math.cos(rad) + 6)  # +6px margin off the left edge
+    return left, _PAD_B + reach * math.sin(rad)
+
+
+def _tick_indices(n: int, k: int) -> list[int]:
+    """Up to ``k`` evenly-spaced indices in ``[0, n)``, always including the first and
+    last — i.e. WHICH x labels to actually stamp on a dense series. The unlabeled points
+    still render; only their labels are thinned."""
+    if n <= k:
+        return list(range(n))
+    stride = (n - 1) / (k - 1)
+    return sorted({round(i * stride) for i in range(k)})
+
+
+def _x_values(x_key: str, rows: list[dict]) -> list[str]:
+    """The x-axis label string for each plotted row (missing key → '')."""
+    return [str(row.get(x_key, "")) for row in rows]
+
+
+def _x_label(x: float, bottom: float, full: str, rotate: bool) -> str:
+    """One x-axis label whose tick is at ``x`` on the axis line ``bottom``: ellipsized
+    display + a ``<title>`` tooltip carrying the full text when truncated; rotated
+    ``-_ROTATE_DEG`` degrees (end-anchored) when the axis is rotated, else horizontal +
+    centered. Rotated labels sit closer to the axis (they hang below it)."""
+    display, truncated = _truncate_label(full)
+    tip = f"<title>{escape(full)}</title>" if truncated else ""
+    y = bottom + (16 if rotate else 20)
+    anchor = "end" if rotate else "middle"
+    transform = f' transform="rotate(-{_ROTATE_DEG} {x:.1f} {y:.1f})"' if rotate else ""
+    return (
+        f'<text x="{x:.1f}" y="{y:.1f}" font-size="12" font-weight="600" '
+        f'text-anchor="{anchor}" fill="#111"{transform}>{escape(display)}{tip}</text>'
+    )
 
 
 def _frame(body: str, title: str) -> str:
@@ -72,8 +165,29 @@ def _bars(c: ChartData) -> str:
     rows, series = c.data, c.y_axes
     if not rows or not series:
         return ""
-    plot_w = _W - _PAD_L - _PAD_R
-    plot_h = _H - _PAD_T - _PAD_B
+    # Legibility cap: never render a smear of dozens of bars. Keep the caller's order
+    # (curating to a handful of comparable drivers is upstream's job — Phase 4) and
+    # disclose the true total in a note below.
+    total_cats = len(rows)
+    capped = total_cats > _MAX_BAR_CATEGORIES
+    if capped:
+        # Keep the _MAX_BAR_CATEGORIES MOST MATERIAL rows (largest |value| across series),
+        # NOT the first N in source order: slicing source-order rows before _value_range
+        # would drop a large-magnitude driver past the cut AND rescale the y-axis to the
+        # smaller visible subset — a materially misleading financial chart (T2 gate: major).
+        # Kept rows render in their original relative order. (_MAX_BAR_CATEGORIES ==
+        # report_service._REPORT_TABLE_TOP_K, so a pre-curated auto-chart never caps here;
+        # this guards the explicit-chart path, which delivers up to 100 unranked rows.)
+        def _mag(row: dict) -> float:
+            return max((abs(_num(row, s.key)) for s in series), default=0.0)
+
+        keep = sorted(sorted(range(len(rows)), key=lambda i: _mag(rows[i]), reverse=True)[:_MAX_BAR_CATEGORIES])
+        rows = [rows[i] for i in keep]
+    labels = _x_values(c.x_axis.key, rows)
+    rotate = _should_rotate(labels)
+    pad_l, pad_b = _label_pads(labels, rotate)
+    plot_w = _W - pad_l - _PAD_R
+    plot_h = _H - _PAD_T - pad_b
     bottom = _PAD_T + plot_h
     vmax, vmin, span = _value_range(rows, series)
     # y of value 0 (the baseline). All-zero data (vmax==vmin==0) → baseline at the BOTTOM
@@ -82,10 +196,11 @@ def _bars(c: ChartData) -> str:
     group_w = plot_w / len(rows)
     bar_w = group_w / (len(series) + 1)
     out = [
-        f'<line x1="{_PAD_L}" y1="{base_y:.1f}" x2="{_W - _PAD_R}" y2="{base_y:.1f}" stroke="#000" stroke-width="2"/>'
+        f'<line x1="{pad_l:.1f}" y1="{base_y:.1f}" x2="{_W - _PAD_R}" y2="{base_y:.1f}" '
+        'stroke="#000" stroke-width="2"/>'
     ]
     for i, row in enumerate(rows):
-        gx = _PAD_L + i * group_w
+        gx = pad_l + i * group_w
         for j, s in enumerate(series):
             v = _num(row, s.key)
             h = abs(v) / span * plot_h
@@ -99,17 +214,19 @@ def _bars(c: ChartData) -> str:
                 f'<rect x="{x:.1f}" y="{y:.1f}" width="{bar_w:.1f}" height="{h:.1f}" '
                 f'fill="{color}" stroke="#000" stroke-width="2"/>'
             )
-        label = escape(str(row.get(c.x_axis.key, "")))
-        out.append(
-            f'<text x="{gx + group_w / 2:.1f}" y="{bottom + 20}" font-size="12" font-weight="600" '
-            f'text-anchor="middle" fill="#111">{label}</text>'
-        )
+        out.append(_x_label(gx + group_w / 2, bottom, labels[i], rotate))
     out.append(
-        f'<text x="{_PAD_L - 8}" y="{_PAD_T + 8}" font-size="11" text-anchor="end" fill="#444">{_fmt(vmax)}</text>'
+        f'<text x="{pad_l - 8:.1f}" y="{_PAD_T + 8}" font-size="11" text-anchor="end" fill="#444">{_fmt(vmax)}</text>'
     )
     if vmin < 0:
         out.append(
-            f'<text x="{_PAD_L - 8}" y="{bottom}" font-size="11" text-anchor="end" fill="#444">{_fmt(vmin)}</text>'
+            f'<text x="{pad_l - 8:.1f}" y="{bottom:.1f}" font-size="11" text-anchor="end" fill="#444">'
+            f"{_fmt(vmin)}</text>"
+        )
+    if capped:
+        out.append(
+            f'<text x="{_W - _PAD_R}" y="44" font-size="11" text-anchor="end" fill="#666">'
+            f"Showing {_MAX_BAR_CATEGORIES} largest of {total_cats} categories</text>"
         )
     return "".join(out)
 
@@ -118,8 +235,15 @@ def _lines(c: ChartData, area: bool) -> str:
     rows, series = c.data, c.y_axes
     if not rows or not series:
         return ""
-    plot_w = _W - _PAD_L - _PAD_R
-    plot_h = _H - _PAD_T - _PAD_B
+    labels = _x_values(c.x_axis.key, rows)
+    # Keep EVERY data point on the line, but thin the LABELS on a dense series so a long
+    # monthly trend doesn't stamp an overlapping label under all 24+ points.
+    ticks = _tick_indices(len(rows), _MAX_AXIS_TICKS)
+    shown = [labels[i] for i in ticks]
+    rotate = _should_rotate(shown)
+    pad_l, pad_b = _label_pads(shown, rotate)
+    plot_w = _W - pad_l - _PAD_R
+    plot_h = _H - _PAD_T - pad_b
     bottom = _PAD_T + plot_h
     vmax, vmin, span = _value_range(rows, series)
     base_y = bottom if vmax == vmin else _PAD_T + plot_h * (vmax / span)  # y of value 0
@@ -131,14 +255,15 @@ def _lines(c: ChartData, area: bool) -> str:
 
     step = plot_w / max(len(rows) - 1, 1)
     out = [
-        f'<line x1="{_PAD_L}" y1="{base_y:.1f}" x2="{_W - _PAD_R}" y2="{base_y:.1f}" stroke="#000" stroke-width="2"/>'
+        f'<line x1="{pad_l:.1f}" y1="{base_y:.1f}" x2="{_W - _PAD_R}" y2="{base_y:.1f}" '
+        'stroke="#000" stroke-width="2"/>'
     ]
     for j, s in enumerate(series):
         color = _safe_color(s.color, _PALETTE[j % len(_PALETTE)])
-        pts = [(_PAD_L + i * step, _y(_num(r, s.key))) for i, r in enumerate(rows)]
+        pts = [(pad_l + i * step, _y(_num(r, s.key))) for i, r in enumerate(rows)]
         path = " ".join(f"{x:.1f},{y:.1f}" for x, y in pts)
         if area:
-            poly = f"{_PAD_L},{base_y:.1f} " + path + f" {_PAD_L + (len(rows) - 1) * step:.1f},{base_y:.1f}"
+            poly = f"{pad_l:.1f},{base_y:.1f} " + path + f" {pad_l + (len(rows) - 1) * step:.1f},{base_y:.1f}"
             out.append(f'<polygon points="{poly}" fill="{color}" fill-opacity="0.25"/>')
         out.append(f'<polyline points="{path}" fill="none" stroke="{color}" stroke-width="3"/>')
         for x, y in pts:
@@ -146,11 +271,8 @@ def _lines(c: ChartData, area: bool) -> str:
                 f'<rect x="{x - 4:.1f}" y="{y - 4:.1f}" width="8" height="8" '
                 f'fill="{color}" stroke="#000" stroke-width="2"/>'
             )
-    for i, r in enumerate(rows):
-        out.append(
-            f'<text x="{_PAD_L + i * step:.1f}" y="{bottom + 20}" font-size="12" font-weight="600" '
-            f'text-anchor="middle" fill="#111">{escape(str(r.get(c.x_axis.key, "")))}</text>'
-        )
+    for i in ticks:
+        out.append(_x_label(pad_l + i * step, bottom, labels[i], rotate))
     return "".join(out)
 
 
