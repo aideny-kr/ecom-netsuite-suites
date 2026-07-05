@@ -21,6 +21,7 @@
 - **Zero regressions**: Run full test suite before committing. Fix CI as a follow-up after every deploy.
 - **Discuss before fixing**: Always discuss approach AND research existing code before making changes.
 - **Commit frequently**: One commit per logical change. Never amend. Push to BOTH repos (`origin` + `framework`).
+- **Workflow model-tiering**: when authoring a `Workflow` or spawning an `Agent`, tier by role (Fable for plan/architect/synthesize/judge · Sonnet for reason/verify/implement · Haiku for search/mechanical) and cap bursty stages with `makeGate(n)`. This is what keeps the T2 gate from rate-limiting (it fanned out ~16 concurrent Opus verifiers). Canonical policy + harness block to paste: `~/.claude/workflows/model-tiering.md`.
 
 ## UAT + Review — tier EVERY PR
 
