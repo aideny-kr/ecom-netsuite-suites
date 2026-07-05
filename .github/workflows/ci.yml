@@ -217,6 +217,23 @@ jobs:
         # TODO: Remove the `|| true` fallback and add a docker-compose stack-up step
         # once the e2e suite is ready to run against a real backend in CI.
 
+  workflow-tiering-tests:
+    name: Workflow Tiering Guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      # Guards the T2 review gate's model-tiering (.claude/workflows/*.js): every fan-out
+      # goes through tagent() (no un-tiered agent() burst) and the pasted TIER copies match
+      # the canonical policy. Node builtins only — no install step. See tiering.test.mjs.
+      - name: Run workflow tiering guard tests
+        run: node --test .claude/workflows/tiering.test.mjs
+
   required-checks:
     name: Required Checks
     runs-on: ubuntu-latest
@@ -227,6 +244,7 @@ jobs:
       - frontend-typecheck
       - frontend-build
       - secret-scan
+      - workflow-tiering-tests
       # e2e-smoke is intentionally excluded: it is conditional (PR-only) and
       # currently allowed to fail, so it must not gate branch protection.
     steps:
