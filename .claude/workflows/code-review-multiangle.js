@@ -9,6 +9,30 @@ export const meta = {
   ],
 }
 
+// ---- model-tiering harness — canonical: ~/.claude/workflows/model-tiering.md ----
+const TIER = {
+  plan:['fable','high'], architect:['fable','high'], design:['fable','high'], spec:['fable','high'],
+  synthesize:['fable','high'], judge:['fable','high'], decide:['fable','high'],
+  reason:['sonnet','medium'], verify:['sonnet','medium'], 'review-angle':['sonnet','medium'],
+  analyze:['sonnet','medium'], implement:['sonnet','medium'],
+  search:['haiku','low'], explore:['haiku','low'], read:['haiku','low'], map:['haiku','low'],
+  format:['haiku','low'], diff:['haiku','low'], extract:['haiku','low'], mechanical:['haiku','low'], rename:['haiku','low'],
+}
+const EXPENSIVE = new Set(['fable','opus'])
+function makeGate(limit){
+  let active=0; const q=[]
+  const pump=()=>{ while(active<limit && q.length){ active++
+    const {fn,res,rej}=q.shift(); Promise.resolve().then(fn).then(res,rej).finally(()=>{active--;pump()}) } }
+  return fn=>new Promise((res,rej)=>{ q.push({fn,res,rej}); pump() })
+}
+const _topGate = makeGate(3)                         // <=3 fable/opus agents at once
+function tagent(role, prompt, opts={}){
+  const [model,effort] = TIER[role] || ['sonnet','medium']
+  const run = () => agent(prompt, { label: role, effort, ...opts, model: (opts.model||model) })
+  return EXPENSIVE.has(opts.model||model) ? _topGate(run) : run()
+}
+// ---- end harness ----
+
 const REPO_INVARIANTS = `
 REPO-SPECIFIC INVARIANTS — flag any place the diff could violate one:
 - Multi-tenant: every table has tenant_id; RLS via SET LOCAL app.current_tenant_id (set_tenant_context). Flag any query/path that could mix or leak tenants, or a mutation without the tenant filter.
@@ -43,7 +67,7 @@ phase('Prep')
 let diff = providedDiff
 let baseUsed = baseArg
 if (!diff) {
-  const prep = await agent(
+  const prep = await tagent('reason',
     `Resolve the unified diff under review. cwd = repo root. Use Bash.
 Target: ${targetSpec ? `"${targetSpec}"` : 'the current branch HEAD'}.
 Base override: ${baseUsed ? `"${baseUsed}"` : 'none — resolve the correct base yourself'}.
@@ -160,14 +184,14 @@ ${diff}`
 // -------------------------------------------------------------------- Find
 phase('Find')
 const claudeFinders = ANGLES.map(a => () =>
-  agent(FINDER_CTX + '\n\nTASK: ' + a.prompt, { label: `find:${a.key}`, phase: 'Find', schema: CAND_SCHEMA })
+  tagent('review-angle', FINDER_CTX + '\n\nTASK: ' + a.prompt, { label: `find:${a.key}`, phase: 'Find', schema: CAND_SCHEMA })
     .then(r => ({ key: a.key, ok: !!r, candidates: (r && r.candidates) || [] }))
     .catch(() => ({ key: a.key, ok: false, candidates: [] }))
 )
 // Carry codex_used out on the RETURNED result (not a closure side-effect) so the top-level
 // metadata derives from data, never from parallel()'s execution order/retry semantics.
 const codexFinder = () =>
-  agent(codexAnglePrompt, { label: 'find:Codex(independent)', phase: 'Find', schema: CODEX_SCHEMA })
+  tagent('reason', codexAnglePrompt, { label: 'find:Codex(independent)', phase: 'Find', schema: CODEX_SCHEMA })
     .then(r => ({ key: 'Codex', ok: !!r, candidates: (r && r.candidates) || [], codex_used: !!(r && r.codex_used) }))
     .catch(() => ({ key: 'Codex', ok: false, candidates: [], codex_used: false }))
 const finderRaw = await parallel([...claudeFinders, codexFinder])
@@ -198,7 +222,8 @@ const VERIFY_SCHEMA = {
 }
 // Failed/skipped verify -> UNVERIFIED at MAJOR (needs human; never under-rank an unverifiable finding).
 const unverified = c => ({ ...c, verdict: 'UNVERIFIED', severity: 'major', reason: 'verifier agent failed/skipped — PRESERVED at major for human review (fail-closed)' })
-const verified = await parallel(deduped.map(c => () => {
+const verifyGate = makeGate(6)   // <=6 concurrent verifiers (was up to ~16 -> the rate-limit burst)
+const verified = await parallel(deduped.map(c => () => verifyGate(() => {
   const slice = fileSlice(diff, c.file)
   const ctx = `You are verifying ONE candidate from a code review. cwd = repo root. Re-read the cited file(s) yourself to confirm — do NOT trust the candidate. ${REPO_INVARIANTS}
 
@@ -209,9 +234,9 @@ Return CONFIRMED (constructible bug shown), PLAUSIBLE (realistic reachable state
 
 CANDIDATE:
 ${JSON.stringify(c, null, 2)}`
-  return agent(ctx, { label: `verify:${(c.file || '').split('/').pop()}:${c.line}`, phase: 'Verify', schema: VERIFY_SCHEMA })
+  return tagent('verify', ctx, { label: `verify:${(c.file || '').split('/').pop()}:${c.line}`, phase: 'Verify', schema: VERIFY_SCHEMA })
     .then(v => (v ? { ...c, ...v } : unverified(c))).catch(() => unverified(c))
-}))
+})))
 
 // -------------------------------------------------------------------- Synthesize
 const SEV = { blocker: 0, major: 1, minor: 2, nit: 3 }
