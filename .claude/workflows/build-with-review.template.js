@@ -9,9 +9,34 @@ export const meta = {
   ],
 }
 
+// ---- model-tiering harness — canonical: ~/.claude/workflows/model-tiering.md ----
+const TIER = {
+  plan:['fable','high'], architect:['fable','high'], design:['fable','high'], spec:['fable','high'],
+  synthesize:['fable','high'], judge:['fable','high'], decide:['fable','high'],
+  reason:['sonnet','medium'], verify:['sonnet','medium'], 'review-angle':['sonnet','medium'],
+  analyze:['sonnet','medium'], implement:['sonnet','medium'],
+  search:['haiku','low'], explore:['haiku','low'], read:['haiku','low'], map:['haiku','low'],
+  format:['haiku','low'], diff:['haiku','low'], extract:['haiku','low'], mechanical:['haiku','low'], rename:['haiku','low'],
+}
+const EXPENSIVE = new Set(['fable','opus'])
+function makeGate(limit){
+  let active=0; const q=[]
+  const pump=()=>{ while(active<limit && q.length){ active++
+    const {fn,res,rej}=q.shift(); Promise.resolve().then(fn).then(res,rej).finally(()=>{active--;pump()}) } }
+  return fn=>new Promise((res,rej)=>{ q.push({fn,res,rej}); pump() })
+}
+const _topGate = makeGate(3)
+function tagent(role, prompt, opts={}){
+  const [model,effort] = TIER[role] || ['sonnet','medium']
+  const run = () => agent(prompt, { label: role, effort, ...opts, model: (opts.model||model) })
+  return EXPENSIVE.has(opts.model||model) ? _topGate(run) : run()
+}
+// ---- end harness ----
+
 // ---------------------------------------------------------------- Implement
-// REPLACE THIS PHASE with your real implementation agents, e.g.:
-//   const built = await pipeline(tasks, t => agent(`implement ${t} (TDD: failing test FIRST)`, {...}))
+// REPLACE THIS PHASE with your real implementation agents, tiered via tagent(), e.g.:
+//   const built = await pipeline(tasks, t => tagent('implement', `implement ${t} (TDD: failing test FIRST)`, {...}))
+//   (use tagent('mechanical', …) for trivial edits, tagent('architect', …) for design steps.)
 // It is left empty in the template so the file is safe to run as a smoke of the Diff+Review wiring.
 phase('Implement')
 log('Implement: (template placeholder — replace with your real build agents)')
@@ -21,7 +46,7 @@ log('Implement: (template placeholder — replace with your real build agents)')
 // workflow()). So an agent computes the diff the build just produced. Tune the git command to
 // match how your Implement phase leaves changes (uncommitted working tree vs committed to a branch).
 phase('Diff')
-const diffRes = await agent(
+const diffRes = await tagent('diff',
   `cwd = repo root; use Bash. Return the unified diff representing the change just built:
 - If the build left UNCOMMITTED changes: \`git --no-pager diff HEAD\`.
 - If it COMMITTED to the current branch: \`git --no-pager diff "$(git merge-base origin/HEAD HEAD)"...HEAD\`.

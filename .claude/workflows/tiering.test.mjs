@@ -14,3 +14,10 @@ test('code-review-multiangle uses the tiering harness (no bare Opus fan-out)', (
   assert.match(s, /makeGate\(6\)/, 'verify burst not capped at 6')
   assert.doesNotMatch(s, /\bawait agent\(/, 'a bare `await agent(` remains — convert it to tagent')
 })
+
+test('build-with-review template uses the tiering harness', () => {
+  const s = read('./build-with-review.template.js')
+  assert.match(s, /const TIER = \{/, 'harness block missing')
+  assert.match(s, /tagent\('diff'/, 'compute-diff not tiered to diff')
+  assert.doesNotMatch(s, /\bawait agent\(/, 'a bare `await agent(` remains — convert it to tagent')
+})
