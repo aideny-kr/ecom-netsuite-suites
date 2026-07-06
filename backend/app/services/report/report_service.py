@@ -41,6 +41,11 @@ _MIN_AUTO_CHART_ROWS = 2
 _STATEMENT_TABLE_MAX = 8
 _STATEMENT_CALLOUT_MAX = 4
 _MIN_STATEMENT_LINES = 2
+# On a REAL NetSuite statement (section rows tagged via line_meta.is_section), the shallowest
+# section level with fewer than this many lines is enriched with the next level's subtotals —
+# so a P&L (only 3 net lines at the top level) shows Revenue/COGS/Gross Profit, while a cash
+# flow (7 top-level flows) stays at its top level and does not pull in sub-section noise.
+_STATEMENT_MIN_SECTIONS = 4
 # Time-series detection (Phase 4): a chart whose x column is a strictly ORDERED period
 # sequence renders as a LINE (a trend), not account-style bars. Matched on the VALUES'
 # shape only — never on column names (no schema assumptions). Conservative: any miss
@@ -255,84 +260,131 @@ def _curate_table_rows(rows: list, k: int) -> tuple[list, bool]:
     return rows[:k], True
 
 
+def _trim_statement_by_indent(picked: list) -> list:
+    """Legacy trim (synthetic/indented ``line_meta``): keep the shallowest indent levels that
+    fit ``_STATEMENT_TABLE_MAX`` and still contain the closing conclusion; else HEAD+TAIL.
+    Behavior unchanged — the section-aware path runs only on real NetSuite data.
+
+    ``picked`` is ``(level, index, row, amount)``. The lower bound matters: a lone shallow
+    grand-total is a "fitting" subset of ONE that would collapse the statement to a single
+    row (T2 gate r3). A subset also must CONTAIN the last qualifying line — the positional
+    conclusion (Net Change / Ending Cash) — or the marquee figures are cut (T2 gate r5)."""
+    if len(picked) <= _STATEMENT_TABLE_MAX:
+        return picked
+    for threshold in sorted({p[0] for p in picked}, reverse=True):
+        subset = [p for p in picked if p[0] <= threshold]
+        if _MIN_STATEMENT_LINES <= len(subset) <= _STATEMENT_TABLE_MAX and subset[-1] is picked[-1]:
+            return subset
+    head = _STATEMENT_TABLE_MAX - _STATEMENT_CALLOUT_MAX
+    return picked[:head] + picked[-_STATEMENT_CALLOUT_MAX:]
+
+
+def _select_statement_sections(picked: list) -> list:
+    """Select the coherent lines from a REAL NetSuite statement's section rows.
+
+    ``picked`` is ``(level, index, row, amount)`` in statement order. First DEDUPE, within
+    each level's own line-up, consecutive equal-amount rows — a section header and its own
+    total ("Operating Activities" == "Total Operating Activities") sit adjacent there and
+    carry the same amount, so they collapse to one line (structural; keep the LAST; no label
+    matching). Then take the SHALLOWEST level that reaches ``_STATEMENT_MIN_SECTIONS`` (a
+    cash flow keeps its top-level flows), falling through to the next level when the shallow
+    one is too thin (a P&L shows Revenue/COGS/Gross Profit, not just its 3 net lines). Over
+    ``_STATEMENT_TABLE_MAX`` lines, keep the shallowest, always preserving the closing
+    conclusion, in statement order."""
+    by_level: dict[int, list] = {}
+    for p in picked:
+        by_level.setdefault(p[0], []).append(p)
+    deduped: dict[int, list] = {}
+    for lvl, ps in by_level.items():
+        run: list = []
+        for p in ps:
+            if run and run[-1][3] == p[3]:  # same amount as the previous kept row -> keep LAST
+                run[-1] = p
+            else:
+                run.append(p)
+        deduped[lvl] = run
+    levels = sorted(deduped)
+    chosen: list = []
+    for lvl in levels:
+        chosen = sorted((p for low in levels if low <= lvl for p in deduped[low]), key=lambda p: p[1])
+        if len(chosen) >= _STATEMENT_MIN_SECTIONS or lvl == levels[-1]:
+            break
+    if len(chosen) > _STATEMENT_TABLE_MAX:
+        conclusion = chosen[-1]  # the positional close (Net Change / Ending Cash / Net Income)
+        head = sorted(chosen, key=lambda p: (p[0], p[1]))[:_STATEMENT_TABLE_MAX]
+        if conclusion[1] not in {p[1] for p in head}:
+            head = head[: _STATEMENT_TABLE_MAX - 1] + [conclusion]
+        chosen = sorted(head, key=lambda p: p[1])
+    return chosen
+
+
 def _curate_statement(cols: list, rows: list, line_meta, currency_columns: list) -> tuple[list, list] | None:
     """Curate a statement-shaped table to its NAMED section-summary lines.
 
     Returns ``(statement_rows, callout_sections)`` or None when the payload is not
     statement-shaped (missing/misaligned ``line_meta``, or fewer than
-    ``_MIN_STATEMENT_LINES`` qualifying lines) — the caller then falls back to the
-    general top-K floor.
+    ``_MIN_STATEMENT_LINES`` qualifying lines) — the caller then falls back to the general
+    top-K floor.
 
-    A line qualifies iff it is a summary (``line_meta.is_summary``) with a non-empty
-    label (col 0) AND a non-null amount — so detail GL lines, blank continuation rows,
-    and amount-less placeholder/header rows all drop out STRUCTURALLY (no label
-    matching). Over ``_STATEMENT_TABLE_MAX`` lines, the shallowest indent levels (the
-    most aggregate subtotals) are kept, statement order always preserved. Callouts are
-    the LAST ``_STATEMENT_CALLOUT_MAX`` curated lines — a statement builds to its
-    conclusions (Net Change, Ending Cash) — as metric_headline sections with the amount
-    accounting-formatted (exact Decimal semantics via the shared ``fmt_amount``).
+    REAL ns_runReport statements (CF/P&L/BS) tag section/total rows via ``line_meta``
+    ``is_section`` (a non-null NetSuite ``label``) and mark the unnamed grand-total
+    ``named=False``; the curated statement is then built from NAMED SECTION rows ONLY
+    (``_select_statement_sections``) — detail accounts and the junk "Financial Row" grand
+    total drop out STRUCTURALLY and the coherent section flows survive. The
+    synthetic/indented path (only ``is_summary`` in line_meta) is unchanged
+    (``_trim_statement_by_indent``). A line always needs a non-empty label (col 0) + a
+    non-null amount (a "N/A" string still qualifies — a named value, rendered verbatim).
+    Callouts are the LAST ``_STATEMENT_CALLOUT_MAX`` curated lines — a statement builds to
+    its conclusions — accounting-formatted via the shared ``fmt_amount``.
     """
     if not isinstance(line_meta, list) or len(line_meta) != len(rows) or len(cols) < 2:
         return None
     amount_idx = _amount_index(cols, currency_columns)
-    picked: list[tuple[int, list, object]] = []  # (level, row, qualified amount)
-    for row, meta in zip(rows, line_meta):
-        if not isinstance(meta, dict) or not meta.get("is_summary"):
+    # Real statements carry section markers; the synthetic/indented path has only is_summary.
+    # Detect which so the section-aware selection engages ONLY on real data.
+    uses_sections = any(isinstance(m, dict) and "is_section" in m for m in line_meta)
+    # Drop the unnamed grand-total (value=null "Financial Row") ONLY when the statement
+    # otherwise names its sections via ``value`` (real NetSuite). A report that names rows via
+    # ``label`` (value absent) has no such junk row, so keep every one of its sections.
+    drop_unnamed = uses_sections and any(
+        isinstance(m, dict) and m.get("is_section") and m.get("named") for m in line_meta
+    )
+    picked: list[tuple[int, int, list, object]] = []  # (level, index, row, qualified amount)
+    for i, (row, meta) in enumerate(zip(rows, line_meta)):
+        if not isinstance(meta, dict):
+            continue
+        if uses_sections:
+            if not meta.get("is_section"):  # a section/subtotal/total row (not a detail account)
+                continue
+            if drop_unnamed and not meta.get("named", True):  # the junk unnamed grand-total
+                continue
+        elif not meta.get("is_summary"):
             continue
         label = str(row[0]).strip() if row and row[0] is not None else ""
         amount = row[amount_idx] if amount_idx < len(row) else None
-        # A blank/whitespace string is not a figure — it would render an empty callout
-        # card. (A non-numeric string like "N/A" still qualifies: it's a named value and
-        # renders verbatim — never silently drop a figure.)
         if not label or amount is None or (isinstance(amount, str) and not amount.strip()):
             continue
         try:
-            # Parse like the producer (_line_hierarchy): int(float(...)) so a
-            # round-tripped "1.0" string level trims consistently.
+            # Parse like the producer (_line_hierarchy): int(float(...)) so a round-tripped
+            # "1.0" string level trims consistently.
             level = int(float(meta.get("level", 0)))
         except (TypeError, ValueError):
             level = 0
-        picked.append((level, row, amount))
+        picked.append((level, i, row, amount))
     if len(picked) < _MIN_STATEMENT_LINES:
         return None
-    if len(picked) > _STATEMENT_TABLE_MAX:
-        # Keep the shallowest levels that fit the cap — the largest threshold T whose
-        # subset size lands in [_MIN_STATEMENT_LINES, _STATEMENT_TABLE_MAX]. The lower
-        # bound matters: a lone shallow grand-total line is a "fitting" subset of ONE,
-        # which would collapse the whole curated statement to a single row and cut the
-        # marquee conclusions from both table and callouts (T2 gate r3: major).
-        # When no threshold yields a usable size (the shallowest level alone overflows,
-        # or is degenerately small), keep HEAD + TAIL over ALL qualifying lines in
-        # statement order — a statement builds to its conclusions, so the trailing
-        # lines (Net Change / Ending Cash) must survive the trim regardless of the
-        # indent-level distribution (reportData often carries no indent keys at all).
-        chosen = None
-        for threshold in sorted({lvl for lvl, _, _ in picked}, reverse=True):
-            subset = [p for p in picked if p[0] <= threshold]
-            # A subset qualifies only if it also CONTAINS the statement's LAST qualifying
-            # line — the positional conclusion (Net Change / Ending Cash). A shallow
-            # subset of mid-statement section lines that drops a deeper trailing
-            # conclusion would cut the marquee figures from both table and callouts
-            # (T2 gate r5: major).
-            if _MIN_STATEMENT_LINES <= len(subset) <= _STATEMENT_TABLE_MAX and subset[-1] is picked[-1]:
-                chosen = subset
-                break
-        if chosen is None:
-            head = _STATEMENT_TABLE_MAX - _STATEMENT_CALLOUT_MAX
-            chosen = picked[:head] + picked[-_STATEMENT_CALLOUT_MAX:]
-        picked = chosen
-    statement_rows = [row for _, row, _ in picked]
+    picked = _select_statement_sections(picked) if uses_sections else _trim_statement_by_indent(picked)
+    statement_rows = [row for _, _, row, _ in picked]
     callouts = [
         {
             "type": "metric_headline",
             "label": str(row[0]),
-            # the amount each line QUALIFIED on — no re-derivation to drift
-            "value": fmt_amount(amount),
+            "value": fmt_amount(amount),  # the amount the line QUALIFIED on — no re-derivation
             "unit": "",
             "period": "",
             "definition_version": None,
         }
-        for _, row, amount in picked[-_STATEMENT_CALLOUT_MAX:]
+        for _, _, row, amount in picked[-_STATEMENT_CALLOUT_MAX:]
     ]
     return statement_rows, callouts
 
@@ -346,7 +398,16 @@ def _driver_rows(rows: list, line_meta: list, cols: list, currency_columns: list
     amount_idx = _amount_index(cols, currency_columns)
     leaves: list[tuple[float, int, list]] = []
     for i, (row, meta) in enumerate(zip(rows, line_meta)):
-        if not isinstance(meta, dict) or meta.get("is_summary"):
+        if not isinstance(meta, dict):
+            continue
+        # A real leaf account (``is_leaf``: named, immediately followed by its detail marker)
+        # is the chartable driver — this excludes both section/subtotal rows AND account
+        # GROUPS (whose sub-accounts would double-count). On the synthetic/indented path
+        # (no ``is_leaf`` signal) fall back to "any non-summary named row" (pre-existing).
+        if "is_leaf" in meta:
+            if not meta.get("is_leaf"):
+                continue
+        elif meta.get("is_summary"):
             continue
         label = str(row[0]).strip() if row and row[0] is not None else ""
         amount = _coerce_number(row[amount_idx]) if amount_idx < len(row) else None
