@@ -235,6 +235,15 @@ def test_coincidental_equal_amount_sections_both_survive():
     assert "Operating" in labels and "Investing" in labels
 
 
+def test_fold_requires_word_boundary_not_raw_substring():
+    # "Non-Operating Income" nests "Operating Income" as a raw substring but they are DISTINCT
+    # sections — a coincidental amount tie must NOT fold them (word-boundary guard).
+    labels = _sel_labels(
+        [_p(0, 0, "Operating Income", 500), _p(0, 1, "Non-Operating Income", 500), _p(0, 2, "Net Income", 1000)]
+    )
+    assert "Operating Income" in labels and "Non-Operating Income" in labels
+
+
 def test_header_and_its_total_collapse_to_one():
     # A header and its own subtotal (label containment + equal amount) collapse to the subtotal.
     labels = _sel_labels(

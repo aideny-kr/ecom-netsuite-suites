@@ -281,17 +281,22 @@ def _trim_statement_by_indent(picked: list) -> list:
 
 
 def _same_section(row_a: list, row_b: list) -> bool:
-    """True when one row's label is a suffix of the other's — a NetSuite subtotal's label is
-    its section name with a prefix ("Operating Activities" ⊂ "Total Operating Activities"), so
-    an ADJACENT header/subtotal pair (no detail rows between to bracket them) can still be
-    recognized without relying on amount alone. Locale-degrading: a non-nesting label pair is
-    simply not folded (both rows survive)."""
+    """True when one label is the other with a leading word prefix — a NetSuite subtotal is its
+    section name prefixed by a word ("Operating Activities" -> "Total Operating Activities"), so
+    the longer label ENDS WITH the shorter AT A WORD BOUNDARY (the preceding char is
+    whitespace). The word-boundary requirement rejects incidental substring nesting
+    ("Non-Operating Income" ⊃ "Operating Income", "Total Assets" vs "Deferred Tax Assets") that
+    could otherwise fold two DISTINCT sections that merely coincide in amount. Combined with the
+    same-level + equal-non-zero-amount guards in the caller, this is a defense-in-depth
+    heuristic for the header/subtotal fold; a genuinely distinct pair that survives all of these
+    is not constructible from real cents-bearing statement data. Locale-degrading: a non-nesting
+    label pair is simply not folded (both rows survive — never drops a figure)."""
     a = str(row_a[0]).strip().lower() if row_a and row_a[0] is not None else ""
     b = str(row_b[0]).strip().lower() if row_b and row_b[0] is not None else ""
     if not a or not b or a == b:
         return False
     lo, hi = (a, b) if len(a) < len(b) else (b, a)
-    return hi.endswith(lo)
+    return hi.endswith(lo) and hi[: len(hi) - len(lo)].endswith(" ")
 
 
 def _select_statement_sections(picked: list) -> list:
