@@ -299,22 +299,24 @@ def _select_statement_sections(picked: list) -> list:
 
     ``picked`` is ``(level, index, row, amount)`` in statement order.
 
-    Step 1 — fold each section HEADER into its own subtotal. The two share a level and a
-    NON-ZERO amount, and the subtotal is the FIRST later section at level <= the header's, so
-    the section's deeper contents sit BETWEEN them (or, for a contents-less section, the two
-    labels nest — ``_same_section``). This is SAFE, unlike a blind equal-amount dedupe: two
-    DISTINCT sections never pair — a real statement places each section's own subtotal between
-    siblings — and a $0 (or non-numeric) tie is skipped, so two coincidentally-equal or two $0
-    lines both survive (never drop a real figure). No label MATCHING, so it is locale-safe.
+    Step 1 — fold each section HEADER into its own subtotal. The two share a level and the
+    SAME coerced NON-ZERO amount, the subtotal is the first later section at level <= the
+    header's (and is NOT the closing conclusion), and the two labels NEST (``_same_section``:
+    a subtotal's label ends with its section name, "Operating Activities" ⊂ "Total Operating
+    Activities"). The label-nest check is what makes this SAFE — two DISTINCT sections that
+    merely coincide in amount (a chance tie, two $0 lines) never merge, so no real figure is
+    dropped. A section NetSuite names differently from its total (a P&L "Ordinary
+    Income/Expense" / "Net Ordinary Income") is simply not folded; both coherent rows survive.
 
-    Step 2 — take the SHALLOWEST level that reaches ``_STATEMENT_MIN_SECTIONS`` (a cash flow
-    keeps its top-level flows), falling through to the next level when the shallow one is too
-    thin (a P&L then shows Revenue/COGS/Gross Profit, not just its net lines).
+    Step 2 — everything that fits is shown as-is. ONLY when the section set overflows
+    ``_STATEMENT_TABLE_MAX`` do we pick an altitude: the SHALLOWEST level reaching
+    ``_STATEMENT_MIN_SECTIONS`` (a cash flow keeps its top-level flows), falling through to the
+    next level when the shallow one is too thin.
 
-    Step 3 — the TRUE closing conclusion (``picked[-1]``, the last line in statement order)
-    ALWAYS survives, even if it sits deeper than the selected level (the T2-gate r5 invariant).
-    Over ``_STATEMENT_TABLE_MAX``, keep the shallowest lines + the conclusion (evict
-    deepest-then-latest — never a shallow section, never the close), in statement order."""
+    Step 3 — the TRUE closing conclusion (``picked[-1]``, last in statement order) ALWAYS
+    survives, even if it sits deeper than the selected level (the T2-gate r5 invariant). If
+    still over the cap, keep the shallowest lines + the conclusion (evict deepest-then-latest —
+    never a shallow section, never the close), in statement order."""
     conclusion = picked[-1]  # true statement close (highest index) — never dropped
     fold: set = set()
     for i, p in enumerate(picked):
@@ -324,23 +326,27 @@ def _select_statement_sections(picked: list) -> list:
         j = next((k for k in range(i + 1, len(picked)) if picked[k][0] <= p[0]), None)
         if (
             j is not None
+            and picked[j] is not conclusion
             and picked[j][0] == p[0]
-            and picked[j][3] == p[3]
-            and (j > i + 1 or _same_section(p[2], picked[j][2]))
+            and _coerce_number(picked[j][3]) == num
+            and _same_section(p[2], picked[j][2])
         ):
-            fold.add(i)  # header folds into its subtotal (the later of the pair is kept)
-    kept = [p for i, p in enumerate(picked) if i not in fold]
-    by_level: dict[int, list] = defaultdict(list)
-    for p in kept:
-        by_level[p[0]].append(p)
-    levels = sorted(by_level)
-    chosen: list = []
-    acc: list = []
-    for lvl in levels:
-        acc.extend(by_level[lvl])
-        if len(acc) >= _STATEMENT_MIN_SECTIONS or lvl == levels[-1]:
-            chosen = sorted(acc, key=lambda p: p[1])
-            break
+            fold.add(i)  # the header folds into its subtotal (the later of the pair is kept)
+    kept = [p for i, p in enumerate(picked) if i not in fold]  # already in statement order
+    if len(kept) <= _STATEMENT_TABLE_MAX:
+        chosen = kept  # it all fits — show every section, no altitude trimming
+    else:
+        by_level: dict[int, list] = defaultdict(list)
+        for p in kept:
+            by_level[p[0]].append(p)
+        levels = sorted(by_level)
+        chosen = kept
+        acc: list = []
+        for lvl in levels:
+            acc.extend(by_level[lvl])
+            if len(acc) >= _STATEMENT_MIN_SECTIONS or lvl == levels[-1]:
+                chosen = sorted(acc, key=lambda p: p[1])
+                break
     if conclusion[1] not in {p[1] for p in chosen}:  # the close may sit deeper than the level
         chosen = sorted(chosen + [conclusion], key=lambda p: p[1])
     if len(chosen) > _STATEMENT_TABLE_MAX:
@@ -406,6 +412,10 @@ def _curate_statement(cols: list, rows: list, line_meta, currency_columns: list)
     if len(picked) < _MIN_STATEMENT_LINES:
         return None
     picked = _select_statement_sections(picked) if uses_sections else _trim_statement_by_indent(picked)
+    if len(picked) < _MIN_STATEMENT_LINES:
+        # the header->subtotal fold can collapse a header+total-only statement to one row; fall
+        # back to the general top-K floor rather than emit a single-line "curated statement".
+        return None
     statement_rows = [row for _, _, row, _ in picked]
     callouts = [
         {

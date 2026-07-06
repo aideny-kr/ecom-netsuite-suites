@@ -277,17 +277,19 @@ def _line_hierarchy(entry: dict, value_source: str | None, next_entry: dict | No
         and _coerce_netsuite_bool(next_entry.get("isDetailLine")) is True
         and not (next_entry.get("value") or next_entry.get("label"))
     )
+    # a section/subtotal/total is a NON-detail row NetSuite tags with a label; a label-named
+    # DETAIL line (isDetailLine=true) is an account, not a section.
+    is_section = entry.get("label") is not None and not is_detail
     return {
         "is_summary": not is_detail,
         "level": level,
-        # a section/subtotal/total is a NON-detail row NetSuite tags with a label; a
-        # label-named DETAIL line (isDetailLine=true) is an account, not a section.
-        "is_section": entry.get("label") is not None and not is_detail,
+        "is_section": is_section,
         "named": named,  # has its OWN value name — false only for the unnamed grand-total
-        # a real chartable leaf: a named row that is either a detail line itself OR a named
-        # account immediately followed by its own (unnamed) detail marker (excludes sections
-        # + account groups, whose sub-accounts would double-count).
-        "is_leaf": has_name and (is_detail or next_own_marker),
+        # a real chartable leaf: a NAMED, NON-SECTION row (so every subtotal AND the unnamed
+        # grand-total are excluded — they carry a label and would otherwise pass has_name) that
+        # is either a detail line itself OR a named account immediately followed by its own
+        # unnamed detail marker (excludes account GROUPS, whose sub-accounts would double-count).
+        "is_leaf": (not is_section) and has_name and (is_detail or next_own_marker),
     }
 
 

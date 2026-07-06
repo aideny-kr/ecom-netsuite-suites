@@ -149,19 +149,62 @@ def test_cash_flow_driver_chart_is_leaf_accounts_not_sections():
         assert bad not in svg
 
 
-# --- Income Statement: falls through to the meaty level-1 sections ---
-def test_income_statement_curated_statement_includes_margin_lines():
+# --- Income Statement: coherent net structure (margins live in the driver chart) ---
+def test_income_statement_shows_coherent_net_structure():
     secs = _spec_of(_income_stmt_reportdata())["sections"]
     table = next(s for s in secs if s["type"] == "table")
     labels = _labels(table)
     assert table.get("curation") == "statement"
     assert "Financial Row" not in labels
     assert len(labels) <= 8
-    # a board-ready P&L shows the margin story, not just the net skeleton
-    assert "Income" in labels
-    assert "Gross Profit" in labels
+    # NetSuite names a P&L section total ("Net Ordinary Income") differently from its header
+    # ("Ordinary Income/Expense"), so the safe label-nest fold does NOT merge them and the
+    # coherent net structure survives (the margin/account detail is in the driver chart).
+    assert "Net Ordinary Income" in labels
     assert "Net Income" in labels
-    assert not any("40001" in x or "50000" in x for x in labels)  # accounts excluded
+    assert not any("40001" in x or "50000" in x for x in labels)  # detail accounts excluded
+
+
+def test_junk_grand_total_never_becomes_a_chart_leaf():
+    # Regression (T2 re-gate): the unnamed grand-total (label='Financial Row', value=None) is a
+    # SECTION, not an account — it must never be is_leaf even when followed by a detail marker.
+    from app.services.chat.tool_call_results import _extract_report_data_as_table
+
+    _c, _r, meta = _extract_report_data_as_table(
+        {
+            "0": {
+                "label": "Financial Row",
+                "value": None,
+                "parent": None,
+                "isDetailLine": False,
+                "summaryLineValues": [{"Amount": 30000}],
+            },  # fmt: skip
+            "1": {
+                "label": None,
+                "value": None,
+                "parent": "x",
+                "isDetailLine": True,
+                "detailLineValues": [{"Amount": 30000}],
+            },  # fmt: skip
+        }
+    )
+    assert meta[0]["is_section"] is True and meta[0]["is_leaf"] is False
+
+
+def test_header_plus_total_only_falls_to_floor_not_one_line():
+    # Regression (T2 re-gate): a statement that is only a section header + its own total folds
+    # to a single row; the curated-statement path must DECLINE (fall to the floor), never emit
+    # a one-line "curated statement".
+    rd = {
+        "0": _sec("Operating Activities", -1_600_000),
+        "1": _acct("11000 - Accounts Receivable", -1_600_000),
+        "2": _det(-1_600_000),
+        "3": _sec("Total Operating Activities", -1_600_000),
+    }
+    table = next(s for s in _spec_of(rd)["sections"] if s["type"] == "table")
+    # a 1-row "curated statement" is the collapse bug: either the floor kicked in (curation is
+    # no longer "statement") or the statement kept the minimum >= 2 rows.
+    assert not (table.get("curation") == "statement" and len(table["rows"]) < 2)
 
 
 # --- Safety of the section selector (regression for the T2-gate majors) ---
