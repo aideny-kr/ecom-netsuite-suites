@@ -74,7 +74,7 @@ def test_line_meta_aligned_to_rows_through_capped_table():
     columns, rows, line_meta, row_count, truncated = report_data_to_capped_table(entries)
     assert columns == ["account", "amount"]
     assert len(line_meta) == len(rows)  # parallel to rows
-    assert all(set(m) == {"is_summary", "level"} for m in line_meta)
+    assert all(set(m) == {"is_summary", "level", "is_section", "named", "is_leaf"} for m in line_meta)
 
 
 # --- carried on the PERSISTED payload (== the in-turn sidecar full_payload) -----------
@@ -154,3 +154,94 @@ def test_netsuite_bool_coercion_is_distinctly_named():
     assert not hasattr(m, "_coerce_bool")
     assert m._coerce_netsuite_bool("T") is True
     assert m._coerce_netsuite_bool("F") is False
+
+
+# --- Real-NetSuite statement signals (no indentLevel; hierarchy via label/value/parent) ---
+# Real ns_runReport statements (CF/P&L/BS) carry NO indentLevel keys, mark section/total rows
+# with a non-null ``label`` (the account name lives in ``value``), leave detail lines UNNAMED
+# (value=null,label=null,isDetailLine=true) right after their named account sibling, and nest
+# via ``parent`` (null=top). line_meta carries the derived signals so Phase-3 curation works.
+def _ns_section(value, amount, parent=None):
+    return {"label": "Financial Row", "value": value, "parent": parent, "isDetailLine": False,
+            "summaryLineValues": [{"Amount": amount}]}  # fmt: skip
+
+
+def _ns_account(value, amount, parent="finandim_srawfullname"):
+    return {"label": None, "value": value, "parent": parent, "isDetailLine": False,
+            "summaryLineValues": [{"Amount": amount}]}  # fmt: skip
+
+
+def _ns_detail(amount):
+    return {"label": None, "value": None, "parent": "finandim_srawvalidname", "isDetailLine": True,
+            "detailLineValues": [{"Amount": amount}]}  # fmt: skip
+
+
+def test_line_meta_is_section_from_label_presence():
+    # label!=null marks a section/total row (keyed off PRESENCE, not the string — locale-safe).
+    _c, _r, meta = _extract_report_data_as_table(
+        {"0": _ns_section("Operating Activities", -100), "1": _ns_account("12000 - Inventory", -50)}
+    )
+    assert [m["is_section"] for m in meta] == [True, False]
+
+
+def test_line_meta_named_from_value_presence_marks_junk_grand_total():
+    # The unnamed grand-total (value=null, label='Financial Row') is a SECTION but NOT named;
+    # curation drops named=False rows so the junk 'Financial Row' line never surfaces.
+    _c, rows, meta = _extract_report_data_as_table(
+        {
+            "0": {
+                "label": "Financial Row",
+                "value": None,
+                "parent": None,
+                "isDetailLine": False,
+                "summaryLineValues": [{"Amount": 30000}],
+            },  # fmt: skip
+            "1": _ns_section("Operating Activities", -100),
+        }
+    )
+    assert rows[0] == ["Financial Row", 30000]  # faithful table keeps the figure
+    assert meta[0]["is_section"] is True and meta[0]["named"] is False  # but flagged unnamed
+    assert meta[1]["named"] is True
+
+
+def test_line_meta_is_leaf_from_detail_pairing():
+    # A named isDetailLine=false row FOLLOWED BY its isDetailLine=true marker is a leaf account;
+    # a section (followed by another named row) and an account GROUP are NOT leaves.
+    _c, _r, meta = _extract_report_data_as_table(
+        {
+            "0": _ns_section("Operating Activities", -100),  # next is account -> not a leaf
+            "1": _ns_account("12000 - Inventory", -50),  # next is a detail marker -> LEAF
+            "2": _ns_detail(-50),  # the unnamed detail marker itself -> not a leaf
+            "3": _ns_section("Total Operating", -100),  # next is nothing -> not a leaf
+        }
+    )
+    assert [m["is_leaf"] for m in meta] == [False, True, False, False]
+
+
+def test_line_meta_level_from_parent_when_no_indent():
+    # Real statements carry NO indentLevel; derive level from parent (null=0, else=1).
+    _c, _r, meta = _extract_report_data_as_table(
+        {
+            "0": _ns_section("Operating Activities", -100, parent=None),
+            "1": _ns_section("Net Income", 50, parent="finandim_srawfullname"),
+            "2": _ns_account("12000 - Inventory", -50, parent="finandim_srawvalidname"),
+        }
+    )
+    assert [m["level"] for m in meta] == [0, 1, 1]
+
+
+def test_line_meta_indent_level_still_wins_over_parent():
+    # When indentLevel IS present it takes precedence over the parent-derived fallback.
+    _c, _r, meta = _extract_report_data_as_table(
+        {
+            "0": {
+                "label": "X",
+                "value": "X",
+                "parent": None,
+                "isDetailLine": False,
+                "indentLevel": 3,
+                "summaryLineValues": [{"Amount": 1}],
+            },  # fmt: skip
+        }
+    )
+    assert meta[0]["level"] == 3

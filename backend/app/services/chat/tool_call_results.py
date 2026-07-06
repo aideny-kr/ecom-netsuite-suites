@@ -223,7 +223,7 @@ def _coerce_netsuite_bool(value) -> bool | None:
     return None
 
 
-def _line_hierarchy(entry: dict, value_source: str | None) -> dict:
+def _line_hierarchy(entry: dict, value_source: str | None, next_entry: dict | None = None) -> dict:
     """Per-row statement-hierarchy metadata carried ALONGSIDE the flattened
     ``[account, amount]`` row (never as a column), so a later curation step
     (``report.compose`` Phase 3) can build a curated statement / key-figure callouts
@@ -234,15 +234,28 @@ def _line_hierarchy(entry: dict, value_source: str | None) -> dict:
     JSON false OR the string ``"F"``). When that key is absent, fall back to the SAME
     non-empty value list the amount was read from (``value_source``: ``"summary"`` vs
     ``"detail"``) — NOT mere key presence, which would mislabel a detail line that merely
-    carries an empty ``summaryLineValues`` key. ``level``: indent depth
-    (``indentLevel``/``indent``/``level``; via ``float`` so ``"2.0"`` parses), 0 when
-    unknown. All structural, keyed off reportData markers — no hardcoded account/label
-    names (no prompt pollution).
+    carries an empty ``summaryLineValues`` key.
+
+    ``level``: indent depth (``indentLevel``/``indent``/``level``; via ``float`` so ``"2.0"``
+    parses). REAL ns_runReport statements (CF/P&L/BS) carry NONE of those keys, so when all
+    are absent fall back to ``parent`` depth — a top-level section/conclusion has
+    ``parent=null``; anything nested carries a parent grouping alias (→ level 1). Keeps the
+    curation's level-trim meaningful on real data instead of collapsing every line to 0.
+
+    ``is_section`` (real-statement signal): NetSuite marks a section/subtotal/total row with a
+    NON-NULL ``label`` (the account name lives in ``value``); detail + individual-account rows
+    carry ``label=null``. Keyed off PRESENCE, not the string, so it is locale-independent.
+    ``named``: the row has its own ``value`` name — false ONLY for the unnamed grand-total
+    whose ``value`` is null and whose sole name is the placeholder label ("Financial Row"),
+    letting curation drop that junk line. ``is_leaf``: a NAMED non-detail row IMMEDIATELY
+    FOLLOWED BY its ``isDetailLine=true`` marker is a real detail account (a chartable leaf);
+    a section (followed by another named row) and an account GROUP (followed by its
+    sub-accounts) are not. All structural — no hardcoded account/label names.
     """
     is_detail = _coerce_netsuite_bool(entry.get("isDetailLine"))
     if is_detail is None:
         is_detail = value_source == "detail"  # matches amount extraction's non-emptiness
-    level = 0
+    level: int | None = None
     for key in ("indentLevel", "indent", "level"):
         # Fall THROUGH a present-but-unparseable key ({"indentLevel": null, "level": 2}
         # must yield 2, not stop at the null) — take the first key that parses.
@@ -252,7 +265,32 @@ def _line_hierarchy(entry: dict, value_source: str | None) -> dict:
                 break
             except (TypeError, ValueError):
                 continue
-    return {"is_summary": not is_detail, "level": level}
+    if level is None:  # no indent key (real NetSuite statement) — derive from parent depth
+        level = 0 if entry.get("parent") is None else 1
+    named = entry.get("value") is not None
+    has_name = bool(entry.get("value") or entry.get("label"))
+    # A real account's detail marker is an UNNAMED isDetailLine=true row right after it; a
+    # NAMED isDetailLine=true row is itself a detail account, and a NAMED non-detail row after
+    # a section is the next section — neither makes the current row a leaf.
+    next_own_marker = (
+        isinstance(next_entry, dict)
+        and _coerce_netsuite_bool(next_entry.get("isDetailLine")) is True
+        and not (next_entry.get("value") or next_entry.get("label"))
+    )
+    # a section/subtotal/total is a NON-detail row NetSuite tags with a label; a label-named
+    # DETAIL line (isDetailLine=true) is an account, not a section.
+    is_section = entry.get("label") is not None and not is_detail
+    return {
+        "is_summary": not is_detail,
+        "level": level,
+        "is_section": is_section,
+        "named": named,  # has its OWN value name — false only for the unnamed grand-total
+        # a real chartable leaf: a NAMED, NON-SECTION row (so every subtotal AND the unnamed
+        # grand-total are excluded — they carry a label and would otherwise pass has_name) that
+        # is either a detail line itself OR a named account immediately followed by its own
+        # unnamed detail marker (excludes account GROUPS, whose sub-accounts would double-count).
+        "is_leaf": (not is_section) and has_name and (is_detail or next_own_marker),
+    }
 
 
 def _extract_report_data_as_table(report_data: dict) -> tuple[list[str], list[list], list[dict]] | None:
@@ -277,7 +315,8 @@ def _extract_report_data_as_table(report_data: dict) -> tuple[list[str], list[li
     rows: list[list] = []
     line_meta: list[dict] = []
 
-    for _key, entry in sorted(report_data.items(), key=lambda x: int(x[0]) if x[0].isdigit() else 0):
+    sorted_entries = sorted(report_data.items(), key=lambda x: int(x[0]) if x[0].isdigit() else 0)
+    for i, (_key, entry) in enumerate(sorted_entries):
         if not isinstance(entry, dict):
             continue
         label = entry.get("value") or entry.get("label") or ""
@@ -313,8 +352,11 @@ def _extract_report_data_as_table(report_data: dict) -> tuple[list[str], list[li
         # No hardcoded label filtering either — a tenant may name a line anything.
         if not label_str and amount is None:
             continue
+        # is_leaf keys off the NEXT entry (a named account is immediately followed by its
+        # isDetailLine=true detail marker), so look ahead in the original entry order.
+        next_entry = sorted_entries[i + 1][1] if i + 1 < len(sorted_entries) else None
         rows.append([label_str, amount])
-        line_meta.append(_line_hierarchy(entry, value_source))  # parallel to rows (same keep/skip)
+        line_meta.append(_line_hierarchy(entry, value_source, next_entry))  # parallel to rows
 
     return (columns, rows, line_meta) if rows else None
 
