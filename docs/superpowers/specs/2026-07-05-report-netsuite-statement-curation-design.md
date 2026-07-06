@@ -32,7 +32,7 @@ Verified on **three** consolidated FY2025 statements — Cash Flow (`-203`), Inc
 All changes are **backward-compatible**: new behavior activates only when `indentLevel` is absent (real NetSuite). Synthetic tests inject `line_meta={is_summary,level}` directly and stay unaffected.
 
 ### Fix A — flatten carries real hierarchy (`tool_call_results.py`: `_line_hierarchy`, `_extract_report_data_as_table`)
-- `level`: keep the existing `indentLevel/indent/level` parse; **when all absent**, derive from `parent` (null→0, `finandim_srawfullname`→1, `finandim_srawvalidname`→2, other non-null→1).
+- `level`: keep the existing `indentLevel/indent/level` parse; **when all absent**, derive from `parent` — **`null`→0, any non-null (nested) parent→1** (binary). A finer per-alias depth (`fullname`=1/`validname`=2) is deliberately *not* used: curation only needs top-level-vs-nested — leaf accounts are excluded by `is_section` and the driver chart keys off `is_leaf`, never `level` — so the extra depth would be dead precision.
 - `is_section` (new `line_meta` field): `label is not None`.
 - `is_leaf` (new `line_meta` field): a named `isDetailLine=false` row whose next entry (sorted) is an `isDetailLine=true` marker. Requires one-row lookahead in the flatten.
 - The unnamed `isDetailLine=true` marker rows stay in the faithful table (label `""` ⇒ already inert to curation and drivers) — the "never drop a figure" invariant is preserved.

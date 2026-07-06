@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import re
+from collections import defaultdict
 from typing import Callable
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -279,42 +280,73 @@ def _trim_statement_by_indent(picked: list) -> list:
     return picked[:head] + picked[-_STATEMENT_CALLOUT_MAX:]
 
 
+def _same_section(row_a: list, row_b: list) -> bool:
+    """True when one row's label is a suffix of the other's — a NetSuite subtotal's label is
+    its section name with a prefix ("Operating Activities" ⊂ "Total Operating Activities"), so
+    an ADJACENT header/subtotal pair (no detail rows between to bracket them) can still be
+    recognized without relying on amount alone. Locale-degrading: a non-nesting label pair is
+    simply not folded (both rows survive)."""
+    a = str(row_a[0]).strip().lower() if row_a and row_a[0] is not None else ""
+    b = str(row_b[0]).strip().lower() if row_b and row_b[0] is not None else ""
+    if not a or not b or a == b:
+        return False
+    lo, hi = (a, b) if len(a) < len(b) else (b, a)
+    return hi.endswith(lo)
+
+
 def _select_statement_sections(picked: list) -> list:
     """Select the coherent lines from a REAL NetSuite statement's section rows.
 
-    ``picked`` is ``(level, index, row, amount)`` in statement order. First DEDUPE, within
-    each level's own line-up, consecutive equal-amount rows — a section header and its own
-    total ("Operating Activities" == "Total Operating Activities") sit adjacent there and
-    carry the same amount, so they collapse to one line (structural; keep the LAST; no label
-    matching). Then take the SHALLOWEST level that reaches ``_STATEMENT_MIN_SECTIONS`` (a
-    cash flow keeps its top-level flows), falling through to the next level when the shallow
-    one is too thin (a P&L shows Revenue/COGS/Gross Profit, not just its 3 net lines). Over
-    ``_STATEMENT_TABLE_MAX`` lines, keep the shallowest, always preserving the closing
-    conclusion, in statement order."""
-    by_level: dict[int, list] = {}
-    for p in picked:
-        by_level.setdefault(p[0], []).append(p)
-    deduped: dict[int, list] = {}
-    for lvl, ps in by_level.items():
-        run: list = []
-        for p in ps:
-            if run and run[-1][3] == p[3]:  # same amount as the previous kept row -> keep LAST
-                run[-1] = p
-            else:
-                run.append(p)
-        deduped[lvl] = run
-    levels = sorted(deduped)
+    ``picked`` is ``(level, index, row, amount)`` in statement order.
+
+    Step 1 — fold each section HEADER into its own subtotal. The two share a level and a
+    NON-ZERO amount, and the subtotal is the FIRST later section at level <= the header's, so
+    the section's deeper contents sit BETWEEN them (or, for a contents-less section, the two
+    labels nest — ``_same_section``). This is SAFE, unlike a blind equal-amount dedupe: two
+    DISTINCT sections never pair — a real statement places each section's own subtotal between
+    siblings — and a $0 (or non-numeric) tie is skipped, so two coincidentally-equal or two $0
+    lines both survive (never drop a real figure). No label MATCHING, so it is locale-safe.
+
+    Step 2 — take the SHALLOWEST level that reaches ``_STATEMENT_MIN_SECTIONS`` (a cash flow
+    keeps its top-level flows), falling through to the next level when the shallow one is too
+    thin (a P&L then shows Revenue/COGS/Gross Profit, not just its net lines).
+
+    Step 3 — the TRUE closing conclusion (``picked[-1]``, the last line in statement order)
+    ALWAYS survives, even if it sits deeper than the selected level (the T2-gate r5 invariant).
+    Over ``_STATEMENT_TABLE_MAX``, keep the shallowest lines + the conclusion (evict
+    deepest-then-latest — never a shallow section, never the close), in statement order."""
+    conclusion = picked[-1]  # true statement close (highest index) — never dropped
+    fold: set = set()
+    for i, p in enumerate(picked):
+        num = _coerce_number(p[3])
+        if p is conclusion or num is None or num == 0:
+            continue
+        j = next((k for k in range(i + 1, len(picked)) if picked[k][0] <= p[0]), None)
+        if (
+            j is not None
+            and picked[j][0] == p[0]
+            and picked[j][3] == p[3]
+            and (j > i + 1 or _same_section(p[2], picked[j][2]))
+        ):
+            fold.add(i)  # header folds into its subtotal (the later of the pair is kept)
+    kept = [p for i, p in enumerate(picked) if i not in fold]
+    by_level: dict[int, list] = defaultdict(list)
+    for p in kept:
+        by_level[p[0]].append(p)
+    levels = sorted(by_level)
     chosen: list = []
+    acc: list = []
     for lvl in levels:
-        chosen = sorted((p for low in levels if low <= lvl for p in deduped[low]), key=lambda p: p[1])
-        if len(chosen) >= _STATEMENT_MIN_SECTIONS or lvl == levels[-1]:
+        acc.extend(by_level[lvl])
+        if len(acc) >= _STATEMENT_MIN_SECTIONS or lvl == levels[-1]:
+            chosen = sorted(acc, key=lambda p: p[1])
             break
+    if conclusion[1] not in {p[1] for p in chosen}:  # the close may sit deeper than the level
+        chosen = sorted(chosen + [conclusion], key=lambda p: p[1])
     if len(chosen) > _STATEMENT_TABLE_MAX:
-        conclusion = chosen[-1]  # the positional close (Net Change / Ending Cash / Net Income)
-        head = sorted(chosen, key=lambda p: (p[0], p[1]))[:_STATEMENT_TABLE_MAX]
-        if conclusion[1] not in {p[1] for p in head}:
-            head = head[: _STATEMENT_TABLE_MAX - 1] + [conclusion]
-        chosen = sorted(head, key=lambda p: p[1])
+        body = [p for p in chosen if p[1] != conclusion[1]]
+        body = sorted(body, key=lambda p: (p[0], p[1]))[: _STATEMENT_TABLE_MAX - 1]
+        chosen = sorted(body + [conclusion], key=lambda p: p[1])
     return chosen
 
 

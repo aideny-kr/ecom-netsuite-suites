@@ -87,8 +87,11 @@ def _income_stmt_reportdata() -> dict:
         "11": _det(-9_000_000),
         "12": _sec("Net Ordinary Income", 990_000),
         "13": _sec("Other Income and Expenses", 612_000),
-        "14": _sec("Net Other Income", 612_000),
-        "15": _sec("Net Income", 1_600_000),
+        "14": _sec("Other Expense", 612_000, parent="finandim_srawfullname"),
+        "15": _acct("90003 - Exchange Gain/Loss", 612_000),
+        "16": _det(612_000),
+        "17": _sec("Net Other Income", 612_000),
+        "18": _sec("Net Income", 1_600_000),
     }
 
 
@@ -159,3 +162,62 @@ def test_income_statement_curated_statement_includes_margin_lines():
     assert "Gross Profit" in labels
     assert "Net Income" in labels
     assert not any("40001" in x or "50000" in x for x in labels)  # accounts excluded
+
+
+# --- Safety of the section selector (regression for the T2-gate majors) ---
+from app.services.report.report_service import _select_statement_sections  # noqa: E402
+
+
+def _p(level, index, label, amount):
+    return (level, index, [label, amount], amount)
+
+
+def _sel_labels(picked):
+    return [p[2][0] for p in _select_statement_sections(picked)]
+
+
+def test_distinct_zero_sections_both_survive():
+    # Two DISTINCT $0 sections must NOT be merged by the dedupe — never drop a figure
+    # (the exact "two $0 balance-sheet lines" hazard the flatten docstring warns about).
+    labels = _sel_labels(
+        [_p(0, 0, "Unbilled Receivable", 0), _p(0, 1, "Other Receivable", 0), _p(0, 2, "Net Income", 500)]
+    )
+    assert "Unbilled Receivable" in labels and "Other Receivable" in labels
+    assert "Net Income" in labels
+
+
+def test_coincidental_equal_amount_sections_both_survive():
+    # Two unrelated sections that merely tie in amount (no label containment) must both survive.
+    labels = _sel_labels([_p(0, 0, "Operating", 1000), _p(0, 1, "Investing", 1000), _p(0, 2, "Net Change", -50)])
+    assert "Operating" in labels and "Investing" in labels
+
+
+def test_header_and_its_total_collapse_to_one():
+    # A header and its own subtotal (label containment + equal amount) collapse to the subtotal.
+    labels = _sel_labels(
+        [
+            _p(0, 0, "Operating Activities", -1600),
+            _p(0, 1, "Total Operating Activities", -1600),
+            _p(0, 2, "Cash at End", 17000),
+        ]
+    )
+    assert labels.count("Operating Activities") == 0  # the header folded into its total
+    assert "Total Operating Activities" in labels and "Cash at End" in labels
+
+
+def test_true_conclusion_at_deeper_level_always_survives():
+    # Selection stops at level 0 (reaches the richness floor) but the true close is level 1 —
+    # it must still appear (the T2 gate r5 invariant the old trim guaranteed).
+    labels = _sel_labels(
+        [_p(0, 0, "A", 1), _p(0, 1, "B", 2), _p(0, 2, "C", 3), _p(0, 3, "D", 4), _p(1, 4, "Net Income", 5)]
+    )
+    assert "Net Income" in labels
+
+
+def test_over_max_keeps_shallowest_and_conclusion():
+    picked = [_p(0, i, f"S{i}", i + 1) for i in range(9)] + [_p(0, 9, "Net Change", 100)]
+    out = _select_statement_sections(picked)
+    labels = [p[2][0] for p in out]
+    assert len(out) <= 8
+    assert "Net Change" in labels  # the conclusion is never evicted
+    assert "S0" in labels  # shallowest/earliest kept, not head+tail-dropped
