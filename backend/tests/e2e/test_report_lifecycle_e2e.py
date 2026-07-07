@@ -509,3 +509,138 @@ async def test_view_cross_tenant_is_404(db, client):
             "migration catalog test + the live smoke are the authoritative policy gates"
         )
     assert rows == [], "FORCE RLS must hide tenant A's report from tenant B (-> endpoint 404)"
+
+
+# ---------------------------------------------------------------------------
+# Slice B — the full live-dashboard lifecycle: REAL compose captures the recipe
+#   (Slice A, sidecar meta) → REAL HTTP refresh replays it (Slice B) → version
+#   chain 1→2→3 with immutable history, the parent-mirror invariant, the audit
+#   trail, and the debounce. Only the outbound tool executor is stubbed.
+# ---------------------------------------------------------------------------
+
+
+async def test_compose_capture_refresh_lifecycle(db, client, monkeypatch):
+    import json as _json
+    from datetime import datetime, timedelta, timezone
+    from unittest.mock import patch
+
+    from app.mcp.tools import report_export
+    from app.models.report_version import ReportVersion
+    from app.services.report.refresh_service import REFRESH_MIN_INTERVAL_SECONDS
+
+    tenant = await create_test_tenant(db, name="Report Corp Live")
+    user, _ = await create_test_user(db, tenant)
+    await set_tenant_context(db, str(tenant.id))
+
+    session = ChatSession(tenant_id=tenant.id, user_id=user.id, title="Live dashboard")
+    db.add(session)
+    await db.flush()
+    conversation_id = str(session.id)
+
+    def _suiteql_result(marker: str) -> dict:
+        return {
+            "success": True,
+            "columns": ["account", "amount"],
+            "rows": [[marker, 1000]],
+            "row_count": 1,
+            "query": "SELECT account, amount FROM balances",
+        }
+
+    store: dict = {}
+
+    class FakeRedis:
+        def hset(self, key, field, value):
+            store.setdefault(key, {})[field] = value
+
+        def hget(self, key, field):
+            return store.get(key, {}).get(field)
+
+        def hgetall(self, key):
+            return store.get(key, {})
+
+        def hdel(self, key, field):
+            store.get(key, {}).pop(field, None)
+
+        def expire(self, key, ttl):
+            pass
+
+    with patch("app.services.chat.result_cache._get_redis", return_value=FakeRedis()):
+        from app.services.chat.result_cache import cache_full_payload
+        from app.services.chat.tool_call_results import extract_result_payload
+
+        # The orchestrator's sidecar write, meta-bearing (Slice A): payload + executed tool/params.
+        params = {"query": "SELECT account, amount FROM balances"}
+        payload = extract_result_payload("netsuite_suiteql", params, _json.dumps(_suiteql_result("COMPOSE-V1")))
+        assert payload is not None
+        cache_full_payload(conversation_id, "r1", payload, tool_name="netsuite_suiteql", params=params)
+
+        # REAL compose — recipe captured server-side from the executed call.
+        result = await report_export.execute(
+            {
+                "title": "Live Cash",
+                "sections": [
+                    {"type": "heading", "level": 1, "text": "Live Cash"},
+                    {"type": "table", "result_id": "r1"},
+                ],
+            },
+            context={"db": db, "tenant_id": tenant.id, "conversation_id": conversation_id, "actor_id": user.id},
+        )
+    report_id = result["report_id"]
+    report = (await db.execute(select(Report).where(Report.id == uuid.UUID(report_id)))).scalar_one()
+    assert report.recipe_json is not None, "Slice A capture must feed Slice B replay"
+    assert report.recipe_json["sources"]["r1"]["tool"] == "netsuite_suiteql"
+    assert "COMPOSE-V1" in report.rendered_html
+
+    # Stub ONLY the outbound executor for the replay; fresh numbers each refresh.
+    fresh = {"marker": "REFRESH-V2"}
+
+    async def fake_execute(tool_name, tool_input, tenant_id, actor_id, correlation_id, db, **kw):
+        assert tool_name == "netsuite_suiteql" and tool_input == params  # stored params replayed
+        return _json.dumps(_suiteql_result(fresh["marker"]))
+
+    monkeypatch.setattr("app.services.chat.tools.execute_tool_call", fake_execute)
+    headers = make_auth_headers(user)
+
+    # Refresh #1 over REAL HTTP → v2 at the same URL.
+    res = await client.post(f"{API}/{report_id}/refresh", headers=headers)
+    assert res.status_code == 200, res.text
+    assert res.json()["version"] == 2
+    view = await client.get(f"{API}/{report_id}/view", headers=headers)
+    assert "REFRESH-V2" in view.text and "COMPOSE-V1" not in view.text
+    assert 'class="stamp"' in view.text
+
+    # Debounced within the window.
+    assert (await client.post(f"{API}/{report_id}/refresh", headers=headers)).status_code == 429
+
+    # Step past the window; refresh #2 → v3.
+    report.last_refreshed_at = datetime.now(timezone.utc) - timedelta(seconds=REFRESH_MIN_INTERVAL_SECONDS + 1)
+    await db.flush()
+    fresh["marker"] = "REFRESH-V3"
+    res = await client.post(f"{API}/{report_id}/refresh", headers=headers)
+    assert res.status_code == 200 and res.json()["version"] == 3
+
+    # Version chain: immutable history + the parent-mirror invariant (risk §8.6 pin).
+    versions = (await db.execute(select(ReportVersion).where(ReportVersion.report_id == report.id))).scalars().all()
+    by_v = {v.version: v for v in versions}
+    assert set(by_v) == {1, 2, 3}
+    assert "COMPOSE-V1" in by_v[1].rendered_html  # v1 = the original compose, snapshotted honestly
+    assert "REFRESH-V2" in by_v[2].rendered_html
+    await db.refresh(report)
+    assert report.version == max(by_v), "parent must mirror the latest version"
+    assert "REFRESH-V3" in report.rendered_html
+
+    # HTTP version picker + historical view.
+    listed = (await client.get(f"{API}/{report_id}/versions", headers=headers)).json()
+    assert [v["version"] for v in listed] == [3, 2, 1]
+    v1 = await client.get(f"{API}/{report_id}/versions/1/view", headers=headers)
+    assert "COMPOSE-V1" in v1.text
+
+    # Audit trail: one compose + two refreshes on the stable id.
+    refresh_audits = (
+        await db.execute(
+            select(func.count())
+            .select_from(AuditEvent)
+            .where(AuditEvent.action == "report.refresh", AuditEvent.resource_id == report_id)
+        )
+    ).scalar_one()
+    assert refresh_audits == 2
