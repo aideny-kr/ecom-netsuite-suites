@@ -450,6 +450,92 @@ def test_interceptor_callback_receives_tool_and_params():
     assert captured["full_payload"] is not None
 
 
+# --- Slice A: the cross-turn meta walker mirrors the payload resolver EXACTLY ---
+# collect_tool_meta_from_messages recovers {tool, params} per rid from persisted
+# tool_calls[] — same population criterion + same counter as
+# resolve_payload_from_messages, so meta availability tracks payload availability
+# (the anti-drift lock is asserting both walks agree on every rid).
+
+
+def test_meta_map_positional_ids_match_payload_resolver():
+    from app.services.chat.tool_call_results import collect_tool_meta_from_messages
+
+    messages = [
+        _msg(
+            [
+                {
+                    "tool": "netsuite_suiteql",
+                    "params": {"query": "SELECT a"},
+                    "result_payload": {"rows": [["t1a"]], "row_count": 1},
+                },
+                {"tool": "no_payload_tool", "params": {"x": 1}},  # skipped by BOTH walks
+                {
+                    "tool": "ext__0f3c9a2e00000000000000000000beef__ns_runReport",
+                    "params": {"reportId": 7},
+                    "result_payload": {"rows": [["t1b"]], "row_count": 1},
+                },
+            ]
+        ),
+        _msg(
+            [
+                {
+                    "tool": "metric_compute",
+                    "params": {"metric_id": "m"},
+                    "result_payload": {"rows": [["t2a"]], "row_count": 1},
+                }
+            ]
+        ),
+    ]
+    meta = collect_tool_meta_from_messages(messages)
+    assert set(meta) == {"r1", "r2", "r3"}
+    # every rid's meta corresponds to the SAME entry the payload resolver returns
+    assert meta["r1"]["tool"] == "netsuite_suiteql"
+    assert resolve_payload_from_messages(messages, "r1")["rows"] == [["t1a"]]
+    assert meta["r2"]["tool"].startswith("ext__")
+    assert resolve_payload_from_messages(messages, "r2")["rows"] == [["t1b"]]
+    assert meta["r3"]["params"] == {"metric_id": "m"}
+    assert resolve_payload_from_messages(messages, "r3")["rows"] == [["t2a"]]
+
+
+def test_meta_map_explicit_result_id_wins_like_the_resolver():
+    """No production writer sets an explicit result_id key today, but the resolver
+    supports it — the meta walker must register the explicit key too (in ADDITION to
+    the positional slot the entry still consumes)."""
+    from app.services.chat.tool_call_results import collect_tool_meta_from_messages
+
+    messages = [
+        _msg([{"tool": "t_expl", "params": {}, "result_id": "rX", "result_payload": {"rows": [["e"]], "row_count": 1}}])
+    ]
+    meta = collect_tool_meta_from_messages(messages)
+    assert meta["rX"]["tool"] == "t_expl"
+    assert resolve_payload_from_messages(messages, "rX")["rows"] == [["e"]]
+    assert meta["r1"]["tool"] == "t_expl"  # the resolver's positional fallback reaches it too
+
+
+def test_meta_map_skips_metaless_entries_without_shifting_numbering():
+    """A payload-bearing call missing tool/params still CONSUMES its positional slot
+    (the counter must stay aligned with the resolver) but yields no meta — the recipe
+    builder then fails closed for that rid."""
+    from app.services.chat.tool_call_results import collect_tool_meta_from_messages
+
+    messages = [
+        _msg(
+            [
+                {"result_payload": {"rows": [["x"]], "row_count": 1}},  # no tool/params
+                {
+                    "tool": "netsuite_suiteql",
+                    "params": {"query": "q"},
+                    "result_payload": {"rows": [["y"]], "row_count": 1},
+                },
+            ]
+        )
+    ]
+    meta = collect_tool_meta_from_messages(messages)
+    assert "r1" not in meta  # meta unrecoverable
+    assert meta["r2"]["tool"] == "netsuite_suiteql"  # numbering NOT shifted
+    assert resolve_payload_from_messages(messages, "r2")["rows"] == [["y"]]
+
+
 # --- Gate D (finding #18): defense-in-depth tenant filter on the resolver query ---
 
 
