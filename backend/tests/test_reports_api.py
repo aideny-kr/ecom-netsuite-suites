@@ -129,3 +129,32 @@ async def test_view_cross_tenant_is_rls_invisible(db):
             "test + the live smoke are the authoritative policy gates"
         )
     assert rows == [], "FORCE RLS must hide tenant A's report from tenant B's context (→ endpoint 404)"
+
+
+async def test_has_recipe_flag_reflects_recipe_presence(client, db):
+    """Slice A: the API exposes ONLY a has_recipe boolean (never the raw recipe —
+    params embed full SQL); the FE shows Refresh iff a recipe exists (Slice B)."""
+    ta = await create_test_tenant(db, name="A3")
+    ua, _ = await create_test_user(db, ta)
+    await set_tenant_context(db, str(ta.id))
+    plain = Report(
+        tenant_id=ta.id, title="Snapshot", spec_json={"sections": []}, rendered_html="<html></html>", created_by=ua.id
+    )
+    with_recipe = Report(
+        tenant_id=ta.id,
+        title="Live",
+        spec_json={"sections": []},
+        rendered_html="<html></html>",
+        created_by=ua.id,
+        recipe_json={"schema_version": 1, "captured_at": "t", "sections": [], "sources": {}},
+    )
+    db.add(plain)
+    db.add(with_recipe)
+    await db.flush()
+
+    headers = make_auth_headers(ua)
+    body_plain = (await client.get(f"/api/v1/reports/{plain.id}", headers=headers)).json()
+    body_live = (await client.get(f"/api/v1/reports/{with_recipe.id}", headers=headers)).json()
+    assert body_plain["has_recipe"] is False
+    assert body_live["has_recipe"] is True
+    assert "recipe_json" not in body_plain and "recipe_json" not in body_live  # never the raw recipe

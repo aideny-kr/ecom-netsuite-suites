@@ -130,4 +130,7 @@ class ReportResponse(BaseModel):
     status: str
     version: int
     created_at: datetime
+    # Slice A: whether a refresh recipe was captured (the FE shows Refresh iff true —
+    # Slice B). ONLY the boolean is exposed, never the raw recipe (params embed SQL).
+    has_recipe: bool = False
     model_config = {"from_attributes": True}

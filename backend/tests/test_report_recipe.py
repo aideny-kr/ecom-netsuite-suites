@@ -179,3 +179,117 @@ def test_recipe_never_raises_even_on_hostile_input():
 
     with patch("app.services.chat.result_cache.get_full_payload_entry", side_effect=RuntimeError("redis")):
         assert build_recipe(sections=[_Boom()], conversation_id="c", fallback_messages=None) is None
+
+
+# --- compose wiring: recipe_json rides the Report row; capture never breaks compose ---
+
+
+def _compose_env(monkeypatch):
+    """AsyncMock db capturing added Report rows + neutered RLS/audit (the
+    test_report_service.py compose idiom)."""
+    import uuid as _uuid
+    from unittest.mock import AsyncMock
+
+    from app.services.report import report_service
+
+    monkeypatch.setattr(report_service.audit_service, "log_event", AsyncMock())
+    monkeypatch.setattr(report_service, "set_tenant_context", AsyncMock())
+    db = AsyncMock()
+    added: list = []
+    db.add = lambda obj: (added.append(obj), setattr(obj, "id", _uuid.uuid4()))
+    return db, added
+
+
+async def test_compose_report_persists_recipe_json_kwarg(monkeypatch):
+    import uuid as _uuid
+
+    from app.services.report import report_service
+
+    db, added = _compose_env(monkeypatch)
+    recipe = {"schema_version": 1, "captured_at": "t", "sections": [], "sources": {}}
+    await report_service.compose_report(
+        db,
+        tenant_id=_uuid.uuid4(),
+        title="R",
+        sections=[{"type": "heading", "level": 1, "text": "R"}],
+        resolver=lambda rid: {},
+        recipe_json=recipe,
+    )
+    assert added and added[0].recipe_json == recipe
+
+
+async def test_compose_report_defaults_recipe_json_none(monkeypatch):
+    import uuid as _uuid
+
+    from app.services.report import report_service
+
+    db, added = _compose_env(monkeypatch)
+    await report_service.compose_report(
+        db,
+        tenant_id=_uuid.uuid4(),
+        title="R",
+        sections=[{"type": "heading", "level": 1, "text": "R"}],
+        resolver=lambda rid: {},
+    )
+    assert added and added[0].recipe_json is None
+
+
+def _table_payload():
+    return {"columns": ["account", "amount"], "rows": [["Cash", 1]], "row_count": 1, "currency_columns": ["amount"]}
+
+
+async def _run_execute(monkeypatch, sidecar_entries, fallback_messages, sections=None):
+    """Drive the REAL report_export.execute with the compose env + patched meta paths."""
+    import uuid as _uuid
+    from unittest.mock import AsyncMock
+
+    from app.mcp.tools import report_export
+
+    db, added = _compose_env(monkeypatch)
+    monkeypatch.setattr(
+        "app.services.chat.tool_call_results.load_conversation_tool_messages",
+        AsyncMock(return_value=fallback_messages),
+    )
+    params = {"title": "T", "sections": sections or [{"type": "table", "result_id": "r1", "label": "T"}]}
+    ctx = {"db": db, "tenant_id": _uuid.uuid4(), "conversation_id": "conv-1", "actor_id": _uuid.uuid4()}
+    with _sidecar(sidecar_entries):
+        result = await report_export.execute(params, ctx)
+    assert result.get("report_id"), "report must compose regardless of recipe outcome"
+    return added[0]
+
+
+async def test_report_export_execute_captures_recipe_same_turn(monkeypatch):
+    report = await _run_execute(
+        monkeypatch,
+        sidecar_entries={
+            "r1": {"payload": _table_payload(), "tool": "netsuite_suiteql", "params": {"query": "SELECT 1"}}
+        },
+        fallback_messages=[],
+    )
+    assert report.recipe_json is not None
+    assert report.recipe_json["sources"]["r1"] == {
+        "tool": "netsuite_suiteql",
+        "params": {"query": "SELECT 1"},
+        "connection_id": None,
+    }
+    assert report.recipe_json["sections"] == [{"type": "table", "result_id": "r1", "label": "T"}]
+
+
+async def test_report_export_execute_cross_turn_recipe_from_persisted(monkeypatch):
+    fallback = [_msg([{"tool": _EXT_RUNREPORT, "params": {"reportId": 7}, "result_payload": _table_payload()}])]
+    report = await _run_execute(monkeypatch, sidecar_entries={}, fallback_messages=fallback)
+    assert report.recipe_json is not None
+    assert report.recipe_json["sources"]["r1"]["tool"] == _EXT_RUNREPORT
+    assert report.recipe_json["sources"]["r1"]["connection_id"] == str(uuid.UUID(_EXT_HEX))
+
+
+async def test_report_export_execute_ineligible_tool_composes_without_recipe(monkeypatch):
+    """Zero behavior change: a non-allowlisted source tool means recipe_json=None —
+    the report itself composes exactly as today."""
+    report = await _run_execute(
+        monkeypatch,
+        sidecar_entries={"r1": {"payload": _table_payload(), "tool": "pivot_query_result", "params": {"rid": "r0"}}},
+        fallback_messages=[],
+    )
+    assert report.recipe_json is None
+    assert report.spec_json is not None and report.rendered_html

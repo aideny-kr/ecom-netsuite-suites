@@ -863,6 +863,7 @@ async def compose_report(
     created_by=None,
     source_run_id=None,
     accent_hsl: str = "240 6% 10%",
+    recipe_json: dict | None = None,
 ) -> dict:
     from app.models.report import Report
 
@@ -876,6 +877,9 @@ async def compose_report(
         rendered_html=html,
         created_by=created_by,
         source_run_id=source_run_id,
+        # Slice A: the caller-built refresh recipe (server-captured, read-only tools
+        # only, fail closed). None = snapshot-only; pass-through — never derived here.
+        recipe_json=recipe_json,
     )
     db.add(report)
     await db.flush()
