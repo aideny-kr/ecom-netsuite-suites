@@ -294,8 +294,12 @@ explicit `carried_forward` addition.
   invariant; confirmation-card flow for `recon.approve_group`; agent narrative contract test
   (amounts only from evidence fields).
 - **E2E:** seeded-tenant CI e2e extended: run → plan → approve fee group → assert posting
-  instructions + audit trail. Live smoke inside the uat-smoke safe envelope; posting smoke
-  points **only at a sandbox NetSuite account**, never production.
+  instructions + audit trail (NetSuite mocked at the REST-client boundary; runs on every PR).
+  Live smoke inside the uat-smoke safe envelope; posting smoke points **only at a sandbox
+  NetSuite account**, never production. **Zero-residue extension:** the smoke harness must
+  reverse/delete every NetSuite sandbox record it creates (via the same writers +
+  `netsuite_record_refs`), so sandbox state stays deterministic across re-runs — the existing
+  harness only cleans our DB.
 - **Frontend:** vitest (group cards, materiality split, amber JE chip); Playwright
   (approve-to-posted flow).
 - **Regression:** full existing recon suite green — close, per-bucket bulk approve, evidence
