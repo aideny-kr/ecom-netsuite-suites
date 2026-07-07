@@ -24,6 +24,10 @@ class Report(Base):
         UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    # Slice A (live-dashboard reports): the captured refresh recipe — the LLM's compose
+    # sections VERBATIM + per-result_id {tool, params, connection_id} server-captured from
+    # executed tool calls. NULL = snapshot-only report (no backfill; refresh unavailable).
+    recipe_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     published_drive_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
