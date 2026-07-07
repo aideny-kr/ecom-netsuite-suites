@@ -561,6 +561,29 @@ def _auto_chart_section(resolved: dict, *, drivers: list | None = None, label: s
     return {"type": "chart", "svg": render_chart_svg(chart), "chart_type": chart.chart_type}
 
 
+def referenced_result_ids(sections: list[dict]) -> list[str]:
+    """Every result_id a compose references: data sections' ``result_id`` plus the rid
+    before the first ``.`` inside narrative ``{{result:…}}``/``{{metric:…}}``
+    placeholders — single-sourced on the SAME ``_PLACEHOLDER`` regex
+    ``fill_placeholders`` resolves, so the two can never disagree on what counts as a
+    reference. Order of first reference, deduped. Tolerates junk sections (recipe
+    capture runs on the raw LLM dicts, pre-validation)."""
+    seen: dict[str, None] = {}
+    for s in sections or []:
+        if not isinstance(s, dict):
+            continue
+        rid = s.get("result_id")
+        if isinstance(rid, str) and rid:
+            seen.setdefault(rid)
+        markdown = s.get("markdown")
+        if isinstance(markdown, str):
+            for m in _PLACEHOLDER.finditer(markdown):
+                ref_rid = m.group(2).strip().partition(".")[0]
+                if ref_rid:
+                    seen.setdefault(ref_rid)
+    return list(seen)
+
+
 def fill_placeholders(text: str, resolver: Resolver) -> str:
     def _sub(m: re.Match) -> str:
         kind, ref = m.group(1), m.group(2).strip()
