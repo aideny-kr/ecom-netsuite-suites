@@ -370,15 +370,20 @@ async def test_superseded_refresh_aborts_before_publish(db, monkeypatch):
     """Major fix: a slow refresh overtaken by a newer claim (window expired mid-flight)
     must NOT publish stale data over the newer version — compare-and-publish guard."""
     tenant, user, report = await _seed_report(db, recipe=_recipe())
+    rid, tid, uid = report.id, tenant.id, user.id
 
     async def overtaking_execute(tool_name, tool_input, tenant_id, actor_id, correlation_id, db, **kw):
-        # simulate a competing refresh claiming the window while we execute
-        report.last_refreshed_at = datetime.now(timezone.utc) + timedelta(seconds=5)
-        await db.flush()
+        # Simulate a competing refresh claiming the window while we execute — via RAW SQL,
+        # exactly like a concurrent request's committed write: it must NOT go through this
+        # session's identity map, or the Phase-3 re-read could echo our own cached instance
+        # instead of the database row (the re-gate's dead-guard finding).
+        await db.execute(
+            text("UPDATE reports SET last_refreshed_at = :ts WHERE id = :rid"),
+            {"ts": datetime.now(timezone.utc) + timedelta(seconds=5), "rid": rid},
+        )
         return _fresh_result_str()
 
     monkeypatch.setattr("app.services.chat.tools.execute_tool_call", overtaking_execute)
-    rid, tid, uid = report.id, tenant.id, user.id
     with pytest.raises(RefreshError) as exc:
         await refresh_report(db, report_id=rid, tenant_id=tid, actor_id=uid)
     assert exc.value.status_code == 409

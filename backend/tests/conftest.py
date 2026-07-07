@@ -68,6 +68,13 @@ async def db():
         # rollback can never detonate the fixture's seeded state. (The default
         # conditional mode joins the OUTER transaction directly after the first service
         # commit, so a later service rollback wiped the whole test world.)
+        #
+        # SEMANTIC CAVEAT (T2 re-gate): a service-level commit here is RELEASE SAVEPOINT,
+        # which — unlike a real COMMIT — does NOT clear SET LOCAL GUCs such as
+        # app.current_tenant_id. Do NOT write tests that assert GUC state across a
+        # service-internal commit/rollback (they would false-pass); assert the
+        # set_tenant_context CALL ORDERING instead (see test_report_refresh's ctx-spy
+        # tests for the pattern).
         session = AsyncSession(bind=conn, expire_on_commit=False, join_transaction_mode="create_savepoint")
         try:
             yield session

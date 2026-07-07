@@ -67,7 +67,15 @@ class RefreshDebouncedError(RefreshError):
 
 
 async def _locked_report(db: AsyncSession, report_id: uuid.UUID) -> Report:
-    row = (await db.execute(select(Report).where(Report.id == report_id).with_for_update())).scalar_one_or_none()
+    # populate_existing is LOAD-BEARING (T2 re-gate): without it the identity map hands
+    # back this session's cached instance UNREFRESHED, so Phase 3's supersede comparison
+    # would echo our own in-memory write and never observe a concurrent request's
+    # committed stamp — the FOR UPDATE row read must reflect the database row.
+    row = (
+        await db.execute(
+            select(Report).where(Report.id == report_id).with_for_update().execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
     if row is None:  # RLS makes cross-tenant rows invisible — same 404 shape as the API
         raise RefreshError(404, "report not found")
     return row
@@ -154,9 +162,7 @@ async def _execute_sources(
         except (json.JSONDecodeError, TypeError):
             raise RefreshError(502, f"source {rid} ({tool}) returned an unreadable result") from None
         if isinstance(parsed, dict) and (parsed.get("error") or parsed.get("success") is False):
-            message = ""
-            if isinstance(parsed, dict):
-                message = str(parsed.get("message") or parsed.get("detail") or parsed.get("error_message") or "")
+            message = str(parsed.get("message") or parsed.get("detail") or parsed.get("error_message") or "")
             raise RefreshError(502, f"source {rid} ({tool}) failed{': ' + message[:200] if message else ''}")
         payload = extract_result_payload(tool, params, result_str)
         if payload is None:
