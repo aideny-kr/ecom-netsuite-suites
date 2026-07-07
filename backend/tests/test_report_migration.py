@@ -50,6 +50,107 @@ async def test_reports_recipe_json_column_exists_nullable_jsonb(db):
     assert is_nullable == "YES"
 
 
+async def test_reports_last_refreshed_at_column_exists_nullable_timestamptz(db):
+    """Slice B: the DB-derived refresh debounce stamp (attempt-time, ~5 min window)."""
+    row = (
+        await db.execute(
+            text(
+                "SELECT data_type, is_nullable FROM information_schema.columns "
+                "WHERE table_name='reports' AND column_name='last_refreshed_at'"
+            )
+        )
+    ).first()
+    assert row is not None, "reports.last_refreshed_at missing — migration 087 not applied"
+    assert row[0] == "timestamp with time zone"
+    assert row[1] == "YES"
+
+
+async def test_report_versions_table_columns_exist(db):
+    """Slice B: immutable per-version snapshots; the parent reports row stays the stable
+    identity/URL and mirrors the CURRENT version. `pinned` ships dormant for Slice C."""
+    cols = dict(
+        (
+            await db.execute(
+                text("SELECT column_name, data_type FROM information_schema.columns WHERE table_name='report_versions'")
+            )
+        ).all()
+    )
+    assert {
+        "id",
+        "tenant_id",
+        "report_id",
+        "version",
+        "spec_json",
+        "rendered_html",
+        "created_by",
+        "pinned",
+        "created_at",
+    } <= set(cols), f"report_versions columns missing: {cols}"
+    assert cols["spec_json"] == "jsonb"
+    assert cols["pinned"] == "boolean"
+    # immutable rows: deliberately NO updated_at column (an onupdate stamp would be a lie)
+    assert "updated_at" not in cols
+    uq = (
+        await db.execute(
+            text("SELECT count(*) FROM pg_constraint WHERE conname='uq_report_versions_report_version' AND contype='u'")
+        )
+    ).scalar()
+    assert uq == 1, "(report_id, version) unique constraint missing"
+
+
+async def test_report_versions_rls_is_forced_with_tenant_policy(db):
+    """Same catalog-level pin as reports: ENABLE + FORCE, policy on get_current_tenant_id()
+    for BOTH USING and WITH CHECK, and no OR-SYSTEM branch (versions are never SYSTEM-owned)."""
+    rls = (
+        await db.execute(
+            text("SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname='report_versions'")
+        )
+    ).first()
+    assert rls is not None and rls[0] and rls[1], "report_versions must have RLS ENABLED + FORCE'd"
+    pol = (
+        await db.execute(
+            text(
+                "SELECT pg_get_expr(polqual, polrelid), pg_get_expr(polwithcheck, polrelid) "
+                "FROM pg_policy p JOIN pg_class c ON c.oid = p.polrelid WHERE c.relname='report_versions'"
+            )
+        )
+    ).first()
+    assert pol is not None, "report_versions has no RLS policy"
+    using, with_check = pol
+    assert using and "get_current_tenant_id()" in using
+    assert with_check and "get_current_tenant_id()" in with_check
+    assert "00000000-0000-0000-0000-000000000000" not in (using + with_check)
+
+
+async def test_report_versions_model_roundtrip(db):
+    """ORM model inserts + reads under tenant context (the moving parts a catalog check
+    can't see: uuid default, FKs, server defaults)."""
+    from app.models.report_version import ReportVersion
+
+    tenant = await create_test_tenant(db, name="VerCorp")
+    await set_tenant_context(db, str(tenant.id))
+    parent = Report(
+        tenant_id=tenant.id,
+        title="R",
+        spec_json={"sections": []},
+        rendered_html="<html></html>",
+        created_by=None,
+    )
+    db.add(parent)
+    await db.flush()
+    v1 = ReportVersion(
+        tenant_id=tenant.id,
+        report_id=parent.id,
+        version=1,
+        spec_json={"sections": []},
+        rendered_html="<html>v1</html>",
+        created_by=None,
+    )
+    db.add(v1)
+    await db.flush()
+    assert v1.id is not None and v1.pinned is False and v1.created_at is not None
+
+
 async def test_reports_rls_is_forced_with_tenant_policy(db):
     """Pin the migration's intent at the catalog level (always valid, even under the
     local BYPASSRLS `postgres` role): RLS is ENABLED + FORCE'd and the policy pins BOTH

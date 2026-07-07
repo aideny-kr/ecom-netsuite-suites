@@ -28,6 +28,10 @@ class Report(Base):
     # sections VERBATIM + per-result_id {tool, params, connection_id} server-captured from
     # executed tool calls. NULL = snapshot-only report (no backfill; refresh unavailable).
     recipe_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # Slice B: the DB-derived refresh debounce stamp — set at ATTEMPT time (a failed
+    # refresh also consumes the ~5 min window; quota protection against hammering a
+    # dead OAuth connection). NULL = never refreshed.
+    last_refreshed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     published_drive_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
