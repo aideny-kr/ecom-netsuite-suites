@@ -778,9 +778,7 @@ async def test_auto_refresh_sweep_ladder_retention_resume_e2e(db, client, monkey
     report = (await db.execute(select(Report).where(Report.id == rid))).scalar_one()
     assert report.version == 2
     v2 = (
-        await db.execute(
-            select(ReportVersion).where(ReportVersion.report_id == rid, ReportVersion.version == 2)
-        )
+        await db.execute(select(ReportVersion).where(ReportVersion.report_id == rid, ReportVersion.version == 2))
     ).scalar_one()
     assert v2.created_by is None  # no human author
     sys_audit = (
@@ -797,9 +795,7 @@ async def test_auto_refresh_sweep_ladder_retention_resume_e2e(db, client, monkey
     # --- Retention (cap 2): pinned v1 survives, oldest unpinned pruned, parent==MAX ---
     monkeypatch.setattr(settings, "REPORT_VERSION_RETENTION_CAP", 2)
     v1_row = (
-        await db.execute(
-            select(ReportVersion).where(ReportVersion.report_id == rid, ReportVersion.version == 1)
-        )
+        await db.execute(select(ReportVersion).where(ReportVersion.report_id == rid, ReportVersion.version == 1))
     ).scalar_one()
     v1_row.pinned = True  # the auditor's pin
     await db.flush()

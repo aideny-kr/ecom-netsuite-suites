@@ -66,7 +66,5 @@ async def enforce_version_retention(
     result = await db.execute(delete(ReportVersion).where(ReportVersion.id.in_(victims)))
     pruned = result.rowcount or 0
     if pruned:
-        logger.info(
-            "report version retention pruned %d of %d (cap %d) for report %s", pruned, total, cap, report_id
-        )
+        logger.info("report version retention pruned %d of %d (cap %d) for report %s", pruned, total, cap, report_id)
     return pruned

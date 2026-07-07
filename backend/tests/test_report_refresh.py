@@ -391,9 +391,7 @@ async def test_system_actor_refresh_publishes_with_null_created_by(db, monkeypat
 
     assert updated.version == 2
     v2 = (
-        await db.execute(
-            select(ReportVersion).where(ReportVersion.report_id == report.id, ReportVersion.version == 2)
-        )
+        await db.execute(select(ReportVersion).where(ReportVersion.report_id == report.id, ReportVersion.version == 2))
     ).scalar_one()
     assert v2.created_by is None
     row = await _refresh_audit_actor(db, report.id)
@@ -419,9 +417,7 @@ async def test_default_actor_type_stays_user(db, monkeypatch):
     _patch_executor(monkeypatch)
     await refresh_report(db, report_id=report.id, tenant_id=tenant.id, actor_id=user.id)
     v2 = (
-        await db.execute(
-            select(ReportVersion).where(ReportVersion.report_id == report.id, ReportVersion.version == 2)
-        )
+        await db.execute(select(ReportVersion).where(ReportVersion.report_id == report.id, ReportVersion.version == 2))
     ).scalar_one()
     assert v2.created_by == user.id
     row = await _refresh_audit_actor(db, report.id)
