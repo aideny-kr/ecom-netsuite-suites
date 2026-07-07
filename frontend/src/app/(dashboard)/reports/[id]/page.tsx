@@ -3,8 +3,15 @@ import { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { apiClient } from "@/lib/api-client";
 import { Button } from "@/components/ui/button";
-import { ArrowLeft, Download, RefreshCw } from "lucide-react";
-import { useRefreshReport, useReport, useReportVersions } from "@/hooks/use-reports";
+import { AlertTriangle, ArrowLeft, Download, PauseCircle, RefreshCw } from "lucide-react";
+import {
+  useRefreshReport,
+  useReport,
+  useReportVersions,
+  useResumeAutoRefresh,
+  useUpdateReportSettings,
+  type AutoRefreshInterval,
+} from "@/hooks/use-reports";
 
 function fmtStamp(iso: string): string {
   const d = new Date(iso);
@@ -26,7 +33,11 @@ export default function ReportViewPage() {
   const { data: report } = useReport(id);
   const { data: versions } = useReportVersions(id);
   const refresh = useRefreshReport(id);
+  const updateSettings = useUpdateReportSettings(id);
+  const resume = useResumeAutoRefresh(id);
   const viewingCurrent = selectedVersion === null;
+  const paused = Boolean(report?.auto_refresh_paused_at);
+  const refreshFailing = (report?.refresh_failure_count ?? 0) > 0;
 
   useEffect(() => {
     let url: string | null = null;
@@ -113,6 +124,19 @@ export default function ReportViewPage() {
             </select>
           )}
           {report?.has_recipe && (
+            <select
+              aria-label="Auto-refresh interval"
+              className="h-8 rounded-md border bg-background px-2 text-[13px]"
+              value={report.auto_refresh ?? "daily"}
+              disabled={updateSettings.isPending}
+              onChange={(e) => updateSettings.mutate(e.target.value as AutoRefreshInterval)}
+            >
+              <option value="off">Auto-refresh: off</option>
+              <option value="hourly">Auto-refresh: hourly</option>
+              <option value="daily">Auto-refresh: daily</option>
+            </select>
+          )}
+          {report?.has_recipe && (
             <Button
               variant="outline"
               size="sm"
@@ -129,6 +153,31 @@ export default function ReportViewPage() {
           </Button>
         </div>
       </div>
+      {/* Failure-ladder banners (§4C): the last good version stays up — never a broken
+          page. Copy is provider-generic: no structured failure attribution exists, so
+          "check the data connection" instead of naming NetSuite. */}
+      {paused ? (
+        <div className="flex items-center gap-2.5 border-b border-amber-500/30 bg-amber-500/5 px-4 py-2.5">
+          <PauseCircle className="h-4 w-4 text-amber-600 shrink-0" />
+          <span className="flex-1 text-[13px]">
+            Auto-refresh is paused after repeated failures
+            {stampSource && <> — data as of {fmtStamp(stampSource)}</>}. Fix this report&apos;s data
+            connection, then resume.
+          </span>
+          <Button variant="outline" size="sm" onClick={() => resume.mutate()} disabled={resume.isPending}>
+            Resume auto-refresh
+          </Button>
+        </div>
+      ) : refreshFailing ? (
+        <div className="flex items-center gap-2.5 border-b border-amber-500/30 bg-amber-500/5 px-4 py-2.5">
+          <AlertTriangle className="h-4 w-4 text-amber-600 shrink-0" />
+          <span className="text-[13px]">
+            Automatic refresh has been failing
+            {stampSource && <> — data as of {fmtStamp(stampSource)}</>}. Check this report&apos;s data
+            connection.
+          </span>
+        </div>
+      ) : null}
       {error ? (
         <div className="p-8 text-muted-foreground">{error}</div>
       ) : blobUrl ? (

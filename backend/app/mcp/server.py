@@ -50,6 +50,7 @@ class MCPServer:
         db: AsyncSession | None = None,
         context_need: str | None = None,
         session_id: str | None = None,
+        actor_type: str = "user",
     ) -> dict:
         """Call a tool with full governance wrapper."""
         if tool_name not in self.tools:
@@ -61,6 +62,7 @@ class MCPServer:
             params=params,
             tenant_id=tenant_id,
             actor_id=actor_id,
+            actor_type=actor_type,
             execute_fn=tool["execute"],
             correlation_id=correlation_id or str(uuid.uuid4()),
             db=db,

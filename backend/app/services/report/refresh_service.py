@@ -44,6 +44,7 @@ from app.models.report import Report
 from app.models.report_version import ReportVersion
 from app.services import audit_service
 from app.services.report.recipe import is_recipe_eligible
+from app.services.report.retention import enforce_version_retention
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +65,14 @@ class RefreshDebouncedError(RefreshError):
     def __init__(self, retry_after_seconds: int):
         super().__init__(429, f"refreshed recently — try again in about {retry_after_seconds}s")
         self.retry_after_seconds = retry_after_seconds
+
+
+class RefreshSupersededError(RefreshError):
+    """A newer refresh claimed the window mid-flight. Typed so the Slice-C sweep can
+    tell "someone else refreshed" (never a ladder increment) from a real failure."""
+
+    def __init__(self):
+        super().__init__(409, "superseded by a newer refresh — reload to see the latest version")
 
 
 async def _locked_report(db: AsyncSession, report_id: uuid.UUID) -> Report:
@@ -131,7 +140,8 @@ async def _execute_sources(
     needed_rids: list[str],
     *,
     tenant_id: uuid.UUID,
-    actor_id: uuid.UUID,
+    actor_id: uuid.UUID | None,
+    actor_type: str,
     correlation_id: str,
 ) -> dict[str, dict]:
     """Replay ONLY the sources the sections actually reference (an extra source in a
@@ -155,7 +165,13 @@ async def _execute_sources(
         # inside the tool (e.g. the Connection lookup) always run under this tenant.
         await set_tenant_context(db, str(tenant_id))
         result_str = await execute_tool_call(
-            tool, params, tenant_id=tenant_id, actor_id=actor_id, correlation_id=correlation_id, db=db
+            tool,
+            params,
+            tenant_id=tenant_id,
+            actor_id=actor_id,
+            actor_type=actor_type,  # tool_call audit rows must not stamp a system replay as 'user'
+            correlation_id=correlation_id,
+            db=db,
         )
         try:
             parsed = json.loads(result_str)
@@ -176,12 +192,22 @@ async def refresh_report(
     *,
     report_id: uuid.UUID,
     tenant_id: uuid.UUID,
-    actor_id: uuid.UUID,
+    actor_id: uuid.UUID | None,
+    actor_type: str = "user",
 ) -> Report:
     """Re-execute ``report_id``'s recipe and publish version N+1. Raises RefreshError
-    (→ clean HTTP error); the current version is never corrupted on failure."""
+    (→ clean HTTP error); the current version is never corrupted on failure.
+
+    Slice C: the Beat sweep calls with ``actor_id=None, actor_type="system"`` (the
+    house audit convention for cron actors) — the published version's ``created_by``
+    is then NULL. The HTTP endpoint always passes the acting user."""
     from app.services.report.report_html import render_report_html
     from app.services.report.report_service import assemble_spec, referenced_result_ids
+
+    if actor_id is None and actor_type == "user":
+        # a user-attributed audit row with no user id is indistinguishable from a
+        # corrupted record — anonymous actors must declare themselves (e.g. "system")
+        raise ValueError("refresh_report: actor_id=None requires a non-user actor_type")
 
     # ---- Phase 1: claim (debounce stamp committed before any tool runs) -------------
     await set_tenant_context(db, str(tenant_id))
@@ -211,7 +237,13 @@ async def refresh_report(
         # without a source fails closed inside _execute_sources (never "Data unavailable").
         needed_rids = referenced_result_ids(recipe["sections"])
         payloads = await _execute_sources(
-            db, sources, needed_rids, tenant_id=tenant_id, actor_id=actor_id, correlation_id=correlation_id
+            db,
+            sources,
+            needed_rids,
+            tenant_id=tenant_id,
+            actor_id=actor_id,
+            actor_type=actor_type,
+            correlation_id=correlation_id,
         )
 
         spec = assemble_spec(report.title, recipe["sections"], lambda rid: payloads[rid])
@@ -228,7 +260,7 @@ async def refresh_report(
         # the stamp is no longer OURS, a newer refresh claimed after us — abort rather
         # than publish our (older) data over a newer version.
         if report.last_refreshed_at != now:
-            raise RefreshError(409, "superseded by a newer refresh — reload to see the latest version")
+            raise RefreshSupersededError()
         max_version = (
             await db.execute(select(func.max(ReportVersion.version)).where(ReportVersion.report_id == report_id))
         ).scalar()
@@ -266,13 +298,29 @@ async def refresh_report(
             category="report",
             action="report.refresh",
             actor_id=actor_id,
+            actor_type=actor_type,
             resource_type="report",
             resource_id=str(report_id),
             correlation_id=correlation_id,
             payload={"version": next_version, "source_count": len(sources)},
         )
         await db.commit()
-        # the publish commit cleared the GUC; db.refresh re-SELECTs the row under RLS
+        # Best-effort retention (Slice C, §6.2): runs AFTER the publish commit in its
+        # own mini-txn, so it only ever deletes previously COMMITTED versions and its
+        # failure can never take down an already-durable publish. Sequenced BEFORE the
+        # final db.refresh: a retention rollback expires this session's instances, and
+        # the refresh below reloads `report` regardless.
+        try:
+            await set_tenant_context(db, str(tenant_id))  # the publish commit cleared the GUC
+            await enforce_version_retention(db, report_id=report_id, tenant_id=tenant_id)
+            await db.commit()
+        except Exception:
+            # ERROR, not warning: a chronically broken janitor (schema drift, bad SQL)
+            # would otherwise fail silently on EVERY refresh while report_versions
+            # grows unbounded — this must reach the error pipeline, not just the log.
+            logger.error("report.refresh version retention failed (non-fatal)", exc_info=True)
+            await db.rollback()
+        # the last commit/rollback cleared the GUC; db.refresh re-SELECTs the row under RLS
         await set_tenant_context(db, str(tenant_id))
         await db.refresh(report)
         return report
@@ -288,6 +336,7 @@ async def refresh_report(
                 category="report",
                 action="report.refresh",
                 actor_id=actor_id,
+                actor_type=actor_type,
                 resource_type="report",
                 resource_id=str(report_id),
                 correlation_id=correlation_id,

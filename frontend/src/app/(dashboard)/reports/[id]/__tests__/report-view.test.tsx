@@ -11,6 +11,7 @@ const api = vi.hoisted(() => ({
   getText: vi.fn(),
   get: vi.fn(),
   post: vi.fn(),
+  patch: vi.fn(),
 }));
 vi.mock("@/lib/api-client", () => ({ apiClient: api }));
 
@@ -34,6 +35,9 @@ const _report = (over: object = {}) => ({
   created_at: "2026-07-06T18:00:00Z",
   has_recipe: true,
   last_refreshed_at: "2026-07-07T03:00:00Z",
+  auto_refresh: "daily",
+  refresh_failure_count: 0,
+  auto_refresh_paused_at: null,
   ...over,
 });
 
@@ -134,4 +138,56 @@ it("the iframe stays fully sandboxed after a refresh re-render", async () => {
 it("shows the data-as-of stamp from last_refreshed_at", async () => {
   const { findByText } = renderPage();
   expect(await findByText(/data as of/i)).toBeTruthy();
+});
+
+// --- Slice C: auto-refresh selector + staleness/paused banners ------------------------
+
+function mockReport(over: object) {
+  api.get.mockImplementation((path: string) =>
+    path.endsWith("/versions") ? Promise.resolve(_versions) : Promise.resolve(_report(over))
+  );
+}
+
+it("shows the auto-refresh selector for recipe-bearing reports; changing it PATCHes", async () => {
+  api.patch.mockResolvedValue(_report({ auto_refresh: "hourly" }));
+  const { findByLabelText } = renderPage();
+  const sel = (await findByLabelText(/auto-refresh interval/i)) as HTMLSelectElement;
+  expect(sel.value).toBe("daily"); // §6.1 default reflected
+  fireEvent.change(sel, { target: { value: "hourly" } });
+  await waitFor(() =>
+    expect(api.patch).toHaveBeenCalledWith("/api/v1/reports/abc/settings", { auto_refresh: "hourly" })
+  );
+});
+
+it("hides the auto-refresh selector for snapshot-only reports", async () => {
+  mockReport({ has_recipe: false });
+  const { queryByLabelText, findByText } = renderPage();
+  await findByText(/data as of/i); // metadata loaded
+  expect(queryByLabelText(/auto-refresh interval/i)).toBeNull();
+});
+
+it("shows a staleness banner while auto-refresh is failing (last good version stays up)", async () => {
+  mockReport({ refresh_failure_count: 3 });
+  const { findByText } = renderPage();
+  expect(await findByText(/automatic refresh has been failing/i)).toBeTruthy();
+  expect(document.querySelector("iframe")).toBeTruthy(); // never a broken page
+});
+
+it("shows no banner when auto-refresh is healthy", async () => {
+  const { queryByText, findByText } = renderPage();
+  await findByText(/data as of/i);
+  expect(queryByText(/automatic refresh has been failing/i)).toBeNull();
+  expect(queryByText(/paused/i)).toBeNull();
+});
+
+it("paused report shows the paused banner with a one-click Resume", async () => {
+  mockReport({ refresh_failure_count: 7, auto_refresh_paused_at: "2026-07-07T05:00:00Z" });
+  api.post.mockResolvedValue(_report()); // the resume response
+  const { findByText, findByRole } = renderPage();
+  expect(await findByText(/auto-refresh is paused/i)).toBeTruthy();
+  const resume = await findByRole("button", { name: /resume/i });
+  fireEvent.click(resume);
+  await waitFor(() =>
+    expect(api.post).toHaveBeenCalledWith("/api/v1/reports/abc/auto-refresh/resume")
+  );
 });

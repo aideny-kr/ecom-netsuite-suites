@@ -644,3 +644,210 @@ async def test_compose_capture_refresh_lifecycle(db, client, monkeypatch):
         )
     ).scalar_one()
     assert refresh_audits == 2
+
+
+# ---------------------------------------------------------------------------
+# Slice C — dashboard mode: REAL compose (recipe + §6.1 daily default) → the Beat
+#   sweep refreshes as the SYSTEM actor → retention prunes past the cap with a
+#   pinned survivor and the parent-mirror invariant intact → the failure ladder
+#   walks fail → pause (excluded from the sweep) → one-click resume over REAL
+#   HTTP → recovery. Cross-tenant non-interference pinned throughout. The
+#   debounce/supersede skip-classification is unit-pinned in
+#   tests/workers/test_report_auto_refresh.py (not naturally constructible here —
+#   it needs a mid-flight race).
+# ---------------------------------------------------------------------------
+
+
+async def test_auto_refresh_sweep_ladder_retention_resume_e2e(db, client, monkeypatch):
+    import json as _json
+    from datetime import datetime, timedelta, timezone
+    from unittest.mock import patch
+
+    from app.core.config import settings
+    from app.mcp.tools import report_export
+    from app.models.report_version import ReportVersion
+    from app.workers.tasks.report_auto_refresh import PAUSE_THRESHOLD, sweep_tenant_reports
+
+    tenant = await create_test_tenant(db, name="Dashboard Corp")
+    user, _ = await create_test_user(db, tenant)
+
+    # A second tenant with its own due report — must be untouched by tenant A's sweep.
+    tenant_b = await create_test_tenant(db, name="Bystander Corp")
+    user_b, _ = await create_test_user(db, tenant_b)
+    # capture ids NOW: the failure ladder's rollbacks expire every ORM instance in
+    # this session (the documented refresh-service landmine)
+    tid, tb_id = tenant.id, tenant_b.id
+    await set_tenant_context(db, str(tb_id))
+    bystander = Report(
+        tenant_id=tenant_b.id,
+        title="B",
+        spec_json={"sections": []},
+        rendered_html="<html>b</html>",
+        created_by=user_b.id,
+        recipe_json={
+            "schema_version": 1,
+            "captured_at": "t",
+            "sections": [{"type": "table", "result_id": "r1"}],
+            "sources": {"r1": {"tool": "netsuite_suiteql", "params": {"query": "SELECT b"}, "connection_id": None}},
+        },
+    )
+    db.add(bystander)
+    await db.flush()
+    bystander_id = bystander.id
+
+    # --- REAL compose captures the recipe (same rig as the Slice-B lifecycle test) ----
+    await set_tenant_context(db, str(tid))
+    session = ChatSession(tenant_id=tid, user_id=user.id, title="Dashboard")
+    db.add(session)
+    await db.flush()
+    conversation_id = str(session.id)
+
+    def _suiteql_result(marker: str) -> dict:
+        return {
+            "success": True,
+            "columns": ["account", "amount"],
+            "rows": [[marker, 1000]],
+            "row_count": 1,
+            "query": "SELECT account, amount FROM balances",
+        }
+
+    store: dict = {}
+
+    class FakeRedis:
+        def hset(self, key, field, value):
+            store.setdefault(key, {})[field] = value
+
+        def hget(self, key, field):
+            return store.get(key, {}).get(field)
+
+        def hgetall(self, key):
+            return store.get(key, {})
+
+        def hdel(self, key, field):
+            store.get(key, {}).pop(field, None)
+
+        def expire(self, key, ttl):
+            pass
+
+    with patch("app.services.chat.result_cache._get_redis", return_value=FakeRedis()):
+        from app.services.chat.result_cache import cache_full_payload
+        from app.services.chat.tool_call_results import extract_result_payload
+
+        params = {"query": "SELECT account, amount FROM balances"}
+        payload = extract_result_payload("netsuite_suiteql", params, _json.dumps(_suiteql_result("COMPOSE-V1")))
+        cache_full_payload(conversation_id, "r1", payload, tool_name="netsuite_suiteql", params=params)
+        result = await report_export.execute(
+            {
+                "title": "Dash",
+                "sections": [
+                    {"type": "heading", "level": 1, "text": "Dash"},
+                    {"type": "table", "result_id": "r1"},
+                ],
+            },
+            context={"db": db, "tenant_id": tid, "conversation_id": conversation_id, "actor_id": user.id},
+        )
+    report_id = result["report_id"]
+    rid = uuid.UUID(report_id)
+    headers = make_auth_headers(user)
+
+    # §6.1 pin: a newly composed recipe-bearing report defaults to daily.
+    body = (await client.get(f"{API}/{report_id}", headers=headers)).json()
+    assert body["auto_refresh"] == "daily" and body["has_recipe"] is True
+
+    # Controllable outbound executor: marker + failure switch.
+    state = {"marker": "SWEEP-V2", "fail": False}
+
+    async def fake_execute(tool_name, tool_input, tenant_id, actor_id, correlation_id, db, **kw):
+        if state["fail"]:
+            return _json.dumps({"error": True, "message": "invalid or expired token"})
+        return _json.dumps(_suiteql_result(state["marker"]))
+
+    monkeypatch.setattr("app.services.chat.tools.execute_tool_call", fake_execute)
+
+    async def _make_stale():
+        await set_tenant_context(db, str(tid))
+        row = (await db.execute(select(Report).where(Report.id == rid))).scalar_one()
+        row.last_refreshed_at = datetime.now(timezone.utc) - timedelta(days=1, hours=1)
+        await db.flush()
+        return row
+
+    # --- Sweep 1 (happy): the SYSTEM actor publishes v2 -------------------------------
+    stats = await sweep_tenant_reports(db, tid)
+    assert stats["refreshed"] == 1 and stats["failed"] == 0
+    await set_tenant_context(db, str(tid))
+    report = (await db.execute(select(Report).where(Report.id == rid))).scalar_one()
+    assert report.version == 2
+    v2 = (
+        await db.execute(select(ReportVersion).where(ReportVersion.report_id == rid, ReportVersion.version == 2))
+    ).scalar_one()
+    assert v2.created_by is None  # no human author
+    sys_audit = (
+        await db.execute(
+            select(AuditEvent.actor_id, AuditEvent.actor_type).where(
+                AuditEvent.action == "report.refresh", AuditEvent.resource_id == report_id
+            )
+        )
+    ).first()
+    assert sys_audit is not None and sys_audit[0] is None and sys_audit[1] == "system"
+    view = await client.get(f"{API}/{report_id}/view", headers=headers)
+    assert "SWEEP-V2" in view.text  # the stable URL serves the sweep's numbers
+
+    # --- Retention (cap 2): pinned v1 survives, oldest unpinned pruned, parent==MAX ---
+    monkeypatch.setattr(settings, "REPORT_VERSION_RETENTION_CAP", 2)
+    v1_row = (
+        await db.execute(select(ReportVersion).where(ReportVersion.report_id == rid, ReportVersion.version == 1))
+    ).scalar_one()
+    v1_row.pinned = True  # the auditor's pin
+    await db.flush()
+    await _make_stale()
+    state["marker"] = "SWEEP-V3"
+    stats = await sweep_tenant_reports(db, tid)
+    assert stats["refreshed"] == 1
+    await set_tenant_context(db, str(tid))
+    versions = {
+        v.version: v
+        for v in (await db.execute(select(ReportVersion).where(ReportVersion.report_id == rid))).scalars().all()
+    }
+    assert set(versions) == {1, 3}, "cap 2: v2 (oldest unpinned) pruned; pinned v1 exempt"
+    report = (await db.execute(select(Report).where(Report.id == rid))).scalar_one()
+    assert report.version == 3 == max(versions), "parent mirrors MAX surviving version"
+    assert "COMPOSE-V1" in versions[1].rendered_html  # the pinned original, intact
+
+    # --- Failure ladder over REAL HTTP surfaces ---------------------------------------
+    state["fail"] = True
+    await _make_stale()
+    stats = await sweep_tenant_reports(db, tid)
+    assert stats["failed"] == 1
+    body = (await client.get(f"{API}/{report_id}", headers=headers)).json()
+    assert body["refresh_failure_count"] == 1  # the FE staleness banner's signal
+    assert body["auto_refresh_paused_at"] is None
+    assert body["version"] == 3  # last good version intact
+
+    # Walk to the pause threshold, then one more failure → paused + excluded.
+    row = await _make_stale()
+    row.refresh_failure_count = PAUSE_THRESHOLD - 1
+    await db.flush()
+    stats = await sweep_tenant_reports(db, tid)
+    assert stats["failed"] == 1 and stats["paused"] == 1
+    body = (await client.get(f"{API}/{report_id}", headers=headers)).json()
+    assert body["auto_refresh_paused_at"] is not None
+    await _make_stale()
+    assert (await sweep_tenant_reports(db, tid))["due"] == 0  # no retry storm
+
+    # --- One-click resume over REAL HTTP, then recovery --------------------------------
+    res = await client.post(f"{API}/{report_id}/auto-refresh/resume", headers=headers)
+    assert res.status_code == 200
+    assert res.json()["auto_refresh_paused_at"] is None and res.json()["refresh_failure_count"] == 0
+    state["fail"] = False
+    state["marker"] = "SWEEP-V4"
+    await _make_stale()
+    stats = await sweep_tenant_reports(db, tid)
+    assert stats["refreshed"] == 1
+    body = (await client.get(f"{API}/{report_id}", headers=headers)).json()
+    assert body["version"] == 4 and body["refresh_failure_count"] == 0
+
+    # --- Cross-tenant non-interference: B's due report untouched by A's sweeps --------
+    await set_tenant_context(db, str(tb_id))
+    b_row = (await db.execute(select(Report).where(Report.id == bystander_id))).scalar_one()
+    assert b_row.version == 1 and b_row.refresh_failure_count == 0
+    assert b_row.rendered_html == "<html>b</html>"

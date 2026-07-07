@@ -368,9 +368,14 @@ async def governed_execute(
     db: AsyncSession | None = None,
     context_need: str | None = None,
     session_id: str | None = None,
+    actor_type: str = "user",
 ) -> dict[str, Any]:
     """
     Governance wrapper: entitlement → rate limit → param validation → execute → redact → audit.
+
+    actor_type stamps the tool_call audit rows — "system" for cron actors (e.g. the
+    report auto-refresh sweep, actor_id=None) so a NULL actor_id is distinguishable
+    from a real user whose id was lost.
     """
     correlation_id = correlation_id or str(uuid.uuid4())
     start = time.monotonic()
@@ -401,7 +406,7 @@ async def governed_execute(
                     category="tool_call",
                     action="tool.rate_limited",
                     actor_id=actor_uuid,
-                    actor_type="user",
+                    actor_type=actor_type,
                     resource_type="mcp_tool",
                     resource_id=tool_name,
                     correlation_id=correlation_id,
@@ -428,7 +433,7 @@ async def governed_execute(
                 category="tool_call",
                 action="tool.requested",
                 actor_id=actor_uuid,
-                actor_type="user",
+                actor_type=actor_type,
                 resource_type="mcp_tool",
                 resource_id=tool_name,
                 correlation_id=correlation_id,
@@ -497,7 +502,7 @@ async def governed_execute(
                     category="tool_call",
                     action="tool.failed",
                     actor_id=actor_uuid,
-                    actor_type="user",
+                    actor_type=actor_type,
                     resource_type="mcp_tool",
                     resource_id=tool_name,
                     correlation_id=correlation_id,
@@ -538,7 +543,7 @@ async def governed_execute(
                 category="tool_call",
                 action="tool.executed",
                 actor_id=actor_uuid,
-                actor_type="user",
+                actor_type=actor_type,
                 resource_type="mcp_tool",
                 resource_id=tool_name,
                 correlation_id=correlation_id,

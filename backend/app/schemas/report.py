@@ -135,7 +135,20 @@ class ReportResponse(BaseModel):
     has_recipe: bool = False
     # Slice B: the "data as of" stamp source; None = never refreshed (compose-time data).
     last_refreshed_at: datetime | None = None
+    # Slice C: the FE derives the interval selector + staleness/paused banners from
+    # these — failure_count > 0 = "auto-refresh failing" banner; paused_at set =
+    # paused banner + one-click Resume.
+    auto_refresh: str = "daily"
+    refresh_failure_count: int = 0
+    auto_refresh_paused_at: datetime | None = None
     model_config = {"from_attributes": True}
+
+
+class ReportSettingsUpdate(BaseModel):
+    """PATCH /reports/{id}/settings — the interval is the only mutable setting; the
+    Literal is the validity gate (the column is convention-only, like reports.status)."""
+
+    auto_refresh: Literal["off", "hourly", "daily"]
 
 
 class ReportVersionResponse(BaseModel):

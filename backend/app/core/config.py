@@ -139,6 +139,19 @@ class Settings(BaseSettings):
 
     AUDIT_RETENTION_DAYS: int = 90
 
+    # Live-dashboard reports (Slice C): stored versions per report are capped (§6.2);
+    # pinned versions exempt, the current version never pruned.
+    REPORT_VERSION_RETENTION_CAP: int = 30
+    # Per-tenant sweep batch: at most this many reports refresh per Beat tick,
+    # most-stale first (overflow waits for the next tick — the house no-self-retry
+    # convention). With MAX_RECIPE_SOURCES=12 this bounds a tenant tick at ≤120
+    # sequential tool calls against the tenant's connections.
+    REPORT_AUTO_REFRESH_BATCH: int = 10
+    # Rollout gate for the Beat sweep (the AGENT_BENCHMARK_VS_MCP pattern): the Beat
+    # entry is always registered, the fan-out body no-ops until this flips — staging
+    # first, then production.
+    REPORT_AUTO_REFRESH_ENABLED: bool = False
+
     # Autonomous query improvement loop
     QUERY_IMPROVEMENT_ENABLED: bool = False
     QUERY_IMPROVEMENT_BUDGET_USD: float = 12.0

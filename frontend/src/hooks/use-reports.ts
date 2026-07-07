@@ -3,6 +3,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiClient } from "@/lib/api-client";
 
+export type AutoRefreshInterval = "off" | "hourly" | "daily";
+
 export interface ReportSummary {
   id: string;
   title: string;
@@ -13,6 +15,12 @@ export interface ReportSummary {
   has_recipe: boolean;
   /** Slice B: the "data as of" stamp source; null/absent = never refreshed. */
   last_refreshed_at?: string | null;
+  /** Slice C: the user-chosen sweep interval (selector renders iff has_recipe). */
+  auto_refresh?: AutoRefreshInterval;
+  /** Slice C: consecutive failed auto-refreshes — > 0 drives the staleness banner. */
+  refresh_failure_count?: number;
+  /** Slice C: set = auto-refresh paused after repeated failures (banner + Resume). */
+  auto_refresh_paused_at?: string | null;
 }
 
 export interface ReportVersionEntry {
@@ -55,6 +63,29 @@ export function useRefreshReport(id: string) {
       queryClient.invalidateQueries({ queryKey: ["reports"] });
       queryClient.invalidateQueries({ queryKey: ["reports", id] });
       queryClient.invalidateQueries({ queryKey: ["reports", id, "versions"] });
+    },
+  });
+}
+
+export function useUpdateReportSettings(id: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (auto_refresh: AutoRefreshInterval) =>
+      apiClient.patch<ReportSummary>(`/api/v1/reports/${id}/settings`, { auto_refresh }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["reports"] });
+      queryClient.invalidateQueries({ queryKey: ["reports", id] });
+    },
+  });
+}
+
+export function useResumeAutoRefresh(id: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => apiClient.post<ReportSummary>(`/api/v1/reports/${id}/auto-refresh/resume`),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["reports"] });
+      queryClient.invalidateQueries({ queryKey: ["reports", id] });
     },
   });
 }
