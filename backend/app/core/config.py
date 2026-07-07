@@ -139,6 +139,10 @@ class Settings(BaseSettings):
 
     AUDIT_RETENTION_DAYS: int = 90
 
+    # Live-dashboard reports (Slice C): stored versions per report are capped (§6.2);
+    # pinned versions exempt, the current version never pruned.
+    REPORT_VERSION_RETENTION_CAP: int = 30
+
     # Autonomous query improvement loop
     QUERY_IMPROVEMENT_ENABLED: bool = False
     QUERY_IMPROVEMENT_BUDGET_USD: float = 12.0

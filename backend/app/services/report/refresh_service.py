@@ -44,6 +44,7 @@ from app.models.report import Report
 from app.models.report_version import ReportVersion
 from app.services import audit_service
 from app.services.report.recipe import is_recipe_eligible
+from app.services.report.retention import enforce_version_retention
 
 logger = logging.getLogger(__name__)
 
@@ -278,7 +279,19 @@ async def refresh_report(
             payload={"version": next_version, "source_count": len(sources)},
         )
         await db.commit()
-        # the publish commit cleared the GUC; db.refresh re-SELECTs the row under RLS
+        # Best-effort retention (Slice C, §6.2): runs AFTER the publish commit in its
+        # own mini-txn, so it only ever deletes previously COMMITTED versions and its
+        # failure can never take down an already-durable publish. Sequenced BEFORE the
+        # final db.refresh: a retention rollback expires this session's instances, and
+        # the refresh below reloads `report` regardless.
+        try:
+            await set_tenant_context(db, str(tenant_id))  # the publish commit cleared the GUC
+            await enforce_version_retention(db, report_id=report_id, tenant_id=tenant_id)
+            await db.commit()
+        except Exception:
+            logger.warning("report.refresh version retention failed (non-fatal)", exc_info=True)
+            await db.rollback()
+        # the last commit/rollback cleared the GUC; db.refresh re-SELECTs the row under RLS
         await set_tenant_context(db, str(tenant_id))
         await db.refresh(report)
         return report
