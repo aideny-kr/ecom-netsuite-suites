@@ -214,3 +214,37 @@ def test_narrative_single_newline_reflows_not_hard_break():
     html = render_report_html(spec)
     assert "<p>The quarter closed strong with revenue up 12%.</p>" in html
     assert "<br>" not in html
+
+
+# --- Freshness stamp (Slice B: refresh honesty footer) -------------------------------
+
+
+def _min_spec():
+    return {"title": "R", "sections": [{"type": "narrative", "markdown": "hello"}]}
+
+
+def test_no_freshness_keeps_output_stamp_free():
+    """Golden safety: the compose path (freshness=None) is byte-identical — no stamp."""
+    html = render_report_html(_min_spec())
+    assert 'class="stamp"' not in html
+
+
+def test_freshness_renders_composed_and_refreshed_dates():
+    html = render_report_html(
+        _min_spec(),
+        freshness={"composed_at": "2026-07-06T18:04:12.331209+00:00", "refreshed_at": "2026-07-07T03:15:00+00:00"},
+    )
+    assert html.count('class="stamp"') == 1
+    assert "Narrative composed 6 Jul 2026" in html
+    assert "Data refreshed 7 Jul 2026" in html
+    assert "UTC" in html
+
+
+def test_freshness_values_are_escaped_and_unparseable_dates_never_crash():
+    html = render_report_html(
+        _min_spec(),
+        freshness={"composed_at": "<script>alert(1)</script>", "refreshed_at": "not-a-date"},
+    )
+    assert "<script>" not in html  # hostile value neutralized
+    assert "&lt;script&gt;" in html  # rendered verbatim-escaped, never dropped silently
+    assert "not-a-date" in html
