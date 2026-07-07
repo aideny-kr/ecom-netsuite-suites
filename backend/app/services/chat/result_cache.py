@@ -246,20 +246,40 @@ def _full_payload_key(conversation_id: str) -> str:
     return f"result_full:{conversation_id}"
 
 
-def cache_full_payload(conversation_id: str, result_id: str, payload: dict[str, Any]) -> None:
+def cache_full_payload(
+    conversation_id: str,
+    result_id: str,
+    payload: dict[str, Any],
+    *,
+    tool_name: str | None = None,
+    params: dict[str, Any] | None = None,
+) -> None:
     """Write the FULL, uncapped result payload for ``result_id`` THIS turn.
 
     Synchronous (Redis client is sync internally) so the orchestrator's intercept
     callback can write it the instant a data tool is intercepted. No-op when Redis
     is unavailable (dev fallback). Caps the per-conversation list at
     ``MAX_FULL_PAYLOADS_PER_CONVERSATION``, evicting the oldest result_id first.
+
+    ``tool_name``/``params`` (Slice A, live-dashboard reports): the EXECUTED tool
+    call that produced this payload, carried on the envelope so a same-turn
+    ``report.compose`` can capture the refresh recipe's per-result_id
+    {tool, params} via ``get_full_payload_entry`` — the meta is recorded at the
+    single point of execution, never re-derived. Optional: meta-less writes (and
+    pre-deploy envelopes) stay valid; recipe capture then falls back to the
+    persisted tool_calls or omits the recipe (fail closed).
     """
     r = _get_redis()
     if not r:
         return
 
     key = _full_payload_key(conversation_id)
-    envelope = json.dumps({"payload": payload, "seq": time.time()}, default=str)
+    entry: dict[str, Any] = {"payload": payload, "seq": time.time()}
+    if tool_name is not None:
+        entry["tool"] = tool_name
+    if params is not None:
+        entry["params"] = params
+    envelope = json.dumps(entry, default=str)
     r.hset(key, result_id, envelope)
     r.expire(key, CACHE_TTL_SECONDS)
 
@@ -283,6 +303,18 @@ def cache_full_payload(conversation_id: str, result_id: str, payload: dict[str, 
 def get_full_payload(conversation_id: str, result_id: str) -> dict[str, Any] | None:
     """Read the FULL uncapped payload for ``result_id`` written THIS turn (or a
     recent turn within TTL). Returns None on miss / no Redis."""
+    entry = get_full_payload_entry(conversation_id, result_id)
+    if entry is None:
+        return None
+    payload = entry.get("payload")
+    return payload if isinstance(payload, dict) else None
+
+
+def get_full_payload_entry(conversation_id: str, result_id: str) -> dict[str, Any] | None:
+    """Read the WHOLE sidecar envelope ``{payload, seq, tool?, params?}`` for
+    ``result_id`` — the meta reader recipe capture uses (Slice A). Old envelopes
+    written before the meta existed simply lack the ``tool``/``params`` keys.
+    Returns None on miss / undecodable / no Redis."""
     r = _get_redis()
     if not r:
         return None
@@ -295,5 +327,4 @@ def get_full_payload(conversation_id: str, result_id: str) -> dict[str, Any] | N
         envelope = json.loads(raw)
     except (json.JSONDecodeError, TypeError):
         return None
-    payload = envelope.get("payload")
-    return payload if isinstance(payload, dict) else None
+    return envelope if isinstance(envelope, dict) else None

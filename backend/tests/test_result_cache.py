@@ -9,9 +9,11 @@ from app.services.chat.result_cache import (
     MAX_RESULTS_PER_CONVERSATION,
     CachedResult,
     _cache_result_sync,
+    _full_payload_key,
     cache_full_payload,
     cache_result,
     get_full_payload,
+    get_full_payload_entry,
     get_latest_result,
     get_latest_result_by_type,
     get_result_by_message,
@@ -459,3 +461,47 @@ class TestFullPayloadSidecar:
             "turn A's r1 payload must survive turn B (no overwrite)"
         )
         assert get_full_payload("conv-1", "r2")["rows"] == [["turnB"]]
+
+    # --- Recipe meta (Slice A of live-dashboard reports) ------------------------------
+    # The interceptor callback receives {tool_name, params} and used to discard them;
+    # the envelope now carries them so a same-turn report.compose can capture the
+    # refresh recipe's per-result_id {tool, params} without re-deriving anything.
+
+    def test_entry_carries_tool_and_params(self, mock_redis):
+        cache_full_payload(
+            "conv-1",
+            "r1",
+            {"rows": [[1]], "row_count": 1},
+            tool_name="netsuite_suiteql",
+            params={"query": "SELECT 1 FROM transaction"},
+        )
+        entry = get_full_payload_entry("conv-1", "r1")
+        assert entry is not None
+        assert entry["tool"] == "netsuite_suiteql"
+        assert entry["params"] == {"query": "SELECT 1 FROM transaction"}
+        assert entry["payload"]["row_count"] == 1
+        # the payload-only reader is unchanged by the meta
+        assert get_full_payload("conv-1", "r1")["rows"] == [[1]]
+
+    def test_old_envelope_without_meta_still_resolves_payload(self, mock_redis):
+        """A pre-deploy envelope ({payload, seq} only — e.g. written mid-rollover)
+        must stay readable: get_full_payload unchanged; the entry reader returns it
+        WITHOUT a tool key (recipe capture then falls to the persisted fallback)."""
+        old_envelope = json.dumps({"payload": {"rows": [["old"]], "row_count": 1}, "seq": 1.0})
+        mock_redis.setdefault(_full_payload_key("conv-1"), {})["r1"] = old_envelope
+        assert get_full_payload("conv-1", "r1")["rows"] == [["old"]]
+        entry = get_full_payload_entry("conv-1", "r1")
+        assert entry is not None and "tool" not in entry
+
+    def test_entry_miss_and_no_redis_are_safe(self):
+        with patch("app.services.chat.result_cache._get_redis", return_value=None):
+            assert get_full_payload_entry("conv-1", "r1") is None
+
+    def test_meta_write_does_not_break_fifo_eviction(self, mock_redis):
+        n = MAX_RESULTS_PER_CONVERSATION
+        for i in range(1, n + 2):  # one past the cap, every write meta-bearing
+            cache_full_payload(
+                "conv-1", f"r{i}", {"rows": [[i]], "row_count": 1}, tool_name="netsuite_suiteql", params={"q": i}
+            )
+        assert get_full_payload("conv-1", "r1") is None  # oldest evicted
+        assert get_full_payload_entry("conv-1", f"r{n + 1}")["tool"] == "netsuite_suiteql"

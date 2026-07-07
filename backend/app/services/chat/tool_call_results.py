@@ -684,6 +684,38 @@ def resolve_payload_from_messages(messages: list[Any], result_id: str) -> dict[s
     raise KeyError(result_id)
 
 
+def collect_tool_meta_from_messages(messages: list[Any]) -> dict[str, dict[str, Any]]:
+    """Map every resolvable result_id to its executed ``{tool, params}`` — the
+    CROSS-TURN meta source for recipe capture (Slice A of live-dashboard reports).
+
+    MUST mirror ``resolve_payload_from_messages`` EXACTLY: the same population
+    criterion (a dict ``result_payload``) and the same positional counter, so meta
+    availability tracks payload availability rid-for-rid (the agreement test in
+    test_resolve_result_payload.py is the anti-drift lock). An explicit
+    ``result_id`` key registers IN ADDITION to the positional id (explicit ids win
+    over positional in the resolver). A payload-bearing call missing usable
+    tool/params still CONSUMES its positional slot — it just yields no meta, and
+    the recipe builder then fails closed for that rid."""
+    positional = 0
+    meta: dict[str, dict[str, Any]] = {}
+    for message in messages:
+        for call in _tool_calls_of(message):
+            payload = call.get("result_payload")
+            if not isinstance(payload, dict):
+                continue
+            positional += 1
+            tool = call.get("tool")
+            params = call.get("params")
+            if not isinstance(tool, str) or not tool or not isinstance(params, dict):
+                continue  # slot consumed; meta unrecoverable for this rid
+            entry = {"tool": tool, "params": params}
+            meta[f"r{positional}"] = entry
+            explicit_id = call.get("result_id")
+            if isinstance(explicit_id, str) and explicit_id:
+                meta[explicit_id] = entry
+    return meta
+
+
 async def load_conversation_tool_messages(db: Any, conversation_id: Any, tenant_id: Any) -> list[Any]:
     """Load the assistant messages (with their full ``tool_calls``) for a session,
     newest turns last.

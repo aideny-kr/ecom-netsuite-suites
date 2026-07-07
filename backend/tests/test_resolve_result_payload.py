@@ -382,6 +382,160 @@ def test_inturn_result_aligns_with_fallback_across_turns():
     assert captured["result_id"] == "r4"
 
 
+# --- Slice A (live-dashboard reports): the sidecar write carries {tool, params} ---
+# _on_tool_intercepted receives the executed tool_name + params and used to discard
+# them; the extracted module-level helper now forwards both into the sidecar envelope
+# so a same-turn report.compose can capture the refresh recipe's meta.
+
+
+def test_sidecar_write_helper_carries_tool_and_params():
+    from unittest.mock import patch
+
+    from app.services.chat import orchestrator
+
+    calls: dict = {}
+
+    def fake_cache(conversation_id, result_id, payload, *, tool_name=None, params=None):
+        calls.update(
+            conversation_id=conversation_id,
+            result_id=result_id,
+            payload=payload,
+            tool_name=tool_name,
+            params=params,
+        )
+
+    with patch("app.services.chat.result_cache.cache_full_payload", fake_cache):
+        orchestrator._write_full_payload_sidecar(
+            "conv-9", "r4", "netsuite_suiteql", {"query": "SELECT 1"}, {"rows": [[1]], "row_count": 1}
+        )
+    assert calls == {
+        "conversation_id": "conv-9",
+        "result_id": "r4",
+        "payload": {"rows": [[1]], "row_count": 1},
+        "tool_name": "netsuite_suiteql",
+        "params": {"query": "SELECT 1"},
+    }
+
+
+def test_sidecar_write_helper_is_best_effort_never_raises():
+    from unittest.mock import patch
+
+    from app.services.chat import orchestrator
+
+    def boom(*a, **k):
+        raise RuntimeError("redis down")
+
+    with patch("app.services.chat.result_cache.cache_full_payload", boom):
+        orchestrator._write_full_payload_sidecar("c", "r1", "t", {}, {"rows": []})  # must not raise
+
+
+def test_interceptor_callback_receives_tool_and_params():
+    """Pin the plumbing recipe capture rides on: _make_tool_interceptor threads the
+    executed tool_name + params (+ the precomputed full_payload) to the callback."""
+    import json
+
+    from app.services.chat.orchestrator import _make_tool_interceptor
+
+    captured: dict = {}
+
+    def _cb(tool_name, event_type_str, event_data, result_id=None, params=None, result_str=None, full_payload=None):
+        captured.update(tool_name=tool_name, params=params, result_id=result_id, full_payload=full_payload)
+
+    interceptor = _make_tool_interceptor(cache_callback=_cb)
+    payload = {"columns": ["c"], "rows": [["x"]], "row_count": 1, "query": "SELECT 1"}
+    interceptor("netsuite_suiteql", json.dumps(payload), params={"query": "SELECT 1"})
+    assert captured["tool_name"] == "netsuite_suiteql"
+    assert captured["params"] == {"query": "SELECT 1"}
+    assert captured["result_id"] == "r1"
+    assert captured["full_payload"] is not None
+
+
+# --- Slice A: the cross-turn meta walker mirrors the payload resolver EXACTLY ---
+# collect_tool_meta_from_messages recovers {tool, params} per rid from persisted
+# tool_calls[] — same population criterion + same counter as
+# resolve_payload_from_messages, so meta availability tracks payload availability
+# (the anti-drift lock is asserting both walks agree on every rid).
+
+
+def test_meta_map_positional_ids_match_payload_resolver():
+    from app.services.chat.tool_call_results import collect_tool_meta_from_messages
+
+    messages = [
+        _msg(
+            [
+                {
+                    "tool": "netsuite_suiteql",
+                    "params": {"query": "SELECT a"},
+                    "result_payload": {"rows": [["t1a"]], "row_count": 1},
+                },
+                {"tool": "no_payload_tool", "params": {"x": 1}},  # skipped by BOTH walks
+                {
+                    "tool": "ext__0f3c9a2e00000000000000000000beef__ns_runReport",
+                    "params": {"reportId": 7},
+                    "result_payload": {"rows": [["t1b"]], "row_count": 1},
+                },
+            ]
+        ),
+        _msg(
+            [
+                {
+                    "tool": "metric_compute",
+                    "params": {"metric_id": "m"},
+                    "result_payload": {"rows": [["t2a"]], "row_count": 1},
+                }
+            ]
+        ),
+    ]
+    meta = collect_tool_meta_from_messages(messages)
+    assert set(meta) == {"r1", "r2", "r3"}
+    # every rid's meta corresponds to the SAME entry the payload resolver returns
+    assert meta["r1"]["tool"] == "netsuite_suiteql"
+    assert resolve_payload_from_messages(messages, "r1")["rows"] == [["t1a"]]
+    assert meta["r2"]["tool"].startswith("ext__")
+    assert resolve_payload_from_messages(messages, "r2")["rows"] == [["t1b"]]
+    assert meta["r3"]["params"] == {"metric_id": "m"}
+    assert resolve_payload_from_messages(messages, "r3")["rows"] == [["t2a"]]
+
+
+def test_meta_map_explicit_result_id_wins_like_the_resolver():
+    """No production writer sets an explicit result_id key today, but the resolver
+    supports it — the meta walker must register the explicit key too (in ADDITION to
+    the positional slot the entry still consumes)."""
+    from app.services.chat.tool_call_results import collect_tool_meta_from_messages
+
+    messages = [
+        _msg([{"tool": "t_expl", "params": {}, "result_id": "rX", "result_payload": {"rows": [["e"]], "row_count": 1}}])
+    ]
+    meta = collect_tool_meta_from_messages(messages)
+    assert meta["rX"]["tool"] == "t_expl"
+    assert resolve_payload_from_messages(messages, "rX")["rows"] == [["e"]]
+    assert meta["r1"]["tool"] == "t_expl"  # the resolver's positional fallback reaches it too
+
+
+def test_meta_map_skips_metaless_entries_without_shifting_numbering():
+    """A payload-bearing call missing tool/params still CONSUMES its positional slot
+    (the counter must stay aligned with the resolver) but yields no meta — the recipe
+    builder then fails closed for that rid."""
+    from app.services.chat.tool_call_results import collect_tool_meta_from_messages
+
+    messages = [
+        _msg(
+            [
+                {"result_payload": {"rows": [["x"]], "row_count": 1}},  # no tool/params
+                {
+                    "tool": "netsuite_suiteql",
+                    "params": {"query": "q"},
+                    "result_payload": {"rows": [["y"]], "row_count": 1},
+                },
+            ]
+        )
+    ]
+    meta = collect_tool_meta_from_messages(messages)
+    assert "r1" not in meta  # meta unrecoverable
+    assert meta["r2"]["tool"] == "netsuite_suiteql"  # numbering NOT shifted
+    assert resolve_payload_from_messages(messages, "r2")["rows"] == [["y"]]
+
+
 # --- Gate D (finding #18): defense-in-depth tenant filter on the resolver query ---
 
 

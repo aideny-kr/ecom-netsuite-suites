@@ -25,6 +25,7 @@ def _to_response(r: Report) -> ReportResponse:
         status=r.status,
         version=r.version,
         created_at=r.created_at,
+        has_recipe=r.recipe_json is not None,
     )
 
 

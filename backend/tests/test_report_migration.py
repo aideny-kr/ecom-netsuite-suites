@@ -33,6 +33,23 @@ async def test_reports_table_columns_exist(db):
     } <= set(cols)
 
 
+async def test_reports_recipe_json_column_exists_nullable_jsonb(db):
+    """Slice A (live-dashboard reports): the captured refresh recipe. Nullable — historic
+    reports legitimately lack a recipe and stay snapshot-only (spec §4A: no backfill)."""
+    row = (
+        await db.execute(
+            text(
+                "SELECT data_type, is_nullable FROM information_schema.columns "
+                "WHERE table_name='reports' AND column_name='recipe_json'"
+            )
+        )
+    ).first()
+    assert row is not None, "reports.recipe_json missing — migration 086 not applied"
+    data_type, is_nullable = row
+    assert data_type == "jsonb"
+    assert is_nullable == "YES"
+
+
 async def test_reports_rls_is_forced_with_tenant_policy(db):
     """Pin the migration's intent at the catalog level (always valid, even under the
     local BYPASSRLS `postgres` role): RLS is ENABLED + FORCE'd and the policy pins BOTH

@@ -25,6 +25,7 @@ async def execute(params: dict, context: dict | None = None, **kwargs) -> dict:
         load_conversation_tool_messages,
         resolve_payload_from_messages,
     )
+    from app.services.report.recipe import build_recipe
     from app.services.report.report_service import compose_report
 
     ctx = context or {}
@@ -48,6 +49,18 @@ async def execute(params: dict, context: dict | None = None, **kwargs) -> dict:
         # 2) FALLBACK: persisted ChatMessage tool_calls (cross-turn / regeneration).
         return resolve_payload_from_messages(fallback_messages, rid)
 
+    # RECIPE CAPTURE (Slice A, live-dashboard reports): record the refresh recipe —
+    # the verbatim pre-resolution sections + per-result_id {tool, params,
+    # connection_id} from the SAME two meta sources the resolver reads (sidecar
+    # first, then the already-loaded persisted snapshot — no extra query).
+    # Best-effort + fail closed: any unrecoverable/ineligible rid ⇒ recipe is None
+    # and the report composes exactly as a plain snapshot (never raises).
+    recipe = build_recipe(
+        sections=params["sections"],
+        conversation_id=conversation_id,
+        fallback_messages=fallback_messages,
+    )
+
     return await compose_report(
         db,
         tenant_id=tenant_id,
@@ -56,4 +69,5 @@ async def execute(params: dict, context: dict | None = None, **kwargs) -> dict:
         resolver=resolver,
         created_by=ctx.get("actor_id"),
         source_run_id=conversation_id,
+        recipe_json=recipe,
     )
