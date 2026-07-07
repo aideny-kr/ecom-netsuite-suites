@@ -425,6 +425,71 @@ async def test_default_actor_type_stays_user(db, monkeypatch):
     assert row[0] == user.id and row[1] == "user"
 
 
+async def test_system_refresh_threads_actor_type_into_local_tool_dispatch(db, monkeypatch):
+    """Gate r1 finding: the per-tool-call audit rows of a system sweep were stamped
+    actor_type='user' with actor_id NULL — indistinguishable from a lost user id.
+    The caller's actor_type must thread refresh_report → execute_tool_call →
+    mcp_server.call_tool (the governance layer stamps audit rows from it)."""
+    from app.services.chat import tools as chat_tools
+
+    tenant, user, report = await _seed_report(db, recipe=_recipe())
+    captured: dict = {}
+
+    async def fake_call_tool(**kw):
+        captured.update(kw)
+        return json.loads(_fresh_result_str())
+
+    monkeypatch.setattr(chat_tools.mcp_server, "call_tool", fake_call_tool)
+    updated = await refresh_report(db, report_id=report.id, tenant_id=tenant.id, actor_id=None, actor_type="system")
+    assert updated.version == 2
+    assert captured.get("actor_id") is None
+    assert captured.get("actor_type") == "system"
+
+
+async def test_governed_execute_audits_with_caller_actor_type(db):
+    """The deepest link of the system-actor chain: governed_execute's tool_call audit
+    rows must carry the CALLER's actor_type, not a hardcoded 'user'."""
+    from app.mcp.governance import governed_execute
+
+    tenant, _, _ = await _seed_report(db, recipe=None)
+
+    async def fake_tool(params, context=None):
+        return {"success": True}
+
+    result = await governed_execute(
+        tool_name="test.slice_c_probe",  # no TOOL_CONFIGS entry → params pass through
+        params={"query": "SELECT 1"},
+        tenant_id=str(tenant.id),
+        actor_id=None,
+        execute_fn=fake_tool,
+        db=db,
+        actor_type="system",
+    )
+    assert result == {"success": True}
+    row = (
+        await db.execute(
+            text(
+                "SELECT actor_id, actor_type FROM audit_events "
+                "WHERE category='tool_call' AND action='tool.executed' AND tenant_id=:tid"
+            ),
+            {"tid": str(tenant.id)},
+        )
+    ).first()
+    assert row is not None, "tool.executed audit row missing"
+    assert row[0] is None and row[1] == "system"
+
+
+async def test_refresh_report_refuses_anonymous_user_actor(db, monkeypatch):
+    """Gate r1 finding: nothing tied actor_id=None to actor_type='system' — a caller
+    forgetting actor_type would write user-attributed audit rows with no user id.
+    Fail loudly at the seam instead."""
+    tenant, user, report = await _seed_report(db, recipe=_recipe())
+    calls = _patch_executor(monkeypatch)
+    with pytest.raises(ValueError, match="actor_type"):
+        await refresh_report(db, report_id=report.id, tenant_id=tenant.id, actor_id=None)
+    assert calls == []  # refused before any claim or dispatch
+
+
 async def test_execute_tool_call_maps_none_actor_to_none_not_str(db, monkeypatch):
     """Load-bearing for the system-actor sweep: tools.py stringifies actor_id before the
     local dispatch, and str(None) == "None" is TRUTHY — governance's

@@ -248,6 +248,7 @@ async def execute_tool_call(
     db: "AsyncSession",
     context_need: str | None = None,
     session_id: str | None = None,
+    actor_type: str = "user",
 ) -> str:
     """Execute a tool call and return the result as a JSON string.
 
@@ -295,6 +296,7 @@ async def execute_tool_call(
             # a system actor (report auto-refresh sweep) is None — str(None) == "None"
             # is truthy and governance's uuid.UUID(actor_id) would raise on it
             actor_id=str(actor_id) if actor_id is not None else None,
+            actor_type=actor_type,
             correlation_id=correlation_id,
             db=db,
             context_need=context_need,

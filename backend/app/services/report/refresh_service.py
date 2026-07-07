@@ -140,7 +140,8 @@ async def _execute_sources(
     needed_rids: list[str],
     *,
     tenant_id: uuid.UUID,
-    actor_id: uuid.UUID,
+    actor_id: uuid.UUID | None,
+    actor_type: str,
     correlation_id: str,
 ) -> dict[str, dict]:
     """Replay ONLY the sources the sections actually reference (an extra source in a
@@ -164,7 +165,13 @@ async def _execute_sources(
         # inside the tool (e.g. the Connection lookup) always run under this tenant.
         await set_tenant_context(db, str(tenant_id))
         result_str = await execute_tool_call(
-            tool, params, tenant_id=tenant_id, actor_id=actor_id, correlation_id=correlation_id, db=db
+            tool,
+            params,
+            tenant_id=tenant_id,
+            actor_id=actor_id,
+            actor_type=actor_type,  # tool_call audit rows must not stamp a system replay as 'user'
+            correlation_id=correlation_id,
+            db=db,
         )
         try:
             parsed = json.loads(result_str)
@@ -197,6 +204,11 @@ async def refresh_report(
     from app.services.report.report_html import render_report_html
     from app.services.report.report_service import assemble_spec, referenced_result_ids
 
+    if actor_id is None and actor_type == "user":
+        # a user-attributed audit row with no user id is indistinguishable from a
+        # corrupted record — anonymous actors must declare themselves (e.g. "system")
+        raise ValueError("refresh_report: actor_id=None requires a non-user actor_type")
+
     # ---- Phase 1: claim (debounce stamp committed before any tool runs) -------------
     await set_tenant_context(db, str(tenant_id))
     report = await _locked_report(db, report_id)
@@ -225,7 +237,13 @@ async def refresh_report(
         # without a source fails closed inside _execute_sources (never "Data unavailable").
         needed_rids = referenced_result_ids(recipe["sections"])
         payloads = await _execute_sources(
-            db, sources, needed_rids, tenant_id=tenant_id, actor_id=actor_id, correlation_id=correlation_id
+            db,
+            sources,
+            needed_rids,
+            tenant_id=tenant_id,
+            actor_id=actor_id,
+            actor_type=actor_type,
+            correlation_id=correlation_id,
         )
 
         spec = assemble_spec(report.title, recipe["sections"], lambda rid: payloads[rid])
@@ -297,7 +315,10 @@ async def refresh_report(
             await enforce_version_retention(db, report_id=report_id, tenant_id=tenant_id)
             await db.commit()
         except Exception:
-            logger.warning("report.refresh version retention failed (non-fatal)", exc_info=True)
+            # ERROR, not warning: a chronically broken janitor (schema drift, bad SQL)
+            # would otherwise fail silently on EVERY refresh while report_versions
+            # grows unbounded — this must reach the error pipeline, not just the log.
+            logger.error("report.refresh version retention failed (non-fatal)", exc_info=True)
             await db.rollback()
         # the last commit/rollback cleared the GUC; db.refresh re-SELECTs the row under RLS
         await set_tenant_context(db, str(tenant_id))
