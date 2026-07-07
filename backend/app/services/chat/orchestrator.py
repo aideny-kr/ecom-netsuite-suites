@@ -1297,6 +1297,27 @@ def _intercept_with_cache(
     return event_type, _strip_cache_only_fields_from_sse(event_data), new_result_str
 
 
+def _write_full_payload_sidecar(
+    conversation_id: str,
+    result_id: str,
+    tool_name: str | None,
+    params: dict | None,
+    full_payload: dict,
+) -> None:
+    """Eagerly write the FULL pre-truncation payload PLUS its executed {tool, params}
+    (the recipe meta — Slice A of live-dashboard reports) to the in-turn sidecar, so a
+    SAME-TURN report.compose can both resolve the payload and capture the refresh
+    recipe from the single point of execution. Best-effort: the sidecar must never
+    break the turn (module-level so the meta forwarding is unit-testable)."""
+    from app.services.chat.result_cache import cache_full_payload
+
+    try:
+        cache_full_payload(conversation_id, result_id, full_payload, tool_name=tool_name, params=params)
+    except Exception:
+        # The sidecar is best-effort; never break the turn.
+        pass
+
+
 def _make_tool_interceptor(context_need: str = ContextNeed.DATA, cache_callback=None, start_count: int = 0):
     """Create a tool interceptor closure that captures context_need.
 
@@ -2808,7 +2829,6 @@ async def run_chat_turn(
                     from app.services.chat.result_cache import (
                         CachedResult,
                         _cache_result_sync,
-                        cache_full_payload,
                         get_latest_result,
                     )
 
@@ -2930,13 +2950,12 @@ async def run_chat_turn(
                         # isn't persisted until AFTER this loop). The payload is
                         # computed ONCE by the interceptor (the SINGLE
                         # id-assignment criterion) and threaded here — the
-                        # sidecar never re-extracts (finding #15).
+                        # sidecar never re-extracts (finding #15). The executed
+                        # {tool, params} ride the same envelope (recipe meta,
+                        # Slice A) — recorded at the point of execution, never
+                        # re-derived.
                         if result_id and full_payload is not None:
-                            try:
-                                cache_full_payload(str(session.id), result_id, full_payload)
-                            except Exception:
-                                # The sidecar is best-effort; never break the turn.
-                                pass
+                            _write_full_payload_sidecar(str(session.id), result_id, tool_name, params, full_payload)
 
                         # The result-cache / pricing-state entry only exists for an
                         # SSE-producing event (a payload-bearing tool with no event —

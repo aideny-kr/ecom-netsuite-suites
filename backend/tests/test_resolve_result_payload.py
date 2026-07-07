@@ -382,6 +382,74 @@ def test_inturn_result_aligns_with_fallback_across_turns():
     assert captured["result_id"] == "r4"
 
 
+# --- Slice A (live-dashboard reports): the sidecar write carries {tool, params} ---
+# _on_tool_intercepted receives the executed tool_name + params and used to discard
+# them; the extracted module-level helper now forwards both into the sidecar envelope
+# so a same-turn report.compose can capture the refresh recipe's meta.
+
+
+def test_sidecar_write_helper_carries_tool_and_params():
+    from unittest.mock import patch
+
+    from app.services.chat import orchestrator
+
+    calls: dict = {}
+
+    def fake_cache(conversation_id, result_id, payload, *, tool_name=None, params=None):
+        calls.update(
+            conversation_id=conversation_id,
+            result_id=result_id,
+            payload=payload,
+            tool_name=tool_name,
+            params=params,
+        )
+
+    with patch("app.services.chat.result_cache.cache_full_payload", fake_cache):
+        orchestrator._write_full_payload_sidecar(
+            "conv-9", "r4", "netsuite_suiteql", {"query": "SELECT 1"}, {"rows": [[1]], "row_count": 1}
+        )
+    assert calls == {
+        "conversation_id": "conv-9",
+        "result_id": "r4",
+        "payload": {"rows": [[1]], "row_count": 1},
+        "tool_name": "netsuite_suiteql",
+        "params": {"query": "SELECT 1"},
+    }
+
+
+def test_sidecar_write_helper_is_best_effort_never_raises():
+    from unittest.mock import patch
+
+    from app.services.chat import orchestrator
+
+    def boom(*a, **k):
+        raise RuntimeError("redis down")
+
+    with patch("app.services.chat.result_cache.cache_full_payload", boom):
+        orchestrator._write_full_payload_sidecar("c", "r1", "t", {}, {"rows": []})  # must not raise
+
+
+def test_interceptor_callback_receives_tool_and_params():
+    """Pin the plumbing recipe capture rides on: _make_tool_interceptor threads the
+    executed tool_name + params (+ the precomputed full_payload) to the callback."""
+    import json
+
+    from app.services.chat.orchestrator import _make_tool_interceptor
+
+    captured: dict = {}
+
+    def _cb(tool_name, event_type_str, event_data, result_id=None, params=None, result_str=None, full_payload=None):
+        captured.update(tool_name=tool_name, params=params, result_id=result_id, full_payload=full_payload)
+
+    interceptor = _make_tool_interceptor(cache_callback=_cb)
+    payload = {"columns": ["c"], "rows": [["x"]], "row_count": 1, "query": "SELECT 1"}
+    interceptor("netsuite_suiteql", json.dumps(payload), params={"query": "SELECT 1"})
+    assert captured["tool_name"] == "netsuite_suiteql"
+    assert captured["params"] == {"query": "SELECT 1"}
+    assert captured["result_id"] == "r1"
+    assert captured["full_payload"] is not None
+
+
 # --- Gate D (finding #18): defense-in-depth tenant filter on the resolver query ---
 
 
