@@ -26,7 +26,7 @@ from app.models.report import Report
 from app.models.report_version import ReportVersion
 from app.services.report.refresh_service import (
     REFRESH_MIN_INTERVAL_SECONDS,
-    RefreshDebounced,
+    RefreshDebouncedError,
     RefreshError,
     refresh_report,
 )
@@ -148,7 +148,7 @@ async def test_refresh_within_window_debounced_429(db, monkeypatch):
     tenant, user, report = await _seed_report(db, recipe=_recipe())
     _patch_executor(monkeypatch)
     await refresh_report(db, report_id=report.id, tenant_id=tenant.id, actor_id=user.id)
-    with pytest.raises(RefreshDebounced) as exc:
+    with pytest.raises(RefreshDebouncedError) as exc:
         await refresh_report(db, report_id=report.id, tenant_id=tenant.id, actor_id=user.id)
     assert exc.value.status_code == 429
     assert exc.value.retry_after_seconds > 0
@@ -249,7 +249,7 @@ async def test_failed_attempt_still_consumes_debounce_window(db, monkeypatch):
     _patch_executor(monkeypatch, json.dumps({"error": True, "message": "dead token"}))
     with pytest.raises(RefreshError):
         await refresh_report(db, report_id=report.id, tenant_id=tenant.id, actor_id=user.id)
-    with pytest.raises(RefreshDebounced):
+    with pytest.raises(RefreshDebouncedError):
         await refresh_report(db, report_id=report.id, tenant_id=tenant.id, actor_id=user.id)
 
 

@@ -60,7 +60,7 @@ class RefreshError(Exception):
         self.detail = detail
 
 
-class RefreshDebounced(RefreshError):
+class RefreshDebouncedError(RefreshError):
     def __init__(self, retry_after_seconds: int):
         super().__init__(429, f"refreshed recently — try again in about {retry_after_seconds}s")
         self.retry_after_seconds = retry_after_seconds
@@ -163,7 +163,7 @@ async def refresh_report(
     if report.last_refreshed_at is not None:
         elapsed = (now - report.last_refreshed_at).total_seconds()
         if elapsed < REFRESH_MIN_INTERVAL_SECONDS:
-            raise RefreshDebounced(int(REFRESH_MIN_INTERVAL_SECONDS - elapsed) + 1)
+            raise RefreshDebouncedError(int(REFRESH_MIN_INTERVAL_SECONDS - elapsed) + 1)
     # Snapshot the pre-refresh state in memory (for the lazy v1 row) BEFORE committing.
     pre = {
         "version": report.version,
