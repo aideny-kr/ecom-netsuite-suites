@@ -3,7 +3,13 @@ import { useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { apiClient } from "@/lib/api-client";
 import { Button } from "@/components/ui/button";
-import { ArrowLeft, Download } from "lucide-react";
+import { ArrowLeft, Download, RefreshCw } from "lucide-react";
+import { useRefreshReport, useReport, useReportVersions } from "@/hooks/use-reports";
+
+function fmtStamp(iso: string): string {
+  const d = new Date(iso);
+  return isNaN(d.getTime()) ? iso : d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+}
 
 export default function ReportViewPage() {
   const { id } = useParams<{ id: string }>();
@@ -11,24 +17,41 @@ export default function ReportViewPage() {
   const [html, setHtml] = useState<string | null>(null);
   const [blobUrl, setBlobUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // null = the current version (the stable /view URL); a number = a historical snapshot.
+  const [selectedVersion, setSelectedVersion] = useState<number | null>(null);
+  // bumped after a successful refresh so the effect re-fetches the (new) current HTML.
+  const [refreshNonce, setRefreshNonce] = useState(0);
+  const [actionMsg, setActionMsg] = useState<string | null>(null);
+
+  const { data: report } = useReport(id);
+  const { data: versions } = useReportVersions(id);
+  const refresh = useRefreshReport(id);
+  const viewingCurrent = selectedVersion === null;
 
   useEffect(() => {
     let url: string | null = null;
     let cancelled = false;
+    const path =
+      selectedVersion === null
+        ? `/api/v1/reports/${id}/view`
+        : `/api/v1/reports/${id}/versions/${selectedVersion}/view`;
     apiClient
-      .getText(`/api/v1/reports/${id}/view`)
+      .getText(path)
       .then((reportHtml) => {
         if (cancelled) return;
         setHtml(reportHtml);
         url = URL.createObjectURL(new Blob([reportHtml], { type: "text/html" }));
-        setBlobUrl(url);
+        setBlobUrl((old) => {
+          if (old) URL.revokeObjectURL(old); // never leak the previous blob
+          return url;
+        });
       })
       .catch(() => !cancelled && setError("Report not found"));
     return () => {
       cancelled = true;
       if (url) URL.revokeObjectURL(url);
     };
-  }, [id]);
+  }, [id, selectedVersion, refreshNonce]);
 
   // Save the frozen artifact as a standalone .html file — the publishable page.
   // Deliberately NOT "open blob in new tab": a blob: URL shares this app's origin,
@@ -44,6 +67,22 @@ export default function ReportViewPage() {
     URL.revokeObjectURL(dl);
   }
 
+  function handleRefresh() {
+    setActionMsg(null);
+    refresh.mutate(undefined, {
+      onSuccess: () => {
+        setSelectedVersion(null); // a refresh always lands you on the new current version
+        setRefreshNonce((n) => n + 1);
+      },
+      // The backend's detail strings are user-facing ("refreshed recently — try again
+      // in about Ns" on the debounce; "reconnect"-style messages on source failures).
+      // The last good iframe stays untouched on any error.
+      onError: (e: Error) => setActionMsg(e.message || "Refresh failed"),
+    });
+  }
+
+  const stampSource = report?.last_refreshed_at ?? report?.created_at;
+
   return (
     <div className="flex flex-col h-full">
       <div className="flex items-center gap-3 border-b-[3px] border-black bg-card px-4 py-2">
@@ -51,13 +90,44 @@ export default function ReportViewPage() {
           <ArrowLeft className="h-4 w-4 mr-1" />
           Back
         </Button>
-        <div className="ml-auto">
+        {stampSource && (
+          <span className="text-[13px] text-muted-foreground">Data as of {fmtStamp(stampSource)}</span>
+        )}
+        {actionMsg && <span className="text-[13px] text-destructive">{actionMsg}</span>}
+        <div className="ml-auto flex items-center gap-2">
+          {versions && versions.length > 1 && (
+            <select
+              aria-label="Report version"
+              className="h-8 rounded-md border bg-background px-2 text-[13px]"
+              value={selectedVersion === null ? "current" : String(selectedVersion)}
+              onChange={(e) =>
+                setSelectedVersion(e.target.value === "current" ? null : Number(e.target.value))
+              }
+            >
+              {versions.map((v) => (
+                <option key={v.version} value={v.is_current ? "current" : String(v.version)}>
+                  v{v.version}
+                  {v.is_current ? " · current" : ""} · {fmtStamp(v.created_at)}
+                </option>
+              ))}
+            </select>
+          )}
+          {report?.has_recipe && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleRefresh}
+              disabled={refresh.isPending || !viewingCurrent}
+            >
+              <RefreshCw className={`h-4 w-4 mr-1${refresh.isPending ? " animate-spin" : ""}`} />
+              Refresh
+            </Button>
+          )}
           <Button variant="outline" size="sm" onClick={handleDownload} disabled={!html}>
             <Download className="h-4 w-4 mr-1" />
             Download HTML
           </Button>
         </div>
-        {/* Slice 2: Publish to Drive / Download PDF buttons (disabled here) */}
       </div>
       {error ? (
         <div className="p-8 text-muted-foreground">{error}</div>
