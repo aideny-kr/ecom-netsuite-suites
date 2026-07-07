@@ -243,7 +243,7 @@ async def execute_tool_call(
     tool_name: str,
     tool_input: dict,
     tenant_id: uuid.UUID,
-    actor_id: uuid.UUID,
+    actor_id: uuid.UUID | None,
     correlation_id: str,
     db: "AsyncSession",
     context_need: str | None = None,
@@ -292,7 +292,9 @@ async def execute_tool_call(
             tool_name=mcp_name,
             params=tool_input,
             tenant_id=str(tenant_id),
-            actor_id=str(actor_id),
+            # a system actor (report auto-refresh sweep) is None — str(None) == "None"
+            # is truthy and governance's uuid.UUID(actor_id) would raise on it
+            actor_id=str(actor_id) if actor_id is not None else None,
             correlation_id=correlation_id,
             db=db,
             context_need=context_need,

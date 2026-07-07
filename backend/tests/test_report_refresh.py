@@ -366,6 +366,91 @@ async def test_only_referenced_sources_are_dispatched(db, monkeypatch):
     assert [c["params"] for c in calls] == [{"query": "SELECT 1"}]  # r9 never dispatched
 
 
+# --- Slice C: system-actor plumbing (the Beat sweep refreshes with no human actor) ----
+
+
+async def _refresh_audit_actor(db, report_id, *, status="success"):
+    return (
+        await db.execute(
+            text(
+                "SELECT actor_id, actor_type FROM audit_events "
+                "WHERE action='report.refresh' AND status=:st AND resource_id=:rid"
+            ),
+            {"st": status, "rid": str(report_id)},
+        )
+    ).first()
+
+
+async def test_system_actor_refresh_publishes_with_null_created_by(db, monkeypatch):
+    """The sweep calls refresh_report(actor_id=None, actor_type="system") — the new
+    version's author is NULL (no human) and the audit event carries the system actor."""
+    tenant, user, report = await _seed_report(db, recipe=_recipe())
+    _patch_executor(monkeypatch)
+
+    updated = await refresh_report(db, report_id=report.id, tenant_id=tenant.id, actor_id=None, actor_type="system")
+
+    assert updated.version == 2
+    v2 = (
+        await db.execute(
+            select(ReportVersion).where(ReportVersion.report_id == report.id, ReportVersion.version == 2)
+        )
+    ).scalar_one()
+    assert v2.created_by is None
+    row = await _refresh_audit_actor(db, report.id)
+    assert row is not None
+    assert row[0] is None and row[1] == "system"
+
+
+async def test_system_actor_failure_audit_carries_system_actor(db, monkeypatch):
+    tenant, user, report = await _seed_report(db, recipe=_recipe())
+    rid, tid = report.id, tenant.id  # the service's rollback expires ORM instances
+    _patch_executor(monkeypatch, json.dumps({"error": True, "message": "dead token"}))
+    with pytest.raises(RefreshError):
+        await refresh_report(db, report_id=rid, tenant_id=tid, actor_id=None, actor_type="system")
+    row = await _refresh_audit_actor(db, rid, status="error")
+    assert row is not None
+    assert row[0] is None and row[1] == "system"
+
+
+async def test_default_actor_type_stays_user(db, monkeypatch):
+    """The HTTP path is unchanged: actor_id=user.id with no actor_type kwarg keeps
+    authoring + auditing as that user."""
+    tenant, user, report = await _seed_report(db, recipe=_recipe())
+    _patch_executor(monkeypatch)
+    await refresh_report(db, report_id=report.id, tenant_id=tenant.id, actor_id=user.id)
+    v2 = (
+        await db.execute(
+            select(ReportVersion).where(ReportVersion.report_id == report.id, ReportVersion.version == 2)
+        )
+    ).scalar_one()
+    assert v2.created_by == user.id
+    row = await _refresh_audit_actor(db, report.id)
+    assert row is not None
+    assert row[0] == user.id and row[1] == "user"
+
+
+async def test_execute_tool_call_maps_none_actor_to_none_not_str(db, monkeypatch):
+    """Load-bearing for the system-actor sweep: tools.py stringifies actor_id before the
+    local dispatch, and str(None) == "None" is TRUTHY — governance's
+    `uuid.UUID(actor_id) if actor_id else None` would raise on it, failing every local
+    source in a system refresh. None must reach the MCP server as None."""
+    from app.services.chat import tools as chat_tools
+
+    captured: dict = {}
+
+    async def fake_call_tool(**kw):
+        captured.update(kw)
+        return {"success": True}
+
+    monkeypatch.setattr(chat_tools.mcp_server, "call_tool", fake_call_tool)
+    assert "netsuite_suiteql" in chat_tools._LOCAL_NAME_MAP  # the canonical recipe tool
+    await chat_tools.execute_tool_call(
+        "netsuite_suiteql", {"query": "SELECT 1"}, tenant_id=uuid.uuid4(), actor_id=None, correlation_id="c", db=db
+    )
+    assert "actor_id" in captured
+    assert captured["actor_id"] is None, f"None actor must not stringify (got {captured['actor_id']!r})"
+
+
 async def test_superseded_refresh_aborts_before_publish(db, monkeypatch):
     """Major fix: a slow refresh overtaken by a newer claim (window expired mid-flight)
     must NOT publish stale data over the newer version — compare-and-publish guard."""

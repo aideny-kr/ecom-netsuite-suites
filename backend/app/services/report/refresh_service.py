@@ -176,10 +176,15 @@ async def refresh_report(
     *,
     report_id: uuid.UUID,
     tenant_id: uuid.UUID,
-    actor_id: uuid.UUID,
+    actor_id: uuid.UUID | None,
+    actor_type: str = "user",
 ) -> Report:
     """Re-execute ``report_id``'s recipe and publish version N+1. Raises RefreshError
-    (→ clean HTTP error); the current version is never corrupted on failure."""
+    (→ clean HTTP error); the current version is never corrupted on failure.
+
+    Slice C: the Beat sweep calls with ``actor_id=None, actor_type="system"`` (the
+    house audit convention for cron actors) — the published version's ``created_by``
+    is then NULL. The HTTP endpoint always passes the acting user."""
     from app.services.report.report_html import render_report_html
     from app.services.report.report_service import assemble_spec, referenced_result_ids
 
@@ -266,6 +271,7 @@ async def refresh_report(
             category="report",
             action="report.refresh",
             actor_id=actor_id,
+            actor_type=actor_type,
             resource_type="report",
             resource_id=str(report_id),
             correlation_id=correlation_id,
@@ -288,6 +294,7 @@ async def refresh_report(
                 category="report",
                 action="report.refresh",
                 actor_id=actor_id,
+                actor_type=actor_type,
                 resource_type="report",
                 resource_id=str(report_id),
                 correlation_id=correlation_id,
