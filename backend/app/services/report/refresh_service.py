@@ -67,6 +67,14 @@ class RefreshDebouncedError(RefreshError):
         self.retry_after_seconds = retry_after_seconds
 
 
+class RefreshSupersededError(RefreshError):
+    """A newer refresh claimed the window mid-flight. Typed so the Slice-C sweep can
+    tell "someone else refreshed" (never a ladder increment) from a real failure."""
+
+    def __init__(self):
+        super().__init__(409, "superseded by a newer refresh — reload to see the latest version")
+
+
 async def _locked_report(db: AsyncSession, report_id: uuid.UUID) -> Report:
     # populate_existing is LOAD-BEARING (T2 re-gate): without it the identity map hands
     # back this session's cached instance UNREFRESHED, so Phase 3's supersede comparison
@@ -234,7 +242,7 @@ async def refresh_report(
         # the stamp is no longer OURS, a newer refresh claimed after us — abort rather
         # than publish our (older) data over a newer version.
         if report.last_refreshed_at != now:
-            raise RefreshError(409, "superseded by a newer refresh — reload to see the latest version")
+            raise RefreshSupersededError()
         max_version = (
             await db.execute(select(func.max(ReportVersion.version)).where(ReportVersion.report_id == report_id))
         ).scalar()

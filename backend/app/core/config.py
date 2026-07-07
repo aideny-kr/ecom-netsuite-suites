@@ -142,6 +142,11 @@ class Settings(BaseSettings):
     # Live-dashboard reports (Slice C): stored versions per report are capped (§6.2);
     # pinned versions exempt, the current version never pruned.
     REPORT_VERSION_RETENTION_CAP: int = 30
+    # Per-tenant sweep batch: at most this many reports refresh per Beat tick,
+    # most-stale first (overflow waits for the next tick — the house no-self-retry
+    # convention). With MAX_RECIPE_SOURCES=12 this bounds a tenant tick at ≤120
+    # sequential tool calls against the tenant's connections.
+    REPORT_AUTO_REFRESH_BATCH: int = 10
 
     # Autonomous query improvement loop
     QUERY_IMPROVEMENT_ENABLED: bool = False
