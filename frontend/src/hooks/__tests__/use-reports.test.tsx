@@ -6,11 +6,18 @@ import type { ReactNode } from "react";
 const api = vi.hoisted(() => ({
   get: vi.fn(),
   post: vi.fn(),
+  patch: vi.fn(),
   getText: vi.fn(),
 }));
 vi.mock("@/lib/api-client", () => ({ apiClient: api }));
 
-import { useRefreshReport, useReport, useReportVersions } from "@/hooks/use-reports";
+import {
+  useRefreshReport,
+  useReport,
+  useReportVersions,
+  useResumeAutoRefresh,
+  useUpdateReportSettings,
+} from "@/hooks/use-reports";
 
 function makeWrapper(qc: QueryClient) {
   return function Wrapper({ children }: { children: ReactNode }) {
@@ -46,6 +53,34 @@ it("useReportVersions fetches the picker entries", async () => {
   const { result } = renderHook(() => useReportVersions("r-1"), { wrapper: makeWrapper(qc) });
   await waitFor(() => expect(result.current.data?.length).toBe(2));
   expect(api.get).toHaveBeenCalledWith("/api/v1/reports/r-1/versions");
+});
+
+// --- Slice C: auto-refresh settings + resume ------------------------------------------
+
+it("useUpdateReportSettings PATCHes the interval and invalidates report queries", async () => {
+  api.patch.mockResolvedValueOnce({ id: "r-1", auto_refresh: "hourly" });
+  const qc = new QueryClient(qcOpts);
+  const invalidate = vi.spyOn(qc, "invalidateQueries");
+  const { result } = renderHook(() => useUpdateReportSettings("r-1"), { wrapper: makeWrapper(qc) });
+  result.current.mutate("hourly");
+  await waitFor(() => expect(result.current.isSuccess).toBe(true));
+  expect(api.patch).toHaveBeenCalledWith("/api/v1/reports/r-1/settings", { auto_refresh: "hourly" });
+  const keys = invalidate.mock.calls.map((c) => JSON.stringify(c[0]?.queryKey));
+  expect(keys).toContain(JSON.stringify(["reports"]));
+  expect(keys).toContain(JSON.stringify(["reports", "r-1"]));
+});
+
+it("useResumeAutoRefresh posts to /auto-refresh/resume and invalidates report queries", async () => {
+  api.post.mockResolvedValueOnce({ id: "r-1", auto_refresh_paused_at: null, refresh_failure_count: 0 });
+  const qc = new QueryClient(qcOpts);
+  const invalidate = vi.spyOn(qc, "invalidateQueries");
+  const { result } = renderHook(() => useResumeAutoRefresh("r-1"), { wrapper: makeWrapper(qc) });
+  result.current.mutate();
+  await waitFor(() => expect(result.current.isSuccess).toBe(true));
+  expect(api.post).toHaveBeenCalledWith("/api/v1/reports/r-1/auto-refresh/resume");
+  const keys = invalidate.mock.calls.map((c) => JSON.stringify(c[0]?.queryKey));
+  expect(keys).toContain(JSON.stringify(["reports"]));
+  expect(keys).toContain(JSON.stringify(["reports", "r-1"]));
 });
 
 it("useRefreshReport posts to /refresh and invalidates report + versions queries", async () => {
