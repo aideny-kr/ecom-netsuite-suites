@@ -32,6 +32,16 @@ class Report(Base):
     # refresh also consumes the ~5 min window; quota protection against hammering a
     # dead OAuth connection). NULL = never refreshed.
     last_refreshed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Slice C: the USER-CHOSEN sweep interval (off|hourly|daily) — never overwritten by
+    # the failure ladder (backoff is derived in the sweep from refresh_failure_count).
+    # 'daily' default is inert without recipe_json (the sweep predicate requires it).
+    auto_refresh: Mapped[str] = mapped_column(Text, nullable=False, default="daily", server_default="daily")
+    # Slice C failure ladder: consecutive FAILED auto-refreshes (sweep-owned — manual
+    # refresh and debounce/supersede skips never touch it; success resets to 0).
+    refresh_failure_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    # Slice C: stamped when ~7 consecutive failures pause the sweep for this report;
+    # cleared ONLY by the user's explicit resume (a later success never clears it).
+    auto_refresh_paused_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     published_drive_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
