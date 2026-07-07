@@ -11,7 +11,8 @@ from app.core.dependencies import get_current_user
 from app.models.report import Report
 from app.models.report_version import ReportVersion
 from app.models.user import User
-from app.schemas.report import ReportResponse, ReportVersionResponse
+from app.schemas.report import ReportResponse, ReportSettingsUpdate, ReportVersionResponse
+from app.services import audit_service
 from app.services.report import refresh_service
 
 router = APIRouter(prefix="/reports", tags=["reports"])
@@ -29,6 +30,9 @@ def _to_response(r: Report) -> ReportResponse:
         created_at=r.created_at,
         has_recipe=r.recipe_json is not None,
         last_refreshed_at=r.last_refreshed_at,
+        auto_refresh=r.auto_refresh,
+        refresh_failure_count=r.refresh_failure_count,
+        auto_refresh_paused_at=r.auto_refresh_paused_at,
     )
 
 
@@ -96,6 +100,68 @@ async def refresh_report_endpoint(
     except refresh_service.RefreshError as e:
         raise HTTPException(status_code=e.status_code, detail=e.detail) from e
     return _to_response(updated)
+
+
+# --- Slice C: auto-refresh settings + one-click resume ---------------------------------
+# Same gate as every report route (get_current_user + RLS — see the §6.3 permission
+# note above): whoever can view a report can schedule/resume its read-only replay.
+
+
+@router.patch("/{report_id}/settings", response_model=ReportResponse)
+async def update_report_settings(
+    report_id: str,
+    request: ReportSettingsUpdate,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    row = await _get_owned(db, report_id)
+    # Legacy/snapshot reports stay snapshot-only (§6.1): recipe_json loads as Python
+    # None for BOTH SQL NULL and the jsonb-'null' rows compose writes explicitly.
+    if request.auto_refresh != "off" and row.recipe_json is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="snapshot-only report — no refresh recipe to schedule",
+        )
+    row.auto_refresh = request.auto_refresh
+    await audit_service.log_event(
+        db=db,
+        tenant_id=user.tenant_id,
+        category="report",
+        action="report.settings_update",
+        actor_id=user.id,
+        resource_type="report",
+        resource_id=str(row.id),
+        payload={"auto_refresh": request.auto_refresh},
+    )
+    await db.commit()
+    # no db.refresh: the commit cleared the RLS GUC and expire_on_commit=False keeps
+    # every attribute the response needs.
+    return _to_response(row)
+
+
+@router.post("/{report_id}/auto-refresh/resume", response_model=ReportResponse)
+async def resume_auto_refresh(
+    report_id: str,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """One-click resume after the failure ladder paused a report (§4C). Clears the
+    pause AND zeroes the count — otherwise one stale failure would re-pause almost
+    immediately. Idempotent on a never-paused report."""
+    row = await _get_owned(db, report_id)
+    row.auto_refresh_paused_at = None
+    row.refresh_failure_count = 0
+    await audit_service.log_event(
+        db=db,
+        tenant_id=user.tenant_id,
+        category="report",
+        action="report.auto_refresh_resumed",
+        actor_id=user.id,
+        resource_type="report",
+        resource_id=str(row.id),
+    )
+    await db.commit()
+    return _to_response(row)
 
 
 def _version_entry(v: ReportVersion, current_version: int) -> ReportVersionResponse:

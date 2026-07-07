@@ -264,3 +264,104 @@ async def test_versions_list_and_historical_view(client, db, monkeypatch):
     v1 = await client.get(f"/api/v1/reports/{r.id}/versions/1/view", headers=headers)
     assert v1.status_code == 200 and v1.text == "<html>original</html>"
     assert (await client.get(f"/api/v1/reports/{r.id}/versions/99/view", headers=headers)).status_code == 404
+
+
+# --- Slice C: auto-refresh settings + resume (same get_current_user+RLS gate as all
+# report routes — see the §6.3 permission note above the refresh endpoint) -------------
+
+
+async def test_report_response_exposes_auto_refresh_ladder_state(client, db):
+    """The FE derives the selector + staleness/paused banners from these three fields."""
+    ta, ua, r = await _seed_recipe_report(db)
+    body = (await client.get(f"/api/v1/reports/{r.id}", headers=make_auth_headers(ua))).json()
+    assert body["auto_refresh"] == "daily"  # §6.1 default
+    assert body["refresh_failure_count"] == 0
+    assert body["auto_refresh_paused_at"] is None
+
+
+async def test_patch_settings_roundtrip_each_interval_and_audits(client, db):
+    ta, ua, r = await _seed_recipe_report(db)
+    headers = make_auth_headers(ua)
+    for value in ("off", "hourly", "daily"):
+        res = await client.patch(f"/api/v1/reports/{r.id}/settings", headers=headers, json={"auto_refresh": value})
+        assert res.status_code == 200, res.text
+        assert res.json()["auto_refresh"] == value
+    audit = (
+        await db.execute(
+            text(
+                "SELECT count(*), min(actor_type) FROM audit_events "
+                "WHERE action='report.settings_update' AND resource_id=:rid AND actor_id=:aid"
+            ),
+            {"rid": str(r.id), "aid": str(ua.id)},
+        )
+    ).first()
+    assert audit[0] == 3 and audit[1] == "user"
+
+
+async def test_patch_settings_rejects_unknown_interval_422(client, db):
+    ta, ua, r = await _seed_recipe_report(db)
+    res = await client.patch(
+        f"/api/v1/reports/{r.id}/settings", headers=make_auth_headers(ua), json={"auto_refresh": "weekly"}
+    )
+    assert res.status_code == 422
+
+
+async def test_patch_settings_snapshot_only_409_for_scheduling(client, db):
+    """Legacy/snapshot reports stay snapshot-only (§6.1): scheduling them is a 409;
+    'off' is always accepted (inert either way)."""
+    ta, ua, r = await _seed_recipe_report(db, recipe=None)
+    headers = make_auth_headers(ua)
+    assert (
+        await client.patch(f"/api/v1/reports/{r.id}/settings", headers=headers, json={"auto_refresh": "hourly"})
+    ).status_code == 409
+    assert (
+        await client.patch(f"/api/v1/reports/{r.id}/settings", headers=headers, json={"auto_refresh": "off"})
+    ).status_code == 200
+
+
+async def test_patch_settings_unauth_401_and_malformed_404(client, db):
+    """Cross-tenant invisibility is NOT client-testable here (the fixture session is
+    the BYPASSRLS postgres owner — see test_view_cross_tenant_is_rls_invisible, which
+    proves the policy through a non-bypass role; settings rides the same _get_owned
+    None→404 path as every report route)."""
+    ta, ua, r = await _seed_recipe_report(db)
+    assert (await client.patch(f"/api/v1/reports/{r.id}/settings", json={"auto_refresh": "off"})).status_code == 401
+    assert (
+        await client.patch(
+            "/api/v1/reports/not-a-uuid/settings", headers=make_auth_headers(ua), json={"auto_refresh": "off"}
+        )
+    ).status_code == 404
+
+
+async def test_resume_clears_pause_resets_count_and_audits(client, db):
+    """The one-click resume after reconnect (§4C): clears auto_refresh_paused_at AND
+    zeroes the count (otherwise one stale failure re-pauses almost immediately).
+    Idempotent — resuming a never-paused report is a 200 no-op."""
+    from datetime import datetime, timezone
+
+    ta, ua, r = await _seed_recipe_report(db)
+    r.auto_refresh_paused_at = datetime.now(timezone.utc)
+    r.refresh_failure_count = 7
+    await db.flush()
+    headers = make_auth_headers(ua)
+
+    res = await client.post(f"/api/v1/reports/{r.id}/auto-refresh/resume", headers=headers)
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["auto_refresh_paused_at"] is None
+    assert body["refresh_failure_count"] == 0
+
+    audit = (
+        await db.execute(
+            text(
+                "SELECT actor_id, actor_type FROM audit_events "
+                "WHERE action='report.auto_refresh_resumed' AND resource_id=:rid"
+            ),
+            {"rid": str(r.id)},
+        )
+    ).first()
+    assert audit is not None and audit[0] == ua.id and audit[1] == "user"
+
+    again = await client.post(f"/api/v1/reports/{r.id}/auto-refresh/resume", headers=headers)
+    assert again.status_code == 200  # idempotent
+    assert (await client.post(f"/api/v1/reports/{r.id}/auto-refresh/resume")).status_code == 401
