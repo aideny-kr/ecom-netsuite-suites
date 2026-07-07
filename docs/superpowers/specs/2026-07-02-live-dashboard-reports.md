@@ -1,6 +1,6 @@
 # Live Dashboard Reports (Phase 6 of report quality) — Design Spec
 
-**Status:** Draft for product review. **Owner:** next agent. **Tier:** T2 (financial surface + alembic migration + cron/Beat + report tooling).
+**Status:** Product-decided 2026-07-06 (§6) — ready to implement, Slice A first. **Tier:** T2 (financial surface + alembic migration + cron/Beat + report tooling).
 **Product direction (owner, 2026-07-02):** "these reports should be live dashboard. learn from claude."
 **Depends on:** the report-quality stack (#155; #157→#158→#159→#160 — deterministic curation, statement treatment, chart selection, reporting skill). ClickUp: 86bapzbr9 (parent program).
 
@@ -54,8 +54,10 @@ refresh button + "data as of" stamp.
   stored connection ids + `set_tenant_context`), rebuild payloads through
   `extract_result_payload` (so `line_meta`/currency tagging regenerate), re-run
   `assemble_spec` with the ORIGINAL sections, render, insert as version N+1. Audit event
-  `report.refresh`. Permission-gated (same as compose); no HITL needed (reads only) but
-  every refresh is audited.
+  `report.refresh` with the acting user. Permission: report READ permission (§6 decision —
+  it is a read-only replay); no HITL needed (reads only) but every refresh is audited AND
+  per-report debounced (minimum interval between refreshes, proposal 5 min) so viewers
+  cannot burn tenant NetSuite quota or churn versions.
 - Narrative honesty: prose is compose-time text; `{{result:…}}` placeholders re-resolve
   against fresh payloads, but claims in prose can go stale → footer stamps
   "narrative composed <date>; data refreshed <date>". (Re-composing narrative via the
@@ -63,12 +65,17 @@ refresh button + "data as of" stamp.
 - FE: Refresh button + "data as of" stamp + version picker (list versions, view any).
 
 ### Slice C — Dashboard mode (auto-refresh)
-- Per-report `auto_refresh` interval (off | hourly | daily) — Beat `InstrumentedTask`
-  sweep refreshes due reports (T2: cron). Failure = keep last good version + staleness
-  banner ("data as of …; last refresh failed: reconnect NetSuite") — NEVER a broken page,
-  NEVER auto-retry storms against a dead OAuth connection (single-use-token death is the
-  known failure mode; back off to daily on repeated failure).
-- Version retention: cap stored versions per report (e.g. 30) with pinned versions exempt.
+- Per-report `auto_refresh` interval (off | hourly | daily; **default `daily`** for newly
+  composed recipe-bearing reports, §6) — Beat `InstrumentedTask` sweep refreshes due
+  reports (T2: cron). Failure = keep last good version + staleness banner ("data as of …;
+  last refresh failed: reconnect NetSuite") — NEVER a broken page, NEVER auto-retry storms
+  against a dead OAuth connection (single-use-token death is the known failure mode):
+  hourly backs off to daily on repeated failure, and after N consecutive failed refreshes
+  (proposal: 7) auto-refresh PAUSES for that report (banner explains; one-click resume
+  after reconnect). With daily-by-default this pause ladder is launch-critical, not
+  polish.
+- Version retention: cap stored versions per report at **30** (§6), pinned versions
+  exempt, the latest/current version never pruned; prune oldest-unpinned first.
 
 ### Slice D — "Learn from Claude" rendering polish
 - Self-contained interactivity in the report HTML (no CDNs, CSP-safe, inline only):
@@ -83,11 +90,18 @@ refresh button + "data as of" stamp.
 - **RLS/tenant scoping:** refresh runs under the report's tenant context; connections
   resolved per-tenant; a missing/errored connection degrades to staleness, never crosses.
 
-## 6. Open product questions (small)
-1. Default `auto_refresh` for /cashflow-style reports: off (manual refresh) or daily?
-2. Version retention count (proposal: 30, pinned exempt).
-3. Who may refresh: any viewer with report read permission, or composer/admin only?
-   (Proposal: read permission — it's a read-only replay.)
+## 6. Product decisions (owner, 2026-07-06)
+1. **Default `auto_refresh` = `daily`** for newly composed recipe-bearing reports once
+   Slice C ships (Slices A/B ship first with manual refresh only; legacy reports without
+   a recipe stay snapshot-only). Consequence: the Slice-C staleness machinery (last-good
+   version + banner + consecutive-failure pause, §4C) is launch-critical — daily-by-default
+   multiplies the background NetSuite consumer surface, and the known single-use
+   refresh-token death must degrade loudly-but-gracefully, never a silent retry storm.
+2. **Version retention = 30** unpinned versions per report; pinned exempt; latest never
+   pruned; prune oldest-unpinned first.
+3. **Any viewer with report READ permission may refresh** — a read-only replay; every
+   refresh audited with the actor; per-report debounce (proposal 5 min) guards quota and
+   version churn.
 
 ## 7. Definition of done (program-level)
 A Framework cash-flow report opened a week after composition shows a staleness stamp, a
