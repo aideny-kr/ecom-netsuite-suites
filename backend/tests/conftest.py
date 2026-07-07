@@ -62,7 +62,13 @@ async def db():
     engine = create_async_engine(_test_db_url, echo=False, connect_args=_test_connect_args)
     async with engine.connect() as conn:
         trans = await conn.begin()
-        session = AsyncSession(bind=conn, expire_on_commit=False)
+        # create_savepoint (the canonical SQLAlchemy 2.0 testing recipe): EVERY session
+        # transaction — including ones the service under test commits or rolls back
+        # internally — is a SAVEPOINT under the outer test transaction, so a service-side
+        # rollback can never detonate the fixture's seeded state. (The default
+        # conditional mode joins the OUTER transaction directly after the first service
+        # commit, so a later service rollback wiped the whole test world.)
+        session = AsyncSession(bind=conn, expire_on_commit=False, join_transaction_mode="create_savepoint")
         try:
             yield session
         finally:

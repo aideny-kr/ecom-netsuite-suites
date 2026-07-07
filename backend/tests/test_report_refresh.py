@@ -209,26 +209,25 @@ async def test_ext_connection_id_mismatch_refused(db, monkeypatch):
 
 async def test_source_error_fails_whole_refresh_and_never_corrupts_current(db, monkeypatch):
     tenant, user, report = await _seed_report(db, recipe=_recipe(), html="<html>golden</html>")
+    rid, tid, uid = report.id, tenant.id, user.id  # the service's rollback expires ORM instances
     _patch_executor(monkeypatch, json.dumps({"error": True, "message": "invalid or expired token"}))
     with pytest.raises(RefreshError) as exc:
-        await refresh_report(db, report_id=report.id, tenant_id=tenant.id, actor_id=user.id)
+        await refresh_report(db, report_id=rid, tenant_id=tid, actor_id=uid)
     assert exc.value.status_code == 502
     assert "invalid or expired token" in exc.value.detail
     # current version untouched; no version rows created
-    await db.refresh(report)
-    assert report.rendered_html == "<html>golden</html>" and report.version == 1
-    count = (
-        await db.execute(select(func.count(ReportVersion.id)).where(ReportVersion.report_id == report.id))
-    ).scalar()
+    row = (await db.execute(select(Report).where(Report.id == rid))).scalar_one()
+    assert row.rendered_html == "<html>golden</html>" and row.version == 1
+    count = (await db.execute(select(func.count(ReportVersion.id)).where(ReportVersion.report_id == rid))).scalar()
     assert count == 0
     # durable failure audit
     audit = (
         await db.execute(
             text(
                 "SELECT count(*) FROM audit_events WHERE action='report.refresh' "
-                "AND status='error' AND resource_id=:rid"
+                "AND status='error' AND resource_id=:arid"
             ),
-            {"rid": str(report.id)},
+            {"arid": str(rid)},
         )
     ).scalar()
     assert audit == 1
@@ -246,11 +245,12 @@ async def test_failed_attempt_still_consumes_debounce_window(db, monkeypatch):
     """Quota protection: hammering Refresh against a dead OAuth connection must not
     retry-storm — the stamp is attempt-time."""
     tenant, user, report = await _seed_report(db, recipe=_recipe())
+    rid, tid, uid = report.id, tenant.id, user.id  # the service's rollback expires ORM instances
     _patch_executor(monkeypatch, json.dumps({"error": True, "message": "dead token"}))
     with pytest.raises(RefreshError):
-        await refresh_report(db, report_id=report.id, tenant_id=tenant.id, actor_id=user.id)
+        await refresh_report(db, report_id=rid, tenant_id=tid, actor_id=uid)
     with pytest.raises(RefreshDebouncedError):
-        await refresh_report(db, report_id=report.id, tenant_id=tenant.id, actor_id=user.id)
+        await refresh_report(db, report_id=rid, tenant_id=tid, actor_id=uid)
 
 
 async def test_sections_referencing_missing_source_fail_before_publish(db, monkeypatch):
@@ -259,9 +259,128 @@ async def test_sections_referencing_missing_source_fail_before_publish(db, monke
     recipe = _recipe()
     recipe["sections"] = recipe["sections"] + [{"type": "table", "result_id": "r9"}]
     tenant, user, report = await _seed_report(db, recipe=recipe, html="<html>golden</html>")
+    rid, tid, uid = report.id, tenant.id, user.id  # the service's rollback expires ORM instances
     _patch_executor(monkeypatch)
     with pytest.raises(RefreshError) as exc:
-        await refresh_report(db, report_id=report.id, tenant_id=tenant.id, actor_id=user.id)
+        await refresh_report(db, report_id=rid, tenant_id=tid, actor_id=uid)
     assert exc.value.status_code == 502 and "r9" in exc.value.detail
-    await db.refresh(report)
-    assert report.rendered_html == "<html>golden</html>" and report.version == 1
+    row = (await db.execute(select(Report).where(Report.id == rid))).scalar_one()
+    assert row.rendered_html == "<html>golden</html>" and row.version == 1
+
+
+# --- T2-gate round-1 fixes: RLS context across commits, LLM strip, supersede guard ----
+# SET LOCAL app.current_tenant_id is TRANSACTION-scoped: every commit/rollback clears it.
+# The test fixture wraps tests in an outer transaction (savepoints), so the GUC survives
+# test "commits" — these tests therefore assert the CALL ORDERING of set_tenant_context
+# (spied in the service's namespace) against commit/rollback/dispatch events, which is
+# deterministic and immune to the fixture masking.
+
+
+def _spy_events(monkeypatch, db, calls=None):
+    events: list = []
+    real_commit, real_rollback = db.commit, db.rollback
+
+    async def spy_ctx(session, tenant_id):
+        from sqlalchemy import text as _text
+
+        events.append("ctx")
+        await session.execute(_text(f"SET LOCAL app.current_tenant_id = '{tenant_id}'"))
+
+    async def spy_commit():
+        events.append("commit")
+        await real_commit()
+
+    async def spy_rollback():
+        events.append("rollback")
+        await real_rollback()
+
+    monkeypatch.setattr("app.services.report.refresh_service.set_tenant_context", spy_ctx)
+    monkeypatch.setattr(db, "commit", spy_commit)
+    monkeypatch.setattr(db, "rollback", spy_rollback)
+    return events
+
+
+async def test_tenant_context_reestablished_after_claim_commit_before_dispatch(db, monkeypatch):
+    """Blocker fix: Phase 1's commit clears the GUC; Phase 2's dispatch (and every
+    subsequent source) must run under a re-established tenant context."""
+    tenant, user, report = await _seed_report(db, recipe=_recipe())
+    events = _spy_events(monkeypatch, db)
+
+    calls: list = []
+
+    async def fake_execute(tool_name, tool_input, tenant_id, actor_id, correlation_id, db, **kw):
+        events.append("exec")
+        calls.append(tool_name)
+        return _fresh_result_str()
+
+    monkeypatch.setattr("app.services.chat.tools.execute_tool_call", fake_execute)
+    await refresh_report(db, report_id=report.id, tenant_id=tenant.id, actor_id=user.id)
+
+    first_commit = events.index("commit")
+    first_exec = events.index("exec")
+    assert first_commit < first_exec, "claim must commit before any tool runs"
+    assert "ctx" in events[first_commit:first_exec], "context must be re-set between the claim commit and dispatch"
+    # after the FINAL commit, db.refresh(report) re-selects the row — context again
+    last_commit = len(events) - 1 - events[::-1].index("commit")
+    assert "ctx" in events[last_commit:], "context must be re-set after the publish commit (db.refresh reads the row)"
+
+
+async def test_failure_audit_runs_under_reestablished_context(db, monkeypatch):
+    """Major fix: the failure path rolls back (clearing the GUC) then writes the
+    failure audit — a context re-set must sit between rollback and that write."""
+    tenant, user, report = await _seed_report(db, recipe=_recipe())
+    rid, tid, uid = report.id, tenant.id, user.id
+    events = _spy_events(monkeypatch, db)
+
+    async def failing_execute(*a, **kw):
+        events.append("exec")
+        return json.dumps({"error": True, "message": "dead token"})
+
+    monkeypatch.setattr("app.services.chat.tools.execute_tool_call", failing_execute)
+    with pytest.raises(RefreshError):
+        await refresh_report(db, report_id=rid, tenant_id=tid, actor_id=uid)
+    assert "rollback" in events
+    rb = events.index("rollback")
+    assert "ctx" in events[rb:], "failure audit must run under a re-established tenant context"
+
+
+async def test_replay_strips_llm_judge_params(db, monkeypatch):
+    """Major fix (§5 no-LLM invariant): a captured suiteql `user_question` param would
+    re-trigger the judge LLM on every refresh — replay must strip it."""
+    recipe = _recipe(params={"query": "SELECT 1", "user_question": "how is my cash?"})
+    tenant, user, report = await _seed_report(db, recipe=recipe)
+    calls = _patch_executor(monkeypatch)
+    await refresh_report(db, report_id=report.id, tenant_id=tenant.id, actor_id=user.id)
+    assert calls[0]["params"] == {"query": "SELECT 1"}  # user_question stripped, query intact
+
+
+async def test_only_referenced_sources_are_dispatched(db, monkeypatch):
+    """A tampered/drifted recipe with an extra unreferenced source must not burn a
+    tool call on it — only the rids the sections reference execute."""
+    recipe = _recipe()
+    recipe["sources"]["r9"] = {"tool": "netsuite_suiteql", "params": {"query": "SELECT 9"}, "connection_id": None}
+    tenant, user, report = await _seed_report(db, recipe=recipe)
+    calls = _patch_executor(monkeypatch)
+    updated = await refresh_report(db, report_id=report.id, tenant_id=tenant.id, actor_id=user.id)
+    assert updated.version == 2
+    assert [c["params"] for c in calls] == [{"query": "SELECT 1"}]  # r9 never dispatched
+
+
+async def test_superseded_refresh_aborts_before_publish(db, monkeypatch):
+    """Major fix: a slow refresh overtaken by a newer claim (window expired mid-flight)
+    must NOT publish stale data over the newer version — compare-and-publish guard."""
+    tenant, user, report = await _seed_report(db, recipe=_recipe())
+
+    async def overtaking_execute(tool_name, tool_input, tenant_id, actor_id, correlation_id, db, **kw):
+        # simulate a competing refresh claiming the window while we execute
+        report.last_refreshed_at = datetime.now(timezone.utc) + timedelta(seconds=5)
+        await db.flush()
+        return _fresh_result_str()
+
+    monkeypatch.setattr("app.services.chat.tools.execute_tool_call", overtaking_execute)
+    rid, tid, uid = report.id, tenant.id, user.id
+    with pytest.raises(RefreshError) as exc:
+        await refresh_report(db, report_id=rid, tenant_id=tid, actor_id=uid)
+    assert exc.value.status_code == 409
+    count = (await db.execute(select(func.count(ReportVersion.id)).where(ReportVersion.report_id == rid))).scalar()
+    assert count == 0  # nothing published over the newer claim

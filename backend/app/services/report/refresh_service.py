@@ -108,21 +108,44 @@ def _check_source(rid: str, src: object) -> tuple[str, dict]:
     return tool, params
 
 
+# Params that trigger an LLM inside a tool (§5 no-LLM-in-refresh): a captured suiteql
+# `user_question` re-runs the judge model on every replay — strip at dispatch, keyed per
+# tool so a legitimate same-named param on another tool is never touched.
+_LLM_ONLY_PARAMS: dict[str, frozenset[str]] = {
+    "netsuite_suiteql": frozenset({"user_question"}),
+    "netsuite.suiteql": frozenset({"user_question"}),
+}
+
+
 async def _execute_sources(
     db: AsyncSession,
     sources: dict[str, dict],
+    needed_rids: list[str],
     *,
     tenant_id: uuid.UUID,
     actor_id: uuid.UUID,
     correlation_id: str,
 ) -> dict[str, dict]:
-    """Replay every source through the real dispatcher; ANY failure fails the refresh."""
+    """Replay ONLY the sources the sections actually reference (an extra source in a
+    tampered/drifted recipe never burns a tool call); ANY failure fails the refresh.
+    A referenced rid with no source fails BEFORE anything else executes downstream —
+    assemble_spec would otherwise degrade the miss into "Data unavailable" sections."""
     from app.services.chat.tool_call_results import extract_result_payload
     from app.services.chat.tools import execute_tool_call
 
     payloads: dict[str, dict] = {}
-    for rid, src in sources.items():
+    for rid in needed_rids:
+        src = sources.get(rid)
+        if src is None:
+            raise RefreshError(502, f"recipe sources missing for {rid} — recompose the report")
         tool, params = _check_source(rid, src)
+        strip = _LLM_ONLY_PARAMS.get(tool, frozenset())
+        if strip:
+            params = {k: v for k, v in params.items() if k not in strip}
+        # SET LOCAL tenant context is TRANSACTION-scoped and any commit (the claim, or a
+        # tool's own) clears it — re-establish before EVERY dispatch so RLS-scoped reads
+        # inside the tool (e.g. the Connection lookup) always run under this tenant.
+        await set_tenant_context(db, str(tenant_id))
         result_str = await execute_tool_call(
             tool, params, tenant_id=tenant_id, actor_id=actor_id, correlation_id=correlation_id, db=db
         )
@@ -178,15 +201,12 @@ async def refresh_report(
     correlation_id = f"report-refresh:{report_id}:{uuid.uuid4().hex[:8]}"
     try:
         # ---- Phase 2: headless re-execution (no report writes) ----------------------
+        # Only the rids the ORIGINAL sections reference are dispatched; a referenced rid
+        # without a source fails closed inside _execute_sources (never "Data unavailable").
+        needed_rids = referenced_result_ids(recipe["sections"])
         payloads = await _execute_sources(
-            db, sources, tenant_id=tenant_id, actor_id=actor_id, correlation_id=correlation_id
+            db, sources, needed_rids, tenant_id=tenant_id, actor_id=actor_id, correlation_id=correlation_id
         )
-        # Every rid the sections reference MUST have a fresh payload BEFORE assembling:
-        # assemble_spec/fill_placeholders degrade a resolver miss into "Data unavailable"
-        # sections instead of raising — a refresh must never publish that.
-        missing = [rid for rid in referenced_result_ids(recipe["sections"]) if rid not in payloads]
-        if missing:
-            raise RefreshError(502, f"recipe sources missing for {', '.join(missing)} — recompose the report")
 
         spec = assemble_spec(report.title, recipe["sections"], lambda rid: payloads[rid])
         html = render_report_html(
@@ -197,10 +217,17 @@ async def refresh_report(
         # ---- Phase 3: atomic publish -------------------------------------------------
         await set_tenant_context(db, str(tenant_id))  # fresh txn after the claim commit
         report = await _locked_report(db, report_id)
-        have_versions = (
-            await db.execute(select(func.count(ReportVersion.id)).where(ReportVersion.report_id == report_id))
+        # Compare-and-publish (supersede guard): the claim's FOR UPDATE lock died at the
+        # Phase-1 commit, so a slow refresh can be overtaken once the window expires. If
+        # the stamp is no longer OURS, a newer refresh claimed after us — abort rather
+        # than publish our (older) data over a newer version.
+        if report.last_refreshed_at != now:
+            raise RefreshError(409, "superseded by a newer refresh — reload to see the latest version")
+        max_version = (
+            await db.execute(select(func.max(ReportVersion.version)).where(ReportVersion.report_id == report_id))
         ).scalar()
-        if not have_versions:
+        if max_version is None:
+            # first refresh: lazy v1 snapshot of the pre-refresh parent (honest dates)
             db.add(
                 ReportVersion(
                     tenant_id=tenant_id,
@@ -209,13 +236,10 @@ async def refresh_report(
                     spec_json=pre["spec_json"],
                     rendered_html=pre["rendered_html"],
                     created_by=pre["created_by"],
-                    created_at=pre["created_at"],  # honest history dates
+                    created_at=pre["created_at"],
                 )
             )
             await db.flush()
-        max_version = (
-            await db.execute(select(func.max(ReportVersion.version)).where(ReportVersion.report_id == report_id))
-        ).scalar()
         next_version = (max_version or pre["version"]) + 1
         db.add(
             ReportVersion(
@@ -242,12 +266,16 @@ async def refresh_report(
             payload={"version": next_version, "source_count": len(sources)},
         )
         await db.commit()
+        # the publish commit cleared the GUC; db.refresh re-SELECTs the row under RLS
+        await set_tenant_context(db, str(tenant_id))
         await db.refresh(report)
         return report
     except Exception as exc:
         await db.rollback()
         detail = exc.detail if isinstance(exc, RefreshError) else "refresh failed"
         try:  # durable failure record in a fresh mini-txn (best-effort)
+            # rollback cleared the GUC — the audit INSERT's RLS WITH CHECK needs it
+            await set_tenant_context(db, str(tenant_id))
             await audit_service.log_event(
                 db=db,
                 tenant_id=tenant_id,
