@@ -158,3 +158,109 @@ async def test_has_recipe_flag_reflects_recipe_presence(client, db):
     assert body_plain["has_recipe"] is False
     assert body_live["has_recipe"] is True
     assert "recipe_json" not in body_plain and "recipe_json" not in body_live  # never the raw recipe
+
+
+# --- Slice B: refresh + versions endpoints --------------------------------------------
+
+
+def _recipe_v1():
+    return {
+        "schema_version": 1,
+        "captured_at": "2026-07-06T18:00:00+00:00",
+        "sections": [{"type": "table", "result_id": "r1", "label": "T"}],
+        "sources": {"r1": {"tool": "netsuite_suiteql", "params": {"query": "SELECT 1"}, "connection_id": None}},
+    }
+
+
+def _patch_refresh_executor(monkeypatch, amount=777):
+    import json as _json
+
+    async def fake_execute(tool_name, tool_input, tenant_id, actor_id, correlation_id, db, **kw):
+        return _json.dumps(
+            {
+                "success": True,
+                "columns": ["account", "amount"],
+                "rows": [["Cash", amount]],
+                "row_count": 1,
+                "query": "SELECT 1",
+            }
+        )
+
+    monkeypatch.setattr("app.services.chat.tools.execute_tool_call", fake_execute)
+
+
+_DEFAULT_RECIPE = object()  # sentinel: distinguish "use the default recipe" from "no recipe"
+
+
+async def _seed_recipe_report(db, *, recipe=_DEFAULT_RECIPE, html="<html>original</html>"):
+    ta = await create_test_tenant(db, name="RefreshAPI")
+    ua, _ = await create_test_user(db, ta)
+    await set_tenant_context(db, str(ta.id))
+    r = Report(
+        tenant_id=ta.id,
+        title="Live",
+        spec_json={"sections": []},
+        rendered_html=html,
+        created_by=ua.id,
+        recipe_json=_recipe_v1() if recipe is _DEFAULT_RECIPE else recipe,
+    )
+    db.add(r)
+    await db.flush()
+    return ta, ua, r
+
+
+async def test_refresh_endpoint_publishes_and_serves_new_version(client, db, monkeypatch):
+    ta, ua, r = await _seed_recipe_report(db)
+    _patch_refresh_executor(monkeypatch, amount=777)
+    headers = make_auth_headers(ua)
+
+    res = await client.post(f"/api/v1/reports/{r.id}/refresh", headers=headers)
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["version"] == 2
+    assert body["has_recipe"] is True
+    assert body["last_refreshed_at"] is not None
+
+    view = await client.get(f"/api/v1/reports/{r.id}/view", headers=headers)
+    assert "777.00" in view.text  # the stable URL now serves the refreshed numbers
+    assert 'class="stamp"' in view.text
+
+
+async def test_refresh_snapshot_only_409_and_unauth_401(client, db, monkeypatch):
+    ta, ua, r = await _seed_recipe_report(db, recipe=None)
+    _patch_refresh_executor(monkeypatch)
+    headers = make_auth_headers(ua)
+    assert (await client.post(f"/api/v1/reports/{r.id}/refresh", headers=headers)).status_code == 409
+    assert (await client.post(f"/api/v1/reports/{r.id}/refresh")).status_code == 401
+    assert (await client.post("/api/v1/reports/not-a-uuid/refresh", headers=headers)).status_code == 404
+
+
+async def test_refresh_debounce_surfaces_429_with_retry_after(client, db, monkeypatch):
+    ta, ua, r = await _seed_recipe_report(db)
+    _patch_refresh_executor(monkeypatch)
+    headers = make_auth_headers(ua)
+    assert (await client.post(f"/api/v1/reports/{r.id}/refresh", headers=headers)).status_code == 200
+    second = await client.post(f"/api/v1/reports/{r.id}/refresh", headers=headers)
+    assert second.status_code == 429
+    assert int(second.headers["Retry-After"]) > 0
+
+
+async def test_versions_list_and_historical_view(client, db, monkeypatch):
+    ta, ua, r = await _seed_recipe_report(db, html="<html>original</html>")
+    headers = make_auth_headers(ua)
+
+    # pre-refresh: a single synthesized entry derived from the parent
+    listed = (await client.get(f"/api/v1/reports/{r.id}/versions", headers=headers)).json()
+    assert len(listed) == 1
+    assert listed[0]["version"] == 1 and listed[0]["is_current"] is True
+
+    _patch_refresh_executor(monkeypatch)
+    assert (await client.post(f"/api/v1/reports/{r.id}/refresh", headers=headers)).status_code == 200
+
+    listed = (await client.get(f"/api/v1/reports/{r.id}/versions", headers=headers)).json()
+    assert [v["version"] for v in listed] == [2, 1]  # desc
+    assert listed[0]["is_current"] is True and listed[1]["is_current"] is False
+
+    v1 = await client.get(f"/api/v1/reports/{r.id}/versions/1/view", headers=headers)
+    assert v1.status_code == 200 and v1.text == "<html>original</html>"
+    assert (await client.get(f"/api/v1/reports/{r.id}/versions/99/view", headers=headers)).status_code == 404

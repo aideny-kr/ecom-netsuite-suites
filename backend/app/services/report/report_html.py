@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import re
+from datetime import datetime, timezone
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation, localcontext
 from html import escape
 
@@ -263,7 +264,20 @@ def _section_html(s: dict) -> str:
     return ""
 
 
-def render_report_html(spec: dict, accent_hsl: str = "240 6% 10%") -> str:
+def _fmt_stamp(iso: str) -> str:
+    """Human date for the freshness stamp: ``"6 Jul 2026, 14:05 UTC"``. An unparseable
+    value renders escape()d verbatim — the stamp is honesty metadata; never crash or
+    silently drop it."""
+    try:
+        dt = datetime.fromisoformat(str(iso))
+    except (TypeError, ValueError):
+        return escape(str(iso))
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc)
+    return escape(f"{dt.day} {dt.strftime('%b %Y, %H:%M')} UTC")
+
+
+def render_report_html(spec: dict, accent_hsl: str = "240 6% 10%", freshness: dict | None = None) -> str:
     title = escape(str(spec.get("title", "Report")))
     body = "".join(_section_html(s) for s in spec.get("sections", []))
     prov = spec.get("provenance", {}) or {}
@@ -272,10 +286,19 @@ def render_report_html(spec: dict, accent_hsl: str = "240 6% 10%") -> str:
     if sources:
         items = "".join(f"<li>{escape(str(x))}</li>" for x in sources)
         prov_html = f'<div class="prov"><strong>Sources &amp; definitions</strong><ul>{items}</ul></div>'
+    # Freshness stamp (Slice B refresh honesty, spec §4B): prose is compose-time text
+    # while {{result:…}} placeholders re-resolve on refresh — the stamp discloses the
+    # two vintages. None (the compose path) keeps the output byte-identical.
+    stamp_html = ""
+    if freshness:
+        stamp_html = (
+            f'<div class="stamp">Narrative composed {_fmt_stamp(freshness.get("composed_at", ""))}'
+            f" · Data refreshed {_fmt_stamp(freshness.get('refreshed_at', ''))}</div>"
+        )
     css = _CSS % {"accent": escape(accent_hsl)}
     return (
         f'<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
         f'<meta name="viewport" content="width=device-width, initial-scale=1">'
         f'<title>{title}</title><style>{css}</style></head><body><div class="report">'
-        f'<div class="accent-bar"></div><h1>{title}</h1>{body}{prov_html}</div></body></html>'
+        f'<div class="accent-bar"></div><h1>{title}</h1>{body}{stamp_html}{prov_html}</div></body></html>'
     )
