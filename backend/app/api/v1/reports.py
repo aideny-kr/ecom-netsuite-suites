@@ -9,8 +9,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.dependencies import get_current_user
 from app.models.report import Report
+from app.models.report_version import ReportVersion
 from app.models.user import User
-from app.schemas.report import ReportResponse
+from app.schemas.report import ReportResponse, ReportVersionResponse
+from app.services.report import refresh_service
 
 router = APIRouter(prefix="/reports", tags=["reports"])
 
@@ -26,6 +28,7 @@ def _to_response(r: Report) -> ReportResponse:
         version=r.version,
         created_at=r.created_at,
         has_recipe=r.recipe_json is not None,
+        last_refreshed_at=r.last_refreshed_at,
     )
 
 
@@ -66,3 +69,90 @@ async def view_report(
 ):
     row = await _get_owned(db, report_id)
     return Response(content=row.rendered_html, media_type="text/html")
+
+
+# --- Slice B (live-dashboard reports): manual refresh + version history ----------------
+# Permission note (spec §6.3 "any viewer with report READ permission may refresh"): no
+# report.* permission scope exists anywhere today — every report route is gated by
+# get_current_user + RLS, so refresh uses EXACTLY what gates viewing. If a report.read
+# scope is ever introduced, it must gate view/list/versions/refresh together.
+
+
+@router.post("/{report_id}/refresh", response_model=ReportResponse)
+async def refresh_report_endpoint(
+    report_id: str,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    row = await _get_owned(db, report_id)  # 404 shape identical to existing routes
+    try:
+        # the CALLER's tenant, never row.tenant_id — under RLS they are equal, but if
+        # RLS were ever bypassed the row's value could set a foreign tenant context.
+        updated = await refresh_service.refresh_report(db, report_id=row.id, tenant_id=user.tenant_id, actor_id=user.id)
+    except refresh_service.RefreshDebouncedError as e:
+        raise HTTPException(
+            status_code=e.status_code, detail=e.detail, headers={"Retry-After": str(e.retry_after_seconds)}
+        ) from e
+    except refresh_service.RefreshError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail) from e
+    return _to_response(updated)
+
+
+def _version_entry(v: ReportVersion, current_version: int) -> ReportVersionResponse:
+    return ReportVersionResponse(
+        version=v.version,
+        created_at=v.created_at,
+        created_by=str(v.created_by) if v.created_by else None,
+        pinned=v.pinned,
+        is_current=v.version == current_version,
+    )
+
+
+@router.get("/{report_id}/versions", response_model=list[ReportVersionResponse])
+async def list_report_versions(
+    report_id: str,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    row = await _get_owned(db, report_id)
+    versions = (
+        (
+            await db.execute(
+                select(ReportVersion).where(ReportVersion.report_id == row.id).order_by(ReportVersion.version.desc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+    if not versions:
+        # never-refreshed report: synthesize the single "v1 · current" entry from the parent
+        return [
+            ReportVersionResponse(
+                version=row.version,
+                created_at=row.created_at,
+                created_by=str(row.created_by) if row.created_by else None,
+                pinned=False,
+                is_current=True,
+            )
+        ]
+    return [_version_entry(v, row.version) for v in versions]
+
+
+@router.get("/{report_id}/versions/{version}/view")
+async def view_report_version(
+    report_id: str,
+    version: int,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    row = await _get_owned(db, report_id)
+    snapshot = (
+        await db.execute(
+            select(ReportVersion).where(ReportVersion.report_id == row.id, ReportVersion.version == version)
+        )
+    ).scalar_one_or_none()
+    if snapshot is not None:
+        return Response(content=snapshot.rendered_html, media_type="text/html")
+    if version == row.version:  # never-refreshed report: the parent IS v1
+        return Response(content=row.rendered_html, media_type="text/html")
+    raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Version not found")

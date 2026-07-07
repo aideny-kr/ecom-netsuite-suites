@@ -133,4 +133,17 @@ class ReportResponse(BaseModel):
     # Slice A: whether a refresh recipe was captured (the FE shows Refresh iff true —
     # Slice B). ONLY the boolean is exposed, never the raw recipe (params embed SQL).
     has_recipe: bool = False
+    # Slice B: the "data as of" stamp source; None = never refreshed (compose-time data).
+    last_refreshed_at: datetime | None = None
     model_config = {"from_attributes": True}
+
+
+class ReportVersionResponse(BaseModel):
+    """One entry in the version picker (Slice B). Immutable snapshots; `is_current`
+    marks the version the stable /view URL serves."""
+
+    version: int
+    created_at: datetime
+    created_by: str | None = None
+    pinned: bool = False
+    is_current: bool = False
