@@ -338,3 +338,99 @@ async def test_stats_shape_for_job_instrumentation(db, monkeypatch):
     assert set(stats) >= {"tenant_id", "due", "refreshed", "failed", "skipped", "paused"}
     assert stats["tenant_id"] == str(tenant.id)
     assert uuid.UUID(stats["tenant_id"])  # JSON-serializable id, not a UUID object
+
+
+# --- Celery glue (fan-out + per-tenant task + Beat entry + env gate) --------------------
+
+
+from pathlib import Path  # noqa: E402  (glue-test helpers, house pattern)
+
+_BACKEND_ROOT = Path(__file__).resolve().parent.parent.parent
+
+
+def _task_source() -> str:
+    with open(_BACKEND_ROOT / "app/workers/tasks/report_auto_refresh.py") as f:
+        return f.read()
+
+
+class TestPreforkEventLoopSafety:
+    """Prefork workers must NOT use the module-level async_session_factory (bound to
+    the parent's event loop) and must use the SESSION-scoped tenant context —
+    refresh_report commits repeatedly mid-run, which clears SET LOCAL. Source
+    inspection, same style as test_recon_scheduled_run_all.py."""
+
+    def test_uses_worker_async_session(self):
+        src = _task_source()
+        assert "worker_async_session" in src
+        assert "async_session_factory" not in src
+
+    def test_per_tenant_task_sets_session_scoped_tenant_context(self):
+        assert "set_tenant_context_session" in _task_source()
+
+    def test_has_no_self_retry(self):
+        """A failed sweep must NOT retry in-task (the ladder + next tick are the
+        retry); InstrumentedTask records the failure."""
+        assert "self.retry" not in _task_source()
+
+
+def test_tasks_registered_on_sync_queue():
+    from app.workers.tasks.report_auto_refresh import report_auto_refresh_all, report_auto_refresh_tenant
+
+    assert hasattr(report_auto_refresh_all, "delay")
+    assert report_auto_refresh_all.name == "tasks.report_auto_refresh_all"
+    assert report_auto_refresh_all.queue == "sync"
+    assert hasattr(report_auto_refresh_tenant, "delay")
+    assert report_auto_refresh_tenant.name == "tasks.report_auto_refresh"
+    assert report_auto_refresh_tenant.queue == "sync"
+
+
+def test_beat_entry_and_module_registration():
+    from app.workers.celery_app import celery_app
+
+    assert "app.workers.tasks.report_auto_refresh" in celery_app.conf.include
+    entry = celery_app.conf.beat_schedule.get("report-auto-refresh-hourly")
+    assert entry is not None, "Beat must tick the fan-out hourly"
+    assert entry["task"] == "tasks.report_auto_refresh_all"
+
+
+async def test_fanout_dispatches_one_per_active_tenant(db, monkeypatch):
+    from app.core.config import settings
+    from app.workers.tasks import report_auto_refresh as mod
+
+    monkeypatch.setattr(settings, "REPORT_AUTO_REFRESH_ENABLED", True)
+    tenant_a, _ = await _tenant(db, name="Fanout A")
+    tenant_b, _ = await _tenant(db, name="Fanout B")
+    inactive = await create_test_tenant(db, name="Fanout inactive")
+    inactive.is_active = False
+    await db.flush()
+
+    sent: list[dict] = []
+    monkeypatch.setattr(
+        mod.celery_app,
+        "send_task",
+        lambda name, kwargs=None, queue=None, **_: sent.append({"name": name, "kwargs": kwargs, "queue": queue}),
+    )
+    stats = await mod.collect_and_dispatch(db)
+
+    dispatched_ids = {s["kwargs"]["tenant_id"] for s in sent}
+    assert {str(tenant_a.id), str(tenant_b.id)} <= dispatched_ids
+    assert str(inactive.id) not in dispatched_ids  # deactivated tenants excluded (house rule)
+    assert all(s["name"] == "tasks.report_auto_refresh" and s["queue"] == "sync" for s in sent)
+    assert stats["dispatched"] == len(sent) and stats["enabled"] is True
+
+
+async def test_fanout_env_gate_off_is_a_noop(db, monkeypatch):
+    """REPORT_AUTO_REFRESH_ENABLED defaults False — the Beat entry is always
+    registered, the body no-ops (the AGENT_BENCHMARK_VS_MCP pattern)."""
+    from app.core.config import settings
+    from app.workers.tasks import report_auto_refresh as mod
+
+    assert settings.REPORT_AUTO_REFRESH_ENABLED is False  # default OFF until staging flip
+    await _tenant(db, name="Gated")
+    sent: list = []
+    monkeypatch.setattr(mod.celery_app, "send_task", lambda *a, **kw: sent.append(a))
+
+    stats = await mod.collect_and_dispatch(db)
+
+    assert stats == {"enabled": False, "dispatched": 0}
+    assert sent == []

@@ -49,6 +49,7 @@ celery_app.conf.include = [
     "app.workers.tasks.reconciliation_run",
     "app.workers.tasks.recon_scheduled_run_all",
     "app.workers.tasks.recon_envelope_dry_run",
+    "app.workers.tasks.report_auto_refresh",
     "app.workers.tasks.suitescript_sync",
     "app.workers.tasks.suiteql_export",
     "app.workers.tasks.workspace_run",
@@ -115,6 +116,15 @@ celery_app.conf.beat_schedule = {
     "drive-rag-sync-nightly": {
         "task": "tasks.drive_rag_sync_all",
         "schedule": crontab(hour=6, minute=0),  # 06:00 UTC nightly
+    },
+    # Live-dashboard reports (Slice C): the hourly tick drives BOTH hourly and daily
+    # reports — daily-ness is enforced per-report by the sweep's due computation, so
+    # daily reports refresh at whatever hour they come due (spreads tenant NetSuite
+    # load instead of a nightly stampede). :10 avoids the top-of-hour crunch of the
+    # interval-scheduled tasks. Gated by REPORT_AUTO_REFRESH_ENABLED (default false).
+    "report-auto-refresh-hourly": {
+        "task": "tasks.report_auto_refresh_all",
+        "schedule": crontab(minute=10),
     },
     "oracle-skill-reseed": {
         "task": "tasks.oracle_skill_reseed",

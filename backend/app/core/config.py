@@ -147,6 +147,10 @@ class Settings(BaseSettings):
     # convention). With MAX_RECIPE_SOURCES=12 this bounds a tenant tick at ≤120
     # sequential tool calls against the tenant's connections.
     REPORT_AUTO_REFRESH_BATCH: int = 10
+    # Rollout gate for the Beat sweep (the AGENT_BENCHMARK_VS_MCP pattern): the Beat
+    # entry is always registered, the fan-out body no-ops until this flips — staging
+    # first, then production.
+    REPORT_AUTO_REFRESH_ENABLED: bool = False
 
     # Autonomous query improvement loop
     QUERY_IMPROVEMENT_ENABLED: bool = False

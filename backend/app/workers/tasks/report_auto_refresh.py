@@ -36,6 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import settings
 from app.core.database import set_tenant_context
 from app.models.report import Report
+from app.models.tenant import Tenant
 from app.services import audit_service
 from app.services.report.refresh_service import (
     RefreshDebouncedError,
@@ -43,6 +44,8 @@ from app.services.report.refresh_service import (
     RefreshSupersededError,
     refresh_report,
 )
+from app.workers.base_task import InstrumentedTask
+from app.workers.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
 
@@ -178,3 +181,61 @@ async def sweep_tenant_reports(
     if stats["due"]:
         logger.info("report auto-refresh sweep completed", extra=stats)
     return stats
+
+
+# --- Celery glue -------------------------------------------------------------------------
+
+
+async def collect_and_dispatch(db: AsyncSession) -> dict:
+    """Fan-out: one ``tasks.report_auto_refresh`` per ACTIVE tenant (deactivated
+    tenants excluded — house rule for Beat fan-outs). ``tenants`` is not FORCE-RLS,
+    so this reads bare on the worker session; the per-tenant tasks then each run
+    under their own tenant context."""
+    if not settings.REPORT_AUTO_REFRESH_ENABLED:
+        return {"enabled": False, "dispatched": 0}
+    tenant_ids = (await db.execute(select(Tenant.id).where(Tenant.is_active.is_(True)))).scalars().all()
+    stats = {"enabled": True, "dispatched": 0, "failed": 0}
+    for tenant_id in tenant_ids:
+        try:
+            celery_app.send_task(
+                "tasks.report_auto_refresh", kwargs={"tenant_id": str(tenant_id)}, queue="sync"
+            )
+            stats["dispatched"] += 1
+        except Exception:
+            stats["failed"] += 1
+            logger.exception("report_auto_refresh_all.dispatch_failed", extra={"tenant_id": str(tenant_id)})
+    logger.info("report_auto_refresh_all.completed", extra=stats)
+    return stats
+
+
+@celery_app.task(base=InstrumentedTask, name="tasks.report_auto_refresh_all", queue="sync")
+def report_auto_refresh_all():
+    """Beat entry point. Opens its own session; logic lives in collect_and_dispatch()."""
+    import asyncio
+
+    from app.core.database import worker_async_session
+
+    async def _run() -> dict:
+        async with worker_async_session() as db:
+            return await collect_and_dispatch(db)
+
+    # No in-task retry: the next hourly tick is the retry (house convention).
+    return asyncio.run(_run())
+
+
+@celery_app.task(base=InstrumentedTask, name="tasks.report_auto_refresh", queue="sync")
+def report_auto_refresh_tenant(tenant_id: str):
+    """Per-tenant sweep task. One tenant per task — no cross-tenant session reuse."""
+    import asyncio
+
+    from app.core.database import set_tenant_context_session, worker_async_session
+
+    async def _run() -> dict:
+        async with worker_async_session() as db:
+            # Session-scoped SET (not SET LOCAL): refresh_report commits repeatedly
+            # mid-run, which would clear a transaction-scoped GUC. Safe ONLY because
+            # the engine is disposable (never returns to an app pool).
+            await set_tenant_context_session(db, tenant_id)
+            return await sweep_tenant_reports(db, uuid.UUID(tenant_id))
+
+    return asyncio.run(_run())
