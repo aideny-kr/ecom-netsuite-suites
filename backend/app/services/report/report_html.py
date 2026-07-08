@@ -49,6 +49,21 @@ td.num,th.num { text-align:right; font-variant-numeric:tabular-nums; white-space
 .chart-legend { display:flex; flex-wrap:wrap; gap:8px 16px; margin-top:12px; font-size:13px; font-weight:600; }
 .chart-legend label { display:inline-flex; align-items:center; gap:6px; cursor:pointer; }
 .chart-legend .swatch { width:12px; height:12px; border:2px solid var(--border); display:inline-block; }
+/* Slice D — print. Un-clip the scroll regions (a stuck thead prints frozen mid-page
+   and overflow-y clips rows off the paper), keep card/accent colors where the engine
+   honors print-color-adjust (borders + weight-800 text stay legible where it strips
+   them), hide the legend checkbox WIDGETS but keep swatch+label — the printed page
+   shows exactly the series toggled on (WYSIWYG). Long tables paginate; the browser
+   repeats <thead> per page natively. */
+@media print {
+  body { background:#fff; print-color-adjust:exact; -webkit-print-color-adjust:exact; }
+  .nb-card { box-shadow:none; break-inside:avoid; page-break-inside:avoid; }
+  .svg-wrap, .table-wrap { overflow:visible; max-height:none; }
+  .table-wrap { break-inside:auto; page-break-inside:auto; }
+  thead th { position:static; }
+  .chart-legend input { display:none; }
+  .report { max-width:100%%; padding:0; }
+}
 """
 
 # Slice D — CSS-only series toggles: unchecking the legend's ser-j checkbox hides that

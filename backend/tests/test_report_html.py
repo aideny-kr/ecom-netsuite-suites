@@ -300,3 +300,19 @@ def test_stamp_css_rule_defined():
 def test_render_report_html_deterministic():
     spec = _slice_d_spec()
     assert render_report_html(spec) == render_report_html(spec)
+
+
+def test_print_stylesheet_present_and_defuses_screen_features():
+    """Greenfield @media print: un-clip the scroll regions (sticky prints frozen and
+    overflow-y clips rows off the page), keep card colors where the engine honors
+    print-color-adjust, hide the legend checkbox WIDGETS (swatch+label stay — the
+    printed page shows what was toggled on, WYSIWYG), let long tables paginate."""
+    html = render_report_html(_slice_d_spec())
+    assert "@media print" in html
+    printed = html.split("@media print", 1)[1]
+    assert "position:static" in printed  # defuse sticky
+    assert "overflow:visible" in printed and "max-height:none" in printed  # un-clip
+    assert "box-shadow:none" in printed
+    assert "print-color-adjust:exact" in printed
+    assert ".chart-legend input { display:none; }" in printed
+    assert "break-inside:avoid" in printed  # cards don't split across pages
