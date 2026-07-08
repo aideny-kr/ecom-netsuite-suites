@@ -61,6 +61,37 @@ def _fmt(v: float) -> str:
     return f"{n:.0f}"
 
 
+def _tip_num(v: float) -> str:
+    """Full-precision thousands-separated figure for a hover tooltip (Slice D) — the
+    tooltip is where exact numbers belong, never the '1.2M' axis abbreviation. An
+    integral float drops its '.0' noise."""
+    s = f"{v:,}"
+    return s[:-2] if s.endswith(".0") else s
+
+
+def _tip(category: str, series_label: str, v: float) -> str:
+    """A native SVG ``<title>`` — the browser renders it as a hover tooltip with zero
+    JS/CSS, so it works even inside the FE viewer's sandbox="" iframe."""
+    return f"<title>{escape(category)} — {escape(str(series_label))}: {_tip_num(v)}</title>"
+
+
+def _legend(entries: list[tuple[str, str]], *, toggles: bool) -> str:
+    """The legend appended AFTER ``</svg>`` in the same returned string (the artifact
+    stays one self-contained document). ``entries`` = [(label, safe_color)] in series
+    order. ``toggles=True`` emits label-WRAPPED checkboxes (no id/for pairs — several
+    charts per report would collide ids) whose ``ser-j`` class the CSS-only toggle
+    rules in report_html._CSS bind to via :has(); unsupported browsers degrade to
+    inert checkboxes. Colors must already be _safe_color-vetted by the caller."""
+    items = []
+    for j, (label, color) in enumerate(entries):
+        swatch = f'<span class="swatch" style="background:{color}"></span>'
+        if toggles:
+            items.append(f'<label><input type="checkbox" class="ser-{j}" checked>{swatch}{escape(str(label))}</label>')
+        else:
+            items.append(f"<label>{swatch}{escape(str(label))}</label>")
+    return f'<div class="chart-legend">{"".join(items)}</div>'
+
+
 def _truncate_label(text: str) -> tuple[str, bool]:
     """``(display, truncated)``. Ellipsize a label longer than ``_MAX_LABEL_CHARS`` so it
     fits its slot; the caller preserves the full text in a ``<title>`` tooltip when
@@ -208,12 +239,16 @@ def _bars(c: ChartData) -> str:
             # positives rise above the baseline; negatives drop below it (never a negative height)
             y = base_y - h if v >= 0 else base_y
             color = _safe_color(s.color, _PALETTE[j % len(_PALETTE)])
-            # hard offset shadow (no blur) then the bar
+            # One <g> per datum serves BOTH Slice-D features: class ser-j is the CSS
+            # series-toggle hook, <title> is the native hover value. The <rect> strings
+            # stay byte-identical (shadow then bar) — geometry tests anchor on them.
+            out.append(f'<g class="ser-{j}">{_tip(labels[i], s.label, v)}')
             out.append(f'<rect x="{x + 4:.1f}" y="{y + 4:.1f}" width="{bar_w:.1f}" height="{h:.1f}" fill="#000"/>')
             out.append(
                 f'<rect x="{x:.1f}" y="{y:.1f}" width="{bar_w:.1f}" height="{h:.1f}" '
                 f'fill="{color}" stroke="#000" stroke-width="2"/>'
             )
+            out.append("</g>")
         out.append(_x_label(gx + group_w / 2, bottom, labels[i], rotate))
     out.append(
         f'<text x="{pad_l - 8:.1f}" y="{_PAD_T + 8}" font-size="11" text-anchor="end" fill="#444">{_fmt(vmax)}</text>'
@@ -262,15 +297,19 @@ def _lines(c: ChartData, area: bool) -> str:
         color = _safe_color(s.color, _PALETTE[j % len(_PALETTE)])
         pts = [(pad_l + i * step, _y(_num(r, s.key))) for i, r in enumerate(rows)]
         path = " ".join(f"{x:.1f},{y:.1f}" for x, y in pts)
+        # the whole series (fill + line + point markers) shares one ser-j toggle group
+        out.append(f'<g class="ser-{j}">')
         if area:
             poly = f"{pad_l:.1f},{base_y:.1f} " + path + f" {pad_l + (len(rows) - 1) * step:.1f},{base_y:.1f}"
             out.append(f'<polygon points="{poly}" fill="{color}" fill-opacity="0.25"/>')
         out.append(f'<polyline points="{path}" fill="none" stroke="{color}" stroke-width="3"/>')
-        for x, y in pts:
+        for i, (x, y) in enumerate(pts):
             out.append(
+                f"<g>{_tip(labels[i], s.label, _num(rows[i], s.key))}"
                 f'<rect x="{x - 4:.1f}" y="{y - 4:.1f}" width="8" height="8" '
-                f'fill="{color}" stroke="#000" stroke-width="2"/>'
+                f'fill="{color}" stroke="#000" stroke-width="2"/></g>'
             )
+        out.append("</g>")
     for i in ticks:
         out.append(_x_label(pad_l + i * step, bottom, labels[i], rotate))
     return "".join(out)
@@ -286,16 +325,20 @@ def _pie(c: ChartData) -> str:
     # negatives, and an explicit `pie` over it must still render sane slices.
     magnitudes = [abs(_num(r, key)) for r in rows]
     total = sum(magnitudes) or 1
+    labels = _x_values(c.x_axis.key, rows)
+    series_label = c.y_axes[0].label
     cx, cy, rad = _W / 2, _H / 2 + 10, 130
     out, ang = [], -math.pi / 2
     for i, mag in enumerate(magnitudes):
+        # the tooltip carries the REAL signed value — |v| is geometry only
+        tip = _tip(labels[i], series_label, _num(rows[i], key))
         frac = mag / total
         # A single slice at (or ~) 100% is a degenerate SVG arc — its start and end points
         # coincide, so an <path> A-arc draws nothing. Render a full <circle> instead.
         if frac >= 0.999:
             out.append(
-                f'<circle cx="{cx}" cy="{cy}" r="{rad}" fill="{_PALETTE[i % len(_PALETTE)]}" '
-                f'stroke="#000" stroke-width="2"/>'
+                f'<g>{tip}<circle cx="{cx}" cy="{cy}" r="{rad}" fill="{_PALETTE[i % len(_PALETTE)]}" '
+                f'stroke="#000" stroke-width="2"/></g>'
             )
             continue
         a2 = ang + frac * 2 * math.pi
@@ -303,23 +346,47 @@ def _pie(c: ChartData) -> str:
         x1, y1 = cx + rad * math.cos(ang), cy + rad * math.sin(ang)
         x2, y2 = cx + rad * math.cos(a2), cy + rad * math.sin(a2)
         out.append(
-            f'<path d="M{cx},{cy} L{x1:.1f},{y1:.1f} A{rad},{rad} 0 {large} 1 {x2:.1f},{y2:.1f} Z" '
-            f'fill="{_PALETTE[i % len(_PALETTE)]}" stroke="#000" stroke-width="2"/>'
+            f'<g>{tip}<path d="M{cx},{cy} L{x1:.1f},{y1:.1f} A{rad},{rad} 0 {large} 1 {x2:.1f},{y2:.1f} Z" '
+            f'fill="{_PALETTE[i % len(_PALETTE)]}" stroke="#000" stroke-width="2"/></g>'
         )
         ang = a2
     return "".join(out)
 
 
+def _series_legend(chart: ChartData) -> str:
+    """Checkbox-toggle legend for a MULTI-series chart (≥2 y axes). A single series
+    gets nothing: a one-entry legend is noise and toggling the only series off would
+    blank the chart."""
+    if not chart.data or len(chart.y_axes) < 2:
+        return ""
+    entries = [
+        (s.label, _safe_color(s.color, _PALETTE[j % len(_PALETTE)])) for j, s in enumerate(chart.y_axes)
+    ]
+    return _legend(entries, toggles=True)
+
+
+def _pie_legend(chart: ChartData) -> str:
+    """Static color→category key (pies previously shipped with no key at all). NO
+    checkboxes: slices are categories, not series — CSS-hiding one leaves a wedge
+    hole that misrepresents the remaining shares (angles can't recompute without JS),
+    which would be dishonest interactivity."""
+    if not chart.data or not chart.y_axes:
+        return ""
+    labels = _x_values(chart.x_axis.key, chart.data)
+    entries = [(labels[i], _PALETTE[i % len(_PALETTE)]) for i in range(len(chart.data))]
+    return _legend(entries, toggles=False)
+
+
 def render_chart_svg(chart: ChartData) -> str:
     t = chart.chart_type
     if t == "bar":
-        return _frame(_bars(chart), chart.title)
+        return _frame(_bars(chart), chart.title) + _series_legend(chart)
     if t == "line":
-        return _frame(_lines(chart, area=False), chart.title)
+        return _frame(_lines(chart, area=False), chart.title) + _series_legend(chart)
     if t == "area":
-        return _frame(_lines(chart, area=True), chart.title)
+        return _frame(_lines(chart, area=True), chart.title) + _series_legend(chart)
     if t == "pie":
-        return _frame(_pie(chart), chart.title)
+        return _frame(_pie(chart), chart.title) + _pie_legend(chart)
     placeholder = (
         f'<text x="{_W / 2}" y="{_H / 2}" font-size="14" text-anchor="middle" fill="#666">'
         f'Chart type "{escape(t)}" not yet supported</text>'
