@@ -49,6 +49,27 @@ td.num,th.num { text-align:right; font-variant-numeric:tabular-nums; white-space
 .chart-legend { display:flex; flex-wrap:wrap; gap:8px 16px; margin-top:12px; font-size:13px; font-weight:600; }
 .chart-legend label { display:inline-flex; align-items:center; gap:6px; cursor:pointer; }
 .chart-legend .swatch { width:12px; height:12px; border:2px solid var(--border); display:inline-block; }
+/* Slice D — CSS-only series toggles: unchecking the legend's ser-j checkbox hides
+   that series' <g class="ser-j"> groups. :has() is load-bearing (CSS has no parent
+   combinator; id/for label pairs would collide across a report's charts); browsers
+   without :has() degrade to inert checkboxes. Plain literals, NOT generated — and
+   note this whole string passes through percent-formatting, so a percent sign in
+   ANY rule or comment here must be doubled (this comment learned that first-hand).
+   Rules exist for ser-0..ser-11 = report_charts._MAX_TOGGLE_SERIES — the legend
+   stops emitting checkboxes past that cap (a rule-less checkbox is a dead control)
+   and a drift test binds the two. */
+.nb-card:has(input.ser-0:not(:checked)) svg .ser-0 { display:none; }
+.nb-card:has(input.ser-1:not(:checked)) svg .ser-1 { display:none; }
+.nb-card:has(input.ser-2:not(:checked)) svg .ser-2 { display:none; }
+.nb-card:has(input.ser-3:not(:checked)) svg .ser-3 { display:none; }
+.nb-card:has(input.ser-4:not(:checked)) svg .ser-4 { display:none; }
+.nb-card:has(input.ser-5:not(:checked)) svg .ser-5 { display:none; }
+.nb-card:has(input.ser-6:not(:checked)) svg .ser-6 { display:none; }
+.nb-card:has(input.ser-7:not(:checked)) svg .ser-7 { display:none; }
+.nb-card:has(input.ser-8:not(:checked)) svg .ser-8 { display:none; }
+.nb-card:has(input.ser-9:not(:checked)) svg .ser-9 { display:none; }
+.nb-card:has(input.ser-10:not(:checked)) svg .ser-10 { display:none; }
+.nb-card:has(input.ser-11:not(:checked)) svg .ser-11 { display:none; }
 /* Slice D — print. Un-clip the scroll regions (a stuck thead prints frozen mid-page
    and overflow-y clips rows off the paper), keep card/accent colors where the engine
    honors print-color-adjust (borders + weight-800 text stay legible where it strips
@@ -65,14 +86,6 @@ td.num,th.num { text-align:right; font-variant-numeric:tabular-nums; white-space
   .report { max-width:100%%; padding:0; }
 }
 """
-
-# Slice D — CSS-only series toggles: unchecking the legend's ser-j checkbox hides that
-# series' <g class="ser-j"> groups. :has() is load-bearing (CSS has no parent
-# combinator; the alternative is id/for label pairs, which collide across a report's
-# multiple charts); browsers without :has() degrade to inert checkboxes. Static block
-# for j=0..11 — matches the 12-category legibility cap; contains no '%' so it is safe
-# through _CSS's %-formatting.
-_CSS += "".join(f".nb-card:has(input.ser-{j}:not(:checked)) svg .ser-{j} {{ display:none; }}\n" for j in range(12))
 
 
 def fmt_amount(value) -> str:

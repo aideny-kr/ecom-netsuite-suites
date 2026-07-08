@@ -61,12 +61,25 @@ def _fmt(v: float) -> str:
     return f"{n:.0f}"
 
 
+# The series-toggle CSS rules in report_html._CSS exist for ser-0..ser-{N-1} ONLY —
+# a checkbox beyond that would be a DEAD control (unchecking silently no-ops), so the
+# legend degrades to a plain label past the cap. y_axes is unbounded (every numeric
+# column becomes a series); this cap is about toggle wiring, NOT the (coincidentally
+# equal) bar-category cap. A drift test in test_report_html.py binds the CSS block to
+# this constant.
+_MAX_TOGGLE_SERIES = 12
+
+
 def _tip_num(v: float) -> str:
-    """Full-precision thousands-separated figure for a hover tooltip (Slice D) — the
-    tooltip is where exact numbers belong, never the '1.2M' axis abbreviation. An
-    integral float drops its '.0' noise."""
-    s = f"{v:,}"
-    return s[:-2] if s.endswith(".0") else s
+    """Thousands-separated figure for a hover tooltip (Slice D) — the tooltip is where
+    exact numbers belong, never the '1.2M' axis abbreviation. Bounded at 6 decimals
+    then zero-trimmed: rounds away IEEE754 noise (0.1+0.2 must read '0.3', never
+    '0.30000000000000004') while keeping sub-cent precision; f-format with an explicit
+    precision also never flips to scientific notation (bare f"{v:,}" renders >=1e16 as
+    '1.5e+16')."""
+    if v == 0:
+        return "0"  # also normalizes -0.0
+    return f"{v:,.6f}".rstrip("0").rstrip(".")
 
 
 def _tip(category: str, series_label: str, v: float) -> str:
@@ -85,9 +98,11 @@ def _legend(entries: list[tuple[str, str]], *, toggles: bool) -> str:
     items = []
     for j, (label, color) in enumerate(entries):
         swatch = f'<span class="swatch" style="background:{color}"></span>'
-        if toggles:
+        if toggles and j < _MAX_TOGGLE_SERIES:
             items.append(f'<label><input type="checkbox" class="ser-{j}" checked>{swatch}{escape(str(label))}</label>')
         else:
+            # past the toggle cap (no CSS rule exists) a checkbox would be a dead
+            # control — keep the color→label key, drop the fake interactivity
             items.append(f"<label>{swatch}{escape(str(label))}</label>")
     return f'<div class="chart-legend">{"".join(items)}</div>'
 
@@ -295,17 +310,20 @@ def _lines(c: ChartData, area: bool) -> str:
     ]
     for j, s in enumerate(series):
         color = _safe_color(s.color, _PALETTE[j % len(_PALETTE)])
-        pts = [(pad_l + i * step, _y(_num(r, s.key))) for i, r in enumerate(rows)]
-        path = " ".join(f"{x:.1f},{y:.1f}" for x, y in pts)
+        pts = []
+        for i, r in enumerate(rows):
+            v = _num(r, s.key)  # computed once — the tooltip below reuses it
+            pts.append((pad_l + i * step, _y(v), v))
+        path = " ".join(f"{x:.1f},{y:.1f}" for x, y, _ in pts)
         # the whole series (fill + line + point markers) shares one ser-j toggle group
         out.append(f'<g class="ser-{j}">')
         if area:
             poly = f"{pad_l:.1f},{base_y:.1f} " + path + f" {pad_l + (len(rows) - 1) * step:.1f},{base_y:.1f}"
             out.append(f'<polygon points="{poly}" fill="{color}" fill-opacity="0.25"/>')
         out.append(f'<polyline points="{path}" fill="none" stroke="{color}" stroke-width="3"/>')
-        for i, (x, y) in enumerate(pts):
+        for i, (x, y, v) in enumerate(pts):
             out.append(
-                f"<g>{_tip(labels[i], s.label, _num(rows[i], s.key))}"
+                f"<g>{_tip(labels[i], s.label, v)}"
                 f'<rect x="{x - 4:.1f}" y="{y - 4:.1f}" width="8" height="8" '
                 f'fill="{color}" stroke="#000" stroke-width="2"/></g>'
             )

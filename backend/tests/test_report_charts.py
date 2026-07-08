@@ -402,3 +402,51 @@ def test_chart_output_has_no_ids():
 
 def test_multiseries_output_is_deterministic():
     assert render_chart_svg(_multi_bar()) == render_chart_svg(_multi_bar())
+
+
+def _wide_series_chart(n_series: int):
+    keys = [f"s{j}" for j in range(n_series)]
+    return ChartData(
+        chart_type="bar",
+        title="Wide",
+        x_axis=ChartAxis(label="P", key="p"),
+        y_axes=[ChartAxis(label=f"Series {j}", key=k) for j, k in enumerate(keys)],
+        data=[{"p": "Q1", **{k: j + 1 for j, k in enumerate(keys)}}],
+    )
+
+
+def test_series_beyond_toggle_cap_get_plain_labels_not_dead_checkboxes(_=None):
+    """Review r1 (2 independent angles): the CSS toggle rules cover ser-0..ser-11 only,
+    but y_axes is UNBOUNDED (every numeric column becomes a series) — a 13th checkbox
+    would render as a dead control (unchecking silently no-ops). Beyond the cap the
+    legend degrades honestly to a static color→label key."""
+    from app.services.report.report_charts import _MAX_TOGGLE_SERIES
+
+    svg = render_chart_svg(_wide_series_chart(_MAX_TOGGLE_SERIES + 2))
+    legend = svg.split("</svg>", 1)[1]
+    assert legend.count('<input type="checkbox"') == _MAX_TOGGLE_SERIES
+    assert f'class="ser-{_MAX_TOGGLE_SERIES}"' not in legend  # no dead checkbox
+    assert f"Series {_MAX_TOGGLE_SERIES + 1}" in legend  # ...but the label/swatch still shown
+
+
+def test_tooltip_values_never_carry_float_noise_or_scientific_notation():
+    """Review r1 (two angles): raw f"{v:,}" leaks binary-float noise (0.1+0.2 →
+    '0.30000000000000004') and silently switches to scientific notation at >=1e16
+    ('1.5e+16') — an accountant hovering a summed amount must see neither."""
+    chart = ChartData(
+        chart_type="bar",
+        title="N",
+        x_axis=ChartAxis(label="P", key="p"),
+        y_axes=[
+            ChartAxis(label="Total", key="t"),
+            ChartAxis(label="Frac", key="f"),
+            ChartAxis(label="Huge", key="h"),
+        ],
+        data=[{"p": "Q1", "t": 0.1 + 0.2, "f": 0.125, "h": 1.5e16}],
+    )
+    svg = render_chart_svg(chart)
+    assert "<title>Q1 — Total: 0.3</title>" in svg  # IEEE754 noise rounded away
+    assert "<title>Q1 — Frac: 0.125</title>" in svg  # sub-cent precision preserved
+    assert "<title>Q1 — Huge: 15,000,000,000,000,000</title>" in svg  # grouped, not 1.5e+16
+    assert "0000000000000004" not in svg
+    assert "e+16" not in svg

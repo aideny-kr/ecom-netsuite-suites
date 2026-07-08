@@ -264,15 +264,19 @@ def _slice_d_spec():
     }
 
 
-def test_css_contains_series_toggle_rules():
+def test_css_toggle_rules_cover_every_toggleable_series_index():
     """The checkbox-toggle rules bind the legend inputs (class ser-j, emitted by
-    report_charts._legend) to their series groups via :has() — no ids, no JS. Static
-    rule block for j=0..11 (matches the 12-category legibility cap)."""
+    report_charts._legend) to their series groups via :has() — no ids, no JS.
+    DRIFT GUARD (review r1): the legend emits checkboxes for j < _MAX_TOGGLE_SERIES;
+    a rule missing for any such j makes that checkbox a dead control, so the CSS
+    block must cover exactly the constant."""
+    from app.services.report.report_charts import _MAX_TOGGLE_SERIES
+
     html = render_report_html(_slice_d_spec())
     assert ":has(" in html
-    assert "input.ser-0:not(:checked)" in html
-    assert "input.ser-11:not(:checked)" in html
-    assert "input.ser-12" not in html  # static block ends at the cap
+    for j in range(_MAX_TOGGLE_SERIES):
+        assert f"input.ser-{j}:not(:checked)" in html, f"toggle rule missing for ser-{j}"
+    assert f"input.ser-{_MAX_TOGGLE_SERIES}:" not in html  # block ends at the cap
 
 
 def test_table_card_gets_table_wrap_class_and_sticky_css():
