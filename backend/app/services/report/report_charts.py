@@ -359,9 +359,7 @@ def _series_legend(chart: ChartData) -> str:
     blank the chart."""
     if not chart.data or len(chart.y_axes) < 2:
         return ""
-    entries = [
-        (s.label, _safe_color(s.color, _PALETTE[j % len(_PALETTE)])) for j, s in enumerate(chart.y_axes)
-    ]
+    entries = [(s.label, _safe_color(s.color, _PALETTE[j % len(_PALETTE)])) for j, s in enumerate(chart.y_axes)]
     return _legend(entries, toggles=True)
 
 

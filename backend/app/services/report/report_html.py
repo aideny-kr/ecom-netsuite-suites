@@ -72,9 +72,7 @@ td.num,th.num { text-align:right; font-variant-numeric:tabular-nums; white-space
 # multiple charts); browsers without :has() degrade to inert checkboxes. Static block
 # for j=0..11 — matches the 12-category legibility cap; contains no '%' so it is safe
 # through _CSS's %-formatting.
-_CSS += "".join(
-    f".nb-card:has(input.ser-{j}:not(:checked)) svg .ser-{j} {{ display:none; }}\n" for j in range(12)
-)
+_CSS += "".join(f".nb-card:has(input.ser-{j}:not(:checked)) svg .ser-{j} {{ display:none; }}\n" for j in range(12))
 
 
 def fmt_amount(value) -> str:

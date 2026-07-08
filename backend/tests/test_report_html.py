@@ -291,7 +291,8 @@ def test_stamp_css_rule_defined():
     """The Slice-B freshness stamp rendered UNSTYLED (class=\"stamp\" had no rule) —
     style it like the provenance footer. Content assertions elsewhere are untouched."""
     html = render_report_html(
-        _slice_d_spec(), freshness={"composed_at": "2026-07-06T18:00:00+00:00", "refreshed_at": "2026-07-07T18:00:00+00:00"}
+        _slice_d_spec(),
+        freshness={"composed_at": "2026-07-06T18:00:00+00:00", "refreshed_at": "2026-07-07T18:00:00+00:00"},
     )
     assert ".stamp {" in html
     assert 'class="stamp"' in html
@@ -316,3 +317,54 @@ def test_print_stylesheet_present_and_defuses_screen_features():
     assert "print-color-adjust:exact" in printed
     assert ".chart-legend input { display:none; }" in printed
     assert "break-inside:avoid" in printed  # cards don't split across pages
+
+
+def test_document_is_self_contained_no_external_references():
+    """Codifies the previously-untested §4D invariant: the artifact is ONE
+    self-contained document — no CDN scripts, stylesheets, imports, or url() fetches.
+    The only 'http' substring is the SVG xmlns namespace identifier (not a fetch)."""
+    from app.schemas.chart import ChartAxis, ChartData
+    from app.services.report.report_charts import render_chart_svg
+
+    chart = ChartData(
+        chart_type="bar",
+        title="C",
+        x_axis=ChartAxis(label="p", key="p"),
+        y_axes=[ChartAxis(label="A", key="a"), ChartAxis(label="B", key="b")],
+        data=[{"p": "Q1", "a": 1, "b": 2}],
+    )
+    html = render_report_html(
+        {
+            "title": "Self-contained",
+            "sections": [
+                {"type": "chart", "svg": render_chart_svg(chart)},
+                {"type": "table", "columns": ["a"], "rows": [["x"]]},
+                {"type": "narrative", "markdown": "All **inline**."},
+            ],
+            "provenance": {"sources": ["SuiteQL"]},
+        },
+        freshness={"composed_at": "2026-07-06T18:00:00+00:00", "refreshed_at": "2026-07-07T18:00:00+00:00"},
+    )
+    assert "<link" not in html
+    assert "<script" not in html
+    assert "@import" not in html
+    assert "url(" not in html
+    assert html.count("http") == 1  # the svg xmlns only
+
+
+def test_multiseries_chart_size_canary():
+    """Coarse byte tripwire, not a spec: every rendered_html byte is stored ~30x
+    (version retention cap), so a tooltip/legend markup blowup must fail loudly.
+    Baseline at authoring time: ~34KB for a 100-point 3-series line chart."""
+    from app.schemas.chart import ChartAxis, ChartData
+    from app.services.report.report_charts import render_chart_svg
+
+    rows = [{"m": f"M{i:03d}", "a": i * 1000.5, "b": i * 2, "c": 7_000_000 - i} for i in range(100)]
+    chart = ChartData(
+        chart_type="line",
+        title="Canary",
+        x_axis=ChartAxis(label="m", key="m"),
+        y_axes=[ChartAxis(label="A", key="a"), ChartAxis(label="B", key="b"), ChartAxis(label="C", key="c")],
+        data=rows,
+    )
+    assert len(render_chart_svg(chart).encode()) < 80_000
