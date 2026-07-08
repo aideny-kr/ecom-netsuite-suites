@@ -36,7 +36,30 @@ td.num,th.num { text-align:right; font-variant-numeric:tabular-nums; white-space
 .divider { height:0; border-top:3px solid var(--border); margin:32px 0; }
 .svg-wrap { overflow:auto; }
 .prov { font-size:12px; color:#666; border-top:2px dashed #999; margin-top:48px; padding-top:12px; }
+.stamp { font-size:12px; color:#666; margin-top:32px; }
+/* Slice D — sticky table headers. The overflow-x wrapper forces computed overflow-y,
+   so a document-relative sticky thead can never engage; the table card is instead a
+   capped-height scroll region and the thead sticks to ITS scroll box. Short tables
+   are unaffected (max-height only caps). th's opaque accent background keeps rows
+   from bleeding through; the inset shadow re-draws the border that border-collapse
+   detaches from a stuck header. */
+.table-wrap { max-height:70vh; overflow-y:auto; }
+.table-wrap thead th { position:sticky; top:0; z-index:1; box-shadow:inset 0 -2px 0 var(--border); }
+/* Slice D — chart legend (emitted by report_charts after each multi-series svg). */
+.chart-legend { display:flex; flex-wrap:wrap; gap:8px 16px; margin-top:12px; font-size:13px; font-weight:600; }
+.chart-legend label { display:inline-flex; align-items:center; gap:6px; cursor:pointer; }
+.chart-legend .swatch { width:12px; height:12px; border:2px solid var(--border); display:inline-block; }
 """
+
+# Slice D — CSS-only series toggles: unchecking the legend's ser-j checkbox hides that
+# series' <g class="ser-j"> groups. :has() is load-bearing (CSS has no parent
+# combinator; the alternative is id/for label pairs, which collide across a report's
+# multiple charts); browsers without :has() degrade to inert checkboxes. Static block
+# for j=0..11 — matches the 12-category legibility cap; contains no '%' so it is safe
+# through _CSS's %-formatting.
+_CSS += "".join(
+    f".nb-card:has(input.ser-{j}:not(:checked)) svg .ser-{j} {{ display:none; }}\n" for j in range(12)
+)
 
 
 def fmt_amount(value) -> str:
@@ -251,7 +274,9 @@ def _section_html(s: dict) -> str:
             else:
                 note = f'<p class="foot">Showing first {len(rows)} rows (results truncated).</p>'
         return (
-            f'<div class="nb-card svg-wrap"><table><thead><tr>{cols}</tr></thead>'
+            # table-wrap = the capped-height scroll region the sticky thead binds to
+            # (Slice D); charts/narratives keep the plain svg-wrap.
+            f'<div class="nb-card svg-wrap table-wrap"><table><thead><tr>{cols}</tr></thead>'
             f"<tbody>{body}</tbody></table>{note}</div>"
         )
     if t == "divider":

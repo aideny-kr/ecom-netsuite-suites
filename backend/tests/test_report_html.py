@@ -248,3 +248,55 @@ def test_freshness_values_are_escaped_and_unparseable_dates_never_crash():
     assert "<script>" not in html  # hostile value neutralized
     assert "&lt;script&gt;" in html  # rendered verbatim-escaped, never dropped silently
     assert "not-a-date" in html
+
+
+# --- Slice D: CSS-only interactivity (the FE viewer iframe is sandbox="" — no scripts;
+# every §4D feature must work as pure CSS/markup riding inside rendered_html) -----------
+
+
+def _slice_d_spec():
+    return {
+        "title": "D",
+        "sections": [
+            {"type": "table", "columns": ["a", "amount"], "rows": [["x", 1]], "currency_columns": ["amount"]},
+            {"type": "chart", "svg": "<svg></svg>"},
+        ],
+    }
+
+
+def test_css_contains_series_toggle_rules():
+    """The checkbox-toggle rules bind the legend inputs (class ser-j, emitted by
+    report_charts._legend) to their series groups via :has() — no ids, no JS. Static
+    rule block for j=0..11 (matches the 12-category legibility cap)."""
+    html = render_report_html(_slice_d_spec())
+    assert ":has(" in html
+    assert "input.ser-0:not(:checked)" in html
+    assert "input.ser-11:not(:checked)" in html
+    assert "input.ser-12" not in html  # static block ends at the cap
+
+
+def test_table_card_gets_table_wrap_class_and_sticky_css():
+    """Sticky thead can only engage inside the card's own scroll box: the overflow-x
+    wrapper forces computed overflow-y, so document-relative sticky never fires — the
+    table card gains a capped-height scroll region instead. Chart/narrative cards are
+    untouched."""
+    html = render_report_html(_slice_d_spec())
+    assert 'class="nb-card svg-wrap table-wrap"' in html
+    assert "position:sticky" in html
+    assert "max-height:70vh" in html
+    assert '<div class="nb-card svg-wrap"><svg></svg></div>' in html  # chart card unchanged
+
+
+def test_stamp_css_rule_defined():
+    """The Slice-B freshness stamp rendered UNSTYLED (class=\"stamp\" had no rule) —
+    style it like the provenance footer. Content assertions elsewhere are untouched."""
+    html = render_report_html(
+        _slice_d_spec(), freshness={"composed_at": "2026-07-06T18:00:00+00:00", "refreshed_at": "2026-07-07T18:00:00+00:00"}
+    )
+    assert ".stamp {" in html
+    assert 'class="stamp"' in html
+
+
+def test_render_report_html_deterministic():
+    spec = _slice_d_spec()
+    assert render_report_html(spec) == render_report_html(spec)
