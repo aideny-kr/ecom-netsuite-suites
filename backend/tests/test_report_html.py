@@ -248,3 +248,127 @@ def test_freshness_values_are_escaped_and_unparseable_dates_never_crash():
     assert "<script>" not in html  # hostile value neutralized
     assert "&lt;script&gt;" in html  # rendered verbatim-escaped, never dropped silently
     assert "not-a-date" in html
+
+
+# --- Slice D: CSS-only interactivity (the FE viewer iframe is sandbox="" — no scripts;
+# every §4D feature must work as pure CSS/markup riding inside rendered_html) -----------
+
+
+def _slice_d_spec():
+    return {
+        "title": "D",
+        "sections": [
+            {"type": "table", "columns": ["a", "amount"], "rows": [["x", 1]], "currency_columns": ["amount"]},
+            {"type": "chart", "svg": "<svg></svg>"},
+        ],
+    }
+
+
+def test_css_toggle_rules_cover_every_toggleable_series_index():
+    """The checkbox-toggle rules bind the legend inputs (class ser-j, emitted by
+    report_charts._legend) to their series groups via :has() — no ids, no JS.
+    DRIFT GUARD (review r1): the legend emits checkboxes for j < _MAX_TOGGLE_SERIES;
+    a rule missing for any such j makes that checkbox a dead control, so the CSS
+    block must cover exactly the constant."""
+    from app.services.report.report_charts import _MAX_TOGGLE_SERIES
+
+    html = render_report_html(_slice_d_spec())
+    assert ":has(" in html
+    for j in range(_MAX_TOGGLE_SERIES):
+        assert f"input.ser-{j}:not(:checked)" in html, f"toggle rule missing for ser-{j}"
+    assert f"input.ser-{_MAX_TOGGLE_SERIES}:" not in html  # block ends at the cap
+
+
+def test_table_card_gets_table_wrap_class_and_sticky_css():
+    """Sticky thead can only engage inside the card's own scroll box: the overflow-x
+    wrapper forces computed overflow-y, so document-relative sticky never fires — the
+    table card gains a capped-height scroll region instead. Chart/narrative cards are
+    untouched."""
+    html = render_report_html(_slice_d_spec())
+    assert 'class="nb-card svg-wrap table-wrap"' in html
+    assert "position:sticky" in html
+    assert "max-height:70vh" in html
+    assert '<div class="nb-card svg-wrap"><svg></svg></div>' in html  # chart card unchanged
+
+
+def test_stamp_css_rule_defined():
+    """The Slice-B freshness stamp rendered UNSTYLED (class=\"stamp\" had no rule) —
+    style it like the provenance footer. Content assertions elsewhere are untouched."""
+    html = render_report_html(
+        _slice_d_spec(),
+        freshness={"composed_at": "2026-07-06T18:00:00+00:00", "refreshed_at": "2026-07-07T18:00:00+00:00"},
+    )
+    assert ".stamp {" in html
+    assert 'class="stamp"' in html
+
+
+def test_render_report_html_deterministic():
+    spec = _slice_d_spec()
+    assert render_report_html(spec) == render_report_html(spec)
+
+
+def test_print_stylesheet_present_and_defuses_screen_features():
+    """Greenfield @media print: un-clip the scroll regions (sticky prints frozen and
+    overflow-y clips rows off the page), keep card colors where the engine honors
+    print-color-adjust, hide the legend checkbox WIDGETS (swatch+label stay — the
+    printed page shows what was toggled on, WYSIWYG), let long tables paginate."""
+    html = render_report_html(_slice_d_spec())
+    assert "@media print" in html
+    printed = html.split("@media print", 1)[1]
+    assert "position:static" in printed  # defuse sticky
+    assert "overflow:visible" in printed and "max-height:none" in printed  # un-clip
+    assert "box-shadow:none" in printed
+    assert "print-color-adjust:exact" in printed
+    assert ".chart-legend input { display:none; }" in printed
+    assert "break-inside:avoid" in printed  # cards don't split across pages
+
+
+def test_document_is_self_contained_no_external_references():
+    """Codifies the previously-untested §4D invariant: the artifact is ONE
+    self-contained document — no CDN scripts, stylesheets, imports, or url() fetches.
+    The only 'http' substring is the SVG xmlns namespace identifier (not a fetch)."""
+    from app.schemas.chart import ChartAxis, ChartData
+    from app.services.report.report_charts import render_chart_svg
+
+    chart = ChartData(
+        chart_type="bar",
+        title="C",
+        x_axis=ChartAxis(label="p", key="p"),
+        y_axes=[ChartAxis(label="A", key="a"), ChartAxis(label="B", key="b")],
+        data=[{"p": "Q1", "a": 1, "b": 2}],
+    )
+    html = render_report_html(
+        {
+            "title": "Self-contained",
+            "sections": [
+                {"type": "chart", "svg": render_chart_svg(chart)},
+                {"type": "table", "columns": ["a"], "rows": [["x"]]},
+                {"type": "narrative", "markdown": "All **inline**."},
+            ],
+            "provenance": {"sources": ["SuiteQL"]},
+        },
+        freshness={"composed_at": "2026-07-06T18:00:00+00:00", "refreshed_at": "2026-07-07T18:00:00+00:00"},
+    )
+    assert "<link" not in html
+    assert "<script" not in html
+    assert "@import" not in html
+    assert "url(" not in html
+    assert html.count("http") == 1  # the svg xmlns only
+
+
+def test_multiseries_chart_size_canary():
+    """Coarse byte tripwire, not a spec: every rendered_html byte is stored ~30x
+    (version retention cap), so a tooltip/legend markup blowup must fail loudly.
+    Baseline at authoring time: ~34KB for a 100-point 3-series line chart."""
+    from app.schemas.chart import ChartAxis, ChartData
+    from app.services.report.report_charts import render_chart_svg
+
+    rows = [{"m": f"M{i:03d}", "a": i * 1000.5, "b": i * 2, "c": 7_000_000 - i} for i in range(100)]
+    chart = ChartData(
+        chart_type="line",
+        title="Canary",
+        x_axis=ChartAxis(label="m", key="m"),
+        y_axes=[ChartAxis(label="A", key="a"), ChartAxis(label="B", key="b"), ChartAxis(label="C", key="c")],
+        data=rows,
+    )
+    assert len(render_chart_svg(chart).encode()) < 80_000

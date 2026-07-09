@@ -75,12 +75,17 @@ def test_long_label_triggers_rotation_even_when_few():
 # Truncation: long labels ellipsized in-place, full text preserved in a tooltip.
 # ---------------------------------------------------------------------------
 def test_long_label_truncated_with_title_tooltip():
+    import re
+
     full = "11010 - Intercompany Receivables"  # 32 chars > _MAX_LABEL_CHARS
     svg = render_chart_svg(_bar_chart(["A", full]))
     assert "…" in svg  # the visible label is ellipsized
-    # the full text survives ONLY inside a <title> tooltip, never as a visible label
+    # The full text survives ONLY inside <title> tooltips, never as a visible label.
+    # (Since Slice D each datum's hover tooltip also carries the full category name —
+    # a count==1 proxy would miscount; assert the intent directly instead.)
     assert f"<title>{full}</title>" in svg
-    assert svg.count(full) == 1
+    visible = re.sub(r"<title>.*?</title>", "", svg)
+    assert full not in visible
 
 
 # ---------------------------------------------------------------------------

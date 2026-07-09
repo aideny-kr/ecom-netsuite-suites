@@ -289,3 +289,164 @@ def test_valid_hex_and_hsl_colors_are_preserved():
     assert 'fill="hsl(210, 50%, 40%)"' in svg
     svg = render_chart_svg(_injected_bar("hsla(210, 50%, 40%, 0.5)"))
     assert 'fill="hsla(210, 50%, 40%, 0.5)"' in svg
+
+
+# --- Slice D: series groups, datum tooltips, legend markup ------------------------------
+# Spec §4D interactivity is CSS-only (the FE viewer iframe is sandbox="" — no scripts):
+# per-series <g class="ser-j"> hooks for the checkbox-toggle CSS in report_html._CSS,
+# native SVG <title> hover values (browser-rendered, works sandboxed), and a legend
+# appended AFTER </svg> in the same returned string (one self-contained artifact).
+
+
+def _multi_bar():
+    return ChartData(
+        chart_type="bar",
+        title="Rev vs Cost",
+        x_axis=ChartAxis(label="P", key="period"),
+        y_axes=[
+            ChartAxis(label="Revenue", key="revenue", color="#6366f1"),
+            ChartAxis(label="Cost", key="cost"),
+        ],
+        data=[
+            {"period": "Q1", "revenue": 1234567.5, "cost": 200},
+            {"period": "Q2", "revenue": 150, "cost": 90},
+        ],
+    )
+
+
+def test_multiseries_bar_wraps_each_series_in_classed_group():
+    svg = render_chart_svg(_multi_bar())
+    assert 'class="ser-0"' in svg and 'class="ser-1"' in svg
+
+
+def test_bar_datapoint_has_value_tooltip():
+    """Native SVG <title> = the hover value. Full-precision thousands-separated figure
+    (the tooltip is where exact numbers belong — never the '1.2M' axis abbreviation)."""
+    svg = render_chart_svg(_multi_bar())
+    assert "<title>Q1 — Revenue: 1,234,567.5</title>" in svg
+    assert "<title>Q2 — Cost: 90</title>" in svg  # integral floats render without '.0'
+
+
+def test_line_points_and_pie_slices_have_value_tooltips():
+    line = ChartData(
+        chart_type="line",
+        title="Trend",
+        x_axis=ChartAxis(label="P", key="period"),
+        y_axes=[ChartAxis(label="Revenue", key="revenue")],
+        data=[{"period": "Q1", "revenue": 100}, {"period": "Q2", "revenue": 150}],
+    )
+    assert "<title>Q1 — Revenue: 100</title>" in render_chart_svg(line)
+    pie = ChartData(
+        chart_type="pie",
+        title="Mix",
+        x_axis=ChartAxis(label="seg", key="seg"),
+        y_axes=[ChartAxis(label="Amount", key="amount")],
+        data=[{"seg": "Ops", "amount": 60}, {"seg": "R&D", "amount": 40}],
+    )
+    svg = render_chart_svg(pie)
+    assert "<title>Ops — Amount: 60</title>" in svg
+    assert "<title>R&amp;D — Amount: 40</title>" in svg  # category text is escaped
+
+
+def test_single_series_chart_has_no_legend():
+    """A one-entry legend is noise, and toggling the only series off would blank the
+    chart — single-series output carries no legend at all."""
+    assert "chart-legend" not in render_chart_svg(_bar())
+
+
+def test_multiseries_chart_appends_checkbox_legend_after_svg():
+    svg = render_chart_svg(_multi_bar())
+    assert svg.startswith("<svg")  # legend rides AFTER the svg, same returned string
+    legend = svg.split("</svg>", 1)[1]
+    assert 'class="chart-legend"' in legend
+    assert legend.count('<input type="checkbox"') == 2
+    assert legend.count("checked") == 2  # all series start visible
+    assert "Revenue" in legend and "Cost" in legend
+    assert 'style="background:#6366f1"' in legend  # swatch mirrors the series color
+
+
+def test_pie_legend_is_static_no_checkboxes():
+    """Pie slices are categories, not series: CSS-hiding a slice would leave a
+    wedge-shaped hole that misrepresents the remaining shares (angles can't be
+    recomputed without JS) — the legend is the color→label key only."""
+    pie = ChartData(
+        chart_type="pie",
+        title="Mix",
+        x_axis=ChartAxis(label="seg", key="seg"),
+        y_axes=[ChartAxis(label="Amount", key="amount")],
+        data=[{"seg": "Ops", "amount": 60}, {"seg": "R&D", "amount": 40}],
+    )
+    svg = render_chart_svg(pie)
+    legend = svg.split("</svg>", 1)[1]
+    assert 'class="chart-legend"' in legend
+    assert "<input" not in legend
+    assert "Ops" in legend and "R&amp;D" in legend
+
+
+def test_legend_swatch_malicious_color_falls_back_to_palette():
+    """Gate D lineage: ChartAxis.color is upstream-influenced; the legend swatch style
+    attribute must route through _safe_color exactly like the series fill."""
+    hostile = _multi_bar()
+    hostile.y_axes[0].color = '"><script>alert(1)</script>'
+    svg = render_chart_svg(hostile)
+    assert "<script" not in svg
+    assert 'style="background:#6366f1"' in svg  # palette default for series 0
+
+
+def test_chart_output_has_no_ids():
+    """The legend uses label-WRAPPED inputs precisely so no id/for pairs exist — a
+    report with several charts would otherwise collide ids (invalid HTML, broken
+    toggles) and ids would threaten render determinism."""
+    assert 'id="' not in render_chart_svg(_multi_bar())
+
+
+def test_multiseries_output_is_deterministic():
+    assert render_chart_svg(_multi_bar()) == render_chart_svg(_multi_bar())
+
+
+def _wide_series_chart(n_series: int):
+    keys = [f"s{j}" for j in range(n_series)]
+    return ChartData(
+        chart_type="bar",
+        title="Wide",
+        x_axis=ChartAxis(label="P", key="p"),
+        y_axes=[ChartAxis(label=f"Series {j}", key=k) for j, k in enumerate(keys)],
+        data=[{"p": "Q1", **{k: j + 1 for j, k in enumerate(keys)}}],
+    )
+
+
+def test_series_beyond_toggle_cap_get_plain_labels_not_dead_checkboxes(_=None):
+    """Review r1 (2 independent angles): the CSS toggle rules cover ser-0..ser-11 only,
+    but y_axes is UNBOUNDED (every numeric column becomes a series) — a 13th checkbox
+    would render as a dead control (unchecking silently no-ops). Beyond the cap the
+    legend degrades honestly to a static color→label key."""
+    from app.services.report.report_charts import _MAX_TOGGLE_SERIES
+
+    svg = render_chart_svg(_wide_series_chart(_MAX_TOGGLE_SERIES + 2))
+    legend = svg.split("</svg>", 1)[1]
+    assert legend.count('<input type="checkbox"') == _MAX_TOGGLE_SERIES
+    assert f'class="ser-{_MAX_TOGGLE_SERIES}"' not in legend  # no dead checkbox
+    assert f"Series {_MAX_TOGGLE_SERIES + 1}" in legend  # ...but the label/swatch still shown
+
+
+def test_tooltip_values_never_carry_float_noise_or_scientific_notation():
+    """Review r1 (two angles): raw f"{v:,}" leaks binary-float noise (0.1+0.2 →
+    '0.30000000000000004') and silently switches to scientific notation at >=1e16
+    ('1.5e+16') — an accountant hovering a summed amount must see neither."""
+    chart = ChartData(
+        chart_type="bar",
+        title="N",
+        x_axis=ChartAxis(label="P", key="p"),
+        y_axes=[
+            ChartAxis(label="Total", key="t"),
+            ChartAxis(label="Frac", key="f"),
+            ChartAxis(label="Huge", key="h"),
+        ],
+        data=[{"p": "Q1", "t": 0.1 + 0.2, "f": 0.125, "h": 1.5e16}],
+    )
+    svg = render_chart_svg(chart)
+    assert "<title>Q1 — Total: 0.3</title>" in svg  # IEEE754 noise rounded away
+    assert "<title>Q1 — Frac: 0.125</title>" in svg  # sub-cent precision preserved
+    assert "<title>Q1 — Huge: 15,000,000,000,000,000</title>" in svg  # grouped, not 1.5e+16
+    assert "0000000000000004" not in svg
+    assert "e+16" not in svg

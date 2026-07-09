@@ -36,6 +36,55 @@ td.num,th.num { text-align:right; font-variant-numeric:tabular-nums; white-space
 .divider { height:0; border-top:3px solid var(--border); margin:32px 0; }
 .svg-wrap { overflow:auto; }
 .prov { font-size:12px; color:#666; border-top:2px dashed #999; margin-top:48px; padding-top:12px; }
+.stamp { font-size:12px; color:#666; margin-top:32px; }
+/* Slice D — sticky table headers. The overflow-x wrapper forces computed overflow-y,
+   so a document-relative sticky thead can never engage; the table card is instead a
+   capped-height scroll region and the thead sticks to ITS scroll box. Short tables
+   are unaffected (max-height only caps). th's opaque accent background keeps rows
+   from bleeding through; the inset shadow re-draws the border that border-collapse
+   detaches from a stuck header. */
+.table-wrap { max-height:70vh; overflow-y:auto; }
+.table-wrap thead th { position:sticky; top:0; z-index:1; box-shadow:inset 0 -2px 0 var(--border); }
+/* Slice D — chart legend (emitted by report_charts after each multi-series svg). */
+.chart-legend { display:flex; flex-wrap:wrap; gap:8px 16px; margin-top:12px; font-size:13px; font-weight:600; }
+.chart-legend label { display:inline-flex; align-items:center; gap:6px; cursor:pointer; }
+.chart-legend .swatch { width:12px; height:12px; border:2px solid var(--border); display:inline-block; }
+/* Slice D — CSS-only series toggles: unchecking the legend's ser-j checkbox hides
+   that series' <g class="ser-j"> groups. :has() is load-bearing (CSS has no parent
+   combinator; id/for label pairs would collide across a report's charts); browsers
+   without :has() degrade to inert checkboxes. Plain literals, NOT generated — and
+   note this whole string passes through percent-formatting, so a percent sign in
+   ANY rule or comment here must be doubled (this comment learned that first-hand).
+   Rules exist for ser-0..ser-11 = report_charts._MAX_TOGGLE_SERIES — the legend
+   stops emitting checkboxes past that cap (a rule-less checkbox is a dead control)
+   and a drift test binds the two. */
+.nb-card:has(input.ser-0:not(:checked)) svg .ser-0 { display:none; }
+.nb-card:has(input.ser-1:not(:checked)) svg .ser-1 { display:none; }
+.nb-card:has(input.ser-2:not(:checked)) svg .ser-2 { display:none; }
+.nb-card:has(input.ser-3:not(:checked)) svg .ser-3 { display:none; }
+.nb-card:has(input.ser-4:not(:checked)) svg .ser-4 { display:none; }
+.nb-card:has(input.ser-5:not(:checked)) svg .ser-5 { display:none; }
+.nb-card:has(input.ser-6:not(:checked)) svg .ser-6 { display:none; }
+.nb-card:has(input.ser-7:not(:checked)) svg .ser-7 { display:none; }
+.nb-card:has(input.ser-8:not(:checked)) svg .ser-8 { display:none; }
+.nb-card:has(input.ser-9:not(:checked)) svg .ser-9 { display:none; }
+.nb-card:has(input.ser-10:not(:checked)) svg .ser-10 { display:none; }
+.nb-card:has(input.ser-11:not(:checked)) svg .ser-11 { display:none; }
+/* Slice D — print. Un-clip the scroll regions (a stuck thead prints frozen mid-page
+   and overflow-y clips rows off the paper), keep card/accent colors where the engine
+   honors print-color-adjust (borders + weight-800 text stay legible where it strips
+   them), hide the legend checkbox WIDGETS but keep swatch+label — the printed page
+   shows exactly the series toggled on (WYSIWYG). Long tables paginate; the browser
+   repeats <thead> per page natively. */
+@media print {
+  body { background:#fff; print-color-adjust:exact; -webkit-print-color-adjust:exact; }
+  .nb-card { box-shadow:none; break-inside:avoid; page-break-inside:avoid; }
+  .svg-wrap, .table-wrap { overflow:visible; max-height:none; }
+  .table-wrap { break-inside:auto; page-break-inside:auto; }
+  thead th { position:static; }
+  .chart-legend input { display:none; }
+  .report { max-width:100%%; padding:0; }
+}
 """
 
 
@@ -251,7 +300,9 @@ def _section_html(s: dict) -> str:
             else:
                 note = f'<p class="foot">Showing first {len(rows)} rows (results truncated).</p>'
         return (
-            f'<div class="nb-card svg-wrap"><table><thead><tr>{cols}</tr></thead>'
+            # table-wrap = the capped-height scroll region the sticky thead binds to
+            # (Slice D); charts/narratives keep the plain svg-wrap.
+            f'<div class="nb-card svg-wrap table-wrap"><table><thead><tr>{cols}</tr></thead>'
             f"<tbody>{body}</tbody></table>{note}</div>"
         )
     if t == "divider":
