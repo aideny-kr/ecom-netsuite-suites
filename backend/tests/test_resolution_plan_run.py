@@ -108,6 +108,29 @@ async def test_plan_run_cross_run_posted_guard(db, tenant_a):
     assert out["planned_count"] == 0
 
 
+async def test_plan_run_cross_run_guard_covers_approved_status(db, tenant_a):
+    """T2 gate finding: the guard must cover decided-or-in-flight statuses, not
+    just 'posted' — a charge approved (but not yet posted) in run 1 must still
+    guard run 2, otherwise the same charge gets two independent proposals
+    racing toward NetSuite before run 1's posting even starts."""
+    run1 = await create_test_recon_run(db, tenant_a.id, status="completed")
+    r1 = await _result(db, tenant_a.id, run1.id, evidence={"charge_source_id": "ch_approved", "order_reference": "R1"})
+    await db.flush()
+    await plan_run(db, tenant_a.id, run1.id)
+    p1 = (
+        await db.execute(select(ReconResolutionProposal).where(ReconResolutionProposal.result_id == r1.id))
+    ).scalar_one()
+    p1.status = "approved"  # decided, not yet posted
+    await db.flush()
+
+    run2 = await create_test_recon_run(db, tenant_a.id, status="completed")
+    await _result(db, tenant_a.id, run2.id, evidence={"charge_source_id": "ch_approved", "order_reference": "R1"})
+    await db.flush()
+    out = await plan_run(db, tenant_a.id, run2.id)
+    assert out["skipped_guard_count"] == 1
+    assert out["planned_count"] == 0
+
+
 async def test_plan_run_preserves_human_override_after_replan(db, tenant_a):
     """T2 gate finding: the supersede UPDATE must not flip source='human'
     override proposals — a re-plan must not discard a human decision. Mirrors

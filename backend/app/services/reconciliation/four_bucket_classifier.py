@@ -27,6 +27,10 @@ BULK_APPROVABLE_BUCKETS = (BUCKET_MATCHES, BUCKET_RULES, BUCKET_AUTO_CLASSIFICAT
 # carried_forward: an acknowledged reconciling item — bulk-approve must not flip it.
 TERMINAL_RESULT_STATUSES = ("approved", "rejected", "locked", "carried_forward")
 
+# Run-level hard freeze. Canonical home so the REST API's _ensure_run_open and
+# the MCP recon.approve_match tool's closed-run check can't drift apart again.
+CLOSED_RUN_STATUSES = ("closed", "locked")
+
 
 def _has_variance(variance_type: str | None, variance_amount: Decimal | None) -> bool:
     if variance_type is not None:

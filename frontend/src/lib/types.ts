@@ -1008,6 +1008,7 @@ export interface ReconResolutionGroup {
   root_cause: string;
   action: string;
   booking_vehicle: string;
+  currency: string;
   count: number;
   proposed_count: number;
   approved_count: number;

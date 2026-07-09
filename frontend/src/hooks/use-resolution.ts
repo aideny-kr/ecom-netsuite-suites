@@ -51,6 +51,10 @@ export function useApproveResolutionGroup(runId: string) {
       notes?: string;
       included_above_materiality_ids?: string[];
       excluded_ids?: string[];
+      // Scopes the approve to one currency's card — a group_key alone can
+      // now span more than one currency (multi-currency runs render one
+      // card per currency).
+      currency?: string;
     }) =>
       apiClient.post(
         `/api/v1/reconciliation/runs/${runId}/resolution-groups/${encodeURIComponent(
@@ -60,6 +64,7 @@ export function useApproveResolutionGroup(runId: string) {
           notes: data.notes,
           included_above_materiality_ids: data.included_above_materiality_ids ?? [],
           excluded_ids: data.excluded_ids ?? [],
+          currency: data.currency,
         }
       ),
     onSuccess: () => invalidateResolution(queryClient),
@@ -69,12 +74,12 @@ export function useApproveResolutionGroup(runId: string) {
 export function useRejectResolutionGroup(runId: string) {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (data: { group_key: string }) =>
+    mutationFn: (data: { group_key: string; currency?: string }) =>
       apiClient.post(
         `/api/v1/reconciliation/runs/${runId}/resolution-groups/${encodeURIComponent(
           data.group_key
         )}/reject`,
-        {}
+        { currency: data.currency }
       ),
     onSuccess: () => invalidateResolution(queryClient),
   });

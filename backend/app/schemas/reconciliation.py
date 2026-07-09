@@ -299,6 +299,7 @@ class ResolutionGroupSummary(BaseModel):
     root_cause: str
     action: str
     booking_vehicle: str
+    currency: str
     count: int
     proposed_count: int
     approved_count: int
@@ -316,6 +317,10 @@ class ResolutionSummaryResponse(BaseModel):
     ``guard_skipped_count`` = results with no proposal at all — guard-skipped
     or never planned (a human-rejected proposal was still planned, so those
     results are NOT counted here).
+    ``variance_by_root_cause`` keys are plain ``root_cause`` when every group
+    shares one currency; once the run has groups in more than one currency,
+    keys become ``f"{root_cause} ({currency})"`` so amounts are never summed
+    across currencies under one label.
     """
 
     run_id: str
@@ -335,6 +340,10 @@ class ResolutionGroupApprove(BaseModel):
     # Above-materiality items approve ONLY when explicitly ticked.
     included_above_materiality_ids: list[str] = []
     excluded_ids: list[str] = []
+    # A group_key alone can now span more than one currency (multi-currency
+    # runs render one card per currency) — scope the approve to just this one
+    # when the caller sends it; omitted/None matches every currency (back-compat).
+    currency: str | None = None
 
 
 class ResolutionGroupApproveResult(BaseModel):
@@ -343,6 +352,13 @@ class ResolutionGroupApproveResult(BaseModel):
     approved_count: int
     skipped_count: int
     correlation_id: str
+
+
+class ResolutionGroupReject(BaseModel):
+    """Optional body — reject historically took none. Same currency-scoping
+    as ResolutionGroupApprove for multi-currency group_key collisions."""
+
+    currency: str | None = None
 
 
 class ResolutionGroupRejectResult(BaseModel):

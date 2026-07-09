@@ -58,7 +58,7 @@ export function ResolutionGroupCard({
 
   const money = Number(group.total_amount).toLocaleString("en-US", {
     style: "currency",
-    currency: "USD",
+    currency: group.currency,
   });
   const chip = VEHICLE_CHIP[group.booking_vehicle] ?? VEHICLE_CHIP.none;
   const isNeedsHuman = group.action === "needs_human";

@@ -8,6 +8,7 @@ const feeGroup: ReconResolutionGroup = {
   root_cause: "fees",
   action: "book_fee_line",
   booking_vehicle: "deposit",
+  currency: "USD",
   count: 212,
   proposed_count: 212,
   approved_count: 0,
@@ -66,5 +67,11 @@ describe("ResolutionGroupCard", () => {
       above_materiality_count: 0 };
     render(<ResolutionGroupCard group={cf} {...base} />);
     expect(screen.getByRole("button", { name: /acknowledge/i })).toBeInTheDocument();
+  });
+
+  it("formats the amount in the group's own currency (EUR), not hardcoded USD", () => {
+    const eurGroup = { ...feeGroup, currency: "EUR", total_amount: "500.00" };
+    render(<ResolutionGroupCard group={eurGroup} {...base} />);
+    expect(screen.getByText(/€500\.00/)).toBeInTheDocument();
   });
 });

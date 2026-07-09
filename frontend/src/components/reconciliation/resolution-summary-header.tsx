@@ -7,8 +7,13 @@ interface ResolutionSummaryHeaderProps {
   summary: ReconResolutionSummary | null;
 }
 
-const money = (v: string | number) =>
-  Number(v).toLocaleString("en-US", { style: "currency", currency: "USD" });
+const money = (v: string | number, currency = "USD") =>
+  Number(v).toLocaleString("en-US", { style: "currency", currency });
+
+// variance_by_root_cause keys become "root_cause (CUR)" once a run spans more
+// than one currency (see ResolutionSummaryResponse docstring) — recover the
+// currency for correct chip formatting.
+const CAUSE_CURRENCY_SUFFIX = /\s\(([A-Z]{3})\)$/;
 
 export function ResolutionSummaryHeader({ summary }: ResolutionSummaryHeaderProps) {
   if (!summary) {
@@ -22,6 +27,19 @@ export function ResolutionSummaryHeader({ summary }: ResolutionSummaryHeaderProp
     (acc, v) => acc + Number(v),
     0
   );
+  // Gross total is only ever safe to render as one number when every group
+  // shares a currency — otherwise show a per-currency breakdown instead of
+  // silently summing USD + EUR under one symbol.
+  const totalsByCurrency = summary.groups.reduce<Record<string, number>>((acc, g) => {
+    acc[g.currency] = (acc[g.currency] ?? 0) + Number(g.total_amount);
+    return acc;
+  }, {});
+  const distinctCurrencies = Object.keys(totalsByCurrency);
+  const grossExceptionValue =
+    distinctCurrencies.length > 1
+      ? distinctCurrencies.map((c) => money(totalsByCurrency[c], c)).join(" · ")
+      : money(totalVariance, distinctCurrencies[0] ?? "USD");
+  const defaultCauseCurrency = distinctCurrencies.length === 1 ? distinctCurrencies[0] : "USD";
   const cards = [
     {
       label: "Match rate",
@@ -41,7 +59,7 @@ export function ResolutionSummaryHeader({ summary }: ResolutionSummaryHeaderProp
     },
     {
       label: "Gross exception amount",
-      value: money(totalVariance),
+      value: grossExceptionValue,
       sub: "sum of proposed resolution amounts",
       icon: DollarSign,
       color: "text-blue-600",
@@ -70,15 +88,19 @@ export function ResolutionSummaryHeader({ summary }: ResolutionSummaryHeaderProp
         ))}
       </div>
       <div className="flex flex-wrap gap-2">
-        {rootCauses.map(([cause, amount]) => (
-          <span
-            key={cause}
-            className="inline-flex items-center gap-1.5 rounded-full border bg-card px-3 py-1 text-[13px]"
-          >
-            <span className="font-medium">{cause}</span>
-            <span className="text-muted-foreground">{money(amount)}</span>
-          </span>
-        ))}
+        {rootCauses.map(([cause, amount]) => {
+          const parsed = cause.match(CAUSE_CURRENCY_SUFFIX);
+          const causeCurrency = parsed ? parsed[1] : defaultCauseCurrency;
+          return (
+            <span
+              key={cause}
+              className="inline-flex items-center gap-1.5 rounded-full border bg-card px-3 py-1 text-[13px]"
+            >
+              <span className="font-medium">{cause}</span>
+              <span className="text-muted-foreground">{money(amount, causeCurrency)}</span>
+            </span>
+          );
+        })}
       </div>
     </div>
   );

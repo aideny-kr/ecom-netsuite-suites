@@ -71,7 +71,11 @@ export default function ReconciliationPage() {
   const rejectGroup = useRejectResolutionGroup(selectedRunId || "");
   const [expandedGroup, setExpandedGroup] = useState<string | null>(null);
   const [tickedAboveByGroup, setTickedAboveByGroup] = useState<Record<string, string[]>>({});
-  const [groupResetSignal, setGroupResetSignal] = useState(0);
+  // Keyed by cardKey (`${group_key}:${currency}`) — a group_key alone can span
+  // more than one currency (multi-currency runs render one card per
+  // currency), so a single page-level counter would wipe every OTHER card's
+  // unsaved note when any one group is approved.
+  const [groupResetSignals, setGroupResetSignals] = useState<Record<string, number>>({});
   const [showClassicView, setShowClassicView] = useState(false);
 
   const selectedRun = runs?.find((r) => r.id === selectedRunId) || null;
@@ -129,7 +133,12 @@ export default function ReconciliationPage() {
     if (orderRef) {
       query = `Use SuiteQL to investigate order ${orderRef} in NetSuite. A Stripe charge of ${amount} ${dateRange} has no matching customer deposit. Run: SELECT t.id, t.tranid, t.trandate, t.total, BUILTIN.DF(t.entity) AS customer FROM transaction t WHERE t.type = 'CustDep' AND t.tranid LIKE '%${orderRef}%' OR t.total = ${Number(result.stripe_amount || 0).toFixed(2)} FETCH FIRST 10 ROWS ONLY`;
     } else {
-      query = `Use SuiteQL to find customer deposits in NetSuite around ${amount} ${dateRange}. Run: SELECT t.id, t.tranid, t.trandate, t.total, BUILTIN.DF(t.entity) AS customer FROM transaction t WHERE t.type = 'CustDep' AND t.total BETWEEN ${(Number(result.stripe_amount || 0) * 0.95).toFixed(2)} AND ${(Number(result.stripe_amount || 0) * 1.05).toFixed(2)} ${dateFrom ? `AND t.trandate >= TO_DATE('${dateFrom}', 'YYYY-MM-DD') AND t.trandate <= TO_DATE('${dateTo}', 'YYYY-MM-DD')` : ""} FETCH FIRST 10 ROWS ONLY`;
+      // BETWEEN lo AND hi must use the numerically smaller bound first — for a
+      // negative amount, *0.95 is the larger (less negative) of the two.
+      const rawAmount = Number(result.stripe_amount || 0);
+      const lo = Math.min(rawAmount * 0.95, rawAmount * 1.05).toFixed(2);
+      const hi = Math.max(rawAmount * 0.95, rawAmount * 1.05).toFixed(2);
+      query = `Use SuiteQL to find customer deposits in NetSuite around ${amount} ${dateRange}. Run: SELECT t.id, t.tranid, t.trandate, t.total, BUILTIN.DF(t.entity) AS customer FROM transaction t WHERE t.type = 'CustDep' AND t.total BETWEEN ${lo} AND ${hi} ${dateFrom ? `AND t.trandate >= TO_DATE('${dateFrom}', 'YYYY-MM-DD') AND t.trandate <= TO_DATE('${dateTo}', 'YYYY-MM-DD')` : ""} FETCH FIRST 10 ROWS ONLY`;
     }
     // Use unified agent (not recon-agent) — it has SuiteQL tools
     router.push(`/chat?prefill=${encodeURIComponent(query)}&new_session=true`);
@@ -146,7 +155,12 @@ export default function ReconciliationPage() {
       currency: proposal.currency || "USD",
     });
     const dateRange = selectedRun ? `between ${selectedRun.date_from} and ${selectedRun.date_to}` : "";
-    const query = `Use SuiteQL to find customer deposits in NetSuite around ${amount} ${dateRange}. Context: ${proposal.narrative} (recon result ${proposal.result_id}). Run: SELECT t.id, t.tranid, t.trandate, t.total, BUILTIN.DF(t.entity) AS customer FROM transaction t WHERE t.type = 'CustDep' AND t.total BETWEEN ${(Number(proposal.proposed_amount) * 0.95).toFixed(2)} AND ${(Number(proposal.proposed_amount) * 1.05).toFixed(2)} ${dateFrom ? `AND t.trandate >= TO_DATE('${dateFrom}', 'YYYY-MM-DD') AND t.trandate <= TO_DATE('${dateTo}', 'YYYY-MM-DD')` : ""} FETCH FIRST 10 ROWS ONLY`;
+    // BETWEEN lo AND hi must use the numerically smaller bound first — for a
+    // negative amount, *0.95 is the larger (less negative) of the two.
+    const rawAmount = Number(proposal.proposed_amount);
+    const lo = Math.min(rawAmount * 0.95, rawAmount * 1.05).toFixed(2);
+    const hi = Math.max(rawAmount * 0.95, rawAmount * 1.05).toFixed(2);
+    const query = `Use SuiteQL to find customer deposits in NetSuite around ${amount} ${dateRange}. Context: ${proposal.narrative} (recon result ${proposal.result_id}). Run: SELECT t.id, t.tranid, t.trandate, t.total, BUILTIN.DF(t.entity) AS customer FROM transaction t WHERE t.type = 'CustDep' AND t.total BETWEEN ${lo} AND ${hi} ${dateFrom ? `AND t.trandate >= TO_DATE('${dateFrom}', 'YYYY-MM-DD') AND t.trandate <= TO_DATE('${dateTo}', 'YYYY-MM-DD')` : ""} FETCH FIRST 10 ROWS ONLY`;
     router.push(`/chat?prefill=${encodeURIComponent(query)}&new_session=true`);
   };
 
@@ -318,49 +332,66 @@ export default function ReconciliationPage() {
         <>
           <ResolutionSummaryHeader summary={resolutionSummary.data ?? null} />
           <div className="space-y-3">
-            {resolutionSummary.data?.groups.map((group) => (
-              <ResolutionGroupCard
-                key={group.group_key}
-                group={group}
-                expanded={expandedGroup === group.group_key}
-                onToggleExpand={() =>
-                  setExpandedGroup(expandedGroup === group.group_key ? null : group.group_key)
-                }
-                isApproving={approveGroup.isPending}
-                disabled={!reconEnabled || isRunClosed}
-                includedAboveIds={tickedAboveByGroup[group.group_key] ?? []}
-                resetSignal={groupResetSignal}
-                onApprove={(notes, includedAboveIds) =>
-                  approveGroup.mutate(
-                    {
-                      group_key: group.group_key,
-                      notes: notes.trim() || undefined,
-                      included_above_materiality_ids: includedAboveIds,
-                    },
-                    { onSuccess: () => setGroupResetSignal((n) => n + 1) }
-                  )
-                }
-                onReject={() => rejectGroup.mutate({ group_key: group.group_key })}
-              >
-                <ResolutionGroupItems
-                  runId={selectedRunId}
-                  groupKey={group.group_key}
-                  tickedAboveIds={tickedAboveByGroup[group.group_key] ?? []}
-                  onTickAbove={(id, ticked) =>
-                    setTickedAboveByGroup((prev) => {
-                      const current = prev[group.group_key] ?? [];
-                      return {
-                        ...prev,
-                        [group.group_key]: ticked
-                          ? [...current, id]
-                          : current.filter((x) => x !== id),
-                      };
-                    })
+            {resolutionSummary.data?.groups.map((group) => {
+              // A group_key alone can span more than one currency
+              // (multi-currency runs render one card per currency) — every
+              // piece of per-card state must key on the pair, not group_key
+              // alone, or two cards would fight over the same expand/ticked/
+              // reset state.
+              const cardKey = `${group.group_key}:${group.currency}`;
+              return (
+                <ResolutionGroupCard
+                  key={cardKey}
+                  group={group}
+                  expanded={expandedGroup === cardKey}
+                  onToggleExpand={() => setExpandedGroup(expandedGroup === cardKey ? null : cardKey)}
+                  isApproving={approveGroup.isPending}
+                  disabled={!reconEnabled || isRunClosed}
+                  includedAboveIds={tickedAboveByGroup[cardKey] ?? []}
+                  resetSignal={groupResetSignals[cardKey] ?? 0}
+                  onApprove={(notes, includedAboveIds) =>
+                    approveGroup.mutate(
+                      {
+                        group_key: group.group_key,
+                        notes: notes.trim() || undefined,
+                        included_above_materiality_ids: includedAboveIds,
+                        currency: group.currency,
+                      },
+                      {
+                        onSuccess: () => {
+                          setGroupResetSignals((prev) => ({ ...prev, [cardKey]: (prev[cardKey] ?? 0) + 1 }));
+                          // Ticked above-materiality ids are consumed by this
+                          // approve — clear them so a re-render doesn't leave
+                          // stale ids pointing at now-decided proposals.
+                          setTickedAboveByGroup((prev) => {
+                            const next = { ...prev };
+                            delete next[cardKey];
+                            return next;
+                          });
+                        },
+                      }
+                    )
                   }
-                  onInvestigate={handleInvestigateProposal}
-                />
-              </ResolutionGroupCard>
-            ))}
+                  onReject={() => rejectGroup.mutate({ group_key: group.group_key, currency: group.currency })}
+                >
+                  <ResolutionGroupItems
+                    runId={selectedRunId}
+                    groupKey={group.group_key}
+                    tickedAboveIds={tickedAboveByGroup[cardKey] ?? []}
+                    onTickAbove={(id, ticked) =>
+                      setTickedAboveByGroup((prev) => {
+                        const current = prev[cardKey] ?? [];
+                        return {
+                          ...prev,
+                          [cardKey]: ticked ? [...current, id] : current.filter((x) => x !== id),
+                        };
+                      })
+                    }
+                    onInvestigate={handleInvestigateProposal}
+                  />
+                </ResolutionGroupCard>
+              );
+            })}
           </div>
           <button
             type="button"

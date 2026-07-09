@@ -165,6 +165,85 @@ async def test_group_proposals_listing_paginated(db, tenant_a):
     assert page[0].action == "book_fee_line"
 
 
+async def _seed_multi_currency_fees(db, tenant):
+    user, _ = await create_test_user(db, tenant)
+    await enable_feature_flag(db, tenant.id, "recon_resolution_ui")
+    run = await create_test_recon_run(db, tenant.id, status="completed")
+    await create_test_recon_result(
+        db,
+        tenant.id,
+        run.id,
+        status="pending",
+        bucket="auto_classifications",
+        match_type="deterministic",
+        variance_type="fees",
+        variance_amount=Decimal("5.00"),
+        stripe_amount=Decimal("500"),
+        netsuite_amount=Decimal("495"),
+        currency="USD",
+        evidence={"charge_source_id": "ch_usd", "order_reference": "R1"},
+    )
+    await create_test_recon_result(
+        db,
+        tenant.id,
+        run.id,
+        status="pending",
+        bucket="auto_classifications",
+        match_type="deterministic",
+        variance_type="fees",
+        variance_amount=Decimal("7.00"),
+        stripe_amount=Decimal("700"),
+        netsuite_amount=Decimal("693"),
+        currency="EUR",
+        evidence={"charge_source_id": "ch_eur", "order_reference": "R2"},
+    )
+    await db.flush()
+    await plan_resolutions(str(run.id), user=user, db=db)
+    return user, run
+
+
+async def test_summary_splits_groups_by_currency(db, tenant_a):
+    """T2 gate finding: a group_key alone (root_cause:action:vehicle) can span
+    more than one currency — the group query must never sum proposed_amount
+    across currencies under one card, and variance_by_root_cause must split
+    by currency once a run has more than one."""
+    user, run = await _seed_multi_currency_fees(db, tenant_a)
+
+    out = await get_resolution_summary(str(run.id), user=user, db=db)
+    fee_groups = [g for g in out.groups if g.root_cause == "fees"]
+    assert len(fee_groups) == 2
+    by_currency = {g.currency: g for g in fee_groups}
+    assert set(by_currency) == {"USD", "EUR"}
+    assert by_currency["USD"].total_amount == Decimal("5.00")
+    assert by_currency["EUR"].total_amount == Decimal("7.00")
+    assert out.variance_by_root_cause["fees (USD)"] == Decimal("5.00")
+    assert out.variance_by_root_cause["fees (EUR)"] == Decimal("7.00")
+
+
+async def test_approve_group_scoped_to_currency(db, tenant_a):
+    """Approving one currency's card must not touch the other currency's
+    proposals sharing the same group_key."""
+    user, run = await _seed_multi_currency_fees(db, tenant_a)
+
+    out = await approve_resolution_group(
+        str(run.id),
+        "fees:book_fee_line:deposit",
+        ResolutionGroupApprove(currency="USD"),
+        user=user,
+        db=db,
+    )
+    assert out.approved_count == 1
+
+    props = (
+        (await db.execute(select(ReconResolutionProposal).where(ReconResolutionProposal.run_id == run.id)))
+        .scalars()
+        .all()
+    )
+    by_currency = {p.currency: p.status for p in props}
+    assert by_currency["USD"] == "approved"
+    assert by_currency["EUR"] == "proposed"
+
+
 async def test_summary_404_on_foreign_run(db, tenant_a, tenant_b):
     user, _ = await create_test_user(db, tenant_a)
     run_b = await create_test_recon_run(db, tenant_b.id, status="completed")

@@ -40,6 +40,7 @@ from app.schemas.reconciliation import (
     ReconRunSummary,
     ResolutionGroupApprove,
     ResolutionGroupApproveResult,
+    ResolutionGroupReject,
     ResolutionGroupRejectResult,
     ResolutionGroupSummary,
     ResolutionProposalOverride,
@@ -55,6 +56,7 @@ from app.services.reconciliation.evidence_service import EvidencePackGenerator
 from app.services.reconciliation.four_bucket_classifier import (
     ALL_BUCKETS,
     BULK_APPROVABLE_BUCKETS,
+    CLOSED_RUN_STATUSES,
     TERMINAL_RESULT_STATUSES,
     bucket_conditions,
 )
@@ -78,7 +80,7 @@ def _ensure_run_open(run: ReconciliationRun | None) -> None:
     is a no-op (the caller either already 404'd on a missing run, or derived
     the run from a tenant-scoped child row and treats a missing run as not
     blocking)."""
-    if run is not None and run.status in ("closed", "locked"):
+    if run is not None and run.status in CLOSED_RUN_STATUSES:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Period is closed; cannot approve.")
 
 
@@ -571,7 +573,12 @@ async def approve_result(
     # for human review; without this guard such a line could still be single-approved
     # post-close, flipping it to 'approved' inside a closed period and never re-locked.
     run = (
-        await db.execute(select(ReconciliationRun).where(ReconciliationRun.id == recon_result.run_id))
+        await db.execute(
+            select(ReconciliationRun).where(
+                ReconciliationRun.id == recon_result.run_id,
+                ReconciliationRun.tenant_id == user.tenant_id,
+            )
+        )
     ).scalar_one_or_none()
     _ensure_run_open(run)
 
@@ -826,6 +833,7 @@ async def get_resolution_summary(
                 P.action,
                 P.booking_vehicle,
                 P.group_key,
+                P.currency,
                 func.count(P.id).label("count"),
                 func.count(P.id).filter(P.status == "proposed").label("proposed_count"),
                 func.count(P.id).filter(P.status == "approved").label("approved_count"),
@@ -835,7 +843,7 @@ async def get_resolution_summary(
                 .label("above_materiality_count"),
             )
             .where(*live)
-            .group_by(P.root_cause, P.action, P.booking_vehicle, P.group_key)
+            .group_by(P.root_cause, P.action, P.booking_vehicle, P.group_key, P.currency)
             .order_by(func.coalesce(func.sum(P.proposed_amount), 0).desc())
         )
     ).all()
@@ -846,6 +854,7 @@ async def get_resolution_summary(
             root_cause=r.root_cause,
             action=r.action,
             booking_vehicle=r.booking_vehicle,
+            currency=r.currency,
             count=r.count,
             proposed_count=r.proposed_count,
             approved_count=r.approved_count,
@@ -856,9 +865,14 @@ async def get_resolution_summary(
     ]
     proposals_count = sum(g.count for g in groups)
     explained_count = sum(g.count for g in groups if g.action != "needs_human")
+    # Plain root_cause keys when the run is single-currency; once more than one
+    # currency appears across groups, split by currency so amounts are never
+    # summed across currencies under one label (see schema docstring).
+    distinct_currencies = {g.currency for g in groups}
     variance_by_root_cause: dict[str, Decimal] = {}
     for g in groups:
-        variance_by_root_cause[g.root_cause] = variance_by_root_cause.get(g.root_cause, Decimal("0")) + g.total_amount
+        key = f"{g.root_cause} ({g.currency})" if len(distinct_currencies) > 1 else g.root_cause
+        variance_by_root_cause[key] = variance_by_root_cause.get(key, Decimal("0")) + g.total_amount
 
     def _pct(numerator: int, denominator: int) -> Decimal:
         if denominator == 0:
@@ -973,6 +987,11 @@ async def approve_resolution_group(
         P.action == action,
         P.booking_vehicle == vehicle,
     )
+    # A group_key alone can now span more than one currency (multi-currency runs
+    # render one card per currency) — scope to just this currency when the
+    # caller sends one; omitted matches every currency (back-compat).
+    if request.currency:
+        group_filter = (*group_filter, P.currency == request.currency)
     eligibility = (
         or_(P.above_materiality.is_(False), P.id.in_(included)) if included else P.above_materiality.is_(False)
     )
@@ -1084,6 +1103,7 @@ async def reject_resolution_group(
     group_key: str,
     user: Annotated[User, Depends(require_permission("recon.run"))],
     db: Annotated[AsyncSession, Depends(get_db)],
+    request: ResolutionGroupReject | None = None,
 ):
     """Reject a whole group's undecided proposals. Results are untouched —
     proposal history (incl. gathered evidence) is retained for the human."""
@@ -1094,6 +1114,9 @@ async def reject_resolution_group(
     now = datetime.now(timezone.utc)
     correlation_id = str(uuid.uuid4())
     P = ReconResolutionProposal
+    # Same currency-scoping as approve — a group_key alone can span more than
+    # one currency (multi-currency runs render one card per currency).
+    currency_filter = [P.currency == request.currency] if request and request.currency else []
     rejected_ids = (
         (
             await db.execute(
@@ -1105,6 +1128,7 @@ async def reject_resolution_group(
                     P.action == action,
                     P.booking_vehicle == vehicle,
                     P.status == "proposed",
+                    *currency_filter,
                 )
                 .values(status="rejected", decided_by=user.id, decided_at=now, correlation_id=correlation_id)
                 .returning(P.id)

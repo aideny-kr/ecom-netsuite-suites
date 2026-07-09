@@ -280,14 +280,19 @@ async def plan_run(db: AsyncSession, tenant_id, run_id) -> dict:
         ReconResolutionProposal.status.in_((*ACTIVE_PROPOSAL_STATUSES, "rejected")),
     )
 
-    # 3. cross-run double-posting guard: charge ids with a posted proposal
-    #    anywhere in this tenant's history.
-    posted_charge_ids = set(
+    # 3. cross-run double-posting guard: charge ids already decided or in-flight
+    #    toward NetSuite anywhere in this tenant's history. 'approved'/'posting'/
+    #    'post_failed' must guard too, not just 'posted' — a charge approved (or
+    #    mid-post, or failed-post and awaiting retry) in run 1 must not get a
+    #    second, independent proposal planned for it in run 2 before run 1's
+    #    posting resolves. 'proposed' (undecided) and 'rejected' deliberately do
+    #    NOT guard — those are not commitments toward NetSuite.
+    decided_charge_ids = set(
         (
             await db.execute(
                 select(ReconResolutionProposal.charge_source_id).where(
                     ReconResolutionProposal.tenant_id == tid,
-                    ReconResolutionProposal.status == "posted",
+                    ReconResolutionProposal.status.in_(("approved", "posting", "posted", "post_failed")),
                     ReconResolutionProposal.charge_source_id.is_not(None),
                 )
             )
@@ -334,12 +339,12 @@ async def plan_run(db: AsyncSession, tenant_id, run_id) -> dict:
             currency=row.currency,
             variance_explanation=row.variance_explanation,
             evidence=evidence,
-            already_posted=charge_source_id in posted_charge_ids if charge_source_id else False,
+            already_posted=charge_source_id in decided_charge_ids if charge_source_id else False,
             materiality_abs=mat_abs,
             materiality_pct=mat_pct,
         )
         if planned is None:
-            if charge_source_id in posted_charge_ids:
+            if charge_source_id in decided_charge_ids:
                 skipped_guard += 1
             continue
         by_action[planned.action] = by_action.get(planned.action, 0) + 1
