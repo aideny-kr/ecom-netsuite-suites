@@ -57,7 +57,21 @@ vi.mock("@/hooks/use-recon-pipeline", () => ({
     summary: null,
   }),
 }));
-vi.mock("@/hooks/use-features", () => ({ useFeature: () => true }));
+// This suite exercises the classic (flag-off) surface — recon_resolution_ui
+// stays false here so page.tsx renders the untouched tabs+table+bulk-card
+// block directly, matching these tests' assertions. Other flags (e.g.
+// "reconciliation") keep the prior blanket-true behavior.
+vi.mock("@/hooks/use-features", () => ({
+  useFeature: (key: string) => key !== "recon_resolution_ui",
+}));
+// page.tsx now unconditionally calls the resolution hooks (Rules of Hooks) —
+// mock them like use-reconciliation above so no real QueryClientProvider is
+// needed for this classic-view suite.
+vi.mock("@/hooks/use-resolution", () => ({
+  useResolutionSummary: () => ({ data: undefined, isLoading: false }),
+  useApproveResolutionGroup: () => ({ mutate: vi.fn(), isPending: false }),
+  useRejectResolutionGroup: () => ({ mutate: vi.fn(), isPending: false }),
+}));
 vi.mock("@/components/reconciliation/data-freshness-banner", () => ({
   DataFreshnessBanner: () => null,
 }));
