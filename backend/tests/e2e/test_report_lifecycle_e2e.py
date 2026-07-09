@@ -888,8 +888,9 @@ async def test_compose_refuses_unresolvable_result_ids(db):
     """A referenced rid that resolves NOWHERE (sidecar evicted/expired, no persisted
     fallback) must fail the compose loudly — naming the rid so the agent can re-run
     the source tool — never publish 'Data unavailable' holes in a financial report."""
-    import pytest as _pytest
     from unittest.mock import patch
+
+    import pytest as _pytest
 
     from app.mcp.tools import report_export
 
@@ -912,9 +913,7 @@ async def test_compose_refuses_unresolvable_result_ids(db):
                 },
                 context={"db": db, "tenant_id": tenant.id, "conversation_id": str(session.id), "actor_id": user.id},
             )
-    count = (
-        await db.execute(select(func.count(Report.id)).where(Report.tenant_id == tenant.id))
-    ).scalar_one()
+    count = (await db.execute(select(func.count(Report.id)).where(Report.tenant_id == tenant.id))).scalar_one()
     assert count == 0, "a refused compose must not persist a report row"
 
 

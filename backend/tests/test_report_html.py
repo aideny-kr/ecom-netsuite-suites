@@ -372,3 +372,23 @@ def test_multiseries_chart_size_canary():
         data=rows,
     )
     assert len(render_chart_svg(chart).encode()) < 80_000
+
+
+def test_dark_accent_gets_light_table_header_ink():
+    """Live QA (2026-07-09): th background is the tenant accent, and Framework's
+    accent is near-black — header text (--ink #111) rendered dark-on-dark,
+    illegible live AND in print. The header ink must be computed from the accent's
+    lightness server-side (CSS alone can't derive contrast from an hsl() var)."""
+    html = render_report_html(_slice_d_spec())  # default accent "240 6% 10%" — dark
+    assert "--accent-ink:#fff" in html
+    assert "color:var(--accent-ink)" in html  # th rule uses it
+
+
+def test_light_accent_keeps_dark_table_header_ink():
+    html = render_report_html(_slice_d_spec(), accent_hsl="48 96% 89%")
+    assert "--accent-ink:#111" in html
+
+
+def test_unparseable_accent_falls_back_to_dark_ink():
+    html = render_report_html(_slice_d_spec(), accent_hsl="not-a-color")
+    assert "--accent-ink:#111" in html
