@@ -16,6 +16,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy import and_, exists, func, insert, not_, or_, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -768,6 +769,16 @@ async def plan_resolutions(
         return await plan_run(db, user.tenant_id, run.id)
     except ValueError:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
+    except IntegrityError:
+        # Belt-and-braces beneath plan_run's own advisory-lock serialization —
+        # a raced re-plan that still slips past the lock (or a legacy caller
+        # without it) must roll back the failed statement, not leave the
+        # session's transaction poisoned for whatever runs next.
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Planning raced a concurrent re-plan; retry.",
+        )
 
 
 # ---------------------------------------------------------------------------

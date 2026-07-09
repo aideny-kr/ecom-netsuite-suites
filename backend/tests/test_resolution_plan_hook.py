@@ -3,7 +3,7 @@
 import uuid
 from datetime import date
 from decimal import Decimal
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from sqlalchemy import select
 
@@ -97,6 +97,36 @@ async def test_plan_resolutions_rejected_on_closed_run(db, tenant_a):
         .all()
     )
     assert props == []
+
+
+async def test_plan_resolutions_maps_integrity_error_to_409(db, tenant_a):
+    """T2 gate finding (round 4): plan_run races itself under concurrent
+    calls for the same run — the second caller can still hit the partial
+    unique index and raise IntegrityError even beneath plan_run's own
+    advisory-lock serialization (e.g. a caller on an older code path, or a
+    lock-acquisition edge case). The endpoint must roll back the poisoned
+    transaction and surface a clean 409, not a raw 500."""
+    import pytest
+    from fastapi import HTTPException
+    from sqlalchemy.exc import IntegrityError
+
+    user, _ = await create_test_user(db, tenant_a)
+    await enable_feature_flag(db, tenant_a.id, "recon_resolution_ui")
+    run = await create_test_recon_run(db, tenant_a.id, status="completed")
+    await db.flush()
+
+    db.rollback = AsyncMock()
+    with (
+        patch(
+            "app.api.v1.reconciliation.plan_run",
+            side_effect=IntegrityError("", "", Exception()),
+        ),
+        pytest.raises(HTTPException) as exc,
+    ):
+        await plan_resolutions(str(run.id), user=user, db=db)
+
+    assert exc.value.status_code == 409
+    db.rollback.assert_awaited_once()
 
 
 async def test_plan_run_hook_reestablishes_tenant_context_before_planning(db, tenant_a):

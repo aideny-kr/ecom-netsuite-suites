@@ -204,7 +204,7 @@ import logging
 import uuid as _uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import insert, select, update
+from sqlalchemy import insert, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
@@ -226,6 +226,12 @@ async def plan_run(db: AsyncSession, tenant_id, run_id) -> dict:
     abstains that item (needs_human path is total, so this only guards truly
     unexpected data). Planning failure must never fail the run — callers wrap
     this in try/except.
+
+    Concurrent (re-)plans of the SAME run are serialized by a transaction-scoped
+    Postgres advisory lock (below) — the second caller blocks until the first
+    commits, then sees the first plan's rows as decided/superseded and no-ops
+    cleanly instead of racing the supersede/read/insert steps and hitting the
+    partial unique index with a raw IntegrityError.
     """
     from app.models.reconciliation import (
         ACTIVE_PROPOSAL_STATUSES,
@@ -246,6 +252,14 @@ async def plan_run(db: AsyncSession, tenant_id, run_id) -> dict:
     ).scalar_one_or_none()
     if run is None:
         raise ValueError("run not found")
+
+    # Serialize concurrent (re-)plans of the same run: the second caller waits,
+    # then sees the first plan's rows as decided/superseded and no-ops cleanly.
+    # xact-scoped: released automatically at commit/rollback.
+    await db.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+        {"key": f"plan_run:{rid}"},
+    )
 
     mat_abs, mat_pct = await load_materiality(db, tid)
 
@@ -280,28 +294,10 @@ async def plan_run(db: AsyncSession, tenant_id, run_id) -> dict:
         ReconResolutionProposal.status.in_((*ACTIVE_PROPOSAL_STATUSES, "rejected")),
     )
 
-    # 3. cross-run double-posting guard: charge ids already decided or in-flight
-    #    toward NetSuite anywhere in this tenant's history. 'approved'/'posting'/
-    #    'post_failed' must guard too, not just 'posted' — a charge approved (or
-    #    mid-post, or failed-post and awaiting retry) in run 1 must not get a
-    #    second, independent proposal planned for it in run 2 before run 1's
-    #    posting resolves. 'proposed' (undecided) and 'rejected' deliberately do
-    #    NOT guard — those are not commitments toward NetSuite.
-    decided_charge_ids = set(
-        (
-            await db.execute(
-                select(ReconResolutionProposal.charge_source_id).where(
-                    ReconResolutionProposal.tenant_id == tid,
-                    ReconResolutionProposal.status.in_(("approved", "posting", "posted", "post_failed")),
-                    ReconResolutionProposal.charge_source_id.is_not(None),
-                )
-            )
-        )
-        .scalars()
-        .all()
-    )
-
-    # 4. column-only select (evidence included — planner reads order_reference).
+    # 3. column-only select (evidence included — planner reads order_reference).
+    #    Loaded BEFORE the cross-run guard query below so the guard can be
+    #    bounded to just this run's charge ids instead of scanning the whole
+    #    tenant's history.
     rows = (
         await db.execute(
             select(
@@ -322,6 +318,35 @@ async def plan_run(db: AsyncSession, tenant_id, run_id) -> dict:
             )
         )
     ).all()
+
+    # 4. cross-run double-posting guard: of THIS run's charge ids, which are
+    #    already decided or in-flight toward NetSuite anywhere in this
+    #    tenant's history. 'approved'/'posting'/'post_failed' must guard too,
+    #    not just 'posted' — a charge approved (or mid-post, or failed-post
+    #    and awaiting retry) in run 1 must not get a second, independent
+    #    proposal planned for it in run 2 before run 1's posting resolves.
+    #    'proposed' (undecided) and 'rejected' deliberately do NOT guard —
+    #    those are not commitments toward NetSuite. Bounded to charge_ids
+    #    (not a full tenant-history scan) so cost is proportional to this
+    #    run, not tenant lifetime volume; queried in chunks to keep the
+    #    IN-list bounded, using the (tenant_id, charge_source_id) index.
+    charge_ids = sorted({(row.evidence or {}).get("charge_source_id") for row in rows} - {None})
+    decided_charge_ids: set[str] = set()
+    for i in range(0, len(charge_ids), _INSERT_CHUNK):
+        chunk = charge_ids[i : i + _INSERT_CHUNK]
+        decided_charge_ids.update(
+            (
+                await db.execute(
+                    select(ReconResolutionProposal.charge_source_id).where(
+                        ReconResolutionProposal.tenant_id == tid,
+                        ReconResolutionProposal.status.in_(("approved", "posting", "posted", "post_failed")),
+                        ReconResolutionProposal.charge_source_id.in_(chunk),
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
 
     now = datetime.now(timezone.utc)
     to_insert: list[dict] = []
