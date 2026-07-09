@@ -245,6 +245,9 @@ async def test_compose_resolves_from_inturn_cache_sidecar(db, client, monkeypatc
         def hgetall(self, key):
             return store.get(key, {})
 
+        def hlen(self, key):
+            return len(store.get(key, {}))
+
         def hdel(self, key, field):
             store.get(key, {}).pop(field, None)
 
@@ -407,6 +410,9 @@ async def test_conversation_ordinal_ids_span_persisted_and_inturn(db, client):
         def hgetall(self, key):
             return store.get(key, {})
 
+        def hlen(self, key):
+            return len(store.get(key, {}))
+
         def hdel(self, key, field):
             store.get(key, {}).pop(field, None)
 
@@ -557,6 +563,9 @@ async def test_compose_capture_refresh_lifecycle(db, client, monkeypatch):
 
         def hgetall(self, key):
             return store.get(key, {})
+
+        def hlen(self, key):
+            return len(store.get(key, {}))
 
         def hdel(self, key, field):
             store.get(key, {}).pop(field, None)
@@ -723,6 +732,9 @@ async def test_auto_refresh_sweep_ladder_retention_resume_e2e(db, client, monkey
         def hgetall(self, key):
             return store.get(key, {})
 
+        def hlen(self, key):
+            return len(store.get(key, {}))
+
         def hdel(self, key, field):
             store.get(key, {}).pop(field, None)
 
@@ -851,3 +863,265 @@ async def test_auto_refresh_sweep_ladder_retention_resume_e2e(db, client, monkey
     b_row = (await db.execute(select(Report).where(Report.id == bystander_id))).scalar_one()
     assert b_row.version == 1 and b_row.refresh_failure_count == 0
     assert b_row.rendered_html == "<html>b</html>"
+
+
+# ---------------------------------------------------------------------------
+# Live-QA regressions (2026-07-09, real Framework cash-flow compose on staging):
+# a 7-data-call turn FIFO-evicted r1 from the same-turn sidecar (cap was 6 —
+# borrowed from the preview cache), so the published report carried three
+# 'Data unavailable' cards for the flagship statement AND recipe capture
+# fail-closed. Two-layer fix: the sidecar cap covers a whole turn, and compose
+# REFUSES unresolvable rids loudly (the agent re-fetches and retries) instead
+# of publishing a broken financial artifact.
+# ---------------------------------------------------------------------------
+
+
+class _DictRedis:
+    def __init__(self):
+        self.store: dict = {}
+
+    def hset(self, key, field, value):
+        self.store.setdefault(key, {})[field] = value
+
+    def hget(self, key, field):
+        return self.store.get(key, {}).get(field)
+
+    def hgetall(self, key):
+        return self.store.get(key, {})
+
+    def hlen(self, key):
+        return len(self.store.get(key, {}))
+
+    def hdel(self, key, field):
+        self.store.get(key, {}).pop(field, None)
+
+    def expire(self, key, ttl):
+        pass
+
+
+async def test_compose_refuses_unresolvable_result_ids(db):
+    """A referenced rid that resolves NOWHERE (sidecar evicted/expired, no persisted
+    fallback) must fail the compose loudly — naming the rid so the agent can re-run
+    the source tool — never publish 'Data unavailable' holes in a financial report."""
+    from unittest.mock import patch
+
+    import pytest as _pytest
+
+    from app.mcp.tools import report_export
+
+    tenant = await create_test_tenant(db, name="Refuse Corp")
+    user, _ = await create_test_user(db, tenant)
+    await set_tenant_context(db, str(tenant.id))
+    session = ChatSession(tenant_id=tenant.id, user_id=user.id, title="t")
+    db.add(session)
+    await db.flush()
+
+    with patch("app.services.chat.result_cache._get_redis", return_value=_DictRedis()):
+        with _pytest.raises(ValueError, match="r1"):
+            await report_export.execute(
+                {
+                    "title": "Holey",
+                    "sections": [
+                        {"type": "heading", "level": 1, "text": "H"},
+                        {"type": "table", "result_id": "r1"},
+                    ],
+                },
+                context={"db": db, "tenant_id": tenant.id, "conversation_id": str(session.id), "actor_id": user.id},
+            )
+    count = (await db.execute(select(func.count(Report.id)).where(Report.tenant_id == tenant.id))).scalar_one()
+    assert count == 0, "a refused compose must not persist a report row"
+
+
+async def test_compose_survives_a_deep_research_turn(db):
+    """The original live failure shape: EIGHT stamped results in one turn, compose
+    references the FIRST and the LAST. The first must still resolve at compose time
+    (cap covers a full turn) and the recipe must capture both sources."""
+    import json as _json
+    from unittest.mock import patch
+
+    from app.mcp.tools import report_export
+
+    tenant = await create_test_tenant(db, name="Deep Turn Corp")
+    user, _ = await create_test_user(db, tenant)
+    await set_tenant_context(db, str(tenant.id))
+    session = ChatSession(tenant_id=tenant.id, user_id=user.id, title="t")
+    db.add(session)
+    await db.flush()
+    conversation_id = str(session.id)
+
+    with patch("app.services.chat.result_cache._get_redis", return_value=_DictRedis()):
+        from app.services.chat.result_cache import cache_full_payload
+        from app.services.chat.tool_call_results import extract_result_payload
+
+        for i in range(1, 9):  # r1..r8 — more results than the old cap of 6
+            params = {"query": f"SELECT {i}"}
+            payload = extract_result_payload(
+                "netsuite_suiteql",
+                params,
+                _json.dumps(
+                    {
+                        "success": True,
+                        "columns": ["account", "amount"],
+                        "rows": [[f"MARKER-R{i}", i * 100]],
+                        "row_count": 1,
+                        "query": params["query"],
+                    }
+                ),
+            )
+            cache_full_payload(conversation_id, f"r{i}", payload, tool_name="netsuite_suiteql", params=params)
+
+        result = await report_export.execute(
+            {
+                "title": "Deep",
+                "sections": [
+                    {"type": "heading", "level": 1, "text": "Deep"},
+                    {"type": "table", "result_id": "r1"},
+                    {"type": "table", "result_id": "r8"},
+                ],
+            },
+            context={"db": db, "tenant_id": tenant.id, "conversation_id": conversation_id, "actor_id": user.id},
+        )
+
+    report = (await db.execute(select(Report).where(Report.id == uuid.UUID(result["report_id"])))).scalar_one()
+    assert "MARKER-R1" in report.rendered_html, "the turn's FIRST result must survive to compose"
+    assert "MARKER-R8" in report.rendered_html
+    assert "Data unavailable" not in report.rendered_html
+    assert report.recipe_json is not None, "recipe capture must not fail-close on a deep turn"
+    assert set(report.recipe_json["sources"]) == {"r1", "r8"}
+
+
+async def test_compose_degrades_narrative_only_references_gracefully(db):
+    """Gate r1 on the refusal fix: a rid referenced ONLY inside narrative
+    {{result:...}} placeholders is NOT a hard dependency — fill_placeholders
+    degrades it to a visible inline '[unresolved: ...]' marker while every real
+    data section composes. Hard-fail is reserved for DATA sections' result_id."""
+    import json as _json
+    from unittest.mock import patch
+
+    from app.mcp.tools import report_export
+
+    tenant = await create_test_tenant(db, name="Narrative Corp")
+    user, _ = await create_test_user(db, tenant)
+    await set_tenant_context(db, str(tenant.id))
+    session = ChatSession(tenant_id=tenant.id, user_id=user.id, title="t")
+    db.add(session)
+    await db.flush()
+    conversation_id = str(session.id)
+
+    with patch("app.services.chat.result_cache._get_redis", return_value=_DictRedis()):
+        from app.services.chat.result_cache import cache_full_payload
+        from app.services.chat.tool_call_results import extract_result_payload
+
+        params = {"query": "SELECT 1"}
+        payload = extract_result_payload(
+            "netsuite_suiteql",
+            params,
+            _json.dumps(
+                {"success": True, "columns": ["a", "amount"], "rows": [["OK", 5]], "row_count": 1, "query": "q"}
+            ),
+        )
+        cache_full_payload(conversation_id, "r1", payload, tool_name="netsuite_suiteql", params=params)
+
+        result = await report_export.execute(
+            {
+                "title": "Narrative",
+                "sections": [
+                    # gate r2: a stray result_id on a NON-data section (assemble_spec
+                    # ignores it) must not hard-fail the compose either
+                    {"type": "heading", "level": 1, "text": "H", "result_id": "r99"},
+                    {"type": "table", "result_id": "r1"},
+                    {"type": "narrative", "markdown": "Stale ref: {{result:r9.row_count}}"},
+                ],
+            },
+            context={"db": db, "tenant_id": tenant.id, "conversation_id": conversation_id, "actor_id": user.id},
+        )
+
+    report = (await db.execute(select(Report).where(Report.id == uuid.UUID(result["report_id"])))).scalar_one()
+    assert "OK" in report.rendered_html  # the real data section composed
+    assert "[unresolved:" in report.rendered_html  # the stale narrative ref is visibly marked
+
+
+async def test_compose_precheck_survives_transient_resolver_errors(db, monkeypatch, caplog):
+    """Gate r1: the pre-check must catch ANY resolver failure (a Redis blip raises
+    ConnectionError, not KeyError) and refuse with the agent-actionable ValueError —
+    never a raw 500."""
+    import pytest as _pytest
+
+    from app.mcp.tools import report_export
+
+    tenant = await create_test_tenant(db, name="Blip Corp")
+    user, _ = await create_test_user(db, tenant)
+    await set_tenant_context(db, str(tenant.id))
+    session = ChatSession(tenant_id=tenant.id, user_id=user.id, title="t")
+    db.add(session)
+    await db.flush()
+
+    def exploding(*a, **kw):
+        raise RuntimeError("redis blip")
+
+    monkeypatch.setattr("app.services.chat.result_cache.get_full_payload", exploding)
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        with _pytest.raises(ValueError, match="r1"):
+            await report_export.execute(
+                {"title": "Blip", "sections": [{"type": "table", "result_id": "r1"}]},
+                context={"db": db, "tenant_id": tenant.id, "conversation_id": str(session.id), "actor_id": user.id},
+            )
+    # gate r2: the swallowed root cause must be LOGGED (a real bug relabeled as a
+    # stale rid would otherwise be undiagnosable) — the refusal stays actionable.
+    assert any("redis blip" in (r.exc_text or "") for r in caplog.records), (
+        "the resolver's root-cause traceback must be logged before classifying the rid missing"
+    )
+
+
+async def test_compose_resolves_each_rid_once(db):
+    """Gate r1 (efficiency cluster): the pre-check + section render + placeholder
+    fill must share ONE resolution per rid (memoized resolver), not re-hit Redis
+    per reference."""
+    import json as _json
+    from unittest.mock import patch
+
+    from app.mcp.tools import report_export
+    from app.services.chat import result_cache as rc
+
+    tenant = await create_test_tenant(db, name="Memo Corp")
+    user, _ = await create_test_user(db, tenant)
+    await set_tenant_context(db, str(tenant.id))
+    session = ChatSession(tenant_id=tenant.id, user_id=user.id, title="t")
+    db.add(session)
+    await db.flush()
+    conversation_id = str(session.id)
+
+    with patch("app.services.chat.result_cache._get_redis", return_value=_DictRedis()):
+        from app.services.chat.tool_call_results import extract_result_payload
+
+        params = {"query": "SELECT 1"}
+        payload = extract_result_payload(
+            "netsuite_suiteql",
+            params,
+            _json.dumps(
+                {"success": True, "columns": ["a", "amount"], "rows": [["OK", 5]], "row_count": 1, "query": "q"}
+            ),
+        )
+        rc.cache_full_payload(conversation_id, "r1", payload, tool_name="netsuite_suiteql", params=params)
+
+        calls: list[str] = []
+        real = rc.get_full_payload
+
+        def counting(conv, rid):
+            calls.append(rid)
+            return real(conv, rid)
+
+        with patch.object(rc, "get_full_payload", side_effect=counting):
+            await report_export.execute(
+                {
+                    "title": "Memo",
+                    "sections": [
+                        {"type": "table", "result_id": "r1"},
+                        {"type": "narrative", "markdown": "Rows: {{result:r1.row_count}}"},
+                    ],
+                },
+                context={"db": db, "tenant_id": tenant.id, "conversation_id": conversation_id, "actor_id": user.id},
+            )
+    assert calls.count("r1") == 1, f"r1 resolved {calls.count('r1')}x — the resolver must memoize"

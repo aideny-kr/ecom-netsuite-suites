@@ -35,6 +35,9 @@ def mock_redis():
         def hgetall(self, key):
             return store.get(key, {})
 
+        def hlen(self, key):
+            return len(store.get(key, {}))
+
         def hdel(self, key, field):
             store.get(key, {}).pop(field, None)
 
@@ -430,15 +433,35 @@ class TestFullPayloadSidecar:
             assert get_full_payload("conv-1", "r1") is None
 
     def test_full_payload_evicts_oldest_over_cap(self, mock_redis):
-        """The sidecar caps the LIST per conversation at MAX_RESULTS_PER_CONVERSATION,
-        evicting the OLDEST result_id first (FIFO by write order)."""
-        n = MAX_RESULTS_PER_CONVERSATION
+        """The sidecar caps the LIST per conversation at
+        MAX_FULL_PAYLOADS_PER_CONVERSATION, evicting the OLDEST result_id first
+        (FIFO by write order)."""
+        from app.services.chat.result_cache import MAX_FULL_PAYLOADS_PER_CONVERSATION
+
+        n = MAX_FULL_PAYLOADS_PER_CONVERSATION
         for i in range(1, n + 2):  # write one past the cap
             cache_full_payload("conv-1", f"r{i}", {"rows": [[i]], "row_count": 1})
         # r1 (oldest) is evicted; r2..r{n+1} survive.
         assert get_full_payload("conv-1", "r1") is None
         for i in range(2, n + 2):
             assert get_full_payload("conv-1", f"r{i}") is not None
+
+    def test_full_payload_cap_covers_a_parallel_heavy_turn(self, mock_redis):
+        """Live-QA regression (2026-07-09) + gate r1 #0: the sidecar cap was 6
+        (borrowed from the PREVIEW cache) and FIFO-evicted r1 of a 7-data-call turn
+        MID-TURN — 'Data unavailable' + fail-closed recipe capture. And
+        CHAT_MAX_TOOL_CALLS_PER_TURN caps LLM STEPS, not tool calls (one step can
+        carry several parallel tool_use blocks), so the backstop carries 4x headroom
+        over the step cap. It is a runaway backstop, not an invariant — past it, the
+        loud compose refusal makes the miss actionable instead of silent."""
+        from app.core.config import settings
+
+        n = 2 * settings.CHAT_MAX_TOOL_CALLS_PER_TURN  # a parallel-heavy turn: 2 blocks/step
+        for i in range(1, n + 1):
+            cache_full_payload("conv-1", f"r{i}", {"rows": [[i]], "row_count": 1})
+        assert get_full_payload("conv-1", "r1") is not None, (
+            "the earliest result of a parallel-heavy turn must survive to compose time"
+        )
 
     def test_full_payload_is_conversation_scoped(self, mock_redis):
         """The same result_id in two conversations is isolated."""
@@ -498,7 +521,9 @@ class TestFullPayloadSidecar:
             assert get_full_payload_entry("conv-1", "r1") is None
 
     def test_meta_write_does_not_break_fifo_eviction(self, mock_redis):
-        n = MAX_RESULTS_PER_CONVERSATION
+        from app.services.chat.result_cache import MAX_FULL_PAYLOADS_PER_CONVERSATION
+
+        n = MAX_FULL_PAYLOADS_PER_CONVERSATION
         for i in range(1, n + 2):  # one past the cap, every write meta-bearing
             cache_full_payload(
                 "conv-1", f"r{i}", {"rows": [[i]], "row_count": 1}, tool_name="netsuite_suiteql", params={"q": i}

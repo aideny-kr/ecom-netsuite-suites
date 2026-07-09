@@ -15,7 +15,7 @@ from html import escape
 _AMOUNT_STR_RE = re.compile(r"^[+-]?([1-9]\d{0,2}(,\d{3})+|0|[1-9]\d*)(\.\d+)?([eE][+-]?\d+)?$")
 
 _CSS = """
-:root { --bg:#FAF9F6; --ink:#111; --border:#000; --card:#FFF; --accent:hsl(%(accent)s); }
+:root { --bg:#FAF9F6; --ink:#111; --border:#000; --card:#FFF; --accent:hsl(%(accent)s); --accent-ink:%(accent_ink)s; }
 * { box-sizing:border-box; }
 body { margin:0; background:var(--bg); color:var(--ink);
   font-family:'Inter',system-ui,-apple-system,sans-serif; line-height:1.5; }
@@ -31,7 +31,7 @@ h1 { font-size:38px; } h2 { font-size:26px; } h3 { font-size:20px; }
 .accent-bar { height:10px; background:var(--accent); border:3px solid var(--border); margin:0 0 24px; }
 table { width:100%%; border-collapse:collapse; }
 th,td { border:2px solid var(--border); padding:8px 12px; text-align:left; font-size:14px; }
-th { background:var(--accent); font-weight:800; }
+th { background:var(--accent); font-weight:800; color:var(--accent-ink); }
 td.num,th.num { text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; }
 .divider { height:0; border-top:3px solid var(--border); margin:32px 0; }
 .svg-wrap { overflow:auto; }
@@ -81,7 +81,10 @@ td.num,th.num { text-align:right; font-variant-numeric:tabular-nums; white-space
   .nb-card { box-shadow:none; break-inside:avoid; page-break-inside:avoid; }
   .svg-wrap, .table-wrap { overflow:visible; max-height:none; }
   .table-wrap { break-inside:auto; page-break-inside:auto; }
-  thead th { position:static; }
+  /* engines that IGNORE print-color-adjust strip backgrounds — a computed light
+     --accent-ink would then print white-on-white; pin light header + dark ink so
+     printed headers are legible on every engine */
+  thead th { position:static; background:#eee; color:var(--ink); }
   .chart-legend input { display:none; }
   .report { max-width:100%%; padding:0; }
 }
@@ -328,6 +331,18 @@ def _fmt_stamp(iso: str) -> str:
     return escape(f"{dt.day} {dt.strftime('%b %Y, %H:%M')} UTC")
 
 
+def _accent_ink(accent_hsl: str) -> str:
+    """Table-header text color readable on the accent background (live QA 2026-07-09:
+    a near-black tenant accent rendered dark-on-dark, illegible headers): white on a
+    dark accent, near-black otherwise. Computed server-side from the hsl lightness —
+    CSS alone cannot derive a contrast color from an hsl() custom property.
+    Unparseable → dark ink (safe on the light default card)."""
+    m = re.search(r"(\d+(?:\.\d+)?)%\s*\)?\s*$", accent_hsl or "")
+    if not m:
+        return "#111"
+    return "#fff" if float(m.group(1)) < 55 else "#111"
+
+
 def render_report_html(spec: dict, accent_hsl: str = "240 6% 10%", freshness: dict | None = None) -> str:
     title = escape(str(spec.get("title", "Report")))
     body = "".join(_section_html(s) for s in spec.get("sections", []))
@@ -346,7 +361,7 @@ def render_report_html(spec: dict, accent_hsl: str = "240 6% 10%", freshness: di
             f'<div class="stamp">Narrative composed {_fmt_stamp(freshness.get("composed_at", ""))}'
             f" · Data refreshed {_fmt_stamp(freshness.get('refreshed_at', ''))}</div>"
         )
-    css = _CSS % {"accent": escape(accent_hsl)}
+    css = _CSS % {"accent": escape(accent_hsl), "accent_ink": _accent_ink(accent_hsl)}
     return (
         f'<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
         f'<meta name="viewport" content="width=device-width, initial-scale=1">'

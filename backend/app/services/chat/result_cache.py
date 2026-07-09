@@ -239,7 +239,20 @@ async def get_result_by_message(conversation_id: str, message_id: str) -> Cached
 # uses (hset/hget/hgetall/hdel/expire). Same TTL as the result cache.
 # ---------------------------------------------------------------------------
 
-MAX_FULL_PAYLOADS_PER_CONVERSATION = MAX_RESULTS_PER_CONVERSATION
+# NOT the preview cache's cap of MAX_RESULTS_PER_CONVERSATION (=6): this sidecar
+# exists so a SAME-TURN report.compose can resolve every result the turn produced.
+# Borrowing the preview cap FIFO-evicted r1 of a 7-data-call live cash-flow turn
+# MID-TURN (no persisted fallback exists until the turn ends), publishing 'Data
+# unavailable' sections and fail-closing recipe capture (live QA, 2026-07-09).
+#
+# Sizing (gate r1): CHAT_MAX_TOOL_CALLS_PER_TURN caps LLM *steps*, and one step can
+# carry several parallel tool_use blocks — per-turn stamped results have NO hard
+# code bound. The 4x headroom makes this a runaway BACKSTOP, not an invariant: a
+# pathological turn that still overflows it hits report_export's loud refusal (an
+# agent-actionable retry), never a silently broken artifact. Older turns' entries
+# evicting past the cap is fine — they are persisted by then. Memory worst case:
+# this many <=2000-row payloads per conversation, 30-min TTL.
+MAX_FULL_PAYLOADS_PER_CONVERSATION = 4 * settings.CHAT_MAX_TOOL_CALLS_PER_TURN
 
 
 def _full_payload_key(conversation_id: str) -> str:
@@ -283,9 +296,14 @@ def cache_full_payload(
     r.hset(key, result_id, envelope)
     r.expire(key, CACHE_TTL_SECONDS)
 
-    all_fields = r.hgetall(key)
-    if len(all_fields) <= MAX_FULL_PAYLOADS_PER_CONVERSATION:
+    # HLEN, not HGETALL (gate r2): the size probe runs on EVERY intercepted tool
+    # call, and a full-hash fetch transfers every stored payload each time — at the
+    # raised cap that is real per-call latency. Fetch entries only when actually
+    # over cap (rare).
+    if r.hlen(key) <= MAX_FULL_PAYLOADS_PER_CONVERSATION:
         return
+
+    all_fields = r.hgetall(key)
 
     # Evict oldest-by-seq first (FIFO). Undecodable entries sort oldest.
     def _seq_of(raw: str) -> float:
