@@ -1000,6 +1000,9 @@ class TestSameTurnRunReportComposeIntegration:
             def hgetall(self, key):
                 return store.get(key, {})
 
+            def hlen(self, key):
+                return len(store.get(key, {}))
+
             def hdel(self, key, field):
                 store.get(key, {}).pop(field, None)
 
