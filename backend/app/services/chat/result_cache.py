@@ -240,13 +240,19 @@ async def get_result_by_message(conversation_id: str, message_id: str) -> Cached
 # ---------------------------------------------------------------------------
 
 # NOT the preview cache's cap of MAX_RESULTS_PER_CONVERSATION (=6): this sidecar
-# exists so a SAME-TURN report.compose can resolve every result the turn produced,
-# and one turn can stamp up to CHAT_MAX_TOOL_CALLS_PER_TURN results. Borrowing the
-# preview cap FIFO-evicted r1 of a 7-data-call live cash-flow turn MID-TURN (no
-# persisted fallback exists until the turn ends), publishing 'Data unavailable'
-# sections and fail-closing recipe capture (live QA, 2026-07-09). Older turns'
-# entries evicting past this cap is fine — they are persisted by then.
-MAX_FULL_PAYLOADS_PER_CONVERSATION = settings.CHAT_MAX_TOOL_CALLS_PER_TURN
+# exists so a SAME-TURN report.compose can resolve every result the turn produced.
+# Borrowing the preview cap FIFO-evicted r1 of a 7-data-call live cash-flow turn
+# MID-TURN (no persisted fallback exists until the turn ends), publishing 'Data
+# unavailable' sections and fail-closing recipe capture (live QA, 2026-07-09).
+#
+# Sizing (gate r1): CHAT_MAX_TOOL_CALLS_PER_TURN caps LLM *steps*, and one step can
+# carry several parallel tool_use blocks — per-turn stamped results have NO hard
+# code bound. The 4x headroom makes this a runaway BACKSTOP, not an invariant: a
+# pathological turn that still overflows it hits report_export's loud refusal (an
+# agent-actionable retry), never a silently broken artifact. Older turns' entries
+# evicting past the cap is fine — they are persisted by then. Memory worst case:
+# this many <=2000-row payloads per conversation, 30-min TTL.
+MAX_FULL_PAYLOADS_PER_CONVERSATION = 4 * settings.CHAT_MAX_TOOL_CALLS_PER_TURN
 
 
 def _full_payload_key(conversation_id: str) -> str:

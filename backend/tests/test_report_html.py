@@ -392,3 +392,13 @@ def test_light_accent_keeps_dark_table_header_ink():
 def test_unparseable_accent_falls_back_to_dark_ink():
     html = render_report_html(_slice_d_spec(), accent_hsl="not-a-color")
     assert "--accent-ink:#111" in html
+
+
+def test_print_table_header_pins_light_background_and_dark_ink():
+    """Gate r1 on the contrast fix: engines that ignore print-color-adjust STRIP
+    backgrounds — a computed light --accent-ink would then print white-on-white
+    (invisible, worse than the original dark-on-dark). Print pins a light header
+    background + dark ink so headers are legible on EVERY engine."""
+    html = render_report_html(_slice_d_spec())
+    printed = html.split("@media print", 1)[1]
+    assert "th { position:static; background:#eee; color:var(--ink); }" in printed

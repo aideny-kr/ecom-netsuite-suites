@@ -81,7 +81,10 @@ td.num,th.num { text-align:right; font-variant-numeric:tabular-nums; white-space
   .nb-card { box-shadow:none; break-inside:avoid; page-break-inside:avoid; }
   .svg-wrap, .table-wrap { overflow:visible; max-height:none; }
   .table-wrap { break-inside:auto; page-break-inside:auto; }
-  thead th { position:static; }
+  /* engines that IGNORE print-color-adjust strip backgrounds — a computed light
+     --accent-ink would then print white-on-white; pin light header + dark ink so
+     printed headers are legible on every engine */
+  thead th { position:static; background:#eee; color:var(--ink); }
   .chart-legend input { display:none; }
   .report { max-width:100%%; padding:0; }
 }
