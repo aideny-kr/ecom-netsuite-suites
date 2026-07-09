@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.reconciliation import ReconciliationResult, ReconciliationRun
 from app.services import audit_service
+from app.services.reconciliation.four_bucket_classifier import TERMINAL_RESULT_STATUSES
 
 
 async def execute(params: dict, **kwargs) -> dict:
@@ -69,6 +70,16 @@ async def execute(params: dict, **kwargs) -> dict:
 
     if recon_result.status == "locked":
         return {"success": False, "error": "Period is locked — cannot modify"}
+
+    # Any other terminal status (rejected, carried_forward) must not be flipped to
+    # approved either — e.g. a carried_forward result approved here would then get
+    # LOCKED at close, violating the carried_forward-never-locks invariant. Mirrors
+    # the REST single-approve endpoint's guard (app/api/v1/reconciliation.py).
+    if recon_result.status in TERMINAL_RESULT_STATUSES:
+        return {
+            "success": False,
+            "error": f"Result cannot be approved (status={recon_result.status})",
+        }
 
     recon_result.status = "approved"
     recon_result.approved_by = uuid.UUID(str(user_id)) if user_id else None

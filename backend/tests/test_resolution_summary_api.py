@@ -2,7 +2,12 @@
 
 from decimal import Decimal
 
-from app.api.v1.reconciliation import get_resolution_summary, list_group_proposals, plan_resolutions
+from app.api.v1.reconciliation import (
+    get_resolution_summary,
+    list_group_proposals,
+    plan_resolutions,
+    reject_resolution_group,
+)
 from tests.conftest import create_test_recon_result, create_test_recon_run, create_test_user
 
 
@@ -93,6 +98,18 @@ async def test_summary_groups_and_rates(db, tenant_a):
     assert fee_group.above_materiality_count == 1
     assert fee_group.total_amount == Decimal("129.00")
     assert out.variance_by_root_cause["fees"] == Decimal("129.00")
+
+
+async def test_guard_skipped_count_excludes_human_rejected_proposals(db, tenant_a):
+    """T2 gate finding: guard_skipped_count must count only results with NO
+    proposal at all (never planned / guard-skipped), not results whose
+    proposal a human rejected — those fall out of the live proposals_count
+    but were still planned, so they must not be mislabeled as guard-skipped."""
+    user, run = await _seed(db, tenant_a)
+    await reject_resolution_group(str(run.id), "fees:book_fee_line:deposit", user=user, db=db)
+
+    out = await get_resolution_summary(str(run.id), user=user, db=db)
+    assert out.guard_skipped_count == 0
 
 
 async def test_group_proposals_listing_paginated(db, tenant_a):

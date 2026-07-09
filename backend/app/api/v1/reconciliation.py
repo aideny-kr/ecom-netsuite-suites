@@ -15,7 +15,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
-from sqlalchemy import and_, func, insert, not_, or_, select, update
+from sqlalchemy import and_, exists, func, insert, not_, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -71,6 +71,15 @@ def _parse_uuid(value: str) -> uuid.UUID:
         return uuid.UUID(value)
     except ValueError:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+
+
+def _ensure_run_open(run: ReconciliationRun | None) -> None:
+    """Close = hard freeze. Raise if the run is closed/locked; a ``None`` run
+    is a no-op (the caller either already 404'd on a missing run, or derived
+    the run from a tenant-scoped child row and treats a missing run as not
+    blocking)."""
+    if run is not None and run.status in ("closed", "locked"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Period is closed; cannot approve.")
 
 
 # ---------------------------------------------------------------------------
@@ -546,8 +555,7 @@ async def approve_result(
     run = (
         await db.execute(select(ReconciliationRun).where(ReconciliationRun.id == recon_result.run_id))
     ).scalar_one_or_none()
-    if run is not None and run.status in ("closed", "locked"):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Period is closed; cannot approve.")
+    _ensure_run_open(run)
 
     if recon_result.status == "approved":
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Already approved")
@@ -632,11 +640,7 @@ async def approve_bucket(
     # locks 'approved' rows and non-needs_review 'auto_matched' rows, leaving
     # 'suggested'/'pending' (and unreviewed needs_review) rows un-locked and thus
     # still bulk-approvable. Guard the run itself.
-    if run.status in ("closed", "locked"):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Period is closed; cannot approve.",
-        )
+    _ensure_run_open(run)
 
     now = datetime.now(timezone.utc)
     correlation_id = str(uuid.uuid4())
@@ -733,11 +737,7 @@ async def plan_resolutions(
     run = await _get_run_or_404(db, user.tenant_id, run_id)
     # Close = hard freeze: proposals feed the closed period's evidence pack, so
     # re-planning must not supersede/re-derive proposals once the run is closed/locked.
-    if run.status in ("closed", "locked"):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Period is closed; cannot approve.",
-        )
+    _ensure_run_open(run)
     try:
         return await plan_run(db, user.tenant_id, run.id)
     except ValueError:
@@ -844,10 +844,20 @@ async def get_resolution_summary(
             return Decimal("0")
         return (Decimal(numerator) / Decimal(denominator) * 100).quantize(Decimal("0.1"))
 
-    # guard-skip visibility: results with no live proposal, no match, and a
-    # posted proposal elsewhere are reported by plan_run's audit; recompute the
-    # cheap upper bound here for the header (results minus matches minus live).
-    guard_skipped_count = max(0, total_results - matches_count - proposals_count)
+    # guard-skip visibility: a result is guard-skipped/never-planned only when
+    # it has NO proposal row at all (any status) — a human-rejected proposal
+    # was still planned, so it must not be mislabeled as a guard skip just
+    # because rejected/superseded rows are excluded from the live count above.
+    guard_skipped_count = (
+        await db.execute(
+            select(func.count(ReconciliationResult.id)).where(
+                ReconciliationResult.run_id == run_uuid,
+                ReconciliationResult.tenant_id == user.tenant_id,
+                ReconciliationResult.bucket != "matches",
+                ~exists().where(ReconResolutionProposal.result_id == ReconciliationResult.id),
+            )
+        )
+    ).scalar_one()
 
     return ResolutionSummaryResponse(
         run_id=run_id,
@@ -926,11 +936,7 @@ async def approve_resolution_group(
             detail="needs_human groups must be resolved individually",
         )
     run = await _get_run_or_404(db, user.tenant_id, run_id)
-    if run.status in ("closed", "locked"):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Period is closed; cannot approve.",
-        )
+    _ensure_run_open(run)
 
     now = datetime.now(timezone.utc)
     correlation_id = str(uuid.uuid4())
@@ -1050,11 +1056,7 @@ async def reject_resolution_group(
     proposal history (incl. gathered evidence) is retained for the human."""
     root_cause, action, vehicle = _parse_group_key(group_key)
     run = await _get_run_or_404(db, user.tenant_id, run_id)
-    if run.status in ("closed", "locked"):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Period is closed; cannot approve.",
-        )
+    _ensure_run_open(run)
     now = datetime.now(timezone.utc)
     correlation_id = str(uuid.uuid4())
     P = ReconResolutionProposal
@@ -1118,9 +1120,15 @@ async def override_resolution_proposal(
 
     # Close = hard freeze: proposals feed the closed period's evidence pack, so an
     # override must not mutate the proposal chain once the run is closed/locked.
-    run = (await db.execute(select(ReconciliationRun).where(ReconciliationRun.id == prop.run_id))).scalar_one_or_none()
-    if run is not None and run.status in ("closed", "locked"):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Period is closed; cannot approve.")
+    run = (
+        await db.execute(
+            select(ReconciliationRun).where(
+                ReconciliationRun.id == prop.run_id,
+                ReconciliationRun.tenant_id == user.tenant_id,
+            )
+        )
+    ).scalar_one_or_none()
+    _ensure_run_open(run)
 
     if prop.status != "proposed":
         raise HTTPException(

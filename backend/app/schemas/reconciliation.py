@@ -311,6 +311,9 @@ class ResolutionSummaryResponse(BaseModel):
 
     ``explained_rate`` = share of proposals whose action is not ``needs_human``
     (diagnostic: a falling rate signals upstream data problems, not just load).
+    ``guard_skipped_count`` = results with no proposal at all — guard-skipped
+    or never planned (a human-rejected proposal was still planned, so those
+    results are NOT counted here).
     """
 
     run_id: str
