@@ -16,11 +16,19 @@ from app.api.v1.reconciliation import (
 from app.models.audit import AuditEvent
 from app.models.reconciliation import ReconciliationResult, ReconResolutionProposal
 from app.schemas.reconciliation import ResolutionGroupApprove, ResolutionProposalOverride
-from tests.conftest import create_test_recon_result, create_test_recon_run, create_test_user
+from tests.conftest import (
+    create_test_recon_result,
+    create_test_recon_run,
+    create_test_user,
+    enable_feature_flag,
+)
 
 
 async def _seed_fees(db, tenant, above_too=True):
     user, _ = await create_test_user(db, tenant)
+    # recon_resolution_ui defaults OFF (DEFAULT_FLAGS) — these mutation
+    # endpoints are flag-gated, so tests seeding through them must enable it.
+    await enable_feature_flag(db, tenant.id, "recon_resolution_ui")
     run = await create_test_recon_run(db, tenant.id, status="completed")
     # $9 on $1000 = sub-materiality (R2a OR-semantics: not > $50 abs, not > 1%).
     amounts = [(Decimal("9.00"), Decimal("1000"))]
@@ -161,8 +169,68 @@ async def test_approve_group_result_flip_scoped_to_this_batch_only(db, tenant_a)
     assert above_result.status == "pending"  # untouched: not part of THIS batch's correlation_id
 
 
+async def test_approve_group_skips_proposal_whose_result_is_already_terminal(db, tenant_a):
+    """T2 gate finding: a result independently made terminal (e.g. locked via
+    the classic per-result approve path) must not have its still-'proposed'
+    group proposal flipped to 'approved' — that would audit a per-line success
+    for a result the group-approve never actually touched. It must land in
+    skipped_count instead, like any other already-decided item."""
+    user, run = await _seed_fees(db, tenant_a, above_too=False)
+    prop = (await _props(db, run.id))[0]
+    result = (
+        await db.execute(select(ReconciliationResult).where(ReconciliationResult.id == prop.result_id))
+    ).scalar_one()
+    result.status = "locked"
+    await db.flush()
+
+    out = await approve_resolution_group(
+        str(run.id),
+        "fees:book_fee_line:deposit",
+        ResolutionGroupApprove(),
+        user=user,
+        db=db,
+    )
+    assert out.approved_count == 0
+    assert out.skipped_count == 1
+
+    await db.refresh(prop)
+    assert prop.status == "proposed"
+
+    per_line_audit = (
+        (
+            await db.execute(
+                select(AuditEvent).where(
+                    AuditEvent.action == "recon.resolution.approve",
+                    AuditEvent.resource_id == str(prop.id),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert per_line_audit == []
+
+
+async def test_approve_group_403_when_resolution_ui_flag_disabled(db, tenant_a):
+    """T2 gate finding: the resolution-plan mutation endpoints must require
+    recon_resolution_ui (default OFF), not just recon.run permission."""
+    user, run = await _seed_fees(db, tenant_a, above_too=False)
+    await enable_feature_flag(db, tenant_a.id, "recon_resolution_ui", enabled=False)
+
+    with pytest.raises(HTTPException) as exc:
+        await approve_resolution_group(
+            str(run.id),
+            "fees:book_fee_line:deposit",
+            ResolutionGroupApprove(),
+            user=user,
+            db=db,
+        )
+    assert exc.value.status_code == 403
+
+
 async def test_carry_forward_group_sets_carried_forward_not_approved(db, tenant_a):
     user, _ = await create_test_user(db, tenant_a)
+    await enable_feature_flag(db, tenant_a.id, "recon_resolution_ui")
     run = await create_test_recon_run(db, tenant_a.id, status="completed")
     r = await create_test_recon_result(
         db,
@@ -192,6 +260,7 @@ async def test_carry_forward_group_sets_carried_forward_not_approved(db, tenant_
 
 async def test_needs_human_group_not_approvable(db, tenant_a):
     user, _ = await create_test_user(db, tenant_a)
+    await enable_feature_flag(db, tenant_a.id, "recon_resolution_ui")
     run = await create_test_recon_run(db, tenant_a.id, status="completed")
     await create_test_recon_result(
         db,

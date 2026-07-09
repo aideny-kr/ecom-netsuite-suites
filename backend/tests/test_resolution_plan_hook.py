@@ -11,11 +11,17 @@ from app.api.v1.reconciliation import plan_resolutions
 from app.models.reconciliation import ReconciliationRun, ReconResolutionProposal
 from app.schemas.order_reconciliation import ChargeRecord, OrderMatchCandidate
 from app.services.reconciliation.order_recon_job import OrderReconJob
-from tests.conftest import create_test_recon_result, create_test_recon_run, create_test_user
+from tests.conftest import (
+    create_test_recon_result,
+    create_test_recon_run,
+    create_test_user,
+    enable_feature_flag,
+)
 
 
 async def test_plan_resolutions_endpoint_plans_a_completed_run(db, tenant_a):
     user, _ = await create_test_user(db, tenant_a)
+    await enable_feature_flag(db, tenant_a.id, "recon_resolution_ui")
     run = await create_test_recon_run(db, tenant_a.id, status="completed")
     await create_test_recon_result(
         db,
@@ -45,6 +51,7 @@ async def test_plan_resolutions_endpoint_plans_a_completed_run(db, tenant_a):
 
 async def test_plan_resolutions_404_on_foreign_run(db, tenant_a, tenant_b):
     user, _ = await create_test_user(db, tenant_a)
+    await enable_feature_flag(db, tenant_a.id, "recon_resolution_ui")
     run_b = await create_test_recon_run(db, tenant_b.id, status="completed")
     await db.flush()
     import pytest
@@ -62,6 +69,7 @@ async def test_plan_resolutions_rejected_on_closed_run(db, tenant_a):
     from fastapi import HTTPException
 
     user, _ = await create_test_user(db, tenant_a)
+    await enable_feature_flag(db, tenant_a.id, "recon_resolution_ui")
     run = await create_test_recon_run(db, tenant_a.id, status="closed")
     await create_test_recon_result(
         db,
@@ -89,6 +97,61 @@ async def test_plan_resolutions_rejected_on_closed_run(db, tenant_a):
         .all()
     )
     assert props == []
+
+
+async def test_plan_run_hook_reestablishes_tenant_context_before_planning(db, tenant_a):
+    """The finalize commit clears the transaction-scoped SET LOCAL
+    app.current_tenant_id; the hook must re-establish it (same helper used by
+    recon_envelope_dry_run.py) BEFORE calling plan_run, or plan_run's INSERT
+    into the FORCE-RLS'd recon_resolution_proposals table silently writes
+    nothing on a non-BYPASSRLS role. Spies on set_tenant_context and plan_run
+    where the hook resolves them (both are local imports re-resolved at call
+    time) and asserts ordering + the tenant_id argument."""
+    charge = ChargeRecord(
+        id="pl-1",
+        source_id="ch_hook_2",
+        payout_line_id="pl-1",
+        amount=Decimal("50.00"),
+        fee=Decimal("1.50"),
+        net=Decimal("48.50"),
+        currency="USD",
+        charge_date=date(2026, 3, 15),
+    )
+    unmatched_candidate = OrderMatchCandidate(
+        charge=charge,
+        deposit=None,
+        match_type="unmatched",
+        confidence=Decimal("0"),
+        variance_amount=Decimal("50.00"),
+        variance_type="missing",
+    )
+
+    job = OrderReconJob(db=db, tenant_id=str(tenant_a.id))
+    call_order: list[tuple[str, str]] = []
+
+    async def fake_set_tenant_context(session, tenant_id):
+        call_order.append(("set_tenant_context", tenant_id))
+
+    async def fake_plan_run(session, tenant_id, run_id):
+        call_order.append(("plan_run", tenant_id))
+        return {"planned_count": 0}
+
+    with (
+        patch.object(job, "_fetch_charges", return_value=[charge]),
+        patch.object(job, "_fetch_deposits", return_value=[]),
+        patch.object(job.engine, "match", return_value=[unmatched_candidate]),
+        patch("app.services.reconciliation.resolution_planner.plan_run", side_effect=fake_plan_run),
+        patch("app.core.database.set_tenant_context", side_effect=fake_set_tenant_context),
+    ):
+        await job.run(
+            date_from=date(2026, 3, 10),
+            date_to=date(2026, 3, 20),
+        )
+
+    assert call_order == [
+        ("set_tenant_context", job.tenant_id),
+        ("plan_run", job.tenant_id),
+    ]
 
 
 async def test_plan_run_exception_leaves_run_completed_with_no_proposals(db, tenant_a):

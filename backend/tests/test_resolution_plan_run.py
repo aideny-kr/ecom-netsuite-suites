@@ -108,6 +108,101 @@ async def test_plan_run_cross_run_posted_guard(db, tenant_a):
     assert out["planned_count"] == 0
 
 
+async def test_plan_run_preserves_human_override_after_replan(db, tenant_a):
+    """T2 gate finding: the supersede UPDATE must not flip source='human'
+    override proposals — a re-plan must not discard a human decision. Mirrors
+    override_resolution_proposal's semantics directly (supersede the planner
+    row, insert a new active source='human' row for the same result) rather
+    than calling the endpoint, so this test stays independent of the
+    endpoint's own feature-flag gating."""
+    run = await create_test_recon_run(db, tenant_a.id, status="completed")
+    result = await _result(db, tenant_a.id, run.id)
+    await db.flush()
+    await plan_run(db, tenant_a.id, run.id)
+
+    original = (
+        await db.execute(select(ReconResolutionProposal).where(ReconResolutionProposal.result_id == result.id))
+    ).scalar_one()
+    original.status = "superseded"
+    human_override = ReconResolutionProposal(
+        id=uuid.uuid4(),
+        tenant_id=tenant_a.id,
+        run_id=run.id,
+        result_id=result.id,
+        root_cause=original.root_cause,
+        action="needs_human",
+        booking_vehicle="none",
+        group_key="fees:needs_human:none",
+        source="human",
+        narrative="Overridden by user.",
+        proposed_amount=original.proposed_amount,
+        currency=original.currency,
+        above_materiality=original.above_materiality,
+        status="proposed",
+        charge_source_id=original.charge_source_id,
+    )
+    db.add(human_override)
+    await db.flush()
+
+    out = await plan_run(db, tenant_a.id, run.id)
+    await db.refresh(human_override)
+    assert human_override.status == "proposed"
+    assert human_override.source == "human"
+
+    active_props_for_result = (
+        (
+            await db.execute(
+                select(ReconResolutionProposal).where(
+                    ReconResolutionProposal.result_id == result.id,
+                    ReconResolutionProposal.status.notin_(("superseded", "rejected")),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(active_props_for_result) == 1
+    assert active_props_for_result[0].id == human_override.id
+    assert out["planned_count"] == 0  # result excluded — the human proposal protected it
+
+
+async def test_plan_run_does_not_resurrect_rejected_proposal(db, tenant_a):
+    """T2 gate finding: a human rejection is a standing decision within THIS
+    run — decided_result_ids must also exclude 'rejected' rows, or a re-plan
+    silently reverses the rejection by inserting a fresh identical proposal
+    for the same result. (A future run — new run_id, new results — still
+    plans fresh; this guard is run-scoped.)"""
+    run = await create_test_recon_run(db, tenant_a.id, status="completed")
+    result = await _result(db, tenant_a.id, run.id)
+    await db.flush()
+    await plan_run(db, tenant_a.id, run.id)
+
+    prop = (
+        await db.execute(select(ReconResolutionProposal).where(ReconResolutionProposal.result_id == result.id))
+    ).scalar_one()
+    prop.status = "rejected"
+    await db.flush()
+
+    out = await plan_run(db, tenant_a.id, run.id)
+    await db.refresh(prop)
+    assert prop.status == "rejected"
+
+    proposed_props_for_result = (
+        (
+            await db.execute(
+                select(ReconResolutionProposal).where(
+                    ReconResolutionProposal.result_id == result.id,
+                    ReconResolutionProposal.status == "proposed",
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert proposed_props_for_result == []
+    assert out["planned_count"] == 0
+
+
 async def test_plan_run_emits_summary_audit_event(db, tenant_a):
     run = await create_test_recon_run(db, tenant_a.id, status="completed")
     await _result(db, tenant_a.id, run.id)

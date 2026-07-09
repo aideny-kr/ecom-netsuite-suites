@@ -227,15 +227,6 @@ export default function ReconciliationPage() {
           results={results || []}
           onInvestigate={handleInvestigate}
         />
-
-        {/* Close checklist — gated on the PERIOD-scoped readiness it fetches
-            itself (every run the close will touch), not this run's buckets */}
-        {selectedRun && selectedRun.date_from && selectedRun.status !== "closed" && (
-          <CloseChecklist
-            run={selectedRun}
-            period={selectedRun.date_from.substring(0, 7)}
-          />
-        )}
       </>
     );
   }
@@ -381,6 +372,22 @@ export default function ReconciliationPage() {
           {showClassicView && renderClassicBucketView()}
         </>
       )}
+
+      {/* Close checklist — gated on the PERIOD-scoped readiness it fetches
+          itself (every run the close will touch), not this run's buckets.
+          Rendered once here (not inside renderClassicBucketView) so flag-ON
+          tenants get the period-close entry point without opening "Show all
+          results (classic view)" first. */}
+      {!pipeline.isRunning &&
+        selectedRunId &&
+        selectedRun &&
+        selectedRun.date_from &&
+        selectedRun.status !== "closed" && (
+          <CloseChecklist
+            run={selectedRun}
+            period={selectedRun.date_from.substring(0, 7)}
+          />
+        )}
     </div>
   );
 }

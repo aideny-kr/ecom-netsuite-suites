@@ -12,11 +12,17 @@ from app.api.v1.reconciliation import (
     plan_resolutions,
 )
 from app.schemas.reconciliation import ResolutionGroupApprove
-from tests.conftest import create_test_recon_result, create_test_recon_run, create_test_user
+from tests.conftest import (
+    create_test_recon_result,
+    create_test_recon_run,
+    create_test_user,
+    enable_feature_flag,
+)
 
 
 async def test_summary_first_flow_end_to_end(db, tenant_a):
     user, _ = await create_test_user(db, tenant_a)
+    await enable_feature_flag(db, tenant_a.id, "recon_resolution_ui")
     run = await create_test_recon_run(db, tenant_a.id, status="completed")
 
     # $9 fee on a $1000 order = sub-materiality → one-click group-approvable.

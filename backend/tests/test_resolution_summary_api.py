@@ -2,17 +2,28 @@
 
 from decimal import Decimal
 
+from sqlalchemy import select
+
 from app.api.v1.reconciliation import (
+    approve_resolution_group,
     get_resolution_summary,
     list_group_proposals,
     plan_resolutions,
     reject_resolution_group,
 )
-from tests.conftest import create_test_recon_result, create_test_recon_run, create_test_user
+from app.models.reconciliation import ReconResolutionProposal
+from app.schemas.reconciliation import ResolutionGroupApprove
+from tests.conftest import (
+    create_test_recon_result,
+    create_test_recon_run,
+    create_test_user,
+    enable_feature_flag,
+)
 
 
 async def _seed(db, tenant):
     user, _ = await create_test_user(db, tenant)
+    await enable_feature_flag(db, tenant.id, "recon_resolution_ui")
     run = await create_test_recon_run(db, tenant.id, status="completed")
     # 2 fee lines (one above materiality), 1 timing, 1 chargeback, 1 clean match.
     # Materiality is R2a OR-semantics: above when > $50 abs OR > 1% of order.
@@ -110,6 +121,41 @@ async def test_guard_skipped_count_excludes_human_rejected_proposals(db, tenant_
 
     out = await get_resolution_summary(str(run.id), user=user, db=db)
     assert out.guard_skipped_count == 0
+
+
+async def test_above_materiality_count_excludes_decided_proposals(db, tenant_a):
+    """T2 gate finding: above_materiality_count must only count still-proposed
+    rows. After approving the group WITH the above-materiality id ticked in,
+    the fee group's above_materiality_count must drop to 0 — otherwise the
+    FE's oneClickCount = proposed_count - above_materiality_count + ticked
+    goes negative/zero and wrongly disables approval on the next render."""
+    user, run = await _seed(db, tenant_a)
+    fee_props = (
+        (
+            await db.execute(
+                select(ReconResolutionProposal).where(
+                    ReconResolutionProposal.run_id == run.id,
+                    ReconResolutionProposal.root_cause == "fees",
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    above = next(p for p in fee_props if p.above_materiality)
+
+    await approve_resolution_group(
+        str(run.id),
+        "fees:book_fee_line:deposit",
+        ResolutionGroupApprove(included_above_materiality_ids=[str(above.id)]),
+        user=user,
+        db=db,
+    )
+
+    out = await get_resolution_summary(str(run.id), user=user, db=db)
+    fee_group = next(g for g in out.groups if g.root_cause == "fees")
+    assert fee_group.above_materiality_count == 0
+    assert fee_group.proposed_count == 0
 
 
 async def test_group_proposals_listing_paginated(db, tenant_a):

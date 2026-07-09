@@ -57,12 +57,15 @@ vi.mock("@/hooks/use-recon-pipeline", () => ({
     summary: null,
   }),
 }));
-// This suite exercises the classic (flag-off) surface — recon_resolution_ui
-// stays false here so page.tsx renders the untouched tabs+table+bulk-card
-// block directly, matching these tests' assertions. Other flags (e.g.
-// "reconciliation") keep the prior blanket-true behavior.
+// This suite mostly exercises the classic (flag-off) surface —
+// resolutionUiFlag defaults false so page.tsx renders the untouched
+// tabs+table+bulk-card block directly, matching most of these tests'
+// assertions. Other flags (e.g. "reconciliation") keep the prior
+// blanket-true behavior. One test below flips resolutionUiFlag to true to
+// cover the flag-ON surface.
+let resolutionUiFlag = false;
 vi.mock("@/hooks/use-features", () => ({
-  useFeature: (key: string) => key !== "recon_resolution_ui",
+  useFeature: (key: string) => (key === "recon_resolution_ui" ? resolutionUiFlag : true),
 }));
 // page.tsx now unconditionally calls the resolution hooks (Rules of Hooks) —
 // mock them like use-reconciliation above so no real QueryClientProvider is
@@ -88,6 +91,7 @@ import ReconciliationPage from "@/app/(dashboard)/reconciliation/page";
 beforeEach(() => {
   mutate.mockReset();
   closeChecklistSpy.mockReset();
+  resolutionUiFlag = false;
   mockRun = {
     id: "r1",
     status: "completed",
@@ -203,5 +207,20 @@ describe("ReconciliationPage four buckets", () => {
         (screen.getByPlaceholderText(/note/i) as HTMLInputElement).value,
       ).toBe(""),
     );
+  });
+});
+
+describe("ReconciliationPage summary-first surface (flag ON)", () => {
+  it("renders the CloseChecklist without opening classic view", () => {
+    // T2 gate finding: CloseChecklist was rendered only inside
+    // renderClassicBucketView(), which the flag-ON branch only calls when
+    // "Show all results (classic view)" is toggled open — burying the
+    // period-close entry point. It must render unconditionally instead.
+    resolutionUiFlag = true;
+    render(<ReconciliationPage />);
+    expect(closeChecklistSpy).toHaveBeenCalled();
+    expect(
+      screen.queryByText(/Show all results \(classic view\)/i),
+    ).toBeInTheDocument();
   });
 });

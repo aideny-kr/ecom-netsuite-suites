@@ -16,7 +16,12 @@ from openpyxl import Workbook, load_workbook
 from app.api.v1.reconciliation import download_evidence, plan_resolutions
 from app.services.feature_flag_service import DEFAULT_FLAGS
 from app.services.reconciliation.evidence_service import EvidencePackGenerator
-from tests.conftest import create_test_recon_result, create_test_recon_run, create_test_user
+from tests.conftest import (
+    create_test_recon_result,
+    create_test_recon_run,
+    create_test_user,
+    enable_feature_flag,
+)
 
 
 def test_recon_resolution_ui_flag_registered_default_off():
@@ -52,6 +57,7 @@ async def test_download_evidence_includes_proposals_sheet(db, tenant_a):
     """Endpoint-level: a run with a live (non-superseded/rejected) proposal
     must produce an evidence pack whose workbook has a "Proposals" sheet."""
     user, _ = await create_test_user(db, tenant_a)
+    await enable_feature_flag(db, tenant_a.id, "recon_resolution_ui")
     run = await create_test_recon_run(db, tenant_a.id, status="completed")
     await create_test_recon_result(
         db,

@@ -82,6 +82,24 @@ def _ensure_run_open(run: ReconciliationRun | None) -> None:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Period is closed; cannot approve.")
 
 
+async def _ensure_resolution_ui_enabled(db: AsyncSession, tenant_id) -> None:
+    """Flag-gate the resolution-plan mutation endpoints behind
+    recon_resolution_ui (default OFF) — the redesigned surface, independent of
+    the base ``reconciliation`` feature. A body-level check rather than a
+    second ``Depends``: these endpoints are exercised directly as plain
+    function calls throughout the test suite (bypassing FastAPI's dependency
+    injection), so a Depends-only gate would never actually run under a
+    direct call. Read endpoints (resolution-summary, group proposals) are not
+    gated here — only the four mutation entry points."""
+    from app.services.feature_flag_service import is_enabled
+
+    if not await is_enabled(db, tenant_id, "recon_resolution_ui"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Feature 'recon_resolution_ui' is not enabled for your account.",
+        )
+
+
 # ---------------------------------------------------------------------------
 # Data freshness status (finance user accessible)
 # ---------------------------------------------------------------------------
@@ -734,6 +752,7 @@ async def plan_resolutions(
     """(Re-)plan resolution proposals for a run. Idempotent: undecided
     proposals are superseded and re-derived; decided ones are untouched.
     DB-only — never posts to NetSuite."""
+    await _ensure_resolution_ui_enabled(db, user.tenant_id)
     run = await _get_run_or_404(db, user.tenant_id, run_id)
     # Close = hard freeze: proposals feed the closed period's evidence pack, so
     # re-planning must not supersede/re-derive proposals once the run is closed/locked.
@@ -811,7 +830,9 @@ async def get_resolution_summary(
                 func.count(P.id).filter(P.status == "proposed").label("proposed_count"),
                 func.count(P.id).filter(P.status == "approved").label("approved_count"),
                 func.coalesce(func.sum(P.proposed_amount), 0).label("total_amount"),
-                func.count(P.id).filter(P.above_materiality.is_(True)).label("above_materiality_count"),
+                func.count(P.id)
+                .filter(P.above_materiality.is_(True), P.status == "proposed")
+                .label("above_materiality_count"),
             )
             .where(*live)
             .group_by(P.root_cause, P.action, P.booking_vehicle, P.group_key)
@@ -929,6 +950,7 @@ async def approve_resolution_group(
     'carried_forward'; every other approvable action flips to 'approved'.
     needs_human groups are never group-approvable.
     """
+    await _ensure_resolution_ui_enabled(db, user.tenant_id)
     root_cause, action, vehicle = _parse_group_key(group_key)
     if action == "needs_human":
         raise HTTPException(
@@ -958,6 +980,16 @@ async def approve_resolution_group(
     # `P.id.notin_(set())` unconditionally — an empty NOT IN renders as a
     # vacuous/NULL-poisoned predicate on some dialects.
     exclusion_clause = [P.id.notin_(excluded)] if excluded else []
+    # A result can go terminal independently of this proposal (e.g. locked via
+    # the classic per-result approve path) while its proposal row is still
+    # 'proposed'. Skip those instead of flipping the proposal — otherwise the
+    # proposal is marked approved + per-line audited for a result this
+    # group-approve never actually touched.
+    not_terminal_result = ~exists().where(
+        ReconciliationResult.id == P.result_id,
+        ReconciliationResult.tenant_id == user.tenant_id,
+        ReconciliationResult.status.in_(TERMINAL_RESULT_STATUSES),
+    )
 
     upd = (
         update(P)
@@ -966,6 +998,7 @@ async def approve_resolution_group(
             P.status == "proposed",
             eligibility,
             *exclusion_clause,
+            not_terminal_result,
         )
         .values(status="approved", decided_by=user.id, decided_at=now, correlation_id=correlation_id)
         .returning(P.id)
@@ -1054,6 +1087,7 @@ async def reject_resolution_group(
 ):
     """Reject a whole group's undecided proposals. Results are untouched —
     proposal history (incl. gathered evidence) is retained for the human."""
+    await _ensure_resolution_ui_enabled(db, user.tenant_id)
     root_cause, action, vehicle = _parse_group_key(group_key)
     run = await _get_run_or_404(db, user.tenant_id, run_id)
     _ensure_run_open(run)
@@ -1109,6 +1143,7 @@ async def override_resolution_proposal(
     """Override one proposal's action: supersede the original, create a new
     active proposal (source='human') for the same result. Preserves the
     one-active-proposal invariant and the audit chain."""
+    await _ensure_resolution_ui_enabled(db, user.tenant_id)
     from app.services.reconciliation.resolution_planner import VEHICLE_BY_ACTION, group_key_for
 
     P = ReconResolutionProposal

@@ -215,11 +215,17 @@ _INSERT_CHUNK = 5000  # Framework-scale runs are tens of thousands of lines
 async def plan_run(db: AsyncSession, tenant_id, run_id) -> dict:
     """Plan every non-clean result of *run_id* into resolution proposals.
 
-    Idempotent: existing 'proposed' rows for the run are superseded first;
-    decided rows (approved/posted/…) are never touched and their results are
-    not re-planned. A per-item mapping error abstains that item (needs_human
-    path is total, so this only guards truly unexpected data). Planning failure
-    must never fail the run — callers wrap this in try/except.
+    Idempotent: existing 'proposed' PLANNER rows for the run are superseded
+    first; decided rows (approved/posted/…) are never touched and their
+    results are not re-planned. Human decisions are preserved across a
+    re-plan: a 'proposed' source='human' override is never superseded (it IS
+    the decision, not planner output), and 'rejected' is treated as decided
+    for THIS run — re-planning must not resurrect a rejected result with a
+    fresh identical proposal (rejection is run-scoped: protected here,
+    re-derived only by a new run with a new run_id). A per-item mapping error
+    abstains that item (needs_human path is total, so this only guards truly
+    unexpected data). Planning failure must never fail the run — callers wrap
+    this in try/except.
     """
     from app.models.reconciliation import (
         ACTIVE_PROPOSAL_STATUSES,
@@ -243,8 +249,10 @@ async def plan_run(db: AsyncSession, tenant_id, run_id) -> dict:
 
     mat_abs, mat_pct = await load_materiality(db, tid)
 
-    # 1. supersede this run's undecided proposals (re-plan safety; the partial
-    #    unique index would otherwise reject the fresh insert).
+    # 1. supersede this run's undecided PLANNER proposals (re-plan safety; the
+    #    partial unique index would otherwise reject the fresh insert). Never
+    #    supersede a human override — it is itself the human's decision, not
+    #    something a re-plan should discard.
     superseded_count = (
         await db.execute(
             update(ReconResolutionProposal)
@@ -252,6 +260,7 @@ async def plan_run(db: AsyncSession, tenant_id, run_id) -> dict:
                 ReconResolutionProposal.run_id == rid,
                 ReconResolutionProposal.tenant_id == tid,
                 ReconResolutionProposal.status == "proposed",
+                ReconResolutionProposal.source != "human",
             )
             .values(status="superseded")
             .execution_options(synchronize_session=False)
@@ -259,11 +268,16 @@ async def plan_run(db: AsyncSession, tenant_id, run_id) -> dict:
     ).rowcount
 
     # 2. results still holding an ACTIVE proposal (approved/posting/posted/
-    #    post_failed) are decided — exclude them from re-planning.
+    #    post_failed) are decided — exclude them from re-planning. A
+    #    surviving human-override row (protected in step 1, still 'proposed')
+    #    is itself ACTIVE, so its result is excluded here too. 'rejected' is
+    #    ALSO included: within this run a rejection is a standing decision —
+    #    re-planning must not resurrect it with a fresh identical proposal. A
+    #    future run (new run_id, new results) still plans fresh.
     decided_result_ids = select(ReconResolutionProposal.result_id).where(
         ReconResolutionProposal.run_id == rid,
         ReconResolutionProposal.tenant_id == tid,
-        ReconResolutionProposal.status.in_(ACTIVE_PROPOSAL_STATUSES),
+        ReconResolutionProposal.status.in_((*ACTIVE_PROPOSAL_STATUSES, "rejected")),
     )
 
     # 3. cross-run double-posting guard: charge ids with a posted proposal

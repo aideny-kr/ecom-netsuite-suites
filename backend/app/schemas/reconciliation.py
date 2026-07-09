@@ -303,7 +303,9 @@ class ResolutionGroupSummary(BaseModel):
     proposed_count: int
     approved_count: int
     total_amount: Decimal
-    above_materiality_count: int
+    above_materiality_count: int = Field(
+        description="Above-materiality proposals still awaiting decision (status='proposed' only)"
+    )
 
 
 class ResolutionSummaryResponse(BaseModel):

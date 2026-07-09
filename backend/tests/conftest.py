@@ -146,6 +146,18 @@ async def create_test_tenant(
     return tenant
 
 
+async def enable_feature_flag(db: AsyncSession, tenant_id, flag_key: str, enabled: bool = True) -> None:
+    """Set a tenant feature flag for a test (upsert), busting the service's
+    in-memory TTL cache on both sides so the change is visible immediately —
+    mirrors the `_enable_recon` helper pattern in test_recon_bucket_reviewer.py."""
+    from app.services.feature_flag_service import clear_cache, set_flag
+
+    clear_cache()
+    await set_flag(db, tenant_id, flag_key, enabled)
+    await db.flush()
+    clear_cache()
+
+
 async def create_test_user(
     db: AsyncSession,
     tenant: Tenant,

@@ -139,8 +139,14 @@ class OrderReconJob:
             # otherwise a later commit on this session could persist a partial
             # plan.
             try:
+                from app.core.database import set_tenant_context
                 from app.services.reconciliation.resolution_planner import plan_run
 
+                # The finalize commit above clears the transaction-scoped
+                # SET LOCAL app.current_tenant_id; re-establish it before
+                # plan_run's INSERTs into the FORCE-RLS'd
+                # recon_resolution_proposals table.
+                await set_tenant_context(self.db, self.tenant_id)
                 await plan_run(self.db, self.tenant_id, run_id)
             except Exception:
                 await self.db.rollback()
