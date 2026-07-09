@@ -365,6 +365,7 @@ async def create_test_recon_result(
     netsuite_amount: Decimal = Decimal("10.00"),
     currency: str = "USD",
     bucket: str | None = None,
+    evidence: dict | None = None,
 ) -> ReconciliationResult:
     """Create a ReconciliationResult bound to an existing run. Flushes for its id.
 
@@ -395,6 +396,7 @@ async def create_test_recon_result(
         variance_type=variance_type,
         currency=currency,
         match_rule=match_rule,
+        evidence=evidence,
     )
     db.add(result)
     await db.flush()

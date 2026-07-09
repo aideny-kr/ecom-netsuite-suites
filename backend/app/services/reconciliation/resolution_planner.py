@@ -198,3 +198,179 @@ def plan_result(
         abs_variance,
         above,
     )
+
+
+import logging
+import uuid as _uuid
+from datetime import datetime, timezone
+
+from sqlalchemy import insert, select, update
+from sqlalchemy.ext.asyncio import AsyncSession
+
+logger = logging.getLogger(__name__)
+
+_INSERT_CHUNK = 5000  # Framework-scale runs are tens of thousands of lines
+
+
+async def plan_run(db: AsyncSession, tenant_id, run_id) -> dict:
+    """Plan every non-clean result of *run_id* into resolution proposals.
+
+    Idempotent: existing 'proposed' rows for the run are superseded first;
+    decided rows (approved/posted/…) are never touched and their results are
+    not re-planned. A per-item mapping error abstains that item (needs_human
+    path is total, so this only guards truly unexpected data). Planning failure
+    must never fail the run — callers wrap this in try/except.
+    """
+    from app.models.reconciliation import (
+        ACTIVE_PROPOSAL_STATUSES,
+        ReconciliationResult,
+        ReconciliationRun,
+        ReconResolutionProposal,
+    )
+    from app.services import audit_service
+    from app.services.reconciliation.materiality import load_materiality
+
+    tid = tenant_id if isinstance(tenant_id, _uuid.UUID) else _uuid.UUID(str(tenant_id))
+    rid = run_id if isinstance(run_id, _uuid.UUID) else _uuid.UUID(str(run_id))
+
+    run = (
+        await db.execute(
+            select(ReconciliationRun).where(ReconciliationRun.id == rid, ReconciliationRun.tenant_id == tid)
+        )
+    ).scalar_one_or_none()
+    if run is None:
+        raise ValueError("run not found")
+
+    mat_abs, mat_pct = await load_materiality(db, tid)
+
+    # 1. supersede this run's undecided proposals (re-plan safety; the partial
+    #    unique index would otherwise reject the fresh insert).
+    superseded_count = (
+        await db.execute(
+            update(ReconResolutionProposal)
+            .where(
+                ReconResolutionProposal.run_id == rid,
+                ReconResolutionProposal.tenant_id == tid,
+                ReconResolutionProposal.status == "proposed",
+            )
+            .values(status="superseded")
+            .execution_options(synchronize_session=False)
+        )
+    ).rowcount
+
+    # 2. results still holding an ACTIVE proposal (approved/posting/posted/
+    #    post_failed) are decided — exclude them from re-planning.
+    decided_result_ids = select(ReconResolutionProposal.result_id).where(
+        ReconResolutionProposal.run_id == rid,
+        ReconResolutionProposal.tenant_id == tid,
+        ReconResolutionProposal.status.in_(ACTIVE_PROPOSAL_STATUSES),
+    )
+
+    # 3. cross-run double-posting guard: charge ids with a posted proposal
+    #    anywhere in this tenant's history.
+    posted_charge_ids = set(
+        (
+            await db.execute(
+                select(ReconResolutionProposal.charge_source_id).where(
+                    ReconResolutionProposal.tenant_id == tid,
+                    ReconResolutionProposal.status == "posted",
+                    ReconResolutionProposal.charge_source_id.is_not(None),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    # 4. column-only select (evidence included — planner reads order_reference).
+    rows = (
+        await db.execute(
+            select(
+                ReconciliationResult.id,
+                ReconciliationResult.match_type,
+                ReconciliationResult.variance_type,
+                ReconciliationResult.variance_amount,
+                ReconciliationResult.stripe_amount,
+                ReconciliationResult.netsuite_amount,
+                ReconciliationResult.currency,
+                ReconciliationResult.variance_explanation,
+                ReconciliationResult.evidence,
+            ).where(
+                ReconciliationResult.run_id == rid,
+                ReconciliationResult.tenant_id == tid,
+                ReconciliationResult.bucket != "matches",
+                ReconciliationResult.id.notin_(decided_result_ids),
+            )
+        )
+    ).all()
+
+    now = datetime.now(timezone.utc)
+    to_insert: list[dict] = []
+    skipped_guard = 0
+    by_action: dict[str, int] = {}
+    for row in rows:
+        evidence = row.evidence or {}
+        charge_source_id = evidence.get("charge_source_id")
+        planned = plan_result(
+            match_type=row.match_type,
+            variance_type=row.variance_type,
+            variance_amount=row.variance_amount,
+            stripe_amount=row.stripe_amount,
+            netsuite_amount=row.netsuite_amount,
+            currency=row.currency,
+            variance_explanation=row.variance_explanation,
+            evidence=evidence,
+            already_posted=charge_source_id in posted_charge_ids if charge_source_id else False,
+            materiality_abs=mat_abs,
+            materiality_pct=mat_pct,
+        )
+        if planned is None:
+            if charge_source_id in posted_charge_ids:
+                skipped_guard += 1
+            continue
+        by_action[planned.action] = by_action.get(planned.action, 0) + 1
+        to_insert.append(
+            {
+                "tenant_id": tid,
+                "run_id": rid,
+                "result_id": row.id,
+                "root_cause": planned.root_cause,
+                "action": planned.action,
+                "booking_vehicle": planned.booking_vehicle,
+                "group_key": planned.group_key,
+                "source": "planner",
+                "narrative": planned.narrative,
+                "evidence": {"charge_source_id": charge_source_id} if charge_source_id else None,
+                "proposed_amount": planned.proposed_amount,
+                "currency": row.currency,
+                "above_materiality": planned.above_materiality,
+                "status": "proposed",
+                "charge_source_id": charge_source_id,
+                "created_at": now,
+                "updated_at": now,
+            }
+        )
+
+    for i in range(0, len(to_insert), _INSERT_CHUNK):
+        await db.execute(insert(ReconResolutionProposal), to_insert[i : i + _INSERT_CHUNK])
+
+    summary = {
+        "planned_count": len(to_insert),
+        "skipped_guard_count": skipped_guard,
+        "superseded_count": superseded_count,
+        "by_action": by_action,
+    }
+    await audit_service.log_event(
+        db=db,
+        tenant_id=tid,
+        category="reconciliation",
+        action="recon.resolution.planned",
+        actor_id=None,
+        actor_type="system",
+        resource_type="reconciliation_run",
+        resource_id=str(rid),
+        correlation_id=f"resolution-plan-{_uuid.uuid4().hex}",
+        payload=summary,
+    )
+    await db.commit()
+    return summary
