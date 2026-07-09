@@ -54,6 +54,7 @@ class EvidencePackGenerator:
         date_from: date,
         date_to: date,
         tenant_name: str | None = None,
+        proposals: list[dict] | None = None,
     ) -> io.BytesIO:
         """Generate the full evidence pack workbook."""
         wb = Workbook()
@@ -76,10 +77,45 @@ class EvidencePackGenerator:
         # needs_review already covers unmatched + material-variance auto_matched rows.
         self._write_results(wb, needs_review_results, "Exceptions")
 
+        # --- Proposals sheet (summary-first recon rework, Phase 1) ---
+        if proposals:
+            self._write_proposals_sheet(wb, proposals)
+
         buf = io.BytesIO()
         wb.save(buf)
         buf.seek(0)
         return buf
+
+    def _write_proposals_sheet(self, wb: Workbook, proposals: list[dict]) -> None:
+        ws = wb.create_sheet("Proposals")
+        headers = [
+            "Group",
+            "Root Cause",
+            "Action",
+            "Vehicle",
+            "Status",
+            "Source",
+            "Amount",
+            "Currency",
+            "Above Materiality",
+            "Narrative",
+        ]
+        ws.append(headers)
+        for p in proposals:
+            ws.append(
+                [
+                    p.get("group_key"),
+                    p.get("root_cause"),
+                    p.get("action"),
+                    p.get("booking_vehicle"),
+                    p.get("status"),
+                    p.get("source"),
+                    float(p.get("proposed_amount") or 0),
+                    p.get("currency"),
+                    "YES" if p.get("above_materiality") else "no",
+                    p.get("narrative"),
+                ]
+            )
 
     def _write_summary(
         self,

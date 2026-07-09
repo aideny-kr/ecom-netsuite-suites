@@ -1176,12 +1176,36 @@ async def download_evidence(
         for r in results
     ]
 
+    P = ReconResolutionProposal
+    proposals_stmt = select(P).where(
+        P.run_id == uuid.UUID(run_id),
+        P.tenant_id == user.tenant_id,
+        P.status.notin_(("superseded", "rejected")),
+    )
+    proposals_result = await db.execute(proposals_stmt)
+    proposals_dicts = [
+        {
+            "group_key": p.group_key,
+            "root_cause": p.root_cause,
+            "action": p.action,
+            "booking_vehicle": p.booking_vehicle,
+            "status": p.status,
+            "source": p.source,
+            "narrative": p.narrative,
+            "proposed_amount": p.proposed_amount,
+            "currency": p.currency,
+            "above_materiality": p.above_materiality,
+        }
+        for p in proposals_result.scalars().all()
+    ]
+
     generator = EvidencePackGenerator()
     excel_bytes = generator.generate_excel(
         results=results_dicts,
         run_id=run_id,
         date_from=run.date_from,
         date_to=run.date_to,
+        proposals=proposals_dicts,
     )
 
     filename = f"recon-evidence-{run.date_from.isoformat()}-{run.date_to.isoformat()}.xlsx"
