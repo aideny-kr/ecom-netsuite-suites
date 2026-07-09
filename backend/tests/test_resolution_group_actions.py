@@ -126,13 +126,23 @@ async def test_approve_group_flips_result_status_and_audits(db, tenant_a):
 
 async def test_approve_group_result_flip_scoped_to_this_batch_only(db, tenant_a):
     """Result-flip predicate must scope to (correlation_id == this batch, status ==
-    approved) — not just 'any approved proposal in the run'. Regression for the
+    approved) — not 'any approved proposal in the tenant'. Regression for the
     >32,767-row asyncpg IN-list fix: the flip now goes via a correlated subquery on
-    ReconResolutionProposal.correlation_id instead of a Python id list. A proposal
-    left 'proposed' (skipped this batch) but carrying a foreign correlation_id (as if
-    decided by another process) must NOT have its result flipped."""
+    ReconResolutionProposal.correlation_id instead of a Python id list.
+
+    Simulates a proposal already decided by a DIFFERENT batch: status='approved'
+    with its own (different) correlation_id, its result deliberately left un-flipped.
+    Because it's already 'approved' (not 'proposed'), this batch's own proposal
+    UPDATE can never touch it — so this exercises the result-flip subquery's WHERE
+    clause specifically: only the correlation_id predicate stops it being picked up
+    (the status predicate alone would NOT exclude it, since it genuinely is
+    'approved'). A subquery that dropped the correlation_id filter (scoping to
+    'any approved proposal in the tenant' instead of 'this batch') would
+    incorrectly flip this result too.
+    """
     user, run = await _seed_fees(db, tenant_a, above_too=True)
     above = next(p for p in await _props(db, run.id) if p.above_materiality)
+    above.status = "approved"
     above.correlation_id = str(uuid.uuid4())
     await db.flush()
 
@@ -143,12 +153,12 @@ async def test_approve_group_result_flip_scoped_to_this_batch_only(db, tenant_a)
         user=user,
         db=db,
     )
-    assert out.approved_count == 1
+    assert out.approved_count == 1  # only the sub-materiality item, this batch
 
     above_result = (
         await db.execute(select(ReconciliationResult).where(ReconciliationResult.id == above.result_id))
     ).scalar_one()
-    assert above_result.status == "pending"  # untouched: its proposal wasn't part of this batch
+    assert above_result.status == "pending"  # untouched: not part of THIS batch's correlation_id
 
 
 async def test_carry_forward_group_sets_carried_forward_not_approved(db, tenant_a):
