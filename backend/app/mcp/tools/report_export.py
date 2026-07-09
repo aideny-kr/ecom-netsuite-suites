@@ -1,3 +1,8 @@
+import logging
+
+logger = logging.getLogger(__name__)
+
+
 async def execute(params: dict, context: dict | None = None, **kwargs) -> dict:
     """Compose a publishable report from results produced THIS turn.
 
@@ -70,11 +75,20 @@ async def execute(params: dict, context: dict | None = None, **kwargs) -> dict:
     # narrative reference must not block an otherwise-complete report.
     # Any resolution failure counts as missing (a Redis blip raises ConnectionError,
     # not KeyError — the agent-actionable refusal beats a raw 500 either way).
+    # Hard dependencies come from DATA section types only (a stray result_id on a
+    # heading/narrative is ignored by assemble_spec — gate r2). normalize_sections
+    # first so the LLM's known aliases ("data" → table) classify correctly.
+    from app.schemas.report import normalize_sections
+
+    data_types = {"table", "chart", "metric_headline"}
     section_rids = list(
         dict.fromkeys(
             s["result_id"]
-            for s in params["sections"]
-            if isinstance(s, dict) and isinstance(s.get("result_id"), str) and s["result_id"]
+            for s in normalize_sections(params["sections"])
+            if isinstance(s, dict)
+            and s.get("type") in data_types
+            and isinstance(s.get("result_id"), str)
+            and s["result_id"]
         )
     )
     missing = []
@@ -82,6 +96,9 @@ async def execute(params: dict, context: dict | None = None, **kwargs) -> dict:
         try:
             resolver(rid)
         except Exception:
+            # LOG the root cause (gate r2): a real resolver bug relabeled as a stale
+            # rid would send the agent (and a debugging human) down the wrong path.
+            logger.warning("report.compose precheck: rid=%s failed to resolve", rid, exc_info=True)
             missing.append(rid)
     if missing:
         raise ValueError(

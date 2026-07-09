@@ -245,6 +245,9 @@ async def test_compose_resolves_from_inturn_cache_sidecar(db, client, monkeypatc
         def hgetall(self, key):
             return store.get(key, {})
 
+        def hlen(self, key):
+            return len(store.get(key, {}))
+
         def hdel(self, key, field):
             store.get(key, {}).pop(field, None)
 
@@ -407,6 +410,9 @@ async def test_conversation_ordinal_ids_span_persisted_and_inturn(db, client):
         def hgetall(self, key):
             return store.get(key, {})
 
+        def hlen(self, key):
+            return len(store.get(key, {}))
+
         def hdel(self, key, field):
             store.get(key, {}).pop(field, None)
 
@@ -557,6 +563,9 @@ async def test_compose_capture_refresh_lifecycle(db, client, monkeypatch):
 
         def hgetall(self, key):
             return store.get(key, {})
+
+        def hlen(self, key):
+            return len(store.get(key, {}))
 
         def hdel(self, key, field):
             store.get(key, {}).pop(field, None)
@@ -723,6 +732,9 @@ async def test_auto_refresh_sweep_ladder_retention_resume_e2e(db, client, monkey
         def hgetall(self, key):
             return store.get(key, {})
 
+        def hlen(self, key):
+            return len(store.get(key, {}))
+
         def hdel(self, key, field):
             store.get(key, {}).pop(field, None)
 
@@ -877,6 +889,9 @@ class _DictRedis:
     def hgetall(self, key):
         return self.store.get(key, {})
 
+    def hlen(self, key):
+        return len(self.store.get(key, {}))
+
     def hdel(self, key, field):
         self.store.get(key, {}).pop(field, None)
 
@@ -1011,6 +1026,9 @@ async def test_compose_degrades_narrative_only_references_gracefully(db):
             {
                 "title": "Narrative",
                 "sections": [
+                    # gate r2: a stray result_id on a NON-data section (assemble_spec
+                    # ignores it) must not hard-fail the compose either
+                    {"type": "heading", "level": 1, "text": "H", "result_id": "r99"},
                     {"type": "table", "result_id": "r1"},
                     {"type": "narrative", "markdown": "Stale ref: {{result:r9.row_count}}"},
                 ],
@@ -1023,7 +1041,7 @@ async def test_compose_degrades_narrative_only_references_gracefully(db):
     assert "[unresolved:" in report.rendered_html  # the stale narrative ref is visibly marked
 
 
-async def test_compose_precheck_survives_transient_resolver_errors(db, monkeypatch):
+async def test_compose_precheck_survives_transient_resolver_errors(db, monkeypatch, caplog):
     """Gate r1: the pre-check must catch ANY resolver failure (a Redis blip raises
     ConnectionError, not KeyError) and refuse with the agent-actionable ValueError —
     never a raw 500."""
@@ -1042,11 +1060,19 @@ async def test_compose_precheck_survives_transient_resolver_errors(db, monkeypat
         raise RuntimeError("redis blip")
 
     monkeypatch.setattr("app.services.chat.result_cache.get_full_payload", exploding)
-    with _pytest.raises(ValueError, match="r1"):
-        await report_export.execute(
-            {"title": "Blip", "sections": [{"type": "table", "result_id": "r1"}]},
-            context={"db": db, "tenant_id": tenant.id, "conversation_id": str(session.id), "actor_id": user.id},
-        )
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        with _pytest.raises(ValueError, match="r1"):
+            await report_export.execute(
+                {"title": "Blip", "sections": [{"type": "table", "result_id": "r1"}]},
+                context={"db": db, "tenant_id": tenant.id, "conversation_id": str(session.id), "actor_id": user.id},
+            )
+    # gate r2: the swallowed root cause must be LOGGED (a real bug relabeled as a
+    # stale rid would otherwise be undiagnosable) — the refusal stays actionable.
+    assert any("redis blip" in (r.exc_text or "") for r in caplog.records), (
+        "the resolver's root-cause traceback must be logged before classifying the rid missing"
+    )
 
 
 async def test_compose_resolves_each_rid_once(db):

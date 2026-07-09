@@ -296,9 +296,14 @@ def cache_full_payload(
     r.hset(key, result_id, envelope)
     r.expire(key, CACHE_TTL_SECONDS)
 
-    all_fields = r.hgetall(key)
-    if len(all_fields) <= MAX_FULL_PAYLOADS_PER_CONVERSATION:
+    # HLEN, not HGETALL (gate r2): the size probe runs on EVERY intercepted tool
+    # call, and a full-hash fetch transfers every stored payload each time — at the
+    # raised cap that is real per-call latency. Fetch entries only when actually
+    # over cap (rare).
+    if r.hlen(key) <= MAX_FULL_PAYLOADS_PER_CONVERSATION:
         return
+
+    all_fields = r.hgetall(key)
 
     # Evict oldest-by-seq first (FIFO). Undecodable entries sort oldest.
     def _seq_of(raw: str) -> float:
