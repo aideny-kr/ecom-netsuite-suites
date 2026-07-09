@@ -26,7 +26,7 @@ async def execute(params: dict, context: dict | None = None, **kwargs) -> dict:
         resolve_payload_from_messages,
     )
     from app.services.report.recipe import build_recipe
-    from app.services.report.report_service import compose_report
+    from app.services.report.report_service import compose_report, referenced_result_ids
 
     ctx = context or {}
     db = ctx["db"]
@@ -48,6 +48,24 @@ async def execute(params: dict, context: dict | None = None, **kwargs) -> dict:
                 return cached
         # 2) FALLBACK: persisted ChatMessage tool_calls (cross-turn / regeneration).
         return resolve_payload_from_messages(fallback_messages, rid)
+
+    # FAIL LOUDLY on unresolvable rids (live QA, 2026-07-09): assemble_spec degrades a
+    # missing rid into a 'Data unavailable' section — right for VIEW-time robustness,
+    # wrong at COMPOSE time, where it silently publishes a broken financial artifact.
+    # Raising instead surfaces a tool error the agent can act on in the SAME loop
+    # (re-run the source tool, compose again) — parity with refresh, which fails
+    # closed on any missing source rather than rendering holes.
+    missing = []
+    for rid in referenced_result_ids(params["sections"]):
+        try:
+            resolver(rid)
+        except KeyError:
+            missing.append(rid)
+    if missing:
+        raise ValueError(
+            f"result(s) {', '.join(missing)} are no longer available to compose — "
+            "re-run the source tool(s) to get fresh result_ids, then compose again"
+        )
 
     # RECIPE CAPTURE (Slice A, live-dashboard reports): record the refresh recipe —
     # the verbatim pre-resolution sections + per-result_id {tool, params,

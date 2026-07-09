@@ -851,3 +851,126 @@ async def test_auto_refresh_sweep_ladder_retention_resume_e2e(db, client, monkey
     b_row = (await db.execute(select(Report).where(Report.id == bystander_id))).scalar_one()
     assert b_row.version == 1 and b_row.refresh_failure_count == 0
     assert b_row.rendered_html == "<html>b</html>"
+
+
+# ---------------------------------------------------------------------------
+# Live-QA regressions (2026-07-09, real Framework cash-flow compose on staging):
+# a 7-data-call turn FIFO-evicted r1 from the same-turn sidecar (cap was 6 —
+# borrowed from the preview cache), so the published report carried three
+# 'Data unavailable' cards for the flagship statement AND recipe capture
+# fail-closed. Two-layer fix: the sidecar cap covers a whole turn, and compose
+# REFUSES unresolvable rids loudly (the agent re-fetches and retries) instead
+# of publishing a broken financial artifact.
+# ---------------------------------------------------------------------------
+
+
+class _DictRedis:
+    def __init__(self):
+        self.store: dict = {}
+
+    def hset(self, key, field, value):
+        self.store.setdefault(key, {})[field] = value
+
+    def hget(self, key, field):
+        return self.store.get(key, {}).get(field)
+
+    def hgetall(self, key):
+        return self.store.get(key, {})
+
+    def hdel(self, key, field):
+        self.store.get(key, {}).pop(field, None)
+
+    def expire(self, key, ttl):
+        pass
+
+
+async def test_compose_refuses_unresolvable_result_ids(db):
+    """A referenced rid that resolves NOWHERE (sidecar evicted/expired, no persisted
+    fallback) must fail the compose loudly — naming the rid so the agent can re-run
+    the source tool — never publish 'Data unavailable' holes in a financial report."""
+    import pytest as _pytest
+    from unittest.mock import patch
+
+    from app.mcp.tools import report_export
+
+    tenant = await create_test_tenant(db, name="Refuse Corp")
+    user, _ = await create_test_user(db, tenant)
+    await set_tenant_context(db, str(tenant.id))
+    session = ChatSession(tenant_id=tenant.id, user_id=user.id, title="t")
+    db.add(session)
+    await db.flush()
+
+    with patch("app.services.chat.result_cache._get_redis", return_value=_DictRedis()):
+        with _pytest.raises(ValueError, match="r1"):
+            await report_export.execute(
+                {
+                    "title": "Holey",
+                    "sections": [
+                        {"type": "heading", "level": 1, "text": "H"},
+                        {"type": "table", "result_id": "r1"},
+                    ],
+                },
+                context={"db": db, "tenant_id": tenant.id, "conversation_id": str(session.id), "actor_id": user.id},
+            )
+    count = (
+        await db.execute(select(func.count(Report.id)).where(Report.tenant_id == tenant.id))
+    ).scalar_one()
+    assert count == 0, "a refused compose must not persist a report row"
+
+
+async def test_compose_survives_a_deep_research_turn(db):
+    """The original live failure shape: EIGHT stamped results in one turn, compose
+    references the FIRST and the LAST. The first must still resolve at compose time
+    (cap covers a full turn) and the recipe must capture both sources."""
+    import json as _json
+    from unittest.mock import patch
+
+    from app.mcp.tools import report_export
+
+    tenant = await create_test_tenant(db, name="Deep Turn Corp")
+    user, _ = await create_test_user(db, tenant)
+    await set_tenant_context(db, str(tenant.id))
+    session = ChatSession(tenant_id=tenant.id, user_id=user.id, title="t")
+    db.add(session)
+    await db.flush()
+    conversation_id = str(session.id)
+
+    with patch("app.services.chat.result_cache._get_redis", return_value=_DictRedis()):
+        from app.services.chat.result_cache import cache_full_payload
+        from app.services.chat.tool_call_results import extract_result_payload
+
+        for i in range(1, 9):  # r1..r8 — more results than the old cap of 6
+            params = {"query": f"SELECT {i}"}
+            payload = extract_result_payload(
+                "netsuite_suiteql",
+                params,
+                _json.dumps(
+                    {
+                        "success": True,
+                        "columns": ["account", "amount"],
+                        "rows": [[f"MARKER-R{i}", i * 100]],
+                        "row_count": 1,
+                        "query": params["query"],
+                    }
+                ),
+            )
+            cache_full_payload(conversation_id, f"r{i}", payload, tool_name="netsuite_suiteql", params=params)
+
+        result = await report_export.execute(
+            {
+                "title": "Deep",
+                "sections": [
+                    {"type": "heading", "level": 1, "text": "Deep"},
+                    {"type": "table", "result_id": "r1"},
+                    {"type": "table", "result_id": "r8"},
+                ],
+            },
+            context={"db": db, "tenant_id": tenant.id, "conversation_id": conversation_id, "actor_id": user.id},
+        )
+
+    report = (await db.execute(select(Report).where(Report.id == uuid.UUID(result["report_id"])))).scalar_one()
+    assert "MARKER-R1" in report.rendered_html, "the turn's FIRST result must survive to compose"
+    assert "MARKER-R8" in report.rendered_html
+    assert "Data unavailable" not in report.rendered_html
+    assert report.recipe_json is not None, "recipe capture must not fail-close on a deep turn"
+    assert set(report.recipe_json["sources"]) == {"r1", "r8"}

@@ -239,7 +239,14 @@ async def get_result_by_message(conversation_id: str, message_id: str) -> Cached
 # uses (hset/hget/hgetall/hdel/expire). Same TTL as the result cache.
 # ---------------------------------------------------------------------------
 
-MAX_FULL_PAYLOADS_PER_CONVERSATION = MAX_RESULTS_PER_CONVERSATION
+# NOT the preview cache's cap of MAX_RESULTS_PER_CONVERSATION (=6): this sidecar
+# exists so a SAME-TURN report.compose can resolve every result the turn produced,
+# and one turn can stamp up to CHAT_MAX_TOOL_CALLS_PER_TURN results. Borrowing the
+# preview cap FIFO-evicted r1 of a 7-data-call live cash-flow turn MID-TURN (no
+# persisted fallback exists until the turn ends), publishing 'Data unavailable'
+# sections and fail-closing recipe capture (live QA, 2026-07-09). Older turns'
+# entries evicting past this cap is fine — they are persisted by then.
+MAX_FULL_PAYLOADS_PER_CONVERSATION = settings.CHAT_MAX_TOOL_CALLS_PER_TURN
 
 
 def _full_payload_key(conversation_id: str) -> str:
