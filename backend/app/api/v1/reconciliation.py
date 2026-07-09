@@ -52,6 +52,7 @@ from app.services.reconciliation.four_bucket_classifier import (
 )
 from app.services.reconciliation.pipeline import ReconPipeline
 from app.services.reconciliation.recon_job import ReconJobRunner
+from app.services.reconciliation.resolution_planner import plan_run
 
 router = APIRouter(prefix="/reconciliation", tags=["reconciliation"])
 
@@ -698,6 +699,25 @@ async def approve_bucket(
         skipped_count=skipped_count,
         correlation_id=correlation_id,
     )
+
+
+# ---------------------------------------------------------------------------
+# (Re-)plan resolution proposals for a run — retry surface for the post-run hook
+# ---------------------------------------------------------------------------
+@router.post("/runs/{run_id}/plan-resolutions")
+async def plan_resolutions(
+    run_id: str,
+    user: Annotated[User, Depends(require_permission("recon.run"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """(Re-)plan resolution proposals for a run. Idempotent: undecided
+    proposals are superseded and re-derived; decided ones are untouched.
+    DB-only — never posts to NetSuite."""
+    run_uuid = _parse_uuid(run_id)
+    try:
+        return await plan_run(db, user.tenant_id, run_uuid)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
 
 
 # ---------------------------------------------------------------------------

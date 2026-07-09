@@ -132,6 +132,20 @@ class OrderReconJob:
             run.needs_review_count = buckets.count(BUCKET_NEEDS_REVIEW)
             await self.db.commit()
 
+            # Phase 1 (summary-first rework): derive resolution proposals.
+            # Planning failure must never fail the run — the page offers retry
+            # via POST /runs/{run_id}/plan-resolutions. plan_run makes writes
+            # before its own commit, so a failure here must roll back first —
+            # otherwise a later commit on this session could persist a partial
+            # plan.
+            try:
+                from app.services.reconciliation.resolution_planner import plan_run
+
+                await plan_run(self.db, self.tenant_id, run_id)
+            except Exception:
+                await self.db.rollback()
+                logger.exception("resolution_planning_failed", run_id=str(run_id))
+
             match_rate = Decimal(len(matched)) / Decimal(len(charges)) * 100 if charges else Decimal("0")
 
             summary = ReconRunSummary(
