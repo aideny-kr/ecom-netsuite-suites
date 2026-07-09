@@ -10,6 +10,7 @@ import asyncio
 import json
 import uuid
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -24,7 +25,7 @@ from app.models.audit import AuditEvent
 from app.models.canonical import NetsuitePosting, Payout, PayoutLine
 from app.models.connection import Connection
 from app.models.pipeline import CursorState
-from app.models.reconciliation import ReconciliationResult, ReconciliationRun
+from app.models.reconciliation import ReconciliationResult, ReconciliationRun, ReconResolutionProposal
 from app.models.user import User
 from app.schemas.reconciliation import (
     ReconBucketApprove,
@@ -37,6 +38,9 @@ from app.schemas.reconciliation import (
     ReconRunCreate,
     ReconRunResponse,
     ReconRunSummary,
+    ResolutionGroupSummary,
+    ResolutionProposalResponse,
+    ResolutionSummaryResponse,
 )
 from app.services import audit_service
 from app.services.reconciliation.close_scope import (
@@ -718,6 +722,163 @@ async def plan_resolutions(
         return await plan_run(db, user.tenant_id, run_uuid)
     except ValueError:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
+
+
+# ---------------------------------------------------------------------------
+# Resolution summary + per-group proposal listing (summary-first rework)
+# ---------------------------------------------------------------------------
+def _parse_group_key(group_key: str) -> tuple[str, str, str]:
+    parts = group_key.split(":")
+    if len(parts) != 3:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="group_key must be root_cause:action:booking_vehicle",
+        )
+    return parts[0], parts[1], parts[2]
+
+
+async def _get_run_or_404(db: AsyncSession, tenant_id, run_id_str: str) -> ReconciliationRun:
+    run_uuid = _parse_uuid(run_id_str)
+    run = (
+        await db.execute(
+            select(ReconciliationRun).where(
+                ReconciliationRun.id == run_uuid,
+                ReconciliationRun.tenant_id == tenant_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if run is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
+    return run
+
+
+@router.get("/runs/{run_id}/resolution-summary", response_model=ResolutionSummaryResponse)
+async def get_resolution_summary(
+    run_id: str,
+    user: Annotated[User, Depends(require_feature("reconciliation"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Summary-first payload: rates + variance-by-root-cause + computed groups.
+
+    Groups are computed here by GROUP BY on real columns (never parsed out of
+    group_key). Only ACTIVE, undecided-or-approved proposal states are shown;
+    superseded/rejected history is excluded.
+    """
+    run = await _get_run_or_404(db, user.tenant_id, run_id)
+    run_uuid = run.id
+
+    total_results = (
+        await db.execute(
+            select(func.count(ReconciliationResult.id)).where(
+                ReconciliationResult.run_id == run_uuid,
+                ReconciliationResult.tenant_id == user.tenant_id,
+            )
+        )
+    ).scalar_one()
+    matches_count = run.matches_count
+
+    P = ReconResolutionProposal
+    live = (P.run_id == run_uuid, P.tenant_id == user.tenant_id, P.status.notin_(("superseded", "rejected")))
+
+    group_rows = (
+        await db.execute(
+            select(
+                P.root_cause,
+                P.action,
+                P.booking_vehicle,
+                P.group_key,
+                func.count(P.id).label("count"),
+                func.count(P.id).filter(P.status == "proposed").label("proposed_count"),
+                func.count(P.id).filter(P.status == "approved").label("approved_count"),
+                func.coalesce(func.sum(P.proposed_amount), 0).label("total_amount"),
+                func.count(P.id).filter(P.above_materiality.is_(True)).label("above_materiality_count"),
+            )
+            .where(*live)
+            .group_by(P.root_cause, P.action, P.booking_vehicle, P.group_key)
+            .order_by(func.coalesce(func.sum(P.proposed_amount), 0).desc())
+        )
+    ).all()
+
+    groups = [
+        ResolutionGroupSummary(
+            group_key=r.group_key,
+            root_cause=r.root_cause,
+            action=r.action,
+            booking_vehicle=r.booking_vehicle,
+            count=r.count,
+            proposed_count=r.proposed_count,
+            approved_count=r.approved_count,
+            total_amount=r.total_amount,
+            above_materiality_count=r.above_materiality_count,
+        )
+        for r in group_rows
+    ]
+    proposals_count = sum(g.count for g in groups)
+    explained_count = sum(g.count for g in groups if g.action != "needs_human")
+    variance_by_root_cause: dict[str, Decimal] = {}
+    for g in groups:
+        variance_by_root_cause[g.root_cause] = variance_by_root_cause.get(g.root_cause, Decimal("0")) + g.total_amount
+
+    def _pct(numerator: int, denominator: int) -> Decimal:
+        if denominator == 0:
+            return Decimal("0")
+        return (Decimal(numerator) / Decimal(denominator) * 100).quantize(Decimal("0.1"))
+
+    # guard-skip visibility: results with no live proposal, no match, and a
+    # posted proposal elsewhere are reported by plan_run's audit; recompute the
+    # cheap upper bound here for the header (results minus matches minus live).
+    guard_skipped_count = max(0, total_results - matches_count - proposals_count)
+
+    return ResolutionSummaryResponse(
+        run_id=run_id,
+        total_results=total_results,
+        matches_count=matches_count,
+        match_rate=_pct(matches_count, total_results),
+        proposals_count=proposals_count,
+        explained_count=explained_count,
+        explained_rate=_pct(explained_count, proposals_count),
+        guard_skipped_count=guard_skipped_count,
+        variance_by_root_cause=variance_by_root_cause,
+        groups=groups,
+    )
+
+
+@router.get(
+    "/runs/{run_id}/resolution-groups/{group_key}/proposals",
+    response_model=list[ResolutionProposalResponse],
+)
+async def list_group_proposals(
+    run_id: str,
+    group_key: str,
+    user: Annotated[User, Depends(require_feature("reconciliation"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    limit: int = 100,
+    offset: int = 0,
+):
+    await _get_run_or_404(db, user.tenant_id, run_id)
+    root_cause, action, vehicle = _parse_group_key(group_key)
+    P = ReconResolutionProposal
+    rows = (
+        (
+            await db.execute(
+                select(P)
+                .where(
+                    P.run_id == _parse_uuid(run_id),
+                    P.tenant_id == user.tenant_id,
+                    P.root_cause == root_cause,
+                    P.action == action,
+                    P.booking_vehicle == vehicle,
+                    P.status.notin_(("superseded", "rejected")),
+                )
+                .order_by(P.proposed_amount.desc())
+                .limit(limit)
+                .offset(offset)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return [ResolutionProposalResponse.model_validate(p) for p in rows]
 
 
 # ---------------------------------------------------------------------------
