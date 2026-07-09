@@ -10,15 +10,23 @@ import { ReconProgressStepper } from "@/components/reconciliation/recon-progress
 import { DataFreshnessBanner } from "@/components/reconciliation/data-freshness-banner";
 import { CloseChecklist } from "@/components/reconciliation/close-checklist";
 import { BulkApprovalCard } from "@/components/reconciliation/bulk-approval-card";
+import { ResolutionSummaryHeader } from "@/components/reconciliation/resolution-summary-header";
+import { ResolutionGroupCard } from "@/components/reconciliation/resolution-group-card";
+import { ResolutionGroupItems } from "@/components/reconciliation/resolution-group-items";
 import {
   useReconRuns,
   useReconResults,
   useReconBucketSummary,
   useApproveBucket,
 } from "@/hooks/use-reconciliation";
+import {
+  useResolutionSummary,
+  useApproveResolutionGroup,
+  useRejectResolutionGroup,
+} from "@/hooks/use-resolution";
 import { useReconPipeline } from "@/hooks/use-recon-pipeline";
 import { useFeature } from "@/hooks/use-features";
-import type { ReconResult, ReconBucketId } from "@/lib/types";
+import type { ReconResult, ReconBucketId, ReconResolutionProposal } from "@/lib/types";
 
 const BUCKET_TABS: { id: ReconBucketId; label: string }[] = [
   { id: "matches", label: "Matches" },
@@ -52,6 +60,23 @@ export default function ReconciliationPage() {
   const approveBucket = useApproveBucket(selectedRunId || "");
   const reconEnabled = useFeature("reconciliation");
   const pipeline = useReconPipeline();
+
+  // Summary-first resolution surface (recon_resolution_ui, default OFF). Flag
+  // OFF must leave every hook call above and below byte-identical in effect —
+  // useResolutionSummary is only enabled when the flag is on, and the
+  // mutations don't fire network calls until .mutate() is invoked.
+  const resolutionUiEnabled = useFeature("recon_resolution_ui");
+  const resolutionSummary = useResolutionSummary(resolutionUiEnabled ? selectedRunId : null);
+  const approveGroup = useApproveResolutionGroup(selectedRunId || "");
+  const rejectGroup = useRejectResolutionGroup(selectedRunId || "");
+  const [expandedGroup, setExpandedGroup] = useState<string | null>(null);
+  const [tickedAboveByGroup, setTickedAboveByGroup] = useState<Record<string, string[]>>({});
+  // Keyed by cardKey (`${group_key}:${currency}`) — a group_key alone can span
+  // more than one currency (multi-currency runs render one card per
+  // currency), so a single page-level counter would wipe every OTHER card's
+  // unsaved note when any one group is approved.
+  const [groupResetSignals, setGroupResetSignals] = useState<Record<string, number>>({});
+  const [showClassicView, setShowClassicView] = useState(false);
 
   const selectedRun = runs?.find((r) => r.id === selectedRunId) || null;
 
@@ -108,9 +133,34 @@ export default function ReconciliationPage() {
     if (orderRef) {
       query = `Use SuiteQL to investigate order ${orderRef} in NetSuite. A Stripe charge of ${amount} ${dateRange} has no matching customer deposit. Run: SELECT t.id, t.tranid, t.trandate, t.total, BUILTIN.DF(t.entity) AS customer FROM transaction t WHERE t.type = 'CustDep' AND t.tranid LIKE '%${orderRef}%' OR t.total = ${Number(result.stripe_amount || 0).toFixed(2)} FETCH FIRST 10 ROWS ONLY`;
     } else {
-      query = `Use SuiteQL to find customer deposits in NetSuite around ${amount} ${dateRange}. Run: SELECT t.id, t.tranid, t.trandate, t.total, BUILTIN.DF(t.entity) AS customer FROM transaction t WHERE t.type = 'CustDep' AND t.total BETWEEN ${(Number(result.stripe_amount || 0) * 0.95).toFixed(2)} AND ${(Number(result.stripe_amount || 0) * 1.05).toFixed(2)} ${dateFrom ? `AND t.trandate >= TO_DATE('${dateFrom}', 'YYYY-MM-DD') AND t.trandate <= TO_DATE('${dateTo}', 'YYYY-MM-DD')` : ""} FETCH FIRST 10 ROWS ONLY`;
+      // BETWEEN lo AND hi must use the numerically smaller bound first — for a
+      // negative amount, *0.95 is the larger (less negative) of the two.
+      const rawAmount = Number(result.stripe_amount || 0);
+      const lo = Math.min(rawAmount * 0.95, rawAmount * 1.05).toFixed(2);
+      const hi = Math.max(rawAmount * 0.95, rawAmount * 1.05).toFixed(2);
+      query = `Use SuiteQL to find customer deposits in NetSuite around ${amount} ${dateRange}. Run: SELECT t.id, t.tranid, t.trandate, t.total, BUILTIN.DF(t.entity) AS customer FROM transaction t WHERE t.type = 'CustDep' AND t.total BETWEEN ${lo} AND ${hi} ${dateFrom ? `AND t.trandate >= TO_DATE('${dateFrom}', 'YYYY-MM-DD') AND t.trandate <= TO_DATE('${dateTo}', 'YYYY-MM-DD')` : ""} FETCH FIRST 10 ROWS ONLY`;
     }
     // Use unified agent (not recon-agent) — it has SuiteQL tools
+    router.push(`/chat?prefill=${encodeURIComponent(query)}&new_session=true`);
+  };
+
+  // A resolution proposal (group drill-down row) carries the resolved amount +
+  // narrative but not the underlying result's raw evidence (order reference /
+  // charge-source id) — so investigate-in-chat searches by amount instead of
+  // order reference, and folds the result id into the narrative for
+  // cross-reference rather than the SuiteQL WHERE clause.
+  const handleInvestigateProposal = (proposal: ReconResolutionProposal) => {
+    const amount = Number(proposal.proposed_amount).toLocaleString("en-US", {
+      style: "currency",
+      currency: proposal.currency || "USD",
+    });
+    const dateRange = selectedRun ? `between ${selectedRun.date_from} and ${selectedRun.date_to}` : "";
+    // BETWEEN lo AND hi must use the numerically smaller bound first — for a
+    // negative amount, *0.95 is the larger (less negative) of the two.
+    const rawAmount = Number(proposal.proposed_amount);
+    const lo = Math.min(rawAmount * 0.95, rawAmount * 1.05).toFixed(2);
+    const hi = Math.max(rawAmount * 0.95, rawAmount * 1.05).toFixed(2);
+    const query = `Use SuiteQL to find customer deposits in NetSuite around ${amount} ${dateRange}. Context: ${proposal.narrative} (recon result ${proposal.result_id}). Run: SELECT t.id, t.tranid, t.trandate, t.total, BUILTIN.DF(t.entity) AS customer FROM transaction t WHERE t.type = 'CustDep' AND t.total BETWEEN ${lo} AND ${hi} ${dateFrom ? `AND t.trandate >= TO_DATE('${dateFrom}', 'YYYY-MM-DD') AND t.trandate <= TO_DATE('${dateTo}', 'YYYY-MM-DD')` : ""} FETCH FIRST 10 ROWS ONLY`;
     router.push(`/chat?prefill=${encodeURIComponent(query)}&new_session=true`);
   };
 
@@ -118,6 +168,82 @@ export default function ReconciliationPage() {
     ...t,
     count: summary.data?.[t.id]?.count ?? 0,
   }));
+
+  // The classic tabs+table+bulk-card surface. Defined as a plain function
+  // (called, not rendered as a JSX tag) so it stays a single copy shared by
+  // the flag-off branch and the flag-on "classic view" toggle WITHOUT
+  // introducing a new component identity on every render — a nested
+  // `function ClassicBucketView(){}` rendered as `<ClassicBucketView/>` would
+  // get a fresh function reference each render and React would remount the
+  // whole subtree (losing in-progress note text, etc.) on every parent
+  // re-render, not just tab switches.
+  function renderClassicBucketView() {
+    return (
+      <>
+        <div className="flex gap-1 border-b">
+          {tabs.map((tab) => (
+            <button
+              key={tab.id}
+              onClick={() => setActiveTab(tab.id)}
+              className={`px-4 py-2 text-[13px] font-medium border-b-2 transition-colors ${
+                activeTab === tab.id
+                  ? "border-blue-600 text-blue-600"
+                  : "border-transparent text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              {tab.label} ({tab.count})
+            </button>
+          ))}
+        </div>
+
+        {/* Bulk-approval card for bulk-approvable buckets.
+            Never offered on a closed run (mirrors the CloseChecklist gate). */}
+        {isBulkApprovable && (
+          <div className="space-y-2">
+            {/* key={activeTab}: remount per bucket so a note typed for one
+                bucket can't carry into the next bucket's approve. */}
+            <BulkApprovalCard
+              key={activeTab}
+              bucketLabel={activeBucket.label}
+              count={activeCount}
+              totalVariance={activeVariance}
+              onApprove={handleApproveBucket}
+              isApproving={approveBucket.isPending}
+              disabled={!reconEnabled || activeCount === 0 || isRunClosed}
+              resetSignal={approveResetSignal}
+            />
+            {/* Surface what bulk-approve actually did — the bucket count is
+                status-agnostic and can overstate the eligible set. */}
+            {approveResult && (
+              <p className="text-[13px] text-green-700">
+                Approved {approveResult.approved_count} · skipped{" "}
+                {approveResult.skipped_count} already-decided
+              </p>
+            )}
+          </div>
+        )}
+
+        {/* Exception cards (needs-review tab, top 5) */}
+        {activeTab === "needs_review" && (results || []).length > 0 && (
+          <div className="space-y-4">
+            {(results || []).slice(0, 5).map((result) => (
+              <ReconExceptionCard
+                key={result.id}
+                result={result}
+                onInvestigate={handleInvestigate}
+              />
+            ))}
+          </div>
+        )}
+
+        {/* Results table */}
+        <ReconResultsTable
+          results={results || []}
+          onInvestigate={handleInvestigate}
+        />
+      </>
+    );
+  }
 
   return (
     <div className="animate-fade-in space-y-8 p-8">
@@ -193,86 +319,106 @@ export default function ReconciliationPage() {
         </div>
       )}
 
-      {/* Summary bar */}
-      {!pipeline.isRunning && selectedRunId && (
+      {/* Summary bar — classic view only; the flag-on surface uses ResolutionSummaryHeader instead */}
+      {!resolutionUiEnabled && !pipeline.isRunning && selectedRunId && (
         <ReconSummaryBar summary={summary.data ?? null} run={selectedRun} />
       )}
 
-      {/* Tabs + results */}
-      {!pipeline.isRunning && selectedRunId && (
+      {/* Tabs + results — classic view (flag OFF). Byte-identical to pre-flag behavior. */}
+      {!resolutionUiEnabled && !pipeline.isRunning && selectedRunId && renderClassicBucketView()}
+
+      {/* Summary-first resolution surface (flag ON) */}
+      {resolutionUiEnabled && !pipeline.isRunning && selectedRunId && (
         <>
-          <div className="flex gap-1 border-b">
-            {tabs.map((tab) => (
-              <button
-                key={tab.id}
-                onClick={() => setActiveTab(tab.id)}
-                className={`px-4 py-2 text-[13px] font-medium border-b-2 transition-colors ${
-                  activeTab === tab.id
-                    ? "border-blue-600 text-blue-600"
-                    : "border-transparent text-muted-foreground hover:text-foreground"
-                }`}
-              >
-                {tab.label} ({tab.count})
-              </button>
-            ))}
+          <ResolutionSummaryHeader summary={resolutionSummary.data ?? null} />
+          <div className="space-y-3">
+            {resolutionSummary.data?.groups.map((group) => {
+              // A group_key alone can span more than one currency
+              // (multi-currency runs render one card per currency) — every
+              // piece of per-card state must key on the pair, not group_key
+              // alone, or two cards would fight over the same expand/ticked/
+              // reset state.
+              const cardKey = `${group.group_key}:${group.currency}`;
+              return (
+                <ResolutionGroupCard
+                  key={cardKey}
+                  group={group}
+                  expanded={expandedGroup === cardKey}
+                  onToggleExpand={() => setExpandedGroup(expandedGroup === cardKey ? null : cardKey)}
+                  isApproving={approveGroup.isPending}
+                  disabled={!reconEnabled || isRunClosed}
+                  includedAboveIds={tickedAboveByGroup[cardKey] ?? []}
+                  resetSignal={groupResetSignals[cardKey] ?? 0}
+                  onApprove={(notes, includedAboveIds) =>
+                    approveGroup.mutate(
+                      {
+                        group_key: group.group_key,
+                        notes: notes.trim() || undefined,
+                        included_above_materiality_ids: includedAboveIds,
+                        currency: group.currency,
+                      },
+                      {
+                        onSuccess: () => {
+                          setGroupResetSignals((prev) => ({ ...prev, [cardKey]: (prev[cardKey] ?? 0) + 1 }));
+                          // Ticked above-materiality ids are consumed by this
+                          // approve — clear them so a re-render doesn't leave
+                          // stale ids pointing at now-decided proposals.
+                          setTickedAboveByGroup((prev) => {
+                            const next = { ...prev };
+                            delete next[cardKey];
+                            return next;
+                          });
+                        },
+                      }
+                    )
+                  }
+                  onReject={() => rejectGroup.mutate({ group_key: group.group_key, currency: group.currency })}
+                >
+                  <ResolutionGroupItems
+                    runId={selectedRunId}
+                    groupKey={group.group_key}
+                    tickedAboveIds={tickedAboveByGroup[cardKey] ?? []}
+                    onTickAbove={(id, ticked) =>
+                      setTickedAboveByGroup((prev) => {
+                        const current = prev[cardKey] ?? [];
+                        return {
+                          ...prev,
+                          [cardKey]: ticked ? [...current, id] : current.filter((x) => x !== id),
+                        };
+                      })
+                    }
+                    onInvestigate={handleInvestigateProposal}
+                  />
+                </ResolutionGroupCard>
+              );
+            })}
           </div>
-
-          {/* Bulk-approval card for bulk-approvable buckets.
-              Never offered on a closed run (mirrors the CloseChecklist gate). */}
-          {isBulkApprovable && (
-            <div className="space-y-2">
-              {/* key={activeTab}: remount per bucket so a note typed for one
-                  bucket can't carry into the next bucket's approve. */}
-              <BulkApprovalCard
-                key={activeTab}
-                bucketLabel={activeBucket.label}
-                count={activeCount}
-                totalVariance={activeVariance}
-                onApprove={handleApproveBucket}
-                isApproving={approveBucket.isPending}
-                disabled={!reconEnabled || activeCount === 0 || isRunClosed}
-                resetSignal={approveResetSignal}
-              />
-              {/* Surface what bulk-approve actually did — the bucket count is
-                  status-agnostic and can overstate the eligible set. */}
-              {approveResult && (
-                <p className="text-[13px] text-green-700">
-                  Approved {approveResult.approved_count} · skipped{" "}
-                  {approveResult.skipped_count} already-decided
-                </p>
-              )}
-            </div>
-          )}
-
-          {/* Exception cards (needs-review tab, top 5) */}
-          {activeTab === "needs_review" && (results || []).length > 0 && (
-            <div className="space-y-4">
-              {(results || []).slice(0, 5).map((result) => (
-                <ReconExceptionCard
-                  key={result.id}
-                  result={result}
-                  onInvestigate={handleInvestigate}
-                />
-              ))}
-            </div>
-          )}
-
-          {/* Results table */}
-          <ReconResultsTable
-            results={results || []}
-            onInvestigate={handleInvestigate}
-          />
-
-          {/* Close checklist — gated on the PERIOD-scoped readiness it fetches
-              itself (every run the close will touch), not this run's buckets */}
-          {selectedRun && selectedRun.date_from && selectedRun.status !== "closed" && (
-            <CloseChecklist
-              run={selectedRun}
-              period={selectedRun.date_from.substring(0, 7)}
-            />
-          )}
+          <button
+            type="button"
+            onClick={() => setShowClassicView((v) => !v)}
+            className="text-[13px] text-muted-foreground underline-offset-2 hover:underline"
+          >
+            {showClassicView ? "Hide" : "Show"} all results (classic view)
+          </button>
+          {showClassicView && renderClassicBucketView()}
         </>
       )}
+
+      {/* Close checklist — gated on the PERIOD-scoped readiness it fetches
+          itself (every run the close will touch), not this run's buckets.
+          Rendered once here (not inside renderClassicBucketView) so flag-ON
+          tenants get the period-close entry point without opening "Show all
+          results (classic view)" first. */}
+      {!pipeline.isRunning &&
+        selectedRunId &&
+        selectedRun &&
+        selectedRun.date_from &&
+        selectedRun.status !== "closed" && (
+          <CloseChecklist
+            run={selectedRun}
+            period={selectedRun.date_from.substring(0, 7)}
+          />
+        )}
     </div>
   );
 }

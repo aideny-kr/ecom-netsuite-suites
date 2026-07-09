@@ -10,11 +10,13 @@ import asyncio
 import json
 import uuid
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
-from sqlalchemy import and_, func, insert, not_, or_, select, update
+from sqlalchemy import and_, exists, func, insert, not_, or_, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -24,7 +26,7 @@ from app.models.audit import AuditEvent
 from app.models.canonical import NetsuitePosting, Payout, PayoutLine
 from app.models.connection import Connection
 from app.models.pipeline import CursorState
-from app.models.reconciliation import ReconciliationResult, ReconciliationRun
+from app.models.reconciliation import ReconciliationResult, ReconciliationRun, ReconResolutionProposal
 from app.models.user import User
 from app.schemas.reconciliation import (
     ReconBucketApprove,
@@ -37,6 +39,14 @@ from app.schemas.reconciliation import (
     ReconRunCreate,
     ReconRunResponse,
     ReconRunSummary,
+    ResolutionGroupApprove,
+    ResolutionGroupApproveResult,
+    ResolutionGroupReject,
+    ResolutionGroupRejectResult,
+    ResolutionGroupSummary,
+    ResolutionProposalOverride,
+    ResolutionProposalResponse,
+    ResolutionSummaryResponse,
 )
 from app.services import audit_service
 from app.services.reconciliation.close_scope import (
@@ -47,11 +57,13 @@ from app.services.reconciliation.evidence_service import EvidencePackGenerator
 from app.services.reconciliation.four_bucket_classifier import (
     ALL_BUCKETS,
     BULK_APPROVABLE_BUCKETS,
+    CLOSED_RUN_STATUSES,
     TERMINAL_RESULT_STATUSES,
     bucket_conditions,
 )
 from app.services.reconciliation.pipeline import ReconPipeline
 from app.services.reconciliation.recon_job import ReconJobRunner
+from app.services.reconciliation.resolution_planner import plan_run
 
 router = APIRouter(prefix="/reconciliation", tags=["reconciliation"])
 
@@ -62,6 +74,33 @@ def _parse_uuid(value: str) -> uuid.UUID:
         return uuid.UUID(value)
     except ValueError:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+
+
+def _ensure_run_open(run: ReconciliationRun | None) -> None:
+    """Close = hard freeze. Raise if the run is closed/locked; a ``None`` run
+    is a no-op (the caller either already 404'd on a missing run, or derived
+    the run from a tenant-scoped child row and treats a missing run as not
+    blocking)."""
+    if run is not None and run.status in CLOSED_RUN_STATUSES:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Period is closed; cannot approve.")
+
+
+async def _ensure_resolution_ui_enabled(db: AsyncSession, tenant_id) -> None:
+    """Flag-gate the resolution-plan mutation endpoints behind
+    recon_resolution_ui (default OFF) — the redesigned surface, independent of
+    the base ``reconciliation`` feature. A body-level check rather than a
+    second ``Depends``: these endpoints are exercised directly as plain
+    function calls throughout the test suite (bypassing FastAPI's dependency
+    injection), so a Depends-only gate would never actually run under a
+    direct call. Read endpoints (resolution-summary, group proposals) are not
+    gated here — only the four mutation entry points."""
+    from app.services.feature_flag_service import is_enabled
+
+    if not await is_enabled(db, tenant_id, "recon_resolution_ui"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Feature 'recon_resolution_ui' is not enabled for your account.",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -535,10 +574,14 @@ async def approve_result(
     # for human review; without this guard such a line could still be single-approved
     # post-close, flipping it to 'approved' inside a closed period and never re-locked.
     run = (
-        await db.execute(select(ReconciliationRun).where(ReconciliationRun.id == recon_result.run_id))
+        await db.execute(
+            select(ReconciliationRun).where(
+                ReconciliationRun.id == recon_result.run_id,
+                ReconciliationRun.tenant_id == user.tenant_id,
+            )
+        )
     ).scalar_one_or_none()
-    if run is not None and run.status in ("closed", "locked"):
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Period is closed; cannot approve.")
+    _ensure_run_open(run)
 
     if recon_result.status == "approved":
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Already approved")
@@ -547,6 +590,15 @@ async def approve_result(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Result is locked (period closed)",
+        )
+
+    # Any other terminal status (rejected, carried_forward) must not be flipped to
+    # approved either — e.g. a carried_forward result approved here would then get
+    # LOCKED at close, violating the carried_forward-never-locks invariant.
+    if recon_result.status in TERMINAL_RESULT_STATUSES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Result cannot be approved (status={recon_result.status})",
         )
 
     recon_result.status = "approved"
@@ -614,11 +666,7 @@ async def approve_bucket(
     # locks 'approved' rows and non-needs_review 'auto_matched' rows, leaving
     # 'suggested'/'pending' (and unreviewed needs_review) rows un-locked and thus
     # still bulk-approvable. Guard the run itself.
-    if run.status in ("closed", "locked"):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Period is closed; cannot approve.",
-        )
+    _ensure_run_open(run)
 
     now = datetime.now(timezone.utc)
     correlation_id = str(uuid.uuid4())
@@ -701,6 +749,503 @@ async def approve_bucket(
 
 
 # ---------------------------------------------------------------------------
+# (Re-)plan resolution proposals for a run — retry surface for the post-run hook
+# ---------------------------------------------------------------------------
+@router.post("/runs/{run_id}/plan-resolutions")
+async def plan_resolutions(
+    run_id: str,
+    user: Annotated[User, Depends(require_permission("recon.run"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """(Re-)plan resolution proposals for a run. Idempotent: undecided
+    proposals are superseded and re-derived; decided ones are untouched.
+    DB-only — never posts to NetSuite."""
+    await _ensure_resolution_ui_enabled(db, user.tenant_id)
+    run = await _get_run_or_404(db, user.tenant_id, run_id)
+    # Close = hard freeze: proposals feed the closed period's evidence pack, so
+    # re-planning must not supersede/re-derive proposals once the run is closed/locked.
+    _ensure_run_open(run)
+    try:
+        return await plan_run(db, user.tenant_id, run.id)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
+    except IntegrityError:
+        # Belt-and-braces beneath plan_run's own advisory-lock serialization —
+        # a raced re-plan that still slips past the lock (or a legacy caller
+        # without it) must roll back the failed statement, not leave the
+        # session's transaction poisoned for whatever runs next.
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Planning raced a concurrent re-plan; retry.",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Resolution summary + per-group proposal listing (summary-first rework)
+# ---------------------------------------------------------------------------
+def _parse_group_key(group_key: str) -> tuple[str, str, str]:
+    parts = group_key.split(":")
+    if len(parts) != 3:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="group_key must be root_cause:action:booking_vehicle",
+        )
+    return parts[0], parts[1], parts[2]
+
+
+async def _get_run_or_404(db: AsyncSession, tenant_id, run_id_str: str) -> ReconciliationRun:
+    run_uuid = _parse_uuid(run_id_str)
+    run = (
+        await db.execute(
+            select(ReconciliationRun).where(
+                ReconciliationRun.id == run_uuid,
+                ReconciliationRun.tenant_id == tenant_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if run is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
+    return run
+
+
+@router.get("/runs/{run_id}/resolution-summary", response_model=ResolutionSummaryResponse)
+async def get_resolution_summary(
+    run_id: str,
+    user: Annotated[User, Depends(require_feature("reconciliation"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Summary-first payload: rates + variance-by-root-cause + computed groups.
+
+    Groups are computed here by GROUP BY on real columns (never parsed out of
+    group_key). Only ACTIVE, undecided-or-approved proposal states are shown;
+    superseded/rejected history is excluded.
+    """
+    run = await _get_run_or_404(db, user.tenant_id, run_id)
+    run_uuid = run.id
+
+    total_results = (
+        await db.execute(
+            select(func.count(ReconciliationResult.id)).where(
+                ReconciliationResult.run_id == run_uuid,
+                ReconciliationResult.tenant_id == user.tenant_id,
+            )
+        )
+    ).scalar_one()
+    matches_count = run.matches_count
+
+    P = ReconResolutionProposal
+    live = (P.run_id == run_uuid, P.tenant_id == user.tenant_id, P.status.notin_(("superseded", "rejected")))
+
+    group_rows = (
+        await db.execute(
+            select(
+                P.root_cause,
+                P.action,
+                P.booking_vehicle,
+                P.group_key,
+                P.currency,
+                func.count(P.id).label("count"),
+                func.count(P.id).filter(P.status == "proposed").label("proposed_count"),
+                func.count(P.id).filter(P.status == "approved").label("approved_count"),
+                func.coalesce(func.sum(P.proposed_amount), 0).label("total_amount"),
+                func.count(P.id)
+                .filter(P.above_materiality.is_(True), P.status == "proposed")
+                .label("above_materiality_count"),
+            )
+            .where(*live)
+            .group_by(P.root_cause, P.action, P.booking_vehicle, P.group_key, P.currency)
+            .order_by(func.coalesce(func.sum(P.proposed_amount), 0).desc())
+        )
+    ).all()
+
+    groups = [
+        ResolutionGroupSummary(
+            group_key=r.group_key,
+            root_cause=r.root_cause,
+            action=r.action,
+            booking_vehicle=r.booking_vehicle,
+            currency=r.currency,
+            count=r.count,
+            proposed_count=r.proposed_count,
+            approved_count=r.approved_count,
+            total_amount=r.total_amount,
+            above_materiality_count=r.above_materiality_count,
+        )
+        for r in group_rows
+    ]
+    proposals_count = sum(g.count for g in groups)
+    explained_count = sum(g.count for g in groups if g.action != "needs_human")
+    # Plain root_cause keys when the run is single-currency; once more than one
+    # currency appears across groups, split by currency so amounts are never
+    # summed across currencies under one label (see schema docstring).
+    distinct_currencies = {g.currency for g in groups}
+    variance_by_root_cause: dict[str, Decimal] = {}
+    for g in groups:
+        key = f"{g.root_cause} ({g.currency})" if len(distinct_currencies) > 1 else g.root_cause
+        variance_by_root_cause[key] = variance_by_root_cause.get(key, Decimal("0")) + g.total_amount
+
+    def _pct(numerator: int, denominator: int) -> Decimal:
+        if denominator == 0:
+            return Decimal("0")
+        return (Decimal(numerator) / Decimal(denominator) * 100).quantize(Decimal("0.1"))
+
+    # guard-skip visibility: a result is guard-skipped/never-planned only when
+    # it has NO proposal row at all (any status) — a human-rejected proposal
+    # was still planned, so it must not be mislabeled as a guard skip just
+    # because rejected/superseded rows are excluded from the live count above.
+    guard_skipped_count = (
+        await db.execute(
+            select(func.count(ReconciliationResult.id)).where(
+                ReconciliationResult.run_id == run_uuid,
+                ReconciliationResult.tenant_id == user.tenant_id,
+                ReconciliationResult.bucket != "matches",
+                ~exists().where(ReconResolutionProposal.result_id == ReconciliationResult.id),
+            )
+        )
+    ).scalar_one()
+
+    return ResolutionSummaryResponse(
+        run_id=run_id,
+        total_results=total_results,
+        matches_count=matches_count,
+        match_rate=_pct(matches_count, total_results),
+        proposals_count=proposals_count,
+        explained_count=explained_count,
+        explained_rate=_pct(explained_count, proposals_count),
+        guard_skipped_count=guard_skipped_count,
+        variance_by_root_cause=variance_by_root_cause,
+        groups=groups,
+    )
+
+
+@router.get(
+    "/runs/{run_id}/resolution-groups/{group_key}/proposals",
+    response_model=list[ResolutionProposalResponse],
+)
+async def list_group_proposals(
+    run_id: str,
+    group_key: str,
+    user: Annotated[User, Depends(require_feature("reconciliation"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    limit: int = 100,
+    offset: int = 0,
+):
+    await _get_run_or_404(db, user.tenant_id, run_id)
+    root_cause, action, vehicle = _parse_group_key(group_key)
+    P = ReconResolutionProposal
+    rows = (
+        (
+            await db.execute(
+                select(P)
+                .where(
+                    P.run_id == _parse_uuid(run_id),
+                    P.tenant_id == user.tenant_id,
+                    P.root_cause == root_cause,
+                    P.action == action,
+                    P.booking_vehicle == vehicle,
+                    P.status.notin_(("superseded", "rejected")),
+                )
+                .order_by(P.proposed_amount.desc())
+                .limit(limit)
+                .offset(offset)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    return [ResolutionProposalResponse.model_validate(p) for p in rows]
+
+
+@router.post(
+    "/runs/{run_id}/resolution-groups/{group_key}/approve",
+    response_model=ResolutionGroupApproveResult,
+)
+async def approve_resolution_group(
+    run_id: str,
+    group_key: str,
+    request: ResolutionGroupApprove,
+    user: Annotated[User, Depends(require_permission("recon.run"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Set-based approve of a resolution group. DB-only in Phase 1 (no posting).
+
+    Above-materiality proposals approve ONLY when explicitly ticked
+    (included_above_materiality_ids). carry_forward groups flip results to
+    'carried_forward'; every other approvable action flips to 'approved'.
+    needs_human groups are never group-approvable.
+    """
+    await _ensure_resolution_ui_enabled(db, user.tenant_id)
+    root_cause, action, vehicle = _parse_group_key(group_key)
+    if action == "needs_human":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="needs_human groups must be resolved individually",
+        )
+    run = await _get_run_or_404(db, user.tenant_id, run_id)
+    _ensure_run_open(run)
+
+    now = datetime.now(timezone.utc)
+    correlation_id = str(uuid.uuid4())
+    P = ReconResolutionProposal
+    included = {_parse_uuid(i) for i in request.included_above_materiality_ids}
+    excluded = {_parse_uuid(i) for i in request.excluded_ids}
+
+    group_filter = (
+        P.run_id == run.id,
+        P.tenant_id == user.tenant_id,
+        P.root_cause == root_cause,
+        P.action == action,
+        P.booking_vehicle == vehicle,
+    )
+    # A group_key alone can now span more than one currency (multi-currency runs
+    # render one card per currency) — scope to just this currency when the
+    # caller sends one; omitted matches every currency (back-compat).
+    if request.currency:
+        group_filter = (*group_filter, P.currency == request.currency)
+    eligibility = (
+        or_(P.above_materiality.is_(False), P.id.in_(included)) if included else P.above_materiality.is_(False)
+    )
+    # Build the where-clause list conditionally rather than pass
+    # `P.id.notin_(set())` unconditionally — an empty NOT IN renders as a
+    # vacuous/NULL-poisoned predicate on some dialects.
+    exclusion_clause = [P.id.notin_(excluded)] if excluded else []
+    # A result can go terminal independently of this proposal (e.g. locked via
+    # the classic per-result approve path) while its proposal row is still
+    # 'proposed'. Skip those instead of flipping the proposal — otherwise the
+    # proposal is marked approved + per-line audited for a result this
+    # group-approve never actually touched.
+    not_terminal_result = ~exists().where(
+        ReconciliationResult.id == P.result_id,
+        ReconciliationResult.tenant_id == user.tenant_id,
+        ReconciliationResult.status.in_(TERMINAL_RESULT_STATUSES),
+    )
+
+    upd = (
+        update(P)
+        .where(
+            *group_filter,
+            P.status == "proposed",
+            eligibility,
+            *exclusion_clause,
+            not_terminal_result,
+        )
+        .values(status="approved", decided_by=user.id, decided_at=now, correlation_id=correlation_id)
+        .returning(P.id)
+    )
+    approved_ids = (await db.execute(upd)).scalars().all()
+
+    total_in_group = (
+        await db.execute(select(func.count(P.id)).where(*group_filter, P.status.notin_(("superseded", "rejected"))))
+    ).scalar_one()
+    skipped_count = total_in_group - len(approved_ids)
+
+    # Flip the underlying results (never terminal rows). Scoped via a correlated
+    # subquery on this batch's correlation_id rather than a Python id list — at
+    # Framework scale (>32,767 approved rows) an `IN (<python list>)` blows the
+    # asyncpg bind-parameter limit; the freshly-approved proposals already carry
+    # this batch's unique correlation_id, so the subquery re-derives the same set.
+    if approved_ids:
+        result_status = "carried_forward" if action == "carry_forward" else "approved"
+        values = {"status": result_status}
+        if result_status == "approved":
+            values.update(approved_by=user.id, approved_at=now)
+        approved_result_ids = select(P.result_id).where(
+            P.tenant_id == user.tenant_id,
+            P.correlation_id == correlation_id,
+            P.status == "approved",
+        )
+        await db.execute(
+            update(ReconciliationResult)
+            .where(
+                ReconciliationResult.id.in_(approved_result_ids),
+                ReconciliationResult.tenant_id == user.tenant_id,
+                ReconciliationResult.status.notin_(TERMINAL_RESULT_STATUSES),
+            )
+            .values(**values)
+            .execution_options(synchronize_session=False)
+        )
+
+    if approved_ids:
+        await db.execute(
+            insert(AuditEvent),
+            [
+                {
+                    "tenant_id": user.tenant_id,
+                    "actor_id": user.id,
+                    "actor_type": "user",
+                    "category": "reconciliation",
+                    "action": "recon.resolution.approve",
+                    "resource_type": "recon_resolution_proposal",
+                    "resource_id": str(pid),
+                    "correlation_id": correlation_id,
+                    "status": "success",
+                }
+                for pid in approved_ids
+            ],
+        )
+    await audit_service.log_event(
+        db=db,
+        tenant_id=user.tenant_id,
+        category="reconciliation",
+        action="recon.resolution.bulk_approve",
+        actor_id=user.id,
+        resource_type="reconciliation_run",
+        resource_id=run_id,
+        correlation_id=correlation_id,
+        payload={"group_key": group_key, "approved_count": len(approved_ids), "notes": request.notes},
+    )
+    await db.commit()
+    return ResolutionGroupApproveResult(
+        run_id=run_id,
+        group_key=group_key,
+        approved_count=len(approved_ids),
+        skipped_count=skipped_count,
+        correlation_id=correlation_id,
+    )
+
+
+@router.post(
+    "/runs/{run_id}/resolution-groups/{group_key}/reject",
+    response_model=ResolutionGroupRejectResult,
+)
+async def reject_resolution_group(
+    run_id: str,
+    group_key: str,
+    user: Annotated[User, Depends(require_permission("recon.run"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    request: ResolutionGroupReject | None = None,
+):
+    """Reject a whole group's undecided proposals. Results are untouched —
+    proposal history (incl. gathered evidence) is retained for the human."""
+    await _ensure_resolution_ui_enabled(db, user.tenant_id)
+    root_cause, action, vehicle = _parse_group_key(group_key)
+    run = await _get_run_or_404(db, user.tenant_id, run_id)
+    _ensure_run_open(run)
+    now = datetime.now(timezone.utc)
+    correlation_id = str(uuid.uuid4())
+    P = ReconResolutionProposal
+    # Same currency-scoping as approve — a group_key alone can span more than
+    # one currency (multi-currency runs render one card per currency).
+    currency_filter = [P.currency == request.currency] if request and request.currency else []
+    rejected_ids = (
+        (
+            await db.execute(
+                update(P)
+                .where(
+                    P.run_id == run.id,
+                    P.tenant_id == user.tenant_id,
+                    P.root_cause == root_cause,
+                    P.action == action,
+                    P.booking_vehicle == vehicle,
+                    P.status == "proposed",
+                    *currency_filter,
+                )
+                .values(status="rejected", decided_by=user.id, decided_at=now, correlation_id=correlation_id)
+                .returning(P.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    await audit_service.log_event(
+        db=db,
+        tenant_id=user.tenant_id,
+        category="reconciliation",
+        action="recon.resolution.bulk_reject",
+        actor_id=user.id,
+        resource_type="reconciliation_run",
+        resource_id=run_id,
+        correlation_id=correlation_id,
+        payload={"group_key": group_key, "rejected_count": len(rejected_ids)},
+    )
+    await db.commit()
+    return ResolutionGroupRejectResult(
+        run_id=run_id,
+        group_key=group_key,
+        rejected_count=len(rejected_ids),
+        correlation_id=correlation_id,
+    )
+
+
+@router.patch("/resolution-proposals/{proposal_id}", response_model=ResolutionProposalResponse)
+async def override_resolution_proposal(
+    proposal_id: str,
+    request: ResolutionProposalOverride,
+    user: Annotated[User, Depends(require_permission("recon.run"))],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    """Override one proposal's action: supersede the original, create a new
+    active proposal (source='human') for the same result. Preserves the
+    one-active-proposal invariant and the audit chain."""
+    await _ensure_resolution_ui_enabled(db, user.tenant_id)
+    from app.services.reconciliation.resolution_planner import VEHICLE_BY_ACTION, group_key_for
+
+    P = ReconResolutionProposal
+    prop = (
+        await db.execute(select(P).where(P.id == _parse_uuid(proposal_id), P.tenant_id == user.tenant_id))
+    ).scalar_one_or_none()
+    if prop is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Proposal not found")
+
+    # Close = hard freeze: proposals feed the closed period's evidence pack, so an
+    # override must not mutate the proposal chain once the run is closed/locked.
+    run = (
+        await db.execute(
+            select(ReconciliationRun).where(
+                ReconciliationRun.id == prop.run_id,
+                ReconciliationRun.tenant_id == user.tenant_id,
+            )
+        )
+    ).scalar_one_or_none()
+    _ensure_run_open(run)
+
+    if prop.status != "proposed":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Only undecided proposals can be overridden (status={prop.status})",
+        )
+    now = datetime.now(timezone.utc)
+    prop.status = "superseded"
+    prop.decided_by = user.id
+    prop.decided_at = now
+    vehicle = VEHICLE_BY_ACTION[request.action]
+    note = f" Override note: {request.notes}" if request.notes else ""
+    new = ReconResolutionProposal(
+        id=uuid.uuid4(),
+        tenant_id=user.tenant_id,
+        run_id=prop.run_id,
+        result_id=prop.result_id,
+        root_cause=prop.root_cause,
+        action=request.action,
+        booking_vehicle=vehicle,
+        group_key=group_key_for(prop.root_cause, request.action, vehicle),
+        source="human",
+        narrative=f"Overridden by user from '{prop.action}'.{note}",
+        evidence=prop.evidence,
+        proposed_amount=prop.proposed_amount,
+        currency=prop.currency,
+        above_materiality=prop.above_materiality,
+        status="proposed",
+        charge_source_id=prop.charge_source_id,
+    )
+    db.add(new)
+    await audit_service.log_event(
+        db=db,
+        tenant_id=user.tenant_id,
+        category="reconciliation",
+        action="recon.resolution.override",
+        actor_id=user.id,
+        resource_type="recon_resolution_proposal",
+        resource_id=str(prop.id),
+        payload={"from_action": prop.action, "to_action": request.action, "notes": request.notes},
+    )
+    await db.commit()
+    await db.refresh(new)
+    return ResolutionProposalResponse.model_validate(new)
+
+
+# ---------------------------------------------------------------------------
 # Download evidence pack
 # ---------------------------------------------------------------------------
 @router.get("/evidence/{run_id}")
@@ -744,12 +1289,36 @@ async def download_evidence(
         for r in results
     ]
 
+    P = ReconResolutionProposal
+    proposals_stmt = select(P).where(
+        P.run_id == uuid.UUID(run_id),
+        P.tenant_id == user.tenant_id,
+        P.status.notin_(("superseded", "rejected")),
+    )
+    proposals_result = await db.execute(proposals_stmt)
+    proposals_dicts = [
+        {
+            "group_key": p.group_key,
+            "root_cause": p.root_cause,
+            "action": p.action,
+            "booking_vehicle": p.booking_vehicle,
+            "status": p.status,
+            "source": p.source,
+            "narrative": p.narrative,
+            "proposed_amount": p.proposed_amount,
+            "currency": p.currency,
+            "above_materiality": p.above_materiality,
+        }
+        for p in proposals_result.scalars().all()
+    ]
+
     generator = EvidencePackGenerator()
     excel_bytes = generator.generate_excel(
         results=results_dicts,
         run_id=run_id,
         date_from=run.date_from,
         date_to=run.date_to,
+        proposals=proposals_dicts,
     )
 
     filename = f"recon-evidence-{run.date_from.isoformat()}-{run.date_to.isoformat()}.xlsx"
@@ -821,6 +1390,10 @@ async def get_close_readiness(
                 # Rows close deliberately leaves UNLOCKED (HITL) — the shared
                 # predicate close_period() skips by.
                 func.count().filter(and_(*left_for_review_conditions())).label("left_for_review"),
+                # An acknowledged reconciling item (timing group-approved).
+                # Non-blocking (excluded from open_exceptions) and never
+                # locked by close_period's lock_predicate below.
+                func.count().filter(ReconciliationResult.status == "carried_forward").label("carried_forward"),
             )
             .select_from(ReconciliationResult)
             .where(
@@ -841,6 +1414,7 @@ async def get_close_readiness(
         open_exceptions=row.open_exceptions,
         suggested=row.suggested,
         left_for_review=row.left_for_review,
+        carried_forward=row.carried_forward,
     )
 
 

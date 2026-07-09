@@ -26,6 +26,9 @@ DEFAULT_FLAGS: dict[str, bool] = {
     # Bet 3 Rung 1 (decision doc 2026-06-10): both default OFF for every tenant.
     "recon_scheduled_runs": False,  # nightly scheduled matching (read+match only)
     "autonomous_recon": False,  # autonomy envelope evaluation (dry-run in Rung 1)
+    # Phase 1 of the summary-first recon rework (spec 2026-07-06): gates the
+    # redesigned resolution-groups page surface, independent of posting.
+    "recon_resolution_ui": False,
 }
 
 # In-memory cache: (tenant_id, flag_key) → (enabled, timestamp)

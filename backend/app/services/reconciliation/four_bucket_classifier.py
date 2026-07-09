@@ -24,7 +24,12 @@ BULK_APPROVABLE_BUCKETS = (BUCKET_MATCHES, BUCKET_RULES, BUCKET_AUTO_CLASSIFICAT
 
 # Rows already dispositioned can never be acted on again. Canonical home of the
 # invariant — shared by the bulk-approve guard (API) and the autonomy envelope.
-TERMINAL_RESULT_STATUSES = ("approved", "rejected", "locked")
+# carried_forward: an acknowledged reconciling item — bulk-approve must not flip it.
+TERMINAL_RESULT_STATUSES = ("approved", "rejected", "locked", "carried_forward")
+
+# Run-level hard freeze. Canonical home so the REST API's _ensure_run_open and
+# the MCP recon.approve_match tool's closed-run check can't drift apart again.
+CLOSED_RUN_STATUSES = ("closed", "locked")
 
 
 def _has_variance(variance_type: str | None, variance_amount: Decimal | None) -> bool:
@@ -57,6 +62,17 @@ def _is_material(
     ):
         return True
     return False
+
+
+# Public alias — the ResolutionPlanner computes proposal-level materiality with
+# the exact same predicate the bucket router uses (single source of truth).
+def is_material(
+    variance_amount: Decimal | None,
+    matched_amount: Decimal | None,
+    materiality_abs: Decimal | None,
+    materiality_pct: Decimal | None,
+) -> bool:
+    return _is_material(variance_amount, matched_amount, materiality_abs, materiality_pct)
 
 
 def classify(

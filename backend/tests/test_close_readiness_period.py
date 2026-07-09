@@ -105,6 +105,7 @@ def test_close_readiness_schema_shape():
         open_exceptions=1,
         suggested=0,
         left_for_review=3,
+        carried_forward=4,
     )
     assert r.model_dump() == {
         "period": "2026-04",
@@ -113,6 +114,7 @@ def test_close_readiness_schema_shape():
         "open_exceptions": 1,
         "suggested": 0,
         "left_for_review": 3,
+        "carried_forward": 4,
     }
 
 
@@ -170,6 +172,7 @@ async def test_close_readiness_counts(client, db, finance_user):
         "open_exceptions": 1,
         "suggested": 1,
         "left_for_review": 1,
+        "carried_forward": 0,
     }
 
 
@@ -210,6 +213,7 @@ async def test_close_readiness_aggregates_over_all_runs_in_period(client, db, fi
         "open_exceptions": 1,
         "suggested": 1,
         "left_for_review": 1,
+        "carried_forward": 0,
     }
 
 
@@ -267,6 +271,7 @@ async def test_close_readiness_tenant_scoped(client, db, finance_user, tenant_b)
         "open_exceptions": 0,
         "suggested": 0,
         "left_for_review": 0,
+        "carried_forward": 0,
     }
 
 
@@ -306,6 +311,7 @@ async def test_close_readiness_excludes_out_of_scope_runs(client, db, finance_us
         "open_exceptions": 0,
         "suggested": 1,
         "left_for_review": 0,
+        "carried_forward": 0,
     }
 
 
@@ -324,6 +330,7 @@ async def test_close_readiness_zero_runs_all_zeros(client, db, finance_user):
         "open_exceptions": 0,
         "suggested": 0,
         "left_for_review": 0,
+        "carried_forward": 0,
     }
 
 

@@ -146,6 +146,18 @@ async def create_test_tenant(
     return tenant
 
 
+async def enable_feature_flag(db: AsyncSession, tenant_id, flag_key: str, enabled: bool = True) -> None:
+    """Set a tenant feature flag for a test (upsert), busting the service's
+    in-memory TTL cache on both sides so the change is visible immediately —
+    mirrors the `_enable_recon` helper pattern in test_recon_bucket_reviewer.py."""
+    from app.services.feature_flag_service import clear_cache, set_flag
+
+    clear_cache()
+    await set_flag(db, tenant_id, flag_key, enabled)
+    await db.flush()
+    clear_cache()
+
+
 async def create_test_user(
     db: AsyncSession,
     tenant: Tenant,
@@ -365,6 +377,7 @@ async def create_test_recon_result(
     netsuite_amount: Decimal = Decimal("10.00"),
     currency: str = "USD",
     bucket: str | None = None,
+    evidence: dict | None = None,
 ) -> ReconciliationResult:
     """Create a ReconciliationResult bound to an existing run. Flushes for its id.
 
@@ -395,6 +408,7 @@ async def create_test_recon_result(
         variance_type=variance_type,
         currency=currency,
         match_rule=match_rule,
+        evidence=evidence,
     )
     db.add(result)
     await db.flush()

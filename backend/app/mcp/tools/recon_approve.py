@@ -10,6 +10,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.reconciliation import ReconciliationResult, ReconciliationRun
 from app.services import audit_service
+from app.services.reconciliation.four_bucket_classifier import (
+    CLOSED_RUN_STATUSES,
+    TERMINAL_RESULT_STATUSES,
+)
 
 
 async def execute(params: dict, **kwargs) -> dict:
@@ -58,10 +62,17 @@ async def execute(params: dict, **kwargs) -> dict:
 
     # Close = hard freeze. Guard the run before any status change / audit write so a
     # line left unlocked in a now-closed run cannot be approved post-close.
+    # Tenant-scoped: recon_result is already tenant-filtered above, but the run
+    # lookup itself must not trust a cross-tenant run id to resolve.
     run = (
-        await db.execute(select(ReconciliationRun).where(ReconciliationRun.id == recon_result.run_id))
+        await db.execute(
+            select(ReconciliationRun).where(
+                ReconciliationRun.id == recon_result.run_id,
+                ReconciliationRun.tenant_id == str(tenant_id),
+            )
+        )
     ).scalar_one_or_none()
-    if run is not None and run.status in ("closed", "locked"):
+    if run is not None and run.status in CLOSED_RUN_STATUSES:
         return {"success": False, "error": "Period is closed — cannot modify"}
 
     if recon_result.status == "approved":
@@ -69,6 +80,16 @@ async def execute(params: dict, **kwargs) -> dict:
 
     if recon_result.status == "locked":
         return {"success": False, "error": "Period is locked — cannot modify"}
+
+    # Any other terminal status (rejected, carried_forward) must not be flipped to
+    # approved either — e.g. a carried_forward result approved here would then get
+    # LOCKED at close, violating the carried_forward-never-locks invariant. Mirrors
+    # the REST single-approve endpoint's guard (app/api/v1/reconciliation.py).
+    if recon_result.status in TERMINAL_RESULT_STATUSES:
+        return {
+            "success": False,
+            "error": f"Result cannot be approved (status={recon_result.status})",
+        }
 
     recon_result.status = "approved"
     recon_result.approved_by = uuid.UUID(str(user_id)) if user_id else None

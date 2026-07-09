@@ -19,8 +19,45 @@ StrFromUUID = Annotated[str, BeforeValidator(lambda v: str(v) if isinstance(v, U
 # ---------------------------------------------------------------------------
 MatchType = Literal["deterministic", "fuzzy", "unmatched", "exception"]
 VarianceType = Literal["fees", "fx_rounding", "timing", "missing", "duplicate", "chargeback", "manual_adjustment"]
-ResultStatus = Literal["pending", "auto_matched", "suggested", "approved", "rejected", "investigating", "locked"]
+ResultStatus = Literal[
+    "pending",
+    "auto_matched",
+    "suggested",
+    "approved",
+    "rejected",
+    "investigating",
+    "locked",
+    "carried_forward",
+]
 RunStatus = Literal["pending", "running", "completed", "failed", "closed"]
+
+ResolutionAction = Literal[
+    "book_fee_line",
+    "create_and_apply_deposit",
+    "apply_deposit",
+    "credit_memo_refund",
+    "void_duplicate",
+    "writeoff_je",
+    "carry_forward",
+    "needs_human",
+]
+ProposalStatus = Literal[
+    "proposed",
+    "approved",
+    "posting",
+    "posted",
+    "rejected",
+    "post_failed",
+    "superseded",
+]
+PostFailureReason = Literal[
+    "period_locked",
+    "period_closed",
+    "connection",
+    "netsuite_validation",
+    "netsuite_error",
+    "guard_tripped",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -194,6 +231,10 @@ class ReconCloseReadiness(BaseModel):
     - ``left_for_review``: status='auto_matched' AND bucket='needs_review' —
       ``close_scope.left_for_review_conditions``: rows close deliberately
       leaves unlocked for human review (HITL).
+    - ``carried_forward``: status='carried_forward' — an acknowledged
+      reconciling item (timing group-approved). Non-blocking (not
+      ``open_exceptions``) and never locked by ``close_period``. Default 0
+      keeps older API clients working.
     """
 
     period: str
@@ -202,6 +243,7 @@ class ReconCloseReadiness(BaseModel):
     open_exceptions: int
     suggested: int
     left_for_review: int
+    carried_forward: int = 0
 
 
 class ReconBucketSummary(BaseModel):
@@ -223,3 +265,109 @@ class ReconBucketApproveResult(BaseModel):
     approved_count: int
     skipped_count: int
     correlation_id: str
+
+
+# ---------------------------------------------------------------------------
+# Resolution proposal schemas (summary-first rework, Phase 1)
+# ---------------------------------------------------------------------------
+class ResolutionProposalResponse(BaseModel):
+    id: StrFromUUID
+    run_id: StrFromUUID
+    result_id: StrFromUUID
+    root_cause: str
+    action: str
+    booking_vehicle: str
+    group_key: str
+    source: str
+    narrative: str
+    proposed_amount: Decimal
+    currency: str
+    above_materiality: bool
+    status: str
+    failure_reason: str | None = None
+    netsuite_record_refs: dict | None = None
+    correlation_id: str | None = None
+    decided_by: StrFromUUID | None = None
+    decided_at: datetime | None = None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class ResolutionGroupSummary(BaseModel):
+    group_key: str
+    root_cause: str
+    action: str
+    booking_vehicle: str
+    currency: str
+    count: int
+    proposed_count: int
+    approved_count: int
+    total_amount: Decimal
+    above_materiality_count: int = Field(
+        description="Above-materiality proposals still awaiting decision (status='proposed' only)"
+    )
+
+
+class ResolutionSummaryResponse(BaseModel):
+    """Summary-first payload: one call renders the whole report header + groups.
+
+    ``explained_rate`` = share of proposals whose action is not ``needs_human``
+    (diagnostic: a falling rate signals upstream data problems, not just load).
+    ``guard_skipped_count`` = results with no proposal at all — guard-skipped
+    or never planned (a human-rejected proposal was still planned, so those
+    results are NOT counted here).
+    ``variance_by_root_cause`` keys are plain ``root_cause`` when every group
+    shares one currency; once the run has groups in more than one currency,
+    keys become ``f"{root_cause} ({currency})"`` so amounts are never summed
+    across currencies under one label.
+    """
+
+    run_id: str
+    total_results: int
+    matches_count: int
+    match_rate: Decimal
+    proposals_count: int
+    explained_count: int
+    explained_rate: Decimal
+    guard_skipped_count: int
+    variance_by_root_cause: dict[str, Decimal]
+    groups: list[ResolutionGroupSummary]
+
+
+class ResolutionGroupApprove(BaseModel):
+    notes: str | None = None
+    # Above-materiality items approve ONLY when explicitly ticked.
+    included_above_materiality_ids: list[str] = []
+    excluded_ids: list[str] = []
+    # A group_key alone can now span more than one currency (multi-currency
+    # runs render one card per currency) — scope the approve to just this one
+    # when the caller sends it; omitted/None matches every currency (back-compat).
+    currency: str | None = None
+
+
+class ResolutionGroupApproveResult(BaseModel):
+    run_id: str
+    group_key: str
+    approved_count: int
+    skipped_count: int
+    correlation_id: str
+
+
+class ResolutionGroupReject(BaseModel):
+    """Optional body — reject historically took none. Same currency-scoping
+    as ResolutionGroupApprove for multi-currency group_key collisions."""
+
+    currency: str | None = None
+
+
+class ResolutionGroupRejectResult(BaseModel):
+    run_id: str
+    group_key: str
+    rejected_count: int
+    correlation_id: str
+
+
+class ResolutionProposalOverride(BaseModel):
+    action: ResolutionAction
+    notes: str | None = None

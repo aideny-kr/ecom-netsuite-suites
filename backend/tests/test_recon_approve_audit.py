@@ -111,3 +111,42 @@ async def test_locked_writes_no_audit_event(db, tenant_a):
 
     assert out["success"] is False
     assert await _count_audit(db, resource_id=str(result.id)) == 0
+
+
+async def test_carried_forward_is_rejected_not_approved(db, tenant_a):
+    """Terminal-status guard parity with the REST endpoint (T2 gate finding):
+    a carried_forward result must not be flippable to approved via chat — it
+    would then get LOCKED at close, violating carried-forward-never-locks."""
+    run = await create_test_recon_run(db, tenant_a.id)
+    result = await create_test_recon_result(db, tenant_a.id, run.id, status="carried_forward")
+    await db.flush()
+
+    out = await execute(
+        {"result_id": str(result.id)},
+        db=db,
+        tenant_id=tenant_a.id,
+        user_id=uuid.uuid4(),
+    )
+
+    assert out["success"] is False
+    assert await _count_audit(db, resource_id=str(result.id)) == 0
+    await db.refresh(result)
+    assert result.status == "carried_forward"
+
+
+async def test_rejected_is_rejected_not_approved(db, tenant_a):
+    run = await create_test_recon_run(db, tenant_a.id)
+    result = await create_test_recon_result(db, tenant_a.id, run.id, status="rejected")
+    await db.flush()
+
+    out = await execute(
+        {"result_id": str(result.id)},
+        db=db,
+        tenant_id=tenant_a.id,
+        user_id=uuid.uuid4(),
+    )
+
+    assert out["success"] is False
+    assert await _count_audit(db, resource_id=str(result.id)) == 0
+    await db.refresh(result)
+    assert result.status == "rejected"
