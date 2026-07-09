@@ -1001,3 +1001,48 @@ export interface ClarificationData {
   chosen_id?: "A" | "B" | "C" | null;
   chose_at?: string | null;
 }
+
+// ── Recon resolution proposals (Phase 1, spec 2026-07-06) ──────────────────
+export interface ReconResolutionGroup {
+  group_key: string;
+  root_cause: string;
+  action: string;
+  booking_vehicle: string;
+  count: number;
+  proposed_count: number;
+  approved_count: number;
+  total_amount: string;
+  above_materiality_count: number;
+}
+
+export interface ReconResolutionSummary {
+  run_id: string;
+  total_results: number;
+  matches_count: number;
+  match_rate: string;
+  proposals_count: number;
+  explained_count: number;
+  explained_rate: string;
+  guard_skipped_count: number;
+  variance_by_root_cause: Record<string, string>;
+  groups: ReconResolutionGroup[];
+}
+
+export interface ReconResolutionProposal {
+  id: string;
+  run_id: string;
+  result_id: string;
+  root_cause: string;
+  action: string;
+  booking_vehicle: string;
+  group_key: string;
+  source: string;
+  narrative: string;
+  proposed_amount: string;
+  currency: string;
+  above_materiality: boolean;
+  status: string;
+  failure_reason: string | null;
+  correlation_id: string | null;
+  created_at: string;
+}
