@@ -55,6 +55,42 @@ async def test_plan_resolutions_404_on_foreign_run(db, tenant_a, tenant_b):
     assert exc.value.status_code == 404
 
 
+async def test_plan_resolutions_rejected_on_closed_run(db, tenant_a):
+    """Close = hard freeze: re-planning must not supersede/re-derive proposals
+    once the run is closed — mirrors the guard on approve/reject/override."""
+    import pytest
+    from fastapi import HTTPException
+
+    user, _ = await create_test_user(db, tenant_a)
+    run = await create_test_recon_run(db, tenant_a.id, status="closed")
+    await create_test_recon_result(
+        db,
+        tenant_a.id,
+        run.id,
+        status="pending",
+        bucket="needs_review",
+        match_type="deterministic",
+        variance_type="fees",
+        variance_amount=Decimal("3.20"),
+        stripe_amount=Decimal("100.00"),
+        netsuite_amount=Decimal("96.80"),
+        evidence={"charge_source_id": "ch_1", "order_reference": "R1"},
+    )
+    await db.flush()
+
+    with pytest.raises(HTTPException) as exc:
+        await plan_resolutions(str(run.id), user=user, db=db)
+    assert exc.value.status_code == 400
+    assert "closed" in exc.value.detail.lower()
+
+    props = (
+        (await db.execute(select(ReconResolutionProposal).where(ReconResolutionProposal.run_id == run.id)))
+        .scalars()
+        .all()
+    )
+    assert props == []
+
+
 async def test_plan_run_exception_leaves_run_completed_with_no_proposals(db, tenant_a):
     """OrderReconJob.run()'s post-finalize hook must never fail the run.
 

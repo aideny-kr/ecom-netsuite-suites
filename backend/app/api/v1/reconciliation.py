@@ -558,6 +558,15 @@ async def approve_result(
             detail="Result is locked (period closed)",
         )
 
+    # Any other terminal status (rejected, carried_forward) must not be flipped to
+    # approved either — e.g. a carried_forward result approved here would then get
+    # LOCKED at close, violating the carried_forward-never-locks invariant.
+    if recon_result.status in TERMINAL_RESULT_STATUSES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Result cannot be approved (status={recon_result.status})",
+        )
+
     recon_result.status = "approved"
     recon_result.approved_by = user.id
     recon_result.approved_at = datetime.now(timezone.utc)
@@ -721,9 +730,16 @@ async def plan_resolutions(
     """(Re-)plan resolution proposals for a run. Idempotent: undecided
     proposals are superseded and re-derived; decided ones are untouched.
     DB-only — never posts to NetSuite."""
-    run_uuid = _parse_uuid(run_id)
+    run = await _get_run_or_404(db, user.tenant_id, run_id)
+    # Close = hard freeze: proposals feed the closed period's evidence pack, so
+    # re-planning must not supersede/re-derive proposals once the run is closed/locked.
+    if run.status in ("closed", "locked"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Period is closed; cannot approve.",
+        )
     try:
-        return await plan_run(db, user.tenant_id, run_uuid)
+        return await plan_run(db, user.tenant_id, run.id)
     except ValueError:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
 
@@ -946,27 +962,34 @@ async def approve_resolution_group(
             *exclusion_clause,
         )
         .values(status="approved", decided_by=user.id, decided_at=now, correlation_id=correlation_id)
-        .returning(P.id, P.result_id)
+        .returning(P.id)
     )
-    approved_rows = (await db.execute(upd)).all()
-    approved_ids = [r.id for r in approved_rows]
-    result_ids = [r.result_id for r in approved_rows]
+    approved_ids = (await db.execute(upd)).scalars().all()
 
     total_in_group = (
         await db.execute(select(func.count(P.id)).where(*group_filter, P.status.notin_(("superseded", "rejected"))))
     ).scalar_one()
     skipped_count = total_in_group - len(approved_ids)
 
-    # Flip the underlying results (never terminal rows).
-    if result_ids:
+    # Flip the underlying results (never terminal rows). Scoped via a correlated
+    # subquery on this batch's correlation_id rather than a Python id list — at
+    # Framework scale (>32,767 approved rows) an `IN (<python list>)` blows the
+    # asyncpg bind-parameter limit; the freshly-approved proposals already carry
+    # this batch's unique correlation_id, so the subquery re-derives the same set.
+    if approved_ids:
         result_status = "carried_forward" if action == "carry_forward" else "approved"
         values = {"status": result_status}
         if result_status == "approved":
             values.update(approved_by=user.id, approved_at=now)
+        approved_result_ids = select(P.result_id).where(
+            P.tenant_id == user.tenant_id,
+            P.correlation_id == correlation_id,
+            P.status == "approved",
+        )
         await db.execute(
             update(ReconciliationResult)
             .where(
-                ReconciliationResult.id.in_(result_ids),
+                ReconciliationResult.id.in_(approved_result_ids),
                 ReconciliationResult.tenant_id == user.tenant_id,
                 ReconciliationResult.status.notin_(TERMINAL_RESULT_STATUSES),
             )
@@ -1027,6 +1050,11 @@ async def reject_resolution_group(
     proposal history (incl. gathered evidence) is retained for the human."""
     root_cause, action, vehicle = _parse_group_key(group_key)
     run = await _get_run_or_404(db, user.tenant_id, run_id)
+    if run.status in ("closed", "locked"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Period is closed; cannot approve.",
+        )
     now = datetime.now(timezone.utc)
     correlation_id = str(uuid.uuid4())
     P = ReconResolutionProposal
@@ -1087,6 +1115,13 @@ async def override_resolution_proposal(
     ).scalar_one_or_none()
     if prop is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Proposal not found")
+
+    # Close = hard freeze: proposals feed the closed period's evidence pack, so an
+    # override must not mutate the proposal chain once the run is closed/locked.
+    run = (await db.execute(select(ReconciliationRun).where(ReconciliationRun.id == prop.run_id))).scalar_one_or_none()
+    if run is not None and run.status in ("closed", "locked"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Period is closed; cannot approve.")
+
     if prop.status != "proposed":
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,

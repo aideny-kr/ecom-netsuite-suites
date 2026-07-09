@@ -68,6 +68,35 @@ async def test_approve_result_blocked_when_run_closed(db, tenant_a):
     assert await _count_audit(db, resource_id=str(result.id)) == 0
 
 
+async def test_approve_result_blocked_when_carried_forward(db, tenant_a):
+    """A carried_forward result (an acknowledged timing/reconciling item) must not
+    be flippable to 'approved' via the single-approve path — that would let it get
+    LOCKED at close, violating the carried_forward-never-locks invariant. The guard
+    must key off TERMINAL_RESULT_STATUSES, not a literal ('approved', 'locked') check."""
+    user, _ = await create_test_user(db, tenant_a)
+    run = await create_test_recon_run(db, tenant_a.id, status="completed")
+    result = await create_test_recon_result(
+        db,
+        tenant_a.id,
+        run.id,
+        status="carried_forward",
+    )
+    await db.flush()
+
+    with pytest.raises(HTTPException) as exc:
+        await approve_result(
+            str(result.id),
+            ReconResultApprove(result_id=str(result.id)),
+            user=user,
+            db=db,
+        )
+    assert exc.value.status_code == 400
+
+    await db.refresh(result)
+    assert result.status == "carried_forward"
+    assert await _count_audit(db, resource_id=str(result.id)) == 0
+
+
 async def test_recon_approve_tool_blocked_when_run_closed(db, tenant_a):
     """Chat-agent MCP tool must return failure + NOT mutate / audit a closed-run line."""
     user, _ = await create_test_user(db, tenant_a)

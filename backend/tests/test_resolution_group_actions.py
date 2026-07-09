@@ -1,5 +1,6 @@
 """Group approve/reject/override — set-based, audited, materiality-capped."""
 
+import uuid
 from decimal import Decimal
 
 import pytest
@@ -123,6 +124,33 @@ async def test_approve_group_flips_result_status_and_audits(db, tenant_a):
     assert len(summary) == 1
 
 
+async def test_approve_group_result_flip_scoped_to_this_batch_only(db, tenant_a):
+    """Result-flip predicate must scope to (correlation_id == this batch, status ==
+    approved) — not just 'any approved proposal in the run'. Regression for the
+    >32,767-row asyncpg IN-list fix: the flip now goes via a correlated subquery on
+    ReconResolutionProposal.correlation_id instead of a Python id list. A proposal
+    left 'proposed' (skipped this batch) but carrying a foreign correlation_id (as if
+    decided by another process) must NOT have its result flipped."""
+    user, run = await _seed_fees(db, tenant_a, above_too=True)
+    above = next(p for p in await _props(db, run.id) if p.above_materiality)
+    above.correlation_id = str(uuid.uuid4())
+    await db.flush()
+
+    out = await approve_resolution_group(
+        str(run.id),
+        "fees:book_fee_line:deposit",
+        ResolutionGroupApprove(),  # default: skip above-materiality
+        user=user,
+        db=db,
+    )
+    assert out.approved_count == 1
+
+    above_result = (
+        await db.execute(select(ReconciliationResult).where(ReconciliationResult.id == above.result_id))
+    ).scalar_one()
+    assert above_result.status == "pending"  # untouched: its proposal wasn't part of this batch
+
+
 async def test_carry_forward_group_sets_carried_forward_not_approved(db, tenant_a):
     user, _ = await create_test_user(db, tenant_a)
     run = await create_test_recon_run(db, tenant_a.id, status="completed")
@@ -207,6 +235,42 @@ async def test_reject_group_leaves_results_untouched(db, tenant_a):
     assert out.rejected_count == 1
     result = (await db.execute(select(ReconciliationResult).where(ReconciliationResult.run_id == run.id))).scalar_one()
     assert result.status == "pending"  # result untouched; proposal history retained
+
+
+async def test_reject_rejected_on_closed_run(db, tenant_a):
+    user, run = await _seed_fees(db, tenant_a, above_too=False)
+    run.status = "closed"
+    await db.flush()
+    prop_before = (await _props(db, run.id))[0]
+    with pytest.raises(HTTPException) as exc:
+        await reject_resolution_group(
+            str(run.id),
+            "fees:book_fee_line:deposit",
+            user=user,
+            db=db,
+        )
+    assert exc.value.status_code == 400
+    assert "closed" in exc.value.detail.lower()
+    prop_after = (await _props(db, run.id))[0]
+    assert prop_after.status == prop_before.status == "proposed"
+
+
+async def test_override_rejected_on_closed_run(db, tenant_a):
+    user, run = await _seed_fees(db, tenant_a, above_too=False)
+    prop = (await _props(db, run.id))[0]
+    run.status = "closed"
+    await db.flush()
+    with pytest.raises(HTTPException) as exc:
+        await override_resolution_proposal(
+            str(prop.id),
+            ResolutionProposalOverride(action="needs_human", notes="not a fee"),
+            user=user,
+            db=db,
+        )
+    assert exc.value.status_code == 400
+    assert "closed" in exc.value.detail.lower()
+    await db.refresh(prop)
+    assert prop.status == "proposed"
 
 
 async def test_override_supersedes_and_creates_new_active(db, tenant_a):
