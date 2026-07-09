@@ -231,6 +231,10 @@ class ReconCloseReadiness(BaseModel):
     - ``left_for_review``: status='auto_matched' AND bucket='needs_review' —
       ``close_scope.left_for_review_conditions``: rows close deliberately
       leaves unlocked for human review (HITL).
+    - ``carried_forward``: status='carried_forward' — an acknowledged
+      reconciling item (timing group-approved). Non-blocking (not
+      ``open_exceptions``) and never locked by ``close_period``. Default 0
+      keeps older API clients working.
     """
 
     period: str
@@ -239,6 +243,7 @@ class ReconCloseReadiness(BaseModel):
     open_exceptions: int
     suggested: int
     left_for_review: int
+    carried_forward: int = 0
 
 
 class ReconBucketSummary(BaseModel):
