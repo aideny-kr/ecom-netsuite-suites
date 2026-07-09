@@ -2026,7 +2026,6 @@ def test_proposals_sheet_writer():
 endpoint test: add a planned proposal to its seeded run and assert the returned
 workbook contains the "Proposals" sheet. Locate that test via
 `grep -rl "evidence" backend/tests/`.)
-```
 
 - [ ] **Step 2: Run — expect FAIL**
 
