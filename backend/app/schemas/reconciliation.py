@@ -19,8 +19,45 @@ StrFromUUID = Annotated[str, BeforeValidator(lambda v: str(v) if isinstance(v, U
 # ---------------------------------------------------------------------------
 MatchType = Literal["deterministic", "fuzzy", "unmatched", "exception"]
 VarianceType = Literal["fees", "fx_rounding", "timing", "missing", "duplicate", "chargeback", "manual_adjustment"]
-ResultStatus = Literal["pending", "auto_matched", "suggested", "approved", "rejected", "investigating", "locked"]
+ResultStatus = Literal[
+    "pending",
+    "auto_matched",
+    "suggested",
+    "approved",
+    "rejected",
+    "investigating",
+    "locked",
+    "carried_forward",
+]
 RunStatus = Literal["pending", "running", "completed", "failed", "closed"]
+
+ResolutionAction = Literal[
+    "book_fee_line",
+    "create_and_apply_deposit",
+    "apply_deposit",
+    "credit_memo_refund",
+    "void_duplicate",
+    "writeoff_je",
+    "carry_forward",
+    "needs_human",
+]
+ProposalStatus = Literal[
+    "proposed",
+    "approved",
+    "posting",
+    "posted",
+    "rejected",
+    "post_failed",
+    "superseded",
+]
+PostFailureReason = Literal[
+    "period_locked",
+    "period_closed",
+    "connection",
+    "netsuite_validation",
+    "netsuite_error",
+    "guard_tripped",
+]
 
 
 # ---------------------------------------------------------------------------
@@ -223,3 +260,88 @@ class ReconBucketApproveResult(BaseModel):
     approved_count: int
     skipped_count: int
     correlation_id: str
+
+
+# ---------------------------------------------------------------------------
+# Resolution proposal schemas (summary-first rework, Phase 1)
+# ---------------------------------------------------------------------------
+class ResolutionProposalResponse(BaseModel):
+    id: StrFromUUID
+    run_id: StrFromUUID
+    result_id: StrFromUUID
+    root_cause: str
+    action: str
+    booking_vehicle: str
+    group_key: str
+    source: str
+    narrative: str
+    proposed_amount: Decimal
+    currency: str
+    above_materiality: bool
+    status: str
+    failure_reason: str | None = None
+    netsuite_record_refs: dict | None = None
+    correlation_id: str | None = None
+    decided_by: StrFromUUID | None = None
+    decided_at: datetime | None = None
+    created_at: datetime
+
+    model_config = {"from_attributes": True}
+
+
+class ResolutionGroupSummary(BaseModel):
+    group_key: str
+    root_cause: str
+    action: str
+    booking_vehicle: str
+    count: int
+    proposed_count: int
+    approved_count: int
+    total_amount: Decimal
+    above_materiality_count: int
+
+
+class ResolutionSummaryResponse(BaseModel):
+    """Summary-first payload: one call renders the whole report header + groups.
+
+    ``explained_rate`` = share of proposals whose action is not ``needs_human``
+    (diagnostic: a falling rate signals upstream data problems, not just load).
+    """
+
+    run_id: str
+    total_results: int
+    matches_count: int
+    match_rate: Decimal
+    proposals_count: int
+    explained_count: int
+    explained_rate: Decimal
+    guard_skipped_count: int
+    variance_by_root_cause: dict[str, Decimal]
+    groups: list[ResolutionGroupSummary]
+
+
+class ResolutionGroupApprove(BaseModel):
+    notes: str | None = None
+    # Above-materiality items approve ONLY when explicitly ticked.
+    included_above_materiality_ids: list[str] = []
+    excluded_ids: list[str] = []
+
+
+class ResolutionGroupApproveResult(BaseModel):
+    run_id: str
+    group_key: str
+    approved_count: int
+    skipped_count: int
+    correlation_id: str
+
+
+class ResolutionGroupRejectResult(BaseModel):
+    run_id: str
+    group_key: str
+    rejected_count: int
+    correlation_id: str
+
+
+class ResolutionProposalOverride(BaseModel):
+    action: ResolutionAction
+    notes: str | None = None
