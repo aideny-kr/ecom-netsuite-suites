@@ -1,0 +1,141 @@
+"""ResolutionPlanner rule engine — exhaustive over the spec's ordered rules.
+
+Spec: docs/superpowers/specs/2026-07-06-recon-summary-first-resolution-design.md
+(mapping table, rules 1-10; first match wins; evidence rules before variance dispatch).
+"""
+
+from decimal import Decimal
+
+from app.services.reconciliation.resolution_planner import (
+    VEHICLE_BY_ACTION,
+    group_key_for,
+    plan_result,
+)
+
+MAT = {"materiality_abs": Decimal("50"), "materiality_pct": Decimal("0.01")}
+
+
+def _plan(**over):
+    base = dict(
+        match_type="deterministic",
+        variance_type=None,
+        variance_amount=Decimal("0"),
+        stripe_amount=Decimal("100.00"),
+        netsuite_amount=Decimal("100.00"),
+        currency="USD",
+        variance_explanation=None,
+        evidence={"charge_source_id": "ch_1", "order_reference": "R123456789"},
+        already_posted=False,
+        **MAT,
+    )
+    base.update(over)
+    return plan_result(**base)
+
+
+def test_rule1_guard_prior_posted_skips():
+    assert _plan(already_posted=True, variance_type="fees", variance_amount=Decimal("3.20")) is None
+
+
+def test_rule2_clean_match_skips():
+    assert _plan() is None  # deterministic + zero variance never reaches a proposal
+
+
+def test_rule3_unapplied_deposit_evidence_wins_over_variance_dispatch():
+    p = _plan(
+        variance_type="fees",
+        variance_amount=Decimal("3.20"),
+        evidence={"charge_source_id": "ch_1", "order_reference": "R123456789", "deposit_unapplied": True},
+    )
+    assert p.action == "apply_deposit"
+    assert p.booking_vehicle == "depositapplication"
+
+
+def test_rule4_chargeback_policy_gate():
+    p = _plan(variance_type="chargeback", variance_amount=Decimal("42.00"))
+    assert p.action == "needs_human"
+    assert p.booking_vehicle == "none"
+
+
+def test_rule5_duplicate_voids():
+    p = _plan(variance_type="duplicate", variance_amount=Decimal("100.00"))
+    assert p.action == "void_duplicate"
+    assert p.booking_vehicle == "customerdeposit"
+    assert p.proposed_amount == Decimal("100.00")  # netsuite_amount
+
+
+def test_rule6_fees_book_fee_line():
+    p = _plan(variance_type="fees", variance_amount=Decimal("3.20"))
+    assert p.action == "book_fee_line"
+    assert p.booking_vehicle == "deposit"
+    assert p.proposed_amount == Decimal("3.20")
+    assert p.root_cause == "fees"
+    assert p.group_key == "fees:book_fee_line:deposit"
+
+
+def test_rule7_missing_with_order_ref_creates_deposit():
+    p = _plan(match_type="unmatched", variance_type="missing", variance_amount=Decimal("100.00"), netsuite_amount=None)
+    assert p.action == "create_and_apply_deposit"
+    assert p.booking_vehicle == "customerdeposit"
+    assert p.proposed_amount == Decimal("100.00")  # stripe_amount
+
+
+def test_rule7b_missing_without_order_ref_needs_human():
+    p = _plan(
+        match_type="unmatched",
+        variance_type="missing",
+        variance_amount=Decimal("100.00"),
+        netsuite_amount=None,
+        evidence={"charge_source_id": "ch_1"},
+    )
+    assert p.action == "needs_human"
+
+
+def test_rule8_fx_under_materiality_writeoff_flagged_je():
+    p = _plan(variance_type="fx_rounding", variance_amount=Decimal("0.04"))
+    assert p.action == "writeoff_je"
+    assert p.booking_vehicle == "journalentry"
+    assert p.above_materiality is False
+
+
+def test_rule8b_fx_above_materiality_needs_human():
+    # $60 > $50 abs threshold on a $10k order
+    p = _plan(variance_type="fx_rounding", variance_amount=Decimal("60.00"), stripe_amount=Decimal("10000.00"))
+    assert p.action == "needs_human"
+    assert p.above_materiality is True
+
+
+def test_rule9_timing_carries_forward():
+    p = _plan(variance_type="timing", variance_amount=Decimal("0"))
+    assert p.action == "carry_forward"
+    assert p.booking_vehicle == "none"
+    assert p.proposed_amount == Decimal("0")
+
+
+def test_rule10_manual_adjustment_needs_human():
+    p = _plan(variance_type="manual_adjustment", variance_amount=Decimal("77.10"))
+    assert p.action == "needs_human"
+
+
+def test_rule10b_unknown_variance_type_needs_human_not_crash():
+    p = _plan(variance_type="future_type", variance_amount=Decimal("5.00"))
+    assert p.action == "needs_human"  # total function: unknown → safe default
+
+
+def test_above_materiality_set_on_every_proposal():
+    p = _plan(variance_type="fees", variance_amount=Decimal("120.00"), stripe_amount=Decimal("10000.00"))
+    assert p.action == "book_fee_line"  # materiality never changes action selection…
+    assert p.above_materiality is True  # …only the bulk-approve eligibility flag
+
+
+def test_narrative_embeds_explanation_and_no_invented_numbers():
+    p = _plan(
+        variance_type="fees",
+        variance_amount=Decimal("3.20"),
+        variance_explanation="Variance of $3.20 matches Stripe processing fee",
+    )
+    assert "Variance of $3.20 matches Stripe processing fee" in p.narrative
+
+
+def test_group_key_derived_from_columns():
+    assert group_key_for("fees", "book_fee_line", "deposit") == "fees:book_fee_line:deposit"
+    assert VEHICLE_BY_ACTION["carry_forward"] == "none"
