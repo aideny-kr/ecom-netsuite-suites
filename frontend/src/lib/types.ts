@@ -1016,6 +1016,12 @@ export interface ReconResolutionGroup {
   above_materiality_count: number;
 }
 
+export interface ReconAgentJobStatus {
+  status: string;
+  processed: number;
+  total: number;
+}
+
 export interface ReconResolutionSummary {
   run_id: string;
   total_results: number;
@@ -1027,6 +1033,7 @@ export interface ReconResolutionSummary {
   guard_skipped_count: number;
   variance_by_root_cause: Record<string, string>;
   groups: ReconResolutionGroup[];
+  agent_job?: ReconAgentJobStatus | null;
 }
 
 export interface ReconResolutionProposal {

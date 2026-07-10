@@ -254,3 +254,37 @@ async def test_summary_404_on_foreign_run(db, tenant_a, tenant_b):
     with pytest.raises(HTTPException) as exc:
         await get_resolution_summary(str(run_b.id), user=user, db=db)
     assert exc.value.status_code == 404
+
+
+async def test_summary_includes_running_agent_job(db, tenant_a):
+    from datetime import datetime, timezone
+
+    from app.models.job import Job
+
+    user, run = await _seed(db, tenant_a)
+    db.add(
+        Job(
+            tenant_id=tenant_a.id,
+            job_type="tasks.recon_resolution_agent",
+            status="running",
+            started_at=datetime.now(timezone.utc),
+            parameters={"run_id": str(run.id)},
+            result_summary={"processed": 3, "total": 10},
+        )
+    )
+    await db.flush()
+
+    out = await get_resolution_summary(str(run.id), user=user, db=db)
+
+    assert out.agent_job is not None
+    assert out.agent_job.status == "running"
+    assert out.agent_job.processed == 3
+    assert out.agent_job.total == 10
+
+
+async def test_summary_agent_job_none_when_no_job(db, tenant_a):
+    user, run = await _seed(db, tenant_a)
+
+    out = await get_resolution_summary(str(run.id), user=user, db=db)
+
+    assert out.agent_job is None

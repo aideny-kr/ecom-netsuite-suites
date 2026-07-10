@@ -309,6 +309,14 @@ class ResolutionGroupSummary(BaseModel):
     )
 
 
+class AgentJobStatus(BaseModel):
+    """Latest ResolutionAgent Celery job for this run (progress polling)."""
+
+    status: str
+    processed: int = 0
+    total: int = 0
+
+
 class ResolutionSummaryResponse(BaseModel):
     """Summary-first payload: one call renders the whole report header + groups.
 
@@ -333,6 +341,7 @@ class ResolutionSummaryResponse(BaseModel):
     guard_skipped_count: int
     variance_by_root_cause: dict[str, Decimal]
     groups: list[ResolutionGroupSummary]
+    agent_job: AgentJobStatus | None = None
 
 
 class ResolutionGroupApprove(BaseModel):

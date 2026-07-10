@@ -25,10 +25,12 @@ from app.core.redis_lock import acquire_lock, release_lock
 from app.models.audit import AuditEvent
 from app.models.canonical import NetsuitePosting, Payout, PayoutLine
 from app.models.connection import Connection
+from app.models.job import Job
 from app.models.pipeline import CursorState
 from app.models.reconciliation import ReconciliationResult, ReconciliationRun, ReconResolutionProposal
 from app.models.user import User
 from app.schemas.reconciliation import (
+    AgentJobStatus,
     ReconBucketApprove,
     ReconBucketApproveResult,
     ReconBucketCount,
@@ -871,6 +873,27 @@ async def get_resolution_summary(
         )
     ).scalar_one()
 
+    agent_job_row = (
+        await db.execute(
+            select(Job)
+            .where(
+                Job.tenant_id == user.tenant_id,
+                Job.job_type == "tasks.recon_resolution_agent",
+                Job.parameters["run_id"].astext == run_id,
+            )
+            .order_by(Job.started_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    agent_job = None
+    if agent_job_row is not None:
+        result_summary = agent_job_row.result_summary or {}
+        agent_job = AgentJobStatus(
+            status=agent_job_row.status,
+            processed=result_summary.get("processed", 0),
+            total=result_summary.get("total", 0),
+        )
+
     return ResolutionSummaryResponse(
         run_id=run_id,
         total_results=total_results,
@@ -882,6 +905,7 @@ async def get_resolution_summary(
         guard_skipped_count=guard_skipped_count,
         variance_by_root_cause=variance_by_root_cause,
         groups=groups,
+        agent_job=agent_job,
     )
 
 
