@@ -67,7 +67,14 @@ TOOL_CONFIGS = {
         "timeout_seconds": 30,
         "rate_limit_per_minute": 10,
         "requires_entitlement": "mcp_tools",
-        "allowlisted_params": ["run_id", "group_key", "currency", "notes"],
+        "allowlisted_params": [
+            "run_id",
+            "group_key",
+            "currency",
+            "notes",
+            "included_above_materiality_ids",
+            "excluded_ids",
+        ],
     },
     "schedule.create": {
         "default_limit": None,

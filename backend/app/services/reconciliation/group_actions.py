@@ -69,7 +69,7 @@ async def _ensure_resolution_ui_enabled(db: AsyncSession, tenant_id) -> None:
     if not await is_enabled(db, tenant_id, "recon_resolution_ui"):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="recon_resolution_ui is not enabled for this tenant",
+            detail="Feature 'recon_resolution_ui' is not enabled for your account.",
         )
 
 

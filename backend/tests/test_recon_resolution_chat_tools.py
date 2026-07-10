@@ -18,7 +18,11 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+from sqlalchemy import select
+
+from app.mcp.server import mcp_server
 from app.mcp.tools import recon_approve_group, recon_resolution_summary
+from app.models.reconciliation import ReconResolutionProposal
 from app.services.chat.write_confirmation_service import (
     build_recon_group_confirmation,
     validate_and_extract_confirmation,
@@ -143,6 +147,79 @@ async def test_approve_group_both_convention_context_kwargs(db, tenant_a):
 async def test_approve_group_missing_context_error():
     result = await recon_approve_group.execute({"run_id": "x", "group_key": "a:b:c"})
     assert result == {"success": False, "error": "Missing database session or tenant context"}
+
+
+async def test_approve_group_included_above_materiality_ids_survives_real_dispatch(db, tenant_a):
+    """Registry + governance regression: recon.approve_group's description
+    promises `included_above_materiality_ids`/`excluded_ids` and execute()
+    reads them, but if either the registry's params_schema or governance's
+    allowlisted_params omits them, governed_execute's validate_params()
+    silently strips them before execute() ever sees them — collapsing
+    eligibility to below-materiality only. Must go through the REAL dispatch
+    (mcp_server.call_tool -> governed_execute -> validate_params), not a
+    direct execute() call, or this gap is invisible (mirrors
+    test_recon_tools_dispatch.py's dispatch-boundary pattern)."""
+    user, _ = await create_test_user(db, tenant_a)
+    await enable_feature_flag(db, tenant_a.id, "recon_resolution_ui")
+    run = await create_test_recon_run(db, tenant_a.id, status="completed")
+    # Sub-materiality (auto-eligible) + above-materiality (opt-in only) fee lines.
+    await create_test_recon_result(
+        db,
+        tenant_a.id,
+        run.id,
+        status="pending",
+        bucket="auto_classifications",
+        match_type="deterministic",
+        variance_type="fees",
+        variance_amount=Decimal("9.00"),
+        stripe_amount=Decimal("1000.00"),
+        netsuite_amount=Decimal("991.00"),
+        evidence={"charge_source_id": "ch_1", "order_reference": "R1"},
+    )
+    await create_test_recon_result(
+        db,
+        tenant_a.id,
+        run.id,
+        status="pending",
+        bucket="auto_classifications",
+        match_type="deterministic",
+        variance_type="fees",
+        variance_amount=Decimal("120.00"),
+        stripe_amount=Decimal("10000.00"),
+        netsuite_amount=Decimal("9880.00"),
+        evidence={"charge_source_id": "ch_2", "order_reference": "R2"},
+    )
+    await db.flush()
+    from app.api.v1.reconciliation import plan_resolutions
+
+    await plan_resolutions(str(run.id), user=user, db=db)
+
+    proposals = (
+        (await db.execute(select(ReconResolutionProposal).where(ReconResolutionProposal.run_id == run.id)))
+        .scalars()
+        .all()
+    )
+    above = next(p for p in proposals if p.above_materiality)
+
+    out = await mcp_server.call_tool(
+        tool_name="recon.approve_group",
+        params={
+            "run_id": str(run.id),
+            "group_key": "fees:book_fee_line:deposit",
+            "included_above_materiality_ids": [str(above.id)],
+        },
+        tenant_id=str(tenant_a.id),
+        actor_id=str(user.id),
+        db=db,
+    )
+
+    assert out["success"] is True, out
+    # Both items approved — proves included_above_materiality_ids survived
+    # validate_params() through the real dispatch, not just direct execute().
+    assert out["approved_count"] == 2
+    assert out["skipped_count"] == 0
+    await db.refresh(above)
+    assert above.status == "approved"
 
 
 # ---------------------------------------------------------------------------

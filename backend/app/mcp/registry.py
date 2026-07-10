@@ -309,6 +309,19 @@ TOOL_REGISTRY = {
                 "description": "Optional currency scope for multi-currency group_key collisions",
             },
             "notes": {"type": "string", "required": False, "description": "Optional note for the audit event"},
+            "included_above_materiality_ids": {
+                "type": "array",
+                "required": False,
+                "description": (
+                    "Above-materiality proposal IDs to explicitly include — above-materiality "
+                    "proposals never approve implicitly"
+                ),
+            },
+            "excluded_ids": {
+                "type": "array",
+                "required": False,
+                "description": "Proposal IDs to exclude from this batch",
+            },
         },
     },
     "report.compose": {
