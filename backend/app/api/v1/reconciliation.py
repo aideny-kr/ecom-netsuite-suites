@@ -73,7 +73,7 @@ from app.services.reconciliation.group_actions import (
 from app.services.reconciliation.pipeline import ReconPipeline
 from app.services.reconciliation.recon_job import ReconJobRunner
 from app.services.reconciliation.resolution_planner import plan_run
-from app.workers.tasks.recon_resolution_agent import dispatch_resolution_agent
+from app.workers.tasks.recon_resolution_agent import AGENT_FLAG, dispatch_resolution_agent
 
 router = APIRouter(prefix="/reconciliation", tags=["reconciliation"])
 
@@ -766,10 +766,8 @@ async def plan_resolutions(
     # (reconciliation AND recon_resolution_agent, both default-relevant flags).
     from app.services.feature_flag_service import is_enabled
 
-    if await is_enabled(db, user.tenant_id, "reconciliation") and await is_enabled(
-        db, user.tenant_id, "recon_resolution_agent"
-    ):
-        dispatch_resolution_agent(str(user.tenant_id), str(run.id))
+    if await is_enabled(db, user.tenant_id, "reconciliation") and await is_enabled(db, user.tenant_id, AGENT_FLAG):
+        await asyncio.to_thread(dispatch_resolution_agent, str(user.tenant_id), str(run.id))
 
     return result
 
@@ -879,7 +877,7 @@ async def get_resolution_summary(
             .where(
                 Job.tenant_id == user.tenant_id,
                 Job.job_type == "tasks.recon_resolution_agent",
-                Job.parameters["run_id"].astext == run_id,
+                Job.parameters["run_id"].astext == str(run_uuid),
             )
             .order_by(Job.started_at.desc())
             .limit(1)
