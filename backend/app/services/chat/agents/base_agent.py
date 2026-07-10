@@ -1340,6 +1340,58 @@ class BaseSpecialistAgent(abc.ABC):
                         continue
                     # ── End mutation intercept ──
 
+                    # ── Recon group-approve HITL intercept (Phase 2) ──
+                    if block.name == "recon_approve_group":
+                        from app.services.chat.write_confirmation_service import (
+                            build_recon_group_confirmation,
+                        )
+
+                        payload = build_recon_group_confirmation(
+                            tool_input=block.input,
+                            session_id=session_id if session_id else str(self.tenant_id),
+                        )
+                        yield ("confirmation_required", payload.model_dump())
+                        result_str = json.dumps(
+                            {
+                                "confirmation_required": True,
+                                "message": (
+                                    "Approving this resolution group requires human confirmation. "
+                                    "The confirmation card has been shown. Do NOT proceed until "
+                                    "the user explicitly approves."
+                                ),
+                            }
+                        )
+                        elapsed_ms = int((time.monotonic() - t0) * 1000)
+                        yield (
+                            "tool_end",
+                            {
+                                "tool_name": block.name,
+                                "step": step,
+                                "duration_ms": elapsed_ms,
+                                "success": True,
+                                "result_summary": "Confirmation required",
+                            },
+                        )
+                        tool_calls_log.append(
+                            build_tool_call_log_entry(
+                                step=step,
+                                agent_name=self.agent_name,
+                                tool_name=block.name,
+                                params=block.input,
+                                result_str=result_str,
+                                duration_ms=elapsed_ms,
+                            )
+                        )
+                        tool_results_content.append(
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": block.id,
+                                "content": result_str,
+                            }
+                        )
+                        continue
+                    # ── End recon group-approve intercept ──
+
                     policy_result = policy_evaluate(active_policy, block.name, block.input)
                     if not policy_result["allowed"]:
                         result_str = json.dumps(

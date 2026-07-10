@@ -224,6 +224,7 @@ class TestToolConfigs:
             "netsuite.connectivity",
             "data.sample_table_read",
             "recon.run",
+            "recon.approve_group",
             "rag.search",
             "web.search",
             "schedule.create",

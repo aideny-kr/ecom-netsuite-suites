@@ -14,8 +14,10 @@ from app.mcp.tools import (
     pricing_tools,
     rag_search,
     recon_approve,
+    recon_approve_group,
     recon_evidence,
     recon_exceptions,
+    recon_resolution_summary,
     recon_run,
     report_export,
     save_learned_rule,
@@ -267,6 +269,46 @@ TOOL_REGISTRY = {
         "execute": recon_approve.execute,
         "params_schema": {
             "result_id": {"type": "string", "required": True, "description": "ReconciliationResult ID to approve"},
+        },
+    },
+    "recon.get_resolution_summary": {
+        "description": (
+            "Fetch the summary-first resolution report for a reconciliation run: match_rate, "
+            "explained_rate, proposals_count, and resolution groups (largest total amount first, "
+            "capped at 20 — group_count is the TRUE total distinct-group count and truncated tells "
+            "you whether the returned list was cut off; never present a truncated list as exhaustive). "
+            "Each group carries root_cause, action, booking_vehicle, currency, count, proposed_count, "
+            "approved_count, total_amount, and above_materiality_count. Transcribe every returned "
+            "number VERBATIM into a table — never recompute, round, sum, or paraphrase amounts in "
+            "prose — and quote group_count/proposals_count exactly."
+        ),
+        "execute": recon_resolution_summary.execute,
+        "params_schema": {
+            "run_id": {"type": "string", "required": True, "description": "Reconciliation run ID"},
+        },
+    },
+    "recon.approve_group": {
+        "description": (
+            "Bulk-approve a resolution group (root_cause:action:booking_vehicle). REQUIRES user "
+            "confirmation before execution — a confirmation card is shown; do NOT claim the group is "
+            "approved until the user explicitly confirms. needs_human groups cannot be group-approved. "
+            "Above-materiality proposals only approve when explicitly included via "
+            "included_above_materiality_ids."
+        ),
+        "execute": recon_approve_group.execute,
+        "params_schema": {
+            "run_id": {"type": "string", "required": True, "description": "Reconciliation run ID"},
+            "group_key": {
+                "type": "string",
+                "required": True,
+                "description": "Group key: root_cause:action:booking_vehicle",
+            },
+            "currency": {
+                "type": "string",
+                "required": False,
+                "description": "Optional currency scope for multi-currency group_key collisions",
+            },
+            "notes": {"type": "string", "required": False, "description": "Optional note for the audit event"},
         },
     },
     "report.compose": {
