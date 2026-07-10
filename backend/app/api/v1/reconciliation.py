@@ -64,6 +64,7 @@ from app.services.reconciliation.four_bucket_classifier import (
 from app.services.reconciliation.pipeline import ReconPipeline
 from app.services.reconciliation.recon_job import ReconJobRunner
 from app.services.reconciliation.resolution_planner import plan_run
+from app.workers.tasks.recon_resolution_agent import dispatch_resolution_agent
 
 router = APIRouter(prefix="/reconciliation", tags=["reconciliation"])
 
@@ -766,7 +767,7 @@ async def plan_resolutions(
     # re-planning must not supersede/re-derive proposals once the run is closed/locked.
     _ensure_run_open(run)
     try:
-        return await plan_run(db, user.tenant_id, run.id)
+        result = await plan_run(db, user.tenant_id, run.id)
     except ValueError:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
     except IntegrityError:
@@ -779,6 +780,17 @@ async def plan_resolutions(
             status_code=status.HTTP_409_CONFLICT,
             detail="Planning raced a concurrent re-plan; retry.",
         )
+
+    # Phase 2: dispatch the ResolutionAgent tail — fire-and-forget, flag-gated
+    # (reconciliation AND recon_resolution_agent, both default-relevant flags).
+    from app.services.feature_flag_service import is_enabled
+
+    if await is_enabled(db, user.tenant_id, "reconciliation") and await is_enabled(
+        db, user.tenant_id, "recon_resolution_agent"
+    ):
+        dispatch_resolution_agent(str(user.tenant_id), str(run.id))
+
+    return result
 
 
 # ---------------------------------------------------------------------------

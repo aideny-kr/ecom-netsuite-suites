@@ -49,6 +49,7 @@ celery_app.conf.include = [
     "app.workers.tasks.reconciliation_run",
     "app.workers.tasks.recon_scheduled_run_all",
     "app.workers.tasks.recon_envelope_dry_run",
+    "app.workers.tasks.recon_resolution_agent",
     "app.workers.tasks.report_auto_refresh",
     "app.workers.tasks.suitescript_sync",
     "app.workers.tasks.suiteql_export",
