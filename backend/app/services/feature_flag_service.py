@@ -29,6 +29,9 @@ DEFAULT_FLAGS: dict[str, bool] = {
     # Phase 1 of the summary-first recon rework (spec 2026-07-06): gates the
     # redesigned resolution-groups page surface, independent of posting.
     "recon_resolution_ui": False,
+    # Phase 2 of the summary-first recon rework: background LLM agent that
+    # investigates planner abstentions. LLM-cost surface — default OFF.
+    "recon_resolution_agent": False,
 }
 
 # In-memory cache: (tenant_id, flag_key) → (enabled, timestamp)
