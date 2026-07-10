@@ -17,8 +17,8 @@ from decimal import Decimal
 from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.reconciliation import ReconResolutionProposal
-from app.services.reconciliation.four_bucket_classifier import is_material
+from app.models.reconciliation import ReconciliationResult, ReconResolutionProposal
+from app.services.reconciliation.four_bucket_classifier import TERMINAL_RESULT_STATUSES, is_material
 from app.services.reconciliation.narrative_contract import narrative_respects_evidence
 from app.services.reconciliation.resolution_planner import VEHICLE_BY_ACTION, group_key_for
 
@@ -89,7 +89,6 @@ async def gather_context(db: AsyncSession, tenant_id, proposal: ReconResolutionP
     is stringified so the narrative-contract validator can flatten it.
     """
     from app.models.canonical import NetsuitePosting, PayoutLine
-    from app.models.reconciliation import ReconciliationResult
 
     result = (
         await db.execute(
@@ -123,9 +122,12 @@ async def gather_context(db: AsyncSession, tenant_id, proposal: ReconResolutionP
 
     conditions = []
     if stripe_amount is not None:
-        lower = stripe_amount * (Decimal("1") - _AMOUNT_TOLERANCE_PCT)
-        upper = stripe_amount * (Decimal("1") + _AMOUNT_TOLERANCE_PCT)
-        conditions.append(NetsuitePosting.amount.between(lower, upper))
+        # A negative stripe_amount (refund/chargeback) flips which bound is
+        # smaller — min/max rather than raw lower/upper keeps BETWEEN's
+        # low <= high invariant instead of silently matching zero rows.
+        bound_a = stripe_amount * (Decimal("1") - _AMOUNT_TOLERANCE_PCT)
+        bound_b = stripe_amount * (Decimal("1") + _AMOUNT_TOLERANCE_PCT)
+        conditions.append(NetsuitePosting.amount.between(min(bound_a, bound_b), max(bound_a, bound_b)))
     if order_reference:
         conditions.append(NetsuitePosting.memo.ilike(f"%{order_reference}%"))
 
@@ -255,6 +257,12 @@ def validate_output(out: dict, context: dict, materiality: tuple[Decimal, Decima
     if action not in AGENT_ALLOWED_ACTIONS:
         return _degraded(f"disallowed action '{action}'", key_evidence)
 
+    # Chargeback policy pin: chargebacks always need a human regardless of what
+    # the model classified them as — gather_context always sets root_cause
+    # from the proposal, so this doesn't need a separate parameter.
+    if context.get("root_cause") == "chargeback" and action != "needs_human":
+        return _degraded("chargeback_policy", key_evidence)
+
     if action == "writeoff_je":
         mat_abs, mat_pct = materiality
         variance_amount = Decimal(context.get("variance_amount") or "0")
@@ -282,6 +290,23 @@ async def apply_agent_proposal(db: AsyncSession, proposal: ReconResolutionPropos
     False (no-op, nothing written) if the planner row is no longer eligible
     (a human decided meanwhile). Commits on success.
     """
+    # A result can go terminal independently of this proposal (e.g. locked via
+    # the classic per-result approve path, or closed by a period freeze) while
+    # its proposal row is still 'proposed' — mirrors the not_terminal_result
+    # guard approve_group_core uses. Skip instead of superseding: otherwise the
+    # planner row is replaced by an agent row for a result the agent never
+    # actually gets to touch.
+    result_status = (
+        await db.execute(
+            select(ReconciliationResult.status).where(
+                ReconciliationResult.id == proposal.result_id,
+                ReconciliationResult.tenant_id == proposal.tenant_id,
+            )
+        )
+    ).scalar_one_or_none()
+    if result_status in TERMINAL_RESULT_STATUSES:
+        return False
+
     result = await db.execute(
         update(ReconResolutionProposal)
         .where(

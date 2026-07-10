@@ -136,6 +136,140 @@ async def test_task_skips_when_agent_flag_disabled(db, tenant_a, monkeypatch):
     assert all(p.source == "planner" for p in props)
 
 
+async def test_task_skips_when_run_closed(db, tenant_a, monkeypatch):
+    """Close = hard freeze: a run can close between planning and the agent
+    tail picking it up (e.g. a manually-triggered re-plan on an old run). The
+    agent must skip entirely — no context gathered, no LLM call, no proposal
+    touched."""
+    await enable_feature_flag(db, tenant_a.id, "reconciliation")
+    await enable_feature_flag(db, tenant_a.id, "recon_resolution_agent")
+    run, _result = await _seed_planned_run(db, tenant_a.id)
+    run.status = "closed"
+    await db.flush()
+
+    called = {"adapter": False}
+
+    def _fake_get_adapter(*_a, **_kw):
+        called["adapter"] = True
+        return FakeAdapter(action="book_fee_line", narrative="n/a")
+
+    monkeypatch.setattr(agent_task, "get_adapter", _fake_get_adapter)
+
+    summary = await agent_task.run_resolution_agent(db, str(tenant_a.id), str(run.id))
+
+    assert summary == {"skipped": "run_closed"}
+    assert called["adapter"] is False
+
+    props = (
+        (await db.execute(select(ReconResolutionProposal).where(ReconResolutionProposal.run_id == run.id)))
+        .scalars()
+        .all()
+    )
+    assert all(p.status == "proposed" for p in props)
+    assert all(p.source == "planner" for p in props)
+
+
+async def test_task_processes_two_eligible_items_both_applied(db, tenant_a, monkeypatch):
+    """T2 gate fix (RLS-context regression): the outer Celery task now sets
+    the SESSION-scoped tenant context, since apply_agent_proposal commits
+    once per item and a transaction-scoped SET LOCAL would silently drop RLS
+    for every item after the first in production. This drives the inner loop
+    directly (the only part testable from an async test — see
+    TestPreforkEventLoopSafety below for why) and pins that BOTH of two
+    eligible items in one run get an agent proposal applied, not just the
+    first."""
+    await enable_feature_flag(db, tenant_a.id, "reconciliation")
+    await enable_feature_flag(db, tenant_a.id, "recon_resolution_agent")
+    run = await create_test_recon_run(db, tenant_a.id, status="completed")
+    for i in range(2):
+        await create_test_recon_result(
+            db,
+            tenant_a.id,
+            run.id,
+            status="pending",
+            bucket="needs_review",
+            match_type="deterministic",
+            variance_type="manual_adjustment",
+            variance_amount=Decimal("77.10"),
+            stripe_amount=Decimal("500.00"),
+            netsuite_amount=Decimal("422.90"),
+            evidence={"charge_source_id": f"ch_task2_{i}", "order_reference": f"R{i}"},
+        )
+    await db.flush()
+    await plan_run(db, tenant_a.id, run.id)
+
+    fake_adapter = FakeAdapter(
+        action="book_fee_line",
+        narrative="Unexplained variance of $77.10 against a $500.00 charge — book as a fee line.",
+        key_evidence=["variance_amount=77.10"],
+    )
+
+    async def fake_get_tenant_ai_config(_db, _tenant_id):
+        return ("anthropic", "test-model", "sk-test", False)
+
+    monkeypatch.setattr(agent_task, "get_adapter", lambda provider, api_key: fake_adapter)
+    monkeypatch.setattr(agent_task, "get_tenant_ai_config", fake_get_tenant_ai_config)
+
+    summary = await agent_task.run_resolution_agent(db, str(tenant_a.id), str(run.id))
+
+    assert summary == {
+        "processed": 2,
+        "upgraded": 2,
+        "kept_needs_human": 0,
+        "contract_violations": 0,
+    }
+    assert len(fake_adapter.calls) == 2
+
+    props = (
+        (await db.execute(select(ReconResolutionProposal).where(ReconResolutionProposal.run_id == run.id)))
+        .scalars()
+        .all()
+    )
+    planner_rows = [p for p in props if p.source == "planner"]
+    agent_rows = [p for p in props if p.source == "agent"]
+    assert len(planner_rows) == 2
+    assert all(p.status == "superseded" for p in planner_rows)
+    assert len(agent_rows) == 2
+    assert all(p.status == "proposed" for p in agent_rows)
+    assert all(p.action == "book_fee_line" for p in agent_rows)
+
+
+# ---------------------------------------------------------------------------
+# Celery-wrapper RLS context: session-scoped SET, not transaction-scoped SET
+# LOCAL (source-inspection — asyncio.run() inside the wrapper can't be driven
+# from an already-running pytest-asyncio loop, and worker_async_session()
+# opens a brand-new engine the seeded-but-uncommitted `db` fixture rows would
+# never be visible to anyway; same style as
+# tests/workers/test_report_auto_refresh.py / test_recon_scheduled_run_all.py)
+# ---------------------------------------------------------------------------
+
+import re as _re
+from pathlib import Path as _Path
+
+_BACKEND_ROOT = _Path(__file__).resolve().parent.parent
+
+
+def _agent_task_source() -> str:
+    with open(_BACKEND_ROOT / "app/workers/tasks/recon_resolution_agent.py") as f:
+        return f.read()
+
+
+class TestPreforkEventLoopSafety:
+    def test_uses_worker_async_session(self):
+        src = _agent_task_source()
+        assert "worker_async_session" in src
+        assert "async_session_factory" not in src
+
+    def test_sets_session_scoped_tenant_context_not_local(self):
+        """apply_agent_proposal commits once per item; a transaction-scoped
+        SET LOCAL would silently drop RLS context for every item after the
+        first. The bare set_tenant_context( call — not the _session suffixed
+        variant — must not appear."""
+        src = _agent_task_source()
+        assert "set_tenant_context_session" in src
+        assert _re.search(r"\bset_tenant_context\(", src) is None
+
+
 async def test_plan_resolutions_dispatches_agent_when_flag_on(db, tenant_a, monkeypatch):
     user, _ = await create_test_user(db, tenant_a)
     await enable_feature_flag(db, tenant_a.id, "recon_resolution_ui")

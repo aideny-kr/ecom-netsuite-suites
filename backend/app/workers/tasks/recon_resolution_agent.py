@@ -55,7 +55,11 @@ async def run_resolution_agent(
     job_id: uuid.UUID | str | None = None,
 ) -> dict:
     """Core agent tail. Testable directly against a seeded DB session."""
+    from sqlalchemy import select
+
+    from app.models.reconciliation import ReconciliationRun
     from app.services import feature_flag_service
+    from app.services.reconciliation.four_bucket_classifier import CLOSED_RUN_STATUSES
     from app.services.reconciliation.materiality import load_materiality
     from app.services.reconciliation.resolution_agent import (
         PER_ITEM_TIMEOUT_SECONDS,
@@ -73,6 +77,17 @@ async def run_resolution_agent(
         return {"skipped": "flag_disabled"}
     if not await feature_flag_service.is_enabled(db, tid, AGENT_FLAG):
         return {"skipped": "flag_disabled"}
+
+    # Close = hard freeze: a run can close between planning and the agent tail
+    # picking it up (e.g. a manually-triggered re-plan on an old run). Never
+    # investigate or write proposals for a closed/locked run.
+    run = (
+        await db.execute(
+            select(ReconciliationRun).where(ReconciliationRun.id == rid, ReconciliationRun.tenant_id == tid)
+        )
+    ).scalar_one_or_none()
+    if run is not None and run.status in CLOSED_RUN_STATUSES:
+        return {"skipped": "run_closed"}
 
     items = await fetch_agent_eligible(db, tid, rid)
     total = len(items)
@@ -148,12 +163,18 @@ def dispatch_resolution_agent(tenant_id: str, run_id: str) -> None:
 
 @celery_app.task(base=InstrumentedTask, name="tasks.recon_resolution_agent", queue="recon", bind=True)
 def recon_resolution_agent(self, tenant_id: str, run_id: str, **kwargs) -> dict:
-    """Per-run agent tail. Opens its own RLS-scoped session."""
-    from app.core.database import set_tenant_context, worker_async_session
+    """Per-run agent tail. Opens its own RLS-scoped session.
+
+    Session-scoped SET (not SET LOCAL): apply_agent_proposal commits once per
+    item it processes, which would clear a transaction-scoped GUC after the
+    FIRST item, silently dropping RLS context for every item after it. Safe
+    here because worker_async_session() is a disposable per-task engine, never
+    a pooled session returned to a shared pool (see database.py docstring)."""
+    from app.core.database import set_tenant_context_session, worker_async_session
 
     async def _run() -> dict:
         async with worker_async_session() as db:
-            await set_tenant_context(db, tenant_id)
+            await set_tenant_context_session(db, tenant_id)
             return await run_resolution_agent(db, tenant_id, run_id, job_id=self._job_id)
 
     return asyncio.run(_run())

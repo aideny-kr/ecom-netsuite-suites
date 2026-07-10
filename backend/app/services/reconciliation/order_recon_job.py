@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import date, timedelta
 from decimal import Decimal
@@ -158,7 +159,9 @@ class OrderReconJob:
                 if await is_enabled(self.db, self.tenant_id, "reconciliation") and await is_enabled(
                     self.db, self.tenant_id, "recon_resolution_agent"
                 ):
-                    dispatch_resolution_agent(str(self.tenant_id), str(run_id))
+                    # Off the event loop, same as the plan-resolutions endpoint's
+                    # dispatch — send_task does blocking I/O (broker connection).
+                    await asyncio.to_thread(dispatch_resolution_agent, str(self.tenant_id), str(run_id))
             except Exception:
                 await self.db.rollback()
                 logger.exception("resolution_planning_failed", run_id=str(run_id))

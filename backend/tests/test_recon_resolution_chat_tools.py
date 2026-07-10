@@ -247,8 +247,23 @@ def test_recon_tools_not_in_default_chat_schema():
     """recon.* tools stay off the default chat tool schema (dormant family,
     same as recon.get_exceptions/recon.approve_match pre-existing) — chat
     reaches them only via the confirmation-card path wired in base_agent.py,
-    not via Claude calling them directly through build_local_tool_definitions."""
+    not via Claude calling them directly through build_local_tool_definitions.
+
+    Chat enablement requires: a _LOCAL_NAME_MAP entry (app/services/chat/tools.py),
+    params schemas on the tool definitions, a base_agent intercept name check for
+    the sanitized tool name, and a pass of the vs-MCP benchmark gate — see the
+    logged chat-enablement follow-up ticket. Pinned here (both the dotted name
+    and its Anthropic-safe sanitized form) so a future PR that widens
+    ALLOWED_CHAT_TOOLS to include the recon family without doing that work
+    fails CI instead of silently exposing an unconfirmed financial mutation to
+    the chat model.
+    """
     from app.services.chat.nodes import ALLOWED_CHAT_TOOLS
+    from app.services.chat.tools import _LOCAL_NAME_MAP
 
     assert "recon.get_resolution_summary" not in ALLOWED_CHAT_TOOLS
     assert "recon.approve_group" not in ALLOWED_CHAT_TOOLS
+    # _LOCAL_NAME_MAP is derived from ALLOWED_CHAT_TOOLS, so the sanitized
+    # (dot -> underscore) names can't be reachable via chat dispatch either.
+    assert "recon_approve_group" not in _LOCAL_NAME_MAP
+    assert "recon_get_resolution_summary" not in _LOCAL_NAME_MAP

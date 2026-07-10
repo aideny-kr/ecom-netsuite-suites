@@ -7,10 +7,11 @@ agent involvement) → plans the run → drives the agent task fn directly with 
 FakeAdapter (mirrors LLMResponse/ToolUseBlock, no network call) that:
   - upgrades the manual_adjustment item to book_fee_line with a contract-clean
     narrative (numbers taken verbatim from context)
-  - returns needs_human (with an enriched narrative) for the chargeback item —
-    it IS agent-eligible (planner/needs_human/proposed), but the allowlist and
-    the fake's own classification keep it at needs_human; the planner row is
-    still superseded and replaced by an agent-sourced needs_human row.
+  - classifies the chargeback item as book_fee_line (an otherwise-ALLOWED
+    action) — proving the code-side chargeback policy pin in validate_output,
+    not the fake's own choice, is what forces it back to needs_human; the
+    planner row is still superseded and replaced by an agent-sourced
+    needs_human row with a chargeback_policy contract_violation.
 Then asserts the resolution-summary payload reflects the new agent group, and
 that approve_group_core flips the manual_adjustment group's result to
 'approved' — the same core the REST endpoint and chat tool share.
@@ -57,12 +58,12 @@ class FakeAdapter:
                 "key_evidence": [f"variance_amount={context['variance_amount']}"],
             }
         else:
+            # Deliberately classifies the chargeback as an otherwise-ALLOWED
+            # action — validate_output's chargeback policy pin (not this
+            # fake's choice) must be what forces it back to needs_human.
             out = {
-                "action": "needs_human",
-                "narrative": (
-                    f"Chargeback of ${context['variance_amount']} — no candidate NetSuite "
-                    "postings found; still needs human review."
-                ),
+                "action": "book_fee_line",
+                "narrative": (f"Chargeback of ${context['variance_amount']} — book as a fee line."),
                 "key_evidence": [f"variance_amount={context['variance_amount']}"],
             }
         return LLMResponse(tool_use_blocks=[ToolUseBlock(id="tu_1", name="classify_resolution", input=out)])
@@ -136,7 +137,9 @@ async def test_agent_tail_e2e_through_summary_and_approve(db, tenant_a, monkeypa
         "processed": 2,
         "upgraded": 1,
         "kept_needs_human": 1,
-        "contract_violations": 0,
+        # The chargeback item's book_fee_line is degraded to needs_human by
+        # the chargeback policy pin, which counts as a contract_violation.
+        "contract_violations": 1,
     }
     assert len(fake_adapter.calls) == 2
 
@@ -161,7 +164,7 @@ async def test_agent_tail_e2e_through_summary_and_approve(db, tenant_a, monkeypa
     assert len(cb_agent) == 1
     assert cb_agent[0].status == "proposed"
     assert cb_agent[0].action == "needs_human"
-    assert "still needs human review" in cb_agent[0].narrative
+    assert "chargeback_policy" in cb_agent[0].narrative
 
     # Summary reflects the new agent-sourced group.
     out = await get_resolution_summary(str(run.id), user=user, db=db)

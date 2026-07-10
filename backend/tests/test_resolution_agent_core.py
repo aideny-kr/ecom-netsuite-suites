@@ -197,6 +197,47 @@ async def test_apply_agent_proposal_noops_when_no_longer_eligible(db, tenant_a):
     assert agent_rows == []
 
 
+async def test_apply_agent_proposal_noops_when_result_went_terminal(db, tenant_a):
+    """A result can go terminal (e.g. locked via the classic per-result approve
+    path) independently of its proposal row, which is still 'proposed' — the
+    agent must not supersede/insert for a result it no longer has any
+    business touching, mirroring approve_group_core's not_terminal_result
+    guard."""
+    from app.models.reconciliation import ReconciliationResult
+
+    _run, result, proposal = await _seed_needs_human(db, tenant_a.id)
+    result.status = "locked"
+    await db.flush()
+
+    out = {"action": "book_fee_line", "narrative": "n/a", "key_evidence": []}
+    applied = await apply_agent_proposal(db, proposal, out)
+    assert applied is False
+
+    refreshed = (
+        await db.execute(select(ReconResolutionProposal).where(ReconResolutionProposal.id == proposal.id))
+    ).scalar_one()
+    assert refreshed.status == "proposed"  # planner row untouched, not superseded
+
+    agent_rows = (
+        (
+            await db.execute(
+                select(ReconResolutionProposal).where(
+                    ReconResolutionProposal.result_id == proposal.result_id,
+                    ReconResolutionProposal.source == "agent",
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert agent_rows == []
+
+    locked_result = (
+        await db.execute(select(ReconciliationResult).where(ReconciliationResult.id == result.id))
+    ).scalar_one()
+    assert locked_result.status == "locked"
+
+
 async def test_gather_context_tenant_scoped_candidate_postings(db, tenant_a, tenant_b):
     _run, _result, proposal = await _seed_needs_human(db, tenant_a.id)
 
@@ -234,3 +275,69 @@ async def test_gather_context_tenant_scoped_candidate_postings(db, tenant_a, ten
     assert postings[0]["netsuite_internal_id"] == "" or postings[0]["record_type"] == "customerdeposit"
     assert all(isinstance(v, str) for p in postings for v in p.values())
     assert postings[0]["amount"] == "495.00"
+
+
+async def test_gather_context_amount_window_handles_negative_stripe_amount(db, tenant_a):
+    """A negative stripe_amount (refund/chargeback) must not silently invert
+    the BETWEEN bounds — lower/upper picked by raw arithmetic rather than
+    min/max would build a window like between(-105, -95) with the wrong sign,
+    which always matches zero rows."""
+    run = await create_test_recon_run(db, tenant_a.id, status="completed")
+    result = await create_test_recon_result(
+        db,
+        tenant_a.id,
+        run.id,
+        status="pending",
+        bucket="needs_review",
+        match_type="deterministic",
+        variance_type="manual_adjustment",
+        variance_amount=Decimal("2.00"),
+        stripe_amount=Decimal("-100.00"),
+        netsuite_amount=Decimal("-102.00"),
+        evidence={"charge_source_id": f"ch_{uuid.uuid4().hex[:8]}", "order_reference": "R9"},
+    )
+    await db.flush()
+    await plan_run(db, tenant_a.id, run.id)
+    eligible = await fetch_agent_eligible(db, tenant_a.id, run.id)
+    assert len(eligible) == 1
+    proposal = eligible[0]
+    assert proposal.result_id == result.id
+
+    db.add(
+        NetsuitePosting(
+            tenant_id=tenant_a.id,
+            dedupe_key=f"dk-neg-{uuid.uuid4().hex}",
+            source="netsuite",
+            source_id="ns-neg-1",
+            record_type="customerdeposit",
+            amount=Decimal("-98.00"),
+            currency="USD",
+            memo="Refund adjustment",
+        )
+    )
+    await db.flush()
+
+    context = await gather_context(db, tenant_a.id, proposal)
+    postings = context["candidate_postings"]
+    assert len(postings) == 1
+    assert postings[0]["amount"] == "-98.00"
+
+
+async def test_validate_output_pins_chargeback_to_needs_human_regardless_of_action(db, tenant_a):
+    """Chargeback policy pin: even when the model classifies a chargeback item
+    with an otherwise-allowed action, the code-side validator overrides it to
+    needs_human — the policy must not depend on the model choosing correctly."""
+    _run, _result, proposal = await _seed_needs_human(db, tenant_a.id, variance_type="chargeback")
+    context = await gather_context(db, tenant_a.id, proposal)
+    assert context["root_cause"] == "chargeback"
+
+    adapter = FakeAdapter(
+        action="book_fee_line",
+        narrative="Book the variance as a fee line.",
+        key_evidence=["variance_amount=77.10"],
+    )
+    out = await classify_item(adapter, "test-model", context)
+    validated = validate_output(out, context, MATERIALITY)
+
+    assert validated["action"] == "needs_human"
+    assert validated["contract_violation"] == "chargeback_policy"
