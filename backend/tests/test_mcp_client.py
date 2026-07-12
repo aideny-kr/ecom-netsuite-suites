@@ -59,6 +59,8 @@ EXPECTED_TOOLS = {
     "recon.approve_match",
     "recon.get_exceptions",
     "recon.get_evidence",
+    "recon.get_resolution_summary",
+    "recon.approve_group",
     "sheets.create",
     "sheets.write_range",
     "sheets.read_range",

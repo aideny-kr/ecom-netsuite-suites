@@ -25,10 +25,12 @@ from app.core.redis_lock import acquire_lock, release_lock
 from app.models.audit import AuditEvent
 from app.models.canonical import NetsuitePosting, Payout, PayoutLine
 from app.models.connection import Connection
+from app.models.job import Job
 from app.models.pipeline import CursorState
 from app.models.reconciliation import ReconciliationResult, ReconciliationRun, ReconResolutionProposal
 from app.models.user import User
 from app.schemas.reconciliation import (
+    AgentJobStatus,
     ReconBucketApprove,
     ReconBucketApproveResult,
     ReconBucketCount,
@@ -57,50 +59,30 @@ from app.services.reconciliation.evidence_service import EvidencePackGenerator
 from app.services.reconciliation.four_bucket_classifier import (
     ALL_BUCKETS,
     BULK_APPROVABLE_BUCKETS,
-    CLOSED_RUN_STATUSES,
     TERMINAL_RESULT_STATUSES,
     bucket_conditions,
+)
+from app.services.reconciliation.group_actions import (
+    _ensure_resolution_ui_enabled,
+    _ensure_run_open,
+    _get_run_or_404,
+    _parse_group_key,
+    _parse_uuid,
+    approve_group_core,
 )
 from app.services.reconciliation.pipeline import ReconPipeline
 from app.services.reconciliation.recon_job import ReconJobRunner
 from app.services.reconciliation.resolution_planner import plan_run
+from app.workers.tasks.recon_resolution_agent import AGENT_FLAG, dispatch_resolution_agent
 
 router = APIRouter(prefix="/reconciliation", tags=["reconciliation"])
 
 
-def _parse_uuid(value: str) -> uuid.UUID:
-    """Parse a path UUID, returning 404 (not 500) on a malformed id."""
-    try:
-        return uuid.UUID(value)
-    except ValueError:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
-
-
-def _ensure_run_open(run: ReconciliationRun | None) -> None:
-    """Close = hard freeze. Raise if the run is closed/locked; a ``None`` run
-    is a no-op (the caller either already 404'd on a missing run, or derived
-    the run from a tenant-scoped child row and treats a missing run as not
-    blocking)."""
-    if run is not None and run.status in CLOSED_RUN_STATUSES:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Period is closed; cannot approve.")
-
-
-async def _ensure_resolution_ui_enabled(db: AsyncSession, tenant_id) -> None:
-    """Flag-gate the resolution-plan mutation endpoints behind
-    recon_resolution_ui (default OFF) — the redesigned surface, independent of
-    the base ``reconciliation`` feature. A body-level check rather than a
-    second ``Depends``: these endpoints are exercised directly as plain
-    function calls throughout the test suite (bypassing FastAPI's dependency
-    injection), so a Depends-only gate would never actually run under a
-    direct call. Read endpoints (resolution-summary, group proposals) are not
-    gated here — only the four mutation entry points."""
-    from app.services.feature_flag_service import is_enabled
-
-    if not await is_enabled(db, tenant_id, "recon_resolution_ui"):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Feature 'recon_resolution_ui' is not enabled for your account.",
-        )
+# _parse_uuid, _ensure_run_open, _ensure_resolution_ui_enabled, _get_run_or_404,
+# and _parse_group_key now live in app.services.reconciliation.group_actions
+# (imported above) so approve_group_core and this module share one
+# implementation. Re-imported under the same names so every other endpoint in
+# this file (which predates the extraction) keeps working unchanged.
 
 
 # ---------------------------------------------------------------------------
@@ -766,7 +748,7 @@ async def plan_resolutions(
     # re-planning must not supersede/re-derive proposals once the run is closed/locked.
     _ensure_run_open(run)
     try:
-        return await plan_run(db, user.tenant_id, run.id)
+        result = await plan_run(db, user.tenant_id, run.id)
     except ValueError:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
     except IntegrityError:
@@ -780,35 +762,19 @@ async def plan_resolutions(
             detail="Planning raced a concurrent re-plan; retry.",
         )
 
+    # Phase 2: dispatch the ResolutionAgent tail — fire-and-forget, flag-gated
+    # (reconciliation AND recon_resolution_agent, both default-relevant flags).
+    from app.services.feature_flag_service import is_enabled
+
+    if await is_enabled(db, user.tenant_id, "reconciliation") and await is_enabled(db, user.tenant_id, AGENT_FLAG):
+        await asyncio.to_thread(dispatch_resolution_agent, str(user.tenant_id), str(run.id))
+
+    return result
+
 
 # ---------------------------------------------------------------------------
 # Resolution summary + per-group proposal listing (summary-first rework)
 # ---------------------------------------------------------------------------
-def _parse_group_key(group_key: str) -> tuple[str, str, str]:
-    parts = group_key.split(":")
-    if len(parts) != 3:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="group_key must be root_cause:action:booking_vehicle",
-        )
-    return parts[0], parts[1], parts[2]
-
-
-async def _get_run_or_404(db: AsyncSession, tenant_id, run_id_str: str) -> ReconciliationRun:
-    run_uuid = _parse_uuid(run_id_str)
-    run = (
-        await db.execute(
-            select(ReconciliationRun).where(
-                ReconciliationRun.id == run_uuid,
-                ReconciliationRun.tenant_id == tenant_id,
-            )
-        )
-    ).scalar_one_or_none()
-    if run is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Run not found")
-    return run
-
-
 @router.get("/runs/{run_id}/resolution-summary", response_model=ResolutionSummaryResponse)
 async def get_resolution_summary(
     run_id: str,
@@ -905,6 +871,27 @@ async def get_resolution_summary(
         )
     ).scalar_one()
 
+    agent_job_row = (
+        await db.execute(
+            select(Job)
+            .where(
+                Job.tenant_id == user.tenant_id,
+                Job.job_type == "tasks.recon_resolution_agent",
+                Job.parameters["run_id"].astext == str(run_uuid),
+            )
+            .order_by(Job.started_at.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    agent_job = None
+    if agent_job_row is not None:
+        result_summary = agent_job_row.result_summary or {}
+        agent_job = AgentJobStatus(
+            status=agent_job_row.status,
+            processed=result_summary.get("processed", 0),
+            total=result_summary.get("total", 0),
+        )
+
     return ResolutionSummaryResponse(
         run_id=run_id,
         total_results=total_results,
@@ -916,6 +903,7 @@ async def get_resolution_summary(
         guard_skipped_count=guard_skipped_count,
         variance_by_root_cause=variance_by_root_cause,
         groups=groups,
+        agent_job=agent_job,
     )
 
 
@@ -974,134 +962,21 @@ async def approve_resolution_group(
     (included_above_materiality_ids). carry_forward groups flip results to
     'carried_forward'; every other approvable action flips to 'approved'.
     needs_human groups are never group-approvable.
+
+    Thin wrapper: the entire behavior lives in
+    ``app.services.reconciliation.group_actions.approve_group_core`` so the
+    chat `recon.approve_group` tool can share the exact same code path.
     """
-    await _ensure_resolution_ui_enabled(db, user.tenant_id)
-    root_cause, action, vehicle = _parse_group_key(group_key)
-    if action == "needs_human":
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="needs_human groups must be resolved individually",
-        )
-    run = await _get_run_or_404(db, user.tenant_id, run_id)
-    _ensure_run_open(run)
-
-    now = datetime.now(timezone.utc)
-    correlation_id = str(uuid.uuid4())
-    P = ReconResolutionProposal
-    included = {_parse_uuid(i) for i in request.included_above_materiality_ids}
-    excluded = {_parse_uuid(i) for i in request.excluded_ids}
-
-    group_filter = (
-        P.run_id == run.id,
-        P.tenant_id == user.tenant_id,
-        P.root_cause == root_cause,
-        P.action == action,
-        P.booking_vehicle == vehicle,
-    )
-    # A group_key alone can now span more than one currency (multi-currency runs
-    # render one card per currency) — scope to just this currency when the
-    # caller sends one; omitted matches every currency (back-compat).
-    if request.currency:
-        group_filter = (*group_filter, P.currency == request.currency)
-    eligibility = (
-        or_(P.above_materiality.is_(False), P.id.in_(included)) if included else P.above_materiality.is_(False)
-    )
-    # Build the where-clause list conditionally rather than pass
-    # `P.id.notin_(set())` unconditionally — an empty NOT IN renders as a
-    # vacuous/NULL-poisoned predicate on some dialects.
-    exclusion_clause = [P.id.notin_(excluded)] if excluded else []
-    # A result can go terminal independently of this proposal (e.g. locked via
-    # the classic per-result approve path) while its proposal row is still
-    # 'proposed'. Skip those instead of flipping the proposal — otherwise the
-    # proposal is marked approved + per-line audited for a result this
-    # group-approve never actually touched.
-    not_terminal_result = ~exists().where(
-        ReconciliationResult.id == P.result_id,
-        ReconciliationResult.tenant_id == user.tenant_id,
-        ReconciliationResult.status.in_(TERMINAL_RESULT_STATUSES),
-    )
-
-    upd = (
-        update(P)
-        .where(
-            *group_filter,
-            P.status == "proposed",
-            eligibility,
-            *exclusion_clause,
-            not_terminal_result,
-        )
-        .values(status="approved", decided_by=user.id, decided_at=now, correlation_id=correlation_id)
-        .returning(P.id)
-    )
-    approved_ids = (await db.execute(upd)).scalars().all()
-
-    total_in_group = (
-        await db.execute(select(func.count(P.id)).where(*group_filter, P.status.notin_(("superseded", "rejected"))))
-    ).scalar_one()
-    skipped_count = total_in_group - len(approved_ids)
-
-    # Flip the underlying results (never terminal rows). Scoped via a correlated
-    # subquery on this batch's correlation_id rather than a Python id list — at
-    # Framework scale (>32,767 approved rows) an `IN (<python list>)` blows the
-    # asyncpg bind-parameter limit; the freshly-approved proposals already carry
-    # this batch's unique correlation_id, so the subquery re-derives the same set.
-    if approved_ids:
-        result_status = "carried_forward" if action == "carry_forward" else "approved"
-        values = {"status": result_status}
-        if result_status == "approved":
-            values.update(approved_by=user.id, approved_at=now)
-        approved_result_ids = select(P.result_id).where(
-            P.tenant_id == user.tenant_id,
-            P.correlation_id == correlation_id,
-            P.status == "approved",
-        )
-        await db.execute(
-            update(ReconciliationResult)
-            .where(
-                ReconciliationResult.id.in_(approved_result_ids),
-                ReconciliationResult.tenant_id == user.tenant_id,
-                ReconciliationResult.status.notin_(TERMINAL_RESULT_STATUSES),
-            )
-            .values(**values)
-            .execution_options(synchronize_session=False)
-        )
-
-    if approved_ids:
-        await db.execute(
-            insert(AuditEvent),
-            [
-                {
-                    "tenant_id": user.tenant_id,
-                    "actor_id": user.id,
-                    "actor_type": "user",
-                    "category": "reconciliation",
-                    "action": "recon.resolution.approve",
-                    "resource_type": "recon_resolution_proposal",
-                    "resource_id": str(pid),
-                    "correlation_id": correlation_id,
-                    "status": "success",
-                }
-                for pid in approved_ids
-            ],
-        )
-    await audit_service.log_event(
-        db=db,
+    return await approve_group_core(
+        db,
         tenant_id=user.tenant_id,
-        category="reconciliation",
-        action="recon.resolution.bulk_approve",
         actor_id=user.id,
-        resource_type="reconciliation_run",
-        resource_id=run_id,
-        correlation_id=correlation_id,
-        payload={"group_key": group_key, "approved_count": len(approved_ids), "notes": request.notes},
-    )
-    await db.commit()
-    return ResolutionGroupApproveResult(
         run_id=run_id,
         group_key=group_key,
-        approved_count=len(approved_ids),
-        skipped_count=skipped_count,
-        correlation_id=correlation_id,
+        notes=request.notes,
+        included_above_materiality_ids=request.included_above_materiality_ids,
+        excluded_ids=request.excluded_ids,
+        currency=request.currency,
     )
 
 

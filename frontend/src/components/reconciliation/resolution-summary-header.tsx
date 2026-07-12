@@ -1,6 +1,6 @@
 "use client";
 
-import { CheckCircle2, Lightbulb, DollarSign } from "lucide-react";
+import { CheckCircle2, Lightbulb, DollarSign, Loader2 } from "lucide-react";
 import type { ReconResolutionSummary } from "@/lib/types";
 
 interface ResolutionSummaryHeaderProps {
@@ -71,6 +71,14 @@ export function ResolutionSummaryHeader({ summary }: ResolutionSummaryHeaderProp
   );
   return (
     <div className="space-y-3">
+      {summary.agent_job?.status === "running" && (
+        <div className="inline-flex items-center gap-1.5 rounded-full border bg-card px-3 py-1 text-[13px] text-muted-foreground">
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          <span>
+            Agent investigating… {summary.agent_job.processed}/{summary.agent_job.total}
+          </span>
+        </div>
+      )}
       <div className="grid grid-cols-3 gap-4">
         {cards.map(({ label, value, sub, icon: Icon, color, bg }) => (
           <div key={label} className="rounded-xl border bg-card p-5 shadow-soft">

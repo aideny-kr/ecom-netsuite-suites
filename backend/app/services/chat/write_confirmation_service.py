@@ -127,6 +127,56 @@ def build_confirmation_payload(
     )
 
 
+def build_recon_group_confirmation(
+    tool_input: dict[str, Any],
+    session_id: str,
+) -> WriteConfirmationPayload:
+    """Build a ``WriteConfirmationPayload`` for a pending ``recon.approve_group``
+    bulk-approve (Phase 2 chat tool).
+
+    Unlike ``build_confirmation_payload``, this bypasses the NetSuite
+    ``is_record_type_allowed`` record-type allowlist entirely — a resolution
+    group is not a NetSuite record type, so that gate would always deny it.
+    Reuses ``generate_confirmation_token`` with the DEFAULT ``event_type``
+    (``"write_confirm"``) so the orchestrator's existing
+    ``validate_and_extract_confirmation`` approve path (chat runs API) works
+    completely unchanged for this new tool.
+
+    Parameters
+    ----------
+    tool_input:
+        The raw ``recon_approve_group`` tool-use input from the LLM
+        (``run_id``, ``group_key``, optional ``currency``/``notes``).
+    session_id:
+        The current chat session ID — bound into the HMAC token.
+    """
+    group_key = tool_input.get("group_key", "")
+    currency = tool_input.get("currency")
+    notes = tool_input.get("notes")
+
+    proposed_fields: dict[str, Any] = {
+        "group": group_key,
+        "currency": currency,
+        "notes": notes,
+        # Item count is unknown at card-build time (no DB lookup here) —
+        # omit rather than guess/fabricate a number the user would see.
+    }
+
+    payload_json = _build_payload_json("recon.approve_group", tool_input)
+    confirmation_token = generate_confirmation_token(session_id, payload_json)
+
+    return WriteConfirmationPayload(
+        mutation_type="update",
+        record_type="reconciliation group",
+        record_id=group_key or None,
+        proposed_fields=proposed_fields,
+        current_record=None,
+        tool_name="recon.approve_group",
+        tool_input=tool_input,
+        confirmation_token=confirmation_token,
+    )
+
+
 def validate_and_extract_confirmation(
     structured_output: dict[str, Any],
     session_id: str,

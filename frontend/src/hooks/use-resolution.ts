@@ -15,6 +15,8 @@ export function useResolutionSummary(runId: string | null) {
         `/api/v1/reconciliation/runs/${runId}/resolution-summary`
       ),
     enabled: !!runId,
+    refetchInterval: (query) =>
+      query.state.data?.agent_job?.status === "running" ? 5000 : false,
   });
 }
 

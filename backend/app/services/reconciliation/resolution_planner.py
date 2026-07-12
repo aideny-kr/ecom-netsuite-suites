@@ -7,8 +7,8 @@ the async orchestrator (plan_run, below in this module) owns the DB.
 Ordered rules (first match wins; spec mapping table):
   1. already posted in a prior run (guard)      → skip
   2. clean deterministic match, zero variance   → skip (never reaches proposals)
-  3. evidence: matched deposit unapplied        → apply_deposit
-  4. chargeback / refund-shaped                 → needs_human (policy gate)
+  3. chargeback / refund-shaped                 → needs_human (policy gate)
+  4. evidence: matched deposit unapplied        → apply_deposit
   5. duplicate                                  → void_duplicate
   6. fees                                       → book_fee_line
   7. missing + order ref known                  → create_and_apply_deposit
@@ -111,21 +111,23 @@ def plan_result(
     # 2. clean match — nothing to resolve
     if match_type == "deterministic" and variance_type is None and variance_amount == Decimal("0"):
         return None
-    # 3. evidence-based rules BEFORE variance-type dispatch
-    if evidence.get("deposit_unapplied") is True and netsuite_amount is not None:
-        return _mk(
-            root,
-            ACTION_APPLY_DEPOSIT,
-            f"Deposit exists but is unapplied — apply it to the linked order.{explain}",
-            abs_variance,
-            above,
-        )
-    # 4. policy gate: never auto-propose a booking for a chargeback
+    # 3. policy gate: never auto-propose a booking for a chargeback (beats
+    #    evidence rules — a chargeback is never auto-applied regardless of
+    #    what the evidence dict says)
     if variance_type == "chargeback":
         return _mk(
             "chargeback",
             ACTION_NEEDS_HUMAN,
             f"Chargeback/dispute — requires human review before any booking.{explain}",
+            abs_variance,
+            above,
+        )
+    # 4. evidence-based rules BEFORE variance-type dispatch
+    if evidence.get("deposit_unapplied") is True and netsuite_amount is not None:
+        return _mk(
+            root,
+            ACTION_APPLY_DEPOSIT,
+            f"Deposit exists but is unapplied — apply it to the linked order.{explain}",
             abs_variance,
             above,
         )

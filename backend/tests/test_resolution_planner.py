@@ -1,7 +1,8 @@
 """ResolutionPlanner rule engine — exhaustive over the spec's ordered rules.
 
 Spec: docs/superpowers/specs/2026-07-06-recon-summary-first-resolution-design.md
-(mapping table, rules 1-10; first match wins; evidence rules before variance dispatch).
+(mapping table, rules 1-10; first match wins; policy gates (chargeback) beat
+evidence rules (deposit_unapplied), which beat variance-type dispatch).
 """
 
 from decimal import Decimal
@@ -40,7 +41,13 @@ def test_rule2_clean_match_skips():
     assert _plan() is None  # deterministic + zero variance never reaches a proposal
 
 
-def test_rule3_unapplied_deposit_evidence_wins_over_variance_dispatch():
+def test_rule3_chargeback_policy_gate():
+    p = _plan(variance_type="chargeback", variance_amount=Decimal("42.00"))
+    assert p.action == "needs_human"
+    assert p.booking_vehicle == "none"
+
+
+def test_rule4_unapplied_deposit_evidence_wins_over_variance_dispatch():
     p = _plan(
         variance_type="fees",
         variance_amount=Decimal("3.20"),
@@ -48,12 +55,6 @@ def test_rule3_unapplied_deposit_evidence_wins_over_variance_dispatch():
     )
     assert p.action == "apply_deposit"
     assert p.booking_vehicle == "depositapplication"
-
-
-def test_rule4_chargeback_policy_gate():
-    p = _plan(variance_type="chargeback", variance_amount=Decimal("42.00"))
-    assert p.action == "needs_human"
-    assert p.booking_vehicle == "none"
 
 
 def test_rule5_duplicate_voids():
@@ -139,3 +140,15 @@ def test_narrative_embeds_explanation_and_no_invented_numbers():
 def test_group_key_derived_from_columns():
     assert group_key_for("fees", "book_fee_line", "deposit") == "fees:book_fee_line:deposit"
     assert VEHICLE_BY_ACTION["carry_forward"] == "none"
+
+
+def test_chargeback_gate_preempts_unapplied_evidence():
+    """Policy gates beat evidence rules: a chargeback with deposit_unapplied
+    evidence must still go to needs_human, never apply_deposit."""
+    p = _plan(
+        variance_type="chargeback",
+        variance_amount=Decimal("42.00"),
+        evidence={"charge_source_id": "ch_1", "order_reference": "R1", "deposit_unapplied": True},
+    )
+    assert p.action == "needs_human"
+    assert p.root_cause == "chargeback"

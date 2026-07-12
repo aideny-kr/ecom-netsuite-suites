@@ -30,4 +30,18 @@ describe("ResolutionSummaryHeader", () => {
     render(<ResolutionSummaryHeader summary={null} />);
     expect(screen.getByText(/no reconciliation run selected/i)).toBeInTheDocument();
   });
+
+  it("renders the agent progress badge while the agent job is running", () => {
+    render(
+      <ResolutionSummaryHeader
+        summary={{ ...summary, agent_job: { status: "running", processed: 3, total: 10 } }}
+      />
+    );
+    expect(screen.getByText(/agent investigating.*3\/10/i)).toBeInTheDocument();
+  });
+
+  it("does not render the agent badge when there is no agent job", () => {
+    render(<ResolutionSummaryHeader summary={summary} />);
+    expect(screen.queryByText(/agent investigating/i)).not.toBeInTheDocument();
+  });
 });

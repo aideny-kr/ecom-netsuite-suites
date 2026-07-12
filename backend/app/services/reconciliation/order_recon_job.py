@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import date, timedelta
 from decimal import Decimal
@@ -33,6 +34,7 @@ from app.services.reconciliation.order_ref import (
     extract_order_ref,
     load_order_ref_pattern,
 )
+from app.workers.tasks.recon_resolution_agent import dispatch_resolution_agent
 
 logger = structlog.get_logger()
 
@@ -148,6 +150,18 @@ class OrderReconJob:
                 # recon_resolution_proposals table.
                 await set_tenant_context(self.db, self.tenant_id)
                 await plan_run(self.db, self.tenant_id, run_id)
+
+                # Phase 2: dispatch the ResolutionAgent tail right after a
+                # successful plan — fire-and-forget, flag-gated (reconciliation
+                # AND recon_resolution_agent, both default OFF for the agent).
+                from app.services.feature_flag_service import is_enabled
+
+                if await is_enabled(self.db, self.tenant_id, "reconciliation") and await is_enabled(
+                    self.db, self.tenant_id, "recon_resolution_agent"
+                ):
+                    # Off the event loop, same as the plan-resolutions endpoint's
+                    # dispatch — send_task does blocking I/O (broker connection).
+                    await asyncio.to_thread(dispatch_resolution_agent, str(self.tenant_id), str(run_id))
             except Exception:
                 await self.db.rollback()
                 logger.exception("resolution_planning_failed", run_id=str(run_id))

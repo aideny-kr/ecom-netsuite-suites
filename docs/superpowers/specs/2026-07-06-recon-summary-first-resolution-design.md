@@ -96,6 +96,61 @@ failures degrade to `needs_human` with partial evidence. **All amounts in narrat
 tool-computed evidence fields, never model prose** (no-LLM-numbers rule); contract tests enforce
 this. The agent writes proposals, never postings.
 
+### Phase 2 addendum — as implemented (closes ticket 86bavax8u item 1)
+
+The design above sketched a multi-hop, tool-using investigator (SuiteQL, Stripe payout
+lookups). What shipped in Phase 2 is deliberately narrower:
+
+- **Single forced-tool classification call, not multi-hop investigation.** Context is
+  gathered deterministically and read-only, code-side, BEFORE the model ever runs: the
+  result row + its evidence + up to 5 candidate `NetsuitePosting` rows (amount within ±5%
+  of the Stripe amount, or memo matching the order reference) + the payout line detail when
+  a `charge_payout_line_id` is present (`gather_context`,
+  `backend/app/services/reconciliation/resolution_agent.py`). The model then makes exactly
+  ONE tool-forced call (`tool_choice={"type": "tool", "name": "classify_resolution"}`,
+  `max_tokens=1024`, 45s per-item timeout) to classify — it never calls SuiteQL, Stripe, or
+  any other tool itself. This trades a deferred capability (the model directing its own
+  follow-up queries) for a much smaller trust boundary: every value the model can possibly
+  cite already passed through a code-side gather step, so the no-LLM-numbers narrative
+  contract (`narrative_contract.narrative_respects_evidence`) can validate against a known,
+  bounded value set. Genuine multi-hop investigation (the model deciding what to look up
+  next) is deferred to **Phase 2.5** as a follow-up, not dropped — see "Out of scope"
+  addendum below.
+- **`recon_resolution_agent` flag, default OFF.** Registered in
+  `feature_flag_service.DEFAULT_FLAGS`. Agent dispatch (both the post-plan hook in
+  `OrderReconJob` and the `plan_resolutions` endpoint) requires it AND the base
+  `reconciliation` flag. Independent of `recon_resolution_ui` (the UI-surface flag gating
+  group-approve mutations), which the agent's own writes never touch directly — the agent
+  only ever supersedes-and-inserts proposal rows; a human still approves through the
+  UI-flag-gated `approve_group_core`.
+- **Agent action allowlist**: `book_fee_line`, `create_and_apply_deposit`, `apply_deposit`,
+  `writeoff_je` (sub-materiality only — the code-side materiality guard degrades an
+  above-materiality `writeoff_je` output to `needs_human`), `carry_forward`, `needs_human`.
+  `credit_memo_refund` and `void_duplicate` are permanently excluded — human-only policy,
+  enforced code-side (`AGENT_ALLOWED_ACTIONS`), not by prompting the model to avoid them.
+  Any output outside the allowlist, or any narrative citing a number not present verbatim in
+  the gathered context, degrades to `needs_human` with a `contract_violation` note for audit
+  (`validate_output`).
+- **Chargeback-precedence resolution (Task 1, ticket 86bavax8u item 1):** the planner's
+  policy gate for chargebacks (rule 3: never auto-propose a booking for a chargeback,
+  regardless of what the evidence dict says) now runs BEFORE the `deposit_unapplied`
+  evidence rule (renumbered rule 4). Previously a chargeback with `deposit_unapplied: true`
+  evidence hit the evidence rule first and got proposed as `apply_deposit` — a policy gate
+  must always beat an evidence rule, never the reverse. The agent inherits this precedence
+  unchanged: a chargeback-rooted `needs_human` row is agent-eligible (planner/needs_human/
+  proposed matches the eligibility predicate) and the agent DOES gather context and make a
+  classification call for it, but the allowlist has no chargeback-specific override — the
+  agent's own classification (informed by the same policy framing in its system prompt) is
+  expected to keep returning `needs_human`, now with an agent-enriched narrative instead of
+  the planner's generic one. This is a real supersede (planner row → superseded, new
+  agent-sourced `needs_human` row inserted), not a skip — the row is still one investigation
+  cycle richer even when the action doesn't change.
+- **Deferred to Phase 2.5:** genuine multi-hop investigation (the model requesting
+  additional SuiteQL/Stripe lookups mid-classification rather than receiving everything
+  pre-gathered), and any agent-driven auto-approval (out of scope for all of Phase 2 —
+  the agent only ever proposes; every action still requires a human `approve_group_core`
+  call, whether via the recon page, `recon.approve_group` chat tool, or REST).
+
 ## Variance → action → NetSuite record mapping
 
 Ordered planner rules (first match wins). "Vehicle" is the canonical `booking_vehicle` used in
