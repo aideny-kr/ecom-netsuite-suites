@@ -8,10 +8,11 @@ execution dispatcher that routes calls to the appropriate backend.
 from __future__ import annotations
 
 import json
-import logging
 import time
 import uuid
 from typing import TYPE_CHECKING
+
+import structlog
 
 from app.mcp.registry import TOOL_REGISTRY
 from app.mcp.server import mcp_server
@@ -20,7 +21,11 @@ from app.services.chat.nodes import ALLOWED_CHAT_TOOLS
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
-logger = logging.getLogger(__name__)
+# structlog, NOT logging.getLogger: the kwargs-style calls below crash a stdlib
+# logger with TypeError wherever INFO is enabled — silently fine under uvicorn
+# (WARNING default) but fatal in the celery worker (root hijacked to INFO),
+# which broke every worker-side tool dispatch (report auto-refresh).
+logger = structlog.get_logger(__name__)
 
 # Max length for Anthropic tool names (alphanumeric + underscores)
 _MAX_TOOL_NAME_LEN = 64
