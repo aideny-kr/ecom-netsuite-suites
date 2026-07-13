@@ -233,6 +233,19 @@ async def test_source_error_fails_whole_refresh_and_never_corrupts_current(db, m
     assert audit == 1
 
 
+async def test_source_error_key_reaches_refresh_detail(db, monkeypatch):
+    """Local tools (e.g. netsuite_financial_report) fail with
+    {"success": False, "error": "<real reason>"} — no message/detail keys.
+    The reason must reach RefreshError.detail (and thus the failure audit row),
+    not be dropped into a bare "source rN failed"."""
+    tenant, user, report = await _seed_report(db, recipe=_recipe())
+    _patch_executor(monkeypatch, json.dumps({"success": False, "error": "No active NetSuite connection found"}))
+    with pytest.raises(RefreshError) as exc:
+        await refresh_report(db, report_id=report.id, tenant_id=tenant.id, actor_id=user.id)
+    assert exc.value.status_code == 502
+    assert "No active NetSuite connection found" in exc.value.detail
+
+
 async def test_unextractable_source_result_fails_502(db, monkeypatch):
     tenant, user, report = await _seed_report(db, recipe=_recipe())
     _patch_executor(monkeypatch, json.dumps({"success": True}))  # parseable but no data shape

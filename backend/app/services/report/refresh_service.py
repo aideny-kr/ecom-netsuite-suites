@@ -178,7 +178,15 @@ async def _execute_sources(
         except (json.JSONDecodeError, TypeError):
             raise RefreshError(502, f"source {rid} ({tool}) returned an unreadable result") from None
         if isinstance(parsed, dict) and (parsed.get("error") or parsed.get("success") is False):
-            message = str(parsed.get("message") or parsed.get("detail") or parsed.get("error_message") or "")
+            # "error" is last: it doubles as a boolean flag in some tool shapes,
+            # so only a *string* error carries a human-readable reason.
+            error_val = parsed.get("error")
+            message = str(
+                parsed.get("message")
+                or parsed.get("detail")
+                or parsed.get("error_message")
+                or (error_val if isinstance(error_val, str) else "")
+            )
             raise RefreshError(502, f"source {rid} ({tool}) failed{': ' + message[:200] if message else ''}")
         payload = extract_result_payload(tool, params, result_str)
         if payload is None:
