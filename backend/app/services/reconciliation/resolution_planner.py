@@ -7,17 +7,26 @@ the async orchestrator (plan_run, below in this module) owns the DB.
 Ordered rules (first match wins; spec mapping table):
   1. already posted in a prior run (guard)      → skip
   2. clean deterministic match, zero variance   → skip (never reaches proposals)
+ 2b. zero-variance fuzzy match                  → skip (approve-the-match; no proposal noise)
   3. chargeback / refund-shaped                 → needs_human (policy gate)
   4. evidence: matched deposit unapplied        → apply_deposit
   5. duplicate                                  → void_duplicate
   6. fees                                       → book_fee_line
-  7. missing + order ref known                  → create_and_apply_deposit
-  8. fx_rounding: ≤ materiality → writeoff_je; above → needs_human
+  7. missing / missing_in_netsuite:
+       recent payout (<= RECENT_PAYOUT_LAG_DAYS) → carry_forward (sync-lag timing item)
+       else + order ref known                    → create_and_apply_deposit
+       else                                       → needs_human
+ 7b. amount_mismatch:
+       fee-explained (within FEE_EXPLAIN_TOLERANCE of fee_amount) → book_fee_line
+       else                                                        → delegates to rule 8 semantics
+  8. fx_rounding (and amount_mismatch fallback): ≤ materiality → writeoff_je; above → needs_human
   9. timing                                     → carry_forward (no booking, ever)
  10. anything else (manual_adjustment, unknown) → needs_human
 
 Materiality NEVER changes action selection except writeoff_je eligibility
-(rule 8); it only sets above_materiality, which gates one-click bulk approval.
+(rules 8/7b-fallback); it only sets above_materiality, which gates one-click
+bulk approval. `root_cause` on every path is always the raw `variance_type`
+string (group keys stay honest to source data).
 """
 
 from __future__ import annotations
@@ -26,6 +35,11 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from app.services.reconciliation.four_bucket_classifier import is_material
+
+# Mirrors the payout classifier's fee-match tolerance and the sync-lag window
+# used to decide whether a "missing" counterpart is likely still in transit.
+FEE_EXPLAIN_TOLERANCE = Decimal("0.50")
+RECENT_PAYOUT_LAG_DAYS = 7
 
 ACTION_BOOK_FEE_LINE = "book_fee_line"
 ACTION_CREATE_AND_APPLY = "create_and_apply_deposit"
@@ -84,6 +98,28 @@ def _mk(
     )
 
 
+def _fx_rounding_split(root_cause: str, abs_variance: Decimal, above: bool, explain: str) -> PlannedProposal:
+    """Shared materiality-split body for rule 8 (fx_rounding) and the rule 7b
+    (amount_mismatch) fallback when no fee evidence explains the variance.
+    Behavior for real fx_rounding rows is unchanged (existing tests prove it).
+    """
+    if not above:
+        return _mk(
+            root_cause,
+            ACTION_WRITEOFF_JE,
+            f"Sub-materiality FX/rounding difference — aggregate write-off journal.{explain}",
+            abs_variance,
+            above,
+        )
+    return _mk(
+        root_cause,
+        ACTION_NEEDS_HUMAN,
+        f"FX/rounding variance above materiality — needs investigation.{explain}",
+        abs_variance,
+        above,
+    )
+
+
 def plan_result(
     *,
     match_type: str,
@@ -97,8 +133,10 @@ def plan_result(
     already_posted: bool,
     materiality_abs: Decimal,
     materiality_pct: Decimal,
+    fee_amount: Decimal | None = None,
+    days_since_payout: int | None = None,
 ) -> PlannedProposal | None:
-    """Total, pure. Returns None only for rules 1-2 (skips)."""
+    """Total, pure. Returns None only for rules 1-2/2b (skips)."""
     evidence = evidence or {}
     abs_variance = abs(variance_amount)
     above = is_material(variance_amount, stripe_amount, materiality_abs, materiality_pct)
@@ -110,6 +148,11 @@ def plan_result(
         return None
     # 2. clean match — nothing to resolve
     if match_type == "deterministic" and variance_type is None and variance_amount == Decimal("0"):
+        return None
+    # 2b. zero-variance fuzzy match — approve-the-match case, not a proposal;
+    #     the classic rules-bucket bulk approve covers it (removes the
+    #     manual_adjustment amt=0.00 noise group observed live).
+    if match_type == "fuzzy" and variance_amount == Decimal("0") and variance_type in (None, ""):
         return None
     # 3. policy gate: never auto-propose a booking for a chargeback (beats
     #    evidence rules — a chargeback is never auto-applied regardless of
@@ -149,40 +192,50 @@ def plan_result(
             abs_variance,
             above,
         )
-    # 7. missing counterpart
-    if variance_type == "missing":
+    # 7. missing counterpart (order engine emits "missing_in_netsuite"; legacy
+    #    rows may still carry the plain "missing" string — both route the same)
+    if variance_type in ("missing", "missing_in_netsuite"):
+        if days_since_payout is not None and days_since_payout <= RECENT_PAYOUT_LAG_DAYS:
+            return _mk(
+                variance_type,
+                ACTION_CARRY_FORWARD,
+                "Charge settled recently — NetSuite deposit likely not yet synced; carry forward as a timing item."
+                f"{explain}",
+                abs_variance,
+                above,
+            )
         if evidence.get("order_reference"):
             return _mk(
-                "missing",
+                variance_type,
                 ACTION_CREATE_AND_APPLY,
                 f"Charge has no NetSuite deposit — create a customer deposit and apply it to the order.{explain}",
                 stripe_amount if stripe_amount is not None else abs_variance,
                 above,
             )
         return _mk(
-            "missing",
+            variance_type,
             ACTION_NEEDS_HUMAN,
             f"Charge has no NetSuite deposit and no order reference — needs investigation.{explain}",
             abs_variance,
             above,
         )
-    # 8. fx/rounding: sub-materiality write-off (flagged JE fallback); material → human
-    if variance_type == "fx_rounding":
-        if not above:
+    # 7b. amount_mismatch: fee-explained first, else fall through to the
+    #     fx_rounding materiality split (rule 8's body, unchanged for real
+    #     fx_rounding rows).
+    if variance_type == "amount_mismatch":
+        if fee_amount is not None and fee_amount > 0 and abs(abs_variance - fee_amount) <= FEE_EXPLAIN_TOLERANCE:
             return _mk(
-                "fx_rounding",
-                ACTION_WRITEOFF_JE,
-                f"Sub-materiality FX/rounding difference — aggregate write-off journal.{explain}",
+                "amount_mismatch",
+                ACTION_BOOK_FEE_LINE,
+                f"Variance matches the Stripe processing fee — book as a fee line on the payout's bank "
+                f"deposit.{explain}",
                 abs_variance,
                 above,
             )
-        return _mk(
-            "fx_rounding",
-            ACTION_NEEDS_HUMAN,
-            f"FX/rounding variance above materiality — needs investigation.{explain}",
-            abs_variance,
-            above,
-        )
+        return _fx_rounding_split("amount_mismatch", abs_variance, above, explain)
+    # 8. fx/rounding: sub-materiality write-off (flagged JE fallback); material → human
+    if variance_type == "fx_rounding":
+        return _fx_rounding_split("fx_rounding", abs_variance, above, explain)
     # 9. timing: reconciling item, never force-matched, never booked
     if variance_type == "timing":
         return _mk(
