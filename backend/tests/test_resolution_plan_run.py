@@ -1,6 +1,7 @@
 """plan_run orchestrator: supersede-then-insert, cross-run guard, audit event."""
 
 import uuid
+from datetime import date, timedelta
 from decimal import Decimal
 
 from sqlalchemy import select
@@ -8,7 +9,7 @@ from sqlalchemy import select
 from app.models.audit import AuditEvent
 from app.models.reconciliation import ReconResolutionProposal
 from app.services.reconciliation.resolution_planner import plan_run
-from tests.conftest import create_test_recon_result, create_test_recon_run
+from tests.conftest import create_test_payout_line, create_test_recon_result, create_test_recon_run
 
 
 async def _result(db, tenant_id, run_id, **over):
@@ -246,3 +247,117 @@ async def test_plan_run_emits_summary_audit_event(db, tenant_a):
     assert len(evt) == 1
     assert evt[0].actor_type == "system"
     assert evt[0].payload["planned_count"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Task 2: batched fee/recency enrichment (payout_lines/payouts lookup)
+# ---------------------------------------------------------------------------
+
+
+async def test_plan_run_enriches_fee_amount_and_emits_book_fee_line(db, tenant_a):
+    """A payout_line carrying a fee close to the variance amount must flow
+    through plan_run's batched lookup into plan_result's fee_amount arg,
+    producing book_fee_line (rule 7b) end-to-end — not needs_human."""
+    run = await create_test_recon_run(db, tenant_a.id, status="completed")
+    payout_line = await create_test_payout_line(db, tenant_a.id, fee=Decimal("3.20"))
+    await _result(
+        db,
+        tenant_a.id,
+        run.id,
+        variance_type="amount_mismatch",
+        variance_amount=Decimal("3.00"),  # within FEE_EXPLAIN_TOLERANCE (0.50) of fee 3.20
+        stripe_amount=Decimal("100.00"),
+        netsuite_amount=Decimal("97.00"),
+        evidence={
+            "charge_source_id": f"ch_{uuid.uuid4().hex[:8]}",
+            "charge_payout_line_id": str(payout_line.id),
+        },
+    )
+    await db.flush()
+
+    out = await plan_run(db, tenant_a.id, run.id)
+
+    prop = (
+        await db.execute(select(ReconResolutionProposal).where(ReconResolutionProposal.run_id == run.id))
+    ).scalar_one()
+    assert prop.action == "book_fee_line"
+    assert prop.root_cause == "amount_mismatch"
+    assert out["by_action"]["book_fee_line"] == 1
+
+
+async def test_plan_run_enriches_recent_arrival_date_and_emits_carry_forward(db, tenant_a):
+    """A payout arriving within RECENT_PAYOUT_LAG_DAYS must flow through
+    plan_run's batched lookup into plan_result's days_since_payout arg,
+    producing carry_forward for a missing_in_netsuite row instead of the
+    default create_and_apply_deposit/needs_human path."""
+    run = await create_test_recon_run(db, tenant_a.id, status="completed")
+    payout_line = await create_test_payout_line(db, tenant_a.id, arrival_date=date.today() - timedelta(days=1))
+    await _result(
+        db,
+        tenant_a.id,
+        run.id,
+        variance_type="missing_in_netsuite",
+        variance_amount=Decimal("100.00"),
+        stripe_amount=Decimal("100.00"),
+        netsuite_amount=None,
+        evidence={
+            "charge_source_id": f"ch_{uuid.uuid4().hex[:8]}",
+            "order_reference": "R123456789",
+            "charge_payout_line_id": str(payout_line.id),
+        },
+    )
+    await db.flush()
+
+    out = await plan_run(db, tenant_a.id, run.id)
+
+    prop = (
+        await db.execute(select(ReconResolutionProposal).where(ReconResolutionProposal.run_id == run.id))
+    ).scalar_one()
+    assert prop.action == "carry_forward"
+    assert out["by_action"]["carry_forward"] == 1
+
+
+async def test_plan_run_missing_payout_line_falls_back_without_crash(db, tenant_a):
+    """A charge_payout_line_id that doesn't resolve to a real payout_line
+    (malformed UUID string, or a UUID for a row that doesn't exist) must not
+    crash plan_run — fee_amount/days_since_payout both stay None and the
+    result falls back to plan_result's un-enriched behavior."""
+    run = await create_test_recon_run(db, tenant_a.id, status="completed")
+    await _result(
+        db,
+        tenant_a.id,
+        run.id,
+        variance_type="amount_mismatch",
+        variance_amount=Decimal("500.00"),  # above materiality, no fee evidence available
+        stripe_amount=Decimal("1000.00"),
+        netsuite_amount=Decimal("500.00"),
+        evidence={
+            "charge_source_id": f"ch_{uuid.uuid4().hex[:8]}",
+            "charge_payout_line_id": "not-a-uuid",
+        },
+    )
+    await _result(
+        db,
+        tenant_a.id,
+        run.id,
+        variance_type="amount_mismatch",
+        variance_amount=Decimal("500.00"),
+        stripe_amount=Decimal("1000.00"),
+        netsuite_amount=Decimal("500.00"),
+        evidence={
+            "charge_source_id": f"ch_{uuid.uuid4().hex[:8]}",
+            "charge_payout_line_id": str(uuid.uuid4()),  # well-formed but nonexistent
+        },
+    )
+    await db.flush()
+
+    out = await plan_run(db, tenant_a.id, run.id)
+
+    props = (
+        (await db.execute(select(ReconResolutionProposal).where(ReconResolutionProposal.run_id == run.id)))
+        .scalars()
+        .all()
+    )
+    assert len(props) == 2
+    assert all(p.action == "needs_human" for p in props)
+    assert out["by_action"]["needs_human"] == 2

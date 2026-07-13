@@ -257,7 +257,7 @@ def plan_result(
 
 import logging
 import uuid as _uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 from sqlalchemy import insert, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -288,6 +288,7 @@ async def plan_run(db: AsyncSession, tenant_id, run_id) -> dict:
     cleanly instead of racing the supersede/read/insert steps and hitting the
     partial unique index with a raw IntegrityError.
     """
+    from app.models.canonical import Payout, PayoutLine
     from app.models.reconciliation import (
         ACTIVE_PROPOSAL_STATUSES,
         ReconciliationResult,
@@ -374,6 +375,39 @@ async def plan_run(db: AsyncSession, tenant_id, run_id) -> dict:
         )
     ).all()
 
+    # 3b. batched payout_line fee/recency enrichment: collect the payout_line
+    #     ids referenced by evidence["charge_payout_line_id"] (uuid-parse
+    #     defensively — malformed or absent ids are simply skipped, never
+    #     crash the plan), then look them up in one tenant-scoped query per
+    #     5000-chunk (Framework-scale runs are tens of thousands of lines).
+    #     A line with no matching row (or no id at all) leaves both
+    #     fee_amount and days_since_payout as None — fully backward-compatible
+    #     with plan_result's pre-Task-2 behavior.
+    payout_line_ids: list[_uuid.UUID] = []
+    for row in rows:
+        raw_id = (row.evidence or {}).get("charge_payout_line_id")
+        if not raw_id:
+            continue
+        try:
+            payout_line_ids.append(_uuid.UUID(str(raw_id)))
+        except ValueError:
+            continue
+
+    payout_line_info: dict[_uuid.UUID, tuple[Decimal | None, date | None]] = {}
+    for i in range(0, len(payout_line_ids), _INSERT_CHUNK):
+        chunk = payout_line_ids[i : i + _INSERT_CHUNK]
+        pl_rows = (
+            await db.execute(
+                select(PayoutLine.id, PayoutLine.fee, Payout.arrival_date)
+                .outerjoin(Payout, Payout.id == PayoutLine.payout_id)
+                .where(PayoutLine.tenant_id == tid, PayoutLine.id.in_(chunk))
+            )
+        ).all()
+        for pl_id, fee, arrival_date in pl_rows:
+            payout_line_info[pl_id] = (fee, arrival_date)
+
+    today = datetime.now(timezone.utc).date()
+
     # 4. cross-run double-posting guard: of THIS run's charge ids, which are
     #    already decided or in-flight toward NetSuite anywhere in this
     #    tenant's history. 'approved'/'posting'/'post_failed' must guard too,
@@ -410,6 +444,18 @@ async def plan_run(db: AsyncSession, tenant_id, run_id) -> dict:
     for row in rows:
         evidence = row.evidence or {}
         charge_source_id = evidence.get("charge_source_id")
+        fee_amount: Decimal | None = None
+        days_since_payout: int | None = None
+        raw_pl_id = evidence.get("charge_payout_line_id")
+        if raw_pl_id:
+            try:
+                pl_uuid = _uuid.UUID(str(raw_pl_id))
+            except ValueError:
+                pl_uuid = None
+            if pl_uuid is not None and pl_uuid in payout_line_info:
+                fee_amount, arrival_date = payout_line_info[pl_uuid]
+                if arrival_date is not None:
+                    days_since_payout = (today - arrival_date).days
         planned = plan_result(
             match_type=row.match_type,
             variance_type=row.variance_type,
@@ -422,6 +468,8 @@ async def plan_run(db: AsyncSession, tenant_id, run_id) -> dict:
             already_posted=charge_source_id in decided_charge_ids if charge_source_id else False,
             materiality_abs=mat_abs,
             materiality_pct=mat_pct,
+            fee_amount=fee_amount,
+            days_since_payout=days_since_payout,
         )
         if planned is None:
             if charge_source_id in decided_charge_ids:
