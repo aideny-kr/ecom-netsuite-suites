@@ -68,6 +68,9 @@ prompts/
 .claude/skills/*
 vibe-coding-strategy.md
 
+# Hook audit log — append-only per-worktree, never shared
+.claude/audit/
+
 # Vendored Oracle SuiteCloud SDK agent skills — refresh via scripts/refresh-oracle-skills.sh
 !.claude/skills/netsuite-ai-connector-instructions/
 !.claude/skills/netsuite-owasp-secure-coding/
