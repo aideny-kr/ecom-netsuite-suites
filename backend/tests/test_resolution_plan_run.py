@@ -8,8 +8,15 @@ from sqlalchemy import select
 
 from app.models.audit import AuditEvent
 from app.models.reconciliation import ReconResolutionProposal
+from app.services.reconciliation.group_actions import approve_group_core
 from app.services.reconciliation.resolution_planner import plan_run
-from tests.conftest import create_test_payout_line, create_test_recon_result, create_test_recon_run
+from tests.conftest import (
+    create_test_payout_line,
+    create_test_recon_result,
+    create_test_recon_run,
+    create_test_user,
+    enable_feature_flag,
+)
 
 
 async def _result(db, tenant_id, run_id, **over):
@@ -130,6 +137,87 @@ async def test_plan_run_cross_run_guard_covers_approved_status(db, tenant_a):
     out = await plan_run(db, tenant_a.id, run2.id)
     assert out["skipped_guard_count"] == 1
     assert out["planned_count"] == 0
+
+
+async def test_plan_run_replans_approved_carry_forward_after_lag_window(db, tenant_a):
+    """T2 gate finding: an APPROVED carry_forward proposal must not
+    permanently suppress its charge from all future planning via the
+    cross-run decided_charge_ids guard. carry_forward is an acknowledged
+    timing item, not a commitment toward NetSuite — the guard exists to
+    prevent double-POSTING, and carry_forward never posts. A
+    missing_in_netsuite charge carried forward as sync-lag in run 1 must
+    still be re-surfaced (fresh create_and_apply_deposit) in a later run once
+    the recency window passes and the deposit still hasn't arrived."""
+    await enable_feature_flag(db, tenant_a.id, "recon_resolution_ui")
+    user, _ = await create_test_user(db, tenant_a)
+    charge_source_id = f"ch_{uuid.uuid4().hex[:8]}"
+
+    recent_line = await create_test_payout_line(db, tenant_a.id, arrival_date=date.today() - timedelta(days=1))
+    run1 = await create_test_recon_run(db, tenant_a.id, status="completed")
+    await _result(
+        db,
+        tenant_a.id,
+        run1.id,
+        variance_type="missing_in_netsuite",
+        variance_amount=Decimal("9.00"),
+        stripe_amount=Decimal("1000.00"),
+        netsuite_amount=None,
+        evidence={
+            "charge_source_id": charge_source_id,
+            "order_reference": "R1",
+            "charge_payout_line_id": str(recent_line.id),
+        },
+    )
+    await db.flush()
+    await plan_run(db, tenant_a.id, run1.id)
+
+    prop1 = (
+        await db.execute(select(ReconResolutionProposal).where(ReconResolutionProposal.run_id == run1.id))
+    ).scalar_one()
+    assert prop1.action == "carry_forward"
+
+    await approve_group_core(
+        db,
+        tenant_id=tenant_a.id,
+        actor_id=user.id,
+        run_id=str(run1.id),
+        group_key=prop1.group_key,
+        notes=None,
+        included_above_materiality_ids=[],
+        excluded_ids=[],
+        currency=None,
+    )
+    await db.refresh(prop1)
+    assert prop1.status == "approved"
+
+    # Deposit STILL hasn't arrived: same charge, a later run, days_since_payout
+    # now beyond the recency window.
+    old_line = await create_test_payout_line(db, tenant_a.id, arrival_date=date.today() - timedelta(days=30))
+    run2 = await create_test_recon_run(db, tenant_a.id, status="completed")
+    await _result(
+        db,
+        tenant_a.id,
+        run2.id,
+        variance_type="missing_in_netsuite",
+        variance_amount=Decimal("9.00"),
+        stripe_amount=Decimal("1000.00"),
+        netsuite_amount=None,
+        evidence={
+            "charge_source_id": charge_source_id,
+            "order_reference": "R1",
+            "charge_payout_line_id": str(old_line.id),
+        },
+    )
+    await db.flush()
+
+    out = await plan_run(db, tenant_a.id, run2.id)
+
+    assert out["skipped_guard_count"] == 0
+    assert out["planned_count"] == 1
+    prop2 = (
+        await db.execute(select(ReconResolutionProposal).where(ReconResolutionProposal.run_id == run2.id))
+    ).scalar_one()
+    assert prop2.action == "create_and_apply_deposit"
 
 
 async def test_plan_run_preserves_human_override_after_replan(db, tenant_a):

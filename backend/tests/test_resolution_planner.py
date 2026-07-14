@@ -302,6 +302,22 @@ def test_days_since_payout_and_fee_amount_default_none_behave_as_before():
     assert p.action == "create_and_apply_deposit"
 
 
+def test_rule4_amount_mismatch_does_not_swallow_unapplied_evidence():
+    """T2 gate finding: rule 4 (deposit_unapplied evidence) must not preempt
+    the amount_mismatch dispatch — the deposit's amount is KNOWN to be wrong,
+    so returning apply_deposit here would auto-apply a wrong-amount deposit,
+    bypassing the fee/materiality logic in rule 7b. An amount_mismatch row
+    must resolve through the mismatch dispatch first."""
+    p = _plan(
+        variance_type="amount_mismatch",
+        variance_amount=Decimal("3.20"),
+        fee_amount=Decimal("3.00"),
+        evidence={"charge_source_id": "ch_1", "order_reference": "R123456789", "deposit_unapplied": True},
+    )
+    assert p.action == "book_fee_line"
+    assert p.action != "apply_deposit"
+
+
 def test_variance_type_literal_includes_new_order_taxonomy_strings():
     from typing import get_args
 

@@ -8,7 +8,8 @@ Ordered rules (first match wins; spec mapping table):
   1. already posted in a prior run (guard)      → skip
   2. clean deterministic match, zero variance   → skip (never reaches proposals)
   3. chargeback / refund-shaped                 → needs_human (policy gate)
-  4. evidence: matched deposit unapplied        → apply_deposit
+  4. evidence: matched deposit unapplied,
+     variance_type != amount_mismatch           → apply_deposit
  4b. zero-variance fuzzy match, no evidence      → skip (approve-the-match; no proposal noise)
   5. duplicate                                  → void_duplicate
   6. fees                                       → book_fee_line
@@ -36,9 +37,11 @@ from decimal import Decimal
 
 from app.services.reconciliation.four_bucket_classifier import is_material
 
-# Mirrors the payout classifier's fee-match tolerance and the sync-lag window
-# used to decide whether a "missing" counterpart is likely still in transit.
+# Mirrors the payout classifier's fee-match tolerance.
 FEE_EXPLAIN_TOLERANCE = Decimal("0.50")
+# New operational threshold (no prior art in the codebase): NetSuite deposit
+# sync runs nightly (02:00 UTC), so 7 days is a generous in-transit window;
+# revisit against observed sync lag.
 RECENT_PAYOUT_LAG_DAYS = 7
 
 ACTION_BOOK_FEE_LINE = "book_fee_line"
@@ -157,8 +160,12 @@ def plan_result(
             abs_variance,
             above,
         )
-    # 4. evidence-based rules BEFORE variance-type dispatch
-    if evidence.get("deposit_unapplied") is True and netsuite_amount is not None:
+    # 4. evidence-based rules BEFORE variance-type dispatch. Excludes
+    #    amount_mismatch: an amount discrepancy must resolve through the
+    #    mismatch dispatch (rule 7b) first — applying a deposit whose amount
+    #    is KNOWN to be wrong is never correct, even when it also happens to
+    #    be sitting unapplied.
+    if evidence.get("deposit_unapplied") is True and netsuite_amount is not None and variance_type != "amount_mismatch":
         return _mk(
             root,
             ACTION_APPLY_DEPOSIT,
@@ -435,6 +442,11 @@ async def plan_run(db: AsyncSession, tenant_id, run_id) -> dict:
     #    (not a full tenant-history scan) so cost is proportional to this
     #    run, not tenant lifetime volume; queried in chunks to keep the
     #    IN-list bounded, using the (tenant_id, charge_source_id) index.
+    #    An APPROVED carry_forward is excluded too: it's an acknowledged
+    #    timing item, never a posting commitment, so it must not permanently
+    #    suppress a charge whose deposit never actually arrives — the next
+    #    run needs to be free to re-propose it (e.g. create_and_apply_deposit
+    #    once the recency window passes).
     charge_ids = sorted({(row.evidence or {}).get("charge_source_id") for row in rows} - {None})
     decided_charge_ids: set[str] = set()
     for i in range(0, len(charge_ids), _INSERT_CHUNK):
@@ -445,6 +457,7 @@ async def plan_run(db: AsyncSession, tenant_id, run_id) -> dict:
                     select(ReconResolutionProposal.charge_source_id).where(
                         ReconResolutionProposal.tenant_id == tid,
                         ReconResolutionProposal.status.in_(("approved", "posting", "posted", "post_failed")),
+                        ReconResolutionProposal.action != ACTION_CARRY_FORWARD,
                         ReconResolutionProposal.charge_source_id.in_(chunk),
                     )
                 )
