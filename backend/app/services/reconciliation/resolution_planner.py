@@ -15,6 +15,8 @@ Ordered rules (first match wins; spec mapping table):
   6. fees                                       → book_fee_line
   7. missing / missing_in_netsuite:
        payout failed/canceled                     → needs_human (funds never settled)
+       payout pending/in_transit AND past the
+         recency window                            → needs_human (still unsettled)
        recent payout (<= RECENT_PAYOUT_LAG_DAYS)
          AND payout healthy or unknown             → carry_forward (sync-lag timing item)
        else + order ref known                    → create_and_apply_deposit
@@ -232,6 +234,25 @@ def plan_result(
                 variance_type,
                 ACTION_NEEDS_HUMAN,
                 f"Stripe payout failed or was canceled — funds never settled; investigate.{explain}",
+                abs_variance,
+                above,
+            )
+        # Past the recency window, a payout still pending/in_transit is
+        # unsettled — Stripe hasn't confirmed the funds landed, so this must
+        # not fall through to create_and_apply_deposit (that would propose a
+        # NetSuite deposit for money that may never arrive). Checked before
+        # the recency branch below; inside the window pending/in_transit is
+        # still plausibly sync-lag and stays carry_forward via that branch.
+        if (
+            payout_status in ("pending", "in_transit")
+            and days_since_payout is not None
+            and days_since_payout > RECENT_PAYOUT_LAG_DAYS
+        ):
+            return _mk(
+                variance_type,
+                ACTION_NEEDS_HUMAN,
+                f"Stripe payout still unsettled after the sync-lag window — investigate before creating a "
+                f"deposit.{explain}",
                 abs_variance,
                 above,
             )
@@ -513,11 +534,17 @@ async def plan_run(db: AsyncSession, tenant_id, run_id) -> dict:
     #    is "deposit probably in transit — re-check next run"; the UI
     #    acknowledgment is a per-period snooze, and either the deposit
     #    arrives → no new proposal, or it escalates →
-    #    create_and_apply_deposit/needs_human). Every OTHER carry_forward
-    #    (rule-9 timing, root_cause='timing') is an ordinary standing
-    #    decision: approved ⇒ feeds this guard ⇒ suppresses, and is never
-    #    system-superseded. Cross-run 'proposed' rows for other actions may
-    #    coexist across runs — a pre-existing property, tracked separately.
+    #    create_and_apply_deposit/needs_human). This lifecycle applies
+    #    regardless of source: an agent-authored hold (source='agent',
+    #    inserted by resolution_agent.apply_agent_proposal after
+    #    investigating a needs_human abstention) is just as much a per-run
+    #    snooze as a planner-authored one, so it is superseded the same way —
+    #    only source='human' is exempt (see the supersede query below). Every
+    #    OTHER carry_forward (rule-9 timing, root_cause='timing') is an
+    #    ordinary standing decision: approved ⇒ feeds this guard ⇒
+    #    suppresses, and is never system-superseded. Cross-run 'proposed'
+    #    rows for other actions may coexist across runs — a pre-existing
+    #    property, tracked separately.
     charge_ids = sorted({(row.evidence or {}).get("charge_source_id") for row in rows} - {None})
     decided_charge_ids: set[str] = set()
     for i in range(0, len(charge_ids), _INSERT_CHUNK):

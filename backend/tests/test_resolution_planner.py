@@ -293,6 +293,51 @@ def test_rule7_unknown_payout_status_recent_charge_behaves_as_before():
     assert p.action == "carry_forward"
 
 
+def test_rule7_pending_payout_past_recency_window_needs_human():
+    """Final wave Fix 1: past the recency window, a payout still pending or
+    in_transit is unsettled — Stripe hasn't confirmed the funds landed, so
+    proposing a NetSuite deposit would book against money that may never
+    arrive. Must route to needs_human, not create_and_apply_deposit."""
+    p = _plan(
+        match_type="unmatched",
+        variance_type="missing_in_netsuite",
+        variance_amount=Decimal("100.00"),
+        netsuite_amount=None,
+        days_since_payout=8,
+        payout_status="pending",
+    )
+    assert p.action == "needs_human"
+    assert "unsettled" in p.narrative.lower()
+
+
+def test_rule7_paid_payout_past_recency_window_still_creates_deposit():
+    """Unchanged: a settled (paid) payout past the recency window still
+    proposes create_and_apply_deposit — only pending/in_transit is unsettled."""
+    p = _plan(
+        match_type="unmatched",
+        variance_type="missing_in_netsuite",
+        variance_amount=Decimal("100.00"),
+        netsuite_amount=None,
+        days_since_payout=8,
+        payout_status="paid",
+    )
+    assert p.action == "create_and_apply_deposit"
+
+
+def test_rule7_pending_payout_within_recency_window_still_carries_forward():
+    """Unchanged: inside the recency window, pending/in_transit is still
+    plausibly sync-lag — the existing healthy-status recency branch owns it."""
+    p = _plan(
+        match_type="unmatched",
+        variance_type="missing_in_netsuite",
+        variance_amount=Decimal("100.00"),
+        netsuite_amount=None,
+        days_since_payout=3,
+        payout_status="pending",
+    )
+    assert p.action == "carry_forward"
+
+
 def test_rule7b_amount_mismatch_fee_explained_books_fee_line():
     p = _plan(
         variance_type="amount_mismatch",

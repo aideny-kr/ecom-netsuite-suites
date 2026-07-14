@@ -636,6 +636,111 @@ async def test_plan_run_carry_forward_supersede_emits_per_proposal_audit(db, ten
     assert evt.payload == {"superseding_run_id": str(run2.id), "prior_run_id": str(run1.id)}
 
 
+async def test_plan_run_supersedes_agent_sourced_recency_hold(db, tenant_a):
+    """Final wave Fix 2 (pin-by-design): an agent-authored recency hold
+    (source='agent', action='carry_forward', root_cause in
+    RECENCY_HOLD_ROOT_CAUSES — as resolution_agent.apply_agent_proposal
+    inserts after investigating a needs_human abstention) shares the same
+    cross-run snooze lifecycle as a planner-authored one; it is NOT a
+    standing decision like a human override (mirrors
+    test_plan_run_carry_forward_supersede_preserves_human_override with the
+    opposite expectation — only source='human' is exempt from the supersede).
+    This test currently PASSES with no code change: the cross-run supersede
+    query only excludes source='human', so source='agent' was already
+    included. It pins that intended behavior so a future change can't
+    silently narrow the exemption to cover agent rows too."""
+    charge_source_id = f"ch_{uuid.uuid4().hex[:8]}"
+    recent_line = await create_test_payout_line(db, tenant_a.id, arrival_date=date.today() - timedelta(days=1))
+    run1 = await create_test_recon_run(db, tenant_a.id, status="completed")
+    result1 = await _result(
+        db,
+        tenant_a.id,
+        run1.id,
+        variance_type="missing_in_netsuite",
+        variance_amount=Decimal("9.00"),
+        stripe_amount=Decimal("1000.00"),
+        netsuite_amount=None,
+        evidence={
+            "charge_source_id": charge_source_id,
+            "order_reference": "R1",
+            "charge_payout_line_id": str(recent_line.id),
+        },
+    )
+    await db.flush()
+    await plan_run(db, tenant_a.id, run1.id)
+    prop1 = (
+        await db.execute(select(ReconResolutionProposal).where(ReconResolutionProposal.run_id == run1.id))
+    ).scalar_one()
+    assert prop1.action == "carry_forward"
+    # Mirrors apply_agent_proposal: supersede the planner row, insert a new
+    # active source='agent' row for the same result — the agent investigated
+    # a needs_human abstention and judged the charge still in transit.
+    prop1.status = "superseded"
+    agent_prop = ReconResolutionProposal(
+        id=uuid.uuid4(),
+        tenant_id=tenant_a.id,
+        run_id=run1.id,
+        result_id=result1.id,
+        root_cause="missing_in_netsuite",
+        action="carry_forward",
+        booking_vehicle="none",
+        group_key="missing_in_netsuite:carry_forward:none",
+        source="agent",
+        narrative="Agent investigation: payout likely still in transit.",
+        proposed_amount=prop1.proposed_amount,
+        currency=prop1.currency,
+        above_materiality=prop1.above_materiality,
+        status="approved",
+        charge_source_id=charge_source_id,
+    )
+    db.add(agent_prop)
+    await db.flush()
+
+    old_line = await create_test_payout_line(db, tenant_a.id, arrival_date=date.today() - timedelta(days=30))
+    run2 = await create_test_recon_run(db, tenant_a.id, status="completed")
+    await _result(
+        db,
+        tenant_a.id,
+        run2.id,
+        variance_type="missing_in_netsuite",
+        variance_amount=Decimal("9.00"),
+        stripe_amount=Decimal("1000.00"),
+        netsuite_amount=None,
+        evidence={
+            "charge_source_id": charge_source_id,
+            "order_reference": "R1",
+            "charge_payout_line_id": str(old_line.id),
+        },
+    )
+    await db.flush()
+
+    out = await plan_run(db, tenant_a.id, run2.id)
+
+    await db.refresh(agent_prop)
+    assert agent_prop.status == "superseded"  # NOT preserved like a human override
+    assert out["recency_holds_superseded_count"] == 1
+
+    supersede_events = (
+        (
+            await db.execute(
+                select(AuditEvent).where(
+                    AuditEvent.action == "recon.resolution.recency_hold_superseded",
+                    AuditEvent.resource_id == str(agent_prop.id),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(supersede_events) == 1
+    assert supersede_events[0].payload == {"superseding_run_id": str(run2.id), "prior_run_id": str(run1.id)}
+
+    prop2 = (
+        await db.execute(select(ReconResolutionProposal).where(ReconResolutionProposal.run_id == run2.id))
+    ).scalar_one()
+    assert prop2.action == "create_and_apply_deposit"
+
+
 async def test_plan_run_preserves_human_override_after_replan(db, tenant_a):
     """T2 gate finding: the supersede UPDATE must not flip source='human'
     override proposals — a re-plan must not discard a human decision. Mirrors
