@@ -14,11 +14,15 @@ Ordered rules (first match wins; spec mapping table):
   5. duplicate                                  → void_duplicate
   6. fees                                       → book_fee_line
   7. missing / missing_in_netsuite:
-       recent payout (<= RECENT_PAYOUT_LAG_DAYS) → carry_forward (sync-lag timing item)
+       payout failed/canceled                     → needs_human (funds never settled)
+       recent payout (<= RECENT_PAYOUT_LAG_DAYS)
+         AND payout healthy or unknown             → carry_forward (sync-lag timing item)
        else + order ref known                    → create_and_apply_deposit
        else                                       → needs_human
  7b. amount_mismatch:
-       fee-explained (within FEE_EXPLAIN_TOLERANCE of fee_amount) → book_fee_line
+       fee-explained (within FEE_EXPLAIN_TOLERANCE of fee_amount,
+         AND netsuite_amount < stripe_amount — a fee only ever lowers
+         NetSuite, never raises it)               → book_fee_line
        else                                                        → delegates to rule 8 semantics
   8. fx_rounding (and amount_mismatch fallback): ≤ materiality → writeoff_je; above → needs_human
   9. timing                                     → carry_forward (no booking, ever)
@@ -43,6 +47,11 @@ FEE_EXPLAIN_TOLERANCE = Decimal("0.50")
 # sync runs nightly (02:00 UTC), so 7 days is a generous in-transit window;
 # revisit against observed sync lag.
 RECENT_PAYOUT_LAG_DAYS = 7
+# Payout statuses under which a recent "missing" charge is plausibly just
+# in-flight sync lag. The recency branch (rule 7) also allows payout_status
+# is None (no payout row joined — enrichment couldn't determine health, so it
+# must not be treated as proof the payout died).
+HEALTHY_PAYOUT_STATUSES = frozenset({"paid", "pending", "in_transit"})
 
 ACTION_BOOK_FEE_LINE = "book_fee_line"
 ACTION_CREATE_AND_APPLY = "create_and_apply_deposit"
@@ -135,6 +144,7 @@ def plan_result(
     materiality_pct: Decimal,
     fee_amount: Decimal | None = None,
     days_since_payout: int | None = None,
+    payout_status: str | None = None,
 ) -> PlannedProposal | None:
     """Total, pure. Returns None only for rules 1-2/2b (skips)."""
     evidence = evidence or {}
@@ -179,7 +189,11 @@ def plan_result(
     #     AFTER rule 4 so a fuzzy zero-variance match that DOES carry
     #     deposit_unapplied evidence still produces apply_deposit instead of
     #     being silently dropped.
-    if match_type == "fuzzy" and variance_amount == Decimal("0") and variance_type in (None, ""):
+    # Matches four_bucket_classifier._has_variance: an empty-string
+    # variance_type still counts as "has variance" there, so this skip must
+    # not treat it as variance-free too — only variance_type is None (no
+    # variance signal at all) qualifies for the approve-the-match skip.
+    if match_type == "fuzzy" and variance_amount == Decimal("0") and variance_type is None:
         return None
     # 5. duplicates: reverse via the same record type (pre-checks at posting time)
     if variance_type == "duplicate":
@@ -202,7 +216,23 @@ def plan_result(
     # 7. missing counterpart (order engine emits "missing_in_netsuite"; legacy
     #    rows may still carry the plain "missing" string — both route the same)
     if variance_type in ("missing", "missing_in_netsuite"):
-        if days_since_payout is not None and days_since_payout <= RECENT_PAYOUT_LAG_DAYS:
+        # A failed/canceled payout never settles — funds never arrived, so
+        # this can never be sync-lag regardless of recency; check first so it
+        # preempts both the recency carry_forward and create_and_apply below
+        # (auto-creating a deposit for money that never landed would be wrong).
+        if payout_status in ("failed", "canceled"):
+            return _mk(
+                variance_type,
+                ACTION_NEEDS_HUMAN,
+                f"Stripe payout failed or was canceled — funds never settled; investigate.{explain}",
+                abs_variance,
+                above,
+            )
+        if (
+            days_since_payout is not None
+            and days_since_payout <= RECENT_PAYOUT_LAG_DAYS
+            and (payout_status is None or payout_status in HEALTHY_PAYOUT_STATUSES)
+        ):
             return _mk(
                 variance_type,
                 ACTION_CARRY_FORWARD,
@@ -230,7 +260,17 @@ def plan_result(
     #     materiality split with its own honest narrative — an amount
     #     mismatch is NOT fx/rounding, so it must not borrow that wording.
     if variance_type == "amount_mismatch":
-        if fee_amount is not None and fee_amount > 0 and abs(abs_variance - fee_amount) <= FEE_EXPLAIN_TOLERANCE:
+        if (
+            fee_amount is not None
+            and fee_amount > 0
+            and abs(abs_variance - fee_amount) <= FEE_EXPLAIN_TOLERANCE
+            # A Stripe fee can only ever make NetSuite LOWER than Stripe —
+            # never equal to or higher. Without this, a mismatch where
+            # NetSuite is too HIGH would be misexplained as a fee.
+            and stripe_amount is not None
+            and netsuite_amount is not None
+            and netsuite_amount < stripe_amount
+        ):
             return _mk(
                 "amount_mismatch",
                 ACTION_BOOK_FEE_LINE,
@@ -416,18 +456,18 @@ async def plan_run(db: AsyncSession, tenant_id, run_id) -> dict:
             continue
 
     payout_line_id_list = sorted(payout_line_ids)
-    payout_line_info: dict[_uuid.UUID, tuple[Decimal | None, date | None]] = {}
+    payout_line_info: dict[_uuid.UUID, tuple[Decimal | None, date | None, str | None]] = {}
     for i in range(0, len(payout_line_id_list), _INSERT_CHUNK):
         chunk = payout_line_id_list[i : i + _INSERT_CHUNK]
         pl_rows = (
             await db.execute(
-                select(PayoutLine.id, PayoutLine.fee, Payout.arrival_date)
+                select(PayoutLine.id, PayoutLine.fee, Payout.arrival_date, Payout.status)
                 .outerjoin(Payout, (Payout.id == PayoutLine.payout_id) & (Payout.tenant_id == tid))
                 .where(PayoutLine.tenant_id == tid, PayoutLine.id.in_(chunk))
             )
         ).all()
-        for pl_id, fee, arrival_date in pl_rows:
-            payout_line_info[pl_id] = (fee, arrival_date)
+        for pl_id, fee, arrival_date, payout_status in pl_rows:
+            payout_line_info[pl_id] = (fee, arrival_date, payout_status)
 
     today = datetime.now(timezone.utc).date()
 
@@ -475,6 +515,7 @@ async def plan_run(db: AsyncSession, tenant_id, run_id) -> dict:
         charge_source_id = evidence.get("charge_source_id")
         fee_amount: Decimal | None = None
         days_since_payout: int | None = None
+        payout_status: str | None = None
         raw_pl_id = evidence.get("charge_payout_line_id")
         if raw_pl_id:
             try:
@@ -482,7 +523,7 @@ async def plan_run(db: AsyncSession, tenant_id, run_id) -> dict:
             except ValueError:
                 pl_uuid = None
             if pl_uuid is not None and pl_uuid in payout_line_info:
-                fee_amount, arrival_date = payout_line_info[pl_uuid]
+                fee_amount, arrival_date, payout_status = payout_line_info[pl_uuid]
                 if arrival_date is not None:
                     # clamp at 0: a future-dated arrival_date (clock skew,
                     # bad data) must read as "just arrived", not a negative
@@ -502,6 +543,7 @@ async def plan_run(db: AsyncSession, tenant_id, run_id) -> dict:
             materiality_pct=mat_pct,
             fee_amount=fee_amount,
             days_since_payout=days_since_payout,
+            payout_status=payout_status,
         )
         if planned is None:
             if charge_source_id in decided_charge_ids:
@@ -533,10 +575,37 @@ async def plan_run(db: AsyncSession, tenant_id, run_id) -> dict:
     for i in range(0, len(to_insert), _INSERT_CHUNK):
         await db.execute(insert(ReconResolutionProposal), to_insert[i : i + _INSERT_CHUNK])
 
+    # carry_forward is a per-run, re-evaluable acknowledgment — when a later
+    # run re-plans a charge, prior cross-run carry_forward proposals for that
+    # charge are superseded; exactly one live proposal thread per charge. This
+    # is the other half of the decided_charge_ids carry_forward exemption
+    # above: that exemption lets a charge be re-planned instead of being
+    # permanently suppressed, and this closes the loop by retiring the old
+    # carry_forward row instead of leaving it orphaned next to the fresh one.
+    inserted_charge_ids = sorted({row["charge_source_id"] for row in to_insert if row["charge_source_id"]})
+    carry_forward_superseded_count = 0
+    for i in range(0, len(inserted_charge_ids), _INSERT_CHUNK):
+        chunk = inserted_charge_ids[i : i + _INSERT_CHUNK]
+        carry_forward_superseded_count += (
+            await db.execute(
+                update(ReconResolutionProposal)
+                .where(
+                    ReconResolutionProposal.tenant_id == tid,
+                    ReconResolutionProposal.charge_source_id.in_(chunk),
+                    ReconResolutionProposal.action == ACTION_CARRY_FORWARD,
+                    ReconResolutionProposal.status.in_(("proposed", "approved")),
+                    ReconResolutionProposal.run_id != rid,
+                )
+                .values(status="superseded")
+                .execution_options(synchronize_session=False)
+            )
+        ).rowcount
+
     summary = {
         "planned_count": len(to_insert),
         "skipped_guard_count": skipped_guard,
         "superseded_count": superseded_count,
+        "carry_forward_superseded_count": carry_forward_superseded_count,
         "by_action": by_action,
     }
     await audit_service.log_event(

@@ -423,8 +423,8 @@ and executed against Framework's real distribution (21,679 joined `amount_mismat
 | Engine `variance_type` | Routes like | Notes |
 |---|---|---|
 | `missing_in_netsuite` | `missing` (rule 7, extended) | Same three-way split as `missing`: recency guard first, then order-ref-known vs. unknown. `root_cause` stays the raw string (`missing_in_netsuite`, not folded into `missing`) — group keys stay honest to source data. |
-| `amount_mismatch` | new rule 7b, falls back to `fx_rounding`'s materiality split (rule 8) | Fee-explained evidence checked first; unexplained residue reuses rule 8's body verbatim (`_fx_rounding_split` helper) so real `fx_rounding` rows are bit-identical to before this change. |
-| zero-variance `fuzzy` match (`variance_type in (None, "")`, `variance_amount == 0`) | new rule 2b, before the variance-type dispatch | Not a proposal at all — it's an approve-the-match case already covered by the classic rules-bucket bulk approve. Emitting `needs_human`/`manual_adjustment` here was pure noise (the live `manual_adjustment amt=0.00` group). |
+| `amount_mismatch` | new rule 7b, falls back to `fx_rounding`'s materiality split (rule 8) | Fee-explained evidence checked first (and directional: only when `netsuite_amount < stripe_amount`, since a Stripe fee can only ever lower NetSuite); unexplained residue reuses rule 8's body verbatim (`_materiality_split` helper) so real `fx_rounding` rows are bit-identical to before this change. |
+| zero-variance `fuzzy` match (`variance_type is None`, `variance_amount == 0`) | new rule 2b, before the variance-type dispatch | Not a proposal at all — it's an approve-the-match case already covered by the classic rules-bucket bulk approve. Emitting `needs_human`/`manual_adjustment` here was pure noise (the live `manual_adjustment amt=0.00` group). Matches `four_bucket_classifier._has_variance`: an empty-string `variance_type` still counts as HAVING variance there, so 2b must not skip it too (gate r2 Fix D). |
 
 ### Recency guard (sync-lag timing item)
 

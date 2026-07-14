@@ -165,9 +165,14 @@ def test_rule2b_zero_variance_fuzzy_match_skips():
     assert p is None
 
 
-def test_rule2b_zero_variance_fuzzy_match_empty_string_variance_type_skips():
+def test_rule2b_empty_string_variance_type_does_not_skip():
+    """Gate r2: four_bucket_classifier._has_variance treats an empty-string
+    variance_type as HAVING variance (only None means no variance signal), so
+    the 2b skip must not swallow it — it must fall through to a real
+    disposition (needs_human, the rule-10 tail) instead of vanishing."""
     p = _plan(match_type="fuzzy", variance_type="", variance_amount=Decimal("0"))
-    assert p is None
+    assert p is not None
+    assert p.action == "needs_human"
 
 
 def test_rule2b_does_not_swallow_deposit_unapplied_evidence():
@@ -232,10 +237,67 @@ def test_rule7_missing_in_netsuite_no_order_ref_needs_human():
     assert p.action == "needs_human"
 
 
+def test_rule7_failed_payout_recent_charge_needs_human_not_carry_forward():
+    """Gate r2 Fix C: a recent charge tied to a FAILED payout must not be
+    treated as sync-lag — the payout never settled, so carry_forward would be
+    wrong regardless of how recent the (non-)arrival looks."""
+    p = _plan(
+        match_type="unmatched",
+        variance_type="missing_in_netsuite",
+        variance_amount=Decimal("100.00"),
+        netsuite_amount=None,
+        days_since_payout=1,
+        payout_status="failed",
+    )
+    assert p.action == "needs_human"
+    assert "payout failed" in p.narrative.lower()
+
+
+def test_rule7_canceled_payout_recent_charge_needs_human():
+    p = _plan(
+        match_type="unmatched",
+        variance_type="missing_in_netsuite",
+        variance_amount=Decimal("100.00"),
+        netsuite_amount=None,
+        days_since_payout=1,
+        payout_status="canceled",
+    )
+    assert p.action == "needs_human"
+
+
+def test_rule7_healthy_payout_recent_charge_carries_forward_unchanged():
+    for status in ("paid", "pending", "in_transit"):
+        p = _plan(
+            match_type="unmatched",
+            variance_type="missing_in_netsuite",
+            variance_amount=Decimal("100.00"),
+            netsuite_amount=None,
+            days_since_payout=1,
+            payout_status=status,
+        )
+        assert p.action == "carry_forward", status
+
+
+def test_rule7_unknown_payout_status_recent_charge_behaves_as_before():
+    """payout_status=None (no payout row joined — enrichment couldn't
+    determine health) must not be treated as proof the payout died; behaves
+    exactly as pre-Fix-C (recency alone decides)."""
+    p = _plan(
+        match_type="unmatched",
+        variance_type="missing_in_netsuite",
+        variance_amount=Decimal("100.00"),
+        netsuite_amount=None,
+        days_since_payout=1,
+        payout_status=None,
+    )
+    assert p.action == "carry_forward"
+
+
 def test_rule7b_amount_mismatch_fee_explained_books_fee_line():
     p = _plan(
         variance_type="amount_mismatch",
         variance_amount=Decimal("3.20"),
+        netsuite_amount=Decimal("96.80"),  # < stripe_amount (100.00) — fee lowered NetSuite
         fee_amount=Decimal("3.00"),
     )
     assert p.action == "book_fee_line"
@@ -248,10 +310,27 @@ def test_rule7b_amount_mismatch_fee_explained_ignores_materiality():
         variance_type="amount_mismatch",
         variance_amount=Decimal("60.20"),
         stripe_amount=Decimal("100.00"),
+        netsuite_amount=Decimal("39.80"),  # < stripe_amount — fee lowered NetSuite
         fee_amount=Decimal("60.00"),
     )
     assert p.action == "book_fee_line"
     assert p.above_materiality is True
+
+
+def test_rule7b_amount_mismatch_fee_proximate_but_wrong_direction_not_fee_explained():
+    """Gate r2 Fix B: a Stripe fee can only ever make NetSuite LOWER than
+    Stripe. netsuite_amount HIGHER than stripe_amount by an amount close to
+    fee_amount must NOT be misexplained as a fee — it must fall through to
+    the materiality split instead."""
+    p = _plan(
+        variance_type="amount_mismatch",
+        variance_amount=Decimal("3.00"),
+        stripe_amount=Decimal("10000.00"),  # large base so 3.00 stays sub-materiality by % too
+        netsuite_amount=Decimal("10003.00"),  # HIGHER than stripe — not fee-explainable
+        fee_amount=Decimal("3.00"),
+    )
+    assert p.action != "book_fee_line"
+    assert p.action == "writeoff_je"  # sub-materiality residual (abs 3.00 < 50, pct 0.03% < 1%)
 
 
 def test_rule7b_amount_mismatch_small_writes_off():
@@ -311,6 +390,7 @@ def test_rule4_amount_mismatch_does_not_swallow_unapplied_evidence():
     p = _plan(
         variance_type="amount_mismatch",
         variance_amount=Decimal("3.20"),
+        netsuite_amount=Decimal("96.80"),  # < stripe_amount (100.00) — fee lowered NetSuite
         fee_amount=Decimal("3.00"),
         evidence={"charge_source_id": "ch_1", "order_reference": "R123456789", "deposit_unapplied": True},
     )
