@@ -62,6 +62,13 @@ ACTION_WRITEOFF_JE = "writeoff_je"
 ACTION_CARRY_FORWARD = "carry_forward"
 ACTION_NEEDS_HUMAN = "needs_human"
 
+# RECENCY HOLDS: only the rule-7 sync-lag carry_forwards (root_cause in this
+# set) get the special cross-run lifecycle in plan_run — see the design note
+# above the cross-run guard, below. These root_cause values are structurally
+# unique to rule 7 (no other rule ever emits them), so the set alone fully
+# identifies that branch; no need to also check action there.
+RECENCY_HOLD_ROOT_CAUSES = ("missing", "missing_in_netsuite")
+
 # Canonical booking vehicle per action (multi-write actions use the primary
 # record; secondary records land in netsuite_record_refs at posting time).
 VEHICLE_BY_ACTION: dict[str, str] = {
@@ -320,7 +327,7 @@ import logging
 import uuid as _uuid
 from datetime import date, datetime, timezone
 
-from sqlalchemy import insert, select, text, update
+from sqlalchemy import insert, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
@@ -342,6 +349,14 @@ async def plan_run(db: AsyncSession, tenant_id, run_id) -> dict:
     abstains that item (needs_human path is total, so this only guards truly
     unexpected data). Planning failure must never fail the run — callers wrap
     this in try/except.
+
+    Recency holds (rule-7 sync-lag carry_forwards, root_cause in
+    RECENCY_HOLD_ROOT_CAUSES) are the one exception to the decided/re-plan
+    rule above: they never suppress a re-plan of their charge, and a fresh
+    proposal for that charge supersedes the old hold (see the design note
+    above the cross-run guard). Every other carry_forward — e.g. rule-9
+    timing — is an ordinary standing decision under the paragraph above:
+    approved ⇒ suppresses re-planning ⇒ never system-superseded.
 
     Concurrent (re-)plans of the SAME run are serialized by a transaction-scoped
     Postgres advisory lock (below) — the second caller blocks until the first
@@ -489,15 +504,20 @@ async def plan_run(db: AsyncSession, tenant_id, run_id) -> dict:
     #    (not a full tenant-history scan) so cost is proportional to this
     #    run, not tenant lifetime volume; queried in chunks to keep the
     #    IN-list bounded, using the (tenant_id, charge_source_id) index.
-    #    An APPROVED carry_forward is excluded too: it's an acknowledged
-    #    timing item, never a posting commitment, so it must not permanently
-    #    suppress a charge whose deposit never actually arrives — the next
-    #    run needs to be free to re-propose it (e.g. create_and_apply_deposit
-    #    once the recency window passes). This exemption deliberately covers
-    #    EVERY carry_forward variant — the rule-7 recency carry_forward and
-    #    the rule-9 timing carry_forward alike — since the supersede
-    #    lifecycle below applies uniformly regardless of which rule produced
-    #    the row.
+    #
+    #    RECENCY HOLDS: only the rule-7 sync-lag carry_forwards
+    #    (action='carry_forward' AND root_cause IN RECENCY_HOLD_ROOT_CAUSES —
+    #    structurally unique to that branch) have the special cross-run
+    #    lifecycle: they never feed this suppression guard, and they ARE
+    #    superseded when a later run re-plans the same charge (their meaning
+    #    is "deposit probably in transit — re-check next run"; the UI
+    #    acknowledgment is a per-period snooze, and either the deposit
+    #    arrives → no new proposal, or it escalates →
+    #    create_and_apply_deposit/needs_human). Every OTHER carry_forward
+    #    (rule-9 timing, root_cause='timing') is an ordinary standing
+    #    decision: approved ⇒ feeds this guard ⇒ suppresses, and is never
+    #    system-superseded. Cross-run 'proposed' rows for other actions may
+    #    coexist across runs — a pre-existing property, tracked separately.
     charge_ids = sorted({(row.evidence or {}).get("charge_source_id") for row in rows} - {None})
     decided_charge_ids: set[str] = set()
     for i in range(0, len(charge_ids), _INSERT_CHUNK):
@@ -508,7 +528,10 @@ async def plan_run(db: AsyncSession, tenant_id, run_id) -> dict:
                     select(ReconResolutionProposal.charge_source_id).where(
                         ReconResolutionProposal.tenant_id == tid,
                         ReconResolutionProposal.status.in_(("approved", "posting", "posted", "post_failed")),
-                        ReconResolutionProposal.action != ACTION_CARRY_FORWARD,
+                        or_(
+                            ReconResolutionProposal.action != ACTION_CARRY_FORWARD,
+                            ReconResolutionProposal.root_cause.notin_(RECENCY_HOLD_ROOT_CAUSES),
+                        ),
                         ReconResolutionProposal.charge_source_id.in_(chunk),
                     )
                 )
@@ -586,18 +609,17 @@ async def plan_run(db: AsyncSession, tenant_id, run_id) -> dict:
     for i in range(0, len(to_insert), _INSERT_CHUNK):
         await db.execute(insert(ReconResolutionProposal), to_insert[i : i + _INSERT_CHUNK])
 
-    # carry_forward is a per-run, re-evaluable acknowledgment — when a later
-    # run re-plans a charge, prior cross-run carry_forward proposals for that
-    # charge are superseded; exactly one live proposal thread per charge. This
-    # is the other half of the decided_charge_ids carry_forward exemption
-    # above: that exemption lets a charge be re-planned instead of being
-    # permanently suppressed, and this closes the loop by retiring the old
-    # carry_forward row instead of leaving it orphaned next to the fresh one.
+    # Recency holds only (see the RECENCY HOLDS design note above the
+    # cross-run guard, above): their meaning is "re-check next run", so a
+    # fresh proposal for the same charge supersedes the old hold — exactly
+    # one live recency-hold thread per charge. Timing carry_forwards
+    # (root_cause='timing') are excluded via the root_cause filter below —
+    # they are standing decisions and are never system-superseded.
     closed_run_ids = select(ReconciliationRun.id).where(
         ReconciliationRun.tenant_id == tid, ReconciliationRun.status.in_(CLOSED_RUN_STATUSES)
     )
     inserted_charge_ids = sorted({row["charge_source_id"] for row in to_insert if row["charge_source_id"]})
-    carry_forward_superseded_count = 0
+    recency_holds_superseded_count = 0
     for i in range(0, len(inserted_charge_ids), _INSERT_CHUNK):
         chunk = inserted_charge_ids[i : i + _INSERT_CHUNK]
         superseded_rows = (
@@ -607,6 +629,7 @@ async def plan_run(db: AsyncSession, tenant_id, run_id) -> dict:
                     ReconResolutionProposal.tenant_id == tid,
                     ReconResolutionProposal.charge_source_id.in_(chunk),
                     ReconResolutionProposal.action == ACTION_CARRY_FORWARD,
+                    ReconResolutionProposal.root_cause.in_(RECENCY_HOLD_ROOT_CAUSES),
                     ReconResolutionProposal.status.in_(("proposed", "approved")),
                     ReconResolutionProposal.run_id != rid,
                     # the one-live-thread invariant bends for frozen periods —
@@ -623,7 +646,7 @@ async def plan_run(db: AsyncSession, tenant_id, run_id) -> dict:
                 .execution_options(synchronize_session=False)
             )
         ).all()
-        carry_forward_superseded_count += len(superseded_rows)
+        recency_holds_superseded_count += len(superseded_rows)
         if superseded_rows:
             # Per-proposal audit (mirrors group_actions.approve_group_core's
             # per-line insert): reversing an already-acknowledged — possibly
@@ -637,7 +660,7 @@ async def plan_run(db: AsyncSession, tenant_id, run_id) -> dict:
                         "actor_id": None,
                         "actor_type": "system",
                         "category": "reconciliation",
-                        "action": "recon.resolution.carry_forward_superseded",
+                        "action": "recon.resolution.recency_hold_superseded",
                         "resource_type": "recon_resolution_proposal",
                         "resource_id": str(prop_id),
                         "correlation_id": correlation_id,
@@ -651,7 +674,7 @@ async def plan_run(db: AsyncSession, tenant_id, run_id) -> dict:
         "planned_count": len(to_insert),
         "skipped_guard_count": skipped_guard,
         "superseded_count": superseded_count,
-        "carry_forward_superseded_count": carry_forward_superseded_count,
+        "recency_holds_superseded_count": recency_holds_superseded_count,
         "by_action": by_action,
     }
     await audit_service.log_event(

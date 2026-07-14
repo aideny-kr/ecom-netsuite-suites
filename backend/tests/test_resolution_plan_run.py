@@ -140,12 +140,13 @@ async def test_plan_run_cross_run_guard_covers_approved_status(db, tenant_a):
     assert out["planned_count"] == 0
 
 
-async def test_plan_run_replans_approved_carry_forward_after_lag_window(db, tenant_a):
-    """T2 gate finding: an APPROVED carry_forward proposal must not
-    permanently suppress its charge from all future planning via the
-    cross-run decided_charge_ids guard. carry_forward is an acknowledged
-    timing item, not a commitment toward NetSuite — the guard exists to
-    prevent double-POSTING, and carry_forward never posts. A
+async def test_plan_run_replans_approved_recency_hold_after_lag_window(db, tenant_a):
+    """T2 gate finding, narrowed by Option A (recency holds): an APPROVED
+    rule-7 recency-hold carry_forward (root_cause='missing_in_netsuite') must
+    not permanently suppress its charge from all future planning via the
+    cross-run decided_charge_ids guard. A recency hold is an acknowledged
+    're-check next run' snooze, not a commitment toward NetSuite — the guard
+    exists to prevent double-POSTING, and carry_forward never posts. A
     missing_in_netsuite charge carried forward as sync-lag in run 1 must
     still be re-surfaced (fresh create_and_apply_deposit) in a later run once
     the recency window passes and the deposit still hasn't arrived."""
@@ -220,19 +221,20 @@ async def test_plan_run_replans_approved_carry_forward_after_lag_window(db, tena
     ).scalar_one()
     assert prop2.action == "create_and_apply_deposit"
 
-    # Fix A: the run-1 approved carry_forward is now superseded — exactly one
-    # live proposal thread for this charge (the fresh run-2 proposal).
+    # Fix A: the run-1 approved recency hold is now superseded — exactly one
+    # live recency-hold thread for this charge (the fresh run-2 proposal).
     await db.refresh(prop1)
     assert prop1.status == "superseded"
-    assert out["carry_forward_superseded_count"] == 1
+    assert out["recency_holds_superseded_count"] == 1
 
 
-async def test_plan_run_supersedes_cross_run_proposed_carry_forward(db, tenant_a):
-    """Fix A: carry_forward is a per-run, re-evaluable acknowledgment. A
-    prior-run carry_forward that was never approved (still 'proposed') must
-    also be superseded when a later run re-plans the same charge — the
-    supersede is keyed on action=carry_forward + charge, not on the prior
-    proposal's decision status."""
+async def test_plan_run_supersedes_cross_run_proposed_recency_hold(db, tenant_a):
+    """Fix A, narrowed by Option A: a rule-7 recency hold is a per-run,
+    re-evaluable acknowledgment. A prior-run recency hold that was never
+    approved (still 'proposed') must also be superseded when a later run
+    re-plans the same charge — the supersede is keyed on
+    action=carry_forward + root_cause IN RECENCY_HOLD_ROOT_CAUSES + charge,
+    not on the prior proposal's decision status."""
     charge_source_id = f"ch_{uuid.uuid4().hex[:8]}"
 
     recent_line = await create_test_payout_line(db, tenant_a.id, arrival_date=date.today() - timedelta(days=1))
@@ -282,7 +284,81 @@ async def test_plan_run_supersedes_cross_run_proposed_carry_forward(db, tenant_a
 
     await db.refresh(prop1)
     assert prop1.status == "superseded"
-    assert out["carry_forward_superseded_count"] == 1
+    assert out["recency_holds_superseded_count"] == 1
+
+
+async def test_plan_run_approved_timing_carry_forward_is_standing_decision(db, tenant_a):
+    """Option A (recency holds): a TIMING carry_forward (root_cause='timing',
+    rule 9) is an ordinary standing decision, unlike a rule-7 recency hold —
+    once approved it DOES feed the cross-run decided_charge_ids guard (like
+    any other approved action) and is NEVER system-superseded. Before this
+    fix the guard's blanket `action != carry_forward` exclusion covered every
+    carry_forward variant, so a timing carry_forward would incorrectly get
+    re-planned (and then swept up by the cross-run supersede) exactly like a
+    recency hold — this is the RED case that motivated narrowing the
+    exemption to root_cause IN RECENCY_HOLD_ROOT_CAUSES."""
+    await enable_feature_flag(db, tenant_a.id, "recon_resolution_ui")
+    user, _ = await create_test_user(db, tenant_a)
+    charge_source_id = f"ch_{uuid.uuid4().hex[:8]}"
+
+    run1 = await create_test_recon_run(db, tenant_a.id, status="completed")
+    await _result(
+        db,
+        tenant_a.id,
+        run1.id,
+        variance_type="timing",
+        variance_amount=Decimal("5.00"),
+        stripe_amount=Decimal("1000.00"),
+        netsuite_amount=Decimal("995.00"),
+        evidence={"charge_source_id": charge_source_id, "order_reference": "R1"},
+    )
+    await db.flush()
+    await plan_run(db, tenant_a.id, run1.id)
+
+    prop1 = (
+        await db.execute(select(ReconResolutionProposal).where(ReconResolutionProposal.run_id == run1.id))
+    ).scalar_one()
+    assert prop1.action == "carry_forward"
+    assert prop1.root_cause == "timing"
+
+    await approve_group_core(
+        db,
+        tenant_id=tenant_a.id,
+        actor_id=user.id,
+        run_id=str(run1.id),
+        group_key=prop1.group_key,
+        notes=None,
+        included_above_materiality_ids=[],
+        excluded_ids=[],
+        currency=None,
+    )
+    await db.refresh(prop1)
+    assert prop1.status == "approved"
+
+    # Same charge shows the same timing variance again in a later run.
+    run2 = await create_test_recon_run(db, tenant_a.id, status="completed")
+    await _result(
+        db,
+        tenant_a.id,
+        run2.id,
+        variance_type="timing",
+        variance_amount=Decimal("5.00"),
+        stripe_amount=Decimal("1000.00"),
+        netsuite_amount=Decimal("995.00"),
+        evidence={"charge_source_id": charge_source_id, "order_reference": "R1"},
+    )
+    await db.flush()
+
+    out = await plan_run(db, tenant_a.id, run2.id)
+
+    # Standing decision: the guard suppresses re-planning, exactly like any
+    # other approved action — no fresh proposal, no supersede.
+    assert out["skipped_guard_count"] == 1
+    assert out["planned_count"] == 0
+    assert out["recency_holds_superseded_count"] == 0
+
+    await db.refresh(prop1)
+    assert prop1.status == "approved"  # never system-superseded
 
 
 async def test_plan_run_carry_forward_supersede_does_not_touch_other_actions(db, tenant_a):
@@ -325,7 +401,7 @@ async def test_plan_run_carry_forward_supersede_does_not_touch_other_actions(db,
     assert prop1.status == "approved"  # untouched — guarded from re-planning entirely
     assert out["skipped_guard_count"] == 1
     assert out["planned_count"] == 0
-    assert out["carry_forward_superseded_count"] == 0
+    assert out["recency_holds_superseded_count"] == 0
 
 
 async def test_plan_run_carry_forward_supersede_skips_closed_run(db, tenant_a):
@@ -388,7 +464,7 @@ async def test_plan_run_carry_forward_supersede_skips_closed_run(db, tenant_a):
         await db.execute(select(ReconResolutionProposal).where(ReconResolutionProposal.run_id == run2.id))
     ).scalar_one()
     assert prop2.action == "create_and_apply_deposit"
-    assert out["carry_forward_superseded_count"] == 0
+    assert out["recency_holds_superseded_count"] == 0
 
 
 async def test_plan_run_carry_forward_supersede_preserves_human_override(db, tenant_a):
@@ -473,15 +549,15 @@ async def test_plan_run_carry_forward_supersede_preserves_human_override(db, ten
         await db.execute(select(ReconResolutionProposal).where(ReconResolutionProposal.run_id == run2.id))
     ).scalar_one()
     assert prop2.action == "create_and_apply_deposit"
-    assert out["carry_forward_superseded_count"] == 0
+    assert out["recency_holds_superseded_count"] == 0
 
 
 async def test_plan_run_carry_forward_supersede_emits_per_proposal_audit(db, tenant_a):
-    """Gate r3 Fix 3: each cross-run carry_forward supersede emits its own
-    AuditEvent (mirrors the per-line audit pattern in
+    """Gate r3 Fix 3, narrowed by Option A: each cross-run recency-hold
+    supersede emits its own AuditEvent (mirrors the per-line audit pattern in
     group_actions.approve_group_core) — reversing an acknowledged decision
     needs its own audit trail, not just the aggregate
-    carry_forward_superseded_count in the summary. The event's
+    recency_holds_superseded_count in the summary. The event's
     correlation_id links to this plan's own 'recon.resolution.planned'
     event."""
     charge_source_id = f"ch_{uuid.uuid4().hex[:8]}"
@@ -527,7 +603,7 @@ async def test_plan_run_carry_forward_supersede_emits_per_proposal_audit(db, ten
     await db.flush()
 
     out = await plan_run(db, tenant_a.id, run2.id)
-    assert out["carry_forward_superseded_count"] == 1
+    assert out["recency_holds_superseded_count"] == 1
 
     plan_event = (
         await db.execute(
@@ -542,7 +618,7 @@ async def test_plan_run_carry_forward_supersede_emits_per_proposal_audit(db, ten
         (
             await db.execute(
                 select(AuditEvent).where(
-                    AuditEvent.action == "recon.resolution.carry_forward_superseded",
+                    AuditEvent.action == "recon.resolution.recency_hold_superseded",
                     AuditEvent.resource_id == str(prop1.id),
                 )
             )

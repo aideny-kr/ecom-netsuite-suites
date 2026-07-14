@@ -438,6 +438,35 @@ is actually wrong yet). `days_since_payout` is computed in `plan_run` from the p
 `None` when no payout_line evidence resolves, which degrades to the pre-fix behavior exactly
 (no crash, no silent miscategorization).
 
+### Cross-run lifecycle: recency holds vs. standing decisions (Option A)
+
+`carry_forward` is emitted by two different rules (rule 7's recency guard above, and rule 9
+`timing`) and the two do **not** share one lifecycle across runs — narrowed from an earlier,
+over-broad implementation that treated every `carry_forward` row identically. Only the rule-7
+sync-lag rows (`action='carry_forward'` AND `root_cause` in `RECENCY_HOLD_ROOT_CAUSES` —
+`("missing", "missing_in_netsuite")`, structurally unique to that branch) are **recency holds**:
+they never feed `plan_run`'s cross-run decided-charge suppression guard, and they ARE superseded
+when a later run re-plans the same charge. Their meaning is "the deposit is probably in
+transit — re-check next run"; the UI acknowledgment (approving the group) is effectively a
+per-period snooze, not a decision, and one of two things eventually happens — the deposit
+arrives (no new proposal, the hold is simply never re-created) or the recency window passes
+(the charge escalates to `create_and_apply_deposit` or `needs_human`, and the run-1 hold is
+retired via the supersede UPDATE, audited as `recon.resolution.recency_hold_superseded`).
+
+(a) Every **other** `carry_forward` — concretely, rule 9's `timing` rows — is an ordinary
+**standing decision**, same as `book_fee_line`, `writeoff_je`, or any other action: once
+approved it feeds the cross-run guard like everything else (suppressing re-planning of that
+charge in a later run) and is never system-superseded. This corrects an earlier version of this
+design that let the recency-hold exemption cover "every carry_forward variant … uniformly" —
+that blanket exemption meant an approved timing acknowledgment could be silently discarded and
+re-planned by a later run, which is wrong: a timing difference, once acknowledged, is not
+something that resolves itself the way sync lag does.
+
+(b) Cross-run coexistence of multiple `'proposed'` rows for the same charge, across different
+actions, is a **pre-existing property** of this planner (unrelated to the recency-hold/standing
+distinction above) — it is not addressed by this narrowing and is tracked as a separate,
+already-ticketed concern, not a new gap introduced here.
+
 ### Fee-explained decomposition (`amount_mismatch`)
 
 Before falling back to the fx_rounding materiality split, rule 7b checks whether the variance
