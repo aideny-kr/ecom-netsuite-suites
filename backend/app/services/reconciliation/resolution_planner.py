@@ -39,7 +39,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import Decimal
 
-from app.services.reconciliation.four_bucket_classifier import is_material
+from app.services.reconciliation.four_bucket_classifier import CLOSED_RUN_STATUSES, is_material
 
 # Mirrors the payout classifier's fee-match tolerance.
 FEE_EXPLAIN_TOLERANCE = Decimal("0.50")
@@ -349,6 +349,7 @@ async def plan_run(db: AsyncSession, tenant_id, run_id) -> dict:
     cleanly instead of racing the supersede/read/insert steps and hitting the
     partial unique index with a raw IntegrityError.
     """
+    from app.models.audit import AuditEvent
     from app.models.canonical import Payout, PayoutLine
     from app.models.reconciliation import (
         ACTIVE_PROPOSAL_STATUSES,
@@ -379,6 +380,12 @@ async def plan_run(db: AsyncSession, tenant_id, run_id) -> dict:
     )
 
     mat_abs, mat_pct = await load_materiality(db, tid)
+
+    # Shared across this plan's own audit event AND every per-proposal
+    # cross-run carry_forward supersede audit event below — lets a reader
+    # trace "which plan superseded this old carry_forward" back to the
+    # 'recon.resolution.planned' summary event for the same run.
+    correlation_id = f"resolution-plan-{_uuid.uuid4().hex}"
 
     # 1. supersede this run's undecided PLANNER proposals (re-plan safety; the
     #    partial unique index would otherwise reject the fresh insert). Never
@@ -486,7 +493,11 @@ async def plan_run(db: AsyncSession, tenant_id, run_id) -> dict:
     #    timing item, never a posting commitment, so it must not permanently
     #    suppress a charge whose deposit never actually arrives — the next
     #    run needs to be free to re-propose it (e.g. create_and_apply_deposit
-    #    once the recency window passes).
+    #    once the recency window passes). This exemption deliberately covers
+    #    EVERY carry_forward variant — the rule-7 recency carry_forward and
+    #    the rule-9 timing carry_forward alike — since the supersede
+    #    lifecycle below applies uniformly regardless of which rule produced
+    #    the row.
     charge_ids = sorted({(row.evidence or {}).get("charge_source_id") for row in rows} - {None})
     decided_charge_ids: set[str] = set()
     for i in range(0, len(charge_ids), _INSERT_CHUNK):
@@ -582,11 +593,14 @@ async def plan_run(db: AsyncSession, tenant_id, run_id) -> dict:
     # above: that exemption lets a charge be re-planned instead of being
     # permanently suppressed, and this closes the loop by retiring the old
     # carry_forward row instead of leaving it orphaned next to the fresh one.
+    closed_run_ids = select(ReconciliationRun.id).where(
+        ReconciliationRun.tenant_id == tid, ReconciliationRun.status.in_(CLOSED_RUN_STATUSES)
+    )
     inserted_charge_ids = sorted({row["charge_source_id"] for row in to_insert if row["charge_source_id"]})
     carry_forward_superseded_count = 0
     for i in range(0, len(inserted_charge_ids), _INSERT_CHUNK):
         chunk = inserted_charge_ids[i : i + _INSERT_CHUNK]
-        carry_forward_superseded_count += (
+        superseded_rows = (
             await db.execute(
                 update(ReconResolutionProposal)
                 .where(
@@ -595,11 +609,43 @@ async def plan_run(db: AsyncSession, tenant_id, run_id) -> dict:
                     ReconResolutionProposal.action == ACTION_CARRY_FORWARD,
                     ReconResolutionProposal.status.in_(("proposed", "approved")),
                     ReconResolutionProposal.run_id != rid,
+                    # the one-live-thread invariant bends for frozen periods —
+                    # closed-period acknowledgments are immutable audit
+                    # history; the new proposal still supersedes them
+                    # *logically* by being the only live row.
+                    ReconResolutionProposal.run_id.notin_(closed_run_ids),
+                    # Never supersede a human override — it is itself the
+                    # human's decision.
+                    ReconResolutionProposal.source != "human",
                 )
                 .values(status="superseded")
+                .returning(ReconResolutionProposal.id, ReconResolutionProposal.run_id)
                 .execution_options(synchronize_session=False)
             )
-        ).rowcount
+        ).all()
+        carry_forward_superseded_count += len(superseded_rows)
+        if superseded_rows:
+            # Per-proposal audit (mirrors group_actions.approve_group_core's
+            # per-line insert): reversing an already-acknowledged — possibly
+            # already-approved — decision from a prior run needs its own
+            # audit trail, not just the aggregate count in the summary.
+            await db.execute(
+                insert(AuditEvent),
+                [
+                    {
+                        "tenant_id": tid,
+                        "actor_id": None,
+                        "actor_type": "system",
+                        "category": "reconciliation",
+                        "action": "recon.resolution.carry_forward_superseded",
+                        "resource_type": "recon_resolution_proposal",
+                        "resource_id": str(prop_id),
+                        "correlation_id": correlation_id,
+                        "payload": {"superseding_run_id": str(rid), "prior_run_id": str(prior_run_id)},
+                    }
+                    for prop_id, prior_run_id in superseded_rows
+                ],
+            )
 
     summary = {
         "planned_count": len(to_insert),
@@ -617,7 +663,7 @@ async def plan_run(db: AsyncSession, tenant_id, run_id) -> dict:
         actor_type="system",
         resource_type="reconciliation_run",
         resource_id=str(rid),
-        correlation_id=f"resolution-plan-{_uuid.uuid4().hex}",
+        correlation_id=correlation_id,
         payload=summary,
     )
     await db.commit()

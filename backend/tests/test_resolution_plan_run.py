@@ -328,6 +328,238 @@ async def test_plan_run_carry_forward_supersede_does_not_touch_other_actions(db,
     assert out["carry_forward_superseded_count"] == 0
 
 
+async def test_plan_run_carry_forward_supersede_skips_closed_run(db, tenant_a):
+    """Gate r3 Fix 1: the cross-run carry_forward supersede must not touch a
+    proposal whose owning run is closed/locked — closed-period
+    acknowledgments are immutable audit history. The new run-2 proposal still
+    supersedes run-1's *logically* (it becomes the only live row going
+    forward); run-1's approved carry_forward row itself must stay
+    'approved'."""
+    charge_source_id = f"ch_{uuid.uuid4().hex[:8]}"
+    recent_line = await create_test_payout_line(db, tenant_a.id, arrival_date=date.today() - timedelta(days=1))
+    run1 = await create_test_recon_run(db, tenant_a.id, status="completed")
+    await _result(
+        db,
+        tenant_a.id,
+        run1.id,
+        variance_type="missing_in_netsuite",
+        variance_amount=Decimal("9.00"),
+        stripe_amount=Decimal("1000.00"),
+        netsuite_amount=None,
+        evidence={
+            "charge_source_id": charge_source_id,
+            "order_reference": "R1",
+            "charge_payout_line_id": str(recent_line.id),
+        },
+    )
+    await db.flush()
+    await plan_run(db, tenant_a.id, run1.id)
+    prop1 = (
+        await db.execute(select(ReconResolutionProposal).where(ReconResolutionProposal.run_id == run1.id))
+    ).scalar_one()
+    assert prop1.action == "carry_forward"
+    prop1.status = "approved"
+    run1.status = "closed"
+    await db.flush()
+
+    old_line = await create_test_payout_line(db, tenant_a.id, arrival_date=date.today() - timedelta(days=30))
+    run2 = await create_test_recon_run(db, tenant_a.id, status="completed")
+    await _result(
+        db,
+        tenant_a.id,
+        run2.id,
+        variance_type="missing_in_netsuite",
+        variance_amount=Decimal("9.00"),
+        stripe_amount=Decimal("1000.00"),
+        netsuite_amount=None,
+        evidence={
+            "charge_source_id": charge_source_id,
+            "order_reference": "R1",
+            "charge_payout_line_id": str(old_line.id),
+        },
+    )
+    await db.flush()
+
+    out = await plan_run(db, tenant_a.id, run2.id)
+
+    await db.refresh(prop1)
+    assert prop1.status == "approved"  # frozen history — closed run's proposal untouched
+    prop2 = (
+        await db.execute(select(ReconResolutionProposal).where(ReconResolutionProposal.run_id == run2.id))
+    ).scalar_one()
+    assert prop2.action == "create_and_apply_deposit"
+    assert out["carry_forward_superseded_count"] == 0
+
+
+async def test_plan_run_carry_forward_supersede_preserves_human_override(db, tenant_a):
+    """Gate r3 Fix 2: never supersede a human override — it is itself the
+    human's decision, mirroring the same-run supersede's source != 'human'
+    guard (this is the cross-run counterpart of
+    test_plan_run_preserves_human_override_after_replan). NOTE the
+    interaction: the human's carry_forward proposal survives as 'proposed'
+    while run2 still inserts a fresh proposal for its own (new) result row —
+    that's two live rows for the charge across runs, which is acceptable and
+    inherent here: a human decision outranks the one-live-thread invariant."""
+    charge_source_id = f"ch_{uuid.uuid4().hex[:8]}"
+    recent_line = await create_test_payout_line(db, tenant_a.id, arrival_date=date.today() - timedelta(days=1))
+    run1 = await create_test_recon_run(db, tenant_a.id, status="completed")
+    result1 = await _result(
+        db,
+        tenant_a.id,
+        run1.id,
+        variance_type="missing_in_netsuite",
+        variance_amount=Decimal("9.00"),
+        stripe_amount=Decimal("1000.00"),
+        netsuite_amount=None,
+        evidence={
+            "charge_source_id": charge_source_id,
+            "order_reference": "R1",
+            "charge_payout_line_id": str(recent_line.id),
+        },
+    )
+    await db.flush()
+    await plan_run(db, tenant_a.id, run1.id)
+    prop1 = (
+        await db.execute(select(ReconResolutionProposal).where(ReconResolutionProposal.run_id == run1.id))
+    ).scalar_one()
+    assert prop1.action == "carry_forward"
+    # Mirrors override_resolution_proposal: supersede the planner row, insert
+    # a new active source='human' row for the same result.
+    prop1.status = "superseded"
+    human_prop = ReconResolutionProposal(
+        id=uuid.uuid4(),
+        tenant_id=tenant_a.id,
+        run_id=run1.id,
+        result_id=result1.id,
+        root_cause=prop1.root_cause,
+        action="carry_forward",
+        booking_vehicle="none",
+        group_key="missing_in_netsuite:carry_forward:none",
+        source="human",
+        narrative="Overridden by user.",
+        proposed_amount=prop1.proposed_amount,
+        currency=prop1.currency,
+        above_materiality=prop1.above_materiality,
+        status="proposed",
+        charge_source_id=charge_source_id,
+    )
+    db.add(human_prop)
+    await db.flush()
+
+    old_line = await create_test_payout_line(db, tenant_a.id, arrival_date=date.today() - timedelta(days=30))
+    run2 = await create_test_recon_run(db, tenant_a.id, status="completed")
+    await _result(
+        db,
+        tenant_a.id,
+        run2.id,
+        variance_type="missing_in_netsuite",
+        variance_amount=Decimal("9.00"),
+        stripe_amount=Decimal("1000.00"),
+        netsuite_amount=None,
+        evidence={
+            "charge_source_id": charge_source_id,
+            "order_reference": "R1",
+            "charge_payout_line_id": str(old_line.id),
+        },
+    )
+    await db.flush()
+
+    out = await plan_run(db, tenant_a.id, run2.id)
+
+    await db.refresh(human_prop)
+    assert human_prop.status == "proposed"  # human decision untouched
+    assert human_prop.source == "human"
+    prop2 = (
+        await db.execute(select(ReconResolutionProposal).where(ReconResolutionProposal.run_id == run2.id))
+    ).scalar_one()
+    assert prop2.action == "create_and_apply_deposit"
+    assert out["carry_forward_superseded_count"] == 0
+
+
+async def test_plan_run_carry_forward_supersede_emits_per_proposal_audit(db, tenant_a):
+    """Gate r3 Fix 3: each cross-run carry_forward supersede emits its own
+    AuditEvent (mirrors the per-line audit pattern in
+    group_actions.approve_group_core) — reversing an acknowledged decision
+    needs its own audit trail, not just the aggregate
+    carry_forward_superseded_count in the summary. The event's
+    correlation_id links to this plan's own 'recon.resolution.planned'
+    event."""
+    charge_source_id = f"ch_{uuid.uuid4().hex[:8]}"
+    recent_line = await create_test_payout_line(db, tenant_a.id, arrival_date=date.today() - timedelta(days=1))
+    run1 = await create_test_recon_run(db, tenant_a.id, status="completed")
+    await _result(
+        db,
+        tenant_a.id,
+        run1.id,
+        variance_type="missing_in_netsuite",
+        variance_amount=Decimal("9.00"),
+        stripe_amount=Decimal("1000.00"),
+        netsuite_amount=None,
+        evidence={
+            "charge_source_id": charge_source_id,
+            "order_reference": "R1",
+            "charge_payout_line_id": str(recent_line.id),
+        },
+    )
+    await db.flush()
+    await plan_run(db, tenant_a.id, run1.id)
+    prop1 = (
+        await db.execute(select(ReconResolutionProposal).where(ReconResolutionProposal.run_id == run1.id))
+    ).scalar_one()
+    assert prop1.action == "carry_forward"
+
+    old_line = await create_test_payout_line(db, tenant_a.id, arrival_date=date.today() - timedelta(days=30))
+    run2 = await create_test_recon_run(db, tenant_a.id, status="completed")
+    await _result(
+        db,
+        tenant_a.id,
+        run2.id,
+        variance_type="missing_in_netsuite",
+        variance_amount=Decimal("9.00"),
+        stripe_amount=Decimal("1000.00"),
+        netsuite_amount=None,
+        evidence={
+            "charge_source_id": charge_source_id,
+            "order_reference": "R1",
+            "charge_payout_line_id": str(old_line.id),
+        },
+    )
+    await db.flush()
+
+    out = await plan_run(db, tenant_a.id, run2.id)
+    assert out["carry_forward_superseded_count"] == 1
+
+    plan_event = (
+        await db.execute(
+            select(AuditEvent).where(
+                AuditEvent.action == "recon.resolution.planned",
+                AuditEvent.resource_id == str(run2.id),
+            )
+        )
+    ).scalar_one()
+
+    supersede_events = (
+        (
+            await db.execute(
+                select(AuditEvent).where(
+                    AuditEvent.action == "recon.resolution.carry_forward_superseded",
+                    AuditEvent.resource_id == str(prop1.id),
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert len(supersede_events) == 1
+    evt = supersede_events[0]
+    assert evt.actor_type == "system"
+    assert evt.actor_id is None
+    assert evt.category == "reconciliation"
+    assert evt.resource_type == "recon_resolution_proposal"
+    assert evt.correlation_id == plan_event.correlation_id
+    assert evt.payload == {"superseding_run_id": str(run2.id), "prior_run_id": str(run1.id)}
+
+
 async def test_plan_run_preserves_human_override_after_replan(db, tenant_a):
     """T2 gate finding: the supersede UPDATE must not flip source='human'
     override proposals — a re-plan must not discard a human decision. Mirrors
