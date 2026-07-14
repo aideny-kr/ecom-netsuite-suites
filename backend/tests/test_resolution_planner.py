@@ -170,6 +170,20 @@ def test_rule2b_zero_variance_fuzzy_match_empty_string_variance_type_skips():
     assert p is None
 
 
+def test_rule2b_does_not_swallow_deposit_unapplied_evidence():
+    """A fuzzy zero-variance match still carrying deposit_unapplied evidence
+    must reach rule 4 (apply_deposit), not be dropped by the 2b skip — 2b is
+    only for the no-evidence approve-the-match case."""
+    p = _plan(
+        match_type="fuzzy",
+        variance_type=None,
+        variance_amount=Decimal("0"),
+        evidence={"charge_source_id": "ch_1", "order_reference": "R1", "deposit_unapplied": True},
+    )
+    assert p is not None
+    assert p.action == "apply_deposit"
+
+
 def test_rule7_missing_in_netsuite_with_order_ref_old_payout_creates_deposit():
     p = _plan(
         match_type="unmatched",
@@ -249,6 +263,10 @@ def test_rule7b_amount_mismatch_small_writes_off():
     assert p.action == "writeoff_je"
     assert p.root_cause == "amount_mismatch"
     assert p.above_materiality is False
+    # narrative honesty: amount_mismatch is not FX/rounding — must not borrow
+    # fx_rounding's wording (real fx_rounding rows are unaffected, see below).
+    assert "Small residual amount mismatch" in p.narrative
+    assert "FX/rounding" not in p.narrative
 
 
 def test_rule7b_amount_mismatch_large_needs_human():
@@ -261,11 +279,22 @@ def test_rule7b_amount_mismatch_large_needs_human():
     assert p.action == "needs_human"
     assert p.root_cause == "amount_mismatch"
     assert p.above_materiality is True
+    assert "Amount mismatch above materiality" in p.narrative
+    assert "FX/rounding" not in p.narrative
 
 
 def test_rule7b_amount_mismatch_no_fee_amount_delegates_to_fx_rounding_semantics():
     p = _plan(variance_type="amount_mismatch", variance_amount=Decimal("0.04"), fee_amount=None)
     assert p.action == "writeoff_je"
+
+
+def test_fx_rounding_narratives_unchanged_by_amount_mismatch_wording():
+    """Real fx_rounding rows must keep the FX/rounding narrative — only the
+    amount_mismatch fallback path gets the new honest wording."""
+    small = _plan(variance_type="fx_rounding", variance_amount=Decimal("0.04"))
+    assert "FX/rounding difference" in small.narrative
+    large = _plan(variance_type="fx_rounding", variance_amount=Decimal("60.00"), stripe_amount=Decimal("10000.00"))
+    assert "FX/rounding variance above materiality" in large.narrative
 
 
 def test_days_since_payout_and_fee_amount_default_none_behave_as_before():

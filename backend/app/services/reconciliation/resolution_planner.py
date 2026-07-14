@@ -7,9 +7,9 @@ the async orchestrator (plan_run, below in this module) owns the DB.
 Ordered rules (first match wins; spec mapping table):
   1. already posted in a prior run (guard)      → skip
   2. clean deterministic match, zero variance   → skip (never reaches proposals)
- 2b. zero-variance fuzzy match                  → skip (approve-the-match; no proposal noise)
   3. chargeback / refund-shaped                 → needs_human (policy gate)
   4. evidence: matched deposit unapplied        → apply_deposit
+ 4b. zero-variance fuzzy match, no evidence      → skip (approve-the-match; no proposal noise)
   5. duplicate                                  → void_duplicate
   6. fees                                       → book_fee_line
   7. missing / missing_in_netsuite:
@@ -98,26 +98,23 @@ def _mk(
     )
 
 
-def _fx_rounding_split(root_cause: str, abs_variance: Decimal, above: bool, explain: str) -> PlannedProposal:
+def _materiality_split(
+    root_cause: str,
+    abs_variance: Decimal,
+    above: bool,
+    explain: str,
+    *,
+    sub_materiality_narrative: str,
+    above_materiality_narrative: str,
+) -> PlannedProposal:
     """Shared materiality-split body for rule 8 (fx_rounding) and the rule 7b
     (amount_mismatch) fallback when no fee evidence explains the variance.
-    Behavior for real fx_rounding rows is unchanged (existing tests prove it).
+    Narrative text is caller-supplied so each root cause gets an honest
+    description instead of amount_mismatch borrowing fx_rounding's wording.
     """
     if not above:
-        return _mk(
-            root_cause,
-            ACTION_WRITEOFF_JE,
-            f"Sub-materiality FX/rounding difference — aggregate write-off journal.{explain}",
-            abs_variance,
-            above,
-        )
-    return _mk(
-        root_cause,
-        ACTION_NEEDS_HUMAN,
-        f"FX/rounding variance above materiality — needs investigation.{explain}",
-        abs_variance,
-        above,
-    )
+        return _mk(root_cause, ACTION_WRITEOFF_JE, f"{sub_materiality_narrative}{explain}", abs_variance, above)
+    return _mk(root_cause, ACTION_NEEDS_HUMAN, f"{above_materiality_narrative}{explain}", abs_variance, above)
 
 
 def plan_result(
@@ -149,11 +146,6 @@ def plan_result(
     # 2. clean match — nothing to resolve
     if match_type == "deterministic" and variance_type is None and variance_amount == Decimal("0"):
         return None
-    # 2b. zero-variance fuzzy match — approve-the-match case, not a proposal;
-    #     the classic rules-bucket bulk approve covers it (removes the
-    #     manual_adjustment amt=0.00 noise group observed live).
-    if match_type == "fuzzy" and variance_amount == Decimal("0") and variance_type in (None, ""):
-        return None
     # 3. policy gate: never auto-propose a booking for a chargeback (beats
     #    evidence rules — a chargeback is never auto-applied regardless of
     #    what the evidence dict says)
@@ -174,6 +166,14 @@ def plan_result(
             abs_variance,
             above,
         )
+    # 4b. zero-variance fuzzy match, no evidence — approve-the-match case, not
+    #     a proposal; the classic rules-bucket bulk approve covers it (removes
+    #     the manual_adjustment amt=0.00 noise group observed live). Must run
+    #     AFTER rule 4 so a fuzzy zero-variance match that DOES carry
+    #     deposit_unapplied evidence still produces apply_deposit instead of
+    #     being silently dropped.
+    if match_type == "fuzzy" and variance_amount == Decimal("0") and variance_type in (None, ""):
+        return None
     # 5. duplicates: reverse via the same record type (pre-checks at posting time)
     if variance_type == "duplicate":
         return _mk(
@@ -219,9 +219,9 @@ def plan_result(
             abs_variance,
             above,
         )
-    # 7b. amount_mismatch: fee-explained first, else fall through to the
-    #     fx_rounding materiality split (rule 8's body, unchanged for real
-    #     fx_rounding rows).
+    # 7b. amount_mismatch: fee-explained first, else fall through to a
+    #     materiality split with its own honest narrative — an amount
+    #     mismatch is NOT fx/rounding, so it must not borrow that wording.
     if variance_type == "amount_mismatch":
         if fee_amount is not None and fee_amount > 0 and abs(abs_variance - fee_amount) <= FEE_EXPLAIN_TOLERANCE:
             return _mk(
@@ -232,10 +232,24 @@ def plan_result(
                 abs_variance,
                 above,
             )
-        return _fx_rounding_split("amount_mismatch", abs_variance, above, explain)
+        return _materiality_split(
+            "amount_mismatch",
+            abs_variance,
+            above,
+            explain,
+            sub_materiality_narrative="Small residual amount mismatch — aggregate write-off journal.",
+            above_materiality_narrative="Amount mismatch above materiality — needs investigation.",
+        )
     # 8. fx/rounding: sub-materiality write-off (flagged JE fallback); material → human
     if variance_type == "fx_rounding":
-        return _fx_rounding_split("fx_rounding", abs_variance, above, explain)
+        return _materiality_split(
+            "fx_rounding",
+            abs_variance,
+            above,
+            explain,
+            sub_materiality_narrative="Sub-materiality FX/rounding difference — aggregate write-off journal.",
+            above_materiality_narrative="FX/rounding variance above materiality — needs investigation.",
+        )
     # 9. timing: reconciling item, never force-matched, never booked
     if variance_type == "timing":
         return _mk(
@@ -382,24 +396,26 @@ async def plan_run(db: AsyncSession, tenant_id, run_id) -> dict:
     #     5000-chunk (Framework-scale runs are tens of thousands of lines).
     #     A line with no matching row (or no id at all) leaves both
     #     fee_amount and days_since_payout as None — fully backward-compatible
-    #     with plan_result's pre-Task-2 behavior.
-    payout_line_ids: list[_uuid.UUID] = []
+    #     with plan_result's pre-Task-2 behavior. Deduped via a set — many
+    #     results in a run commonly share the same payout_line.
+    payout_line_ids: set[_uuid.UUID] = set()
     for row in rows:
         raw_id = (row.evidence or {}).get("charge_payout_line_id")
         if not raw_id:
             continue
         try:
-            payout_line_ids.append(_uuid.UUID(str(raw_id)))
+            payout_line_ids.add(_uuid.UUID(str(raw_id)))
         except ValueError:
             continue
 
+    payout_line_id_list = sorted(payout_line_ids)
     payout_line_info: dict[_uuid.UUID, tuple[Decimal | None, date | None]] = {}
-    for i in range(0, len(payout_line_ids), _INSERT_CHUNK):
-        chunk = payout_line_ids[i : i + _INSERT_CHUNK]
+    for i in range(0, len(payout_line_id_list), _INSERT_CHUNK):
+        chunk = payout_line_id_list[i : i + _INSERT_CHUNK]
         pl_rows = (
             await db.execute(
                 select(PayoutLine.id, PayoutLine.fee, Payout.arrival_date)
-                .outerjoin(Payout, Payout.id == PayoutLine.payout_id)
+                .outerjoin(Payout, (Payout.id == PayoutLine.payout_id) & (Payout.tenant_id == tid))
                 .where(PayoutLine.tenant_id == tid, PayoutLine.id.in_(chunk))
             )
         ).all()
@@ -455,7 +471,10 @@ async def plan_run(db: AsyncSession, tenant_id, run_id) -> dict:
             if pl_uuid is not None and pl_uuid in payout_line_info:
                 fee_amount, arrival_date = payout_line_info[pl_uuid]
                 if arrival_date is not None:
-                    days_since_payout = (today - arrival_date).days
+                    # clamp at 0: a future-dated arrival_date (clock skew,
+                    # bad data) must read as "just arrived", not a negative
+                    # day count that would slip past the recency guard.
+                    days_since_payout = max(0, (today - arrival_date).days)
         planned = plan_result(
             match_type=row.match_type,
             variance_type=row.variance_type,
