@@ -23,6 +23,8 @@ const ROOT_CAUSE_LABEL: Record<string, string> = {
   duplicate: "Duplicate deposits",
   chargeback: "Chargebacks / disputes",
   manual_adjustment: "Unexplained",
+  missing_in_netsuite: "Missing in NetSuite",
+  amount_mismatch: "Amount mismatch",
 };
 
 interface ResolutionGroupCardProps {

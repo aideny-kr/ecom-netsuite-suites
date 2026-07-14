@@ -288,7 +288,12 @@ async def apply_agent_proposal(db: AsyncSession, proposal: ReconResolutionPropos
 
     Mirrors plan_run's supersede-then-insert but scoped to ONE proposal. Returns
     False (no-op, nothing written) if the planner row is no longer eligible
-    (a human decided meanwhile). Commits on success.
+    (a human decided meanwhile). Commits on success. If the inserted row is a
+    recency-hold carry_forward (action='carry_forward', root_cause in
+    resolution_planner.RECENCY_HOLD_ROOT_CAUSES), it shares the planner's
+    cross-run snooze lifecycle — a later plan_run supersedes it exactly like
+    a planner-authored hold (see the RECENCY HOLDS design note in
+    resolution_planner.plan_run).
     """
     # A result can go terminal independently of this proposal (e.g. locked via
     # the classic per-result approve path, or closed by a period freeze) while

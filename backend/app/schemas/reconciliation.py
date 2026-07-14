@@ -18,7 +18,17 @@ StrFromUUID = Annotated[str, BeforeValidator(lambda v: str(v) if isinstance(v, U
 # Enums / Literals
 # ---------------------------------------------------------------------------
 MatchType = Literal["deterministic", "fuzzy", "unmatched", "exception"]
-VarianceType = Literal["fees", "fx_rounding", "timing", "missing", "duplicate", "chargeback", "manual_adjustment"]
+VarianceType = Literal[
+    "fees",
+    "fx_rounding",
+    "timing",
+    "missing",
+    "duplicate",
+    "chargeback",
+    "manual_adjustment",
+    "missing_in_netsuite",
+    "amount_mismatch",
+]
 ResultStatus = Literal[
     "pending",
     "auto_matched",

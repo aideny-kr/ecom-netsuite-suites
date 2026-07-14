@@ -404,3 +404,96 @@ Four phases, each an independently-reviewable PR with its own T2 gate:
 | HITL token helpers (only the HMAC primitives reused) | `backend/app/services/chat/write_confirmation_service.py`, `mutation_guard.py` |
 | Recon page | `frontend/src/app/(dashboard)/reconciliation/page.tsx` + `frontend/src/components/reconciliation/*` |
 | Trust-model ladder | `docs/superpowers/specs/2026-06-10-bet3-autonomous-posting-trust-model.md` |
+
+## Addendum (2026-07-13): order-level taxonomy fix (86bawk3cp)
+
+Phase 1 shipped ResolutionPlanner against the taxonomy the design spec assumed (`missing`,
+`fees`, `duplicate`, `chargeback`, `fx_rounding`, `timing`, plus the deposit-unapplied evidence
+rule). Framework's live order-level engine (`order_matching_engine.py` /
+`order_fuzzy_matcher.py`) emits a **different vocabulary** — `missing_in_netsuite` and
+`amount_mismatch` — that the planner's rules never matched, so every one of those rows fell
+through to rule 10 (`needs_human`), collapsing the real explained rate toward zero on live data
+even though the rule engine's unit tests were all green (they only ever exercised the spec's
+enum values, not the engine's actual output strings). This addendum documents the fix, planned
+and executed against Framework's real distribution (21,679 joined `amount_mismatch` rows;
+3,073 fee-explained, 4,932 ≤ $0.05, residue sub-materiality relative variance).
+
+### Order-level taxonomy mapping table
+
+| Engine `variance_type` | Routes like | Notes |
+|---|---|---|
+| `missing_in_netsuite` | `missing` (rule 7, extended) | Same three-way split as `missing`: recency guard first, then order-ref-known vs. unknown. `root_cause` stays the raw string (`missing_in_netsuite`, not folded into `missing`) — group keys stay honest to source data. |
+| `amount_mismatch` | new rule 7b, falls back to `fx_rounding`'s materiality split (rule 8) | Fee-explained evidence checked first (and directional: only when `netsuite_amount < stripe_amount`, since a Stripe fee can only ever lower NetSuite); unexplained residue reuses rule 8's body verbatim (`_materiality_split` helper) so real `fx_rounding` rows are bit-identical to before this change. |
+| zero-variance `fuzzy` match (`variance_type is None`, `variance_amount == 0`) | new rule 2b, before the variance-type dispatch | Not a proposal at all — it's an approve-the-match case already covered by the classic rules-bucket bulk approve. Emitting `needs_human`/`manual_adjustment` here was pure noise (the live `manual_adjustment amt=0.00` group). Matches `four_bucket_classifier._has_variance`: an empty-string `variance_type` still counts as HAVING variance there, so 2b must not skip it too (gate r2 Fix D). |
+
+### Recency guard (sync-lag timing item)
+
+`missing_in_netsuite` (and legacy `missing`) rows first check `days_since_payout <=
+RECENT_PAYOUT_LAG_DAYS` (constant, value `7`, mirrors the payout classifier's own sync-lag
+assumption). Within the window the charge is presumed still in NetSuite's sync queue — routed
+to `carry_forward` with a narrative that says so, rather than `create_and_apply_deposit` (which
+would create a duplicate once the real sync catches up) or `needs_human` (premature — nothing
+is actually wrong yet). `days_since_payout` is computed in `plan_run` from the payout's
+`arrival_date` (batched, tenant-scoped lookup keyed off `evidence->>"charge_payout_line_id"`);
+`None` when no payout_line evidence resolves, which degrades to the pre-fix behavior exactly
+(no crash, no silent miscategorization).
+
+### Cross-run lifecycle: recency holds vs. standing decisions (Option A)
+
+`carry_forward` is emitted by two different rules (rule 7's recency guard above, and rule 9
+`timing`) and the two do **not** share one lifecycle across runs — narrowed from an earlier,
+over-broad implementation that treated every `carry_forward` row identically. Only the rule-7
+sync-lag rows (`action='carry_forward'` AND `root_cause` in `RECENCY_HOLD_ROOT_CAUSES` —
+`("missing", "missing_in_netsuite")`, structurally unique to that branch) are **recency holds**:
+they never feed `plan_run`'s cross-run decided-charge suppression guard, and they ARE superseded
+when a later run re-plans the same charge. Their meaning is "the deposit is probably in
+transit — re-check next run"; the UI acknowledgment (approving the group) is effectively a
+per-period snooze, not a decision, and one of two things eventually happens — the deposit
+arrives (no new proposal, the hold is simply never re-created) or the recency window passes
+(the charge escalates to `create_and_apply_deposit` or `needs_human`, and the run-1 hold is
+retired via the supersede UPDATE, audited as `recon.resolution.recency_hold_superseded`).
+
+(a) Every **other** `carry_forward` — concretely, rule 9's `timing` rows — is an ordinary
+**standing decision**, same as `book_fee_line`, `writeoff_je`, or any other action: once
+approved it feeds the cross-run guard like everything else (suppressing re-planning of that
+charge in a later run) and is never system-superseded. This corrects an earlier version of this
+design that let the recency-hold exemption cover "every carry_forward variant … uniformly" —
+that blanket exemption meant an approved timing acknowledgment could be silently discarded and
+re-planned by a later run, which is wrong: a timing difference, once acknowledged, is not
+something that resolves itself the way sync lag does.
+
+(b) Cross-run coexistence of multiple `'proposed'` rows for the same charge, across different
+actions, is a **pre-existing property** of this planner (unrelated to the recency-hold/standing
+distinction above) — it is not addressed by this narrowing and is tracked as a separate,
+already-ticketed concern, not a new gap introduced here.
+
+### Fee-explained decomposition (`amount_mismatch`)
+
+Before falling back to the fx_rounding materiality split, rule 7b checks whether the variance
+is explained by the linked `payout_lines.fee` value: `fee_amount is not None and fee_amount > 0
+and abs(abs_variance - fee_amount) <= FEE_EXPLAIN_TOLERANCE` (constant, value `Decimal("0.50")`,
+mirrors the payout classifier's own fee-match tolerance) → `book_fee_line`. This is action
+selection only — independent of materiality, so a fee-explained variance above the materiality
+threshold still books cleanly rather than routing to `needs_human`. Unexplained residue falls
+through to rule 8's existing behavior unchanged: sub-materiality → `writeoff_je`; above →
+`needs_human`.
+
+### Thresholds (verbatim, `resolution_planner.py`)
+
+```python
+FEE_EXPLAIN_TOLERANCE = Decimal("0.50")   # mirrors the payout classifier's fee-match tolerance
+RECENT_PAYOUT_LAG_DAYS = 7                # sync-lag window before "missing" becomes a real gap
+```
+
+### Lesson: validate against live rows, not spec enums
+
+The Phase 1 rule engine's test suite was exhaustive over the design spec's `VarianceType`
+literal and passed cleanly, but the spec's enum was written before the order-level engine
+existed and was never cross-checked against what that engine actually emits. A rule engine can
+be 100% covered against its own assumed vocabulary and still under-deliver by a wide margin the
+moment it meets a real row shape it was never told about — silently, because "no rule matched"
+degrades gracefully to `needs_human` rather than erroring. The fix: any planner/classifier rule
+set that consumes another module's output enum needs a regression test seeded with that
+module's *actual* emitted strings (grep the engine, not the spec) — `backend/tests/
+test_resolution_taxonomy_e2e.py` is that guard for this planner going forward, seeded from
+Framework's 2026-07-13 live distribution rather than from the design doc's example table.

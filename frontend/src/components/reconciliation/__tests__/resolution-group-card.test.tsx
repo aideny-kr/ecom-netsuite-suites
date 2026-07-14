@@ -74,4 +74,16 @@ describe("ResolutionGroupCard", () => {
     render(<ResolutionGroupCard group={eurGroup} {...base} />);
     expect(screen.getByText(/€500\.00/)).toBeInTheDocument();
   });
+
+  it("renders order-level root-cause labels (missing_in_netsuite, amount_mismatch)", () => {
+    const missing = { ...feeGroup, group_key: "missing_in_netsuite:create_and_apply_deposit:deposit",
+      root_cause: "missing_in_netsuite", action: "create_and_apply_deposit", booking_vehicle: "deposit" };
+    const { rerender } = render(<ResolutionGroupCard group={missing} {...base} />);
+    expect(screen.getByText("Missing in NetSuite")).toBeInTheDocument();
+
+    const mismatch = { ...feeGroup, group_key: "amount_mismatch:book_fee_line:deposit",
+      root_cause: "amount_mismatch", action: "book_fee_line", booking_vehicle: "deposit" };
+    rerender(<ResolutionGroupCard group={mismatch} {...base} />);
+    expect(screen.getByText("Amount mismatch")).toBeInTheDocument();
+  });
 });
