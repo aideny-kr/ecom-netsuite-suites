@@ -1053,4 +1053,8 @@ export interface ReconResolutionProposal {
   failure_reason: string | null;
   correlation_id: string | null;
   created_at: string;
+  order_reference: string | null;
+  stripe_charge_id: string | null;
+  netsuite_internal_id: string | null;
+  netsuite_record_type: string | null;
 }

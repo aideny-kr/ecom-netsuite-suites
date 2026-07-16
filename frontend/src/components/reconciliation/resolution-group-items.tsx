@@ -1,8 +1,58 @@
 "use client";
 
-import { MessageSquare } from "lucide-react";
+import { useState } from "react";
+import { Check, MessageSquare } from "lucide-react";
 import { useGroupProposals } from "@/hooks/use-resolution";
 import type { ReconResolutionProposal } from "@/lib/types";
+
+/** One click-to-copy identifier segment. Displays `${prefix}${value}` but
+ * copies the raw `value` — e.g. "NS#12345" displays with the prefix, but
+ * finance pastes "12345" straight into a NetSuite internal-id search. */
+function IdentifierSegment({ prefix = "", value }: { prefix?: string; value: string }) {
+  const [copied, setCopied] = useState(false);
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // Permissions/insecure-context failures land here — leave `copied`
+      // false rather than show a checkmark for a copy that didn't happen.
+    }
+  };
+  return (
+    <button
+      type="button"
+      onClick={handleCopy}
+      title={`Copy ${value}`}
+      className="inline-flex items-center gap-0.5 hover:text-foreground"
+    >
+      {prefix}
+      {value}
+      {copied && <Check className="h-3 w-3 text-green-500" />}
+    </button>
+  );
+}
+
+function IdentifierLine({ proposal }: { proposal: ReconResolutionProposal }) {
+  const segments: { key: string; prefix?: string; value: string }[] = [];
+  if (proposal.order_reference) segments.push({ key: "order", value: proposal.order_reference });
+  if (proposal.stripe_charge_id) segments.push({ key: "charge", value: proposal.stripe_charge_id });
+  if (proposal.netsuite_internal_id) {
+    segments.push({ key: "netsuite", prefix: "NS#", value: proposal.netsuite_internal_id });
+  }
+  if (!segments.length) return null;
+  return (
+    <p className="mt-0.5 flex items-center gap-1.5 font-mono text-[11px] text-muted-foreground">
+      {segments.map((s, i) => (
+        <span key={s.key} className="inline-flex items-center gap-1.5">
+          {i > 0 && <span aria-hidden>·</span>}
+          <IdentifierSegment prefix={s.prefix} value={s.value} />
+        </span>
+      ))}
+    </p>
+  );
+}
 
 interface ResolutionGroupItemsProps {
   runId: string;
@@ -53,6 +103,7 @@ export function ResolutionGroupItems({
                 )}
                 {p.status !== "proposed" && <span className="ml-2">· {p.status}</span>}
               </p>
+              <IdentifierLine proposal={p} />
             </div>
           </div>
           {p.action === "needs_human" && (

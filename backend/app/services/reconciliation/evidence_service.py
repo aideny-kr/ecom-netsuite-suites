@@ -99,6 +99,9 @@ class EvidencePackGenerator:
             "Currency",
             "Above Materiality",
             "Narrative",
+            "Order Ref",
+            "Stripe Charge",
+            "NetSuite ID",
         ]
         ws.append(headers)
         for p in proposals:
@@ -114,6 +117,9 @@ class EvidencePackGenerator:
                     p.get("currency"),
                     "YES" if p.get("above_materiality") else "no",
                     p.get("narrative"),
+                    p.get("order_reference"),
+                    p.get("stripe_charge_id"),
+                    p.get("netsuite_internal_id"),
                 ]
             )
 

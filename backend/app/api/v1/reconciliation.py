@@ -907,6 +907,54 @@ async def get_resolution_summary(
     )
 
 
+def _proposal_response_with_enrichment(
+    proposal: ReconResolutionProposal,
+    order_reference: str | None,
+    netsuite_internal_id: str | None,
+    netsuite_record_type: str | None,
+) -> ResolutionProposalResponse:
+    return ResolutionProposalResponse.model_validate(proposal).model_copy(
+        update={
+            "order_reference": order_reference,
+            "stripe_charge_id": proposal.charge_source_id,
+            "netsuite_internal_id": netsuite_internal_id,
+            "netsuite_record_type": netsuite_record_type,
+        }
+    )
+
+
+async def _enrich_proposal_response(
+    db: AsyncSession, tenant_id: uuid.UUID, proposal: ReconResolutionProposal
+) -> ResolutionProposalResponse:
+    """Single-proposal version of list_group_proposals' enrichment join —
+    order_reference off the result's evidence JSON, NetSuite fields off the
+    deposit the result matched to (LEFT JOIN, most needs_human items have no
+    deposit_id). Used by mutation endpoints that return one proposal."""
+    row = (
+        await db.execute(
+            select(
+                ReconciliationResult.evidence["order_reference"].astext,
+                NetsuitePosting.netsuite_internal_id,
+                NetsuitePosting.record_type,
+            )
+            .select_from(ReconciliationResult)
+            .outerjoin(
+                NetsuitePosting,
+                and_(
+                    NetsuitePosting.id == ReconciliationResult.deposit_id,
+                    NetsuitePosting.tenant_id == tenant_id,
+                ),
+            )
+            .where(
+                ReconciliationResult.id == proposal.result_id,
+                ReconciliationResult.tenant_id == tenant_id,
+            )
+        )
+    ).first()
+    order_reference, netsuite_internal_id, record_type = row or (None, None, None)
+    return _proposal_response_with_enrichment(proposal, order_reference, netsuite_internal_id, record_type)
+
+
 @router.get(
     "/runs/{run_id}/resolution-groups/{group_key}/proposals",
     response_model=list[ResolutionProposalResponse],
@@ -922,27 +970,48 @@ async def list_group_proposals(
     await _get_run_or_404(db, user.tenant_id, run_id)
     root_cause, action, vehicle = _parse_group_key(group_key)
     P = ReconResolutionProposal
+    # Single query (join, not N+1): order_reference comes off the result's
+    # evidence JSON; NetSuite fields come off the deposit the result matched
+    # to, if any (LEFT JOIN — most needs_human items have no deposit_id).
     rows = (
-        (
-            await db.execute(
-                select(P)
-                .where(
-                    P.run_id == _parse_uuid(run_id),
-                    P.tenant_id == user.tenant_id,
-                    P.root_cause == root_cause,
-                    P.action == action,
-                    P.booking_vehicle == vehicle,
-                    P.status.notin_(("superseded", "rejected")),
-                )
-                .order_by(P.proposed_amount.desc())
-                .limit(limit)
-                .offset(offset)
+        await db.execute(
+            select(
+                P,
+                ReconciliationResult.evidence["order_reference"].astext,
+                NetsuitePosting.netsuite_internal_id,
+                NetsuitePosting.record_type,
             )
+            .join(
+                ReconciliationResult,
+                and_(
+                    ReconciliationResult.id == P.result_id,
+                    ReconciliationResult.tenant_id == user.tenant_id,
+                ),
+            )
+            .outerjoin(
+                NetsuitePosting,
+                and_(
+                    NetsuitePosting.id == ReconciliationResult.deposit_id,
+                    NetsuitePosting.tenant_id == user.tenant_id,
+                ),
+            )
+            .where(
+                P.run_id == _parse_uuid(run_id),
+                P.tenant_id == user.tenant_id,
+                P.root_cause == root_cause,
+                P.action == action,
+                P.booking_vehicle == vehicle,
+                P.status.notin_(("superseded", "rejected")),
+            )
+            .order_by(P.proposed_amount.desc())
+            .limit(limit)
+            .offset(offset)
         )
-        .scalars()
-        .all()
-    )
-    return [ResolutionProposalResponse.model_validate(p) for p in rows]
+    ).all()
+    return [
+        _proposal_response_with_enrichment(p, order_reference, netsuite_internal_id, record_type)
+        for p, order_reference, netsuite_internal_id, record_type in rows
+    ]
 
 
 @router.post(
@@ -1117,7 +1186,7 @@ async def override_resolution_proposal(
     )
     await db.commit()
     await db.refresh(new)
-    return ResolutionProposalResponse.model_validate(new)
+    return await _enrich_proposal_response(db, user.tenant_id, new)
 
 
 # ---------------------------------------------------------------------------
@@ -1165,10 +1234,34 @@ async def download_evidence(
     ]
 
     P = ReconResolutionProposal
-    proposals_stmt = select(P).where(
-        P.run_id == uuid.UUID(run_id),
-        P.tenant_id == user.tenant_id,
-        P.status.notin_(("superseded", "rejected")),
+    # Same enrichment join as list_group_proposals (A1): order_reference off
+    # the result's evidence JSON, NetSuite id off the deposit it matched to
+    # (LEFT JOIN — most needs_human proposals have no deposit_id).
+    proposals_stmt = (
+        select(
+            P,
+            ReconciliationResult.evidence["order_reference"].astext,
+            NetsuitePosting.netsuite_internal_id,
+        )
+        .join(
+            ReconciliationResult,
+            and_(
+                ReconciliationResult.id == P.result_id,
+                ReconciliationResult.tenant_id == user.tenant_id,
+            ),
+        )
+        .outerjoin(
+            NetsuitePosting,
+            and_(
+                NetsuitePosting.id == ReconciliationResult.deposit_id,
+                NetsuitePosting.tenant_id == user.tenant_id,
+            ),
+        )
+        .where(
+            P.run_id == uuid.UUID(run_id),
+            P.tenant_id == user.tenant_id,
+            P.status.notin_(("superseded", "rejected")),
+        )
     )
     proposals_result = await db.execute(proposals_stmt)
     proposals_dicts = [
@@ -1183,8 +1276,11 @@ async def download_evidence(
             "proposed_amount": p.proposed_amount,
             "currency": p.currency,
             "above_materiality": p.above_materiality,
+            "order_reference": order_reference,
+            "stripe_charge_id": p.charge_source_id,
+            "netsuite_internal_id": netsuite_internal_id,
         }
-        for p in proposals_result.scalars().all()
+        for p, order_reference, netsuite_internal_id in proposals_result.all()
     ]
 
     generator = EvidencePackGenerator()

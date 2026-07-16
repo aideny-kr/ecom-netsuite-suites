@@ -378,6 +378,7 @@ async def create_test_recon_result(
     currency: str = "USD",
     bucket: str | None = None,
     evidence: dict | None = None,
+    deposit_id=None,
 ) -> ReconciliationResult:
     """Create a ReconciliationResult bound to an existing run. Flushes for its id.
 
@@ -397,7 +398,7 @@ async def create_test_recon_result(
         tenant_id=tenant_id,
         run_id=run_id,
         payout_id=None,
-        deposit_id=None,
+        deposit_id=deposit_id,
         match_type=match_type,
         confidence=confidence,
         status=status,

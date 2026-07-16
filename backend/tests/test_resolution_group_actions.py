@@ -17,6 +17,7 @@ from app.models.audit import AuditEvent
 from app.models.reconciliation import ReconciliationResult, ReconResolutionProposal
 from app.schemas.reconciliation import ResolutionGroupApprove, ResolutionProposalOverride
 from tests.conftest import (
+    create_test_netsuite_posting,
     create_test_recon_result,
     create_test_recon_run,
     create_test_user,
@@ -366,3 +367,42 @@ async def test_override_supersedes_and_creates_new_active(db, tenant_a):
     assert new.action == "needs_human"
     assert new.source == "human"
     assert new.result_id == str(prop.result_id)
+
+
+async def test_override_response_includes_enrichment(db, tenant_a):
+    """Gate fix: the override response must carry the same order_reference /
+    stripe_charge_id / netsuite_internal_id / netsuite_record_type
+    enrichment as list_group_proposals — not the ORM's null defaults."""
+    user, _ = await create_test_user(db, tenant_a)
+    await enable_feature_flag(db, tenant_a.id, "recon_resolution_ui")
+    run = await create_test_recon_run(db, tenant_a.id, status="completed")
+    posting = await create_test_netsuite_posting(db, tenant_a.id, netsuite_internal_id="98765", record_type="custdep")
+    await create_test_recon_result(
+        db,
+        tenant_a.id,
+        run.id,
+        status="pending",
+        bucket="auto_classifications",
+        match_type="deterministic",
+        variance_type="fees",
+        variance_amount=Decimal("9.00"),
+        stripe_amount=Decimal("1000"),
+        netsuite_amount=Decimal("991"),
+        evidence={"charge_source_id": "ch_matched", "order_reference": "R9"},
+        deposit_id=posting.id,
+    )
+    run.matches_count = 0
+    await db.flush()
+    await plan_resolutions(str(run.id), user=user, db=db)
+    prop = (await _props(db, run.id))[0]
+
+    new = await override_resolution_proposal(
+        str(prop.id),
+        ResolutionProposalOverride(action="needs_human", notes="not a fee"),
+        user=user,
+        db=db,
+    )
+    assert new.order_reference == "R9"
+    assert new.stripe_charge_id == "ch_matched"
+    assert new.netsuite_internal_id == "98765"
+    assert new.netsuite_record_type == "custdep"
