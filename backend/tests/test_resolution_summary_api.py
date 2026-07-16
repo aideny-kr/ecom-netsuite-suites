@@ -14,6 +14,7 @@ from app.api.v1.reconciliation import (
 from app.models.reconciliation import ReconResolutionProposal
 from app.schemas.reconciliation import ResolutionGroupApprove
 from tests.conftest import (
+    create_test_netsuite_posting,
     create_test_recon_result,
     create_test_recon_run,
     create_test_user,
@@ -163,6 +164,53 @@ async def test_group_proposals_listing_paginated(db, tenant_a):
     page = await list_group_proposals(str(run.id), "fees:book_fee_line:deposit", user=user, db=db, limit=1, offset=0)
     assert len(page) == 1
     assert page[0].action == "book_fee_line"
+
+
+async def test_group_proposals_listing_includes_identifiers_when_matched(db, tenant_a):
+    """A1: a proposal whose result has a linked NetSuite deposit surfaces all
+    four identifiers (order ref, Stripe charge id, NetSuite id + record type)."""
+    user, _ = await create_test_user(db, tenant_a)
+    await enable_feature_flag(db, tenant_a.id, "recon_resolution_ui")
+    run = await create_test_recon_run(db, tenant_a.id, status="completed")
+    posting = await create_test_netsuite_posting(db, tenant_a.id, netsuite_internal_id="98765", record_type="custdep")
+    await create_test_recon_result(
+        db,
+        tenant_a.id,
+        run.id,
+        status="pending",
+        bucket="auto_classifications",
+        match_type="deterministic",
+        variance_type="fees",
+        variance_amount=Decimal("9.00"),
+        stripe_amount=Decimal("1000"),
+        netsuite_amount=Decimal("991"),
+        evidence={"charge_source_id": "ch_matched", "order_reference": "R9"},
+        deposit_id=posting.id,
+    )
+    run.matches_count = 0
+    await db.flush()
+    await plan_resolutions(str(run.id), user=user, db=db)
+
+    page = await list_group_proposals(str(run.id), "fees:book_fee_line:deposit", user=user, db=db)
+    assert len(page) == 1
+    item = page[0]
+    assert item.order_reference == "R9"
+    assert item.stripe_charge_id == "ch_matched"
+    assert item.netsuite_internal_id == "98765"
+    assert item.netsuite_record_type == "custdep"
+
+
+async def test_group_proposals_listing_omits_identifiers_when_unmatched(db, tenant_a):
+    """A1: an unmatched result (no deposit_id) surfaces order ref + charge id
+    but leaves the NetSuite fields None rather than erroring the join."""
+    user, run = await _seed(db, tenant_a)
+    page = await list_group_proposals(str(run.id), "fees:book_fee_line:deposit", user=user, db=db)
+    assert len(page) == 2
+    for item in page:
+        assert item.order_reference == "R1"
+        assert item.stripe_charge_id is not None
+        assert item.netsuite_internal_id is None
+        assert item.netsuite_record_type is None
 
 
 async def _seed_multi_currency_fees(db, tenant):

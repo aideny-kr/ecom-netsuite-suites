@@ -922,27 +922,55 @@ async def list_group_proposals(
     await _get_run_or_404(db, user.tenant_id, run_id)
     root_cause, action, vehicle = _parse_group_key(group_key)
     P = ReconResolutionProposal
+    # Single query (join, not N+1): order_reference comes off the result's
+    # evidence JSON; NetSuite fields come off the deposit the result matched
+    # to, if any (LEFT JOIN — most needs_human items have no deposit_id).
     rows = (
-        (
-            await db.execute(
-                select(P)
-                .where(
-                    P.run_id == _parse_uuid(run_id),
-                    P.tenant_id == user.tenant_id,
-                    P.root_cause == root_cause,
-                    P.action == action,
-                    P.booking_vehicle == vehicle,
-                    P.status.notin_(("superseded", "rejected")),
-                )
-                .order_by(P.proposed_amount.desc())
-                .limit(limit)
-                .offset(offset)
+        await db.execute(
+            select(
+                P,
+                ReconciliationResult.evidence["order_reference"].astext,
+                NetsuitePosting.netsuite_internal_id,
+                NetsuitePosting.record_type,
             )
+            .join(
+                ReconciliationResult,
+                and_(
+                    ReconciliationResult.id == P.result_id,
+                    ReconciliationResult.tenant_id == user.tenant_id,
+                ),
+            )
+            .outerjoin(
+                NetsuitePosting,
+                and_(
+                    NetsuitePosting.id == ReconciliationResult.deposit_id,
+                    NetsuitePosting.tenant_id == user.tenant_id,
+                ),
+            )
+            .where(
+                P.run_id == _parse_uuid(run_id),
+                P.tenant_id == user.tenant_id,
+                P.root_cause == root_cause,
+                P.action == action,
+                P.booking_vehicle == vehicle,
+                P.status.notin_(("superseded", "rejected")),
+            )
+            .order_by(P.proposed_amount.desc())
+            .limit(limit)
+            .offset(offset)
         )
-        .scalars()
-        .all()
-    )
-    return [ResolutionProposalResponse.model_validate(p) for p in rows]
+    ).all()
+    return [
+        ResolutionProposalResponse.model_validate(p).model_copy(
+            update={
+                "order_reference": order_reference,
+                "stripe_charge_id": p.charge_source_id,
+                "netsuite_internal_id": netsuite_internal_id,
+                "netsuite_record_type": record_type,
+            }
+        )
+        for p, order_reference, netsuite_internal_id, record_type in rows
+    ]
 
 
 @router.post(

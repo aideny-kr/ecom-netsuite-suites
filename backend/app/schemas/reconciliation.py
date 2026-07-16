@@ -300,6 +300,13 @@ class ResolutionProposalResponse(BaseModel):
     decided_by: StrFromUUID | None = None
     decided_at: datetime | None = None
     created_at: datetime
+    # Identifiers for drill-down verification (A1): the order number, Stripe
+    # charge id (alias of the proposal's own charge_source_id — no duplicate
+    # storage), and NetSuite deposit id/type when a match exists.
+    order_reference: str | None = None
+    stripe_charge_id: str | None = None
+    netsuite_internal_id: str | None = None
+    netsuite_record_type: str | None = None
 
     model_config = {"from_attributes": True}
 
