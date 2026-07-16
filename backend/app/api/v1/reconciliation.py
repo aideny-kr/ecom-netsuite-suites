@@ -907,6 +907,54 @@ async def get_resolution_summary(
     )
 
 
+def _proposal_response_with_enrichment(
+    proposal: ReconResolutionProposal,
+    order_reference: str | None,
+    netsuite_internal_id: str | None,
+    netsuite_record_type: str | None,
+) -> ResolutionProposalResponse:
+    return ResolutionProposalResponse.model_validate(proposal).model_copy(
+        update={
+            "order_reference": order_reference,
+            "stripe_charge_id": proposal.charge_source_id,
+            "netsuite_internal_id": netsuite_internal_id,
+            "netsuite_record_type": netsuite_record_type,
+        }
+    )
+
+
+async def _enrich_proposal_response(
+    db: AsyncSession, tenant_id: uuid.UUID, proposal: ReconResolutionProposal
+) -> ResolutionProposalResponse:
+    """Single-proposal version of list_group_proposals' enrichment join —
+    order_reference off the result's evidence JSON, NetSuite fields off the
+    deposit the result matched to (LEFT JOIN, most needs_human items have no
+    deposit_id). Used by mutation endpoints that return one proposal."""
+    row = (
+        await db.execute(
+            select(
+                ReconciliationResult.evidence["order_reference"].astext,
+                NetsuitePosting.netsuite_internal_id,
+                NetsuitePosting.record_type,
+            )
+            .select_from(ReconciliationResult)
+            .outerjoin(
+                NetsuitePosting,
+                and_(
+                    NetsuitePosting.id == ReconciliationResult.deposit_id,
+                    NetsuitePosting.tenant_id == tenant_id,
+                ),
+            )
+            .where(
+                ReconciliationResult.id == proposal.result_id,
+                ReconciliationResult.tenant_id == tenant_id,
+            )
+        )
+    ).first()
+    order_reference, netsuite_internal_id, record_type = row or (None, None, None)
+    return _proposal_response_with_enrichment(proposal, order_reference, netsuite_internal_id, record_type)
+
+
 @router.get(
     "/runs/{run_id}/resolution-groups/{group_key}/proposals",
     response_model=list[ResolutionProposalResponse],
@@ -961,14 +1009,7 @@ async def list_group_proposals(
         )
     ).all()
     return [
-        ResolutionProposalResponse.model_validate(p).model_copy(
-            update={
-                "order_reference": order_reference,
-                "stripe_charge_id": p.charge_source_id,
-                "netsuite_internal_id": netsuite_internal_id,
-                "netsuite_record_type": record_type,
-            }
-        )
+        _proposal_response_with_enrichment(p, order_reference, netsuite_internal_id, record_type)
         for p, order_reference, netsuite_internal_id, record_type in rows
     ]
 
@@ -1145,7 +1186,7 @@ async def override_resolution_proposal(
     )
     await db.commit()
     await db.refresh(new)
-    return ResolutionProposalResponse.model_validate(new)
+    return await _enrich_proposal_response(db, user.tenant_id, new)
 
 
 # ---------------------------------------------------------------------------

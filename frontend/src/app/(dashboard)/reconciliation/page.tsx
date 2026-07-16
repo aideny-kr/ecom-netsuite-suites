@@ -152,8 +152,16 @@ export default function ReconciliationPage() {
     const dateRange = selectedRun ? `between ${selectedRun.date_from} and ${selectedRun.date_to}` : "";
 
     let query: string;
-    if (proposal.order_reference) {
-      query = `Use SuiteQL to investigate order ${proposal.order_reference} in NetSuite. Context: ${proposal.narrative} (recon result ${proposal.result_id}), amount ${amount} ${dateRange}. Run: SELECT t.id, t.tranid, t.trandate, t.total, BUILTIN.DF(t.entity) AS customer FROM transaction t WHERE t.type = 'CustDep' AND (t.tranid LIKE '%${proposal.order_reference}%' OR t.total = ${Number(proposal.proposed_amount).toFixed(2)}) FETCH FIRST 10 ROWS ONLY`;
+    if (proposal.netsuite_internal_id) {
+      // Exact id in hand — no LIKE/date heuristics needed.
+      const recordTypeNote = proposal.netsuite_record_type
+        ? ` (NetSuite record type: ${proposal.netsuite_record_type})`
+        : "";
+      query = `Use SuiteQL to investigate NetSuite record ${proposal.netsuite_internal_id}${recordTypeNote}, the deposit matched to this proposal. Context: ${proposal.narrative} (recon result ${proposal.result_id}), amount ${amount}. Run: SELECT t.id, t.tranid, t.trandate, t.total, BUILTIN.DF(t.entity) AS customer FROM transaction t WHERE t.id = ${proposal.netsuite_internal_id} FETCH FIRST 10 ROWS ONLY`;
+    } else if (proposal.order_reference) {
+      // Order refs live on the memo, not tranid — matches the backend's own
+      // matching column (resolution_agent.py: NetsuitePosting.memo.ilike).
+      query = `Use SuiteQL to investigate order ${proposal.order_reference} in NetSuite. Context: ${proposal.narrative} (recon result ${proposal.result_id}), amount ${amount} ${dateRange}. Run: SELECT t.id, t.tranid, t.trandate, t.total, BUILTIN.DF(t.entity) AS customer FROM transaction t WHERE t.type IN ('CustDep', 'Deposit') AND (t.memo LIKE '%${proposal.order_reference}%' OR t.total = ${Number(proposal.proposed_amount).toFixed(2)}) ${dateFrom ? `AND t.trandate >= TO_DATE('${dateFrom}', 'YYYY-MM-DD') AND t.trandate <= TO_DATE('${dateTo}', 'YYYY-MM-DD')` : ""} FETCH FIRST 10 ROWS ONLY`;
     } else {
       // BETWEEN lo AND hi must use the numerically smaller bound first — for a
       // negative amount, *0.95 is the larger (less negative) of the two.

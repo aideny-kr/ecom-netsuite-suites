@@ -10,10 +10,15 @@ import type { ReconResolutionProposal } from "@/lib/types";
  * finance pastes "12345" straight into a NetSuite internal-id search. */
 function IdentifierSegment({ prefix = "", value }: { prefix?: string; value: string }) {
   const [copied, setCopied] = useState(false);
-  const handleCopy = () => {
-    navigator.clipboard.writeText(value);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1500);
+  const handleCopy = async () => {
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // Permissions/insecure-context failures land here — leave `copied`
+      // false rather than show a checkmark for a copy that didn't happen.
+    }
   };
   return (
     <button

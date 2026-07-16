@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import type { ReconResolutionProposal, ReconResolutionGroup } from "@/lib/types";
 
 // mutate mirrors React Query's signature: (vars, options?) — the page passes a
 // per-call onSuccess to bump the reset-signal, so the mock must invoke it to
@@ -15,7 +16,7 @@ const mutate = vi.fn(
 
 // Mutable run + approve-result state so individual tests can drive the
 // run status (completed vs closed) and the mutation success payload.
-let mockRun: { id: string; status: string; total_variance: number; date_from?: string } = {
+let mockRun: { id: string; status: string; total_variance: number; date_from?: string; date_to?: string } = {
   id: "r1",
   status: "completed",
   total_variance: -42.5,
@@ -67,13 +68,20 @@ let resolutionUiFlag = false;
 vi.mock("@/hooks/use-features", () => ({
   useFeature: (key: string) => (key === "recon_resolution_ui" ? resolutionUiFlag : true),
 }));
+// Mutable — the investigate-prefill suite below drives a group's proposals
+// through the real ResolutionGroupItems component (rather than mocking it
+// out) so handleInvestigateProposal gets exercised end-to-end via a real
+// button click.
+let mockResolutionSummaryData: Record<string, unknown> | undefined;
+let mockGroupProposals: ReconResolutionProposal[] = [];
 // page.tsx now unconditionally calls the resolution hooks (Rules of Hooks) —
 // mock them like use-reconciliation above so no real QueryClientProvider is
 // needed for this classic-view suite.
 vi.mock("@/hooks/use-resolution", () => ({
-  useResolutionSummary: () => ({ data: undefined, isLoading: false }),
+  useResolutionSummary: () => ({ data: mockResolutionSummaryData, isLoading: false }),
   useApproveResolutionGroup: () => ({ mutate: vi.fn(), isPending: false }),
   useRejectResolutionGroup: () => ({ mutate: vi.fn(), isPending: false }),
+  useGroupProposals: () => ({ data: mockGroupProposals, isLoading: false }),
 }));
 vi.mock("@/components/reconciliation/data-freshness-banner", () => ({
   DataFreshnessBanner: () => null,
@@ -84,13 +92,17 @@ vi.mock("@/components/reconciliation/close-checklist", () => ({
     return null;
   },
 }));
-vi.mock("next/navigation", () => ({ useRouter: () => ({ push: vi.fn() }) }));
+// A stable fn (not a fresh vi.fn() per render) so tests can assert on calls
+// across a render + interaction.
+const routerPush = vi.fn();
+vi.mock("next/navigation", () => ({ useRouter: () => ({ push: routerPush }) }));
 
 import ReconciliationPage from "@/app/(dashboard)/reconciliation/page";
 
 beforeEach(() => {
   mutate.mockReset();
   closeChecklistSpy.mockReset();
+  routerPush.mockReset();
   resolutionUiFlag = false;
   mockRun = {
     id: "r1",
@@ -99,6 +111,8 @@ beforeEach(() => {
     date_from: "2026-05-01",
   };
   mockApproveData = undefined;
+  mockResolutionSummaryData = undefined;
+  mockGroupProposals = [];
 });
 
 describe("ReconciliationPage four buckets", () => {
@@ -222,5 +236,118 @@ describe("ReconciliationPage summary-first surface (flag ON)", () => {
     expect(
       screen.queryByText(/Show all results \(classic view\)/i),
     ).toBeInTheDocument();
+  });
+});
+
+describe("ReconciliationPage investigate-proposal prefill", () => {
+  const baseProposal: ReconResolutionProposal = {
+    id: "p1",
+    run_id: "r1",
+    result_id: "res1",
+    root_cause: "missing",
+    action: "needs_human",
+    booking_vehicle: "none",
+    group_key: "missing:needs_human:none",
+    source: "planner",
+    narrative: "No matching NetSuite deposit found.",
+    proposed_amount: "42.00",
+    currency: "USD",
+    above_materiality: false,
+    status: "proposed",
+    failure_reason: null,
+    correlation_id: null,
+    created_at: "2026-07-06T00:00:00Z",
+    order_reference: null,
+    stripe_charge_id: "ch_abc",
+    netsuite_internal_id: null,
+    netsuite_record_type: null,
+  };
+
+  const mockGroup: ReconResolutionGroup = {
+    group_key: "missing:needs_human:none",
+    root_cause: "missing",
+    action: "needs_human",
+    booking_vehicle: "none",
+    currency: "USD",
+    count: 1,
+    proposed_count: 1,
+    approved_count: 0,
+    total_amount: "42.00",
+    above_materiality_count: 0,
+  };
+
+  const summaryBase = {
+    run_id: "r1",
+    total_results: 1,
+    matches_count: 0,
+    match_rate: "0",
+    proposals_count: 1,
+    explained_count: 0,
+    explained_rate: "0",
+    guard_skipped_count: 0,
+    variance_by_root_cause: { missing: "42.00" },
+    groups: [mockGroup],
+    agent_job: null,
+  };
+
+  beforeEach(() => {
+    resolutionUiFlag = true;
+    mockRun.date_to = "2026-05-31";
+  });
+
+  // Expands the (only) group card so the real ResolutionGroupItems renders,
+  // then clicks its "Investigate in chat" button — exercises
+  // handleInvestigateProposal end to end via a real DOM interaction.
+  // The SQL date filter is driven by the page's own date-range pickers (not
+  // selectedRun's dates), so setDates fills those in via fireEvent.change.
+  function renderAndInvestigate(proposal: ReconResolutionProposal, opts: { setDates?: boolean } = {}) {
+    mockGroupProposals = [proposal];
+    mockResolutionSummaryData = summaryBase;
+    const { container } = render(<ReconciliationPage />);
+    if (opts.setDates) {
+      const dateInputs = container.querySelectorAll('input[type="date"]');
+      fireEvent.change(dateInputs[0], { target: { value: "2026-05-01" } });
+      fireEvent.change(dateInputs[1], { target: { value: "2026-05-31" } });
+    }
+    fireEvent.click(screen.getByText(/missing netsuite deposit/i));
+    fireEvent.click(screen.getByText(/investigate in chat/i));
+  }
+
+  it("uses an exact t.id lookup when netsuite_internal_id is present, no LIKE or date filter", () => {
+    renderAndInvestigate({
+      ...baseProposal,
+      netsuite_internal_id: "98765",
+      netsuite_record_type: "custdep",
+    });
+    expect(routerPush).toHaveBeenCalledTimes(1);
+    const query = decodeURIComponent(routerPush.mock.calls[0][0] as string);
+    expect(query).toContain("t.id = 98765");
+    expect(query).toContain("record type: custdep");
+    expect(query).not.toContain("LIKE");
+    expect(query).not.toContain("TO_DATE");
+  });
+
+  it("searches memo (not tranid) with the CustDep/Deposit type set and date range when only order_reference is present", () => {
+    renderAndInvestigate(
+      { ...baseProposal, order_reference: "R946866359" },
+      { setDates: true },
+    );
+    expect(routerPush).toHaveBeenCalledTimes(1);
+    const query = decodeURIComponent(routerPush.mock.calls[0][0] as string);
+    expect(query).toContain("t.memo LIKE '%R946866359%'");
+    expect(query).not.toContain("t.tranid LIKE");
+    expect(query).toContain("t.type IN ('CustDep', 'Deposit')");
+    expect(query).toContain("TO_DATE('2026-05-01'");
+    expect(query).toContain("TO_DATE('2026-05-31'");
+  });
+
+  it("falls back to the amount+date search when neither identifier is present", () => {
+    renderAndInvestigate({ ...baseProposal });
+    expect(routerPush).toHaveBeenCalledTimes(1);
+    const query = decodeURIComponent(routerPush.mock.calls[0][0] as string);
+    expect(query).toContain("t.type = 'CustDep'");
+    expect(query).toContain("BETWEEN");
+    expect(query).not.toContain("t.memo LIKE");
+    expect(query).not.toContain("t.id =");
   });
 });

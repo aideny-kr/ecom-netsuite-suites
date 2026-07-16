@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent, within } from "@testing-library/react";
+import { render, screen, fireEvent, within, waitFor } from "@testing-library/react";
 import { ResolutionGroupItems } from "@/components/reconciliation/resolution-group-items";
 import type { ReconResolutionProposal } from "@/lib/types";
 
@@ -84,5 +84,14 @@ describe("ResolutionGroupItems", () => {
     render(<ResolutionGroupItems {...base} />);
     fireEvent.click(screen.getByText("NS#12345"));
     expect(writeText).toHaveBeenCalledWith("12345");
+  });
+
+  it("does not show a copied checkmark when the clipboard write fails", async () => {
+    const writeText = vi.fn().mockRejectedValue(new Error("denied"));
+    Object.assign(navigator, { clipboard: { writeText } });
+    const { container } = render(<ResolutionGroupItems {...base} />);
+    fireEvent.click(screen.getByText("NS#12345"));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("12345"));
+    expect(container.querySelector(".text-green-500")).toBeNull();
   });
 });
