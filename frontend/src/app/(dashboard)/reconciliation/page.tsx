@@ -144,23 +144,24 @@ export default function ReconciliationPage() {
     router.push(`/chat?prefill=${encodeURIComponent(query)}&new_session=true`);
   };
 
-  // A resolution proposal (group drill-down row) carries the resolved amount +
-  // narrative but not the underlying result's raw evidence (order reference /
-  // charge-source id) — so investigate-in-chat searches by amount instead of
-  // order reference, and folds the result id into the narrative for
-  // cross-reference rather than the SuiteQL WHERE clause.
   const handleInvestigateProposal = (proposal: ReconResolutionProposal) => {
     const amount = Number(proposal.proposed_amount).toLocaleString("en-US", {
       style: "currency",
       currency: proposal.currency || "USD",
     });
     const dateRange = selectedRun ? `between ${selectedRun.date_from} and ${selectedRun.date_to}` : "";
-    // BETWEEN lo AND hi must use the numerically smaller bound first — for a
-    // negative amount, *0.95 is the larger (less negative) of the two.
-    const rawAmount = Number(proposal.proposed_amount);
-    const lo = Math.min(rawAmount * 0.95, rawAmount * 1.05).toFixed(2);
-    const hi = Math.max(rawAmount * 0.95, rawAmount * 1.05).toFixed(2);
-    const query = `Use SuiteQL to find customer deposits in NetSuite around ${amount} ${dateRange}. Context: ${proposal.narrative} (recon result ${proposal.result_id}). Run: SELECT t.id, t.tranid, t.trandate, t.total, BUILTIN.DF(t.entity) AS customer FROM transaction t WHERE t.type = 'CustDep' AND t.total BETWEEN ${lo} AND ${hi} ${dateFrom ? `AND t.trandate >= TO_DATE('${dateFrom}', 'YYYY-MM-DD') AND t.trandate <= TO_DATE('${dateTo}', 'YYYY-MM-DD')` : ""} FETCH FIRST 10 ROWS ONLY`;
+
+    let query: string;
+    if (proposal.order_reference) {
+      query = `Use SuiteQL to investigate order ${proposal.order_reference} in NetSuite. Context: ${proposal.narrative} (recon result ${proposal.result_id}), amount ${amount} ${dateRange}. Run: SELECT t.id, t.tranid, t.trandate, t.total, BUILTIN.DF(t.entity) AS customer FROM transaction t WHERE t.type = 'CustDep' AND (t.tranid LIKE '%${proposal.order_reference}%' OR t.total = ${Number(proposal.proposed_amount).toFixed(2)}) FETCH FIRST 10 ROWS ONLY`;
+    } else {
+      // BETWEEN lo AND hi must use the numerically smaller bound first — for a
+      // negative amount, *0.95 is the larger (less negative) of the two.
+      const rawAmount = Number(proposal.proposed_amount);
+      const lo = Math.min(rawAmount * 0.95, rawAmount * 1.05).toFixed(2);
+      const hi = Math.max(rawAmount * 0.95, rawAmount * 1.05).toFixed(2);
+      query = `Use SuiteQL to find customer deposits in NetSuite around ${amount} ${dateRange}. Context: ${proposal.narrative} (recon result ${proposal.result_id}). Run: SELECT t.id, t.tranid, t.trandate, t.total, BUILTIN.DF(t.entity) AS customer FROM transaction t WHERE t.type = 'CustDep' AND t.total BETWEEN ${lo} AND ${hi} ${dateFrom ? `AND t.trandate >= TO_DATE('${dateFrom}', 'YYYY-MM-DD') AND t.trandate <= TO_DATE('${dateTo}', 'YYYY-MM-DD')` : ""} FETCH FIRST 10 ROWS ONLY`;
+    }
     router.push(`/chat?prefill=${encodeURIComponent(query)}&new_session=true`);
   };
 
