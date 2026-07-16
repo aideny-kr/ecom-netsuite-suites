@@ -1193,10 +1193,34 @@ async def download_evidence(
     ]
 
     P = ReconResolutionProposal
-    proposals_stmt = select(P).where(
-        P.run_id == uuid.UUID(run_id),
-        P.tenant_id == user.tenant_id,
-        P.status.notin_(("superseded", "rejected")),
+    # Same enrichment join as list_group_proposals (A1): order_reference off
+    # the result's evidence JSON, NetSuite id off the deposit it matched to
+    # (LEFT JOIN — most needs_human proposals have no deposit_id).
+    proposals_stmt = (
+        select(
+            P,
+            ReconciliationResult.evidence["order_reference"].astext,
+            NetsuitePosting.netsuite_internal_id,
+        )
+        .join(
+            ReconciliationResult,
+            and_(
+                ReconciliationResult.id == P.result_id,
+                ReconciliationResult.tenant_id == user.tenant_id,
+            ),
+        )
+        .outerjoin(
+            NetsuitePosting,
+            and_(
+                NetsuitePosting.id == ReconciliationResult.deposit_id,
+                NetsuitePosting.tenant_id == user.tenant_id,
+            ),
+        )
+        .where(
+            P.run_id == uuid.UUID(run_id),
+            P.tenant_id == user.tenant_id,
+            P.status.notin_(("superseded", "rejected")),
+        )
     )
     proposals_result = await db.execute(proposals_stmt)
     proposals_dicts = [
@@ -1211,8 +1235,11 @@ async def download_evidence(
             "proposed_amount": p.proposed_amount,
             "currency": p.currency,
             "above_materiality": p.above_materiality,
+            "order_reference": order_reference,
+            "stripe_charge_id": p.charge_source_id,
+            "netsuite_internal_id": netsuite_internal_id,
         }
-        for p in proposals_result.scalars().all()
+        for p, order_reference, netsuite_internal_id in proposals_result.all()
     ]
 
     generator = EvidencePackGenerator()
