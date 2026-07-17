@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import select, text
 
 from app.models.report import Report
@@ -141,3 +142,56 @@ async def test_compose_playbook_endpoint_creates_report(db, monkeypatch):
         db=db,
     )
     assert resp.version == 1 and "Jun 2026" in resp.title
+
+
+async def test_compose_playbook_endpoint_unknown_key_is_404(db, monkeypatch):
+    from app.api.v1.reports import PlaybookComposeRequest, compose_playbook_endpoint
+
+    tenant = await create_test_tenant(db, name="PlaybookApi404Corp")
+    user, _ = await create_test_user(db, tenant)
+    _patch_executor(monkeypatch)
+
+    with pytest.raises(HTTPException) as exc:
+        await compose_playbook_endpoint(
+            "nope",
+            PlaybookComposeRequest(params={"period": "Jun 2026"}),
+            user=user,
+            db=db,
+        )
+    assert exc.value.status_code == 404
+
+
+async def test_compose_playbook_endpoint_bad_params_is_400(db, monkeypatch):
+    from app.api.v1.reports import PlaybookComposeRequest, compose_playbook_endpoint
+
+    tenant = await create_test_tenant(db, name="PlaybookApi400Corp")
+    user, _ = await create_test_user(db, tenant)
+    _patch_executor(monkeypatch)
+
+    with pytest.raises(HTTPException) as exc:
+        await compose_playbook_endpoint(
+            "income_statement",
+            PlaybookComposeRequest(params={"period": "June 2026"}),  # malformed: "Jun", not "June"
+            user=user,
+            db=db,
+        )
+    assert exc.value.status_code == 400
+    assert "period" in exc.value.detail
+
+
+async def test_compose_playbook_endpoint_tool_failure_passes_through_refresh_error(db, monkeypatch):
+    from app.api.v1.reports import PlaybookComposeRequest, compose_playbook_endpoint
+
+    tenant = await create_test_tenant(db, name="PlaybookApi502Corp")
+    user, _ = await create_test_user(db, tenant)
+    _patch_executor(monkeypatch, json.dumps({"success": False, "error": "No active NetSuite connection found"}))
+
+    with pytest.raises(HTTPException) as exc:
+        await compose_playbook_endpoint(
+            "income_statement",
+            PlaybookComposeRequest(params={"period": "Jun 2026"}),
+            user=user,
+            db=db,
+        )
+    assert exc.value.status_code == 502
+    assert "No active NetSuite connection found" in exc.value.detail
