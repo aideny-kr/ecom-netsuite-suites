@@ -114,3 +114,30 @@ async def test_compose_playbook_source_failure_creates_nothing(db, monkeypatch):
     await db.rollback()
     count = (await db.execute(select(Report).where(Report.tenant_id == tenant.id))).scalars().all()
     assert count == []
+
+
+def test_playbook_routes_declared_before_dynamic_report_route():
+    """FastAPI matches in declaration order — /playbooks after /{report_id}
+    would be swallowed and 404. Guard the ordering statically."""
+    from app.api.v1 import reports as reports_api
+
+    paths = [r.path for r in reports_api.router.routes]
+    playbook_idx = min(i for i, p in enumerate(paths) if "playbooks" in p)
+    dynamic_idx = min(i for i, p in enumerate(paths) if "{report_id}" in p)
+    assert playbook_idx < dynamic_idx
+
+
+async def test_compose_playbook_endpoint_creates_report(db, monkeypatch):
+    from app.api.v1.reports import PlaybookComposeRequest, compose_playbook_endpoint
+
+    tenant = await create_test_tenant(db, name="PlaybookApiCorp")
+    user, _ = await create_test_user(db, tenant)
+    _patch_executor(monkeypatch)
+
+    resp = await compose_playbook_endpoint(
+        "income_statement",
+        PlaybookComposeRequest(params={"period": "Jun 2026"}),
+        user=user,
+        db=db,
+    )
+    assert resp.version == 1 and "Jun 2026" in resp.title

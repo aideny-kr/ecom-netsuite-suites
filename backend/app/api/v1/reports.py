@@ -3,6 +3,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import Response
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -14,6 +15,7 @@ from app.models.user import User
 from app.schemas.report import ReportResponse, ReportSettingsUpdate, ReportVersionResponse
 from app.services import audit_service
 from app.services.report import refresh_service
+from app.services.report.playbooks import PLAYBOOKS, compose_playbook_report
 
 router = APIRouter(prefix="/reports", tags=["reports"])
 
@@ -43,6 +45,44 @@ async def list_reports(
 ):
     rows = (await db.execute(select(Report).order_by(Report.created_at.desc()))).scalars().all()
     return [_to_response(r) for r in rows]
+
+
+class PlaybookComposeRequest(BaseModel):
+    params: dict[str, str] = {}
+
+
+@router.get("/playbooks")
+async def list_playbooks(
+    user: Annotated[User, Depends(get_current_user)],
+):
+    return [
+        {"key": key, "name": m["name"], "description": m["description"], "params": m["params"]}
+        for key, m in PLAYBOOKS.items()
+    ]
+
+
+@router.post("/playbooks/{playbook_key}", response_model=ReportResponse, status_code=status.HTTP_201_CREATED)
+async def compose_playbook_endpoint(
+    playbook_key: str,
+    request: PlaybookComposeRequest,
+    user: Annotated[User, Depends(get_current_user)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+):
+    if playbook_key not in PLAYBOOKS:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unknown playbook")
+    try:
+        report = await compose_playbook_report(
+            db,
+            playbook_key=playbook_key,
+            params=request.params,
+            tenant_id=user.tenant_id,
+            actor_id=user.id,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)) from e
+    except refresh_service.RefreshError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.detail) from e
+    return _to_response(report)
 
 
 async def _get_owned(db: AsyncSession, report_id: str) -> Report:
