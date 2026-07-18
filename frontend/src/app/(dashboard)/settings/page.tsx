@@ -62,6 +62,7 @@ import { JobsSection } from "@/components/settings/jobs-section";
 import { NetSuiteConnectionsSection } from "@/components/settings/netsuite-connections-section";
 import { BigQueryConnectionSection } from "@/components/settings/bigquery-connection-section";
 import { DataSourceConnectorsSection } from "@/components/settings/data-source-connectors-section";
+import { PricingConfigSection } from "@/components/settings/pricing-config-section";
 
 import { usePermissions } from "@/hooks/use-permissions";
 import { useAuth } from "@/providers/auth-provider";
@@ -2865,6 +2866,11 @@ export default function SettingsPage() {
 
           {/* Chat Settings (MCP Financial toggle) */}
           <ChatSettingsSection />
+
+          {/* Pricing Configuration (FX / VAT / rounding) — formerly only in the removed Pricing agent workspace */}
+          <SectionErrorBoundary name="Pricing">
+            <PricingConfigSection />
+          </SectionErrorBoundary>
 
           {/* Tenant Profile Section */}
           <TenantProfileSection />
