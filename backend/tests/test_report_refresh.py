@@ -548,3 +548,14 @@ async def test_superseded_refresh_aborts_before_publish(db, monkeypatch):
     assert exc.value.status_code == 409
     count = (await db.execute(select(func.count(ReportVersion.id)).where(ReportVersion.report_id == rid))).scalar()
     assert count == 0  # nothing published over the newer claim
+
+
+# --- Provenance (Task 6): refresh renders a human-readable "Sources & method" block --
+
+
+async def test_refresh_embeds_provenance_block(db, monkeypatch):
+    tenant, user, report = await _seed_report(db, recipe=_recipe())
+    _patch_executor(monkeypatch, _fresh_result_str())
+    updated = await refresh_report(db, report_id=report.id, tenant_id=tenant.id, actor_id=user.id)
+    assert "Sources" in updated.rendered_html and "netsuite_suiteql" not in updated.rendered_html
+    assert "NetSuite SuiteQL query" in updated.rendered_html

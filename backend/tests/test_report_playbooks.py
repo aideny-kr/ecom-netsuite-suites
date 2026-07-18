@@ -195,3 +195,18 @@ async def test_compose_playbook_endpoint_tool_failure_passes_through_refresh_err
         )
     assert exc.value.status_code == 502
     assert "No active NetSuite connection found" in exc.value.detail
+
+
+async def test_playbook_report_embeds_provenance(db, monkeypatch):
+    tenant = await create_test_tenant(db, name="ProvCorp")
+    user, _ = await create_test_user(db, tenant)
+    _patch_executor(monkeypatch)
+    report = await compose_playbook_report(
+        db,
+        playbook_key="income_statement",
+        params={"period": "Jun 2026"},
+        tenant_id=tenant.id,
+        actor_id=user.id,
+    )
+    assert "NetSuite GL statement template (SuiteQL)" in report.rendered_html
+    assert "period=Jun 2026" in report.rendered_html

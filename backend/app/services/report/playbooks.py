@@ -78,7 +78,7 @@ async def compose_playbook_report(db, *, playbook_key, params, tenant_id, actor_
     from app.models.report import Report
     from app.services import audit_service
     from app.services.report.refresh_service import _execute_sources, _validated_sources
-    from app.services.report.report_html import render_report_html
+    from app.services.report.report_html import build_provenance, render_report_html
     from app.services.report.report_service import assemble_spec, referenced_result_ids
 
     title, recipe = build_playbook_recipe(playbook_key, params)
@@ -95,7 +95,11 @@ async def compose_playbook_report(db, *, playbook_key, params, tenant_id, actor_
         correlation_id=correlation_id,
     )
     spec = assemble_spec(title, recipe["sections"], lambda rid: payloads[rid])
-    html = render_report_html(spec, freshness={"composed_at": recipe["captured_at"], "refreshed_at": ""})
+    html = render_report_html(
+        spec,
+        freshness={"composed_at": recipe["captured_at"], "refreshed_at": ""},
+        provenance=build_provenance(recipe["sources"], recipe["captured_at"]),
+    )
 
     # tool calls may commit (e.g. token refresh) — re-establish before RLS writes
     await set_tenant_context(db, str(tenant_id))
