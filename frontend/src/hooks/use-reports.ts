@@ -89,3 +89,32 @@ export function useResumeAutoRefresh(id: string) {
     },
   });
 }
+
+export interface PlaybookParam {
+  key: string;
+  label: string;
+  example: string;
+}
+
+export interface PlaybookInfo {
+  key: string;
+  name: string;
+  description: string;
+  params: PlaybookParam[];
+}
+
+export function usePlaybooks() {
+  return useQuery<PlaybookInfo[]>({
+    queryKey: ["report-playbooks"],
+    queryFn: () => apiClient.get<PlaybookInfo[]>("/api/v1/reports/playbooks"),
+  });
+}
+
+export function useComposePlaybook() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (args: { key: string; params: Record<string, string> }) =>
+      apiClient.post<ReportSummary>(`/api/v1/reports/playbooks/${args.key}`, { params: args.params }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["reports"] }),
+  });
+}

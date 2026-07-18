@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useReports } from "@/hooks/use-reports";
+import { PlaybookLauncher } from "./playbook-launcher";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { FileBarChart, ChevronRight } from "lucide-react";
@@ -17,6 +18,8 @@ export default function ReportsPage() {
           Published reports composed from your analytics
         </p>
       </div>
+
+      <PlaybookLauncher />
 
       {isLoading ? (
         <div className="space-y-2">

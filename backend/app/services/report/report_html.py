@@ -343,7 +343,94 @@ def _accent_ink(accent_hsl: str) -> str:
     return "#fff" if float(m.group(1)) < 55 else "#111"
 
 
-def render_report_html(spec: dict, accent_hsl: str = "240 6% 10%", freshness: dict | None = None) -> str:
+# A recipe source's tool name for an external MCP call: "ext__<32-hex connection
+# fingerprint>__<raw tool name>". Distinguishes MCP-routed sources (label by raw tool
+# name) from local tools (labeled via _TOOL_LABELS below).
+_EXT_TOOL_RE = re.compile(r"^ext__[0-9a-f]{32}__(?P<raw>.+)$")
+
+_TOOL_LABELS = {
+    "netsuite_financial_report": "NetSuite GL statement template (SuiteQL)",
+    "netsuite_suiteql": "NetSuite SuiteQL query",
+}
+
+
+# Params that must never reach the frozen HTML's "Sources & method" block. All of these
+# are full SQL text (or verbatim chat text) on tools that ARE recipe-eligible — a
+# recipe-eligible tool means a real captured recipe can carry the param, so each must be
+# named here regardless of which tool/key shape carries it:
+# - `query` (local netsuite_suiteql) and `sqlQuery` (external ext__..__ns_runCustomSuiteQL /
+#   ns_runSuiteQL — the external-MCP equivalent key) are the literal SQL text. The label
+#   ("NetSuite SuiteQL query" / "External MCP tool ...") already conveys method; printing
+#   SQL into a report is its own trust-boundary problem regardless of content.
+# - `left_query` / `right_query` (cross_source_query) are the same leak class: two full
+#   SQL texts on a different recipe-eligible tool.
+# - LLM-only params are additionally stripped per-tool via refresh_service's
+#   `_LLM_ONLY_PARAMS` (the set stripped before dispatch on refresh) — a captured
+#   `user_question` is verbatim chat text, and echoing it here would both leak arbitrary
+#   user text into every recipe-bearing report AND misrepresent the replay (refresh never
+#   actually sends it to the tool).
+_ALWAYS_EXCLUDED_PARAM_KEYS = frozenset({"query", "sqlQuery", "left_query", "right_query"})
+
+# Forward guard: even a param that survives the exclusion list above must not blow up the
+# frozen HTML with an unbounded value — a future recipe-eligible tool could carry a big
+# text param under a name not yet on the list. Caps, doesn't hide: the key still shows.
+_DETAIL_VALUE_MAX_LEN = 80
+
+
+def _truncate_detail_value(value: object) -> str:
+    s = str(value)
+    return s if len(s) <= _DETAIL_VALUE_MAX_LEN else s[:_DETAIL_VALUE_MAX_LEN] + "…"
+
+
+def build_provenance(sources: dict, executed_at: str) -> list[dict]:
+    """Translate a recipe's raw ``sources`` map (``result_id -> {tool, params, ...}``)
+    into human-readable entries for the renderer's "Sources & method" block: each result
+    id, a plain-English label for the tool that produced it, its params as ``detail``,
+    and when it ran. Sorted by ``result_id`` for deterministic (byte-stable) output.
+
+    ``detail`` is policy-filtered (see ``_ALWAYS_EXCLUDED_PARAM_KEYS`` / ``_LLM_ONLY_PARAMS``
+    above) and each surviving value length-capped (``_DETAIL_VALUE_MAX_LEN``) — never a raw
+    dump of every captured param. Playbook sources (``report_type``, ``period``) and
+    external-MCP params (e.g. ``reportId``) are unaffected."""
+    from app.services.report.refresh_service import _LLM_ONLY_PARAMS
+
+    entries = []
+    for result_id in sorted(sources):
+        src = sources[result_id] or {}
+        tool = str(src.get("tool", ""))
+        m = _EXT_TOOL_RE.match(tool)
+        if m:
+            raw = m.group("raw")
+            label = "NetSuite native report runner" if raw == "ns_runReport" else f"External MCP tool {raw}"
+        else:
+            label = _TOOL_LABELS.get(tool, tool)
+        params = src.get("params") or {}
+        excluded = _ALWAYS_EXCLUDED_PARAM_KEYS | _LLM_ONLY_PARAMS.get(tool, frozenset())
+        detail = ", ".join(f"{k}={_truncate_detail_value(params[k])}" for k in sorted(params) if k not in excluded)
+        entries.append({"result_id": result_id, "label": label, "detail": detail, "executed_at": executed_at})
+    return entries
+
+
+def _provenance_html(provenance: list[dict]) -> str:
+    rows = "".join(
+        f"<div>{escape(str(p.get('result_id', '')))} — {escape(str(p.get('label', '')))}"
+        f" · {escape(str(p.get('detail', '')))} · executed {escape(str(p.get('executed_at', '')))}</div>"
+        for p in provenance
+    )
+    return (
+        '<div class="prov"><strong>Sources &amp; method</strong>'
+        f"{rows}"
+        "<div>Numbers are tool-computed and rendered deterministically — no model generated a figure.</div>"
+        "</div>"
+    )
+
+
+def render_report_html(
+    spec: dict,
+    accent_hsl: str = "240 6% 10%",
+    freshness: dict | None = None,
+    provenance: list[dict] | None = None,
+) -> str:
     title = escape(str(spec.get("title", "Report")))
     body = "".join(_section_html(s) for s in spec.get("sections", []))
     prov = spec.get("provenance", {}) or {}
@@ -357,14 +444,21 @@ def render_report_html(spec: dict, accent_hsl: str = "240 6% 10%", freshness: di
     # two vintages. None (the compose path) keeps the output byte-identical.
     stamp_html = ""
     if freshness:
-        stamp_html = (
-            f'<div class="stamp">Narrative composed {_fmt_stamp(freshness.get("composed_at", ""))}'
-            f" · Data refreshed {_fmt_stamp(freshness.get('refreshed_at', ''))}</div>"
-        )
+        # Compose (playbook compose, first version) has no refreshed_at yet — omit any
+        # component whose value is empty/falsy rather than joining a dangling "· Data
+        # refreshed " with nothing after it.
+        parts = []
+        if freshness.get("composed_at"):
+            parts.append(f"Narrative composed {_fmt_stamp(freshness['composed_at'])}")
+        if freshness.get("refreshed_at"):
+            parts.append(f"Data refreshed {_fmt_stamp(freshness['refreshed_at'])}")
+        if parts:
+            stamp_html = f'<div class="stamp">{" · ".join(parts)}</div>'
+    method_html = _provenance_html(provenance) if provenance else ""
     css = _CSS % {"accent": escape(accent_hsl), "accent_ink": _accent_ink(accent_hsl)}
     return (
         f'<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
         f'<meta name="viewport" content="width=device-width, initial-scale=1">'
         f'<title>{title}</title><style>{css}</style></head><body><div class="report">'
-        f'<div class="accent-bar"></div><h1>{title}</h1>{body}{stamp_html}{prov_html}</div></body></html>'
+        f'<div class="accent-bar"></div><h1>{title}</h1>{body}{method_html}{stamp_html}{prov_html}</div></body></html>'
     )

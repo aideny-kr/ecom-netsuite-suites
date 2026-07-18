@@ -1,4 +1,4 @@
-from app.services.report.report_html import fmt_amount, render_report_html
+from app.services.report.report_html import build_provenance, fmt_amount, render_report_html
 
 
 def test_fmt_amount_accounting_style():
@@ -240,6 +240,19 @@ def test_freshness_renders_composed_and_refreshed_dates():
     assert "UTC" in html
 
 
+def test_freshness_with_empty_refreshed_at_omits_dangling_separator():
+    """Compose-time freshness (playbook compose) passes refreshed_at="" — the stamp must
+    render ONLY the composed part, with no trailing '· Data refreshed' separator/label
+    for a value that was never set."""
+    html = render_report_html(
+        _min_spec(),
+        freshness={"composed_at": "2026-07-06T18:04:12.331209+00:00", "refreshed_at": ""},
+    )
+    assert "Narrative composed 6 Jul 2026" in html
+    assert "Data refreshed" not in html
+    assert html.count('class="stamp"') == 1
+
+
 def test_freshness_values_are_escaped_and_unparseable_dates_never_crash():
     html = render_report_html(
         _min_spec(),
@@ -402,3 +415,138 @@ def test_print_table_header_pins_light_background_and_dark_ink():
     html = render_report_html(_slice_d_spec())
     printed = html.split("@media print", 1)[1]
     assert "th { position:static; background:#eee; color:var(--ink); }" in printed
+
+
+# --- Provenance block ("Sources & method") --------------------------------------------
+
+
+def _freshness():
+    return {"composed_at": "2026-07-06T18:04:12.331209+00:00", "refreshed_at": "2026-07-07T03:15:00+00:00"}
+
+
+def test_provenance_block_renders_sources_and_method():
+    prov = build_provenance(
+        {
+            "r1": {
+                "tool": "netsuite_financial_report",
+                "params": {"report_type": "income_statement", "period": "Jun 2026"},
+                "connection_id": None,
+            },
+            "r2": {
+                "tool": "ext__fc1cba33e9924f62a5b7df0d5f235214__ns_runReport",
+                "params": {"reportId": -203},
+                "connection_id": "fc1cba33",
+            },
+        },
+        executed_at="2026-07-17T20:00:00+00:00",
+    )
+    html = render_report_html(_min_spec(), freshness=_freshness(), provenance=prov)
+    assert "Sources &amp; method" in html or "Sources & method" in html
+    assert "NetSuite GL statement template (SuiteQL)" in html
+    assert "NetSuite native report runner" in html
+    assert "period=Jun 2026" in html
+    assert "2026-07-17T20:00:00+00:00" in html
+
+
+def test_no_provenance_renders_no_block():
+    html = render_report_html(_min_spec(), freshness=_freshness())
+    assert "Sources & method" not in html
+
+
+def test_provenance_values_are_escaped():
+    prov = [{"result_id": "r1", "label": "<script>x</script>", "detail": "a=<b>", "executed_at": "t"}]
+    html = render_report_html(_min_spec(), freshness=_freshness(), provenance=prov)
+    assert "<script>x</script>" not in html
+
+
+def test_provenance_excludes_llm_only_params_and_raw_sql():
+    """build_provenance must never leak a chat-composed recipe's raw suiteql params into
+    the frozen HTML: `query` is the literal SQL text (the label already conveys method —
+    never print SQL into a report), and `user_question` is verbatim chat text that is
+    ALSO stripped before dispatch on refresh (_LLM_ONLY_PARAMS in refresh_service) —
+    displaying it would misrepresent what was actually replayed. A benign param on the
+    same source must still show."""
+    prov = build_provenance(
+        {
+            "r1": {
+                "tool": "netsuite_suiteql",
+                "params": {
+                    "query": "SELECT ssn, salary FROM employee",
+                    "user_question": "what did the CEO get paid last year",
+                    "limit": 50,
+                },
+                "connection_id": None,
+            }
+        },
+        executed_at="2026-07-17T20:00:00+00:00",
+    )
+    detail = prov[0]["detail"]
+    assert "SELECT" not in detail
+    assert "salary" not in detail
+    assert "CEO" not in detail
+    assert "what did the CEO get paid" not in detail
+    assert "limit=50" in detail
+    # the label alone still conveys method — unaffected by the param policy
+    assert prov[0]["label"] == "NetSuite SuiteQL query"
+    html = render_report_html(_min_spec(), freshness=_freshness(), provenance=prov)
+    assert "SELECT" not in html
+
+
+def test_provenance_excludes_sql_from_external_custom_suiteql():
+    """ext__<hex>__ns_runCustomSuiteQL is recipe-eligible (data_table category) and
+    carries the full SQL under `sqlQuery` (the external-MCP equivalent of the local
+    `query` key) — same leak class as Finding 1, different key name."""
+    prov = build_provenance(
+        {
+            "r1": {
+                "tool": "ext__fc1cba33e9924f62a5b7df0d5f235214__ns_runCustomSuiteQL",
+                "params": {"sqlQuery": "SELECT ssn FROM employee", "limit": 50},
+                "connection_id": "fc1cba33",
+            }
+        },
+        executed_at="2026-07-17T20:00:00+00:00",
+    )
+    detail = prov[0]["detail"]
+    assert "SELECT" not in detail
+    assert "ssn" not in detail
+    assert "limit=50" in detail
+
+
+def test_provenance_excludes_sql_from_cross_source_query():
+    """cross_source_query is recipe-eligible (data_table category) and takes TWO full
+    SQL texts under left_query/right_query."""
+    prov = build_provenance(
+        {
+            "r1": {
+                "tool": "cross_source_query",
+                "params": {
+                    "left_query": "SELECT ssn FROM employee",
+                    "right_query": "SELECT card_number FROM payments",
+                    "join_type": "inner",
+                },
+                "connection_id": None,
+            }
+        },
+        executed_at="2026-07-17T20:00:00+00:00",
+    )
+    detail = prov[0]["detail"]
+    assert "SELECT" not in detail
+    assert "ssn" not in detail
+    assert "card_number" not in detail
+    assert "join_type=inner" in detail
+
+
+def test_provenance_detail_value_truncated_at_80_chars():
+    """Forward guard: even a param NOT on the exclusion list must not blow up the
+    frozen HTML with an unbounded value — caps any surviving detail value so a future
+    recipe-eligible tool with a big text param under a new (unlisted) name can't
+    silently reopen this leak class."""
+    long_value = "x" * 200
+    prov = build_provenance(
+        {"r1": {"tool": "netsuite_suiteql", "params": {"note": long_value}, "connection_id": None}},
+        executed_at="2026-07-17T20:00:00+00:00",
+    )
+    detail = prov[0]["detail"]
+    assert long_value not in detail
+    assert "…" in detail or "..." in detail
+    assert len(detail) < 120  # "note=" + ~80 chars + ellipsis, well short of the full 200

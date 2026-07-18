@@ -209,7 +209,7 @@ async def refresh_report(
     Slice C: the Beat sweep calls with ``actor_id=None, actor_type="system"`` (the
     house audit convention for cron actors) — the published version's ``created_by``
     is then NULL. The HTTP endpoint always passes the acting user."""
-    from app.services.report.report_html import render_report_html
+    from app.services.report.report_html import build_provenance, render_report_html
     from app.services.report.report_service import assemble_spec, referenced_result_ids
 
     if actor_id is None and actor_type == "user":
@@ -258,6 +258,7 @@ async def refresh_report(
         html = render_report_html(
             spec,
             freshness={"composed_at": recipe.get("captured_at", ""), "refreshed_at": now.isoformat()},
+            provenance=build_provenance(recipe["sources"], now.isoformat()),
         )
 
         # ---- Phase 3: atomic publish -------------------------------------------------
