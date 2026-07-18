@@ -240,6 +240,19 @@ def test_freshness_renders_composed_and_refreshed_dates():
     assert "UTC" in html
 
 
+def test_freshness_with_empty_refreshed_at_omits_dangling_separator():
+    """Compose-time freshness (playbook compose) passes refreshed_at="" — the stamp must
+    render ONLY the composed part, with no trailing '· Data refreshed' separator/label
+    for a value that was never set."""
+    html = render_report_html(
+        _min_spec(),
+        freshness={"composed_at": "2026-07-06T18:04:12.331209+00:00", "refreshed_at": ""},
+    )
+    assert "Narrative composed 6 Jul 2026" in html
+    assert "Data refreshed" not in html
+    assert html.count('class="stamp"') == 1
+
+
 def test_freshness_values_are_escaped_and_unparseable_dates_never_crash():
     html = render_report_html(
         _min_spec(),
@@ -444,3 +457,37 @@ def test_provenance_values_are_escaped():
     prov = [{"result_id": "r1", "label": "<script>x</script>", "detail": "a=<b>", "executed_at": "t"}]
     html = render_report_html(_min_spec(), freshness=_freshness(), provenance=prov)
     assert "<script>x</script>" not in html
+
+
+def test_provenance_excludes_llm_only_params_and_raw_sql():
+    """build_provenance must never leak a chat-composed recipe's raw suiteql params into
+    the frozen HTML: `query` is the literal SQL text (the label already conveys method —
+    never print SQL into a report), and `user_question` is verbatim chat text that is
+    ALSO stripped before dispatch on refresh (_LLM_ONLY_PARAMS in refresh_service) —
+    displaying it would misrepresent what was actually replayed. A benign param on the
+    same source must still show."""
+    prov = build_provenance(
+        {
+            "r1": {
+                "tool": "netsuite_suiteql",
+                "params": {
+                    "query": "SELECT ssn, salary FROM employee",
+                    "user_question": "what did the CEO get paid last year",
+                    "limit": 50,
+                },
+                "connection_id": None,
+            }
+        },
+        executed_at="2026-07-17T20:00:00+00:00",
+    )
+    detail = prov[0]["detail"]
+    assert "SELECT" not in detail
+    assert "salary" not in detail
+    assert "CEO" not in detail
+    assert "what did the CEO get paid" not in detail
+    assert "limit=50" in detail
+    # the label alone still conveys method — unaffected by the param policy
+    assert prov[0]["label"] == "NetSuite SuiteQL query"
+    html = render_report_html(_min_spec(), freshness=_freshness(), provenance=prov)
+    assert "SELECT" not in html
+    assert "CEO" not in html

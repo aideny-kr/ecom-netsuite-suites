@@ -354,11 +354,29 @@ _TOOL_LABELS = {
 }
 
 
+# Params that must never reach the frozen HTML's "Sources & method" block:
+# - `query` is the literal SQL text — the label ("NetSuite SuiteQL query") already
+#   conveys method; printing SQL into a report is its own trust-boundary problem
+#   regardless of what it contains.
+# - the rest are per-tool LLM-only params, single-sourced from refresh_service's
+#   `_LLM_ONLY_PARAMS` (the set stripped before dispatch on refresh) — a captured
+#   `user_question` is verbatim chat text, and echoing it here would both leak
+#   arbitrary user text into every recipe-bearing report AND misrepresent the
+#   replay (refresh never actually sends it to the tool).
+_ALWAYS_EXCLUDED_PARAM_KEYS = frozenset({"query"})
+
+
 def build_provenance(sources: dict, executed_at: str) -> list[dict]:
     """Translate a recipe's raw ``sources`` map (``result_id -> {tool, params, ...}``)
     into human-readable entries for the renderer's "Sources & method" block: each result
     id, a plain-English label for the tool that produced it, its params as ``detail``,
-    and when it ran. Sorted by ``result_id`` for deterministic (byte-stable) output."""
+    and when it ran. Sorted by ``result_id`` for deterministic (byte-stable) output.
+
+    ``detail`` is policy-filtered (see ``_ALWAYS_EXCLUDED_PARAM_KEYS`` / ``_LLM_ONLY_PARAMS``
+    above) — never a raw dump of every captured param. Playbook sources (``report_type``,
+    ``period``) and external-MCP params (e.g. ``reportId``) are unaffected."""
+    from app.services.report.refresh_service import _LLM_ONLY_PARAMS
+
     entries = []
     for result_id in sorted(sources):
         src = sources[result_id] or {}
@@ -370,7 +388,8 @@ def build_provenance(sources: dict, executed_at: str) -> list[dict]:
         else:
             label = _TOOL_LABELS.get(tool, tool)
         params = src.get("params") or {}
-        detail = ", ".join(f"{k}={params[k]}" for k in sorted(params))
+        excluded = _ALWAYS_EXCLUDED_PARAM_KEYS | _LLM_ONLY_PARAMS.get(tool, frozenset())
+        detail = ", ".join(f"{k}={params[k]}" for k in sorted(params) if k not in excluded)
         entries.append({"result_id": result_id, "label": label, "detail": detail, "executed_at": executed_at})
     return entries
 
