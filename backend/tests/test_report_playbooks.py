@@ -34,7 +34,11 @@ def test_build_income_statement_recipe():
     assert src["params"] == {"report_type": "income_statement", "period": "Jun 2026"}
     assert src["connection_id"] is None
     kinds = [s["type"] for s in recipe["sections"]]
-    assert kinds[0] == "heading" and "table" in kinds and "narrative" in kinds
+    # No "heading" section: the title already flows through assemble_spec's outer <h1>
+    # (render_report_html emits it from spec["title"]) — a recipe-authored heading
+    # section would duplicate it back-to-back in the rendered HTML.
+    assert "table" in kinds and "narrative" in kinds
+    assert "heading" not in kinds
 
 
 @pytest.mark.parametrize(
@@ -210,3 +214,21 @@ async def test_playbook_report_embeds_provenance(db, monkeypatch):
     )
     assert "NetSuite GL statement template (SuiteQL)" in report.rendered_html
     assert "period=Jun 2026" in report.rendered_html
+
+
+async def test_playbook_report_title_renders_exactly_once(db, monkeypatch):
+    """The outer <h1> already comes from spec["title"] (assemble_spec -> render_report_html).
+    A recipe-authored heading section duplicated it back-to-back — the recipe must not
+    emit one."""
+    tenant = await create_test_tenant(db, name="TitleOnceCorp")
+    user, _ = await create_test_user(db, tenant)
+    _patch_executor(monkeypatch)
+    report = await compose_playbook_report(
+        db,
+        playbook_key="income_statement",
+        params={"period": "Jun 2026"},
+        tenant_id=tenant.id,
+        actor_id=user.id,
+    )
+    assert report.rendered_html.count("<h1") == 1
+    assert "Income Statement — Jun 2026" in report.rendered_html

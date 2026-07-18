@@ -47,8 +47,10 @@ def build_playbook_recipe(playbook_key: str, params: dict[str, str]) -> tuple[st
     recipe = {
         "schema_version": 1,
         "captured_at": datetime.now(timezone.utc).isoformat(),
+        # No heading section: render_report_html already emits an outer <h1> from
+        # assemble_spec's title — a recipe-authored heading here duplicated it
+        # back-to-back in the rendered HTML.
         "sections": [
-            {"type": "heading", "level": 1, "text": title},
             {"type": "table", "result_id": "r1", "label": meta["table_label"]},
             {
                 "type": "narrative",
