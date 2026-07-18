@@ -1,4 +1,4 @@
-from app.services.report.report_html import fmt_amount, render_report_html
+from app.services.report.report_html import build_provenance, fmt_amount, render_report_html
 
 
 def test_fmt_amount_accounting_style():
@@ -402,3 +402,45 @@ def test_print_table_header_pins_light_background_and_dark_ink():
     html = render_report_html(_slice_d_spec())
     printed = html.split("@media print", 1)[1]
     assert "th { position:static; background:#eee; color:var(--ink); }" in printed
+
+
+# --- Provenance block ("Sources & method") --------------------------------------------
+
+
+def _freshness():
+    return {"composed_at": "2026-07-06T18:04:12.331209+00:00", "refreshed_at": "2026-07-07T03:15:00+00:00"}
+
+
+def test_provenance_block_renders_sources_and_method():
+    prov = build_provenance(
+        {
+            "r1": {
+                "tool": "netsuite_financial_report",
+                "params": {"report_type": "income_statement", "period": "Jun 2026"},
+                "connection_id": None,
+            },
+            "r2": {
+                "tool": "ext__fc1cba33e9924f62a5b7df0d5f235214__ns_runReport",
+                "params": {"reportId": -203},
+                "connection_id": "fc1cba33",
+            },
+        },
+        executed_at="2026-07-17T20:00:00+00:00",
+    )
+    html = render_report_html(_min_spec(), freshness=_freshness(), provenance=prov)
+    assert "Sources &amp; method" in html or "Sources & method" in html
+    assert "NetSuite GL statement template (SuiteQL)" in html
+    assert "NetSuite native report runner" in html
+    assert "period=Jun 2026" in html
+    assert "2026-07-17T20:00:00+00:00" in html
+
+
+def test_no_provenance_renders_no_block():
+    html = render_report_html(_min_spec(), freshness=_freshness())
+    assert "Sources & method" not in html
+
+
+def test_provenance_values_are_escaped():
+    prov = [{"result_id": "r1", "label": "<script>x</script>", "detail": "a=<b>", "executed_at": "t"}]
+    html = render_report_html(_min_spec(), freshness=_freshness(), provenance=prov)
+    assert "<script>x</script>" not in html

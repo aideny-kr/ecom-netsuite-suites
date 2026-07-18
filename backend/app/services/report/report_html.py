@@ -343,7 +343,58 @@ def _accent_ink(accent_hsl: str) -> str:
     return "#fff" if float(m.group(1)) < 55 else "#111"
 
 
-def render_report_html(spec: dict, accent_hsl: str = "240 6% 10%", freshness: dict | None = None) -> str:
+# A recipe source's tool name for an external MCP call: "ext__<32-hex connection
+# fingerprint>__<raw tool name>". Distinguishes MCP-routed sources (label by raw tool
+# name) from local tools (labeled via _TOOL_LABELS below).
+_EXT_TOOL_RE = re.compile(r"^ext__[0-9a-f]{32}__(?P<raw>.+)$")
+
+_TOOL_LABELS = {
+    "netsuite_financial_report": "NetSuite GL statement template (SuiteQL)",
+    "netsuite_suiteql": "NetSuite SuiteQL query",
+}
+
+
+def build_provenance(sources: dict, executed_at: str) -> list[dict]:
+    """Translate a recipe's raw ``sources`` map (``result_id -> {tool, params, ...}``)
+    into human-readable entries for the renderer's "Sources & method" block: each result
+    id, a plain-English label for the tool that produced it, its params as ``detail``,
+    and when it ran. Sorted by ``result_id`` for deterministic (byte-stable) output."""
+    entries = []
+    for result_id in sorted(sources):
+        src = sources[result_id] or {}
+        tool = str(src.get("tool", ""))
+        m = _EXT_TOOL_RE.match(tool)
+        if m:
+            raw = m.group("raw")
+            label = "NetSuite native report runner" if raw == "ns_runReport" else f"External MCP tool {raw}"
+        else:
+            label = _TOOL_LABELS.get(tool, tool)
+        params = src.get("params") or {}
+        detail = ", ".join(f"{k}={params[k]}" for k in sorted(params))
+        entries.append({"result_id": result_id, "label": label, "detail": detail, "executed_at": executed_at})
+    return entries
+
+
+def _provenance_html(provenance: list[dict]) -> str:
+    rows = "".join(
+        f"<div>{escape(str(p.get('result_id', '')))} — {escape(str(p.get('label', '')))}"
+        f" · {escape(str(p.get('detail', '')))} · executed {escape(str(p.get('executed_at', '')))}</div>"
+        for p in provenance
+    )
+    return (
+        '<div class="prov"><strong>Sources &amp; method</strong>'
+        f"{rows}"
+        "<div>Numbers are tool-computed and rendered deterministically — no model generated a figure.</div>"
+        "</div>"
+    )
+
+
+def render_report_html(
+    spec: dict,
+    accent_hsl: str = "240 6% 10%",
+    freshness: dict | None = None,
+    provenance: list[dict] | None = None,
+) -> str:
     title = escape(str(spec.get("title", "Report")))
     body = "".join(_section_html(s) for s in spec.get("sections", []))
     prov = spec.get("provenance", {}) or {}
@@ -361,10 +412,11 @@ def render_report_html(spec: dict, accent_hsl: str = "240 6% 10%", freshness: di
             f'<div class="stamp">Narrative composed {_fmt_stamp(freshness.get("composed_at", ""))}'
             f" · Data refreshed {_fmt_stamp(freshness.get('refreshed_at', ''))}</div>"
         )
+    method_html = _provenance_html(provenance) if provenance else ""
     css = _CSS % {"accent": escape(accent_hsl), "accent_ink": _accent_ink(accent_hsl)}
     return (
         f'<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
         f'<meta name="viewport" content="width=device-width, initial-scale=1">'
         f'<title>{title}</title><style>{css}</style></head><body><div class="report">'
-        f'<div class="accent-bar"></div><h1>{title}</h1>{body}{stamp_html}{prov_html}</div></body></html>'
+        f'<div class="accent-bar"></div><h1>{title}</h1>{body}{method_html}{stamp_html}{prov_html}</div></body></html>'
     )
