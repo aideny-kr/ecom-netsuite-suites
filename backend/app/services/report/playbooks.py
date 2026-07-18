@@ -12,7 +12,14 @@ import re
 import uuid
 from datetime import datetime, timezone
 
-_PERIOD_RE = re.compile(r"^[A-Z][a-z]{2} \d{4}$")  # NetSuite period name: "Jun 2026"
+# NetSuite period name: "Jun 2026". NOT the SuiteQL injection boundary — it's a
+# fail-fast pre-check so a malformed period 400s here instead of burning a tool round
+# trip. netsuite_financial_report.build_period_filter independently re-validates every
+# period token via its own _validate_period_name/_PERIOD_NAME_RE (a stricter real-month
+# allowlist) before f-string-interpolating it into SQL, regardless of what reaches it
+# from here — do not treat relaxing THIS regex alone as reopening an injection path, and
+# do not relax build_period_filter's own check without parameterizing it instead.
+_PERIOD_RE = re.compile(r"^[A-Z][a-z]{2} \d{4}$")
 
 PLAYBOOKS: dict[str, dict] = {
     "income_statement": {
