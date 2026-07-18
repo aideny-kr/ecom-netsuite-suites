@@ -354,16 +354,32 @@ _TOOL_LABELS = {
 }
 
 
-# Params that must never reach the frozen HTML's "Sources & method" block:
-# - `query` is the literal SQL text — the label ("NetSuite SuiteQL query") already
-#   conveys method; printing SQL into a report is its own trust-boundary problem
-#   regardless of what it contains.
-# - the rest are per-tool LLM-only params, single-sourced from refresh_service's
+# Params that must never reach the frozen HTML's "Sources & method" block. All of these
+# are full SQL text (or verbatim chat text) on tools that ARE recipe-eligible — a
+# recipe-eligible tool means a real captured recipe can carry the param, so each must be
+# named here regardless of which tool/key shape carries it:
+# - `query` (local netsuite_suiteql) and `sqlQuery` (external ext__..__ns_runCustomSuiteQL /
+#   ns_runSuiteQL — the external-MCP equivalent key) are the literal SQL text. The label
+#   ("NetSuite SuiteQL query" / "External MCP tool ...") already conveys method; printing
+#   SQL into a report is its own trust-boundary problem regardless of content.
+# - `left_query` / `right_query` (cross_source_query) are the same leak class: two full
+#   SQL texts on a different recipe-eligible tool.
+# - LLM-only params are additionally stripped per-tool via refresh_service's
 #   `_LLM_ONLY_PARAMS` (the set stripped before dispatch on refresh) — a captured
-#   `user_question` is verbatim chat text, and echoing it here would both leak
-#   arbitrary user text into every recipe-bearing report AND misrepresent the
-#   replay (refresh never actually sends it to the tool).
-_ALWAYS_EXCLUDED_PARAM_KEYS = frozenset({"query"})
+#   `user_question` is verbatim chat text, and echoing it here would both leak arbitrary
+#   user text into every recipe-bearing report AND misrepresent the replay (refresh never
+#   actually sends it to the tool).
+_ALWAYS_EXCLUDED_PARAM_KEYS = frozenset({"query", "sqlQuery", "left_query", "right_query"})
+
+# Forward guard: even a param that survives the exclusion list above must not blow up the
+# frozen HTML with an unbounded value — a future recipe-eligible tool could carry a big
+# text param under a name not yet on the list. Caps, doesn't hide: the key still shows.
+_DETAIL_VALUE_MAX_LEN = 80
+
+
+def _truncate_detail_value(value: object) -> str:
+    s = str(value)
+    return s if len(s) <= _DETAIL_VALUE_MAX_LEN else s[:_DETAIL_VALUE_MAX_LEN] + "…"
 
 
 def build_provenance(sources: dict, executed_at: str) -> list[dict]:
@@ -373,8 +389,9 @@ def build_provenance(sources: dict, executed_at: str) -> list[dict]:
     and when it ran. Sorted by ``result_id`` for deterministic (byte-stable) output.
 
     ``detail`` is policy-filtered (see ``_ALWAYS_EXCLUDED_PARAM_KEYS`` / ``_LLM_ONLY_PARAMS``
-    above) — never a raw dump of every captured param. Playbook sources (``report_type``,
-    ``period``) and external-MCP params (e.g. ``reportId``) are unaffected."""
+    above) and each surviving value length-capped (``_DETAIL_VALUE_MAX_LEN``) — never a raw
+    dump of every captured param. Playbook sources (``report_type``, ``period``) and
+    external-MCP params (e.g. ``reportId``) are unaffected."""
     from app.services.report.refresh_service import _LLM_ONLY_PARAMS
 
     entries = []
@@ -389,7 +406,7 @@ def build_provenance(sources: dict, executed_at: str) -> list[dict]:
             label = _TOOL_LABELS.get(tool, tool)
         params = src.get("params") or {}
         excluded = _ALWAYS_EXCLUDED_PARAM_KEYS | _LLM_ONLY_PARAMS.get(tool, frozenset())
-        detail = ", ".join(f"{k}={params[k]}" for k in sorted(params) if k not in excluded)
+        detail = ", ".join(f"{k}={_truncate_detail_value(params[k])}" for k in sorted(params) if k not in excluded)
         entries.append({"result_id": result_id, "label": label, "detail": detail, "executed_at": executed_at})
     return entries
 
