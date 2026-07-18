@@ -13,6 +13,7 @@ export function PlaybookLauncher() {
   const router = useRouter();
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const [paramValues, setParamValues] = useState<Record<string, string>>({});
+  const [actionMsg, setActionMsg] = useState<string | null>(null);
 
   if (isLoading || !data?.length) return null;
 
@@ -21,13 +22,20 @@ export function PlaybookLauncher() {
   function handleSelect(playbook: PlaybookInfo) {
     setSelectedKey(playbook.key);
     setParamValues({});
+    setActionMsg(null);
   }
 
   function handleCreate() {
     if (!selected) return;
+    setActionMsg(null);
     composePlaybook.mutate(
       { key: selected.key, params: paramValues },
-      { onSuccess: (report) => router.push(`/reports/${report.id}`) },
+      {
+        onSuccess: (report) => router.push(`/reports/${report.id}`),
+        // The backend's detail strings are user-facing (400 malformed period, 502 no
+        // NetSuite connection) — surface them instead of failing silently.
+        onError: (e: Error) => setActionMsg(e.message || "Couldn't create report"),
+      },
     );
   }
 
@@ -68,6 +76,7 @@ export function PlaybookLauncher() {
           <Button onClick={handleCreate} disabled={composePlaybook.isPending}>
             Create report
           </Button>
+          {actionMsg && <span className="text-[13px] text-destructive">{actionMsg}</span>}
         </div>
       ) : null}
     </div>

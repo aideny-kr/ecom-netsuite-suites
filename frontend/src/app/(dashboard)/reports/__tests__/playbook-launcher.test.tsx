@@ -1,4 +1,4 @@
-import { render, screen, fireEvent } from "@testing-library/react";
+import { act, render, screen, fireEvent } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
 const mutate = vi.fn();
@@ -37,5 +37,29 @@ describe("PlaybookLauncher", () => {
     render(<PlaybookLauncher />);
     const card = screen.getByRole("button", { name: /income statement/i });
     expect(card.tagName).toBe("BUTTON");
+  });
+
+  it("surfaces the mutation error (e.g. malformed period or no NetSuite connection)", () => {
+    render(<PlaybookLauncher />);
+    fireEvent.click(screen.getByText("Income Statement"));
+    fireEvent.change(screen.getByPlaceholderText("Jun 2026"), { target: { value: "June 2026" } });
+    fireEvent.click(screen.getByRole("button", { name: /create report/i }));
+
+    const [, opts] = mutate.mock.calls[mutate.mock.calls.length - 1];
+    act(() => opts.onError(new Error("period must be a NetSuite period name like 'Jun 2026'")));
+
+    expect(screen.getByText("period must be a NetSuite period name like 'Jun 2026'")).toBeInTheDocument();
+  });
+
+  it("clears a prior error message when the playbook selection changes", () => {
+    render(<PlaybookLauncher />);
+    fireEvent.click(screen.getByText("Income Statement"));
+    fireEvent.click(screen.getByRole("button", { name: /create report/i }));
+    const [, opts] = mutate.mock.calls[mutate.mock.calls.length - 1];
+    act(() => opts.onError(new Error("No active NetSuite connection found")));
+    expect(screen.getByText("No active NetSuite connection found")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText("Income Statement")); // reselect -> clears the stale error
+    expect(screen.queryByText("No active NetSuite connection found")).not.toBeInTheDocument();
   });
 });
