@@ -32,4 +32,10 @@ describe("PlaybookLauncher", () => {
       expect.anything(),
     );
   });
+
+  it("renders each playbook as a native, keyboard-focusable button", () => {
+    render(<PlaybookLauncher />);
+    const card = screen.getByRole("button", { name: /income statement/i });
+    expect(card.tagName).toBe("BUTTON");
+  });
 });

@@ -36,19 +36,18 @@ export function PlaybookLauncher() {
       <h3 className="text-[15px] font-medium text-foreground">Playbooks</h3>
       <div className="grid gap-2 sm:grid-cols-2">
         {data.map((playbook) => (
-          <div
+          <button
             key={playbook.key}
-            role="button"
-            tabIndex={0}
+            type="button"
             onClick={() => handleSelect(playbook)}
             className={cn(
-              "cursor-pointer rounded-xl border bg-card p-5 shadow-soft transition-colors hover:bg-muted/30",
+              "block w-full rounded-xl border bg-card p-5 text-left shadow-soft transition-colors hover:bg-muted/30 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2",
               selectedKey === playbook.key && "border-primary",
             )}
           >
-            <p className="text-[15px] font-medium text-foreground">{playbook.name}</p>
-            <p className="mt-0.5 text-[13px] text-muted-foreground">{playbook.description}</p>
-          </div>
+            <span className="block text-[15px] font-medium text-foreground">{playbook.name}</span>
+            <span className="mt-0.5 block text-[13px] text-muted-foreground">{playbook.description}</span>
+          </button>
         ))}
       </div>
 
