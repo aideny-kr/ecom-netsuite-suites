@@ -427,10 +427,16 @@ def render_report_html(
     # two vintages. None (the compose path) keeps the output byte-identical.
     stamp_html = ""
     if freshness:
-        stamp_html = (
-            f'<div class="stamp">Narrative composed {_fmt_stamp(freshness.get("composed_at", ""))}'
-            f" · Data refreshed {_fmt_stamp(freshness.get('refreshed_at', ''))}</div>"
-        )
+        # Compose (playbook compose, first version) has no refreshed_at yet — omit any
+        # component whose value is empty/falsy rather than joining a dangling "· Data
+        # refreshed " with nothing after it.
+        parts = []
+        if freshness.get("composed_at"):
+            parts.append(f"Narrative composed {_fmt_stamp(freshness['composed_at'])}")
+        if freshness.get("refreshed_at"):
+            parts.append(f"Data refreshed {_fmt_stamp(freshness['refreshed_at'])}")
+        if parts:
+            stamp_html = f'<div class="stamp">{" · ".join(parts)}</div>'
     method_html = _provenance_html(provenance) if provenance else ""
     css = _CSS % {"accent": escape(accent_hsl), "accent_ink": _accent_ink(accent_hsl)}
     return (
