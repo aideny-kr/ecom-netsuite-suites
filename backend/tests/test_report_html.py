@@ -1,4 +1,8 @@
+from html import escape
+
 from app.services.report.report_html import build_provenance, fmt_amount, render_report_html
+from app.services.report.statement_builder import build_statement_model
+from tests.fixtures import statement_fixture as fx
 
 
 def test_fmt_amount_accounting_style():
@@ -550,3 +554,214 @@ def test_provenance_detail_value_truncated_at_80_chars():
     assert long_value not in detail
     assert "…" in detail or "..." in detail
     assert len(detail) < 120  # "note=" + ~80 chars + ellipsis, well short of the full 200
+
+
+# --- Task 3: `financial_statement` renderer (CFO-grade statement, CSS-only interactivity) --
+#
+# The renderer consumes ONLY the MODEL built by statement_builder.build_statement_model —
+# every fixture below goes through the real builder (never a hand-written model dict) so
+# these tests exercise the actual Task 1/2 -> Task 3 contract, not an assumption about it.
+
+
+def _fs_spec(model: dict, title: str = "Income Statement") -> dict:
+    return {"title": title, "sections": [{"type": "financial_statement", "model": model}], "provenance": {}}
+
+
+def _is_model():
+    return build_statement_model(fx.income_statement_section(), fx.income_statement_payloads())
+
+
+def test_fs_report_has_exactly_one_h1():
+    html = render_report_html(_fs_spec(_is_model()))
+    assert html.count("<h1") == 1
+
+
+def test_fs_kpi_values_and_deltas_render_with_formatted_strings():
+    html = render_report_html(_fs_spec(_is_model()))
+    assert "$13,500,000" in html  # revenue value
+    assert fx.EXPECTED_REVENUE_MOM_DELTA_STR in html
+    assert fx.EXPECTED_REVENUE_MOM_PCT_STR in html
+    assert fx.EXPECTED_REVENUE_YOY_PCT_STR in html
+    assert fx.EXPECTED_GP_MARGIN_STR in html  # gross profit KPI margin
+
+
+def test_fs_kpi_sparkline_svg_present_for_is():
+    html = render_report_html(_fs_spec(_is_model()))
+    assert 'class="fs-spark"' in html
+    assert "<polyline" in html
+
+
+def test_fs_quad_rows_render_all_four_metrics():
+    html = render_report_html(_fs_spec(_is_model()))
+    assert 'class="fs-quad' in html
+    for label in ("Revenue", "Gross Profit", "Operating Income", "Net Income"):
+        assert f"<td>{label}</td>" in html
+
+
+def test_fs_statement_emphasis_rows_present_with_derived_totals():
+    html = render_report_html(_fs_spec(_is_model()))
+    assert 'class="fs-sub' in html
+    assert 'class="fs-formula"' in html
+    assert 'class="fs-net"' in html
+    assert "$3,500,000" in html  # gross profit (formula row)
+    assert "$1,800,000" in html  # operating income (formula row)
+    assert "$1,805,000" in html  # net income (net row)
+
+
+def test_fs_statement_table_renders_every_fixture_account_no_truncation():
+    html = render_report_html(_fs_spec(_is_model()))
+    # 30 accounts in the fixture -- one <tr class="fs-acct ...> per account, no cap.
+    # (the narrower "fs-acct " with a trailing space excludes the fs-acct-no muted-number
+    # span class, which also starts with "fs-acct".)
+    assert html.count('<tr class="fs-acct ') == 30
+
+
+def test_fs_parens_formatting_present_for_reduces_profit_lines():
+    html = render_report_html(_fs_spec(_is_model()))
+    assert "($10,000,000)" in html  # COGS section subtotal
+
+
+def test_fs_account_name_escaping_never_renders_raw():
+    payloads = fx.income_statement_payloads()
+    r1 = payloads["r1"]
+    cols = r1["columns"]
+    name_idx = cols.index("acctname")
+    rows = [list(row) for row in r1["rows"]]
+    rows[0][name_idx] = "<script>alert(1)</script>"
+    payloads["r1"] = dict(r1, rows=rows)
+    model = build_statement_model(fx.income_statement_section(), payloads)
+    html = render_report_html(_fs_spec(model))
+    assert "<script>alert(1)</script>" not in html
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
+
+
+def test_fs_narrative_escaping_never_renders_raw():
+    model = _is_model()
+    model = dict(model, narrative=["<script>alert(2)</script>", *model["narrative"][1:]])
+    html = render_report_html(_fs_spec(model))
+    assert "<script>alert(2)</script>" not in html
+    assert "&lt;script&gt;alert(2)&lt;/script&gt;" in html
+
+
+def test_fs_no_script_tag_anywhere_in_rendered_output():
+    html = render_report_html(_fs_spec(_is_model()))
+    assert "<script" not in html
+
+
+def test_fs_collapse_checkboxes_capped_and_css_rules_match_the_cap():
+    """DRIFT GUARD (mirrors test_css_toggle_rules_cover_every_toggleable_series_index):
+    the CSS :has() collapse rules must cover exactly fs-sec-0..fs-sec-{cap-1}."""
+    from app.services.report.report_html import _MAX_STATEMENT_SECTIONS
+
+    html = render_report_html(_fs_spec(_is_model()))
+    assert ":has(" in html
+    for i in range(_MAX_STATEMENT_SECTIONS):
+        assert f"input.fs-sec-{i}:not(:checked)" in html, f"collapse rule missing for fs-sec-{i}"
+    assert f"input.fs-sec-{_MAX_STATEMENT_SECTIONS}:" not in html  # block ends at the cap
+
+
+def test_fs_percent_integrity_canary_full_render_does_not_raise():
+    """If a literal % anywhere in the financial-statement CSS were left un-doubled, the
+    %-format call in render_report_html would raise at render time."""
+    html = render_report_html(_fs_spec(_is_model()))
+    assert "<style>" in html
+    assert "fs-stmt" in html
+
+
+def test_fs_balance_sheet_renders_checks_row_and_in_balance_chip():
+    model = build_statement_model(fx.balance_sheet_section(), fx.balance_sheet_payloads())
+    html = render_report_html(_fs_spec(model, title="Balance Sheet"))
+    assert 'class="fs-check fs-good"' in html
+    assert "Assets = Liabilities + Equity" in html
+    assert 'class="fs-chip fs-good"' in html
+
+
+def test_fs_balance_sheet_unbalanced_renders_bad_tone_check():
+    model = build_statement_model(fx.balance_sheet_section(), fx.balance_sheet_unbalanced_payloads())
+    html = render_report_html(_fs_spec(model, title="Balance Sheet"))
+    assert 'class="fs-check fs-bad"' in html
+    assert 'class="fs-chip fs-bad"' in html
+    assert "off by" in html
+
+
+def test_fs_trial_balance_renders_checks_row_and_chip():
+    model = build_statement_model(fx.trial_balance_section(), fx.trial_balance_payloads())
+    html = render_report_html(_fs_spec(model, title="Trial Balance"))
+    assert 'class="fs-check fs-good"' in html
+    assert "Debits = Credits" in html
+
+
+def test_fs_degraded_model_no_compares_omits_delta_columns():
+    model = build_statement_model(fx.income_statement_section(), fx.income_statement_payloads_missing_compare())
+    assert model["prior_period"] is None  # sanity on the fixture contract
+    html = render_report_html(_fs_spec(model))
+    # "class=\"fs-delta" (not the bare substring) -- the CSS *rule definition* for
+    # .fs-delta always ships in <style> regardless of use; only its usage in the body
+    # is what the degraded model must omit.
+    assert 'class="fs-delta' not in html  # no KPI MoM/YoY deltas anywhere
+    assert "May 2026" not in html  # no prior-period column
+    assert "$13,500,000" in html  # current-period figures still render
+
+
+def test_fs_watch_items_render_with_model_driven_tone_dots():
+    model = _is_model()
+    html = render_report_html(_fs_spec(model))
+    assert model["watch"], "fixture is expected to produce at least one watch item"
+    for item in model["watch"]:
+        assert escape(item["text"]) in html
+        assert f'class="fs-dot fs-{item["tone"] if item["tone"] in ("good", "bad") else "warn"}"' in html
+
+
+def test_fs_highlights_render_as_list_items():
+    model = _is_model()
+    html = render_report_html(_fs_spec(model))
+    assert model["highlights"], "fixture is expected to produce at least one highlight"
+    assert 'class="fs-hl"' in html
+    for text in model["highlights"]:
+        assert f"<li>{escape(text)}</li>" in html
+
+
+def test_fs_narrative_renders_paragraphs():
+    model = _is_model()
+    html = render_report_html(_fs_spec(model))
+    for text in model["narrative"]:
+        assert f"<p>{escape(text)}</p>" in html
+
+
+def test_fs_trend_chart_point_has_exact_value_title_tooltip():
+    model = _is_model()
+    html = render_report_html(_fs_spec(model))
+    assert "<circle" in html
+    assert "<title>Jun 2026 — Revenue: $13,500,000</title>" in html
+
+
+def test_fs_css_only_included_when_statement_section_present():
+    """The financial-statement stylesheet block is additive and conditional -- a report
+    with no financial_statement section must not ship the extra CSS bytes at all (this is
+    what makes the byte-stability guarantee below possible for a shared %-formatted _CSS)."""
+    plain_html = render_report_html(_slice_d_spec())
+    assert "fs-stmt" not in plain_html
+    fs_html = render_report_html(_fs_spec(_is_model()))
+    assert "fs-stmt" in fs_html
+
+
+def test_fs_print_css_present_and_forces_full_expansion():
+    html = render_report_html(_fs_spec(_is_model()))
+    assert "@media print" in html
+    printed = html.split("@media print", 1)[1]
+    assert "fs-acct" in printed
+    assert "!important" in printed
+    assert "fs-sec-cb" in printed
+
+
+def test_non_statement_spec_byte_stable_after_financial_statement_renderer_added():
+    """Codifies the brief's byte-stability requirement: a spec with no financial_statement
+    section must render BYTE-IDENTICALLY to what it rendered before this renderer existed.
+    Pinned via SHA-256 (captured against the pre-Task-3 report_html.py) rather than a giant
+    inline literal -- equally exact, far more maintainable."""
+    import hashlib
+
+    html = render_report_html(_slice_d_spec())
+    assert (
+        hashlib.sha256(html.encode()).hexdigest() == "6205e74d16941ef5d2c6fcb7e5b148867da7ff4e7075102dd35fefee1aa40661"
+    )
