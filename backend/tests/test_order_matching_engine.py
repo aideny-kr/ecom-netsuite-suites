@@ -522,9 +522,13 @@ class TestSameRefSetToSetMatching:
 
     def test_equal_count_zip_stable_attribution_regardless_of_fetch_order(self):
         """2 same-amount charges + 2 exact deposits sharing a ref: the
-        charge<->deposit pairing must be identical no matter which order
-        the charges/deposits list arrives in (DB fetch order is not
-        guaranteed) — attribution stability for the audit trail."""
+        charge<->deposit pairing must be identical regardless of the
+        charges list's fetch order (DB fetch order is not guaranteed) —
+        attribution stability for the audit trail. Deposits are held in
+        ONE fixed order across both runs so this isolates the charges
+        permutation: a synchronized reversal of both lists is invariant
+        under a plain positional zip and would prove nothing; flipping
+        only the charges order against fixed deposits is not."""
         from app.services.reconciliation.order_matching_engine import OrderMatchingEngine
 
         charge_a = _make_charge(id="c_a", source_id="ch_a", order_reference="R400000003", amount=Decimal("100.00"))
@@ -535,14 +539,12 @@ class TestSameRefSetToSetMatching:
         deposit_q = _make_deposit(
             id="d_q", netsuite_internal_id="500", order_reference="R400000003", amount=Decimal("100.00")
         )
+        fixed_deposits = [deposit_p, deposit_q]
 
         pairings = []
-        for charges, deposits in (
-            ([charge_a, charge_b], [deposit_p, deposit_q]),
-            ([charge_b, charge_a], [deposit_q, deposit_p]),
-        ):
+        for charges in ([charge_a, charge_b], [charge_b, charge_a]):
             engine = OrderMatchingEngine()
-            results = engine.match(list(charges), list(deposits))
+            results = engine.match(list(charges), list(fixed_deposits))
             assert len(results) == 2
             assert all(r.confidence == Decimal("1.0") and not r.ambiguous_same_ref for r in results)
             pairings.append({r.charge.id: r.deposit.id for r in results})
