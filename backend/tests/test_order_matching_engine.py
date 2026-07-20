@@ -466,3 +466,85 @@ class TestSameRefSetToSetMatching:
         assert r.ambiguous_same_ref is True
         assert r.confidence == Decimal("0.85")
         assert r.same_ref_deposit_ids == ["d_far_exact"]
+
+    def test_deposit_deficit_two_charges_one_deposit_is_ambiguous_not_confident(self):
+        """Mirror of the surplus case: 2 same-amount charges sharing a ref
+        with only 1 exact deposit is ALSO a competing-candidates situation
+        (which charge is the real one?) — it must never resolve at
+        confidence 1.0. Exactly one charge wins the ambiguous nearest-date
+        pick (capped at 0.85); the other has no deposit left and falls
+        through to fuzzy/missing."""
+        from app.services.reconciliation.order_matching_engine import OrderMatchingEngine
+
+        charge_a = _make_charge(id="c_a", source_id="ch_a", order_reference="R400000001", amount=Decimal("100.00"))
+        charge_b = _make_charge(id="c_b", source_id="ch_b", order_reference="R400000001", amount=Decimal("100.00"))
+        deposit_solo = _make_deposit(
+            id="d_solo",
+            netsuite_internal_id="999",
+            order_reference="R400000001",
+            amount=Decimal("100.00"),
+        )
+
+        engine = OrderMatchingEngine()
+        results = engine.match([charge_a, charge_b], [deposit_solo])
+
+        assert all(r.confidence != Decimal("1.0") for r in results)
+        ambiguous_results = [r for r in results if r.ambiguous_same_ref]
+        unmatched_results = [r for r in results if r.match_type == "unmatched"]
+        assert len(ambiguous_results) == 1
+        assert len(unmatched_results) == 1
+        assert ambiguous_results[0].deposit.id == "d_solo"
+        assert ambiguous_results[0].confidence == Decimal("0.85")
+
+    def test_deposit_deficit_winner_deterministic_regardless_of_charge_order(self):
+        """Which charge wins the deficit's ambiguous pick must not depend on
+        DB fetch order — it's decided by a stable key (source_id), not
+        whichever happened to be first/last in the input list."""
+        from app.services.reconciliation.order_matching_engine import OrderMatchingEngine
+
+        charge_a = _make_charge(id="c_a", source_id="ch_a", order_reference="R400000002", amount=Decimal("100.00"))
+        charge_b = _make_charge(id="c_b", source_id="ch_b", order_reference="R400000002", amount=Decimal("100.00"))
+        deposit_solo = _make_deposit(
+            id="d_solo",
+            netsuite_internal_id="999",
+            order_reference="R400000002",
+            amount=Decimal("100.00"),
+        )
+
+        outcomes = []
+        for charges in ([charge_a, charge_b], [charge_b, charge_a]):
+            engine = OrderMatchingEngine()
+            results = engine.match(list(charges), [deposit_solo])
+            winner = next(r for r in results if r.ambiguous_same_ref)
+            outcomes.append(winner.charge.id)
+
+        assert outcomes[0] == outcomes[1]
+
+    def test_equal_count_zip_stable_attribution_regardless_of_fetch_order(self):
+        """2 same-amount charges + 2 exact deposits sharing a ref: the
+        charge<->deposit pairing must be identical no matter which order
+        the charges/deposits list arrives in (DB fetch order is not
+        guaranteed) — attribution stability for the audit trail."""
+        from app.services.reconciliation.order_matching_engine import OrderMatchingEngine
+
+        charge_a = _make_charge(id="c_a", source_id="ch_a", order_reference="R400000003", amount=Decimal("100.00"))
+        charge_b = _make_charge(id="c_b", source_id="ch_b", order_reference="R400000003", amount=Decimal("100.00"))
+        deposit_p = _make_deposit(
+            id="d_p", netsuite_internal_id="600", order_reference="R400000003", amount=Decimal("100.00")
+        )
+        deposit_q = _make_deposit(
+            id="d_q", netsuite_internal_id="500", order_reference="R400000003", amount=Decimal("100.00")
+        )
+
+        pairings = []
+        for charges, deposits in (
+            ([charge_a, charge_b], [deposit_p, deposit_q]),
+            ([charge_b, charge_a], [deposit_q, deposit_p]),
+        ):
+            engine = OrderMatchingEngine()
+            results = engine.match(list(charges), list(deposits))
+            assert len(results) == 2
+            assert all(r.confidence == Decimal("1.0") and not r.ambiguous_same_ref for r in results)
+            pairings.append({r.charge.id: r.deposit.id for r in results})
+
+        assert pairings[0] == pairings[1]

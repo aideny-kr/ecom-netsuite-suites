@@ -125,13 +125,16 @@ class OrderMatchingEngine:
     ) -> tuple[list[OrderMatchCandidate], list[ChargeRecord]]:
         """Match one order_reference's charges against its deposits SET-to-SET.
 
-        For a ref shared by M charges and N deposits: (1) pair amount-exact
-        charge<->deposit combinations first, greedily, each deposit consumed
-        once — this handles legitimate split/partial-capture orders (2
-        charges + 2 deposits, both exact) with full confidence; (2) each
-        remaining charge takes the nearest-transaction-date remaining deposit
-        (tie: lowest netsuite_internal_id) but the pick is AMBIGUOUS — it
-        must never auto-match; (3) leftover same-ref deposits after pairing
+        For a ref shared by M charges and N deposits: (1) within each amount
+        bucket, pair charge<->deposit confidently ONLY when the bucket has
+        an EQUAL count of charges and deposits — this handles legitimate
+        split/partial-capture orders (2 charges + 2 deposits, both exact)
+        with full confidence; a surplus OR a deficit for that amount are
+        both competing-candidates situations (which one is the real one?)
+        and defer the whole bucket to step 2; (2) each remaining charge
+        takes the nearest-transaction-date remaining deposit (tie: lowest
+        netsuite_internal_id) but the pick is AMBIGUOUS — it must never
+        auto-match; (3) leftover same-ref deposits after pairing
         (reversals/duplicates) are fenced from unrelated fuzzy matching and
         recorded as ``same_ref_deposit_ids`` evidence on every result of the
         group; (4) leftover same-ref charges (more charges than deposits)
@@ -171,28 +174,33 @@ class OrderMatchingEngine:
         assigned: list[tuple[ChargeRecord, NSPaymentRecord, bool]] = []
 
         # Step 1: confident exact-amount pairing, per amount bucket. A bucket
-        # only pairs confidently when it has NO deposit surplus for that
-        # amount — deposit-surplus buckets (more same-amount deposits than
-        # charges) are inherently ambiguous (which one is the real one?) and
-        # deferred to step 2.
+        # only pairs confidently when charges and deposits are EQUAL in
+        # count for that amount — a surplus OR a deficit both mean competing
+        # candidates (which one is the real one?) and are inherently
+        # ambiguous, so either direction defers the whole bucket to step 2.
+        # Sorted by stable id keys before zipping so attribution (which
+        # charge lands on which deposit) never depends on DB fetch order.
         charges_by_amount: dict[Decimal, list[ChargeRecord]] = {}
         for c in charge_group:
             charges_by_amount.setdefault(c.amount, []).append(c)
 
         for amount, c_list in charges_by_amount.items():
             d_list = [d for d in remaining_deposits if d.amount == amount]
-            if d_list and len(d_list) <= len(c_list):
-                for c, d in zip(c_list, d_list):
+            if d_list and len(d_list) == len(c_list):
+                sorted_charges = sorted(c_list, key=lambda c: c.source_id)
+                sorted_deposits = sorted(d_list, key=lambda d: self._numeric_id_sort_key(d.netsuite_internal_id))
+                for c, d in zip(sorted_charges, sorted_deposits):
                     assigned.append((c, d, False))
                     remaining_deposits.remove(d)
-                remaining_charges.extend(c_list[len(d_list) :])
             else:
                 remaining_charges.extend(c_list)
 
         # Step 2: each remaining charge takes the nearest-date remaining
-        # deposit — ambiguous, never auto-matched. Order is deterministic
-        # (grouped by amount bucket, matching step 1's iteration) given fixed
-        # input, though not necessarily charge_group's original order.
+        # deposit — ambiguous, never auto-matched. Sorted by source_id first
+        # so the processing order — and thus which charge wins a deposit
+        # deficit — never depends on charge_group's original (DB fetch)
+        # order.
+        remaining_charges.sort(key=lambda c: c.source_id)
         for c in remaining_charges:
             if not remaining_deposits:
                 break
@@ -244,7 +252,20 @@ class OrderMatchingEngine:
         return variance, Decimal("0.90"), "amount_mismatch"
 
     @staticmethod
+    def _numeric_id_sort_key(id_value: str | None) -> tuple[int, int | str]:
+        """Sort key for a NetSuite internal id: numeric ids (the real-world
+        case) sort numerically; any non-numeric id sorts after all numeric
+        ones. The leading 0/1 keeps the two branches from ever comparing an
+        int against a str. Shared by step 2's nearest-date tie-break and
+        step 1's stable equal-count zip attribution."""
+        try:
+            return (0, int(id_value))
+        except (TypeError, ValueError):
+            return (1, id_value or "")
+
+    @classmethod
     def _nearest_deposit_sort_key(
+        cls,
         deposit: NSPaymentRecord,
         charge: ChargeRecord,
     ) -> tuple[int, tuple[int, int | str]]:
@@ -252,15 +273,7 @@ class OrderMatchingEngine:
         the charge's date wins, tie-broken by the lowest netsuite_internal_id
         so the outcome never depends on fetch/iteration order."""
         days_apart = abs((deposit.transaction_date - charge.charge_date).days)
-        # Numeric ids (the real-world case) sort numerically; any non-numeric
-        # id sorts after all numeric ones. The leading 0/1 keeps the two
-        # branches from ever comparing an int against a str within the same
-        # days_apart tie.
-        try:
-            tie_break: tuple[int, int | str] = (0, int(deposit.netsuite_internal_id))
-        except (TypeError, ValueError):
-            tie_break = (1, deposit.netsuite_internal_id or "")
-        return (days_apart, tie_break)
+        return (days_apart, cls._numeric_id_sort_key(deposit.netsuite_internal_id))
 
     def _fuzzy_match(
         self,
