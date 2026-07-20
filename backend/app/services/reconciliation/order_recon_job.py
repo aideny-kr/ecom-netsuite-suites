@@ -395,6 +395,16 @@ class OrderReconJob:
                 materiality_pct=mat_pct,
                 matched_amount=candidate.charge.amount,
             )
+            if candidate.ambiguous_same_ref:
+                # Ambiguous same-ref disambiguation always gets human review
+                # — bucket override, mirrors the HITL materiality philosophy.
+                # The engine's confidence cap (< 0.95) should already have
+                # kept this out of auto_matched; assert rather than assume.
+                assert status != "auto_matched", (
+                    "ambiguous same-ref pick reached auto_matched — the "
+                    "engine's confidence cap should have prevented this"
+                )
+                bucket = BUCKET_NEEDS_REVIEW
             buckets.append(bucket)
 
             # R2 advisory composite for the ``confidence`` column — the decoupling
@@ -421,12 +431,13 @@ class OrderReconJob:
             }
             if confidence_signals is not None:
                 evidence["confidence_signals"] = confidence_signals
-            # Tier-1 collision evidence (Fix 1): only present when several
-            # deposits shared this charge's order_reference and the engine had
-            # to pick one deterministically — see
-            # OrderMatchingEngine._select_same_ref_deposit.
+            # Tier-1 same-ref evidence: only present when several deposits
+            # shared this charge's order_reference group — see
+            # OrderMatchingEngine._match_same_ref_group.
             if candidate.same_ref_deposit_ids:
                 evidence["same_ref_deposit_ids"] = candidate.same_ref_deposit_ids
+            if candidate.ambiguous_same_ref:
+                evidence["ambiguous_same_ref"] = True
 
             result = ReconciliationResult(
                 id=uuid.uuid4(),

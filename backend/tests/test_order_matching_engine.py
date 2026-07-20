@@ -315,3 +315,154 @@ class TestSameRefDepositCollision:
         results = engine.match(charges, deposits)
         assert results[0].match_type == "deterministic"
         assert results[0].same_ref_deposit_ids == []
+
+    def test_single_charge_single_deposit_variance_byte_identical(self):
+        """Regression guard: a same-ref group with exactly one charge and one
+        deposit must NEVER be routed through the ambiguous nearest-date path,
+        even when the amounts don't match exactly — this is the plain
+        variance case, not a collision. (Pre-existing behavior the round-2
+        set-to-set rewrite must not disturb.)"""
+        from app.services.reconciliation.order_matching_engine import OrderMatchingEngine
+
+        engine = OrderMatchingEngine()
+        charges = [_make_charge(order_reference="R100000005", amount=Decimal("100.00"))]
+        deposits = [_make_deposit(order_reference="R100000005", amount=Decimal("95.00"))]
+        results = engine.match(charges, deposits)
+        assert results[0].match_type == "deterministic"
+        assert results[0].variance_amount == Decimal("5.00")
+        assert results[0].confidence == Decimal("0.90")
+        assert results[0].ambiguous_same_ref is False
+        assert results[0].same_ref_deposit_ids == []
+
+
+class TestSameRefSetToSetMatching:
+    """Gate-round-2 design: a ref shared by M charges and N deposits matches
+    SET-to-SET, not by picking one deposit for a single charge. Split orders
+    (multiple legitimate charges sharing one order_reference) must all match,
+    and any pick that isn't a clean 1:1 exact-amount pairing is flagged
+    ambiguous and routed to human review — never auto-matched.
+    """
+
+    def test_split_order_two_charges_two_deposits_both_exact(self):
+        """2 charges (100, 50) + 2 deposits (100, 50) sharing a ref: BOTH
+        match amount-exact, full confidence, no ambiguity, nothing missing.
+        (The round-2 regression: the second charge used to be falsely
+        reported missing because the first charge's match consumed the
+        entire same-ref deposit group.)"""
+        from app.services.reconciliation.order_matching_engine import OrderMatchingEngine
+
+        engine = OrderMatchingEngine()
+        charge_a = _make_charge(id="c_a", order_reference="R200000001", amount=Decimal("100.00"))
+        charge_b = _make_charge(id="c_b", order_reference="R200000001", amount=Decimal("50.00"))
+        deposit_a = _make_deposit(id="d_a", order_reference="R200000001", amount=Decimal("100.00"))
+        deposit_b = _make_deposit(id="d_b", order_reference="R200000001", amount=Decimal("50.00"))
+
+        results = engine.match([charge_a, charge_b], [deposit_a, deposit_b])
+
+        assert len(results) == 2
+        by_charge_id = {r.charge.id: r for r in results}
+        for charge_id, expected_deposit_id in (("c_a", "d_a"), ("c_b", "d_b")):
+            r = by_charge_id[charge_id]
+            assert r.match_type == "deterministic"
+            assert r.deposit.id == expected_deposit_id
+            assert r.variance_amount == Decimal("0")
+            assert r.confidence == Decimal("1.0")
+            assert r.ambiguous_same_ref is False
+            assert r.same_ref_deposit_ids == []
+
+    def test_three_charges_two_deposits_third_falls_through(self):
+        """3 charges + 2 deposits sharing a ref: two pair exact, the third
+        (no deposit left in its amount bucket) falls through to fuzzy/missing
+        exactly like a no-ref charge."""
+        from app.services.reconciliation.order_matching_engine import OrderMatchingEngine
+
+        engine = OrderMatchingEngine()
+        charge_a = _make_charge(id="c_a", order_reference="R200000002", amount=Decimal("100.00"))
+        charge_b = _make_charge(id="c_b", order_reference="R200000002", amount=Decimal("50.00"))
+        charge_c = _make_charge(id="c_c", order_reference="R200000002", amount=Decimal("30.00"))
+        deposit_a = _make_deposit(id="d_a", order_reference="R200000002", amount=Decimal("100.00"))
+        deposit_b = _make_deposit(id="d_b", order_reference="R200000002", amount=Decimal("50.00"))
+
+        results = engine.match([charge_a, charge_b, charge_c], [deposit_a, deposit_b])
+
+        by_charge_id = {r.charge.id: r for r in results}
+        assert by_charge_id["c_a"].match_type == "deterministic"
+        assert by_charge_id["c_a"].deposit.id == "d_a"
+        assert by_charge_id["c_b"].match_type == "deterministic"
+        assert by_charge_id["c_b"].deposit.id == "d_b"
+        # No deposit left for c_c's amount bucket, and no deposits remain at
+        # all in the group — falls through unresolved, like a no-ref charge.
+        assert by_charge_id["c_c"].match_type == "unmatched"
+        assert by_charge_id["c_c"].variance_type == "missing_in_netsuite"
+
+    def test_ambiguous_pick_nearest_date_wins_capped_below_auto_match(self):
+        """1 charge, 2 non-exact deposits sharing a ref: nearest date wins,
+        but the pick is ambiguous — confidence capped at 0.85 (below the 0.95
+        auto_match threshold), flagged, and the loser fenced as evidence."""
+        from app.services.reconciliation.order_matching_engine import OrderMatchingEngine
+
+        engine = OrderMatchingEngine()
+        charge = _make_charge(
+            order_reference="R200000003",
+            amount=Decimal("100.00"),
+            charge_date=date(2026, 3, 10),
+        )
+        deposit_near = _make_deposit(
+            id="d_near",
+            order_reference="R200000003",
+            amount=Decimal("90.00"),
+            transaction_date=date(2026, 3, 11),
+        )
+        deposit_far = _make_deposit(
+            id="d_far",
+            order_reference="R200000003",
+            amount=Decimal("80.00"),
+            transaction_date=date(2026, 2, 1),
+        )
+
+        results = engine.match([charge], [deposit_far, deposit_near])
+
+        assert len(results) == 1
+        r = results[0]
+        assert r.match_type == "deterministic"
+        assert r.deposit.id == "d_near"
+        assert r.ambiguous_same_ref is True
+        assert r.confidence == Decimal("0.85")
+        assert r.same_ref_deposit_ids == ["d_far"]
+
+    def test_zero_variance_ambiguous_pick_two_exact_candidates(self):
+        """1 charge, 2 deposits that BOTH equal the charge's amount exactly:
+        still a coin flip (which one is the real one?) — nearest date wins
+        among the exacts, but the pick stays ambiguous even though variance
+        is zero."""
+        from app.services.reconciliation.order_matching_engine import OrderMatchingEngine
+
+        engine = OrderMatchingEngine()
+        charge = _make_charge(
+            order_reference="R200000004",
+            amount=Decimal("100.00"),
+            charge_date=date(2026, 3, 10),
+        )
+        deposit_near = _make_deposit(
+            id="d_near_exact",
+            order_reference="R200000004",
+            amount=Decimal("100.00"),
+            transaction_date=date(2026, 3, 11),
+        )
+        deposit_far = _make_deposit(
+            id="d_far_exact",
+            order_reference="R200000004",
+            amount=Decimal("100.00"),
+            transaction_date=date(2026, 2, 1),
+        )
+
+        results = engine.match([charge], [deposit_far, deposit_near])
+
+        assert len(results) == 1
+        r = results[0]
+        assert r.match_type == "deterministic"
+        assert r.deposit.id == "d_near_exact"
+        assert r.variance_amount == Decimal("0")
+        assert r.ambiguous_same_ref is True
+        assert r.confidence == Decimal("0.85")
+        assert r.same_ref_deposit_ids == ["d_far_exact"]

@@ -18,6 +18,7 @@ from app.schemas.order_reconciliation import (
     NSPaymentRecord,
     OrderMatchCandidate,
 )
+from app.services.reconciliation.four_bucket_classifier import BUCKET_MATCHES, BUCKET_NEEDS_REVIEW
 from app.services.reconciliation.order_recon_job import OrderReconJob
 from tests.conftest import create_test_netsuite_posting, create_test_payout, create_test_recon_run
 
@@ -471,6 +472,134 @@ class TestSameRefDepositCollisionDbBacked:
         ).scalar_one()
         assert len(stored_evidence["same_ref_deposit_ids"]) == 1
 
+    async def test_split_order_both_charges_match_db_backed(self, db, tenant_a):
+        """Gate-round-2 regression: a split order (2 charges sharing one ref,
+        2 deposits, both amount-exact) must resolve BOTH charges, not just
+        the first one processed. Drives the real fetch -> match -> store
+        path."""
+        await _seed_charge_line(
+            db,
+            tenant_a.id,
+            source_id="ch_split_a",
+            description="Framework Marketplace Order ID: R628489300-AAAAAAAA",
+            amount=Decimal("100.00"),
+            arrival_date=date(2026, 3, 15),
+        )
+        await _seed_charge_line(
+            db,
+            tenant_a.id,
+            source_id="ch_split_b",
+            description="Framework Marketplace Order ID: R628489300-BBBBBBBB",
+            amount=Decimal("50.00"),
+            arrival_date=date(2026, 3, 15),
+        )
+        await create_test_netsuite_posting(
+            db,
+            tenant_a.id,
+            netsuite_internal_id="99030",
+            related_payout_id="R628489300",
+            transaction_date=date(2026, 3, 16),
+            amount=Decimal("100.00"),
+        )
+        await create_test_netsuite_posting(
+            db,
+            tenant_a.id,
+            netsuite_internal_id="99031",
+            related_payout_id="R628489300",
+            transaction_date=date(2026, 3, 16),
+            amount=Decimal("50.00"),
+        )
+
+        job = OrderReconJob(db=db, tenant_id=str(tenant_a.id))
+        charges = await job._fetch_charges(date_from=date(2026, 3, 10), date_to=date(2026, 3, 20))
+        order_references = {c.order_reference for c in charges if c.order_reference}
+        deposits = await job._fetch_deposits(
+            date_from=date(2026, 3, 10),
+            date_to=date(2026, 3, 20),
+            order_references=order_references,
+        )
+        candidates = job.engine.match(charges, deposits)
+
+        assert len(candidates) == 2
+        by_source = {c.charge.source_id: c for c in candidates}
+        assert by_source["ch_split_a"].match_type == "deterministic"
+        assert by_source["ch_split_a"].deposit.amount == Decimal("100.00")
+        assert by_source["ch_split_b"].match_type == "deterministic"
+        assert by_source["ch_split_b"].deposit.amount == Decimal("50.00")
+        assert by_source["ch_split_a"].ambiguous_same_ref is False
+        assert by_source["ch_split_b"].ambiguous_same_ref is False
+
+        run = await create_test_recon_run(db, tenant_a.id)
+        await job._store_results(run.id, candidates)
+
+        rows = (
+            await db.execute(
+                select(ReconciliationResult.bucket, ReconciliationResult.deposit_id).where(
+                    ReconciliationResult.run_id == run.id
+                )
+            )
+        ).all()
+        assert len(rows) == 2
+        assert all(deposit_id is not None for _, deposit_id in rows)
+        assert all(bucket == BUCKET_MATCHES for bucket, _ in rows)
+
+    async def test_ambiguous_pick_never_auto_matches_db_backed(self, db, tenant_a):
+        """A charge with two non-exact same-ref deposits picks the nearest
+        date, but the pick is ambiguous — stored status must never be
+        auto_matched, bucket must be needs_review, and evidence must flag
+        the ambiguity. Drives the real fetch -> match -> store path."""
+        await _seed_charge_line(
+            db,
+            tenant_a.id,
+            source_id="ch_ambig_db",
+            description="Framework Marketplace Order ID: R628489400-CCCCCCCC",
+            amount=Decimal("100.00"),
+            arrival_date=date(2026, 3, 15),
+        )
+        # Nearest to the charge's transaction date, wins the ambiguous pick.
+        await create_test_netsuite_posting(
+            db,
+            tenant_a.id,
+            netsuite_internal_id="99040",
+            related_payout_id="R628489400",
+            transaction_date=date(2026, 3, 16),
+            amount=Decimal("90.00"),
+        )
+        # Further away, loses — fenced as evidence, not chosen.
+        await create_test_netsuite_posting(
+            db,
+            tenant_a.id,
+            netsuite_internal_id="99041",
+            related_payout_id="R628489400",
+            transaction_date=date(2026, 3, 1),
+            amount=Decimal("80.00"),
+        )
+
+        job = OrderReconJob(db=db, tenant_id=str(tenant_a.id))
+        charges = await job._fetch_charges(date_from=date(2026, 3, 10), date_to=date(2026, 3, 20))
+        order_references = {c.order_reference for c in charges if c.order_reference}
+        deposits = await job._fetch_deposits(
+            date_from=date(2026, 3, 10),
+            date_to=date(2026, 3, 20),
+            order_references=order_references,
+        )
+        candidates = job.engine.match(charges, deposits)
+
+        assert len(candidates) == 1
+        assert candidates[0].ambiguous_same_ref is True
+        assert candidates[0].confidence == Decimal("0.85")
+
+        run = await create_test_recon_run(db, tenant_a.id)
+        await job._store_results(run.id, candidates)
+
+        stored = (
+            await db.execute(select(ReconciliationResult).where(ReconciliationResult.run_id == run.id))
+        ).scalar_one()
+        assert stored.status != "auto_matched"
+        assert stored.bucket == BUCKET_NEEDS_REVIEW
+        assert stored.evidence["ambiguous_same_ref"] is True
+        assert len(stored.evidence["same_ref_deposit_ids"]) == 1
+
 
 class TestRunProducesSummary:
     """Mock fetch + matching to verify ReconRunSummary with correct counts."""
@@ -713,6 +842,60 @@ class TestStoresResultsWithNullPayoutId:
 
         result = db.add.call_args_list[0][0][0]
         assert "same_ref_deposit_ids" not in result.evidence
+
+    @pytest.mark.asyncio
+    async def test_store_results_ambiguous_same_ref_overrides_bucket_to_needs_review(self):
+        """Gate-round-2: an ambiguous same-ref pick must never land in
+        auto_matched — _store_results overrides its bucket to needs_review
+        regardless of variance, and evidence carries both markers."""
+        charge = ChargeRecord(
+            id="pl-1",
+            source_id="ch_ambig",
+            payout_line_id="pl-1",
+            amount=Decimal("100.00"),
+            fee=Decimal("3.00"),
+            net=Decimal("97.00"),
+            currency="USD",
+            charge_date=date(2026, 3, 15),
+            order_reference="R628489275",
+        )
+        deposit_id = str(uuid.uuid4())
+        sibling_id = str(uuid.uuid4())
+        deposit = NSPaymentRecord(
+            id=deposit_id,
+            netsuite_internal_id="12345",
+            amount=Decimal("100.00"),
+            currency="USD",
+            transaction_date=date(2026, 3, 16),
+            record_type="custdep",
+            order_reference="R628489275",
+        )
+        # Zero variance but still ambiguous (e.g. two exact-amount deposits
+        # competing for one charge) — the confidence the engine attaches is
+        # already capped at 0.85, below the 0.95 auto_match threshold.
+        candidate = OrderMatchCandidate(
+            charge=charge,
+            deposit=deposit,
+            match_type="deterministic",
+            confidence=Decimal("0.85"),
+            variance_amount=Decimal("0"),
+            match_rule="order_reference_exact",
+            same_ref_deposit_ids=[sibling_id],
+            ambiguous_same_ref=True,
+        )
+
+        db = _mock_db()
+        job = OrderReconJob(db=db, tenant_id=TENANT_ID)
+        run_id = uuid.uuid4()
+
+        buckets = await job._store_results(run_id, [candidate])
+
+        result = db.add.call_args_list[0][0][0]
+        assert result.status != "auto_matched"
+        assert result.bucket == BUCKET_NEEDS_REVIEW
+        assert buckets == [BUCKET_NEEDS_REVIEW]
+        assert result.evidence["ambiguous_same_ref"] is True
+        assert result.evidence["same_ref_deposit_ids"] == [sibling_id]
 
     @pytest.mark.asyncio
     async def test_store_results_unmatched_no_deposit_id(self):
