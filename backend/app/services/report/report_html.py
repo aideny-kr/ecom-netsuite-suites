@@ -98,8 +98,8 @@ td.num,th.num { text-align:right; font-variant-numeric:tabular-nums; white-space
 # making the brief's "specs without a financial_statement section render byte-identically
 # to today" requirement impossible to satisfy. Kept out of the %-format pipeline entirely,
 # `_FS_CSS` needs NO %% doubling (see render_report_html: appended only when a
-# financial_statement section is actually present) and every literal `%` below (there are
-# none currently) would be safe verbatim either way.
+# financial_statement section is actually present) — a literal `%` below (there is one,
+# in a comment) is safe verbatim either way.
 #
 # Reuses the base stylesheet's vars/idioms (--accent, --border, .nb-card box) and the
 # generic table/th/td + td.num,th.num rules (money cells just get class="num" like every
@@ -108,6 +108,14 @@ td.num,th.num { text-align:right; font-variant-numeric:tabular-nums; white-space
 # CSS-only section-collapse, the trend chart legend, and print.
 _FS_CSS = """
 :root { --fs-good:#0A7A3D; --fs-bad:#B3261E; --fs-warn:#E8A13C; --fs-soft:#EFEDE7; }
+/* Base tone rules — .fs-good/.fs-bad are applied DIRECTLY as a <td> class on statement/
+   quad delta cells (_fs_delta_tone) and KPI deltas (_fs_sign_tone), not only alongside
+   .fs-chip/.fs-dot/.fs-delta below. Those are scoped COMPANION rules for their own
+   compound selectors; without this unscoped base rule a bare `class="num fs-good"` cell
+   matches nothing and renders in the default ink color — exactly the bug a live review
+   caught (statement + quad Δ$/Δ% cells rendering colorless). A drift test binds this. */
+.fs-good { color:var(--fs-good); }
+.fs-bad { color:var(--fs-bad); }
 .fs-meta { display:flex; gap:8px; flex-wrap:wrap; margin:4px 0 14px; }
 .fs-chip { font-size:11px; font-weight:700; border:2px solid var(--border); padding:3px 8px; background:var(--card); }
 .fs-chip.fs-dark { background:var(--accent); color:var(--accent-ink); }
@@ -140,7 +148,7 @@ _FS_CSS = """
 .fs-sw { width:12px; height:12px; border:2px solid var(--border); display:inline-block;
   margin-right:5px; vertical-align:-1px; }
 
-/* Variance quad (design rule #5): Actual | Prior | Delta $ | Delta %% — reuses the same
+/* Variance quad (design rule #5): Actual | Prior | Delta $ | Delta % — reuses the same
    fs-sub/fs-formula/fs-net emphasis classes as the statement table below (both are built
    from the same _quad_row-shaped model dict). */
 table.fs-quad th, table.fs-quad td { border:none; border-bottom:1px solid #ddd; font-size:12.5px; }
@@ -843,7 +851,7 @@ def _fs_quad_html(model: dict) -> str:
     if has_prior:
         headers += [f"<th>{escape(prior_period)}</th>", "<th>Δ $</th>", "<th>Δ %</th>"]
     if has_prior:
-        # Δ%% needs its own cell (the shared _fs_summary_row_html helper only emits
+        # Δ% needs its own cell (the shared _fs_summary_row_html helper only emits
         # current/prior/delta$) — quad rows are the only place delta_pct is displayed, so
         # a dedicated row renderer rather than growing the shared helper for one caller.
         rows = "".join(_fs_quad_row_with_pct_html(r) for r in quad)

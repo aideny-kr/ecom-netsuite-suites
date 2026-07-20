@@ -1,3 +1,4 @@
+import re
 from html import escape
 
 from app.services.report.report_html import build_provenance, fmt_amount, render_report_html
@@ -658,6 +659,25 @@ def test_fs_collapse_checkboxes_capped_and_css_rules_match_the_cap():
     for i in range(_MAX_STATEMENT_SECTIONS):
         assert f"input.fs-sec-{i}:not(:checked)" in html, f"collapse rule missing for fs-sec-{i}"
     assert f"input.fs-sec-{_MAX_STATEMENT_SECTIONS}:" not in html  # block ends at the cap
+
+
+def test_fs_delta_tone_cell_actually_gets_the_semantic_color_class_bound():
+    """DRIFT GUARD: _fs_delta_tone / _fs_sign_tone hand back bare "fs-good"/"fs-bad"
+    strings that get applied DIRECTLY as a <td> class on statement/quad delta cells
+    (see _fs_summary_row_html / _fs_account_row_html / _fs_quad_row_with_pct_html) --
+    not just as a compound class alongside .fs-chip/.fs-dot/.fs-delta. A bare
+    `td.fs-good` only picks up color if the stylesheet defines an UNSCOPED base rule
+    for the class itself; a stylesheet with only scoped companions (.fs-chip.fs-good,
+    .fs-dot.fs-good, .fs-delta.fs-good, tr.fs-check.fs-good td) leaves every plain
+    `class="num fs-good"` cell colorless. The regex requires the selector to START a
+    line (^ in MULTILINE mode) so a scoped selector like `.fs-chip.fs-good{` -- where
+    `.fs-good` appears mid-selector, not at line-start -- can't false-positive the
+    match. Presence-of-class is not enough."""
+    html = render_report_html(_fs_spec(_is_model()))
+    assert '<td class="num fs-bad">' in html or '<td class="num fs-good">' in html
+    style_block = html.split("<style>", 1)[1].split("</style>", 1)[0]
+    assert re.search(r"^\s*\.fs-good\s*\{", style_block, re.MULTILINE)
+    assert re.search(r"^\s*\.fs-bad\s*\{", style_block, re.MULTILINE)
 
 
 def test_fs_percent_integrity_canary_full_render_does_not_raise():
