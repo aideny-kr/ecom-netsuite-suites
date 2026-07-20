@@ -392,6 +392,22 @@ def test_account_mover_watch_silent_just_under_threshold():
     assert not any("Marketing Expense" in w["text"] for w in model["watch"])
 
 
+def test_account_mover_tone_uses_own_section_not_a_name_lookup():
+    # Two accounts share the acctname "Consulting" in different sections. A tone resolved
+    # by re-looking-up "section for this name" (rather than carrying the mover's OWN
+    # section through) would silently give both accounts the SAME tone.
+    model = build_statement_model(fx.income_statement_section(), fx.duplicate_account_name_watch_payloads())
+    consulting_items = [w for w in model["watch"] if w["text"].startswith("Consulting")]
+    assert len(consulting_items) == 2
+    # ranked by |delta| descending: the larger REVENUE mover (+300,000, favorable) is
+    # first with tone "good"; the smaller OPEX mover (+200,000, unfavorable) is second
+    # with tone "warn".
+    assert consulting_items[0]["text"] == fx.EXPECTED_DUP_NAME_REVENUE_MOVER_TEXT
+    assert consulting_items[0]["tone"] == "good"
+    assert consulting_items[1]["text"] == fx.EXPECTED_DUP_NAME_OPEX_MOVER_TEXT
+    assert consulting_items[1]["tone"] == "warn"
+
+
 def test_highlight_fires_just_over_threshold():
     model = build_statement_model(fx.income_statement_section(), fx.highlight_threshold_payloads("just_over"))
     assert any(h.startswith("Gross margin") for h in model["highlights"])
@@ -514,13 +530,24 @@ def test_tb_top_level_identity(tb_model):
     assert tb_model["net"] is None
 
 
-def test_tb_kpis_no_mom(tb_model):
+def test_tb_kpis_have_mom_deltas(tb_model):
+    # TB's recipe fetches r2 the same as every other statement type -- its headline
+    # figures must actually use it (mirrors BS's total_assets/liabilities/equity pattern).
     kpis = {k["key"]: k for k in tb_model["kpis"]}
     assert kpis["total_debits"]["value"] == "$1,600,000"
+    assert kpis["total_debits"]["mom_delta"] == fx.EXPECTED_TB_DEBIT_MOM_DELTA_STR
+    assert kpis["total_debits"]["mom_pct"] == fx.EXPECTED_TB_DEBIT_MOM_PCT_STR
     assert kpis["total_credits"]["value"] == "$1,600,000"
-    # brief: TB KPIs are flat totals + in-balance check, no MoM comparison
-    assert kpis["total_debits"]["mom_delta"] is None
-    assert kpis["total_credits"]["mom_delta"] is None
+    assert kpis["total_credits"]["mom_delta"] == fx.EXPECTED_TB_CREDIT_MOM_DELTA_STR
+    assert kpis["total_credits"]["mom_pct"] == fx.EXPECTED_TB_CREDIT_MOM_PCT_STR
+
+
+def test_tb_quad_has_mom_deltas(tb_model):
+    quad_by_label = {q["label"]: q for q in tb_model["quad"]}
+    assert quad_by_label["Total Debits"]["prior"] == "$1,480,000"
+    assert quad_by_label["Total Debits"]["delta"] == fx.EXPECTED_TB_DEBIT_MOM_DELTA_STR
+    assert quad_by_label["Total Credits"]["prior"] == "$1,480,000"
+    assert quad_by_label["Total Credits"]["delta"] == fx.EXPECTED_TB_CREDIT_MOM_DELTA_STR
 
 
 def test_tb_sections_flat_no_gaap_grouping(tb_model):
@@ -564,6 +591,13 @@ def test_tb_missing_compare_degrades():
     model = build_statement_model(fx.trial_balance_section(), fx.trial_balance_payloads_missing_compare())
     assert model["prior_period"] is None
     assert model["sections"][0]["accounts"][0]["prior"] is None
+    kpis = {k["key"]: k for k in model["kpis"]}
+    assert kpis["total_debits"]["mom_delta"] is None
+    assert kpis["total_debits"]["mom_pct"] is None
+    assert kpis["total_credits"]["mom_delta"] is None
+    quad_by_label = {q["label"]: q for q in model["quad"]}
+    assert quad_by_label["Total Debits"]["prior"] is None
+    assert quad_by_label["Total Debits"]["delta"] is None
 
 
 # ===========================================================================

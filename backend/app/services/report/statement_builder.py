@@ -533,15 +533,18 @@ def _build_is_watch(
             prior_amt = prior_index.get(number, Decimal("0"))
             delta = current_amt - prior_amt
             if abs(delta) >= threshold_dollars:
-                movers.append((abs(delta), row.get("acctname", ""), delta, prior_amt))
+                # Carry THIS row's own section through the tuple -- NetSuite does not
+                # enforce acctname uniqueness, so re-deriving section from name later
+                # (a lookup keyed only on the string) would silently mis-tone whichever
+                # duplicate-named account it happened to match first.
+                movers.append((abs(delta), row.get("acctname", ""), delta, prior_amt, section))
         movers.sort(key=lambda m: m[0], reverse=True)
-        for _magnitude, name, delta, prior_amt in movers[:MAX_ACCOUNT_MOVERS]:
+        for _magnitude, name, delta, prior_amt, mover_section in movers[:MAX_ACCOUNT_MOVERS]:
             account_pct = _pct_change(prior_amt + delta, prior_amt)
             pct_text = account_pct if account_pct is not None else "n/a"
             # tone: an increase is "good" for revenue/other-income, "warn" for an
             # expense-shaped section (COGS/OpEx/OtherExpense); a decrease flips it.
-            section_key = next((r.get("section") for r in current_rows if r.get("acctname") == name), None)
-            favorable_on_increase = section_key in ("1-Revenue", "2-Other Income")
+            favorable_on_increase = mover_section in ("1-Revenue", "2-Other Income")
             improved = (delta > 0) == favorable_on_increase
             tone = "good" if improved else "warn"
             sign = "+" if delta > 0 else MINUS
@@ -891,10 +894,24 @@ def _build_trial_balance_model(section: dict, payloads: dict[str, dict]) -> dict
     prior_rows = _resolve_rows(payloads, compare.get("prior"))
 
     current = _tb_totals(current_rows)
+    prior = _tb_totals(prior_rows)
+
+    def get(totals, key):
+        return None if totals is None else totals[key]
 
     kpis = [
-        _kpi_row("total_debits", "Total debits", current["debit"], None, None, margin_base=None, spark=None),
-        _kpi_row("total_credits", "Total credits", current["credit"], None, None, margin_base=None, spark=None),
+        _kpi_row(
+            "total_debits", "Total debits", current["debit"], get(prior, "debit"), None, margin_base=None, spark=None
+        ),
+        _kpi_row(
+            "total_credits",
+            "Total credits",
+            current["credit"],
+            get(prior, "credit"),
+            None,
+            margin_base=None,
+            spark=None,
+        ),
     ]
 
     # TB has no ``section`` column at all -- a single flat "Accounts" group, using
@@ -916,8 +933,8 @@ def _build_trial_balance_model(section: dict, payloads: dict[str, dict]) -> dict
     )
 
     quad = [
-        _quad_row("Total Debits", current["debit"], None, reduces_profit=False, emph="sub"),
-        _quad_row("Total Credits", current["credit"], None, reduces_profit=False, emph="sub"),
+        _quad_row("Total Debits", current["debit"], get(prior, "debit"), reduces_profit=False, emph="sub"),
+        _quad_row("Total Credits", current["credit"], get(prior, "credit"), reduces_profit=False, emph="sub"),
     ]
 
     balanced = current["debit"] == current["credit"]

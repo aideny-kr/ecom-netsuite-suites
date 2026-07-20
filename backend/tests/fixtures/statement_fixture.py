@@ -644,6 +644,38 @@ def account_mover_watch_payloads(delta_pct_direction: str) -> dict[str, dict]:
     }
 
 
+def duplicate_account_name_watch_payloads() -> dict[str, dict]:
+    """Two accounts sharing the SAME acctname ("Consulting") in DIFFERENT sections --
+    NetSuite does not enforce acctname uniqueness. Proves watch rule 2's tone is resolved
+    from the mover's OWN section (threaded through the movers tuple), not a fragile
+    name-based re-lookup that would silently give both accounts the same tone.
+
+    Base Sales (revenue, unchanged) keeps total revenue fixed at 10,500,000, so the 1%
+    threshold (105,000) is unaffected by either mover. Revenue "Consulting" grows
+    200,000 -> 500,000 (delta +300,000, favorable -> "good"); OpEx "Consulting" grows
+    200,000 -> 400,000 (delta +200,000, unfavorable -> "warn"). Different magnitudes give
+    an unambiguous ranking (larger mover first) so the two watch items are distinguishable
+    by position without relying on tone (the very thing under test)."""
+    r1_rows = [
+        _is_row("4000", "Base Sales", "Income", "1-Revenue", Decimal("10000000")),
+        _is_row("4010", "Consulting", "Income", "1-Revenue", Decimal("500000")),
+        _is_row("6010", "Consulting", "Expense", "4-Operating Expense", Decimal("400000")),
+    ]
+    r2_rows = [
+        _is_row("4000", "Base Sales", "Income", "1-Revenue", Decimal("10000000")),
+        _is_row("4010", "Consulting", "Income", "1-Revenue", Decimal("200000")),
+        _is_row("6010", "Consulting", "Expense", "4-Operating Expense", Decimal("200000")),
+    ]
+    return {
+        "r1": _payload(_IS_COLUMNS, r1_rows, query="income_statement (Jun 2026)"),
+        "r2": _payload(_IS_COLUMNS, r2_rows, query="income_statement (May 2026)"),
+    }
+
+
+EXPECTED_DUP_NAME_REVENUE_MOVER_TEXT = "Consulting +$300,000 MoM (+150.0%)"
+EXPECTED_DUP_NAME_OPEX_MOVER_TEXT = "Consulting +$200,000 MoM (+100.0%)"
+
+
 def highlight_threshold_payloads(delta_direction: str) -> dict[str, dict]:
     """Minimal r1/r2 pair whose single COGS-account MoM delta lands EXACTLY at the
     highlight threshold boundary (0.5% of revenue = 5,000 on 1,000,000 revenue), isolating
@@ -809,6 +841,13 @@ _TB_R2_ROWS = [
 ]
 EXPECTED_TB_PRIOR_TOTAL_DEBIT = Decimal("1480000")  # 930,000+550,000
 EXPECTED_TB_PRIOR_TOTAL_CREDIT = Decimal("1480000")  # 280,000+200,000+150,000+850,000
+
+# MoM deltas: both sides move identically since both periods are balanced
+# (1,600,000-1,480,000=120,000; 120,000/1,480,000*100=8.1081...% -> 8.1%)
+EXPECTED_TB_DEBIT_MOM_DELTA_STR = "+$120,000"
+EXPECTED_TB_DEBIT_MOM_PCT_STR = "+8.1%"
+EXPECTED_TB_CREDIT_MOM_DELTA_STR = "+$120,000"
+EXPECTED_TB_CREDIT_MOM_PCT_STR = "+8.1%"
 assert sum((r["total_debit"] for r in _TB_R2_ROWS), Decimal("0")) == EXPECTED_TB_PRIOR_TOTAL_DEBIT
 assert sum((r["total_credit"] for r in _TB_R2_ROWS), Decimal("0")) == EXPECTED_TB_PRIOR_TOTAL_CREDIT
 
