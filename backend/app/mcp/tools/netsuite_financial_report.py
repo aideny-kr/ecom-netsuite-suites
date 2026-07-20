@@ -120,7 +120,7 @@ WHERE tal.posting = 'T'
 GROUP BY a.acctnumber, a.acctname, a.accttype
 HAVING SUM(BUILTIN.CONSOLIDATE(tal.amount, 'INCOME', 'DEFAULT', 'DEFAULT', 1, ap.id, 'DEFAULT')) <> 0
 ORDER BY section, a.acctnumber
-FETCH FIRST 500 ROWS ONLY""",
+FETCH FIRST 5000 ROWS ONLY""",
     },
     "balance_sheet": {
         "description": "Balance Sheet as of a specific date (inception-to-date)",
@@ -151,7 +151,7 @@ WHERE tal.posting = 'T'
 GROUP BY a.acctnumber, a.acctname, a.accttype
 HAVING SUM(BUILTIN.CONSOLIDATE(tal.amount, 'LEDGER', 'DEFAULT', 'DEFAULT', 1, ap.id, 'DEFAULT')) <> 0
 ORDER BY section, a.acctnumber
-FETCH FIRST 500 ROWS ONLY""",
+FETCH FIRST 5000 ROWS ONLY""",
     },
     "trial_balance": {
         "description": "Trial Balance for a specific period — all GL accounts with debit/credit totals",
@@ -176,7 +176,7 @@ GROUP BY a.acctnumber, a.acctname, a.accttype
 HAVING SUM(BUILTIN.CONSOLIDATE(tal.debit, 'INCOME', 'DEFAULT', 'DEFAULT', 1, ap.id, 'DEFAULT')) <> 0
     OR SUM(BUILTIN.CONSOLIDATE(tal.credit, 'INCOME', 'DEFAULT', 'DEFAULT', 1, ap.id, 'DEFAULT')) <> 0
 ORDER BY a.acctnumber
-FETCH FIRST 500 ROWS ONLY""",
+FETCH FIRST 5000 ROWS ONLY""",
     },
     "income_statement_trend": {
         "description": "Income Statement trend by period — one row per account per month for period-over-period analysis",

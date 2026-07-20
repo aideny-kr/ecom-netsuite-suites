@@ -25,6 +25,21 @@ def test_each_template_has_required_fields():
         )
 
 
+def test_statement_templates_row_cap_matches_statement_builder_guard():
+    """The three STATEMENT templates (income_statement, balance_sheet, trial_balance -- NOT
+    the *_trend templates, which are already 5000) must cap at 5000 rows, not 500. A
+    500-row cap silently truncates any tenant with >500 GL accounts, corrupting
+    totals/NI/the balance check under a UI that otherwise implies "nothing truncated" --
+    see statement_builder.STATEMENT_ROW_CAP, which this SQL-side cap must stay in sync
+    with (that builder-side guard is what actually WARNS when this cap is hit)."""
+    from app.mcp.tools.netsuite_financial_report import REPORT_TEMPLATES
+
+    for name in ("income_statement", "balance_sheet", "trial_balance"):
+        sql = REPORT_TEMPLATES[name]["sql_template"]
+        assert "FETCH FIRST 5000 ROWS ONLY" in sql, f"{name} must cap at 5000 rows, not 500"
+        assert "FETCH FIRST 500 ROWS ONLY" not in sql, f"{name} still has the old 500-row cap"
+
+
 def test_income_statement_template_has_mandatory_filters():
     from app.mcp.tools.netsuite_financial_report import REPORT_TEMPLATES
 
