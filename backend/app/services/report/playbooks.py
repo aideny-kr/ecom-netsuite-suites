@@ -21,26 +21,83 @@ from datetime import datetime, timezone
 # do not relax build_period_filter's own check without parameterizing it instead.
 _PERIOD_RE = re.compile(r"^[A-Z][a-z]{2} \d{4}$")
 
+_MONTH_ABBRS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+# How many trailing months feed an income_statement's trend comparison source (r4).
+_TREND_MONTHS = 6
+
+
+def _parse_period(period: str) -> tuple[int, int]:
+    """Validated "Mon YYYY" -> (month 1-12, year). ``ValueError`` on malformed input —
+    reuses ``_PERIOD_RE`` (the same fail-fast pre-check ``build_playbook_recipe``
+    applies) and additionally rejects a regex-shaped but non-real month ("Xxx 2026")."""
+    if not isinstance(period, str) or not _PERIOD_RE.match(period):
+        raise ValueError("period must be a NetSuite period name like 'Jun 2026'")
+    month_str, year_str = period.split(" ")
+    try:
+        month = _MONTH_ABBRS.index(month_str) + 1
+    except ValueError:
+        raise ValueError(
+            f"period must be a NetSuite period name like 'Jun 2026' (unknown month '{month_str}')"
+        ) from None
+    return month, int(year_str)
+
+
+def _format_period(month: int, year: int) -> str:
+    return f"{_MONTH_ABBRS[month - 1]} {year}"
+
+
+def prior_period(period: str) -> str:
+    """One calendar month back: ``"Jun 2026" -> "May 2026"``; crosses the year boundary
+    (``"Jan 2026" -> "Dec 2025"``)."""
+    month, year = _parse_period(period)
+    if month == 1:
+        return _format_period(12, year - 1)
+    return _format_period(month - 1, year)
+
+
+def yoy_period(period: str) -> str:
+    """Same month, one year back: ``"Jun 2026" -> "Jun 2025"``."""
+    month, year = _parse_period(period)
+    return _format_period(month, year - 1)
+
+
+def trailing_periods(period: str, count: int) -> str:
+    """``count`` consecutive months ending at (and including) ``period``, chronological
+    (oldest first), comma-joined: ``trailing_periods("Jun 2026", 6) ->
+    "Jan 2026,Feb 2026,Mar 2026,Apr 2026,May 2026,Jun 2026"``."""
+    _parse_period(period)  # validate up front — count=1 never reaches prior_period below
+    periods = [period]
+    for _ in range(count - 1):
+        periods.append(prior_period(periods[-1]))
+    return ",".join(reversed(periods))
+
+
 PLAYBOOKS: dict[str, dict] = {
     "income_statement": {
         "name": "Income Statement",
         "description": "Statement-grade P&L for one accounting period, straight from the GL.",
         "params": [{"key": "period", "label": "Accounting period", "example": "Jun 2026"}],
-        "table_label": "P&L by account",
     },
     "balance_sheet": {
         "name": "Balance Sheet",
         "description": "Balance Sheet as of the end of an accounting period (inception-to-date).",
         "params": [{"key": "period", "label": "As-of period", "example": "Jun 2026"}],
-        "table_label": "Balances by account",
     },
     "trial_balance": {
         "name": "Trial Balance",
         "description": "All GL accounts with debit/credit totals for one accounting period.",
         "params": [{"key": "period", "label": "Accounting period", "example": "Jun 2026"}],
-        "table_label": "Trial balance",
     },
 }
+
+
+def _source(report_type: str, period: str) -> dict:
+    return {
+        "tool": "netsuite_financial_report",
+        "params": {"report_type": report_type, "period": period},
+        "connection_id": None,
+    }
 
 
 def build_playbook_recipe(playbook_key: str, params: dict[str, str]) -> tuple[str, dict]:
@@ -51,6 +108,18 @@ def build_playbook_recipe(playbook_key: str, params: dict[str, str]) -> tuple[st
     if not _PERIOD_RE.match(period):
         raise ValueError("period must be a NetSuite period name like 'Jun 2026'")
     title = f"{meta['name']} — {period}"
+
+    # Every statement gets prior-period comparison (r2); income_statement additionally
+    # gets same-month-last-year (r3) and a trailing-trend source (r4) — balance_sheet
+    # and trial_balance are point-in-time/period snapshots without a v1 trend view.
+    sources = {"r1": _source(playbook_key, period), "r2": _source(playbook_key, prior_period(period))}
+    compare = {"prior": "r2"}
+    if playbook_key == "income_statement":
+        sources["r3"] = _source(playbook_key, yoy_period(period))
+        sources["r4"] = _source("income_statement_trend", trailing_periods(period, _TREND_MONTHS))
+        compare["yoy"] = "r3"
+        compare["trend"] = "r4"
+
     recipe = {
         "schema_version": 1,
         "captured_at": datetime.now(timezone.utc).isoformat(),
@@ -58,22 +127,15 @@ def build_playbook_recipe(playbook_key: str, params: dict[str, str]) -> tuple[st
         # assemble_spec's title — a recipe-authored heading here duplicated it
         # back-to-back in the rendered HTML.
         "sections": [
-            {"type": "table", "result_id": "r1", "label": meta["table_label"]},
             {
-                "type": "narrative",
-                "markdown": (
-                    f"{{{{result:r1.row_count}}}} GL lines. Generated deterministically by the "
-                    f"{meta['name']} playbook — every figure is a GL aggregate; no model wrote a number."
-                ),
-            },
-        ],
-        "sources": {
-            "r1": {
-                "tool": "netsuite_financial_report",
-                "params": {"report_type": playbook_key, "period": period},
-                "connection_id": None,
+                "type": "financial_statement",
+                "result_id": "r1",
+                "statement": playbook_key,
+                "period": period,
+                "compare": compare,
             }
-        },
+        ],
+        "sources": sources,
     }
     return title, recipe
 
