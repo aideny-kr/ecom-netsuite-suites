@@ -8,6 +8,7 @@ constant from that same module (never a recomputation of the code under test).
 
 from __future__ import annotations
 
+import json
 from decimal import Decimal
 
 import pytest
@@ -19,6 +20,8 @@ from app.services.report.statement_builder import (
     fmt_pct,
     fmt_pct_delta,
     fmt_pp,
+    statement_model_json_safe,
+    statement_model_restore_decimals,
 )
 from tests.fixtures import statement_fixture as fx
 
@@ -610,3 +613,70 @@ def test_unknown_statement_type_raises_value_error():
     section["statement"] = "cash_flow"  # not one of the three supported types
     with pytest.raises(ValueError):
         build_statement_model(section, fx.income_statement_payloads())
+
+
+# ===========================================================================
+# Task 4 (Risk 3) — JSON-persistence boundary: kpis[].spark / trend.series[].values
+# ===========================================================================
+
+
+def test_statement_model_json_safe_converts_decimal_spark_and_trend_to_strings(is_model):
+    safe = statement_model_json_safe(is_model)
+    kpis = {k["key"]: k for k in safe["kpis"]}
+    assert all(isinstance(v, str) for v in kpis["revenue"]["spark"])
+    assert all(isinstance(v, str) for v in safe["trend"]["series"][0]["values"])
+    # the ORIGINAL model is untouched (no mutation) — still real Decimal
+    kpis_orig = {k["key"]: k for k in is_model["kpis"]}
+    assert all(isinstance(v, Decimal) for v in kpis_orig["revenue"]["spark"])
+
+
+def test_statement_model_json_safe_is_actually_json_dumpable(is_model):
+    safe = statement_model_json_safe(is_model)
+    # this would raise TypeError on a bare Decimal — the exact crash Risk 3 fixes
+    assert json.dumps(safe)
+
+
+def test_statement_model_json_safe_no_trend_or_spark_is_a_noop():
+    """balance_sheet/trial_balance never carry a trend and their kpis never carry a
+    spark — the sanitizer must not choke on (or invent) either."""
+    model = build_statement_model(fx.balance_sheet_section(), fx.balance_sheet_payloads())
+    safe = statement_model_json_safe(model)
+    assert safe["trend"] is None
+    assert all(k["spark"] is None for k in safe["kpis"])
+    assert json.dumps(safe)
+
+
+def test_statement_model_restore_decimals_is_the_inverse(is_model):
+    safe = statement_model_json_safe(is_model)
+    restored = statement_model_restore_decimals(safe)
+    kpis = {k["key"]: k for k in restored["kpis"]}
+    assert kpis["revenue"]["spark"] == fx.EXPECTED_TREND_REVENUE  # exact Decimal values back
+    assert all(isinstance(v, Decimal) for v in kpis["revenue"]["spark"])
+    assert all(isinstance(v, Decimal) for v in restored["trend"]["series"][0]["values"])
+
+
+def test_statement_model_json_round_trip_renders_identically(is_model):
+    """The brief's binding round-trip requirement: build -> json.dumps -> json.loads ->
+    render produces byte-IDENTICAL html to rendering the original (Decimal-bearing)
+    model directly. Proves spec_json can be persisted (Decimal -> str, never through
+    float) without corrupting a future re-render of that stored spec."""
+    from app.services.report.report_html import render_report_html
+
+    spec = {
+        "title": "Income Statement — Jun 2026",
+        "sections": [{"type": "financial_statement", "model": is_model}],
+        "provenance": {"sources": []},
+    }
+    direct_html = render_report_html(spec)
+
+    safe_model = statement_model_json_safe(is_model)
+    round_tripped = json.loads(json.dumps(safe_model))  # the actual persistence round trip
+    restored_model = statement_model_restore_decimals(round_tripped)
+    roundtrip_spec = {
+        "title": "Income Statement — Jun 2026",
+        "sections": [{"type": "financial_statement", "model": restored_model}],
+        "provenance": {"sources": []},
+    }
+    roundtrip_html = render_report_html(roundtrip_spec)
+
+    assert roundtrip_html == direct_html

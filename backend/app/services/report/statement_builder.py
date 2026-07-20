@@ -1023,3 +1023,61 @@ def build_statement_model(section: dict, payloads: dict[str, dict]) -> dict:
     if not section.get("period"):
         raise ValueError("section is missing period")
     return builder(section, payloads)
+
+
+# ---------------------------------------------------------------------------
+# Task 4 (Risk 3) — JSON-persistence boundary.
+#
+# ``kpis[].spark`` and ``trend.series[].values`` are the model's only raw-``Decimal``
+# fields (see module docstring); every other field is already a plain formatted string /
+# bool / None. Standard ``json.dumps`` raises ``TypeError`` on a bare ``Decimal`` — this
+# is what would crash ``db.flush()`` when a ``financial_statement`` spec is persisted to
+# the ``spec_json`` JSONB column (SQLAlchemy's ``JSON`` type has no custom
+# ``json_serializer`` configured; see ``app/core/database.py``).
+#
+# The two functions below are a pure, LOSSLESS round-trip pair, str(Decimal) <->
+# Decimal(str) — never through ``float`` (no precision loss). Report-service callers use
+# ``statement_model_json_safe`` to build the copy that gets persisted, AFTER rendering
+# the ORIGINAL (Decimal-bearing) model — the renderer's trend tooltip
+# (``report_html._fs_tip_value``) calls ``.quantize()`` and therefore requires real
+# ``Decimal`` instances, so the live render always happens against the un-sanitized
+# model. ``statement_model_restore_decimals`` is the inverse, for any future caller that
+# re-renders from a JSON-round-tripped ``spec_json`` (today's ``/view`` endpoint always
+# serves the frozen ``rendered_html`` and never re-renders from ``spec_json`` — this
+# keeps that path safe if it's ever added).
+# ---------------------------------------------------------------------------
+
+
+def statement_model_json_safe(model: dict) -> dict:
+    """A copy of a ``build_statement_model`` output with ``kpis[].spark`` and
+    ``trend.series[].values`` converted from ``Decimal`` to decimal-literal strings
+    (``str(Decimal)``) — safe to ``json.dumps`` without a custom encoder. Does not mutate
+    ``model``; every other field passes through unchanged (already JSON-safe)."""
+    out = dict(model)
+    kpis = model.get("kpis")
+    if kpis:
+        out["kpis"] = [{**k, "spark": [str(v) for v in k["spark"]]} if k.get("spark") else dict(k) for k in kpis]
+    trend = model.get("trend")
+    if trend:
+        out["trend"] = {
+            **trend,
+            "series": [{**s, "values": [str(v) for v in s.get("values") or []]} for s in trend.get("series") or []],
+        }
+    return out
+
+
+def statement_model_restore_decimals(model: dict) -> dict:
+    """Inverse of ``statement_model_json_safe``: turns ``kpis[].spark`` /
+    ``trend.series[].values`` back into ``Decimal`` — the form the renderer's trend
+    tooltip (``_fs_tip_value``) requires. Does not mutate ``model``."""
+    out = dict(model)
+    kpis = model.get("kpis")
+    if kpis:
+        out["kpis"] = [{**k, "spark": [Decimal(v) for v in k["spark"]]} if k.get("spark") else dict(k) for k in kpis]
+    trend = model.get("trend")
+    if trend:
+        out["trend"] = {
+            **trend,
+            "series": [{**s, "values": [Decimal(v) for v in s.get("values") or []]} for s in trend.get("series") or []],
+        }
+    return out
