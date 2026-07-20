@@ -11,14 +11,16 @@ import pytest
 from sqlalchemy import select
 
 from app.models.canonical import PayoutLine
+from app.models.reconciliation import ReconciliationResult
 from app.models.tenant import TenantConfig
 from app.schemas.order_reconciliation import (
     ChargeRecord,
     NSPaymentRecord,
     OrderMatchCandidate,
 )
+from app.services.reconciliation.four_bucket_classifier import BUCKET_MATCHES, BUCKET_NEEDS_REVIEW
 from app.services.reconciliation.order_recon_job import OrderReconJob
-from tests.conftest import create_test_payout
+from tests.conftest import create_test_netsuite_posting, create_test_payout, create_test_recon_run
 
 TENANT_ID = str(uuid.uuid4())
 
@@ -156,11 +158,13 @@ class TestFetchDepositsWithOrderRef:
     @pytest.mark.asyncio
     async def test_fetch_deposits_uses_related_payout_id_as_order_ref(self):
         np1 = _make_posting_row(
+            posting_id="np-1",
             netsuite_internal_id="12345",
             related_payout_id="R628489275",
             transaction_date=date(2026, 3, 16),
         )
         np2 = _make_posting_row(
+            posting_id="np-2",
             netsuite_internal_id="12346",
             related_payout_id=None,
             transaction_date=date(2026, 3, 17),
@@ -188,6 +192,413 @@ class TestFetchDepositsWithOrderRef:
         # Second deposit: no order_reference
         assert deposits[1].netsuite_internal_id == "12346"
         assert deposits[1].order_reference is None
+
+
+class TestRefKeyedDepositFetchMocked:
+    """Ref-keyed pass (2026-07-19): the order reference decides matching, not the
+    date window. These are control-flow/plumbing tests against a mocked DB —
+    the actual SQL date-bound correctness is proven DB-backed in
+    ``TestRefKeyedDepositFetchDbBacked`` below.
+    """
+
+    @pytest.mark.asyncio
+    async def test_ref_keyed_pass_skipped_when_no_order_references(self):
+        """No charge in the run has an order_reference -> no ref-keyed pass is
+        issued; behavior is byte-identical to the pre-fix single windowed query
+        (no-ref charges only ever match via tier-2 fuzzy, which this fix leaves
+        untouched).
+        """
+        np1 = _make_posting_row(netsuite_internal_id="12345", related_payout_id=None)
+
+        db = _mock_db()
+        result_mock = MagicMock()
+        result_mock.all.return_value = [np1]
+        execute_result = MagicMock()
+        execute_result.scalars.return_value = result_mock
+        db.execute = AsyncMock(return_value=execute_result)
+
+        job = OrderReconJob(db=db, tenant_id=TENANT_ID)
+        deposits = await job._fetch_deposits(
+            date_from=date(2026, 3, 10),
+            date_to=date(2026, 3, 20),
+            order_references=set(),
+        )
+
+        assert db.execute.call_count == 1  # windowed pass only, no ref-keyed pass
+        assert len(deposits) == 1
+
+    @pytest.mark.asyncio
+    async def test_dedupes_deposit_present_in_both_fetch_passes(self):
+        """A deposit that's in-window AND ref-matched is unioned once, not twice."""
+        shared = _make_posting_row(
+            posting_id="np-shared",
+            netsuite_internal_id="12345",
+            related_payout_id="R628489275",
+            transaction_date=date(2026, 3, 16),
+        )
+
+        db = _mock_db()
+        windowed_result = MagicMock()
+        windowed_result.all.return_value = [shared]
+        windowed_execute = MagicMock()
+        windowed_execute.scalars.return_value = windowed_result
+
+        ref_result = MagicMock()
+        ref_result.all.return_value = [shared]
+        ref_execute = MagicMock()
+        ref_execute.scalars.return_value = ref_result
+
+        db.execute = AsyncMock(side_effect=[windowed_execute, ref_execute])
+
+        job = OrderReconJob(db=db, tenant_id=TENANT_ID)
+        deposits = await job._fetch_deposits(
+            date_from=date(2026, 3, 10),
+            date_to=date(2026, 3, 20),
+            order_references={"R628489275"},
+        )
+
+        assert db.execute.call_count == 2
+        assert len(deposits) == 1
+        assert deposits[0].netsuite_internal_id == "12345"
+
+    @pytest.mark.asyncio
+    async def test_chunks_ref_keyed_query_at_5000_boundary(self):
+        """A run with 5001 distinct order references issues TWO ref-keyed queries
+        (chunked at 5000), not one enormous IN(...) clause: windowed pass (1) +
+        ref-keyed chunks (2) = 3 total execute calls.
+        """
+        refs = {f"R{i:09d}" for i in range(5001)}
+
+        db = _mock_db()
+        empty_result = MagicMock()
+        empty_result.all.return_value = []
+        empty_execute = MagicMock()
+        empty_execute.scalars.return_value = empty_result
+        db.execute = AsyncMock(side_effect=[empty_execute, empty_execute, empty_execute])
+
+        job = OrderReconJob(db=db, tenant_id=TENANT_ID)
+        deposits = await job._fetch_deposits(
+            date_from=date(2026, 3, 10),
+            date_to=date(2026, 3, 20),
+            order_references=refs,
+        )
+
+        assert db.execute.call_count == 3
+        assert deposits == []
+
+
+class TestRunPassesOrderReferencesToFetchDeposits:
+    """run() derives the distinct non-null order-reference set from the fetched
+    charges and threads it through to _fetch_deposits.
+    """
+
+    @pytest.mark.asyncio
+    async def test_run_passes_distinct_non_null_refs(self):
+        charge_with_ref = ChargeRecord(
+            id="pl-1",
+            source_id="ch_001",
+            payout_line_id="pl-1",
+            amount=Decimal("100.00"),
+            fee=Decimal("3.00"),
+            net=Decimal("97.00"),
+            currency="USD",
+            charge_date=date(2026, 3, 15),
+            order_reference="R628489275",
+        )
+        charge_no_ref = ChargeRecord(
+            id="pl-2",
+            source_id="ch_002",
+            payout_line_id="pl-2",
+            amount=Decimal("50.00"),
+            fee=Decimal("1.50"),
+            net=Decimal("48.50"),
+            currency="USD",
+            charge_date=date(2026, 3, 15),
+        )
+
+        db = _mock_db()
+        job = OrderReconJob(db=db, tenant_id=TENANT_ID)
+
+        with (
+            patch.object(job, "_fetch_charges", return_value=[charge_with_ref, charge_no_ref]),
+            patch.object(job, "_fetch_deposits", return_value=[]) as mock_fetch_deposits,
+            patch.object(job.engine, "match", return_value=[]),
+        ):
+            await job.run(date_from=date(2026, 3, 10), date_to=date(2026, 3, 20))
+
+        _, call_kwargs = mock_fetch_deposits.call_args
+        assert call_kwargs["order_references"] == {"R628489275"}
+
+
+class TestRefKeyedDepositFetchDbBacked:
+    """DB-backed (real Postgres): the sanity bound is a real SQL date filter, so
+    these run against the local docker fixture rather than a mocked DB.
+    """
+
+    async def test_charge_in_window_deposit_40_days_later_matches_deterministically(self, db, tenant_a):
+        """Headline case: a deposit posted 40 days after the charge's arrival
+        date — well outside the +/-14d windowed fetch, well inside the 90d
+        sanity bound — still produces a tier-1 deterministic match.
+        """
+        await _seed_charge_line(
+            db,
+            tenant_a.id,
+            source_id="ch_cross_window",
+            description="Framework Marketplace Order ID: R628489275-XU9EPZPD",
+            arrival_date=date(2026, 3, 15),
+        )
+        await create_test_netsuite_posting(
+            db,
+            tenant_a.id,
+            netsuite_internal_id="99001",
+            related_payout_id="R628489275",
+            transaction_date=date(2026, 4, 24),  # charge arrival + 40 days
+            amount=Decimal("100.00"),
+        )
+
+        job = OrderReconJob(db=db, tenant_id=str(tenant_a.id))
+        charges = await job._fetch_charges(date_from=date(2026, 3, 10), date_to=date(2026, 3, 20))
+        order_references = {c.order_reference for c in charges if c.order_reference}
+        deposits = await job._fetch_deposits(
+            date_from=date(2026, 3, 10),
+            date_to=date(2026, 3, 20),
+            order_references=order_references,
+        )
+        candidates = job.engine.match(charges, deposits)
+
+        assert len(candidates) == 1
+        assert candidates[0].match_type == "deterministic"
+        assert candidates[0].deposit is not None
+        assert candidates[0].deposit.transaction_date == date(2026, 4, 24)
+
+    async def test_deposit_beyond_sanity_bound_still_missing(self, db, tenant_a):
+        """A deposit posted beyond the 90-day sanity bound is NOT ref-matched —
+        the bound is a sanity cap, not an unlimited lookback. The charge remains
+        unmatched (missing_in_netsuite), same as before this fix.
+        """
+        await _seed_charge_line(
+            db,
+            tenant_a.id,
+            source_id="ch_beyond_sanity",
+            description="Framework Marketplace Order ID: R577684612-XU9EPZPD",
+            arrival_date=date(2026, 3, 15),
+        )
+        # date_to (2026-03-20) + 90 days = 2026-06-18; place the deposit one day
+        # beyond that bound.
+        await create_test_netsuite_posting(
+            db,
+            tenant_a.id,
+            netsuite_internal_id="99002",
+            related_payout_id="R577684612",
+            transaction_date=date(2026, 6, 19),
+            amount=Decimal("100.00"),
+        )
+
+        job = OrderReconJob(db=db, tenant_id=str(tenant_a.id))
+        charges = await job._fetch_charges(date_from=date(2026, 3, 10), date_to=date(2026, 3, 20))
+        order_references = {c.order_reference for c in charges if c.order_reference}
+        deposits = await job._fetch_deposits(
+            date_from=date(2026, 3, 10),
+            date_to=date(2026, 3, 20),
+            order_references=order_references,
+        )
+        candidates = job.engine.match(charges, deposits)
+
+        assert deposits == []
+        assert len(candidates) == 1
+        assert candidates[0].match_type == "unmatched"
+        assert candidates[0].variance_type == "missing_in_netsuite"
+
+
+class TestSameRefDepositCollisionDbBacked:
+    """DB-backed: the ref-keyed fetch (this branch) makes same-ref deposit
+    collisions (an original posting + a correction/reversal) far likelier —
+    two real netsuite_postings rows sharing one order_reference must resolve
+    to a single deterministic match, and the collision must be visible in the
+    persisted evidence (drives the real fetch -> match -> store path, not a
+    mocked db).
+    """
+
+    async def test_amount_exact_wins_and_evidence_carries_collision(self, db, tenant_a):
+        await _seed_charge_line(
+            db,
+            tenant_a.id,
+            source_id="ch_collision",
+            description="Framework Marketplace Order ID: R628489275-XU9EPZPD",
+            amount=Decimal("100.00"),
+            arrival_date=date(2026, 3, 15),
+        )
+        # The true match: exact amount.
+        await create_test_netsuite_posting(
+            db,
+            tenant_a.id,
+            netsuite_internal_id="99010",
+            related_payout_id="R628489275",
+            transaction_date=date(2026, 3, 16),
+            amount=Decimal("100.00"),
+        )
+        # A same-ref sibling (e.g. a correction/reversal posting) that must
+        # NOT be silently chosen just because it iterated last.
+        await create_test_netsuite_posting(
+            db,
+            tenant_a.id,
+            netsuite_internal_id="99011",
+            related_payout_id="R628489275",
+            transaction_date=date(2026, 3, 17),
+            amount=Decimal("250.00"),
+        )
+
+        job = OrderReconJob(db=db, tenant_id=str(tenant_a.id))
+        charges = await job._fetch_charges(date_from=date(2026, 3, 10), date_to=date(2026, 3, 20))
+        order_references = {c.order_reference for c in charges if c.order_reference}
+        deposits = await job._fetch_deposits(
+            date_from=date(2026, 3, 10),
+            date_to=date(2026, 3, 20),
+            order_references=order_references,
+        )
+        candidates = job.engine.match(charges, deposits)
+
+        assert len(candidates) == 1
+        assert candidates[0].match_type == "deterministic"
+        assert candidates[0].deposit is not None
+        assert candidates[0].deposit.amount == Decimal("100.00")
+        assert len(candidates[0].same_ref_deposit_ids) == 1
+
+        run = await create_test_recon_run(db, tenant_a.id)
+        await job._store_results(run.id, candidates)
+
+        stored_evidence = (
+            await db.execute(select(ReconciliationResult.evidence).where(ReconciliationResult.run_id == run.id))
+        ).scalar_one()
+        assert len(stored_evidence["same_ref_deposit_ids"]) == 1
+
+    async def test_split_order_both_charges_match_db_backed(self, db, tenant_a):
+        """Gate-round-2 regression: a split order (2 charges sharing one ref,
+        2 deposits, both amount-exact) must resolve BOTH charges, not just
+        the first one processed. Drives the real fetch -> match -> store
+        path."""
+        await _seed_charge_line(
+            db,
+            tenant_a.id,
+            source_id="ch_split_a",
+            description="Framework Marketplace Order ID: R628489300-AAAAAAAA",
+            amount=Decimal("100.00"),
+            arrival_date=date(2026, 3, 15),
+        )
+        await _seed_charge_line(
+            db,
+            tenant_a.id,
+            source_id="ch_split_b",
+            description="Framework Marketplace Order ID: R628489300-BBBBBBBB",
+            amount=Decimal("50.00"),
+            arrival_date=date(2026, 3, 15),
+        )
+        await create_test_netsuite_posting(
+            db,
+            tenant_a.id,
+            netsuite_internal_id="99030",
+            related_payout_id="R628489300",
+            transaction_date=date(2026, 3, 16),
+            amount=Decimal("100.00"),
+        )
+        await create_test_netsuite_posting(
+            db,
+            tenant_a.id,
+            netsuite_internal_id="99031",
+            related_payout_id="R628489300",
+            transaction_date=date(2026, 3, 16),
+            amount=Decimal("50.00"),
+        )
+
+        job = OrderReconJob(db=db, tenant_id=str(tenant_a.id))
+        charges = await job._fetch_charges(date_from=date(2026, 3, 10), date_to=date(2026, 3, 20))
+        order_references = {c.order_reference for c in charges if c.order_reference}
+        deposits = await job._fetch_deposits(
+            date_from=date(2026, 3, 10),
+            date_to=date(2026, 3, 20),
+            order_references=order_references,
+        )
+        candidates = job.engine.match(charges, deposits)
+
+        assert len(candidates) == 2
+        by_source = {c.charge.source_id: c for c in candidates}
+        assert by_source["ch_split_a"].match_type == "deterministic"
+        assert by_source["ch_split_a"].deposit.amount == Decimal("100.00")
+        assert by_source["ch_split_b"].match_type == "deterministic"
+        assert by_source["ch_split_b"].deposit.amount == Decimal("50.00")
+        assert by_source["ch_split_a"].ambiguous_same_ref is False
+        assert by_source["ch_split_b"].ambiguous_same_ref is False
+
+        run = await create_test_recon_run(db, tenant_a.id)
+        await job._store_results(run.id, candidates)
+
+        rows = (
+            await db.execute(
+                select(ReconciliationResult.bucket, ReconciliationResult.deposit_id).where(
+                    ReconciliationResult.run_id == run.id
+                )
+            )
+        ).all()
+        assert len(rows) == 2
+        assert all(deposit_id is not None for _, deposit_id in rows)
+        assert all(bucket == BUCKET_MATCHES for bucket, _ in rows)
+
+    async def test_ambiguous_pick_never_auto_matches_db_backed(self, db, tenant_a):
+        """A charge with two non-exact same-ref deposits picks the nearest
+        date, but the pick is ambiguous — stored status must never be
+        auto_matched, bucket must be needs_review, and evidence must flag
+        the ambiguity. Drives the real fetch -> match -> store path."""
+        await _seed_charge_line(
+            db,
+            tenant_a.id,
+            source_id="ch_ambig_db",
+            description="Framework Marketplace Order ID: R628489400-CCCCCCCC",
+            amount=Decimal("100.00"),
+            arrival_date=date(2026, 3, 15),
+        )
+        # Nearest to the charge's transaction date, wins the ambiguous pick.
+        await create_test_netsuite_posting(
+            db,
+            tenant_a.id,
+            netsuite_internal_id="99040",
+            related_payout_id="R628489400",
+            transaction_date=date(2026, 3, 16),
+            amount=Decimal("90.00"),
+        )
+        # Further away, loses — fenced as evidence, not chosen.
+        await create_test_netsuite_posting(
+            db,
+            tenant_a.id,
+            netsuite_internal_id="99041",
+            related_payout_id="R628489400",
+            transaction_date=date(2026, 3, 1),
+            amount=Decimal("80.00"),
+        )
+
+        job = OrderReconJob(db=db, tenant_id=str(tenant_a.id))
+        charges = await job._fetch_charges(date_from=date(2026, 3, 10), date_to=date(2026, 3, 20))
+        order_references = {c.order_reference for c in charges if c.order_reference}
+        deposits = await job._fetch_deposits(
+            date_from=date(2026, 3, 10),
+            date_to=date(2026, 3, 20),
+            order_references=order_references,
+        )
+        candidates = job.engine.match(charges, deposits)
+
+        assert len(candidates) == 1
+        assert candidates[0].ambiguous_same_ref is True
+        assert candidates[0].confidence == Decimal("0.85")
+
+        run = await create_test_recon_run(db, tenant_a.id)
+        await job._store_results(run.id, candidates)
+
+        stored = (
+            await db.execute(select(ReconciliationResult).where(ReconciliationResult.run_id == run.id))
+        ).scalar_one()
+        assert stored.status != "auto_matched"
+        assert stored.bucket == BUCKET_NEEDS_REVIEW
+        assert stored.evidence["ambiguous_same_ref"] is True
+        assert len(stored.evidence["same_ref_deposit_ids"]) == 1
 
 
 class TestRunProducesSummary:
@@ -344,6 +755,147 @@ class TestStoresResultsWithNullPayoutId:
         assert result.evidence["charge_source_id"] == "ch_001"
         assert result.evidence["order_reference"] == "R628489275"
         assert result.evidence["charge_payout_line_id"] == "pl-1"
+
+    @pytest.mark.asyncio
+    async def test_store_results_persists_same_ref_deposit_ids_when_present(self):
+        """A collision-resolved candidate's same_ref_deposit_ids reaches
+        evidence, so the classifier/planner can see the collision."""
+        charge = ChargeRecord(
+            id="pl-1",
+            source_id="ch_003",
+            payout_line_id="pl-1",
+            amount=Decimal("100.00"),
+            fee=Decimal("3.00"),
+            net=Decimal("97.00"),
+            currency="USD",
+            charge_date=date(2026, 3, 15),
+            order_reference="R628489275",
+        )
+        deposit_id = str(uuid.uuid4())
+        sibling_id = str(uuid.uuid4())
+        deposit = NSPaymentRecord(
+            id=deposit_id,
+            netsuite_internal_id="12345",
+            amount=Decimal("100.00"),
+            currency="USD",
+            transaction_date=date(2026, 3, 16),
+            record_type="custdep",
+            order_reference="R628489275",
+        )
+        candidate = OrderMatchCandidate(
+            charge=charge,
+            deposit=deposit,
+            match_type="deterministic",
+            confidence=Decimal("1.0"),
+            variance_amount=Decimal("0"),
+            match_rule="order_reference_exact",
+            same_ref_deposit_ids=[sibling_id],
+        )
+
+        db = _mock_db()
+        job = OrderReconJob(db=db, tenant_id=TENANT_ID)
+        run_id = uuid.uuid4()
+
+        await job._store_results(run_id, [candidate])
+
+        result = db.add.call_args_list[0][0][0]
+        assert result.evidence["same_ref_deposit_ids"] == [sibling_id]
+
+    @pytest.mark.asyncio
+    async def test_store_results_omits_same_ref_deposit_ids_when_absent(self):
+        """No collision -> the evidence key is absent, byte-identical to
+        before this fix (not an empty list cluttering every row's evidence)."""
+        charge = ChargeRecord(
+            id="pl-1",
+            source_id="ch_004",
+            payout_line_id="pl-1",
+            amount=Decimal("100.00"),
+            fee=Decimal("3.00"),
+            net=Decimal("97.00"),
+            currency="USD",
+            charge_date=date(2026, 3, 15),
+            order_reference="R628489275",
+        )
+        deposit = NSPaymentRecord(
+            id=str(uuid.uuid4()),
+            netsuite_internal_id="12345",
+            amount=Decimal("100.00"),
+            currency="USD",
+            transaction_date=date(2026, 3, 16),
+            record_type="custdep",
+            order_reference="R628489275",
+        )
+        candidate = OrderMatchCandidate(
+            charge=charge,
+            deposit=deposit,
+            match_type="deterministic",
+            confidence=Decimal("1.0"),
+            variance_amount=Decimal("0"),
+            match_rule="order_reference_exact",
+        )
+
+        db = _mock_db()
+        job = OrderReconJob(db=db, tenant_id=TENANT_ID)
+        run_id = uuid.uuid4()
+
+        await job._store_results(run_id, [candidate])
+
+        result = db.add.call_args_list[0][0][0]
+        assert "same_ref_deposit_ids" not in result.evidence
+
+    @pytest.mark.asyncio
+    async def test_store_results_ambiguous_same_ref_overrides_bucket_to_needs_review(self):
+        """Gate-round-2: an ambiguous same-ref pick must never land in
+        auto_matched — _store_results overrides its bucket to needs_review
+        regardless of variance, and evidence carries both markers."""
+        charge = ChargeRecord(
+            id="pl-1",
+            source_id="ch_ambig",
+            payout_line_id="pl-1",
+            amount=Decimal("100.00"),
+            fee=Decimal("3.00"),
+            net=Decimal("97.00"),
+            currency="USD",
+            charge_date=date(2026, 3, 15),
+            order_reference="R628489275",
+        )
+        deposit_id = str(uuid.uuid4())
+        sibling_id = str(uuid.uuid4())
+        deposit = NSPaymentRecord(
+            id=deposit_id,
+            netsuite_internal_id="12345",
+            amount=Decimal("100.00"),
+            currency="USD",
+            transaction_date=date(2026, 3, 16),
+            record_type="custdep",
+            order_reference="R628489275",
+        )
+        # Zero variance but still ambiguous (e.g. two exact-amount deposits
+        # competing for one charge) — the confidence the engine attaches is
+        # already capped at 0.85, below the 0.95 auto_match threshold.
+        candidate = OrderMatchCandidate(
+            charge=charge,
+            deposit=deposit,
+            match_type="deterministic",
+            confidence=Decimal("0.85"),
+            variance_amount=Decimal("0"),
+            match_rule="order_reference_exact",
+            same_ref_deposit_ids=[sibling_id],
+            ambiguous_same_ref=True,
+        )
+
+        db = _mock_db()
+        job = OrderReconJob(db=db, tenant_id=TENANT_ID)
+        run_id = uuid.uuid4()
+
+        buckets = await job._store_results(run_id, [candidate])
+
+        result = db.add.call_args_list[0][0][0]
+        assert result.status != "auto_matched"
+        assert result.bucket == BUCKET_NEEDS_REVIEW
+        assert buckets == [BUCKET_NEEDS_REVIEW]
+        assert result.evidence["ambiguous_same_ref"] is True
+        assert result.evidence["same_ref_deposit_ids"] == [sibling_id]
 
     @pytest.mark.asyncio
     async def test_store_results_unmatched_no_deposit_id(self):

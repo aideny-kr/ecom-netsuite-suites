@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class ChargeRecord(BaseModel):
@@ -43,3 +43,17 @@ class OrderMatchCandidate(BaseModel):
     variance_type: str | None = None
     variance_explanation: str | None = None
     match_rule: str | None = None
+    # Populated when tier-1 resolved a same-ref group: several deposits and/or
+    # charges shared an order_reference (e.g. an original posting plus a
+    # correction/reversal, or a genuine multi-charge split order). Holds the
+    # ids of deposits left over after set-to-set pairing within the group
+    # (never assigned to any charge) — the SAME list on every result of that
+    # group. Empty when there was no same-ref collision.
+    same_ref_deposit_ids: list[str] = Field(default_factory=list)
+    # True when tier-1 could not confidently pair this charge to a deposit by
+    # exact amount (a deposit-count surplus for its amount bucket, or no
+    # amount-exact deposit at all in its same-ref group) and instead picked
+    # the nearest-transaction-date remaining deposit. An ambiguous pick must
+    # never auto-match: OrderMatchingEngine caps its confidence below the
+    # auto_match threshold and OrderReconJob routes it to needs_review.
+    ambiguous_same_ref: bool = False
