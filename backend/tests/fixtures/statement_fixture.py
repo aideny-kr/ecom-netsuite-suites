@@ -576,6 +576,109 @@ def ni_margin_trend_worst_payloads() -> dict[str, dict]:
     }
 
 
+def ni_margin_trend_cross_year_live_date_format_payloads() -> dict[str, dict]:
+    """Cross-year trailing-6 window (Aug 2026 -> Jan 2027) with LIVE-SuiteQL-format
+    startdates ("M/D/YYYY", NOT the ISO "YYYY-MM-DD" every other trend fixture in this
+    module uses) -- proves ``_trend_periods`` orders buckets by the AUTHORITATIVE
+    ``periodname``, never a lexicographic string sort over ``startdate``.
+
+    A raw string sort scrambles this window: "10/1/2026" < "8/1/2026" (comparing the first
+    character, '1' < '8'), and "1/1/2027" sorts before ALL of them ('/' < '0') -- so the
+    buggy order was [Jan 2027, Oct 2026, Nov 2026, Dec 2026, Aug 2026, Sep 2026], putting
+    the TRUE CURRENT period (Jan 2027) first and misattributing its data to whichever bucket
+    the wrong sort put last (Sep 2026).
+
+    NI margins climb monotonically Aug->Dec (10%..14%) then jump to 20% for the true
+    current month (Jan 2027) -- the trailing-6 MAX. Watch rule 3 (``margins[-1]``) only
+    fires "best month" when the last bucket is genuinely Jan 2027; under the buggy order,
+    ``margins[-1]`` resolves to Sep 2026's 11% -- neither the max (20%) nor the min (10%)
+    of the set -- so rule 3 stays silent under the bug, a clean structural tell independent
+    of visually inspecting bucket order.
+
+    Uses a plain Revenue - COGS structure (COGS = 1,000,000 - desired NI) so NI equals the
+    desired figure EXACTLY, with OpEx/OtherIncome/OtherExpense all zero -- NOT a bare
+    "other income" account added on TOP of revenue (that would make NI = revenue +
+    other-income, not other-income alone)."""
+    r1_rows = [
+        _is_row("4000", "Sales", "Income", "1-Revenue", Decimal("1000000")),
+        _is_row("5000", "COGS", "COGS", "3-COGS", Decimal("800000")),  # NI = 1,000,000-800,000 = 200,000
+    ]
+    # (periodname, LIVE-format "M/D/YYYY" startdate, revenue, cogs) -- chronological Aug->Jan
+    periods = [
+        ("Aug 2026", "8/1/2026", Decimal("1000000"), Decimal("900000")),  # NI 100,000 -> 10.0%
+        ("Sep 2026", "9/1/2026", Decimal("1000000"), Decimal("890000")),  # NI 110,000 -> 11.0%
+        ("Oct 2026", "10/1/2026", Decimal("1000000"), Decimal("880000")),  # NI 120,000 -> 12.0%
+        ("Nov 2026", "11/1/2026", Decimal("1000000"), Decimal("870000")),  # NI 130,000 -> 13.0%
+        ("Dec 2026", "12/1/2026", Decimal("1000000"), Decimal("860000")),  # NI 140,000 -> 14.0%
+        ("Jan 2027", "1/1/2027", Decimal("1000000"), Decimal("800000")),  # NI 200,000 -> 20.0% (true current, max)
+    ]
+    trend_rows = []
+    for pname, pdate, rev, cogs in periods:
+        trend_rows.append(
+            {"periodname": pname, "startdate": pdate, **_is_row("4000", "Sales", "Income", "1-Revenue", rev)}
+        )
+        trend_rows.append({"periodname": pname, "startdate": pdate, **_is_row("5000", "COGS", "COGS", "3-COGS", cogs)})
+    return {
+        "r1": _payload(_IS_COLUMNS, r1_rows, query="income_statement (Jan 2027)"),
+        "r4": _payload(_IS_TREND_COLUMNS, trend_rows, query="income_statement_trend (...)"),
+    }
+
+
+EXPECTED_CROSS_YEAR_TREND_PERIODS = ["Aug 2026", "Sep 2026", "Oct 2026", "Nov 2026", "Dec 2026", "Jan 2027"]
+
+
+def malformed_r1_amount_payload() -> dict[str, dict]:
+    """r1 with a non-numeric amount value -- ``Decimal(str(...))`` raises
+    ``decimal.InvalidOperation`` for this, which ``_to_decimal`` must translate to
+    ``ValueError`` (the exception type ``assemble_spec``'s fail-closed ``except ValueError``
+    seam actually catches)."""
+    rows = [_is_row("4000", "Sales", "Income", "1-Revenue", "not-a-number")]
+    return {"r1": _payload(_IS_COLUMNS, rows, query="income_statement (Jun 2026)")}
+
+
+def nonfinite_r1_amount_payload() -> dict[str, dict]:
+    """r1 with a non-finite amount ("nan") -- ``Decimal("nan")`` constructs successfully
+    (it's a valid Decimal special value) but is not finite; ``_to_decimal`` must reject it
+    as ``ValueError`` up front rather than letting a later ``.quantize()`` explode with
+    ``decimal.InvalidOperation`` instead."""
+    rows = [_is_row("4000", "Sales", "Income", "1-Revenue", "nan")]
+    return {"r1": _payload(_IS_COLUMNS, rows, query="income_statement (Jun 2026)")}
+
+
+def malformed_prior_amount_payloads() -> dict[str, dict]:
+    """r1 clean; r2 (prior) has a junk amount on its one row -- must degrade the WHOLE
+    prior comparison to None (never raise), the same as an absent or ``success: False``
+    r2, since a compare-source data problem must never crash the primary statement."""
+    r1_rows = [_is_row("4000", "Sales", "Income", "1-Revenue", Decimal("1000000"))]
+    r2_rows = [_is_row("4000", "Sales", "Income", "1-Revenue", "garbage")]
+    return {
+        "r1": _payload(_IS_COLUMNS, r1_rows, query="income_statement (Jun 2026)"),
+        "r2": _payload(_IS_COLUMNS, r2_rows, query="income_statement (May 2026)"),
+    }
+
+
+def row_cap_boundary_payloads(row_count: int) -> dict[str, dict]:
+    """A synthetic r1 with exactly ``row_count`` distinct 1-Revenue accounts (each $1) --
+    tests the STATEMENT_ROW_CAP guard at its exact boundary without hand-writing thousands
+    of literal rows. Total revenue == row_count dollars, trivial to hand-verify."""
+    rows = [_is_row(str(4000 + i), f"Account {i}", "Income", "1-Revenue", Decimal("1")) for i in range(row_count)]
+    return {"r1": _payload(_IS_COLUMNS, rows, query="income_statement (Jun 2026)")}
+
+
+def bs_row_cap_boundary_payloads(row_count: int) -> dict[str, dict]:
+    """Balance-sheet analogue of ``row_cap_boundary_payloads`` -- exercises the same
+    STATEMENT_ROW_CAP guard wired into the balance_sheet builder (which otherwise has no
+    watch mechanism at all)."""
+    rows = [_bs_row(str(1000 + i), f"Asset {i}", "Bank", "1-Assets", Decimal("1")) for i in range(row_count)]
+    return {"r1": _payload(_BS_COLUMNS, rows, query="balance_sheet (2026-06-30)")}
+
+
+def tb_row_cap_boundary_payloads(row_count: int) -> dict[str, dict]:
+    """Trial-balance analogue of ``row_cap_boundary_payloads``."""
+    rows = [_tb_row(str(1000 + i), f"Account {i}", "Bank", "1", "0") for i in range(row_count)]
+    return {"r1": _payload(_TB_COLUMNS, rows, query="trial_balance (Jun 2026)")}
+
+
 def gp_margin_watch_payloads(delta_pp_direction: str) -> dict[str, dict]:
     """Minimal 2-account (1 revenue + 1 COGS) r1/r2 pair whose GP margin MoM delta lands
     EXACTLY at the watch-rule-1 threshold boundary (0.3pp), for straddling tests.

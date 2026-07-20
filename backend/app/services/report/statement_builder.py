@@ -44,7 +44,8 @@ list-of-dicts fallback is also accepted, defensively, for a payload that never p
 from __future__ import annotations
 
 from collections import defaultdict
-from decimal import ROUND_HALF_UP, Decimal
+from datetime import datetime
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any
 
 # ---------------------------------------------------------------------------
@@ -67,6 +68,13 @@ HIGHLIGHT_THRESHOLD_PCT_OF_REVENUE = Decimal("0.5")
 MAX_HIGHLIGHTS = 3
 #: Trailing-window width for the NI-margin best/worst watch rule (rule 3) and for sparklines.
 TREND_WINDOW_MONTHS = 6
+#: Mirrors `FETCH FIRST 5000 ROWS ONLY` in the three statement SQL templates
+#: (netsuite_financial_report.py REPORT_TEMPLATES: income_statement, balance_sheet,
+#: trial_balance). When a statement's OWN row count reaches this cap, the underlying SQL
+#: may have silently truncated a larger tenant's real account list -- corrupting totals/NI/
+#: the balance check under a UI that otherwise implies "nothing truncated". Keep these two
+#: numbers in sync if either changes.
+STATEMENT_ROW_CAP = 5000
 
 _WHOLE_DOLLAR = Decimal("1")
 _ONE_DP = Decimal("0.1")
@@ -163,19 +171,40 @@ def fmt_pp(value: Decimal) -> str:
     return "0.0pp"
 
 
+def _row_cap_watch_item(row_count: int) -> dict | None:
+    """A ``warn`` watch chip when a statement's OWN row count lands on ``STATEMENT_ROW_CAP``
+    -- see that constant's comment. ``None`` (no chip) below the cap."""
+    if row_count < STATEMENT_ROW_CAP:
+        return None
+    return {"tone": "warn", "text": f"row cap reached — totals may be incomplete ({STATEMENT_ROW_CAP} accounts)"}
+
+
 # ---------------------------------------------------------------------------
 # Parse boundary — the ONLY place a float/str amount becomes a Decimal.
 # ---------------------------------------------------------------------------
 
 
 def _to_decimal(value: Any) -> Decimal:
+    """Parse boundary. Raises ``ValueError`` (never ``decimal.InvalidOperation``, which is
+    NOT a ``ValueError`` subclass and would otherwise escape the ``except ValueError``
+    fail-closed seam every caller up the stack relies on) for anything that doesn't parse
+    to a FINITE Decimal -- a non-numeric string, or a numeric-looking one like "nan"/"inf"
+    that constructs fine but would explode later at ``.quantize()`` instead."""
     if value is None:
         return Decimal("0")
     if isinstance(value, Decimal):
+        if not value.is_finite():
+            raise ValueError(f"amount is not finite: {value!r}")
         return value
     if isinstance(value, bool):
         raise ValueError(f"cannot treat a bool as a monetary amount: {value!r}")
-    return Decimal(str(value))
+    try:
+        d = Decimal(str(value))
+    except InvalidOperation as exc:
+        raise ValueError(f"cannot parse amount as Decimal: {value!r}") from exc
+    if not d.is_finite():
+        raise ValueError(f"amount is not finite: {value!r}")
+    return d
 
 
 def _rows_from_payload(payload: dict) -> list[dict]:
@@ -193,10 +222,17 @@ def _rows_from_payload(payload: dict) -> list[dict]:
     raise ValueError("payload has neither columns+rows nor an items list")
 
 
-def _resolve_rows(payloads: dict[str, dict], rid: str | None) -> list[dict] | None:
-    """Resolve a compare rid to its parsed rows, or ``None`` on ANY failure (absent, marked
-    failed, or structurally unparseable) — this is the degrade-never-raise boundary for
-    compare sources. r1 uses ``_require_rows`` instead (raises)."""
+def _resolve_rows(
+    payloads: dict[str, dict], rid: str | None, *, amount_cols: tuple[str, ...] = ()
+) -> list[dict] | None:
+    """Resolve a compare rid to its parsed rows, or ``None`` on ANY failure — absent, marked
+    failed, structurally unparseable, OR (when ``amount_cols`` is given) a row whose value
+    in one of those columns doesn't parse to a finite Decimal. This is the degrade-never-
+    raise boundary for compare sources: without the ``amount_cols`` pre-validation, a
+    malformed amount in a PRIOR/YOY/TREND source would only be discovered much later, deep
+    inside a totals/section builder that doesn't wrap its calls in try/except — crashing the
+    WHOLE statement instead of degrading just this one comparison. r1 uses ``_require_rows``
+    instead (raises — the primary source must fail closed, never silently degrade)."""
     if not rid:
         return None
     payload = payloads.get(rid)
@@ -205,7 +241,11 @@ def _resolve_rows(payloads: dict[str, dict], rid: str | None) -> list[dict] | No
     if payload.get("success") is False:
         return None
     try:
-        return _rows_from_payload(payload)
+        rows = _rows_from_payload(payload)
+        for col in amount_cols:
+            for row in rows:
+                _to_decimal(row.get(col))
+        return rows
     except (ValueError, TypeError, AttributeError):
         return None
 
@@ -435,9 +475,10 @@ def _is_totals(rows: list[dict] | None, amount_col: str = "amount") -> dict[str,
 
 
 def _trend_periods(trend_rows: list[dict] | None) -> list[tuple[str, list[dict]]] | None:
-    """Group r4 trend rows into ``(periodname, rows)`` buckets, sorted chronologically by
-    ``startdate``. ``None`` when there is no trend source; a bucket whose rows lack a usable
-    ``startdate`` falls back to first-seen (insertion) order rather than crashing."""
+    """Group r4 trend rows into ``(periodname, rows)`` buckets, sorted CHRONOLOGICALLY via
+    ``_period_sort_key`` — NEVER a raw ``startdate`` string sort (see that function's
+    docstring: live SuiteQL's "M/D/YYYY" format sorts wrong as a plain string, e.g.
+    "10/1/2026" < "8/1/2026"). ``None`` when there is no trend source."""
     if trend_rows is None:
         return None
     buckets: dict[str, list[dict]] = defaultdict(list)
@@ -451,7 +492,7 @@ def _trend_periods(trend_rows: list[dict] | None) -> list[tuple[str, list[dict]]
             order.append(pname)
             first_date[pname] = row.get("startdate")
         buckets[pname].append(row)
-    order.sort(key=lambda p: (first_date.get(p) is None, first_date.get(p), p))
+    order.sort(key=lambda p: _period_sort_key(p, first_date.get(p)))
     return [(p, buckets[p]) for p in order]
 
 
@@ -672,9 +713,9 @@ def _build_income_statement_model(section: dict, payloads: dict[str, dict]) -> d
     period = section["period"]
 
     current_rows = _require_rows(payloads, section["result_id"])
-    prior_rows = _resolve_rows(payloads, compare.get("prior"))
-    yoy_rows = _resolve_rows(payloads, compare.get("yoy"))
-    trend_rows = _resolve_rows(payloads, compare.get("trend"))
+    prior_rows = _resolve_rows(payloads, compare.get("prior"), amount_cols=("amount",))
+    yoy_rows = _resolve_rows(payloads, compare.get("yoy"), amount_cols=("amount",))
+    trend_rows = _resolve_rows(payloads, compare.get("trend"), amount_cols=("amount",))
     trend_buckets = _trend_periods(trend_rows)
 
     current = _is_totals(current_rows)
@@ -741,6 +782,9 @@ def _build_income_statement_model(section: dict, payloads: dict[str, dict]) -> d
         }
 
     watch = _build_is_watch(current, prior, current_rows, prior_rows, trend_buckets)
+    cap_item = _row_cap_watch_item(len(current_rows))
+    if cap_item is not None:
+        watch = [cap_item, *watch][:MAX_WATCH_ITEMS]
     highlights = _build_is_highlights(current, prior, current_rows, prior_rows)
     narrative = _build_is_narrative(current, prior, period)
 
@@ -787,7 +831,7 @@ def _build_balance_sheet_model(section: dict, payloads: dict[str, dict]) -> dict
     period = section["period"]
 
     current_rows = _require_rows(payloads, section["result_id"])
-    prior_rows = _resolve_rows(payloads, compare.get("prior"))
+    prior_rows = _resolve_rows(payloads, compare.get("prior"), amount_cols=("balance",))
 
     current = _bs_totals(current_rows)
     prior = _bs_totals(prior_rows)
@@ -851,13 +895,16 @@ def _build_balance_sheet_model(section: dict, payloads: dict[str, dict]) -> dict
         ),
     ]
 
+    cap_item = _row_cap_watch_item(len(current_rows))
+    watch = [cap_item] if cap_item is not None else []
+
     return {
         "statement": "balance_sheet",
         "period": period,
         "prior_period": _prior_period_label(period) if prior_rows is not None else None,
         "yoy_period": None,
         "kpis": kpis,
-        "watch": [],
+        "watch": watch,
         "trend": None,
         "quad": quad,
         "sections": sections,
@@ -891,7 +938,9 @@ def _build_trial_balance_model(section: dict, payloads: dict[str, dict]) -> dict
     period = section["period"]
 
     current_rows = _require_rows(payloads, section["result_id"])
-    prior_rows = _resolve_rows(payloads, compare.get("prior"))
+    prior_rows = _resolve_rows(
+        payloads, compare.get("prior"), amount_cols=("total_debit", "total_credit", "net_amount")
+    )
 
     current = _tb_totals(current_rows)
     prior = _tb_totals(prior_rows)
@@ -952,13 +1001,16 @@ def _build_trial_balance_model(section: dict, payloads: dict[str, dict]) -> dict
         f"The trial balance is {'in balance' if balanced else 'out of balance'}{diff_clause}.",
     ]
 
+    cap_item = _row_cap_watch_item(len(current_rows))
+    watch = [cap_item] if cap_item is not None else []
+
     return {
         "statement": "trial_balance",
         "period": period,
         "prior_period": _prior_period_label(period) if prior_rows is not None else None,
         "yoy_period": None,
         "kpis": kpis,
-        "watch": [],
+        "watch": watch,
         "trend": None,
         "quad": quad,
         "sections": sections,
@@ -1000,6 +1052,43 @@ def _prior_period_label(period: str) -> str:
 def _yoy_period_label(period: str) -> str:
     month, year = _parse_period(period)
     return f"{_MONTH_ABBRS[month - 1]} {year - 1}"
+
+
+def _parse_date_flexible(value: Any) -> tuple[int, int, int] | None:
+    """(year, month, day) from a NetSuite date string in either format SuiteQL emits: ISO
+    "YYYY-MM-DD" (test fixtures, some report shapes) or live "M/D/YYYY" (the format
+    ``netsuite_deposit_sync._parse_date`` documents SuiteQL actually returns). ``None`` on
+    anything else — this is a best-effort ORDERING fallback only, never raises."""
+    if not value:
+        return None
+    for fmt in ("%m/%d/%Y", "%Y-%m-%d", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%dT%H:%M:%SZ"):
+        try:
+            parsed = datetime.strptime(str(value), fmt)
+        except ValueError:
+            continue
+        return (parsed.year, parsed.month, parsed.day)
+    return None
+
+
+def _period_sort_key(periodname: str, startdate: Any) -> tuple[int, int, int]:
+    """Chronological ``(year, month, day)`` sort key for a trend bucket. Prefers the
+    AUTHORITATIVE ``periodname`` ("Mon YYYY") via ``_parse_period`` — this is independent of
+    whatever date-string FORMAT the source used for ``startdate``, so it can never be
+    scrambled by a live-vs-fixture format mismatch (ISO "2026-06-01" sorts fine as a raw
+    string; live "6/1/2026" does NOT — e.g. "10/1/2026" < "6/1/2026" lexicographically,
+    putting October before June, and "1/1/2027" sorts before all twelve months of 2026).
+    Falls back to parsing ``startdate`` (handles both formats) only when the period name
+    itself doesn't parse; an unparseable pair sorts last, deterministically, never
+    crashes."""
+    try:
+        month, year = _parse_period(periodname)
+        return (year, month, 1)
+    except ValueError:
+        pass
+    parsed = _parse_date_flexible(startdate)
+    if parsed is not None:
+        return parsed
+    return (9999, 99, 99)
 
 
 # ---------------------------------------------------------------------------

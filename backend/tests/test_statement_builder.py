@@ -14,6 +14,7 @@ from decimal import Decimal
 import pytest
 
 from app.services.report.statement_builder import (
+    STATEMENT_ROW_CAP,
     build_statement_model,
     fmt_money,
     fmt_money_delta,
@@ -326,6 +327,31 @@ def test_missing_r1_entirely_raises_value_error():
         build_statement_model(fx.income_statement_section(), {})
 
 
+def test_malformed_r1_amount_raises_value_error_not_invalid_operation():
+    # decimal.InvalidOperation is NOT a ValueError subclass -- if _to_decimal let it
+    # escape, this would fail with an unhandled InvalidOperation, not a clean assertion
+    # failure. pytest.raises(ValueError) only passes if the seam actually translates it.
+    with pytest.raises(ValueError):
+        build_statement_model(fx.income_statement_section(), fx.malformed_r1_amount_payload())
+
+
+def test_nonfinite_r1_amount_raises_value_error():
+    with pytest.raises(ValueError):
+        build_statement_model(fx.income_statement_section(), fx.nonfinite_r1_amount_payload())
+
+
+def test_malformed_prior_amount_degrades_not_raises():
+    # A junk amount in a COMPARE source must never crash the whole build -- it degrades
+    # exactly like an absent or success:False r2, same as the other degradation tests.
+    model = build_statement_model(fx.income_statement_section(), fx.malformed_prior_amount_payloads())
+    kpis = {k["key"]: k for k in model["kpis"]}
+    assert kpis["revenue"]["value"] == "$1,000,000"  # r1 unaffected
+    assert kpis["revenue"]["mom_delta"] is None
+    assert kpis["revenue"]["mom_pct"] is None
+    assert model["prior_period"] is None
+    assert model["sections"][0]["accounts"][0]["prior"] is None
+
+
 # ===========================================================================
 # Parse-boundary defensiveness
 # ===========================================================================
@@ -440,6 +466,20 @@ def test_watch_rule3_fires_bad_when_current_is_trailing_six_min():
 def test_watch_rule3_silent_when_current_is_neither_max_nor_min(is_model):
     # the main 30-account fixture's Jun 2026 sits in the middle of its trailing-6 window
     assert not any("trailing 6" in w["text"] for w in is_model["watch"])
+
+
+def test_trend_buckets_order_by_parsed_period_not_raw_startdate_string():
+    # LIVE SuiteQL returns startdate as "M/D/YYYY", not the ISO fixture convention every
+    # other trend test uses -- a raw string sort over that scrambles a cross-year window
+    # (see fixture docstring for the exact lexicographic mechanics). Bucket order AND
+    # rule 3's current-period attribution must both be correct.
+    section = fx.income_statement_section(period="Jan 2027")
+    model = build_statement_model(section, fx.ni_margin_trend_cross_year_live_date_format_payloads())
+    assert model["trend"]["periods"] == fx.EXPECTED_CROSS_YEAR_TREND_PERIODS
+    rule3 = [w for w in model["watch"] if "trailing 6" in w["text"]]
+    assert len(rule3) == 1
+    assert rule3[0]["tone"] == "good"
+    assert rule3[0]["text"] == "NI margin best month in trailing 6 (20.0%)"
 
 
 # ===========================================================================
@@ -601,6 +641,40 @@ def test_tb_missing_compare_degrades():
     quad_by_label = {q["label"]: q for q in model["quad"]}
     assert quad_by_label["Total Debits"]["prior"] is None
     assert quad_by_label["Total Debits"]["delta"] is None
+
+
+# ===========================================================================
+# Row-cap guard — the statement SQL templates cap at STATEMENT_ROW_CAP rows; a payload
+# that lands exactly on the cap may have silently truncated a larger tenant's real
+# account list, corrupting totals/NI/the balance check. Must warn, not stay silent.
+# ===========================================================================
+
+
+def test_row_cap_guard_fires_at_exactly_the_cap():
+    model = build_statement_model(fx.income_statement_section(), fx.row_cap_boundary_payloads(STATEMENT_ROW_CAP))
+    cap_items = [w for w in model["watch"] if "row cap reached" in w["text"]]
+    assert len(cap_items) == 1
+    assert cap_items[0]["tone"] == "warn"
+    assert cap_items[0]["text"] == f"row cap reached — totals may be incomplete ({STATEMENT_ROW_CAP} accounts)"
+
+
+def test_row_cap_guard_silent_just_under_the_cap():
+    model = build_statement_model(fx.income_statement_section(), fx.row_cap_boundary_payloads(STATEMENT_ROW_CAP - 1))
+    assert not any("row cap reached" in w["text"] for w in model["watch"])
+
+
+def test_row_cap_guard_wired_into_balance_sheet():
+    model = build_statement_model(fx.balance_sheet_section(), fx.bs_row_cap_boundary_payloads(STATEMENT_ROW_CAP))
+    assert any("row cap reached" in w["text"] for w in model["watch"])
+    below = build_statement_model(fx.balance_sheet_section(), fx.bs_row_cap_boundary_payloads(STATEMENT_ROW_CAP - 1))
+    assert not any("row cap reached" in w["text"] for w in below["watch"])
+
+
+def test_row_cap_guard_wired_into_trial_balance():
+    model = build_statement_model(fx.trial_balance_section(), fx.tb_row_cap_boundary_payloads(STATEMENT_ROW_CAP))
+    assert any("row cap reached" in w["text"] for w in model["watch"])
+    below = build_statement_model(fx.trial_balance_section(), fx.tb_row_cap_boundary_payloads(STATEMENT_ROW_CAP - 1))
+    assert not any("row cap reached" in w["text"] for w in below["watch"])
 
 
 # ===========================================================================
