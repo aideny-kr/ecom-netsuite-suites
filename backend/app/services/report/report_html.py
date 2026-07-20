@@ -141,7 +141,19 @@ _FS_CSS = """
 .fs-delta.fs-bad { color:var(--fs-bad); }
 .fs-spark { position:absolute; right:12px; bottom:10px; opacity:.9; }
 
-.fs-mid { display:grid; grid-template-columns:1.5fr 1fr; gap:18px; margin-bottom:22px; }
+/* EYEBALL-GATE FIX (F1): the trend card is emitted FIRST (see _financial_statement_html)
+   so it should already own the wider track -- but every .fs-quad cell carries
+   white-space:nowrap (the generic td.num,th.num rule, plus the label column's own
+   nowrap fix), making the quad table's min-content width (~587px unwrapped) exceed
+   its "fair share" of a plain fr split. A plain `fr` track's automatic minimum size
+   defaults to its item's content size unless overridden, so the un-shrinkable quad ate
+   space FROM the trend track regardless of the declared ratio -- trend rendered in an
+   unreadable ~170px sliver. minmax(0, Nfr) overrides that automatic per-item minimum
+   (the grid-native equivalent of min-width:0), so the tracks actually honor their
+   weights; the quad table tolerates its now-narrower track via .fs-scroll (below) the
+   same way the statement table already tolerates overflow. 3:1 gives the trend chart
+   >=560px at the .report's max content width (840 - 2*32 padding - 18 gap = 758px). */
+.fs-mid { display:grid; grid-template-columns:minmax(0,3fr) minmax(0,1fr); gap:18px; margin-bottom:22px; }
 @media (max-width:900px) { .fs-mid { grid-template-columns:1fr; } }
 .fs-scroll { overflow-x:auto; }
 .fs-legend { display:flex; gap:16px; flex-wrap:wrap; font-size:12px; font-weight:600; margin-top:8px; }
@@ -577,6 +589,19 @@ _MINUS = "−"
 # binds the CSS :has() rule count to this constant.
 _MAX_STATEMENT_SECTIONS = 5
 
+# EYEBALL-GATE FIX (F2, design rule #6): a two-step GAAP income statement interleaves
+# formula rows BETWEEN sections (Revenue -> COGS -> Gross Profit -> OpEx -> Operating
+# Income -> Other Income -> Other Expense -> Net Income) rather than stacking them all
+# after the last section. This DISPLAY order differs from statement_builder's internal
+# section-KEY grouping order (1-Revenue, 2-Other Income, 3-COGS, 4-Operating Expense,
+# 5-Other Expense -- the SuiteQL/model grouping order, an unrelated concern nothing else
+# depends on). Deliberately a renderer-only presentation concern, NOT a builder change:
+# statement_builder's section-key order stays stable for every other consumer.
+_IS_SECTION_DISPLAY_ORDER = ["1-Revenue", "3-COGS", "4-Operating Expense", "2-Other Income", "5-Other Expense"]
+# Index into model["formulas"] (always [gross_profit_row, operating_income_row] for
+# income_statement) to insert immediately after finishing the section at this key.
+_IS_FORMULA_INSERT_AFTER = {"3-COGS": 0, "4-Operating Expense": 1}
+
 _FS_KPI_SPARK_COLORS = {
     "revenue": "#4348c8",
     "gross_profit": "#111111",
@@ -863,7 +888,8 @@ def _fs_quad_html(model: dict) -> str:
     title = f"Variance vs {escape(prior_period)}" if has_prior else "Variance"
     return (
         f'<div class="nb-card"><h3>{title} <small>· the four-column read</small></h3>'
-        f'<table class="fs-quad num"><thead><tr>{"".join(headers)}</tr></thead><tbody>{rows}</tbody></table></div>'
+        f'<div class="fs-scroll"><table class="fs-quad num"><thead><tr>{"".join(headers)}</tr></thead>'
+        f"<tbody>{rows}</tbody></table></div></div>"
     )
 
 
@@ -902,17 +928,57 @@ def _fs_statement_table_html(model: dict) -> str:
         headers.append("<th>% of rev</th>")
     ncols = len(headers)
 
+    formulas = model.get("formulas") or []
+    net = model.get("net")
+    is_income_statement = model.get("statement") == "income_statement"
+
+    if is_income_statement:
+        by_key = {sec.get("key"): sec for sec in sections}
+        present_keys = set(by_key)
+        # Two-step display order (see _IS_SECTION_DISPLAY_ORDER); a section key not in
+        # the known map (a future/unexpected type) still renders, appended at the end —
+        # never silently dropped.
+        ordered_sections = [by_key[k] for k in _IS_SECTION_DISPLAY_ORDER if k in by_key]
+        ordered_sections += [sec for sec in sections if sec.get("key") not in _IS_SECTION_DISPLAY_ORDER]
+    else:
+        ordered_sections = sections
+        present_keys = set()
+
     body_rows: list[str] = []
-    for sec_idx, sec in enumerate(sections):
+    for sec_idx, sec in enumerate(ordered_sections):
         body_rows.append(_fs_section_header_html(sec.get("label", ""), sec_idx, ncols))
         for acct in sec.get("accounts", []):
             body_rows.append(_fs_account_row_html(acct, sec_idx, has_prior=has_prior, has_pct_rev=has_pct_rev))
         body_rows.append(_fs_summary_row_html(sec["subtotal"], "fs-sub", has_prior=has_prior, has_pct_rev=has_pct_rev))
+        if is_income_statement:
+            formula_idx = _IS_FORMULA_INSERT_AFTER.get(sec.get("key"))
+            if formula_idx is not None and formula_idx < len(formulas):
+                body_rows.append(
+                    _fs_summary_row_html(
+                        formulas[formula_idx], "fs-formula", has_prior=has_prior, has_pct_rev=has_pct_rev
+                    )
+                )
 
-    for formula_row in model.get("formulas") or []:
-        body_rows.append(_fs_summary_row_html(formula_row, "fs-formula", has_prior=has_prior, has_pct_rev=has_pct_rev))
-    if model.get("net") is not None:
-        body_rows.append(_fs_summary_row_html(model["net"], "fs-net", has_prior=has_prior, has_pct_rev=has_pct_rev))
+    if is_income_statement:
+        # Guarantee every formula row renders even in a degenerate fixture where its
+        # anchor section (COGS/OpEx) has zero accounts and so never appears in
+        # `sections` at all — appended here rather than silently dropped. No current
+        # fixture exercises this (income_statement always has all 5 sections + both
+        # formula rows), but the renderer must never lose a figure regardless.
+        for idx, formula_row in enumerate(formulas):
+            anchor_present = any(k in present_keys for k, v in _IS_FORMULA_INSERT_AFTER.items() if v == idx)
+            if not anchor_present:
+                body_rows.append(
+                    _fs_summary_row_html(formula_row, "fs-formula", has_prior=has_prior, has_pct_rev=has_pct_rev)
+                )
+    else:
+        for formula_row in formulas:
+            body_rows.append(
+                _fs_summary_row_html(formula_row, "fs-formula", has_prior=has_prior, has_pct_rev=has_pct_rev)
+            )
+
+    if net is not None:
+        body_rows.append(_fs_summary_row_html(net, "fs-net", has_prior=has_prior, has_pct_rev=has_pct_rev))
     for check in model.get("checks") or []:
         tone = "fs-good" if check.get("ok") else "fs-bad"
         mark = "✓" if check.get("ok") else "✗"

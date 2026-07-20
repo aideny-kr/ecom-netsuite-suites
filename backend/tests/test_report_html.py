@@ -680,6 +680,109 @@ def test_fs_delta_tone_cell_actually_gets_the_semantic_color_class_bound():
     assert re.search(r"^\s*\.fs-bad\s*\{", style_block, re.MULTILINE)
 
 
+def test_fs_trend_chart_grid_track_is_wide_enough_for_the_560px_floor():
+    """EYEBALL-GATE FIX (F1): the mid-fold grid put the trend chart in the NARROW track
+    and the variance quad in the WIDE one, even though the trend card is emitted FIRST
+    and CSS declared 1.5fr for the first track -- because every .fs-quad cell carries
+    white-space:nowrap (both the generic td.num,th.num rule and the first-column fix),
+    making the quad table's min-content width (~587px unwrapped) exceed its "fair share"
+    of the 1.5fr:1fr split. A plain fr track's minimum size defaults to the item's
+    content size unless overridden, so the un-shrinkable quad ate space FROM the trend
+    track regardless of the declared ratio. Fix: minmax(0, Nfr) tracks (overrides the
+    automatic per-item minimum) + a much larger trend weight. This test proves the
+    weights alone would satisfy the mock's >=560px trend width at the .report's actual
+    content budget; a live screenshot confirms the min-content bug itself is defused."""
+    html = render_report_html(_fs_spec(_is_model()))
+    m = re.search(r"\.fs-mid\s*\{[^}]*grid-template-columns:\s*([^;]+);", html)
+    assert m, "no .fs-mid grid-template-columns rule found"
+    weights = [float(w) for w in re.findall(r"minmax\(0,\s*([\d.]+)fr\)", m.group(1))]
+    assert len(weights) == 2, f"expected two minmax(0, Nfr) tracks, got: {m.group(1)!r}"
+    trend_weight, quad_weight = weights
+    assert trend_weight > quad_weight  # trend (first grid child) gets the WIDE slot
+    # .report{max-width:840px; padding:48px 32px} minus the .fs-mid gap:18px
+    avail_px = 840 - 2 * 32 - 18
+    trend_px = avail_px * trend_weight / (trend_weight + quad_weight)
+    assert trend_px >= 560, f"trend track would render at {trend_px:.0f}px, need >=560"
+
+
+def test_fs_quad_table_is_scroll_wrapped_so_it_cannot_force_the_grid_track_wide():
+    """Companion to the above: minmax(0, Nfr) lets the quad's track shrink below its
+    unwrapped content width, so the quad table itself must tolerate that -- wrapped in
+    .fs-scroll (the same overflow-x:auto pattern the statement table already uses) so a
+    narrow column scrolls horizontally instead of visually breaking."""
+    html = render_report_html(_fs_spec(_is_model()))
+    assert '<div class="fs-scroll"><table class="fs-quad' in html
+
+
+def test_fs_income_statement_is_two_step_interleaved():
+    """EYEBALL-GATE FIX (F2, design rule #6): a two-step statement interleaves formula
+    rows between sections -- Revenue -> Total Revenue -> COGS -> Total COGS -> Gross
+    Profit -> OpEx -> Total OpEx -> Operating Income -> Other Income -> Total Other
+    Income -> Other Expense -> Total Other Expense -> Net Income. NOT
+    statement_builder's internal section-KEY grouping order (Revenue, Other Income,
+    COGS, OpEx, Other Expense -- the SuiteQL/model grouping, an unrelated concern) with
+    all three formula/net rows stacked at the very end."""
+    html = render_report_html(_fs_spec(_is_model()))
+    stmt_html = html.split('<table class="fs-stmt', 1)[1]
+
+    anchors = [
+        "▾</span> Revenue</label>",
+        ">Total Revenue<",
+        "▾</span> Cost of Goods Sold</label>",
+        ">Total Cost of Goods Sold<",
+        ">Gross Profit<",
+        "▾</span> Operating Expense</label>",
+        ">Total Operating Expense<",
+        ">Operating Income<",
+        "▾</span> Other Income</label>",
+        ">Total Other Income<",
+        "▾</span> Other Expense</label>",
+        ">Total Other Expense<",
+        ">Net Income<",
+    ]
+    positions = [stmt_html.index(a) for a in anchors]
+    assert positions == sorted(positions), list(zip(anchors, positions, strict=True))
+
+
+def test_fs_income_statement_two_step_interleave_holds_in_degraded_variant():
+    """Same sequence requirement with no compare data (has_prior=False) -- row PRESENCE/
+    ORDER must not depend on which optional columns are shown."""
+    model = build_statement_model(fx.income_statement_section(), fx.income_statement_payloads_missing_compare())
+    html = render_report_html(_fs_spec(model))
+    stmt_html = html.split('<table class="fs-stmt', 1)[1]
+
+    anchors = [
+        "▾</span> Revenue</label>",
+        ">Total Revenue<",
+        "▾</span> Cost of Goods Sold</label>",
+        ">Total Cost of Goods Sold<",
+        ">Gross Profit<",
+        "▾</span> Operating Expense</label>",
+        ">Total Operating Expense<",
+        ">Operating Income<",
+        "▾</span> Other Income</label>",
+        ">Total Other Income<",
+        "▾</span> Other Expense</label>",
+        ">Total Other Expense<",
+        ">Net Income<",
+    ]
+    positions = [stmt_html.index(a) for a in anchors]
+    assert positions == sorted(positions), list(zip(anchors, positions, strict=True))
+
+
+def test_fs_balance_sheet_section_order_unchanged_by_two_step_interleave():
+    """Confirmed-good at the eyeball gate: BS/TB sections are already sequential and
+    must NOT be touched by the income_statement-only interleave logic."""
+    model = build_statement_model(fx.balance_sheet_section(), fx.balance_sheet_payloads())
+    html = render_report_html(_fs_spec(model, title="Balance Sheet"))
+    stmt_html = html.split('<table class="fs-stmt', 1)[1]
+    positions = [
+        stmt_html.index(a)
+        for a in ("▾</span> Assets</label>", "▾</span> Liabilities</label>", "▾</span> Equity</label>")
+    ]
+    assert positions == sorted(positions)
+
+
 def test_fs_percent_integrity_canary_full_render_does_not_raise():
     """If a literal % anywhere in the financial-statement CSS were left un-doubled, the
     %-format call in render_report_html would raise at render time."""
