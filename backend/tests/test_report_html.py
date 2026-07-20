@@ -680,38 +680,66 @@ def test_fs_delta_tone_cell_actually_gets_the_semantic_color_class_bound():
     assert re.search(r"^\s*\.fs-bad\s*\{", style_block, re.MULTILINE)
 
 
-def test_fs_trend_chart_grid_track_is_wide_enough_for_the_560px_floor():
-    """EYEBALL-GATE FIX (F1): the mid-fold grid put the trend chart in the NARROW track
-    and the variance quad in the WIDE one, even though the trend card is emitted FIRST
-    and CSS declared 1.5fr for the first track -- because every .fs-quad cell carries
-    white-space:nowrap (both the generic td.num,th.num rule and the first-column fix),
-    making the quad table's min-content width (~587px unwrapped) exceed its "fair share"
-    of the 1.5fr:1fr split. A plain fr track's minimum size defaults to the item's
-    content size unless overridden, so the un-shrinkable quad ate space FROM the trend
-    track regardless of the declared ratio. Fix: minmax(0, Nfr) tracks (overrides the
-    automatic per-item minimum) + a much larger trend weight. This test proves the
-    weights alone would satisfy the mock's >=560px trend width at the .report's actual
-    content budget; a live screenshot confirms the min-content bug itself is defused."""
+def test_fs_report_gets_wide_modifier_class_only_for_statement_specs():
+    """EYEBALL-GATE FIX (F1, round 3): a statement report needs the mock's own ~1060px+
+    canvas to fit the mid-fold without either starving the trend chart or leaving the
+    variance quad's own columns hidden behind a scrollbar at rest -- .report{max-width}
+    itself must NOT change (every other report type's byte-stability pin depends on it),
+    so a MODIFIER class is added to the root div only when a financial_statement section
+    is present, gated the same way the CSS itself is."""
+    fs_html = render_report_html(_fs_spec(_is_model()))
+    assert '<div class="report report--wide">' in fs_html
+    plain_html = render_report_html(_slice_d_spec())
+    assert "report--wide" not in plain_html
+    assert '<div class="report">' in plain_html
+
+
+def test_fs_trend_chart_grid_track_clears_the_520px_floor_at_the_wide_canvas():
+    """EYEBALL-GATE FIX (F1, round 3): round 2's 1.5:1 ratio cleared >=560px only at
+    .report's ORIGINAL 840px width -- at that width the two floors (trend + the quad's
+    own unwrapped content) structurally summed to more than the .fs-mid budget had, no
+    matter the ratio (confirmed empirically, not guessed; see the .fs-mid CSS comment).
+    The real fix is .report--wide (see the test above); THIS ratio (chosen algebraically
+    from two measured constants -- .fs-mid's total avail width and the quad table's own
+    natural width, both empirical) only needs to clear the lower floor the dispatch
+    revised down to: >=520px, at the wide canvas."""
     html = render_report_html(_fs_spec(_is_model()))
     m = re.search(r"\.fs-mid\s*\{[^}]*grid-template-columns:\s*([^;]+);", html)
     assert m, "no .fs-mid grid-template-columns rule found"
     weights = [float(w) for w in re.findall(r"minmax\(0,\s*([\d.]+)fr\)", m.group(1))]
     assert len(weights) == 2, f"expected two minmax(0, Nfr) tracks, got: {m.group(1)!r}"
     trend_weight, quad_weight = weights
-    assert trend_weight > quad_weight  # trend (first grid child) gets the WIDE slot
-    # .report{max-width:840px; padding:48px 32px} minus the .fs-mid gap:18px
-    avail_px = 840 - 2 * 32 - 18
+    assert trend_weight > quad_weight  # trend (first grid child) still gets the WIDE slot
+    wide_m = re.search(r"\.report--wide\s*\{[^}]*max-width:\s*(\d+)px", html)
+    assert wide_m, "no .report--wide max-width rule found"
+    canvas_px = int(wide_m.group(1))
+    # .report{padding:48px 32px} (unchanged by the modifier) minus the .fs-mid gap:18px
+    avail_px = canvas_px - 2 * 32 - 18
     trend_px = avail_px * trend_weight / (trend_weight + quad_weight)
-    assert trend_px >= 560, f"trend track would render at {trend_px:.0f}px, need >=560"
+    assert trend_px >= 520, f"trend track would render at {trend_px:.0f}px, need >=520"
 
 
 def test_fs_quad_table_is_scroll_wrapped_so_it_cannot_force_the_grid_track_wide():
-    """Companion to the above: minmax(0, Nfr) lets the quad's track shrink below its
-    unwrapped content width, so the quad table itself must tolerate that -- wrapped in
-    .fs-scroll (the same overflow-x:auto pattern the statement table already uses) so a
-    narrow column scrolls horizontally instead of visually breaking."""
+    """.fs-scroll stays as a SAFETY NET even though the wide canvas + tightened quad
+    typography now fit the table unscrolled at rest (live-verified via browse) -- the
+    wrapper must still be present so a future narrower rendering context degrades to a
+    scrollbar instead of visually breaking the grid."""
     html = render_report_html(_fs_spec(_is_model()))
     assert '<div class="fs-scroll"><table class="fs-quad' in html
+
+
+def test_fs_quad_typography_tightened_to_the_mocks_scale():
+    """Structural proxy for the live no-scroll check (pytest can't measure real layout):
+    the quad's cell padding and the .fs-mid card padding must both be tightened from the
+    base stylesheet's defaults (8px/12px cell, 24px card) to the mock's own scale -- this
+    is what actually lets the table's unwrapped content fit its grid track at rest. The
+    true acceptance (scrollWidth <= clientWidth) is verified live via browse, not here."""
+    html = render_report_html(_fs_spec(_is_model()))
+    assert (
+        "table.fs-quad th, table.fs-quad td { border:none; border-bottom:1px solid #ddd; font-size:12.5px; padding:6px 8px; }"
+        in html
+    )
+    assert ".fs-mid > .nb-card { padding:18px 20px; }" in html
 
 
 def test_fs_income_statement_is_two_step_interleaved():
@@ -875,6 +903,14 @@ def test_fs_print_css_present_and_forces_full_expansion():
     assert "fs-acct" in printed
     assert "!important" in printed
     assert "fs-sec-cb" in printed
+
+
+def test_fs_report_wide_goes_full_width_on_paper():
+    """The mock's own print rule takes the report full-width on paper -- .report--wide
+    (screen-only otherwise) must not clamp a printed statement to its on-screen 1120px
+    canvas cap."""
+    html = render_report_html(_fs_spec(_is_model()))
+    assert re.search(r"@media print\s*\{\s*\.report--wide\s*\{\s*max-width:100%", html)
 
 
 def test_non_statement_spec_byte_stable_after_financial_statement_renderer_added():

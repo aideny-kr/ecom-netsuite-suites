@@ -141,19 +141,38 @@ _FS_CSS = """
 .fs-delta.fs-bad { color:var(--fs-bad); }
 .fs-spark { position:absolute; right:12px; bottom:10px; opacity:.9; }
 
-/* EYEBALL-GATE FIX (F1): the trend card is emitted FIRST (see _financial_statement_html)
-   so it should already own the wider track -- but every .fs-quad cell carries
-   white-space:nowrap (the generic td.num,th.num rule, plus the label column's own
-   nowrap fix), making the quad table's min-content width (~587px unwrapped) exceed
-   its "fair share" of a plain fr split. A plain `fr` track's automatic minimum size
-   defaults to its item's content size unless overridden, so the un-shrinkable quad ate
-   space FROM the trend track regardless of the declared ratio -- trend rendered in an
-   unreadable ~170px sliver. minmax(0, Nfr) overrides that automatic per-item minimum
-   (the grid-native equivalent of min-width:0), so the tracks actually honor their
-   weights; the quad table tolerates its now-narrower track via .fs-scroll (below) the
-   same way the statement table already tolerates overflow. 3:1 gives the trend chart
-   >=560px at the .report's max content width (840 - 2*32 padding - 18 gap = 758px). */
-.fs-mid { display:grid; grid-template-columns:minmax(0,3fr) minmax(0,1fr); gap:18px; margin-bottom:22px; }
+/* EYEBALL-GATE FIX (F1, round 1): the trend card is emitted FIRST (see
+   _financial_statement_html) so it should already own the wider track -- but every
+   .fs-quad cell carries white-space:nowrap (the generic td.num,th.num rule), making the
+   quad table's min-content width (~587px unwrapped, at the base stylesheet's 8px/12px
+   cell padding) exceed its "fair share" of a plain fr split. A plain `fr` track's
+   automatic minimum size defaults to its item's content size unless overridden, so the
+   un-shrinkable quad ate space FROM the trend track regardless of the declared ratio --
+   trend rendered in an unreadable ~170px sliver. minmax(0, Nfr) overrides that automatic
+   per-item minimum (the grid-native equivalent of min-width:0), so the tracks actually
+   honor their weights.
+   EYEBALL-GATE FIX (F1, round 2): a 3:1 ratio cleared the trend floor but over-shrank
+   the quad (~190px) -- its own "the four-column read" showed ZERO columns at rest.
+   Tightening the quad's typography to the mock's scale (6px/8px cell padding) helped
+   but wasn't sufficient on its own: at .report's ORIGINAL 840px max-width, the two
+   floors (trend >=520px, quad's own unwrapped content ~443px + card padding) sum to
+   more than the 758px .fs-mid actually has to split -- no ratio or reasonable
+   typography closes a structural ~250px deficit (confirmed empirically, not guessed).
+   EYEBALL-GATE FIX (F1, round 3): the real fix is canvas width, not the ratio. The
+   approved mock's own canvas is 1060px, not 840px -- .report--wide (below) raises the
+   ceiling to the DISPATCH-STATED 1120px cap for statement pages ONLY (never the shared
+   .report default, which stays 840px for byte-stability on every other report type).
+   The mock's OWN 1.5:1 ratio (tried first, empirically) still left the quad ~82px
+   short of its own unwrapped content width even at this wider canvas -- solved
+   algebraically from two measured constants (this .fs-mid's total avail width and the
+   quad table's own natural width, both empirical, not estimated) for the ratio window
+   that clears BOTH floors simultaneously: trend >= 520px AND quad-card >= quad's own
+   ~483px need (443px table + 2*20px card padding). 1.1:1 sits solidly inside that
+   window with margin on both sides. .fs-scroll stays as the safety net, not the
+   primary mechanism, now that both the ceiling and the ratio are sized correctly. */
+.report--wide { max-width:1120px; }
+@media print { .report--wide { max-width:100%; } }
+.fs-mid { display:grid; grid-template-columns:minmax(0,1.1fr) minmax(0,1fr); gap:18px; margin-bottom:22px; }
 @media (max-width:900px) { .fs-mid { grid-template-columns:1fr; } }
 .fs-scroll { overflow-x:auto; }
 .fs-legend { display:flex; gap:16px; flex-wrap:wrap; font-size:12px; font-weight:600; margin-top:8px; }
@@ -162,9 +181,16 @@ _FS_CSS = """
 
 /* Variance quad (design rule #5): Actual | Prior | Delta $ | Delta % — reuses the same
    fs-sub/fs-formula/fs-net emphasis classes as the statement table below (both are built
-   from the same _quad_row-shaped model dict). */
-table.fs-quad th, table.fs-quad td { border:none; border-bottom:1px solid #ddd; font-size:12.5px; }
-table.fs-quad th:first-child, table.fs-quad td:first-child { white-space:nowrap; }
+   from the same _quad_row-shaped model dict). Cell padding tightened to the mock's own
+   scale (6px 8px, vs the base stylesheet's 8px 12px); the label column is deliberately
+   NOT forced nowrap (only the numeric/.num cells are, via the pre-existing generic
+   td.num,th.num rule) -- a two-word metric label wrapping onto 2 lines is normal in a
+   compact card and narrows the table's overall min-content width meaningfully more
+   than tighter padding alone. .fs-mid > .nb-card gets its own tighter card padding too
+   (below) -- both are what actually let the card fit its own "four-column read"
+   unscrolled at .report--wide's width. */
+.fs-mid > .nb-card { padding:18px 20px; }
+table.fs-quad th, table.fs-quad td { border:none; border-bottom:1px solid #ddd; font-size:12.5px; padding:6px 8px; }
 table.fs-quad th { text-transform:uppercase; font-size:10.5px; letter-spacing:.06em; color:#666;
   background:transparent; border-bottom:2px solid var(--border); }
 table.fs-quad tr:last-child td { border-bottom:none; border-top:2px solid var(--border); font-weight:800; }
@@ -1085,11 +1111,18 @@ def render_report_html(
     # Additive + conditional: only reports that actually use a financial_statement
     # section pay for its CSS — see _FS_CSS's docstring-comment for why this must stay a
     # plain string append (not folded into the %-formatted _CSS) for byte-stability.
-    if any(sec.get("type") == "financial_statement" for sec in spec.get("sections", [])):
+    has_financial_statement = any(sec.get("type") == "financial_statement" for sec in spec.get("sections", []))
+    if has_financial_statement:
         css += _FS_CSS
+    # EYEBALL-GATE FIX (F1, round 3): statement pages get a wider canvas (.report--wide,
+    # a MODIFIER class, never a change to the shared .report default) — see the .fs-mid
+    # comment in _FS_CSS. Scoped to specs that actually carry a financial_statement
+    # section, same gate as the CSS itself, so every other report type's root <div>
+    # (and therefore its exact rendered bytes) is untouched.
+    report_cls = "report report--wide" if has_financial_statement else "report"
     return (
         f'<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">'
         f'<meta name="viewport" content="width=device-width, initial-scale=1">'
-        f'<title>{title}</title><style>{css}</style></head><body><div class="report">'
+        f'<title>{title}</title><style>{css}</style></head><body><div class="{report_cls}">'
         f'<div class="accent-bar"></div><h1>{title}</h1>{body}{method_html}{stamp_html}{prov_html}</div></body></html>'
     )
