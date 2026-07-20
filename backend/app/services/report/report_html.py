@@ -98,8 +98,9 @@ td.num,th.num { text-align:right; font-variant-numeric:tabular-nums; white-space
 # making the brief's "specs without a financial_statement section render byte-identically
 # to today" requirement impossible to satisfy. Kept out of the %-format pipeline entirely,
 # `_FS_CSS` needs NO %% doubling (see render_report_html: appended only when a
-# financial_statement section is actually present) — a literal `%` below (there is one,
-# in a comment) is safe verbatim either way.
+# financial_statement section is actually present) — the several literal `%` characters
+# below (both in CSS values like `max-width:100%` and in comments) are safe verbatim
+# either way.
 #
 # Reuses the base stylesheet's vars/idioms (--accent, --border, .nb-card box) and the
 # generic table/th/td + td.num,th.num rules (money cells just get class="num" like every
@@ -651,7 +652,11 @@ _WATCH_TONE_CLASSES = {"good": "fs-good", "warn": "fs-warn", "bad": "fs-bad"}
 # derived from the model.
 _FS_SPARK_W, _FS_SPARK_H = 64, 26
 _FS_TREND_W, _FS_TREND_H = 620, 240
-_FS_TREND_PAD_L, _FS_TREND_PAD_R, _FS_TREND_PAD_T, _FS_TREND_PAD_B = 56, 16, 24, 34
+# Right pad 28 (final-review minor): the last x-axis label is CENTERED (text-anchor="middle")
+# on its point, so it extends roughly HALF its own rendered width past that x position -- a
+# realistic period label ("Jun 2026") was wider than the old 16px pad, clipping ~2 characters
+# against the SVG's right edge.
+_FS_TREND_PAD_L, _FS_TREND_PAD_R, _FS_TREND_PAD_T, _FS_TREND_PAD_B = 56, 28, 24, 34
 
 
 def _fs_sign_tone(text: str) -> tuple[str, str]:

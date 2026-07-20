@@ -886,6 +886,21 @@ def test_fs_trend_chart_point_has_exact_value_title_tooltip():
     assert "<title>Jun 2026 — Revenue: $13,500,000</title>" in html
 
 
+def test_fs_trend_chart_right_padding_clears_the_last_x_axis_label():
+    """Final-review minor: the last x-axis label ("Jun 2026") clipped ~2 characters against
+    the SVG's right edge at the old 16px right pad -- text-anchor="middle" means a label
+    extends roughly HALF its own rendered width past its x position, and 16px was narrower
+    than that half-width for a realistic period label. Bumped to 28px; pin the constant (a
+    drift guard) and confirm the actual rendered x-axis baseline reflects it, structurally
+    -- pytest can't measure real glyph widths, so the true acceptance is the live browse
+    re-verification this fix requires, not this test alone."""
+    from app.services.report.report_html import _FS_TREND_PAD_R, _FS_TREND_W
+
+    assert _FS_TREND_PAD_R >= 28
+    html = render_report_html(_fs_spec(_is_model()))
+    assert f'x2="{_FS_TREND_W - _FS_TREND_PAD_R}"' in html
+
+
 def test_fs_css_only_included_when_statement_section_present():
     """The financial-statement stylesheet block is additive and conditional -- a report
     with no financial_statement section must not ship the extra CSS bytes at all (this is
