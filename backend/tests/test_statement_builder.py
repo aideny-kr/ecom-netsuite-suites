@@ -680,3 +680,38 @@ def test_statement_model_json_round_trip_renders_identically(is_model):
     roundtrip_html = render_report_html(roundtrip_spec)
 
     assert roundtrip_html == direct_html
+
+
+# ===========================================================================
+# Task 5 — offline rendered-artifact preview harness (no DB, no network, no LLM)
+# ===========================================================================
+
+
+def test_render_statement_preview_harness_writes_four_files(tmp_path):
+    """``scripts/render_statement_preview.py`` is the controller's eyeball gate for the
+    redesign (``.claude/rules/report-design.md`` #2): it must produce all four rendered
+    artifacts offline and each must contain the statement-defining string the renderer
+    actually emits for that statement type -- not a recomputation, the exact literal
+    text asserted in test_report_playbooks.py's compose tests."""
+    from scripts.render_statement_preview import main
+
+    written = main(["--out-dir", str(tmp_path)])
+    names = {p.name for p in written}
+    assert names == {
+        "income_statement.html",
+        "balance_sheet.html",
+        "trial_balance.html",
+        "income_statement_degraded.html",
+    }
+    for path in written:
+        assert path.exists()
+
+    contents = {p.name: p.read_text(encoding="utf-8") for p in written}
+    assert "Net income" in contents["income_statement.html"]  # KPI card label
+    assert "Assets = Liabilities + Equity" in contents["balance_sheet.html"]  # BS check label
+    assert "Debits = Credits" in contents["trial_balance.html"]  # TB check label
+    # the degraded variant still renders the statement (r1 never degrades)...
+    assert "Net income" in contents["income_statement_degraded.html"]
+    # ...but with the compare-fed chip/deltas actually absent (proves it degraded,
+    # not that it silently rendered the same happy-path fixture twice).
+    assert "vs May 2026" not in contents["income_statement_degraded.html"]
