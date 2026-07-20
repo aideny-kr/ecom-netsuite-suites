@@ -18,7 +18,7 @@ from app.schemas.order_reconciliation import (
     OrderMatchCandidate,
 )
 from app.services.reconciliation.order_recon_job import OrderReconJob
-from tests.conftest import create_test_payout
+from tests.conftest import create_test_netsuite_posting, create_test_payout
 
 TENANT_ID = str(uuid.uuid4())
 
@@ -156,11 +156,13 @@ class TestFetchDepositsWithOrderRef:
     @pytest.mark.asyncio
     async def test_fetch_deposits_uses_related_payout_id_as_order_ref(self):
         np1 = _make_posting_row(
+            posting_id="np-1",
             netsuite_internal_id="12345",
             related_payout_id="R628489275",
             transaction_date=date(2026, 3, 16),
         )
         np2 = _make_posting_row(
+            posting_id="np-2",
             netsuite_internal_id="12346",
             related_payout_id=None,
             transaction_date=date(2026, 3, 17),
@@ -188,6 +190,222 @@ class TestFetchDepositsWithOrderRef:
         # Second deposit: no order_reference
         assert deposits[1].netsuite_internal_id == "12346"
         assert deposits[1].order_reference is None
+
+
+class TestRefKeyedDepositFetchMocked:
+    """Ref-keyed pass (2026-07-19): the order reference decides matching, not the
+    date window. These are control-flow/plumbing tests against a mocked DB —
+    the actual SQL date-bound correctness is proven DB-backed in
+    ``TestRefKeyedDepositFetchDbBacked`` below.
+    """
+
+    @pytest.mark.asyncio
+    async def test_ref_keyed_pass_skipped_when_no_order_references(self):
+        """No charge in the run has an order_reference -> no ref-keyed pass is
+        issued; behavior is byte-identical to the pre-fix single windowed query
+        (no-ref charges only ever match via tier-2 fuzzy, which this fix leaves
+        untouched).
+        """
+        np1 = _make_posting_row(netsuite_internal_id="12345", related_payout_id=None)
+
+        db = _mock_db()
+        result_mock = MagicMock()
+        result_mock.all.return_value = [np1]
+        execute_result = MagicMock()
+        execute_result.scalars.return_value = result_mock
+        db.execute = AsyncMock(return_value=execute_result)
+
+        job = OrderReconJob(db=db, tenant_id=TENANT_ID)
+        deposits = await job._fetch_deposits(
+            date_from=date(2026, 3, 10),
+            date_to=date(2026, 3, 20),
+            order_references=set(),
+        )
+
+        assert db.execute.call_count == 1  # windowed pass only, no ref-keyed pass
+        assert len(deposits) == 1
+
+    @pytest.mark.asyncio
+    async def test_dedupes_deposit_present_in_both_fetch_passes(self):
+        """A deposit that's in-window AND ref-matched is unioned once, not twice."""
+        shared = _make_posting_row(
+            posting_id="np-shared",
+            netsuite_internal_id="12345",
+            related_payout_id="R628489275",
+            transaction_date=date(2026, 3, 16),
+        )
+
+        db = _mock_db()
+        windowed_result = MagicMock()
+        windowed_result.all.return_value = [shared]
+        windowed_execute = MagicMock()
+        windowed_execute.scalars.return_value = windowed_result
+
+        ref_result = MagicMock()
+        ref_result.all.return_value = [shared]
+        ref_execute = MagicMock()
+        ref_execute.scalars.return_value = ref_result
+
+        db.execute = AsyncMock(side_effect=[windowed_execute, ref_execute])
+
+        job = OrderReconJob(db=db, tenant_id=TENANT_ID)
+        deposits = await job._fetch_deposits(
+            date_from=date(2026, 3, 10),
+            date_to=date(2026, 3, 20),
+            order_references={"R628489275"},
+        )
+
+        assert db.execute.call_count == 2
+        assert len(deposits) == 1
+        assert deposits[0].netsuite_internal_id == "12345"
+
+    @pytest.mark.asyncio
+    async def test_chunks_ref_keyed_query_at_5000_boundary(self):
+        """A run with 5001 distinct order references issues TWO ref-keyed queries
+        (chunked at 5000), not one enormous IN(...) clause: windowed pass (1) +
+        ref-keyed chunks (2) = 3 total execute calls.
+        """
+        refs = {f"R{i:09d}" for i in range(5001)}
+
+        db = _mock_db()
+        empty_result = MagicMock()
+        empty_result.all.return_value = []
+        empty_execute = MagicMock()
+        empty_execute.scalars.return_value = empty_result
+        db.execute = AsyncMock(side_effect=[empty_execute, empty_execute, empty_execute])
+
+        job = OrderReconJob(db=db, tenant_id=TENANT_ID)
+        deposits = await job._fetch_deposits(
+            date_from=date(2026, 3, 10),
+            date_to=date(2026, 3, 20),
+            order_references=refs,
+        )
+
+        assert db.execute.call_count == 3
+        assert deposits == []
+
+
+class TestRunPassesOrderReferencesToFetchDeposits:
+    """run() derives the distinct non-null order-reference set from the fetched
+    charges and threads it through to _fetch_deposits.
+    """
+
+    @pytest.mark.asyncio
+    async def test_run_passes_distinct_non_null_refs(self):
+        charge_with_ref = ChargeRecord(
+            id="pl-1",
+            source_id="ch_001",
+            payout_line_id="pl-1",
+            amount=Decimal("100.00"),
+            fee=Decimal("3.00"),
+            net=Decimal("97.00"),
+            currency="USD",
+            charge_date=date(2026, 3, 15),
+            order_reference="R628489275",
+        )
+        charge_no_ref = ChargeRecord(
+            id="pl-2",
+            source_id="ch_002",
+            payout_line_id="pl-2",
+            amount=Decimal("50.00"),
+            fee=Decimal("1.50"),
+            net=Decimal("48.50"),
+            currency="USD",
+            charge_date=date(2026, 3, 15),
+        )
+
+        db = _mock_db()
+        job = OrderReconJob(db=db, tenant_id=TENANT_ID)
+
+        with (
+            patch.object(job, "_fetch_charges", return_value=[charge_with_ref, charge_no_ref]),
+            patch.object(job, "_fetch_deposits", return_value=[]) as mock_fetch_deposits,
+            patch.object(job.engine, "match", return_value=[]),
+        ):
+            await job.run(date_from=date(2026, 3, 10), date_to=date(2026, 3, 20))
+
+        _, call_kwargs = mock_fetch_deposits.call_args
+        assert call_kwargs["order_references"] == {"R628489275"}
+
+
+class TestRefKeyedDepositFetchDbBacked:
+    """DB-backed (real Postgres): the sanity bound is a real SQL date filter, so
+    these run against the local docker fixture rather than a mocked DB.
+    """
+
+    async def test_charge_in_window_deposit_40_days_later_matches_deterministically(self, db, tenant_a):
+        """Headline case: a deposit posted 40 days after the charge's arrival
+        date — well outside the +/-14d windowed fetch, well inside the 90d
+        sanity bound — still produces a tier-1 deterministic match.
+        """
+        await _seed_charge_line(
+            db,
+            tenant_a.id,
+            source_id="ch_cross_window",
+            description="Framework Marketplace Order ID: R628489275-XU9EPZPD",
+            arrival_date=date(2026, 3, 15),
+        )
+        await create_test_netsuite_posting(
+            db,
+            tenant_a.id,
+            netsuite_internal_id="99001",
+            related_payout_id="R628489275",
+            transaction_date=date(2026, 4, 24),  # charge arrival + 40 days
+            amount=Decimal("100.00"),
+        )
+
+        job = OrderReconJob(db=db, tenant_id=str(tenant_a.id))
+        charges = await job._fetch_charges(date_from=date(2026, 3, 10), date_to=date(2026, 3, 20))
+        order_references = {c.order_reference for c in charges if c.order_reference}
+        deposits = await job._fetch_deposits(
+            date_from=date(2026, 3, 10),
+            date_to=date(2026, 3, 20),
+            order_references=order_references,
+        )
+        candidates = job.engine.match(charges, deposits)
+
+        assert len(candidates) == 1
+        assert candidates[0].match_type == "deterministic"
+        assert candidates[0].deposit is not None
+        assert candidates[0].deposit.transaction_date == date(2026, 4, 24)
+
+    async def test_deposit_beyond_sanity_bound_still_missing(self, db, tenant_a):
+        """A deposit posted beyond the 90-day sanity bound is NOT ref-matched —
+        the bound is a sanity cap, not an unlimited lookback. The charge remains
+        unmatched (missing_in_netsuite), same as before this fix.
+        """
+        await _seed_charge_line(
+            db,
+            tenant_a.id,
+            source_id="ch_beyond_sanity",
+            description="Framework Marketplace Order ID: R577684612-XU9EPZPD",
+            arrival_date=date(2026, 3, 15),
+        )
+        # date_to (2026-03-20) + 90 days = 2026-06-18; place the deposit one day
+        # beyond that bound.
+        await create_test_netsuite_posting(
+            db,
+            tenant_a.id,
+            netsuite_internal_id="99002",
+            related_payout_id="R577684612",
+            transaction_date=date(2026, 6, 19),
+            amount=Decimal("100.00"),
+        )
+
+        job = OrderReconJob(db=db, tenant_id=str(tenant_a.id))
+        charges = await job._fetch_charges(date_from=date(2026, 3, 10), date_to=date(2026, 3, 20))
+        order_references = {c.order_reference for c in charges if c.order_reference}
+        deposits = await job._fetch_deposits(
+            date_from=date(2026, 3, 10),
+            date_to=date(2026, 3, 20),
+            order_references=order_references,
+        )
+        candidates = job.engine.match(charges, deposits)
+
+        assert deposits == []
+        assert len(candidates) == 1
+        assert candidates[0].match_type == "unmatched"
+        assert candidates[0].variance_type == "missing_in_netsuite"
 
 
 class TestRunProducesSummary:

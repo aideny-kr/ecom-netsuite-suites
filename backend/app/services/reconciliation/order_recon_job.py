@@ -40,6 +40,20 @@ logger = structlog.get_logger()
 
 _DATE_BUFFER = timedelta(days=14)
 
+# Ref-keyed deposit fetch (2026-07-19). Operator: "date doesn't really matter as
+# much... order number is an important indicator; utilize the keys and
+# dimensions of the data." Framework's session ledger (2026-07-19) measured
+# ref-matched lag p50 -3d / p99 +15d, with a genuine >28d tail (147 pairs);
+# 1,089/1,095 (99.5%) of a recent run's missing_in_netsuite charges had their
+# counterpart in netsuite_postings outside the +/-14d windowed fetch. This is a
+# generous SANITY bound (not a proximity/scoring window) that comfortably
+# covers the measured tail — the order reference alone decides the match.
+REF_MATCH_SANITY_DAYS = 90
+
+# Cap per IN(...) batch for the ref-keyed query, so a run with an unusually
+# large charge set never emits one enormous IN clause.
+_REF_CHUNK_SIZE = 5000
+
 
 class OrderReconJob:
     """Orchestrates order-level reconciliation: charge → deposit matching."""
@@ -93,11 +107,16 @@ class OrderReconJob:
                 subsidiary_id=subsidiary_id,
             )
 
-            # 4-5. Fetch deposits with order references
+            # 4-5. Fetch deposits with order references. The distinct non-null
+            # order_references from THIS run's charges drive the ref-keyed pass
+            # (see _fetch_deposits) — the order reference decides matching, not
+            # the date window.
+            order_references = {c.order_reference for c in charges if c.order_reference}
             deposits = await self._fetch_deposits(
                 date_from=date_from,
                 date_to=date_to,
                 subsidiary_id=subsidiary_id,
+                order_references=order_references,
             )
 
             logger.info(
@@ -247,10 +266,27 @@ class OrderReconJob:
         date_from: date,
         date_to: date,
         subsidiary_id: str | None = None,
+        order_references: set[str] | None = None,
     ) -> list[NSPaymentRecord]:
         """Fetch deposits from netsuite_postings (custdep + deposit).
 
-        Uses ±5 day buffer. Sets order_reference from related_payout_id.
+        Two passes, unioned and deduped by id:
+          1. Windowed (unchanged) — ±14 day buffer around [date_from, date_to].
+             Still the sole source of candidates for tier-2 fuzzy matching
+             (no-ref charges never contribute to ``order_references``, so this
+             pass alone serves them, unaffected by the ref-keyed pass below).
+          2. Ref-keyed (new) — when ``order_references`` is non-empty, ALSO
+             fetch postings whose ``related_payout_id`` is in that set, bounded
+             only by REF_MATCH_SANITY_DAYS on either side (a sanity cap, not a
+             proximity window) so a charge in-window still matches a deposit
+             NetSuite posts weeks later. ``related_payout_id`` already stores
+             the extracted order ref, not raw text — the ingestion pipeline
+             (``netsuite_deposit_sync.sync_netsuite_deposits``) applies the same
+             ``extract_order_ref`` this job uses for charges before writing it —
+             so this is a direct equality filter, not a second extraction.
+             Chunked at ``_REF_CHUNK_SIZE`` refs per IN(...) batch.
+
+        Sets order_reference from related_payout_id.
         """
         stmt = select(NetsuitePosting).where(
             NetsuitePosting.tenant_id == self.tenant_id,
@@ -263,7 +299,27 @@ class OrderReconJob:
             stmt = stmt.where(NetsuitePosting.subsidiary_id == subsidiary_id)
 
         result = await self.db.execute(stmt)
-        rows = result.scalars().all()
+        postings_by_id = {r.id: r for r in result.scalars().all()}
+
+        if order_references:
+            refs = sorted(order_references)
+            sanity_from = date_from - timedelta(days=REF_MATCH_SANITY_DAYS)
+            sanity_to = date_to + timedelta(days=REF_MATCH_SANITY_DAYS)
+            for i in range(0, len(refs), _REF_CHUNK_SIZE):
+                chunk = refs[i : i + _REF_CHUNK_SIZE]
+                ref_stmt = select(NetsuitePosting).where(
+                    NetsuitePosting.tenant_id == self.tenant_id,
+                    NetsuitePosting.record_type.in_(["deposit", "custdep"]),
+                    NetsuitePosting.related_payout_id.in_(chunk),
+                    NetsuitePosting.transaction_date >= sanity_from,
+                    NetsuitePosting.transaction_date <= sanity_to,
+                )
+                if subsidiary_id:
+                    ref_stmt = ref_stmt.where(NetsuitePosting.subsidiary_id == subsidiary_id)
+
+                ref_result = await self.db.execute(ref_stmt)
+                for r in ref_result.scalars().all():
+                    postings_by_id[r.id] = r  # union, deduped by id
 
         return [
             NSPaymentRecord(
@@ -276,7 +332,7 @@ class OrderReconJob:
                 memo=r.memo,
                 order_reference=r.related_payout_id,
             )
-            for r in rows
+            for r in postings_by_id.values()
         ]
 
     async def _load_materiality(self) -> tuple[Decimal, Decimal]:
