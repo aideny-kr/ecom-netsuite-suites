@@ -46,7 +46,7 @@ from sqlalchemy import func, select
 from app.mcp.tools import recon_approve
 from app.models.audit import AuditEvent
 from app.models.canonical import NetsuitePosting
-from app.models.reconciliation import ReconciliationResult, ReconciliationRun
+from app.models.reconciliation import ReconciliationResult, ReconciliationRun, ReconResolutionProposal
 from app.models.tenant import TenantConfig
 from app.services.reconciliation.order_recon_job import OrderReconJob
 from tests.conftest import create_test_netsuite_posting, create_test_payout_line
@@ -679,3 +679,60 @@ async def test_high_composite_does_not_promote_fuzzy_status(db, tenant_a):
     assert sigs["amount_score"] == "1.0000", f"amount_score mismatch: {sigs['amount_score']!r}"
     assert sigs["temporal_score"] == "1.0000", f"temporal_score mismatch: {sigs['temporal_score']!r}"
     assert sigs["composite"] == "1.0000", f"composite mismatch: {sigs['composite']!r}"
+
+
+# ---------------------------------------------------------------------------
+# Ref-keyed deposit fetch (2026-07-19) — a charge in-window still matches
+# deterministically when NetSuite posts the deposit well outside the engine's
+# +/-14d windowed fetch, because the order reference (not the date window)
+# decides matching. A clean match reaches the resolution planner's rule 2
+# (clean deterministic match, zero variance -> skip), so this also proves the
+# fix produces no proposal noise end-to-end.
+# ---------------------------------------------------------------------------
+
+
+async def test_cross_window_pair_matches_end_to_end_no_proposal_needed(db, tenant_a):
+    await _set_materiality(db, tenant_a.id, abs_=_DEFAULT_MATERIALITY_ABS, pct=_DEFAULT_MATERIALITY_PCT)
+
+    # RUN_TO (2026-05-31) + the engine's +/-14d windowed buffer = 2026-06-14.
+    # Post the deposit 40 days after the charge's arrival date (ARRIVAL =
+    # 2026-05-15 -> 2026-06-24) — well outside the windowed fetch, well inside
+    # the 90-day ref-keyed sanity bound.
+    await _seed_match_pair(
+        db,
+        tenant_a.id,
+        order_ref="R500000001",
+        source_id="ch_cross_window",
+        charge_amount=Decimal("321.00"),
+        deposit_amount=Decimal("321.00"),
+        arrival=ARRIVAL,
+        txn=date(2026, 6, 24),
+    )
+
+    summary = await OrderReconJob(db, str(tenant_a.id)).run(RUN_FROM, RUN_TO)
+    assert summary.status == "completed"
+    assert summary.matched_count == 1
+    assert summary.unmatched_count == 0
+
+    run_uuid = uuid.UUID(summary.run_id)
+    rows = {
+        r.evidence["order_reference"]: r
+        for r in (await db.execute(select(ReconciliationResult).where(ReconciliationResult.run_id == run_uuid)))
+        .scalars()
+        .all()
+    }
+    result = rows["R500000001"]
+    assert result.match_type == "deterministic"
+    assert result.bucket == "matches"
+    assert result.status == "auto_matched"
+
+    # Clean deterministic match, zero variance -> the planner's rule 2 skips it
+    # before it ever reaches a proposal.
+    proposal_count = (
+        await db.execute(
+            select(func.count())
+            .select_from(ReconResolutionProposal)
+            .where(ReconResolutionProposal.result_id == result.id)
+        )
+    ).scalar_one()
+    assert proposal_count == 0
