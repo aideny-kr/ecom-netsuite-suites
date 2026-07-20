@@ -143,55 +143,83 @@ async def _execute_sources(
     actor_id: uuid.UUID | None,
     actor_type: str,
     correlation_id: str,
+    required_rids: set[str] | None = None,
 ) -> dict[str, dict]:
     """Replay ONLY the sources the sections actually reference (an extra source in a
-    tampered/drifted recipe never burns a tool call); ANY failure fails the refresh.
-    A referenced rid with no source fails BEFORE anything else executes downstream —
-    assemble_spec would otherwise degrade the miss into "Data unavailable" sections."""
+    tampered/drifted recipe never burns a tool call).
+
+    ``required_rids`` (Task 4, Risk 2 — the statement compare-degrade seam): a rid in
+    this set fails the WHOLE refresh on ANY failure (unreadable result, tool-reported
+    error, unextractable payload, missing/tampered source) — the pre-Task-4 fail-closed
+    behavior, unchanged. A rid NOT in this set degrades instead: its failure is caught
+    and the rid is simply OMITTED from the returned payloads dict — never a
+    partial/failed entry standing in for real data. ``assemble_spec`` /
+    ``build_statement_model`` treat an absent rid exactly like one that never resolved
+    (see ``statement_builder``'s "Degradation contract" docstring): a
+    ``financial_statement``'s compare source (prior/yoy/trend) degrades that ONE
+    comparison rather than killing the statement; every OTHER caller passes
+    ``required_rids=None`` (the default), which makes every needed rid required — the
+    exact fail-closed semantics `_execute_sources` had before this param existed, so v1
+    (table/narrative) recipes and chat compose are byte-for-byte unaffected.
+
+    A degraded (non-required) rid's source-trust checks (``_check_source`` —
+    refresh-eligibility, connection match) still run in full before any dispatch; a
+    tampered compare source is refused exactly as before, it just doesn't abort the
+    whole refresh — the security boundary is unchanged, only the blast radius shrinks
+    from "whole report" to "one comparison"."""
     from app.services.chat.tool_call_results import extract_result_payload
     from app.services.chat.tools import execute_tool_call
 
+    if required_rids is None:
+        required_rids = set(needed_rids)
+
     payloads: dict[str, dict] = {}
     for rid in needed_rids:
-        src = sources.get(rid)
-        if src is None:
-            raise RefreshError(502, f"recipe sources missing for {rid} — recompose the report")
-        tool, params = _check_source(rid, src)
-        strip = _LLM_ONLY_PARAMS.get(tool, frozenset())
-        if strip:
-            params = {k: v for k, v in params.items() if k not in strip}
-        # SET LOCAL tenant context is TRANSACTION-scoped and any commit (the claim, or a
-        # tool's own) clears it — re-establish before EVERY dispatch so RLS-scoped reads
-        # inside the tool (e.g. the Connection lookup) always run under this tenant.
-        await set_tenant_context(db, str(tenant_id))
-        result_str = await execute_tool_call(
-            tool,
-            params,
-            tenant_id=tenant_id,
-            actor_id=actor_id,
-            actor_type=actor_type,  # tool_call audit rows must not stamp a system replay as 'user'
-            correlation_id=correlation_id,
-            db=db,
-        )
         try:
-            parsed = json.loads(result_str)
-        except (json.JSONDecodeError, TypeError):
-            raise RefreshError(502, f"source {rid} ({tool}) returned an unreadable result") from None
-        if isinstance(parsed, dict) and (parsed.get("error") or parsed.get("success") is False):
-            # "error" is last: it doubles as a boolean flag in some tool shapes,
-            # so only a *string* error carries a human-readable reason.
-            error_val = parsed.get("error")
-            message = str(
-                parsed.get("message")
-                or parsed.get("detail")
-                or parsed.get("error_message")
-                or (error_val if isinstance(error_val, str) else "")
+            src = sources.get(rid)
+            if src is None:
+                raise RefreshError(502, f"recipe sources missing for {rid} — recompose the report")
+            tool, params = _check_source(rid, src)
+            strip = _LLM_ONLY_PARAMS.get(tool, frozenset())
+            if strip:
+                params = {k: v for k, v in params.items() if k not in strip}
+            # SET LOCAL tenant context is TRANSACTION-scoped and any commit (the claim,
+            # or a tool's own) clears it — re-establish before EVERY dispatch so
+            # RLS-scoped reads inside the tool (e.g. the Connection lookup) always run
+            # under this tenant.
+            await set_tenant_context(db, str(tenant_id))
+            result_str = await execute_tool_call(
+                tool,
+                params,
+                tenant_id=tenant_id,
+                actor_id=actor_id,
+                actor_type=actor_type,  # tool_call audit rows must not stamp a system replay as 'user'
+                correlation_id=correlation_id,
+                db=db,
             )
-            raise RefreshError(502, f"source {rid} ({tool}) failed{': ' + message[:200] if message else ''}")
-        payload = extract_result_payload(tool, params, result_str)
-        if payload is None:
-            raise RefreshError(502, f"source {rid} ({tool}) returned no extractable data")
-        payloads[rid] = payload
+            try:
+                parsed = json.loads(result_str)
+            except (json.JSONDecodeError, TypeError):
+                raise RefreshError(502, f"source {rid} ({tool}) returned an unreadable result") from None
+            if isinstance(parsed, dict) and (parsed.get("error") or parsed.get("success") is False):
+                # "error" is last: it doubles as a boolean flag in some tool shapes,
+                # so only a *string* error carries a human-readable reason.
+                error_val = parsed.get("error")
+                message = str(
+                    parsed.get("message")
+                    or parsed.get("detail")
+                    or parsed.get("error_message")
+                    or (error_val if isinstance(error_val, str) else "")
+                )
+                raise RefreshError(502, f"source {rid} ({tool}) failed{': ' + message[:200] if message else ''}")
+            payload = extract_result_payload(tool, params, result_str)
+            if payload is None:
+                raise RefreshError(502, f"source {rid} ({tool}) returned no extractable data")
+            payloads[rid] = payload
+        except RefreshError:
+            if rid in required_rids:
+                raise
+            continue  # non-required (compare) rid degrades — omitted, never raised
     return payloads
 
 
@@ -210,7 +238,12 @@ async def refresh_report(
     house audit convention for cron actors) — the published version's ``created_by``
     is then NULL. The HTTP endpoint always passes the acting user."""
     from app.services.report.report_html import build_provenance, render_report_html
-    from app.services.report.report_service import assemble_spec, referenced_result_ids
+    from app.services.report.report_service import (
+        assemble_spec,
+        referenced_result_ids,
+        required_result_ids,
+        spec_json_safe,
+    )
 
     if actor_id is None and actor_type == "user":
         # a user-attributed audit row with no user id is indistinguishable from a
@@ -252,6 +285,7 @@ async def refresh_report(
             actor_id=actor_id,
             actor_type=actor_type,
             correlation_id=correlation_id,
+            required_rids=required_result_ids(recipe["sections"]),
         )
 
         spec = assemble_spec(report.title, recipe["sections"], lambda rid: payloads[rid])
@@ -260,6 +294,7 @@ async def refresh_report(
             freshness={"composed_at": recipe.get("captured_at", ""), "refreshed_at": now.isoformat()},
             provenance=build_provenance(recipe["sources"], now.isoformat()),
         )
+        persisted_spec = spec_json_safe(spec)
 
         # ---- Phase 3: atomic publish -------------------------------------------------
         await set_tenant_context(db, str(tenant_id))  # fresh txn after the claim commit
@@ -293,12 +328,12 @@ async def refresh_report(
                 tenant_id=tenant_id,
                 report_id=report_id,
                 version=next_version,
-                spec_json=spec,
+                spec_json=persisted_spec,
                 rendered_html=html,
                 created_by=actor_id,
             )
         )
-        report.spec_json = spec
+        report.spec_json = persisted_spec
         report.rendered_html = html
         report.version = next_version
         await audit_service.log_event(

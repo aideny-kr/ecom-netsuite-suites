@@ -150,7 +150,12 @@ async def compose_playbook_report(db, *, playbook_key, params, tenant_id, actor_
     from app.services import audit_service
     from app.services.report.refresh_service import _execute_sources, _validated_sources
     from app.services.report.report_html import build_provenance, render_report_html
-    from app.services.report.report_service import assemble_spec, referenced_result_ids
+    from app.services.report.report_service import (
+        assemble_spec,
+        referenced_result_ids,
+        required_result_ids,
+        spec_json_safe,
+    )
 
     title, recipe = build_playbook_recipe(playbook_key, params)
     correlation_id = f"report-playbook:{playbook_key}:{uuid.uuid4().hex[:8]}"
@@ -164,6 +169,12 @@ async def compose_playbook_report(db, *, playbook_key, params, tenant_id, actor_
         actor_id=actor_id,
         actor_type="user",
         correlation_id=correlation_id,
+        # Risk 2 (statement compare-degrade seam): only the CURRENT-period source (r1)
+        # is a hard dependency for a financial_statement recipe — a prior/yoy/trend
+        # source outage renders the statement without that comparison instead of
+        # failing the whole compose. See report_service.required_result_ids /
+        # refresh_service._execute_sources docstrings for the mechanics.
+        required_rids=required_result_ids(recipe["sections"]),
     )
     spec = assemble_spec(title, recipe["sections"], lambda rid: payloads[rid])
     html = render_report_html(
@@ -177,7 +188,10 @@ async def compose_playbook_report(db, *, playbook_key, params, tenant_id, actor_
     report = Report(
         tenant_id=tenant_id,
         title=title,
-        spec_json=spec,
+        # Risk 3: a financial_statement model carries raw Decimal (spark/trend) fields —
+        # sanitize BEFORE persisting (spec_json_safe), never before rendering (html
+        # above was already built from the live Decimal-bearing spec).
+        spec_json=spec_json_safe(spec),
         rendered_html=html,
         created_by=actor_id,
         recipe_json=recipe,

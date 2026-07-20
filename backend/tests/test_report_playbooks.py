@@ -23,6 +23,7 @@ from app.services.report.playbooks import (
 )
 from app.services.report.refresh_service import RefreshError
 from tests.conftest import create_test_tenant, create_test_user
+from tests.fixtures import statement_fixture as fx
 
 
 def test_catalog_lists_three_statement_playbooks_with_period_param():
@@ -203,17 +204,125 @@ def _patch_executor(monkeypatch, result_str=_RESULT, by_params=None):
     return calls
 
 
-async def test_compose_playbook_income_statement_pending_renderer_fails_closed(db, monkeypatch):
-    """financial_statement sections aren't wired into assemble_spec's discriminated
-    section union yet (that lands in Task 3/4 — renderer + assembly seam); today
-    normalize_and_validate_sections raises on the new type. Fail-closed still holds:
-    r1 executes with the correct params, and no Report row is left behind despite the
-    tool call succeeding."""
-    tenant = await create_test_tenant(db, name="PlaybookCorp")
-    user, _ = await create_test_user(db, tenant)
-    calls = _patch_executor(monkeypatch)
+def _raw_tool_result(payload: dict) -> str:
+    """A statement_fixture EXTRACTED payload (columns/rows/row_count/query) reconstructed
+    as the RAW netsuite_financial_report tool-result JSON string ``extract_result_payload``
+    Path 1 (columns+rows) parses — see ``app/services/chat/tool_call_results.py``. A
+    ``fx._failed(...)`` payload (``{"success": False, "error": ...}``) is already in that
+    raw shape and passes through unchanged. ``default=str`` mirrors real SuiteQL
+    serialization (amounts often arrive as strings, never through float — see
+    ``report_html.fmt_amount``'s docstring) for the fixture's raw ``Decimal`` cells."""
+    if payload.get("success") is False:
+        return json.dumps(payload)
+    return json.dumps(
+        {
+            "success": True,
+            "columns": payload["columns"],
+            "rows": payload["rows"],
+            "row_count": payload["row_count"],
+            "query": payload.get("query", ""),
+        },
+        default=str,
+    )
 
-    with pytest.raises(ValueError, match="financial_statement"):
+
+_IS_TREND_PERIOD = "Jan 2026,Feb 2026,Mar 2026,Apr 2026,May 2026,Jun 2026"
+
+
+def _income_statement_by_params(*, r1=None, r2=None, r3=None, r4=None) -> dict:
+    """The 4-call ``by_params`` map for an income_statement recipe. Each of ``r1``..``r4``
+    defaults to that rid's fixture payload (as the raw tool-result JSON via
+    ``_raw_tool_result``); pass a raw JSON string (e.g. a failed-tool result) to override
+    that ONE source without touching the others."""
+    payloads = fx.income_statement_payloads()
+    return {
+        ("income_statement", "Jun 2026"): r1 or _raw_tool_result(payloads["r1"]),
+        ("income_statement", "May 2026"): r2 or _raw_tool_result(payloads["r2"]),
+        ("income_statement", "Jun 2025"): r3 or _raw_tool_result(payloads["r3"]),
+        ("income_statement_trend", _IS_TREND_PERIOD): r4 or _raw_tool_result(payloads["r4"]),
+    }
+
+
+async def test_compose_playbook_income_statement_renders_full_statement(db, monkeypatch):
+    """The full financial_statement assembly path (Task 4): recipe -> 4-source fan-out ->
+    build_statement_model -> financial_statement renderer -> persisted Report row. This
+    replaces the Task-1/2/3-era fail-closed placeholder now that the assembly seam
+    (ComposeSection schema + assemble_spec wiring) is live."""
+    tenant = await create_test_tenant(db, name="PlaybookStmtCorp")
+    user, _ = await create_test_user(db, tenant)
+    calls = _patch_executor(monkeypatch, by_params=_income_statement_by_params())
+
+    report = await compose_playbook_report(
+        db,
+        playbook_key="income_statement",
+        params={"period": "Jun 2026"},
+        tenant_id=tenant.id,
+        actor_id=user.id,
+    )
+
+    assert len(calls) == 4
+    html = report.rendered_html
+    assert html.count("<h1") == 1  # title's own h1, no recipe-authored heading duplicate
+    assert "Net income" in html  # KPI card label
+    assert 'class="fs-quad' in html  # the variance quad
+    assert 'class="fs-stmt' in html  # the full statement table
+    # provenance: all 4 sources appear automatically (recipe["sources"]), never hand-picked
+    for rid in ("r1", "r2", "r3", "r4"):
+        assert f"{rid} —" in html
+    # every fixture account name renders somewhere in the statement
+    for row in fx.income_statement_payloads()["r1"]["rows"]:
+        assert row[1] in html  # acctname is column index 1
+    # the persisted spec is JSON-clean (Risk 3): no raw Decimal survived into spec_json
+    assert json.dumps(report.spec_json)
+    model = next(s["model"] for s in report.spec_json["sections"] if s["type"] == "financial_statement")
+    assert model["statement"] == "income_statement"
+    assert model["prior_period"] == "May 2026"
+    assert model["yoy_period"] == "Jun 2025"
+    assert model["trend"]["periods"] == fx.EXPECTED_TREND_PERIODS
+    # spark/trend values persisted as JSON-safe strings, never float
+    assert all(isinstance(v, str) for v in model["kpis"][0]["spark"])
+
+
+async def test_compose_playbook_income_statement_degrades_when_compare_sources_fail(db, monkeypatch):
+    """Risk 2: r1 (current period) succeeds; r2/r3/r4 (prior/yoy/trend) all fail at the
+    tool layer. The statement still composes — never fails closed on a compare-source
+    outage — it just renders without any of the deltas/YoY/trend those sources feed."""
+    tenant = await create_test_tenant(db, name="PlaybookDegradeCorp")
+    user, _ = await create_test_user(db, tenant)
+    failed = json.dumps({"success": False, "error": "No active NetSuite connection found"})
+    calls = _patch_executor(monkeypatch, by_params=_income_statement_by_params(r2=failed, r3=failed, r4=failed))
+
+    report = await compose_playbook_report(
+        db,
+        playbook_key="income_statement",
+        params={"period": "Jun 2026"},
+        tenant_id=tenant.id,
+        actor_id=user.id,
+    )
+
+    assert len(calls) == 4  # every source still attempted — degrade, not skip
+    model = next(s["model"] for s in report.spec_json["sections"] if s["type"] == "financial_statement")
+    assert model["prior_period"] is None
+    assert model["yoy_period"] is None
+    assert model["trend"] is None
+    kpis = {k["key"]: k for k in model["kpis"]}
+    assert kpis["revenue"]["value"] == "$13,500,000"  # r1's own figure unaffected
+    assert kpis["revenue"]["mom_delta"] is None
+    assert kpis["revenue"]["yoy_pct"] is None
+    assert kpis["revenue"]["spark"] is None
+    assert "vs May 2026" not in report.rendered_html  # no prior chip when prior is unavailable
+
+
+async def test_compose_playbook_income_statement_r1_failure_still_fails_closed(db, monkeypatch):
+    """Risk 2's other half: the CURRENT-period source (r1) is still a hard dependency —
+    its failure kills the whole compose exactly like before Task 4 (no partial/degraded
+    statement is ever published)."""
+    tenant = await create_test_tenant(db, name="PlaybookR1FailCorp")
+    user, _ = await create_test_user(db, tenant)
+    failed = json.dumps({"success": False, "error": "No active NetSuite connection found"})
+    calls = _patch_executor(monkeypatch, by_params=_income_statement_by_params(r1=failed))
+
+    with pytest.raises(RefreshError) as exc:
         await compose_playbook_report(
             db,
             playbook_key="income_statement",
@@ -221,10 +330,8 @@ async def test_compose_playbook_income_statement_pending_renderer_fails_closed(d
             tenant_id=tenant.id,
             actor_id=user.id,
         )
-
-    assert calls == [
-        {"tool": "netsuite_financial_report", "params": {"report_type": "income_statement", "period": "Jun 2026"}}
-    ]
+    assert "No active NetSuite connection found" in exc.value.detail
+    assert len(calls) == 1  # r1 (needed first) raises before r2-r4 ever dispatch
     await db.rollback()
     rows = (await db.execute(select(Report).where(Report.tenant_id == tenant.id))).scalars().all()
     assert rows == []
@@ -260,33 +367,31 @@ def test_playbook_routes_declared_before_dynamic_report_route():
     assert playbook_idx < dynamic_idx
 
 
-async def test_compose_playbook_endpoint_income_statement_pending_renderer_is_400(db, monkeypatch):
-    """Same gap as the service-level test above, one layer up: pydantic's
-    ValidationError IS a ValueError (see mro), so the endpoint's existing
-    ``except ValueError`` branch turns the not-yet-wired financial_statement type into
-    a clean 400 rather than an unhandled 500 leak — worth pinning until Task 3/4 make
-    the type renderable and this becomes a real 201 path again."""
+async def test_compose_playbook_endpoint_income_statement_returns_201_with_rendered_statement(db, monkeypatch):
+    """One layer up from the service-level happy-path test: the endpoint now returns a
+    real 201 ReportResponse for a financial_statement playbook, now that the assembly
+    seam (Task 4) is wired — this used to be a fail-closed 400 before the ComposeSection
+    schema/assemble_spec wiring landed."""
     from app.api.v1.reports import PlaybookComposeRequest, compose_playbook_endpoint
 
     tenant = await create_test_tenant(db, name="PlaybookApiCorp")
     user, _ = await create_test_user(db, tenant)
-    calls = _patch_executor(monkeypatch)
+    tenant_id = tenant.id  # read before compose_playbook_endpoint's commit expires `tenant`
+    calls = _patch_executor(monkeypatch, by_params=_income_statement_by_params())
 
-    with pytest.raises(HTTPException) as exc:
-        await compose_playbook_endpoint(
-            "income_statement",
-            PlaybookComposeRequest(params={"period": "Jun 2026"}),
-            user=user,
-            db=db,
-        )
-    assert exc.value.status_code == 400
-    assert "financial_statement" in exc.value.detail
-    assert calls == [
-        {"tool": "netsuite_financial_report", "params": {"report_type": "income_statement", "period": "Jun 2026"}}
-    ]
+    response = await compose_playbook_endpoint(
+        "income_statement",
+        PlaybookComposeRequest(params={"period": "Jun 2026"}),
+        user=user,
+        db=db,
+    )
+    assert "Jun 2026" in response.title
+    assert response.has_recipe is True
+    assert len(calls) == 4
     await db.rollback()
-    rows = (await db.execute(select(Report).where(Report.tenant_id == tenant.id))).scalars().all()
-    assert rows == []
+    rows = (await db.execute(select(Report).where(Report.tenant_id == tenant_id))).scalars().all()
+    assert len(rows) == 1
+    assert "Net income" in rows[0].rendered_html
 
 
 async def test_compose_playbook_endpoint_unknown_key_is_404(db, monkeypatch):

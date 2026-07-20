@@ -24,6 +24,7 @@ from sqlalchemy import func, select, text
 from app.core.database import set_tenant_context
 from app.models.report import Report
 from app.models.report_version import ReportVersion
+from app.services.report.playbooks import build_playbook_recipe
 from app.services.report.refresh_service import (
     REFRESH_MIN_INTERVAL_SECONDS,
     RefreshDebouncedError,
@@ -31,6 +32,7 @@ from app.services.report.refresh_service import (
     refresh_report,
 )
 from tests.conftest import create_test_tenant, create_test_user
+from tests.fixtures import statement_fixture as fx
 
 _SECTIONS = [
     {"type": "heading", "level": 1, "text": "Cash"},
@@ -78,15 +80,55 @@ async def _seed_report(db, *, recipe=None, html="<html>v1</html>"):
     return tenant, user, report
 
 
-def _patch_executor(monkeypatch, result_str=None, calls=None):
+def _patch_executor(monkeypatch, result_str=None, calls=None, by_params=None):
+    """``by_params`` (a ``{(report_type, period): result_str}`` map) serves each call the
+    result matching its OWN params — needed once a recipe fans out to multiple sources
+    with different report_type/period pairs (financial_statement recipes); a call whose
+    params aren't in the map falls back to ``result_str``/``_fresh_result_str()``."""
     calls = calls if calls is not None else []
 
     async def fake_execute(tool_name, tool_input, tenant_id, actor_id, correlation_id, db, **kw):
         calls.append({"tool": tool_name, "params": tool_input, "tenant_id": tenant_id, "actor_id": actor_id})
+        if by_params is not None:
+            key = (tool_input.get("report_type"), tool_input.get("period"))
+            return by_params.get(key, result_str or _fresh_result_str())
         return result_str or _fresh_result_str()
 
     monkeypatch.setattr("app.services.chat.tools.execute_tool_call", fake_execute)
     return calls
+
+
+def _raw_tool_result(payload: dict) -> str:
+    """A statement_fixture EXTRACTED payload (columns/rows/row_count/query) reconstructed
+    as the RAW netsuite_financial_report tool-result JSON ``extract_result_payload`` Path
+    1 (columns+rows) parses — mirrors ``test_report_playbooks._raw_tool_result``,
+    duplicated here to keep this module's fixtures self-contained. A ``fx._failed(...)``
+    payload is already in the raw shape and passes through unchanged."""
+    if payload.get("success") is False:
+        return json.dumps(payload)
+    return json.dumps(
+        {
+            "success": True,
+            "columns": payload["columns"],
+            "rows": payload["rows"],
+            "row_count": payload["row_count"],
+            "query": payload.get("query", ""),
+        },
+        default=str,
+    )
+
+
+_IS_TREND_PERIOD = "Jan 2026,Feb 2026,Mar 2026,Apr 2026,May 2026,Jun 2026"
+
+
+def _income_statement_by_params(*, r1=None, r2=None, r3=None, r4=None) -> dict:
+    payloads = fx.income_statement_payloads()
+    return {
+        ("income_statement", "Jun 2026"): r1 or _raw_tool_result(payloads["r1"]),
+        ("income_statement", "May 2026"): r2 or _raw_tool_result(payloads["r2"]),
+        ("income_statement", "Jun 2025"): r3 or _raw_tool_result(payloads["r3"]),
+        ("income_statement_trend", _IS_TREND_PERIOD): r4 or _raw_tool_result(payloads["r4"]),
+    }
 
 
 async def test_refresh_publishes_new_version_with_fresh_numbers(db, monkeypatch):
@@ -559,3 +601,88 @@ async def test_refresh_embeds_provenance_block(db, monkeypatch):
     updated = await refresh_report(db, report_id=report.id, tenant_id=tenant.id, actor_id=user.id)
     assert "Sources" in updated.rendered_html and "netsuite_suiteql" not in updated.rendered_html
     assert "NetSuite SuiteQL query" in updated.rendered_html
+
+
+# --- Task 4: financial_statement recipes through the refresh engine --------------------
+
+
+async def test_refresh_of_statement_recipe_reassembles_full_statement(db, monkeypatch):
+    """A playbook-captured financial_statement recipe refreshes through the SAME engine
+    as a v1 recipe: fresh payloads re-execute, assemble_spec rebuilds the statement
+    model, and the new version's rendered_html carries the KPI/quad/statement/provenance
+    just like the initial compose."""
+    _title, recipe = build_playbook_recipe("income_statement", {"period": "Jun 2026"})
+    tenant, user, report = await _seed_report(db, recipe=recipe)
+    calls = _patch_executor(monkeypatch, by_params=_income_statement_by_params())
+
+    updated = await refresh_report(db, report_id=report.id, tenant_id=tenant.id, actor_id=user.id)
+
+    assert len(calls) == 4
+    html = updated.rendered_html
+    assert html.count("<h1") == 1
+    assert "Net income" in html
+    assert 'class="fs-quad' in html
+    for rid in ("r1", "r2", "r3", "r4"):
+        assert f"{rid} —" in html
+    assert json.dumps(updated.spec_json)  # Risk 3: JSON-clean, no raw Decimal survived
+    model = next(s["model"] for s in updated.spec_json["sections"] if s["type"] == "financial_statement")
+    assert model["prior_period"] == "May 2026"
+    assert model["trend"]["periods"] == fx.EXPECTED_TREND_PERIODS
+
+
+async def test_refresh_of_statement_recipe_degrades_when_compare_sources_fail(db, monkeypatch):
+    """Risk 2 on the refresh path: r1 succeeds, r2/r3/r4 all fail — the refresh still
+    publishes a new version (never fails closed on a compare-source outage), just
+    without the deltas/YoY/trend those sources feed."""
+    _title, recipe = build_playbook_recipe("income_statement", {"period": "Jun 2026"})
+    tenant, user, report = await _seed_report(db, recipe=recipe)
+    failed = json.dumps({"success": False, "error": "No active NetSuite connection found"})
+    calls = _patch_executor(monkeypatch, by_params=_income_statement_by_params(r2=failed, r3=failed, r4=failed))
+
+    updated = await refresh_report(db, report_id=report.id, tenant_id=tenant.id, actor_id=user.id)
+
+    assert len(calls) == 4  # every source still attempted
+    assert updated.version == 2  # the refresh PUBLISHED — it did not fail closed
+    model = next(s["model"] for s in updated.spec_json["sections"] if s["type"] == "financial_statement")
+    assert model["prior_period"] is None
+    assert model["trend"] is None
+    kpis = {k["key"]: k for k in model["kpis"]}
+    assert kpis["revenue"]["value"] == "$13,500,000"
+    assert kpis["revenue"]["mom_delta"] is None
+
+
+async def test_refresh_of_statement_recipe_r1_failure_still_fails_closed(db, monkeypatch):
+    """Risk 2's other half on the refresh path: r1 (current period) is still a hard
+    dependency — its failure raises RefreshError and never corrupts the current
+    version, exactly like the pre-Task-4 fail-closed semantics for every other rid."""
+    _title, recipe = build_playbook_recipe("income_statement", {"period": "Jun 2026"})
+    tenant, user, report = await _seed_report(db, recipe=recipe)
+    rid, tid, uid, original_html = report.id, tenant.id, user.id, report.rendered_html
+    failed = json.dumps({"success": False, "error": "No active NetSuite connection found"})
+    calls = _patch_executor(monkeypatch, by_params=_income_statement_by_params(r1=failed))
+
+    with pytest.raises(RefreshError) as exc:
+        await refresh_report(db, report_id=rid, tenant_id=tid, actor_id=uid)
+    assert "No active NetSuite connection found" in exc.value.detail
+    assert calls and calls[0]["params"]["report_type"] == "income_statement"
+    row = (await db.execute(select(Report).where(Report.id == rid))).scalar_one()
+    assert row.rendered_html == original_html  # current version untouched
+
+
+async def test_refresh_of_v1_style_recipe_stays_byte_stable_no_fs_markup(db, monkeypatch):
+    """v1 (table/narrative) recipes must refresh exactly as before Task 4's
+    financial_statement wiring landed: no fs-* CSS/markup leaks into a plain report, and
+    spec_json stays trivially JSON-safe (no financial_statement section to sanitize)."""
+    tenant, user, report = await _seed_report(db, recipe=_recipe())
+    calls = _patch_executor(monkeypatch, _fresh_result_str(amount=777))
+
+    updated = await refresh_report(db, report_id=report.id, tenant_id=tenant.id, actor_id=user.id)
+
+    assert len(calls) == 1
+    assert "777.00" in updated.rendered_html
+    assert "fs-kpi" not in updated.rendered_html
+    assert "fs-quad" not in updated.rendered_html
+    assert not any(
+        isinstance(s, dict) and s.get("type") == "financial_statement" for s in updated.spec_json["sections"]
+    )
+    assert json.dumps(updated.spec_json)
