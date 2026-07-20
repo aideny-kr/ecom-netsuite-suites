@@ -77,6 +77,9 @@ vibe-coding-strategy.md
 !.claude/skills/netsuite-suitescript-upgrade/
 !.claude/skills/netsuite-uif-spa-reference/
 
+# House design standard — committed so every checkout/agent loads it
+!.claude/skills/executive-dashboard-design/
+
 # Other agent-targets that `npx skills add` creates as siblings to .claude/ — never ours to commit
 .adal/
 .agents/
